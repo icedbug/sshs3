@@ -115,6 +115,16 @@ describe('writeManagedConfig', () => {
     const written = await fs.readFile(file, 'utf-8');
     expect(written).toContain('  base_url: "http://localhost:11434/v1"\n  key_env: "SSHS3_MODEL_API_KEY"\n');
   });
+
+  it("sends Anthropic through the user's own endpoint instead of api.anthropic.com", async () => {
+    const file = path.join(dir, 'config.yaml');
+    await writeManagedConfig(file, { kind: 'anthropic', model: 'claude-opus-5-5', apiKey: 'k', baseUrl: 'https://gateway.example/llm' });
+    const written = await fs.readFile(file, 'utf-8');
+    expect(written.startsWith(
+      'model:\n  provider: "custom"\n  default: "claude-opus-5-5"\n  base_url: "https://gateway.example/llm"\n' +
+        '  api_mode: "anthropic_messages"\n  key_env: "SSHS3_MODEL_API_KEY"\n'
+    )).toBe(true);
+  });
 });
 
 describe('HermesManager', () => {
@@ -196,6 +206,12 @@ describe('HermesManager', () => {
     await hermes.ensureRunning({ kind: 'custom', model: 'llama3.1', baseUrl: 'http://localhost:11434/v1' });
     expect(firstChild.kill).toHaveBeenCalled();
     expect(spawn).toHaveBeenCalledTimes(2);
+
+    await hermes.ensureRunning({ kind: 'anthropic', model: 'claude-opus-5-5', apiKey: 'gw', baseUrl: 'https://gateway.example/llm' });
+    expect(spawn).toHaveBeenCalledTimes(3);
+    const env = (spawn.mock.calls[2] as [string, string[], { env: NodeJS.ProcessEnv }])[2].env;
+    expect(env.SSHS3_MODEL_API_KEY).toBe('gw');
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
 
     await hermes.stop();
     expect(child.kill).toHaveBeenCalled();

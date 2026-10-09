@@ -173,6 +173,18 @@ describe('AiService', () => {
       expect(hermes.ensureRunning).toHaveBeenCalledWith({ kind: 'custom', model: 'llama3.1', baseUrl: 'http://localhost:11434/v1' });
     });
 
+    it("keeps the user's Anthropic endpoint when Hermes calls the model", async () => {
+      await store.update({ enabled: true, useHermes: true, apiKey: 'sk-test', baseUrl: 'https://gateway.example/llm' }); // pragma: allowlist secret
+      fetchMock.mockResolvedValue(jsonResponse({ choices: [{ message: { content: 'ok' } }] }));
+      await service.ask({ task: 'explain', prompt: 'why' });
+      expect(hermes.ensureRunning).toHaveBeenCalledWith({
+        kind: 'anthropic',
+        model: 'claude-opus-5-5',
+        apiKey: 'sk-test', // pragma: allowlist secret
+        baseUrl: 'https://gateway.example/llm',
+      });
+    });
+
     it('explains when Hermes cannot start or is not part of this build', async () => {
       await store.update({ enabled: true, useHermes: true, apiKey: 'sk-test' }); // pragma: allowlist secret
       hermes.ensureRunning.mockRejectedValue(new Error('This build of sshs3 does not include the Hermes runtime.'));

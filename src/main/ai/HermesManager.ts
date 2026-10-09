@@ -32,9 +32,9 @@ export interface HermesManifest {
   python: string;
 }
 
-/** Which model Hermes itself uses: Anthropic directly, or any OpenAI-compatible server. */
+/** Which model Hermes itself uses: Anthropic (optionally through the user's own endpoint), or any OpenAI-compatible server. */
 export type HermesModelConfig =
-  | { kind: 'anthropic'; model: string; apiKey: string }
+  | { kind: 'anthropic'; model: string; apiKey: string; baseUrl?: string }
   | { kind: 'custom'; model: string; baseUrl: string; apiKey?: string };
 
 export interface HermesEndpoint {
@@ -146,8 +146,8 @@ export class HermesManager {
       API_SERVER_PORT: String(port),
       API_SERVER_KEY: apiKey,
       PYTHONNOUSERSITE: '1',
-      ...(model.kind === 'anthropic' ? { ANTHROPIC_API_KEY: model.apiKey } : {}),
-      ...(model.kind === 'custom' && model.apiKey ? { SSHS3_MODEL_API_KEY: model.apiKey } : {}),
+      ...(model.kind === 'anthropic' && !model.baseUrl ? { ANTHROPIC_API_KEY: model.apiKey } : {}),
+      ...(model.baseUrl && model.apiKey ? { SSHS3_MODEL_API_KEY: model.apiKey } : {}),
     };
 
     const python = path.join(this.runtimeDir, manifest.python);
@@ -274,9 +274,14 @@ export function hermesPolicyBlocks(): string {
 }
 
 export function modelConfigBlock(model: HermesModelConfig): string {
-  const lines = ['model:', `  provider: ${model.kind === 'anthropic' ? '"anthropic"' : '"custom"'}`, `  default: ${yamlString(model.model)}`];
-  if (model.kind === 'custom') {
-    lines.push(`  base_url: ${yamlString(model.baseUrl)}`);
+  const { baseUrl } = model;
+  // Hermes' "anthropic" provider only honours base URLs it recognises and otherwise calls
+  // api.anthropic.com, which would bypass the user's gateway. So an Anthropic endpoint goes
+  // in as a custom endpoint that speaks the Messages API.
+  const lines = ['model:', `  provider: ${baseUrl ? '"custom"' : '"anthropic"'}`, `  default: ${yamlString(model.model)}`];
+  if (baseUrl) {
+    lines.push(`  base_url: ${yamlString(baseUrl)}`);
+    if (model.kind === 'anthropic') lines.push('  api_mode: "anthropic_messages"');
     if (model.apiKey) lines.push('  key_env: "SSHS3_MODEL_API_KEY"');
   }
   return `${lines.join('\n')}\n`;

@@ -134,7 +134,7 @@ export class AiService {
     let model: HermesModelConfig;
     if (config.provider === 'anthropic') {
       if (!config.apiKey) throw new Error('No Anthropic API key is saved. Add one in Settings → AI Assistant.');
-      model = { kind: 'anthropic', model: config.model, apiKey: config.apiKey };
+      model = { kind: 'anthropic', model: config.model, apiKey: config.apiKey, ...(config.baseUrl ? { baseUrl: config.baseUrl } : {}) };
     } else {
       if (!config.baseUrl) {
         throw new Error('No endpoint is set for the OpenAI-compatible provider. Add one in Settings → AI Assistant.');
