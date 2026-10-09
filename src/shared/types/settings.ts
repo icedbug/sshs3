@@ -40,6 +40,7 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
   { id: 'copyLastOutput', name: 'Copy Last Command Output', defaultKeys: 'Ctrl+Shift+G', category: 'Terminal' },
   { id: 'snippets', name: 'Snippets', defaultKeys: 'Ctrl+Shift+L', category: 'Terminal' },
   { id: 'aiAssistant', name: 'AI Assistant', defaultKeys: 'Ctrl+Shift+A', category: 'Terminal' },
+  { id: 'aiInlineCommand', name: 'AI: Turn Typed Text into a Command', defaultKeys: 'Ctrl+Shift+Space', category: 'Terminal' },
   { id: 'searchInFiles', name: 'Search in Files', defaultKeys: 'Ctrl+Shift+K', category: 'General' },
 ];
 

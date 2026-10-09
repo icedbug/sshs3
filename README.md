@@ -114,8 +114,10 @@ Help with commands and output without leaving the terminal. It is **off by defau
 
 - **Suggest a command** — describe what you want ("find files over 100 MB under /var, largest first") and get one command back with a short explanation. **Insert into terminal** types it at the prompt; it is never run until you press Enter yourself, and commands that change or delete data are flagged with a warning.
 - **Explain output** — select an error or any terminal text (or use the last command's output) and ask what it means and how to fix it.
+- **Explain this error** — when a command fails, a small *✨ Explain this error* button appears in the corner of the terminal; one click sends that command's output and shows what went wrong and how to fix it. Failures are read from the exit code in shells that send OSC 133 prompt marks, and otherwise recognised from typical error messages (`command not found`, `No such file or directory`, `Permission denied`, a Python traceback, …). The button only appears while the assistant is turned on.
+- **Type what you want, get the command (`Ctrl+Shift+Space`)** — write a plain description at the prompt ("largest folders here, sorted") and press `Ctrl+Shift+Space`: the text is replaced in place by a command, ready to review and run with Enter. With nothing typed, or after line editing the app can't follow (history, tab completion, arrow keys), it opens the assistant instead.
 - **Providers** — Anthropic (Claude) with your own API key, or any **OpenAI-compatible** endpoint such as a local [Ollama](https://ollama.com) or LM Studio, so terminal text never has to leave your machine.
-- **Privacy** — nothing is sent until you press *Ask*; the dialog shows exactly which terminal text is included, and passwords, tokens, AWS keys, bearer headers and private key blocks are masked before anything leaves the app (the same masking the log file uses). The API key is encrypted with the OS keyring and AI settings live in their own `ai-config.json`, which is never part of remote profile sync. Requests go through Chromium's network stack, so the system proxy and certificate store apply.
+- **Privacy** — nothing is sent until you ask (*Ask*, *Explain this error* or `Ctrl+Shift+Space`); the dialog shows exactly which terminal text is included, and passwords, tokens, AWS keys, bearer headers and private key blocks are masked before anything leaves the app (the same masking the log file uses). The API key is encrypted with the OS keyring and AI settings live in their own `ai-config.json`, which is never part of remote profile sync. Requests go through Chromium's network stack, so the system proxy and certificate store apply.
 
 ### Performance bar *(opt-in)*
 A slim live-metrics strip above SSH, local-shell and Kubernetes terminals. It is **off by default** — enable it under **Settings → Performance**. While it is off nothing is polled and no extra commands are run.
@@ -406,6 +408,7 @@ sshs3 wouldn't exist without these projects:
 | **Copy Last Command Output** | `Ctrl+Shift+G` | Copies the output of the previous command |
 | **Snippets** | `Ctrl+Shift+L` | Opens the snippet palette in the focused terminal |
 | **AI Assistant** | `Ctrl+Shift+A` | Suggests a command or explains output in the focused terminal (opt-in) |
+| **AI: Turn Typed Text into a Command** | `Ctrl+Shift+Space` | Replaces the description typed at the prompt with a command, without running it (opt-in) |
 | **Search in Files** | `Ctrl+Shift+K` | Opens file content search across local/SFTP/S3 panes |
 
 *(All shortcuts are rebindable under Settings → Keyboard Shortcuts.)*

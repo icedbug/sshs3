@@ -159,7 +159,9 @@ export function useAppKeyboard(ctx: AppKeyboardContext): void {
 
         // These only act on the focused terminal; elsewhere the keys must stay free for other uses.
         const terminalOnly =
-          actionId === 'terminalSearch' || actionId === 'copyLastOutput' || actionId === 'snippets' || actionId === 'aiAssistant';
+          actionId === 'terminalSearch' || actionId === 'copyLastOutput' || actionId === 'snippets' ||
+          actionId === 'aiAssistant' ||
+          actionId === 'aiInlineCommand';
         if (
           isMatch &&
           terminalOnly &&
@@ -360,6 +362,7 @@ export function useAppKeyboard(ctx: AppKeyboardContext): void {
             case 'copyLastOutput':
             case 'snippets':
             case 'aiAssistant':
+            case 'aiInlineCommand':
               dispatchTerminalAction(actionId === 'terminalSearch' ? 'search' : actionId);
               break;
             case 'increaseFontSize': {

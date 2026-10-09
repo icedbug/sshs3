@@ -77,6 +77,35 @@ describe('AiAssistantModal', () => {
     );
   });
 
+  it('asks about the last output right away when opened from the error hint', async () => {
+    const api = mockApi({ aiAsk: vi.fn().mockResolvedValue({ text: 'The package name is misspelled.', redacted: false }) });
+    renderModal({ lastOutput: 'E: Unable to locate package ngnix', initialTask: 'explain', autoSubmit: true });
+
+    expect(await screen.findByText('The package name is misspelled.')).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Explain output' })).toHaveAttribute('aria-selected', 'true');
+    expect(api.aiAsk).toHaveBeenCalledTimes(1);
+    expect(api.aiAsk).toHaveBeenCalledWith({
+      task: 'explain',
+      prompt: '',
+      context: 'E: Unable to locate package ngnix',
+      environment: { kind: 'ssh' },
+    });
+  });
+
+  it('does not ask on its own while the assistant is off', async () => {
+    const api = mockApi({ aiGetConfig: vi.fn().mockResolvedValue({ ...enabledConfig, enabled: false }) });
+    renderModal({ lastOutput: 'bash: foo: command not found', initialTask: 'explain', autoSubmit: true });
+    await screen.findByTestId('ai-disabled');
+    expect(api.aiAsk).not.toHaveBeenCalled();
+  });
+
+  it('opens on the command tab when asked to, even with text selected', async () => {
+    mockApi();
+    renderModal({ selection: 'some output', initialTask: 'command' });
+    await screen.findByLabelText('Ask the assistant');
+    expect(screen.getByRole('tab', { name: 'Suggest a command' })).toHaveAttribute('aria-selected', 'true');
+  });
+
   it('shows the error without the Electron IPC prefix', async () => {
     mockApi({
       aiAsk: vi.fn().mockRejectedValue(new Error("Error invoking remote method 'ai:ask': Error: Anthropic rejected the API key.")),
