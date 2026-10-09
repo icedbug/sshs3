@@ -48,6 +48,9 @@ Up to 3 transfers run in parallel; this is fixed, not a setting.
 ### 1.6 Kubernetes & Debug
 - Red Hat OpenShift support toggle, default diagnostic container presets for `kubectl debug` (Netshoot, RHEL Support Tools, BusyBox, Curl, Ubuntu).
 
+### 1.7 AI Assistant
+- **Enable the AI assistant in terminals** (off by default), **Provider** (**Anthropic (Claude)** or **OpenAI-compatible (Ollama, LM Studio, …)**), **Model**, **Endpoint** (optional for Anthropic, required for OpenAI-compatible) and **API key** (encrypted with the OS keyring; **Remove** deletes it). This page saves with its own **Save AI settings** button, and its settings stay on this computer: they are not part of remote profile sync. See the terminal guide for using the assistant.
+
 ---
 
 ## 2. 2D Spatial Keyboard Navigation & Mouse-Free Ergonomics

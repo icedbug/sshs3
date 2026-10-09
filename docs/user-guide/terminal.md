@@ -128,7 +128,14 @@ Hold <kbd>Ctrl</kbd> (<kbd>Cmd</kbd> on macOS) and click:
 - <kbd>Shift+Insert</kbd> and middle-click paste the latest entry.
 - Encrypted at rest via the OS keyring (`safeStorage`). If the OS keyring is unavailable, history is retained in volatile memory only. Can be scoped per connection or configured to purge on application exit.
 
-### 4.6 Terminal Settings Reference Table
+### 4.6 AI Assistant (<kbd>Ctrl+Shift+A</kbd>, opt-in)
+- Off by default. Turn it on with **Enable the AI assistant in terminals** under **Settings → AI Assistant**, choose a **Provider** (**Anthropic (Claude)** or **OpenAI-compatible (Ollama, LM Studio, …)**), a **Model**, and an **API key** and/or **Endpoint**, then click **Save AI settings**.
+- **Suggest a command**: describe the task and press <kbd>Enter</kbd> (<kbd>Shift+Enter</kbd> for a new line). The answer is one command plus a short explanation; commands that change or delete data start with "Warning:". **Insert into terminal** types it at the prompt without pressing Enter, so you always review it and run it yourself. **Copy** puts it on the clipboard.
+- **Explain output**: opens by default when text is selected. Ask about the selection or the last command output, with or without a question.
+- **Include from terminal** chooses what terminal text is sent (**Nothing**, **Selected text** or **Last command output**); **Show what will be sent** previews it. Nothing leaves the app until you click **Ask**.
+- *Security Note:* passwords, tokens, AWS access keys, `Bearer` headers, `user:password@` URLs and private key blocks are masked before sending, using the same rules as the log file. Masking is pattern based, so check the preview for anything else sensitive. Use an OpenAI-compatible local model (for example Ollama at `http://localhost:11434/v1`) to keep terminal text on your machine. The API key is encrypted with the OS keyring, and AI settings are stored in `ai-config.json`, which is not part of remote profile sync.
+
+### 4.7 Terminal Settings Reference Table
 
 | Setting | Default | Purpose & Description |
 | :--- | :--- | :--- |

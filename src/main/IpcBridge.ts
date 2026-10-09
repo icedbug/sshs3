@@ -13,6 +13,8 @@ import { SessionStore } from './session/SessionStore';
 import { ClipboardHistoryStore } from './clipboard/ClipboardHistoryStore';
 import { SnippetStore } from './snippets/SnippetStore';
 import { SettingsStore } from './settings/SettingsStore';
+import { AiConfigStore } from './ai/AiConfigStore';
+import { AiService } from './ai/AiService';
 import { UpdateService } from './update/UpdateService';
 import { SmartcardCoordinator } from './smartcard/SmartcardCoordinator';
 import { createHostVerifier, type HostKeyPromptInfo } from './ssh/HostKeyVerifier';
@@ -60,6 +62,7 @@ import { registerDotfileHandlers } from './ipc/dotfileHandlers';
 import { registerK8sHandlers } from './ipc/k8sHandlers';
 import { registerKeyInstallHandlers } from './ipc/keyInstallHandlers';
 import { registerSyncHandlers } from './ipc/syncHandlers';
+import { registerAiHandlers } from './ipc/aiHandlers';
 import { createLogger } from './log';
 const ipcLog = createLogger('ipc');
 const sshLog = createLogger('ssh');
@@ -102,6 +105,8 @@ export interface IpcBridgeOptions {
   clipboardHistoryStore?: ClipboardHistoryStore;
   snippetStore?: SnippetStore;
   settingsStore?: SettingsStore;
+  aiConfigStore?: AiConfigStore;
+  aiService?: AiService;
   dotfilePoolStore?: DotfilePoolStore;
   dotfileSyncService?: DotfileSyncService;
   directorySyncProfileStore?: DirectorySyncProfileStore;
@@ -133,6 +138,8 @@ export class IpcBridge {
   public readonly clipboardHistoryStore: ClipboardHistoryStore;
   public readonly snippetStore: SnippetStore;
   public readonly settingsStore: SettingsStore;
+  public readonly aiConfigStore: AiConfigStore;
+  public readonly aiService: AiService;
   public readonly dotfilePoolStore: DotfilePoolStore;
   public readonly dotfileSyncService: DotfileSyncService;
   public readonly directorySyncProfileStore: DirectorySyncProfileStore;
@@ -235,6 +242,8 @@ export class IpcBridge {
     this.sessionStore = options.sessionStore ?? new SessionStore();
     this.clipboardHistoryStore = options.clipboardHistoryStore ?? new ClipboardHistoryStore();
     this.snippetStore = options.snippetStore ?? new SnippetStore();
+    this.aiConfigStore = options.aiConfigStore ?? new AiConfigStore();
+    this.aiService = options.aiService ?? new AiService(this.aiConfigStore);
     this.dotfilePoolStore = options.dotfilePoolStore ?? new DotfilePoolStore();
     this.dotfileSyncService = options.dotfileSyncService ?? new DotfileSyncService();
     this.directorySyncProfileStore = options.directorySyncProfileStore ?? new DirectorySyncProfileStore();
@@ -299,6 +308,7 @@ export class IpcBridge {
     registerClipboardHistoryHandlers(this);
     registerSnippetHandlers(this);
     registerSettingsHandlers(this);
+    registerAiHandlers(this);
     registerSyncHandlers(this);
     void this.syncConfigStore
       .getConfig()

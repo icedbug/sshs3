@@ -37,6 +37,7 @@ import type { SessionData } from './session';
 import type { ClipboardHistoryEntry } from './clipboard';
 import type { Snippet } from './snippets';
 import type { AppSettings } from './settings';
+import type { AiAskRequest, AiAskResult, AiConfigUpdate, AiConfigView } from './ai';
 import type {
   DotfileImportedFile,
   DotfilePool,
@@ -184,6 +185,11 @@ export const IPC_CHANNELS = {
   // Settings
   SETTINGS_GET: 'settings:get',
   SETTINGS_SAVE: 'settings:save',
+
+  // AI assistant (opt-in; see shared/types/ai.ts)
+  AI_GET_CONFIG: 'ai:get-config',
+  AI_SAVE_CONFIG: 'ai:save-config',
+  AI_ASK: 'ai:ask',
 
   // Remote profile sync ("Remote Profile Sync" — distinct from the
   // dotfiles:sync-* channels above, which deploy a dotfile pool to a remote
@@ -585,6 +591,11 @@ export interface MultiSSHApi {
   // Settings
   settingsGet(): Promise<AppSettings>;
   settingsSave(settings: Partial<AppSettings>): Promise<AppSettings>;
+
+  // AI assistant
+  aiGetConfig(): Promise<AiConfigView>;
+  aiSaveConfig(update: AiConfigUpdate): Promise<AiConfigView>;
+  aiAsk(request: AiAskRequest): Promise<AiAskResult>;
 
   // Remote profile sync
   profileSyncSetup(payload: { target: StorageConnectConfig; remoteBasePath?: string }): Promise<void>;

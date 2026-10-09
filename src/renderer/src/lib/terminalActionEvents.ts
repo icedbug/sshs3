@@ -1,4 +1,4 @@
-export type TerminalAction = 'search' | 'copyLastOutput' | 'snippets';
+export type TerminalAction = 'search' | 'copyLastOutput' | 'snippets' | 'aiAssistant';
 
 /** Window event App dispatches for terminal shortcuts; only the focused terminal reacts to it. */
 export const TERMINAL_ACTION_EVENT = 'sshs3:terminal-action';
