@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { DEFAULT_AI_MODELS, type AiConfigView, type AiProvider } from '@shared/types/ai';
+import { AI_CONFIG_CHANGED_EVENT } from '../../lib/aiTerminal';
 
 const IPC_PREFIX = /^Error invoking remote method '[^']+':\s*(Error:\s*)?/i;
 
@@ -55,6 +56,7 @@ export const AiSettingsPanel: React.FC = () => {
         ...(removeKey ? { apiKey: null } : apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
       });
       apply(view);
+      window.dispatchEvent(new CustomEvent(AI_CONFIG_CHANGED_EVENT));
       setStatus({ kind: 'ok', message: removeKey ? 'API key removed.' : 'Saved.' });
     } catch (err) {
       setStatus({ kind: 'error', message: (err instanceof Error ? err.message : String(err)).replace(IPC_PREFIX, '') });
@@ -81,8 +83,10 @@ export const AiSettingsPanel: React.FC = () => {
       </label>
       <p className="text-xs text-txt-muted">
         Press the AI Assistant shortcut (Ctrl+Shift+A by default) in a terminal to get a command suggested from a description,
-        or to have selected output explained. Nothing is sent until you press Ask, you see which terminal text is included,
-        and common secret formats are masked first. A suggested command is only typed into the terminal; you run it yourself.
+        or to have selected output explained. Type a description at the prompt and press Ctrl+Shift+Space to turn it into a
+        command in place, and click Explain this error when a command fails. Nothing is sent until you ask, you can see which
+        terminal text was included, and common secret formats are masked first. Commands are only typed into the terminal;
+        you run them yourself.
       </p>
 
       <div className="grid grid-cols-2 gap-3">

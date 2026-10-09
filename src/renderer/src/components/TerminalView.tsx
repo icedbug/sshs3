@@ -12,6 +12,8 @@ import { CommandOutputTracker } from '../lib/terminalOutput';
 import { TERMINAL_ACTION_EVENT, type TerminalAction } from '../lib/terminalActionEvents';
 import { SnippetPaletteModal } from './SnippetPaletteModal';
 import { AiAssistantModal } from './AiAssistantModal';
+import { AI_CONFIG_CHANGED_EVENT, eraseTypedLine, isFailureExitCode, looksLikeFailure, TypedLineTracker } from '../lib/aiTerminal';
+import type { AiTask, AiTerminalEnvironment } from '@shared/types/ai';
 import { PerfBar } from './PerfBar';
 import { ClipboardHistoryModal } from './ClipboardHistoryModal';
 import { OPEN_CLIPBOARD_HISTORY_EVENT } from '../lib/clipboardHistoryEvents';
@@ -250,7 +252,40 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const [searchResults, setSearchResults] = useState<{ index: number; count: number } | null>(null);
   const [snippetsOpen, setSnippetsOpen] = useState(false);
   /** Terminal text captured when the AI assistant was opened (it stays open while the terminal keeps printing). */
-  const [aiContext, setAiContext] = useState<{ selection: string; lastOutput: string } | null>(null);
+  const [aiContext, setAiContext] = useState<{
+    selection: string;
+    lastOutput: string;
+    task?: AiTask;
+    autoSubmit?: boolean;
+  } | null>(null);
+  /** Whether the AI assistant is turned on; its in-terminal hints only appear when it is. */
+  const aiEnabledRef = useRef(false);
+  /** Shown after a command fails, offering to explain the error. */
+  const [failureHint, setFailureHint] = useState(false);
+  const aiEnvironment = useMemo<AiTerminalEnvironment>(() => {
+    if (k8sTarget) return { kind: 'k8s' };
+    if (!local) return { kind: 'ssh' };
+    const ua = typeof navigator !== 'undefined' ? navigator.userAgent : '';
+    return { kind: 'local', platform: ua.includes('Windows') ? 'win32' : ua.includes('Mac') ? 'darwin' : 'linux', shell: shellType };
+  }, [k8sTarget, local, shellType]);
+  const aiEnvironmentRef = useRef(aiEnvironment);
+  aiEnvironmentRef.current = aiEnvironment;
+
+  useEffect(() => {
+    const load = (): void => {
+      const pending = window.multissh?.aiGetConfig?.();
+      if (!pending) return;
+      void pending
+        .then((config) => {
+          aiEnabledRef.current = config.enabled;
+          if (!config.enabled) setFailureHint(false);
+        })
+        .catch(() => {});
+    };
+    load();
+    window.addEventListener(AI_CONFIG_CHANGED_EVENT, load);
+    return () => window.removeEventListener(AI_CONFIG_CHANGED_EVENT, load);
+  }, []);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [copyNotice, setCopyNotice] = useState<string | null>(null);
   const isActiveRef = useRef(isActive);
@@ -431,6 +466,31 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     const outputTracker = new CommandOutputTracker(term);
     outputTrackerRef.current = outputTracker;
 
+    // AI failure hint. With OSC 133 shell integration the exit code says whether a command failed;
+    // otherwise the end of its output is checked for typical error messages once output settles.
+    const typedLine = new TypedLineTracker();
+    /** The command line as typed, for spotting `ssh host` / `exit` (looser than typedLine, never null). */
+    let inputLineBuffer = '';
+    let awaitingCommandEnd = false;
+    let failureCheckTimer: ReturnType<typeof setTimeout> | undefined;
+    outputTracker.onCommandEnd = (exitCode) => {
+      // Only commands the user ran: not the shell's startup or the app's own initial `cd`.
+      const ranByUser = awaitingCommandEnd;
+      awaitingCommandEnd = false;
+      if (ranByUser && aiEnabledRef.current && isFailureExitCode(exitCode)) setFailureHint(true);
+    };
+    const scheduleFailureCheck = (): void => {
+      if (!awaitingCommandEnd || outputTracker.hasShellIntegration || !aiEnabledRef.current) return;
+      clearTimeout(failureCheckTimer);
+      failureCheckTimer = setTimeout(() => {
+        if (!awaitingCommandEnd || term.buffer.active.type !== 'normal') return;
+        if (looksLikeFailure(outputTracker.lastOutput())) {
+          awaitingCommandEnd = false;
+          setFailureHint(true);
+        }
+      }, 700);
+    };
+
     term.open(containerRef.current);
     if (isActiveRef.current) {
       try {
@@ -516,10 +576,49 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     };
     window.addEventListener(OPEN_CLIPBOARD_HISTORY_EVENT, handleOpenHistory);
 
-    const showNotice = (message: string): void => {
-      setCopyNotice(message);
+    const showNotice = (message: string, durationMs = 2000): void => {
+      setCopyNotice(message.length > 200 ? `${message.slice(0, 200)}…` : message);
       clearTimeout(noticeTimer);
-      noticeTimer = setTimeout(() => setCopyNotice(null), 2000);
+      noticeTimer = setTimeout(() => setCopyNotice(null), durationMs);
+    };
+    const writeToPty = (data: string): void => {
+      const write = k8sTargetRef.current ? window.multissh?.k8sTerminalWrite : window.multissh?.terminalWrite;
+      if (sessionIdRef.current && write) write(sessionIdRef.current, data);
+    };
+    // Turns what the user typed at the prompt ("find files over 100 MB") into a command, in place.
+    const runInlineCommand = async (): Promise<void> => {
+      if (!aiEnabledRef.current) {
+        showNotice('Turn on the AI assistant in Settings → AI Assistant', 4000);
+        return;
+      }
+      const typed = typedLine.text;
+      if (typed === null || !typed.trim()) {
+        // Nothing (reliably) typed: describe the task in the assistant instead.
+        setAiContext({ selection: term.getSelection(), lastOutput: outputTracker.lastOutput() ?? '', task: 'command' });
+        return;
+      }
+      showNotice('✨ Writing a command…', 60_000);
+      try {
+        const result = await window.multissh.aiAsk({ task: 'command', prompt: typed, environment: aiEnvironmentRef.current });
+        const command = (result.command ?? '').replace(/[\r\n]+$/, '');
+        if (typedLine.text !== typed) {
+          showNotice('The line changed while waiting, so the suggestion was not inserted', 4000);
+        } else if (!command) {
+          showNotice(result.text || 'No command was suggested for that', 6000);
+        } else if (command.includes('\n')) {
+          showNotice('The suggestion spans several lines; open the AI Assistant to review it', 5000);
+        } else {
+          // The erase goes straight to the shell, so keep both line trackers in step with it.
+          const erase = eraseTypedLine(typed);
+          writeToPty(erase);
+          typedLine.feed(erase);
+          inputLineBuffer = inputLineBuffer.slice(0, Math.max(0, inputLineBuffer.length - typed.length));
+          term.paste(command);
+          showNotice(result.text || 'Review the command, then press Enter', result.text.startsWith('Warning') ? 10_000 : 6000);
+        }
+      } catch (err) {
+        showNotice((err instanceof Error ? err.message : String(err)).replace(/^Error invoking remote method '[^']+':\s*(Error:\s*)?/i, ''), 6000);
+      }
     };
     const handleTerminalAction = (e: Event) => {
       if (!isActiveRef.current || !rootRef.current?.contains(document.activeElement)) return;
@@ -537,6 +636,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         setSnippetsOpen(true);
       } else if (action === 'aiAssistant') {
         setAiContext({ selection: term.getSelection(), lastOutput: outputTracker.lastOutput() ?? '' });
+      } else if (action === 'aiInlineCommand') {
+        void runInlineCommand();
       } else if (action === 'copyLastOutput') {
         const output = outputTracker.lastOutput();
         if (!output) {
@@ -688,13 +789,15 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           };
 
           // 3. User input to PTY
-          let inputLineBuffer = '';
           term.onData((data) => {
             const write = k8sTarget ? window.multissh?.k8sTerminalWrite : window.multissh?.terminalWrite;
             if (sessionIdRef.current && write) {
               write(sessionIdRef.current, data);
             }
+            typedLine.feed(data);
             if (data.includes('\r') || data.includes('\n')) {
+              awaitingCommandEnd = true;
+              setFailureHint(false);
               outputTracker.recordEnter();
               const parts = data.split(/[\r\n]+/);
               const cmd = (inputLineBuffer + (parts[0] || '')).trim();
@@ -724,6 +827,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             unsubData = onData((sessId, data) => {
               if (sessId === sessionIdRef.current) {
                 term.write(data);
+                scheduleFailureCheck();
                 sendInitialCwd();
                 if (!k8sTarget) {
                   const detectedHost = scanOutputForHost(data);
@@ -804,6 +908,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       titleSub.dispose();
       selectionSub.dispose();
       resultsSub.dispose();
+      clearTimeout(failureCheckTimer);
+      outputTracker.onCommandEnd = null;
       outputTracker.dispose();
       outputTrackerRef.current = null;
       searchAddonRef.current = null;
@@ -977,6 +1083,40 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         </div>
       )}
 
+      {failureHint && !aiContext && (
+        <div
+          data-testid="ai-failure-hint"
+          className="dark-surface absolute bottom-3 left-4 z-20 flex items-center gap-1 rounded-lg bg-slate-900/90 px-1 py-1 text-xs text-slate-200 shadow-lg animate-fade-in"
+        >
+          <button
+            type="button"
+            onClick={() => {
+              setFailureHint(false);
+              setAiContext({
+                selection: '',
+                lastOutput: outputTrackerRef.current?.lastOutput() ?? '',
+                task: 'explain',
+                autoSubmit: true,
+              });
+            }}
+            className="rounded-md px-2 py-0.5 hover:bg-slate-700 cursor-pointer"
+          >
+            ✨ Explain this error
+          </button>
+          <button
+            type="button"
+            aria-label="Dismiss"
+            onClick={() => {
+              setFailureHint(false);
+              termRef.current?.focus();
+            }}
+            className="rounded-md p-0.5 text-slate-400 hover:bg-slate-700 hover:text-slate-200 cursor-pointer"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
+
       {copyNotice && (
         <div
           data-testid="copy-notice"
@@ -1015,23 +1155,26 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
       {aiContext && (
         <AiAssistantModal
-          environment={
-            k8sTarget
-              ? { kind: 'k8s' }
-              : local
-                ? { kind: 'local', platform: navigator.userAgent.includes('Windows') ? 'win32' : navigator.userAgent.includes('Mac') ? 'darwin' : 'linux', shell: shellType }
-                : { kind: 'ssh' }
-          }
+          environment={aiEnvironment}
           selection={aiContext.selection}
           lastOutput={aiContext.lastOutput}
+          initialTask={aiContext.task}
+          autoSubmit={aiContext.autoSubmit}
           onInsert={(command) => {
             setAiContext(null);
             const term = termRef.current;
-            if (term) {
-              // Never press Enter: the user reviews the suggestion and runs it themselves.
-              term.paste(command.replace(/[\r\n]+$/, ''));
-              term.focus();
+            if (!term) return;
+            const text = command.replace(/[\r\n]+$/, '');
+            // Never press Enter: the user reviews the suggestion and runs it themselves. A shell
+            // without bracketed paste would run each pasted line, so multi-line text is copied instead.
+            if (text.includes('\n') && !term.modes.bracketedPasteMode) {
+              void navigator.clipboard?.writeText(text).catch(() => {});
+              setCopyNotice('Multi-line command copied: paste it once you have reviewed it');
+              setTimeout(() => setCopyNotice(null), 5000);
+            } else {
+              term.paste(text);
             }
+            term.focus();
           }}
           onClose={() => {
             setAiContext(null);

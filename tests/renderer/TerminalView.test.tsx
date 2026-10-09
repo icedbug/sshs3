@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, act } from '@testing-library/react';
+import { render, screen, cleanup, act, fireEvent, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import type { SSHConnectionConfig } from '../../src/shared/types/ssh';
 import { TerminalView } from '../../src/renderer/src/components/TerminalView';
+import { dispatchTerminalAction } from '../../src/renderer/src/lib/terminalActionEvents';
 
 // Polyfill ResizeObserver and matchMedia for JSDOM
 let resizeCallback: ((entries: any[], observer: any) => void) | null = null;
@@ -387,5 +388,84 @@ describe('TerminalView Component', () => {
     // Terminal container handles DOM paste listener without errors
     expect(container).toBeInTheDocument();
   });
-});
 
+  describe('AI assistant integration', () => {
+    const enabledAi = { enabled: true, provider: 'anthropic', model: 'claude-opus-5-5', hasApiKey: true };
+
+    async function renderWithAi(aiAsk = vi.fn()) {
+      Object.assign(window.multissh, { aiGetConfig: vi.fn().mockResolvedValue(enabledAi), aiAsk });
+      const view = render(<TerminalView config={sampleConfig} />);
+      await act(async () => {
+        await Promise.resolve();
+      });
+      const textarea = view.container.querySelector('textarea.xterm-helper-textarea') as HTMLTextAreaElement;
+      textarea.focus();
+      const type = (text: string) => {
+        for (const ch of text) fireEvent.keyPress(textarea, { key: ch, charCode: ch.charCodeAt(0) });
+      };
+      const pressEnter = () => fireEvent.keyDown(textarea, { key: 'Enter', keyCode: 13 });
+      return { aiAsk, type, pressEnter };
+    }
+
+    it('offers to explain a command that exited with an error', async () => {
+      const aiAsk = vi.fn().mockResolvedValue({ text: 'The command name is misspelled.', redacted: false });
+      const { type, pressEnter } = await renderWithAi(aiAsk);
+      type('dokcer ps');
+      pressEnter();
+      act(() => {
+        dataCallback!('session-123', '\r\nbash: dokcer: command not found\r\n\x1b]133;D;127\x07\x1b]133;A\x07$ ');
+      });
+
+      fireEvent.click(await screen.findByRole('button', { name: /Explain this error/ }));
+      expect(await screen.findByText('The command name is misspelled.')).toBeInTheDocument();
+      expect(aiAsk).toHaveBeenCalledWith(
+        expect.objectContaining({ task: 'explain', context: expect.stringContaining('dokcer: command not found') })
+      );
+      expect(screen.queryByTestId('ai-failure-hint')).not.toBeInTheDocument();
+    });
+
+    it('stays quiet after a command that succeeded', async () => {
+      const { type, pressEnter } = await renderWithAi();
+      type('true');
+      pressEnter();
+      act(() => {
+        dataCallback!('session-123', '\r\n\x1b]133;D;0\x07\x1b]133;A\x07$ ');
+      });
+      await new Promise((resolve) => setTimeout(resolve, 900));
+      expect(screen.queryByTestId('ai-failure-hint')).not.toBeInTheDocument();
+    });
+
+    it('recognises a typical error message when the shell reports no exit codes', async () => {
+      const { type, pressEnter } = await renderWithAi();
+      type('cat nope');
+      pressEnter();
+      act(() => {
+        dataCallback!('session-123', '\r\ncat: nope: No such file or directory\r\n$ ');
+      });
+      expect(await screen.findByTestId('ai-failure-hint', {}, { timeout: 2000 })).toBeInTheDocument();
+    });
+
+    it('turns the typed line into a command without running it', async () => {
+      const aiAsk = vi.fn().mockResolvedValue({ command: 'du -sh * | sort -h', text: 'Sizes, largest last.', redacted: false });
+      const { type } = await renderWithAi(aiAsk);
+      type('largest folders here');
+      mockTerminalWrite.mockClear();
+
+      act(() => dispatchTerminalAction('aiInlineCommand'));
+
+      await waitFor(() => expect(mockTerminalWrite).toHaveBeenCalledTimes(2));
+      expect(aiAsk).toHaveBeenCalledWith(expect.objectContaining({ task: 'command', prompt: 'largest folders here' }));
+      expect(mockTerminalWrite).toHaveBeenNthCalledWith(1, 'session-123', '\x7f'.repeat('largest folders here'.length));
+      expect(mockTerminalWrite).toHaveBeenNthCalledWith(2, 'session-123', 'du -sh * | sort -h');
+      expect(await screen.findByTestId('copy-notice')).toHaveTextContent('Sizes, largest last.');
+    });
+
+    it('opens the assistant instead when nothing is typed', async () => {
+      const aiAsk = vi.fn();
+      await renderWithAi(aiAsk);
+      act(() => dispatchTerminalAction('aiInlineCommand'));
+      expect(await screen.findByRole('tab', { name: 'Suggest a command' })).toHaveAttribute('aria-selected', 'true');
+      expect(aiAsk).not.toHaveBeenCalled();
+    });
+  });
+});

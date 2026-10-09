@@ -16,6 +16,10 @@ interface AiAssistantModalProps {
   selection: string;
   /** Output of the last command, when the terminal tracked one. */
   lastOutput: string;
+  /** Opens in this mode; by default 'explain' when text is selected, else 'command'. */
+  initialTask?: AiTask;
+  /** Asks right away once the settings have loaded (used by the "Explain this error" hint). */
+  autoSubmit?: boolean;
   /** Types the command into the terminal without pressing Enter. */
   onInsert: (command: string) => void;
   onClose: () => void;
@@ -38,11 +42,21 @@ function providerLabel(config: AiConfigView): string {
   return `${host || 'OpenAI-compatible'} · ${config.model}`;
 }
 
-export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({ environment, selection, lastOutput, onInsert, onClose }) => {
+export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
+  environment,
+  selection,
+  lastOutput,
+  initialTask,
+  autoSubmit = false,
+  onInsert,
+  onClose,
+}) => {
   const onBackdrop = useModalDismiss(onClose, true);
   const [config, setConfig] = useState<AiConfigView | null>(null);
-  const [task, setTask] = useState<AiTask>(selection ? 'explain' : 'command');
-  const [source, setSource] = useState<ContextSource>(selection ? 'selection' : 'none');
+  const [task, setTask] = useState<AiTask>(initialTask ?? (selection ? 'explain' : 'command'));
+  const [source, setSource] = useState<ContextSource>(
+    selection ? 'selection' : (initialTask ?? 'command') === 'explain' && lastOutput ? 'lastOutput' : 'none'
+  );
   const [prompt, setPrompt] = useState('');
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<AiAskResult | null>(null);
@@ -50,6 +64,7 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({ environment,
   const [copied, setCopied] = useState(false);
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const requestIdRef = useRef(0);
+  const autoSubmittedRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -106,6 +121,13 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({ environment,
       if (id === requestIdRef.current) setBusy(false);
     }
   };
+
+  useEffect(() => {
+    if (!autoSubmit || autoSubmittedRef.current || !config?.enabled || !canSubmit) return;
+    autoSubmittedRef.current = true;
+    void submit();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- submit() reads the current state; this runs once, when the settings arrive
+  }, [autoSubmit, config?.enabled, canSubmit]);
 
   const copyCommand = (command: string): void => {
     void navigator.clipboard

@@ -22,10 +22,14 @@ export class CommandOutputTracker {
   private markers: IMarker[] = [];
   private regions: OscRegion[] = [];
   private readonly oscHandler: { dispose(): void };
+  private sawShellIntegration = false;
+  /** Called on OSC 133 `D` (command finished) with the exit code, or null when the shell sent none. */
+  public onCommandEnd: ((exitCode: number | null) => void) | null = null;
 
   constructor(private readonly term: Terminal) {
     this.oscHandler = term.parser.registerOscHandler(133, (data) => {
       const kind = data.charAt(0);
+      this.sawShellIntegration = true;
       if (kind === 'C') {
         const start = term.registerMarker(0);
         if (start) {
@@ -38,9 +42,18 @@ export class CommandOutputTracker {
           open.end = term.registerMarker(0);
           open.partialLastLine = term.buffer.active.cursorX > 0;
         }
+        if (kind === 'D') {
+          const code = Number.parseInt(data.split(';')[1] ?? '', 10);
+          this.onCommandEnd?.(Number.isNaN(code) ? null : code);
+        }
       }
       return true;
     });
+  }
+
+  /** True once the shell has sent OSC 133 marks, so exit codes are known instead of guessed. */
+  public get hasShellIntegration(): boolean {
+    return this.sawShellIntegration;
   }
 
   /** Call when the user presses Enter (the cursor is still on the command line). */
