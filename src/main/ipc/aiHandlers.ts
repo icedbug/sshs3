@@ -6,12 +6,13 @@ import {
   type AiAskResult,
   type AiConfigUpdate,
   type AiConfigView,
+  type AiHermesStatus,
   type AiTerminalEnvironment,
 } from '../../shared/types/ai';
 import type { IpcBridge } from '../IpcBridge';
 
 /** The part of IpcBridge this handler group may use. */
-export type AiHost = Pick<IpcBridge, 'aiConfigStore' | 'aiService' | 'registerHandler'>;
+export type AiHost = Pick<IpcBridge, 'aiConfigStore' | 'aiService' | 'hermesManager' | 'registerHandler'>;
 
 /** The renderer may send a whole scrollback as context; anything far beyond what is used is rejected outright. */
 const MAX_CONTEXT_INPUT_CHARS = AI_MAX_CONTEXT_CHARS * 8;
@@ -62,6 +63,7 @@ export function parseConfigUpdate(input: unknown): AiConfigUpdate {
     (u.provider !== undefined && u.provider !== 'anthropic' && u.provider !== 'openai-compatible') ||
     !isOptionalString(u.model, 200) ||
     !isOptionalString(u.baseUrl, 2048) ||
+    (u.useHermes !== undefined && typeof u.useHermes !== 'boolean') ||
     (u.apiKey !== undefined && u.apiKey !== null && !(typeof u.apiKey === 'string' && u.apiKey.length <= 4096)) // pragma: allowlist secret
   ) {
     throw new Error('Invalid AI settings');
@@ -71,6 +73,7 @@ export function parseConfigUpdate(input: unknown): AiConfigUpdate {
     ...(u.provider !== undefined ? { provider: u.provider } : {}),
     ...(u.model !== undefined ? { model: u.model } : {}),
     ...(u.baseUrl !== undefined ? { baseUrl: u.baseUrl } : {}),
+    ...(u.useHermes !== undefined ? { useHermes: u.useHermes } : {}),
     ...(u.apiKey !== undefined ? { apiKey: u.apiKey as string | null } : {}),
   };
 }
@@ -81,7 +84,15 @@ export function registerAiHandlers(bridge: AiHost): void {
   });
 
   bridge.registerHandler(IPC_CHANNELS.AI_SAVE_CONFIG, async (_event, update: unknown): Promise<AiConfigView> => {
-    return await bridge.aiConfigStore.update(parseConfigUpdate(update));
+    const view = await bridge.aiConfigStore.update(parseConfigUpdate(update));
+    // Turning the assistant or Hermes off stops the agent right away rather than at quit.
+    if (!view.enabled || !view.useHermes) await bridge.hermesManager.stop();
+    return view;
+  });
+
+  bridge.registerHandler(IPC_CHANNELS.AI_HERMES_STATUS, async (): Promise<AiHermesStatus> => {
+    const manifest = await bridge.hermesManager.getManifest();
+    return { bundled: manifest !== null, ...(manifest ? { version: manifest.tag } : {}), running: bridge.hermesManager.isRunning() };
   });
 
   bridge.registerHandler(IPC_CHANNELS.AI_ASK, async (_event, request: unknown): Promise<AiAskResult> => {

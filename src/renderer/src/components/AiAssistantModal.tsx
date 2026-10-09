@@ -32,14 +32,19 @@ const IPC_PREFIX = /^Error invoking remote method '[^']+':\s*(Error:\s*)?/i;
 const lineCount = (text: string): number => (text ? text.replace(/\n+$/, '').split('\n').length : 0);
 
 function providerLabel(config: AiConfigView): string {
-  if (config.provider === 'anthropic') return `Anthropic · ${config.model}`;
-  let host = config.baseUrl ?? '';
-  try {
-    host = new URL(host).host;
-  } catch {
-    // Show the raw value.
+  let label: string;
+  if (config.provider === 'anthropic') {
+    label = `Anthropic · ${config.model}`;
+  } else {
+    let host = config.baseUrl ?? '';
+    try {
+      host = new URL(host).host;
+    } catch {
+      // Show the raw value.
+    }
+    label = `${host || 'OpenAI-compatible'} · ${config.model}`;
   }
-  return `${host || 'OpenAI-compatible'} · ${config.model}`;
+  return config.useHermes ? `the Hermes agent on this computer, which uses ${label}` : label;
 }
 
 export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({

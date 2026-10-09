@@ -117,6 +117,7 @@ Help with commands and output without leaving the terminal. It is **off by defau
 - **Explain this error** — when a command fails, a small *✨ Explain this error* button appears in the corner of the terminal; one click sends that command's output and shows what went wrong and how to fix it. Failures are read from the exit code in shells that send OSC 133 prompt marks, and otherwise recognised from typical error messages (`command not found`, `No such file or directory`, `Permission denied`, a Python traceback, …). The button only appears while the assistant is turned on.
 - **Type what you want, get the command (`Ctrl+Shift+Space`)** — write a plain description at the prompt ("largest folders here, sorted") and press `Ctrl+Shift+Space`: the text is replaced in place by a command, ready to review and run with Enter. With nothing typed, or after line editing the app can't follow (history, tab completion, arrow keys), it opens the assistant instead.
 - **Providers** — Anthropic (Claude) with your own API key, or any **OpenAI-compatible** endpoint such as a local [Ollama](https://ollama.com) or LM Studio, so terminal text never has to leave your machine.
+- **Built-in Hermes agent *(opt-in)*** — the installers include [Hermes Agent](https://github.com/NousResearch/hermes-agent) (Nous Research, MIT). Turn on *Use the built-in Hermes agent* and requests go through Hermes, running on your computer, which calls the provider and model you chose and keeps a memory of what you have asked and learned across sessions. Hermes runs with sshs3's guardrails: only its memory, past-session search and to-do tools are on (no shell, file, code, browser or web tools, and every shell command is on its deny list), it listens on `127.0.0.1` only with a fresh key per start, and it starts with a minimal environment, so it gets none of sshs3's passwords, keys, SSH agent or cloud credentials. Its data lives in a `hermes` folder in sshs3's own data folder.
 - **Privacy** — nothing is sent until you ask (*Ask*, *Explain this error* or `Ctrl+Shift+Space`); the dialog shows exactly which terminal text is included, and passwords, tokens, AWS keys, bearer headers and private key blocks are masked before anything leaves the app (the same masking the log file uses). The API key is encrypted with the OS keyring and AI settings live in their own `ai-config.json`, which is never part of remote profile sync. Requests go through Chromium's network stack, so the system proxy and certificate store apply.
 
 ### Performance bar *(opt-in)*
@@ -526,6 +527,11 @@ npm run package:linux
 
 # Windows (requires a Windows build environment)
 npm run package:win
+```
+
+To include the built-in Hermes agent, build its runtime first (needs `git` and [uv](https://docs.astral.sh/uv/); the release workflow does this). It pins the Hermes release by tag and commit and installs its Python dependencies from Hermes' lockfile by hash, into `build-resources/hermes/`, which the installers pick up. Without it the app builds and runs as before, with the Hermes option greyed out.
+```bash
+node scripts/hermes/build-runtime.mjs
 ```
 
 ### Release & Deployment

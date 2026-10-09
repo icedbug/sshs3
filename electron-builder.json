@@ -10,6 +10,15 @@
     "package.json"
   ],
   "icon": "build/icon.png",
+  "extraResources": [
+    {
+      "from": "build-resources/hermes",
+      "to": "hermes",
+      "filter": [
+        "**/*"
+      ]
+    }
+  ],
   "linux": {
     "target": [
       "AppImage",

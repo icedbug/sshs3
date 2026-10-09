@@ -15,6 +15,7 @@ import { SnippetStore } from './snippets/SnippetStore';
 import { SettingsStore } from './settings/SettingsStore';
 import { AiConfigStore } from './ai/AiConfigStore';
 import { AiService } from './ai/AiService';
+import { HermesManager } from './ai/HermesManager';
 import { UpdateService } from './update/UpdateService';
 import { SmartcardCoordinator } from './smartcard/SmartcardCoordinator';
 import { createHostVerifier, type HostKeyPromptInfo } from './ssh/HostKeyVerifier';
@@ -107,6 +108,7 @@ export interface IpcBridgeOptions {
   settingsStore?: SettingsStore;
   aiConfigStore?: AiConfigStore;
   aiService?: AiService;
+  hermesManager?: HermesManager;
   dotfilePoolStore?: DotfilePoolStore;
   dotfileSyncService?: DotfileSyncService;
   directorySyncProfileStore?: DirectorySyncProfileStore;
@@ -140,6 +142,7 @@ export class IpcBridge {
   public readonly settingsStore: SettingsStore;
   public readonly aiConfigStore: AiConfigStore;
   public readonly aiService: AiService;
+  public readonly hermesManager: HermesManager;
   public readonly dotfilePoolStore: DotfilePoolStore;
   public readonly dotfileSyncService: DotfileSyncService;
   public readonly directorySyncProfileStore: DirectorySyncProfileStore;
@@ -243,7 +246,8 @@ export class IpcBridge {
     this.clipboardHistoryStore = options.clipboardHistoryStore ?? new ClipboardHistoryStore();
     this.snippetStore = options.snippetStore ?? new SnippetStore();
     this.aiConfigStore = options.aiConfigStore ?? new AiConfigStore();
-    this.aiService = options.aiService ?? new AiService(this.aiConfigStore);
+    this.hermesManager = options.hermesManager ?? new HermesManager();
+    this.aiService = options.aiService ?? new AiService(this.aiConfigStore, { hermes: this.hermesManager });
     this.dotfilePoolStore = options.dotfilePoolStore ?? new DotfilePoolStore();
     this.dotfileSyncService = options.dotfileSyncService ?? new DotfileSyncService();
     this.directorySyncProfileStore = options.directorySyncProfileStore ?? new DirectorySyncProfileStore();
@@ -1369,6 +1373,7 @@ export class IpcBridge {
     // app 'before-quit' before app.quit() runs, so this is what actually guarantees every standalone
     // tunnel process is signalled before the app exits on a normal quit.
     await this.disposeStep('sshTunnelManager.stopAll', () => this.sshTunnelManager.stopAll());
+    await this.disposeStep('hermesManager.stop', () => this.hermesManager.stop());
 
     if (this.unsubscribeK8sConfig) {
       this.unsubscribeK8sConfig();
