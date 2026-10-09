@@ -37,7 +37,7 @@ import type { SessionData } from './session';
 import type { ClipboardHistoryEntry } from './clipboard';
 import type { Snippet } from './snippets';
 import type { AppSettings } from './settings';
-import type { AiAskRequest, AiAskResult, AiConfigUpdate, AiConfigView } from './ai';
+import type { AiAskRequest, AiAskResult, AiConfigUpdate, AiConfigView, AiHermesStatus } from './ai';
 import type {
   DotfileImportedFile,
   DotfilePool,
@@ -190,6 +190,7 @@ export const IPC_CHANNELS = {
   AI_GET_CONFIG: 'ai:get-config',
   AI_SAVE_CONFIG: 'ai:save-config',
   AI_ASK: 'ai:ask',
+  AI_HERMES_STATUS: 'ai:hermes-status',
 
   // Remote profile sync ("Remote Profile Sync" — distinct from the
   // dotfiles:sync-* channels above, which deploy a dotfile pool to a remote
@@ -596,6 +597,7 @@ export interface MultiSSHApi {
   aiGetConfig(): Promise<AiConfigView>;
   aiSaveConfig(update: AiConfigUpdate): Promise<AiConfigView>;
   aiAsk(request: AiAskRequest): Promise<AiAskResult>;
+  aiHermesStatus(): Promise<AiHermesStatus>;
 
   // Remote profile sync
   profileSyncSetup(payload: { target: StorageConnectConfig; remoteBasePath?: string }): Promise<void>;

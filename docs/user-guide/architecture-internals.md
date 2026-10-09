@@ -67,6 +67,8 @@ During production packaging, hardware-level **Electron Fuses** are enforced via 
 | **Saved Profile Passwords** | `profiles.json` on disk | Decrypted only at connect time | Encrypted with AES via Electron `safeStorage` (libsecret on Linux, DPAPI on Windows, Keychain on macOS). |
 | **Remote Vault Profiles** | Remote S3 / SFTP server | Lifetime of sync session | Client-side encrypted with **AES-256-GCM** and scrypt. Remote server sees only opaque ciphertext. |
 | **Forwarded X11 Windows** | VcXsrv TCP Port 6000 | Lifetime of session | Access control enforced; requires `MIT-MAGIC-COOKIE`. Unauthorized LAN devices are rejected. |
+| **AI API key** | `ai-config.json` on disk | Decrypted per request in the main process | Encrypted with `safeStorage`; never sent to the renderer or synced. Passed to the bundled Hermes agent only through its process environment, never written to its files. |
+| **Bundled Hermes agent** | Loopback port (random) + `userData/hermes` | While AI requests use it | Bound to `127.0.0.1` with a random per-start bearer key. Only memory, session search and to-do tools; shell commands denied. Started with an allowlisted environment, so no SSH agent socket, cloud credentials or user home. |
 
 ---
 

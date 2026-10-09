@@ -31,6 +31,11 @@ export interface AiConfig {
   model: string;
   /** Optional endpoint override. Required for 'openai-compatible' (e.g. http://localhost:11434/v1). */
   baseUrl?: string;
+  /**
+   * Route requests through the Hermes agent bundled with sshs3, which uses the provider and
+   * model above and adds memory across sessions. Off by default.
+   */
+  useHermes: boolean;
 }
 
 /** What the renderer sees: the API key itself never leaves the main process. */
@@ -61,6 +66,14 @@ export interface AiAskResult {
   redacted: boolean;
 }
 
+/** The bundled Hermes agent: whether this build includes it, and whether it is running now. */
+export interface AiHermesStatus {
+  bundled: boolean;
+  /** Hermes release tag, when bundled. */
+  version?: string;
+  running: boolean;
+}
+
 export const AI_MAX_PROMPT_CHARS = 2000;
 /** Longer context is cut from the start: the end of an output is usually where the error is. */
 export const AI_MAX_CONTEXT_CHARS = 16000;
@@ -74,4 +87,5 @@ export const DEFAULT_AI_CONFIG: AiConfig = {
   enabled: false,
   provider: 'anthropic',
   model: DEFAULT_AI_MODELS.anthropic,
+  useHermes: false,
 };

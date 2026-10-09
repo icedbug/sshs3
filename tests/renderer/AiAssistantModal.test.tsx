@@ -6,13 +6,14 @@ import { AiAssistantModal } from '../../src/renderer/src/components/AiAssistantM
 import { AiSettingsPanel } from '../../src/renderer/src/components/SettingsModal/AiSettingsPanel';
 import type { AiConfigView } from '../../src/shared/types/ai';
 
-const enabledConfig: AiConfigView = { enabled: true, provider: 'anthropic', model: 'claude-opus-5-5', hasApiKey: true };
+const enabledConfig: AiConfigView = { enabled: true, provider: 'anthropic', model: 'claude-opus-5-5', useHermes: false, hasApiKey: true };
 
 function mockApi(overrides: Record<string, unknown> = {}) {
   window.multissh = {
     aiGetConfig: vi.fn().mockResolvedValue(enabledConfig),
     aiAsk: vi.fn(),
     aiSaveConfig: vi.fn(),
+    aiHermesStatus: vi.fn().mockResolvedValue({ bundled: false, running: false }),
     ...overrides,
   } as unknown as typeof window.multissh;
   return window.multissh as unknown as Record<string, ReturnType<typeof vi.fn>>;
@@ -122,7 +123,7 @@ describe('AiSettingsPanel', () => {
   afterEach(() => cleanup());
 
   it('saves the provider settings and a new key without ever showing the stored key', async () => {
-    const saved: AiConfigView = { enabled: true, provider: 'openai-compatible', model: 'llama3.1', baseUrl: 'http://localhost:11434/v1', hasApiKey: false };
+    const saved: AiConfigView = { enabled: true, provider: 'openai-compatible', model: 'llama3.1', baseUrl: 'http://localhost:11434/v1', useHermes: false, hasApiKey: false };
     const api = mockApi({
       aiGetConfig: vi.fn().mockResolvedValue({ ...enabledConfig, enabled: false }),
       aiSaveConfig: vi.fn().mockResolvedValue(saved),
@@ -142,8 +143,27 @@ describe('AiSettingsPanel', () => {
         provider: 'openai-compatible',
         model: 'llama3.1',
         baseUrl: 'http://localhost:11434/v1',
+        useHermes: false,
       })
     );
     expect(await screen.findByRole('status')).toHaveTextContent('Saved.');
+  });
+
+  it('offers the built-in Hermes agent only when this build includes it', async () => {
+    const api = mockApi({
+      aiSaveConfig: vi.fn().mockResolvedValue({ ...enabledConfig, useHermes: true }),
+      aiHermesStatus: vi.fn().mockResolvedValue({ bundled: true, version: 'v2026.9.24', running: false }),
+    });
+    render(<AiSettingsPanel />);
+    expect(await screen.findByText(/Hermes v2026\.9\.24 \(Nous Research, MIT\) runs on this computer/)).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('ai-use-hermes'));
+    fireEvent.click(screen.getByTestId('ai-save'));
+    await waitFor(() => expect(api.aiSaveConfig).toHaveBeenCalledWith(expect.objectContaining({ useHermes: true })));
+    cleanup();
+
+    mockApi();
+    render(<AiSettingsPanel />);
+    expect(await screen.findByText('This build of sshs3 does not include the Hermes agent.')).toBeInTheDocument();
+    expect(screen.getByTestId('ai-use-hermes')).toBeDisabled();
   });
 });

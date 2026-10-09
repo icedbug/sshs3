@@ -80,6 +80,14 @@ jobs:
           Write-Host "VcXsrv bundled successfully. Extracted files:"
           Get-ChildItem -Path 'build-resources/vcxsrv' | Select-Object -First 10 Name
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      # The Hermes agent ships inside the installers (electron-builder extraResources). The script
+      # pins the Hermes release by tag and commit and installs its Python dependencies by hash.
+      - name: Build bundled Hermes agent runtime
+        run: node scripts/hermes/build-runtime.mjs
+
       - name: Build application bundles
         run: |
           npm run build

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { DEFAULT_AI_MODELS, type AiConfigView, type AiProvider } from '@shared/types/ai';
+import { DEFAULT_AI_MODELS, type AiConfigView, type AiHermesStatus, type AiProvider } from '@shared/types/ai';
 import { AI_CONFIG_CHANGED_EVENT } from '../../lib/aiTerminal';
 
 const IPC_PREFIX = /^Error invoking remote method '[^']+':\s*(Error:\s*)?/i;
@@ -19,6 +19,8 @@ export const AiSettingsPanel: React.FC = () => {
   const [model, setModel] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
+  const [useHermes, setUseHermes] = useState(false);
+  const [hermes, setHermes] = useState<AiHermesStatus | null>(null);
   const [status, setStatus] = useState<{ kind: 'ok' | 'error'; message: string } | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -28,6 +30,7 @@ export const AiSettingsPanel: React.FC = () => {
     setProvider(view.provider);
     setModel(view.model);
     setBaseUrl(view.baseUrl ?? '');
+    setUseHermes(view.useHermes);
     setApiKey('');
   };
 
@@ -36,6 +39,10 @@ export const AiSettingsPanel: React.FC = () => {
       .aiGetConfig()
       .then(apply)
       .catch(() => setStatus({ kind: 'error', message: 'Could not load the AI assistant settings.' }));
+    window.multissh
+      .aiHermesStatus()
+      .then(setHermes)
+      .catch(() => setHermes({ bundled: false, running: false }));
   }, []);
 
   const changeProvider = (next: AiProvider): void => {
@@ -53,6 +60,7 @@ export const AiSettingsPanel: React.FC = () => {
         provider,
         model,
         baseUrl,
+        useHermes,
         ...(removeKey ? { apiKey: null } : apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
       });
       apply(view);
@@ -154,6 +162,27 @@ export const AiSettingsPanel: React.FC = () => {
         <p className="text-xs text-txt-muted">
           Stored encrypted with the OS keyring, like saved passwords, and only on this computer: AI settings are not part of
           profile sync.
+        </p>
+      </div>
+
+      <div className="space-y-1.5 rounded-lg border border-border-subtle p-3">
+        <label className={`flex items-center gap-2.5 ${hermes?.bundled ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'}`}>
+          <input
+            type="checkbox"
+            checked={useHermes}
+            disabled={!hermes?.bundled}
+            onChange={(e) => setUseHermes(e.target.checked)}
+            data-testid="ai-use-hermes"
+            className="h-4 w-4 rounded border-border-subtle text-sky-600 focus:ring-sky-500"
+          />
+          <span className="text-xs text-txt-primary">Use the built-in Hermes agent (remembers across sessions)</span>
+        </label>
+        <p className="text-xs text-txt-muted" data-testid="ai-hermes-note">
+          {hermes === null
+            ? 'Checking for the Hermes agent…'
+            : hermes.bundled
+              ? `Hermes ${hermes.version ?? ''} (Nous Research, MIT) runs on this computer and calls the provider above. It keeps a memory of what you have asked and learned, in sshs3's own data folder. It has no shell, file or web tools, never runs commands, and gets none of sshs3's passwords, keys or SSH agent.`
+              : 'This build of sshs3 does not include the Hermes agent.'}
         </p>
       </div>
 

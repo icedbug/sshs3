@@ -12,7 +12,7 @@ vi.mock('electron', () => {
 });
 
 import { AiConfigStore } from '../../src/main/ai/AiConfigStore';
-import { AiService } from '../../src/main/ai/AiService';
+import { AiService, type HermesRuntime } from '../../src/main/ai/AiService';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -138,5 +138,63 @@ describe('AiService', () => {
   it('needs an endpoint for the OpenAI-compatible provider', async () => {
     await store.update({ enabled: true, provider: 'openai-compatible' });
     await expect(service.ask({ task: 'command', prompt: 'x' })).rejects.toThrow('No endpoint');
+  });
+
+  describe('through the bundled Hermes agent', () => {
+    const endpoint = { baseUrl: 'http://127.0.0.1:41234/v1', apiKey: 'f'.repeat(64) };
+    let hermes: { ensureRunning: ReturnType<typeof vi.fn> };
+
+    beforeEach(() => {
+      hermes = { ensureRunning: vi.fn().mockResolvedValue(endpoint) };
+      service = new AiService(store, { fetch: fetchMock as unknown as typeof fetch, hermes: hermes as unknown as HermesRuntime });
+    });
+
+    it('starts Hermes with the chosen model and asks it, sharing one memory scope', async () => {
+      await store.update({ enabled: true, useHermes: true, apiKey: 'sk-test' }); // pragma: allowlist secret
+      fetchMock.mockResolvedValue(jsonResponse({ choices: [{ message: { content: '```sh\ndu -sh /var/log\n```\nLog size.' } }] }));
+
+      const result = await service.ask({ task: 'command', prompt: 'how big are the logs', context: 'password=hunter2' }); // pragma: allowlist secret
+
+      expect(hermes.ensureRunning).toHaveBeenCalledWith({ kind: 'anthropic', model: 'claude-opus-5-5', apiKey: 'sk-test' }); // pragma: allowlist secret
+      expect(result).toEqual({ command: 'du -sh /var/log', text: 'Log size.', redacted: true });
+      const req = lastRequest();
+      expect(req.url).toBe('http://127.0.0.1:41234/v1/chat/completions');
+      expect(req.headers.get('authorization')).toBe(`Bearer ${endpoint.apiKey}`);
+      expect(req.headers.get('x-hermes-session-key')).toBe('sshs3');
+      expect(req.body.model).toBe('hermes-agent');
+      expect(JSON.stringify(req.body)).not.toContain('hunter2');
+      expect(JSON.stringify(req.body)).not.toContain('sk-test');
+    });
+
+    it('gives Hermes an OpenAI-compatible endpoint as a custom provider', async () => {
+      await store.update({ enabled: true, useHermes: true, provider: 'openai-compatible', model: 'llama3.1', baseUrl: 'http://localhost:11434/v1' });
+      fetchMock.mockResolvedValue(jsonResponse({ choices: [{ message: { content: 'A missing file.' } }] }));
+      await service.ask({ task: 'explain', prompt: '', context: 'ENOENT' });
+      expect(hermes.ensureRunning).toHaveBeenCalledWith({ kind: 'custom', model: 'llama3.1', baseUrl: 'http://localhost:11434/v1' });
+    });
+
+    it("keeps the user's Anthropic endpoint when Hermes calls the model", async () => {
+      await store.update({ enabled: true, useHermes: true, apiKey: 'sk-test', baseUrl: 'https://gateway.example/llm' }); // pragma: allowlist secret
+      fetchMock.mockResolvedValue(jsonResponse({ choices: [{ message: { content: 'ok' } }] }));
+      await service.ask({ task: 'explain', prompt: 'why' });
+      expect(hermes.ensureRunning).toHaveBeenCalledWith({
+        kind: 'anthropic',
+        model: 'claude-opus-5-5',
+        apiKey: 'sk-test', // pragma: allowlist secret
+        baseUrl: 'https://gateway.example/llm',
+      });
+    });
+
+    it('explains when Hermes cannot start or is not part of this build', async () => {
+      await store.update({ enabled: true, useHermes: true, apiKey: 'sk-test' }); // pragma: allowlist secret
+      hermes.ensureRunning.mockRejectedValue(new Error('This build of sshs3 does not include the Hermes runtime.'));
+      await expect(service.ask({ task: 'command', prompt: 'x' })).rejects.toThrow(
+        'The Hermes agent could not start: This build of sshs3 does not include the Hermes runtime.'
+      );
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      const withoutHermes = new AiService(store, { fetch: fetchMock as unknown as typeof fetch });
+      await expect(withoutHermes.ask({ task: 'command', prompt: 'x' })).rejects.toThrow('does not include the Hermes agent');
+    });
   });
 });

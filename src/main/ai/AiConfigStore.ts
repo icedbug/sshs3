@@ -61,6 +61,7 @@ export class AiConfigStore {
         next.provider = update.provider;
       }
       if (update.model !== undefined) next.model = update.model.trim();
+      if (update.useHermes !== undefined) next.useHermes = Boolean(update.useHermes);
       if (update.baseUrl !== undefined) {
         const baseUrl = update.baseUrl.trim();
         if (baseUrl) assertHttpUrl(baseUrl);
@@ -94,6 +95,7 @@ export class AiConfigStore {
       provider: PROVIDERS.includes(stored.provider) ? stored.provider : DEFAULT_AI_CONFIG.provider,
       model: typeof stored.model === 'string' && stored.model ? stored.model : DEFAULT_AI_CONFIG.model,
       ...(typeof stored.baseUrl === 'string' && stored.baseUrl ? { baseUrl: stored.baseUrl } : {}),
+      useHermes: stored.useHermes === true,
     };
   }
 

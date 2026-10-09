@@ -35,12 +35,12 @@ describe('AiConfigStore', () => {
   });
 
   it('is off by default with the Anthropic provider', async () => {
-    expect(await store.getView()).toEqual({ enabled: false, provider: 'anthropic', model: 'claude-opus-5-5', hasApiKey: false });
+    expect(await store.getView()).toEqual({ enabled: false, provider: 'anthropic', model: 'claude-opus-5-5', useHermes: false, hasApiKey: false });
   });
 
   it('stores the API key encrypted and never returns it in the view', async () => {
     const view = await store.update({ enabled: true, apiKey: ' sk-test-key ' }); // pragma: allowlist secret
-    expect(view).toEqual({ enabled: true, provider: 'anthropic', model: 'claude-opus-5-5', hasApiKey: true });
+    expect(view).toEqual({ enabled: true, provider: 'anthropic', model: 'claude-opus-5-5', useHermes: false, hasApiKey: true });
     expect(view).not.toHaveProperty('apiKey');
 
     const raw = await fs.readFile(store.getFilePath(), 'utf-8');

@@ -18,3 +18,6 @@ GEMINI.md
 
 # Test coverage output
 coverage/
+
+# Bundled Hermes agent runtime, built by scripts/hermes/build-runtime.mjs
+build-resources/hermes/
