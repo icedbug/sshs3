@@ -90,6 +90,7 @@ import type { SessionData } from '../shared/types/session';
 import type { ClipboardHistoryEntry } from '../shared/types/clipboard';
 import type { Snippet } from '../shared/types/snippets';
 import type { AppSettings } from '../shared/types/settings';
+import type { AiAskRequest, AiAskResult, AiConfigUpdate, AiConfigView } from '../shared/types/ai';
 import type { PerfK8sResult, PerfK8sTarget, PerfSshResult } from '../shared/types/perf';
 import type { ProfileSyncStatus, ProfileSyncPullResult, SyncComparisonResult } from '../shared/types/sync';
 import type {
@@ -454,6 +455,16 @@ export const api: MultiSSHApi = {
 
   settingsSave: (settings: Partial<AppSettings>): Promise<AppSettings> =>
     ipcRenderer.invoke(IPC_CHANNELS.SETTINGS_SAVE, settings),
+
+  // AI assistant
+  aiGetConfig: (): Promise<AiConfigView> =>
+    ipcRenderer.invoke(IPC_CHANNELS.AI_GET_CONFIG),
+
+  aiSaveConfig: (update: AiConfigUpdate): Promise<AiConfigView> =>
+    ipcRenderer.invoke(IPC_CHANNELS.AI_SAVE_CONFIG, update),
+
+  aiAsk: (request: AiAskRequest): Promise<AiAskResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.AI_ASK, request),
 
   // Remote profile sync
   profileSyncSetup: (payload: { target: StorageConnectConfig; remoteBasePath?: string }): Promise<void> =>

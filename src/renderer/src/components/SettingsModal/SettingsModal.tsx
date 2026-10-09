@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Activity, Settings, X, Terminal, Keyboard, Sliders, Shield, FolderTree, RefreshCw, Boxes, GitBranch } from 'lucide-react';
+import { Activity, Settings, X, Terminal, Keyboard, Sliders, Shield, FolderTree, RefreshCw, Boxes, GitBranch, Sparkles } from 'lucide-react';
 import { type AppSettings } from '@shared/types/settings';
 import { DotfilePoolManagerModal } from './DotfilePoolManagerModal';
 import { SyncSettingsPanel } from './SyncSettingsPanel';
 import { GitSettingsPanel } from './GitSettingsPanel';
+import { AiSettingsPanel } from './AiSettingsPanel';
 import { useModalDismiss } from '../../lib/useModalDismiss';
 import { useSettingsForm } from './useSettingsForm';
 import type { SettingsCategory } from './settingsConstants';
@@ -91,6 +92,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       group: 'Developer & Security',
       items: [
         { id: 'git', label: 'Git & GitHub', icon: GitBranch },
+        { id: 'ai', label: 'AI Assistant', icon: Sparkles },
         { id: 'security', label: 'Security & Smartcard', icon: Shield },
         { id: 'shortcuts', label: 'Keyboard Shortcuts', icon: Keyboard },
       ],
@@ -191,6 +193,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 />
               )}
 
+              {/* Category: AI Assistant (saves on its own, see AiSettingsPanel) */}
+              {activeCategory === 'ai' && <AiSettingsPanel />}
+
               {/* Category: Keyboard Shortcuts */}
               {activeCategory === 'shortcuts' && <ShortcutsSettingsSection form={form} />}
 
@@ -207,10 +212,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
             {/* Modal Footer */}
             <div className="flex items-center justify-end gap-2 border-t border-divider bg-app-surface px-5 py-3">
-              {activeCategory === 'sync' ? (
+              {activeCategory === 'sync' || activeCategory === 'ai' ? (
                 <>
                   <p className="mr-auto text-xs text-txt-muted">
-                    Synchronization changes save immediately — nothing to save here.
+                    {activeCategory === 'sync'
+                      ? 'Synchronization changes save immediately — nothing to save here.'
+                      : 'AI settings are saved with the button above.'}
                   </p>
                   <button
                     type="button"

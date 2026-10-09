@@ -11,6 +11,7 @@ import { registerTerminalLinks } from '../lib/terminalLinks';
 import { CommandOutputTracker } from '../lib/terminalOutput';
 import { TERMINAL_ACTION_EVENT, type TerminalAction } from '../lib/terminalActionEvents';
 import { SnippetPaletteModal } from './SnippetPaletteModal';
+import { AiAssistantModal } from './AiAssistantModal';
 import { PerfBar } from './PerfBar';
 import { ClipboardHistoryModal } from './ClipboardHistoryModal';
 import { OPEN_CLIPBOARD_HISTORY_EVENT } from '../lib/clipboardHistoryEvents';
@@ -248,6 +249,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   searchQueryRef.current = searchQuery;
   const [searchResults, setSearchResults] = useState<{ index: number; count: number } | null>(null);
   const [snippetsOpen, setSnippetsOpen] = useState(false);
+  /** Terminal text captured when the AI assistant was opened (it stays open while the terminal keeps printing). */
+  const [aiContext, setAiContext] = useState<{ selection: string; lastOutput: string } | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [copyNotice, setCopyNotice] = useState<string | null>(null);
   const isActiveRef = useRef(isActive);
@@ -532,6 +535,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         searchInputRef.current?.select();
       } else if (action === 'snippets') {
         setSnippetsOpen(true);
+      } else if (action === 'aiAssistant') {
+        setAiContext({ selection: term.getSelection(), lastOutput: outputTracker.lastOutput() ?? '' });
       } else if (action === 'copyLastOutput') {
         const output = outputTracker.lastOutput();
         if (!output) {
@@ -1003,6 +1008,33 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           }}
           onClose={() => {
             setSnippetsOpen(false);
+            termRef.current?.focus();
+          }}
+        />
+      )}
+
+      {aiContext && (
+        <AiAssistantModal
+          environment={
+            k8sTarget
+              ? { kind: 'k8s' }
+              : local
+                ? { kind: 'local', platform: navigator.userAgent.includes('Windows') ? 'win32' : navigator.userAgent.includes('Mac') ? 'darwin' : 'linux', shell: shellType }
+                : { kind: 'ssh' }
+          }
+          selection={aiContext.selection}
+          lastOutput={aiContext.lastOutput}
+          onInsert={(command) => {
+            setAiContext(null);
+            const term = termRef.current;
+            if (term) {
+              // Never press Enter: the user reviews the suggestion and runs it themselves.
+              term.paste(command.replace(/[\r\n]+$/, ''));
+              term.focus();
+            }
+          }}
+          onClose={() => {
+            setAiContext(null);
             termRef.current?.focus();
           }}
         />

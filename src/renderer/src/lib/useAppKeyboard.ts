@@ -158,7 +158,8 @@ export function useAppKeyboard(ctx: AppKeyboardContext): void {
             (normalizedCombo === 'ctrl+-' || normalizedCombo === 'ctrl+shift+-'));
 
         // These only act on the focused terminal; elsewhere the keys must stay free for other uses.
-        const terminalOnly = actionId === 'terminalSearch' || actionId === 'copyLastOutput' || actionId === 'snippets';
+        const terminalOnly =
+          actionId === 'terminalSearch' || actionId === 'copyLastOutput' || actionId === 'snippets' || actionId === 'aiAssistant';
         if (
           isMatch &&
           terminalOnly &&
@@ -358,6 +359,7 @@ export function useAppKeyboard(ctx: AppKeyboardContext): void {
             case 'terminalSearch':
             case 'copyLastOutput':
             case 'snippets':
+            case 'aiAssistant':
               dispatchTerminalAction(actionId === 'terminalSearch' ? 'search' : actionId);
               break;
             case 'increaseFontSize': {

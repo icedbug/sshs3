@@ -109,6 +109,14 @@ Under the hood it's a fairly thin, security-conscious shell around a handful of 
 - **Clipboard history (`Ctrl+Shift+R`)** — with *copy on select* enabled, every terminal selection is kept in an encrypted, searchable history (OS keyring; memory-only when none is available). `Shift+Insert` and middle-click paste the latest entry; right-click opens the history. Scope (all hosts or per connection) and "empty on exit" are set under Settings.
 - **SSH agent lifecycle management** — detects whether `ssh-agent` is already running and, if not, can spawn and manage one itself (Linux/macOS), or detect the Windows OpenSSH Authentication Agent service. A local shell tab's `SSH_AUTH_SOCK` is set explicitly from this and controlled by **Settings → Local Terminal SSH Agent**: **Auto** (default) uses, in priority order, (1) under **Global (App Lifetime)** PIN caching (see below) the app-wide agent, which holds every unlocked smartcard and FIDO2 key — so a card you already unlocked in an SSH terminal is immediately usable for a plain `ssh`/`ssh-add` typed into a local shell tab too, no second PIN prompt, and it works even in a tab opened before the card was unlocked (the agent exists from the first local shell and keeps its socket when you lock and unlock); (2) the app's own agent if it is already running; (3) the system / login-shell agent inherited from your environment (a GUI launch backfills `SSH_AUTH_SOCK`/`SSH_AGENT_PID` from your login shell); (4) otherwise a newly spawned managed agent. **System Only** uses just the inherited system/login-shell socket (if it exists) and never spawns an agent or uses the smartcard agent; **Disabled** sets no `SSH_AUTH_SOCK` at all. (A saved legacy `app-managed` value behaves like Auto.) Since this is resolved once, at the moment that specific tab's shell process is spawned, a local shell tab opened *before* a card is unlocked won't retroactively pick it up — open the tab (or a new one) after unlocking the card.
 
+### AI assistant *(opt-in)*
+Help with commands and output without leaving the terminal. It is **off by default**: enable it and pick a provider under **Settings → AI Assistant**, then press `Ctrl+Shift+A` in a terminal.
+
+- **Suggest a command** — describe what you want ("find files over 100 MB under /var, largest first") and get one command back with a short explanation. **Insert into terminal** types it at the prompt; it is never run until you press Enter yourself, and commands that change or delete data are flagged with a warning.
+- **Explain output** — select an error or any terminal text (or use the last command's output) and ask what it means and how to fix it.
+- **Providers** — Anthropic (Claude) with your own API key, or any **OpenAI-compatible** endpoint such as a local [Ollama](https://ollama.com) or LM Studio, so terminal text never has to leave your machine.
+- **Privacy** — nothing is sent until you press *Ask*; the dialog shows exactly which terminal text is included, and passwords, tokens, AWS keys, bearer headers and private key blocks are masked before anything leaves the app (the same masking the log file uses). The API key is encrypted with the OS keyring and AI settings live in their own `ai-config.json`, which is never part of remote profile sync. Requests go through Chromium's network stack, so the system proxy and certificate store apply.
+
 ### Performance bar *(opt-in)*
 A slim live-metrics strip above SSH, local-shell and Kubernetes terminals. It is **off by default** — enable it under **Settings → Performance**. While it is off nothing is polled and no extra commands are run.
 
@@ -397,6 +405,7 @@ sshs3 wouldn't exist without these projects:
 | **Search in Terminal** | `Ctrl+Shift+S` | Opens the search bar in the focused terminal |
 | **Copy Last Command Output** | `Ctrl+Shift+G` | Copies the output of the previous command |
 | **Snippets** | `Ctrl+Shift+L` | Opens the snippet palette in the focused terminal |
+| **AI Assistant** | `Ctrl+Shift+A` | Suggests a command or explains output in the focused terminal (opt-in) |
 | **Search in Files** | `Ctrl+Shift+K` | Opens file content search across local/SFTP/S3 panes |
 
 *(All shortcuts are rebindable under Settings → Keyboard Shortcuts.)*

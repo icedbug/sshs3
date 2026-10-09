@@ -15,7 +15,7 @@ export const FONT_PRESETS: FontPreset[] = [
   { label: 'System Default Monospace', value: 'monospace' },
 ];
 
-export type SettingsCategory = 'general' | 'terminal' | 'performance' | 'files' | 'security' | 'sync' | 'shortcuts' | 'kubernetes' | 'git';
+export type SettingsCategory = 'general' | 'terminal' | 'performance' | 'files' | 'security' | 'sync' | 'shortcuts' | 'kubernetes' | 'git' | 'ai';
 
 /** 'app-managed' is a legacy alias of 'auto' that the select no longer offers. */
 export const normalizeAgentMode = (mode: AppSettings['localTerminalAgentMode']) =>

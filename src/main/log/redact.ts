@@ -29,7 +29,12 @@ const SECRET_PATTERNS: RegExp[] = [
 ];
 
 export function redactString(input: string): string {
-  let out = input.length > MAX_STRING_LENGTH ? `${input.slice(0, MAX_STRING_LENGTH)}…[truncated]` : input;
+  return maskSecrets(input.length > MAX_STRING_LENGTH ? `${input.slice(0, MAX_STRING_LENGTH)}…[truncated]` : input);
+}
+
+/** Masks the secret patterns in `input` without truncating it (also used for text sent to the AI assistant). */
+export function maskSecrets(input: string): string {
+  let out = input;
   out = out.replace(SECRET_PATTERNS[0], REDACTED);
   out = out.replace(SECRET_PATTERNS[1], REDACTED);
   out = out.replace(SECRET_PATTERNS[2], `$1=${REDACTED}`);
