@@ -207,7 +207,7 @@ describe('HermesManager', () => {
     expect(firstChild.kill).toHaveBeenCalled();
     expect(spawn).toHaveBeenCalledTimes(2);
 
-    await hermes.ensureRunning({ kind: 'anthropic', model: 'claude-opus-5-5', apiKey: 'gw', baseUrl: 'https://gateway.example/llm' });
+    await hermes.ensureRunning({ kind: 'anthropic', model: 'claude-opus-5-5', apiKey: 'gw', baseUrl: 'https://gateway.example/llm' }); // pragma: allowlist secret
     expect(spawn).toHaveBeenCalledTimes(3);
     const env = (spawn.mock.calls[2] as [string, string[], { env: NodeJS.ProcessEnv }])[2].env;
     expect(env.SSHS3_MODEL_API_KEY).toBe('gw');
