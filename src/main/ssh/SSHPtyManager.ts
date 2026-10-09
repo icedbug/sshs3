@@ -772,12 +772,16 @@ export class SSHPtyManager extends EventEmitter {
     // the kernel checks all inherited fds and logs AVC denials if the target domain
     // cannot access Electron cache files. Wrapping execution in `/bin/sh` to close
     // all fds > 2 before `exec "$@"` cleanly eliminates this descriptor leak.
+    // When /bin/sh is dash (Debian, Ubuntu), a redirection only takes fds 0-9:
+    // `exec 10>&-` runs a command named "10", which ends the wrapper with code 127
+    // before the shell starts. So fds above 9 are only closed when sh is bash.
     let spawnBinary = shellBinary;
     let spawnArgs = args;
     if (process.platform === 'linux') {
       const script =
         'for fd in $(ls /proc/self/fd 2>/dev/null); do ' +
         'case "$fd" in ""|*[!0-9]*) continue ;; esac; ' +
+        'if [ "$fd" -gt 9 ] && [ -z "${BASH_VERSION-}" ]; then continue; fi; ' +
         'if [ "$fd" -gt 2 ]; then eval "exec $fd>&-" 2>/dev/null; fi; ' +
         'done; ' +
         'exec "$@"';
