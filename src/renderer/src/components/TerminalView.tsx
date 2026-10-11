@@ -14,6 +14,7 @@ import { SnippetPaletteModal } from './SnippetPaletteModal';
 import { AiAssistantModal } from './AiAssistantModal';
 import { AI_CONFIG_CHANGED_EVENT, eraseTypedLine, isFailureExitCode, looksLikeFailure, TypedLineTracker } from '../lib/aiTerminal';
 import type { AiTask, AiTerminalEnvironment } from '@shared/types/ai';
+import { checkSuggestedCommand } from '@shared/aiCommand';
 import { PerfBar } from './PerfBar';
 import { ClipboardHistoryModal } from './ClipboardHistoryModal';
 import { OPEN_CLIPBOARD_HISTORY_EVENT } from '../lib/clipboardHistoryEvents';
@@ -600,14 +601,22 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       showNotice('✨ Writing a command…', 60_000);
       try {
         const result = await window.multissh.aiAsk({ task: 'command', prompt: typed, environment: aiEnvironmentRef.current });
-        const command = (result.command ?? '').replace(/[\r\n]+$/, '');
+        // The command was already checked in the main process; check it again where it meets the
+        // terminal, so no path to the pty relies on the answer having come through that check.
+        const check = checkSuggestedCommand(result.command ?? '');
         if (typedLine.text !== typed) {
           showNotice('The line changed while waiting, so the suggestion was not inserted', 4000);
-        } else if (!command) {
+        } else if (result.commandIssue) {
+          showNotice(result.commandIssue, 6000);
+        } else if (!result.command) {
           showNotice(result.text || 'No command was suggested for that', 6000);
-        } else if (command.includes('\n')) {
-          showNotice('The suggestion spans several lines; open the AI Assistant to review it', 5000);
+        } else if (!check.ok) {
+          showNotice(
+            check.reason === 'multiple-lines' ? 'The suggestion spans several lines; open the AI Assistant to review it' : check.message,
+            5000
+          );
         } else {
+          const command = check.command;
           // The erase goes straight to the shell, so keep both line trackers in step with it.
           const erase = eraseTypedLine(typed);
           writeToPty(erase);
@@ -1164,15 +1173,30 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             setAiContext(null);
             const term = termRef.current;
             if (!term) return;
-            const text = command.replace(/[\r\n]+$/, '');
-            // Never press Enter: the user reviews the suggestion and runs it themselves. A shell
-            // without bracketed paste would run each pasted line, so multi-line text is copied instead.
-            if (text.includes('\n') && !term.modes.bracketedPasteMode) {
-              void navigator.clipboard?.writeText(text).catch(() => {});
-              setCopyNotice('Multi-line command copied: paste it once you have reviewed it');
+            const check = checkSuggestedCommand(command, { allowMultiline: true });
+            if (!check.ok) {
+              setCopyNotice(check.message);
               setTimeout(() => setCopyNotice(null), 5000);
+              term.focus();
+              return;
+            }
+            // Never press Enter: the user reviews the suggestion and runs it themselves. A shell
+            // without bracketed paste runs each pasted line but the last, and the terminal's own
+            // bracketed-paste flag can be set by whatever the remote side prints, so multi-line text
+            // is never written to the pty: it is copied for the user to paste once they have read it.
+            if (check.requiresBracketedPaste) {
+              void navigator.clipboard
+                ?.writeText(check.command)
+                .then(() => {
+                  setCopyNotice('Multi-line command copied, not typed. Read every line before you paste it: a shell that does not support bracketed paste runs all lines but the last at once.');
+                  setTimeout(() => setCopyNotice(null), 8000);
+                })
+                .catch(() => {
+                  setCopyNotice('Could not copy the multi-line command. Use Copy in the AI dialog.');
+                  setTimeout(() => setCopyNotice(null), 5000);
+                });
             } else {
-              term.paste(text);
+              term.paste(check.command);
             }
             term.focus();
           }}

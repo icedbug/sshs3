@@ -4,7 +4,7 @@ import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/re
 import '@testing-library/jest-dom/vitest';
 import { AiAssistantModal } from '../../src/renderer/src/components/AiAssistantModal';
 import { AiSettingsPanel } from '../../src/renderer/src/components/SettingsModal/AiSettingsPanel';
-import type { AiConfigView } from '../../src/shared/types/ai';
+import { AI_MAX_CONTEXT_CHARS, AI_MAX_CONTEXT_INPUT_CHARS, type AiConfigView } from '../../src/shared/types/ai';
 
 const enabledConfig: AiConfigView = { enabled: true, provider: 'anthropic', model: 'claude-opus-5-5', useHermes: false, hasApiKey: true };
 
@@ -91,6 +91,66 @@ describe('AiAssistantModal', () => {
       context: 'E: Unable to locate package ngnix',
       environment: { kind: 'ssh' },
     });
+  });
+
+  it('previews the masked text, the same text that is sent, with a count', async () => {
+    mockApi();
+    renderModal({ selection: 'export DB_PASSWORD=hunter2hunter2\nls -la', initialTask: 'explain' }); // pragma: allowlist secret
+    await screen.findByLabelText('Ask the assistant');
+    fireEvent.click(screen.getByText('Show what will be sent'));
+    expect(screen.queryByText(/hunter2hunter2/)).not.toBeInTheDocument();
+    expect(screen.getByText(/DB_PASSWORD=\[redacted\]/)).toBeInTheDocument();
+    expect(screen.getByTestId('ai-preview-note')).toHaveTextContent('1 value masked.');
+  });
+
+  it('only says the text is cut when it was, judged after masking', async () => {
+    mockApi();
+    renderModal({ selection: `${'x'.repeat(AI_MAX_CONTEXT_CHARS + 50)}\nthe end`, initialTask: 'explain' });
+    await screen.findByLabelText('Ask the assistant');
+    expect(screen.getByTestId('ai-preview-note')).toHaveTextContent(`Only the last ${AI_MAX_CONTEXT_CHARS} characters are sent.`);
+  });
+
+  it('cuts a huge scrollback to what the main process accepts instead of failing', async () => {
+    const api = mockApi({ aiAsk: vi.fn().mockResolvedValue({ text: 'ok', redacted: false }) });
+    renderModal({ selection: 'y'.repeat(AI_MAX_CONTEXT_INPUT_CHARS + 5000), initialTask: 'explain' });
+    fireEvent.click(await screen.findByRole('button', { name: 'Ask' }));
+    await waitFor(() => expect(api.aiAsk).toHaveBeenCalled());
+    expect(api.aiAsk.mock.calls[0][0].context).toHaveLength(AI_MAX_CONTEXT_INPUT_CHARS);
+  });
+
+  it('says so when no known secret pattern was found, without claiming nothing is sensitive', async () => {
+    mockApi();
+    renderModal({ selection: 'ls: cannot access foo', initialTask: 'explain' });
+    await screen.findByLabelText('Ask the assistant');
+    expect(screen.getByTestId('ai-preview-note')).toHaveTextContent('No known secret patterns found. Other secrets are not detected');
+  });
+
+  it('shows a refused command with its hidden characters made visible, and offers no Insert', async () => {
+    mockApi({
+      aiAsk: vi.fn().mockResolvedValue({
+        command: '',
+        text: 'Lists files.',
+        redacted: false,
+        commandIssue: 'The suggested command contains hidden control characters, so it was not inserted.',
+        commandPreview: 'ls<ESC>[201~<CR>id',
+      }),
+    });
+    renderModal();
+    const input = await screen.findByLabelText('Ask the assistant');
+    fireEvent.change(input, { target: { value: 'list files' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    const refused = await screen.findByTestId('ai-command-refused');
+    expect(refused).toHaveTextContent('hidden control characters');
+    expect(refused).toHaveTextContent('ls<ESC>[201~<CR>id');
+    expect(screen.queryByTestId('ai-command')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Insert into terminal/ })).not.toBeInTheDocument();
+  });
+
+  it('names the real endpoint when an override is set, not just Anthropic', async () => {
+    mockApi({ aiGetConfig: vi.fn().mockResolvedValue({ ...enabledConfig, baseUrl: 'https://gateway.example.com/v1' }) });
+    renderModal();
+    await screen.findByLabelText('Ask the assistant');
+    expect(screen.getByText(/Sent to gateway\.example\.com \(Anthropic API\) · claude-opus-5-5\./)).toBeInTheDocument();
   });
 
   it('does not ask on its own while the assistant is off', async () => {

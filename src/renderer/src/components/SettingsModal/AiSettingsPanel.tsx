@@ -181,7 +181,7 @@ export const AiSettingsPanel: React.FC = () => {
           {hermes === null
             ? 'Checking for the Hermes agent…'
             : hermes.bundled
-              ? `Hermes ${hermes.version ?? ''} (Nous Research, MIT) runs on this computer and calls the provider above. It keeps a memory of what you have asked and learned, in sshs3's own data folder. It has no shell, file or web tools, never runs commands, and gets none of sshs3's passwords, keys or SSH agent.`
+              ? `Hermes ${hermes.version ?? ''} (Nous Research, MIT) runs on this computer and calls the provider above. It keeps a memory of what you have asked and learned, and an unencrypted copy of each request with its masked terminal text, in sshs3's own data folder. It has no shell, file or web tools, never runs commands, and gets none of sshs3's passwords, keys or SSH agent.`
               : 'This build of sshs3 does not include the Hermes agent.'}
         </p>
       </div>

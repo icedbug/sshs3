@@ -64,6 +64,16 @@ export interface AiAskResult {
   command?: string;
   /** True when secrets were masked out of the prompt or context before sending. */
   redacted: boolean;
+  /** How many values were masked out of the prompt and context before sending. */
+  maskedCount?: number;
+  /**
+   * 'command' only: why the suggested command was not offered. Set when it was empty-looking, too long
+   * or held control or hidden characters (for example an escape sequence that could end a bracketed
+   * paste and press Enter). `command` is then empty.
+   */
+  commandIssue?: string;
+  /** 'command' only: the refused suggestion with hidden characters made visible. For display, never typed. */
+  commandPreview?: string;
 }
 
 /** The bundled Hermes agent: whether this build includes it, and whether it is running now. */
@@ -77,6 +87,9 @@ export interface AiHermesStatus {
 export const AI_MAX_PROMPT_CHARS = 2000;
 /** Longer context is cut from the start: the end of an output is usually where the error is. */
 export const AI_MAX_CONTEXT_CHARS = 16000;
+
+/** The most context text the main process accepts per request; the renderer sends at most this much. */
+export const AI_MAX_CONTEXT_INPUT_CHARS = AI_MAX_CONTEXT_CHARS * 8;
 
 export const DEFAULT_AI_MODELS: Record<AiProvider, string> = {
   anthropic: 'claude-opus-5-5',

@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import * as electron from 'electron';
 import type { AiAskRequest, AiAskResult, AiConfig } from '../../shared/types/ai';
+import { checkSuggestedCommand, neutralizeText, showHiddenCharacters } from '../../shared/aiCommand';
 import { buildPrompt, parseCommandAnswer, type BuiltPrompt } from './aiPrompt';
 import type { AiConfigStore } from './AiConfigStore';
 import type { HermesEndpoint, HermesModelConfig } from './HermesManager';
@@ -60,6 +61,7 @@ export class AiService {
       model: config.model,
       hermes: config.useHermes,
       redacted: built.redacted,
+      maskedCount: built.maskedCount,
     });
 
     const answer = config.useHermes
@@ -70,9 +72,17 @@ export class AiService {
 
     if (request.task === 'command') {
       const { command, explanation } = parseCommandAnswer(answer);
-      return { text: explanation, command, redacted: built.redacted };
+      const base = { text: neutralizeText(explanation), redacted: built.redacted, maskedCount: built.maskedCount };
+      if (!command) return { ...base, command };
+      // A model's answer can be steered by text in the terminal, so a command is only offered when it
+      // holds nothing that could press Enter or hide what it does. The same check runs again where the
+      // command is typed into the terminal.
+      const check = checkSuggestedCommand(command, { allowMultiline: true });
+      if (check.ok) return { ...base, command: check.command };
+      aiLog.warn('A suggested command was refused', { reason: check.reason });
+      return { ...base, command: '', commandIssue: check.message, commandPreview: showHiddenCharacters(command) };
     }
-    return { text: answer.trim(), redacted: built.redacted };
+    return { text: neutralizeText(answer.trim()), redacted: built.redacted, maskedCount: built.maskedCount };
   }
 
   private async askAnthropic(config: AiConfig & { apiKey: string }, built: BuiltPrompt): Promise<string> {

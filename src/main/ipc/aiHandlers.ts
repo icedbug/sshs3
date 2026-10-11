@@ -1,6 +1,6 @@
 import { IPC_CHANNELS } from '../../shared/types/ipc';
 import {
-  AI_MAX_CONTEXT_CHARS,
+  AI_MAX_CONTEXT_INPUT_CHARS,
   AI_MAX_PROMPT_CHARS,
   type AiAskRequest,
   type AiAskResult,
@@ -15,7 +15,7 @@ import type { IpcBridge } from '../IpcBridge';
 export type AiHost = Pick<IpcBridge, 'aiConfigStore' | 'aiService' | 'hermesManager' | 'registerHandler'>;
 
 /** The renderer may send a whole scrollback as context; anything far beyond what is used is rejected outright. */
-const MAX_CONTEXT_INPUT_CHARS = AI_MAX_CONTEXT_CHARS * 8;
+const MAX_CONTEXT_INPUT_CHARS = AI_MAX_CONTEXT_INPUT_CHARS;
 
 const isOptionalString = (v: unknown, max: number): v is string | undefined =>
   v === undefined || (typeof v === 'string' && v.length <= max);

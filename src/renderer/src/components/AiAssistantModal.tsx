@@ -2,12 +2,15 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Copy, CornerDownLeft, Loader2, Sparkles, X } from 'lucide-react';
 import {
+  AI_MAX_CONTEXT_CHARS,
+  AI_MAX_CONTEXT_INPUT_CHARS,
   AI_MAX_PROMPT_CHARS,
   type AiAskResult,
   type AiConfigView,
   type AiTask,
   type AiTerminalEnvironment,
 } from '@shared/types/ai';
+import { prepareContext } from '@shared/aiContext';
 import { useModalDismiss } from '../lib/useModalDismiss';
 
 interface AiAssistantModalProps {
@@ -32,16 +35,17 @@ const IPC_PREFIX = /^Error invoking remote method '[^']+':\s*(Error:\s*)?/i;
 const lineCount = (text: string): number => (text ? text.replace(/\n+$/, '').split('\n').length : 0);
 
 function providerLabel(config: AiConfigView): string {
+  let host = config.baseUrl ?? '';
+  try {
+    host = new URL(host).host;
+  } catch {
+    // Show the raw value.
+  }
+  // An endpoint override means the text goes there, not to Anthropic's own servers.
   let label: string;
   if (config.provider === 'anthropic') {
-    label = `Anthropic · ${config.model}`;
+    label = host ? `${host} (Anthropic API) · ${config.model}` : `Anthropic · ${config.model}`;
   } else {
-    let host = config.baseUrl ?? '';
-    try {
-      host = new URL(host).host;
-    } catch {
-      // Show the raw value.
-    }
     label = `${host || 'OpenAI-compatible'} · ${config.model}`;
   }
   return config.useHermes ? `the Hermes agent on this computer, which uses ${label}` : label;
@@ -93,7 +97,11 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
     return () => clearTimeout(timer);
   }, [config?.enabled]);
 
-  const contextText = source === 'selection' ? selection : source === 'lastOutput' ? lastOutput : '';
+  const fullContext = source === 'selection' ? selection : source === 'lastOutput' ? lastOutput : '';
+  // A scrollback longer than the main process accepts is cut from the start here, so it is clipped, not refused.
+  const contextText = fullContext.length > AI_MAX_CONTEXT_INPUT_CHARS ? fullContext.slice(-AI_MAX_CONTEXT_INPUT_CHARS) : fullContext;
+  // The same function builds what is sent, so the preview shows exactly that text.
+  const preview = useMemo(() => prepareContext(contextText), [contextText]);
   const canSubmit = !busy && (task === 'command' ? prompt.trim() !== '' : prompt.trim() !== '' || contextText.trim() !== '');
 
   const switchTask = (next: AiTask): void => {
@@ -234,8 +242,14 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
           <details className="text-xs text-txt-muted">
             <summary className="cursor-pointer">Show what will be sent</summary>
             <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-app-input p-2 font-mono text-[11px]">
-              {contextText}
+              {preview.text}
             </pre>
+            <p className="mt-1" data-testid="ai-preview-note">
+              {preview.count > 0
+                ? `${preview.count} value${preview.count === 1 ? '' : 's'} masked.`
+                : 'No known secret patterns found. Other secrets are not detected, so read this before you send it.'}
+              {preview.clipped && ` Only the last ${AI_MAX_CONTEXT_CHARS} characters are sent.`}
+            </p>
           </details>
         )}
 
@@ -265,7 +279,7 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
               <div className="space-y-2">
                 <pre
                   data-testid="ai-command"
-                  className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-app-input p-3 font-mono text-xs text-txt-primary"
+                  className="max-h-72 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-app-input p-3 font-mono text-xs text-txt-primary"
                 >
                   {result.command}
                 </pre>
@@ -281,7 +295,7 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
                   <button
                     type="button"
                     onClick={() => onInsert(result.command ?? '')}
-                    title="Types the command into the terminal. Review it, then press Enter yourself."
+                    title="Types a one-line command into the terminal (a multi-line one is copied instead). Review it, then press Enter yourself."
                     className="flex items-center gap-1 rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-500 cursor-pointer"
                   >
                     <CornerDownLeft className="h-3.5 w-3.5" />
@@ -290,8 +304,25 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
                 </div>
               </div>
             )}
+            {result.commandIssue && (
+              <div role="alert" className="space-y-1" data-testid="ai-command-refused">
+                <p className="text-xs text-amber-400">{result.commandIssue}</p>
+                {result.commandPreview && (
+                  <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-app-input p-3 font-mono text-xs text-txt-muted">
+                    {result.commandPreview}
+                  </pre>
+                )}
+                <p className="text-[11px] text-txt-muted">Hidden characters are shown as &lt;…&gt;. Nothing was typed into the terminal.</p>
+              </div>
+            )}
             {result.text && <p className="whitespace-pre-wrap text-xs text-txt-secondary">{result.text}</p>}
-            {result.redacted && <p className="text-[11px] text-amber-400">Some secrets were masked before sending.</p>}
+            {result.redacted && (
+              <p className="text-[11px] text-amber-400">
+                {result.maskedCount
+                  ? `${result.maskedCount} value${result.maskedCount === 1 ? '' : 's'} masked before sending, including in your question.`
+                  : 'Some secrets were masked before sending.'}
+              </p>
+            )}
           </div>
         )}
       </form>

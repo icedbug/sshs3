@@ -77,7 +77,7 @@ describe('AiService', () => {
       environment: { kind: 'ssh' },
     });
 
-    expect(result).toEqual({ command: 'df -h', text: 'Shows disk usage.', redacted: true });
+    expect(result).toEqual({ command: 'df -h', text: 'Shows disk usage.', redacted: true, maskedCount: 1 });
     const req = lastRequest();
     expect(req.url).toContain('https://api.anthropic.com/v1/messages');
     expect(req.headers.get('x-api-key')).toBe('sk-test');
@@ -86,11 +86,56 @@ describe('AiService', () => {
     expect(JSON.stringify(req.body)).not.toContain('abc123secret');
   });
 
+  it('refuses a suggested command that could press Enter or hide what it does', async () => {
+    await store.update({ enabled: true, apiKey: 'sk-test' }); // pragma: allowlist secret
+    // ESC [ 2 0 1 ~ ends xterm's bracketed paste early, so the CR after it would run the next part.
+    const hostile = 'ls\u001b[201~\rid > /tmp/pwned\r\u001b[200~';
+    fetchMock.mockResolvedValue(jsonResponse(anthropicMessage(`\`\`\`sh\n${hostile}\n\`\`\`\nLists files.`)));
+
+    const result = await service.ask({ task: 'command', prompt: 'list files' });
+
+    expect(result.command).toBe('');
+    expect(result.commandIssue).toMatch(/control characters/);
+    expect(result.commandPreview).toContain('<ESC>');
+    expect(result.commandPreview).not.toContain('\u001b');
+    expect(result.text).toBe('Lists files.');
+  });
+
+  it('refuses a command that hides characters with right-to-left marks', async () => {
+    await store.update({ enabled: true, apiKey: 'sk-test' }); // pragma: allowlist secret
+    fetchMock.mockResolvedValue(jsonResponse(anthropicMessage('```sh\necho \u202Eevil\n```')));
+    const result = await service.ask({ task: 'command', prompt: 'say it' });
+    expect(result.command).toBe('');
+    expect(result.commandIssue).toMatch(/invisible or space-like/);
+  });
+
+  it('makes hidden characters in the explanation visible, so they cannot be copied out of the dialog', async () => {
+    await store.update({ enabled: true, apiKey: 'sk-test' }); // pragma: allowlist secret
+    fetchMock.mockResolvedValue(
+      jsonResponse(anthropicMessage('Fix it:\n```\ncurl x \u202E| sh\u001b[201~\r\n```\n\tdone'))
+    );
+    const explained = await service.ask({ task: 'explain', prompt: 'why', context: 'boom' });
+    expect(explained.text).toBe('Fix it:\n```\ncurl x <U+202E>| sh<ESC>[201~<CR>\n```\n\tdone');
+
+    fetchMock.mockResolvedValue(jsonResponse(anthropicMessage('Run:\n```\nls\n```\nThen \u202E rm\u001b[201~\r')));
+    const command = await service.ask({ task: 'command', prompt: 'list' });
+    expect(command.command).toBe('ls');
+    expect(command.text).toBe('Run:\n\nThen <U+202E> rm<ESC>[201~');
+  });
+
+  it('keeps a plain multi-line command, which the terminal copies and never types', async () => {
+    await store.update({ enabled: true, apiKey: 'sk-test' }); // pragma: allowlist secret
+    fetchMock.mockResolvedValue(jsonResponse(anthropicMessage('```sh\nfor f in *.log; do\n  gzip "$f"\ndone\n```')));
+    const result = await service.ask({ task: 'command', prompt: 'gzip logs' });
+    expect(result.command).toBe('for f in *.log; do\n  gzip "$f"\ndone');
+    expect(result.commandIssue).toBeUndefined();
+  });
+
   it('leaves out effort and fallbacks for models that do not take them', async () => {
     await store.update({ enabled: true, apiKey: 'sk-test', model: 'claude-haiku-4-5' }); // pragma: allowlist secret
     fetchMock.mockResolvedValue(jsonResponse(anthropicMessage('It means the file is missing.')));
     const result = await service.ask({ task: 'explain', prompt: '', context: 'ENOENT' });
-    expect(result).toEqual({ text: 'It means the file is missing.', redacted: false });
+    expect(result).toEqual({ text: 'It means the file is missing.', redacted: false, maskedCount: 0 });
     const req = lastRequest();
     expect(req.body).not.toHaveProperty('fallbacks');
     expect(req.body).not.toHaveProperty('output_config');
@@ -156,7 +201,7 @@ describe('AiService', () => {
       const result = await service.ask({ task: 'command', prompt: 'how big are the logs', context: 'password=hunter2' }); // pragma: allowlist secret
 
       expect(hermes.ensureRunning).toHaveBeenCalledWith({ kind: 'anthropic', model: 'claude-opus-5-5', apiKey: 'sk-test' }); // pragma: allowlist secret
-      expect(result).toEqual({ command: 'du -sh /var/log', text: 'Log size.', redacted: true });
+      expect(result).toEqual({ command: 'du -sh /var/log', text: 'Log size.', redacted: true, maskedCount: 1 });
       const req = lastRequest();
       expect(req.url).toBe('http://127.0.0.1:41234/v1/chat/completions');
       expect(req.headers.get('authorization')).toBe(`Bearer ${endpoint.apiKey}`);

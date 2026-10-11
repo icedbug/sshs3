@@ -460,6 +460,71 @@ describe('TerminalView Component', () => {
       expect(await screen.findByTestId('copy-notice')).toHaveTextContent('Sizes, largest last.');
     });
 
+    it('does not touch the typed line when the suggested command was refused', async () => {
+      const aiAsk = vi.fn().mockResolvedValue({
+        command: '',
+        text: '',
+        redacted: false,
+        commandIssue: 'The suggested command contains hidden control characters, so it was not inserted.',
+        commandPreview: 'ls<ESC>[201~<CR>id',
+      });
+      const { type } = await renderWithAi(aiAsk);
+      type('list files');
+      mockTerminalWrite.mockClear();
+
+      act(() => dispatchTerminalAction('aiInlineCommand'));
+
+      expect(await screen.findByTestId('copy-notice')).toHaveTextContent('hidden control characters');
+      expect(mockTerminalWrite).not.toHaveBeenCalled();
+    });
+
+    it('checks the command again before typing it, even if it arrives without a refusal', async () => {
+      const hostile = 'ls\u001b[201~\rid > /tmp/pwned\r\u001b[200~';
+      const aiAsk = vi.fn().mockResolvedValue({ command: hostile, text: 'Lists files.', redacted: false });
+      const { type } = await renderWithAi(aiAsk);
+      type('list files');
+      mockTerminalWrite.mockClear();
+
+      act(() => dispatchTerminalAction('aiInlineCommand'));
+
+      expect(await screen.findByTestId('copy-notice')).toHaveTextContent('control characters');
+      expect(mockTerminalWrite).not.toHaveBeenCalled();
+    });
+
+    it('does not type a hostile command from the assistant dialog, and says why', async () => {
+      const hostile = 'ls\u001b[201~\rid > /tmp/pwned\r\u001b[200~';
+      const aiAsk = vi.fn().mockResolvedValue({ command: hostile, text: '', redacted: false });
+      await renderWithAi(aiAsk);
+      act(() => dispatchTerminalAction('aiAssistant'));
+      const input = await screen.findByLabelText('Ask the assistant');
+      fireEvent.change(input, { target: { value: 'list files' } });
+      fireEvent.keyDown(input, { key: 'Enter' });
+      const insert = await screen.findByRole('button', { name: /Insert into terminal/ });
+      mockTerminalWrite.mockClear();
+      fireEvent.click(insert);
+
+      expect(await screen.findByTestId('copy-notice')).toHaveTextContent('control characters');
+      expect(mockTerminalWrite).not.toHaveBeenCalled();
+    });
+
+    it('copies a multi-line suggestion instead of typing it, even when the terminal says it is in bracketed paste mode', async () => {
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+      const aiAsk = vi.fn().mockResolvedValue({ command: 'echo one\necho two', text: '', redacted: false });
+      await renderWithAi(aiAsk);
+      act(() => dispatchTerminalAction('aiAssistant'));
+      const input = await screen.findByLabelText('Ask the assistant');
+      fireEvent.change(input, { target: { value: 'say two things' } });
+      fireEvent.keyDown(input, { key: 'Enter' });
+      const insert = await screen.findByRole('button', { name: /Insert into terminal/ });
+      mockTerminalWrite.mockClear();
+      fireEvent.click(insert);
+
+      expect(await screen.findByTestId('copy-notice')).toHaveTextContent('copied, not typed');
+      expect(writeText).toHaveBeenCalledWith('echo one\necho two');
+      expect(mockTerminalWrite).not.toHaveBeenCalled();
+    });
+
     it('opens the assistant instead when nothing is typed', async () => {
       const aiAsk = vi.fn();
       await renderWithAi(aiAsk);
