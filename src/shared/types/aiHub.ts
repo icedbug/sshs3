@@ -92,6 +92,50 @@ export interface MemoryEntry {
   author?: string;
   updatedAt: number;
 }
+export interface LocalServerAuthOverride {
+  profileId: string;
+  username?: string;
+  privateKeyPath?: string;
+  authType?: "agent" | "privateKey";
+}
+export interface WorkspacePresenceTerminal {
+  profileId?: string;
+  targetLabel: string;
+  state: "connected" | "ai-working";
+  since: number;
+}
+export interface WorkspacePresenceEntry {
+  actor: string;
+  updatedAt: number;
+  activeTerminals: WorkspacePresenceTerminal[];
+}
+export interface S3WorkspaceConfig {
+  enabled: boolean;
+  endpoint?: string;
+  region: string;
+  bucket: string;
+  prefix: string;
+  accessKeyId: string;
+  secretAccessKey?: string;
+  forcePathStyle?: boolean;
+  actorName?: string;
+}
+export interface S3WorkspaceSyncStatus {
+  configured: boolean;
+  enabled: boolean;
+  connected: boolean;
+  endpoint?: string;
+  region: string;
+  bucket: string;
+  prefix: string;
+  accessKeyId: string;
+  hasSecretAccessKey: boolean;
+  forcePathStyle: boolean;
+  lastSyncAt?: number;
+  syncing?: boolean;
+  error?: string;
+  inviteCode?: string;
+}
 export interface WorkspaceServerSummary {
   id: string;
   name: string;
@@ -108,6 +152,10 @@ export interface WorkspaceServerSummary {
   shared: boolean;
   updatedAt?: string;
   updatedBy?: string;
+  deletedAt?: string;
+  localUsername?: string;
+  localPrivateKeyPath?: string;
+  localAuthType?: "agent" | "privateKey";
 }
 export interface InlineCommandSuggestion {
   command: string;
@@ -162,6 +210,9 @@ export interface HubSnapshot {
   activityLog?: WorkspaceActivityEvent[];
   workspaceServers?: WorkspaceServerSummary[];
   inlineSuggestion?: InlineCommandSuggestion;
+  s3Workspace?: S3WorkspaceSyncStatus;
+  presence?: WorkspacePresenceEntry[];
+  localOverrides?: Record<string, LocalServerAuthOverride>;
 }
 export interface StartAgentTask {
   prompt: string;
@@ -204,6 +255,9 @@ export type HubRequest =
       description?: string;
       role?: string;
       tags?: string[];
+      localUsername?: string;
+      localPrivateKeyPath?: string;
+      localAuthType?: "agent" | "privateKey";
     }
   | {
       action: "server-upsert";
@@ -220,8 +274,26 @@ export type HubRequest =
         description?: string;
         tags?: string[];
         shared?: boolean;
+        localUsername?: string;
+        localPrivateKeyPath?: string;
+        localAuthType?: "agent" | "privateKey";
       };
     }
+  | {
+      action: "server-local-override";
+      override: LocalServerAuthOverride;
+    }
+  | {
+      action: "server-delete";
+      profileId: string;
+    }
+  | {
+      action: "workspace-s3-configure";
+      config?: Partial<S3WorkspaceConfig>;
+      inviteCode?: string;
+    }
+  | { action: "workspace-s3-sync-now" }
+  | { action: "workspace-s3-disconnect" }
   | {
       action: "inline-suggest";
       prompt: string;

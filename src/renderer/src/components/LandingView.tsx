@@ -2,18 +2,23 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
   Bot,
+  Check,
   Clock,
   Cloud,
+  Copy,
   Edit3,
   Folder,
+  Key,
   Layers,
   Plus,
+  RefreshCw,
   Search,
   Server,
   Shield,
   Sparkles,
   Tag,
   Terminal,
+  Trash2,
   Users,
   X,
 } from 'lucide-react';
@@ -158,6 +163,8 @@ export const LandingView: React.FC<LandingViewProps> = ({
   const [editDescription, setEditDescription] = useState('');
   const [editRole, setEditRole] = useState('');
   const [editTags, setEditTags] = useState('');
+  const [editLocalUser, setEditLocalUser] = useState('');
+  const [editLocalKeyPath, setEditLocalKeyPath] = useState('');
   const [savingMeta, setSavingMeta] = useState(false);
 
   // Add Cluster / Node builder state
@@ -173,6 +180,21 @@ export const LandingView: React.FC<LandingViewProps> = ({
   const [newNodeDesc, setNewNodeDesc] = useState('');
   const [newNodeShared, setNewNodeShared] = useState(true);
   const [creatingNode, setCreatingNode] = useState(false);
+
+  // S3 Team Bucket setup state
+  const [s3SetupOpen, setS3SetupOpen] = useState(false);
+  const [s3InviteCode, setS3InviteCode] = useState('');
+  const [s3Bucket, setS3Bucket] = useState('');
+  const [s3Region, setS3Region] = useState('eu-north-1');
+  const [s3Endpoint, setS3Endpoint] = useState('');
+  const [s3Prefix, setS3Prefix] = useState('sshs3-team');
+  const [s3AccessKeyId, setS3AccessKeyId] = useState('');
+  const [s3SecretAccessKey, setS3SecretAccessKey] = useState('');
+  const [s3ActorName, setS3ActorName] = useState('');
+  const [s3Saving, setS3Saving] = useState(false);
+  const [s3Syncing, setS3Syncing] = useState(false);
+  const [s3CopyFeedback, setS3CopyFeedback] = useState(false);
+  const [s3StatusMsg, setS3StatusMsg] = useState<string | null>(null);
 
   const [noteTarget, setNoteTarget] = useState('');
   const [noteSummary, setNoteSummary] = useState('');
@@ -244,6 +266,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
   const workspaceServers: WorkspaceServerSummary[] = useMemo(() => {
     const map = new Map<string, WorkspaceServerSummary>();
     for (const p of [...recentSSH, ...allSSH]) {
+      const localOverride = hub?.localOverrides?.[p.id];
       map.set(p.id, {
         id: p.id,
         name: p.name || p.host,
@@ -257,20 +280,60 @@ export const LandingView: React.FC<LandingViewProps> = ({
         description: p.description,
         role: p.role,
         tags: p.tags,
-        shared: Boolean(p.teamVaultProfileRef),
+        shared: Boolean(p.shared || p.teamVaultProfileRef),
         updatedAt: p.updatedAt,
         updatedBy: p.updatedBy,
+        localUsername: localOverride?.username,
+        localPrivateKeyPath: localOverride?.privateKeyPath,
+        localAuthType: localOverride?.authType,
       });
     }
     for (const s of hub?.workspaceServers ?? []) {
+      if (s.deletedAt) {
+        map.delete(s.id);
+        continue;
+      }
       const prev = map.get(s.id);
+      const localOverride = hub?.localOverrides?.[s.id];
       map.set(s.id, {
         ...prev,
         ...s,
+        localUsername: localOverride?.username ?? s.localUsername ?? prev?.localUsername,
+        localPrivateKeyPath:
+          localOverride?.privateKeyPath ?? s.localPrivateKeyPath ?? prev?.localPrivateKeyPath,
+        localAuthType: localOverride?.authType ?? s.localAuthType ?? prev?.localAuthType,
       });
     }
     return Array.from(map.values());
-  }, [recentSSH, allSSH, hub?.workspaceServers]);
+  }, [recentSSH, allSSH, hub?.workspaceServers, hub?.localOverrides]);
+
+  const presenceByServer = useMemo(() => {
+    const map = new Map<string, Array<{ actor: string; aiWorking?: boolean }>>();
+    const addEntry = (key: string | undefined, actor: string, aiWorking?: boolean) => {
+      if (!key) return;
+      const list = map.get(key) ?? [];
+      if (!list.some((x) => x.actor === actor && Boolean(x.aiWorking) === Boolean(aiWorking))) {
+        list.push({ actor, aiWorking });
+        map.set(key, list);
+      }
+    };
+    for (const entry of hub?.presence ?? []) {
+      for (const t of entry.activeTerminals ?? []) {
+        const aiWorking = t.state === 'ai-working';
+        addEntry(t.profileId, entry.actor, aiWorking);
+        addEntry(t.targetLabel, entry.actor, aiWorking);
+      }
+    }
+    const localActor = hub?.config?.actorName || 'du';
+    for (const sess of hub?.sessions ?? []) {
+      if (sess.kind === 'ssh' && sess.state !== 'disconnected') {
+        const aiWorking = Boolean(sess.owner);
+        addEntry(sess.profileId, localActor, aiWorking);
+        addEntry(sess.label, localActor, aiWorking);
+      }
+    }
+    return map;
+  }, [hub?.presence, hub?.sessions, hub?.config?.actorName]);
 
   const folders = useMemo(() => {
     const set = new Set<string>();
@@ -347,20 +410,37 @@ export const LandingView: React.FC<LandingViewProps> = ({
 
   const toConnectableProfile = (server: WorkspaceServerSummary): SSHConnectionConfig => {
     const existing = profileMap.get(server.id);
-    if (existing) return existing;
+    const localOverride = hub?.localOverrides?.[server.id];
+    const effectiveUser =
+      localOverride?.username || server.localUsername || server.username || existing?.username || 'root';
+    const effectiveKeyPath =
+      localOverride?.privateKeyPath || server.localPrivateKeyPath || existing?.privateKeyPath;
+    const effectiveAuthType = effectiveKeyPath
+      ? 'privateKey'
+      : localOverride?.authType || server.localAuthType || existing?.authType || 'agent';
+
+    if (existing) {
+      return {
+        ...existing,
+        username: effectiveUser,
+        privateKeyPath: effectiveKeyPath,
+        authType: effectiveAuthType,
+      };
+    }
     return {
       id: server.id,
       name: server.name,
       host: server.host,
       port: server.port || 22,
-      username: server.username,
-      authType: 'agent',
+      username: effectiveUser,
+      authType: effectiveAuthType,
+      privateKeyPath: effectiveKeyPath,
       cluster: server.cluster,
       nodeRole: server.nodeRole,
       description: server.description,
       role: server.role,
       tags: server.tags,
-      ...(server.shared ? { teamVaultProfileRef: { vaultId: 'default', profileId: server.id } } : {}),
+      shared: server.shared,
     };
   };
 
@@ -369,7 +449,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
       latestActivityByServer.get(server.id) || latestActivityByServer.get(server.name);
     const contextLines = [
       `Server/Node: ${server.name} (${server.username}@${server.host}:${server.port})`,
-      `Scope: ${server.shared ? 'Shared Team Vault VM' : 'Personal VM'}`,
+      `Scope: ${server.shared ? 'Shared S3 Team Bucket VM' : 'Personal VM'}`,
       ...(server.cluster ? [`Cluster: ${server.cluster}`] : []),
       ...(server.nodeRole ? [`Node Role: ${server.nodeRole}`] : []),
       ...(server.role ? [`Infra Role: ${server.role}`] : []),
@@ -422,12 +502,15 @@ export const LandingView: React.FC<LandingViewProps> = ({
   };
 
   const openEditServer = (server: WorkspaceServerSummary) => {
+    const localOverride = hub?.localOverrides?.[server.id];
     setEditingServerId(server.id);
     setEditCluster(server.cluster ?? '');
     setEditNodeRole(server.nodeRole ?? '');
     setEditDescription(server.description ?? '');
     setEditRole(server.role ?? '');
     setEditTags((server.tags ?? []).join(', '));
+    setEditLocalUser(localOverride?.username ?? server.localUsername ?? '');
+    setEditLocalKeyPath(localOverride?.privateKeyPath ?? server.localPrivateKeyPath ?? '');
   };
 
   const handleSaveServerMeta = async (server: WorkspaceServerSummary) => {
@@ -446,6 +529,8 @@ export const LandingView: React.FC<LandingViewProps> = ({
         description: editDescription.trim() || undefined,
         role: editRole || undefined,
         tags,
+        localUsername: editLocalUser.trim(),
+        localPrivateKeyPath: editLocalKeyPath.trim(),
       });
       setEditingServerId(null);
     } catch {
@@ -454,6 +539,95 @@ export const LandingView: React.FC<LandingViewProps> = ({
     } finally {
       setSavingMeta(false);
     }
+  };
+
+  const handleDeleteServer = async (server: WorkspaceServerSummary) => {
+    setSavingMeta(true);
+    try {
+      await hubRequest({
+        action: 'server-delete',
+        profileId: server.id,
+      });
+      setEditingServerId(null);
+    } catch {
+      setEditingServerId(null);
+    } finally {
+      setSavingMeta(false);
+    }
+  };
+
+  const openS3BucketSetup = () => {
+    const cfg = hub?.s3Workspace;
+    if (cfg) {
+      setS3Bucket(cfg.bucket || '');
+      setS3Region(cfg.region || 'eu-north-1');
+      setS3Endpoint(cfg.endpoint || '');
+      setS3Prefix(cfg.prefix || 'sshs3-team');
+      setS3AccessKeyId(cfg.accessKeyId || '');
+    }
+    setS3ActorName(hub?.config?.actorName || '');
+    setS3StatusMsg(null);
+    setS3SetupOpen((prev) => !prev);
+  };
+
+  const handleSaveS3Bucket = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setS3Saving(true);
+    setS3StatusMsg(null);
+    try {
+      await hubRequest({
+        action: 'workspace-s3-configure',
+        inviteCode: s3InviteCode.trim() || undefined,
+        config: {
+          enabled: true,
+          bucket: s3Bucket.trim(),
+          region: s3Region.trim() || 'eu-north-1',
+          endpoint: s3Endpoint.trim() || undefined,
+          prefix: s3Prefix.trim() || 'sshs3-team',
+          accessKeyId: s3AccessKeyId.trim(),
+          ...(s3SecretAccessKey.trim() ? { secretAccessKey: s3SecretAccessKey.trim() } : {}),
+          actorName: s3ActorName.trim() || undefined,
+        },
+      });
+      setS3SecretAccessKey('');
+      setS3InviteCode('');
+      setS3SetupOpen(false);
+    } catch (err) {
+      setS3StatusMsg(err instanceof Error ? err.message : String(err));
+    } finally {
+      setS3Saving(false);
+    }
+  };
+
+  const handleSyncS3Now = async () => {
+    setS3Syncing(true);
+    try {
+      await hubRequest({ action: 'workspace-s3-sync-now' });
+    } catch {
+      // status error is shown via hub.s3Workspace.error
+    } finally {
+      setS3Syncing(false);
+    }
+  };
+
+  const handleDisconnectS3 = async () => {
+    setS3Saving(true);
+    try {
+      await hubRequest({ action: 'workspace-s3-disconnect' });
+      setS3SetupOpen(false);
+    } catch {
+      // ignore
+    } finally {
+      setS3Saving(false);
+    }
+  };
+
+  const handleCopyS3Invite = () => {
+    const code = hub?.s3Workspace?.inviteCode;
+    if (!code) return;
+    void navigator.clipboard?.writeText(code);
+    setS3CopyFeedback(true);
+    setTimeout(() => setS3CopyFeedback(false), 2000);
   };
 
   const handleCreateClusterNode = async (e: React.FormEvent) => {
@@ -523,7 +697,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
     }
   };
 
-  const showWorkspaceSection = workspaceServers.length > 0 || activityLog.length > 0;
+  const showWorkspaceSection = true;
 
   return (
     <div
@@ -897,6 +1071,307 @@ export const LandingView: React.FC<LandingViewProps> = ({
             data-testid="workspace-dashboard"
             className="grid grid-cols-1 lg:grid-cols-3 gap-4 w-full text-left"
           >
+            {/* Full-width S3 Team Bucket Sync & Presence Bar */}
+            <div className="lg:col-span-3 rounded-xl border border-sky-500/30 bg-app-surface-subtle p-3 shadow-sm space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex items-center gap-1.5">
+                    <Cloud className="h-4 w-4 text-sky-400" />
+                    <span className="text-xs font-bold text-txt-primary">
+                      S3 Team Workspace
+                    </span>
+                  </div>
+                  {hub?.s3Workspace?.configured ? (
+                    <span
+                      data-testid="s3-workspace-status-badge"
+                      className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${
+                        hub.s3Workspace.error
+                          ? 'border-rose-500/40 bg-rose-500/15 text-rose-300'
+                          : 'border-emerald-500/40 bg-emerald-500/15 text-emerald-300'
+                      }`}
+                    >
+                      <span>
+                        {hub.s3Workspace.error ? '⚠️' : '🟢'} s3://{hub.s3Workspace.bucket}/
+                        {hub.s3Workspace.prefix || 'sshs3-team'}
+                      </span>
+                      {hub.s3Workspace.syncing ? (
+                        <span className="text-sky-300">· Synkar…</span>
+                      ) : hub.s3Workspace.lastSyncAt ? (
+                        <span className="text-txt-muted">
+                          · Synkad {formatRelativeTime(hub.s3Workspace.lastSyncAt)}
+                        </span>
+                      ) : null}
+                    </span>
+                  ) : (
+                    <span
+                      data-testid="s3-workspace-status-badge"
+                      className="inline-flex items-center gap-1 rounded-full border border-border-subtle bg-app-card px-2 py-0.5 text-[10px] text-txt-muted"
+                    >
+                      Ej kopplad — dela VMs, kluster & AI-minne med dina kompisar via en S3-bucket (endast S3-nycklar krävs)
+                    </span>
+                  )}
+
+                  {/* Online Teammates Presence */}
+                  {(hub?.presence ?? []).length > 0 && (
+                    <div className="flex flex-wrap items-center gap-1">
+                      {(hub?.presence ?? []).map((p) => (
+                        <span
+                          key={p.actor}
+                          title={
+                            (p.activeTerminals ?? []).length > 0
+                              ? `${p.actor}: ${(p.activeTerminals ?? []).map((t) => t.targetLabel).join(', ')}`
+                              : `${p.actor} är online`
+                          }
+                          className="inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-300"
+                        >
+                          <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                          <span>{p.actor}</span>
+                          {(p.activeTerminals ?? []).length > 0 && (
+                            <span className="text-[9px] text-emerald-200/80">
+                              ({(p.activeTerminals ?? []).length} term)
+                            </span>
+                          )}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {hub?.s3Workspace?.configured && hub.s3Workspace.inviteCode && (
+                    <button
+                      type="button"
+                      data-testid="copy-s3-invite-btn"
+                      onClick={handleCopyS3Invite}
+                      title="Kopiera 1-klicks S3 Invite-kod (sshs3-s3://...) att skicka till dina kompisar"
+                      className="inline-flex items-center gap-1 rounded-md border border-sky-500/40 bg-sky-500/15 px-2.5 py-1 text-[11px] font-semibold text-sky-300 hover:bg-sky-500/25 transition-colors"
+                    >
+                      {s3CopyFeedback ? (
+                        <>
+                          <Check className="h-3 w-3 text-emerald-400" />
+                          <span>Kopierad!</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="h-3 w-3" />
+                          <span>Kopiera Invite-kod</span>
+                        </>
+                      )}
+                    </button>
+                  )}
+                  {hub?.s3Workspace?.configured && (
+                    <button
+                      type="button"
+                      data-testid="s3-sync-now-btn"
+                      disabled={s3Syncing || hub.s3Workspace.syncing}
+                      onClick={() => void handleSyncS3Now()}
+                      className="inline-flex items-center gap-1 rounded-md border border-border-subtle bg-app-card px-2 py-1 text-[11px] font-medium text-txt-primary hover:bg-app-surface-hover disabled:opacity-50"
+                    >
+                      <RefreshCw
+                        className={`h-3 w-3 ${s3Syncing || hub.s3Workspace.syncing ? 'animate-spin text-sky-400' : ''}`}
+                      />
+                      <span>Synka nu</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    data-testid="toggle-s3-bucket-setup-btn"
+                    onClick={openS3BucketSetup}
+                    className="inline-flex items-center gap-1 rounded-md border border-purple-500/40 bg-purple-500/15 px-2.5 py-1 text-[11px] font-semibold text-purple-300 hover:bg-purple-500/25 transition-colors"
+                  >
+                    <Key className="h-3 w-3" />
+                    <span>
+                      {s3SetupOpen
+                        ? 'Stäng S3-inställning'
+                        : hub?.s3Workspace?.configured
+                          ? 'S3-nycklar'
+                          : 'Koppla S3 Team Bucket'}
+                    </span>
+                  </button>
+                </div>
+              </div>
+
+              {hub?.s3Workspace?.error && (
+                <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-2.5 py-1.5 text-[11px] text-rose-300">
+                  S3-synkfel: {hub.s3Workspace.error}
+                </div>
+              )}
+
+              {s3SetupOpen && (
+                <form
+                  data-testid="s3-bucket-setup-form"
+                  onSubmit={handleSaveS3Bucket}
+                  className="space-y-3 rounded-xl border border-purple-500/35 bg-app-card p-3.5 shadow-md"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <div className="text-xs font-bold text-purple-300">
+                        Dela Workspace med kompisar via S3 Bucket (AWS S3, Cloudflare R2, MinIO, Hetzner)
+                      </div>
+                      <p className="text-[11px] text-txt-muted mt-0.5">
+                        Endast IP/host, port, standard-användare, kluster, roller, taggar, AI-minnen och live-presence synkas i S3. Varje kompis loggar in med sin egen lokala SSH-nyckel (<code className="text-sky-300">~/.ssh</code>) som aldrig lämnar datorn.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setS3SetupOpen(false)}
+                      className="rounded p-0.5 text-txt-muted hover:text-txt-primary"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+
+                  {/* 1-Click Invite Code Paste */}
+                  <div className="rounded-lg border border-sky-500/30 bg-sky-500/5 p-2.5">
+                    <label className="block text-[10px] font-bold uppercase tracking-wider text-sky-300 mb-1">
+                      Snabb-gå med: Klistra in Invite-kod från en kompis (sshs3-s3://…)
+                    </label>
+                    <input
+                      type="text"
+                      data-testid="s3-invite-code-input"
+                      value={s3InviteCode}
+                      onChange={(e) => setS3InviteCode(e.target.value)}
+                      placeholder="sshs3-s3://eyJidWNrZXQiOi..."
+                      className="w-full rounded border border-border-subtle bg-app px-2.5 py-1 text-xs font-mono text-txt-primary placeholder:text-txt-muted"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
+                    <div>
+                      <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
+                        S3 Bucket {!s3InviteCode.trim() && '*'}
+                      </label>
+                      <input
+                        type="text"
+                        data-testid="s3-bucket-input"
+                        value={s3Bucket}
+                        onChange={(e) => setS3Bucket(e.target.value)}
+                        placeholder="t.ex. my-team-infra"
+                        className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
+                        Region
+                      </label>
+                      <input
+                        type="text"
+                        value={s3Region}
+                        onChange={(e) => setS3Region(e.target.value)}
+                        placeholder="eu-north-1 / auto"
+                        className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
+                        Endpoint (valfri, t.ex. R2 / MinIO)
+                      </label>
+                      <input
+                        type="text"
+                        value={s3Endpoint}
+                        onChange={(e) => setS3Endpoint(e.target.value)}
+                        placeholder="https://<id>.r2.cloudflarestorage.com"
+                        className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
+                        Prefix / Mapp i bucket
+                      </label>
+                      <input
+                        type="text"
+                        value={s3Prefix}
+                        onChange={(e) => setS3Prefix(e.target.value)}
+                        placeholder="sshs3-team"
+                        className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    <div>
+                      <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
+                        Access Key ID {!s3InviteCode.trim() && '*'}
+                      </label>
+                      <input
+                        type="text"
+                        data-testid="s3-access-key-input"
+                        value={s3AccessKeyId}
+                        onChange={(e) => setS3AccessKeyId(e.target.value)}
+                        placeholder="AKIA..."
+                        className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs font-mono text-txt-primary"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
+                        Secret Access Key {!s3InviteCode.trim() && !hub?.s3Workspace?.configured && '*'}
+                      </label>
+                      <input
+                        type="password"
+                        data-testid="s3-secret-key-input"
+                        value={s3SecretAccessKey}
+                        onChange={(e) => setS3SecretAccessKey(e.target.value)}
+                        placeholder={
+                          hub?.s3Workspace?.configured
+                            ? '•••••••• (lämna tom för att behålla)'
+                            : 'Din S3 Secret Access Key'
+                        }
+                        className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs font-mono text-txt-primary"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
+                        Ditt namn i teamet (visas vid ändringar & terminal)
+                      </label>
+                      <input
+                        type="text"
+                        data-testid="s3-actor-name-input"
+                        value={s3ActorName}
+                        onChange={(e) => setS3ActorName(e.target.value)}
+                        placeholder="t.ex. jacob"
+                        className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
+                      />
+                    </div>
+                  </div>
+
+                  {s3StatusMsg && (
+                    <div className="text-[11px] text-rose-400">{s3StatusMsg}</div>
+                  )}
+
+                  <div className="flex items-center justify-between pt-1">
+                    <div>
+                      {hub?.s3Workspace?.configured && (
+                        <button
+                          type="button"
+                          onClick={() => void handleDisconnectS3()}
+                          className="rounded px-2 py-1 text-[11px] text-rose-400 hover:bg-rose-500/10"
+                        >
+                          Koppla från S3 Bucket
+                        </button>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setS3SetupOpen(false)}
+                        className="rounded px-2.5 py-1 text-xs text-txt-muted hover:text-txt-primary"
+                      >
+                        Avbryt
+                      </button>
+                      <button
+                        type="submit"
+                        data-testid="s3-save-connect-btn"
+                        disabled={s3Saving}
+                        className="rounded-lg bg-purple-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-purple-500 disabled:opacity-40"
+                      >
+                        {s3Saving ? 'Ansluter & synkar…' : 'Spara & Synka S3 Bucket'}
+                      </button>
+                    </div>
+                  </div>
+                </form>
+              )}
+            </div>
+
             {/* Left 2 Columns: Termius-style Server, Cluster & Node Cards */}
             <div className="lg:col-span-2 flex flex-col gap-3 rounded-xl border border-border-subtle bg-app-surface-subtle p-3.5">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -927,7 +1402,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                           : 'text-txt-muted hover:text-txt-primary border border-transparent'
                       }`}
                     >
-                      {scope === 'all' ? 'Alla' : scope === 'shared' ? 'Team Vault' : 'Personliga'}
+                      {scope === 'all' ? 'Alla' : scope === 'shared' ? 'Delade (S3)' : 'Personliga'}
                     </button>
                   ))}
                 </div>
@@ -1111,7 +1586,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                           checked={newNodeShared}
                           onChange={(e) => setNewNodeShared(e.target.checked)}
                         />
-                        Dela i Team Vault
+                        Dela i S3 Team Bucket
                       </label>
                       <button
                         type="submit"
@@ -1238,6 +1713,14 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     latestActivityByServer.get(server.id) ||
                     latestActivityByServer.get(server.name);
                   const connectable = toConnectableProfile(server);
+                  const livePresence =
+                    presenceByServer.get(server.id) ||
+                    presenceByServer.get(server.host) ||
+                    presenceByServer.get(server.name) ||
+                    [];
+                  const hasLocalOverride = Boolean(
+                    server.localUsername || server.localPrivateKeyPath
+                  );
 
                   return (
                     <div
@@ -1283,23 +1766,43 @@ export const LandingView: React.FC<LandingViewProps> = ({
                               )}
                               {server.shared ? (
                                 <span className="inline-flex items-center gap-0.5 rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.2 text-[10px] text-emerald-300">
-                                  <Users className="h-2.5 w-2.5" /> Delad
+                                  <Users className="h-2.5 w-2.5" /> Delad (S3)
                                 </span>
                               ) : (
                                 <span className="inline-flex items-center gap-0.5 rounded border border-border-subtle bg-app-surface-subtle px-1.5 py-0.2 text-[10px] text-txt-muted">
                                   <Shield className="h-2.5 w-2.5" /> Privat
                                 </span>
                               )}
+                              {livePresence.map((p, idx) => (
+                                <span
+                                  key={`${p.actor}-${idx}`}
+                                  data-testid={`server-presence-${server.id}-${p.actor}`}
+                                  className="inline-flex items-center gap-1 rounded-full border border-emerald-500/40 bg-emerald-500/15 px-1.5 py-0.2 text-[10px] font-semibold text-emerald-300"
+                                >
+                                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                                  <span>
+                                    {p.aiWorking ? `🤖 ${p.actor} (AI)` : `${p.actor} (Terminal)`}
+                                  </span>
+                                </span>
+                              ))}
                             </div>
                             <div className="mt-0.5 truncate text-[11px] font-mono text-txt-muted">
-                              {server.username}@{server.host}:{server.port}
+                              {connectable.username}@{server.host}:{server.port}
                               {server.folder ? ` · ${server.folder}` : ''}
+                              {hasLocalOverride && (
+                                <span
+                                  title="Lokal ~/.ssh-override sparad på din dator"
+                                  className="ml-1.5 rounded bg-purple-500/15 px-1 py-0.2 text-[9.5px] font-sans text-purple-300"
+                                >
+                                  🔑 Lokal ~/.ssh
+                                </span>
+                              )}
                             </div>
                           </div>
 
                           <button
                             type="button"
-                            title="Redigera kluster, nod-roll, taggar & beskrivning"
+                            title="Redigera kluster, nod-roll, taggar, beskrivning & lokal ~/.ssh"
                             onClick={() =>
                               isEditing ? setEditingServerId(null) : openEditServer(server)
                             }
@@ -1406,22 +1909,67 @@ export const LandingView: React.FC<LandingViewProps> = ({
                                 })}
                               </div>
                             </div>
-                            <div className="flex justify-end gap-1.5 pt-1">
+                            {/* Per-user local ~/.ssh override (never uploaded to S3) */}
+                            <div className="rounded-md border border-purple-500/25 bg-purple-500/5 p-2 space-y-1.5">
+                              <div className="flex items-center gap-1 text-[10px] font-semibold text-purple-300">
+                                <Key className="h-3 w-3" />
+                                <span>Min lokala SSH-inloggning (~/.ssh — delas aldrig i S3)</span>
+                              </div>
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                                <div>
+                                  <label className="block text-[9.5px] text-txt-muted mb-0.5">
+                                    Mitt SSH-användarnamn (om annat än {server.username})
+                                  </label>
+                                  <input
+                                    type="text"
+                                    value={editLocalUser}
+                                    onChange={(e) => setEditLocalUser(e.target.value)}
+                                    placeholder={server.username}
+                                    className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs font-mono text-txt-primary"
+                                  />
+                                </div>
+                                <div>
+                                  <label className="block text-[9.5px] text-txt-muted mb-0.5">
+                                    Lokal SSH-nyckel (valfri sökväg)
+                                  </label>
+                                  <input
+                                    type="text"
+                                    value={editLocalKeyPath}
+                                    onChange={(e) => setEditLocalKeyPath(e.target.value)}
+                                    placeholder="~/.ssh/id_ed25519 (tom = SSH-agent)"
+                                    className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs font-mono text-txt-primary"
+                                  />
+                                </div>
+                              </div>
+                            </div>
+                            <div className="flex items-center justify-between pt-1">
                               <button
                                 type="button"
-                                onClick={() => setEditingServerId(null)}
-                                className="rounded px-2 py-1 text-[11px] text-txt-muted hover:text-txt-primary"
-                              >
-                                Avbryt
-                              </button>
-                              <button
-                                type="button"
+                                data-testid={`delete-server-btn-${server.id}`}
                                 disabled={savingMeta}
-                                onClick={() => void handleSaveServerMeta(server)}
-                                className="rounded bg-sky-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-sky-500"
+                                onClick={() => void handleDeleteServer(server)}
+                                className="inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] text-rose-400 hover:bg-rose-500/10"
                               >
-                                Spara
+                                <Trash2 className="h-3 w-3" />
+                                <span>Ta bort nod</span>
                               </button>
+                              <div className="flex items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => setEditingServerId(null)}
+                                  className="rounded px-2 py-1 text-[11px] text-txt-muted hover:text-txt-primary"
+                                >
+                                  Avbryt
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={savingMeta}
+                                  onClick={() => void handleSaveServerMeta(server)}
+                                  className="rounded bg-sky-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-sky-500"
+                                >
+                                  Spara
+                                </button>
+                              </div>
                             </div>
                           </div>
                         ) : (

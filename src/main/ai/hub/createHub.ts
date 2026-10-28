@@ -64,6 +64,7 @@ export function createHub(
       try {
         const profiles = await bridge.profileStore.getProfiles();
         for (const p of profiles.ssh ?? []) {
+          if (servers.some((s) => s.id === p.id)) continue;
           servers.push({
             id: p.id,
             name: p.name || p.host,
@@ -77,7 +78,7 @@ export function createHub(
             description: p.description,
             role: p.role,
             tags: p.tags,
-            shared: false,
+            shared: Boolean(p.shared),
             updatedAt: p.updatedAt,
             updatedBy: p.updatedBy,
           });
@@ -208,9 +209,10 @@ export function createHub(
       }
       const profiles = await bridge.profileStore.getProfiles();
       const existing = profiles.ssh.find((p) => p.id === input.profileId);
-      if (!existing) throw new Error("Server profile not found");
+      if (!existing) return;
       await bridge.profileStore.saveSSH({
         ...existing,
+        shared: input.shared ?? existing.shared,
         cluster:
           input.cluster !== undefined
             ? input.cluster.trim() || undefined
@@ -239,7 +241,8 @@ export function createHub(
           tags: cleanTags,
         });
       }
-      if (input.shared && bridge.teamVaultService?.isUnlocked?.()) {
+      const isShared = input.shared ?? true;
+      if (isShared && bridge.teamVaultService?.isUnlocked?.()) {
         const payload = await bridge.teamVaultService.getPayload();
         const existing = payload.ssh.find((p) => p.id === id);
         const actor =
@@ -259,30 +262,15 @@ export function createHub(
           role: input.role?.trim() || undefined,
           description: input.description?.trim() || undefined,
           tags: cleanTags?.length ? cleanTags : undefined,
+          shared: true,
           updatedAt: new Date().toISOString(),
           updatedBy: actor,
         });
         bridge.scheduleTeamVaultAutoPush?.();
-        return {
-          id,
-          name: input.name.trim(),
-          host: input.host.trim(),
-          port: input.port || 22,
-          username: input.username.trim() || "root",
-          folder: input.folder?.trim() || input.cluster?.trim(),
-          group: input.folder?.trim() || input.cluster?.trim(),
-          cluster: input.cluster?.trim() || undefined,
-          nodeRole: input.nodeRole?.trim() || undefined,
-          role: input.role?.trim() || undefined,
-          description: input.description?.trim() || undefined,
-          tags: cleanTags,
-          shared: true,
-          updatedAt: new Date().toISOString(),
-          updatedBy: actor,
-        };
       }
       const profiles = await bridge.profileStore.getProfiles();
       const existing = profiles.ssh.find((p) => p.id === id);
+      const nowIso = new Date().toISOString();
       await bridge.profileStore.saveSSH({
         ...existing,
         id,
@@ -298,7 +286,8 @@ export function createHub(
         role: input.role?.trim() || undefined,
         description: input.description?.trim() || undefined,
         tags: cleanTags?.length ? cleanTags : undefined,
-        updatedAt: new Date().toISOString(),
+        shared: isShared,
+        updatedAt: nowIso,
       });
       bridge.scheduleAutoSync?.();
       return {
@@ -314,9 +303,67 @@ export function createHub(
         role: input.role?.trim() || undefined,
         description: input.description?.trim() || undefined,
         tags: cleanTags,
-        shared: false,
-        updatedAt: new Date().toISOString(),
+        shared: isShared,
+        updatedAt: nowIso,
       };
+    },
+    deleteServer: async (profileId) => {
+      try {
+        if (bridge.teamVaultService?.isUnlocked?.()) {
+          await bridge.teamVaultService
+            .deleteSSHProfile(profileId)
+            .catch(() => {});
+          bridge.scheduleTeamVaultAutoPush?.();
+        }
+      } catch {
+        // Ignore
+      }
+      await bridge.profileStore.deleteSSH(profileId).catch(() => {});
+      bridge.scheduleAutoSync?.();
+    },
+    syncSharedServersFromS3: async (servers, deletedServerIds) => {
+      try {
+        const profiles = await bridge.profileStore.getProfiles();
+        const byId = new Map(profiles.ssh.map((p) => [p.id, p]));
+        for (const [delId, delIso] of Object.entries(deletedServerIds ?? {})) {
+          const existing = byId.get(delId);
+          if (!existing) continue;
+          const delMs = Date.parse(delIso) || 0;
+          const updMs = Date.parse(existing.updatedAt || "") || 0;
+          if (delMs >= updMs) {
+            await bridge.profileStore.deleteSSH(delId).catch(() => {});
+            byId.delete(delId);
+          }
+        }
+        for (const s of servers) {
+          if (!s?.id || !s.host) continue;
+          const existing = byId.get(s.id);
+          const tRemote = Date.parse(s.updatedAt || "") || 0;
+          const tLocal = Date.parse(existing?.updatedAt || "") || 0;
+          if (!existing || tRemote > tLocal || !existing.shared) {
+            await bridge.profileStore.saveSSH({
+              ...existing,
+              id: s.id,
+              name: s.name || s.host,
+              host: s.host,
+              port: s.port || 22,
+              username: s.username || existing?.username || "root",
+              authType: existing?.authType || "agent",
+              group: s.folder || s.group || s.cluster || existing?.group,
+              cluster: s.cluster,
+              nodeRole: s.nodeRole,
+              role: s.role,
+              description: s.description,
+              tags: s.tags,
+              shared: true,
+              updatedAt: s.updatedAt || new Date().toISOString(),
+              updatedBy: s.updatedBy,
+            });
+          }
+        }
+      } catch {
+        // Ignore profileStore sync errors
+      }
     },
     inventoryTargets: async () => {
       const profiles = await bridge.profileStore.getProfiles();

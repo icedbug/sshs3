@@ -6,6 +6,7 @@ import type {
   ContextSource,
   HubPreferences,
   InventoryEntry,
+  LocalServerAuthOverride,
   MemoryEntry,
   WorkspaceActivityEvent,
   WorkspaceServerSummary,
@@ -18,6 +19,8 @@ export interface SharedWorkspaceFilePayload {
   servers: WorkspaceServerSummary[];
   memories: MemoryEntry[];
   activityLog: WorkspaceActivityEvent[];
+  deletedServerIds?: Record<string, string>;
+  deletedMemoryIds?: Record<string, number>;
 }
 
 export interface HubData {
@@ -29,6 +32,10 @@ export interface HubData {
   inventory: InventoryEntry[];
   history: ContextSource[];
   activityLog: WorkspaceActivityEvent[];
+  localOverrides?: Record<string, LocalServerAuthOverride>;
+  deletedServerIds?: Record<string, string>;
+  deletedMemoryIds?: Record<string, number>;
+  s3SyncedServers?: WorkspaceServerSummary[];
 }
 export const defaultHubData = (): HubData => ({
   version: 1,
@@ -44,6 +51,10 @@ export const defaultHubData = (): HubData => ({
   inventory: [],
   history: [],
   activityLog: [],
+  localOverrides: {},
+  deletedServerIds: {},
+  deletedMemoryIds: {},
+  s3SyncedServers: [],
 });
 
 /** One process owns the store. Serial atomic replacements preserve the last valid snapshot. */

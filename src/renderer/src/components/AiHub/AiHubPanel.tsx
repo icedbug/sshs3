@@ -1558,6 +1558,15 @@ function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Element {
           }
         />
       </label>
+      {hub.s3Workspace?.configured && (
+        <small>
+          S3 Team Bucket active: s3://{hub.s3Workspace.bucket}/
+          {hub.s3Workspace.prefix || "sshs3-team"}
+          {hub.s3Workspace.lastSyncAt
+            ? ` (synced ${new Date(hub.s3Workspace.lastSyncAt).toLocaleTimeString()})`
+            : ""}
+        </small>
+      )}
       <label>
         Shared Team Workspace File (Git / OneDrive / Shared Folder — optional)
         <input

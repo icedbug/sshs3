@@ -115,6 +115,8 @@ export interface SSHConnectionConfig {
   tags?: string[];
   /** Team member / user who last updated this profile's metadata. */
   updatedBy?: string;
+  /** Whether this SSH node is shared in the S3 Team Workspace. */
+  shared?: boolean;
 }
 
 export interface DetectedSmartcardLib {
