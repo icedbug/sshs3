@@ -115,6 +115,8 @@ function encodeWsControlFrame(opcode: number, payload = Buffer.alloc(0)): Buffer
 /**
  * Attaches an RFC 6455 WebSocket frame parser to a raw upgraded socket.
  */
+const MAX_WS_MESSAGE_BYTES = 16 * 1024 * 1024;
+
 function attachWsFrameParser(
   socket: Duplex,
   onMessage: (text: string) => void,
@@ -122,9 +124,11 @@ function attachWsFrameParser(
 ): void {
   let buffer = Buffer.alloc(0);
   let fragments: Buffer[] = [];
+  let fragmentsBytes = 0;
 
   const cleanup = () => {
     fragments = [];
+    fragmentsBytes = 0;
     buffer = Buffer.alloc(0);
     onClose();
   };
@@ -135,6 +139,10 @@ function attachWsFrameParser(
   });
 
   socket.on('data', (chunk: Buffer) => {
+    if (buffer.length + chunk.length > MAX_WS_MESSAGE_BYTES) {
+      socket.destroy();
+      return;
+    }
     buffer = Buffer.concat([buffer, chunk]);
 
     while (buffer.length >= 2) {
@@ -153,12 +161,17 @@ function attachWsFrameParser(
       } else if (payloadLen === 127) {
         if (buffer.length < 10) return;
         const bigLen = buffer.readBigUInt64BE(2);
-        if (bigLen > BigInt(16 * 1024 * 1024)) {
+        if (bigLen > BigInt(MAX_WS_MESSAGE_BYTES)) {
           socket.destroy();
           return;
         }
         payloadLen = Number(bigLen);
         offset = 10;
+      }
+
+      if (payloadLen > MAX_WS_MESSAGE_BYTES) {
+        socket.destroy();
+        return;
       }
 
       const maskLen = masked ? 4 : 0;
@@ -201,10 +214,16 @@ function attachWsFrameParser(
       } else if (opcode === 0xa) {
         // Pong
       } else if (opcode === 0x1 || opcode === 0x0) {
+        fragmentsBytes += payload.length;
+        if (fragmentsBytes > MAX_WS_MESSAGE_BYTES) {
+          socket.destroy();
+          return;
+        }
         fragments.push(payload);
         if (fin) {
           const fullText = Buffer.concat(fragments).toString('utf8');
           fragments = [];
+          fragmentsBytes = 0;
           onMessage(fullText);
         }
       }
@@ -468,6 +487,23 @@ export class Sshs3WebServer {
         return;
       }
 
+      if (pathname === '/api/user/password' && method === 'POST') {
+        const body = await readJsonBody(req);
+        try {
+          await this.auth.changePassword(
+            user.id,
+            String(body.currentPassword || ''),
+            String(body.newPassword || ''),
+          );
+          sendJson(res, 200, { ok: true });
+        } catch (err) {
+          sendJson(res, 400, {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+        return;
+      }
+
       // Admin endpoints
       if (pathname.startsWith('/api/admin/')) {
         if (user.role !== 'admin') {
@@ -514,11 +550,10 @@ export class Sshs3WebServer {
             ? decodeURIComponent(pathname.slice('/api/admin/users/'.length))
             : '';
           const body = pathUserId ? {} : await readJsonBody(req);
+          const targetUserId = String(pathUserId || body.userId || '');
           try {
-            await this.auth.deleteUserByAdmin(
-              String(pathUserId || body.userId || ''),
-              user.id,
-            );
+            await this.auth.deleteUserByAdmin(targetUserId, user.id);
+            await this.tenants.disposeTenant(targetUserId);
             sendJson(res, 200, { ok: true });
           } catch (err) {
             sendJson(res, 400, {
@@ -537,6 +572,22 @@ export class Sshs3WebServer {
             maxUses: body.maxUses ? Number(body.maxUses) : 10,
           });
           sendJson(res, 200, { invite });
+          return;
+        }
+
+        if (
+          (pathname === '/api/admin/invites' || pathname.startsWith('/api/admin/invites/')) &&
+          method === 'DELETE'
+        ) {
+          const pathToken = pathname.startsWith('/api/admin/invites/')
+            ? decodeURIComponent(pathname.slice('/api/admin/invites/'.length))
+            : '';
+          const body = pathToken ? {} : await readJsonBody(req);
+          const token = String(
+            pathToken || url.searchParams.get('token') || body.token || '',
+          );
+          await this.auth.revokeInvite(token);
+          sendJson(res, 200, { ok: true, invites: this.auth.listInvites() });
           return;
         }
       }
@@ -588,6 +639,31 @@ export class Sshs3WebServer {
       return;
     }
 
+    // CSWSH protection: validate Origin header if present
+    const originHeader = req.headers.origin;
+    if (typeof originHeader === 'string' && originHeader.trim()) {
+      let originUrl: URL;
+      try {
+        originUrl = new URL(originHeader);
+      } catch {
+        socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+      const reqHost = (req.headers.host || '').trim().toLowerCase();
+      const reqHostname = reqHost.split(':')[0] || '';
+      const originHost = originUrl.host.toLowerCase();
+      const originHostname = originUrl.hostname.toLowerCase();
+      const isLoopbackMatch =
+        (originHostname === 'localhost' || originHostname === '127.0.0.1') &&
+        (reqHostname === 'localhost' || reqHostname === '127.0.0.1' || !reqHostname);
+      if (originHost !== reqHost && !isLoopbackMatch) {
+        socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+    }
+
     const user = await this.authenticateRequest(req);
     if (!user) {
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
@@ -615,6 +691,7 @@ export class Sshs3WebServer {
     };
 
     tenant.clients.add(sendFrame);
+    tenant.sockets.add(socket);
 
     attachWsFrameParser(
       socket,
@@ -660,6 +737,7 @@ export class Sshs3WebServer {
       },
       () => {
         tenant.clients.delete(sendFrame);
+        tenant.sockets.delete(socket);
         this.activeSockets.delete(socket);
       },
     );

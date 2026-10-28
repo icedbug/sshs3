@@ -94,7 +94,7 @@ export function createHub(
             description: p.description,
             role: p.role,
             tags: p.tags,
-            shared: Boolean(p.shared),
+            shared: p.shared !== false,
             updatedAt: p.updatedAt,
             updatedBy: p.updatedBy,
           });
@@ -344,7 +344,10 @@ export function createHub(
         for (const [delId, delIso] of Object.entries(deletedServerIds ?? {})) {
           const existing = byId.get(delId);
           if (!existing) continue;
-          const delMs = Date.parse(delIso) || 0;
+          const delMs =
+            typeof delIso === "number"
+              ? delIso
+              : Date.parse(String(delIso)) || Number(delIso) || 0;
           const updMs = Date.parse(existing.updatedAt || "") || 0;
           if (delMs >= updMs) {
             await bridge.profileStore.deleteSSH(delId).catch(() => {});

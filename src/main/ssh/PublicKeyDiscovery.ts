@@ -30,9 +30,10 @@ function toLocalKey(
 }
 
 /** `~/.ssh/*.pub` samt `<privateKeyPath>.pub` för en profils nyckelfil. Ogiltiga filer hoppas över. */
-export async function listFilePublicKeys(extraPrivateKeyPath?: string): Promise<LocalPublicKey[]> {
-  const sshDir = path.join(os.homedir(), '.ssh');
+export async function listFilePublicKeys(extraPrivateKeyPath?: string, homeDir?: string): Promise<LocalPublicKey[]> {
+  const sshDir = path.join(homeDir || os.homedir(), '.ssh');
   const pubFiles = new Set<string>();
+  if (extraPrivateKeyPath?.trim()) pubFiles.add(`${extraPrivateKeyPath.trim()}.pub`);
   try {
     const names = await fs.readdir(sshDir);
     for (const name of names.filter((n) => n.endsWith('.pub')).slice(0, MAX_PUB_FILES)) {
@@ -41,7 +42,6 @@ export async function listFilePublicKeys(extraPrivateKeyPath?: string): Promise<
   } catch {
     // ingen ~/.ssh
   }
-  if (extraPrivateKeyPath?.trim()) pubFiles.add(`${extraPrivateKeyPath.trim()}.pub`);
 
   const keys: LocalPublicKey[] = [];
   for (const file of pubFiles) {

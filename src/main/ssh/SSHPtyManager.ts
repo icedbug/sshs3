@@ -409,6 +409,16 @@ export class SSHPtyManager extends EventEmitter {
     this.settingsStore = options?.settingsStore;
   }
 
+  public static getControlPath(config: SSHConnectionConfig): string {
+    const hashInput = `${config.username}@${config.host}:${config.port ?? 22}:${config.privateKeyPath ?? ''}`;
+    const digest = crypto.createHash('sha256').update(hashInput).digest('hex').slice(0, 8);
+    return path.join(os.tmpdir(), `s3m-${digest}-${crypto.randomUUID().slice(0, 8)}.sock`);
+  }
+
+  public getControlPath(config: SSHConnectionConfig): string {
+    return SSHPtyManager.getControlPath(config);
+  }
+
   /**
    * Strips any saved tunnels from a config before it's handed to `buildSSHArguments`. Tunnels
    * are only ever started explicitly from the Tunnels panel (`SSHTunnelManager`) now — a terminal
@@ -594,7 +604,7 @@ export class SSHPtyManager extends EventEmitter {
 
     const controlPath =
       process.platform !== 'win32'
-        ? path.join(os.tmpdir(), `s3m-${crypto.randomUUID().slice(0, 8)}.sock`)
+        ? this.getControlPath(config)
         : undefined;
     let muxRegistryId: string | null = null;
     let filteredConfig: SSHConnectionConfig;

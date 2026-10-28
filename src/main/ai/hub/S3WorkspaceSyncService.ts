@@ -179,11 +179,11 @@ export function mergeS3WorkspacePayload(
     ...(local.deletedServerIds ?? {}),
   };
   for (const [id, delIso] of Object.entries(remote.deletedServerIds ?? {})) {
-    if (!id || typeof delIso !== "string") continue;
+    if (!id || (typeof delIso !== "string" && typeof delIso !== "number")) continue;
     const prevMs = parseTimeMs(deletedServerIds[id]);
     const nextMs = parseTimeMs(delIso);
     if (nextMs > prevMs) {
-      deletedServerIds[id] = delIso;
+      deletedServerIds[id] = String(delIso);
       changed = true;
     }
   }
@@ -233,7 +233,7 @@ export function mergeS3WorkspacePayload(
     const delMs = parseTimeMs(delIso);
     const updMs = parseTimeMs(srv.updatedAt);
     if (delMs > 0 && delMs >= updMs) {
-      allMergedServers.push({ ...srv, deletedAt: delIso });
+      allMergedServers.push({ ...srv, deletedAt: String(delIso) });
     } else {
       if (deletedServerIds[srv.id]) {
         delete deletedServerIds[srv.id];
@@ -363,7 +363,7 @@ export class S3WorkspaceSyncService {
   private syncing = false;
   private connected = false;
   private lastError?: string;
-  private lastKnownRemoteStat?: { size: number; mtime: string } | null;
+  private lastKnownRemoteStat?: { size: number; mtime?: string } | null;
   private presenceList: WorkspacePresenceEntry[] = [];
   private pollTimer?: NodeJS.Timeout;
   private presenceTimer?: NodeJS.Timeout;
@@ -432,7 +432,7 @@ export class S3WorkspaceSyncService {
       recursive: true,
       mode: 0o700,
     });
-    const tmp = `${this.configFilePath}.tmp`;
+    const tmp = `${this.configFilePath}.tmp-${process.pid}-${crypto.randomUUID()}`;
     await fs.writeFile(tmp, JSON.stringify(stored, null, 2), { mode: 0o600 });
     await fs.rename(tmp, this.configFilePath);
   }
@@ -530,6 +530,52 @@ export class S3WorkspaceSyncService {
     void this.syncNow().catch((err) =>
       log.warn("Initial S3 workspace sync failed", safeError(err)),
     );
+  }
+
+  async reloadFromDisk(): Promise<void> {
+    if (this.disposed) return;
+    const prevKey = JSON.stringify({
+      enabled: this.config.enabled,
+      endpoint: this.config.endpoint,
+      region: this.config.region,
+      bucket: this.config.bucket,
+      prefix: this.config.prefix,
+      accessKeyId: this.config.accessKeyId,
+      secretAccessKey: this.config.secretAccessKey,
+      forcePathStyle: this.config.forcePathStyle,
+    });
+    await this.load();
+    const nextKey = JSON.stringify({
+      enabled: this.config.enabled,
+      endpoint: this.config.endpoint,
+      region: this.config.region,
+      bucket: this.config.bucket,
+      prefix: this.config.prefix,
+      accessKeyId: this.config.accessKeyId,
+      secretAccessKey: this.config.secretAccessKey,
+      forcePathStyle: this.config.forcePathStyle,
+    });
+    if (prevKey !== nextKey) {
+      await this.resetProvider();
+      this.lastKnownRemoteStat = undefined;
+      this.lastError = undefined;
+      if (this.isConfigured()) {
+        this.startTimers();
+        await this.syncNow().catch((err) =>
+          log.warn("Reloaded S3 workspace sync failed", safeError(err)),
+        );
+      } else {
+        this.stopTimers();
+        this.connected = false;
+        this.presenceList = [];
+      }
+      this.callbacks.onStateChanged();
+    } else if (this.isConfigured() && !this.connected) {
+      this.startTimers();
+      await this.syncNow().catch((err) =>
+        log.warn("Reloaded S3 workspace sync failed", safeError(err)),
+      );
+    }
   }
 
   startTimers(): void {
@@ -800,7 +846,9 @@ export class S3WorkspaceSyncService {
     if (this.provider) return this.provider;
     if (this.options.providerFactory) {
       this.provider = this.options.providerFactory(this.config);
-      await this.provider.connect();
+      await (
+        this.provider as { connect?: () => Promise<void> }
+      ).connect?.();
       return this.provider;
     }
     const s3Provider = new S3StorageProvider({
@@ -812,7 +860,7 @@ export class S3WorkspaceSyncService {
       secretAccessKey: this.config.secretAccessKey || "",
       forcePathStyle: this.config.forcePathStyle ?? true,
     });
-    await s3Provider.connect();
+    await (s3Provider as { connect?: () => Promise<void> }).connect?.();
     this.provider = s3Provider;
     return this.provider;
   }
@@ -821,7 +869,7 @@ export class S3WorkspaceSyncService {
     const old = this.provider;
     this.provider = undefined;
     if (old) {
-      await old.disconnect().catch(() => {});
+      await old.disconnect?.().catch(() => {});
     }
   }
 

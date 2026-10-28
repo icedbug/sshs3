@@ -80,6 +80,9 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
   const [customPrivateKey, setCustomPrivateKey] = useState('');
   const [showImportKey, setShowImportKey] = useState(false);
   const [keyStatusMsg, setKeyStatusMsg] = useState<string | null>(null);
+  const [currentPasswordInput, setCurrentPasswordInput] = useState('');
+  const [newPasswordInput, setNewPasswordInput] = useState('');
+  const [passwordStatusMsg, setPasswordStatusMsg] = useState<string | null>(null);
 
   // Admin states
   const [usersList, setUsersList] = useState<WebUserPublic[]>([]);
@@ -349,6 +352,38 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
       await loadAdminData();
     } catch (err: any) {
       setAdminMsg(`Fel: ${err?.message || 'Kunde inte skapa invite-länk'}`);
+    }
+  };
+
+  const handleRevokeInvite = async (token: string) => {
+    setAdminMsg(null);
+    try {
+      await webApiFetch(`/api/admin/invites/${encodeURIComponent(token)}`, {
+        method: 'DELETE',
+      });
+      setAdminMsg('Invite-kod återkallad.');
+      await loadAdminData();
+    } catch (err: any) {
+      setAdminMsg(`Fel: ${err?.message || 'Kunde inte återkalla invite-kod'}`);
+    }
+  };
+
+  const handleChangePassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setPasswordStatusMsg(null);
+    try {
+      await webApiFetch('/api/user/password', {
+        method: 'POST',
+        body: JSON.stringify({
+          currentPassword: currentPasswordInput,
+          newPassword: newPasswordInput,
+        }),
+      });
+      setCurrentPasswordInput('');
+      setNewPasswordInput('');
+      setPasswordStatusMsg('Lösenordet har uppdaterats!');
+    } catch (err: any) {
+      setPasswordStatusMsg(`Fel: ${err?.message || 'Kunde inte byta lösenord'}`);
     }
   };
 
@@ -824,6 +859,44 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                       </form>
                     )}
                   </div>
+
+                  {/* Password change card */}
+                  <form
+                    onSubmit={handleChangePassword}
+                    className="rounded-xl bg-slate-900/80 border border-slate-800 p-4 space-y-3"
+                  >
+                    <h3 className="text-sm font-semibold text-white">Byt lösenord</h3>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <input
+                        type="password"
+                        required
+                        value={currentPasswordInput}
+                        onChange={(e) => setCurrentPasswordInput(e.target.value)}
+                        placeholder="Nuvarande lösenord"
+                        className="rounded-lg bg-slate-950 border border-slate-700 px-2.5 py-1.5 text-white"
+                      />
+                      <input
+                        type="password"
+                        required
+                        minLength={6}
+                        value={newPasswordInput}
+                        onChange={(e) => setNewPasswordInput(e.target.value)}
+                        placeholder="Nytt lösenord (minst 6 tecken)"
+                        className="rounded-lg bg-slate-950 border border-slate-700 px-2.5 py-1.5 text-white"
+                      />
+                    </div>
+                    <button
+                      type="submit"
+                      className="px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white font-medium"
+                    >
+                      Uppdatera lösenord
+                    </button>
+                    {passwordStatusMsg && (
+                      <div className="rounded-lg bg-cyan-500/10 border border-cyan-500/30 px-3 py-2 text-cyan-200">
+                        {passwordStatusMsg}
+                      </div>
+                    )}
+                  </form>
                 </div>
               )}
 
@@ -891,6 +964,48 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                         </div>
                         <div className="font-mono text-[11px] text-slate-200 break-all select-all">
                           {latestInviteUrl}
+                        </div>
+                      </div>
+                    )}
+
+                    {invitesList.length > 0 && (
+                      <div className="pt-3 border-t border-slate-800 space-y-2">
+                        <div className="text-xs font-semibold text-slate-300">
+                          Aktiva Invite-länkar ({invitesList.length})
+                        </div>
+                        <div className="divide-y divide-slate-800">
+                          {invitesList.map((inv) => {
+                            const invUrl = `${window.location.origin}/?invite=${inv.token}`;
+                            return (
+                              <div key={inv.token} className="py-2 flex items-center justify-between gap-2">
+                                <div className="min-w-0">
+                                  <div className="font-mono text-[11px] text-cyan-200 truncate">
+                                    {inv.token}
+                                    {inv.note ? ` · ${inv.note}` : ''}
+                                  </div>
+                                  <div className="text-[10px] text-slate-400">
+                                    Roll: {inv.role} · Använd: {inv.usedCount}/{inv.maxUses}
+                                  </div>
+                                </div>
+                                <div className="flex items-center gap-1.5 shrink-0">
+                                  <button
+                                    type="button"
+                                    onClick={() => copyToClipboard(invUrl, `inv-${inv.token}`)}
+                                    className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 text-[11px]"
+                                  >
+                                    {copiedText === `inv-${inv.token}` ? '✓ Kopierad' : 'Kopiera länk'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRevokeInvite(inv.token)}
+                                    className="px-2 py-1 rounded bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 text-[11px]"
+                                  >
+                                    Återkalla
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })}
                         </div>
                       </div>
                     )}

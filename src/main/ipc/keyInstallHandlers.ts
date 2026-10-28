@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import path from 'node:path';
 import { classifyAskpassPrompt } from '../ssh/askpassPrompt';
 import { type HostKeyPromptInfo } from '../ssh/HostKeyVerifier';
 import { installPublicKeys, probeHost, testLogin, verifyKeyLogin } from '../ssh/KeyInstallService';
@@ -13,7 +14,7 @@ import type { SmartcardCoordinator } from '../smartcard/SmartcardCoordinator';
 /** The part of IpcBridge this handler group may use. */
 export type KeyInstallHost = Pick<
   IpcBridge,
-  'makePresenceNotifier' | 'promptForPinDirect' | 'promptHostKeyTrust' | 'registerHandler' | 'resolveProxyJumpConfig' | 'restoreSavedSecrets'
+  'makePresenceNotifier' | 'promptForPinDirect' | 'promptHostKeyTrust' | 'registerHandler' | 'resolveProxyJumpConfig' | 'restoreSavedSecrets' | 'tenantHomeDir' | 'tenantSshPrivateKeyPath'
 > & {
   smartcard: Pick<
     SmartcardCoordinator,
@@ -65,6 +66,27 @@ export function registerKeyInstallHandlers(bridge: KeyInstallHost): void {
     return prepared;
   };
 
+  const listTenantSafeFileKeys = async (profilePrivateKeyPath?: string): Promise<LocalPublicKey[]> => {
+    if (bridge.tenantHomeDir) {
+      const tenantRoot = path.resolve(bridge.tenantHomeDir);
+      const safeProfileKey =
+        profilePrivateKeyPath &&
+        path.resolve(profilePrivateKeyPath).startsWith(tenantRoot + path.sep)
+          ? profilePrivateKeyPath
+          : undefined;
+      return dedupeKeys(
+        bridge.tenantSshPrivateKeyPath
+          ? await listFilePublicKeys(bridge.tenantSshPrivateKeyPath, bridge.tenantHomeDir)
+          : [],
+        await listFilePublicKeys(safeProfileKey, bridge.tenantHomeDir)
+      );
+    }
+    return dedupeKeys(
+      bridge.tenantSshPrivateKeyPath ? await listFilePublicKeys(bridge.tenantSshPrivateKeyPath) : [],
+      await listFilePublicKeys(profilePrivateKeyPath)
+    );
+  };
+
   bridge.registerHandler(
     IPC_CHANNELS.SSH_LIST_PUBLIC_KEYS,
     async (_event, request?: ListPublicKeysRequest): Promise<LocalPublicKey[]> => {
@@ -76,10 +98,11 @@ export function registerKeyInstallHandlers(bridge: KeyInstallHost): void {
           // Draft resolution optional for global key discovery
         }
       }
-      const lists = [
-        await listFilePublicKeys(profile?.privateKeyPath),
-        await listAgentPublicKeys('agent', 'Cached key'),
-      ];
+      const fileKeys = await listTenantSafeFileKeys(profile?.privateKeyPath);
+      const lists: LocalPublicKey[][] = [fileKeys];
+      if (!bridge.tenantHomeDir) {
+        lists.push(await listAgentPublicKeys('agent', 'Cached key'));
+      }
 
       // The app-wide agent ('agent-global' PIN caching) holds every unlocked smartcard and FIDO2 key.
       const appSocket = bridge.smartcard.appAgentSocketIfUnlocked();
@@ -200,7 +223,9 @@ export function registerKeyInstallHandlers(bridge: KeyInstallHost): void {
         });
 
         // Verifiera nycklar som har en oskyddad privat nyckelfil lokalt; allt annat lämnas som "okänt".
-        const fileKeys = outcome.success ? await listFilePublicKeys(profile.privateKeyPath) : [];
+        const fileKeys = outcome.success
+          ? await listTenantSafeFileKeys(profile.privateKeyPath)
+          : [];
         const results = await Promise.all(
           outcome.results.map(async (r) => {
             if (!outcome.success || (r.status !== 'installed' && r.status !== 'present')) return r;

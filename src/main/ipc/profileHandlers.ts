@@ -26,6 +26,7 @@ export function registerProfileHandlers(bridge: ProfileHost): void {
       await bridge.storageRegistry.disconnect?.(`sftp-${config.id}`);
       bridge.scheduleAutoSync();
       void bridge.profileSyncService.autoSyncLocalSshConfig();
+      await bridge.aiHub?.recordServerSaved(config.id);
       bridge.aiHub?.changed();
     }
   );
@@ -37,6 +38,7 @@ export function registerProfileHandlers(bridge: ProfileHost): void {
       await bridge.storageRegistry.disconnect?.(`sftp-${id}`);
       bridge.scheduleAutoSync();
       void bridge.profileSyncService.autoSyncLocalSshConfig();
+      await bridge.aiHub?.recordServerDeleted(id);
       bridge.aiHub?.changed();
     }
   );

@@ -493,7 +493,7 @@ describe("Production multi-user workspace sync & auto-memory", () => {
         ...chatTask,
         id: "task-attached",
         mode: "assisted",
-        target: { sessionId: "s1", label: "prod-01", kind: "ssh" },
+        target: { sessionId: "s1", label: "prod-01", generation: "g1" },
       },
       { kind: "openai-codex", model: "gpt-6.1-sol" },
       () => {},
@@ -519,6 +519,8 @@ describe("Production multi-user workspace sync & auto-memory", () => {
         changed: () => {},
         inventoryTargets: async () => [],
         backgroundChanged: async () => {},
+        openSchedule: async () => "s1",
+        show: () => {},
       },
       tmpDir,
     );
@@ -541,6 +543,7 @@ describe("Production multi-user workspace sync & auto-memory", () => {
       provider: "openai-codex" as const,
       model: "gpt-6.1-sol",
       useHermes: false,
+      apiKey: "",
     });
 
     // Even when config.getView throws during both initialize() and snapshot(), snapshot() resolves cleanly

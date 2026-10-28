@@ -103,6 +103,11 @@ class BrowserWebSocketIpcTransport implements IpcRendererTransport {
       socket.onclose = () => {
         this.notifyConnectionState(false);
         this.ws = null;
+        for (const [, req] of this.pending) {
+          clearTimeout(req.timer);
+          req.reject(new Error('WebSocket connection closed'));
+        }
+        this.pending.clear();
         if (this.shouldReconnect) {
           this.reconnectTimer = setTimeout(() => {
             this.connect();
@@ -213,10 +218,14 @@ let singletonTransport: BrowserWebSocketIpcTransport | null = null;
 let isNativeElectronMode: boolean | null = null;
 
 export function isWebBrowserMode(): boolean {
+  if (typeof window === 'undefined') return false;
+  if ((window as any).__SSHS3_WEB_MODE__ === true) return true;
   if (isNativeElectronMode !== null) {
     return !isNativeElectronMode;
   }
-  if (typeof window === 'undefined') return false;
+  if (typeof navigator !== 'undefined' && /jsdom/i.test(navigator.userAgent || '')) {
+    return false;
+  }
   isNativeElectronMode = Boolean((window as any).multissh && !(window as any).__SSHS3_WEB_MODE__);
   return !isNativeElectronMode;
 }

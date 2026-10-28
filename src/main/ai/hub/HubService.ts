@@ -189,15 +189,23 @@ export class HubService {
           };
           const srvMap = new Map<string, WorkspaceServerSummary>();
           for (const s of this.store.data.s3SyncedServers ?? []) {
-            if (s?.id && s.shared) srvMap.set(s.id, s);
+            if (s?.id && s.shared !== false) {
+              srvMap.set(s.id, { ...s, shared: true });
+            }
           }
           for (const s of hostServers) {
-            if (s?.id && s.shared) {
+            if (s?.id && s.shared !== false) {
+              const delVal = deletedServerIds[s.id];
+              const delMs =
+                typeof delVal === "number"
+                  ? delVal
+                  : Date.parse(String(delVal || "")) || Number(delVal) || 0;
+              const tNext = Date.parse(s.updatedAt || "") || 0;
+              if (delMs > 0 && delMs >= tNext) continue;
               const prev = srvMap.get(s.id);
               const tPrev = Date.parse(prev?.updatedAt || "") || 0;
-              const tNext = Date.parse(s.updatedAt || "") || 0;
               if (!prev || tNext >= tPrev) {
-                srvMap.set(s.id, s);
+                srvMap.set(s.id, { ...s, shared: true });
               }
             }
           }
@@ -377,7 +385,7 @@ export class HubService {
           model: "gpt-6.1-codex-max",
           useHermes: false,
           hasApiKey: false,
-          keyEncrypted: false,
+          keyStorage: "encrypted" as const,
         };
       }),
       preferences: this.store.data.preferences,
@@ -678,7 +686,13 @@ export class HubService {
             updatedAt: nowIso,
             updatedBy: actor,
           };
-          this.upsertLocalS3ServerCache(updatedSrv);
+          if (updatedSrv.shared !== false) {
+            this.upsertLocalS3ServerCache(updatedSrv);
+          } else {
+            this.store.data.s3SyncedServers = (
+              this.store.data.s3SyncedServers ?? []
+            ).filter((s) => s.id !== pid);
+          }
         }
         const humanLabel = matchedServer?.name || pid;
         const roleInfo = [request.cluster, request.nodeRole, request.role]
@@ -723,6 +737,11 @@ export class HubService {
           shared: s.shared ?? true,
         });
         const targetId = saved?.id ?? s.id ?? crypto.randomUUID();
+        if (this.store.data.deletedServerIds?.[targetId]) {
+          const nextDeleted = { ...this.store.data.deletedServerIds };
+          delete nextDeleted[targetId];
+          this.store.data.deletedServerIds = nextDeleted;
+        }
         if (
           s.localUsername !== undefined ||
           s.localPrivateKeyPath !== undefined ||
@@ -754,6 +773,10 @@ export class HubService {
         };
         if (summary.shared) {
           this.upsertLocalS3ServerCache(summary);
+        } else {
+          this.store.data.s3SyncedServers = (
+            this.store.data.s3SyncedServers ?? []
+          ).filter((srv) => srv.id !== targetId);
         }
         const clusterBadge = s.cluster?.trim()
           ? ` in cluster ${s.cluster.trim()}`
@@ -890,9 +913,10 @@ export class HubService {
       default:
         throw new Error("Unknown AI request");
     }
-    this.changed();
     await this.store.save();
-    return this.snapshot();
+    const snap = await this.snapshot();
+    this.changed();
+    return snap;
   }
 
   private async start(
@@ -1704,8 +1728,15 @@ export class HubService {
     const workspaceServers: WorkspaceServerSummary[] = [];
     for (const srv of srvMap.values()) {
       const delIso = deletedServerIds[srv.id] || srv.deletedAt;
-      const delMs = delIso ? Date.parse(delIso) || 0 : 0;
-      const updMs = srv.updatedAt ? Date.parse(srv.updatedAt) || 0 : 0;
+      const delMs =
+        typeof delIso === "number"
+          ? delIso
+          : typeof delIso === "string"
+            ? Number(delIso) || Date.parse(delIso) || 0
+            : 0;
+      const updMs = srv.updatedAt
+        ? Number(srv.updatedAt) || Date.parse(srv.updatedAt) || 0
+        : 0;
       if (delMs > 0 && delMs >= updMs) {
         continue;
       }
@@ -1786,6 +1817,47 @@ export class HubService {
       memories,
       activityLog,
     };
+  }
+
+  async recordServerDeleted(id: string): Promise<void> {
+    const trimmed = id?.trim();
+    if (!trimmed) return;
+    await this.initialize().catch(() => {});
+    const nowIso = new Date().toISOString();
+    this.store.data.deletedServerIds = {
+      ...(this.store.data.deletedServerIds ?? {}),
+      [trimmed]: nowIso,
+    };
+    this.store.data.s3SyncedServers = (
+      this.store.data.s3SyncedServers ?? []
+    ).filter((s) => s.id !== trimmed);
+    const rawWorkspaceServers =
+      (await this.host.workspaceServers?.().catch(() => [])) ?? [];
+    await this.store
+      .syncSharedFile(undefined, rawWorkspaceServers)
+      .catch(() => {});
+    await this.store.save().catch(() => {});
+    this.s3Workspace.schedulePush(400);
+    this.changed();
+  }
+
+  async recordServerSaved(id: string): Promise<void> {
+    const trimmed = id?.trim();
+    if (!trimmed) return;
+    await this.initialize().catch(() => {});
+    if (this.store.data.deletedServerIds?.[trimmed]) {
+      const next = { ...this.store.data.deletedServerIds };
+      delete next[trimmed];
+      this.store.data.deletedServerIds = next;
+    }
+    const rawWorkspaceServers =
+      (await this.host.workspaceServers?.().catch(() => [])) ?? [];
+    await this.store
+      .syncSharedFile(undefined, rawWorkspaceServers)
+      .catch(() => {});
+    await this.store.save().catch(() => {});
+    this.s3Workspace.schedulePush(400);
+    this.changed();
   }
 
   async dispose(): Promise<void> {

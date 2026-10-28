@@ -157,6 +157,7 @@ export class WebAuthService {
     sessions: [],
   };
   private initialized = false;
+  private writeQueue: Promise<void> = Promise.resolve();
   private loginAttempts = new Map<string, { count: number; resetAt: number }>();
 
   constructor(private readonly baseDataDir: string) {
@@ -208,13 +209,18 @@ export class WebAuthService {
     this.initialized = true;
   }
 
-  private async save(): Promise<void> {
-    await fsp.mkdir(this.baseDataDir, { recursive: true, mode: 0o700 });
-    const tmp = `${this.authFilePath}.tmp`;
-    await fsp.writeFile(tmp, JSON.stringify(this.data, null, 2), {
-      mode: 0o600,
-    });
-    await fsp.rename(tmp, this.authFilePath);
+  private save(): Promise<void> {
+    const content = JSON.stringify(this.data, null, 2);
+    const write = async (): Promise<void> => {
+      await fsp.mkdir(this.baseDataDir, { recursive: true, mode: 0o700 });
+      const tmp = `${this.authFilePath}.tmp-${process.pid}-${crypto.randomUUID()}`;
+      await fsp.writeFile(tmp, content, {
+        mode: 0o600,
+      });
+      await fsp.rename(tmp, this.authFilePath);
+    };
+    this.writeQueue = this.writeQueue.then(write, write);
+    return this.writeQueue;
   }
 
   hasAnyUsers(): boolean {
@@ -516,6 +522,36 @@ export class WebAuthService {
     return this.data.invites.filter(
       (inv) => inv.expiresAt > now && inv.usedCount < inv.maxUses,
     );
+  }
+
+  async revokeInvite(token: string): Promise<void> {
+    const clean = token.trim();
+    if (!clean) return;
+    const before = this.data.invites.length;
+    this.data.invites = this.data.invites.filter((i) => i.token !== clean);
+    if (this.data.invites.length !== before) {
+      await this.save();
+    }
+  }
+
+  async changePassword(
+    userId: string,
+    currentPassword: string,
+    newPassword: string,
+  ): Promise<void> {
+    const user = this.data.users.find((u) => u.id === userId);
+    if (!user) {
+      throw new Error('Användaren hittades inte');
+    }
+    const candidateHash = hashPassword(currentPassword, user.passwordSalt);
+    if (!timingSafeEqualHex(candidateHash, user.passwordHash)) {
+      throw new Error('Nuvarande lösenord är felaktigt');
+    }
+    this.validatePassword(newPassword);
+    const newSalt = crypto.randomBytes(16).toString('hex');
+    user.passwordSalt = newSalt;
+    user.passwordHash = hashPassword(newPassword, newSalt);
+    await this.save();
   }
 
   async redeemInvite(input: {

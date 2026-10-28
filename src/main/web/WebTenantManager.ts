@@ -82,13 +82,18 @@ export class HybridTenantProfileStore extends ProfileStore {
   }
 
   override async getProfiles(): Promise<ProfilesData> {
-    const [personal, shared] = await Promise.all([
+    const [personal, sharedWithTombstones] = await Promise.all([
       super.getProfiles(),
-      this.sharedStore.getProfiles(),
+      this.sharedStore.getProfilesIncludingTombstones(),
     ]);
 
+    const activeSharedSsh = (sharedWithTombstones.ssh ?? []).filter((s) => !s.deletedAt);
+    const deletedSharedSshIds = new Set(
+      (sharedWithTombstones.ssh ?? []).filter((s) => Boolean(s.deletedAt)).map((s) => s.id),
+    );
+
     const sshMap = new Map<string, SSHConnectionConfig>();
-    for (const s of shared.ssh ?? []) {
+    for (const s of activeSharedSsh) {
       sshMap.set(
         s.id,
         this.withUserDefaultKey({
@@ -100,28 +105,45 @@ export class HybridTenantProfileStore extends ProfileStore {
     for (const p of personal.ssh ?? []) {
       const existingShared = sshMap.get(p.id);
       if (existingShared && p.shared !== false) {
-        // Merge personal auth fields onto shared topology
+        // Merge personal auth/state fields onto shared topology (shared topology fields win)
         sshMap.set(
           p.id,
           this.withUserDefaultKey({
-            ...existingShared,
             ...p,
+            ...existingShared,
             shared: true,
+            password: p.password,
+            passphrase: p.passphrase,
             privateKeyPath: p.privateKeyPath || existingShared.privateKeyPath,
-            authType: p.privateKeyPath ? 'privateKey' : p.authType || existingShared.authType,
+            authType: p.privateKeyPath
+              ? 'privateKey'
+              : p.password
+                ? 'password'
+                : p.authType || existingShared.authType,
+            lastUsedAt: p.lastUsedAt || existingShared.lastUsedAt,
           }),
         );
-      } else {
+      } else if (p.shared === false) {
+        sshMap.set(p.id, this.withUserDefaultKey(p));
+      } else if (p.shared !== true && !deletedSharedSshIds.has(p.id)) {
         sshMap.set(p.id, this.withUserDefaultKey(p));
       }
     }
 
+    const activeSharedS3 = (sharedWithTombstones.s3 ?? []).filter((s) => !s.deletedAt);
+    const deletedSharedS3Ids = new Set(
+      (sharedWithTombstones.s3 ?? []).filter((s) => Boolean(s.deletedAt)).map((s) => s.id),
+    );
     const s3Map = new Map<string, import('../../shared/types/storage').S3Config>();
-    for (const s of shared.s3 ?? []) s3Map.set(s.id, s);
-    for (const p of personal.s3 ?? []) s3Map.set(p.id, p);
+    for (const s of activeSharedS3) s3Map.set(s.id, s);
+    for (const p of personal.s3 ?? []) {
+      if (!s3Map.has(p.id) && !deletedSharedS3Ids.has(p.id)) {
+        s3Map.set(p.id, p);
+      }
+    }
 
     const folders = Array.from(
-      new Set([...(shared.folders ?? []), ...(personal.folders ?? [])]),
+      new Set([...(sharedWithTombstones.folders ?? []), ...(personal.folders ?? [])]),
     );
 
     return {
@@ -131,7 +153,7 @@ export class HybridTenantProfileStore extends ProfileStore {
     };
   }
 
-  override async getSSHProfiles(): Promise<SSHConnectionConfig[]> {
+  async getSSHProfiles(): Promise<SSHConnectionConfig[]> {
     const data = await this.getProfiles();
     return data.ssh;
   }
@@ -157,15 +179,56 @@ export class HybridTenantProfileStore extends ProfileStore {
         updatedBy: profile.updatedBy,
       };
       await this.sharedStore.saveSSH(sanitizedForTeam);
+      await super.saveSSH({ ...profile, shared: true });
       this.onSharedChanged();
+    } else {
+      const shared = await this.sharedStore.getProfiles();
+      if (shared.ssh.some((s) => s.id === profile.id)) {
+        await this.sharedStore.deleteSSH(profile.id).catch(() => {});
+        this.onSharedChanged();
+      }
+      await super.saveSSH({ ...profile, shared: false });
     }
-    await super.saveSSH(profile);
   }
 
   override async deleteSSH(id: string): Promise<void> {
     await Promise.all([
       super.deleteSSH(id).catch(() => {}),
       this.sharedStore.deleteSSH(id).catch(() => {}),
+    ]);
+    this.onSharedChanged();
+  }
+
+  override async saveS3(config: import('../../shared/types/storage').S3Config): Promise<void> {
+    await this.sharedStore.saveS3(config);
+    this.onSharedChanged();
+  }
+
+  override async deleteS3(id: string): Promise<void> {
+    await Promise.all([
+      super.deleteS3(id).catch(() => {}),
+      this.sharedStore.deleteS3(id).catch(() => {}),
+    ]);
+    this.onSharedChanged();
+  }
+
+  override async saveFolder(name: string): Promise<void> {
+    await this.sharedStore.saveFolder(name);
+    this.onSharedChanged();
+  }
+
+  override async deleteFolder(name: string, deleteProfiles = false): Promise<void> {
+    await Promise.all([
+      super.deleteFolder(name, deleteProfiles).catch(() => {}),
+      this.sharedStore.deleteFolder(name, deleteProfiles).catch(() => {}),
+    ]);
+    this.onSharedChanged();
+  }
+
+  override async renameFolder(oldName: string, newName: string): Promise<void> {
+    await Promise.all([
+      super.renameFolder(oldName, newName).catch(() => {}),
+      this.sharedStore.renameFolder(oldName, newName).catch(() => {}),
     ]);
     this.onSharedChanged();
   }
@@ -178,12 +241,14 @@ export interface UserTenant {
   bridge: IpcBridge;
   hub: HubService;
   clients: Set<(payload: string) => void>;
+  sockets: Set<import('node:stream').Duplex>;
   broadcast: (channel: string, ...args: unknown[]) => void;
 }
 
 export class WebTenantManager {
   private tenants = new Map<string, Promise<UserTenant>>();
   private resolvedTenants = new Map<string, UserTenant>();
+  private reloadingTenants = new Set<string>();
   private readonly sharedDir: string;
   private notifyTimer?: NodeJS.Timeout;
 
@@ -235,6 +300,22 @@ export class WebTenantManager {
     return entries;
   }
 
+  private notifyCrossTenantChanged(excludeUserId?: string): void {
+    if (excludeUserId && this.reloadingTenants.has(excludeUserId)) return;
+    for (const [uid, tenant] of this.resolvedTenants.entries()) {
+      if (uid !== excludeUserId && !this.reloadingTenants.has(uid)) {
+        this.reloadingTenants.add(uid);
+        void tenant.hub.s3Workspace
+          .reloadFromDisk()
+          .catch(() => {})
+          .finally(() => {
+            this.reloadingTenants.delete(uid);
+          });
+      }
+    }
+    this.scheduleCrossTenantBroadcast(excludeUserId);
+  }
+
   private scheduleCrossTenantBroadcast(excludeUserId?: string): void {
     if (this.notifyTimer) clearTimeout(this.notifyTimer);
     this.notifyTimer = setTimeout(() => {
@@ -276,6 +357,7 @@ export class WebTenantManager {
 
     const virtualIpcMain = new VirtualIpcMain();
     const clients = new Set<(payload: string) => void>();
+    const sockets = new Set<import('node:stream').Duplex>();
 
     const broadcast = (channel: string, ...args: unknown[]): void => {
       if (clients.size === 0) return;
@@ -307,7 +389,7 @@ export class WebTenantManager {
       path.join(userDir, 'profiles.json'),
       this.getSharedProfilesPath(),
       userPrivateKeyPath,
-      () => this.scheduleCrossTenantBroadcast(user.id),
+      () => this.notifyCrossTenantChanged(user.id),
     );
     const sessionStore = new SessionStore(path.join(userDir, 'sessions.json'));
     const clipboardHistoryStore = new ClipboardHistoryStore(
@@ -341,6 +423,8 @@ export class WebTenantManager {
       teamVaultConfigStore,
       getWebContents: () => virtualWebContents,
       confirmQuit: async () => true,
+      tenantHomeDir: userDir,
+      tenantSshPrivateKeyPath: userPrivateKeyPath,
     });
 
     const hub = createHub(
@@ -356,7 +440,7 @@ export class WebTenantManager {
         defaultActorName: user.displayName || user.username,
         peerPresenceProvider: () => this.getAllLocalTenantsPresence(),
         onSharedWorkspaceChanged: () =>
-          this.scheduleCrossTenantBroadcast(user.id),
+          this.notifyCrossTenantChanged(user.id),
       },
     );
 
@@ -379,8 +463,36 @@ export class WebTenantManager {
       bridge,
       hub,
       clients,
+      sockets,
       broadcast,
     };
+  }
+
+  async disposeTenant(userId: string): Promise<void> {
+    const pending = this.tenants.get(userId);
+    const resolved =
+      this.resolvedTenants.get(userId) ??
+      (pending ? await pending.catch(() => undefined) : undefined);
+    this.tenants.delete(userId);
+    this.resolvedTenants.delete(userId);
+    if (resolved) {
+      for (const sock of Array.from(resolved.sockets)) {
+        try {
+          sock.destroy();
+        } catch {
+          // Ignore socket destroy error
+        }
+      }
+      resolved.sockets.clear();
+      resolved.clients.clear();
+      await resolved.hub.dispose().catch(() => {});
+      await resolved.bridge.dispose().catch(() => {});
+    }
+    const safeId = userId.replace(/[^a-zA-Z0-9_-]/g, '');
+    if (safeId) {
+      const userDir = path.join(this.baseDataDir, 'users', safeId);
+      await fsp.rm(userDir, { recursive: true, force: true }).catch(() => {});
+    }
   }
 
   async disposeAll(): Promise<void> {
@@ -389,6 +501,15 @@ export class WebTenantManager {
       this.notifyTimer = undefined;
     }
     for (const tenant of this.resolvedTenants.values()) {
+      for (const sock of Array.from(tenant.sockets)) {
+        try {
+          sock.destroy();
+        } catch {
+          // Ignore
+        }
+      }
+      tenant.sockets.clear();
+      await tenant.hub.dispose().catch(() => {});
       await tenant.bridge.dispose().catch(() => {});
     }
     this.resolvedTenants.clear();

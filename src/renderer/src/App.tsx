@@ -213,16 +213,23 @@ export const App: React.FC = () => {
   useEffect(() => {
     if (tabs.length !== 0 && activeTabId !== "") return;
     let cancelled = false;
-    void window.multissh
-      ?.profilesGet?.()
-      .then((profiles) => {
-        if (!cancelled) setRecentSSHProfiles(profiles.ssh || []);
-      })
-      .catch(() => {
-        // Landing page recents are a nice-to-have; ignore failures
-      });
+    const reloadProfiles = () => {
+      void window.multissh
+        ?.profilesGet?.()
+        .then((profiles) => {
+          if (!cancelled) setRecentSSHProfiles(profiles.ssh || []);
+        })
+        .catch(() => {
+          // Landing page recents are a nice-to-have; ignore failures
+        });
+    };
+    reloadProfiles();
+    const offHub = window.multissh?.onAiHubChanged?.(() => {
+      reloadProfiles();
+    });
     return () => {
       cancelled = true;
+      offHub?.();
     };
   }, [tabs.length, activeTabId, profilesModalOpen]);
 

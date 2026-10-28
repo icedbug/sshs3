@@ -19,12 +19,15 @@ import type {
 } from '../../src/shared/types/aiHub';
 
 class InMemoryS3BucketProvider implements IStorageProvider {
+  readonly id = 'mem-s3';
+  readonly name = 'InMemory S3';
   readonly type = 's3' as const;
 
   constructor(private readonly objects: Map<string, { content: Buffer; mtime: string }>) {}
 
   async connect(): Promise<void> {}
   async disconnect(): Promise<void> {}
+  async createFolder(): Promise<void> {}
 
   private normalize(p: string): string {
     return p.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
@@ -187,8 +190,8 @@ describe('S3WorkspaceSyncService & CRDT Merge', () => {
     expect(sanitized.localUsername).toBeUndefined();
     expect(sanitized.localPrivateKeyPath).toBeUndefined();
     expect(sanitized.localAuthType).toBeUndefined();
-    expect((sanitized as Record<string, unknown>).password).toBeUndefined();
-    expect((sanitized as Record<string, unknown>).privateKey).toBeUndefined();
+    expect((sanitized as unknown as Record<string, unknown>).password).toBeUndefined();
+    expect((sanitized as unknown as Record<string, unknown>).privateKey).toBeUndefined();
   });
 
   it('merges concurrent server additions, edits, and deletion tombstones deterministically', () => {
@@ -438,6 +441,44 @@ describe('S3WorkspaceSyncService & CRDT Merge', () => {
       erikPresence.find((p) => p.actor === 'jacob')?.activeTerminals[0]?.state
     ).toBe('ai-working');
 
+    // Jacob deletes node-k8s-1 and records a tombstone
+    jacobServers = [];
+    jacobDeletedServers['node-k8s-1'] = '2026-10-28T15:00:00.000Z';
+    await syncJacob.syncNow({ forcePush: true });
+
+    // Erik polls S3 and sees node-k8s-1 removed via tombstone (does not return as zombie)
+    await syncErik.pollOnce();
+    expect(erikServers).toHaveLength(0);
+    expect(erikDeletedServers['node-k8s-1']).toBe('2026-10-28T15:00:00.000Z');
+
+    // Another tenant sharing the same s3-workspace.json reloads config from disk
+    let peerServers: WorkspaceServerSummary[] = [];
+    const syncPeerOnSameVm = new S3WorkspaceSyncService(
+      path.join(tmpDirA, 's3-workspace.json'),
+      {
+        getLocalState: async () => ({
+          actor: 'peer',
+          servers: peerServers,
+          memories: [],
+          activityLog: [],
+          deletedServerIds: {},
+          deletedMemoryIds: {},
+          activeTerminals: [],
+        }),
+        applyMergedState: async (state) => {
+          peerServers = state.activeServers;
+        },
+        onStateChanged: () => {},
+      },
+      { providerFactory }
+    );
+    expect(syncPeerOnSameVm.getStatus().configured).toBe(false);
+    await syncPeerOnSameVm.reloadFromDisk();
+    expect(syncPeerOnSameVm.getStatus().configured).toBe(true);
+    expect(syncPeerOnSameVm.getStatus().connected).toBe(true);
+    expect(syncPeerOnSameVm.getStatus().bucket).toBe('sshs3-friends');
+
+    await syncPeerOnSameVm.dispose();
     await syncJacob.dispose();
     await syncErik.dispose();
   });

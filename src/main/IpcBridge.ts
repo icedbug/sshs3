@@ -129,10 +129,14 @@ export interface IpcBridgeOptions {
   getWebContents?: () => Electron.WebContents | null | undefined;
   /** Quit confirmation (transfers, confirm-before-quit) run before an update restart. */
   confirmQuit?: () => Promise<boolean>;
+  tenantHomeDir?: string;
+  tenantSshPrivateKeyPath?: string;
 }
 
 export class IpcBridge {
   public aiHub?: HubService;
+  public readonly tenantHomeDir?: string;
+  public readonly tenantSshPrivateKeyPath?: string;
   private ipcMain: IpcMain;
   public readonly sshPtyManager: SSHPtyManager;
   public readonly storageRegistry: StorageRegistry;
@@ -312,6 +316,8 @@ export class IpcBridge {
     this.sshTunnelManager = options.sshTunnelManager ?? new SSHTunnelManager();
     this.getWebContents = options.getWebContents ?? (() => null);
     this.confirmQuit = options.confirmQuit;
+    this.tenantHomeDir = options.tenantHomeDir;
+    this.tenantSshPrivateKeyPath = options.tenantSshPrivateKeyPath;
   }
 
   public setWebContentsGetter(getter: () => Electron.WebContents | null | undefined): void {

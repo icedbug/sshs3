@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type {
@@ -151,7 +152,7 @@ export class HubStore {
     const content = JSON.stringify(clean(this.data));
     const write = async (): Promise<void> => {
       await fs.mkdir(path.dirname(this.file), { recursive: true, mode: 0o700 });
-      const temporary = `${this.file}.tmp`;
+      const temporary = `${this.file}.tmp-${process.pid}-${crypto.randomUUID()}`;
       await fs.writeFile(temporary, content, { mode: 0o600 });
       await fs.rename(temporary, this.file);
     };
@@ -188,11 +189,57 @@ export class HubStore {
 
     let changed = false;
 
-    // 1. Merge memories by id (latest updatedAt wins)
+    const parseTimeMs = (v: unknown): number => {
+      if (typeof v === "number" && Number.isFinite(v)) return v;
+      if (typeof v === "string" && v.trim()) {
+        const asNum = Number(v);
+        if (Number.isFinite(asNum)) return asNum;
+        const parsed = Date.parse(v);
+        if (Number.isFinite(parsed)) return parsed;
+      }
+      return 0;
+    };
+
+    // 0. Merge tombstones (deletedServerIds & deletedMemoryIds)
+    const deletedServerIds: Record<string, string> = {
+      ...(this.data.deletedServerIds ?? {}),
+    };
+    if (remote.deletedServerIds && typeof remote.deletedServerIds === "object") {
+      for (const [id, iso] of Object.entries(remote.deletedServerIds)) {
+        if (!id || !iso) continue;
+        const curMs = parseTimeMs(deletedServerIds[id]);
+        const remMs = parseTimeMs(iso);
+        if (remMs > curMs) {
+          deletedServerIds[id] = String(iso);
+          changed = true;
+        }
+      }
+    }
+    this.data.deletedServerIds = deletedServerIds;
+
+    const deletedMemoryIds: Record<string, number> = {
+      ...(this.data.deletedMemoryIds ?? {}),
+    };
+    if (remote.deletedMemoryIds && typeof remote.deletedMemoryIds === "object") {
+      for (const [id, ts] of Object.entries(remote.deletedMemoryIds)) {
+        if (!id || typeof ts !== "number") continue;
+        if (ts > (deletedMemoryIds[id] ?? 0)) {
+          deletedMemoryIds[id] = ts;
+          changed = true;
+        }
+      }
+    }
+    this.data.deletedMemoryIds = deletedMemoryIds;
+
+    // 1. Merge memories by id (latest updatedAt wins, respecting tombstones)
     const memMap = new Map<string, MemoryEntry>();
-    for (const m of this.data.memories) memMap.set(m.id, m);
+    for (const m of this.data.memories) {
+      if ((deletedMemoryIds[m.id] ?? 0) >= (m.updatedAt ?? 0)) continue;
+      memMap.set(m.id, m);
+    }
     for (const rm of Array.isArray(remote.memories) ? remote.memories : []) {
       if (!rm || typeof rm.id !== "string") continue;
+      if ((deletedMemoryIds[rm.id] ?? 0) >= (rm.updatedAt ?? 0)) continue;
       const prev = memMap.get(rm.id);
       if (!prev || (rm.updatedAt ?? 0) > (prev.updatedAt ?? 0)) {
         memMap.set(rm.id, rm);
@@ -215,35 +262,54 @@ export class HubStore {
       .sort((a, b) => a.at - b.at)
       .slice(-500);
 
-    // 3. Merge servers by id (latest updatedAt wins)
+    // 3. Merge servers by id (latest updatedAt wins, respecting tombstones)
     const srvMap = new Map<string, WorkspaceServerSummary>();
     for (const rs of Array.isArray(remote.servers) ? remote.servers : []) {
-      if (rs && typeof rs.id === "string" && rs.host) {
+      if (rs && typeof rs.id === "string" && rs.host && rs.shared !== false) {
+        const delMs = Math.max(
+          parseTimeMs(deletedServerIds[rs.id]),
+          parseTimeMs(rs.deletedAt),
+        );
+        const updMs = parseTimeMs(rs.updatedAt);
+        if (delMs > 0 && delMs >= updMs) continue;
+        if (delMs > 0 && updMs > delMs) {
+          delete deletedServerIds[rs.id];
+        }
         srvMap.set(rs.id, { ...rs, shared: true });
       }
     }
     for (const ls of localServers) {
+      const delMs = Math.max(
+        parseTimeMs(deletedServerIds[ls.id]),
+        parseTimeMs(ls.deletedAt),
+      );
+      const updMs = parseTimeMs(ls.updatedAt);
+      if (delMs > 0 && delMs >= updMs) continue;
+      if (delMs > 0 && updMs > delMs) {
+        delete deletedServerIds[ls.id];
+      }
       const prev = srvMap.get(ls.id);
       if (!prev) {
         srvMap.set(ls.id, ls);
       } else {
-        const tPrev = Date.parse(prev.updatedAt || "") || 0;
-        const tLocal = Date.parse(ls.updatedAt || "") || 0;
-        if (tLocal >= tPrev) {
+        const tPrev = parseTimeMs(prev.updatedAt);
+        if (updMs >= tPrev) {
           srvMap.set(ls.id, ls);
         }
       }
     }
     const mergedServers = Array.from(srvMap.values());
 
-    // Persist redacted shared payload back to targetPath
+    // Persist redacted shared payload back to targetPath (excluding personal servers)
     try {
       const payload: SharedWorkspaceFilePayload = {
         version: 1,
         updatedAt: Date.now(),
-        servers: mergedServers,
+        servers: mergedServers.filter((s) => s.shared !== false),
         memories: this.data.memories.filter((m) => m.scope !== "personal"),
         activityLog: this.data.activityLog,
+        deletedServerIds,
+        deletedMemoryIds,
       };
       const clean = (value: unknown): unknown =>
         typeof value === "string"
@@ -256,7 +322,7 @@ export class HubStore {
                 )
               : value;
       await fs.mkdir(path.dirname(targetPath), { recursive: true });
-      const tmp = `${targetPath}.tmp-${process.pid}`;
+      const tmp = `${targetPath}.tmp-${process.pid}-${crypto.randomUUID()}`;
       await fs.writeFile(tmp, JSON.stringify(clean(payload), null, 2), "utf8");
       await fs.rename(tmp, targetPath);
     } catch {

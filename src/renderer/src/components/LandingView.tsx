@@ -35,6 +35,7 @@ import {
   type NavigationDirection,
 } from '../lib/spatialNavigation';
 import { hubRequest, useHub } from '../lib/aiHub';
+import { isWebBrowserMode } from '../lib/webClientBridge';
 
 export interface LandingViewProps {
   recentSSH: SSHConnectionConfig[];
@@ -1101,6 +1102,13 @@ export const LandingView: React.FC<LandingViewProps> = ({
                           · Synkad {formatRelativeTime(hub.s3Workspace.lastSyncAt)}
                         </span>
                       ) : null}
+                    </span>
+                  ) : isWebBrowserMode() ? (
+                    <span
+                      data-testid="s3-workspace-status-badge"
+                      className="inline-flex items-center gap-1 rounded-full border border-emerald-500/35 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-300"
+                    >
+                      🟢 VM Team-delning aktiv på denna Web-server — alla inloggade användare delar VMs, kluster & AI-minnen direkt (S3-bucket är valfri molnbackup)
                     </span>
                   ) : (
                     <span
