@@ -32,7 +32,7 @@ import { SshProfileRow, SshRecentRow } from './SshProfileRows';
 import { S3ProfileRow, S3RecentRow } from './S3ProfileRows';
 import { TeamSshProfileRow, TeamS3ProfileRow } from './TeamProfileRows';
 import { TeamProfileTree } from './TeamProfileTree';
-import { buildTeamFolderTree, collectTeamFolderSuggestions } from './teamProfileTree';
+import { buildTeamFolderTree, collectTeamFolderSuggestions } from './teamProfileTreeModel';
 import {
   collectFolderNames,
   filterS3Profiles,

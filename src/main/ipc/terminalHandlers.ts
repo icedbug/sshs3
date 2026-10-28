@@ -1,8 +1,32 @@
 import { XServerManager } from '../x11/XServerManager';
 import { IPC_CHANNELS } from '../../shared/types/ipc';
 import type { SSHConnectionConfig, PtyOptions } from '../../shared/types/ssh';
+import type { ShellKind } from '../../shared/types/aiHub';
 import type { IpcBridge } from '../IpcBridge';
 import type { SmartcardCoordinator } from '../smartcard/SmartcardCoordinator';
+
+function resolveLocalShellKind(ptyOptions?: PtyOptions): ShellKind {
+  const shellType = ptyOptions?.shellType;
+  if (shellType === 'powershell') return 'powershell';
+  if (shellType === 'pwsh') return 'pwsh';
+  if (shellType === 'cmd') return 'cmd';
+  if (shellType === 'wsl') return 'bash';
+
+  const rawBinary = (
+    ptyOptions?.shellBinary ||
+    (process.platform === 'win32'
+      ? process.env.COMSPEC || 'cmd.exe'
+      : process.env.SHELL || '/bin/bash')
+  ).toLowerCase();
+
+  if (rawBinary.includes('pwsh')) return 'pwsh';
+  if (rawBinary.includes('powershell')) return 'powershell';
+  if (rawBinary.includes('cmd')) return 'cmd';
+  if (rawBinary.includes('zsh')) return 'zsh';
+  if (rawBinary.includes('fish')) return 'fish';
+  if (process.platform === 'win32') return 'cmd';
+  return 'bash';
+}
 
 /** The part of IpcBridge this handler group may use. */
 export type TerminalHost = Pick<
@@ -14,6 +38,7 @@ export type TerminalHost = Pick<
   | 'settingsStore'
   | 'sshPtyManager'
   | 'teamVaultService'
+  | 'aiHub'
 > & {
   smartcard: Pick<
     SmartcardCoordinator,
@@ -26,7 +51,7 @@ export function registerTerminalHandlers(bridge: TerminalHost): void {
     IPC_CHANNELS.TERMINAL_CREATE,
     async (
       _event,
-      options: { config?: SSHConnectionConfig; local?: boolean; ptyOptions?: PtyOptions }
+      options: { config?: SSHConnectionConfig; local?: boolean; ptyOptions?: PtyOptions; profileId?: string }
     ) => {
       if (!options || (!options.config && !options.local)) {
         throw new Error('Connection config is required to create terminal');
@@ -83,6 +108,17 @@ export function registerTerminalHandlers(bridge: TerminalHost): void {
       const session = options.local
         ? await bridge.sshPtyManager.createShellSession(ptyOptions)
         : await bridge.sshPtyManager.createSession(config!, ptyOptions);
+      const localShell = options.local ? resolveLocalShellKind(ptyOptions) : undefined;
+      bridge.aiHub?.terminals.register(
+        {
+          id: session.sessionId,
+          label: options.local ? `Local ${ptyOptions?.shellType ?? localShell ?? 'shell'}` : config!.name || config!.host,
+          kind: options.local ? 'local' : 'ssh',
+          shell: localShell,
+          profileId: options.local ? 'local' : options.profileId,
+        },
+        (data) => bridge.sshPtyManager.write(session.sessionId, data)
+      );
 
       if (!options.local && config) {
         // Fire-and-forget: never let the dotfiles check delay or fail the
@@ -102,6 +138,7 @@ export function registerTerminalHandlers(bridge: TerminalHost): void {
   bridge.registerHandler(
     IPC_CHANNELS.TERMINAL_WRITE,
     async (_event, sessionId: string, data: string) => {
+      bridge.aiHub?.terminals.observeHumanInput(sessionId, data);
       bridge.sshPtyManager.write(sessionId, data);
     }
   );
@@ -116,6 +153,7 @@ export function registerTerminalHandlers(bridge: TerminalHost): void {
   bridge.registerHandler(
     IPC_CHANNELS.TERMINAL_KILL,
     async (_event, sessionId: string) => {
+      bridge.aiHub?.terminals.invalidate(sessionId, 'Terminal closed', true);
       bridge.sshPtyManager.kill(sessionId);
     }
   );

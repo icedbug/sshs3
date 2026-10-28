@@ -1,0 +1,473 @@
+ÖVERLÄMNINGSPROMPT — SSHS3 AI HUB / NATIVE HERMES
+Sammanställd 25 oktober 2026. Språk: svenska.
+
+Du ska ta över ett pågående utvecklingsarbete åt Jacob. Fortsätt från den befintliga koden, användarens fattade beslut och den verifierade statusen nedan. Börja med att läsa projektets instruktioner och kontrollera arbetskatalogen. Denna överlämning ersätter inte en inspektion av aktuella filer eller processer.
+
+Det mest angelägna arbetet är att leverera en redan skriven och testad rättning för terminalåtkomst mellan två chattmeddelanden. Den finns i utvecklingskoden men saknas i den installerade appens pluginfil. Därefter återstår betydande delar av den överenskomna slutprodukten. Projektet är inte färdigt.
+
+1. ORIGINALREPO, ANVÄNDARENS FORK OCH KÄLLOR
+
+Originalprojektet sshs3, upstream:
+https://github.com/alun-hub/sshs3
+Git-URL: https://github.com/alun-hub/sshs3.git
+
+Jacobs fork, origin:
+https://github.com/icedbug/sshs3
+Git-URL: https://github.com/icedbug/sshs3.git
+
+Tidigare AI-förslag som användaren hänvisade till:
+https://github.com/icedbug/sshs3/pulls
+De ska behandlas som tekniska referenser för selektiv återanvändning. Användaren var missnöjd med deras dialogflöde och gränssnitt. Inga specifika PR-nummer är verifierade i denna överlämning; hitta dem vid behov i repot. Hitta inte på vilka PR:er som återanvänts.
+
+Originalprojektet Hermes Agent, med den grafiska Desktop-appen:
+https://github.com/NousResearch/hermes-agent
+Git-URL: https://github.com/NousResearch/hermes-agent.git
+
+Den integrerade Hermes-koden är låst till:
+f925b01791fe052e7d55dc975750c0bd985aff91
+Hermes Desktop-version: 0.17.6
+Desktop-källan vid denna revision:
+https://github.com/NousResearch/hermes-agent/tree/f925b01791fe052e7d55dc975750c0bd985aff91/apps/desktop
+Licens enligt den undersökta källan: MIT. Originalets licensmeddelanden ska bevaras.
+
+Historiska referenser i den ursprungliga planen:
+https://github.com/icedbug/sshs3/blob/master/src/renderer/src/lib/terminalOutput.ts
+https://github.com/NousResearch/hermes-agent/blob/f97608f178d1ffeca59860195ab7da295f7c8e5f/gateway/platforms/api_server.py
+Den senare länken avser en tidigare undersökt Hermes-revision. Den är inte den nu paketerade versionen. Aktuell native-integration använder f925b017... för både Desktop och motor.
+
+Git-remotes verifierades lokalt den 25 oktober 2026:
+origin = https://github.com/icedbug/sshs3.git
+upstream = https://github.com/alun-hub/sshs3.git
+
+2. ARBETSKATALOG, GIT-STATUS OCH VAD SOM FINNS LOKALT
+
+Utvecklingskatalog:
+C:\Users\jacob\OneDrive\Dokument\ChatGPT\sshs3
+
+Aktiv gren:
+codex/ai-hub
+
+HEAD och grund för utvecklingen:
+001dd296c529c34ef2439c13fb8323a2fc6f5930
+Commitmeddelande: Merge branch 'feature/team-vault-password-admin-only'
+Basversion: sshs3 0.96.34
+
+Grenen följer för närvarande upstream/master. Det innebär inte att AI-arbetet är pushat. Vid överlämningen står HEAD fortfarande på bascommitten, medan AI-arbetet finns som omfattande modifierade och ospårade filer. En ny klon av origin eller upstream räcker INTE för att få det arbete som redan gjorts.
+
+Bevara hela den aktuella arbetskatalogens källändringar. Kontrollera git status och diff före ändringar. Gör inte reset, clean, checkout över lokala ändringar eller en blind uppdatering från upstream. Det finns även ändringar i anslutningsträdet/ConnectionModal som inte ska återställas som del av AI-arbetet.
+
+Användaren ville ursprungligen utgå från uppdaterad upstream på en separat utvecklingsgren; det är gjort för den ovan angivna basrevisionen. Det är inte påstått att basrevisionen fortfarande är senaste upstream idag.
+
+Om kod senare ska publiceras ska rätt destination väljas uttryckligen: användarens fork är origin, originalprojektet är upstream. Förutsätt inte att grenens tracking-inställning är rätt push-destination.
+
+3. VAD VI BYGGER OCH VARFÖR
+
+sshs3 är en Electron-/React-/TypeScript-app för SSH, terminaler, SFTP, S3 och Kubernetes med befintlig hantering av anslutningar och autentisering.
+
+Målet är en driftagent som är djupt integrerad i terminalen: den förstår miljön, undersöker problem, genomför tillåtna åtgärder och verifierar resultat. Den ska arbeta i användarens befintliga sshs3-terminal och shellmiljö. En frikopplad chatbot eller en extra osynlig SSH-session uppfyller inte användarens avsikt.
+
+Övergripande flöde:
+observation -> hypotes -> undersökning -> åtgärd -> verifiering.
+
+Användaren ska kunna se vilka observationer slutsatserna bygger på. En genomförd undersökning ska kunna bli en redigerbar skill.
+
+Representativa första uppgifter:
+- En tjänst som inte startar.
+- Full disk.
+- Nätverksproblem.
+- Felaktig konfiguration.
+- En Kubernetes-pod som kraschar.
+
+Första produkten är personlig och lokalt driven. Gemensam teamchatt, central fakturering och drift medan användarens dator är avstängd ingår inte.
+
+4. DESIGNBESLUT OCH HUR DE HAR ÄNDRATS
+
+Tidiga egna AI Hub-förslag och dialogflöden fungerade inte som användaren ville. Vi tog fram flera mockups. Användaren valde Terminalfokus och förtydligade senare att den stora vyn ska vara den RIKTIGA Hermes Desktop-appen.
+
+Bindande slutliga beslut:
+- Kompakt AI-chatt på HÖGER sida om terminalarbetsytan.
+- Ren, avskalad presentation.
+- Dragbar panelbredd, som sparas.
+- Expandering fyller appens arbetsyta med originalet Hermes Desktop.
+- Originalnavigationen, Sessions, Bots och övriga Hermes-funktioner ska finnas kvar.
+- Samma konversation, skrivutkast och tillstånd ska fortsätta mellan liten och stor vy.
+- Expansion får inte ändra terminalmål eller behörigheter.
+- Det ska finnas en tydlig väg tillbaka till den kompakta vyn.
+
+Den ursprungliga planen hade en egen meny med Arbete, Infrastruktur, Ändringar, Minne/skills och Scheman. Användaren avvisade senare en sådan egen meny som ersättning för Hermes i den expanderade vyn. Bevara produktbehoven bakom dessa områden, men bygg inte tillbaka det avvisade gränssnittet.
+
+Användaren sade uttryckligen att vi skulle återanvända Hermes kod direkt. Den aktiva lösningen gör därför det; det är inte längre en mockup eller en begränsad egen chatt ovanpå ett enstaka agentanrop.
+
+I den verifierade GUI-versionen finns Return to terminal i Hermes titelrad till vänster, nära sidopanelsknappen. sshs3-terminalens verktygsrad har Expand AI. Kontrollera aktuell layout visuellt om den behöver ändras.
+
+Gamla mockupfiler, endast historisk designreferens:
+.npm-cache\sshs3-hermes-designs.html
+En inline-visualisering refererade också till sshs3-terminal-focus.html och gav ENOENT vid ett tillfälle. Gamla visualiseringars sparade val ska inte ersätta de senare uttryckliga produktbesluten.
+
+5. IMPLEMENTATIONEN SOM NU FINNS
+
+Hermes Desktop och agentmotorn är versionslåsta till samma f925b017...-revision.
+Pin och licensmetadata:
+scripts\hermes\desktop-source.json
+
+Originalets Electron-main, preload, React-gränssnitt, contribution registry, medföljande frontendplugins och poolade hermes serve-backend används. Hermes äger sina egna konversationer, profiler, kontextkomprimering, minnesfunktioner och native schemadelar.
+
+sshs3 och Hermes visas i två separata, beständiga WebContentsViews. De två React-träden byggs separat. Kompakt/stor presentation återanvänder samma Hermes-renderer och stores.
+
+src/main/desktopEntry.ts är appens entrypoint. Den väljer appens egen Hermes-home, startar terminalbryggan och laddar den riktiga Hermes-mainprocessen. Den kontrollerar att frontend- och motorrevisionerna matchar.
+
+nativeWindow.ts behåller originalfönstrets identitet och kopplar originalets rendereranrop till den inbäddade Hermes-vyn. NativeDesktopShell.ts äger layouten mellan Hermes och sshs3-terminalvyn.
+
+Viktig tidigare löst Electron-detalj: försök inte adoptera ett redan anslutet BrowserWindow-webContents som en ny vy. Den aktuella lösningen skapar en ny WebContentsView med originalets uttryckliga preload/webPreferences och håller den vid liv.
+
+HubService används fortfarande för sshs3:s terminal- och verktygsbehörigheter. I native-läget ska dess äldre agentruntime och scheduler inte starta parallellt med Hermes.
+
+Äldre AiHub-renderer och äldre runtime finns kvar för referens/regressioner. De är inte den aktiva original-Hermes-vyn.
+
+Originalfunktionerna finns kvar i återanvänd kod och navigation, men operativ fullständighet för varje funktion, modell, integration och plattform är INTE verifierad. Bots syns och navigationen har testats; det är inte samma sak som testad Bot-delegering, gruppchatt eller gatewaydrift.
+
+6. TERMINALBRYGGAN OCH BEHÖRIGHETERNA
+
+Nuvarande brygga är INTE standard-MCP.
+
+Hermes-pluginet sshs3_terminal pratar med en privat HTTP-server på 127.0.0.1 i sshs3. Den använder en slumpad processhemlighet som autentisering. Browser-origin-anrop avvisas. Hemligheten ska inte exponeras i renderern, modellargument, loggar eller agentstartade subprocesser.
+
+Exponerade verktyg:
+- sshs3_terminal_context
+- sshs3_terminal_command
+- sshs3_terminal_verify
+- sshs3_terminal_file_read
+- sshs3_terminal_file_write
+
+sshs3:s NativeToolBridge och ToolBroker verkställer:
+- Bindning till en bestämd terminal och dess sessionsgeneration.
+- Bindning till betrodd Hermes-profil och konversationsidentitet.
+- Oföränderligt mål även om användaren byter terminalflik.
+- Kontroll av promptberedskap och terminalägande.
+- Godkännanden för kommandon och filändringar.
+- Budget och tidsgränser.
+- Återkallning vid Stop, takeover eller osäkert tillstånd.
+- Filtrering av hemligheter och källmärkning av kontext.
+
+Modellargument väljer aldrig målterminal, profil, konversations-ID eller behörighetsgrant. Hermes SessionDB:s compression lineage används för att behålla samma konversationsrot genom kontextkomprimering; förgreningar och återställningar ska inte blandas ihop.
+
+Standard är assisterat läge med 30 kommandon och 15 minuter per native-vända. UI-godkännanden avser den konkreta uppgiften/ändringen.
+
+En terminal måste för närvarande kopplas vid en verifierad ledig prompt med rätt shell via Connect at prompt/arm. En korrelerad shell-handshake måste lyckas. Terminalval räcker inte för exekveringsbehörighet. Mänsklig inmatning ogiltigförklarar promptberedskap; återanslutning eller osäkra kommandon kräver kontroll och eventuell ny armering.
+
+Native Stop återkallar även väntande godkännanden. Ett senare turn-end får inte upphäva en interruption. Återuppta behåller originalmålet och får inte spela om ett osäkert kommando.
+
+Terminalbundna konversationer blockeras från alternativa körvägar som kringgår kontrollen, bland annat generella host-terminal-/filverktyg, kodexekvering, vissa connector-/MCP-verktyg, cron-skapande, delegering till nya chattar/Bots och interaktiv computer use/browserstyrning. Native navigation, minne och skills bevaras. Obundna konversationer behåller originalets verktygsbeteende.
+
+Detta är en viktig avvägning att fortsätta arbeta med: användaren vill ha all Hermes-funktionalitet, men tillgång till originalets UI innebär inte obegränsad exekvering utanför en tilldelad terminal. Lös inte funktionsluckor genom att ta bort mål- och godkännandekontroller.
+
+Filverktygen hanterar fullständiga UTF-8-textfiler under 64 KB, förväntad innehållshash, granskad ersättning och återläsning. Nuvarande hashkontroll är inte en atomisk compare-and-write mot andra externa skribenter. Verktyget verify bevisar den konkreta kontrollen, inte automatiskt att hela driftfelet är löst.
+
+7. MCP-DISKUSSIONEN: FÖRSLAG, INTE GENOMFÖRD MIGRERING
+
+Användaren upplevde lösningen som otillräckligt integrerad och föreslog en riktig MCP-server för sshs3. Vi diskuterade att exponera befintlig terminal-/behörighetskontroll via MCP så att Hermes kan använda sin vanliga MCP-anslutning.
+
+Användaren sade sedan uttryckligen: "Vi kan vänta lite med det", och bad oss felsöka de aktuella felen. MCP-migreringen ska därför inte ersätta det pågående felarbetet utan ny prioritering.
+
+Vid en framtida MCP-migrering räcker det inte att lägga till en generisk server: betrodd konversationsidentitet, terminalmål, godkännanden, synliga kommandon, automatisk kontext och kontrollöverlämning måste följa med. Nuvarande plugin blockerar generella mcp_-verktyg i bundna konversationer; en avsiktlig integration måste hantera detta uttryckligen.
+
+8. AKTUELLT FEL — ORSAK, PATCH OCH EXAKT LEVERANSSTATUS
+
+Feltext vid användarens test:
+Terminal authority is inactive; explicitly resume the assigned task
+
+Terminalen var redan kopplad. GUI visade You control men ingen användbar Resume-knapp. Modellen kunde svara, medan terminalverktyget misslyckades.
+
+Verifierad orsak:
+Hermes kör on_session_start när den initiala prompten byggs. Fortsatta meddelanden återanvänder konversationsprompten och kör inte samma hook igen. Däremot körs on_session_end efter varje meddelande. Vårt plugin aktiverade terminalbehörighet vid session-start och återkallade den vid varje turn-end. Nästa meddelande saknade därför grant.
+
+Rättning skriven i:
+integrations\hermes-desktop\sshs3_terminal\__init__.py
+
+I _pre_tool för sshs3_terminal_* anropas nu begin för en BEFINTLIG bindning, med tom plattform. Tom plattform får inte skapa en ny terminaltilldelning. Befintligt begin är idempotent under en aktiv vända och ska avvisa avbrutna uppgifter, gamla sessionsgenerationer och ej redo terminaler.
+
+Rättningen bevarar mål, stopp, takeover, promptkrav, budget och godkännanden.
+
+Regressionsfixtur:
+tests\main\fixtures\nativeHermesToolsContract.py
+Den fortsätter en konversation utan ett nytt on_session_start, genom en komprimerad konversationsidentitet, och kontrollerar samma mål. Den testar även att ett nytt verktygsanrop efter native Stop INTE får återaktivera behörigheten.
+
+Nio native verktygstester passerade den 12 oktober 2026 efter ändringen.
+Logg: .npm-cache\native-continuation-fix-tests.log
+
+Filer jämförda inför överlämningen den 25 oktober:
+- Utvecklingspluginet innehåller rättningen.
+- build-resources\hermes-native-runtime\hermes-agent\plugins\sshs3_terminal\__init__.py innehåller samma rättning.
+- Den installerade appens resources\hermes\hermes-agent\plugins\sshs3_terminal\__init__.py innehåller INTE rättningen.
+
+Källans och byggresursens SHA-256:
+159E8638BDA1BE0438AB5766EAEEB5E19501277000D916DF4A84EA8ADB9476C5
+Installerade pluginfilens SHA-256 vid jämförelsen:
+895758B3F2E28FC10F46EF53C0EFDCCDA6662F2992D58C3F316984BB6911EC4C
+
+Ingen leverans av denna rättning till installerad runtime eller omladdning av dess körande modul har verifierats. Det är nästa konkreta uppgift. Ett filbyte ensamt räcker inte om backendprocessen redan importerat den gamla Python-modulen. Installationspaketet ska också byggas med rättningen innan en ny leverans kan beskrivas som komplett.
+
+Möjlig omladdningsväg att undersöka:
+gateway/control_socket.py har reload_gateway_plugins.
+gateway/run_plugin_rewire.py implementerar reload-plugins.
+Det är INTE fastställt att Desktop-appens hermes serve använder just denna kontrollsocket. Förväxla inte en separat gatewayprocess med sshs3:s backend.
+
+Hermes Desktop har även recycleBackend för backendåterstart. Välj en stödd väg som kan bevara sshs3:s PTY-sessioner. Vid senaste observationen hade användaren lokal PowerShell och en localhost-SSH-flik öppen. Kontrollera dagens läge före en omstart.
+
+Sikta en eventuell omladdning mot appens egen hermes-native-home. Ändra inte fristående Hermes-profil. Verifiera laddad kod och verklig fortsatt konversation; nöj dig inte med att filens hash ändrats.
+
+9. INSTALLATIONER, DATA OCH ARKITEKTURFÄLLOR
+
+Installerad sshs3 AI Hub:
+C:\Users\jacob\AppData\Local\Programs\sshs3-ai-hub\sshs3-ai-hub.exe
+
+Installerad ASAR-version enligt verifierat kvitto:
+0.96.34-ai-hub.3
+Windows exe-resurs kan visa 0.96.34.0 eftersom prerelease-suffixet inte ingår där.
+Root package.json är fortfarande basversion 0.96.34; anta inte att den ensam beskriver installerat paket.
+
+Installationspaket:
+release\ai-hub\sshs3-AI-Hub-Setup-0.96.34-ai-hub.3.exe
+Tidigare installerat med exitkod 0.
+
+Installerad native-motor:
+C:\Users\jacob\AppData\Local\Programs\sshs3-ai-hub\resources\hermes
+
+Installerad native Desktop-resurs:
+C:\Users\jacob\AppData\Local\Programs\sshs3-ai-hub\resources\hermes-desktop
+
+Appens användardata:
+%APPDATA%\sshs3
+Hermes-home:
+%APPDATA%\sshs3\hermes-native
+Terminal-/uppgiftslager:
+%APPDATA%\sshs3\ai-hub\hub.json
+Läs bara relevanta metadata; skriv inte ut konversationer eller hemligheter i felsökningsloggar.
+
+Fristående Hermes-installation:
+C:\Users\jacob\Hermes\hermes-agent
+Dess exe observerades under apps\desktop\release\win-arm64-unpacked\Hermes.exe.
+Dess källkod, profil och credentials ska hållas åtskilda från sshs3-integrationen.
+
+Utvecklingsdator: Windows ARM64.
+Paketerad app/motor som verifierats: Windows x64, via emulering.
+Hermes runtime: CPython 3.14.7 x64 med frysta beroenden och hanterade ffmpeg, Node/npm och ripgrep.
+
+Aktuell byggresurs:
+build-resources\hermes-native-runtime
+Hermes Desktop staging:
+build-resources\hermes-desktop
+Det gamla build-resources\hermes med tidigare f97608f/Python 3.13-runtime ska inte ersätta den nya motorn.
+
+Hermes PM:s målhantering anpassades för en förseglad win32-x64-payload på ARM64-värd. Undvik att återinföra ARM64/x64-fel för Python, PortAudio, Electron eller node-pty. Den lokala Node-miljön och vissa byggverktyg är ARM64, medan paketerade native-moduler är x64.
+
+Tidigare använd Node:
+C:\Users\jacob\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe
+Tidigare använd npm CLI:
+C:\Program Files\nodejs\node_modules\npm\bin\npm-cli.js
+Kontrollera att dessa fortfarande finns; kör inte blind ominstallation av native dependencies.
+
+En utvecklingspreview registrerade tidigare hermes:// till utvecklings-Electron. Registreringen återställdes till den fristående Hermes-appen. Den integrerade versionen ska hoppa över native protokollregistrering så att den inte tar över igen.
+
+10. MODELLINLOGGNING OCH GAMMAL DOKUMENTATION
+
+Användaren bad om Sign in with ChatGPT. Native inställningar och inloggningsflödet öppnades. Användaren hanterade autentiseringen själv. Vid senaste observerade GUI-tillståndet visade Hermes ChatGPT/Codex, backend ready och modellsvar. Terminalfelet inträffade därefter.
+
+Det finns äldre formuleringar om "provider unconfigured" i docs/ai-hub.md, docs/hermes-feature-inventory.json och installationskvittot. De skrevs före den senare inloggningsobservationen. Kontrollera dagens tillstånd och uppdatera dokumentationen med verifierade fakta.
+
+Automatiserade kontraktstester gör inga modell-API-anrop. Det finns ingen fullständig verifiering av alla modell-, auth-, voice- eller providerflöden. Anta inte att äldre AiConfigStore-nycklar automatiskt migrerats till native Hermes-profiler.
+
+11. KARTA ÖVER KÄLLKOD OCH UNDERLAG
+
+Dokumentation:
+docs\ai-hub.md — arkitektur, byggflöde, verifieringar och kvarvarande arbete.
+docs\hermes-feature-inventory.json — bevarade native funktioner kontra faktisk verifiering.
+.npm-cache\native-install-receipt.json — installations- och testkvitto från 12 oktober.
+.npm-cache\native-continuation-fix-tests.log — nio godkända tester för senaste rättningen.
+.npm-cache\shell-real-pty-results.json — tidigare faktisk Windows-shellverifiering.
+.npm-cache\ai-hub-builder.json — tidigare separat AI Hub-paketeringskonfiguration.
+
+Native host:
+src\main\desktopEntry.ts
+src\main\ai\desktop\nativeWindow.ts
+src\main\ai\desktop\NativeDesktopShell.ts
+src\main\ai\desktop\NativeToolBridge.ts
+src\main\ai\desktop\nativeEvents.ts
+src\main\ai\desktop\nativeTools.ts
+src\main\ai\desktop\layout.ts
+src\shared\types\nativeHermes.ts
+
+Terminaler, behörigheter och kontext:
+src\main\ai\hub\HubService.ts
+src\main\ai\hub\TerminalRegistry.ts
+src\main\ai\hub\ToolBroker.ts
+src\main\ai\hub\shellAdapters.ts
+src\main\ai\hub\ContextService.ts
+src\main\ai\hub\FileTools.ts
+src\main\ai\hub\privacy.ts
+src\main\ai\hub\HubStore.ts
+src\renderer\src\components\TerminalView.tsx
+
+Hermes-anpassningar:
+integrations\hermes-desktop\renderer-extension.tsx
+integrations\hermes-desktop\presentation.ts
+integrations\hermes-desktop\terminal-controls.tsx
+integrations\hermes-desktop\preload-extension.cjs
+integrations\hermes-desktop\sshs3_terminal\__init__.py
+integrations\hermes-desktop\sshs3_terminal\environment.py
+integrations\hermes-desktop\sshs3_terminal\plugin.yaml
+integrations\hermes-desktop\sshs3_terminal\README.md
+
+Byggande:
+scripts\hermes\desktop-source.json
+scripts\hermes\stage-desktop.mjs
+scripts\hermes\build-desktop.mjs
+scripts\hermes\build-runtime.mjs
+scripts\hermes\pm-build-runtime.py
+scripts\hermes\runtime-target-adapter.py
+scripts\hermes\sshs3_bootstrap.py
+electron-builder.json
+.github\workflows\ai-hub.yml
+
+Tester:
+tests\main\nativeHermesTools.test.ts
+tests\main\fixtures\nativeHermesToolsContract.py
+tests\main\nativeDesktopShell.test.ts
+tests\main\nativeWindow.test.ts
+tests\main\nativeHermesLayout.test.ts
+tests\main\aiHub.shell.integration.test.ts
+tests\main\aiHub.test.ts
+tests\main\aiHub.files.test.ts
+tests\main\aiHub.config.test.ts
+tests\main\aiHub.lifecycle.test.ts
+tests\renderer\aiHub.test.tsx
+tests\hermes\runtime-target-contract.py
+
+12. BYGGFLÖDE OCH TESTSTATUS
+
+Huvudflödet för en förberedd, korrekt arkitekturanpassad miljö:
+npm run hermes:desktop:stage
+npm run hermes:desktop:build -- --arch x64
+npm run hermes:build -- --out build-resources/hermes-native-runtime --arch x64 --python PATH_TO_BOOTSTRAP_PYTHON
+npm run build
+
+Frontendbyggandet använder originalets låsta beroenden. Runtime-byggandet använder Hermes PM:s frysta beroendegraf och officiella assembler. Desktop och motor måste ha matchande pin. Ändringar enbart i genererade build-resources är inte en beständig källkodsrättning; byggskripten måste återskapa rätt paket.
+
+Relevanta PowerShell-kontroller:
+$env:HERMES_NATIVE_CONTRACT = '1'
+$env:SSHS3_HERMES_NATIVE_RUNTIME_DIR = (Join-Path $PWD 'build-resources/hermes-native-runtime')
+npx vitest run tests/main/nativeHermesTools.test.ts tests/main/nativeDesktopShell.test.ts tests/main/nativeWindow.test.ts tests/main/nativeHermesLayout.test.ts
+npm run typecheck
+npm run lint
+npm run build
+
+SSHS3_HERMES_NATIVE_RUNTIME_DIR kan riktas mot installerad/paketerad runtime för att verifiera den verkliga leveransen.
+
+Verkliga PTY-tester aktiveras separat:
+$env:SSHS3_SHELL_INTEGRATION = '1'
+npx vitest run tests/main/aiHub.shell.integration.test.ts
+De kräver kompatibel Node/Electron-ABI och arkitektur för node-pty. Tidigare kördes x64-Electron som Node för x64-bindningarna på ARM64-värden. Återskapa inte ABI-fel genom att blint använda ARM64-Node.
+
+Historiskt dokumenterade resultat:
+- 43 befintliga regressionstester passerade.
+- 12 native host/factory-tester passerade.
+- 9 native verktygstester passerade.
+- 3 verkliga Windows-PTY-tester passerade.
+- Totalt 67 fokuserade tester.
+- Typecheck, lint och produktionsbygge passerade. Lint hade noll fel och en tidigare noterad varning.
+- Separata målresolver-/paketeringskontroller gjordes.
+
+Windows-PTY-testerna omfattade powershell, pwsh och cmd: lyckade/misslyckade kommandon, flerradskommandon, arbetskatalog, stora utdata och takeover.
+
+De nio native verktygstesterna använder riktig paketerad Python/Hermes med isolerade imports, riktig plugin-discovery och dispatcher. De kör inga betalda modell-anrop. Äldre version av sviten kördes också mot installerad runtime. Den senare fortsättningsrättningen har nio godkända tester mot den rättade utvecklingsruntime, men är ännu inte installerad.
+
+GUI som tidigare verifierats:
+- Högerpanel.
+- Originalnavigation, Sessions och Bots.
+- Expandering och Return to terminal.
+- Samma utkast över expandering/återgång.
+- Utkast över hel processstängning och återöppning.
+- Verklig dragändring av bredd från 380 till 526 pixlar, med sparad bredd.
+- Lokal PowerShell 7-terminal bredvid chatten.
+
+Detta bevisar INTE att en körande PTY eller uppgift överlever processavslut. Bevarat skrivutkast är en annan egenskap.
+
+CI-workflow för Windows och Ubuntu har uppdaterats och tolkats lokalt. Ingen GitHub Actions-körning är dokumenterad för denna revision. Linux-paketet och den fulla Linux-/WSL-/SSH-/Kubernetes-matrisen är inte verifierade.
+
+Valfritt upstream-beroende get-windows saknas i nuvarande dependency tree. Funktioner som behöver dess fönsterinventering är inte verifierade.
+
+13. ÅTERSTÅENDE OMFATTNING FRÅN ORIGINALPLANEN
+
+Bakgrundsägande:
+En process per inloggad användare ska äga terminalsessioner, jobb och schemaläggning. Electron-fönstret ska återansluta via autentiserad lokal IPC. Stängt fönster ska lämna processen igång; ett separat Avsluta sshs3 helt ska stoppa den. Autostart ska väljas uttryckligen. Detta är inte färdigverifierat och får inte ersättas av påståendet att två vyer hålls vid liv.
+
+Terminalmatris:
+bash, zsh, fish, POSIX sh/dash, PowerShell, cmd och relevanta WSL-shell, samt befintliga SSH- och Kubernetes-terminaler. Säker promptberedskap, kommandogränser, cwd och exitstatus. Tyst utdata är inte slutbevis. Interaktiva program, auth-prompter, nästlad SSH och återanslutning behöver tydliga tillstånd. Avbrutna fjärrkommandon ska betraktas som osäkra tills kontrollerade och aldrig spelas om automatiskt.
+
+Kontext och inventering:
+Överblick över alla öppna sessioner och sparade anslutningar. Lätt bakgrundsinventering med begränsad samtidighet; djupare fil-/loggläsning vid behov. Okända eller otillgängliga mål ska visas ärligt. Lokalt sökbart lager med källa, tidpunkt och osäkerhet. Användaren ska kunna bifoga markerad text, filer, terminalpaneler och servergrupper.
+
+Minne:
+Separera personliga preferenser från kunskap om server, kluster och arbetsyta. Granskning, rättning och radering. Konfigurerbar terminalhistorik, med 30 dagar råhistorik som ursprungligt standardkrav. Hemligheter ska filtreras före modellöverföring och beständig AI-lagring.
+
+Behörighetslägen:
+Rådgivning: analysera och föreslå.
+Assisterad, standard: godkända diagnostikverktyg får läsa; kommandon/ändringar godkänns.
+Autonom: utför inom uttryckliga mål, åtgärdsramar och budget.
+Loggar, filer och terminalutdata är underlag och får inte skapa nya behörigheter.
+
+Scheman:
+Fasta mål, modellval, behörigheter och körningsbudget. Egna identifierade sessioner som kan öppnas. Redovisa missade körningar efter vila/omstart; ändrande jobb körs inte automatiskt ikapp. Native Hermes schemavy/backend är bevarad, men denna koppling till sshs3-mål är inte implementerad.
+
+Förslag/notifieringar:
+Bakgrundsinventering får visa diskreta förslag. Fördjupad felsökning börjar efter användarval eller ett uttryckligt konfigurerat jobb. Notifieringar gäller relevanta förändringar, färdiga resultat och blockerade uppgifter.
+
+Modeller:
+Egna API-nycklar, företagsendpoints och lokala modeller ska fungera via den valda native Hermes-arkitekturen, med faktisk verifiering.
+
+Den ursprungliga leveransordningen var:
+1. Sessionsgrund och bakgrundsägande.
+2. Komplett arbetsflöde med chatt, Hermes, vald terminal och verifierad felsökning.
+3. Full terminalmatris.
+4. Kontext, inventering, minne, skills och ändringsunderlag.
+5. Bakgrundsjobb, scheman, notifieringar och paketering.
+Vi har gjort mycket UI/native-integration före full sessionsgrund; dölja inte den kvarvarande luckan.
+
+14. ACCEPTANSKRITERIER ATT FÖLJA UPP
+
+- Samma uppgift/terminal över presentationsbyte och stängning/återöppning av fönstret.
+- Flikbyte, återanslutning och samtidiga uppgifter kan inte exekvera i fel session.
+- Alla stödda shell provas med success/failure, flerradskommandon, stora utdata, interaktivitet och avbrott.
+- Användaren kan ta över utan att fler agentkommandon släpps igenom.
+- Verifierat resultat skiljs från antagande och ofullständig undersökning.
+- Modellavbrott, utebliven autentisering, vila, omstart och nätverksförlust testas.
+- Hemlighetsfiltrering, källor och miljöavgränsning i kontext/minne testas.
+- Representativa driftfel provas isolerat med mätning av lösningsgrad, felaktiga åtgärder, manuella ingripanden, tid och modellkostnad.
+- Windows- och Linux-paket verifieras med faktisk Hermes-motor.
+- Terminalrespons jämförs med AI avstängd.
+- Typecheck, lint, relevanta tester och produktionsbygge passerar före leverans.
+
+15. FÖRSTA ARBETSSEKVENSEN FÖR DIG SOM TAR ÖVER
+
+1) Läs projektinstruktioner, git status, docs/ai-hub.md, feature-inventory och den aktuella pluginpatchen. Bevara lokalt arbete; en ny klon innehåller inte allt.
+2) Kontrollera att installerad plugin fortfarande saknar rättningen och att det inte tillkommit senare ändringar.
+3) Kontrollera aktuell app/backend och pågående terminaljobb.
+4) Leverera rättningen till appens egen runtime och ladda om genom en verifierad stödd väg som bevarar terminalerna när möjligt. Hantera eventuellt installationsbehov enligt aktuell miljös behörigheter.
+5) Verifiera att den nya modulen verkligen används. Testa två efterföljande meddelanden i samma konversation, komprimeringskontinuitet, flikbyte, godkännanden och Stop/takeover. Ett nytt meddelande får inte kräva manuell återaktivering efter varje lyckat svar.
+6) Bygg och verifiera uppdaterat paket så att en ominstallation inte återinför felet. Uppdatera versions-/installationskvitto och dokumentation med vad som faktiskt körts.
+7) Redovisa kvarvarande begränsningar och fortsätt mot originalplanens återstående delar i användarens prioriteringsordning.
+
+16. SAMARBETE MED ANVÄNDAREN
+
+Svara på svenska. Utför redan beställt arbete; stanna inte vid "jag ska kolla". Undvik upprepade frågor om beslut som redan finns i denna överlämning. Fråga när ett verkligt nytt produktval, en destruktiv åtgärd eller saknad nödvändig information kräver det.
+
+Användaren har varit missnöjd både med tidigare design och med överdrivna färdigpåståenden. Visa verkliga resultat. Skilj mellan:
+- källkod skriven,
+- test godkänt,
+- paket byggt,
+- paket installerat,
+- funktion verifierad i den installerade appen.
+
+Bevarad upstream-kod är inte bevis för full funktionalitet. Ett lyckat test utan modell är inte ett lyckat verkligt agentflöde. Ett sparat utkast är inte en överlevande terminalsession. Ett klick i gränssnittet är inte en verifierad backendändring.
+
+Användaren bad om denna överlämning för att flytta arbetet till en annan AI-agent. Den ska ge dig kontinuitet utan att kräva att Jacob återberättar projektet. Behåll den valda högerpanelen, den riktiga expanderade Hermes-appen och djup terminalintegration som produktens kärna.

@@ -1,4 +1,8 @@
-import { app, BrowserWindow, Menu, nativeImage } from 'electron';
+import { app, BrowserWindow, Menu, nativeImage, Tray } from 'electron';
+import { createHub } from './ai/hub/createHub';
+import { NativeDesktopShell } from './ai/desktop/NativeDesktopShell';
+import { getNativeWindow } from './ai/desktop/nativeWindow';
+import { nativeTools, setNativeHub } from './ai/desktop/nativeTools';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -32,7 +36,9 @@ if (process.env.PORTABLE_EXECUTABLE_DIR) {
 // Enforce single-instance lock: if an instance is already running with the same userData directory,
 // focus the existing window and immediately terminate the new instance.
 let hasSingleInstanceLock = true;
-if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
+const nativeHermes = process.env.SSHS3_NATIVE_HERMES === '1';
+const demoMode = process.env.SSHS3_DEMO === '1' || process.argv.includes('--demo');
+if (!nativeHermes && !demoMode && process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
   hasSingleInstanceLock = app.requestSingleInstanceLock();
   if (!hasSingleInstanceLock) {
     app.quit();
@@ -43,6 +49,7 @@ if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
           mainWindow.restore();
         }
         mainWindow.focus();
+        mainWindow.show();
       }
     });
   }
@@ -52,7 +59,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Only the instance that owns the single-instance lock writes the log file.
 if (hasSingleInstanceLock && process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
-  configureLogging({ dir: app.getPath('logs'), mirrorToConsole: !app.isPackaged });
+  configureLogging({ dir: app.getPath('logs'), mirrorToConsole: !app.isPackaged && !nativeHermes });
 }
 const log = createLogger('app');
 const quitLog = createLogger('quit');
@@ -129,6 +136,8 @@ process.on('unhandledRejection', (reason) => {
 });
 
 let mainWindow: BrowserWindow | null = null;
+let nativeShell: NativeDesktopShell | null = null;
+let backgroundTray: Tray | null = null;
 // Windows-only startup progress window (null elsewhere); see ./splash/SplashWindow.
 let splash: SplashController | null = null;
 let ipcBridge: IpcBridge | null = null;
@@ -184,19 +193,25 @@ async function confirmQuit(): Promise<boolean> {
   return true;
 }
 
-function createWindow(): BrowserWindow {
+async function createWindow(): Promise<BrowserWindow> {
+  if (nativeHermes) {
+    mainWindow = await getNativeWindow();
+    if (!nativeShell) nativeShell = new NativeDesktopShell(mainWindow, path.join(__dirname, 'index.cjs'), path.join(__dirname, '../dist/index.html'));
+    mainWindow.once('closed', () => { nativeShell = null; mainWindow = null; });
+    return mainWindow;
+  }
   const iconPath = process.env.VITE_DEV_SERVER_URL
     ? path.join(__dirname, '../../build/icon.png')
     : path.join(__dirname, '../build/icon.png');
   const appIcon = nativeImage.createFromPath(iconPath);
 
   mainWindow = new BrowserWindow({
-    width: 1200,
-    height: 800,
+    width: demoMode ? 1480 : 1200,
+    height: demoMode ? 920 : 800,
     icon: appIcon,
     // On Windows the splash stays up until the renderer has loaded, so the main
     // window is created hidden instead of flashing an empty frame.
-    show: process.platform !== 'win32',
+    show: process.platform !== 'win32' && !(process.argv.includes('--background') && ipcBridge?.aiHub?.background),
     webPreferences: {
       preload: path.join(__dirname, 'index.cjs'),
       sandbox: true,
@@ -232,6 +247,7 @@ function createWindow(): BrowserWindow {
 
   mainWindow.on('close', (event) => {
     if (isQuitting) return;
+    if (ipcBridge?.aiHub?.background) { event.preventDefault(); mainWindow?.hide(); return; }
     // Always defer to app.quit() (handled by 'before-quit' below) instead of
     // letting the window close on its own, so a plain window-close ("X" the
     // window) goes through the same graceful shutdown — ipcBridge.dispose(),
@@ -256,7 +272,7 @@ function createWindow(): BrowserWindow {
       revealed = true;
       clearTimeout(fallback);
       splash?.setProgress(100, 'Ready');
-      if (!window.isDestroyed()) window.show();
+      if (!window.isDestroyed() && !process.argv.includes('--background')) window.show();
       splash?.close();
       splash = null;
     };
@@ -274,9 +290,15 @@ function createWindow(): BrowserWindow {
   }
 
   if (process.env.VITE_DEV_SERVER_URL) {
-    mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
+    const url = demoMode
+      ? `${process.env.VITE_DEV_SERVER_URL}${process.env.VITE_DEV_SERVER_URL.includes('?') ? '&' : '?'}demo=1`
+      : process.env.VITE_DEV_SERVER_URL;
+    mainWindow.loadURL(url);
   } else {
-    mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
+    mainWindow.loadFile(
+      path.join(__dirname, '../dist/index.html'),
+      demoMode ? { query: { demo: '1' } } : undefined,
+    );
   }
 
   return mainWindow;
@@ -295,14 +317,43 @@ async function initializeApp(): Promise<void> {
   configureRegistryDir(path.join(app.getPath('userData'), 'runtime-agents'));
 
   // Remove default dead application menu
-  Menu.setApplicationMenu(null);
+  if (!nativeHermes) Menu.setApplicationMenu(null);
 
   // Initialize and register IPC bridge
   ipcBridge = new IpcBridge({
-    getWebContents: () => mainWindow?.webContents,
+    getWebContents: () => nativeHermes ? nativeShell?.getWebContents() : mainWindow?.webContents,
     confirmQuit,
   });
+  ipcBridge.aiHub = createHub(ipcBridge, {
+    show: () => { mainWindow?.show(); mainWindow?.focus(); },
+    backgroundChanged: async (enabled, autoStart) => {
+      if (enabled && !backgroundTray) {
+        const icon = nativeImage.createFromPath(app.isPackaged
+          ? path.join(process.resourcesPath, 'ai-hub-icon.png')
+          : path.join(app.getAppPath(), 'build/icon.png'));
+        backgroundTray = new Tray(icon.resize({ width: 16, height: 16 }));
+        backgroundTray.setToolTip('sshs3 — running in background');
+        backgroundTray.setContextMenu(Menu.buildFromTemplate([
+          { label: 'Open sshs3', click: () => { mainWindow?.show(); mainWindow?.focus(); } },
+          { label: 'Quit sshs3 completely', click: () => { mainWindow?.show(); app.quit(); } },
+        ]));
+        backgroundTray.on('double-click', () => mainWindow?.show());
+      } else if (!enabled && backgroundTray) { backgroundTray.destroy(); backgroundTray = null; }
+      if (process.platform === 'win32') app.setLoginItemSettings({ openAtLogin: enabled && autoStart, args: ['--background'] });
+      if (process.platform === 'linux') {
+        const autoDir = path.join(process.env.XDG_CONFIG_HOME || path.join(app.getPath('home'), '.config'), 'autostart');
+        const target = path.join(autoDir, 'sshs3-background.desktop');
+        if (enabled && autoStart) {
+          fs.mkdirSync(autoDir, { recursive: true });
+          const exe = process.execPath.replace(/(["`$\\])/g, '\\$1');
+          fs.writeFileSync(target, `[Desktop Entry]\nType=Application\nName=sshs3 Background\nExec="${exe}" --background\nTerminal=false\n`, { mode: 0o600 });
+        } else if (fs.existsSync(target)) fs.unlinkSync(target);
+      }
+    },
+  });
   ipcBridge.register();
+  if (nativeHermes) setNativeHub(ipcBridge.aiHub);
+  await ipcBridge.aiHub.initialize().catch((error) => log.warn('AI Hub initialization failed', error));
   void ipcBridge.settingsStore
     .getSettings()
     .then((settings) => setLogLevel(resolveLogLevel(settings.logLevel)))
@@ -312,8 +363,8 @@ async function initializeApp(): Promise<void> {
   void ipcBridge.clearClipboardHistoryIfConfigured().catch(() => {});
 
   // Create the main window immediately so the UI starts loading without waiting for subshells
-  createWindow();
-  ipcBridge.startUpdateChecks();
+  await createWindow();
+  if (!nativeHermes) ipcBridge.startUpdateChecks();
 
   // Run background tasks (orphan cleanup, login shell environment, trust store, ~/.ssh/config sync)
   // in parallel with window loading so startup time is not penalized
@@ -340,7 +391,7 @@ async function initializeApp(): Promise<void> {
 
 app.whenReady().then(() => {
   if (!hasSingleInstanceLock) return;
-  splash = showSplash();
+  if (!nativeHermes) splash = showSplash();
   return initializeApp();
 });
 
@@ -357,6 +408,7 @@ app.on('before-quit', (event) => {
       isQuitting = true;
       if (ipcBridge) {
         try {
+          if (nativeHermes) await nativeTools.dispose();
           await ipcBridge.dispose();
         } catch {
           // ignore
@@ -390,8 +442,8 @@ app.on('window-all-closed', () => {
 });
 
 app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) {
-    createWindow();
+  if (!nativeHermes && BrowserWindow.getAllWindows().length === 0) {
+    void createWindow();
   }
 });
 

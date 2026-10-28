@@ -2,7 +2,7 @@
   "name": "sshs3",
   "version": "0.96.34",
   "description": "Modern cross-platform SSH, SFTP, and S3 client with smartcard and drag-and-drop support",
-  "main": "dist-electron/index.js",
+  "main": "dist-electron/desktopEntry.js",
   "type": "module",
   "author": {
     "name": "Andreas Lundqvist",
@@ -16,8 +16,12 @@
     "url": "https://github.com/alun-hub/sshs3.git"
   },
   "scripts": {
+    "hermes:build": "node scripts/hermes/build-runtime.mjs",
+    "hermes:desktop:stage": "node scripts/hermes/stage-desktop.mjs",
+    "hermes:desktop:build": "node scripts/hermes/build-desktop.mjs",
     "dev": "vite",
     "dev:prod": "npm run build && electron --no-sandbox .",
+    "demo": "npm run build && electron --no-sandbox . --demo",
     "build": "tsc --noEmit && vite build",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",

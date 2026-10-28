@@ -12,6 +12,7 @@ const teamVaultLog = createLogger('team-vault');
 /** The part of IpcBridge this handler group may use. */
 export type TeamVaultHost = Pick<
   IpcBridge,
+  | 'aiHub'
   | 'buildTeamVaultStatus'
   | 'registerHandler'
   | 'scheduleTeamVaultAutoPush'
@@ -256,6 +257,7 @@ export function registerTeamVaultHandlers(bridge: TeamVaultHost): void {
       }
       const provider = await bridge.storageRegistry.getOrCreate(config.target);
       await bridge.teamVaultService.pullFromRemote(provider, config.remoteBasePath ?? '', options);
+      bridge.aiHub?.changed();
       await bridge.teamVaultConfigStore.setLastSyncAt(new Date().toISOString());
       return bridge.buildTeamVaultStatus();
     }
@@ -286,12 +288,14 @@ export function registerTeamVaultHandlers(bridge: TeamVaultHost): void {
   bridge.registerHandler(IPC_CHANNELS.TEAM_VAULT_SAVE_SSH_PROFILE, async (_event, profile: SSHConnectionConfig) => {
     requireProfile(profile, 'SSH profile');
     await bridge.teamVaultService.saveSSHProfile(profile);
+    bridge.aiHub?.changed();
     bridge.scheduleTeamVaultAutoPush();
   });
 
   bridge.registerHandler(IPC_CHANNELS.TEAM_VAULT_DELETE_SSH_PROFILE, async (_event, id: string) => {
     requireRecipientId(id, 'Profile id');
     await bridge.teamVaultService.deleteSSHProfile(id);
+    bridge.aiHub?.changed();
     bridge.scheduleTeamVaultAutoPush();
   });
 

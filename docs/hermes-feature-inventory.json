@@ -1,0 +1,197 @@
+{
+  "baseline": {
+    "repository": "https://github.com/NousResearch/hermes-agent.git",
+    "commit": "f925b01791fe052e7d55dc975750c0bd985aff91",
+    "desktopVersion": "0.17.6",
+    "observedStandaloneDesktopVersion": "v0.17.6 (+221) f925b01",
+    "engineCommit": "f925b01791fe052e7d55dc975750c0bd985aff91",
+    "runtimeInterpreter": "CPython 3.14.7 x64",
+    "runtimeTarget": "win32-x64",
+    "developmentHost": "Windows ARM64",
+    "dependencyPolicy": "Hermes PM frozen lock and sealed distribution; original frontend dependency lock",
+    "license": "MIT; upstream notices preserved",
+    "evidence": [
+      "scripts/hermes/desktop-source.json",
+      "build-resources/hermes-desktop/source-pin.json",
+      "build-resources/hermes-native-runtime/manifest.json",
+      "Original apps/desktop Electron main, preload, React app, contribution registry and bundled plugins",
+      "Original hermes serve backend and profile-scoped plugin/tool contracts"
+    ],
+    "completeness": "Original source is integrated. Actual Windows x64 packaged GUI navigation/Bots, draft continuity, expansion/collapse, process reopen and real resizing/persistence have passed. Installation, installed runtime contracts and installed GUI checks passed for 0.96.34-ai-hub.3 with matching native Desktop 0.17.6/engine pin. Contract and presentation checks do not establish operational parity for every native feature/service/platform."
+  },
+  "productDecisions": {
+    "compactDesign": "Terminalfokus",
+    "side": "right",
+    "resizable": true,
+    "rememberWidth": true,
+    "expandedView": "Original full Hermes Desktop graphical application",
+    "sameRendererAndStoresAcrossViews": true,
+    "preserveNativeFeaturesAndBundledPlugins": true,
+    "useUpstreamContributionRegistry": true,
+    "legacyCustomHubNavigation": "superseded",
+    "expansionChangesPermissions": false
+  },
+  "nativeIntegration": {
+    "entry": "src/main/desktopEntry.ts",
+    "presentation": "Two kept-alive WebContentsViews, with compact geometry around the same native chat",
+    "backend": "Original pooled hermes serve",
+    "state": "Persistent application-owned hermes-native profile home under sshs3 user data",
+    "standaloneHermesProfileModified": false,
+    "legacyPrivateAgentRuntimeActive": false,
+    "legacyHubSchedulerActive": false,
+    "legacyProviderKeyMigration": "not assumed; configure providers through native Hermes settings",
+    "currentProviderState": "unconfigured; installed GUI provider choice skipped without authentication or key changes",
+    "nativeToolPlugin": "integrations/hermes-desktop/sshs3_terminal",
+    "nativeToolset": "desktop_ui",
+    "nativeTools": [
+      "sshs3_terminal_context",
+      "sshs3_terminal_command",
+      "sshs3_terminal_verify",
+      "sshs3_terminal_file_read",
+      "sshs3_terminal_file_write"
+    ],
+    "authority": {
+      "defaultMode": "assisted",
+      "commandBudgetPerTurn": 30,
+      "minuteBudgetPerTurn": 15,
+      "promptReadiness": "explicit manual idle-shell arm and correlated handshake",
+      "binding": "immutable profile home plus native compression-root conversation and sshs3 session generation",
+      "modelMayChooseTargetOrGrant": false,
+      "approval": "exact pending task/change through existing ToolBroker",
+      "nativeStop": "agent_loop_stopped immediately revokes pending approvals",
+      "takeover": "revokes authority; late native turn-end cannot clear interruption",
+      "compression": "native SessionDB compression lineage preserves target; branches/resets remain separate",
+      "resume": "explicit UI action after inspection and rearming; no uncertain command replay",
+      "secretTransport": "random loopback capability; no browser origins; transport env keys stripped from model children"
+    },
+    "restrictionsWhenBound": [
+      "Built-in host terminal/process and file tools",
+      "Code execution and delegation",
+      "Spawning another native chat or messaging another Bot to run work outside the target",
+      "New connector execution, cron creation and MCP host tools",
+      "Computer use, interactive preview input and arbitrary browser scripting, including self-approval paths"
+    ],
+    "preservedWhenBound": [
+      "Original native navigation, layout, passive tours and UI",
+      "Original native memory, skills and session context",
+      "Target context and approved terminal/file tools through sshs3"
+    ],
+    "unboundConversations": "retain original Hermes tool behavior",
+    "fileLimits": "complete UTF-8 text under 64 KB; reviewed expected-hash replacement and read-back; no atomic compare-and-write guarantee",
+    "nativeSchedulesToAuthorizedSshs3Sessions": "not implemented"
+  },
+  "featureGroups": [
+    {
+      "id": "sessions",
+      "features": ["history", "search", "pinning", "resume", "branches", "checkpoints", "editing", "streaming", "interrupt/redirect"],
+      "sourceStatus": "original native implementation retained",
+      "operationalStatus": "packaged GUI navigation and draft persistence across views/process reopen verified; model streaming, history operations and deeper session flows untested"
+    },
+    {
+      "id": "bots",
+      "features": ["native Sessions/Bots switch", "bot identities", "profiles", "canonical Bot Chats", "group chats"],
+      "sourceStatus": "original bundled hermes-bots frontend plugin and native backend retained",
+      "operationalStatus": "packaged and installed native Bots/navigation verified, including installed Hermes @hermes roster entry marked Ready; bot execution, canonical/group chat and configured gateway operation audit pending; bound task delegation gates apply"
+    },
+    {
+      "id": "capabilities",
+      "features": ["skills", "tools", "connectors", "plugins", "capability management"],
+      "sourceStatus": "original contribution registry, plugin registry and management retained",
+      "operationalStatus": "service/account-specific setup and plugin operation audit pending"
+    },
+    {
+      "id": "messaging",
+      "features": ["messaging integrations", "webhooks"],
+      "sourceStatus": "original native implementation retained",
+      "operationalStatus": "credentials, platform configuration and message delivery untested"
+    },
+    {
+      "id": "artifacts",
+      "features": ["native artifacts and previews"],
+      "sourceStatus": "original native implementation retained",
+      "operationalStatus": "live rendering and export audit pending"
+    },
+    {
+      "id": "schedules",
+      "features": ["native scheduled jobs", "Bot routines"],
+      "sourceStatus": "original native UI/backend retained",
+      "operationalStatus": "native configured jobs untested; separately authorized sshs3 target sessions and missed-run semantics not implemented"
+    },
+    {
+      "id": "profiles-and-models",
+      "features": ["profiles", "gateways", "providers", "model configuration", "effort controls"],
+      "sourceStatus": "original native implementation retained",
+      "operationalStatus": "native isolated home; credentials/provider operations and remote gateway flows untested"
+    },
+    {
+      "id": "context-and-memory",
+      "features": ["compression", "persistent memory", "cross-session recall", "session search"],
+      "sourceStatus": "original native implementation retained",
+      "operationalStatus": "compression-root terminal binding contract verified; broader memory/model behavior and sshs3 environment scope audit pending"
+    },
+    {
+      "id": "attachments-and-voice",
+      "features": ["attachments", "dictation", "voice conversations", "speech and vision tools"],
+      "sourceStatus": "original native implementation and packaged dependency extras retained",
+      "operationalStatus": "voice/media imports pass; microphone, model/provider and live conversation tests not performed"
+    },
+    {
+      "id": "presentation",
+      "features": ["right compact chat", "draggable width", "full native view", "native appearance", "pane layouts", "HUD", "command controls"],
+      "sourceStatus": "native original UI plus sshs3 presentation adapter implemented",
+      "operationalStatus": "host unit tests and actual packaged GUI checks passed: right panel, native navigation, draft across expansion/collapse and full process close/reopen, real drag from 380 to 526 pixels with persistence; installed native full navigation/Bots and Return to right chat beside an actual PowerShell 7 prompt verified"
+    },
+    {
+      "id": "advanced-and-extensions",
+      "features": ["advanced core views", "plugin-contributed views", "native window context"],
+      "sourceStatus": "original registries and source retained",
+      "operationalStatus": "plugin-specific audit pending; optional upstream get-windows absent, dependent native window enumeration not verified"
+    }
+  ],
+  "observedNativeToolsets": [
+    "Computer Use (macOS/Windows/Linux)", "Skills", "Terminal & Processes", "Clarifying Questions",
+    "File Operations", "A2A", "Browser Automation", "Code Execution", "Connections", "Cron Jobs",
+    "Image Generation", "Kanban", "Memory", "Session Search", "Speech-to-Text", "Task Delegation",
+    "Task Planning", "Text-to-Speech", "Video Analysis", "Video Generation", "Vision / Image Analysis",
+    "Web Search & Scraping", "X (Twitter) Search"
+  ],
+  "validation": {
+    "nativeToolTests": {
+      "passed": 9,
+      "file": "tests/main/nativeHermesTools.test.ts",
+      "actualRuntime": "CPython 3.14.7 x64, -I -B sealed imports; nine tests pass against build-resources/hermes-native-runtime, release/ai-hub/win-unpacked/resources/hermes and C:\\Users\\jacob\\AppData\\Local\\Programs\\sshs3-ai-hub\\resources\\hermes",
+      "runtimeOverride": "SSHS3_HERMES_NATIVE_RUNTIME_DIR",
+      "contracts": ["native plugin discovery", "trusted dispatcher session identity", "immutable target across tab/turn changes", "profile isolation", "approval and takeover", "stale sessions", "budgets and verification", "secret scrubbing", "compression continuity", "immediate native Stop", "bound bypass refusal", "unbound native tools retained"]
+    },
+    "nativeHostTests": {
+      "passed": 12,
+      "files": ["tests/main/nativeDesktopShell.test.ts", "tests/main/nativeWindow.test.ts"],
+      "contracts": ["trusted main-frame IPC", "iframe rejection", "same kept-alive terminal view", "layout and width persistence", "resize coalescing", "cleanup", "navigation and popup refusal"]
+    },
+    "actualWindowsPtyTests": { "passed": 3, "file": "tests/main/aiHub.shell.integration.test.ts" },
+    "existingRegressionTests": { "passed": 43 },
+    "focusedTestsTotal": 67,
+    "typecheckLintProductionBuild": "passed",
+    "finalProductionBuildAndPackage": "Windows x64 package built and actual GUI exercised on Windows ARM64; installation succeeded and installed engine contracts passed; Linux package untested",
+    "liveGuiDraftAndResize": {
+      "status": "verified against the Windows x64 packaged GUI",
+      "checks": ["right chat panel", "original native navigation", "native Bots", "draft survives expansion and collapse", "draft survives full process close/reopen", "actual divider drag 380 to 526 pixels", "dragged width persists"],
+      "limits": "no model calls, deep original feature flows or running PTY/job recovery verified by these GUI checks"
+    },
+    "installation": { "status": "verified", "installerExitCode": 0, "applicationLaunched": true, "executable": "C:\\Users\\jacob\\AppData\\Local\\Programs\\sshs3-ai-hub\\sshs3-ai-hub.exe", "asarVersion": "0.96.34-ai-hub.3", "nativeDesktopVersion": "0.17.6", "engineAndDesktopCommit": "f925b01791fe052e7d55dc975750c0bd985aff91", "nativeRuntimeContractsPassed": 9, "installedGui": { "status": "verified", "checks": ["original Sessions/Bots navigation", "Hermes @hermes roster entry marked Ready", "original full navigation", "Return to correct right chat", "actual local PowerShell 7 prompt beside chat", "Local/pwsh target and You control state"], "provider": "currently unconfigured; provider choice skipped without auth/key changes" } },
+    "paidModelOrCredentials": "not tested",
+    "productionSshOrKubernetes": "not tested",
+    "Linux": "not tested",
+    "fullFeatureOperationalParity": "not established"
+  },
+  "remainingProductWork": [
+    "Provider/model configuration and deeper native feature operations",
+    "Separately reconnectable background owner, window/crash/restart recovery",
+    "Persistent prompt hooks and interactive/authentication/nested-SSH states",
+    "Full Linux/WSL/SSH/Kubernetes shell and interruption matrix",
+    "Searchable terminal event journal, authenticated inventory and scoped environment evidence/memory",
+    "Native schedules mapped to identified target sessions with explicit permissions/budgets",
+    "Fault scenarios, model cost, intervention rate and terminal latency measurements"
+  ],
+  "implementationStatus": "Original pinned Hermes Desktop and matching engine integrated, with 67 focused tests and actual Windows x64 packaged GUI navigation/Bots, draft continuity, process reopen and draggable width persistence verified. Version 0.96.34-ai-hub.3 is installed; installed original native GUI, right chat beside PowerShell 7 and all nine installed-runtime contracts are verified. Provider/model is unconfigured; model/authentication, deeper native features, Linux and remaining original acceptance work are unverified. The earlier mockup and legacy limited wrapper are superseded."
+}

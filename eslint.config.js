@@ -7,10 +7,11 @@ import security from 'eslint-plugin-security';
 
 export default tseslint.config(
   {
-    ignores: ['dist', 'dist-electron', 'node_modules', 'coverage', '*.config.js', '*.config.ts', '.claude/**', '.superpowers/**', 'pieces/**'],
+    ignores: ['dist', 'dist-electron', 'build-resources/**', 'release/**', '.npm-cache/**', 'node_modules', 'coverage', '*.config.js', '*.config.ts', '.claude/**', '.superpowers/**', 'pieces/**'],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,
+  { languageOptions: { parserOptions: { tsconfigRootDir: import.meta.dirname } } },
   {
     files: ['src/renderer/**/*.{ts,tsx}', 'tests/renderer/**/*.{ts,tsx}'],
     languageOptions: {
@@ -30,10 +31,14 @@ export default tseslint.config(
     },
   },
   {
-    files: ['src/main/**/*.{ts,cjs}', 'src/preload/**/*.ts', 'src/shared/**/*.ts', 'scripts/**/*.{mjs,js}'],
+    files: ['src/main/**/*.{ts,cjs}', 'src/preload/**/*.ts', 'src/shared/**/*.ts', 'scripts/**/*.{mjs,js}', 'integrations/**/*.cjs'],
     languageOptions: {
       globals: { ...globals.node },
     },
+  },
+  {
+    files: ['integrations/**/*.tsx'],
+    languageOptions: { globals: { ...globals.browser } },
   },
   {
     // Security lint for the privileged (main/preload) processes. Non-literal fs paths

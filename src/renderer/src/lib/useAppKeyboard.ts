@@ -134,6 +134,15 @@ export function useAppKeyboard(ctx: AppKeyboardContext): void {
       // Quick Connect shortcut Ctrl+K (not Ctrl+Shift+K, which is a separate,
       // user-rebindable shortcut — see 'searchInFiles' below).
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'k') {
+        const inlineAiBtn = Array.from(
+          document.querySelectorAll<HTMLButtonElement>('[data-testid="terminal-inline-ai-btn"]')
+        ).find((el) => el.offsetParent !== null);
+        if (inlineAiBtn) {
+          e.preventDefault();
+          e.stopPropagation();
+          inlineAiBtn.click();
+          return;
+        }
         e.preventDefault();
         openTopLevelModal(() => setProfilesModalOpen(true));
         return;

@@ -20,8 +20,8 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import { TEAM_FOLDER_ICONS, type TeamFolderIcon } from '@shared/types/teamVault';
-import type { TeamFolderNode } from './teamProfileTree';
-import { findFolderNode, flattenTeamFolderTree } from './teamProfileTree';
+import type { TeamFolderNode } from './teamProfileTreeModel';
+import { findFolderNode, flattenTeamFolderTree } from './teamProfileTreeModel';
 
 /** Maps `TEAM_FOLDER_ICONS` keys (shared/types/teamVault.ts) to their `lucide-react` component —
  * the only place that mapping needs to exist, so adding an icon to the shared allowlist is a

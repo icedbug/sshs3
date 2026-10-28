@@ -1,0 +1,16 @@
+name: sshs3_terminal
+version: 1.0.0
+description: "Operate the explicitly assigned sshs3 terminal with immutable session identity, approvals, command completion and verification."
+author: sshs3
+kind: backend
+provides_tools:
+  - sshs3_terminal_context
+  - sshs3_terminal_command
+  - sshs3_terminal_verify
+  - sshs3_terminal_file_read
+  - sshs3_terminal_file_write
+provides_hooks:
+  - on_session_start
+  - on_session_end
+  - agent_loop_stopped
+  - pre_tool_call

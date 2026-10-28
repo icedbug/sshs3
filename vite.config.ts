@@ -57,7 +57,7 @@ export default defineConfig({
     copyOcShimCliPlugin(),
     electron({
       main: {
-        entry: 'src/main/index.ts',
+        entry: 'src/main/desktopEntry.ts',
         vite: {
           build: {
             outDir: 'dist-electron',
@@ -120,6 +120,7 @@ export default defineConfig({
     },
   },
   test: {
+    include: ['tests/**/*.test.{ts,tsx,js,cjs,mjs}'],
     globals: true,
     environment: 'node',
     passWithNoTests: true,

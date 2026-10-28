@@ -45,7 +45,7 @@ export class SessionStore {
 
   public async getSession(): Promise<SessionData | null> {
     try {
-      const raw = await fs.readFile(this.filePath, 'utf-8');
+      const raw = (await fs.readFile(this.filePath, 'utf-8')).replace(/^\uFEFF/, '');
       const data = JSON.parse(raw);
       if (!data || !Array.isArray(data.tabs)) {
         return null;

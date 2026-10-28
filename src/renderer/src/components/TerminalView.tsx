@@ -3,7 +3,7 @@ import { Terminal } from 'xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { SearchAddon } from '@xterm/addon-search';
 import 'xterm/css/xterm.css';
-import { ChevronDown, ChevronUp, RotateCcw, Search, X } from 'lucide-react';
+import { ChevronDown, ChevronUp, RotateCcw, Search, Sparkles, X } from 'lucide-react';
 import type { SSHConnectionConfig, SSHPtyExitEvent, LocalShellType } from '@shared/types/ssh';
 import type { SessionExitAction, AppSettings } from '@shared/types/settings';
 import type { K8sTerminalTarget } from '@shared/types/kubernetes';
@@ -17,6 +17,9 @@ import { OPEN_CLIPBOARD_HISTORY_EVENT } from '../lib/clipboardHistoryEvents';
 import { usePerfSamples } from '../lib/usePerfSamples';
 import type { PerfLayout, PerfMetricId } from '@shared/types/perf';
 import { extractHostnameFromCommand, scanOutputForHost } from '../lib/terminalTitle';
+
+import { TerminalControl } from './AiHub/TerminalControl';
+import { hubRequest, selectAiTerminal } from '../lib/aiHub';
 
 export interface TerminalViewProps {
   /** Omit together with `local` to spawn a local shell instead of an SSH session. */
@@ -183,6 +186,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const sessionIdRef = useRef<string | null>(null);
   // State copy of the SSH session id so the perf bar can poll it (the ref alone doesn't re-render).
   const [perfSessionId, setPerfSessionId] = useState<string | null>(null);
+  useEffect(() => { if (isActive && perfSessionId) selectAiTerminal(perfSessionId); }, [isActive, perfSessionId]);
   const onExitRef = useRef(onExit);
   onExitRef.current = onExit;
   const onTitleChangeRef = useRef(onTitleChange);
@@ -250,6 +254,15 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const [snippetsOpen, setSnippetsOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [copyNotice, setCopyNotice] = useState<string | null>(null);
+  const [inlineAiOpen, setInlineAiOpen] = useState(false);
+  const [inlineAiPrompt, setInlineAiPrompt] = useState('');
+  const [inlineSuggestion, setInlineSuggestion] = useState<{
+    command: string;
+    explanation: string;
+  } | null>(null);
+  const [inlineLoading, setInlineLoading] = useState(false);
+  const [terminalErrorHint, setTerminalErrorHint] = useState<string | null>(null);
+  const inlineAiInputRef = useRef<HTMLInputElement>(null);
   const isActiveRef = useRef(isActive);
   isActiveRef.current = isActive;
   // Tracks the size last reported to the PTY, shared between the resize observer and the
@@ -582,6 +595,35 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     // so it's wired up explicitly here.
     // Also prevent xterm from intercepting/swallowing tab switching shortcuts (Ctrl+Tab, Ctrl+Shift+Tab).
     term.attachCustomKeyEventHandler((e) => {
+      if (e.type === 'keydown' && (e.ctrlKey || e.metaKey) && !e.altKey) {
+        const keyLower = e.key.toLowerCase();
+        // Ctrl+K: Open Inline Terminal AI bar (VS Code / Cursor style)
+        if (!e.shiftKey && keyLower === 'k') {
+          e.preventDefault();
+          setInlineAiOpen(true);
+          setTimeout(() => inlineAiInputRef.current?.focus(), 20);
+          return false;
+        }
+        // Ctrl+L (with selection) or Ctrl+Shift+L: Send selection or last command output to AI Chat
+        if (keyLower === 'l' && (e.shiftKey || Boolean(term.getSelection()))) {
+          e.preventDefault();
+          const selectedText = term.getSelection() || outputTracker.lastOutput() || '';
+          if (selectedText) {
+            window.dispatchEvent(
+              new CustomEvent('sshs3:ai-attach', {
+                detail: {
+                  sessionId: sessionIdRef.current ?? undefined,
+                  text: selectedText,
+                  label: term.getSelection() ? 'Terminal selection' : 'Last command output',
+                },
+              })
+            );
+          } else {
+            window.dispatchEvent(new CustomEvent('sshs3:ai-open'));
+          }
+          return false;
+        }
+      }
       if (e.type === 'keydown' && e.shiftKey && e.key === 'Insert') {
         e.preventDefault();
         pasteLatest();
@@ -642,7 +684,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         : window.multissh?.terminalCreate?.(
             local
               ? { local: true as const, ptyOptions: { cols, rows, shellType, wslDistro } }
-              : { config: { ...(activeConfig as SSHConnectionConfig), id: crypto.randomUUID() }, ptyOptions: { cols, rows } }
+              : { config: { ...(activeConfig as SSHConnectionConfig), id: crypto.randomUUID() }, profileId: activeConfig?.id, ptyOptions: { cols, rows } }
           );
       createPromise
         ?.then(({ sessionId }) => {
@@ -687,7 +729,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           term.onData((data) => {
             const write = k8sTarget ? window.multissh?.k8sTerminalWrite : window.multissh?.terminalWrite;
             if (sessionIdRef.current && write) {
-              write(sessionIdRef.current, data);
+              void write(sessionIdRef.current, data).catch(() => { window.dispatchEvent(new CustomEvent('sshs3:ai-open')); });
             }
             if (data.includes('\r') || data.includes('\n')) {
               outputTracker.recordEnter();
@@ -724,6 +766,17 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                   const detectedHost = scanOutputForHost(data);
                   if (detectedHost) {
                     onTitleChangeRef.current?.(detectedHost);
+                  }
+                }
+                if (
+                  /(?:command not found|Permission denied|Connection refused|No such file or directory|502 Bad Gateway|CrashLoopBackOff|CommandNotFoundException|ParserError|failed \(Result: exit-code\)|ERR!|fatal:)/i.test(
+                    data
+                  )
+                ) {
+                  // eslint-disable-next-line no-control-regex
+                  const clean = data.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').trim();
+                  if (clean) {
+                    setTerminalErrorHint(clean.slice(0, 400));
                   }
                 }
               }
@@ -900,6 +953,288 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       {/* Padding sits on this wrapper, not on the xterm container: FitAddon reads the parent's
           border-box height and only subtracts the xterm element's own padding, so padding on the
           container made the terminal ~16px too tall and clipped the last row (worse on Windows). */}
+      <TerminalControl sessionId={perfSessionId} />
+      {perfSessionId && (
+        <div className="absolute bottom-1 right-3 z-10 flex items-center gap-1.5">
+          {terminalErrorHint && (
+            <div className="flex items-center gap-1 rounded-md border border-rose-500/40 bg-rose-500/15 px-2 py-0.5 text-[10px] font-medium text-rose-200 shadow-lg animate-fade-in">
+              <button
+                type="button"
+                data-testid="terminal-fix-error-btn"
+                className="inline-flex items-center gap-1 hover:text-white"
+                onClick={() => {
+                  const latest = outputTrackerRef.current?.lastOutput() || terminalErrorHint;
+                  window.dispatchEvent(new CustomEvent('sshs3:ai-open'));
+                  window.dispatchEvent(
+                    new CustomEvent('sshs3:ai-attach', {
+                      detail: {
+                        sessionId: perfSessionId,
+                        text: latest,
+                        label: `${hostLabel || 'Terminal'} error output`,
+                        prompt:
+                          'Förklara varför detta fel uppstod i terminalen och föreslå rätt kommando för att lösa det.',
+                      },
+                    })
+                  );
+                  setTerminalErrorHint(null);
+                }}
+              >
+                <Sparkles className="h-3 w-3 text-rose-400" />
+                <span>✨ Förklara & fixa felet</span>
+              </button>
+              <button
+                type="button"
+                aria-label="Dismiss error hint"
+                onClick={() => setTerminalErrorHint(null)}
+                className="ml-0.5 text-rose-300/70 hover:text-white"
+              >
+                <X className="h-2.5 w-2.5" />
+              </button>
+            </div>
+          )}
+          <button
+            type="button"
+            data-testid="terminal-inline-ai-btn"
+            className="rounded border border-border-subtle bg-app-surface px-2 py-0.5 text-[10px] text-sky-400 hover:bg-app-surface-hover"
+            onClick={() => {
+              setInlineAiOpen((prev) => !prev);
+              setInlineSuggestion(null);
+              setTimeout(() => inlineAiInputRef.current?.focus(), 20);
+            }}
+          >
+            Inline AI (Ctrl+K)
+          </button>
+          <button
+            type="button"
+            className="rounded bg-app-surface px-2 py-0.5 text-[10px] text-txt-muted hover:text-txt-primary"
+            onClick={() => {
+              const text = termRef.current?.getSelection() || outputTrackerRef.current?.lastOutput();
+              window.dispatchEvent(new CustomEvent('sshs3:ai-open'));
+              if (text) {
+                window.dispatchEvent(
+                  new CustomEvent('sshs3:ai-attach', {
+                    detail: {
+                      sessionId: perfSessionId,
+                      text,
+                      label: termRef.current?.getSelection() ? 'Terminal selection' : 'Last command output',
+                    },
+                  })
+                );
+              }
+            }}
+          >
+            Attach selection to AI
+          </button>
+        </div>
+      )}
+      {inlineAiOpen && (
+        <div
+          data-testid="terminal-inline-ai"
+          className="absolute left-4 right-4 top-9 z-20 flex flex-col gap-2 rounded-xl border border-sky-500/40 bg-app-surface/95 px-3 py-2.5 text-xs text-txt-primary shadow-2xl backdrop-blur"
+        >
+          <form
+            onSubmit={async (e) => {
+              e.preventDefault();
+              const q = inlineAiPrompt.trim();
+              if (!q) return;
+              if (inlineSuggestion) {
+                // Pressing Enter when a suggestion is ready pastes it into the terminal
+                termRef.current?.paste(inlineSuggestion.command);
+                setInlineSuggestion(null);
+                setInlineAiPrompt('');
+                setInlineAiOpen(false);
+                termRef.current?.focus();
+                return;
+              }
+              setInlineLoading(true);
+              try {
+                const contextText =
+                  termRef.current?.getSelection() || outputTrackerRef.current?.lastOutput() || '';
+                const snap = await hubRequest({
+                  action: 'inline-suggest',
+                  prompt: q,
+                  sessionId: perfSessionId ?? undefined,
+                  context: contextText || undefined,
+                });
+                if (snap.inlineSuggestion) {
+                  setInlineSuggestion({
+                    command: snap.inlineSuggestion.command,
+                    explanation: snap.inlineSuggestion.explanation,
+                  });
+                }
+              } catch {
+                // Fallback to side chat if inline suggestion fails
+                window.dispatchEvent(new CustomEvent('sshs3:ai-open'));
+                window.dispatchEvent(
+                  new CustomEvent('sshs3:ai-attach', {
+                    detail: {
+                      sessionId: perfSessionId ?? undefined,
+                      prompt: q,
+                    },
+                  })
+                );
+                setInlineAiPrompt('');
+                setInlineAiOpen(false);
+              } finally {
+                setInlineLoading(false);
+              }
+            }}
+            className="flex items-center gap-2"
+          >
+            <span className="rounded bg-sky-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-sky-400 shrink-0">
+              AI · {hostLabel || 'Terminal'}
+            </span>
+            <input
+              ref={inlineAiInputRef}
+              type="text"
+              value={inlineAiPrompt}
+              onChange={(e) => {
+                setInlineAiPrompt(e.target.value);
+                if (inlineSuggestion) setInlineSuggestion(null);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') {
+                  e.preventDefault();
+                  setInlineAiOpen(false);
+                  setInlineSuggestion(null);
+                  termRef.current?.focus();
+                } else if (e.key === 'Enter' && e.ctrlKey && inlineSuggestion) {
+                  e.preventDefault();
+                  const cmd = inlineSuggestion.command.replace(/[\r\n]+$/, '');
+                  termRef.current?.paste(cmd);
+                  if (sessionIdRef.current) {
+                    outputTrackerRef.current?.recordEnter();
+                    const write = k8sTarget
+                      ? window.multissh?.k8sTerminalWrite
+                      : window.multissh?.terminalWrite;
+                    write?.(sessionIdRef.current, '\r');
+                  }
+                  setInlineSuggestion(null);
+                  setInlineAiPrompt('');
+                  setInlineAiOpen(false);
+                  termRef.current?.focus();
+                } else if (e.key === 'Enter' && e.shiftKey && inlineAiPrompt.trim()) {
+                  e.preventDefault();
+                  const q = inlineAiPrompt.trim();
+                  const contextText =
+                    termRef.current?.getSelection() || outputTrackerRef.current?.lastOutput() || '';
+                  window.dispatchEvent(new CustomEvent('sshs3:ai-open'));
+                  window.dispatchEvent(
+                    new CustomEvent('sshs3:ai-attach', {
+                      detail: {
+                        sessionId: perfSessionId ?? undefined,
+                        text: contextText || undefined,
+                        label: contextText ? `${hostLabel || 'Terminal'} context` : undefined,
+                        prompt: q,
+                      },
+                    })
+                  );
+                  setInlineSuggestion(null);
+                  setInlineAiPrompt('');
+                  setInlineAiOpen(false);
+                }
+              }}
+              placeholder="Beskriv ett kommando (Enter = föreslå kommando direkt här, Shift+Enter = öppna i AI-chatt)…"
+              className="flex-1 bg-transparent text-xs text-txt-primary outline-none placeholder:text-txt-muted"
+            />
+            <button
+              type="submit"
+              disabled={!inlineAiPrompt.trim() || inlineLoading}
+              className="rounded-md bg-sky-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-sky-500 disabled:opacity-40 shrink-0"
+            >
+              {inlineLoading ? 'Tänker…' : inlineSuggestion ? 'Klistra in (Enter)' : '⚡ Föreslå'}
+            </button>
+            <button
+              type="button"
+              disabled={!inlineAiPrompt.trim()}
+              onClick={() => {
+                const q = inlineAiPrompt.trim();
+                if (!q) return;
+                const contextText =
+                  termRef.current?.getSelection() || outputTrackerRef.current?.lastOutput() || '';
+                window.dispatchEvent(new CustomEvent('sshs3:ai-open'));
+                window.dispatchEvent(
+                  new CustomEvent('sshs3:ai-attach', {
+                    detail: {
+                      sessionId: perfSessionId ?? undefined,
+                      text: contextText || undefined,
+                      label: contextText ? `${hostLabel || 'Terminal'} context` : undefined,
+                      prompt: q,
+                    },
+                  })
+                );
+                setInlineSuggestion(null);
+                setInlineAiPrompt('');
+                setInlineAiOpen(false);
+              }}
+              className="rounded-md border border-border-subtle bg-app px-2 py-1 text-[11px] text-txt-secondary hover:text-txt-primary disabled:opacity-40 shrink-0"
+            >
+              Till Chatt
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setInlineAiOpen(false);
+                setInlineSuggestion(null);
+                termRef.current?.focus();
+              }}
+              className="rounded p-1 text-txt-muted hover:text-txt-primary"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </form>
+
+          {inlineSuggestion && (
+            <div
+              data-testid="terminal-inline-suggestion"
+              className="flex flex-col gap-1.5 rounded-lg border border-sky-500/30 bg-app px-3 py-2"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <code className="font-mono text-xs text-emerald-300 break-all">
+                  $ {inlineSuggestion.command}
+                </code>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      termRef.current?.paste(inlineSuggestion.command);
+                      setInlineSuggestion(null);
+                      setInlineAiPrompt('');
+                      setInlineAiOpen(false);
+                      termRef.current?.focus();
+                    }}
+                    className="rounded bg-app-surface px-2 py-1 text-[10px] font-medium text-txt-primary hover:bg-app-surface-hover border border-border-subtle"
+                  >
+                    Klistra in (Enter)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const cmd = inlineSuggestion.command.replace(/[\r\n]+$/, '');
+                      termRef.current?.paste(cmd);
+                      if (sessionIdRef.current) {
+                        outputTrackerRef.current?.recordEnter();
+                        const write = k8sTarget
+                          ? window.multissh?.k8sTerminalWrite
+                          : window.multissh?.terminalWrite;
+                        write?.(sessionIdRef.current, '\r');
+                      }
+                      setInlineSuggestion(null);
+                      setInlineAiPrompt('');
+                      setInlineAiOpen(false);
+                      termRef.current?.focus();
+                    }}
+                    className="rounded bg-emerald-600 px-2.5 py-1 text-[10px] font-semibold text-white hover:bg-emerald-500"
+                  >
+                    ▶ Kör direkt (Ctrl+Enter)
+                  </button>
+                </div>
+              </div>
+              <span className="text-[11px] text-txt-muted">{inlineSuggestion.explanation}</span>
+            </div>
+          )}
+        </div>
+      )}
       <div className="min-h-0 w-full flex-1 px-1.5 py-1">
         <div
           ref={containerRef}

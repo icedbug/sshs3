@@ -40,7 +40,7 @@ export class SettingsStore {
 
   public async getSettings(): Promise<AppSettings> {
     try {
-      const raw = await fs.readFile(this.filePath, 'utf-8');
+      const raw = (await fs.readFile(this.filePath, 'utf-8')).replace(/^\uFEFF/, '');
       const data = JSON.parse(raw);
       return {
         ...DEFAULT_SETTINGS,
@@ -50,7 +50,7 @@ export class SettingsStore {
       const legacyPath = this.getLegacyFilePath();
       if (legacyPath) {
         try {
-          const raw = await fs.readFile(legacyPath, 'utf-8');
+          const raw = (await fs.readFile(legacyPath, 'utf-8')).replace(/^\uFEFF/, '');
           const data = JSON.parse(raw);
           const loaded = {
             ...DEFAULT_SETTINGS,

@@ -1,3 +1,5 @@
+import type { AiHubApi } from './aiHub';
+import type { NativeHermesApi } from './nativeHermes';
 import type { UpdateState } from './update';
 import type { LogLevel } from './log';
 import type { PerfK8sResult, PerfK8sTarget, PerfSshResult } from './perf';
@@ -489,9 +491,11 @@ export interface StorageConnectConfig {
   k8sConfig?: K8sStorageConfig;
 }
 
-export interface MultiSSHApi {
+export interface MultiSSHApi extends AiHubApi {
+  nativeHermes?: NativeHermesApi;
   // Terminal
   terminalCreate(options: {
+    profileId?: string;
     config?: SSHConnectionConfig;
     local?: boolean;
     ptyOptions?: PtyOptions;

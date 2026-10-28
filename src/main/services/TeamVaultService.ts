@@ -10,6 +10,8 @@ import type {
   TeamVaultPayload,
   TeamVaultRole,
   TeamVaultStatus,
+  WorkspaceActivityEvent,
+  WorkspaceMemoryEntry,
 } from '../../shared/types/teamVault';
 import type { SSHConnectionConfig } from '../../shared/types/ssh';
 import type { FileEntry, IStorageProvider, S3Config } from '../../shared/types/storage';
@@ -912,11 +914,82 @@ export class TeamVaultService {
         s3,
         folders,
         folderIcons,
+        ...(parsed?.folderDescriptions && typeof parsed.folderDescriptions === 'object' && !Array.isArray(parsed.folderDescriptions)
+          ? { folderDescriptions: parsed.folderDescriptions }
+          : {}),
+        ...(Array.isArray(parsed?.workspaceMemories) ? { workspaceMemories: parsed.workspaceMemories } : {}),
+        ...(Array.isArray(parsed?.activityLog) ? { activityLog: parsed.activityLog } : {}),
       };
     } catch {
       // The original `createVault` payload is the literal string '{}' (pre-dating this feature),
       // not a parse error — either way, treat as empty rather than throwing.
       return { ssh: [], s3: [], folders: [], folderIcons: {} };
+    }
+  }
+
+  /** Returns the currently unlocked recipient ID, or undefined when locked. */
+  getUnlockedRecipientId(): string | undefined {
+    return this.unlockedAsRecipientId ?? undefined;
+  }
+
+  /** Appends a secret-scrubbed activity event to the shared Team Vault payload if unlocked. */
+  async recordWorkspaceActivity(event: WorkspaceActivityEvent): Promise<void> {
+    if (!this.unlockedVaultKey) return;
+    return this.queueMutation(async () => {
+      const file = await this.readFile();
+      if (!file || !this.unlockedVaultKey) return;
+      const payload = this.decryptPayload(file, this.unlockedVaultKey);
+      const existing = payload.activityLog ?? [];
+      const filtered = existing.filter((item) => item.id !== event.id);
+      filtered.push({
+        ...event,
+        actor: event.actor || this.unlockedAsRecipientId || 'member',
+      });
+      const activityLog = filtered.sort((a, b) => a.at - b.at).slice(-500);
+      await this.persistPayload(file, this.unlockedVaultKey, { ...payload, activityLog });
+    });
+  }
+
+  /** Upserts a shared AI memory or skill inside the Team Vault payload if unlocked. */
+  async saveWorkspaceMemory(entry: WorkspaceMemoryEntry): Promise<void> {
+    if (!this.unlockedVaultKey) return;
+    return this.queueMutation(async () => {
+      const file = await this.readFile();
+      if (!file || !this.unlockedVaultKey) return;
+      const payload = this.decryptPayload(file, this.unlockedVaultKey);
+      const existing = (payload.workspaceMemories ?? []).filter((m) => m.id !== entry.id);
+      existing.push({
+        ...entry,
+        author: entry.author || this.unlockedAsRecipientId || 'member',
+      });
+      await this.persistPayload(file, this.unlockedVaultKey, { ...payload, workspaceMemories: existing });
+    });
+  }
+
+  /** Deletes a shared AI memory or skill from the Team Vault payload if unlocked. */
+  async deleteWorkspaceMemory(id: string): Promise<void> {
+    if (!this.unlockedVaultKey) return;
+    return this.queueMutation(async () => {
+      const file = await this.readFile();
+      if (!file || !this.unlockedVaultKey) return;
+      const payload = this.decryptPayload(file, this.unlockedVaultKey);
+      if (!payload.workspaceMemories) return;
+      const workspaceMemories = payload.workspaceMemories.filter((m) => m.id !== id);
+      await this.persistPayload(file, this.unlockedVaultKey, { ...payload, workspaceMemories });
+    });
+  }
+
+  /** Sets or clears a shared folder's description inside the Team Vault payload if unlocked. */
+  async setTeamFolderDescription(folderPath: string, description: string | undefined): Promise<void> {
+    const trimmed = normalizeFolderPath(folderPath);
+    if (!trimmed || !this.unlockedVaultKey) return;
+    const file = await this.readFile();
+    if (file && this.unlockedVaultKey) {
+      const payload = this.decryptPayload(file, this.unlockedVaultKey);
+      const folderDescriptions = { ...(payload.folderDescriptions ?? {}) };
+      if (description?.trim()) folderDescriptions[trimmed] = description.trim();
+      else delete folderDescriptions[trimmed];
+      await this.persistPayload(file, this.unlockedVaultKey, { ...payload, folderDescriptions });
     }
   }
 
@@ -972,7 +1045,7 @@ export class TeamVaultService {
         folderIcons[remap(path)] = icon;
       }
 
-      await this.persistPayload(file, vaultKey, { ssh, s3, folders: Array.from(new Set(folders)), folderIcons });
+      await this.persistPayload(file, vaultKey, { ...payload, ssh, s3, folders: Array.from(new Set(folders)), folderIcons });
     });
   }
 
@@ -998,7 +1071,7 @@ export class TeamVaultService {
         if (!isSelfOrDescendant(path, trimmed)) folderIcons[path] = icon;
       }
 
-      await this.persistPayload(file, vaultKey, { ssh, s3, folders, folderIcons });
+      await this.persistPayload(file, vaultKey, { ...payload, ssh, s3, folders, folderIcons });
     });
   }
 
@@ -1338,6 +1411,115 @@ export class TeamVaultService {
    * `HeadObjectCommand`), compared against `lastKnownRemoteEntry` the same way `pushToRemote`'s
    * own freshness check does. Deliberately NOT run through `queueMutation` (read-only, mutates no
    * state) so a poll never has to wait behind an unrelated pending push/pull. */
+  /**
+   * Cryptographically verifies and merges concurrent local & remote Team Vault payloads
+   * (SSH/S3 profiles, folders, shared AI memories, and terminal activity logs) when
+   * multiple teammates are working simultaneously while the vault is unlocked.
+   */
+  async mergeWithRemote(provider: IStorageProvider, remoteBasePath = ''): Promise<boolean> {
+    if (!this.unlockedVaultKey || !this.unlockedAsRecipientId) return false;
+    return this.queueMutation(async () => {
+      const localFile = await this.readFile();
+      if (!localFile || !this.unlockedVaultKey || !this.unlockedAsRecipientId) return false;
+      const remotePath = this.remoteVaultPath(remoteBasePath);
+      const current = await this.statOrNull(provider, remotePath);
+      if (!current) return false;
+
+      const remoteFile = await this.readRemoteVaultFile(provider, remotePath);
+      if (remoteFile.vaultId !== localFile.vaultId) {
+        throw new TeamVaultForeignVaultError();
+      }
+      this.assertNoAgeRecipientTampering(localFile, remoteFile);
+      if (remoteFile.accessHeader.length < localFile.accessHeader.length) {
+        return false;
+      }
+      const expectedMac = this.cryptoService.computeAccessHeaderMac(
+        this.unlockedVaultKey,
+        remoteFile.vaultId,
+        remoteFile.revision,
+        remoteFile.vaultName ?? '',
+        remoteFile.accessHeader,
+        remoteFile.recovery
+      );
+      if (expectedMac !== remoteFile.accessHeaderMac) {
+        throw new TeamVaultHeaderIntegrityError();
+      }
+
+      const localPayload = this.decryptPayload(localFile, this.unlockedVaultKey);
+      const remotePayload = this.decryptPayload(remoteFile, this.unlockedVaultKey);
+
+      const mergeByUpdatedAt = <T extends { id: string; updatedAt?: string | number }>(a: T[], b: T[]): T[] => {
+        const map = new Map<string, T>();
+        for (const item of a) map.set(item.id, item);
+        for (const item of b) {
+          const prev = map.get(item.id);
+          if (!prev) {
+            map.set(item.id, item);
+            continue;
+          }
+          const tPrev = typeof prev.updatedAt === 'number' ? prev.updatedAt : Date.parse(String(prev.updatedAt || '')) || 0;
+          const tNext = typeof item.updatedAt === 'number' ? item.updatedAt : Date.parse(String(item.updatedAt || '')) || 0;
+          if (tNext >= tPrev) {
+            map.set(item.id, item);
+          }
+        }
+        return Array.from(map.values());
+      };
+
+      const activityMap = new Map<string, WorkspaceActivityEvent>();
+      for (const evt of remotePayload.activityLog ?? []) activityMap.set(evt.id, evt);
+      for (const evt of localPayload.activityLog ?? []) activityMap.set(evt.id, evt);
+      const mergedActivity = Array.from(activityMap.values())
+        .sort((x, y) => x.at - y.at)
+        .slice(-500);
+
+      const mergedPayload: TeamVaultPayload = {
+        ssh: mergeByUpdatedAt(remotePayload.ssh ?? [], localPayload.ssh ?? []),
+        s3: mergeByUpdatedAt(remotePayload.s3 ?? [], localPayload.s3 ?? []),
+        folders: Array.from(new Set([...(remotePayload.folders ?? []), ...(localPayload.folders ?? [])])),
+        folderIcons: { ...(remotePayload.folderIcons ?? {}), ...(localPayload.folderIcons ?? {}) },
+        folderDescriptions: { ...(remotePayload.folderDescriptions ?? {}), ...(localPayload.folderDescriptions ?? {}) },
+        workspaceMemories: mergeByUpdatedAt(remotePayload.workspaceMemories ?? [], localPayload.workspaceMemories ?? []),
+        activityLog: mergedActivity,
+      };
+
+      const newRevision = Math.max(localFile.revision, remoteFile.revision) + 1;
+      const mergedHeader =
+        remoteFile.accessHeader.length >= localFile.accessHeader.length
+          ? remoteFile.accessHeader
+          : localFile.accessHeader;
+      const mergedVaultName = localFile.vaultName ?? remoteFile.vaultName;
+      const updated: TeamVaultFile = {
+        ...localFile,
+        vaultName: mergedVaultName,
+        revision: newRevision,
+        updatedAt: new Date().toISOString(),
+        updatedBy: this.unlockedAsRecipientId,
+        accessHeader: mergedHeader,
+        encryptedPayload: this.cryptoService.encryptPayload(
+          this.unlockedVaultKey,
+          localFile.vaultId,
+          localFile.formatVersion,
+          JSON.stringify(mergedPayload)
+        ),
+        accessHeaderMac: this.cryptoService.computeAccessHeaderMac(
+          this.unlockedVaultKey,
+          localFile.vaultId,
+          newRevision,
+          mergedVaultName ?? '',
+          mergedHeader,
+          localFile.recovery
+        ),
+      };
+
+      await this.writeFile(updated);
+      await this.writeProviderFile(provider, remotePath, Buffer.from(JSON.stringify(updated), 'utf-8'));
+      this.lastKnownRemoteEntry = await this.statOrNull(provider, remotePath);
+      this.lastSyncedRevision = newRevision;
+      return true;
+    });
+  }
+
   async hasRemoteChangedSinceLastSync(provider: IStorageProvider, remoteBasePath = ''): Promise<boolean> {
     const remotePath = this.remoteVaultPath(remoteBasePath);
     const current = await this.statOrNull(provider, remotePath);

@@ -357,7 +357,11 @@ function joinById<T extends { id: string }>(topologyHalves: Partial<T>[], creden
   return results;
 }
 
+import type { WorkspaceActivityEvent, WorkspaceMemoryEntry } from '../../shared/types/teamVault';
+
 interface TopologyPayload {
+  workspaceMemories?: WorkspaceMemoryEntry[];
+  activityLog?: WorkspaceActivityEvent[];
   ssh: Partial<SSHConnectionConfig>[];
   s3: Partial<S3Config>[];
 }
@@ -619,6 +623,16 @@ export class ProfileSyncService {
   private sshConfigWriteQueue: Promise<unknown> = Promise.resolve();
   /** Called after every automatic sync of the managed ~/.ssh/config block (also after a remote pull). */
   public onLocalSshConfigSynced?: () => void;
+  public workspaceStateProvider?: {
+    getState: () => Promise<{
+      workspaceMemories?: TopologyPayload['workspaceMemories'];
+      activityLog?: TopologyPayload['activityLog'];
+    }>;
+    applyRemoteState: (state: {
+      workspaceMemories?: TopologyPayload['workspaceMemories'];
+      activityLog?: TopologyPayload['activityLog'];
+    }) => Promise<boolean>;
+  };
 
   constructor(
     private readonly profileStore: ProfileStore,
@@ -719,7 +733,10 @@ export class ProfileSyncService {
     const sshSplit = profiles.ssh.map((item) => splitFields(item, SSH_FIELD_SPLIT));
     const s3Split = profiles.s3.map((item) => splitFields(item, S3_FIELD_SPLIT));
 
+    const wsState = await this.workspaceStateProvider?.getState().catch(() => null);
     const topologyPayload: TopologyPayload = {
+      ...(wsState?.workspaceMemories?.length ? { workspaceMemories: wsState.workspaceMemories } : {}),
+      ...(wsState?.activityLog?.length ? { activityLog: wsState.activityLog } : {}),
       ssh: sshSplit.map((s) => s.topology),
       s3: s3Split.map((s) => s.topology),
     };
@@ -825,6 +842,17 @@ export class ProfileSyncService {
       const sshResult = mergeRecords(local.ssh, remoteSsh);
       const s3Result = mergeRecords(local.s3, remoteS3);
 
+      if (this.workspaceStateProvider && (topology.workspaceMemories?.length || topology.activityLog?.length)) {
+        const wsChanged = await this.workspaceStateProvider
+          .applyRemoteState({
+            workspaceMemories: topology.workspaceMemories,
+            activityLog: topology.activityLog,
+          })
+          .catch(() => false);
+        if (wsChanged && !changedCategories.includes('topology')) {
+          changedCategories.push('topology');
+        }
+      }
       if (sshResult.changed || s3Result.changed) {
         const merged: ProfilesData = { ssh: sshResult.merged, s3: s3Result.merged };
         await this.profileStore.replaceAll(merged);

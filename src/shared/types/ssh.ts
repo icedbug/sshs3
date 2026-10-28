@@ -103,6 +103,18 @@ export interface SSHConnectionConfig {
   maxReconnectAttempts?: number;
   /** Initial delay in ms before reconnection attempts (default: 2000ms). */
   reconnectDelayMs?: number;
+  /** Shared Workspace description of what this VM/server/cluster does. */
+  description?: string;
+  /** Cluster name this node belongs to (e.g. 'k8s-eu-north-1', 'Proxmox-Prod', 'Postgres-HA'). */
+  cluster?: string;
+  /** Node role inside the cluster (e.g. 'control-plane', 'worker-node', 'gpu-node', 'ingress', 'primary-db', 'replica-db'). */
+  nodeRole?: string;
+  /** Infrastructure role (e.g. 'web', 'database', 'proxy', 'k8s', 'worker', 'bastion', 'storage'). */
+  role?: string;
+  /** Services or tags running on this host (e.g. ['nginx', 'docker', 'postgres']). */
+  tags?: string[];
+  /** Team member / user who last updated this profile's metadata. */
+  updatedBy?: string;
 }
 
 export interface DetectedSmartcardLib {
@@ -179,6 +191,9 @@ export interface GeneratedFido2Key {
 export type LocalShellType = 'default' | 'cmd' | 'powershell' | 'pwsh' | 'wsl';
 
 export interface PtyOptions {
+  /** Host-selected executable and args for dedicated jobs. */
+  shellBinary?: string;
+  shellArgs?: string[];
   cols?: number; // default 80
   rows?: number; // default 24
   cwd?: string;

@@ -10,7 +10,7 @@ import type { IpcBridge } from '../IpcBridge';
 /** The part of IpcBridge this handler group may use. */
 export type ProfileHost = Pick<
   IpcBridge,
-  'profileStore' | 'profileSyncService' | 'registerHandler' | 'scheduleAutoSync' | 'storageRegistry'
+  'aiHub' | 'profileStore' | 'profileSyncService' | 'registerHandler' | 'scheduleAutoSync' | 'storageRegistry'
 >;
 
 export function registerProfileHandlers(bridge: ProfileHost): void {
@@ -26,6 +26,7 @@ export function registerProfileHandlers(bridge: ProfileHost): void {
       await bridge.storageRegistry.disconnect?.(`sftp-${config.id}`);
       bridge.scheduleAutoSync();
       void bridge.profileSyncService.autoSyncLocalSshConfig();
+      bridge.aiHub?.changed();
     }
   );
 
@@ -36,6 +37,7 @@ export function registerProfileHandlers(bridge: ProfileHost): void {
       await bridge.storageRegistry.disconnect?.(`sftp-${id}`);
       bridge.scheduleAutoSync();
       void bridge.profileSyncService.autoSyncLocalSshConfig();
+      bridge.aiHub?.changed();
     }
   );
 
@@ -179,6 +181,7 @@ export function registerProfileHandlers(bridge: ProfileHost): void {
       bridge.scheduleAutoSync();
       if (sshList.length > 0) {
         void bridge.profileSyncService.autoSyncLocalSshConfig();
+      bridge.aiHub?.changed();
       }
       return { count };
     }

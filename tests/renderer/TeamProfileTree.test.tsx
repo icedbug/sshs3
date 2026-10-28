@@ -4,7 +4,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, within } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import { TeamProfileTree } from '../../src/renderer/src/components/ConnectionModal/TeamProfileTree';
-import { buildTeamFolderTree } from '../../src/renderer/src/components/ConnectionModal/teamProfileTree';
+import { buildTeamFolderTree } from '../../src/renderer/src/components/ConnectionModal/teamProfileTreeModel';
 
 interface P {
   id: string;

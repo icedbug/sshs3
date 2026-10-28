@@ -1,4 +1,10 @@
 node_modules/
+.npm-cache/
+build-resources/hermes/
+build-resources/hermes-native-runtime/
+build-resources/.hermes-runtime-*/
+build-resources/.hermes-previous-*/
+build-resources/hermes-desktop/
 dist/
 dist-electron/
 release/
@@ -21,3 +27,7 @@ GEMINI.md
 
 # Test coverage output
 coverage/
+
+# Bundled VcXsrv runtime is downloaded for packaging
+build-resources/vcxsrv/*
+!build-resources/vcxsrv/.gitkeep

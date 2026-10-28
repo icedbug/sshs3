@@ -1,4 +1,6 @@
 import crypto from 'node:crypto';
+import type { HubService } from './ai/hub/HubService';
+import { HUB_CHANNEL, type HubRequest } from '../shared/types/aiHub';
 import { ipcMain as electronIpcMain } from 'electron';
 import type { IpcMain } from 'electron';
 import { SSHPtyManager, type InternalSSHPtySession } from './ssh/SSHPtyManager';
@@ -130,6 +132,7 @@ export interface IpcBridgeOptions {
 }
 
 export class IpcBridge {
+  public aiHub?: HubService;
   private ipcMain: IpcMain;
   public readonly sshPtyManager: SSHPtyManager;
   public readonly storageRegistry: StorageRegistry;
@@ -316,6 +319,10 @@ export class IpcBridge {
   }
 
   public register(): void {
+    this.registerHandler(HUB_CHANNEL, async (_event, request: HubRequest) => {
+      if (!this.aiHub) throw new Error('AI Hub unavailable');
+      return this.aiHub.request(request);
+    });
     registerTerminalHandlers(this);
     registerSmartcardHandlers(this);
     registerStorageHandlers(this);
@@ -787,6 +794,7 @@ export class IpcBridge {
         await this.profileSyncService.pushToRemote(provider, config.remoteBasePath ?? '');
         await this.syncConfigStore.setLastSyncAt(new Date().toISOString());
         await this.pushSyncStatusToRenderer();
+      this.aiHub?.changed();
       } catch (err) {
         autosyncLog.warn('Background push failed:', err);
       }
@@ -819,7 +827,17 @@ export class IpcBridge {
           return;
         }
         const provider = await this.storageRegistry.getOrCreate(config.target);
-        await this.teamVaultService.pushToRemote(provider, config.remoteBasePath ?? '');
+        try {
+          await this.teamVaultService.pushToRemote(provider, config.remoteBasePath ?? '');
+        } catch (pushErr: any) {
+          if (pushErr?.name === 'TeamVaultSyncConflictError' && this.teamVaultService.isUnlocked()) {
+            const merged = await this.teamVaultService.mergeWithRemote(provider, config.remoteBasePath ?? '');
+            if (merged) this.aiHub?.changed();
+            else throw pushErr;
+          } else {
+            throw pushErr;
+          }
+        }
         await this.teamVaultConfigStore.setLastSyncAt(new Date().toISOString());
       } catch (err) {
         autosyncLog.warn('Team Vault background push failed:', err);
@@ -870,6 +888,7 @@ export class IpcBridge {
         );
       }
       await this.pushSyncStatusToRenderer();
+      this.aiHub?.changed();
     } catch (err) {
       autosyncLog.warn('Background pull failed:', err);
     }
@@ -937,6 +956,7 @@ export class IpcBridge {
       }
 
       await this.teamVaultService.pullFromRemote(provider, remoteBasePath);
+      this.aiHub?.changed();
       await this.teamVaultConfigStore.setLastSyncAt(new Date().toISOString());
       if (webContents && !webContents.isDestroyed?.()) {
         webContents.send(IPC_CHANNELS.TEAM_VAULT_AUTO_PULLED);
@@ -1253,6 +1273,7 @@ export class IpcBridge {
 
   private setupEventListeners(): void {
     this.onPtyData = ({ sessionId, data }) => {
+      const displayData = this.aiHub ? this.aiHub.terminals.feed(sessionId, data) : data;
       if (sessionId && this.activePresenceSessions.has(sessionId)) {
         this.activePresenceSessions.delete(sessionId);
         const webContents = this.getWebContents();
@@ -1263,12 +1284,13 @@ export class IpcBridge {
       }
       const webContents = this.getWebContents();
       if (webContents && !webContents.isDestroyed?.()) {
-        webContents.send(IPC_CHANNELS.TERMINAL_DATA, sessionId, data);
+        if (displayData) webContents.send(IPC_CHANNELS.TERMINAL_DATA, sessionId, displayData);
       }
     };
     this.sshPtyManager.on('data', this.onPtyData);
 
     this.onPtyExit = ({ sessionId, exitCode, signal }) => {
+      this.aiHub?.terminals.invalidate(sessionId, 'Terminal exited', true);
       if (sessionId && this.activePresenceSessions.has(sessionId)) {
         this.activePresenceSessions.delete(sessionId);
         const webContents = this.getWebContents();
@@ -1302,6 +1324,7 @@ export class IpcBridge {
     this.sshPtyManager.on('exit', this.onPtyExit);
 
     this.onPtyAskpass = ({ sessionId, prompt, kind, context, retry, callback }) => {
+      if (sessionId) this.aiHub?.terminals.invalidate(sessionId, 'Authentication requires user interaction');
       const id = crypto.randomUUID();
       this.pendingAskpass.set(id, { sessionId, callback });
       if (sessionId) {
@@ -1339,6 +1362,7 @@ export class IpcBridge {
     this.sshPtyManager.on('presence', this.onPtyPresence);
 
     this.sshPtyManager.on('reconnecting', ({ sessionId, attempt, maxAttempts }) => {
+      this.aiHub?.terminals.invalidate(sessionId, 'Connection lost or reconnecting');
       const webContents = this.getWebContents();
       if (webContents && !webContents.isDestroyed?.()) {
         webContents.send(IPC_CHANNELS.TERMINAL_RECONNECTING, sessionId, { attempt, maxAttempts });
@@ -1354,14 +1378,16 @@ export class IpcBridge {
     this.transferQueue.on('progress', this.onTransferProgress);
 
     this.onK8sTerminalData = ({ sessionId, data }) => {
+      const displayData = this.aiHub ? this.aiHub.terminals.feed(sessionId, data) : data;
       const webContents = this.getWebContents();
       if (webContents && !webContents.isDestroyed?.()) {
-        webContents.send(IPC_CHANNELS.K8S_TERMINAL_DATA, sessionId, data);
+        if (displayData) webContents.send(IPC_CHANNELS.K8S_TERMINAL_DATA, sessionId, displayData);
       }
     };
     this.k8sTerminalManager.on('data', this.onK8sTerminalData);
 
     this.onK8sTerminalExit = ({ sessionId, status }) => {
+      this.aiHub?.terminals.invalidate(sessionId, 'Kubernetes terminal exited', true);
       const webContents = this.getWebContents();
       if (webContents && !webContents.isDestroyed?.()) {
         webContents.send(IPC_CHANNELS.K8S_TERMINAL_EXIT, sessionId, { status });
@@ -1445,6 +1471,7 @@ export class IpcBridge {
   }
 
   public async dispose(): Promise<void> {
+    await this.aiHub?.dispose();
     this.updateService?.dispose();
 
     for (const channel of this.handlers) {

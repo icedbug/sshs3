@@ -72,7 +72,7 @@ export class ProfileStore {
    */
   public async getProfilesIncludingTombstones(): Promise<ProfilesData> {
     try {
-      const raw = await fs.readFile(this.filePath, 'utf-8');
+      const raw = (await fs.readFile(this.filePath, 'utf-8')).replace(/^\uFEFF/, '');
       const data = JSON.parse(raw);
       const ssh: SSHConnectionConfig[] = Array.isArray(data.ssh) ? data.ssh : [];
       const s3: S3Config[] = Array.isArray(data.s3) ? data.s3 : [];

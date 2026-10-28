@@ -242,6 +242,7 @@ export class InternalSSHPtySession implements SSHPtySession {
 
   public resize(cols: number, rows: number): void {
     if (!this.disposed) {
+      if (cols === this.cols && rows === this.rows) return;
       this.cols = cols;
       this.rows = rows;
       this.pty.resize(cols, rows);
@@ -480,6 +481,9 @@ export class SSHPtyManager extends EventEmitter {
       ...SmartcardDetector.buildProxyEnv(config),
       ...(options?.env || {}),
     };
+    // The native agent's host capability is never an environment credential for a PTY.
+    delete env.SSHS3_NATIVE_TOOL_KEY;
+    delete env.SSHS3_NATIVE_TOOL_URL;
 
     if (config.agentPath) {
       env.SSH_AUTH_SOCK = config.agentPath;
@@ -606,6 +610,8 @@ export class SSHPtyManager extends EventEmitter {
         ...SmartcardDetector.buildProxyEnv(config),
         ...(options?.env || {}),
       };
+      delete env.SSHS3_NATIVE_TOOL_KEY;
+      delete env.SSHS3_NATIVE_TOOL_URL;
 
       if (config.agentPath) {
         env.SSH_AUTH_SOCK = config.agentPath;
@@ -700,8 +706,8 @@ export class SSHPtyManager extends EventEmitter {
     const rows = options?.rows ?? 24;
     const cwd = options?.cwd ?? (process.env.HOME || process.env.USERPROFILE || process.cwd());
 
-    const shellBinary = resolveLocalShellBinary(options?.shellType);
-    const args: string[] = [];
+    const shellBinary = options?.shellBinary ?? resolveLocalShellBinary(options?.shellType);
+    const args: string[] = [...(options?.shellArgs ?? [])];
     if (process.platform === 'win32' && options?.shellType === 'wsl' && options?.wslDistro) {
       args.push('-d', options.wslDistro);
     }
@@ -710,6 +716,8 @@ export class SSHPtyManager extends EventEmitter {
       ...(process.env as Record<string, string>),
       TERM: 'xterm-256color',
     };
+    delete env.SSHS3_NATIVE_TOOL_KEY;
+    delete env.SSHS3_NATIVE_TOOL_URL;
 
     const settings = await this.settingsStore?.getSettings().catch(() => null);
     const agentMode = settings?.localTerminalAgentMode ?? 'auto';
@@ -733,6 +741,8 @@ export class SSHPtyManager extends EventEmitter {
     }
 
     Object.assign(env, options?.env || {});
+    delete env.SSHS3_NATIVE_TOOL_KEY;
+    delete env.SSHS3_NATIVE_TOOL_URL;
     if (agentMode === 'disabled') {
       delete env.SSH_AUTH_SOCK;
       delete env.SSH_AGENT_PID;

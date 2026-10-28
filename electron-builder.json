@@ -10,6 +10,48 @@
     "package.json"
   ],
   "icon": "build/icon.png",
+  "extraResources": [
+    {
+      "from": "build-resources/hermes-desktop",
+      "to": "hermes-desktop",
+      "filter": [
+        "source-pin.json",
+        "LICENSE",
+        "source/**",
+        "!source/tests/**",
+        "!source/tests-js/**",
+        "!source/website/**",
+        "!source/evals/**",
+        "!source/.github/**",
+        "!source/nix/**",
+        "!source/docker/**",
+        "!source/apps/desktop/node_modules/**",
+        "!source/apps/desktop/src/**",
+        "!source/apps/desktop/electron/**",
+        "!source/apps/desktop/scripts/**",
+        "!source/apps/desktop/build/**",
+        "!source/**/__pycache__/**",
+        "!source/**/*.test.*",
+        "!source/**/*.spec.*",
+        "!source/**/*.tsbuildinfo",
+        "!source/node_modules/**",
+        "source/node_modules{,/}",
+        "source/node_modules/node-pty/**",
+        "source/node_modules/get-windows/**"
+      ]
+    },
+    {
+      "from": "build-resources/hermes-native-runtime",
+      "to": "hermes",
+      "filter": [
+        "**/*"
+      ]
+    },
+    {
+      "from": "build/icon.png",
+      "to": "ai-hub-icon.png"
+    }
+  ],
   "linux": {
     "target": [
       "AppImage",

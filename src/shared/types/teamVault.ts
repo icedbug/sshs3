@@ -3,6 +3,40 @@ import type { S3Config } from './storage';
 
 export type TeamVaultRole = 'admin' | 'member';
 
+/** Shared team activity event synced across the workspace so all teammates and the AI know who changed what on which VM/cluster. */
+export interface WorkspaceActivityEvent {
+  id: string;
+  profileId?: string;
+  targetLabel: string;
+  actor: string;
+  kind:
+    | 'config-edit'
+    | 'service-action'
+    | 'service'
+    | 'package-change'
+    | 'deploy'
+    | 'command'
+    | 'ai-action'
+    | 'profile-update'
+    | 'note';
+  summary: string;
+  commandOrPath?: string;
+  detail?: string;
+  details?: string;
+  at: number;
+}
+
+/** Shared team AI memory / runbook / server knowledge entry synced inside TeamVaultPayload. */
+export interface WorkspaceMemoryEntry {
+  id: string;
+  kind: 'memory' | 'skill';
+  scope: string;
+  title: string;
+  text: string;
+  author?: string;
+  updatedAt: number;
+}
+
 /** The decrypted shape of `TeamVaultFile.encryptedPayload` — reuses the same domain models as
  * local profiles (`ProfileStore`'s `SSHConnectionConfig`/`S3Config`), per docs/team-vault-plan.md
  * §3's decision to avoid a third profile representation. Every field is shared as-is, including
@@ -34,6 +68,12 @@ export interface TeamVaultPayload {
    * same self+descendant keys). Absent on a payload written before this field existed; treat as
    * `{}`. */
   folderIcons?: Record<string, string>;
+  /** Optional descriptions for shared project/cluster folders. */
+  folderDescriptions?: Record<string, string>;
+  /** Shared AI memories, server facts, and skills across the workspace. */
+  workspaceMemories?: WorkspaceMemoryEntry[];
+  /** Shared activity & configuration change log across team members. */
+  activityLog?: WorkspaceActivityEvent[];
 }
 
 /** The fixed set of icons a Team Vault folder can be given (`TeamVaultPayload.folderIcons`) —

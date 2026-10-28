@@ -5,7 +5,7 @@ import {
   collectTeamFolderSuggestions,
   findFolderNode,
   flattenTeamFolderTree,
-} from '../../src/renderer/src/components/ConnectionModal/teamProfileTree';
+} from '../../src/renderer/src/components/ConnectionModal/teamProfileTreeModel';
 import type { SSHConnectionConfig } from '../../src/shared/types/ssh';
 
 const ssh = (id: string, group?: string): SSHConnectionConfig =>

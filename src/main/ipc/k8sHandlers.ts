@@ -11,6 +11,7 @@ export type K8sHost = Pick<
   IpcBridge,
   'getWebContents' | 'k8sDebugService' | 'k8sDiscoveryService' | 'k8sLogManager' | 'k8sPortForwardManager' | 'k8sTerminalManager' | 'perfMetricsService' | 'promptForPinDirect' | 'registerHandler' | 'resolveProxyJumpConfig' | 'sshTunnelManager'
 > & {
+  aiHub?: IpcBridge['aiHub'];
   smartcard: Pick<SmartcardCoordinator, 'prepareFido2Config' | 'prepareSmartcardConfig'>;
 };
 
@@ -58,11 +59,13 @@ export function registerK8sHandlers(bridge: K8sHost): void {
       options?: { cols?: number; rows?: number }
     ): Promise<{ sessionId: string }> => {
       const sessionId = await bridge.k8sTerminalManager.createSession(target, options);
+      bridge.aiHub?.terminals.register({ id: sessionId, label: `${target.contextName}/${target.namespace}/${target.podName}:${target.containerName}`, kind: 'k8s', profileId: `k8s:${target.contextName}/${target.namespace}/${target.podName}/${target.containerName}` }, (data) => bridge.k8sTerminalManager.write(sessionId, data));
       return { sessionId };
     }
   );
 
   bridge.registerHandler(IPC_CHANNELS.K8S_TERMINAL_WRITE, async (_event, sessionId: string, data: string) => {
+    bridge.aiHub?.terminals.observeHumanInput(sessionId, data);
     bridge.k8sTerminalManager.write(sessionId, data);
   });
 
@@ -74,6 +77,7 @@ export function registerK8sHandlers(bridge: K8sHost): void {
   );
 
   bridge.registerHandler(IPC_CHANNELS.K8S_TERMINAL_KILL, async (_event, sessionId: string) => {
+    bridge.aiHub?.terminals.invalidate(sessionId, 'Terminal closed', true);
     bridge.k8sTerminalManager.kill(sessionId);
   });
 

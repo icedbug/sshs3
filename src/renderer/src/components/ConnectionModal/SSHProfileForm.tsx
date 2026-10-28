@@ -1013,6 +1013,66 @@ export const SSHProfileForm: React.FC<SSHProfileFormProps> = ({
         </div>
       )}
 
+      {/* Workspace AI, Cluster & Node Tagging */}
+      <div className="rounded-lg border border-border-subtle bg-app-surface-subtle p-3 space-y-2.5">
+        <div className="text-xs font-semibold text-txt-primary">
+          Workspace AI, Cluster &amp; Node Tagging (shared with team &amp; AI memory)
+        </div>
+        <div className="grid grid-cols-3 gap-2.5">
+          <label className="flex flex-col gap-1 text-txt-secondary">
+            <span>Cluster (optional)</span>
+            <input
+              value={config.cluster ?? ''}
+              onChange={(e) => update('cluster', e.target.value || undefined)}
+              placeholder="e.g. k8s-eu-north-1"
+              className="rounded-lg border border-border-subtle bg-app-input px-2.5 py-1.5 text-xs text-txt-primary outline-none focus:border-sky-500 placeholder-txt-muted"
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-txt-secondary">
+            <span>Node Role</span>
+            <select
+              value={config.nodeRole ?? ''}
+              onChange={(e) => update('nodeRole', e.target.value || undefined)}
+              className="rounded-lg border border-border-subtle bg-app-input px-2.5 py-1.5 text-xs text-txt-primary outline-none focus:border-sky-500"
+            >
+              <option value="">None</option>
+              <option value="control-plane">Control Plane / Master</option>
+              <option value="worker-node">Worker Node</option>
+              <option value="gpu-node">GPU / AI Node</option>
+              <option value="ingress">Ingress / Edge Proxy</option>
+              <option value="primary-db">Primary Database</option>
+              <option value="replica-db">Replica / Read Node</option>
+              <option value="storage-node">Storage / NVMe Node</option>
+              <option value="bastion">Bastion / Jump Node</option>
+            </select>
+          </label>
+          <label className="flex flex-col gap-1 text-txt-secondary">
+            <span>Tags (comma-separated)</span>
+            <input
+              value={(config.tags ?? []).join(', ')}
+              onChange={(e) => {
+                const tags = e.target.value
+                  .split(',')
+                  .map((t) => t.trim())
+                  .filter(Boolean);
+                update('tags', tags.length > 0 ? tags : undefined);
+              }}
+              placeholder="k8s, gpu-node, prod"
+              className="rounded-lg border border-border-subtle bg-app-input px-2.5 py-1.5 text-xs text-txt-primary outline-none focus:border-sky-500 placeholder-txt-muted"
+            />
+          </label>
+        </div>
+        <label className="flex flex-col gap-1 text-txt-secondary">
+          <span>What does this VM / node do? (AI &amp; Team Description)</span>
+          <input
+            value={config.description ?? ''}
+            onChange={(e) => update('description', e.target.value || undefined)}
+            placeholder="e.g. Primary Kubernetes worker running inference pods on port 8080"
+            className="rounded-lg border border-border-subtle bg-app-input px-2.5 py-1.5 text-xs text-txt-primary outline-none focus:border-sky-500 placeholder-txt-muted"
+          />
+        </label>
+      </div>
+
       {/* Advanced SSH Options */}
       <div className="rounded-lg border border-border-subtle bg-app-surface-subtle">
         <button

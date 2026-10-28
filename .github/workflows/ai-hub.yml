@@ -1,0 +1,100 @@
+name: Native Hermes AI Hub integration
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'src/main/ai/**'
+      - 'src/main/desktopEntry.ts'
+      - 'src/main/index.ts'
+      - 'src/main/IpcBridge.ts'
+      - 'src/renderer/**'
+      - 'src/preload/**'
+      - 'src/shared/types/**'
+      - 'integrations/hermes-desktop/**'
+      - 'scripts/hermes/**'
+      - 'tests/**/aiHub*'
+      - 'tests/main/nativeHermes*'
+      - 'tests/main/nativeDesktopShell*'
+      - 'tests/main/fixtures/nativeHermes*'
+      - 'tests/hermes/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'electron-builder.json'
+      - 'vite.config.ts'
+      - 'vitest.config.ts'
+      - 'tsconfig*.json'
+      - 'eslint.config.js'
+      - '.github/workflows/ai-hub.yml'
+permissions:
+  contents: read
+jobs:
+  integration:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - uses: actions/setup-python@v7
+        id: bootstrap-python
+        with:
+          # Bootstrap only: Hermes PM selects its own locked portable interpreter.
+          python-version: '3.14'
+          architecture: x64
+      - name: Install Linux shells and build tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zsh fish build-essential libx11-dev libxi-dev libportaudio2
+      - name: Install sshs3 locked dependencies
+        run: npm ci
+      - name: Stage pinned original Hermes source
+        run: npm run hermes:desktop:stage
+      - name: Build original Hermes Desktop with frozen workspace dependencies
+        run: npm run hermes:desktop:build -- --arch x64
+      - name: Assemble pinned native engine with Hermes PM
+        shell: pwsh
+        run: npm run hermes:build -- --out build-resources/hermes-native-runtime --arch x64 --python "$env:HERMES_PYTHON"
+        env:
+          HERMES_PYTHON: ${{ steps.bootstrap-python.outputs.python-path }}
+      - name: Verify matching source pins and sealed runtime health
+        shell: pwsh
+        run: |
+          $runtime = Join-Path $PWD 'build-resources/hermes-native-runtime'
+          $pin = Get-Content 'scripts/hermes/desktop-source.json' -Raw | ConvertFrom-Json
+          $desktop = Get-Content 'build-resources/hermes-desktop/source-pin.json' -Raw | ConvertFrom-Json
+          $manifest = Get-Content (Join-Path $runtime 'manifest.json') -Raw | ConvertFrom-Json
+          if ($pin.commit -ne $desktop.commit -or $pin.commit -ne $manifest.commit) { throw 'Desktop and engine revisions differ' }
+          $target = if ($IsWindows) { 'win32-x64' } else { 'linux-x64' }
+          if ($manifest.target -ne $target) { throw 'Native runtime has the wrong build target' }
+          $python = Join-Path $runtime $manifest.runtime.storePython
+          & $python -I -B -c 'import pm.install; drift = pm.install.check(); print(drift); assert not drift, drift'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Native engine tools, host ownership and presentation contracts
+        run: npx vitest run tests/main/nativeHermesTools.test.ts tests/main/nativeDesktopShell.test.ts tests/main/nativeHermesLayout.test.ts
+        env:
+          HERMES_NATIVE_CONTRACT: '1'
+          SSHS3_HERMES_NATIVE_RUNTIME_DIR: ${{ github.workspace }}/build-resources/hermes-native-runtime
+      - name: Windows sealed payload target resolver contract
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $runtime = Join-Path $PWD 'build-resources/hermes-native-runtime'
+          $manifest = Get-Content (Join-Path $runtime 'manifest.json') -Raw | ConvertFrom-Json
+          & (Join-Path $runtime $manifest.runtime.storePython) -I -B tests/hermes/runtime-target-contract.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Actual Windows or Linux PTY shell matrix
+        run: npx vitest run tests/main/aiHub.shell.integration.test.ts
+        env:
+          SSHS3_SHELL_INTEGRATION: '1'
+      - name: Existing terminal broker and storage regressions
+        run: npx vitest run tests/main/aiHub.test.ts tests/main/aiHub.files.test.ts tests/main/aiHub.config.test.ts tests/main/aiHub.lifecycle.test.ts tests/renderer/aiHub.test.tsx
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run build

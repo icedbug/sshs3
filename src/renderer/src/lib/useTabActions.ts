@@ -419,6 +419,18 @@ export function useTabActions(ctx: TabActionsContext) {
   }, [localHostname, setActiveTabId, setTabs]);
 
   const handleConnectRecentSSH = useCallback((profile: SSHConnectionConfig) => {
+    if (profile.id.startsWith('demo-')) {
+      const newId = `term-${Date.now()}`;
+      const newTab: AppTab = {
+        id: newId,
+        type: 'terminal',
+        title: `${profile.name} (Demo)`,
+        paneTree: createLeaf(`${newId}-root`, { local: true, baseHost: profile.name }),
+      };
+      setTabs((prev) => [...prev, newTab]);
+      setActiveTabId(newId);
+      return;
+    }
     const updated = { ...profile, lastUsedAt: formatDateTime(new Date()) };
     void window.multissh?.profilesSaveSSH?.(updated).catch(() => {});
     const newId = `term-${Date.now()}`;

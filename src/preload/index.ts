@@ -104,8 +104,35 @@ import type {
 } from '../shared/types/search';
 
 export const api: MultiSSHApi = {
+  nativeHermes: process.argv.includes('--sshs3-native-hermes') ? {
+    get: () => ipcRenderer.invoke('sshs3:hermes:state'),
+    set: update => ipcRenderer.invoke('sshs3:hermes:layout', update),
+    tools: () => ipcRenderer.invoke('sshs3:hermes:tools:state'),
+    selectTerminal: id => ipcRenderer.invoke('sshs3:hermes:tools:select', id),
+    arm: shell => ipcRenderer.invoke('sshs3:hermes:tools:arm', shell),
+    approve: (task, change, allowed) => ipcRenderer.invoke('sshs3:hermes:tools:approve', task, change, allowed),
+    takeover: task => ipcRenderer.invoke('sshs3:hermes:tools:takeover', task),
+    resume: task => ipcRenderer.invoke('sshs3:hermes:tools:resume', task),
+    onToolsChanged: callback => {
+      const handler = (_event: Electron.IpcRendererEvent, state: import('../shared/types/nativeHermes').NativeToolState): void => callback(state);
+      ipcRenderer.on('sshs3:hermes:tools:changed', handler);
+      return () => ipcRenderer.removeListener('sshs3:hermes:tools:changed', handler);
+    },
+    onChange: callback => {
+      const handler = (_event: Electron.IpcRendererEvent, state: import('../shared/types/nativeHermes').NativeHermesState): void => callback(state);
+      ipcRenderer.on('sshs3:hermes:changed', handler);
+      return () => ipcRenderer.removeListener('sshs3:hermes:changed', handler);
+    },
+  } : undefined,
+  aiHubRequest: (request) => ipcRenderer.invoke('ai-hub:request', request),
+  onAiHubChanged: (callback) => {
+    const listener = (): void => callback();
+    ipcRenderer.on('ai-hub:changed', listener);
+    return () => ipcRenderer.removeListener('ai-hub:changed', listener);
+  },
   // Terminal
   terminalCreate: (options: {
+    profileId?: string;
     config?: SSHConnectionConfig;
     local?: boolean;
     ptyOptions?: PtyOptions;
