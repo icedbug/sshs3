@@ -93,13 +93,18 @@ export interface HubHost {
     deletedServerIds: Record<string, string>,
   ): Promise<void>;
   s3ProviderFactory?: (cfg: S3WorkspaceConfig) => IStorageProvider;
+  aiConfigFilePath?: string;
+  s3ConfigFilePath?: string;
+  defaultActorName?: string;
+  peerPresenceProvider?: () => import("../../../shared/types/aiHub").WorkspacePresenceEntry[];
+  onSharedWorkspaceChanged?: () => void;
 }
 
 /** The Electron main process is the per-user background owner; renderer lifetimes confer no authority. */
 export class HubService {
   readonly terminals = new TerminalRegistry();
   readonly store: HubStore;
-  readonly config = new AiConfigStore();
+  readonly config: AiConfigStore;
   readonly context: ContextService;
   readonly broker: ToolBroker;
   readonly s3Workspace: S3WorkspaceSyncService;
@@ -135,6 +140,7 @@ export class HubService {
     directory = path.join(app.getPath("userData"), "ai-hub"),
   ) {
     this.store = new HubStore(path.join(directory, "hub.json"));
+    this.config = new AiConfigStore(host.aiConfigFilePath);
     this.context = new ContextService(
       this.store,
       this.terminals,
@@ -172,7 +178,7 @@ export class HubService {
       changed: () => this.changed(),
     });
     this.s3Workspace = new S3WorkspaceSyncService(
-      path.join(directory, "s3-workspace.json"),
+      host.s3ConfigFilePath ?? path.join(directory, "s3-workspace.json"),
       {
         getLocalState: async () => {
           const actor = await this.resolveActorName();
@@ -388,9 +394,35 @@ export class HubService {
       workspaceServers: extra.workspaceServers ?? [],
       inlineSuggestion: this.inlineSuggestion,
       s3Workspace: this.s3Workspace.getStatus(),
-      presence: this.s3Workspace.getPresence(),
+      presence: this.mergePresence(
+        this.s3Workspace.getPresence(),
+        this.host.peerPresenceProvider?.() ?? [],
+      ),
       localOverrides: { ...(this.store.data.localOverrides ?? {}) },
     };
+  }
+
+  private mergePresence(
+    s3Presence: import("../../../shared/types/aiHub").WorkspacePresenceEntry[],
+    peerPresence: import("../../../shared/types/aiHub").WorkspacePresenceEntry[],
+  ): import("../../../shared/types/aiHub").WorkspacePresenceEntry[] {
+    const map = new Map<
+      string,
+      import("../../../shared/types/aiHub").WorkspacePresenceEntry
+    >();
+    for (const p of s3Presence) {
+      if (p?.actor) map.set(p.actor, p);
+    }
+    for (const p of peerPresence) {
+      if (!p?.actor) continue;
+      const existing = map.get(p.actor);
+      if (!existing || p.updatedAt >= existing.updatedAt) {
+        map.set(p.actor, p);
+      }
+    }
+    return Array.from(map.values()).sort((a, b) =>
+      a.actor.localeCompare(b.actor),
+    );
   }
 
   async request(request: HubRequest): Promise<HubSnapshot> {
@@ -1300,10 +1332,13 @@ export class HubService {
     try {
       const view = await this.config.getView();
       if (view.actorName?.trim()) return view.actorName.trim();
+      if (this.host.defaultActorName?.trim())
+        return this.host.defaultActorName.trim();
       if (view.codexAccountEmail?.trim())
         return view.codexAccountEmail.split("@")[0];
     } catch {
-      // Fallback below
+      if (this.host.defaultActorName?.trim())
+        return this.host.defaultActorName.trim();
     }
     try {
       const teamData = await this.host.getTeamWorkspaceData?.();
@@ -1311,6 +1346,8 @@ export class HubService {
     } catch {
       // Fallback below
     }
+    if (this.host.defaultActorName?.trim())
+      return this.host.defaultActorName.trim();
     try {
       return os.userInfo().username || "user";
     } catch {

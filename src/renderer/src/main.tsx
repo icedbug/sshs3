@@ -6,8 +6,11 @@ import '@fontsource/fira-code/400.css'
 import '@fontsource/fira-code/700.css'
 import App from './App'
 import './index.css'
+import { ensureWebClientBridgeInstalled } from './lib/webClientBridge'
+import { WebAuthGate } from './components/WebAuthGate'
 import { installGlobalErrorLogging } from './lib/log'
 
+ensureWebClientBridgeInstalled()
 installGlobalErrorLogging()
 
 // Guarantee dropEffect is set to 'copy' during drag operations across the entire application window
@@ -27,8 +30,9 @@ const rootElement = document.getElementById('root')
 if (rootElement) {
   ReactDOM.createRoot(rootElement).render(
     <React.StrictMode>
-      <App />
+      <WebAuthGate>
+        <App />
+      </WebAuthGate>
     </React.StrictMode>
   )
 }
-

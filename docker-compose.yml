@@ -1,0 +1,18 @@
+services:
+  sshs3-web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sshs3-web
+    restart: unless-stopped
+    ports:
+      - "${SSHS3_WEB_PORT:-8080}:8080"
+    environment:
+      - NODE_ENV=production
+      - SSHS3_WEB_HOST=0.0.0.0
+      - SSHS3_WEB_PORT=8080
+      - SSHS3_DATA_DIR=/data
+      - SSHS3_ADMIN_USER=${SSHS3_ADMIN_USER:-}
+      - SSHS3_ADMIN_PASSWORD=${SSHS3_ADMIN_PASSWORD:-}
+    volumes:
+      - ./sshs3-data:/data

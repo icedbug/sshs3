@@ -20,17 +20,33 @@ import {
   upsertDemoServer,
 } from "./demoWorkspace";
 
+export interface CreateHubOptions {
+  hubDirectory?: string;
+  aiConfigFilePath?: string;
+  s3ConfigFilePath?: string;
+  defaultActorName?: string;
+  peerPresenceProvider?: HubHost["peerPresenceProvider"];
+  onSharedWorkspaceChanged?: () => void;
+}
+
 export function createHub(
   bridge: IpcBridge,
   lifecycle: Pick<HubHost, "backgroundChanged" | "show">,
+  options?: CreateHubOptions,
 ): HubService {
   const hub: HubService = new HubService({
     ...lifecycle,
+    aiConfigFilePath: options?.aiConfigFilePath,
+    s3ConfigFilePath: options?.s3ConfigFilePath,
+    defaultActorName: options?.defaultActorName,
+    peerPresenceProvider: options?.peerPresenceProvider,
+    onSharedWorkspaceChanged: options?.onSharedWorkspaceChanged,
     file: (...args) => files.invoke(...args),
     changed: () => {
       const contents = bridge.getWebContents();
       if (contents && !contents.isDestroyed()) contents.send(HUB_CHANGED);
       if (process.env.SSHS3_NATIVE_HERMES === '1') nativeEvents.emit('toolsChanged');
+      options?.onSharedWorkspaceChanged?.();
     },
     workspaceServers: async (): Promise<WorkspaceServerSummary[]> => {
       const servers: WorkspaceServerSummary[] = [];
@@ -466,7 +482,7 @@ export function createHub(
       );
       return id;
     },
-  });
+  }, options?.hubDirectory);
   const files = new FileTools(bridge, hub.terminals, () => hub.changed());
   if (bridge.profileSyncService) {
     bridge.profileSyncService.workspaceStateProvider = {
