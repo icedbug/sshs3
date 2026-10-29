@@ -49,6 +49,7 @@ function copyOcShimCliPlugin() {
 }
 
 export default defineConfig({
+  base: './',
   plugins: [
     tailwindcss(),
     react(),

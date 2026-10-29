@@ -13,6 +13,7 @@ async function buildWeb() {
   await build({
     configFile: false,
     root: rootDir,
+    base: './',
     plugins: [tailwindcss(), react()],
     resolve: {
       alias: {
