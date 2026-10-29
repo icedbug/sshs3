@@ -17,6 +17,7 @@ export interface ToolRequest {
   text?: string;
   kind?: "memory" | "skill";
   scope?: string;
+  payload?: Record<string, unknown>;
 }
 export interface ToolDependencies {
   context(task: AgentTask, query?: string, sessionId?: string): Promise<unknown>;
@@ -26,6 +27,8 @@ export interface ToolDependencies {
     request: ToolRequest,
     authorize: (change: AgentChange) => Promise<void>,
   ): Promise<unknown>;
+  appAction?(task: AgentTask, request: ToolRequest): Promise<unknown>;
+  openLocalTerminal?(): Promise<string>;
   activity?(task: AgentTask, change: AgentChange, sessionId?: string): void;
   changed(): void;
 }
@@ -117,6 +120,11 @@ export class ToolBroker {
         request.action === "memory-save"
       )
         return await this.deps.memory(task, request);
+      if (request.action.startsWith("sshs3_") && this.deps.appAction) {
+        const res = await this.deps.appAction(task, request);
+        this.deps.changed();
+        return res;
+      }
       if (request.action === "file-read" || request.action === "file-write") {
         if (
           request.action === "file-write" &&
@@ -170,6 +178,30 @@ export class ToolBroker {
             label: byMatch.label,
           };
           if (!task.target) {
+            task.target = target;
+          }
+        }
+      }
+      if (!target) {
+        const fallbackSession = this.terminals
+          .list()
+          .find((s) => s.state !== "disconnected");
+        if (fallbackSession) {
+          target = {
+            sessionId: fallbackSession.id,
+            generation: fallbackSession.generation,
+            label: fallbackSession.label,
+          };
+          task.target = target;
+        } else if (this.deps.openLocalTerminal && task.mode !== "advice") {
+          const newSessionId = await this.deps.openLocalTerminal();
+          const created = this.terminals.get(newSessionId);
+          if (created) {
+            target = {
+              sessionId: created.id,
+              generation: created.generation,
+              label: created.label,
+            };
             task.target = target;
           }
         }

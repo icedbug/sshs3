@@ -98,6 +98,51 @@ export interface HubHost {
   defaultActorName?: string;
   peerPresenceProvider?: () => import("../../../shared/types/aiHub").WorkspacePresenceEntry[];
   onSharedWorkspaceChanged?: () => void;
+  extraAppContext?(): Promise<{
+    folders: string[];
+    s3Profiles: Array<{
+      id: string;
+      name: string;
+      endpoint?: string;
+      region?: string;
+      bucket?: string;
+      group?: string;
+    }>;
+    snippets: unknown[];
+    appSettings: Record<string, unknown>;
+  }>;
+  manageFolders?(input: {
+    operation: "create_folder" | "rename_folder" | "delete_folder";
+    folderName: string;
+    newFolderName?: string;
+  }): Promise<unknown>;
+  manageS3Profile?(input: {
+    operation: "upsert_s3_profile" | "delete_s3_profile";
+    idOrName?: string;
+    name?: string;
+    endpoint?: string;
+    region?: string;
+    bucket?: string;
+    accessKeyId?: string;
+    secretAccessKey?: string;
+    forcePathStyle?: boolean;
+    group?: string;
+  }): Promise<unknown>;
+  manageAppSettings?(input: {
+    operation:
+      | "get_state"
+      | "update_settings"
+      | "save_snippet"
+      | "delete_snippet"
+      | "open_local_terminal";
+    settings?: Record<string, unknown>;
+    snippet?: {
+      id?: string;
+      name?: string;
+      command?: string;
+      category?: string;
+    };
+  }): Promise<unknown>;
 }
 
 /** The Electron main process is the per-user background owner; renderer lifetimes confer no authority. */
@@ -171,6 +216,16 @@ export class HubService {
       file: (...args) => {
         if (!this.host.file) throw new Error("File tools unavailable");
         return this.host.file(...args);
+      },
+      appAction: (task, request) => this.handleAppAction(task, request),
+      openLocalTerminal: async () => {
+        const res = (await this.host.manageAppSettings?.({
+          operation: "open_local_terminal",
+        })) as { sessionId?: string } | undefined;
+        if (!res?.sessionId) {
+          throw new Error("Could not open a local terminal session");
+        }
+        return res.sessionId;
       },
       activity: (task, change, sessionId) => {
         void this.recordAgentChangeActivity(task, change, sessionId);
@@ -1812,11 +1867,453 @@ export class HubService {
       (a, b) => b.updatedAt - a.updatedAt,
     );
 
+    const appExtra = await this.host.extraAppContext?.().catch(() => undefined);
+
     return {
       workspaceServers,
       memories,
       activityLog,
+      folders: appExtra?.folders ?? [],
+      s3Profiles: appExtra?.s3Profiles ?? [],
+      s3TeamWorkspace: this.s3Workspace.getStatus(),
+      schedules: this.store.data.schedules ?? [],
+      snippets: appExtra?.snippets ?? [],
+      appSettings: {
+        ...(appExtra?.appSettings ?? {}),
+        aiPreferences: this.store.data.preferences,
+      },
     };
+  }
+
+  private async resolveServerTarget(
+    query?: string,
+  ): Promise<WorkspaceServerSummary | undefined> {
+    if (!query || !query.trim()) return undefined;
+    const q = query.trim().toLowerCase();
+    const extra = await this.collectExtraContext();
+    const servers = extra.workspaceServers ?? [];
+    return (
+      servers.find((s) => s.id.toLowerCase() === q) ||
+      servers.find((s) => s.name.toLowerCase() === q) ||
+      servers.find((s) => s.host.toLowerCase() === q) ||
+      servers.find(
+        (s) =>
+          s.name.toLowerCase().includes(q) || s.host.toLowerCase().includes(q),
+      )
+    );
+  }
+
+  private async handleAppAction(
+    _task: AgentTask,
+    request: import("./ToolBroker").ToolRequest,
+  ): Promise<unknown> {
+    const p = (request.payload ?? {}) as Record<string, unknown>;
+    const str = (key: string): string | undefined =>
+      typeof p[key] === "string" && (p[key] as string).trim()
+        ? (p[key] as string).trim()
+        : undefined;
+    const bool = (key: string): boolean | undefined =>
+      typeof p[key] === "boolean" ? (p[key] as boolean) : undefined;
+    const num = (key: string): number | undefined =>
+      typeof p[key] === "number" && Number.isFinite(p[key] as number)
+        ? (p[key] as number)
+        : undefined;
+    const tags = Array.isArray(p.tags)
+      ? (p.tags as unknown[])
+          .map((t) => String(t).trim())
+          .filter(Boolean)
+      : typeof p.tags === "string"
+        ? p.tags
+            .split(",")
+            .map((t) => t.trim())
+            .filter(Boolean)
+        : undefined;
+
+    switch (request.action) {
+      case "sshs3_manage_server": {
+        const op = str("operation") || "upsert";
+        const query = str("serverIdOrName") || str("id") || str("name") || str("host");
+        const existing = await this.resolveServerTarget(query);
+
+        if (op === "delete") {
+          const targetId = existing?.id || str("serverIdOrName") || str("id");
+          if (!targetId) {
+            throw new Error(`Could not find server matching "${query ?? ""}" to delete`);
+          }
+          await this.request({ action: "server-delete", profileId: targetId });
+          return {
+            ok: true,
+            operation: "delete",
+            deletedServerId: targetId,
+            deletedServerName: existing?.name ?? targetId,
+          };
+        }
+
+        const rawLocalAuth = str("localAuthType");
+        const normalizedLocalAuth: "agent" | "privateKey" | undefined =
+          rawLocalAuth === "agent"
+            ? "agent"
+            : rawLocalAuth === "key" || rawLocalAuth === "privateKey"
+              ? "privateKey"
+              : undefined;
+
+        if (op === "set_local_override") {
+          const targetId = existing?.id || str("serverIdOrName") || str("id");
+          if (!targetId) {
+            throw new Error(`Could not find server matching "${query ?? ""}"`);
+          }
+          await this.request({
+            action: "server-local-override",
+            override: {
+              profileId: targetId,
+              username: str("localUsername") ?? str("username"),
+              privateKeyPath: str("localPrivateKeyPath"),
+              authType: normalizedLocalAuth,
+            },
+          });
+          return {
+            ok: true,
+            operation: "set_local_override",
+            profileId: targetId,
+          };
+        }
+
+        if (
+          op === "update_metadata" &&
+          existing &&
+          !str("host") &&
+          !str("name") &&
+          num("port") === undefined &&
+          !str("username")
+        ) {
+          await this.request({
+            action: "server-describe",
+            profileId: existing.id,
+            shared: bool("shared") ?? existing.shared,
+            cluster: str("cluster") ?? existing.cluster,
+            nodeRole: str("nodeRole") ?? existing.nodeRole,
+            role: str("role") ?? existing.role,
+            description: str("description") ?? existing.description,
+            tags: tags ?? existing.tags,
+          });
+          return {
+            ok: true,
+            operation: "update_metadata",
+            serverId: existing.id,
+            name: existing.name,
+          };
+        }
+
+        // Default: upsert (handles both creating a new server and updating any field on an existing server)
+        const name = str("name") || existing?.name || str("host") || str("serverIdOrName");
+        const host = str("host") || existing?.host || name;
+        if (!name || !host) {
+          throw new Error("Server 'name' and 'host' are required to create or update a server");
+        }
+        const snap = await this.request({
+          action: "server-upsert",
+          server: {
+            id: existing?.id || str("id"),
+            name,
+            host,
+            port: num("port") ?? existing?.port ?? 22,
+            username: str("username") || existing?.username || "root",
+            folder: str("folder") ?? existing?.folder ?? str("cluster") ?? existing?.cluster,
+            cluster: str("cluster") ?? existing?.cluster,
+            nodeRole: str("nodeRole") ?? existing?.nodeRole,
+            role: str("role") ?? existing?.role,
+            description: str("description") ?? existing?.description,
+            tags: tags ?? existing?.tags,
+            shared: bool("shared") ?? existing?.shared ?? true,
+            localUsername: str("localUsername"),
+            localPrivateKeyPath: str("localPrivateKeyPath"),
+            localAuthType: normalizedLocalAuth,
+          },
+        });
+        const saved = (snap.workspaceServers ?? []).find(
+          (s) =>
+            (existing && s.id === existing.id) ||
+            s.name.toLowerCase() === name.toLowerCase() ||
+            s.host.toLowerCase() === host.toLowerCase(),
+        );
+        return {
+          ok: true,
+          operation: existing ? "updated" : "created",
+          server: saved ?? { name, host },
+        };
+      }
+
+      case "sshs3_manage_cluster_and_folders": {
+        const op = str("operation") || "assign_cluster";
+        if (op === "assign_cluster") {
+          const cluster = str("cluster");
+          if (!cluster) throw new Error("Cluster name is required");
+          const rawTargets = Array.isArray(p.serverIdsOrNames)
+            ? (p.serverIdsOrNames as unknown[]).map((x) => String(x).trim()).filter(Boolean)
+            : str("serverIdOrName")
+              ? [str("serverIdOrName")!]
+              : [];
+          const updated: string[] = [];
+          for (const t of rawTargets) {
+            const srv = await this.resolveServerTarget(t);
+            if (srv) {
+              await this.request({
+                action: "server-describe",
+                profileId: srv.id,
+                shared: srv.shared,
+                cluster,
+                nodeRole: str("nodeRole") ?? srv.nodeRole,
+                role: str("role") ?? srv.role,
+                description: str("description") ?? srv.description,
+                tags: tags ?? srv.tags,
+              });
+              updated.push(srv.name);
+            }
+          }
+          return {
+            ok: true,
+            operation: "assign_cluster",
+            cluster,
+            updatedServers: updated,
+          };
+        }
+        const folderName = str("folderName") || str("name") || str("cluster");
+        if (!folderName) throw new Error("folderName is required");
+        const res = await this.host.manageFolders?.({
+          operation: op as "create_folder" | "rename_folder" | "delete_folder",
+          folderName,
+          newFolderName: str("newFolderName"),
+        });
+        this.changed();
+        return { ok: true, operation: op, folderName, result: res };
+      }
+
+      case "sshs3_manage_memory_and_activity": {
+        const op = str("operation") || "save";
+        const extra = await this.collectExtraContext();
+        if (op === "list") {
+          return {
+            memories: extra.memories ?? [],
+            recentActivity: (extra.activityLog ?? []).slice(0, 30),
+          };
+        }
+        if (op === "delete") {
+          const q = (str("idOrTitle") || str("id") || str("title") || "").toLowerCase();
+          if (!q) throw new Error("idOrTitle is required to delete a memory");
+          const match = (extra.memories ?? []).find(
+            (m) => m.id.toLowerCase() === q || m.title.toLowerCase() === q || m.title.toLowerCase().includes(q),
+          );
+          const targetId = match?.id || str("idOrTitle") || str("id")!;
+          await this.request({ action: "memory-delete", id: targetId });
+          return { ok: true, operation: "delete", deletedMemoryId: targetId, title: match?.title };
+        }
+        if (op === "log_activity") {
+          const targetLabel = str("targetLabel") || str("title") || "Workspace";
+          const summary = str("summary") || str("text") || "Team note";
+          await this.request({
+            action: "activity-record",
+            event: {
+              actor: str("actor") || (await this.resolveActorName()),
+              targetLabel,
+              kind: (str("activityKind") as WorkspaceActivityEvent["kind"]) || "note",
+              summary,
+              detail: str("detail"),
+            },
+          });
+          return { ok: true, operation: "log_activity", targetLabel, summary };
+        }
+        // save memory or skill
+        const title = str("title") || str("idOrTitle") || "Workspace note";
+        const text = str("text") || str("content") || "";
+        const q = (str("idOrTitle") || title).toLowerCase();
+        const existing = (extra.memories ?? []).find(
+          (m) => m.id.toLowerCase() === q || m.title.toLowerCase() === q,
+        );
+        const entry = await this.saveMemoryInternal({
+          id: existing?.id || str("id"),
+          kind: str("kind") === "skill" ? "skill" : "memory",
+          scope: str("scope") || "workspace",
+          title,
+          text,
+        });
+        await this.store.save();
+        return { ok: true, operation: "save", entry };
+      }
+
+      case "sshs3_manage_schedule": {
+        const op = str("operation") || "list";
+        if (op === "list") {
+          return { schedules: this.store.data.schedules };
+        }
+        const q = (str("idOrTitle") || str("id") || str("title") || "").toLowerCase();
+        const existing = this.store.data.schedules.find(
+          (s) => s.id.toLowerCase() === q || s.title.toLowerCase() === q || s.title.toLowerCase().includes(q),
+        );
+        if (op === "delete") {
+          const targetId = existing?.id || str("idOrTitle") || str("id");
+          if (!targetId) throw new Error("Schedule not found");
+          await this.request({ action: "schedule-delete", id: targetId });
+          return { ok: true, operation: "delete", deletedScheduleId: targetId };
+        }
+        if (op === "toggle") {
+          if (!existing) throw new Error(`Schedule matching "${q}" not found`);
+          existing.enabled = bool("enabled") ?? !existing.enabled;
+          await this.store.save();
+          this.changed();
+          return { ok: true, operation: "toggle", schedule: existing };
+        }
+        // save / create schedule
+        const srvQuery = str("serverIdOrName") || str("profileId");
+        let profileId = "local";
+        if (srvQuery && srvQuery.toLowerCase() !== "local") {
+          const matchedSrv = await this.resolveServerTarget(srvQuery);
+          profileId = matchedSrv?.id || srvQuery;
+        } else if (existing?.profileId) {
+          profileId = existing.profileId;
+        }
+        const cfg = await this.config.getConfig();
+        const intervalMinutes = Math.max(1, Math.min(525600, Math.round(num("intervalMinutes") ?? existing?.intervalMinutes ?? 60)));
+        const defaultShell =
+          profileId === "local" && process.platform === "win32" ? "powershell" : "bash";
+        const schedule: AgentSchedule = {
+          id: existing?.id || crypto.randomUUID(),
+          title: str("title") || existing?.title || "Scheduled check",
+          prompt: str("prompt") || existing?.prompt || "Check system health",
+          profileId,
+          shell: (str("shell") as AgentSchedule["shell"]) || existing?.shell || defaultShell,
+          mode: (str("mode") as AgentSchedule["mode"]) || existing?.mode || "assisted",
+          provider: cfg.provider || "openai-codex",
+          model: cfg.model || DEFAULT_AI_MODELS["openai-codex"],
+          baseUrl: cfg.baseUrl,
+          intervalMinutes,
+          maxCommands: Math.max(1, Math.min(100, Math.round(num("maxCommands") ?? existing?.maxCommands ?? 10))),
+          maxMinutes: Math.max(1, Math.min(120, Math.round(num("maxMinutes") ?? existing?.maxMinutes ?? 10))),
+          enabled: bool("enabled") ?? existing?.enabled ?? true,
+          nextRunAt: Date.now() + intervalMinutes * 60_000,
+        };
+        await this.request({ action: "schedule-save", schedule });
+        return { ok: true, operation: "save", schedule };
+      }
+
+      case "sshs3_manage_s3_and_sync": {
+        const op = str("operation") || "status";
+        const extra = await this.collectExtraContext();
+        if (op === "status") {
+          return {
+            s3TeamWorkspace: this.s3Workspace.getStatus(),
+            s3Profiles: extra.s3Profiles ?? [],
+          };
+        }
+        if (op === "sync_now") {
+          await this.request({ action: "workspace-s3-sync-now" });
+          return {
+            ok: true,
+            operation: "sync_now",
+            s3TeamWorkspace: this.s3Workspace.getStatus(),
+          };
+        }
+        const res = await this.host.manageS3Profile?.({
+          operation: op as "upsert_s3_profile" | "delete_s3_profile",
+          idOrName: str("idOrName") || str("id") || str("name"),
+          name: str("name"),
+          endpoint: str("endpoint"),
+          region: str("region"),
+          bucket: str("bucket"),
+          accessKeyId: str("accessKeyId"),
+          secretAccessKey: str("secretAccessKey"),
+          forcePathStyle: bool("forcePathStyle"),
+          group: str("group") || str("folder"),
+        });
+        this.changed();
+        return { ok: true, operation: op, result: res };
+      }
+
+      case "sshs3_manage_app_and_settings": {
+        const op = str("operation") || "get_state";
+        if (op === "get_state") {
+          const extra = await this.collectExtraContext();
+          const aiConfig = await this.config.getView();
+          return {
+            aiConfig,
+            appSettings: extra.appSettings,
+            folders: extra.folders,
+            s3Profiles: extra.s3Profiles,
+            s3TeamWorkspace: extra.s3TeamWorkspace,
+            schedules: extra.schedules,
+            snippets: extra.snippets,
+            workspaceServersCount: (extra.workspaceServers ?? []).length,
+            workspaceServers: extra.workspaceServers,
+            openTerminals: this.terminals.list(),
+          };
+        }
+        if (op === "update_settings") {
+          if (str("actorName")) {
+            await this.config.update({ actorName: str("actorName") });
+          }
+          if (
+            bool("background") !== undefined ||
+            bool("autoStart") !== undefined ||
+            bool("inventory") !== undefined
+          ) {
+            await this.request({
+              action: "configure",
+              config: {},
+              preferences: {
+                background: bool("background") ?? this.store.data.preferences.background,
+                autoStart: bool("autoStart") ?? this.store.data.preferences.autoStart,
+                inventory: bool("inventory") ?? this.store.data.preferences.inventory,
+              },
+            });
+          }
+          const appSettingsPatch: Record<string, unknown> = {};
+          for (const k of [
+            "theme",
+            "terminalFontSize",
+            "terminalFontFamily",
+            "scrollbackLines",
+            "cursorStyle",
+            "cursorBlink",
+            "confirmBeforeQuit",
+            "copyOnSelect",
+            "rightClickPaste",
+          ]) {
+            if (p[k] !== undefined) appSettingsPatch[k] = p[k];
+          }
+          let updatedAppSettings: unknown;
+          if (Object.keys(appSettingsPatch).length > 0) {
+            updatedAppSettings = await this.host.manageAppSettings?.({
+              operation: "update_settings",
+              settings: appSettingsPatch,
+            });
+          }
+          this.changed();
+          return {
+            ok: true,
+            operation: "update_settings",
+            actorName: (await this.config.getView()).actorName,
+            aiPreferences: this.store.data.preferences,
+            appSettings: updatedAppSettings,
+          };
+        }
+        if (op === "save_snippet" || op === "delete_snippet" || op === "open_local_terminal") {
+          const res = await this.host.manageAppSettings?.({
+            operation: op,
+            snippet: {
+              id: str("snippetId") || str("id"),
+              name: str("snippetName") || str("name"),
+              command: str("snippetCommand") || str("command"),
+              category: str("snippetCategory") || str("category"),
+            },
+          });
+          this.changed();
+          return { ok: true, operation: op, result: res };
+        }
+        throw new Error(`Unsupported app settings operation: ${op}`);
+      }
+
+      default:
+        throw new Error(`Unknown sshs3 action: ${request.action}`);
+    }
   }
 
   async recordServerDeleted(id: string): Promise<void> {

@@ -39,6 +39,19 @@ export interface ExtraWorkspaceContext {
   workspaceServers?: WorkspaceServerSummary[];
   activityLog?: WorkspaceActivityEvent[];
   memories?: MemoryEntry[];
+  folders?: string[];
+  s3Profiles?: Array<{
+    id: string;
+    name: string;
+    endpoint?: string;
+    region?: string;
+    bucket?: string;
+    group?: string;
+  }>;
+  s3TeamWorkspace?: unknown;
+  schedules?: unknown[];
+  snippets?: unknown[];
+  appSettings?: Record<string, unknown>;
 }
 
 export class ContextService {
@@ -67,13 +80,34 @@ export class ContextService {
     const activitySource =
       extra?.activityLog ?? this.store.data.activityLog ?? [];
     const memorySource = extra?.memories ?? this.store.data.memories;
+    const servers = extra?.workspaceServers ?? [];
+    const clusterMap = new Map<string, string[]>();
+    for (const s of servers) {
+      if (s.cluster) {
+        const list = clusterMap.get(s.cluster) ?? [];
+        list.push(`${s.name} (${s.host}${s.nodeRole ? `, ${s.nodeRole}` : ""})`);
+        clusterMap.set(s.cluster, list);
+      }
+    }
+    const clusters = Array.from(clusterMap.entries()).map(([name, nodes]) => ({
+      cluster: name,
+      nodeCount: nodes.length,
+      nodes,
+    }));
     return {
       observedAt: Date.now(),
       terminals: allTerminals,
-      workspaceServers: (extra?.workspaceServers ?? []).filter(
+      clusters,
+      folders: extra?.folders ?? [],
+      s3Profiles: extra?.s3Profiles ?? [],
+      s3TeamWorkspace: extra?.s3TeamWorkspace ?? null,
+      schedules: extra?.schedules ?? this.store.data.schedules ?? [],
+      snippets: extra?.snippets ?? [],
+      appSettings: extra?.appSettings ?? {},
+      workspaceServers: servers.filter(
         (s) =>
           !q ||
-          `${s.name} ${s.host} ${s.description ?? ""} ${s.role ?? ""} ${(s.tags ?? []).join(" ")}`
+          `${s.name} ${s.host} ${s.cluster ?? ""} ${s.nodeRole ?? ""} ${s.description ?? ""} ${s.role ?? ""} ${(s.tags ?? []).join(" ")}`
             .toLowerCase()
             .includes(q),
       ),

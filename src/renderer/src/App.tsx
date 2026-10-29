@@ -147,11 +147,20 @@ export const App: React.FC = () => {
     }
   }, [isDemoQuery, sessionLoaded]);
 
-  // Load saved settings on mount
+  // Load saved settings on mount and refresh whenever AI Hub modifies app state
   useEffect(() => {
-    void window.multissh.settingsGet?.().then((saved) => {
-      if (saved) setSettings(saved);
+    const loadSettings = () => {
+      void window.multissh.settingsGet?.().then((saved) => {
+        if (saved) setSettings(saved);
+      });
+    };
+    loadSettings();
+    const offHub = window.multissh?.onAiHubChanged?.(() => {
+      loadSettings();
     });
+    return () => {
+      offHub?.();
+    };
   }, []);
 
   // Apply theme to root

@@ -122,9 +122,198 @@ const AGENT_TOOLS: FunctionToolDef[] = [
       additionalProperties: false,
     },
   },
+  {
+    name: "sshs3_manage_server",
+    description:
+      "Create, update, or delete SSH servers / VMs / cluster nodes in sshs3, or configure local SSH auth overrides. Always available in any mode.",
+    parameters: {
+      type: "object",
+      properties: {
+        operation: {
+          type: "string",
+          enum: ["upsert", "update_metadata", "delete", "set_local_override"],
+          description: "Operation: 'upsert' (create or update a server), 'update_metadata' (update cluster/role/description/tags), 'delete' (remove server), or 'set_local_override' (set local SSH user/key).",
+        },
+        serverIdOrName: {
+          type: "string",
+          description: "Existing server ID, name, or hostname/IP when updating or deleting.",
+        },
+        name: { type: "string", description: "Display name of the VM/node (e.g. 'prod-redis-01')." },
+        host: { type: "string", description: "Hostname or IP address (e.g. '10.20.1.50')." },
+        port: { type: "number", description: "SSH port (default 22)." },
+        username: { type: "string", description: "SSH username (e.g. 'ubuntu', 'root', 'deploy')." },
+        cluster: { type: "string", description: "Cluster name (e.g. 'Acme-Prod-Core', 'k8s-eu-north-1')." },
+        nodeRole: {
+          type: "string",
+          description: "Role inside the cluster (e.g. 'control-plane', 'worker', 'primary-db', 'replica-db', 'ingress', 'cache', 'storage', 'bastion').",
+        },
+        role: {
+          type: "string",
+          description: "Infrastructure role category ('web', 'database', 'k8s', 'worker', 'storage', 'bastion', 'cache').",
+        },
+        folder: { type: "string", description: "Folder / group path in sshs3 (e.g. 'Acme Cloud / Prod')." },
+        description: { type: "string", description: "Human-readable description of what this VM/node does." },
+        tags: {
+          type: "array",
+          items: { type: "string" },
+          description: "List of tags (e.g. ['redis', 'prod', 'cache']).",
+        },
+        shared: {
+          type: "boolean",
+          description: "Whether this server is shared with teammates via S3 Team Workspace / Web Server (default true) or personal (false).",
+        },
+        localUsername: { type: "string", description: "Optional local-only SSH username override." },
+        localPrivateKeyPath: { type: "string", description: "Optional local-only SSH private key path override." },
+      },
+      required: ["operation"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "sshs3_manage_cluster_and_folders",
+    description:
+      "Organize or assign multiple servers into a cluster at once, or create, rename, or delete folders in sshs3.",
+    parameters: {
+      type: "object",
+      properties: {
+        operation: {
+          type: "string",
+          enum: ["assign_cluster", "create_folder", "rename_folder", "delete_folder"],
+          description: "Operation to perform.",
+        },
+        cluster: { type: "string", description: "Cluster name when operation is 'assign_cluster'." },
+        serverIdsOrNames: {
+          type: "array",
+          items: { type: "string" },
+          description: "Server IDs, names, or hosts to assign to the cluster.",
+        },
+        nodeRole: { type: "string", description: "Optional nodeRole to set on assigned servers." },
+        role: { type: "string", description: "Optional role to set on assigned servers." },
+        folderName: { type: "string", description: "Folder name for create_folder, rename_folder, or delete_folder." },
+        newFolderName: { type: "string", description: "New folder name when operation is 'rename_folder'." },
+      },
+      required: ["operation"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "sshs3_manage_memory_and_activity",
+    description:
+      "List, create, update, or delete shared/personal AI memories and reusable troubleshooting skills in sshs3, or log a team activity note.",
+    parameters: {
+      type: "object",
+      properties: {
+        operation: {
+          type: "string",
+          enum: ["list", "save", "delete", "log_activity"],
+          description: "Operation: 'list', 'save' (create/update memory or skill), 'delete', or 'log_activity'.",
+        },
+        idOrTitle: { type: "string", description: "Memory/skill ID or title to update or delete." },
+        title: { type: "string", description: "Title for the memory/skill or target label for activity." },
+        text: { type: "string", description: "Content for the memory/skill or summary for activity." },
+        detail: { type: "string", description: "Optional command or config detail when logging activity." },
+        kind: { type: "string", enum: ["memory", "skill"], description: "Whether entry is a memory or reusable skill." },
+        scope: { type: "string", description: "Scope: 'workspace' (shared with team) or 'personal'." },
+        activityKind: {
+          type: "string",
+          enum: ["note", "config-edit", "service", "deploy", "package", "command"],
+          description: "Category when logging a team activity event.",
+        },
+      },
+      required: ["operation"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "sshs3_manage_schedule",
+    description:
+      "List, create, update, enable/disable, or delete scheduled recurring AI health checks and tasks in sshs3.",
+    parameters: {
+      type: "object",
+      properties: {
+        operation: {
+          type: "string",
+          enum: ["list", "save", "toggle", "delete"],
+          description: "Operation: 'list', 'save' (create or update schedule), 'toggle' (enable/disable), or 'delete'.",
+        },
+        idOrTitle: { type: "string", description: "Schedule ID or title when updating, toggling, or deleting." },
+        title: { type: "string", description: "Schedule title (e.g. 'Check PostgreSQL replication & disk')." },
+        prompt: { type: "string", description: "AI instructions to run on schedule." },
+        serverIdOrName: { type: "string", description: "Target server ID/name/host, or 'local' for local shell." },
+        intervalMinutes: { type: "number", description: "How often to run in minutes (e.g. 60)." },
+        mode: { type: "string", enum: ["advice", "assisted", "autonomous"], description: "Execution mode." },
+        enabled: { type: "boolean", description: "Whether the schedule is active." },
+      },
+      required: ["operation"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "sshs3_manage_s3_and_sync",
+    description:
+      "Check S3 Team Workspace sync status and saved S3 bucket profiles, trigger an immediate S3 Team Workspace sync, or create/update/delete an S3 bucket profile in sshs3.",
+    parameters: {
+      type: "object",
+      properties: {
+        operation: {
+          type: "string",
+          enum: ["status", "sync_now", "upsert_s3_profile", "delete_s3_profile"],
+          description: "Operation to perform.",
+        },
+        idOrName: { type: "string", description: "S3 profile ID or name when updating or deleting." },
+        name: { type: "string", description: "Display name for the S3 profile." },
+        endpoint: { type: "string", description: "S3 endpoint URL (e.g. 'https://s3.eu-north-1.amazonaws.com')." },
+        region: { type: "string", description: "S3 region (e.g. 'eu-north-1', 'auto')." },
+        bucket: { type: "string", description: "Bucket name." },
+        accessKeyId: { type: "string", description: "Access Key ID." },
+        secretAccessKey: { type: "string", description: "Secret Access Key." },
+        forcePathStyle: { type: "boolean", description: "Whether to use path-style S3 URLs (true for MinIO)." },
+        group: { type: "string", description: "Optional folder/group name." },
+      },
+      required: ["operation"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "sshs3_manage_app_and_settings",
+    description:
+      "Read full sshs3 application state, update sshs3 settings (actorName, theme, terminalFontSize, terminalFontFamily, scrollbackLines, cursorStyle, cursorBlink, confirmBeforeQuit, background, autoStart, inventory), manage command snippets, or open a local terminal session.",
+    parameters: {
+      type: "object",
+      properties: {
+        operation: {
+          type: "string",
+          enum: ["get_state", "update_settings", "save_snippet", "delete_snippet", "open_local_terminal"],
+          description: "Operation to perform.",
+        },
+        actorName: { type: "string", description: "User's display name in the team workspace & activity log." },
+        theme: { type: "string", enum: ["dark", "light", "system"], description: "UI theme." },
+        terminalFontSize: { type: "number", description: "Terminal font size in px (e.g. 14, 16)." },
+        terminalFontFamily: { type: "string", description: "Terminal font family (e.g. 'JetBrains Mono', 'Fira Code')." },
+        scrollbackLines: { type: "number", description: "Terminal scrollback buffer lines." },
+        cursorStyle: { type: "string", enum: ["block", "underline", "bar"], description: "Terminal cursor style." },
+        cursorBlink: { type: "boolean", description: "Whether terminal cursor blinks." },
+        confirmBeforeQuit: { type: "boolean", description: "Ask confirmation before quitting sshs3." },
+        background: { type: "boolean", description: "Keep sshs3 AI Hub running in background tray." },
+        autoStart: { type: "boolean", description: "Start sshs3 automatically on login." },
+        inventory: { type: "boolean", description: "Enable background TCP reachability checks." },
+        snippetName: { type: "string", description: "Name of command snippet to save or delete." },
+        snippetCommand: { type: "string", description: "Shell command for the snippet." },
+        snippetCategory: { type: "string", description: "Optional snippet category." },
+      },
+      required: ["operation"],
+      additionalProperties: false,
+    },
+  },
 ];
 
 function mapToolCallToBrokerRequest(name: string, args: Record<string, unknown>): ToolRequest {
+  if (name.startsWith("sshs3_")) {
+    return {
+      action: name,
+      payload: args,
+    };
+  }
   switch (name) {
     case "workspace_context":
       return {
@@ -177,8 +366,14 @@ function mapToolCallToBrokerRequest(name: string, args: Record<string, unknown>)
 
 function toolsForTask(task: AgentTask) {
   if (task.mode === "advice" || !task.target) {
+    // Even in 'advice' (Context only) mode or without a terminal open, the AI can always
+    // read workspace context AND make any requested changes inside sshs3 itself
+    // (servers, clusters, folders, memories, schedules, S3 profiles, snippets, settings).
     return AGENT_TOOLS.filter(
-      (t) => t.name === "workspace_context" || t.name === "workspace_remember",
+      (t) =>
+        t.name === "workspace_context" ||
+        t.name === "workspace_remember" ||
+        t.name.startsWith("sshs3_"),
     );
   }
   return AGENT_TOOLS;
@@ -186,14 +381,24 @@ function toolsForTask(task: AgentTask) {
 
 function buildSystemInstructions(task: AgentTask): string {
   return [
-    "You are the sshs3 Workspace & Terminal AI Assistant — a helpful conversational AI and infrastructure copilot integrated into the user's shared workspace, clusters, nodes, and live terminals.",
+    "You are the built-in AI Copilot and Master Architect of **sshs3** — a modern cross-platform SSH, SFTP, S3, and Kubernetes/Cluster workspace platform with an integrated AI Workspace, S3 Team Workspace sync, YubiKey/PIV Team Vault, and Multi-User Web Server mode.",
     `Current autonomy mode: ${task.mode}. Primary terminal target: ${JSON.stringify(task.target ?? null)}.`,
-    "Key capabilities & guidelines:",
-    "1. DIRECT CONVERSATION FIRST: If the user is greeting you, chatting, brainstorming, or asking a general/conceptual question that does not require running commands on a live terminal, answer directly and naturally without invoking terminal or file tools.",
-    "2. SHARED WORKSPACE, CLUSTERS & ALWAYS-ON TEAM MEMORY: Use the workspace snapshot (`workspaceServers`, `activityLog`, and `memories`) for context about servers, clusters, node roles, and recent team or AI changes.",
-    "3. MULTI-VM / MULTI-NODE COLLABORATION: When a terminal is attached and mode is not 'advice', you can run non-interactive commands via `terminal_command` or `terminal_verify` (passing `sessionId` if targeting a specific open node). Never run interactive full-screen programs (vim/nano/top/less without flags).",
-    "4. OBSERVE -> HYPOTHESIZE -> ACT -> VERIFY: When troubleshooting or changing files/services, cite concrete observations, use `file_read` before `file_write`, and use `terminal_verify` to confirm fixes.",
-    "Respond in the same language as the user (e.g. Swedish if the user writes in Swedish).",
+    "",
+    "### YOUR CORE MANDATE",
+    "1. **YOU CAN ANSWER ANYTHING ABOUT SSHS3 & INFRASTRUCTURE**: You have complete, encyclopedic understanding of how `sshs3` works, how all its features are configured, and the user's current servers, clusters, folders, S3 buckets, memories, recent team changes, schedules, and settings (provided automatically in `[Automatic Workspace & Terminal Snapshot]`).",
+    "2. **YOU CAN DIRECTLY MODIFY SSHS3 AT ANY TIME**: Whenever the user asks you to add, edit, organize, or delete servers/VMs, clusters, folders, S3 profiles, AI memories/skills, scheduled checks, command snippets, or app settings (such as terminal font size, theme, or actor name), **use your `sshs3_*` tools immediately to perform the change directly in sshs3**! You do NOT need an open terminal to use `sshs3_*` tools, and they work in all modes (`advice` / Context only, `assisted` / Ask first, and `autonomous` / Auto).",
+    "3. **TERMINAL & FILE EXECUTION**: When troubleshooting or operating on a server/shell (and mode is `assisted` or `autonomous`), use `terminal_command`, `terminal_verify`, `file_read`, and `file_write`. If no terminal is open and the user wants to run a local command, you can open one with `sshs3_manage_app_and_settings` (`operation: 'open_local_terminal'`). Never run interactive full-screen TUI programs (`vim`, `nano`, `top`, `less` without flags).",
+    "",
+    "### COMPLETE KNOWLEDGE BASE OF SSHS3",
+    "- **Workspace VMs & Clusters (`LandingView`)**: Servers have `name`, `host`, `port`, `username`, `cluster` (e.g. `Acme-Prod-Core`, `k8s-eu-north-1`), `nodeRole` (`control-plane`, `worker`, `primary-db`, `replica-db`, `ingress`, `cache`, `storage`, `bastion`), infrastructure `role` (`web`, `database`, `k8s`, `worker`, `storage`, `bastion`, `cache`), `folder`, `tags`, `description`, and `shared` (`true` = Delad med teamet, `false` = Personlig). Users can filter by cluster or folder and click `Terminal`, `SFTP`, or `✨ Fråga AI` on any card.",
+    "- **@-Context Mentions in Chat**: Typing `@` in chat autocompletes `@workspace` (all clusters/VMs), `@team-changes` (recent config/service changes), `@cluster:<name>` (entire cluster topology), or `@<server>` (specific VM).",
+    "- **Inline Terminal AI (`Ctrl+K`)**: Inside any open SSH or Local Shell terminal, pressing `Ctrl+K` (or clicking `Inline AI`) opens an inline bar where the user describes a task in natural language and gets a clean executable command with `Enter` (`Klistra in`) or `Ctrl+Enter` (`Kör direkt`).",
+    "- **Automatic Team Activity & Collective AI Memory (`TerminalObserver`)**: Notable commands run in terminals (editing `/etc/...` configs, `systemctl restart/reload`, `kubectl apply/rollout`, `docker`, `apt/dnf`) are automatically detected, stripped of secrets/tokens, logged in `Teamets Aktivitet & AI-Minne`, and summarized into `Auto-Memory` per node.",
+    "- **S3 Team Workspace (`☁️ S3 Team Bucket`)**: Shares `workspace.json` (servers, clusters, roles, memories, skills, activity log, tombstones) and `presence/<actor>.json` (live `🟢 Online` badges) via any S3-compatible bucket (AWS S3, Cloudflare R2, MinIO, Hetzner, DigitalOcean Spaces). Uses a hybrid privacy model: topology is shared in S3, while private SSH keys (`~/.ssh/config`, `IdentityFile`) and passwords remain 100% local per user (`LocalServerAuthOverride`). Supports 1-click Invite Codes (`SSHS3-S3-...`).",
+    "- **Multi-User Web Server Mode (`npm run build:web` / `npm run start:web` / `docker compose up -d --build` / `./scripts/deploy-vm.sh`)**: Allows deploying `sshs3` on a VM and logging in via browser (`http://<vm>:8080`). Includes First-Run Admin setup, 1-click Invite links (`?invite=...`) with expiration and revocation, password change, automatic per-user Ed25519 server SSH keys (`🔑 SSH-nyckel`) with 1-click `authorized_keys` command & built-in `ssh-copy-id`, and strict per-user `UserTenant` + OpenSSH `ControlMaster` isolation.",
+    "- **SFTP + S3 Dual-Pane File Manager, SSH Tunnels & Team Vault**: Built-in file manager (`File Manager` / `Cloud Sync`), SSH Port Forwarding (`-L` Local, `-R` Remote, `-D` Dynamic SOCKS), and hardware-backed YubiKey PIV + `age` Team Vault.",
+    "",
+    "Always respond in the same language as the user (e.g. Swedish if the user writes in Swedish). Be clear, helpful, and proactive.",
   ].join("\n");
 }
 

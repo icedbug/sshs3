@@ -673,60 +673,58 @@ export function AiHubPanel({
               >
                 {!task && !connection && (
                   <div className="ai-welcome">
-                    <h2>What can I help with?</h2>
-                    <p>Ask a question or describe what you want to do across your shared VMs and terminals.</p>
-                    {mode === "hub" && (
-                      <div className="ai-welcome-grid">
-                        <button
-                          type="button"
-                          className="ai-starter-card"
-                          onClick={() =>
-                            setPrompt(
-                              "Summarize the latest @team-changes across our shared VMs and check if any service needs attention.",
-                            )
-                          }
-                        >
-                          <strong>Review recent team changes</strong>
-                          <small>Check what Erik & Sara changed on prod-api-01 and prod-db-primary</small>
-                        </button>
-                        <button
-                          type="button"
-                          className="ai-starter-card"
-                          onClick={() =>
-                            setPrompt(
-                              "Diagnose nginx upstream timeouts and PgBouncer connection pool saturation on prod-api-01.",
-                            )
-                          }
-                        >
-                          <strong>Investigate prod-api-01 latency</strong>
-                          <small>Inspect nginx error logs, PgBouncer pools, and active connections</small>
-                        </button>
-                        <button
-                          type="button"
-                          className="ai-starter-card"
-                          onClick={() =>
-                            setPrompt(
-                              "Check CrashLoopBackOff pods in namespace payments on k8s-eu-north-1 and verify Redis TLS settings.",
-                            )
-                          }
-                        >
-                          <strong>Debug Kubernetes CrashLoopBackOff</strong>
-                          <small>Inspect pod logs and events in k8s-eu-north-1</small>
-                        </button>
-                        <button
-                          type="button"
-                          className="ai-starter-card"
-                          onClick={() =>
-                            setPrompt(
-                              "Audit disk usage, WAL archive growth, and replication lag on prod-db-primary.",
-                            )
-                          }
-                        >
-                          <strong>Check PostgreSQL health & disk</strong>
-                          <small>Verify WAL cleanup and replication status on prod-db-primary</small>
-                        </button>
-                      </div>
-                    )}
+                    <h2>Vad kan jag hjälpa dig med i sshS3?</h2>
+                    <p>Fråga vad som helst om sshS3 och din infrastruktur, eller be mig skapa och ändra VMs, kluster, mappar, minnen, scheman och inställningar direkt.</p>
+                    <div className="ai-welcome-grid">
+                      <button
+                        type="button"
+                        className="ai-starter-card"
+                        onClick={() =>
+                          setPrompt(
+                            "Lägg till en ny VM som heter prod-redis-01 (10.20.1.50, port 22, användare ubuntu) i klustret Acme-Prod-Core med rollen cache och taggarna redis, prod.",
+                          )
+                        }
+                      >
+                        <strong>Lägg till eller ändra VMs &amp; kluster</strong>
+                        <small>Be AI:n skapa/uppdatera servrar, kluster, mappar eller S3-profiler i sshS3</small>
+                      </button>
+                      <button
+                        type="button"
+                        className="ai-starter-card"
+                        onClick={() =>
+                          setPrompt(
+                            "Ge mig en komplett överblick över allt i min sshS3-arbetsyta (kluster, servrar, minnen, S3-synk och inställningar) och vad teamet ändrat senast.",
+                          )
+                        }
+                      >
+                        <strong>Full överblick &amp; teamets ändringar</strong>
+                        <small>Se alla kluster, noder, minnen och vad kollegorna nyss ändrade</small>
+                      </button>
+                      <button
+                        type="button"
+                        className="ai-starter-card"
+                        onClick={() =>
+                          setPrompt(
+                            "Hur fungerar S3 Team Workspace, Multi-User Web Server på VM och Inline Terminal AI (Ctrl+K) i sshS3?",
+                          )
+                        }
+                      >
+                        <strong>Fråga vad som helst om sshS3</strong>
+                        <small>Full förståelse för alla funktioner, flöden, nycklar och inställningar</small>
+                      </button>
+                      <button
+                        type="button"
+                        className="ai-starter-card"
+                        onClick={() =>
+                          setPrompt(
+                            "Skapa ett nytt delat AI-minne och en schemalagd hälsokontroll varje timme för vårt produktionskluster.",
+                          )
+                        }
+                      >
+                        <strong>Styr minnen, scheman &amp; inställningar</strong>
+                        <small>Be AI:n spara runbooks, schemalägga kontroller eller ändra appinställningar</small>
+                      </button>
+                    </div>
                   </div>
                 )}
                 {timeline.map((item) =>

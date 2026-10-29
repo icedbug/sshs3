@@ -472,12 +472,21 @@ describe("Production multi-user workspace sync & auto-memory", () => {
     expect(capturedUrl).toBe("https://chatgpt.com/backend-api/codex/responses");
     expect(capturedBody.model).toBe("gpt-6.1-sol");
     const toolNames = ((capturedBody.tools as Array<{ name: string }>) ?? []).map((t) => t.name);
-    expect(toolNames).toEqual(["workspace_context", "workspace_remember"]);
+    expect(toolNames).toEqual([
+      "workspace_context",
+      "workspace_remember",
+      "sshs3_manage_server",
+      "sshs3_manage_cluster_and_folders",
+      "sshs3_manage_memory_and_activity",
+      "sshs3_manage_schedule",
+      "sshs3_manage_s3_and_sync",
+      "sshs3_manage_app_and_settings",
+    ]);
     expect(events.find((e) => e.type === "run.completed")?.output).toContain(
       "Hej! Jag kan hjälpa dig",
     );
 
-    // Also excludes execution tools in assisted mode when target is detached ("Context only")
+    // Also excludes terminal execution tools in assisted mode when target is detached ("Context only"), while keeping all sshs3_* tools
     await runtime.start(
       { ...chatTask, id: "task-context-only", mode: "assisted", target: undefined },
       { kind: "openai-codex", model: "gpt-5.3-codex" },
@@ -485,9 +494,18 @@ describe("Production multi-user workspace sync & auto-memory", () => {
     );
     expect(capturedBody.model).toBe("gpt-6.1-sol");
     const contextOnlyTools = ((capturedBody.tools as Array<{ name: string }>) ?? []).map((t) => t.name);
-    expect(contextOnlyTools).toEqual(["workspace_context", "workspace_remember"]);
+    expect(contextOnlyTools).toEqual([
+      "workspace_context",
+      "workspace_remember",
+      "sshs3_manage_server",
+      "sshs3_manage_cluster_and_folders",
+      "sshs3_manage_memory_and_activity",
+      "sshs3_manage_schedule",
+      "sshs3_manage_s3_and_sync",
+      "sshs3_manage_app_and_settings",
+    ]);
 
-    // Includes execution tools in assisted mode when target is attached
+    // Includes terminal execution tools + sshs3_* tools in assisted mode when target is attached
     await runtime.start(
       {
         ...chatTask,
@@ -506,7 +524,152 @@ describe("Production multi-user workspace sync & auto-memory", () => {
       "file_read",
       "file_write",
       "workspace_remember",
+      "sshs3_manage_server",
+      "sshs3_manage_cluster_and_folders",
+      "sshs3_manage_memory_and_activity",
+      "sshs3_manage_schedule",
+      "sshs3_manage_s3_and_sync",
+      "sshs3_manage_app_and_settings",
     ]);
+  });
+
+  it("allows AI to directly create/update/delete servers, clusters, folders, memories, schedules, and settings in sshs3", async () => {
+    const { HubService } = await import("../../src/main/ai/hub/HubService");
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "sshs3-hub-actions-"));
+    disposals.push(() => fs.rm(tmpDir, { recursive: true, force: true }));
+
+    const savedServers = new Map<string, Record<string, unknown>>();
+    const folders: string[] = [];
+    let appSettings: Record<string, unknown> = { theme: "dark", terminalFontSize: 14 };
+
+    const hub = new HubService(
+      {
+        changed: () => {},
+        inventoryTargets: async () => [],
+        backgroundChanged: async () => {},
+        openSchedule: async () => "s1",
+        show: () => {},
+        workspaceServers: async () => Array.from(savedServers.values()) as never[],
+        upsertServer: async (input) => {
+          const id = input.id || `srv-${savedServers.size + 1}`;
+          const rec = { ...input, id, port: input.port || 22, shared: input.shared ?? true };
+          savedServers.set(id, rec);
+          return rec as never;
+        },
+        describeServer: async (input) => {
+          const existing = savedServers.get(input.profileId);
+          if (existing) {
+            savedServers.set(input.profileId, { ...existing, ...input });
+          }
+        },
+        deleteServer: async (id) => {
+          savedServers.delete(id);
+        },
+        extraAppContext: async () => ({
+          folders,
+          s3Profiles: [],
+          snippets: [],
+          appSettings,
+        }),
+        manageFolders: async (input) => {
+          if (input.operation === "create_folder") folders.push(input.folderName);
+          return { folders };
+        },
+        manageAppSettings: async (input) => {
+          if (input.operation === "update_settings" && input.settings) {
+            appSettings = { ...appSettings, ...input.settings };
+          }
+          return appSettings;
+        },
+      },
+      tmpDir,
+    );
+    disposals.push(() => hub.dispose());
+    await hub.initialize();
+
+    const dummyTask: AgentTask = {
+      id: "task-ai-manage",
+      title: "Manage sshs3",
+      mode: "advice",
+      status: "running",
+      messages: [],
+      changes: [],
+      sources: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      maxCommands: 10,
+      maxMinutes: 5,
+      verification: "not-verified",
+    };
+    const cap = await hub.broker.issue(dummyTask);
+
+    // 1. AI creates a server in sshs3
+    const createRes = (await hub.broker.invoke(cap.key, {
+      action: "sshs3_manage_server",
+      payload: {
+        operation: "upsert",
+        name: "prod-redis-01",
+        host: "10.20.1.50",
+        username: "ubuntu",
+        cluster: "Acme-Prod-Core",
+        nodeRole: "cache",
+        role: "cache",
+        tags: ["redis", "prod"],
+        description: "Primary Redis cluster node",
+      },
+    })) as { ok: boolean; operation: string; server: { name: string; cluster: string } };
+    expect(createRes.ok).toBe(true);
+    expect(createRes.server.name).toBe("prod-redis-01");
+    expect(createRes.server.cluster).toBe("Acme-Prod-Core");
+
+    // 2. AI assigns server to a new cluster & creates a folder
+    await hub.broker.invoke(cap.key, {
+      action: "sshs3_manage_cluster_and_folders",
+      payload: {
+        operation: "assign_cluster",
+        cluster: "EU-North-Cache",
+        serverIdsOrNames: ["prod-redis-01"],
+      },
+    });
+    const snapAfterCluster = await hub.snapshot();
+    expect(
+      (snapAfterCluster.workspaceServers ?? []).find((s) => s.name === "prod-redis-01")?.cluster,
+    ).toBe("EU-North-Cache");
+
+    await hub.broker.invoke(cap.key, {
+      action: "sshs3_manage_cluster_and_folders",
+      payload: {
+        operation: "create_folder",
+        folderName: "Acme Cloud / Cache",
+      },
+    });
+    expect(folders).toContain("Acme Cloud / Cache");
+
+    // 3. AI saves a schedule
+    const schedRes = (await hub.broker.invoke(cap.key, {
+      action: "sshs3_manage_schedule",
+      payload: {
+        operation: "save",
+        title: "Hourly Redis memory check",
+        prompt: "Check redis-cli info memory",
+        serverIdOrName: "prod-redis-01",
+        intervalMinutes: 60,
+      },
+    })) as { ok: boolean; schedule: { title: string } };
+    expect(schedRes.ok).toBe(true);
+    expect(schedRes.schedule.title).toBe("Hourly Redis memory check");
+
+    // 4. AI updates sshs3 settings (terminalFontSize + actorName)
+    await hub.broker.invoke(cap.key, {
+      action: "sshs3_manage_app_and_settings",
+      payload: {
+        operation: "update_settings",
+        actorName: "Jacob (Architect)",
+        terminalFontSize: 16,
+      },
+    });
+    expect(appSettings.terminalFontSize).toBe(16);
+    expect((await hub.config.getView()).actorName).toBe("Jacob (Architect)");
   });
 
   it("returns cmd-compatible inline suggestions for cmd shell and never rejects snapshot if config.getView throws", async () => {

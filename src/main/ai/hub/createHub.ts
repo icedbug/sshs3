@@ -485,6 +485,129 @@ export function createHub(
       );
       return id;
     },
+    extraAppContext: async () => {
+      const [profiles, settings, snippets] = await Promise.all([
+        bridge.profileStore.getProfiles().catch(() => ({ ssh: [], s3: [], folders: [] })),
+        bridge.settingsStore?.getSettings?.().catch(() => ({})) ?? Promise.resolve({}),
+        bridge.snippetStore?.list?.().catch(() => []) ?? Promise.resolve([]),
+      ]);
+      return {
+        folders: profiles.folders ?? [],
+        s3Profiles: (profiles.s3 ?? []).map((s) => ({
+          id: s.id,
+          name: s.name,
+          endpoint: s.endpoint,
+          region: s.region,
+          bucket: s.initialPath,
+          group: s.group,
+        })),
+        snippets: snippets ?? [],
+        appSettings: (settings ?? {}) as unknown as Record<string, unknown>,
+      };
+    },
+    manageFolders: async (input) => {
+      if (input.operation === "create_folder") {
+        await bridge.profileStore.saveFolder(input.folderName);
+        bridge.scheduleAutoSync?.();
+        return { created: input.folderName };
+      }
+      if (input.operation === "rename_folder") {
+        if (!input.newFolderName) throw new Error("newFolderName is required");
+        await bridge.profileStore.renameFolder(input.folderName, input.newFolderName);
+        bridge.scheduleAutoSync?.();
+        return { renamedFrom: input.folderName, renamedTo: input.newFolderName };
+      }
+      if (input.operation === "delete_folder") {
+        await bridge.profileStore.deleteFolder(input.folderName);
+        bridge.scheduleAutoSync?.();
+        return { deleted: input.folderName };
+      }
+      throw new Error(`Unsupported folder operation: ${input.operation}`);
+    },
+    manageS3Profile: async (input) => {
+      const profiles = await bridge.profileStore.getProfiles();
+      const q = (input.idOrName || input.name || "").trim().toLowerCase();
+      const existing = (profiles.s3 ?? []).find(
+        (s) => s.id.toLowerCase() === q || s.name.toLowerCase() === q || (q && s.name.toLowerCase().includes(q)),
+      );
+      if (input.operation === "delete_s3_profile") {
+        const targetId = existing?.id || input.idOrName;
+        if (!targetId) throw new Error("S3 profile not found");
+        await bridge.profileStore.deleteS3(targetId);
+        bridge.scheduleAutoSync?.();
+        return { deletedS3ProfileId: targetId, name: existing?.name };
+      }
+      const id = existing?.id || crypto.randomUUID();
+      const name = input.name?.trim() || existing?.name || input.bucket || "S3 Bucket";
+      await bridge.profileStore.saveS3({
+        ...existing,
+        id,
+        name,
+        endpoint: input.endpoint ?? existing?.endpoint ?? "",
+        region: input.region ?? existing?.region ?? "us-east-1",
+        initialPath: input.bucket ?? existing?.initialPath,
+        accessKeyId: input.accessKeyId ?? existing?.accessKeyId ?? "",
+        secretAccessKey: input.secretAccessKey ?? existing?.secretAccessKey ?? "",
+        forcePathStyle: input.forcePathStyle ?? existing?.forcePathStyle ?? false,
+        group: input.group ?? existing?.group,
+        updatedAt: new Date().toISOString(),
+      });
+      bridge.scheduleAutoSync?.();
+      return { savedS3ProfileId: id, name };
+    },
+    manageAppSettings: async (input) => {
+      if (input.operation === "update_settings" && input.settings) {
+        const current = await bridge.settingsStore.getSettings();
+        const merged = { ...current, ...input.settings };
+        await bridge.settingsStore.saveSettings(merged);
+        bridge.scheduleAutoSync?.();
+        return merged;
+      }
+      if (input.operation === "save_snippet" && input.snippet) {
+        const snippets = (await bridge.snippetStore?.list?.().catch(() => [])) ?? [];
+        const q = (input.snippet.id || input.snippet.name || "").trim().toLowerCase();
+        const existing = snippets.find(
+          (s) => s.id.toLowerCase() === q || s.name.toLowerCase() === q,
+        );
+        const saved = await bridge.snippetStore.save({
+          id: existing?.id || input.snippet.id,
+          name: input.snippet.name || existing?.name || "Snippet",
+          command: input.snippet.command || existing?.command || "",
+        });
+        return saved;
+      }
+      if (input.operation === "delete_snippet" && input.snippet) {
+        const snippets = (await bridge.snippetStore?.list?.().catch(() => [])) ?? [];
+        const q = (input.snippet.id || input.snippet.name || "").trim().toLowerCase();
+        const existing = snippets.find(
+          (s) => s.id.toLowerCase() === q || s.name.toLowerCase() === q,
+        );
+        const targetId = existing?.id || input.snippet.id;
+        if (!targetId) throw new Error("Snippet not found");
+        await bridge.snippetStore.delete(targetId);
+        return { deletedSnippetId: targetId };
+      }
+      if (input.operation === "open_local_terminal") {
+        const shell = process.platform === "win32" ? "powershell" : "bash";
+        const session = await bridge.sshPtyManager.createShellSession({
+          cols: 100,
+          rows: 30,
+          shellBinary: process.platform === "win32" ? "powershell.exe" : "bash",
+        });
+        hub.terminals.register(
+          {
+            id: session.sessionId,
+            label: "Local Shell (AI)",
+            kind: "local",
+            profileId: "local",
+          },
+          (data) => bridge.sshPtyManager.write(session.sessionId, data),
+        );
+        await hub.terminals.arm(session.sessionId, shell).catch(() => {});
+        return { sessionId: session.sessionId };
+      }
+      return {};
+    },
   }, options?.hubDirectory);
   const files = new FileTools(bridge, hub.terminals, () => hub.changed());
   if (bridge.profileSyncService) {
