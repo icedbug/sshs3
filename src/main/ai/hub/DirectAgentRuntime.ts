@@ -505,15 +505,26 @@ export class DirectAgentRuntime implements AgentRuntime {
     for (const msg of task.messages.slice(-30)) {
       if (msg.role === "system") continue;
       const role = msg.role === "assistant" ? "assistant" : "user";
+      const contentParts: Array<Record<string, unknown>> = [
+        {
+          type: role === "user" ? "input_text" : "output_text",
+          text: boundedContext(msg.text),
+        },
+      ];
+      if (role === "user" && msg.images?.length) {
+        for (const img of msg.images) {
+          if (img.dataUrl?.startsWith("data:image/")) {
+            contentParts.push({
+              type: "input_image",
+              image_url: img.dataUrl,
+            });
+          }
+        }
+      }
       inputItems.push({
         type: "message",
         role,
-        content: [
-          {
-            type: role === "user" ? "input_text" : "output_text",
-            text: boundedContext(msg.text),
-          },
-        ],
+        content: contentParts,
       });
     }
 
@@ -689,7 +700,22 @@ export class DirectAgentRuntime implements AgentRuntime {
 
     for (const msg of task.messages.slice(-30)) {
       if (msg.role === "system") continue;
-      messages.push({ role: msg.role, content: boundedContext(msg.text) });
+      if (msg.role === "user" && msg.images?.length) {
+        messages.push({
+          role: "user",
+          content: [
+            { type: "text", text: boundedContext(msg.text) },
+            ...msg.images
+              .filter((img) => img.dataUrl?.startsWith("data:image/"))
+              .map((img) => ({
+                type: "image_url",
+                image_url: { url: img.dataUrl },
+              })),
+          ],
+        });
+      } else {
+        messages.push({ role: msg.role, content: boundedContext(msg.text) });
+      }
     }
 
     const tools = toolsForTask(task).map((t) => ({

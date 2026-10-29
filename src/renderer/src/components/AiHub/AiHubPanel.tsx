@@ -351,13 +351,78 @@ export function AiHubPanel({
     setMenu(null);
     setError("");
   }
+  function attachFileOrImage(file: File): void {
+    const isImage =
+      file.type.startsWith("image/") ||
+      /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(file.name);
+    if (isImage) {
+      if (file.size > 4_500_000) {
+        setError("Choose an image smaller than 4.5 MB.");
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = typeof reader.result === "string" ? reader.result : "";
+        if (!dataUrl.startsWith("data:image/")) {
+          setError("Could not read that image.");
+          return;
+        }
+        setAttachments((old) => [
+          ...old.slice(-9),
+          {
+            id: crypto.randomUUID(),
+            label: file.name || `screenshot-${ new Date().toLocaleTimeString() }.png`,
+            text: `[Image attachment: ${file.name || "image"}]`,
+            imageDataUrl: dataUrl,
+            mimeType: file.type || "image/png",
+            observedAt: Date.now(),
+          },
+        ]);
+      };
+      reader.onerror = () => setError("Could not read that image.");
+      reader.readAsDataURL(file);
+      return;
+    }
+    if (file.size > 128_000) {
+      setError("Choose a text file smaller than 128 KB.");
+      return;
+    }
+    void file
+      .text()
+      .then((text) =>
+        setAttachments((old) => [
+          ...old.slice(-9),
+          {
+            id: crypto.randomUUID(),
+            label: file.name,
+            text,
+            observedAt: Date.now(),
+          },
+        ]),
+      )
+      .catch(() => setError("Could not read that file."));
+  }
   async function sendMessage(sessionId?: string): Promise<void> {
-    if (busy || !prompt.trim()) return;
+    const hasImages = attachments.some((a) => !!a.imageDataUrl);
+    if (busy || (!prompt.trim() && !hasImages)) return;
+    const textToSend =
+      prompt.trim() || "Analysera den bifogade bilden.";
     const result = task
-      ? await act({ action: "reply", taskId: task.id, text: prompt })
+      ? await act({
+          action: "reply",
+          taskId: task.id,
+          text: textToSend,
+          sessionId,
+          attachments,
+        })
       : await act({
           action: "start",
-          task: { prompt, sessionId, mode: autonomy, attachments },
+          task: {
+            prompt: textToSend,
+            sessionId,
+            mode: autonomy,
+            attachments,
+          },
         });
     if (result) {
       if (!task) setTaskId(result.tasks.at(-1)?.id ?? "");
@@ -367,7 +432,8 @@ export function AiHubPanel({
     }
   }
   async function submit(): Promise<void> {
-    if (busy || !prompt.trim()) return;
+    const hasImages = attachments.some((a) => !!a.imageDataUrl);
+    if (busy || (!prompt.trim() && !hasImages)) return;
     if (!hub?.config.enabled || !hub.config.model || !hub.runtime.bundled) {
       setSettingsOpen(true);
       return;
@@ -740,6 +806,32 @@ export function AiHubPanel({
                             ? "Assistant"
                             : "sshs3"}
                       </small>
+                      {item.message.images && item.message.images.length > 0 && (
+                        <div
+                          style={{
+                            display: "flex",
+                            flexWrap: "wrap",
+                            gap: "8px",
+                            marginBottom: "8px",
+                          }}
+                        >
+                          {item.message.images.map((img, idx) => (
+                            <img
+                              key={idx}
+                              src={img.dataUrl}
+                              alt={img.label}
+                              title={img.label}
+                              style={{
+                                maxWidth: "240px",
+                                maxHeight: "160px",
+                                borderRadius: "8px",
+                                border: "1px solid rgba(255,255,255,0.14)",
+                                objectFit: "cover",
+                              }}
+                            />
+                          ))}
+                        </div>
+                      )}
                       <ReactMarkdown>{item.message.text}</ReactMarkdown>
                     </article>
                   ) : item.change && task ? (
@@ -1047,14 +1139,42 @@ export function AiHubPanel({
                           )
                         }
                       >
-                        <Paperclip size={11} />
+                        {a.imageDataUrl ? (
+                          <img
+                            src={a.imageDataUrl}
+                            alt={a.label}
+                            style={{
+                              width: "20px",
+                              height: "20px",
+                              borderRadius: "4px",
+                              objectFit: "cover",
+                            }}
+                          />
+                        ) : (
+                          <Paperclip size={11} />
+                        )}
                         {a.label}
                         <X size={11} />
                       </button>
                     ))}
                   </div>
                 )}
-                <div className="ai-input-box" style={{ position: "relative" }}>
+                <div
+                  className="ai-input-box"
+                  style={{ position: "relative" }}
+                  onDragOver={(e) => {
+                    if (e.dataTransfer?.types?.includes("Files")) {
+                      e.preventDefault();
+                    }
+                  }}
+                  onDrop={(e) => {
+                    const files = Array.from(e.dataTransfer?.files ?? []);
+                    if (files.length > 0) {
+                      e.preventDefault();
+                      for (const f of files) attachFileOrImage(f);
+                    }
+                  }}
+                >
                   {activeAtSuggestions.length > 0 && (
                     <div
                       className="ai-popover"
@@ -1091,14 +1211,28 @@ export function AiHubPanel({
                     aria-label="Message to agent"
                     placeholder={
                       running
-                        ? "Send a follow-up… (type @ for clusters/nodes)"
-                        : "Ask anything… (type @ for clusters, nodes or @team-changes)"
+                        ? "Send a follow-up… (type @ for clusters/nodes, paste or drop images)"
+                        : "Ask anything… (type @ for clusters/nodes, or paste/upload images)"
                     }
                     value={prompt}
                     onChange={(e) => {
                       setPrompt(e.target.value);
                       setAtIndex(0);
                       setAtDismissedFor(null);
+                    }}
+                    onPaste={(e) => {
+                      const items = Array.from(e.clipboardData?.items ?? []);
+                      const imageFiles: File[] = [];
+                      for (const item of items) {
+                        if (item.kind === "file" && item.type.startsWith("image/")) {
+                          const f = item.getAsFile();
+                          if (f) imageFiles.push(f);
+                        }
+                      }
+                      if (imageFiles.length > 0) {
+                        e.preventDefault();
+                        for (const f of imageFiles) attachFileOrImage(f);
+                      }
                     }}
                     onKeyDown={(e) => {
                       if (activeAtSuggestions.length > 0) {
@@ -1147,14 +1281,14 @@ export function AiHubPanel({
                   <div className="ai-input-tools">
                     <button
                       className="ai-icon-button"
-                      aria-label="Attach text file"
-                      title="Attach text file"
+                      aria-label="Attach image or text file"
+                      title="Attach image (PNG/JPG/WebP) or text file — or paste with Ctrl+V"
                       onClick={() => fileInput.current?.click()}
                     >
                       <Paperclip size={16} />
                     </button>
-                    <small>Enter to send · Shift+Enter for a new line</small>
-                    {running && !prompt.trim() ? (
+                    <small>Enter to send · Ctrl+V to paste screenshot</small>
+                    {running && !prompt.trim() && !attachments.some((a) => !!a.imageDataUrl) ? (
                       <button
                         className="ai-send ai-stop"
                         aria-label="Stop response"
@@ -1171,7 +1305,11 @@ export function AiHubPanel({
                         className="ai-send"
                         aria-label="Send message"
                         title="Send message"
-                        disabled={busy || !prompt.trim()}
+                        disabled={
+                          busy ||
+                          (!prompt.trim() &&
+                            !attachments.some((a) => !!a.imageDataUrl))
+                        }
                         onClick={() => void submit()}
                       >
                         <ArrowUp size={17} />
@@ -1249,27 +1387,12 @@ export function AiHubPanel({
                   ref={fileInput}
                   hidden
                   type="file"
-                  accept="text/*,.log,.yaml,.yml,.json,.conf,.md"
+                  multiple
+                  accept="image/*,text/*,.log,.yaml,.yml,.json,.conf,.md,.sh,.ps1,.py,.ts,.tsx,.js"
                   onChange={(e) => {
-                    const file = e.target.files?.[0];
-                    if (file) {
-                      if (file.size > 128_000)
-                        setError("Choose a text file smaller than 128 KB.");
-                      else
-                        void file
-                          .text()
-                          .then((text) =>
-                            setAttachments((old) => [
-                              ...old.slice(-9),
-                              {
-                                id: crypto.randomUUID(),
-                                label: file.name,
-                                text,
-                                observedAt: Date.now(),
-                              },
-                            ]),
-                          )
-                          .catch(() => setError("Could not read that file."));
+                    const files = Array.from(e.target.files ?? []);
+                    for (const file of files) {
+                      attachFileOrImage(file);
                     }
                     e.target.value = "";
                   }}

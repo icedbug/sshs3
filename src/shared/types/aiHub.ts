@@ -37,12 +37,15 @@ export interface ContextSource {
   id: string;
   label: string;
   text: string;
+  imageDataUrl?: string;
+  mimeType?: string;
   observedAt: number;
 }
 export interface AgentMessage {
   id: string;
   role: "user" | "assistant" | "system";
   text: string;
+  images?: Array<{ label: string; dataUrl: string; mimeType?: string }>;
   at: number;
 }
 export interface AgentChange {
@@ -232,7 +235,13 @@ export type HubRequest =
       preferences?: Partial<HubPreferences>;
     }
   | { action: "start"; task: StartAgentTask }
-  | { action: "reply"; taskId: string; text: string; sessionId?: string }
+  | {
+      action: "reply";
+      taskId: string;
+      text: string;
+      sessionId?: string;
+      attachments?: ContextSource[];
+    }
   | { action: "stop"; taskId: string }
   | { action: "takeover"; sessionId: string }
   | { action: "arm"; sessionId: string; shell: ShellKind }

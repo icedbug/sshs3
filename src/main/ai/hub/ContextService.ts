@@ -137,9 +137,18 @@ export class ContextService {
               "Output may be incomplete; command results are the completion evidence.",
           }
         : null,
-      attachments: task.sources.filter(
-        (s) => !q || `${s.label} ${s.text}`.toLowerCase().includes(q),
-      ),
+      attachments: task.sources
+        .filter(
+          (s) =>
+            !s.imageDataUrl &&
+            (!q || `${s.label} ${s.text}`.toLowerCase().includes(q)),
+        )
+        .map((s) => ({
+          id: s.id,
+          label: s.label,
+          text: s.text,
+          observedAt: s.observedAt,
+        })),
       history: this.store.data.history
         .filter(
           (s) =>

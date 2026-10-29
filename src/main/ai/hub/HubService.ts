@@ -574,13 +574,39 @@ export class HubService {
         break;
       case "reply": {
         const task = this.task(request.taskId);
-        const text = boundedContext(requiredText(request.text), 16_000);
+        const rawAttachments = (request.attachments ?? []).slice(0, 10);
+        const replyImages = rawAttachments
+          .filter(
+            (s) =>
+              typeof s.imageDataUrl === "string" &&
+              s.imageDataUrl.startsWith("data:image/"),
+          )
+          .map((s) => ({
+            label: boundedContext(s.label || "image", 200),
+            dataUrl: s.imageDataUrl!.slice(0, 6_000_000),
+            mimeType: s.mimeType,
+          }));
+        for (const s of rawAttachments) {
+          if (!s.imageDataUrl && s.text?.trim()) {
+            task.sources.push({
+              id: crypto.randomUUID(),
+              label: boundedContext(s.label || "attachment", 200),
+              text: boundedContext(s.text),
+              observedAt: Date.now(),
+            });
+          }
+        }
+        const rawText =
+          request.text?.trim() ||
+          (replyImages.length > 0 ? "Analyze the attached image(s)." : "");
+        const text = boundedContext(requiredText(rawText), 16_000);
         if (active(task)) {
           await this.runtimes.get(task.id)?.steer(text);
           task.messages.push({
             id: crypto.randomUUID(),
             role: "user",
             text,
+            ...(replyImages.length > 0 ? { images: replyImages } : {}),
             at: Date.now(),
           });
         } else {
@@ -609,6 +635,7 @@ export class HubService {
             id: crypto.randomUUID(),
             role: "user",
             text,
+            ...(replyImages.length > 0 ? { images: replyImages } : {}),
             at: Date.now(),
           });
           await this.launch(task);
@@ -986,7 +1013,22 @@ export class HubService {
     if (input.sessionId && (!terminal || terminal.state === "disconnected"))
       throw new Error("Target unavailable");
     const now = Date.now();
-    const prompt = boundedContext(requiredText(input.prompt), 16_000);
+    const rawAttachments = (input.attachments ?? []).slice(0, 10);
+    const startImages = rawAttachments
+      .filter(
+        (s) =>
+          typeof s.imageDataUrl === "string" &&
+          s.imageDataUrl.startsWith("data:image/"),
+      )
+      .map((s) => ({
+        label: boundedContext(s.label || "image", 200),
+        dataUrl: s.imageDataUrl!.slice(0, 6_000_000),
+        mimeType: s.mimeType,
+      }));
+    const rawPrompt =
+      input.prompt?.trim() ||
+      (startImages.length > 0 ? "Analyze the attached image(s)." : "");
+    const prompt = boundedContext(requiredText(rawPrompt), 16_000);
     const task: AgentTask = {
       id: crypto.randomUUID(),
       title: prompt.slice(0, 100),
@@ -1000,15 +1042,23 @@ export class HubService {
           }
         : undefined,
       messages: [
-        { id: crypto.randomUUID(), role: "user", text: prompt, at: now },
+        {
+          id: crypto.randomUUID(),
+          role: "user",
+          text: prompt,
+          ...(startImages.length > 0 ? { images: startImages } : {}),
+          at: now,
+        },
       ],
       changes: [],
-      sources: (input.attachments ?? []).slice(0, 10).map((s) => ({
-        id: crypto.randomUUID(),
-        label: boundedContext(requiredText(s.label), 200),
-        text: boundedContext(requiredText(s.text)),
-        observedAt: now,
-      })),
+      sources: rawAttachments
+        .filter((s) => !s.imageDataUrl && s.text?.trim())
+        .map((s) => ({
+          id: crypto.randomUUID(),
+          label: boundedContext(requiredText(s.label), 200),
+          text: boundedContext(requiredText(s.text)),
+          observedAt: now,
+        })),
       createdAt: now,
       updatedAt: now,
       maxCommands: integer(input.maxCommands ?? 20, 1, 100),
