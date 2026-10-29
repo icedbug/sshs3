@@ -4,7 +4,15 @@ import type {
   WorkspaceServerSummary,
 } from "../../../shared/types/aiHub";
 
+let demoOverride: boolean | undefined;
+
+export function setDemoMode(enabled: boolean): void {
+  demoOverride = enabled;
+  process.env.SSHS3_DEMO = enabled ? "1" : "0";
+}
+
 export function isDemoMode(): boolean {
+  if (demoOverride !== undefined) return demoOverride;
   return (
     process.env.SSHS3_DEMO === "1" ||
     process.argv.includes("--demo")

@@ -6,6 +6,7 @@ import { IPC_CHANNELS } from '../../shared/types/ipc';
 import type { SSHConnectionConfig } from '../../shared/types/ssh';
 import type { S3Config } from '../../shared/types/storage';
 import type { IpcBridge } from '../IpcBridge';
+import { getDemoServers, isDemoMode } from '../ai/hub/demoWorkspace';
 
 /** The part of IpcBridge this handler group may use. */
 export type ProfileHost = Pick<
@@ -15,7 +16,39 @@ export type ProfileHost = Pick<
 
 export function registerProfileHandlers(bridge: ProfileHost): void {
   bridge.registerHandler(IPC_CHANNELS.PROFILES_GET, async () => {
-    return await bridge.profileStore.getProfiles();
+    const profiles = await bridge.profileStore.getProfiles();
+    if (isDemoMode()) {
+      const ssh = [...profiles.ssh];
+      const folderSet = new Set<string>(profiles.folders ?? []);
+      for (const d of getDemoServers()) {
+        if (d.folder) folderSet.add(d.folder);
+        if (!ssh.some((p) => p.id === d.id)) {
+          ssh.push({
+            id: d.id,
+            name: d.name,
+            host: d.host,
+            port: d.port || 22,
+            username: d.username || 'root',
+            authType: 'agent',
+            group: d.folder || d.group,
+            cluster: d.cluster,
+            nodeRole: d.nodeRole,
+            role: d.role,
+            description: d.description,
+            tags: d.tags,
+            shared: d.shared,
+            updatedAt: d.updatedAt,
+            updatedBy: d.updatedBy,
+          });
+        }
+      }
+      return {
+        ...profiles,
+        ssh,
+        folders: Array.from(folderSet),
+      };
+    }
+    return profiles;
   });
 
   bridge.registerHandler(

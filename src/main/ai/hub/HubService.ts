@@ -26,6 +26,7 @@ import { CodexAuthProvider } from "../CodexAuthProvider";
 import { HermesManager, type HermesModelConfig } from "../HermesManager";
 import { HubStore } from "./HubStore";
 import { S3WorkspaceSyncService } from "./S3WorkspaceSyncService";
+import { isDemoMode, setDemoMode } from "./demoWorkspace";
 import {
   TerminalRegistry,
   type DetectedCommandActivity,
@@ -2297,6 +2298,9 @@ export class HubService {
           };
         }
         if (op === "update_settings") {
+          if (bool("demoMode") !== undefined) {
+            setDemoMode(bool("demoMode")!);
+          }
           if (str("actorName")) {
             await this.config.update({ actorName: str("actorName") });
           }
@@ -2340,6 +2344,7 @@ export class HubService {
           return {
             ok: true,
             operation: "update_settings",
+            demoMode: isDemoMode(),
             actorName: (await this.config.getView()).actorName,
             aiPreferences: this.store.data.preferences,
             appSettings: updatedAppSettings,

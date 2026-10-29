@@ -277,7 +277,7 @@ const AGENT_TOOLS: FunctionToolDef[] = [
   {
     name: "sshs3_manage_app_and_settings",
     description:
-      "Read full sshs3 application state, update sshs3 settings (actorName, theme, terminalFontSize, terminalFontFamily, scrollbackLines, cursorStyle, cursorBlink, confirmBeforeQuit, background, autoStart, inventory), manage command snippets, or open a local terminal session.",
+      "Read full sshs3 application state, update sshs3 settings (demoMode, actorName, theme, terminalFontSize, terminalFontFamily, scrollbackLines, cursorStyle, cursorBlink, confirmBeforeQuit, background, autoStart, inventory), manage command snippets, or open a local terminal session.",
     parameters: {
       type: "object",
       properties: {
@@ -286,6 +286,7 @@ const AGENT_TOOLS: FunctionToolDef[] = [
           enum: ["get_state", "update_settings", "save_snippet", "delete_snippet", "open_local_terminal"],
           description: "Operation to perform.",
         },
+        demoMode: { type: "boolean", description: "Enable or disable sshs3 Demo Mode (pre-populated Acme Cloud clusters, VMs, memories, and activity log)." },
         actorName: { type: "string", description: "User's display name in the team workspace & activity log." },
         theme: { type: "string", enum: ["dark", "light", "system"], description: "UI theme." },
         terminalFontSize: { type: "number", description: "Terminal font size in px (e.g. 14, 16)." },
