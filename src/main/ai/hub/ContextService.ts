@@ -51,6 +51,9 @@ export interface ExtraWorkspaceContext {
   s3TeamWorkspace?: unknown;
   schedules?: unknown[];
   snippets?: unknown[];
+  dotfilesPools?: unknown[];
+  dirSyncProfiles?: unknown[];
+  activeTunnels?: unknown[];
   appSettings?: Record<string, unknown>;
   agents?: unknown[];
   mcpServers?: unknown[];
@@ -111,6 +114,9 @@ export class ContextService {
       s3TeamWorkspace: extra?.s3TeamWorkspace ?? null,
       schedules: extra?.schedules ?? this.store.data.schedules ?? [],
       snippets: extra?.snippets ?? [],
+      dotfilesPools: extra?.dotfilesPools ?? [],
+      dirSyncProfiles: extra?.dirSyncProfiles ?? [],
+      activeTunnels: extra?.activeTunnels ?? [],
       appSettings: extra?.appSettings ?? {},
       agents: extra?.agents ?? this.store.data.agents ?? [],
       mcpServers: extra?.mcpServers ?? this.store.data.mcpServers ?? [],

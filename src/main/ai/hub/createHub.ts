@@ -7,10 +7,12 @@ import {
   HUB_CHANGED,
   type WorkspaceServerSummary,
 } from "../../../shared/types/aiHub";
+import { DEFAULT_SHORTCUTS } from "../../../shared/types/settings";
 import type { InventoryTarget } from "./ContextService";
 import {
   appendDemoActivity,
   deleteDemoMemory,
+  deleteDemoServer,
   getDemoActivityLog,
   getDemoMemories,
   getDemoS3Profiles,
@@ -63,6 +65,25 @@ export function createHub(
               host: p.host,
               port: p.port || 22,
               username: p.username,
+              authType: p.authType,
+              privateKeyPath: p.privateKeyPath,
+              pkcs11LibPath: p.pkcs11LibPath,
+              fido2Resident: p.fido2Resident,
+              proxyJump: p.proxyJump,
+              proxyJumpProfileId: p.proxyJumpProfileId,
+              forwardAgent: p.forwardAgent,
+              x11Forwarding: p.x11Forwarding,
+              x11Display: p.x11Display,
+              compression: p.compression,
+              serverAliveInterval: p.serverAliveInterval,
+              initialPath: p.initialPath,
+              poolId: p.poolId,
+              dotfilesSyncPolicy: p.dotfilesSyncPolicy,
+              autoReconnect: p.autoReconnect,
+              maxReconnectAttempts: p.maxReconnectAttempts,
+              reconnectDelayMs: p.reconnectDelayMs,
+              extraOptions: p.extraOptions,
+              tunnels: p.tunnels,
               folder: p.group,
               group: p.group,
               cluster: p.cluster,
@@ -89,6 +110,25 @@ export function createHub(
             host: p.host,
             port: p.port || 22,
             username: p.username,
+            authType: p.authType,
+            privateKeyPath: p.privateKeyPath,
+            pkcs11LibPath: p.pkcs11LibPath,
+            fido2Resident: p.fido2Resident,
+            proxyJump: p.proxyJump,
+            proxyJumpProfileId: p.proxyJumpProfileId,
+            forwardAgent: p.forwardAgent,
+            x11Forwarding: p.x11Forwarding,
+            x11Display: p.x11Display,
+            compression: p.compression,
+            serverAliveInterval: p.serverAliveInterval,
+            initialPath: p.initialPath,
+            poolId: p.poolId,
+            dotfilesSyncPolicy: p.dotfilesSyncPolicy,
+            autoReconnect: p.autoReconnect,
+            maxReconnectAttempts: p.maxReconnectAttempts,
+            reconnectDelayMs: p.reconnectDelayMs,
+            extraOptions: p.extraOptions,
+            tunnels: p.tunnels,
             folder: p.group,
             group: p.group,
             cluster: p.cluster,
@@ -252,14 +292,15 @@ export function createHub(
         ?.map((t) => t.trim())
         .filter(Boolean)
         .slice(0, 16);
+      const isShared = input.shared ?? true;
+      const nowIso = new Date().toISOString();
       if (isDemoMode()) {
-        return upsertDemoServer({
+        upsertDemoServer({
           ...input,
           id,
           tags: cleanTags,
         });
       }
-      const isShared = input.shared ?? true;
       if (isShared && bridge.teamVaultService?.isUnlocked?.()) {
         const payload = await bridge.teamVaultService.getPayload();
         const existing = payload.ssh.find((p) => p.id === id);
@@ -270,62 +311,120 @@ export function createHub(
           id,
           name: input.name.trim(),
           host: input.host.trim(),
-          port: input.port || 22,
-          username: input.username.trim() || "root",
-          authType: existing?.authType || "agent",
+          port: input.port || existing?.port || 22,
+          username: input.username.trim() || existing?.username || "root",
+          authType: input.authType ?? existing?.authType ?? "agent",
+          privateKeyPath: input.privateKeyPath ?? existing?.privateKeyPath,
+          pkcs11LibPath: input.pkcs11LibPath ?? existing?.pkcs11LibPath,
+          fido2Resident: input.fido2Resident ?? existing?.fido2Resident,
+          proxyJump: input.proxyJump ?? existing?.proxyJump,
+          proxyJumpProfileId: input.proxyJumpProfileId ?? existing?.proxyJumpProfileId,
+          forwardAgent: input.forwardAgent ?? existing?.forwardAgent,
+          x11Forwarding: input.x11Forwarding ?? existing?.x11Forwarding,
+          x11Display: input.x11Display ?? existing?.x11Display,
+          compression: input.compression ?? existing?.compression,
+          serverAliveInterval: input.serverAliveInterval ?? existing?.serverAliveInterval,
+          initialPath: input.initialPath ?? existing?.initialPath,
+          poolId: input.poolId ?? existing?.poolId,
+          dotfilesSyncPolicy: input.dotfilesSyncPolicy ?? existing?.dotfilesSyncPolicy,
+          autoReconnect: input.autoReconnect ?? existing?.autoReconnect,
+          maxReconnectAttempts: input.maxReconnectAttempts ?? existing?.maxReconnectAttempts,
+          reconnectDelayMs: input.reconnectDelayMs ?? existing?.reconnectDelayMs,
+          extraOptions: input.extraOptions ?? existing?.extraOptions,
+          tunnels: input.tunnels ?? existing?.tunnels,
           group:
             input.folder?.trim() || input.cluster?.trim() || existing?.group,
-          cluster: input.cluster?.trim() || undefined,
-          nodeRole: input.nodeRole?.trim() || undefined,
-          role: input.role?.trim() || undefined,
-          description: input.description?.trim() || undefined,
-          tags: cleanTags?.length ? cleanTags : undefined,
+          cluster: input.cluster?.trim() || existing?.cluster,
+          nodeRole: input.nodeRole?.trim() || existing?.nodeRole,
+          role: input.role?.trim() || existing?.role,
+          description: input.description?.trim() || existing?.description,
+          tags: cleanTags?.length ? cleanTags : existing?.tags,
           shared: true,
-          updatedAt: new Date().toISOString(),
+          updatedAt: nowIso,
           updatedBy: actor,
         });
         bridge.scheduleTeamVaultAutoPush?.();
       }
       const profiles = await bridge.profileStore.getProfiles();
       const existing = profiles.ssh.find((p) => p.id === id);
-      const nowIso = new Date().toISOString();
-      await bridge.profileStore.saveSSH({
+      const savedProfile = {
         ...existing,
         id,
         name: input.name.trim(),
         host: input.host.trim(),
-        port: input.port || 22,
-        username: input.username.trim() || "root",
-        authType: existing?.authType || "agent",
+        port: input.port || existing?.port || 22,
+        username: input.username.trim() || existing?.username || "root",
+        authType: input.authType ?? existing?.authType ?? "agent",
+        privateKeyPath: input.privateKeyPath ?? existing?.privateKeyPath,
+        pkcs11LibPath: input.pkcs11LibPath ?? existing?.pkcs11LibPath,
+        fido2Resident: input.fido2Resident ?? existing?.fido2Resident,
+        proxyJump: input.proxyJump ?? existing?.proxyJump,
+        proxyJumpProfileId: input.proxyJumpProfileId ?? existing?.proxyJumpProfileId,
+        forwardAgent: input.forwardAgent ?? existing?.forwardAgent,
+        x11Forwarding: input.x11Forwarding ?? existing?.x11Forwarding,
+        x11Display: input.x11Display ?? existing?.x11Display,
+        compression: input.compression ?? existing?.compression,
+        serverAliveInterval: input.serverAliveInterval ?? existing?.serverAliveInterval,
+        initialPath: input.initialPath ?? existing?.initialPath,
+        poolId: input.poolId ?? existing?.poolId,
+        dotfilesSyncPolicy: input.dotfilesSyncPolicy ?? existing?.dotfilesSyncPolicy,
+        autoReconnect: input.autoReconnect ?? existing?.autoReconnect,
+        maxReconnectAttempts: input.maxReconnectAttempts ?? existing?.maxReconnectAttempts,
+        reconnectDelayMs: input.reconnectDelayMs ?? existing?.reconnectDelayMs,
+        extraOptions: input.extraOptions ?? existing?.extraOptions,
+        tunnels: input.tunnels ?? existing?.tunnels,
         group:
           input.folder?.trim() || input.cluster?.trim() || existing?.group,
-        cluster: input.cluster?.trim() || undefined,
-        nodeRole: input.nodeRole?.trim() || undefined,
-        role: input.role?.trim() || undefined,
-        description: input.description?.trim() || undefined,
-        tags: cleanTags?.length ? cleanTags : undefined,
+        cluster: input.cluster?.trim() || existing?.cluster,
+        nodeRole: input.nodeRole?.trim() || existing?.nodeRole,
+        role: input.role?.trim() || existing?.role,
+        description: input.description?.trim() || existing?.description,
+        tags: cleanTags?.length ? cleanTags : existing?.tags,
         shared: isShared,
         updatedAt: nowIso,
-      });
+      };
+      await bridge.profileStore.saveSSH(savedProfile);
       bridge.scheduleAutoSync?.();
       return {
         id,
-        name: input.name.trim(),
-        host: input.host.trim(),
-        port: input.port || 22,
-        username: input.username.trim() || "root",
-        folder: input.folder?.trim() || input.cluster?.trim(),
-        group: input.folder?.trim() || input.cluster?.trim(),
-        cluster: input.cluster?.trim() || undefined,
-        nodeRole: input.nodeRole?.trim() || undefined,
-        role: input.role?.trim() || undefined,
-        description: input.description?.trim() || undefined,
-        tags: cleanTags,
+        name: savedProfile.name,
+        host: savedProfile.host,
+        port: savedProfile.port,
+        username: savedProfile.username,
+        authType: savedProfile.authType,
+        privateKeyPath: savedProfile.privateKeyPath,
+        pkcs11LibPath: savedProfile.pkcs11LibPath,
+        fido2Resident: savedProfile.fido2Resident,
+        proxyJump: savedProfile.proxyJump,
+        proxyJumpProfileId: savedProfile.proxyJumpProfileId,
+        forwardAgent: savedProfile.forwardAgent,
+        x11Forwarding: savedProfile.x11Forwarding,
+        x11Display: savedProfile.x11Display,
+        compression: savedProfile.compression,
+        serverAliveInterval: savedProfile.serverAliveInterval,
+        initialPath: savedProfile.initialPath,
+        poolId: savedProfile.poolId,
+        dotfilesSyncPolicy: savedProfile.dotfilesSyncPolicy,
+        autoReconnect: savedProfile.autoReconnect,
+        maxReconnectAttempts: savedProfile.maxReconnectAttempts,
+        reconnectDelayMs: savedProfile.reconnectDelayMs,
+        extraOptions: savedProfile.extraOptions,
+        tunnels: savedProfile.tunnels,
+        folder: savedProfile.group,
+        group: savedProfile.group,
+        cluster: savedProfile.cluster,
+        nodeRole: savedProfile.nodeRole,
+        role: savedProfile.role,
+        description: savedProfile.description,
+        tags: savedProfile.tags,
         shared: isShared,
         updatedAt: nowIso,
       };
     },
     deleteServer: async (profileId) => {
+      if (isDemoMode()) {
+        deleteDemoServer(profileId);
+      }
       try {
         if (bridge.teamVaultService?.isUnlocked?.()) {
           await bridge.teamVaultService
@@ -523,10 +622,12 @@ export function createHub(
       return session.sessionId;
     },
     extraAppContext: async () => {
-      const [profiles, settings, snippets] = await Promise.all([
+      const [profiles, settings, snippets, dotfilesPools, dirSyncProfiles] = await Promise.all([
         bridge.profileStore.getProfiles().catch(() => ({ ssh: [], s3: [], folders: [] })),
         bridge.settingsStore?.getSettings?.().catch(() => ({})) ?? Promise.resolve({}),
         bridge.snippetStore?.list?.().catch(() => []) ?? Promise.resolve([]),
+        bridge.dotfilePoolStore?.getPools?.().catch(() => []) ?? Promise.resolve([]),
+        bridge.directorySyncProfileStore?.list?.().catch(() => []) ?? Promise.resolve([]),
       ]);
       const folderSet = new Set<string>(profiles.folders ?? []);
       const s3List = [...(profiles.s3 ?? [])];
@@ -543,6 +644,16 @@ export function createHub(
           if (!snippetList.some((s) => s.id === ds.id)) snippetList.push(ds);
         }
       }
+      const activeTunnels = (bridge.sshTunnelManager?.listActive?.() ?? []).map((t) => ({
+        id: t.id,
+        connectionId: t.connectionId,
+        connectionName: t.connectionName,
+        type: t.tunnel.type,
+        localPort: t.tunnel.localPort,
+        remoteHost: t.tunnel.remoteHost,
+        remotePort: t.tunnel.remotePort,
+        status: t.status,
+      }));
       return {
         folders: Array.from(folderSet),
         s3Profiles: s3List.map((s) => ({
@@ -555,6 +666,26 @@ export function createHub(
         })),
         snippets: snippetList,
         appSettings: (settings ?? {}) as unknown as Record<string, unknown>,
+        dotfilesPools: (dotfilesPools ?? []).map((pool) => ({
+          id: pool.id,
+          name: pool.name,
+          files: (pool.files ?? []).map((f) => ({
+            id: f.id,
+            remotePath: f.remotePath,
+            mode: f.mode,
+            updatedAt: f.updatedAt,
+          })),
+        })),
+        dirSyncProfiles: (dirSyncProfiles ?? []).map((dp) => ({
+          id: dp.id,
+          name: dp.name,
+          sourceRef: dp.source.providerConfigRef,
+          sourcePath: dp.source.path,
+          targetRef: dp.target.providerConfigRef,
+          targetPath: dp.target.path,
+          deleteExtraneous: dp.deleteExtraneous,
+        })),
+        activeTunnels,
       };
     },
     manageFolders: async (input) => {
@@ -577,6 +708,53 @@ export function createHub(
       throw new Error(`Unsupported folder operation: ${input.operation}`);
     },
     manageS3Profile: async (input) => {
+      if (input.operation === "list_dir_sync_profiles") {
+        const list = (await bridge.directorySyncProfileStore?.list?.().catch(() => [])) ?? [];
+        return { dirSyncProfiles: list };
+      }
+      if (input.operation === "save_dir_sync_profile") {
+        const list = (await bridge.directorySyncProfileStore?.list?.().catch(() => [])) ?? [];
+        const q = (input.idOrName || input.name || "").trim().toLowerCase();
+        const existing = list.find(
+          (p) => p.id.toLowerCase() === q || p.name.toLowerCase() === q,
+        );
+        const now = new Date().toISOString();
+        const saved = await bridge.directorySyncProfileStore.save({
+          id: existing?.id || crypto.randomUUID(),
+          name: input.name?.trim() || existing?.name || "Directory Sync Profile",
+          source: {
+            providerConfigRef:
+              input.sourceProviderId?.trim() ||
+              existing?.source.providerConfigRef ||
+              "local",
+            path: input.sourcePath?.trim() || existing?.source.path || "/",
+          },
+          target: {
+            providerConfigRef:
+              input.targetProviderId?.trim() ||
+              existing?.target.providerConfigRef ||
+              "local",
+            path: input.targetPath?.trim() || existing?.target.path || "/",
+          },
+          deleteExtraneous: input.deleteExtraneous ?? existing?.deleteExtraneous ?? false,
+          createdAt: existing?.createdAt || now,
+          updatedAt: now,
+        });
+        bridge.scheduleAutoSync?.();
+        return { savedDirSyncProfile: saved };
+      }
+      if (input.operation === "delete_dir_sync_profile") {
+        const list = (await bridge.directorySyncProfileStore?.list?.().catch(() => [])) ?? [];
+        const q = (input.idOrName || input.name || "").trim().toLowerCase();
+        const existing = list.find(
+          (p) => p.id.toLowerCase() === q || p.name.toLowerCase() === q || (q && p.name.toLowerCase().includes(q)),
+        );
+        const targetId = existing?.id || input.idOrName;
+        if (!targetId) throw new Error("Directory Sync profile not found");
+        await bridge.directorySyncProfileStore.delete(targetId);
+        bridge.scheduleAutoSync?.();
+        return { deletedDirSyncProfileId: targetId, name: existing?.name };
+      }
       const profiles = await bridge.profileStore.getProfiles();
       const q = (input.idOrName || input.name || "").trim().toLowerCase();
       const existing = (profiles.s3 ?? []).find(
@@ -598,6 +776,7 @@ export function createHub(
         endpoint: input.endpoint ?? existing?.endpoint ?? "",
         region: input.region ?? existing?.region ?? "us-east-1",
         initialPath: input.bucket ?? existing?.initialPath,
+        authMode: input.authMethod === "awsSso" ? "sso" : existing?.authMode ?? "static",
         accessKeyId: input.accessKeyId ?? existing?.accessKeyId ?? "",
         secretAccessKey: input.secretAccessKey ?? existing?.secretAccessKey ?? "",
         forcePathStyle: input.forcePathStyle ?? existing?.forcePathStyle ?? false,
@@ -614,6 +793,89 @@ export function createHub(
         await bridge.settingsStore.saveSettings(merged);
         bridge.scheduleAutoSync?.();
         return merged;
+      }
+      if (input.operation === "update_shortcuts") {
+        const current = await bridge.settingsStore.getSettings();
+        const baseShortcuts = input.resetShortcuts
+          ? { ...DEFAULT_SHORTCUTS }
+          : { ...DEFAULT_SHORTCUTS, ...(current.shortcuts ?? {}) };
+        const mergedShortcuts = {
+          ...baseShortcuts,
+          ...(input.shortcuts ?? {}),
+        };
+        const updated = await bridge.settingsStore.saveSettings({
+          ...current,
+          shortcuts: mergedShortcuts,
+        });
+        bridge.scheduleAutoSync?.();
+        return { shortcuts: updated.shortcuts };
+      }
+      if (input.operation === "list_dotfiles") {
+        const pools = (await bridge.dotfilePoolStore?.getPools?.().catch(() => [])) ?? [];
+        const settings = await bridge.settingsStore.getSettings().catch(() => ({ dotfilesPoolEnabled: false }));
+        return {
+          dotfilesPoolEnabled: Boolean(settings.dotfilesPoolEnabled),
+          pools,
+        };
+      }
+      if (input.operation === "save_dotfile" && input.dotfile) {
+        const poolId = input.dotfile.poolId?.trim() || "default";
+        const pools = (await bridge.dotfilePoolStore?.getPools?.().catch(() => [])) ?? [];
+        let pool = pools.find((p) => p.id === poolId);
+        if (!pool) {
+          pool = {
+            id: poolId,
+            name: input.dotfile.poolName?.trim() || "Default Pool",
+            files: [],
+          };
+          await bridge.dotfilePoolStore.savePool(pool);
+        } else if (input.dotfile.poolName?.trim() && input.dotfile.poolName.trim() !== pool.name) {
+          pool.name = input.dotfile.poolName.trim();
+          await bridge.dotfilePoolStore.savePool(pool);
+        }
+        let updatedPool = pool;
+        if (input.dotfile.remotePath) {
+          updatedPool = await bridge.dotfilePoolStore.addFileToPool(poolId, {
+            remotePath: input.dotfile.remotePath.trim(),
+            content: input.dotfile.content ?? "",
+            mode: input.dotfile.mode?.trim() || "644",
+          });
+        }
+        const currentSettings = await bridge.settingsStore.getSettings();
+        if (!currentSettings.dotfilesPoolEnabled) {
+          await bridge.settingsStore.saveSettings({
+            ...currentSettings,
+            dotfilesPoolEnabled: true,
+          });
+        }
+        bridge.scheduleAutoSync?.();
+        return { pool: updatedPool, dotfilesPoolEnabled: true };
+      }
+      if (input.operation === "delete_dotfile" && input.dotfile) {
+        const poolId = input.dotfile.poolId?.trim() || "default";
+        if (input.dotfile.deletePool || !input.dotfile.remotePath) {
+          await bridge.dotfilePoolStore.deletePool(poolId);
+          bridge.scheduleAutoSync?.();
+          return { deletedPoolId: poolId };
+        }
+        const pool = await bridge.dotfilePoolStore.getPool(poolId);
+        if (!pool) throw new Error(`Dotfile pool "${poolId}" not found`);
+        const now = new Date().toISOString();
+        for (const f of pool.files) {
+          if (f.remotePath === input.dotfile.remotePath) {
+            f.deletedAt = now;
+          }
+        }
+        await bridge.dotfilePoolStore.savePool(pool);
+        bridge.scheduleAutoSync?.();
+        return {
+          poolId,
+          deletedRemotePath: input.dotfile.remotePath,
+        };
+      }
+      if (input.operation === "list_snippets") {
+        const snippets = (await bridge.snippetStore?.list?.().catch(() => [])) ?? [];
+        return { snippets };
       }
       if (input.operation === "save_snippet" && input.snippet) {
         const snippets = (await bridge.snippetStore?.list?.().catch(() => [])) ?? [];

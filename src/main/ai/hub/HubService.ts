@@ -99,6 +99,25 @@ export interface HubHost {
     host: string;
     port?: number;
     username: string;
+    authType?: WorkspaceServerSummary["authType"];
+    privateKeyPath?: string;
+    pkcs11LibPath?: string;
+    fido2Resident?: boolean;
+    proxyJump?: string;
+    proxyJumpProfileId?: string;
+    forwardAgent?: boolean;
+    x11Forwarding?: boolean;
+    x11Display?: string;
+    compression?: boolean;
+    serverAliveInterval?: number;
+    initialPath?: string;
+    poolId?: string;
+    dotfilesSyncPolicy?: "ask" | "always";
+    autoReconnect?: boolean;
+    maxReconnectAttempts?: number;
+    reconnectDelayMs?: number;
+    extraOptions?: Record<string, string>;
+    tunnels?: WorkspaceServerSummary["tunnels"];
     folder?: string;
     cluster?: string;
     nodeRole?: string;
@@ -127,8 +146,13 @@ export interface HubHost {
       region?: string;
       bucket?: string;
       group?: string;
+      authMethod?: string;
+      awsProfile?: string;
     }>;
     snippets: unknown[];
+    dotfilesPools?: unknown[];
+    dirSyncProfiles?: unknown[];
+    activeTunnels?: unknown[];
     appSettings: Record<string, unknown>;
   }>;
   manageFolders?(input: {
@@ -137,7 +161,12 @@ export interface HubHost {
     newFolderName?: string;
   }): Promise<unknown>;
   manageS3Profile?(input: {
-    operation: "upsert_s3_profile" | "delete_s3_profile";
+    operation:
+      | "upsert_s3_profile"
+      | "delete_s3_profile"
+      | "list_dir_sync_profiles"
+      | "save_dir_sync_profile"
+      | "delete_dir_sync_profile";
     idOrName?: string;
     name?: string;
     endpoint?: string;
@@ -147,15 +176,37 @@ export interface HubHost {
     secretAccessKey?: string;
     forcePathStyle?: boolean;
     group?: string;
+    authMethod?: "accessKey" | "awsProfile" | "awsSso";
+    awsProfile?: string;
+    sourceProviderId?: string;
+    sourcePath?: string;
+    targetProviderId?: string;
+    targetPath?: string;
+    deleteExtraneous?: boolean;
   }): Promise<unknown>;
   manageAppSettings?(input: {
     operation:
       | "get_state"
       | "update_settings"
+      | "update_shortcuts"
+      | "list_dotfiles"
+      | "save_dotfile"
+      | "delete_dotfile"
+      | "list_snippets"
       | "save_snippet"
       | "delete_snippet"
       | "open_local_terminal";
     settings?: Record<string, unknown>;
+    shortcuts?: Record<string, string>;
+    resetShortcuts?: boolean;
+    dotfile?: {
+      poolId?: string;
+      poolName?: string;
+      remotePath?: string;
+      content?: string;
+      mode?: string;
+      deletePool?: boolean;
+    };
     snippet?: {
       id?: string;
       name?: string;
@@ -911,6 +962,25 @@ export class HubService {
           host,
           port: s.port,
           username: s.username?.trim() || "root",
+          authType: s.authType,
+          privateKeyPath: s.privateKeyPath,
+          pkcs11LibPath: s.pkcs11LibPath,
+          fido2Resident: s.fido2Resident,
+          proxyJump: s.proxyJump,
+          proxyJumpProfileId: s.proxyJumpProfileId,
+          forwardAgent: s.forwardAgent,
+          x11Forwarding: s.x11Forwarding,
+          x11Display: s.x11Display,
+          compression: s.compression,
+          serverAliveInterval: s.serverAliveInterval,
+          initialPath: s.initialPath,
+          poolId: s.poolId,
+          dotfilesSyncPolicy: s.dotfilesSyncPolicy,
+          autoReconnect: s.autoReconnect,
+          maxReconnectAttempts: s.maxReconnectAttempts,
+          reconnectDelayMs: s.reconnectDelayMs,
+          extraOptions: s.extraOptions,
+          tunnels: s.tunnels,
           folder: s.folder,
           cluster: s.cluster,
           nodeRole: s.nodeRole,
@@ -943,6 +1013,25 @@ export class HubService {
           host: host.trim(),
           port: s.port || 22,
           username: s.username?.trim() || "root",
+          authType: s.authType ?? saved?.authType,
+          privateKeyPath: s.privateKeyPath ?? saved?.privateKeyPath,
+          pkcs11LibPath: s.pkcs11LibPath ?? saved?.pkcs11LibPath,
+          fido2Resident: s.fido2Resident ?? saved?.fido2Resident,
+          proxyJump: s.proxyJump ?? saved?.proxyJump,
+          proxyJumpProfileId: s.proxyJumpProfileId ?? saved?.proxyJumpProfileId,
+          forwardAgent: s.forwardAgent ?? saved?.forwardAgent,
+          x11Forwarding: s.x11Forwarding ?? saved?.x11Forwarding,
+          x11Display: s.x11Display ?? saved?.x11Display,
+          compression: s.compression ?? saved?.compression,
+          serverAliveInterval: s.serverAliveInterval ?? saved?.serverAliveInterval,
+          initialPath: s.initialPath ?? saved?.initialPath,
+          poolId: s.poolId ?? saved?.poolId,
+          dotfilesSyncPolicy: s.dotfilesSyncPolicy ?? saved?.dotfilesSyncPolicy,
+          autoReconnect: s.autoReconnect ?? saved?.autoReconnect,
+          maxReconnectAttempts: s.maxReconnectAttempts ?? saved?.maxReconnectAttempts,
+          reconnectDelayMs: s.reconnectDelayMs ?? saved?.reconnectDelayMs,
+          extraOptions: s.extraOptions ?? saved?.extraOptions,
+          tunnels: s.tunnels ?? saved?.tunnels,
           folder: s.folder?.trim() || s.cluster?.trim() || undefined,
           group: s.folder?.trim() || s.cluster?.trim() || undefined,
           cluster: s.cluster?.trim() || undefined,
@@ -1807,6 +1896,25 @@ export class HubService {
       host: server.host,
       port: server.port || 22,
       username: server.username || "root",
+      authType: server.authType,
+      privateKeyPath: server.privateKeyPath,
+      pkcs11LibPath: server.pkcs11LibPath,
+      fido2Resident: server.fido2Resident,
+      proxyJump: server.proxyJump,
+      proxyJumpProfileId: server.proxyJumpProfileId,
+      forwardAgent: server.forwardAgent,
+      x11Forwarding: server.x11Forwarding,
+      x11Display: server.x11Display,
+      compression: server.compression,
+      serverAliveInterval: server.serverAliveInterval,
+      initialPath: server.initialPath,
+      poolId: server.poolId,
+      dotfilesSyncPolicy: server.dotfilesSyncPolicy,
+      autoReconnect: server.autoReconnect,
+      maxReconnectAttempts: server.maxReconnectAttempts,
+      reconnectDelayMs: server.reconnectDelayMs,
+      extraOptions: server.extraOptions,
+      tunnels: server.tunnels,
       folder: server.folder,
       group: server.group,
       cluster: server.cluster,
@@ -2227,6 +2335,9 @@ export class HubService {
       s3TeamWorkspace: this.s3Workspace.getStatus(),
       schedules: this.store.data.schedules ?? [],
       snippets: appExtra?.snippets ?? [],
+      dotfilesPools: appExtra?.dotfilesPools ?? [],
+      dirSyncProfiles: appExtra?.dirSyncProfiles ?? [],
+      activeTunnels: appExtra?.activeTunnels ?? [],
       agents: this.getAgentsList(),
       mcpServers: this.getMcpServersList(),
       kbDocuments: this.getKbDocumentsList(),
@@ -2326,6 +2437,109 @@ export class HubService {
         const query = str("serverIdOrName") || str("id") || str("name") || str("host");
         const existing = await this.resolveServerTarget(query);
 
+        if (op === "list_tunnels") {
+          const extra = await this.collectExtraContext();
+          const allSrvs = extra.workspaceServers ?? [];
+          const filtered = existing ? [existing] : allSrvs;
+          const tunnelsByServer = filtered
+            .filter((s) => (s.tunnels ?? []).length > 0 || existing)
+            .map((s) => ({
+              serverId: s.id,
+              serverName: s.name,
+              host: s.host,
+              tunnels: s.tunnels ?? [],
+            }));
+          return {
+            ok: true,
+            operation: "list_tunnels",
+            tunnelsByServer,
+            activeTunnels: extra.activeTunnels ?? [],
+          };
+        }
+
+        if (op === "save_tunnel" || op === "delete_tunnel") {
+          if (!existing) {
+            throw new Error(`Could not find server matching "${query ?? ""}" to manage SSH tunnels`);
+          }
+          const currentTunnels = [...(existing.tunnels ?? [])];
+          const tQuery = (str("tunnelIdOrName") || str("tunnelName") || "").toLowerCase();
+          if (op === "delete_tunnel") {
+            const nextTunnels = currentTunnels.filter(
+              (t) =>
+                t.id.toLowerCase() !== tQuery &&
+                t.name.toLowerCase() !== tQuery &&
+                !t.name.toLowerCase().includes(tQuery),
+            );
+            await this.request({
+              action: "server-upsert",
+              server: {
+                ...existing,
+                tunnels: nextTunnels,
+              },
+            });
+            return {
+              ok: true,
+              operation: "delete_tunnel",
+              serverId: existing.id,
+              serverName: existing.name,
+              tunnels: nextTunnels,
+            };
+          }
+          // save_tunnel
+          const tunnelTypeRaw = str("tunnelType") || "local";
+          const tunnelType: "local" | "remote" | "dynamic" =
+            tunnelTypeRaw === "remote" || tunnelTypeRaw === "dynamic"
+              ? tunnelTypeRaw
+              : "local";
+          const localPort = num("localPort") ?? 8080;
+          const existingTunnelIdx = tQuery
+            ? currentTunnels.findIndex(
+                (t) => t.id.toLowerCase() === tQuery || t.name.toLowerCase() === tQuery,
+              )
+            : -1;
+          const prevTunnel = existingTunnelIdx >= 0 ? currentTunnels[existingTunnelIdx] : undefined;
+          const newTunnel = {
+            id: prevTunnel?.id || crypto.randomUUID(),
+            name:
+              str("tunnelName") ||
+              str("tunnelIdOrName") ||
+              prevTunnel?.name ||
+              `${tunnelType.toUpperCase()} :${localPort}`,
+            type: tunnelType,
+            localPort,
+            remoteHost:
+              tunnelType === "dynamic"
+                ? undefined
+                : str("remoteHost") || prevTunnel?.remoteHost || "127.0.0.1",
+            remotePort:
+              tunnelType === "dynamic"
+                ? undefined
+                : num("remotePort") ?? prevTunnel?.remotePort ?? localPort,
+            description: str("tunnelDescription") ?? prevTunnel?.description,
+            enabled: bool("tunnelEnabled") ?? prevTunnel?.enabled ?? true,
+          };
+          if (existingTunnelIdx >= 0) {
+            currentTunnels[existingTunnelIdx] = newTunnel;
+          } else {
+            currentTunnels.push(newTunnel);
+          }
+          await this.request({
+            action: "server-upsert",
+            server: {
+              ...existing,
+              tunnels: currentTunnels,
+            },
+          });
+          return {
+            ok: true,
+            operation: "save_tunnel",
+            serverId: existing.id,
+            serverName: existing.name,
+            tunnel: newTunnel,
+            tunnels: currentTunnels,
+          };
+        }
+
         if (op === "delete") {
           const targetId = existing?.id || str("serverIdOrName") || str("id");
           if (!targetId) {
@@ -2401,6 +2615,31 @@ export class HubService {
         if (!name || !host) {
           throw new Error("Server 'name' and 'host' are required to create or update a server");
         }
+        const rawAuthType = str("authType");
+        const authType: WorkspaceServerSummary["authType"] =
+          rawAuthType === "password" ||
+          rawAuthType === "privateKey" ||
+          rawAuthType === "smartcard" ||
+          rawAuthType === "agent" ||
+          rawAuthType === "fido2"
+            ? rawAuthType
+            : existing?.authType;
+        const rawDotfilesPolicy = str("dotfilesSyncPolicy");
+        const dotfilesSyncPolicy: "ask" | "always" | undefined =
+          rawDotfilesPolicy === "ask" || rawDotfilesPolicy === "always"
+            ? rawDotfilesPolicy
+            : rawDotfilesPolicy === "push-only" || rawDotfilesPolicy === "always-push"
+              ? "always"
+              : existing?.dotfilesSyncPolicy;
+        const extraOptions =
+          p.extraOptions && typeof p.extraOptions === "object" && !Array.isArray(p.extraOptions)
+            ? (p.extraOptions as Record<string, string>)
+            : existing?.extraOptions;
+        let resolvedJumpProfileId = str("proxyJumpProfileId") ?? existing?.proxyJumpProfileId;
+        if (str("proxyJumpProfileId")) {
+          const jumpTarget = await this.resolveServerTarget(str("proxyJumpProfileId"));
+          if (jumpTarget) resolvedJumpProfileId = jumpTarget.id;
+        }
         const snap = await this.request({
           action: "server-upsert",
           server: {
@@ -2409,6 +2648,25 @@ export class HubService {
             host,
             port: num("port") ?? existing?.port ?? 22,
             username: str("username") || existing?.username || "root",
+            authType,
+            privateKeyPath: str("privateKeyPath") ?? existing?.privateKeyPath,
+            pkcs11LibPath: str("pkcs11LibPath") ?? existing?.pkcs11LibPath,
+            fido2Resident: bool("fido2Resident") ?? existing?.fido2Resident,
+            proxyJump: str("proxyJump") ?? existing?.proxyJump,
+            proxyJumpProfileId: resolvedJumpProfileId,
+            forwardAgent: bool("forwardAgent") ?? existing?.forwardAgent,
+            x11Forwarding: bool("x11Forwarding") ?? existing?.x11Forwarding,
+            x11Display: str("x11Display") ?? existing?.x11Display,
+            compression: bool("compression") ?? existing?.compression,
+            serverAliveInterval: num("serverAliveInterval") ?? existing?.serverAliveInterval,
+            initialPath: str("initialPath") ?? existing?.initialPath,
+            poolId: str("poolId") ?? existing?.poolId,
+            dotfilesSyncPolicy,
+            autoReconnect: bool("autoReconnect") ?? existing?.autoReconnect,
+            maxReconnectAttempts: num("maxReconnectAttempts") ?? existing?.maxReconnectAttempts,
+            reconnectDelayMs: num("reconnectDelayMs") ?? existing?.reconnectDelayMs,
+            extraOptions,
+            tunnels: existing?.tunnels,
             folder: str("folder") ?? existing?.folder ?? str("cluster") ?? existing?.cluster,
             cluster: str("cluster") ?? existing?.cluster,
             nodeRole: str("nodeRole") ?? existing?.nodeRole,
@@ -2593,6 +2851,14 @@ export class HubService {
           return {
             s3TeamWorkspace: this.s3Workspace.getStatus(),
             s3Profiles: extra.s3Profiles ?? [],
+            dirSyncProfiles: extra.dirSyncProfiles ?? [],
+          };
+        }
+        if (op === "list_dir_sync_profiles") {
+          return {
+            ok: true,
+            operation: "list_dir_sync_profiles",
+            dirSyncProfiles: extra.dirSyncProfiles ?? [],
           };
         }
         if (op === "sync_now") {
@@ -2603,8 +2869,50 @@ export class HubService {
             s3TeamWorkspace: this.s3Workspace.getStatus(),
           };
         }
+        if (op === "configure_s3_workspace") {
+          await this.request({
+            action: "workspace-s3-configure",
+            config: {
+              enabled: bool("enabled") ?? true,
+              endpoint: str("endpoint"),
+              region: str("region") || "eu-north-1",
+              bucket: str("bucket") || "",
+              prefix: str("prefix") || "sshs3-workspace",
+              accessKeyId: str("accessKeyId") || "",
+              secretAccessKey: str("secretAccessKey"),
+              forcePathStyle: bool("forcePathStyle") ?? true,
+              actorName: str("actorName"),
+            },
+            inviteCode: str("inviteCode"),
+          });
+          return {
+            ok: true,
+            operation: "configure_s3_workspace",
+            s3TeamWorkspace: this.s3Workspace.getStatus(),
+          };
+        }
+        if (op === "disconnect_s3_workspace") {
+          await this.request({ action: "workspace-s3-disconnect" });
+          return {
+            ok: true,
+            operation: "disconnect_s3_workspace",
+            s3TeamWorkspace: this.s3Workspace.getStatus(),
+          };
+        }
+        const rawAuthMethod = str("authMethod");
+        const authMethod: "accessKey" | "awsProfile" | "awsSso" | undefined =
+          rawAuthMethod === "accessKey" ||
+          rawAuthMethod === "awsProfile" ||
+          rawAuthMethod === "awsSso"
+            ? rawAuthMethod
+            : undefined;
         const res = await this.host.manageS3Profile?.({
-          operation: op as "upsert_s3_profile" | "delete_s3_profile",
+          operation: op as
+            | "upsert_s3_profile"
+            | "delete_s3_profile"
+            | "list_dir_sync_profiles"
+            | "save_dir_sync_profile"
+            | "delete_dir_sync_profile",
           idOrName: str("idOrName") || str("id") || str("name"),
           name: str("name"),
           endpoint: str("endpoint"),
@@ -2614,6 +2922,13 @@ export class HubService {
           secretAccessKey: str("secretAccessKey"),
           forcePathStyle: bool("forcePathStyle"),
           group: str("group") || str("folder"),
+          authMethod,
+          awsProfile: str("awsProfile"),
+          sourceProviderId: str("sourceProviderId"),
+          sourcePath: str("sourcePath"),
+          targetProviderId: str("targetProviderId"),
+          targetPath: str("targetPath"),
+          deleteExtraneous: bool("deleteExtraneous"),
         });
         this.changed();
         return { ok: true, operation: op, result: res };
@@ -2629,68 +2944,222 @@ export class HubService {
             appSettings: extra.appSettings,
             folders: extra.folders,
             s3Profiles: extra.s3Profiles,
+            dirSyncProfiles: extra.dirSyncProfiles,
+            dotfilesPools: extra.dotfilesPools,
+            activeTunnels: extra.activeTunnels,
             s3TeamWorkspace: extra.s3TeamWorkspace,
             schedules: extra.schedules,
             snippets: extra.snippets,
+            agents: extra.agents,
+            mcpServers: extra.mcpServers,
+            kbDocuments: extra.kbDocuments,
             workspaceServersCount: (extra.workspaceServers ?? []).length,
             workspaceServers: extra.workspaceServers,
             openTerminals: this.terminals.list(),
           };
         }
-        if (op === "update_settings") {
+        if (
+          op === "update_settings" ||
+          op === "configure_ai" ||
+          op === "update_shortcuts"
+        ) {
           if (bool("demoMode") !== undefined) {
             setDemoMode(bool("demoMode")!);
           }
-          if (str("actorName")) {
-            await this.config.update({ actorName: str("actorName") });
+          const aiConfigPatch: Record<string, unknown> = {};
+          if (bool("aiEnabled") !== undefined) aiConfigPatch.enabled = bool("aiEnabled");
+          if (str("aiProvider")) aiConfigPatch.provider = str("aiProvider");
+          if (str("aiModel")) aiConfigPatch.model = str("aiModel");
+          if (str("aiBaseUrl") !== undefined) aiConfigPatch.baseUrl = str("aiBaseUrl");
+          if (str("actorName")) aiConfigPatch.actorName = str("actorName");
+          if (num("contextWindowTokens") !== undefined) {
+            aiConfigPatch.contextWindowTokens = Math.max(
+              4000,
+              Math.min(1_000_000, Math.round(num("contextWindowTokens")!)),
+            );
+          }
+          if (num("terminalContextChars") !== undefined) {
+            aiConfigPatch.terminalContextChars = Math.max(
+              1000,
+              Math.min(64_000, Math.round(num("terminalContextChars")!)),
+            );
+          }
+          if (num("maxOutputTokens") !== undefined) {
+            aiConfigPatch.maxOutputTokens = Math.max(
+              512,
+              Math.min(32_768, Math.round(num("maxOutputTokens")!)),
+            );
+          }
+          if (num("maxToolTurns") !== undefined) {
+            aiConfigPatch.maxToolTurns = Math.max(
+              1,
+              Math.min(60, Math.round(num("maxToolTurns")!)),
+            );
           }
           if (
+            str("reasoningEffort") === "low" ||
+            str("reasoningEffort") === "medium" ||
+            str("reasoningEffort") === "high"
+          ) {
+            aiConfigPatch.reasoningEffort = str("reasoningEffort");
+          }
+          if (num("temperature") !== undefined) {
+            aiConfigPatch.temperature = Math.max(
+              0,
+              Math.min(1, Number(num("temperature"))),
+            );
+          }
+
+          const hasPrefUpdates =
             bool("background") !== undefined ||
             bool("autoStart") !== undefined ||
-            bool("inventory") !== undefined
-          ) {
+            bool("inventory") !== undefined ||
+            num("retentionDays") !== undefined;
+
+          if (Object.keys(aiConfigPatch).length > 0 || hasPrefUpdates) {
             await this.request({
               action: "configure",
-              config: {},
-              preferences: {
-                background: bool("background") ?? this.store.data.preferences.background,
-                autoStart: bool("autoStart") ?? this.store.data.preferences.autoStart,
-                inventory: bool("inventory") ?? this.store.data.preferences.inventory,
-              },
+              config: aiConfigPatch as import("../../../shared/types/ai").AiConfigUpdate,
+              preferences: hasPrefUpdates
+                ? {
+                    background:
+                      bool("background") ?? this.store.data.preferences.background,
+                    autoStart:
+                      bool("autoStart") ?? this.store.data.preferences.autoStart,
+                    inventory:
+                      bool("inventory") ?? this.store.data.preferences.inventory,
+                    retentionDays:
+                      num("retentionDays") !== undefined
+                        ? Math.max(1, Math.min(365, Math.round(num("retentionDays")!)))
+                        : this.store.data.preferences.retentionDays,
+                  }
+                : undefined,
             });
           }
+
           const appSettingsPatch: Record<string, unknown> = {};
-          for (const k of [
+          const directAppSettingKeys = [
             "theme",
+            "defaultNewTabType",
             "terminalFontSize",
             "terminalFontFamily",
-            "scrollbackLines",
-            "cursorStyle",
+            "terminalScrollback",
+            "terminalCursorStyle",
             "cursorBlink",
-            "confirmBeforeQuit",
             "copyOnSelect",
             "rightClickPaste",
-          ]) {
+            "clipboardHistoryScope",
+            "clipboardHistoryClearOnExit",
+            "sessionExitAction",
+            "localTerminalAgentMode",
+            "autoSyncLocalSshConfig",
+            "confirmBeforeQuit",
+            "confirmBeforeDelete",
+            "showHiddenFiles",
+            "defaultConflictPolicy",
+            "verifyTransferIntegrity",
+            "fileManagerGitIntegration",
+            "shareFoldersAcrossTypes",
+            "perfMetricsEnabled",
+            "perfMetricsLayout",
+            "perfMetricsItems",
+            "perfMetricsIntervalSec",
+            "perfBarVisible",
+            "perfBarLayout",
+            "maxConcurrentTransfers",
+            "maxBandwidthBps",
+            "enableOpenShift",
+            "k8sDebugImages",
+            "smartcardAuthMode",
+            "smartcardUnlockAtStartup",
+            "smartcardLibPath",
+            "x11ServerMode",
+            "x11ServerPath",
+            "x11ServerArgs",
+            "dotfilesPoolEnabled",
+            "logLevel",
+            "autoCheckUpdates",
+          ];
+          for (const k of directAppSettingKeys) {
             if (p[k] !== undefined) appSettingsPatch[k] = p[k];
           }
+          // Support friendly aliases
+          if (p.scrollbackLines !== undefined && appSettingsPatch.terminalScrollback === undefined) {
+            appSettingsPatch.terminalScrollback = p.scrollbackLines;
+          }
+          if (p.cursorStyle !== undefined && appSettingsPatch.terminalCursorStyle === undefined) {
+            appSettingsPatch.terminalCursorStyle = p.cursorStyle;
+          }
+          if (p.perfBarVisible !== undefined && appSettingsPatch.perfMetricsEnabled === undefined) {
+            appSettingsPatch.perfMetricsEnabled = p.perfBarVisible;
+          }
+          if (p.perfBarLayout !== undefined && appSettingsPatch.perfMetricsLayout === undefined) {
+            appSettingsPatch.perfMetricsLayout = p.perfBarLayout;
+          }
+
+          const shortcutsPatch: Record<string, string> = {};
+          if (p.shortcuts && typeof p.shortcuts === "object" && !Array.isArray(p.shortcuts)) {
+            for (const [sk, sv] of Object.entries(p.shortcuts as Record<string, unknown>)) {
+              if (typeof sv === "string" && sv.trim()) {
+                shortcutsPatch[sk] = sv.trim();
+              }
+            }
+          }
+          if (str("shortcutId") && str("shortcutKeys")) {
+            shortcutsPatch[str("shortcutId")!] = str("shortcutKeys")!;
+          }
+
           let updatedAppSettings: unknown;
-          if (Object.keys(appSettingsPatch).length > 0) {
+          if (
+            Object.keys(appSettingsPatch).length > 0 ||
+            Object.keys(shortcutsPatch).length > 0 ||
+            bool("resetShortcuts")
+          ) {
             updatedAppSettings = await this.host.manageAppSettings?.({
-              operation: "update_settings",
+              operation: op === "update_shortcuts" ? "update_shortcuts" : "update_settings",
               settings: appSettingsPatch,
+              shortcuts:
+                Object.keys(shortcutsPatch).length > 0 ? shortcutsPatch : undefined,
+              resetShortcuts: bool("resetShortcuts"),
             });
           }
           this.changed();
+          const aiConfigView = await this.config.getView();
           return {
             ok: true,
-            operation: "update_settings",
+            operation: op,
             demoMode: isDemoMode(),
-            actorName: (await this.config.getView()).actorName,
+            actorName: aiConfigView.actorName,
+            aiConfig: aiConfigView,
             aiPreferences: this.store.data.preferences,
             appSettings: updatedAppSettings,
           };
         }
-        if (op === "save_snippet" || op === "delete_snippet" || op === "open_local_terminal") {
+        if (
+          op === "list_dotfiles" ||
+          op === "save_dotfile" ||
+          op === "delete_dotfile"
+        ) {
+          const res = await this.host.manageAppSettings?.({
+            operation: op,
+            dotfile: {
+              poolId: str("poolId") || str("id"),
+              poolName: str("poolName") || str("name"),
+              remotePath: str("remotePath") || str("path"),
+              content: typeof p.content === "string" ? p.content : str("text"),
+              mode: str("mode"),
+              deletePool: bool("deletePool"),
+            },
+          });
+          this.changed();
+          return { ok: true, operation: op, result: res };
+        }
+        if (
+          op === "list_snippets" ||
+          op === "save_snippet" ||
+          op === "delete_snippet" ||
+          op === "open_local_terminal"
+        ) {
           const res = await this.host.manageAppSettings?.({
             operation: op,
             snippet: {
@@ -3037,6 +3506,23 @@ export class HubService {
             ok: true,
             operation: "ingest_local_folder",
             folderPath,
+            totalDocuments: this.getKbDocumentsList().length,
+          };
+        }
+        if (op === "ingest_s3_prefix") {
+          const s3ProfileId = requiredText(str("s3ProfileId") || str("idOrName") || str("profileId"));
+          const prefix = str("prefix") || "";
+          await this.request({
+            action: "kb-ingest-s3",
+            s3ProfileId,
+            prefix,
+            cluster: str("cluster"),
+          });
+          return {
+            ok: true,
+            operation: "ingest_s3_prefix",
+            s3ProfileId,
+            prefix,
             totalDocuments: this.getKbDocumentsList().length,
           };
         }

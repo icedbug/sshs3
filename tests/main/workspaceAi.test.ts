@@ -972,6 +972,315 @@ describe("Production multi-user workspace sync & auto-memory", () => {
     expect(diffRes.operation).toBe("diff_paths");
     expect(diffRes.unifiedDiff).toContain("---");
   });
+
+  it("allows the AI to configure everything in sshs3: advanced SSH profiles, SSH port-forward tunnels (-L/-R/-D), S3 & Directory Sync profiles, Dotfile Pools, keyboard shortcuts, AI model/context settings, and full AppSettings", async () => {
+    const { HubService } = await import("../../src/main/ai/hub/HubService");
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "sshs3-hub-full-config-"));
+    disposals.push(() => fs.rm(tmpDir, { recursive: true, force: true }));
+
+    const servers: Array<Record<string, unknown>> = [];
+    const s3Profiles: Array<Record<string, unknown>> = [];
+    const dirSyncProfiles: Array<Record<string, unknown>> = [];
+    const dotfilePools: Array<{
+      id: string;
+      name: string;
+      files: Array<{ id: string; remotePath: string; content: string; mode?: string }>;
+    }> = [];
+    let appSettings: Record<string, unknown> = {
+      theme: "dark",
+      terminalFontSize: 14,
+      shortcuts: { newTerminal: "Ctrl+Shift+T" },
+    };
+
+    const hub = new HubService(
+      {
+        changed: () => {},
+        inventoryTargets: async () => [],
+        backgroundChanged: async () => {},
+        openSchedule: async () => "s1",
+        show: () => {},
+        workspaceServers: async () => servers as never[],
+        upsertServer: async (input) => {
+          const id = input.id || `srv-${servers.length + 1}`;
+          const idx = servers.findIndex((s) => s.id === id);
+          const merged = {
+            ...(idx >= 0 ? servers[idx] : {}),
+            ...input,
+            id,
+          };
+          if (idx >= 0) servers[idx] = merged;
+          else servers.push(merged);
+          return merged as never;
+        },
+        deleteServer: async (profileId) => {
+          const idx = servers.findIndex((s) => s.id === profileId);
+          if (idx >= 0) servers.splice(idx, 1);
+        },
+        extraAppContext: async () => ({
+          folders: ["NetApp-ONTAP-Prod-SE"],
+          s3Profiles: s3Profiles as never[],
+          snippets: [],
+          appSettings,
+          dotfilesPools: dotfilePools,
+          dirSyncProfiles: dirSyncProfiles as never[],
+          activeTunnels: [],
+        }),
+        manageS3Profile: async (input) => {
+          if (input.operation === "save_dir_sync_profile") {
+            const entry = {
+              id: `ds-${dirSyncProfiles.length + 1}`,
+              name: input.name,
+              sourceRef: input.sourceProviderId,
+              sourcePath: input.sourcePath,
+              targetRef: input.targetProviderId,
+              targetPath: input.targetPath,
+              deleteExtraneous: Boolean(input.deleteExtraneous),
+            };
+            dirSyncProfiles.push(entry);
+            return { savedDirSyncProfile: entry };
+          }
+          if (input.operation === "list_dir_sync_profiles") {
+            return { dirSyncProfiles };
+          }
+          if (input.operation === "delete_dir_sync_profile") {
+            const idx = dirSyncProfiles.findIndex(
+              (d) => d.id === input.idOrName || d.name === input.idOrName,
+            );
+            if (idx >= 0) dirSyncProfiles.splice(idx, 1);
+            return { deleted: input.idOrName };
+          }
+          if (input.operation === "upsert_s3_profile") {
+            const entry = {
+              id: `s3-${s3Profiles.length + 1}`,
+              name: input.name,
+              endpoint: input.endpoint,
+              region: input.region,
+              bucket: input.bucket,
+              authMethod: input.authMethod,
+              awsProfile: input.awsProfile,
+            };
+            s3Profiles.push(entry);
+            return entry;
+          }
+          return {};
+        },
+        manageAppSettings: async (input) => {
+          if (input.operation === "update_settings" && input.settings) {
+            appSettings = { ...appSettings, ...input.settings };
+            return appSettings;
+          }
+          if (input.operation === "update_shortcuts") {
+            appSettings.shortcuts = {
+              ...(input.resetShortcuts ? {} : (appSettings.shortcuts as Record<string, string>)),
+              ...(input.shortcuts ?? {}),
+            };
+            return { shortcuts: appSettings.shortcuts };
+          }
+          if (input.operation === "save_dotfile" && input.dotfile) {
+            const poolId = input.dotfile.poolId || "default";
+            let pool = dotfilePools.find((p) => p.id === poolId);
+            if (!pool) {
+              pool = {
+                id: poolId,
+                name: input.dotfile.poolName || "Default Pool",
+                files: [],
+              };
+              dotfilePools.push(pool);
+            }
+            if (input.dotfile.remotePath) {
+              pool.files.push({
+                id: `df-${pool.files.length + 1}`,
+                remotePath: input.dotfile.remotePath,
+                content: input.dotfile.content || "",
+                mode: input.dotfile.mode || "644",
+              });
+            }
+            appSettings.dotfilesPoolEnabled = true;
+            return { pool, dotfilesPoolEnabled: true };
+          }
+          if (input.operation === "list_dotfiles") {
+            return {
+              dotfilesPoolEnabled: Boolean(appSettings.dotfilesPoolEnabled),
+              pools: dotfilePools,
+            };
+          }
+          if (input.operation === "delete_dotfile" && input.dotfile) {
+            const pool = dotfilePools.find((p) => p.id === (input.dotfile?.poolId || "default"));
+            if (pool && input.dotfile.remotePath) {
+              pool.files = pool.files.filter((f) => f.remotePath !== input.dotfile?.remotePath);
+            }
+            return { deletedRemotePath: input.dotfile.remotePath };
+          }
+          return {};
+        },
+      },
+      tmpDir,
+    );
+    disposals.push(() => hub.dispose());
+    await hub.initialize();
+
+    const task: AgentTask = {
+      id: "task-full-cfg",
+      title: "Configure all of sshs3",
+      mode: "autonomous",
+      status: "running",
+      messages: [],
+      changes: [],
+      sources: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      maxCommands: 30,
+      maxMinutes: 15,
+      verification: "not-verified",
+    };
+    const cap = await hub.broker.issue(task);
+
+    // 1. Upsert SSH server with full advanced SSH options + ProxyJump + X11 + FIDO2 + Dotfile Pool
+    await hub.broker.invoke(cap.key, {
+      action: "sshs3_manage_server",
+      payload: {
+        operation: "upsert",
+        id: "srv-bastion-01",
+        name: "ontap-bastion-01",
+        host: "10.30.0.10",
+        port: 2222,
+        username: "secadmin",
+        authType: "fido2",
+        fido2Resident: true,
+        forwardAgent: true,
+        x11Forwarding: true,
+        compression: true,
+        serverAliveInterval: 30,
+        poolId: "sre-dotfiles",
+        dotfilesSyncPolicy: "push-only",
+        autoReconnect: true,
+        maxReconnectAttempts: 5,
+        extraOptions: { StrictHostKeyChecking: "accept-new" },
+        cluster: "NetApp-ONTAP-Prod-SE",
+        nodeRole: "bastion",
+      },
+    });
+    expect(servers).toHaveLength(1);
+    expect(servers[0].authType).toBe("fido2");
+    expect(servers[0].fido2Resident).toBe(true);
+    expect(servers[0].forwardAgent).toBe(true);
+    expect(servers[0].x11Forwarding).toBe(true);
+    expect(servers[0].poolId).toBe("sre-dotfiles");
+    expect(servers[0].dotfilesSyncPolicy).toBe("always");
+    expect(servers[0].extraOptions).toEqual({ StrictHostKeyChecking: "accept-new" });
+
+    // 2. Configure SSH port-forwarding tunnels (-L and -D) on the server
+    const saveTunnelRes = (await hub.broker.invoke(cap.key, {
+      action: "sshs3_manage_server",
+      payload: {
+        operation: "save_tunnel",
+        serverIdOrName: "ontap-bastion-01",
+        tunnelName: "Grafana Dashboard Forward",
+        tunnelType: "local",
+        localPort: 3000,
+        remoteHost: "10.30.10.50",
+        remotePort: 3000,
+      },
+    })) as { ok: boolean; tunnels: Array<{ name: string; localPort: number; type: string }> };
+    expect(saveTunnelRes.ok).toBe(true);
+    expect(saveTunnelRes.tunnels).toHaveLength(1);
+    expect(saveTunnelRes.tunnels[0].localPort).toBe(3000);
+
+    const listTunnelsRes = (await hub.broker.invoke(cap.key, {
+      action: "sshs3_manage_server",
+      payload: {
+        operation: "list_tunnels",
+        serverIdOrName: "ontap-bastion-01",
+      },
+    })) as { ok: boolean; tunnelsByServer: Array<{ tunnels: unknown[] }> };
+    expect(listTunnelsRes.ok).toBe(true);
+    expect(listTunnelsRes.tunnelsByServer[0].tunnels).toHaveLength(1);
+
+    // 3. Configure Directory Sync profile & S3 profile
+    await hub.broker.invoke(cap.key, {
+      action: "sshs3_manage_s3_and_sync",
+      payload: {
+        operation: "save_dir_sync_profile",
+        name: "ONTAP Runbooks to S3",
+        sourceProviderId: "local",
+        sourcePath: "/ops/runbooks",
+        targetProviderId: "s3-grid-se",
+        targetPath: "s3://netapp-runbooks/prod",
+        deleteExtraneous: true,
+      },
+    });
+    expect(dirSyncProfiles).toHaveLength(1);
+    expect(dirSyncProfiles[0].name).toBe("ONTAP Runbooks to S3");
+    expect(dirSyncProfiles[0].deleteExtraneous).toBe(true);
+
+    // 4. Configure AppSettings (Perf Bar, Smartcard Auth, Transfer Integrity, Terminal Cursor, etc.)
+    await hub.broker.invoke(cap.key, {
+      action: "sshs3_manage_app_and_settings",
+      payload: {
+        operation: "update_settings",
+        theme: "breeze",
+        terminalFontSize: 15,
+        terminalCursorStyle: "bar",
+        perfBarVisible: true,
+        perfBarLayout: "detailed",
+        smartcardAuthMode: "agent-global",
+        verifyTransferIntegrity: true,
+        maxConcurrentTransfers: 8,
+        maxBandwidthBps: 50_000_000,
+      },
+    });
+    expect(appSettings.theme).toBe("breeze");
+    expect(appSettings.terminalCursorStyle).toBe("bar");
+    expect(appSettings.perfBarVisible).toBe(true);
+    expect(appSettings.smartcardAuthMode).toBe("agent-global");
+    expect(appSettings.maxConcurrentTransfers).toBe(8);
+
+    // 5. Configure Keyboard Shortcuts via AI
+    await hub.broker.invoke(cap.key, {
+      action: "sshs3_manage_app_and_settings",
+      payload: {
+        operation: "update_shortcuts",
+        shortcutId: "splitVertical",
+        shortcutKeys: "Ctrl+Alt+V",
+      },
+    });
+    expect((appSettings.shortcuts as Record<string, string>).splitVertical).toBe("Ctrl+Alt+V");
+
+    // 6. Configure AI Model & Context Window via AI tool (`configure_ai`)
+    await hub.broker.invoke(cap.key, {
+      action: "sshs3_manage_app_and_settings",
+      payload: {
+        operation: "configure_ai",
+        aiModel: "gpt-5.4",
+        contextWindowTokens: 200000,
+        terminalContextChars: 24000,
+        maxToolTurns: 25,
+        reasoningEffort: "high",
+      },
+    });
+    const snapAfterAiCfg = await hub.snapshot();
+    expect(snapAfterAiCfg.config.model).toBe("gpt-5.4");
+    expect(snapAfterAiCfg.config.contextWindowTokens).toBe(200000);
+    expect(snapAfterAiCfg.config.terminalContextChars).toBe(24000);
+    expect(snapAfterAiCfg.config.maxToolTurns).toBe(25);
+
+    // 7. Configure Dotfile Pool & synced dotfiles via AI (`save_dotfile` & `list_dotfiles`)
+    await hub.broker.invoke(cap.key, {
+      action: "sshs3_manage_app_and_settings",
+      payload: {
+        operation: "save_dotfile",
+        poolId: "sre-dotfiles",
+        poolName: "SRE Production Dotfiles",
+        remotePath: "~/.bashrc",
+        content: "alias ll='ls -lah --color=auto'\nexport EDITOR=vim\n",
+        mode: "644",
+      },
+    });
+    expect(dotfilePools).toHaveLength(1);
+    expect(dotfilePools[0].id).toBe("sre-dotfiles");
+    expect(dotfilePools[0].files[0].remotePath).toBe("~/.bashrc");
+    expect(appSettings.dotfilesPoolEnabled).toBe(true);
+  });
 });
 
 

@@ -750,6 +750,25 @@ export function upsertDemoServer(input: {
   host: string;
   port?: number;
   username: string;
+  authType?: WorkspaceServerSummary["authType"];
+  privateKeyPath?: string;
+  pkcs11LibPath?: string;
+  fido2Resident?: boolean;
+  proxyJump?: string;
+  proxyJumpProfileId?: string;
+  forwardAgent?: boolean;
+  x11Forwarding?: boolean;
+  x11Display?: string;
+  compression?: boolean;
+  serverAliveInterval?: number;
+  initialPath?: string;
+  poolId?: string;
+  dotfilesSyncPolicy?: "ask" | "always";
+  autoReconnect?: boolean;
+  maxReconnectAttempts?: number;
+  reconnectDelayMs?: number;
+  extraOptions?: Record<string, string>;
+  tunnels?: WorkspaceServerSummary["tunnels"];
   folder?: string;
   cluster?: string;
   nodeRole?: string;
@@ -766,6 +785,25 @@ export function upsertDemoServer(input: {
     host: input.host.trim(),
     port: input.port || 22,
     username: input.username.trim() || "root",
+    authType: input.authType ?? existing?.authType,
+    privateKeyPath: input.privateKeyPath ?? existing?.privateKeyPath,
+    pkcs11LibPath: input.pkcs11LibPath ?? existing?.pkcs11LibPath,
+    fido2Resident: input.fido2Resident ?? existing?.fido2Resident,
+    proxyJump: input.proxyJump ?? existing?.proxyJump,
+    proxyJumpProfileId: input.proxyJumpProfileId ?? existing?.proxyJumpProfileId,
+    forwardAgent: input.forwardAgent ?? existing?.forwardAgent,
+    x11Forwarding: input.x11Forwarding ?? existing?.x11Forwarding,
+    x11Display: input.x11Display ?? existing?.x11Display,
+    compression: input.compression ?? existing?.compression,
+    serverAliveInterval: input.serverAliveInterval ?? existing?.serverAliveInterval,
+    initialPath: input.initialPath ?? existing?.initialPath,
+    poolId: input.poolId ?? existing?.poolId,
+    dotfilesSyncPolicy: input.dotfilesSyncPolicy ?? existing?.dotfilesSyncPolicy,
+    autoReconnect: input.autoReconnect ?? existing?.autoReconnect,
+    maxReconnectAttempts: input.maxReconnectAttempts ?? existing?.maxReconnectAttempts,
+    reconnectDelayMs: input.reconnectDelayMs ?? existing?.reconnectDelayMs,
+    extraOptions: input.extraOptions ?? existing?.extraOptions,
+    tunnels: input.tunnels ?? existing?.tunnels,
     folder: input.folder?.trim() || input.cluster?.trim() || existing?.folder,
     group: input.folder?.trim() || input.cluster?.trim() || existing?.group,
     cluster: input.cluster?.trim() || undefined,
@@ -779,6 +817,10 @@ export function upsertDemoServer(input: {
   };
   demoServersStore.set(next.id, next);
   return next;
+}
+
+export function deleteDemoServer(id: string): void {
+  demoServersStore.delete(id);
 }
 
 export function getDemoActivityLog(): WorkspaceActivityEvent[] {
