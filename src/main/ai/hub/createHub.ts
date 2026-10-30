@@ -487,6 +487,41 @@ export function createHub(
       );
       return id;
     },
+    openServerTerminal: async (profileId) => {
+      const profile = (await bridge.profileStore.getProfiles()).ssh.find(
+        (p) => p.id === profileId,
+      );
+      if (!profile) throw new Error(`Saved SSH profile "${profileId}" not found`);
+      if (["password", "smartcard", "fido2"].includes(profile.authType)) {
+        throw new Error(
+          `Node "${profile.name || profile.host}" requires interactive auth; open its terminal tab first.`,
+        );
+      }
+      const config = await bridge.resolveProxyJumpConfig({
+        ...profile,
+        id: crypto.randomUUID(),
+        autoReconnect: false,
+        extraOptions: {
+          ...profile.extraOptions,
+          BatchMode: "yes",
+          ConnectTimeout: "10",
+        },
+      });
+      const session = await bridge.sshPtyManager.createSession(config, {
+        cols: 100,
+        rows: 30,
+      });
+      hub.terminals.register(
+        {
+          id: session.sessionId,
+          label: profile.name || profile.host,
+          kind: "ssh",
+          profileId: profile.id,
+        },
+        (data) => bridge.sshPtyManager.write(session.sessionId, data),
+      );
+      return session.sessionId;
+    },
     extraAppContext: async () => {
       const [profiles, settings, snippets] = await Promise.all([
         bridge.profileStore.getProfiles().catch(() => ({ ssh: [], s3: [], folders: [] })),

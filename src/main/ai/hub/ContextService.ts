@@ -52,6 +52,10 @@ export interface ExtraWorkspaceContext {
   schedules?: unknown[];
   snippets?: unknown[];
   appSettings?: Record<string, unknown>;
+  agents?: unknown[];
+  mcpServers?: unknown[];
+  kbDocuments?: unknown[];
+  terminalContextChars?: number;
 }
 
 export class ContextService {
@@ -73,9 +77,13 @@ export class ContextService {
       sessionIdOverride ??
       task.target?.sessionId ??
       this.terminals.list()[0]?.id;
+    const termChars = Math.max(
+      1000,
+      Math.min(64_000, extra?.terminalContextChars ?? 8000),
+    );
     const allTerminals = this.terminals.list().map((t) => ({
       ...t,
-      recentOutput: this.terminals.context(t.id).slice(-4000),
+      recentOutput: this.terminals.context(t.id).slice(-Math.min(termChars, 12_000)),
     }));
     const activitySource =
       extra?.activityLog ?? this.store.data.activityLog ?? [];
@@ -104,6 +112,9 @@ export class ContextService {
       schedules: extra?.schedules ?? this.store.data.schedules ?? [],
       snippets: extra?.snippets ?? [],
       appSettings: extra?.appSettings ?? {},
+      agents: extra?.agents ?? this.store.data.agents ?? [],
+      mcpServers: extra?.mcpServers ?? this.store.data.mcpServers ?? [],
+      kbDocuments: extra?.kbDocuments ?? [],
       workspaceServers: servers.filter(
         (s) =>
           !q ||
@@ -131,7 +142,7 @@ export class ContextService {
       target: id
         ? {
             session: this.terminals.get(id),
-            output: this.terminals.context(id),
+            output: this.terminals.context(id).slice(-termChars),
             source: `terminal:${id}`,
             uncertainty:
               "Output may be incomplete; command results are the completion evidence.",

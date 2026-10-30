@@ -28,8 +28,11 @@ import {
   countLeaves,
   createLeaf,
   findLeaf,
+  genPaneId,
   getFirstLeafId,
 } from "./lib/paneTree";
+import type { PaneNode } from "@shared/types/session";
+import { hubRequest } from "./lib/aiHub";
 import { installSpatialNavPointerReset } from "./lib/spatialNavigation";
 import { FILEMANAGER_FOCUS_SIDE_EVENT } from "./components/FileManager/types";
 
@@ -148,15 +151,169 @@ export const App: React.FC = () => {
   }, [isDemoQuery, sessionLoaded]);
 
   // Load saved settings on mount and refresh whenever AI Hub modifies app state
+  // Also handle AI-driven workspace layout events (split-pane cluster grids & dual-pane explorer)
+  const handledLayoutEventsRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     const loadSettings = () => {
       void window.multissh.settingsGet?.().then((saved) => {
         if (saved) setSettings(saved);
       });
     };
+    const checkLayoutEvents = async () => {
+      try {
+        const snap = await hubRequest({ action: "snapshot" });
+        const evt = snap.pendingLayoutEvent;
+        if (!evt || handledLayoutEventsRef.current.has(evt.id)) return;
+        handledLayoutEventsRef.current.add(evt.id);
+        void hubRequest({ action: "layout-event-ack", id: evt.id }).catch(() => {});
+
+        const savedProfiles = await window.multissh?.profilesGet?.().catch(() => null);
+        const sshProfiles = savedProfiles?.ssh ?? [];
+        const wsServers = snap.workspaceServers ?? [];
+        const resolveSshConfig = (id: string): SSHConnectionConfig | undefined => {
+          const fromSaved = sshProfiles.find(
+            (p) => p.id === id || p.name.toLowerCase() === id.toLowerCase(),
+          );
+          if (fromSaved) return fromSaved;
+          const fromWs = wsServers.find(
+            (s) => s.id === id || s.name.toLowerCase() === id.toLowerCase(),
+          );
+          if (!fromWs) return undefined;
+          return {
+            id: fromWs.id,
+            name: fromWs.name,
+            host: fromWs.host,
+            port: fromWs.port || 22,
+            username: fromWs.localUsername || fromWs.username || "root",
+            authType: fromWs.localAuthType || "agent",
+            privateKeyPath: fromWs.localPrivateKeyPath,
+            group: fromWs.folder || fromWs.group,
+            cluster: fromWs.cluster,
+            nodeRole: fromWs.nodeRole,
+            description: fromWs.description,
+            role: fromWs.role,
+            tags: fromWs.tags,
+            shared: fromWs.shared,
+          };
+        };
+
+        const configs = (evt.serverIds ?? [])
+          .map(resolveSshConfig)
+          .filter((c): c is SSHConnectionConfig => Boolean(c));
+
+        if (evt.operation === "open_dual_pane_explorer") {
+          const leftCfg =
+            (evt.leftTargetId && resolveSshConfig(evt.leftTargetId)) ||
+            configs[0];
+          const tabId = `fm-${Date.now()}`;
+          const newTab: AppTab = {
+            id: tabId,
+            type: "filemanager",
+            title: leftCfg ? `Files · ${leftCfg.name}` : "Dual-Pane Explorer",
+            initialSSHConfig: leftCfg,
+          };
+          setTabs((prev) => [...prev, newTab]);
+          setActiveTabId(tabId);
+          return;
+        }
+
+        const tabId = `term-${Date.now()}`;
+        if (configs.length === 0) {
+          const newTab: AppTab = {
+            id: tabId,
+            type: "terminal",
+            title: "Local Shell",
+            paneTree: createLeaf(`${tabId}-root`, { local: true }),
+          };
+          setTabs((prev) => [...prev, newTab]);
+          setActiveTabId(tabId);
+          return;
+        }
+
+        if (configs.length === 1 || evt.operation === "open_terminal") {
+          const cfg = configs[0];
+          const newTab: AppTab = {
+            id: tabId,
+            type: "terminal",
+            title: cfg.name,
+            paneTree: createLeaf(`${tabId}-root`, { config: cfg }),
+          };
+          setTabs((prev) => [...prev, newTab]);
+          setActiveTabId(tabId);
+          return;
+        }
+
+        // Multi-node Konsole split-pane tree (2x2 grid, horizontal, or vertical)
+        const leaves = configs.slice(0, 6).map((cfg, idx) =>
+          createLeaf(`${tabId}-p${idx + 1}`, { config: cfg }),
+        );
+        let paneTree: PaneNode;
+        if (evt.layout === "horizontal") {
+          paneTree = {
+            type: "split",
+            id: genPaneId(`${tabId}-row`),
+            orientation: "row",
+            children: leaves,
+          };
+        } else if (evt.layout === "vertical") {
+          paneTree = {
+            type: "split",
+            id: genPaneId(`${tabId}-col`),
+            orientation: "column",
+            children: leaves,
+          };
+        } else if (leaves.length <= 2) {
+          paneTree = {
+            type: "split",
+            id: genPaneId(`${tabId}-row`),
+            orientation: "row",
+            children: leaves,
+          };
+        } else {
+          const mid = Math.ceil(leaves.length / 2);
+          const topRow: PaneNode = {
+            type: "split",
+            id: genPaneId(`${tabId}-top`),
+            orientation: "row",
+            children: leaves.slice(0, mid),
+          };
+          const bottomSlice = leaves.slice(mid);
+          const bottomRow: PaneNode =
+            bottomSlice.length === 1
+              ? bottomSlice[0]
+              : {
+                  type: "split",
+                  id: genPaneId(`${tabId}-bot`),
+                  orientation: "row",
+                  children: bottomSlice,
+                };
+          paneTree = {
+            type: "split",
+            id: genPaneId(`${tabId}-grid`),
+            orientation: "column",
+            children: [topRow, bottomRow],
+          };
+        }
+
+        const newTab: AppTab = {
+          id: tabId,
+          type: "terminal",
+          title: evt.cluster
+            ? `Cluster · ${evt.cluster} (${leaves.length})`
+            : `Split (${leaves.length} nodes)`,
+          paneTree,
+          activePaneId: leaves[0].id,
+        };
+        setTabs((prev) => [...prev, newTab]);
+        setActiveTabId(tabId);
+      } catch {
+        // Ignore snapshot errors
+      }
+    };
     loadSettings();
     const offHub = window.multissh?.onAiHubChanged?.(() => {
       loadSettings();
+      void checkLayoutEvents();
     });
     return () => {
       offHub?.();

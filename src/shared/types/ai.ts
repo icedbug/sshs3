@@ -1,6 +1,8 @@
 /** Model connection settings; task execution contracts live in aiHub.ts. */
 export type AiProvider = "openai-codex" | "anthropic" | "openai-compatible";
 
+export type AiReasoningEffort = "low" | "medium" | "high";
+
 export interface AiConfig {
   /** Master switch. Off by default: an opt-in feature. */
   enabled: boolean;
@@ -12,6 +14,18 @@ export interface AiConfig {
   useHermes: boolean;
   /** Display name / handle used when recording team workspace changes (e.g. 'jacob'). */
   actorName?: string;
+  /** Context window budget in tokens (e.g. 16000, 32000, 64000, 128000, 256000, 900000). Default: 128000. */
+  contextWindowTokens?: number;
+  /** Max characters of terminal scrollback included per session in context. Default: 8000. */
+  terminalContextChars?: number;
+  /** Max output tokens per model turn. Default: 8192. */
+  maxOutputTokens?: number;
+  /** Max tool-call loop turns per run. Default: 20. */
+  maxToolTurns?: number;
+  /** Reasoning effort for reasoning-capable models. Default: 'medium'. */
+  reasoningEffort?: AiReasoningEffort;
+  /** Sampling temperature (0.0 - 1.0) for custom/compatible models. Default: 0.2. */
+  temperature?: number;
 }
 
 /** What the renderer sees: the API key itself never leaves the main process. */

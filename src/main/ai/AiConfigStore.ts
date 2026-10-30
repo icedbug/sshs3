@@ -98,6 +98,41 @@ export class AiConfigStore {
         if (actor) next.actorName = actor;
         else delete next.actorName;
       }
+      if (update.contextWindowTokens !== undefined) {
+        next.contextWindowTokens = Math.max(
+          4000,
+          Math.min(1_000_000, Math.round(Number(update.contextWindowTokens) || 128000)),
+        );
+      }
+      if (update.terminalContextChars !== undefined) {
+        next.terminalContextChars = Math.max(
+          1000,
+          Math.min(128000, Math.round(Number(update.terminalContextChars) || 8000)),
+        );
+      }
+      if (update.maxOutputTokens !== undefined) {
+        next.maxOutputTokens = Math.max(
+          512,
+          Math.min(65536, Math.round(Number(update.maxOutputTokens) || 8192)),
+        );
+      }
+      if (update.maxToolTurns !== undefined) {
+        next.maxToolTurns = Math.max(
+          2,
+          Math.min(80, Math.round(Number(update.maxToolTurns) || 20)),
+        );
+      }
+      if (update.reasoningEffort !== undefined) {
+        if (["low", "medium", "high"].includes(update.reasoningEffort)) {
+          next.reasoningEffort = update.reasoningEffort;
+        }
+      }
+      if (update.temperature !== undefined) {
+        const t = Number(update.temperature);
+        if (Number.isFinite(t)) {
+          next.temperature = Math.max(0, Math.min(1.5, Math.round(t * 100) / 100));
+        }
+      }
       if (update.useHermes !== undefined)
         next.useHermes = Boolean(update.useHermes);
       if (update.baseUrl !== undefined) {
@@ -242,6 +277,30 @@ export class AiConfigStore {
       ...(typeof stored.actorName === "string" && stored.actorName
         ? { actorName: stored.actorName }
         : {}),
+      contextWindowTokens:
+        typeof stored.contextWindowTokens === "number" && stored.contextWindowTokens >= 4000
+          ? stored.contextWindowTokens
+          : 128000,
+      terminalContextChars:
+        typeof stored.terminalContextChars === "number" && stored.terminalContextChars >= 1000
+          ? stored.terminalContextChars
+          : 8000,
+      maxOutputTokens:
+        typeof stored.maxOutputTokens === "number" && stored.maxOutputTokens >= 512
+          ? stored.maxOutputTokens
+          : 8192,
+      maxToolTurns:
+        typeof stored.maxToolTurns === "number" && stored.maxToolTurns >= 2
+          ? stored.maxToolTurns
+          : 20,
+      reasoningEffort:
+        stored.reasoningEffort && ["low", "medium", "high"].includes(stored.reasoningEffort)
+          ? stored.reasoningEffort
+          : "medium",
+      temperature:
+        typeof stored.temperature === "number" && Number.isFinite(stored.temperature)
+          ? stored.temperature
+          : 0.2,
       useHermes: stored.useHermes === true,
     };
   }

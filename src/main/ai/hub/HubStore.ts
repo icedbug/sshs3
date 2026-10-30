@@ -7,8 +7,11 @@ import type {
   ContextSource,
   HubPreferences,
   InventoryEntry,
+  KbDocument,
   LocalServerAuthOverride,
+  McpServerConfig,
   MemoryEntry,
+  MissionAgent,
   WorkspaceActivityEvent,
   WorkspaceServerSummary,
 } from "../../../shared/types/aiHub";
@@ -20,6 +23,8 @@ export interface SharedWorkspaceFilePayload {
   servers: WorkspaceServerSummary[];
   memories: MemoryEntry[];
   activityLog: WorkspaceActivityEvent[];
+  agents?: MissionAgent[];
+  kbDocuments?: KbDocument[];
   deletedServerIds?: Record<string, string>;
   deletedMemoryIds?: Record<string, number>;
 }
@@ -33,6 +38,9 @@ export interface HubData {
   inventory: InventoryEntry[];
   history: ContextSource[];
   activityLog: WorkspaceActivityEvent[];
+  agents?: MissionAgent[];
+  mcpServers?: McpServerConfig[];
+  kbDocuments?: KbDocument[];
   localOverrides?: Record<string, LocalServerAuthOverride>;
   deletedServerIds?: Record<string, string>;
   deletedMemoryIds?: Record<string, number>;
@@ -52,6 +60,9 @@ export const defaultHubData = (): HubData => ({
   inventory: [],
   history: [],
   activityLog: [],
+  agents: [],
+  mcpServers: [],
+  kbDocuments: [],
   localOverrides: {},
   deletedServerIds: {},
   deletedMemoryIds: {},

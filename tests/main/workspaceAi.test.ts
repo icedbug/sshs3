@@ -481,6 +481,12 @@ describe("Production multi-user workspace sync & auto-memory", () => {
       "sshs3_manage_schedule",
       "sshs3_manage_s3_and_sync",
       "sshs3_manage_app_and_settings",
+      "sshs3_cluster_exec",
+      "sshs3_workspace_layout",
+      "sshs3_storage_ops",
+      "sshs3_kb_search",
+      "sshs3_kb_manage",
+      "sshs3_agent_and_mcp_manage",
     ]);
     expect(events.find((e) => e.type === "run.completed")?.output).toContain(
       "Hej! Jag kan hjälpa dig",
@@ -503,6 +509,12 @@ describe("Production multi-user workspace sync & auto-memory", () => {
       "sshs3_manage_schedule",
       "sshs3_manage_s3_and_sync",
       "sshs3_manage_app_and_settings",
+      "sshs3_cluster_exec",
+      "sshs3_workspace_layout",
+      "sshs3_storage_ops",
+      "sshs3_kb_search",
+      "sshs3_kb_manage",
+      "sshs3_agent_and_mcp_manage",
     ]);
 
     // Includes terminal execution tools + sshs3_* tools in assisted mode when target is attached
@@ -530,6 +542,12 @@ describe("Production multi-user workspace sync & auto-memory", () => {
       "sshs3_manage_schedule",
       "sshs3_manage_s3_and_sync",
       "sshs3_manage_app_and_settings",
+      "sshs3_cluster_exec",
+      "sshs3_workspace_layout",
+      "sshs3_storage_ops",
+      "sshs3_kb_search",
+      "sshs3_kb_manage",
+      "sshs3_agent_and_mcp_manage",
     ]);
   });
 
@@ -728,6 +746,231 @@ describe("Production multi-user workspace sync & auto-memory", () => {
     });
     expect(cmdDefaultSnap.inlineSuggestion?.command).toContain("tasklist");
     expect(cmdDefaultSnap.inlineSuggestion?.command).not.toMatch(/^Get-Process/);
+  });
+
+  it("supports Mission Agents, MCP servers, Knowledge Base BM25 search, Cluster Exec, Layout Orchestration, Storage Ops, and Context Window settings", async () => {
+    const { HubService } = await import("../../src/main/ai/hub/HubService");
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "sshs3-hub-nextgen-"));
+    disposals.push(() => fs.rm(tmpDir, { recursive: true, force: true }));
+
+    const savedServers = [
+      {
+        id: "srv-ontap-01",
+        name: "aff-a800-dc1-01",
+        host: "10.30.10.11",
+        port: 22,
+        username: "admin",
+        cluster: "NetApp-ONTAP-Prod-SE",
+        nodeRole: "storage-controller",
+        shared: true,
+      },
+      {
+        id: "srv-ontap-02",
+        name: "aff-a800-dc1-02",
+        host: "10.30.10.12",
+        port: 22,
+        username: "admin",
+        cluster: "NetApp-ONTAP-Prod-SE",
+        nodeRole: "storage-controller",
+        shared: true,
+      },
+    ];
+
+    const hub = new HubService(
+      {
+        changed: () => {},
+        inventoryTargets: async () => [],
+        backgroundChanged: async () => {},
+        openSchedule: async () => "s1",
+        show: () => {},
+        workspaceServers: async () => savedServers,
+      },
+      tmpDir,
+    );
+    disposals.push(() => hub.dispose());
+    await hub.initialize();
+
+    // 1. Configure context window & model parameters
+    const configuredSnap = await hub.request({
+      action: "configure",
+      config: {
+        contextWindowTokens: 256000,
+        terminalContextChars: 16000,
+        maxOutputTokens: 16384,
+        maxToolTurns: 30,
+        reasoningEffort: "high",
+        temperature: 0.15,
+      },
+    });
+    expect(configuredSnap.config.contextWindowTokens).toBe(256000);
+    expect(configuredSnap.config.terminalContextChars).toBe(16000);
+    expect(configuredSnap.config.reasoningEffort).toBe("high");
+    expect(configuredSnap.contextBudget?.contextWindowTokens).toBe(256000);
+    expect(configuredSnap.contextBudget?.terminalContextChars).toBe(16000);
+
+    // 2. Save & search Knowledge Base documents
+    await hub.request({
+      action: "kb-save",
+      doc: {
+        id: "kb-ontap-qos",
+        title: "NetApp ONTAP QoS & WAFL Latency Runbook",
+        collection: "netapp-ontap",
+        cluster: "NetApp-ONTAP-Prod-SE",
+        tags: ["ontap", "qos", "wafl"],
+        sourceType: "manual",
+        content:
+          "# QoS Ceiling Policy\nApply `volume modify -vserver svm_prod -volume vol_scratch -qos-policy-group pg-batch-ceiling` when latency exceeds 1.5ms on aggr2_nvme_db.",
+      },
+    });
+
+    const dummyTask: AgentTask = {
+      id: "task-nextgen",
+      title: "Next-gen AI Ops",
+      mode: "autonomous",
+      status: "running",
+      messages: [],
+      changes: [],
+      sources: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      maxCommands: 20,
+      maxMinutes: 15,
+      verification: "not-verified",
+    };
+    const cap = await hub.broker.issue(dummyTask);
+
+    const kbSearchRes = (await hub.broker.invoke(cap.key, {
+      action: "sshs3_kb_search",
+      payload: {
+        query: "pg-batch-ceiling aggr2_nvme_db latency",
+        cluster: "NetApp-ONTAP-Prod-SE",
+      },
+    })) as { matches: Array<{ title: string; snippet: string; score: number }> };
+    expect(kbSearchRes.matches.length).toBeGreaterThan(0);
+    expect(kbSearchRes.matches[0].title).toContain("NetApp ONTAP QoS");
+    expect(kbSearchRes.matches[0].snippet).toContain("pg-batch-ceiling");
+
+    // 3. Save Mission Agent & MCP Server
+    await hub.request({
+      action: "agent-save",
+      agent: {
+        id: "agent-ontap-sre",
+        name: "ONTAP Latency Guardian",
+        role: "NetApp ONTAP Performance Engineer",
+        mission: "Keep WAFL and NVMe latency under 1.0ms across NetApp-ONTAP-Prod-SE.",
+        systemPrompt: "Always check QoS statistics before modifying policy groups.",
+        targetCluster: "NetApp-ONTAP-Prod-SE",
+        defaultMode: "assisted",
+        kbDocIds: ["kb-ontap-qos"],
+      },
+    });
+    await hub.request({
+      action: "mcp-save",
+      server: {
+        id: "mcp-harvest",
+        name: "NetApp Harvest MCP",
+        transport: "http",
+        url: "http://127.0.0.1:18890/mcp",
+        enabled: true,
+        discoveredTools: [
+          {
+            name: "get_aggr_iops",
+            description: "Fetch aggregate IOPS from Harvest",
+          },
+        ],
+      },
+    });
+
+    const snapWithAgentsAndMcp = await hub.snapshot();
+    expect(
+      snapWithAgentsAndMcp.agents?.some((a) => a.name === "ONTAP Latency Guardian"),
+    ).toBe(true);
+    expect(
+      snapWithAgentsAndMcp.mcpServers?.some((m) => m.name === "NetApp Harvest MCP"),
+    ).toBe(true);
+
+    // 4. Workspace Layout Orchestration (split view & ack)
+    const layoutRes = (await hub.broker.invoke(cap.key, {
+      action: "sshs3_workspace_layout",
+      payload: {
+        operation: "open_cluster_split",
+        cluster: "NetApp-ONTAP-Prod-SE",
+        layout: "grid",
+      },
+    })) as {
+      ok: boolean;
+      layoutEvent: { id: string; operation: string; serverIds: string[] };
+    };
+    expect(layoutRes.ok).toBe(true);
+    expect(layoutRes.layoutEvent.operation).toBe("open_cluster_split");
+    expect(layoutRes.layoutEvent.serverIds).toEqual([
+      "srv-ontap-01",
+      "srv-ontap-02",
+    ]);
+    expect((await hub.snapshot()).pendingLayoutEvent?.id).toBe(
+      layoutRes.layoutEvent.id,
+    );
+
+    const ackedSnap = await hub.request({
+      action: "layout-event-ack",
+      id: layoutRes.layoutEvent.id,
+    });
+    expect(ackedSnap.pendingLayoutEvent).toBeUndefined();
+
+    // 5. Parallel Cluster Execution across NetApp-ONTAP-Prod-SE
+    for (const srv of savedServers) {
+      const sid = `sess-${srv.id}`;
+      hub.terminals.register(
+        { id: sid, label: srv.name, kind: "ssh", profileId: srv.id },
+        (data) => {
+          const n = /SSHS3;([a-f0-9]{32});BEGIN/.exec(data)?.[1];
+          if (n) {
+            queueMicrotask(() =>
+              hub.terminals.feed(
+                sid,
+                `\x1b]777;SSHS3;${n};BEGIN\x07aggr1_nvme_prod online\n\x1b]777;SSHS3;${n};END;0;/root\x07`,
+              ),
+            );
+          }
+        },
+      );
+      await hub.terminals.arm(sid, "bash");
+    }
+
+    const clusterExecRes = (await hub.broker.invoke(cap.key, {
+      action: "sshs3_cluster_exec",
+      payload: {
+        cluster: "NetApp-ONTAP-Prod-SE",
+        command: "storage aggregate show",
+        description: "Check aggregate capacity across ONTAP cluster",
+      },
+    })) as {
+      ok: boolean;
+      nodeCount: number;
+      results: Array<{ node: string; exitCode: number; output: string }>;
+    };
+    expect(clusterExecRes.ok).toBe(true);
+    expect(clusterExecRes.nodeCount).toBe(2);
+    expect(clusterExecRes.results.map((r) => r.node)).toEqual([
+      "aff-a800-dc1-01",
+      "aff-a800-dc1-02",
+    ]);
+    expect(clusterExecRes.results[0].output).toContain("aggr1_nvme_prod online");
+
+    // 6. Deep Storage Ops (cross-server config diff)
+    const diffRes = (await hub.broker.invoke(cap.key, {
+      action: "sshs3_storage_ops",
+      payload: {
+        operation: "diff_paths",
+        targetA: "aff-a800-dc1-01",
+        pathA: "/etc/multipath.conf",
+        targetB: "aff-a800-dc1-02",
+        pathB: "/etc/multipath.conf",
+      },
+    })) as { ok: boolean; operation: string; unifiedDiff: string };
+    expect(diffRes.ok).toBe(true);
+    expect(diffRes.operation).toBe("diff_paths");
+    expect(diffRes.unifiedDiff).toContain("---");
   });
 });
 

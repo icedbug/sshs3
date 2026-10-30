@@ -1,6 +1,10 @@
 import crypto from "node:crypto";
 import { EventEmitter } from "node:events";
-import type { ShellKind, TerminalSession } from "../../../shared/types/aiHub";
+import type {
+  ShellKind,
+  TerminalCommandFailure,
+  TerminalSession,
+} from "../../../shared/types/aiHub";
 import {
   CommandFrames,
   commandEnvelope,
@@ -13,6 +17,8 @@ interface LiveTerminal {
   write: (data: string) => void;
   output: string;
   inputBuffer: string;
+  lastSubmittedCommand?: string;
+  lastSubmittedAt?: number;
   trimPostHandshakeNewline?: boolean;
   pending?: {
     frames: CommandFrames;
@@ -139,12 +145,28 @@ export function classifyNotableCommand(
 /** Authoritative ownership lives beside the PTYs, never in React or in an LLM prompt. */
 export class TerminalRegistry extends EventEmitter {
   private sessions = new Map<string, LiveTerminal>();
+  private lastFailures = new Map<string, TerminalCommandFailure>();
   private observing = false;
 
   observe(enabled: boolean): void {
     this.observing = enabled;
     if (!enabled)
       for (const session of this.sessions.values()) session.output = "";
+  }
+
+  failures(): Record<string, TerminalCommandFailure> {
+    return Object.fromEntries(this.lastFailures.entries());
+  }
+
+  dismissFailure(sessionId: string): void {
+    if (this.lastFailures.delete(sessionId)) {
+      this.emit("changed");
+    }
+  }
+
+  recordFailure(failure: TerminalCommandFailure): void {
+    this.lastFailures.set(failure.sessionId, failure);
+    this.emit("changed");
   }
 
   register(
@@ -199,6 +221,18 @@ export class TerminalRegistry extends EventEmitter {
           s.view.state = "ready";
           s.view.cwd = result.cwd;
           s.view.updatedAt = Date.now();
+          if (!pending.handshake && result.exitCode !== 0) {
+            this.lastFailures.set(id, {
+              sessionId: id,
+              label: s.view.label,
+              command: pending.frames.commandText || s.lastSubmittedCommand || "",
+              exitCode: result.exitCode,
+              snippet: boundedContext(result.output, 1500),
+              at: Date.now(),
+            });
+          } else if (!pending.handshake && result.exitCode === 0) {
+            this.lastFailures.delete(id);
+          }
           pending.resolve({ ...result, output: boundedContext(result.output) });
           this.emit("changed");
         }
@@ -219,7 +253,53 @@ export class TerminalRegistry extends EventEmitter {
     if (this.observing && clean) {
       s.output = (s.output + clean).slice(-128_000);
     }
+    this.detectHumanOutputFailure(id, s, clean);
     return clean;
+  }
+
+  private detectHumanOutputFailure(
+    id: string,
+    s: LiveTerminal,
+    chunk: string,
+  ): void {
+    if (!chunk) return;
+    // 1. Check OSC 133;D;<exitCode> shell integration marker
+    const oscMatch = /\x1b\]133;D;([0-9]+)(?:\x07|\x1b\\)/.exec(chunk);
+    if (oscMatch) {
+      const code = Number(oscMatch[1]);
+      if (code !== 0) {
+        this.lastFailures.set(id, {
+          sessionId: id,
+          label: s.view.label,
+          command: s.lastSubmittedCommand || "",
+          exitCode: code,
+          snippet: boundedContext(s.output.slice(-1500), 1500),
+          at: Date.now(),
+        });
+        this.emit("changed");
+      } else if (this.lastFailures.delete(id)) {
+        this.emit("changed");
+      }
+      return;
+    }
+    // 2. Check common terminal / storage / K8s / SSH error patterns within 15s of a human command
+    if (
+      s.lastSubmittedAt &&
+      Date.now() - s.lastSubmittedAt < 15_000 &&
+      /(?:command not found|Permission denied|No such file or directory|Connection refused|MountVolume\.SetUp failed|AttachVolume\.Attach failed|snapmirror.*broken-off|HEALTH_ERR|Error:\s+\S+|fatal:\s+\S+|502 Bad Gateway|503 Service Unavailable)/i.test(
+        chunk,
+      )
+    ) {
+      this.lastFailures.set(id, {
+        sessionId: id,
+        label: s.view.label,
+        command: s.lastSubmittedCommand || "",
+        exitCode: 1,
+        snippet: boundedContext((s.output || chunk).slice(-1500), 1500),
+        at: Date.now(),
+      });
+      this.emit("changed");
+    }
   }
 
   /** Called on ALL human write paths, including snippets and paste. */
@@ -259,6 +339,8 @@ export class TerminalRegistry extends EventEmitter {
         const submitted = s.inputBuffer.trim();
         s.inputBuffer = "";
         if (submitted) {
+          s.lastSubmittedCommand = submitted;
+          s.lastSubmittedAt = Date.now();
           const classified = classifyNotableCommand(submitted);
           if (classified) {
             this.emit("commandLine", { ...s.view }, submitted, classified);

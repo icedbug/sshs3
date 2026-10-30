@@ -22,11 +22,15 @@ import {
   type ContextSource,
   type HubRequest,
   type HubSnapshot,
+  type KbDocument,
+  type McpServerConfig,
+  type MissionAgent,
   type ShellKind,
 } from "@shared/types/aiHub";
 import {
   DEFAULT_AI_MODELS,
   DEFAULT_PROVIDER_MODELS,
+  type AiReasoningEffort,
 } from "@shared/types/ai";
 import {
   hubRequest,
@@ -37,8 +41,14 @@ import {
 import "./aiHub.css";
 
 type View =
-  "Work" | "Infrastructure" | "Changes" | "Memory & skills" | "Schedules";
-type Menu = "history" | "target" | "control" | "mention" | null;
+  | "Work"
+  | "Agents & MCP"
+  | "Knowledge Base"
+  | "Infrastructure"
+  | "Changes"
+  | "Memory & skills"
+  | "Schedules";
+type Menu = "history" | "target" | "control" | "mention" | "agent" | null;
 const modes: Record<AgentMode, string> = {
   advice: "Ask",
   assisted: "Ask first",
@@ -62,6 +72,7 @@ export function AiHubPanel({
   const [taskId, setTaskId] = useState("");
   const [prompt, setPrompt] = useState("");
   const [autonomy, setAutonomy] = useState<AgentMode>("assisted");
+  const [selectedAgentId, setSelectedAgentId] = useState<string>("");
   const [shell, setShell] = useState<ShellKind>("bash");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -76,6 +87,9 @@ export function AiHubPanel({
     label: string;
   }>();
   const task = hub?.tasks.find((t) => t.id === taskId);
+  const activeAgent: MissionAgent | undefined = (hub?.agents ?? []).find(
+    (a) => a.id === (task?.agentId || selectedAgentId),
+  );
   const targetSessionId = task
     ? task.target?.sessionId
     : (connection?.id ?? selectedTerminal);
@@ -84,7 +98,7 @@ export function AiHubPanel({
   );
   const running =
     !!task && ["queued", "running", "waiting"].includes(task.status);
-  const activeView = mode === "panel" ? "Work" : view;
+  const activeView = view;
   const end = useRef<HTMLDivElement>(null);
   const conversation = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
@@ -190,6 +204,26 @@ export function AiHubPanel({
               ]
             : []),
         ].join("\n"),
+      });
+    }
+    for (const ag of hub.agents ?? []) {
+      const slug = ag.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+      items.push({
+        label: `@agent:${slug}`,
+        subtitle: `🤖 ${ag.name} · ${ag.role} (${ag.mission})`,
+        text: [
+          `Mission Agent: ${ag.name} (${ag.role})`,
+          `Mission: ${ag.mission}`,
+          `System Prompt:\n${ag.systemPrompt}`,
+        ].join("\n"),
+      });
+    }
+    for (const doc of (hub.kbDocuments ?? []).slice(0, 12)) {
+      const slug = doc.title.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+      items.push({
+        label: `@kb:${slug}`,
+        subtitle: `📚 KB (${doc.collection}): ${doc.title}`,
+        text: `# KB Document: ${doc.title} (${doc.collection})\n\n${doc.content.slice(0, 6000)}`,
       });
     }
     return items;
@@ -420,7 +454,9 @@ export function AiHubPanel({
           task: {
             prompt: textToSend,
             sessionId,
-            mode: autonomy,
+            mode: activeAgent?.defaultMode ?? autonomy,
+            agentId: activeAgent?.id,
+            agentName: activeAgent?.name,
             attachments,
           },
         });
@@ -589,30 +625,41 @@ export function AiHubPanel({
           ))}
         </div>
       )}
-      {mode === "hub" && (
-        <nav aria-label="Hub views">
-          {(
-            [
-              "Work",
-              "Infrastructure",
-              "Changes",
-              "Memory & skills",
-              "Schedules",
-            ] as View[]
-          ).map((name) => (
-            <button
-              key={name}
-              aria-current={activeView === name ? "page" : undefined}
-              onClick={() => {
-                setView(name);
-                setMenu(null);
-              }}
-            >
-              {name === "Work" ? "Chat" : name}
-            </button>
-          ))}
-        </nav>
-      )}
+      <nav aria-label="Hub views">
+        {(
+          mode === "hub"
+            ? ([
+                "Work",
+                "Agents & MCP",
+                "Knowledge Base",
+                "Infrastructure",
+                "Changes",
+                "Memory & skills",
+                "Schedules",
+              ] as View[])
+            : ([
+                "Work",
+                "Agents & MCP",
+                "Knowledge Base",
+                "Memory & skills",
+              ] as View[])
+        ).map((name) => (
+          <button
+            key={name}
+            aria-current={activeView === name ? "page" : undefined}
+            onClick={() => {
+              setView(name);
+              setMenu(null);
+            }}
+          >
+            {name === "Work"
+              ? "Chat"
+              : name === "Knowledge Base" && mode === "panel"
+                ? "KB"
+                : name}
+          </button>
+        ))}
+      </nav>
       {error && (
         <div className="ai-error" role="alert">
           {error}
@@ -1095,6 +1142,71 @@ export function AiHubPanel({
                       </div>
                     )}
                   </div>
+                  <div className="ai-menu-anchor">
+                    <button
+                      className="ai-context-chip"
+                      aria-label="Select Mission Agent"
+                      title={
+                        activeAgent
+                          ? `${activeAgent.name}: ${activeAgent.mission}`
+                          : "Choose a specialized Mission Agent or use Default Assistant"
+                      }
+                      aria-expanded={menu === "agent"}
+                      onClick={() =>
+                        setMenu(menu === "agent" ? null : "agent")
+                      }
+                    >
+                      <span>
+                        🤖 {activeAgent ? activeAgent.name : "Default Agent"}
+                      </span>
+                      <ChevronDown size={11} />
+                    </button>
+                    {menu === "agent" && (
+                      <div
+                        className="ai-popover"
+                        style={{ right: 0, left: "auto", minWidth: 250 }}
+                        aria-label="Mission Agents"
+                      >
+                        <strong>Active Mission Agent</strong>
+                        <button
+                          className={!selectedAgentId ? "active" : ""}
+                          onClick={() => {
+                            setSelectedAgentId("");
+                            setMenu(null);
+                          }}
+                        >
+                          Default SSHS3 Assistant
+                          <small>General SSH, S3, cluster & workspace assistant</small>
+                        </button>
+                        {(hub.agents ?? []).map((ag) => (
+                          <button
+                            key={ag.id}
+                            className={selectedAgentId === ag.id ? "active" : ""}
+                            onClick={() => {
+                              setSelectedAgentId(ag.id);
+                              setAutonomy(ag.defaultMode);
+                              setMenu(null);
+                            }}
+                          >
+                            🤖 {ag.name}
+                            <small>
+                              {ag.role}
+                              {ag.targetCluster ? ` · ${ag.targetCluster}` : ""}
+                            </small>
+                          </button>
+                        ))}
+                        <button
+                          onClick={() => {
+                            setMenu(null);
+                            setView("Agents & MCP");
+                          }}
+                        >
+                          ⚙️ Manage Agents & MCP…
+                          <small>Create custom mission agents & MCP servers</small>
+                        </button>
+                      </div>
+                    )}
+                  </div>
                   {task?.usage && (
                     <small
                       className="ai-usage"
@@ -1379,6 +1491,34 @@ export function AiHubPanel({
                     </span>
                     <ChevronDown size={11} />
                   </button>
+                  <button
+                    className="ai-footer-chip"
+                    aria-label="Context budget & parameters"
+                    title={`Context window: ${Math.round((hub.contextBudget?.contextWindowTokens ?? hub.config.contextWindowTokens ?? 128000) / 1000)}k tokens · Terminal scrollback: ${Math.round((hub.contextBudget?.terminalContextChars ?? hub.config.terminalContextChars ?? 8000) / 1000)}k chars · Reasoning: ${hub.config.reasoningEffort ?? "medium"}`}
+                    onClick={() => setSettingsOpen(true)}
+                  >
+                    <span>
+                      📊{" "}
+                      {Math.max(
+                        1,
+                        Math.round(
+                          ((hub.contextBudget?.estimatedUsedTokens ?? 2400) +
+                            attachments.reduce(
+                              (sum, a) => sum + Math.ceil((a.text?.length ?? 0) / 4),
+                              0,
+                            )) /
+                            1000,
+                        ),
+                      )}
+                      k /{" "}
+                      {Math.round(
+                        (hub.contextBudget?.contextWindowTokens ??
+                          hub.config.contextWindowTokens ??
+                          128000) / 1000,
+                      )}
+                      k ctx
+                    </span>
+                  </button>
                   {attachments.length > 0 && (
                     <small>{attachments.length} sources</small>
                   )}
@@ -1400,6 +1540,42 @@ export function AiHubPanel({
               </div>
             </div>
             </div>
+          )}
+          {activeView === "Agents & MCP" && (
+            <AgentsAndMcpView
+              hub={hub}
+              act={act}
+              selectedAgentId={selectedAgentId}
+              onSelectAgentForChat={(id) => {
+                setSelectedAgentId(id);
+                const ag = hub.agents?.find((x) => x.id === id);
+                if (ag) setAutonomy(ag.defaultMode);
+                setView("Work");
+              }}
+              onStartedMission={(newTaskId) => {
+                if (newTaskId) setTaskId(newTaskId);
+                setView("Work");
+              }}
+            />
+          )}
+          {activeView === "Knowledge Base" && (
+            <KnowledgeBaseView
+              hub={hub}
+              act={act}
+              onAttachDoc={(doc) => {
+                const slug = doc.title.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+                setAttachments((old) => [
+                  ...old.filter((x) => x.label !== `@kb:${slug}`).slice(-9),
+                  {
+                    id: crypto.randomUUID(),
+                    label: `@kb:${slug}`,
+                    text: `# KB Document: ${doc.title} (${doc.collection})\n\n${doc.content.slice(0, 8000)}`,
+                    observedAt: Date.now(),
+                  },
+                ]);
+                setView("Work");
+              }}
+            />
           )}
           {activeView === "Infrastructure" && (
             <div className="ai-scroll">
@@ -1602,6 +1778,24 @@ function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Element {
   const [key, setKey] = useState("");
   const [actorName, setActorName] = useState(hub.config.actorName ?? "");
   const [enabled, setEnabled] = useState(hub.config.enabled);
+  const [contextWindowTokens, setContextWindowTokens] = useState(
+    hub.config.contextWindowTokens ?? 128000,
+  );
+  const [terminalContextChars, setTerminalContextChars] = useState(
+    hub.config.terminalContextChars ?? 8000,
+  );
+  const [maxOutputTokens, setMaxOutputTokens] = useState(
+    hub.config.maxOutputTokens ?? 8192,
+  );
+  const [maxToolTurns, setMaxToolTurns] = useState(
+    hub.config.maxToolTurns ?? 20,
+  );
+  const [reasoningEffort, setReasoningEffort] = useState<AiReasoningEffort>(
+    hub.config.reasoningEffort ?? "medium",
+  );
+  const [temperature, setTemperature] = useState(
+    hub.config.temperature ?? 0.2,
+  );
   const [prefs, setPrefs] = useState(hub.preferences);
   const [savedNotice, setSavedNotice] = useState(false);
   const modelInputRef = useRef<HTMLInputElement>(null);
@@ -1613,12 +1807,24 @@ function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Element {
     setUrl(hub.config.baseUrl ?? "");
     setActorName(hub.config.actorName ?? "");
     setEnabled(hub.config.enabled);
+    setContextWindowTokens(hub.config.contextWindowTokens ?? 128000);
+    setTerminalContextChars(hub.config.terminalContextChars ?? 8000);
+    setMaxOutputTokens(hub.config.maxOutputTokens ?? 8192);
+    setMaxToolTurns(hub.config.maxToolTurns ?? 20);
+    setReasoningEffort(hub.config.reasoningEffort ?? "medium");
+    setTemperature(hub.config.temperature ?? 0.2);
   }, [
     hub.config.provider,
     hub.config.model,
     hub.config.baseUrl,
     hub.config.actorName,
     hub.config.enabled,
+    hub.config.contextWindowTokens,
+    hub.config.terminalContextChars,
+    hub.config.maxOutputTokens,
+    hub.config.maxToolTurns,
+    hub.config.reasoningEffort,
+    hub.config.temperature,
   ]);
 
   useEffect(() => {
@@ -1647,6 +1853,12 @@ function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Element {
             baseUrl: provider === "openai-codex" ? "" : url.trim(),
             actorName,
             useHermes: false,
+            contextWindowTokens,
+            terminalContextChars,
+            maxOutputTokens,
+            maxToolTurns,
+            reasoningEffort,
+            temperature,
             ...(key ? { apiKey: key } : {}),
           },
           preferences: prefs,
@@ -1876,6 +2088,83 @@ function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Element {
           onChange={(e) =>
             setPrefs({ ...prefs, retentionDays: Number(e.target.value) })
           }
+        />
+      </label>
+      <h3>Context Window & Model Parameters</h3>
+      <label>
+        Max Context Window (tokens)
+        <select
+          aria-label="Max Context Window"
+          value={String(contextWindowTokens)}
+          onChange={(e) => setContextWindowTokens(Number(e.target.value))}
+        >
+          <option value="16384">16k tokens (Fast / Compact)</option>
+          <option value="32768">32k tokens (Standard)</option>
+          <option value="65536">64k tokens (Extended)</option>
+          <option value="128000">128k tokens (Recommended Enterprise)</option>
+          <option value="256000">256k tokens (Deep Multi-Cluster)</option>
+          <option value="900000">900k tokens (Ultra Long Context)</option>
+        </select>
+      </label>
+      <label>
+        Terminal Scrollback Context (chars per terminal)
+        <select
+          aria-label="Terminal Scrollback Context"
+          value={String(terminalContextChars)}
+          onChange={(e) => setTerminalContextChars(Number(e.target.value))}
+        >
+          <option value="2000">2,000 chars (~500 tokens)</option>
+          <option value="4000">4,000 chars (~1k tokens)</option>
+          <option value="8000">8,000 chars (~2k tokens — default)</option>
+          <option value="16000">16,000 chars (~4k tokens)</option>
+          <option value="32000">32,000 chars (~8k tokens)</option>
+          <option value="64000">64,000 chars (~16k tokens)</option>
+        </select>
+      </label>
+      <label>
+        Max Output Tokens
+        <input
+          type="number"
+          min="512"
+          max="65536"
+          step="512"
+          value={maxOutputTokens}
+          onChange={(e) => setMaxOutputTokens(Number(e.target.value))}
+        />
+      </label>
+      <label>
+        Max Autonomous Tool Turns per Task
+        <input
+          type="number"
+          min="1"
+          max="100"
+          value={maxToolTurns}
+          onChange={(e) => setMaxToolTurns(Number(e.target.value))}
+        />
+      </label>
+      <label>
+        Reasoning Effort
+        <select
+          aria-label="Reasoning Effort"
+          value={reasoningEffort}
+          onChange={(e) =>
+            setReasoningEffort(e.target.value as AiReasoningEffort)
+          }
+        >
+          <option value="low">Low (Fastest response)</option>
+          <option value="medium">Medium (Balanced — default)</option>
+          <option value="high">High (Deep storage & root-cause analysis)</option>
+        </select>
+      </label>
+      <label>
+        Temperature ({temperature.toFixed(2)})
+        <input
+          type="range"
+          min="0"
+          max="1"
+          step="0.05"
+          value={temperature}
+          onChange={(e) => setTemperature(Number(e.target.value))}
         />
       </label>
       <button type="submit">Save settings</button>
@@ -2130,6 +2419,587 @@ function Schedules({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Element {
           >
             Delete
           </button>
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function AgentsAndMcpView({
+  hub,
+  act,
+  selectedAgentId,
+  onSelectAgentForChat,
+  onStartedMission,
+}: {
+  hub: HubSnapshot;
+  act: Act;
+  selectedAgentId: string;
+  onSelectAgentForChat: (id: string) => void;
+  onStartedMission: (newTaskId?: string) => void;
+}): JSX.Element {
+  const [agentName, setAgentName] = useState("");
+  const [agentRole, setAgentRole] = useState("");
+  const [agentMission, setAgentMission] = useState("");
+  const [agentPrompt, setAgentPrompt] = useState("");
+  const [agentCluster, setAgentCluster] = useState("");
+  const [agentMode, setAgentMode] = useState<AgentMode>("assisted");
+  const [agentKbCollections, setAgentKbCollections] = useState("");
+  const [showAgentForm, setShowAgentForm] = useState(false);
+
+  const [mcpName, setMcpName] = useState("");
+  const [mcpTransport, setMcpTransport] = useState<"stdio" | "http">("stdio");
+  const [mcpCommand, setMcpCommand] = useState("npx");
+  const [mcpArgs, setMcpArgs] = useState("");
+  const [mcpUrl, setMcpUrl] = useState("");
+  const [showMcpForm, setShowMcpForm] = useState(false);
+  const [testingMcpId, setTestingMcpId] = useState("");
+
+  const clusters = Array.from(
+    new Set(
+      (hub.workspaceServers ?? [])
+        .map((s) => s.cluster)
+        .filter((c): c is string => Boolean(c)),
+    ),
+  );
+
+  return (
+    <div className="ai-scroll">
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+        <h2>🤖 Mission Agents ({(hub.agents ?? []).length})</h2>
+        <button onClick={() => setShowAgentForm((v) => !v)}>
+          {showAgentForm ? "Close Form" : "+ New Mission Agent"}
+        </button>
+      </div>
+      <p className="ai-hint">
+        Configure specialized AI agents with their own mission, system prompt, target cluster, KB collections, and MCP tools. Select an agent in chat or launch its mission directly.
+      </p>
+
+      {showAgentForm && (
+        <form
+          className="ai-form ai-card"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (!agentName.trim() || !agentMission.trim()) return;
+            void act({
+              action: "agent-save",
+              agent: {
+                name: agentName.trim(),
+                role: agentRole.trim() || "Storage & Infrastructure Specialist",
+                mission: agentMission.trim(),
+                systemPrompt:
+                  agentPrompt.trim() ||
+                  `You are ${agentName.trim()}. Focus on mission: ${agentMission.trim()}`,
+                targetCluster: agentCluster || undefined,
+                defaultMode: agentMode,
+                kbCollectionIds: agentKbCollections
+                  .split(",")
+                  .map((x) => x.trim())
+                  .filter(Boolean),
+                mcpServerIds: (hub.mcpServers ?? [])
+                  .filter((m) => m.enabled)
+                  .map((m) => m.id),
+                enabled: true,
+              },
+            }).then(() => {
+              setAgentName("");
+              setAgentRole("");
+              setAgentMission("");
+              setAgentPrompt("");
+              setShowAgentForm(false);
+            });
+          }}
+        >
+          <strong>Create Mission Agent</strong>
+          <label>
+            Agent Name
+            <input
+              required
+              placeholder="e.g. NetApp MetroCluster Failover Auditor"
+              value={agentName}
+              onChange={(e) => setAgentName(e.target.value)}
+            />
+          </label>
+          <label>
+            Role / Title
+            <input
+              placeholder="e.g. Principal ONTAP Availability Engineer"
+              value={agentRole}
+              onChange={(e) => setAgentRole(e.target.value)}
+            />
+          </label>
+          <label>
+            Mission (Uppdrag)
+            <textarea
+              required
+              placeholder="e.g. Audit SnapMirror lag, aggregate capacity, and LIF failover policies across the cluster and propose remediations."
+              value={agentMission}
+              onChange={(e) => setAgentMission(e.target.value)}
+            />
+          </label>
+          <label>
+            System Instructions
+            <textarea
+              placeholder="Detailed runbook instructions, preferred CLI syntax, and safety rules…"
+              value={agentPrompt}
+              onChange={(e) => setAgentPrompt(e.target.value)}
+            />
+          </label>
+          <label>
+            Target Cluster (optional)
+            <select
+              value={agentCluster}
+              onChange={(e) => setAgentCluster(e.target.value)}
+            >
+              <option value="">All clusters / active terminal</option>
+              {clusters.map((c) => (
+                <option key={c} value={c}>
+                  {c}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Default Control Mode
+            <select
+              value={agentMode}
+              onChange={(e) => setAgentMode(e.target.value as AgentMode)}
+            >
+              <option value="plan">Plan only (read-only analysis)</option>
+              <option value="assisted">Assisted (approve commands first)</option>
+              <option value="autonomous">Autonomous (execute immediately)</option>
+            </select>
+          </label>
+          <label>
+            KB Collections (comma-separated, e.g. netapp-ontap, storagegrid)
+            <input
+              placeholder="netapp-ontap, storagegrid, ceph"
+              value={agentKbCollections}
+              onChange={(e) => setAgentKbCollections(e.target.value)}
+            />
+          </label>
+          <button type="submit">Save Mission Agent</button>
+        </form>
+      )}
+
+      {(hub.agents ?? []).map((ag: MissionAgent) => (
+        <article className="ai-card" key={ag.id}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+            <div>
+              <strong>
+                {ag.icon || "🤖"} {ag.name}
+              </strong>
+              <div>
+                <small>
+                  {ag.role} · Mode: <code>{ag.defaultMode}</code>
+                  {ag.targetCluster ? ` · Cluster: ${ag.targetCluster}` : ""}
+                </small>
+              </div>
+            </div>
+            {selectedAgentId === ag.id && (
+              <span className="ai-pill">Active in Chat</span>
+            )}
+          </div>
+          <p style={{ marginTop: 6 }}>
+            <strong>Uppdrag:</strong> {ag.mission}
+          </p>
+          {((ag.kbCollectionIds ?? ag.kbDocIds ?? []).length > 0 ||
+            (ag.mcpServerIds ?? []).length > 0) && (
+            <small style={{ display: "block", marginBottom: 6 }}>
+              {(ag.kbCollectionIds ?? ag.kbDocIds ?? []).length > 0
+                ? `📚 KB: ${(ag.kbCollectionIds ?? ag.kbDocIds ?? []).join(", ")}`
+                : ""}
+              {(ag.mcpServerIds ?? []).length > 0
+                ? ` · 🔌 ${(ag.mcpServerIds ?? []).length} MCP server(s)`
+                : ""}
+            </small>
+          )}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6 }}>
+            <button onClick={() => onSelectAgentForChat(ag.id)}>
+              💬 Use in Chat
+            </button>
+            <button
+              onClick={() => {
+                const prevIds = new Set(hub.tasks.map((t) => t.id));
+                void act({
+                  action: "agent-run-mission",
+                  id: ag.id,
+                }).then((nextSnap) => {
+                  const created = nextSnap?.tasks.find((t) => !prevIds.has(t.id));
+                  onStartedMission(created?.id ?? nextSnap?.tasks[0]?.id);
+                });
+              }}
+            >
+              🚀 Run Mission Now
+            </button>
+            <button
+              onClick={() =>
+                void act({ action: "agent-delete", id: ag.id })
+              }
+            >
+              Delete
+            </button>
+          </div>
+        </article>
+      ))}
+
+      <hr style={{ border: "none", borderTop: "1px solid var(--border-subtle, #2a3140)", margin: "18px 0" }} />
+
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+        <h2>🔌 MCP Servers ({(hub.mcpServers ?? []).length})</h2>
+        <button onClick={() => setShowMcpForm((v) => !v)}>
+          {showMcpForm ? "Close Form" : "+ Add MCP Server"}
+        </button>
+      </div>
+      <p className="ai-hint">
+        Connect external Model Context Protocol (MCP) servers over local <code>stdio</code> or remote <code>HTTP / JSON-RPC</code>. Discovered tools are automatically exposed to the AI as <code>mcp__&lt;server&gt;__&lt;tool&gt;</code>.
+      </p>
+
+      {showMcpForm && (
+        <form
+          className="ai-form ai-card"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (!mcpName.trim()) return;
+            void act({
+              action: "mcp-save",
+              server: {
+                name: mcpName.trim(),
+                transport: mcpTransport,
+                command: mcpTransport === "stdio" ? mcpCommand.trim() : undefined,
+                args:
+                  mcpTransport === "stdio"
+                    ? mcpArgs
+                        .split(/\s+/)
+                        .map((x) => x.trim())
+                        .filter(Boolean)
+                    : undefined,
+                url: mcpTransport === "http" ? mcpUrl.trim() : undefined,
+                enabled: true,
+              },
+            }).then(() => {
+              setMcpName("");
+              setMcpArgs("");
+              setMcpUrl("");
+              setShowMcpForm(false);
+            });
+          }}
+        >
+          <strong>Add MCP Server</strong>
+          <label>
+            Server Name
+            <input
+              required
+              placeholder="e.g. NetApp Harvest & Prometheus MCP"
+              value={mcpName}
+              onChange={(e) => setMcpName(e.target.value)}
+            />
+          </label>
+          <label>
+            Transport
+            <select
+              value={mcpTransport}
+              onChange={(e) =>
+                setMcpTransport(e.target.value as "stdio" | "http")
+              }
+            >
+              <option value="stdio">Local Process (stdio JSON-RPC)</option>
+              <option value="http">Remote HTTP / JSON-RPC Endpoint</option>
+            </select>
+          </label>
+          {mcpTransport === "stdio" ? (
+            <>
+              <label>
+                Command
+                <input
+                  required
+                  placeholder="npx or node or python"
+                  value={mcpCommand}
+                  onChange={(e) => setMcpCommand(e.target.value)}
+                />
+              </label>
+              <label>
+                Arguments (space-separated)
+                <input
+                  placeholder="-y @modelcontextprotocol/server-filesystem /etc"
+                  value={mcpArgs}
+                  onChange={(e) => setMcpArgs(e.target.value)}
+                />
+              </label>
+            </>
+          ) : (
+            <label>
+              HTTP JSON-RPC Endpoint URL
+              <input
+                required
+                placeholder="https://mcp.internal.example.com/rpc"
+                value={mcpUrl}
+                onChange={(e) => setMcpUrl(e.target.value)}
+              />
+            </label>
+          )}
+          <button type="submit">Save & Discover Tools</button>
+        </form>
+      )}
+
+      {(hub.mcpServers ?? []).map((srv: McpServerConfig) => (
+        <article className="ai-card" key={srv.id}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+            <strong>🔌 {srv.name}</strong>
+            <small>
+              {srv.transport.toUpperCase()} ·{" "}
+              {srv.status ?? (srv.enabled ? "configured" : "disabled")}
+            </small>
+          </div>
+          <small style={{ display: "block", marginTop: 4 }}>
+            {srv.transport === "stdio"
+              ? `${srv.command ?? ""} ${(srv.args ?? []).join(" ")}`
+              : srv.url}
+          </small>
+          {srv.lastError && (
+            <p className="ai-error" style={{ marginTop: 6 }}>
+              {srv.lastError}
+            </p>
+          )}
+          {(srv.discoveredTools ?? []).length > 0 && (
+            <div style={{ marginTop: 8 }}>
+              <small>
+                <strong>Discovered tools ({srv.discoveredTools!.length}):</strong>{" "}
+                {srv.discoveredTools!.map((t) => t.name).join(", ")}
+              </small>
+            </div>
+          )}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+            <button
+              disabled={testingMcpId === srv.id}
+              onClick={() => {
+                setTestingMcpId(srv.id);
+                void act({ action: "mcp-test", id: srv.id }).finally(() =>
+                  setTestingMcpId(""),
+                );
+              }}
+            >
+              {testingMcpId === srv.id ? "Testing…" : "🔍 Test & Discover Tools"}
+            </button>
+            <button
+              onClick={() =>
+                void act({
+                  action: "mcp-save",
+                  server: { ...srv, enabled: !srv.enabled },
+                })
+              }
+            >
+              {srv.enabled ? "Disable" : "Enable"}
+            </button>
+            <button
+              onClick={() => void act({ action: "mcp-delete", id: srv.id })}
+            >
+              Delete
+            </button>
+          </div>
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function KnowledgeBaseView({
+  hub,
+  act,
+  onAttachDoc,
+}: {
+  hub: HubSnapshot;
+  act: Act;
+  onAttachDoc: (doc: KbDocument) => void;
+}): JSX.Element {
+  const [title, setTitle] = useState("");
+  const [collection, setCollection] = useState("netapp-ontap");
+  const [cluster, setCluster] = useState("");
+  const [tags, setTags] = useState("");
+  const [content, setContent] = useState("");
+  const [folderPath, setFolderPath] = useState("");
+  const [searchFilter, setSearchFilter] = useState("");
+  const [showAddDoc, setShowAddDoc] = useState(false);
+  const [expandedDocId, setExpandedDocId] = useState<string | null>(null);
+
+  const docs = (hub.kbDocuments ?? []).filter((d) => {
+    if (!searchFilter.trim()) return true;
+    const q = searchFilter.toLowerCase();
+    return (
+      d.title.toLowerCase().includes(q) ||
+      (d.collection ?? d.cluster ?? "").toLowerCase().includes(q) ||
+      d.content.toLowerCase().includes(q) ||
+      (d.tags ?? []).some((t: string) => t.toLowerCase().includes(q))
+    );
+  });
+
+  return (
+    <div className="ai-scroll">
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+        <h2>📚 Knowledge Base ({(hub.kbDocuments ?? []).length} docs)</h2>
+        <button onClick={() => setShowAddDoc((v) => !v)}>
+          {showAddDoc ? "Close Editor" : "+ Add Runbook / Doc"}
+        </button>
+      </div>
+      <p className="ai-hint">
+        Store NetApp ONTAP, StorageGRID, Ceph, ZFS, and Kubernetes runbooks, CLI cheat-sheets, and architecture docs. Documents are automatically chunked and indexed for BM25 retrieval via <code>sshs3_kb_search</code> and synced with your S3 Team Workspace.
+      </p>
+
+      <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+        <input
+          style={{ flex: 1 }}
+          placeholder="Search KB runbooks, CLI commands, collections, tags…"
+          value={searchFilter}
+          onChange={(e) => setSearchFilter(e.target.value)}
+        />
+      </div>
+
+      {showAddDoc && (
+        <form
+          className="ai-form ai-card"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (!title.trim() || !content.trim()) return;
+            void act({
+              action: "kb-save",
+              doc: {
+                title: title.trim(),
+                collection: collection.trim() || "general",
+                cluster: cluster.trim() || undefined,
+                tags: tags
+                  .split(",")
+                  .map((t) => t.trim())
+                  .filter(Boolean),
+                content: content.trim(),
+                sourceType: "manual",
+              },
+            }).then(() => {
+              setTitle("");
+              setContent("");
+              setTags("");
+              setShowAddDoc(false);
+            });
+          }}
+        >
+          <strong>Add KB Document / Runbook</strong>
+          <label>
+            Title
+            <input
+              required
+              placeholder="e.g. NetApp ONTAP Aggregate Relocation SOP"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+            />
+          </label>
+          <label>
+            Collection
+            <input
+              placeholder="netapp-ontap, storagegrid, ceph, kubernetes"
+              value={collection}
+              onChange={(e) => setCollection(e.target.value)}
+            />
+          </label>
+          <label>
+            Cluster Binding (optional)
+            <input
+              placeholder="e.g. NetApp MetroCluster Stockholm"
+              value={cluster}
+              onChange={(e) => setCluster(e.target.value)}
+            />
+          </label>
+          <label>
+            Tags (comma-separated)
+            <input
+              placeholder="ontap, snapmirror, qos, failover"
+              value={tags}
+              onChange={(e) => setTags(e.target.value)}
+            />
+          </label>
+          <label>
+            Markdown / Runbook Content
+            <textarea
+              required
+              rows={6}
+              placeholder="# Runbook Title&#10;&#10;Paste CLI commands, troubleshooting steps, and architecture notes…"
+              value={content}
+              onChange={(e) => setContent(e.target.value)}
+            />
+          </label>
+          <button type="submit">Save & Index Document</button>
+        </form>
+      )}
+
+      <form
+        className="ai-form ai-card"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!folderPath.trim()) return;
+          void act({
+            action: "kb-ingest-folder",
+            folderPath: folderPath.trim(),
+            collection: collection.trim() || "folder-sync",
+            cluster: cluster.trim() || undefined,
+          }).then(() => setFolderPath(""));
+        }}
+      >
+        <strong>Ingest Local Runbook Folder</strong>
+        <div style={{ display: "flex", gap: 6 }}>
+          <input
+            style={{ flex: 1 }}
+            placeholder="e.g. C:\Runbooks\NetApp-ONTAP (.md, .txt, .yaml, .conf)"
+            value={folderPath}
+            onChange={(e) => setFolderPath(e.target.value)}
+          />
+          <button type="submit">Sync Folder</button>
+        </div>
+      </form>
+
+      {docs.map((doc: KbDocument) => (
+        <article className="ai-card" key={doc.id}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+            <div>
+              <strong>📄 {doc.title}</strong>
+              <div>
+                <small>
+                  Collection: <code>{doc.collection || doc.cluster || "general"}</code> · {doc.chunks.length} chunk(s)
+                  {doc.cluster ? ` · Cluster: ${doc.cluster}` : ""}
+                </small>
+              </div>
+            </div>
+            <small>{new Date(doc.updatedAt).toLocaleDateString()}</small>
+          </div>
+          {(doc.tags ?? []).length > 0 && (
+            <small style={{ display: "block", marginTop: 4 }}>
+              🏷️ {(doc.tags ?? []).join(", ")}
+            </small>
+          )}
+          {expandedDocId === doc.id ? (
+            <pre style={{ marginTop: 8, maxHeight: 280, overflow: "auto", whiteSpace: "pre-wrap" }}>
+              {doc.content}
+            </pre>
+          ) : (
+            <p style={{ marginTop: 6 }}>
+              {doc.content.slice(0, 200)}
+              {doc.content.length > 200 ? "…" : ""}
+            </p>
+          )}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+            <button onClick={() => onAttachDoc(doc)}>
+              📎 Attach to Chat (@kb)
+            </button>
+            <button
+              onClick={() =>
+                setExpandedDocId(expandedDocId === doc.id ? null : doc.id)
+              }
+            >
+              {expandedDocId === doc.id ? "Hide Content" : "Read Full Runbook"}
+            </button>
+            <button
+              onClick={() => void act({ action: "kb-delete", id: doc.id })}
+            >
+              Delete
+            </button>
+          </div>
         </article>
       ))}
     </div>

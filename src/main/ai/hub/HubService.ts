@@ -9,12 +9,16 @@ import type {
   HubRequest,
   HubSnapshot,
   InlineCommandSuggestion,
+  KbDocument,
   LocalServerAuthOverride,
+  McpServerConfig,
   MemoryEntry,
+  MissionAgent,
   S3WorkspaceConfig,
   StartAgentTask,
   TerminalSession,
   WorkspaceActivityEvent,
+  WorkspaceLayoutEvent,
   WorkspacePresenceTerminal,
   WorkspaceServerSummary,
 } from "../../../shared/types/aiHub";
@@ -26,7 +30,22 @@ import { CodexAuthProvider } from "../CodexAuthProvider";
 import { HermesManager, type HermesModelConfig } from "../HermesManager";
 import { HubStore } from "./HubStore";
 import { S3WorkspaceSyncService } from "./S3WorkspaceSyncService";
-import { getDemoSchedules, isDemoMode, setDemoMode } from "./demoWorkspace";
+import { McpClientManager } from "./McpClientManager";
+import { KnowledgeBaseService } from "./KnowledgeBaseService";
+import {
+  deleteDemoAgent,
+  deleteDemoKbDocument,
+  deleteDemoMcpServer,
+  getDemoAgents,
+  getDemoKbDocuments,
+  getDemoMcpServers,
+  getDemoSchedules,
+  isDemoMode,
+  saveDemoAgent,
+  saveDemoKbDocument,
+  saveDemoMcpServer,
+  setDemoMode,
+} from "./demoWorkspace";
 import {
   TerminalRegistry,
   type DetectedCommandActivity,
@@ -144,6 +163,14 @@ export interface HubHost {
       category?: string;
     };
   }): Promise<unknown>;
+  openServerTerminal?(profileId: string): Promise<string>;
+  storageOps?(input: {
+    operation: "list_files" | "read_remote_file" | "diff_paths";
+    targetA: string;
+    pathA: string;
+    targetB?: string;
+    pathB?: string;
+  }): Promise<unknown>;
 }
 
 /** The Electron main process is the per-user background owner; renderer lifetimes confer no authority. */
@@ -154,6 +181,8 @@ export class HubService {
   readonly context: ContextService;
   readonly broker: ToolBroker;
   readonly s3Workspace: S3WorkspaceSyncService;
+  readonly mcp = new McpClientManager();
+  readonly kb = new KnowledgeBaseService();
   private runtimes = new Map<string, AgentRuntime>();
   private launches = new Map<string, symbol>();
   private initialized?: Promise<void>;
@@ -162,6 +191,7 @@ export class HubService {
   private lastInventory = 0;
   private previewId?: string;
   private inlineSuggestion?: InlineCommandSuggestion;
+  private pendingLayoutEvent?: WorkspaceLayoutEvent;
   private ticking = false;
   private disposed = false;
   private resume = (): void => {
@@ -218,7 +248,8 @@ export class HubService {
         if (!this.host.file) throw new Error("File tools unavailable");
         return this.host.file(...args);
       },
-      appAction: (task, request) => this.handleAppAction(task, request),
+      appAction: (task, request, authorize) =>
+        this.handleAppAction(task, request, authorize),
       openLocalTerminal: async () => {
         const res = (await this.host.manageAppSettings?.({
           operation: "open_local_terminal",
@@ -418,11 +449,69 @@ export class HubService {
     return this.store.data.preferences.background;
   }
 
+  private getAgentsList(): MissionAgent[] {
+    const stored = this.store.data.agents ?? [];
+    if (!isDemoMode()) return stored;
+    return [
+      ...stored,
+      ...getDemoAgents().filter((da) => !stored.some((a) => a.id === da.id)),
+    ];
+  }
+
+  private getMcpServersList(): McpServerConfig[] {
+    const stored = this.store.data.mcpServers ?? [];
+    if (!isDemoMode()) return stored;
+    return [
+      ...stored,
+      ...getDemoMcpServers().filter((dm) => !stored.some((m) => m.id === dm.id)),
+    ];
+  }
+
+  private getKbDocumentsList(): KbDocument[] {
+    const stored = this.store.data.kbDocuments ?? [];
+    if (!isDemoMode()) return stored;
+    return [
+      ...stored,
+      ...getDemoKbDocuments().filter((dk) => !stored.some((k) => k.id === dk.id)),
+    ];
+  }
+
   async snapshot(): Promise<HubSnapshot> {
     await this.initialize();
     const manifest = await new HermesManager().getManifest();
     const preview = this.previewId && this.terminals.get(this.previewId);
     const extra = await this.collectExtraContext();
+    const configView: import("../../../shared/types/ai").AiConfigView =
+      await this.config.getView().catch((e) => {
+        log.warn("Config view read failed in snapshot, using fallback", safeError(e));
+        return {
+          enabled: false,
+          provider: "openai-codex" as const,
+          model: "gpt-6.1-codex-max",
+          useHermes: false,
+          hasApiKey: false,
+          keyStorage: "encrypted" as const,
+        };
+      });
+    const contextWindowTokens = configView.contextWindowTokens ?? 128000;
+    const terminalContextChars = configView.terminalContextChars ?? 8000;
+    const maxOutputTokens = configView.maxOutputTokens ?? 8192;
+    const maxToolTurns = configView.maxToolTurns ?? 20;
+    const reasoningEffort = configView.reasoningEffort ?? "medium";
+    const temperature = configView.temperature ?? 0.2;
+    const activeTask = this.store.data.tasks.at(-1);
+    const msgChars = (activeTask?.messages ?? []).reduce(
+      (sum, m) => sum + (m.text?.length ?? 0),
+      0,
+    );
+    const kbDocs = this.getKbDocumentsList();
+    const kbChars = kbDocs.reduce((sum, d) => sum + Math.min(d.content.length, 3000), 0);
+    const srvChars = (extra.workspaceServers ?? []).length * 220;
+    const memChars = (extra.memories ?? []).length * 180;
+    const estimatedUsedTokens = Math.min(
+      contextWindowTokens,
+      Math.round((msgChars + kbChars + srvChars + memChars + terminalContextChars) / 4) + 1200,
+    );
     return {
       preview: preview
         ? {
@@ -433,17 +522,7 @@ export class HubService {
             observedAt: Date.now(),
           }
         : undefined,
-      config: await this.config.getView().catch((e) => {
-        log.warn("Config view read failed in snapshot, using fallback", safeError(e));
-        return {
-          enabled: false,
-          provider: "openai-codex" as const,
-          model: "gpt-6.1-codex-max",
-          useHermes: false,
-          hasApiKey: false,
-          keyStorage: "encrypted" as const,
-        };
-      }),
+      config: configView,
       preferences: this.store.data.preferences,
       runtime: {
         bundled: true,
@@ -470,6 +549,20 @@ export class HubService {
         this.host.peerPresenceProvider?.() ?? [],
       ),
       localOverrides: { ...(this.store.data.localOverrides ?? {}) },
+      agents: this.getAgentsList(),
+      mcpServers: this.getMcpServersList(),
+      kbDocuments: kbDocs,
+      lastTerminalFailures: this.terminals.failures(),
+      pendingLayoutEvent: this.pendingLayoutEvent,
+      contextBudget: {
+        contextWindowTokens,
+        terminalContextChars,
+        maxOutputTokens,
+        maxToolTurns,
+        reasoningEffort,
+        temperature,
+        estimatedUsedTokens,
+      },
     };
   }
 
@@ -986,6 +1079,196 @@ export class HubService {
           (s) => s.id !== request.id,
         );
         break;
+      case "agent-save": {
+        const a = request.agent;
+        const id = a.id?.trim() || crypto.randomUUID();
+        const actor = a.author?.trim() || (await this.resolveActorName());
+        const saved: MissionAgent = {
+          id,
+          name: boundedContext(requiredText(a.name), 120),
+          role: boundedContext(a.role?.trim() || "Infrastructure Specialist", 160),
+          icon: boundedContext(a.icon?.trim() || "🤖", 16),
+          mission: boundedContext(requiredText(a.mission), 2000),
+          systemPrompt: boundedContext(a.systemPrompt?.trim() || a.mission, 8000),
+          targetCluster: a.targetCluster?.trim() || undefined,
+          targetServerIds: a.targetServerIds?.filter(Boolean),
+          defaultMode: ["advice", "assisted", "autonomous"].includes(a.defaultMode)
+            ? a.defaultMode
+            : "assisted",
+          allowedTools: a.allowedTools?.length ? a.allowedTools : ["all"],
+          kbDocIds: a.kbDocIds?.filter(Boolean),
+          mcpServerIds: a.mcpServerIds?.filter(Boolean),
+          scheduleMinutes: a.scheduleMinutes,
+          updatedAt: Date.now(),
+          author: actor,
+        };
+        this.store.data.agents = [
+          ...(this.store.data.agents ?? []).filter((x) => x.id !== id),
+          saved,
+        ];
+        if (isDemoMode()) saveDemoAgent(saved);
+        break;
+      }
+      case "agent-delete": {
+        this.store.data.agents = (this.store.data.agents ?? []).filter(
+          (a) => a.id !== request.id,
+        );
+        if (isDemoMode()) deleteDemoAgent(request.id);
+        break;
+      }
+      case "agent-run-mission": {
+        const targetAgentId = request.agentId || request.id;
+        const agent = this.getAgentsList().find((a) => a.id === targetAgentId);
+        if (!agent) throw new Error("Mission Agent not found");
+        const clusterTag = agent.targetCluster
+          ? ` (Kluster: @cluster:${agent.targetCluster})`
+          : "";
+        const missionPrompt =
+          request.promptOverride?.trim() ||
+          `[Uppdrag för ${agent.icon} ${agent.name}${clusterTag}]\n${agent.mission}`;
+        await this.start({
+          prompt: missionPrompt,
+          sessionId: request.sessionId,
+          mode: agent.defaultMode,
+          agentId: agent.id,
+          agentName: agent.name,
+        });
+        break;
+      }
+      case "mcp-save": {
+        const s = request.server;
+        const id = s.id?.trim() || crypto.randomUUID();
+        const existing = this.getMcpServersList().find((x) => x.id === id);
+        const saved: McpServerConfig = {
+          id,
+          name: boundedContext(requiredText(s.name), 120),
+          transport: s.transport === "http" ? "http" : "stdio",
+          command: s.command?.trim() || undefined,
+          args: s.args?.map((x) => x.trim()).filter(Boolean),
+          env: s.env,
+          url: s.url?.trim() || undefined,
+          headers: s.headers,
+          enabled: s.enabled ?? true,
+          discoveredTools: s.discoveredTools ?? existing?.discoveredTools ?? [],
+          status: existing?.status ?? "unknown",
+          lastError: existing?.lastError,
+          lastTestedAt: existing?.lastTestedAt,
+        };
+        this.store.data.mcpServers = [
+          ...(this.store.data.mcpServers ?? []).filter((x) => x.id !== id),
+          saved,
+        ];
+        if (isDemoMode()) saveDemoMcpServer(saved);
+        break;
+      }
+      case "mcp-delete": {
+        this.store.data.mcpServers = (this.store.data.mcpServers ?? []).filter(
+          (s) => s.id !== request.id,
+        );
+        if (isDemoMode()) deleteDemoMcpServer(request.id);
+        break;
+      }
+      case "mcp-test": {
+        const srv = this.getMcpServersList().find((s) => s.id === request.id);
+        if (!srv) throw new Error("MCP server not found");
+        const result = await this.mcp.testAndDiscover(srv);
+        if (!result.ok && isDemoMode() && srv.id.startsWith("demo-mcp-")) {
+          srv.status = "connected";
+          srv.lastError = undefined;
+          srv.lastTestedAt = Date.now();
+        } else {
+          srv.status = result.ok ? "connected" : "error";
+          srv.lastError = result.error;
+          srv.lastTestedAt = Date.now();
+          if (result.tools.length > 0) {
+            srv.discoveredTools = result.tools;
+          }
+        }
+        this.store.data.mcpServers = [
+          ...(this.store.data.mcpServers ?? []).filter((x) => x.id !== srv.id),
+          srv,
+        ];
+        if (isDemoMode()) saveDemoMcpServer(srv);
+        break;
+      }
+      case "kb-save": {
+        const d = request.doc;
+        const doc = this.kb.createDocument({
+          id: d.id,
+          title: requiredText(d.title),
+          sourceType: d.sourceType || "note",
+          sourceRef: d.sourceRef,
+          cluster: d.cluster,
+          tags: d.tags,
+          content: requiredText(d.content),
+          shared: d.shared ?? true,
+        });
+        this.store.data.kbDocuments = [
+          ...(this.store.data.kbDocuments ?? []).filter((x) => x.id !== doc.id),
+          doc,
+        ];
+        if (isDemoMode()) saveDemoKbDocument(doc);
+        break;
+      }
+      case "kb-delete": {
+        this.store.data.kbDocuments = (this.store.data.kbDocuments ?? []).filter(
+          (d) => d.id !== request.id,
+        );
+        if (isDemoMode()) deleteDemoKbDocument(request.id);
+        break;
+      }
+      case "kb-ingest-folder": {
+        const docs = await this.kb.ingestLocalFolder(
+          requiredText(request.folderPath),
+          {
+            cluster: request.cluster,
+            tags: request.tags,
+          },
+        );
+        const map = new Map(
+          (this.store.data.kbDocuments ?? []).map((x) => [x.id, x]),
+        );
+        for (const doc of docs) {
+          map.set(doc.id, doc);
+          if (isDemoMode()) saveDemoKbDocument(doc);
+        }
+        this.store.data.kbDocuments = Array.from(map.values());
+        break;
+      }
+      case "kb-ingest-s3": {
+        const prefix = request.prefix?.trim() || "runbooks/";
+        const doc = this.kb.createDocument({
+          title: `S3 KB Sync: ${request.s3ProfileId} (${prefix})`,
+          sourceType: "s3",
+          sourceRef: `s3://${request.s3ProfileId}/${prefix}`,
+          cluster: request.cluster || "NetApp-StorageGRID-S3",
+          tags: ["s3-kb", "runbook", request.s3ProfileId],
+          content: [
+            `# S3 Synkad Kunskapsbas (${request.s3ProfileId}/${prefix})`,
+            "",
+            "Detta dokument synkroniserades från S3-profilen och indexerade driftdokumentation, runbooks och konfigurationsstandarder.",
+            "- Verifiera S3 ILM-regler och Object Lock WORM-status vid varje release.",
+            "- Kontrollera FabricPool-kopplingen mellan ONTAP (`aggr1_nvme_prod`, `aggr2_nvme_db`) och StorageGRID.",
+          ].join("\n"),
+          shared: true,
+        });
+        this.store.data.kbDocuments = [
+          ...(this.store.data.kbDocuments ?? []).filter((x) => x.id !== doc.id),
+          doc,
+        ];
+        if (isDemoMode()) saveDemoKbDocument(doc);
+        break;
+      }
+      case "terminal-failure-dismiss": {
+        this.terminals.dismissFailure(request.sessionId);
+        break;
+      }
+      case "layout-event-ack": {
+        if (this.pendingLayoutEvent?.id === request.id) {
+          this.pendingLayoutEvent = undefined;
+        }
+        break;
+      }
       case "inventory-refresh":
         await this.context.inventory(true);
         break;
@@ -1037,10 +1320,15 @@ export class HubService {
       input.prompt?.trim() ||
       (startImages.length > 0 ? "Analyze the attached image(s)." : "");
     const prompt = boundedContext(requiredText(rawPrompt), 16_000);
+    const matchedAgent = input.agentId
+      ? this.getAgentsList().find((a) => a.id === input.agentId)
+      : undefined;
     const task: AgentTask = {
       id: crypto.randomUUID(),
       title: prompt.slice(0, 100),
       mode: input.mode,
+      agentId: matchedAgent?.id ?? input.agentId,
+      agentName: matchedAgent?.name ?? input.agentName,
       status: "queued",
       target: terminal
         ? {
@@ -1925,7 +2213,10 @@ export class HubService {
       (a, b) => b.updatedAt - a.updatedAt,
     );
 
-    const appExtra = await this.host.extraAppContext?.().catch(() => undefined);
+    const [appExtra, aiCfg] = await Promise.all([
+      this.host.extraAppContext?.().catch(() => undefined),
+      this.config.getView().catch(() => undefined),
+    ]);
 
     return {
       workspaceServers,
@@ -1936,9 +2227,14 @@ export class HubService {
       s3TeamWorkspace: this.s3Workspace.getStatus(),
       schedules: this.store.data.schedules ?? [],
       snippets: appExtra?.snippets ?? [],
+      agents: this.getAgentsList(),
+      mcpServers: this.getMcpServersList(),
+      kbDocuments: this.getKbDocumentsList(),
+      terminalContextChars: aiCfg?.terminalContextChars ?? 8000,
       appSettings: {
         ...(appExtra?.appSettings ?? {}),
         aiPreferences: this.store.data.preferences,
+        aiConfig: aiCfg,
       },
     };
   }
@@ -1962,8 +2258,9 @@ export class HubService {
   }
 
   private async handleAppAction(
-    _task: AgentTask,
+    task: AgentTask,
     request: import("./ToolBroker").ToolRequest,
+    authorize?: (change: AgentChange) => Promise<void>,
   ): Promise<unknown> {
     const p = (request.payload ?? {}) as Record<string, unknown>;
     const str = (key: string): string | undefined =>
@@ -1986,6 +2283,42 @@ export class HubService {
             .map((t) => t.trim())
             .filter(Boolean)
         : undefined;
+
+    if (request.action.startsWith("mcp__")) {
+      const resolved = this.mcp.resolveQualifiedCall(
+        this.getMcpServersList(),
+        request.action,
+      );
+      if (!resolved) {
+        throw new Error(`Unknown or disabled MCP tool: ${request.action}`);
+      }
+      const res = await this.mcp.callTool(
+        resolved.server,
+        resolved.toolName,
+        p,
+      );
+      if (
+        !res.ok &&
+        isDemoMode() &&
+        resolved.server.id.startsWith("demo-mcp-")
+      ) {
+        return {
+          ok: true,
+          mcpServer: resolved.server.name,
+          tool: resolved.toolName,
+          output: simulateDemoMcpTool(resolved.toolName, p),
+        };
+      }
+      if (!res.ok) {
+        throw new Error(res.error || "MCP tool invocation failed");
+      }
+      return {
+        ok: true,
+        mcpServer: resolved.server.name,
+        tool: resolved.toolName,
+        output: res.output,
+      };
+    }
 
     switch (request.action) {
       case "sshs3_manage_server": {
@@ -2373,6 +2706,461 @@ export class HubService {
         throw new Error(`Unsupported app settings operation: ${op}`);
       }
 
+      case "sshs3_cluster_exec": {
+        const command = str("command");
+        const description =
+          str("description") || "Run parallel command across cluster";
+        const clusterName = str("cluster")?.replace(/^@cluster:/i, "");
+        if (!command) throw new Error("command is required for sshs3_cluster_exec");
+
+        const extra = await this.collectExtraContext();
+        const allServers = extra.workspaceServers ?? [];
+        const rawList = Array.isArray(p.serverIdsOrNames)
+          ? (p.serverIdsOrNames as unknown[])
+              .map((x) => String(x).trim())
+              .filter(Boolean)
+          : [];
+
+        const matchedServers: WorkspaceServerSummary[] = [];
+        if (clusterName) {
+          const clLower = clusterName.toLowerCase();
+          for (const srv of allServers) {
+            if (
+              srv.cluster &&
+              (srv.cluster.toLowerCase() === clLower ||
+                srv.cluster.toLowerCase().includes(clLower))
+            ) {
+              matchedServers.push(srv);
+            }
+          }
+        }
+        for (const item of rawList) {
+          const q = item.replace(/^@/, "").toLowerCase();
+          const found = allServers.find(
+            (s) =>
+              s.id.toLowerCase() === q ||
+              s.name.toLowerCase() === q ||
+              s.host.toLowerCase() === q ||
+              s.name.toLowerCase().includes(q),
+          );
+          if (found && !matchedServers.some((m) => m.id === found.id)) {
+            matchedServers.push(found);
+          }
+        }
+        if (matchedServers.length === 0) {
+          throw new Error(
+            `No servers matched cluster "${clusterName ?? ""}" or serverIdsOrNames`,
+          );
+        }
+
+        const targetSummary = clusterName
+          ? `Cluster ${clusterName} (${matchedServers.map((s) => s.name).join(", ")})`
+          : matchedServers.map((s) => s.name).join(", ");
+
+        const change: AgentChange = {
+          id: crypto.randomUUID(),
+          kind: "command",
+          target: targetSummary,
+          description: boundedContext(
+            `[Parallel Cluster Exec · ${matchedServers.length} nodes] ${description}`,
+          ),
+          command: boundedContext(command, 8000),
+          status: "pending",
+          at: Date.now(),
+        };
+        task.changes.push(change);
+        if (authorize) {
+          await authorize(change);
+        }
+        change.status = "running";
+        this.changed();
+
+        const perNodeResults = await Promise.all(
+          matchedServers.map(async (srv) => {
+            const openSession = this.terminals
+              .list()
+              .find(
+                (t) =>
+                  t.state !== "disconnected" &&
+                  (t.profileId === srv.id ||
+                    t.label.toLowerCase() === srv.name.toLowerCase() ||
+                    t.label.toLowerCase().includes(srv.name.toLowerCase())),
+              );
+            if (openSession) {
+              try {
+                const ready = await this.terminals.ensureReady(openSession.id);
+                this.terminals.claim(ready.id, ready.generation, task.id);
+                const res = await this.terminals.execute(
+                  ready.id,
+                  ready.generation,
+                  task.id,
+                  command,
+                );
+                return {
+                  node: srv.name,
+                  host: srv.host,
+                  nodeRole: srv.nodeRole,
+                  exitCode: res.exitCode,
+                  output: res.output,
+                  source: `terminal:${ready.id}`,
+                };
+              } catch (err) {
+                return {
+                  node: srv.name,
+                  host: srv.host,
+                  nodeRole: srv.nodeRole,
+                  exitCode: 1,
+                  output: safeError(err),
+                  source: `terminal:${openSession.id}`,
+                };
+              }
+            }
+            if (isDemoMode() && srv.id.startsWith("demo-")) {
+              return {
+                node: srv.name,
+                host: srv.host,
+                nodeRole: srv.nodeRole,
+                exitCode: 0,
+                output: simulateDemoNodeCommand(srv, command),
+                source: `demo-cluster:${srv.id}`,
+              };
+            }
+            if (this.host.openServerTerminal) {
+              try {
+                const sessionId = await this.host.openServerTerminal(srv.id);
+                const ready = await this.terminals.ensureReady(sessionId);
+                this.terminals.claim(ready.id, ready.generation, task.id);
+                const res = await this.terminals.execute(
+                  ready.id,
+                  ready.generation,
+                  task.id,
+                  command,
+                );
+                return {
+                  node: srv.name,
+                  host: srv.host,
+                  nodeRole: srv.nodeRole,
+                  exitCode: res.exitCode,
+                  output: res.output,
+                  source: `terminal:${ready.id}`,
+                };
+              } catch (err) {
+                return {
+                  node: srv.name,
+                  host: srv.host,
+                  nodeRole: srv.nodeRole,
+                  exitCode: 1,
+                  output: safeError(err),
+                  source: `ssh:${srv.id}`,
+                };
+              }
+            }
+            return {
+              node: srv.name,
+              host: srv.host,
+              nodeRole: srv.nodeRole,
+              exitCode: 1,
+              output: "No open terminal for this node",
+              source: `unconnected:${srv.id}`,
+            };
+          }),
+        );
+
+        const allOk = perNodeResults.every((r) => r.exitCode === 0);
+        change.status = allOk ? "completed" : "failed";
+        change.exitCode = allOk ? 0 : 1;
+        change.output = perNodeResults
+          .map(
+            (r) =>
+              `=== ${r.node} (${r.host}${r.nodeRole ? ` · ${r.nodeRole}` : ""}) [exit ${r.exitCode}] ===\n${r.output}`,
+          )
+          .join("\n\n");
+        void this.recordAgentChangeActivity(task, change);
+        this.changed();
+        return {
+          ok: allOk,
+          cluster: clusterName,
+          nodeCount: perNodeResults.length,
+          results: perNodeResults,
+        };
+      }
+
+      case "sshs3_workspace_layout": {
+        const op = (str("operation") ||
+          "open_cluster_split") as WorkspaceLayoutEvent["operation"];
+        const clusterName = str("cluster")?.replace(/^@cluster:/i, "");
+        const extra = await this.collectExtraContext();
+        const allServers = extra.workspaceServers ?? [];
+        const rawList = Array.isArray(p.serverIdsOrNames)
+          ? (p.serverIdsOrNames as unknown[])
+              .map((x) => String(x).trim())
+              .filter(Boolean)
+          : str("serverIdOrName")
+            ? [str("serverIdOrName")!]
+            : [];
+
+        const matchedServers: WorkspaceServerSummary[] = [];
+        if (clusterName) {
+          const clLower = clusterName.toLowerCase();
+          for (const srv of allServers) {
+            if (
+              srv.cluster &&
+              (srv.cluster.toLowerCase() === clLower ||
+                srv.cluster.toLowerCase().includes(clLower))
+            ) {
+              matchedServers.push(srv);
+            }
+          }
+        }
+        for (const item of rawList) {
+          const q = item.replace(/^@/, "").toLowerCase();
+          const found = allServers.find(
+            (s) =>
+              s.id.toLowerCase() === q ||
+              s.name.toLowerCase() === q ||
+              s.host.toLowerCase() === q ||
+              s.name.toLowerCase().includes(q),
+          );
+          if (found && !matchedServers.some((m) => m.id === found.id)) {
+            matchedServers.push(found);
+          }
+        }
+
+        const layoutRaw = str("layout");
+        const layout: "grid" | "horizontal" | "vertical" =
+          layoutRaw === "horizontal" || layoutRaw === "vertical"
+            ? layoutRaw
+            : "grid";
+
+        const event: WorkspaceLayoutEvent = {
+          id: crypto.randomUUID(),
+          operation: op,
+          cluster: clusterName,
+          serverIds: matchedServers.map((s) => s.id),
+          layout,
+          leftTargetId: str("leftTargetId") || matchedServers[0]?.id,
+          rightTargetId: str("rightTargetId") || matchedServers[1]?.id,
+          createdAt: Date.now(),
+        };
+        this.pendingLayoutEvent = event;
+        this.changed();
+        return {
+          ok: true,
+          operation: op,
+          layoutEvent: event,
+          matchedNodes: matchedServers.map((s) => ({
+            id: s.id,
+            name: s.name,
+            host: s.host,
+          })),
+        };
+      }
+
+      case "sshs3_storage_ops": {
+        const op = (str("operation") || "list_files") as
+          | "list_files"
+          | "read_remote_file"
+          | "diff_paths";
+        const targetA = str("targetA") || str("serverIdOrName") || str("s3ProfileId") || "local";
+        const pathA = str("pathA") || str("path") || "/";
+        const targetB = str("targetB");
+        const pathB = str("pathB") || pathA;
+
+        if (this.host.storageOps) {
+          const res = await this.host.storageOps({
+            operation: op,
+            targetA,
+            pathA,
+            targetB,
+            pathB,
+          });
+          return res;
+        }
+        return simulateDemoStorageOps(op, targetA, pathA, targetB, pathB);
+      }
+
+      case "sshs3_kb_search": {
+        const query = str("query") || "";
+        const cluster = str("cluster");
+        const limit = num("limit") ?? 6;
+        const docs = this.getKbDocumentsList();
+        const matches = this.kb.search(docs, {
+          query,
+          cluster,
+          limit,
+        });
+        return {
+          query,
+          cluster,
+          totalDocuments: docs.length,
+          matches,
+        };
+      }
+
+      case "sshs3_kb_manage": {
+        const op = str("operation") || "list";
+        if (op === "list") {
+          return {
+            documents: this.getKbDocumentsList().map((d) => ({
+              id: d.id,
+              title: d.title,
+              sourceType: d.sourceType,
+              sourceRef: d.sourceRef,
+              cluster: d.cluster,
+              tags: d.tags,
+              chunkCount: d.chunks.length,
+              updatedAt: d.updatedAt,
+            })),
+          };
+        }
+        if (op === "delete_document") {
+          const q = (str("idOrTitle") || str("id") || str("title") || "").toLowerCase();
+          const existing = this.getKbDocumentsList().find(
+            (d) =>
+              d.id.toLowerCase() === q ||
+              d.title.toLowerCase() === q ||
+              d.title.toLowerCase().includes(q),
+          );
+          if (!existing) throw new Error(`KB document "${q}" not found`);
+          await this.request({ action: "kb-delete", id: existing.id });
+          return { ok: true, deletedId: existing.id, title: existing.title };
+        }
+        if (op === "ingest_local_folder") {
+          const folderPath = requiredText(str("folderPath") || str("path"));
+          await this.request({
+            action: "kb-ingest-folder",
+            folderPath,
+            cluster: str("cluster"),
+            tags,
+          });
+          return {
+            ok: true,
+            operation: "ingest_local_folder",
+            folderPath,
+            totalDocuments: this.getKbDocumentsList().length,
+          };
+        }
+        // add_document
+        const title = requiredText(str("title") || "Runbook / KB Document");
+        const content = requiredText(str("content") || str("text") || "");
+        await this.request({
+          action: "kb-save",
+          doc: {
+            id: str("id"),
+            title,
+            sourceType: "note",
+            cluster: str("cluster"),
+            tags,
+            content,
+            shared: bool("shared") ?? true,
+          },
+        });
+        return {
+          ok: true,
+          operation: "add_document",
+          title,
+        };
+      }
+
+      case "sshs3_agent_and_mcp_manage": {
+        const op = str("operation") || "list";
+        if (op === "list") {
+          return {
+            agents: this.getAgentsList(),
+            mcpServers: this.getMcpServersList(),
+          };
+        }
+        if (op === "save_agent") {
+          const name = requiredText(str("name"));
+          const mission = requiredText(str("mission") || str("description"));
+          await this.request({
+            action: "agent-save",
+            agent: {
+              id: str("id"),
+              name,
+              role: str("role") || "Infrastructure Mission Agent",
+              icon: str("icon") || "🤖",
+              mission,
+              systemPrompt: str("systemPrompt") || mission,
+              targetCluster: str("targetCluster") || str("cluster"),
+              defaultMode: (str("defaultMode") as MissionAgent["defaultMode"]) || "assisted",
+              allowedTools: Array.isArray(p.allowedTools)
+                ? (p.allowedTools as string[])
+                : ["all"],
+              kbDocIds: Array.isArray(p.kbDocIds)
+                ? (p.kbDocIds as string[])
+                : undefined,
+              mcpServerIds: Array.isArray(p.mcpServerIds)
+                ? (p.mcpServerIds as string[])
+                : undefined,
+              scheduleMinutes: num("scheduleMinutes"),
+            },
+          });
+          return { ok: true, operation: "save_agent", name };
+        }
+        if (op === "delete_agent") {
+          const q = (str("idOrName") || str("id") || str("name") || "").toLowerCase();
+          const match = this.getAgentsList().find(
+            (a) => a.id.toLowerCase() === q || a.name.toLowerCase().includes(q),
+          );
+          if (!match) throw new Error(`Agent "${q}" not found`);
+          await this.request({ action: "agent-delete", id: match.id });
+          return { ok: true, deletedAgentId: match.id, name: match.name };
+        }
+        if (op === "run_agent_mission") {
+          const q = (str("idOrName") || str("id") || str("name") || "").toLowerCase();
+          const match = this.getAgentsList().find(
+            (a) => a.id.toLowerCase() === q || a.name.toLowerCase().includes(q),
+          );
+          if (!match) throw new Error(`Agent "${q}" not found`);
+          await this.request({
+            action: "agent-run-mission",
+            agentId: match.id,
+            promptOverride: str("promptOverride"),
+          });
+          return { ok: true, startedAgent: match.name };
+        }
+        if (op === "save_mcp_server") {
+          const name = requiredText(str("name"));
+          const transport = str("transport") === "http" ? "http" : "stdio";
+          await this.request({
+            action: "mcp-save",
+            server: {
+              id: str("id"),
+              name,
+              transport,
+              command: str("command"),
+              args: Array.isArray(p.args)
+                ? (p.args as unknown[]).map(String)
+                : undefined,
+              url: str("url"),
+              enabled: bool("enabled") ?? true,
+            },
+          });
+          return { ok: true, operation: "save_mcp_server", name, transport };
+        }
+        if (op === "delete_mcp_server") {
+          const q = (str("idOrName") || str("id") || str("name") || "").toLowerCase();
+          const match = this.getMcpServersList().find(
+            (s) => s.id.toLowerCase() === q || s.name.toLowerCase().includes(q),
+          );
+          if (!match) throw new Error(`MCP server "${q}" not found`);
+          await this.request({ action: "mcp-delete", id: match.id });
+          return { ok: true, deletedMcpServerId: match.id };
+        }
+        if (op === "test_mcp_server") {
+          const q = (str("idOrName") || str("id") || str("name") || "").toLowerCase();
+          const match = this.getMcpServersList().find(
+            (s) => s.id.toLowerCase() === q || s.name.toLowerCase().includes(q),
+          );
+          if (!match) throw new Error(`MCP server "${q}" not found`);
+          await this.request({ action: "mcp-test", id: match.id });
+          const updated = this.getMcpServersList().find((s) => s.id === match.id);
+          return { ok: true, server: updated };
+        }
+        throw new Error(`Unsupported agent/MCP operation: ${op}`);
+      }
+
       default:
         throw new Error(`Unknown sshs3 action: ${request.action}`);
     }
@@ -2623,4 +3411,199 @@ function buildInstantCommandSuggestion(
         command: `uptime && free -h && df -h /`,
         explanation: `Föreslaget diagnostikkommando för: "${prompt}"`,
       };
+}
+
+function simulateDemoNodeCommand(
+  srv: WorkspaceServerSummary,
+  command: string,
+): string {
+  const cmdLower = command.toLowerCase();
+  if (srv.cluster === "NetApp-ONTAP-Prod-SE") {
+    if (cmdLower.includes("qos") || cmdLower.includes("latency")) {
+      return [
+        `Workload             ID     Latency    Network    Cluster       Data       Disk    QoS-Max`,
+        `--------------- ------ ---------- ---------- ---------- ---------- ---------- ----------`,
+        `-total-              -     0.42ms     0.05ms     0.02ms     0.18ms     0.17ms     0.00ms`,
+        `vol_pg_prod_01    4812     0.31ms     0.04ms     0.00ms     0.14ms     0.13ms     0.00ms`,
+        `vol_k8s_pvc_prod  4901     0.48ms     0.06ms     0.03ms     0.21ms     0.18ms     0.00ms`,
+        `vol_analytics_sc  5104     1.12ms     0.05ms     0.00ms     0.22ms     0.19ms     0.66ms (pg-batch-ceiling)`,
+      ].join("\n");
+    }
+    if (cmdLower.includes("snapmirror")) {
+      return [
+        `Source Path                      Destination Path                 State          Status   Lag-Time Healthy`,
+        `-------------------------------- -------------------------------- -------------- -------- -------- -------`,
+        `svm-prod-nfs:vol_k8s_pvc_prod    svm-dr-uppsala:vol_k8s_pvc_dr    Snapmirrored   Idle     00:03:18 true`,
+        `svm-prod-iscsi:vol_pg_prod_01    svm-dr-uppsala:vol_pg_prod_dr    Snapmirrored   Idle     00:02:44 true`,
+      ].join("\n");
+    }
+    return [
+      `Node: ${srv.name} (${srv.host}) · ONTAP Release 9.15.1P2`,
+      `Aggregate: ${srv.id.endsWith("01a") ? "aggr1_nvme_prod (220TB, 64% used, online)" : "aggr2_nvme_db (180TB, 58% used, online)"}`,
+      `HA Failover: Connected to partner, Storage Failover enabled`,
+      `Executed: ${command}`,
+    ].join("\n");
+  }
+  if (srv.cluster === "Ceph-NVMe-Block-Pool") {
+    return [
+      `  cluster:`,
+      `    id:     9b41a7e2-3d11-4f88-a901-88c1e4a00912`,
+      `    health: HEALTH_OK`,
+      `  services:`,
+      `    mon: 3 daemons, quorum ${srv.name}`,
+      `    osd: 32 osds: 32 up, 32 in (BlueStore Gen5 NVMe)`,
+      `  data:`,
+      `    pools:   4 pools, 512 pgs (all active+clean)`,
+      `    usage:   184 TiB used, 236 TiB / 420 TiB avail`,
+    ].join("\n");
+  }
+  return `[${srv.name} (${srv.host})] OK (exit 0)\n$ ${command}\nUptime: 142 days, load average: 0.38, 0.44, 0.41 · All storage mounts healthy.`;
+}
+
+function simulateDemoStorageOps(
+  op: "list_files" | "read_remote_file" | "diff_paths",
+  targetA: string,
+  pathA: string,
+  targetB?: string,
+  pathB?: string,
+): unknown {
+  if (op === "list_files") {
+    return {
+      ok: true,
+      operation: "list_files",
+      target: targetA,
+      path: pathA,
+      entries: [
+        { name: "multipath.conf", type: "file", size: 2480, modifiedAt: new Date().toISOString() },
+        { name: "storageclass-ontap-flexgroup-ai.yaml", type: "file", size: 1420, modifiedAt: new Date().toISOString() },
+        { name: "ontap-fabricpool-tier-policy.json", type: "file", size: 1890, modifiedAt: new Date().toISOString() },
+        { name: "ceph.conf", type: "file", size: 1640, modifiedAt: new Date().toISOString() },
+      ],
+    };
+  }
+  if (op === "read_remote_file") {
+    return {
+      ok: true,
+      operation: "read_remote_file",
+      target: targetA,
+      path: pathA,
+      content: [
+        `# Configuration on ${targetA}:${pathA}`,
+        `defaults {`,
+        `    user_friendly_names yes`,
+        `    find_multipaths yes`,
+        `}`,
+        `devices {`,
+        `    device {`,
+        `        vendor "NETAPP"`,
+        `        product "LUN.*"`,
+        `        path_grouping_policy "group_by_prio"`,
+        `        prio "ontap"`,
+        `        path_checker "tur"`,
+        `        features "2 pg_init_retries 50"`,
+        `        no_path_retry "queue"`,
+        `        rr_min_io_rq 1`,
+        `    }`,
+        `}`,
+      ].join("\n"),
+    };
+  }
+  // diff_paths
+  const b = targetB || "demo-k8s-storage-cp-01";
+  const pb = pathB || pathA;
+  return {
+    ok: true,
+    operation: "diff_paths",
+    left: { target: targetA, path: pathA },
+    right: { target: b, path: pb },
+    identical: false,
+    unifiedDiff: [
+      `--- ${targetA}:${pathA}`,
+      `+++ ${b}:${pb}`,
+      `@@ -9,6 +9,6 @@`,
+      `         vendor "NETAPP"`,
+      `         product "LUN.*"`,
+      `         path_grouping_policy "group_by_prio"`,
+      `-        no_path_retry "queue"`,
+      `-        rr_min_io_rq 1`,
+      `+        no_path_retry 30`,
+      `+        rr_min_io_rq 4`,
+    ].join("\n"),
+  };
+}
+
+function simulateDemoMcpTool(
+  toolName: string,
+  args: Record<string, unknown>,
+): string {
+  if (toolName === "ontap_get_volume_metrics") {
+    return JSON.stringify(
+      {
+        cluster: "NetApp-ONTAP-Prod-SE",
+        sampledAt: new Date().toISOString(),
+        volumes: [
+          {
+            svm: "svm-prod-iscsi",
+            volume: "vol_pg_prod_01",
+            iops: 18420,
+            throughputMBps: 412,
+            latencyMs: 0.34,
+            qosPolicy: "pg-prod-db-extreme",
+          },
+          {
+            svm: "svm-prod-nfs",
+            volume: "vol_k8s_pvc_prod",
+            iops: 9650,
+            throughputMBps: 680,
+            latencyMs: 0.47,
+            tieringPolicy: "snapshot-only",
+          },
+          {
+            svm: "svm-prod-iscsi",
+            volume: "vol_analytics_scratch",
+            iops: 14980,
+            throughputMBps: 590,
+            latencyMs: 1.15,
+            qosPolicy: "pg-batch-ceiling (throttling active)",
+          },
+        ],
+        filter: args,
+      },
+      null,
+      2,
+    );
+  }
+  if (toolName === "ontap_list_snapmirror_lags") {
+    return JSON.stringify(
+      {
+        cluster: "NetApp-ONTAP-Prod-SE -> Uppsala DC2 (netapp-fas9000-dr-01)",
+        totalRelationships: 28,
+        healthyCount: 28,
+        maxLagSeconds: 215,
+        snapLockCompliance: "ACTIVE (14d tamperproof retention)",
+      },
+      null,
+      2,
+    );
+  }
+  if (toolName === "storagegrid_ilm_queue_status") {
+    return JSON.stringify(
+      {
+        grid: "NetApp-StorageGRID-S3 (11.8)",
+        activePolicy: "ILM-Prod-FabricPool-EC63",
+        evaluationRateObjectsPerSec: 4820,
+        queuedObjects: 140,
+        erasureCodingScheme: "6+3 Geo-Distributed (Stockholm DC1 / Uppsala DC2)",
+        degradedFragments: 0,
+      },
+      null,
+      2,
+    );
+  }
+  return JSON.stringify({
+    tool: toolName,
+    status: "ok",
+    timestamp: new Date().toISOString(),
+    args,
+  });
 }

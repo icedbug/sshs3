@@ -71,6 +71,8 @@ export interface AgentChange {
 export interface AgentTask {
   id: string;
   title: string;
+  agentId?: string;
+  agentName?: string;
   target?: { sessionId: string; generation: string; label: string };
   mode: AgentMode;
   status: RunStatus;
@@ -200,6 +202,96 @@ export interface HubPreferences {
   retentionDays: number;
   sharedWorkspacePath?: string;
 }
+export interface MissionAgent {
+  id: string;
+  name: string;
+  role: string;
+  mission: string;
+  systemPrompt: string;
+  icon?: string;
+  targetCluster?: string;
+  targetServerIds?: string[];
+  kbCollectionIds?: string[];
+  kbDocIds?: string[];
+  mcpServerIds?: string[];
+  allowedTools?: string[];
+  defaultMode: AgentMode;
+  modelOverride?: string;
+  scheduleMinutes?: number;
+  enabled?: boolean;
+  author?: string;
+  updatedAt: number;
+}
+export interface McpToolSummary {
+  name: string;
+  description: string;
+  inputSchema?: Record<string, unknown>;
+}
+export interface McpServerConfig {
+  id: string;
+  name: string;
+  transport: "stdio" | "http";
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  url?: string;
+  headers?: Record<string, string>;
+  enabled: boolean;
+  status?: "connected" | "disconnected" | "error" | "unknown";
+  lastError?: string;
+  lastTestedAt?: number;
+  discoveredTools?: McpToolSummary[];
+  updatedAt?: number;
+}
+export interface KbChunk {
+  id: string;
+  heading?: string;
+  text: string;
+}
+export interface KbDocument {
+  id: string;
+  collection?: string;
+  title: string;
+  sourceType: "upload" | "folder" | "s3" | "manual" | "note";
+  sourceUri?: string;
+  sourceRef?: string;
+  targetCluster?: string;
+  cluster?: string;
+  tags?: string[];
+  content: string;
+  chunks: KbChunk[];
+  chunkCount?: number;
+  shared?: boolean;
+  updatedAt: number;
+  author?: string;
+}
+export interface TerminalCommandFailure {
+  sessionId: string;
+  label: string;
+  command: string;
+  exitCode?: number;
+  snippet: string;
+  outputSnippet?: string;
+  at: number;
+}
+export interface WorkspaceLayoutEvent {
+  id: string;
+  operation:
+    | "open_terminal"
+    | "open_cluster_split"
+    | "open_dual_pane_explorer";
+  kind?: "open_terminal" | "open_cluster_split" | "open_dual_pane_explorer";
+  serverIds: string[];
+  cluster?: string;
+  clusterName?: string;
+  layout?: "grid" | "horizontal" | "vertical";
+  leftTargetId?: string;
+  rightTargetId?: string;
+  leftTarget?: { type: "local" | "sftp" | "s3"; profileId?: string; path?: string };
+  rightTarget?: { type: "local" | "sftp" | "s3"; profileId?: string; path?: string };
+  createdAt: number;
+  at?: number;
+}
 export interface HubSnapshot {
   preview?: ContextSource & { sessionId: string };
   config: AiConfigView;
@@ -216,10 +308,26 @@ export interface HubSnapshot {
   s3Workspace?: S3WorkspaceSyncStatus;
   presence?: WorkspacePresenceEntry[];
   localOverrides?: Record<string, LocalServerAuthOverride>;
+  agents?: MissionAgent[];
+  mcpServers?: McpServerConfig[];
+  kbDocuments?: KbDocument[];
+  lastTerminalFailures?: Record<string, TerminalCommandFailure>;
+  pendingLayoutEvent?: WorkspaceLayoutEvent;
+  contextBudget?: {
+    contextWindowTokens: number;
+    terminalContextChars: number;
+    maxOutputTokens: number;
+    maxToolTurns: number;
+    reasoningEffort: string;
+    temperature: number;
+    estimatedUsedTokens: number;
+  };
 }
 export interface StartAgentTask {
   prompt: string;
   sessionId?: string;
+  agentId?: string;
+  agentName?: string;
   mode: AgentMode;
   attachments?: ContextSource[];
   maxCommands?: number;
@@ -240,6 +348,7 @@ export type HubRequest =
       taskId: string;
       text: string;
       sessionId?: string;
+      agentId?: string;
       attachments?: ContextSource[];
     }
   | { action: "stop"; taskId: string }
@@ -251,6 +360,50 @@ export type HubRequest =
       entry: Omit<MemoryEntry, "id" | "updatedAt"> & { id?: string };
     }
   | { action: "memory-delete"; id: string }
+  | {
+      action: "agent-save";
+      agent: Omit<MissionAgent, "id" | "updatedAt"> & { id?: string };
+    }
+  | { action: "agent-delete"; id: string }
+  | {
+      action: "agent-run-mission";
+      id?: string;
+      agentId?: string;
+      sessionId?: string;
+      promptOverride?: string;
+    }
+  | {
+      action: "mcp-save";
+      server: Omit<McpServerConfig, "id" | "updatedAt"> & { id?: string };
+    }
+  | { action: "mcp-delete"; id: string }
+  | { action: "mcp-test"; id: string }
+  | {
+      action: "kb-save";
+      doc: Omit<KbDocument, "id" | "updatedAt" | "chunks"> & {
+        id?: string;
+        chunks?: KbChunk[];
+      };
+    }
+  | { action: "kb-delete"; id: string }
+  | {
+      action: "kb-ingest-folder";
+      folderPath: string;
+      collection?: string;
+      cluster?: string;
+      targetCluster?: string;
+      tags?: string[];
+    }
+  | {
+      action: "kb-ingest-s3";
+      s3ProfileId: string;
+      prefix?: string;
+      collection?: string;
+      cluster?: string;
+      targetCluster?: string;
+    }
+  | { action: "terminal-failure-dismiss"; sessionId: string }
+  | { action: "layout-event-ack"; id: string }
   | {
       action: "activity-record";
       event: Omit<WorkspaceActivityEvent, "id" | "at"> & { id?: string; at?: number };

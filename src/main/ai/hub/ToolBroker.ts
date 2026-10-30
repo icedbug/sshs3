@@ -27,7 +27,11 @@ export interface ToolDependencies {
     request: ToolRequest,
     authorize: (change: AgentChange) => Promise<void>,
   ): Promise<unknown>;
-  appAction?(task: AgentTask, request: ToolRequest): Promise<unknown>;
+  appAction?(
+    task: AgentTask,
+    request: ToolRequest,
+    authorize: (change: AgentChange) => Promise<void>,
+  ): Promise<unknown>;
   openLocalTerminal?(): Promise<string>;
   activity?(task: AgentTask, change: AgentChange, sessionId?: string): void;
   changed(): void;
@@ -120,8 +124,14 @@ export class ToolBroker {
         request.action === "memory-save"
       )
         return await this.deps.memory(task, request);
-      if (request.action.startsWith("sshs3_") && this.deps.appAction) {
-        const res = await this.deps.appAction(task, request);
+      if (
+        (request.action.startsWith("sshs3_") ||
+          request.action.startsWith("mcp__")) &&
+        this.deps.appAction
+      ) {
+        const res = await this.deps.appAction(task, request, (change) =>
+          this.authorize(key, task, change),
+        );
         this.deps.changed();
         return res;
       }

@@ -768,15 +768,17 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                     onTitleChangeRef.current?.(detectedHost);
                   }
                 }
+                const oscExitMatch = /\x1b\]133;D;([1-9][0-9]*)(?:\x07|\x1b\\)/.exec(data);
                 if (
-                  /(?:command not found|Permission denied|Connection refused|No such file or directory|502 Bad Gateway|CrashLoopBackOff|CommandNotFoundException|ParserError|failed \(Result: exit-code\)|ERR!|fatal:)/i.test(
+                  oscExitMatch ||
+                  /(?:command not found|Permission denied|Connection refused|No such file or directory|502 Bad Gateway|CrashLoopBackOff|MountVolume\.SetUp failed|AttachVolume\.Attach failed|snapmirror.*broken-off|HEALTH_ERR|CommandNotFoundException|ParserError|failed \(Result: exit-code\)|ERR!|fatal:)/i.test(
                     data
                   )
                 ) {
                   // eslint-disable-next-line no-control-regex
-                  const clean = data.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').trim();
+                  const clean = (outputTracker.lastOutput() || data).replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').trim();
                   if (clean) {
-                    setTerminalErrorHint(clean.slice(0, 400));
+                    setTerminalErrorHint(clean.slice(0, 500));
                   }
                 }
               }

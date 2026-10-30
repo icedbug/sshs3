@@ -1,6 +1,9 @@
 import type {
   AgentSchedule,
+  KbDocument,
+  McpServerConfig,
   MemoryEntry,
+  MissionAgent,
   WorkspaceActivityEvent,
   WorkspaceServerSummary,
 } from "../../../shared/types/aiHub";
@@ -802,3 +805,317 @@ export function deleteDemoMemory(id: string): void {
   const idx = demoMemoriesStore.findIndex((m) => m.id === id);
   if (idx >= 0) demoMemoriesStore.splice(idx, 1);
 }
+
+const initialDemoAgents: MissionAgent[] = [
+  {
+    id: "demo-agent-ontap-architect",
+    name: "NetApp ONTAP Storage Architect",
+    role: "ONTAP 9.15 All-Flash SAN/NAS, QoS & SnapMirror Specialist",
+    icon: "🗄️",
+    mission:
+      "Övervaka och optimera NetApp AFF A800 & FAS9000: analysera WAFL/NVRAM-latens, hantera FlexVol/FlexGroup, sätt QoS-gränser mot noisy neighbors och verifiera SnapMirror XDP & SnapLock-replikering.",
+    systemPrompt: [
+      "Du är en senior NetApp ONTAP 9.15 Storage Architect för klustret NetApp-ONTAP-Prod-SE.",
+      "- Prioritera alltid icke-destruktiva ONTAP CLI-kommandon (`qos statistics volume latency show`, `storage aggregate show`, `volume show`, `snapmirror show`).",
+      "- Vid latens > 1.5 ms på `aggr2_nvme_db`, identifiera noisy neighbors och föreslå `volume modify -qos-policy-group pg-batch-ceiling`.",
+      "- Kontrollera alltid KB-dokumentet 'NetApp ONTAP 9.15 CLI & QoS Reference' innan du föreslår ändringar i produktions-SVM:er.",
+    ].join("\n"),
+    targetCluster: "NetApp-ONTAP-Prod-SE",
+    defaultMode: "assisted",
+    allowedTools: ["all"],
+    kbDocIds: ["demo-kb-ontap-cli-qos"],
+    mcpServerIds: ["demo-mcp-netapp-harvest"],
+    updatedAt: now - 12 * min,
+    author: "erik@acme.se",
+  },
+  {
+    id: "demo-agent-storagegrid-ilm",
+    name: "StorageGRID & S3 ILM Specialist",
+    role: "NetApp StorageGRID 11.8, FabricPool & MinIO AIStor Engineer",
+    icon: "🪣",
+    mission:
+      "Säkerställ S3-tillgänglighet, Erasure Coding 6+3 ILM-komplians, S3 Object Lock (WORM) och optimal FabricPool-tiering mellan ONTAP och StorageGRID.",
+    systemPrompt: [
+      "Du ansvarar för NetApp StorageGRID 11.8 (`NetApp-StorageGRID-S3`) och MinIO AIStor NVMe-cachen.",
+      "- Verifiera S3-slutpunkter, multipart uploads, ILM-köer och FabricPool object-store availability.",
+      "- Använd `sshs3_storage_ops` för att inspektera buckets och jämföra konfigurationer mellan noder.",
+    ].join("\n"),
+    targetCluster: "NetApp-StorageGRID-S3",
+    defaultMode: "assisted",
+    allowedTools: ["all"],
+    kbDocIds: ["demo-kb-storagegrid-ilm"],
+    mcpServerIds: ["demo-mcp-s3-inspector"],
+    updatedAt: now - 25 * min,
+    author: "sara@acme.se",
+  },
+  {
+    id: "demo-agent-ceph-zfs-sre",
+    name: "Ceph & ZFS Reliability SRE",
+    role: "Ceph Reef BlueStore NVMe & TrueNAS OpenZFS Engineer",
+    icon: "⚡",
+    mission:
+      "Håll Ceph NVMe-poolen (`rbd-nvme-prod`) i HEALTH_OK, analysera slow ops/PG scrubbing och verifiera immutable ZFS-snapshots på TrueNAS.",
+    systemPrompt: [
+      "Du är specialist på Ceph Reef (18.2) BlueStore NVMe och OpenZFS 2.2 på TrueNAS Enterprise.",
+      "- Kontrollera alltid `ceph status`, `ceph health detail`, `ceph osd df tree` och `zpool status`.",
+      "- Under kontorstid (07:00–19:00) ska `osd_max_backfills` hållas <= 2 för att skydda KVM/OpenStack-latens.",
+    ].join("\n"),
+    targetCluster: "Ceph-NVMe-Block-Pool",
+    defaultMode: "assisted",
+    allowedTools: ["all"],
+    kbDocIds: ["demo-kb-ceph-reef-ops"],
+    mcpServerIds: [],
+    updatedAt: now - 40 * min,
+    author: "linnea@acme.se",
+  },
+  {
+    id: "demo-agent-k8s-trident-csi",
+    name: "Kubernetes Astra Trident CSI Debugger",
+    role: "K8s PVC, NFSv4.1 nconnect & DM-Multipath iSCSI/NVMe-oF Specialist",
+    icon: "☸️",
+    mission:
+      "Felsök och åtgärda PVC:er i Pending, VolumeAttachment-fel, iSCSI multipath/ALUA och NFSv4.1 export-policies mellan Kubernetes och NetApp ONTAP.",
+    systemPrompt: [
+      "Du felsöker Kubernetes lagring med NetApp Astra Trident CSI 24.06 i klustret `K8s-Trident-CSI-Prod`.",
+      "- Korrelera alltid Kubernetes-sidan (`kubectl describe pvc`, `tridentctl logs`) med ONTAP-sidan (`vserver export-policy`, `lun mapping show`, `igroup show`).",
+    ].join("\n"),
+    targetCluster: "K8s-Trident-CSI-Prod",
+    defaultMode: "assisted",
+    allowedTools: ["all"],
+    kbDocIds: ["demo-kb-trident-csi"],
+    mcpServerIds: ["demo-mcp-netapp-harvest"],
+    updatedAt: now - 18 * min,
+    author: "jacob",
+  },
+];
+
+const initialDemoMcpServers: McpServerConfig[] = [
+  {
+    id: "demo-mcp-netapp-harvest",
+    name: "NetApp Harvest & ActiveIQ MCP",
+    transport: "http",
+    url: "http://10.30.10.25:8890/mcp",
+    enabled: true,
+    status: "connected",
+    lastTestedAt: now - 15 * min,
+    discoveredTools: [
+      {
+        name: "ontap_get_volume_metrics",
+        description:
+          "Fetch real-time IOPS, throughput, and WAFL/QoS latency breakdown from NetApp Harvest / ActiveIQ.",
+      },
+      {
+        name: "ontap_list_snapmirror_lags",
+        description:
+          "List all SnapMirror XDP relationships across Stockholm DC1 and Uppsala DC2 with lag-time and SnapLock status.",
+      },
+      {
+        name: "trident_inspect_pvc_mapping",
+        description:
+          "Map a Kubernetes PVC name to its underlying NetApp ONTAP SVM, FlexVol/FlexGroup, LUN, or qtree.",
+      },
+    ],
+  },
+  {
+    id: "demo-mcp-s3-inspector",
+    name: "StorageGRID & S3 Compliance MCP",
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "@acme-storage/mcp-storagegrid-inspector", "--endpoint", "https://s3-dc1.storage.acme.se:10443"],
+    enabled: true,
+    status: "connected",
+    lastTestedAt: now - 30 * min,
+    discoveredTools: [
+      {
+        name: "storagegrid_ilm_queue_status",
+        description:
+          "Check NetApp StorageGRID ILM evaluation rate, queued objects, and Erasure Coding 6+3 repair progress.",
+      },
+      {
+        name: "s3_verify_object_lock",
+        description:
+          "Verify WORM Object Lock retention mode and compliance settings on S3 buckets.",
+      },
+    ],
+  },
+];
+
+const initialDemoKbDocuments: KbDocument[] = [
+  {
+    id: "demo-kb-ontap-cli-qos",
+    title: "NetApp ONTAP 9.15 CLI, Adaptive QoS & FabricPool Reference",
+    sourceType: "upload",
+    sourceRef: "ontap-9.15-operations-handbook.md",
+    cluster: "NetApp-ONTAP-Prod-SE",
+    tags: ["netapp", "ontap", "qos", "fabricpool", "snapmirror"],
+    content: [
+      "# NetApp ONTAP 9.15 Operations Handbook (Stockholm DC1 & Uppsala DC2)",
+      "",
+      "## 1. Latency Diagnosis & Adaptive QoS",
+      "Use `qos statistics volume latency show -iterations 5 -rows 15` to inspect latency by cluster center (Network, Cluster, Data, Disk, QoS-Max, WAFL).",
+      "- Standard production policy: `pg-prod-db-extreme` (min 10,000 IOPS, max 120,000 IOPS, expected latency < 0.5ms).",
+      "- Batch / scratch throttling policy: `pg-batch-ceiling` (max 15,000 IOPS, max 600 MB/s).",
+      "Command to apply QoS ceiling:",
+      "`volume modify -vserver <svm> -volume <vol> -qos-policy-group pg-batch-ceiling`",
+      "",
+      "## 2. FabricPool S3 Tiering to StorageGRID",
+      "Aggregates `aggr1_nvme_prod` and `aggr2_nvme_db` attach to `sg-fabricpool-dc1` (`ontap-fabricpool-tier`).",
+      "- Recommended tiering policy for Kubernetes PVCs: `auto` with `tiering-minimum-cooling-days 14`.",
+      "- Recommended tiering policy for transactional DB volumes: `snapshot-only`.",
+      "- Check tiering health: `storage aggregate object-store show -instance`.",
+    ].join("\n"),
+    chunks: [
+      {
+        id: "demo-kb-ontap-cli-qos#0",
+        heading: "1. Latency Diagnosis & Adaptive QoS",
+        text: "Use `qos statistics volume latency show -iterations 5 -rows 15` to inspect latency by cluster center (Network, Cluster, Data, Disk, QoS-Max, WAFL). Standard production policy: `pg-prod-db-extreme`. Batch throttling policy: `pg-batch-ceiling` (max 15,000 IOPS, max 600 MB/s). Command: `volume modify -vserver <svm> -volume <vol> -qos-policy-group pg-batch-ceiling`.",
+      },
+      {
+        id: "demo-kb-ontap-cli-qos#1",
+        heading: "2. FabricPool S3 Tiering to StorageGRID",
+        text: "Aggregates `aggr1_nvme_prod` and `aggr2_nvme_db` attach to `sg-fabricpool-dc1` (`ontap-fabricpool-tier`). Recommended tiering policy for Kubernetes PVCs: `auto` with `tiering-minimum-cooling-days 14`. Check health: `storage aggregate object-store show -instance`.",
+      },
+    ],
+    updatedAt: now - 20 * min,
+    shared: true,
+  },
+  {
+    id: "demo-kb-storagegrid-ilm",
+    title: "NetApp StorageGRID 11.8 ILM, Erasure Coding 6+3 & WORM Guide",
+    sourceType: "s3",
+    sourceRef: "s3://ontap-fabricpool-tier/runbooks/storagegrid-ilm-guide.md",
+    cluster: "NetApp-StorageGRID-S3",
+    tags: ["storagegrid", "s3", "ilm", "erasure-coding", "worm"],
+    content: [
+      "# NetApp StorageGRID 11.8 Architecture & ILM Guide",
+      "",
+      "## Active ILM Policy: ILM-Prod-FabricPool-EC63",
+      "- Rule 1 (`FabricPool-Cold-Blocks`): Objects > 64 KB in bucket `ontap-fabricpool-tier` use 6+3 Erasure Coding across `sg-sn-nvme-01`, `sg-sn-nvme-02` and Uppsala DC2 storage nodes.",
+      "- Rule 2 (`AI-Checkpoints-Hot`): Replicated 2-copies on All-NVMe storage nodes for 30 days, then EC 6+3.",
+      "",
+      "## Troubleshooting High S3 Latency or 503 SlowDown",
+      "1. Check Load Balancer service on `sg-admin-primary-01`: `storagegrid-status`.",
+      "2. Inspect Cassandra/RangedDB disk latency on `sg-sn-nvme-01` and `sg-sn-nvme-02`: `iostat -xz 1 5`.",
+      "3. Verify S3 certificate and HA VIP on port `10443`.",
+    ].join("\n"),
+    chunks: [
+      {
+        id: "demo-kb-storagegrid-ilm#0",
+        heading: "Active ILM Policy: ILM-Prod-FabricPool-EC63",
+        text: "Rule 1 (`FabricPool-Cold-Blocks`): Objects > 64 KB in bucket `ontap-fabricpool-tier` use 6+3 Erasure Coding across `sg-sn-nvme-01`, `sg-sn-nvme-02` and Uppsala DC2. Rule 2 (`AI-Checkpoints-Hot`): Replicated 2-copies on All-NVMe nodes for 30 days.",
+      },
+      {
+        id: "demo-kb-storagegrid-ilm#1",
+        heading: "Troubleshooting High S3 Latency or 503 SlowDown",
+        text: "Check Load Balancer service on `sg-admin-primary-01`: `storagegrid-status`. Inspect RangedDB disk latency on `sg-sn-nvme-01` and `sg-sn-nvme-02`: `iostat -xz 1 5`.",
+      },
+    ],
+    updatedAt: now - 35 * min,
+    shared: true,
+  },
+  {
+    id: "demo-kb-ceph-reef-ops",
+    title: "Ceph Reef 18.2 NVMe BlueStore & TrueNAS ZFS Operations",
+    sourceType: "folder",
+    sourceRef: "/etc/ceph/docs/ceph-reef-nvme-runbook.md",
+    cluster: "Ceph-NVMe-Block-Pool",
+    tags: ["ceph", "bluestore", "nvme", "truenas", "zfs"],
+    content: [
+      "# Ceph Reef NVMe & TrueNAS ZFS Operations",
+      "",
+      "## Ceph Pool Layout",
+      "- `rbd-nvme-prod`: size=3, min_size=2, pg_num=512, crush_rule=`nvme_rack_isolated`.",
+      "- Network: Dual 100GbE RoCEv2 (`10.30.40.0/24` public, `10.30.140.0/24` cluster).",
+      "",
+      "## Handling OSD Nearfull or Slow Ops",
+      "- Check OSD tree utilization: `ceph osd df tree`.",
+      "- Enable upmap balancer: `ceph balancer on && ceph balancer mode upmap`.",
+      "- Inspect slow ops: `ceph daemon osd.0 dump_historic_slow_ops`.",
+    ].join("\n"),
+    chunks: [
+      {
+        id: "demo-kb-ceph-reef-ops#0",
+        heading: "Ceph Pool Layout & Handling Slow Ops",
+        text: "`rbd-nvme-prod`: size=3, min_size=2, pg_num=512, crush_rule=`nvme_rack_isolated`. Check OSD utilization: `ceph osd df tree`. Enable upmap balancer: `ceph balancer on`. Inspect slow ops: `ceph daemon osd.0 dump_historic_slow_ops`.",
+      },
+    ],
+    updatedAt: now - 50 * min,
+    shared: true,
+  },
+  {
+    id: "demo-kb-trident-csi",
+    title: "Astra Trident 24.06 CSI & Linux Multipath Configuration Standard",
+    sourceType: "upload",
+    sourceRef: "trident-csi-multipath-standard.md",
+    cluster: "K8s-Trident-CSI-Prod",
+    tags: ["kubernetes", "trident", "multipath", "nfsv4.1", "iscsi"],
+    content: [
+      "# Astra Trident 24.06 CSI & Linux DM-Multipath Standard",
+      "",
+      "## Required `/etc/multipath.conf` for NetApp ONTAP LUNs",
+      "All Kubernetes worker nodes (`k8s-gpu-io-worker-01`) must use ALUA `group_by_prio`, `path_checker tur`, `features \"2 pg_init_retries 50\"`, and `no_path_retry queue`.",
+      "",
+      "## NFSv4.1 Mount Options for AI/GPU Workloads",
+      "StorageClass `ontap-flexgroup-ai` requires `nfsvers=4.1,nconnect=8,rsize=262144,wsize=262144,noatime,hard`.",
+    ].join("\n"),
+    chunks: [
+      {
+        id: "demo-kb-trident-csi#0",
+        heading: "Required /etc/multipath.conf & NFSv4.1 Mount Options",
+        text: "All Kubernetes worker nodes (`k8s-gpu-io-worker-01`) must use ALUA `group_by_prio`, `path_checker tur`, `no_path_retry queue`. StorageClass `ontap-flexgroup-ai` requires `nfsvers=4.1,nconnect=8,rsize=262144,wsize=262144,noatime,hard`.",
+      },
+    ],
+    updatedAt: now - 28 * min,
+    shared: true,
+  },
+];
+
+const demoAgentsStore: MissionAgent[] = [...initialDemoAgents];
+const demoMcpStore: McpServerConfig[] = [...initialDemoMcpServers];
+const demoKbStore: KbDocument[] = [...initialDemoKbDocuments];
+
+export function getDemoAgents(): MissionAgent[] {
+  return [...demoAgentsStore];
+}
+
+export function saveDemoAgent(agent: MissionAgent): void {
+  const idx = demoAgentsStore.findIndex((a) => a.id === agent.id);
+  if (idx >= 0) demoAgentsStore[idx] = agent;
+  else demoAgentsStore.unshift(agent);
+}
+
+export function deleteDemoAgent(id: string): void {
+  const idx = demoAgentsStore.findIndex((a) => a.id === id);
+  if (idx >= 0) demoAgentsStore.splice(idx, 1);
+}
+
+export function getDemoMcpServers(): McpServerConfig[] {
+  return [...demoMcpStore];
+}
+
+export function saveDemoMcpServer(server: McpServerConfig): void {
+  const idx = demoMcpStore.findIndex((s) => s.id === server.id);
+  if (idx >= 0) demoMcpStore[idx] = server;
+  else demoMcpStore.unshift(server);
+}
+
+export function deleteDemoMcpServer(id: string): void {
+  const idx = demoMcpStore.findIndex((s) => s.id === id);
+  if (idx >= 0) demoMcpStore.splice(idx, 1);
+}
+
+export function getDemoKbDocuments(): KbDocument[] {
+  return [...demoKbStore];
+}
+
+export function saveDemoKbDocument(doc: KbDocument): void {
+  const idx = demoKbStore.findIndex((d) => d.id === doc.id);
+  if (idx >= 0) demoKbStore[idx] = doc;
+  else demoKbStore.unshift(doc);
+}
+
+export function deleteDemoKbDocument(id: string): void {
+  const idx = demoKbStore.findIndex((d) => d.id === id);
+  if (idx >= 0) demoKbStore.splice(idx, 1);
+}
+

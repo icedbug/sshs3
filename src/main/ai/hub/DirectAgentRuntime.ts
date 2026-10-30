@@ -1,6 +1,11 @@
 import { CodexAuthProvider, buildCodexHeaders } from "../CodexAuthProvider";
 import type { HermesModelConfig } from "../HermesManager";
-import type { AgentTask } from "../../../shared/types/aiHub";
+import type {
+  AgentTask,
+  KbDocument,
+  McpServerConfig,
+  MissionAgent,
+} from "../../../shared/types/aiHub";
 import type { ToolRequest } from "./ToolBroker";
 import type { AgentRuntime, RunEvent } from "./AgentRuntime";
 import { boundedContext, safeError } from "./privacy";
@@ -306,10 +311,253 @@ const AGENT_TOOLS: FunctionToolDef[] = [
       additionalProperties: false,
     },
   },
+  {
+    name: "sshs3_cluster_exec",
+    description:
+      "Execute a shell/CLI command in parallel across an entire cluster (e.g. 'NetApp-ONTAP-Prod-SE', 'Ceph-NVMe-Block-Pool') or a list of nodes, and return aggregated per-node output. In 'assisted' mode, prompts the user once to approve the multi-node run; in 'autonomous' mode, executes immediately.",
+    parameters: {
+      type: "object",
+      properties: {
+        command: {
+          type: "string",
+          description: "Non-interactive command to execute across all target nodes.",
+        },
+        description: {
+          type: "string",
+          description: "Brief explanation of what this multi-node command checks or updates.",
+        },
+        cluster: {
+          type: "string",
+          description: "Cluster name to target (e.g. 'NetApp-ONTAP-Prod-SE').",
+        },
+        serverIdsOrNames: {
+          type: "array",
+          items: { type: "string" },
+          description: "Explicit list of server IDs, names, or hosts when targeting specific nodes.",
+        },
+      },
+      required: ["command", "description"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "sshs3_workspace_layout",
+    description:
+      "Orchestrate the sshs3 UI workspace layout: open a terminal tab for a server, open a Konsole-style multi-pane split view (2x2 grid, horizontal, or vertical) for a cluster or list of nodes, or open a Dual-Pane SFTP/S3 File Explorer tab.",
+    parameters: {
+      type: "object",
+      properties: {
+        operation: {
+          type: "string",
+          enum: ["open_terminal", "open_cluster_split", "open_dual_pane_explorer"],
+          description: "UI layout operation to trigger.",
+        },
+        cluster: {
+          type: "string",
+          description: "Cluster name whose nodes should be opened in a split-view grid.",
+        },
+        serverIdsOrNames: {
+          type: "array",
+          items: { type: "string" },
+          description: "Server IDs or names to open in terminal / split panes.",
+        },
+        layout: {
+          type: "string",
+          enum: ["grid", "horizontal", "vertical"],
+          description: "Split-pane layout style (default 'grid').",
+        },
+        leftTargetId: {
+          type: "string",
+          description: "Optional left pane server/S3 ID for open_dual_pane_explorer.",
+        },
+        rightTargetId: {
+          type: "string",
+          description: "Optional right pane server/S3 ID for open_dual_pane_explorer.",
+        },
+      },
+      required: ["operation"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "sshs3_storage_ops",
+    description:
+      "Perform deep SFTP / S3 / storage file operations: list files in a directory or S3 bucket prefix, read a remote configuration file, or compute a unified diff comparing a file/path across two servers or S3 buckets.",
+    parameters: {
+      type: "object",
+      properties: {
+        operation: {
+          type: "string",
+          enum: ["list_files", "read_remote_file", "diff_paths"],
+          description: "Storage operation: 'list_files', 'read_remote_file', or 'diff_paths'.",
+        },
+        targetA: {
+          type: "string",
+          description: "Primary server name/ID or S3 profile name/ID.",
+        },
+        pathA: {
+          type: "string",
+          description: "File or directory path on targetA (e.g. '/etc/multipath.conf' or 'ontap-fabricpool-tier/').",
+        },
+        targetB: {
+          type: "string",
+          description: "Second server name/ID or S3 profile when operation is 'diff_paths'.",
+        },
+        pathB: {
+          type: "string",
+          description: "Optional file path on targetB (defaults to pathA).",
+        },
+      },
+      required: ["operation", "targetA", "pathA"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "sshs3_kb_search",
+    description:
+      "Search the built-in sshs3 Knowledge Base (KB) for runbooks, architecture docs, NetApp ONTAP / StorageGRID / Ceph / Kubernetes Trident guides, and configuration standards.",
+    parameters: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "Keywords or question to search in the Knowledge Base.",
+        },
+        cluster: {
+          type: "string",
+          description: "Optional cluster name to prioritize matching KB documents.",
+        },
+        limit: {
+          type: "number",
+          description: "Maximum number of KB chunks to return (default 6).",
+        },
+      },
+      required: ["query"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "sshs3_kb_manage",
+    description:
+      "List, add, delete, or ingest local folder documentation into the sshs3 Knowledge Base (KB).",
+    parameters: {
+      type: "object",
+      properties: {
+        operation: {
+          type: "string",
+          enum: ["list", "add_document", "delete_document", "ingest_local_folder"],
+          description: "KB management operation.",
+        },
+        idOrTitle: {
+          type: "string",
+          description: "Document ID or title when deleting.",
+        },
+        title: {
+          type: "string",
+          description: "Title when adding a KB document.",
+        },
+        content: {
+          type: "string",
+          description: "Markdown or text content when adding a KB document.",
+        },
+        cluster: {
+          type: "string",
+          description: "Optional cluster association (e.g. 'NetApp-ONTAP-Prod-SE').",
+        },
+        tags: {
+          type: "array",
+          items: { type: "string" },
+          description: "Optional tags for the KB document.",
+        },
+        folderPath: {
+          type: "string",
+          description: "Local directory path when operation is 'ingest_local_folder'.",
+        },
+      },
+      required: ["operation"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "sshs3_agent_and_mcp_manage",
+    description:
+      "List, create, update, delete, or launch specialized AI Mission Agents (with custom missions, system prompts, target clusters, KB docs, and MCP servers), or configure and test Model Context Protocol (MCP) servers.",
+    parameters: {
+      type: "object",
+      properties: {
+        operation: {
+          type: "string",
+          enum: [
+            "list",
+            "save_agent",
+            "delete_agent",
+            "run_agent_mission",
+            "save_mcp_server",
+            "delete_mcp_server",
+            "test_mcp_server",
+          ],
+          description: "Operation to perform.",
+        },
+        idOrName: {
+          type: "string",
+          description: "Agent or MCP server ID/name when updating, deleting, running, or testing.",
+        },
+        name: {
+          type: "string",
+          description: "Name of the Mission Agent or MCP server.",
+        },
+        role: {
+          type: "string",
+          description: "Short role/title for the Mission Agent.",
+        },
+        icon: {
+          type: "string",
+          description: "Emoji icon for the Mission Agent (e.g. '🗄️', '🪣', '⚡', '☸️').",
+        },
+        mission: {
+          type: "string",
+          description: "Primary mission / assignment description for the Mission Agent.",
+        },
+        systemPrompt: {
+          type: "string",
+          description: "Detailed system instructions for the Mission Agent.",
+        },
+        targetCluster: {
+          type: "string",
+          description: "Optional cluster bound to the Mission Agent.",
+        },
+        defaultMode: {
+          type: "string",
+          enum: ["advice", "assisted", "autonomous"],
+          description: "Default execution mode for the Mission Agent.",
+        },
+        transport: {
+          type: "string",
+          enum: ["stdio", "http"],
+          description: "MCP transport type when saving an MCP server.",
+        },
+        command: {
+          type: "string",
+          description: "Executable command for stdio MCP server (e.g. 'npx').",
+        },
+        args: {
+          type: "array",
+          items: { type: "string" },
+          description: "Command arguments for stdio MCP server.",
+        },
+        url: {
+          type: "string",
+          description: "HTTP endpoint URL for http MCP server.",
+        },
+      },
+      required: ["operation"],
+      additionalProperties: false,
+    },
+  },
 ];
 
 function mapToolCallToBrokerRequest(name: string, args: Record<string, unknown>): ToolRequest {
-  if (name.startsWith("sshs3_")) {
+  if (name.startsWith("sshs3_") || name.startsWith("mcp__")) {
     return {
       action: name,
       payload: args,
@@ -365,39 +613,198 @@ function mapToolCallToBrokerRequest(name: string, args: Record<string, unknown>)
   }
 }
 
-function toolsForTask(task: AgentTask) {
-  if (task.mode === "advice" || !task.target) {
-    // Even in 'advice' (Context only) mode or without a terminal open, the AI can always
-    // read workspace context AND make any requested changes inside sshs3 itself
-    // (servers, clusters, folders, memories, schedules, S3 profiles, snippets, settings).
-    return AGENT_TOOLS.filter(
-      (t) =>
-        t.name === "workspace_context" ||
-        t.name === "workspace_remember" ||
-        t.name.startsWith("sshs3_"),
+function resolveActiveAgent(
+  task: AgentTask,
+  initialContext?: unknown,
+): MissionAgent | undefined {
+  const ctx = (initialContext ?? {}) as { agents?: MissionAgent[] };
+  const agents = Array.isArray(ctx.agents) ? ctx.agents : [];
+  if (agents.length === 0) return undefined;
+  if (task.agentId) {
+    const byId = agents.find((a) => a.id === task.agentId);
+    if (byId) return byId;
+  }
+  const lastUserText =
+    task.messages
+      .filter((m) => m.role === "user")
+      .at(-1)
+      ?.text.toLowerCase() ?? "";
+  const mentionMatch = /@agent:([a-z0-9_-]+)/i.exec(lastUserText);
+  if (mentionMatch) {
+    const q = mentionMatch[1].toLowerCase();
+    return agents.find(
+      (a) =>
+        a.id.toLowerCase().includes(q) ||
+        a.name.toLowerCase().replace(/\s+/g, "-").includes(q) ||
+        a.name.toLowerCase().includes(q),
     );
   }
-  return AGENT_TOOLS;
+  return undefined;
 }
 
-function buildSystemInstructions(task: AgentTask): string {
+function toolsForTask(
+  task: AgentTask,
+  initialContext?: unknown,
+): FunctionToolDef[] {
+  const activeAgent = resolveActiveAgent(task, initialContext);
+  let baseTools =
+    task.mode === "advice" || !task.target
+      ? AGENT_TOOLS.filter(
+          (t) =>
+            t.name === "workspace_context" ||
+            t.name === "workspace_remember" ||
+            t.name.startsWith("sshs3_"),
+        )
+      : [...AGENT_TOOLS];
+
+  if (
+    activeAgent?.allowedTools?.length &&
+    !activeAgent.allowedTools.includes("all")
+  ) {
+    const allowed = new Set(activeAgent.allowedTools);
+    baseTools = baseTools.filter(
+      (t) =>
+        allowed.has(t.name) ||
+        t.name === "workspace_context" ||
+        t.name === "sshs3_kb_search",
+    );
+  }
+
+  // Dynamically append discovered MCP tools from enabled MCP servers
+  const ctx = (initialContext ?? {}) as { mcpServers?: McpServerConfig[] };
+  const mcpServers = Array.isArray(ctx.mcpServers) ? ctx.mcpServers : [];
+  const allowedMcpIds = activeAgent?.mcpServerIds?.length
+    ? new Set(activeAgent.mcpServerIds)
+    : null;
+
+  for (const srv of mcpServers) {
+    if (!srv.enabled) continue;
+    if (allowedMcpIds && !allowedMcpIds.has(srv.id)) continue;
+    const safeSrvId = srv.id.replace(/[^a-zA-Z0-9_-]/g, "_");
+    for (const tool of srv.discoveredTools ?? []) {
+      const safeToolName = tool.name.replace(/[^a-zA-Z0-9_-]/g, "_");
+      const qualified = `mcp__${safeSrvId}__${safeToolName}`;
+      if (baseTools.some((t) => t.name === qualified)) continue;
+      baseTools.push({
+        name: qualified,
+        description: `[MCP: ${srv.name}] ${tool.description || tool.name}`,
+        parameters:
+          tool.inputSchema && typeof tool.inputSchema === "object"
+            ? tool.inputSchema
+            : {
+                type: "object",
+                properties: {},
+                additionalProperties: true,
+              },
+      });
+    }
+  }
+
+  return baseTools;
+}
+
+function extractAiRuntimeTuning(
+  task: AgentTask,
+  initialContext?: unknown,
+): {
+  snapshotMaxChars: number;
+  maxOutputTokens: number;
+  maxTurns: number;
+  reasoningEffort: "low" | "medium" | "high";
+  temperature: number;
+} {
+  const ctx = (initialContext ?? {}) as {
+    appSettings?: { aiConfig?: Record<string, unknown> };
+  };
+  const cfg = ctx.appSettings?.aiConfig ?? {};
+  const contextWindowTokens =
+    typeof cfg.contextWindowTokens === "number"
+      ? cfg.contextWindowTokens
+      : 128_000;
+  const maxOutputTokens =
+    typeof cfg.maxOutputTokens === "number" ? cfg.maxOutputTokens : 8192;
+  const maxToolTurns =
+    typeof cfg.maxToolTurns === "number"
+      ? cfg.maxToolTurns
+      : Math.max(8, Math.min(35, task.maxCommands + 6));
+  const reasoningEffort =
+    cfg.reasoningEffort === "low" ||
+    cfg.reasoningEffort === "medium" ||
+    cfg.reasoningEffort === "high"
+      ? cfg.reasoningEffort
+      : "medium";
+  const temperature =
+    typeof cfg.temperature === "number" ? cfg.temperature : 0.2;
+  // Scale snapshot char budget proportionally to contextWindowTokens (16k -> 12k chars, 128k+ -> 36k chars)
+  const snapshotMaxChars = Math.max(
+    8000,
+    Math.min(64_000, Math.round(contextWindowTokens * 0.3)),
+  );
+  return {
+    snapshotMaxChars,
+    maxOutputTokens,
+    maxTurns: Math.max(4, Math.min(60, maxToolTurns)),
+    reasoningEffort,
+    temperature,
+  };
+}
+
+function buildSystemInstructions(
+  task: AgentTask,
+  initialContext?: unknown,
+): string {
+  const activeAgent = resolveActiveAgent(task, initialContext);
+  const ctx = (initialContext ?? {}) as { kbDocuments?: KbDocument[] };
+  const kbDocs = Array.isArray(ctx.kbDocuments) ? ctx.kbDocuments : [];
+
+  const agentSection: string[] = [];
+  if (activeAgent) {
+    agentSection.push(
+      "",
+      `### ACTIVE MISSION AGENT: ${activeAgent.icon} ${activeAgent.name} (${activeAgent.role})`,
+      `- **Mission Assignment**: ${activeAgent.mission}`,
+      ...(activeAgent.targetCluster
+        ? [`- **Bound Target Cluster**: \`${activeAgent.targetCluster}\``]
+        : []),
+      `- **Agent System Instructions**:\n${activeAgent.systemPrompt}`,
+    );
+    if (activeAgent.kbDocIds?.length) {
+      const boundDocs = kbDocs.filter((d) =>
+        activeAgent.kbDocIds!.includes(d.id),
+      );
+      if (boundDocs.length > 0) {
+        agentSection.push(
+          "- **Agent Bound Knowledge Base (KB) Excerpts**:",
+          ...boundDocs.map(
+            (d) =>
+              `  * **${d.title}** (${d.cluster || "global"}):\n    ${boundedContext(d.content, 2000).replace(/\n/g, "\n    ")}`,
+          ),
+        );
+      }
+    }
+  }
+
   return [
-    "You are the built-in AI Copilot and Master Architect of **sshs3** — a modern cross-platform SSH, SFTP, S3, and Kubernetes/Cluster workspace platform with an integrated AI Workspace, S3 Team Workspace sync, YubiKey/PIV Team Vault, and Multi-User Web Server mode.",
+    "You are the built-in AI Copilot and Master Architect of **sshs3** — a modern cross-platform SSH, SFTP, S3, and Kubernetes/Cluster workspace platform with an integrated AI Workspace, Mission Agents, MCP (Model Context Protocol) support, Knowledge Base (KB), S3 Team Workspace sync, YubiKey/PIV Team Vault, and Multi-User Web Server mode.",
     `Current autonomy mode: ${task.mode}. Primary terminal target: ${JSON.stringify(task.target ?? null)}.`,
+    ...agentSection,
     "",
     "### YOUR CORE MANDATE",
-    "1. **YOU CAN ANSWER ANYTHING ABOUT SSHS3 & INFRASTRUCTURE**: You have complete, encyclopedic understanding of how `sshs3` works, how all its features are configured, and the user's current servers, clusters, folders, S3 buckets, memories, recent team changes, schedules, and settings (provided automatically in `[Automatic Workspace & Terminal Snapshot]`).",
-    "2. **YOU CAN DIRECTLY MODIFY SSHS3 AT ANY TIME**: Whenever the user asks you to add, edit, organize, or delete servers/VMs, clusters, folders, S3 profiles, AI memories/skills, scheduled checks, command snippets, or app settings (such as terminal font size, theme, or actor name), **use your `sshs3_*` tools immediately to perform the change directly in sshs3**! You do NOT need an open terminal to use `sshs3_*` tools, and they work in all modes (`advice` / Context only, `assisted` / Ask first, and `autonomous` / Auto).",
-    "3. **TERMINAL & FILE EXECUTION**: When troubleshooting or operating on a server/shell (and mode is `assisted` or `autonomous`), use `terminal_command`, `terminal_verify`, `file_read`, and `file_write`. If no terminal is open and the user wants to run a local command, you can open one with `sshs3_manage_app_and_settings` (`operation: 'open_local_terminal'`). Never run interactive full-screen TUI programs (`vim`, `nano`, `top`, `less` without flags).",
+    "1. **YOU CAN ANSWER ANYTHING ABOUT SSHS3 & INFRASTRUCTURE**: You have complete, encyclopedic understanding of how `sshs3` works, how all its features are configured, and the user's current servers, clusters, folders, S3 buckets, memories, recent team changes, schedules, Mission Agents, MCP servers, Knowledge Base documents, and settings (provided automatically in `[Automatic Workspace & Terminal Snapshot]`).",
+    "2. **YOU CAN DIRECTLY MODIFY & ORCHESTRATE SSHS3 AT ANY TIME**:",
+    "   - Manage servers/VMs, clusters, folders, memories/skills, schedules, S3 profiles, snippets, and settings with `sshs3_manage_*` tools.",
+    "   - Run commands in parallel across an entire cluster or list of nodes with `sshs3_cluster_exec`.",
+    "   - Open single terminals, 2x2/horizontal/vertical Konsole split-pane grids for a cluster, or Dual-Pane SFTP/S3 File Explorer tabs directly in the UI with `sshs3_workspace_layout`.",
+    "   - List/inspect remote SFTP & S3 files and diff configuration files across two nodes or buckets with `sshs3_storage_ops`.",
+    "   - Search and manage the built-in Knowledge Base (KB) with `sshs3_kb_search` and `sshs3_kb_manage`.",
+    "   - Create/manage/run Mission Agents and MCP servers with `sshs3_agent_and_mcp_manage`, and invoke discovered external MCP tools (`mcp__<server>__<tool>`).",
+    "3. **TERMINAL & FILE EXECUTION**: When troubleshooting or operating on a single server/shell (and mode is `assisted` or `autonomous`), use `terminal_command`, `terminal_verify`, `file_read`, and `file_write`. Never run interactive full-screen TUI programs (`vim`, `nano`, `top`, `less` without flags).",
     "",
     "### COMPLETE KNOWLEDGE BASE OF SSHS3",
-    "- **Workspace VMs & Clusters (`LandingView`)**: Servers have `name`, `host`, `port`, `username`, `cluster` (e.g. `Acme-Prod-Core`, `k8s-eu-north-1`), `nodeRole` (`control-plane`, `worker`, `primary-db`, `replica-db`, `ingress`, `cache`, `storage`, `bastion`), infrastructure `role` (`web`, `database`, `k8s`, `worker`, `storage`, `bastion`, `cache`), `folder`, `tags`, `description`, and `shared` (`true` = Delad med teamet, `false` = Personlig). Users can filter by cluster or folder and click `Terminal`, `SFTP`, or `✨ Fråga AI` on any card.",
-    "- **@-Context Mentions in Chat**: Typing `@` in chat autocompletes `@workspace` (all clusters/VMs), `@team-changes` (recent config/service changes), `@cluster:<name>` (entire cluster topology), or `@<server>` (specific VM).",
-    "- **Inline Terminal AI (`Ctrl+K`)**: Inside any open SSH or Local Shell terminal, pressing `Ctrl+K` (or clicking `Inline AI`) opens an inline bar where the user describes a task in natural language and gets a clean executable command with `Enter` (`Klistra in`) or `Ctrl+Enter` (`Kör direkt`).",
-    "- **Automatic Team Activity & Collective AI Memory (`TerminalObserver`)**: Notable commands run in terminals (editing `/etc/...` configs, `systemctl restart/reload`, `kubectl apply/rollout`, `docker`, `apt/dnf`) are automatically detected, stripped of secrets/tokens, logged in `Teamets Aktivitet & AI-Minne`, and summarized into `Auto-Memory` per node.",
-    "- **S3 Team Workspace (`☁️ S3 Team Bucket`)**: Shares `workspace.json` (servers, clusters, roles, memories, skills, activity log, tombstones) and `presence/<actor>.json` (live `🟢 Online` badges) via any S3-compatible bucket (AWS S3, Cloudflare R2, MinIO, Hetzner, DigitalOcean Spaces). Uses a hybrid privacy model: topology is shared in S3, while private SSH keys (`~/.ssh/config`, `IdentityFile`) and passwords remain 100% local per user (`LocalServerAuthOverride`). Supports 1-click Invite Codes (`SSHS3-S3-...`).",
-    "- **Multi-User Web Server Mode (`npm run build:web` / `npm run start:web` / `docker compose up -d --build` / `./scripts/deploy-vm.sh`)**: Allows deploying `sshs3` on a VM and logging in via browser (`http://<vm>:8080`). Includes First-Run Admin setup, 1-click Invite links (`?invite=...`) with expiration and revocation, password change, automatic per-user Ed25519 server SSH keys (`🔑 SSH-nyckel`) with 1-click `authorized_keys` command & built-in `ssh-copy-id`, and strict per-user `UserTenant` + OpenSSH `ControlMaster` isolation.",
-    "- **SFTP + S3 Dual-Pane File Manager, SSH Tunnels & Team Vault**: Built-in file manager (`File Manager` / `Cloud Sync`), SSH Port Forwarding (`-L` Local, `-R` Remote, `-D` Dynamic SOCKS), and hardware-backed YubiKey PIV + `age` Team Vault.",
+    "- **Workspace VMs & Clusters (`LandingView`)**: Servers have `name`, `host`, `port`, `username`, `cluster` (e.g. `NetApp-ONTAP-Prod-SE`, `NetApp-StorageGRID-S3`, `Ceph-NVMe-Block-Pool`, `K8s-Trident-CSI-Prod`), `nodeRole`, infrastructure `role`, `folder`, `tags`, `description`, and `shared`.",
+    "- **@-Context Mentions in Chat**: Typing `@` autocompletes `@workspace`, `@team-changes`, `@cluster:<name>`, `@agent:<name>` (Mission Agents), `@kb:<title>` (Knowledge Base docs), or `@<server>`.",
+    "- **Proactive 'Fix with AI' Terminal Banner & Inline AI (`Ctrl+K`)**: When a command fails in any terminal, sshs3 surfaces a 1-click `✨ Förklara & fixa felet` chip that attaches the failed command, exit code, and terminal output to AI chat.",
+    "- **Mission Agents, MCP & Knowledge Base**: Users can configure specialized Mission Agents with custom system prompts, target clusters, KB collections, and stdio/HTTP MCP servers, plus control context window size (`16k`–`900k`), terminal scrollback budget, reasoning effort, and max tool turns.",
     "",
     "Always respond in the same language as the user (e.g. Swedish if the user writes in Swedish). Be clear, helpful, and proactive.",
   ].join("\n");
@@ -500,7 +907,14 @@ export class DirectAgentRuntime implements AgentRuntime {
       model.model.startsWith("claude-")
         ? creds.defaultModel || "gpt-6.1-sol"
         : model.model;
-    const instructions = buildSystemInstructions(task);
+    let initialContext: unknown;
+    try {
+      initialContext = await this.invokeBroker({ action: "context" });
+    } catch {
+      // Non-fatal if context snapshot fails
+    }
+    const tuning = extractAiRuntimeTuning(task, initialContext);
+    const instructions = buildSystemInstructions(task, initialContext);
 
     const inputItems: Array<Record<string, unknown>> = [];
     for (const msg of task.messages.slice(-30)) {
@@ -529,31 +943,27 @@ export class DirectAgentRuntime implements AgentRuntime {
       });
     }
 
-    // Fetch initial workspace context automatically so the first turn already knows the servers and recent team activity
-    try {
-      const initialContext = await this.invokeBroker({ action: "context" });
+    if (initialContext) {
       inputItems.unshift({
         type: "message",
         role: "user",
         content: [
           {
             type: "input_text",
-            text: `[Automatic Workspace & Terminal Snapshot]\n${boundedContext(JSON.stringify(initialContext), 24_000)}`,
+            text: `[Automatic Workspace & Terminal Snapshot]\n${boundedContext(JSON.stringify(initialContext), tuning.snapshotMaxChars)}`,
           },
         ],
       });
-    } catch {
-      // Non-fatal if context snapshot fails
     }
 
-    const wireTools = toolsForTask(task).map((t) => ({
+    const wireTools = toolsForTask(task, initialContext).map((t) => ({
       type: "function",
       name: t.name,
       description: t.description,
       parameters: t.parameters,
     }));
 
-    const maxTurns = Math.max(8, Math.min(35, task.maxCommands + 6));
+    const maxTurns = tuning.maxTurns;
     let finalOutput = "";
 
     for (let turn = 0; turn < maxTurns && !this.cancelled; turn++) {
@@ -686,17 +1096,21 @@ export class DirectAgentRuntime implements AgentRuntime {
     onEvent: (event: RunEvent) => void,
   ): Promise<void> {
     const baseUrl = model.baseUrl.replace(/\/$/, "");
-    const instructions = buildSystemInstructions(task);
-    const messages: Array<Record<string, unknown>> = [{ role: "system", content: instructions }];
-
+    let initialContext: unknown;
     try {
-      const initialContext = await this.invokeBroker({ action: "context" });
-      messages.push({
-        role: "system",
-        content: `Current Workspace & Terminal Snapshot:\n${boundedContext(JSON.stringify(initialContext), 24_000)}`,
-      });
+      initialContext = await this.invokeBroker({ action: "context" });
     } catch {
       // ignore
+    }
+    const tuning = extractAiRuntimeTuning(task, initialContext);
+    const instructions = buildSystemInstructions(task, initialContext);
+    const messages: Array<Record<string, unknown>> = [{ role: "system", content: instructions }];
+
+    if (initialContext) {
+      messages.push({
+        role: "system",
+        content: `Current Workspace & Terminal Snapshot:\n${boundedContext(JSON.stringify(initialContext), tuning.snapshotMaxChars)}`,
+      });
     }
 
     for (const msg of task.messages.slice(-30)) {
@@ -719,7 +1133,7 @@ export class DirectAgentRuntime implements AgentRuntime {
       }
     }
 
-    const tools = toolsForTask(task).map((t) => ({
+    const tools = toolsForTask(task, initialContext).map((t) => ({
       type: "function",
       function: {
         name: t.name,
@@ -728,7 +1142,7 @@ export class DirectAgentRuntime implements AgentRuntime {
       },
     }));
 
-    const maxTurns = Math.max(8, Math.min(35, task.maxCommands + 6));
+    const maxTurns = tuning.maxTurns;
     let finalOutput = "";
 
     for (let turn = 0; turn < maxTurns && !this.cancelled; turn++) {
@@ -843,13 +1257,16 @@ export class DirectAgentRuntime implements AgentRuntime {
   ): Promise<void> {
     const base = (model.baseUrl || "https://api.anthropic.com").replace(/\/$/, "");
     const endpoint = base.endsWith("/v1") ? `${base}/messages` : `${base}/v1/messages`;
-    let systemInstructions = buildSystemInstructions(task);
-
+    let initialContext: unknown;
     try {
-      const initialContext = await this.invokeBroker({ action: "context" });
-      systemInstructions += `\n\nCurrent Workspace & Terminal Snapshot:\n${boundedContext(JSON.stringify(initialContext), 24_000)}`;
+      initialContext = await this.invokeBroker({ action: "context" });
     } catch {
       // ignore
+    }
+    const tuning = extractAiRuntimeTuning(task, initialContext);
+    let systemInstructions = buildSystemInstructions(task, initialContext);
+    if (initialContext) {
+      systemInstructions += `\n\nCurrent Workspace & Terminal Snapshot:\n${boundedContext(JSON.stringify(initialContext), tuning.snapshotMaxChars)}`;
     }
 
     const messages: Array<Record<string, unknown>> = task.messages
@@ -860,13 +1277,13 @@ export class DirectAgentRuntime implements AgentRuntime {
         content: boundedContext(m.text),
       }));
 
-    const tools = toolsForTask(task).map((t) => ({
+    const tools = toolsForTask(task, initialContext).map((t) => ({
       name: t.name,
       description: t.description,
       input_schema: t.parameters,
     }));
 
-    const maxTurns = Math.max(8, Math.min(35, task.maxCommands + 6));
+    const maxTurns = tuning.maxTurns;
     let finalOutput = "";
 
     for (let turn = 0; turn < maxTurns && !this.cancelled; turn++) {

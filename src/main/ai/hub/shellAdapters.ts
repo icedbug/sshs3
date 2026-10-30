@@ -72,6 +72,9 @@ export class CommandFrames {
     private readonly maxOutput = 128_000,
     private readonly options: CommandFrameOptions = {},
   ) {}
+  get commandText(): string | undefined {
+    return this.options.command;
+  }
   drainDisplay(): string {
     const out = this.displayBuffer;
     this.displayBuffer = "";
