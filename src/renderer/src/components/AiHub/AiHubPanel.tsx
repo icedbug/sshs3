@@ -283,7 +283,27 @@ export function AiHubPanel({
     }
   }, [prompt, mode]);
   useEffect(() => {
-    const open = (): void => setMode("panel");
+    const open = (event: Event): void => {
+      const detail = (
+        event as CustomEvent<{
+          view?: View;
+          mode?: "closed" | "panel" | "hub";
+          agentId?: string;
+          prompt?: string;
+        }>
+      ).detail;
+      setMode(detail?.mode ?? "panel");
+      if (detail?.view) {
+        setView(detail.view);
+      }
+      if (detail?.agentId !== undefined) {
+        setSelectedAgentId(detail.agentId);
+      }
+      if (detail?.prompt) {
+        setPrompt(detail.prompt);
+        setTimeout(() => composer.current?.focus(), 30);
+      }
+    };
     const attach = (event: Event): void => {
       const detail = (
         event as CustomEvent<{
@@ -643,22 +663,47 @@ export function AiHubPanel({
                 "Knowledge Base",
                 "Memory & skills",
               ] as View[])
-        ).map((name) => (
-          <button
-            key={name}
-            aria-current={activeView === name ? "page" : undefined}
-            onClick={() => {
-              setView(name);
-              setMenu(null);
-            }}
-          >
-            {name === "Work"
-              ? "Chat"
-              : name === "Knowledge Base" && mode === "panel"
-                ? "KB"
-                : name}
-          </button>
-        ))}
+        ).map((name) => {
+          const badgeCount =
+            name === "Agents & MCP"
+              ? (hub?.agents?.length ?? 0) + (hub?.mcpServers?.length ?? 0)
+              : name === "Knowledge Base"
+                ? (hub?.kbDocuments?.length ?? 0)
+                : name === "Memory & skills"
+                  ? (hub?.memories?.length ?? 0)
+                  : name === "Schedules"
+                    ? (hub?.schedules?.length ?? 0)
+                    : 0;
+          return (
+            <button
+              key={name}
+              aria-current={activeView === name ? "page" : undefined}
+              onClick={() => {
+                setView(name);
+                setMenu(null);
+              }}
+            >
+              <span>
+                {name === "Work"
+                  ? "💬 Chat"
+                  : name === "Agents & MCP"
+                    ? "🤖 Agents & MCP"
+                    : name === "Knowledge Base"
+                      ? mode === "panel"
+                        ? "📚 KB"
+                        : "📚 Knowledge Base"
+                      : name === "Memory & skills"
+                        ? mode === "panel"
+                          ? "🧠 Memory"
+                          : "🧠 Memory & skills"
+                        : name}
+              </span>
+              {badgeCount > 0 && (
+                <span className="ai-nav-badge">{badgeCount}</span>
+              )}
+            </button>
+          );
+        })}
       </nav>
       {error && (
         <div className="ai-error" role="alert">
@@ -758,6 +803,42 @@ export function AiHubPanel({
 
                   <div className="ai-sidebar-section">
                     <div className="ai-sidebar-header">
+                      <strong>Mission Agents</strong>
+                      <button
+                        className="ai-sidebar-new"
+                        onClick={() => setView("Agents & MCP")}
+                        title="Manage Mission Agents & MCP servers"
+                      >
+                        Manage
+                      </button>
+                    </div>
+                    <div className="ai-sidebar-list">
+                      {(hub.agents ?? []).map((ag) => (
+                        <button
+                          key={ag.id}
+                          className="ai-sidebar-item"
+                          aria-current={selectedAgentId === ag.id ? "true" : undefined}
+                          onClick={() => {
+                            setSelectedAgentId(
+                              selectedAgentId === ag.id ? "" : ag.id,
+                            );
+                            setAutonomy(ag.defaultMode);
+                          }}
+                        >
+                          <span>{ag.icon || "🤖"}</span>
+                          <div>
+                            <span>{ag.name}</span>
+                            <small>
+                              {ag.targetCluster || ag.role} · {ag.defaultMode}
+                            </small>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="ai-sidebar-section">
+                    <div className="ai-sidebar-header">
                       <strong>Recent Team Activity</strong>
                     </div>
                     <div className="ai-sidebar-list">
@@ -787,55 +868,134 @@ export function AiHubPanel({
                 {!task && !connection && (
                   <div className="ai-welcome">
                     <h2>Vad kan jag hjälpa dig med i sshS3?</h2>
-                    <p>Fråga vad som helst om sshS3 och din infrastruktur, eller be mig skapa och ändra VMs, kluster, mappar, minnen, scheman och inställningar direkt.</p>
+                    <p>
+                      Välj en specialiserad <strong>Mission Agent</strong> eller fråga fritt om dina kluster, VMs, S3-buckets, KB-runbooks och MCP-verktyg.
+                    </p>
+                    {(hub.agents ?? []).length > 0 && (
+                      <div className="ai-agent-quick-bar" aria-label="Quick select Mission Agent">
+                        <button
+                          type="button"
+                          className={`ai-agent-pill ${!selectedAgentId ? "active" : ""}`}
+                          onClick={() => setSelectedAgentId("")}
+                        >
+                          ✨ Standard AI
+                        </button>
+                        {(hub.agents ?? []).map((ag) => (
+                          <button
+                            key={ag.id}
+                            type="button"
+                            className={`ai-agent-pill ${selectedAgentId === ag.id ? "active" : ""}`}
+                            onClick={() => {
+                              setSelectedAgentId(ag.id);
+                              setAutonomy(ag.defaultMode);
+                            }}
+                          >
+                            <span>{ag.icon || "🤖"}</span>
+                            <span>{ag.name}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    {activeAgent && (
+                      <article className="ai-card ai-card-active" style={{ marginBottom: 14 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+                          <div>
+                            <strong>
+                              {activeAgent.icon || "🤖"} {activeAgent.name}
+                            </strong>
+                            <div>
+                              <small>{activeAgent.role}</small>
+                            </div>
+                          </div>
+                          {activeAgent.targetCluster && (
+                            <span className="ai-badge ai-badge-cluster">
+                              🧩 {activeAgent.targetCluster}
+                            </span>
+                          )}
+                        </div>
+                        <p style={{ fontSize: 12, margin: "8px 0" }}>
+                          <strong>Uppdrag:</strong> {activeAgent.mission}
+                        </p>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                          <button
+                            type="button"
+                            className="ai-btn-emerald"
+                            onClick={() => {
+                              const prevIds = new Set(hub.tasks.map((t) => t.id));
+                              void act({
+                                action: "agent-run-mission",
+                                id: activeAgent.id,
+                              }).then((nextSnap) => {
+                                const created = nextSnap?.tasks.find(
+                                  (t) => !prevIds.has(t.id),
+                                );
+                                if (created?.id) setTaskId(created.id);
+                              });
+                            }}
+                          >
+                            🚀 Kör uppdrag nu
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setPrompt(
+                                `Utför ditt uppdrag för ${activeAgent.targetCluster ? `@cluster:${activeAgent.targetCluster}` : "vår infrastruktur"}: ${activeAgent.mission}`,
+                              )
+                            }
+                          >
+                            ✏️ Anpassa uppdrag i chatten
+                          </button>
+                        </div>
+                      </article>
+                    )}
                     <div className="ai-welcome-grid">
                       <button
                         type="button"
                         className="ai-starter-card"
                         onClick={() =>
                           setPrompt(
-                            "Lägg till en ny VM som heter prod-redis-01 (10.20.1.50, port 22, användare ubuntu) i klustret Acme-Prod-Core med rollen cache och taggarna redis, prod.",
+                            "Kör en parallell hälsokontroll över alla noder i @cluster:NetApp-ONTAP-Prod-SE med sshs3_cluster_exec och jämför WAFL/NVMe-latens, aggregat och SnapMirror-status.",
                           )
                         }
                       >
-                        <strong>Lägg till eller ändra VMs &amp; kluster</strong>
-                        <small>Be AI:n skapa/uppdatera servrar, kluster, mappar eller S3-profiler i sshS3</small>
+                        <strong>⚡ Parallell klusterkörning (@cluster)</strong>
+                        <small>Kör kommandon parallellt över hela kluster och få en samlad rapport</small>
                       </button>
                       <button
                         type="button"
                         className="ai-starter-card"
                         onClick={() =>
                           setPrompt(
-                            "Ge mig en komplett överblick över allt i min sshS3-arbetsyta (kluster, servrar, minnen, S3-synk och inställningar) och vad teamet ändrat senast.",
+                            "Öppna en 2x2 split-view terminal-grid för alla noder i @cluster:NetApp-ONTAP-Prod-SE så att jag kan övervaka dem sida vid sida.",
                           )
                         }
                       >
-                        <strong>Full överblick &amp; teamets ändringar</strong>
-                        <small>Se alla kluster, noder, minnen och vad kollegorna nyss ändrade</small>
+                        <strong>🪟 Öppna 2×2 Kluster Split-View</strong>
+                        <small>Be AI:n öppna Konsole split-grid eller Dual-Pane Explorer direkt i UI:t</small>
                       </button>
                       <button
                         type="button"
                         className="ai-starter-card"
                         onClick={() =>
                           setPrompt(
-                            "Hur fungerar S3 Team Workspace, Multi-User Web Server på VM och Inline Terminal AI (Ctrl+K) i sshS3?",
+                            "Jämför (diffa) /etc/multipath.conf mellan k8s-gpu-io-worker-01 och k8s-storage-cp-01 med sshs3_storage_ops och kontrollera mot vår KB-standard.",
                           )
                         }
                       >
-                        <strong>Fråga vad som helst om sshS3</strong>
-                        <small>Full förståelse för alla funktioner, flöden, nycklar och inställningar</small>
+                        <strong>🔍 Cross-Server Config Diff &amp; SFTP/S3</strong>
+                        <small>Diffa konfigurationsfiler mellan två noder eller inspektera S3-buckets</small>
                       </button>
                       <button
                         type="button"
                         className="ai-starter-card"
                         onClick={() =>
                           setPrompt(
-                            "Skapa ett nytt delat AI-minne och en schemalagd hälsokontroll varje timme för vårt produktionskluster.",
+                            "Sök i vår Knowledge Base (@kb) efter ONTAP Adaptive QoS och hämta aktuella volym-IOPS och latens via NetApp Harvest MCP.",
                           )
                         }
                       >
-                        <strong>Styr minnen, scheman &amp; inställningar</strong>
-                        <small>Be AI:n spara runbooks, schemalägga kontroller eller ändra appinställningar</small>
+                        <strong>📚 Sök i Kunskapsbasen (KB) &amp; MCP</strong>
+                        <small>Kombinera BM25-runbooks med live-telemetri från anslutna MCP-servrar</small>
                       </button>
                     </div>
                   </div>
@@ -1144,7 +1304,7 @@ export function AiHubPanel({
                   </div>
                   <div className="ai-menu-anchor">
                     <button
-                      className="ai-context-chip"
+                      className={`ai-context-chip ${activeAgent ? "ai-context-chip-active" : ""}`}
                       aria-label="Select Mission Agent"
                       title={
                         activeAgent
@@ -1157,7 +1317,9 @@ export function AiHubPanel({
                       }
                     >
                       <span>
-                        🤖 {activeAgent ? activeAgent.name : "Default Agent"}
+                        {activeAgent
+                          ? `${activeAgent.icon || "🤖"} ${activeAgent.name}`
+                          : "🤖 Default Agent"}
                       </span>
                       <ChevronDown size={11} />
                     </button>
@@ -1497,27 +1659,36 @@ export function AiHubPanel({
                     title={`Context window: ${Math.round((hub.contextBudget?.contextWindowTokens ?? hub.config.contextWindowTokens ?? 128000) / 1000)}k tokens · Terminal scrollback: ${Math.round((hub.contextBudget?.terminalContextChars ?? hub.config.terminalContextChars ?? 8000) / 1000)}k chars · Reasoning: ${hub.config.reasoningEffort ?? "medium"}`}
                     onClick={() => setSettingsOpen(true)}
                   >
-                    <span>
-                      📊{" "}
-                      {Math.max(
-                        1,
-                        Math.round(
-                          ((hub.contextBudget?.estimatedUsedTokens ?? 2400) +
-                            attachments.reduce(
-                              (sum, a) => sum + Math.ceil((a.text?.length ?? 0) / 4),
-                              0,
-                            )) /
-                            1000,
-                        ),
-                      )}
-                      k /{" "}
-                      {Math.round(
-                        (hub.contextBudget?.contextWindowTokens ??
-                          hub.config.contextWindowTokens ??
-                          128000) / 1000,
-                      )}
-                      k ctx
-                    </span>
+                    {(() => {
+                      const usedTokens =
+                        (hub.contextBudget?.estimatedUsedTokens ?? 2400) +
+                        attachments.reduce(
+                          (sum, a) => sum + Math.ceil((a.text?.length ?? 0) / 4),
+                          0,
+                        );
+                      const maxTokens =
+                        hub.contextBudget?.contextWindowTokens ??
+                        hub.config.contextWindowTokens ??
+                        128000;
+                      const pct = Math.min(
+                        100,
+                        Math.max(4, Math.round((usedTokens / maxTokens) * 100)),
+                      );
+                      return (
+                        <>
+                          <span>
+                            📊 {Math.max(1, Math.round(usedTokens / 1000))}k /{" "}
+                            {Math.round(maxTokens / 1000)}k ctx
+                          </span>
+                          <span className="ai-context-meter-bar" aria-hidden="true">
+                            <span
+                              className="ai-context-meter-fill"
+                              style={{ width: `${pct}%` }}
+                            />
+                          </span>
+                        </>
+                      );
+                    })()}
                   </button>
                   {attachments.length > 0 && (
                     <small>{attachments.length} sources</small>
@@ -2463,11 +2634,31 @@ function AgentsAndMcpView({
     ),
   );
 
+  const totalMcpTools = (hub.mcpServers ?? []).reduce(
+    (sum, s) => sum + (s.discoveredTools?.length ?? 0),
+    0,
+  );
+
   return (
     <div className="ai-scroll">
+      <div className="ai-stat-grid">
+        <div className="ai-stat-box">
+          <strong>{(hub.agents ?? []).length}</strong>
+          <small>🤖 Mission Agents</small>
+        </div>
+        <div className="ai-stat-box">
+          <strong>{(hub.mcpServers ?? []).filter((s) => s.enabled).length}</strong>
+          <small>🔌 Active MCP Servers</small>
+        </div>
+        <div className="ai-stat-box">
+          <strong>{totalMcpTools}</strong>
+          <small>🛠️ Discovered MCP Tools</small>
+        </div>
+      </div>
+
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
         <h2>🤖 Mission Agents ({(hub.agents ?? []).length})</h2>
-        <button onClick={() => setShowAgentForm((v) => !v)}>
+        <button className="ai-btn-accent" onClick={() => setShowAgentForm((v) => !v)}>
           {showAgentForm ? "Close Form" : "+ New Mission Agent"}
         </button>
       </div>
@@ -2583,42 +2774,61 @@ function AgentsAndMcpView({
       )}
 
       {(hub.agents ?? []).map((ag: MissionAgent) => (
-        <article className="ai-card" key={ag.id}>
+        <article
+          className={`ai-card ${selectedAgentId === ag.id ? "ai-card-active" : ""}`}
+          key={ag.id}
+        >
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
             <div>
               <strong>
                 {ag.icon || "🤖"} {ag.name}
               </strong>
-              <div>
-                <small>
-                  {ag.role} · Mode: <code>{ag.defaultMode}</code>
-                  {ag.targetCluster ? ` · Cluster: ${ag.targetCluster}` : ""}
-                </small>
+              <div style={{ marginTop: 2 }}>
+                <small>{ag.role}</small>
               </div>
             </div>
-            {selectedAgentId === ag.id && (
-              <span className="ai-pill">Active in Chat</span>
-            )}
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 4, justifyContent: "flex-end" }}>
+              {selectedAgentId === ag.id && (
+                <span className="ai-pill">Active in Chat</span>
+              )}
+              <span className="ai-badge ai-badge-mode">{ag.defaultMode}</span>
+              {ag.targetCluster && (
+                <span className="ai-badge ai-badge-cluster">
+                  🧩 {ag.targetCluster}
+                </span>
+              )}
+            </div>
           </div>
-          <p style={{ marginTop: 6 }}>
+          <p style={{ marginTop: 8 }}>
             <strong>Uppdrag:</strong> {ag.mission}
           </p>
           {((ag.kbCollectionIds ?? ag.kbDocIds ?? []).length > 0 ||
             (ag.mcpServerIds ?? []).length > 0) && (
-            <small style={{ display: "block", marginBottom: 6 }}>
-              {(ag.kbCollectionIds ?? ag.kbDocIds ?? []).length > 0
-                ? `📚 KB: ${(ag.kbCollectionIds ?? ag.kbDocIds ?? []).join(", ")}`
-                : ""}
-              {(ag.mcpServerIds ?? []).length > 0
-                ? ` · 🔌 ${(ag.mcpServerIds ?? []).length} MCP server(s)`
-                : ""}
-            </small>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 8 }}>
+              {(ag.kbCollectionIds ?? ag.kbDocIds ?? []).map((kb) => (
+                <span key={kb} className="ai-tool-tag">
+                  📚 {kb}
+                </span>
+              ))}
+              {(ag.mcpServerIds ?? []).map((mcpId) => {
+                const srv = (hub.mcpServers ?? []).find((m) => m.id === mcpId);
+                return (
+                  <span key={mcpId} className="ai-tool-tag">
+                    🔌 {srv?.name || mcpId}
+                  </span>
+                );
+              })}
+            </div>
           )}
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6 }}>
-            <button onClick={() => onSelectAgentForChat(ag.id)}>
+            <button
+              className="ai-btn-accent"
+              onClick={() => onSelectAgentForChat(ag.id)}
+            >
               💬 Use in Chat
             </button>
             <button
+              className="ai-btn-emerald"
               onClick={() => {
                 const prevIds = new Set(hub.tasks.map((t) => t.id));
                 void act({
@@ -2633,6 +2843,7 @@ function AgentsAndMcpView({
               🚀 Run Mission Now
             </button>
             <button
+              className="ai-btn-danger"
               onClick={() =>
                 void act({ action: "agent-delete", id: ag.id })
               }
@@ -2746,12 +2957,17 @@ function AgentsAndMcpView({
         <article className="ai-card" key={srv.id}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
             <strong>🔌 {srv.name}</strong>
-            <small>
+            <span
+              className={`ai-badge ${
+                srv.status === "connected" ? "ai-badge-success" : ""
+              }`}
+            >
+              {srv.status === "connected" ? "🟢 " : ""}
               {srv.transport.toUpperCase()} ·{" "}
               {srv.status ?? (srv.enabled ? "configured" : "disabled")}
-            </small>
+            </span>
           </div>
-          <small style={{ display: "block", marginTop: 4 }}>
+          <small style={{ display: "block", marginTop: 4, fontFamily: "monospace" }}>
             {srv.transport === "stdio"
               ? `${srv.command ?? ""} ${(srv.args ?? []).join(" ")}`
               : srv.url}
@@ -2762,15 +2978,21 @@ function AgentsAndMcpView({
             </p>
           )}
           {(srv.discoveredTools ?? []).length > 0 && (
-            <div style={{ marginTop: 8 }}>
-              <small>
-                <strong>Discovered tools ({srv.discoveredTools!.length}):</strong>{" "}
-                {srv.discoveredTools!.map((t) => t.name).join(", ")}
-              </small>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 8 }}>
+              {srv.discoveredTools!.map((t) => (
+                <span
+                  key={t.name}
+                  className="ai-tool-tag"
+                  title={t.description}
+                >
+                  🛠️ {t.name}
+                </span>
+              ))}
             </div>
           )}
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 10 }}>
             <button
+              className="ai-btn-accent"
               disabled={testingMcpId === srv.id}
               onClick={() => {
                 setTestingMcpId(srv.id);
@@ -2792,6 +3014,7 @@ function AgentsAndMcpView({
               {srv.enabled ? "Disable" : "Enable"}
             </button>
             <button
+              className="ai-btn-danger"
               onClick={() => void act({ action: "mcp-delete", id: srv.id })}
             >
               Delete
@@ -2833,13 +3056,47 @@ function KnowledgeBaseView({
     );
   });
 
+  const totalChunks = (hub.kbDocuments ?? []).reduce(
+    (sum, d) => sum + (d.chunks?.length ?? 1),
+    0,
+  );
+
   return (
     <div className="ai-scroll">
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+      <div className="ai-stat-grid">
+        <div className="ai-stat-box">
+          <strong>{(hub.kbDocuments ?? []).length}</strong>
+          <small>📚 Runbooks & Docs</small>
+        </div>
+        <div className="ai-stat-box">
+          <strong>{totalChunks}</strong>
+          <small>🧩 Indexed BM25 Chunks</small>
+        </div>
+        <div className="ai-stat-box">
+          <strong>BM25 + Cluster</strong>
+          <small>⚡ Retrieval Engine</small>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <h2>📚 Knowledge Base ({(hub.kbDocuments ?? []).length} docs)</h2>
-        <button onClick={() => setShowAddDoc((v) => !v)}>
-          {showAddDoc ? "Close Editor" : "+ Add Runbook / Doc"}
-        </button>
+        <div style={{ display: "flex", gap: 6 }}>
+          <button
+            onClick={() =>
+              void act({
+                action: "kb-ingest-s3",
+                s3ProfileId: "sg-fabricpool-dc1",
+                prefix: "runbooks/",
+                cluster: "NetApp-StorageGRID-S3",
+              })
+            }
+          >
+            ☁️ Sync S3 Runbooks
+          </button>
+          <button className="ai-btn-accent" onClick={() => setShowAddDoc((v) => !v)}>
+            {showAddDoc ? "Close Editor" : "+ Add Runbook / Doc"}
+          </button>
+        </div>
       </div>
       <p className="ai-hint">
         Store NetApp ONTAP, StorageGRID, Ceph, ZFS, and Kubernetes runbooks, CLI cheat-sheets, and architecture docs. Documents are automatically chunked and indexed for BM25 retrieval via <code>sshs3_kb_search</code> and synced with your S3 Team Workspace.

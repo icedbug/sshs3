@@ -90,28 +90,35 @@ const QUICK_TAG_PRESETS = [
 ];
 
 function roleBadgeStyle(role?: string): string {
-  switch ((role || '').toLowerCase()) {
-    case 'web':
-    case 'ingress':
-      return 'border-sky-500/40 bg-sky-500/15 text-sky-300';
-    case 'database':
-    case 'primary-db':
-    case 'replica-db':
-      return 'border-amber-500/40 bg-amber-500/15 text-amber-300';
-    case 'k8s':
-    case 'control-plane':
-      return 'border-indigo-500/40 bg-indigo-500/15 text-indigo-300';
-    case 'proxy':
-      return 'border-emerald-500/40 bg-emerald-500/15 text-emerald-300';
-    case 'worker':
-    case 'worker-node':
-    case 'gpu-node':
-      return 'border-purple-500/40 bg-purple-500/15 text-purple-300';
-    case 'bastion':
-      return 'border-rose-500/40 bg-rose-500/15 text-rose-300';
-    default:
-      return 'border-border-subtle bg-app-surface-subtle text-txt-muted';
+  const r = (role || '').toLowerCase();
+  if (r.includes('ontap') || r.includes('netapp') || r.includes('svm')) {
+    return 'border-sky-500/45 bg-sky-500/15 text-sky-300';
   }
+  if (r.includes('storagegrid') || r.includes('minio') || r.includes('s3') || r.includes('ilm')) {
+    return 'border-emerald-500/45 bg-emerald-500/15 text-emerald-300';
+  }
+  if (r.includes('ceph') || r.includes('osd') || r.includes('mon') || r.includes('rados')) {
+    return 'border-amber-500/45 bg-amber-500/15 text-amber-300';
+  }
+  if (r.includes('truenas') || r.includes('zfs') || r.includes('backup') || r.includes('snapmirror')) {
+    return 'border-teal-500/45 bg-teal-500/15 text-teal-300';
+  }
+  if (r.includes('k8s') || r.includes('control-plane') || r.includes('csi') || r.includes('trident')) {
+    return 'border-indigo-500/45 bg-indigo-500/15 text-indigo-300';
+  }
+  if (r.includes('gpu') || r.includes('worker') || r.includes('nvme')) {
+    return 'border-purple-500/45 bg-purple-500/15 text-purple-300';
+  }
+  if (r.includes('bastion') || r.includes('jump')) {
+    return 'border-rose-500/45 bg-rose-500/15 text-rose-300';
+  }
+  if (r.includes('database') || r.includes('db') || r.includes('storage')) {
+    return 'border-cyan-500/45 bg-cyan-500/15 text-cyan-300';
+  }
+  if (r.includes('web') || r.includes('ingress') || r.includes('proxy')) {
+    return 'border-blue-500/45 bg-blue-500/15 text-blue-300';
+  }
+  return 'border-border-subtle bg-app-surface-subtle text-txt-muted';
 }
 
 function toggleCommaTag(current: string, tag: string): string {
@@ -486,6 +493,20 @@ export const LandingView: React.FC<LandingViewProps> = ({
         detail: {
           label: `@cluster:${clusterName}`,
           text: lines.join('\n'),
+        },
+      })
+    );
+  };
+
+  const handleOpenClusterSplitView = (clusterName: string) => {
+    const members = workspaceServers.filter((s) => s.cluster === clusterName);
+    if (!members.length) return;
+    window.dispatchEvent(
+      new CustomEvent('sshs3:open-cluster-split', {
+        detail: {
+          cluster: clusterName,
+          serverIds: members.map((m) => m.id),
+          layout: 'grid',
         },
       })
     );
@@ -1608,6 +1629,72 @@ export const LandingView: React.FC<LandingViewProps> = ({
                 </form>
               )}
 
+              {/* Next-Gen AI Hub Quick Bar: Mission Agents, MCP Servers & Knowledge Base */}
+              {(hub?.agents?.length ?? 0) > 0 && (
+                <div
+                  data-testid="landing-ai-agents-bar"
+                  className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-sky-500/30 bg-sky-500/5 px-2.5 py-1.5"
+                >
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-sky-400 mr-1">
+                      <Sparkles className="h-3 w-3" />
+                      Mission Agents:
+                    </span>
+                    {(hub?.agents ?? []).slice(0, 4).map((ag) => (
+                      <button
+                        key={ag.id}
+                        type="button"
+                        title={`${ag.role}\nUppdrag: ${ag.mission}\nKlicka för att aktivera och köra i AI Hub`}
+                        onClick={() =>
+                          window.dispatchEvent(
+                            new CustomEvent('sshs3:ai-open', {
+                              detail: {
+                                view: 'Work',
+                                mode: 'panel',
+                                agentId: ag.id,
+                                prompt: `Kör ditt uppdrag som ${ag.name}: ${ag.mission}`,
+                              },
+                            })
+                          )
+                        }
+                        className="inline-flex items-center gap-1 rounded-md border border-border-subtle bg-app-card px-2 py-0.5 text-[11px] font-medium text-txt-secondary hover:border-sky-500/40 hover:bg-sky-500/10 hover:text-sky-200 transition-all"
+                      >
+                        <span>{ag.icon || '🤖'}</span>
+                        <span className="truncate max-w-[140px]">{ag.name}</span>
+                      </button>
+                    ))}
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        window.dispatchEvent(
+                          new CustomEvent('sshs3:ai-open', {
+                            detail: { view: 'Agents & MCP', mode: 'hub' },
+                          })
+                        )
+                      }
+                      className="inline-flex items-center gap-1 rounded-md border border-indigo-500/40 bg-indigo-500/15 px-2 py-0.5 text-[10px] font-semibold text-indigo-300 hover:bg-indigo-500/25"
+                    >
+                      <span>🔌 MCP ({hub?.mcpServers?.length ?? 0})</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        window.dispatchEvent(
+                          new CustomEvent('sshs3:ai-open', {
+                            detail: { view: 'Knowledge Base', mode: 'hub' },
+                          })
+                        )
+                      }
+                      className="inline-flex items-center gap-1 rounded-md border border-emerald-500/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300 hover:bg-emerald-500/25"
+                    >
+                      <span>📚 KB ({hub?.kbDocuments?.length ?? 0})</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {/* Cluster Filter Bar */}
               {clusters.length > 0 && (
                 <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border-subtle bg-app-card/60 px-2.5 py-1.5">
@@ -1647,14 +1734,25 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     ))}
                   </div>
                   {selectedCluster !== 'ALL' && (
-                    <button
-                      type="button"
-                      onClick={() => handleAskAiAboutCluster(selectedCluster)}
-                      className="inline-flex items-center gap-1 rounded-md border border-sky-500/40 bg-sky-500/15 px-2 py-0.5 text-[10px] font-semibold text-sky-300 hover:bg-sky-500/25"
-                    >
-                      <Sparkles className="h-3 w-3" />
-                      Fråga AI om @{selectedCluster}
-                    </button>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <button
+                        type="button"
+                        data-testid="cluster-open-split-btn"
+                        title={`Öppna alla noder i ${selectedCluster} i en 2×2 Konsole Split-View`}
+                        onClick={() => handleOpenClusterSplitView(selectedCluster)}
+                        className="inline-flex items-center gap-1 rounded-md border border-emerald-500/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300 hover:bg-emerald-500/25"
+                      >
+                        <span>🪟 Split-View ({selectedCluster})</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleAskAiAboutCluster(selectedCluster)}
+                        className="inline-flex items-center gap-1 rounded-md border border-sky-500/40 bg-sky-500/15 px-2 py-0.5 text-[10px] font-semibold text-sky-300 hover:bg-sky-500/25"
+                      >
+                        <Sparkles className="h-3 w-3" />
+                        Fråga AI om @{selectedCluster}
+                      </button>
+                    </div>
                   )}
                 </div>
               )}
@@ -1714,7 +1812,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
               </div>
 
               {/* Server Cards Grid */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 max-h-[380px] overflow-y-auto pr-1">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 max-h-[580px] overflow-y-auto pr-1">
                 {filteredServers.map((server) => {
                   const isEditing = editingServerId === server.id;
                   const latestEvent =

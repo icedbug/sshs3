@@ -159,14 +159,15 @@ export const App: React.FC = () => {
         if (saved) setSettings(saved);
       });
     };
-    const checkLayoutEvents = async () => {
+    const applyLayoutSpec = async (evt: {
+      operation?: string;
+      cluster?: string;
+      serverIds?: string[];
+      layout?: string;
+      leftTargetId?: string;
+    }) => {
       try {
         const snap = await hubRequest({ action: "snapshot" });
-        const evt = snap.pendingLayoutEvent;
-        if (!evt || handledLayoutEventsRef.current.has(evt.id)) return;
-        handledLayoutEventsRef.current.add(evt.id);
-        void hubRequest({ action: "layout-event-ack", id: evt.id }).catch(() => {});
-
         const savedProfiles = await window.multissh?.profilesGet?.().catch(() => null);
         const sshProfiles = savedProfiles?.ssh ?? [];
         const wsServers = snap.workspaceServers ?? [];
@@ -310,12 +311,46 @@ export const App: React.FC = () => {
         // Ignore snapshot errors
       }
     };
+
+    const checkLayoutEvents = async () => {
+      try {
+        const snap = await hubRequest({ action: "snapshot" });
+        const evt = snap.pendingLayoutEvent;
+        if (!evt || handledLayoutEventsRef.current.has(evt.id)) return;
+        handledLayoutEventsRef.current.add(evt.id);
+        void hubRequest({ action: "layout-event-ack", id: evt.id }).catch(() => {});
+        await applyLayoutSpec(evt);
+      } catch {
+        // Ignore snapshot errors
+      }
+    };
+
+    const onOpenClusterSplit = (e: Event) => {
+      const detail = (
+        e as CustomEvent<{
+          cluster?: string;
+          serverIds?: string[];
+          layout?: string;
+        }>
+      ).detail;
+      if (detail?.serverIds?.length) {
+        void applyLayoutSpec({
+          operation: "open_split_cluster",
+          cluster: detail.cluster,
+          serverIds: detail.serverIds,
+          layout: detail.layout ?? "grid",
+        });
+      }
+    };
+
     loadSettings();
+    window.addEventListener("sshs3:open-cluster-split", onOpenClusterSplit);
     const offHub = window.multissh?.onAiHubChanged?.(() => {
       loadSettings();
       void checkLayoutEvents();
     });
     return () => {
+      window.removeEventListener("sshs3:open-cluster-split", onOpenClusterSplit);
       offHub?.();
     };
   }, []);
@@ -580,15 +615,27 @@ export const App: React.FC = () => {
             />
           </div>
           <button
-            className="h-full shrink-0 px-3 text-xs text-sky-400 hover:bg-app-surface-hover"
-            onClick={() => nativeHermes ? void nativeHermes.set({ mode: nativeMode === "closed" ? "panel" : "closed" }) : setAiMode(aiMode === "closed" ? "panel" : "closed")}
+            className={`h-full shrink-0 px-3 text-xs font-medium border-l border-divider/40 transition-colors flex items-center gap-1.5 ${
+              (nativeHermes ? nativeMode !== "closed" : aiMode !== "closed")
+                ? "bg-sky-500/15 text-sky-300"
+                : "text-sky-400 hover:bg-app-surface-hover"
+            }`}
+            title="Öppna / stäng AI Hub (Chat, Mission Agents, MCP, Kunskapsbas)"
+            onClick={() =>
+              nativeHermes
+                ? void nativeHermes.set({
+                    mode: nativeMode === "closed" ? "panel" : "closed",
+                  })
+                : setAiMode(aiMode === "closed" ? "panel" : "closed")
+            }
           >
-            Chat
+            <span>✨</span>
+            <span>Chat</span>
           </button>
           {nativeHermes ? (
             nativeMode !== 'closed' && (
               <button
-                className="h-full shrink-0 px-3 text-xs text-sky-400 hover:bg-app-surface-hover"
+                className="h-full shrink-0 px-3 text-xs font-medium text-sky-400 hover:bg-app-surface-hover border-l border-divider/40"
                 onClick={() => void nativeHermes.set({ mode: 'full' })}
               >
                 Expand AI
@@ -598,10 +645,19 @@ export const App: React.FC = () => {
             aiMode !== 'closed' && (
               <button
                 data-testid="topbar-expand-ai-btn"
-                className="h-full shrink-0 px-3 text-xs font-medium text-sky-400 hover:bg-app-surface-hover border-l border-divider/40"
+                title={
+                  aiMode === 'hub'
+                    ? 'Växla tillbaka till sidopanel'
+                    : 'Expandera AI Hub till helskärm (Mission Agents, MCP & KB)'
+                }
+                className={`h-full shrink-0 px-3 text-xs font-medium border-l border-divider/40 transition-colors flex items-center gap-1 ${
+                  aiMode === 'hub'
+                    ? 'bg-indigo-500/20 text-indigo-300'
+                    : 'text-sky-400 hover:bg-app-surface-hover'
+                }`}
                 onClick={() => setAiMode(aiMode === 'hub' ? 'panel' : 'hub')}
               >
-                {aiMode === 'hub' ? 'Sidebar AI' : 'Expand AI'}
+                <span>{aiMode === 'hub' ? '◧ Sidebar AI' : '⛶ Expand AI'}</span>
               </button>
             )
           )}
