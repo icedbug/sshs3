@@ -284,4 +284,58 @@ describe('LandingView Component', () => {
       delete (window as any).__SSHS3_WEB_MODE__;
     }
   });
+
+  it('renders AI Workspace Command Center, KPI Ribbon, and 3-tab Right Column (Activity, Memory, Runbooks)', () => {
+    const aiOpenEvents: any[] = [];
+    const listener = (e: Event) => {
+      aiOpenEvents.push((e as CustomEvent).detail);
+    };
+    window.addEventListener('sshs3:ai-open', listener);
+
+    try {
+      render(
+        <LandingView
+          recentSSH={mockRecentSSH}
+          onConnectRecentSSH={vi.fn()}
+          onConnectSFTP={vi.fn()}
+          onQuickStartTerminal={vi.fn()}
+          onNewTab={vi.fn()}
+          onOpenProfiles={vi.fn()}
+          onNewProfile={vi.fn()}
+          onOpenSyncBootstrap={vi.fn()}
+          onNavigateToTabBar={vi.fn()}
+        />
+      );
+
+      // KPI Ribbon & AI Command Bar are present
+      expect(screen.getByTestId('workspace-kpi-ribbon')).toBeInTheDocument();
+      expect(screen.getByTestId('workspace-ai-command-bar')).toBeInTheDocument();
+
+      // Submitting a prompt in the AI Workspace Command Bar dispatches sshs3:ai-open
+      const promptInput = screen.getByTestId('workspace-ai-prompt-input');
+      fireEvent.change(promptInput, {
+        target: { value: 'Konfigurera en SSH-tunnel för port 5432' },
+      });
+      fireEvent.click(screen.getByTestId('workspace-ai-submit-btn'));
+      expect(aiOpenEvents.length).toBeGreaterThanOrEqual(1);
+      expect(aiOpenEvents[0]).toMatchObject({
+        view: 'Work',
+        mode: 'panel',
+        prompt: 'Konfigurera en SSH-tunnel för port 5432',
+      });
+
+      // Switch right column tabs between Activity, Team Memory, and Runbooks (KB)
+      expect(screen.getByTestId('workspace-right-tabs')).toBeInTheDocument();
+      fireEvent.click(screen.getByTestId('right-tab-memory'));
+      expect(screen.getByTestId('right-panel-memory')).toBeInTheDocument();
+
+      fireEvent.click(screen.getByTestId('right-tab-kb'));
+      expect(screen.getByTestId('right-panel-kb')).toBeInTheDocument();
+
+      fireEvent.click(screen.getByTestId('right-tab-activity'));
+      expect(screen.queryByTestId('right-panel-kb')).not.toBeInTheDocument();
+    } finally {
+      window.removeEventListener('sshs3:ai-open', listener);
+    }
+  });
 });

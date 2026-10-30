@@ -208,6 +208,16 @@ export const LandingView: React.FC<LandingViewProps> = ({
   const [noteSummary, setNoteSummary] = useState('');
   const [addingNote, setAddingNote] = useState(false);
 
+  // AI Workspace Command Center & Right Column state
+  const [aiQuickPrompt, setAiQuickPrompt] = useState('');
+  const [aiQuickAgentId, setAiQuickAgentId] = useState('');
+  const [showClusterTopology, setShowClusterTopology] = useState(true);
+  const [rightColTab, setRightColTab] = useState<'activity' | 'memory' | 'kb'>('activity');
+  const [memTitle, setMemTitle] = useState('');
+  const [memText, setMemText] = useState('');
+  const [memKind, setMemKind] = useState<'memory' | 'skill'>('memory');
+  const [addingMemory, setAddingMemory] = useState(false);
+
   // Auto-focus the first actionable element on mount so keyboard navigation is immediately active
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -719,6 +729,61 @@ export const LandingView: React.FC<LandingViewProps> = ({
     }
   };
 
+  const handleLaunchAiCommand = (customPrompt?: string, customAgentId?: string) => {
+    const promptToSend = (customPrompt ?? aiQuickPrompt).trim();
+    const agentToUse = customAgentId !== undefined ? customAgentId : aiQuickAgentId;
+    window.dispatchEvent(
+      new CustomEvent('sshs3:ai-open', {
+        detail: {
+          view: 'Work',
+          mode: 'panel',
+          agentId: agentToUse || undefined,
+          prompt: promptToSend || undefined,
+        },
+      })
+    );
+    if (!customPrompt) {
+      setAiQuickPrompt('');
+    }
+  };
+
+  const handleSaveTeamMemory = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!memTitle.trim() || !memText.trim()) return;
+    setAddingMemory(true);
+    try {
+      await hubRequest({
+        action: 'memory-save',
+        entry: {
+          title: memTitle.trim(),
+          text: memText.trim(),
+          kind: memKind,
+          scope: 'workspace',
+        },
+      });
+      setMemTitle('');
+      setMemText('');
+    } catch {
+      // Non-fatal
+    } finally {
+      setAddingMemory(false);
+    }
+  };
+
+  const totalMcpTools = useMemo(
+    () =>
+      (hub?.mcpServers ?? []).reduce(
+        (sum, s) => sum + (s.discoveredTools?.length ?? 0),
+        0
+      ),
+    [hub?.mcpServers]
+  );
+
+  const activeSessionCount = useMemo(
+    () => (hub?.sessions ?? []).filter((s) => s.state !== 'disconnected').length,
+    [hub?.sessions]
+  );
+
   const showWorkspaceSection = true;
 
   return (
@@ -1093,6 +1158,269 @@ export const LandingView: React.FC<LandingViewProps> = ({
             data-testid="workspace-dashboard"
             className="grid grid-cols-1 lg:grid-cols-3 gap-4 w-full text-left"
           >
+            {/* Executive Infrastructure Telemetry & KPI Ribbon */}
+            <div
+              data-testid="workspace-kpi-ribbon"
+              className="lg:col-span-3 grid grid-cols-2 sm:grid-cols-4 gap-2.5"
+            >
+              <div className="rounded-xl border border-sky-500/30 bg-gradient-to-br from-sky-500/10 via-app-card to-app-card p-3 shadow-sm">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-sky-400">
+                    🖥️ Noder & VMs
+                  </span>
+                  <span className="rounded-full border border-emerald-500/30 bg-emerald-500/15 px-1.5 py-0.5 text-[9.5px] font-semibold text-emerald-300">
+                    {activeSessionCount > 0 ? `${activeSessionCount} live` : 'Redo'}
+                  </span>
+                </div>
+                <div className="mt-1 flex items-baseline gap-2">
+                  <span className="text-xl font-extrabold text-txt-primary">
+                    {workspaceServers.length}
+                  </span>
+                  <span className="text-[11px] text-txt-muted">
+                    ({workspaceServers.filter((s) => s.shared).length} delade i S3)
+                  </span>
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-indigo-500/30 bg-gradient-to-br from-indigo-500/10 via-app-card to-app-card p-3 shadow-sm">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-300">
+                    🧩 Infrastruktur-kluster
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setShowClusterTopology((v) => !v)}
+                    className="rounded border border-indigo-500/30 bg-indigo-500/10 px-1.5 py-0.5 text-[9.5px] font-semibold text-indigo-300 hover:bg-indigo-500/20"
+                  >
+                    {showClusterTopology ? 'Dölj topologi' : 'Visa topologi'}
+                  </button>
+                </div>
+                <div className="mt-1 flex items-baseline gap-2">
+                  <span className="text-xl font-extrabold text-txt-primary">
+                    {clusters.length}
+                  </span>
+                  <span className="truncate text-[11px] text-txt-muted">
+                    {selectedCluster !== 'ALL' ? `Aktivt: ${selectedCluster}` : 'ONTAP, Ceph, S3, K8s'}
+                  </span>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() =>
+                  window.dispatchEvent(
+                    new CustomEvent('sshs3:ai-open', {
+                      detail: { view: 'Agents & MCP', mode: 'hub' },
+                    })
+                  )
+                }
+                className="rounded-xl border border-purple-500/30 bg-gradient-to-br from-purple-500/10 via-app-card to-app-card p-3 text-left shadow-sm hover:border-purple-400/50 transition-all"
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-purple-300">
+                    🤖 Mission Agents & MCP
+                  </span>
+                  <span className="rounded-full border border-purple-500/30 bg-purple-500/15 px-1.5 py-0.5 text-[9.5px] font-semibold text-purple-200">
+                    {totalMcpTools} MCP-verktyg
+                  </span>
+                </div>
+                <div className="mt-1 flex items-baseline gap-2">
+                  <span className="text-xl font-extrabold text-txt-primary">
+                    {(hub?.agents ?? []).length}
+                  </span>
+                  <span className="text-[11px] text-txt-muted">
+                    agenter · {(hub?.mcpServers ?? []).length} MCP-servrar
+                  </span>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() =>
+                  window.dispatchEvent(
+                    new CustomEvent('sshs3:ai-open', {
+                      detail: { view: 'Knowledge Base', mode: 'hub' },
+                    })
+                  )
+                }
+                className="rounded-xl border border-emerald-500/30 bg-gradient-to-br from-emerald-500/10 via-app-card to-app-card p-3 text-left shadow-sm hover:border-emerald-400/50 transition-all"
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-300">
+                    📚 Knowledge Base & Minne
+                  </span>
+                  <span className="rounded-full border border-emerald-500/30 bg-emerald-500/15 px-1.5 py-0.5 text-[9.5px] font-semibold text-emerald-200">
+                    BM25 + S3
+                  </span>
+                </div>
+                <div className="mt-1 flex items-baseline gap-2">
+                  <span className="text-xl font-extrabold text-txt-primary">
+                    {(hub?.kbDocuments ?? []).length}
+                  </span>
+                  <span className="text-[11px] text-txt-muted">
+                    runbooks · {(hub?.memories ?? []).length} team-minnen
+                  </span>
+                </div>
+              </button>
+            </div>
+
+            {/* AI Workspace Command Center (Omnibar + Agent Selector + Quick Ops Chips) */}
+            <div
+              data-testid="workspace-ai-command-bar"
+              className="lg:col-span-3 rounded-xl border border-sky-500/40 bg-gradient-to-r from-sky-500/10 via-indigo-500/10 to-purple-500/10 p-3.5 shadow-md space-y-2.5"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <span className="inline-flex h-6 w-6 items-center justify-center rounded-lg border border-sky-400/40 bg-sky-500/20 text-sky-300">
+                    <Sparkles className="h-3.5 w-3.5" />
+                  </span>
+                  <div>
+                    <span className="text-xs font-bold text-txt-primary">
+                      AI Workspace Command Center
+                    </span>
+                    <span className="ml-2 hidden sm:inline text-[11px] text-txt-muted">
+                      Styr kluster, kör parallella diagnoser, diffa filer eller be AI:n konfigurera hela sshS3
+                    </span>
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setAiQuickAgentId('')}
+                    className={`rounded-full px-2 py-0.5 text-[10.5px] font-semibold transition-all ${
+                      !aiQuickAgentId
+                        ? 'border border-sky-400/50 bg-sky-500/20 text-sky-200'
+                        : 'border border-border-subtle bg-app-card text-txt-muted hover:text-txt-primary'
+                    }`}
+                  >
+                    ✨ Standard AI
+                  </button>
+                  {(hub?.agents ?? []).slice(0, 4).map((ag) => (
+                    <button
+                      key={ag.id}
+                      type="button"
+                      title={`${ag.role}: ${ag.mission}`}
+                      onClick={() =>
+                        setAiQuickAgentId(aiQuickAgentId === ag.id ? '' : ag.id)
+                      }
+                      className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10.5px] font-semibold transition-all ${
+                        aiQuickAgentId === ag.id
+                          ? 'border border-sky-400/60 bg-sky-500/25 text-sky-200 shadow-sm'
+                          : 'border border-border-subtle bg-app-card text-txt-secondary hover:border-sky-500/40 hover:text-sky-200'
+                      }`}
+                    >
+                      <span>{ag.icon || '🤖'}</span>
+                      <span className="truncate max-w-[130px]">{ag.name}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  handleLaunchAiCommand();
+                }}
+                className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2"
+              >
+                <div className="relative flex-1">
+                  <Bot className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-sky-400" />
+                  <input
+                    type="text"
+                    data-testid="workspace-ai-prompt-input"
+                    value={aiQuickPrompt}
+                    onChange={(e) => setAiQuickPrompt(e.target.value)}
+                    placeholder="Fråga eller be AI:n utföra något… (t.ex. 'Kör hälsokontroll på @cluster:NetApp-ONTAP-Prod-SE' eller 'Skapa en SSH-tunnel på port 8443')"
+                    className="w-full rounded-lg border border-sky-500/35 bg-app/95 pl-9 pr-3 py-2 text-xs text-txt-primary placeholder:text-txt-muted outline-none focus:border-sky-400"
+                  />
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="submit"
+                    data-testid="workspace-ai-submit-btn"
+                    className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-sky-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-sky-500 shadow-sm transition-colors"
+                  >
+                    <Sparkles className="h-3.5 w-3.5" />
+                    <span>Kör med AI</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      window.dispatchEvent(
+                        new CustomEvent('sshs3:ai-open', {
+                          detail: { view: 'Work', mode: 'hub' },
+                        })
+                      )
+                    }
+                    className="inline-flex items-center justify-center gap-1 rounded-lg border border-border-subtle bg-app-card px-2.5 py-2 text-xs font-medium text-txt-secondary hover:border-sky-500/40 hover:text-txt-primary transition-colors"
+                  >
+                    <span>Full AI Hub ↗</span>
+                  </button>
+                </div>
+              </form>
+
+              <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-txt-muted mr-1">
+                  Snabbuppdrag:
+                </span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    handleLaunchAiCommand(
+                      'Kör en parallell hälsokontroll över alla noder i @cluster:NetApp-ONTAP-Prod-SE med sshs3_cluster_exec och sammanställ WAFL/NVMe-latens, aggregat och SnapMirror-status.'
+                    )
+                  }
+                  className="rounded-md border border-sky-500/30 bg-app-card/90 px-2 py-0.5 text-[10.5px] font-medium text-sky-300 hover:bg-sky-500/15 transition-colors"
+                >
+                  ⚡ Kluster-hälsokontroll
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    handleLaunchAiCommand(
+                      'Öppna en 2x2 Konsole split-view för alla noder i @cluster:NetApp-ONTAP-Prod-SE med sshs3_workspace_layout.'
+                    )
+                  }
+                  className="rounded-md border border-emerald-500/30 bg-app-card/90 px-2 py-0.5 text-[10.5px] font-medium text-emerald-300 hover:bg-emerald-500/15 transition-colors"
+                >
+                  🪟 2×2 Kluster Split-View
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    handleLaunchAiCommand(
+                      'Diffa /etc/multipath.conf mellan k8s-storage-cp-01 och k8s-gpu-io-worker-01 med sshs3_storage_ops och validera mot vår KB-runbook.'
+                    )
+                  }
+                  className="rounded-md border border-indigo-500/30 bg-app-card/90 px-2 py-0.5 text-[10.5px] font-medium text-indigo-300 hover:bg-indigo-500/15 transition-colors"
+                >
+                  🔍 Cross-Server Config Diff
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    handleLaunchAiCommand(
+                      'Visa alla mina inställningar i sshS3 med sshs3_manage_app_and_settings och hjälp mig optimera SSH-tunnlar, dotfiles-pool, prestandabar och kortkommandon.'
+                    )
+                  }
+                  className="rounded-md border border-purple-500/30 bg-app-card/90 px-2 py-0.5 text-[10.5px] font-medium text-purple-300 hover:bg-purple-500/15 transition-colors"
+                >
+                  🛠️ Konfigurera sshS3 med AI
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    handleLaunchAiCommand(
+                      'Sök i vår Knowledge Base (@kb) efter ONTAP Adaptive QoS och hämta aktuell telemetri via NetApp Harvest MCP.'
+                    )
+                  }
+                  className="rounded-md border border-amber-500/30 bg-app-card/90 px-2 py-0.5 text-[10.5px] font-medium text-amber-300 hover:bg-amber-500/15 transition-colors"
+                >
+                  📚 Sök i Runbooks & MCP
+                </button>
+              </div>
+            </div>
+
             {/* Full-width S3 Team Bucket Sync & Presence Bar */}
             <div className="lg:col-span-3 rounded-xl border border-sky-500/30 bg-app-surface-subtle p-3 shadow-sm space-y-2.5">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1697,61 +2025,141 @@ export const LandingView: React.FC<LandingViewProps> = ({
 
               {/* Cluster Filter Bar */}
               {clusters.length > 0 && (
-                <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border-subtle bg-app-card/60 px-2.5 py-1.5">
-                  <div className="flex flex-wrap items-center gap-1">
-                    <span className="text-[10px] font-bold uppercase tracking-wider text-txt-muted mr-1">
-                      Kluster:
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setSelectedCluster('ALL')}
-                      className={`rounded-md px-2 py-0.5 text-[11px] font-medium transition-colors ${
-                        selectedCluster === 'ALL'
-                          ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/40'
-                          : 'text-txt-muted hover:text-txt-primary'
-                      }`}
-                    >
-                      Alla kluster ({workspaceServers.length})
-                    </button>
-                    {clusters.map((c) => (
+                <div className="space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border-subtle bg-app-card/60 px-2.5 py-1.5">
+                    <div className="flex flex-wrap items-center gap-1">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-txt-muted mr-1">
+                        Kluster:
+                      </span>
                       <button
-                        key={c.name}
                         type="button"
-                        onClick={() =>
-                          setSelectedCluster(selectedCluster === c.name ? 'ALL' : c.name)
-                        }
-                        className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium transition-colors ${
-                          selectedCluster === c.name
-                            ? 'bg-indigo-500/25 text-indigo-200 border border-indigo-500/50'
-                            : 'text-txt-muted hover:text-txt-primary border border-transparent'
+                        onClick={() => setSelectedCluster('ALL')}
+                        className={`rounded-md px-2 py-0.5 text-[11px] font-medium transition-colors ${
+                          selectedCluster === 'ALL'
+                            ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/40'
+                            : 'text-txt-muted hover:text-txt-primary'
                         }`}
                       >
-                        <span>🧩 {c.name}</span>
-                        <span className="rounded-full bg-app px-1.5 text-[10px] text-txt-muted">
-                          {c.count}
-                        </span>
+                        Alla kluster ({workspaceServers.length})
                       </button>
-                    ))}
+                      {clusters.map((c) => (
+                        <button
+                          key={c.name}
+                          type="button"
+                          onClick={() =>
+                            setSelectedCluster(selectedCluster === c.name ? 'ALL' : c.name)
+                          }
+                          className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium transition-colors ${
+                            selectedCluster === c.name
+                              ? 'bg-indigo-500/25 text-indigo-200 border border-indigo-500/50'
+                              : 'text-txt-muted hover:text-txt-primary border border-transparent'
+                          }`}
+                        >
+                          <span>🧩 {c.name}</span>
+                          <span className="rounded-full bg-app px-1.5 text-[10px] text-txt-muted">
+                            {c.count}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                    {selectedCluster !== 'ALL' && (
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <button
+                          type="button"
+                          data-testid="cluster-open-split-btn"
+                          title={`Öppna alla noder i ${selectedCluster} i en 2×2 Konsole Split-View`}
+                          onClick={() => handleOpenClusterSplitView(selectedCluster)}
+                          className="inline-flex items-center gap-1 rounded-md border border-emerald-500/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300 hover:bg-emerald-500/25"
+                        >
+                          <span>🪟 Split-View ({selectedCluster})</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleAskAiAboutCluster(selectedCluster)}
+                          className="inline-flex items-center gap-1 rounded-md border border-sky-500/40 bg-sky-500/15 px-2 py-0.5 text-[10px] font-semibold text-sky-300 hover:bg-sky-500/25"
+                        >
+                          <Sparkles className="h-3 w-3" />
+                          Fråga AI om @{selectedCluster}
+                        </button>
+                      </div>
+                    )}
                   </div>
-                  {selectedCluster !== 'ALL' && (
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <button
-                        type="button"
-                        data-testid="cluster-open-split-btn"
-                        title={`Öppna alla noder i ${selectedCluster} i en 2×2 Konsole Split-View`}
-                        onClick={() => handleOpenClusterSplitView(selectedCluster)}
-                        className="inline-flex items-center gap-1 rounded-md border border-emerald-500/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300 hover:bg-emerald-500/25"
-                      >
-                        <span>🪟 Split-View ({selectedCluster})</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleAskAiAboutCluster(selectedCluster)}
-                        className="inline-flex items-center gap-1 rounded-md border border-sky-500/40 bg-sky-500/15 px-2 py-0.5 text-[10px] font-semibold text-sky-300 hover:bg-sky-500/25"
-                      >
-                        <Sparkles className="h-3 w-3" />
-                        Fråga AI om @{selectedCluster}
-                      </button>
+
+                  {/* Interactive Cluster Topology Cards */}
+                  {showClusterTopology && (
+                    <div
+                      data-testid="workspace-cluster-topology"
+                      className="grid grid-cols-1 sm:grid-cols-2 gap-2"
+                    >
+                      {clusters.slice(0, 6).map((c) => {
+                        const members = workspaceServers.filter((s) => s.cluster === c.name);
+                        const isSelected = selectedCluster === c.name;
+                        const matchingAgent = (hub?.agents ?? []).find(
+                          (ag) => ag.targetCluster === c.name
+                        );
+                        return (
+                          <div
+                            key={c.name}
+                            className={`rounded-xl border p-2.5 transition-all ${
+                              isSelected
+                                ? 'border-indigo-400/60 bg-indigo-500/10 shadow-sm'
+                                : 'border-border-subtle bg-app-card/85 hover:border-indigo-500/40'
+                            }`}
+                          >
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  <span className="text-xs font-bold text-txt-primary truncate">
+                                    🧩 {c.name}
+                                  </span>
+                                  <span className="rounded-full border border-emerald-500/35 bg-emerald-500/10 px-1.5 py-0.2 text-[9.5px] font-semibold text-emerald-300">
+                                    🟢 {members.length} noder
+                                  </span>
+                                </div>
+                                {matchingAgent && (
+                                  <div className="mt-0.5 text-[10px] text-sky-300 truncate">
+                                    {matchingAgent.icon || '🤖'} Agent: {matchingAgent.name}
+                                  </div>
+                                )}
+                              </div>
+                              <div className="flex shrink-0 items-center gap-1">
+                                <button
+                                  type="button"
+                                  title={`Öppna 2×2 Split-View för ${c.name}`}
+                                  onClick={() => handleOpenClusterSplitView(c.name)}
+                                  className="rounded border border-emerald-500/35 bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-300 hover:bg-emerald-500/25"
+                                >
+                                  🪟 Split
+                                </button>
+                                <button
+                                  type="button"
+                                  title={`Kör parallell AI-diagnos på @cluster:${c.name}`}
+                                  onClick={() => handleAskAiAboutCluster(c.name)}
+                                  className="rounded border border-sky-500/35 bg-sky-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-sky-300 hover:bg-sky-500/25"
+                                >
+                                  ⚡ AI
+                                </button>
+                              </div>
+                            </div>
+                            <div className="mt-1.5 flex flex-wrap gap-1">
+                              {members.slice(0, 4).map((m) => (
+                                <span
+                                  key={m.id}
+                                  className="inline-flex items-center gap-1 rounded border border-border-subtle bg-app px-1.5 py-0.2 text-[10px] font-mono text-txt-secondary"
+                                >
+                                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                                  <span className="truncate max-w-[115px]">{m.name}</span>
+                                </span>
+                              ))}
+                              {members.length > 4 && (
+                                <span className="rounded bg-app px-1.5 py-0.2 text-[10px] text-txt-muted">
+                                  +{members.length - 4} till
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
                   )}
                 </div>
@@ -2151,10 +2559,13 @@ export const LandingView: React.FC<LandingViewProps> = ({
               </div>
             </div>
 
-            {/* Right Column: Team Activity & Shared AI Memory Feed */}
-            <div className="flex flex-col justify-between gap-3 rounded-xl border border-border-subtle bg-app-surface-subtle p-3.5">
+            {/* Right Column: Team Activity, Shared AI Memory & Runbooks (KB) */}
+            <div
+              data-testid="workspace-right-column"
+              className="flex flex-col justify-between gap-3 rounded-xl border border-border-subtle bg-app-surface-subtle p-3.5"
+            >
               <div className="space-y-3">
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-1.5">
                     <Activity className="h-4 w-4 text-amber-400" />
                     <h2 className="text-xs font-bold uppercase tracking-wider text-txt-primary">
@@ -2170,83 +2581,300 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   </button>
                 </div>
 
-                <p className="text-[11px] text-txt-muted">
-                  Ändringar i konfiguration, tjänster och paket över alla VMs loggas här så både du, dina kompisar och AI:n har full koll.
-                </p>
-
-                {/* Quick Note Form */}
-                <form onSubmit={handleRecordTeamNote} className="space-y-1.5 rounded-lg border border-border-subtle bg-app-card p-2">
-                  <div className="flex gap-1.5">
-                    <select
-                      value={noteTarget}
-                      onChange={(e) => setNoteTarget(e.target.value)}
-                      className="w-28 rounded border border-border-subtle bg-app px-1.5 py-1 text-[11px] text-txt-primary"
-                    >
-                      <option value="">Allmänt</option>
-                      {workspaceServers.map((s) => (
-                        <option key={s.id} value={s.name}>
-                          {`${s.name} (${s.host})`}
-                        </option>
-                      ))}
-                    </select>
-                    <input
-                      type="text"
-                      value={noteSummary}
-                      onChange={(e) => setNoteSummary(e.target.value)}
-                      placeholder="Logga en team-notis (t.ex. bytte port i nginx)…"
-                      className="flex-1 rounded border border-border-subtle bg-app px-2 py-1 text-[11px] text-txt-primary placeholder:text-txt-muted outline-none"
-                    />
-                    <button
-                      type="submit"
-                      disabled={addingNote || !noteSummary.trim()}
-                      className="rounded bg-sky-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-sky-500 disabled:opacity-40"
-                    >
-                      Logga
-                    </button>
-                  </div>
-                </form>
-
-                {/* Activity List */}
-                <div className="space-y-2 max-h-[270px] overflow-y-auto pr-1">
-                  {activityLog.length === 0 ? (
-                    <div className="rounded-lg border border-dashed border-border-subtle p-4 text-center text-xs text-txt-muted">
-                      Inga loggade ändringar ännu. När någon i teamet ändrar konfiguration eller startar om en tjänst i terminalen dyker det upp här automatiskt.
-                    </div>
-                  ) : (
-                    activityLog.map((ev) => (
-                      <div
-                        key={ev.id}
-                        className="rounded-lg border border-border-subtle bg-app-card p-2.5 text-xs space-y-1"
-                      >
-                        <div className="flex items-center justify-between gap-1">
-                          <span className="font-semibold text-txt-primary truncate">
-                            {ev.actor}{' '}
-                            <span className="font-normal text-txt-muted">på</span>{' '}
-                            <span className="text-sky-400">{ev.targetLabel}</span>
-                          </span>
-                          <span className="shrink-0 text-[10px] text-txt-muted">
-                            {formatRelativeTime(ev.at)}
-                          </span>
-                        </div>
-                        <p className="text-[11px] text-txt-secondary">{ev.summary}</p>
-                        {ev.detail && (
-                          <pre className="rounded bg-app px-2 py-1 text-[10px] font-mono text-txt-muted overflow-x-auto">
-                            {ev.detail}
-                          </pre>
-                        )}
-                        <div className="flex justify-end">
-                          <button
-                            type="button"
-                            onClick={() => handleAskAiAboutActivity(ev)}
-                            className="inline-flex items-center gap-1 text-[10px] text-sky-400 hover:underline"
-                          >
-                            <Sparkles className="h-2.5 w-2.5" /> Fråga AI om denna ändring
-                          </button>
-                        </div>
-                      </div>
-                    ))
-                  )}
+                {/* 3-Tab Switcher: Aktivitet / Team Memory / Runbooks (KB) */}
+                <div
+                  data-testid="workspace-right-tabs"
+                  className="grid grid-cols-3 gap-1 rounded-lg border border-border-subtle bg-app-card p-1"
+                >
+                  <button
+                    type="button"
+                    data-testid="right-tab-activity"
+                    onClick={() => setRightColTab('activity')}
+                    className={`rounded-md px-2 py-1 text-[10.5px] font-semibold transition-all ${
+                      rightColTab === 'activity'
+                        ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm'
+                        : 'text-txt-muted hover:text-txt-primary'
+                    }`}
+                  >
+                    📡 Aktivitet ({activityLog.length})
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="right-tab-memory"
+                    onClick={() => setRightColTab('memory')}
+                    className={`rounded-md px-2 py-1 text-[10.5px] font-semibold transition-all ${
+                      rightColTab === 'memory'
+                        ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40 shadow-sm'
+                        : 'text-txt-muted hover:text-txt-primary'
+                    }`}
+                  >
+                    🧠 Minne ({hub?.memories?.length ?? 0})
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="right-tab-kb"
+                    onClick={() => setRightColTab('kb')}
+                    className={`rounded-md px-2 py-1 text-[10.5px] font-semibold transition-all ${
+                      rightColTab === 'kb'
+                        ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm'
+                        : 'text-txt-muted hover:text-txt-primary'
+                    }`}
+                  >
+                    📚 Runbooks ({hub?.kbDocuments?.length ?? 0})
+                  </button>
                 </div>
+
+                {rightColTab === 'activity' && (
+                  <>
+                    <p className="text-[11px] text-txt-muted">
+                      Ändringar i konfiguration, tjänster och paket över alla VMs loggas här så både du, dina kompisar och AI:n har full koll.
+                    </p>
+
+                    {/* Quick Note Form */}
+                    <form onSubmit={handleRecordTeamNote} className="space-y-1.5 rounded-lg border border-border-subtle bg-app-card p-2">
+                      <div className="flex gap-1.5">
+                        <select
+                          value={noteTarget}
+                          onChange={(e) => setNoteTarget(e.target.value)}
+                          className="w-28 rounded border border-border-subtle bg-app px-1.5 py-1 text-[11px] text-txt-primary"
+                        >
+                          <option value="">Allmänt</option>
+                          {workspaceServers.map((s) => (
+                            <option key={s.id} value={s.name}>
+                              {`${s.name} (${s.host})`}
+                            </option>
+                          ))}
+                        </select>
+                        <input
+                          type="text"
+                          value={noteSummary}
+                          onChange={(e) => setNoteSummary(e.target.value)}
+                          placeholder="Logga en team-notis (t.ex. bytte port i nginx)…"
+                          className="flex-1 rounded border border-border-subtle bg-app px-2 py-1 text-[11px] text-txt-primary placeholder:text-txt-muted outline-none"
+                        />
+                        <button
+                          type="submit"
+                          disabled={addingNote || !noteSummary.trim()}
+                          className="rounded bg-sky-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-sky-500 disabled:opacity-40"
+                        >
+                          Logga
+                        </button>
+                      </div>
+                    </form>
+
+                    {/* Activity List */}
+                    <div className="space-y-2 max-h-[290px] overflow-y-auto pr-1">
+                      {activityLog.length === 0 ? (
+                        <div className="rounded-lg border border-dashed border-border-subtle p-4 text-center text-xs text-txt-muted">
+                          Inga loggade ändringar ännu. När någon i teamet ändrar konfiguration eller startar om en tjänst i terminalen dyker det upp här automatiskt.
+                        </div>
+                      ) : (
+                        activityLog.map((ev) => (
+                          <div
+                            key={ev.id}
+                            className="rounded-lg border border-border-subtle bg-app-card p-2.5 text-xs space-y-1"
+                          >
+                            <div className="flex items-center justify-between gap-1">
+                              <span className="font-semibold text-txt-primary truncate">
+                                {ev.actor}{' '}
+                                <span className="font-normal text-txt-muted">på</span>{' '}
+                                <span className="text-sky-400">{ev.targetLabel}</span>
+                              </span>
+                              <span className="shrink-0 text-[10px] text-txt-muted">
+                                {formatRelativeTime(ev.at)}
+                              </span>
+                            </div>
+                            <p className="text-[11px] text-txt-secondary">{ev.summary}</p>
+                            {ev.detail && (
+                              <pre className="rounded bg-app px-2 py-1 text-[10px] font-mono text-txt-muted overflow-x-auto">
+                                {ev.detail}
+                              </pre>
+                            )}
+                            <div className="flex justify-end">
+                              <button
+                                type="button"
+                                onClick={() => handleAskAiAboutActivity(ev)}
+                                className="inline-flex items-center gap-1 text-[10px] text-sky-400 hover:underline"
+                              >
+                                <Sparkles className="h-2.5 w-2.5" /> Fråga AI om denna ändring
+                              </button>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </>
+                )}
+
+                {rightColTab === 'memory' && (
+                  <div data-testid="right-panel-memory" className="space-y-2.5">
+                    <p className="text-[11px] text-txt-muted">
+                      Delat AI-minne &amp; Skills synkas i ert S3 Team Workspace och injiceras automatiskt i AI:ns kontext.
+                    </p>
+
+                    <form
+                      onSubmit={handleSaveTeamMemory}
+                      className="space-y-1.5 rounded-lg border border-sky-500/30 bg-app-card p-2"
+                    >
+                      <div className="flex gap-1.5">
+                        <select
+                          value={memKind}
+                          onChange={(e) => setMemKind(e.target.value as 'memory' | 'skill')}
+                          className="rounded border border-border-subtle bg-app px-1.5 py-1 text-[10.5px] text-txt-primary"
+                        >
+                          <option value="memory">🧠 Minne</option>
+                          <option value="skill">⚡ Skill</option>
+                        </select>
+                        <input
+                          type="text"
+                          value={memTitle}
+                          onChange={(e) => setMemTitle(e.target.value)}
+                          placeholder="Titel (t.ex. Nginx reload-rutin)…"
+                          className="flex-1 rounded border border-border-subtle bg-app px-2 py-1 text-[11px] text-txt-primary placeholder:text-txt-muted outline-none"
+                        />
+                      </div>
+                      <div className="flex gap-1.5">
+                        <input
+                          type="text"
+                          value={memText}
+                          onChange={(e) => setMemText(e.target.value)}
+                          placeholder="Innehåll / kommando som AI:n ska minnas…"
+                          className="flex-1 rounded border border-border-subtle bg-app px-2 py-1 text-[11px] text-txt-primary placeholder:text-txt-muted outline-none"
+                        />
+                        <button
+                          type="submit"
+                          disabled={addingMemory || !memTitle.trim() || !memText.trim()}
+                          className="rounded bg-sky-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-sky-500 disabled:opacity-40"
+                        >
+                          Spara
+                        </button>
+                      </div>
+                    </form>
+
+                    <div className="space-y-2 max-h-[270px] overflow-y-auto pr-1">
+                      {(hub?.memories ?? []).length === 0 ? (
+                        <div className="rounded-lg border border-dashed border-border-subtle p-4 text-center text-xs text-txt-muted">
+                          Inga sparade team-minnen ännu. Lägg till ett minne eller en skill ovan!
+                        </div>
+                      ) : (
+                        (hub?.memories ?? []).map((mem) => (
+                          <div
+                            key={mem.id}
+                            className="rounded-lg border border-border-subtle bg-app-card p-2.5 text-xs space-y-1"
+                          >
+                            <div className="flex items-center justify-between gap-1">
+                              <span className="font-semibold text-txt-primary truncate">
+                                {mem.kind === 'skill' ? '⚡' : '🧠'} {mem.title}
+                              </span>
+                              <span className="rounded-full bg-sky-500/15 px-1.5 py-0.5 text-[9.5px] font-semibold text-sky-300">
+                                {mem.scope === 'workspace' ? 'Team S3' : mem.scope}
+                              </span>
+                            </div>
+                            <p className="text-[11px] text-txt-secondary line-clamp-2">{mem.text}</p>
+                            <div className="flex justify-end">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  window.dispatchEvent(
+                                    new CustomEvent('sshs3:ai-open', {
+                                      detail: {
+                                        view: 'Work',
+                                        mode: 'panel',
+                                        prompt: `Använd vårt team-minne "${mem.title}" (${mem.text}) och hjälp mig applicera det.`,
+                                      },
+                                    })
+                                  )
+                                }
+                                className="inline-flex items-center gap-1 text-[10px] text-sky-400 hover:underline"
+                              >
+                                <Sparkles className="h-2.5 w-2.5" /> Kör i AI med detta minne
+                              </button>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {rightColTab === 'kb' && (
+                  <div data-testid="right-panel-kb" className="space-y-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-[11px] text-txt-muted">
+                        Runbooks, arkitekturdokument och post-mortems i Knowledge Base (`@kb`).
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          window.dispatchEvent(
+                            new CustomEvent('sshs3:ai-open', {
+                              detail: { view: 'Knowledge Base', mode: 'hub' },
+                            })
+                          )
+                        }
+                        className="shrink-0 rounded border border-emerald-500/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300 hover:bg-emerald-500/25"
+                      >
+                        Hantera KB ↗
+                      </button>
+                    </div>
+
+                    <div className="space-y-2 max-h-[310px] overflow-y-auto pr-1">
+                      {(hub?.kbDocuments ?? []).length === 0 ? (
+                        <div className="rounded-lg border border-dashed border-border-subtle p-4 text-center text-xs text-txt-muted">
+                          Inga Runbooks i Knowledge Base ännu. Öppna KB i AI Hub för att lägga till dokumentation.
+                        </div>
+                      ) : (
+                        (hub?.kbDocuments ?? []).map((doc) => (
+                          <div
+                            key={doc.id}
+                            className="rounded-lg border border-border-subtle bg-app-card p-2.5 text-xs space-y-1.5"
+                          >
+                            <div className="flex items-center justify-between gap-1">
+                              <span className="font-semibold text-txt-primary truncate">
+                                📘 {doc.title}
+                              </span>
+                              <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[9.5px] font-semibold text-emerald-300">
+                                {doc.collection}
+                              </span>
+                            </div>
+                            <p className="text-[11px] text-txt-secondary line-clamp-2">
+                              {doc.content}
+                            </p>
+                            <div className="flex items-center justify-between pt-0.5">
+                              <div className="flex flex-wrap gap-1">
+                                {(doc.tags ?? []).slice(0, 3).map((t) => (
+                                  <span
+                                    key={t}
+                                    className="rounded bg-app px-1.5 py-0.2 text-[9.5px] text-txt-muted"
+                                  >
+                                    #{t}
+                                  </span>
+                                ))}
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  window.dispatchEvent(
+                                    new CustomEvent('sshs3:ai-open', {
+                                      detail: {
+                                        view: 'Work',
+                                        mode: 'panel',
+                                        prompt: `Utgå från vår runbook "${doc.title}" i @kb och hjälp mig genomföra stegen säkert.`,
+                                      },
+                                    })
+                                  )
+                                }
+                                className="inline-flex items-center gap-1 text-[10px] font-medium text-emerald-300 hover:underline"
+                              >
+                                <Sparkles className="h-2.5 w-2.5" /> Kör Runbook med AI
+                              </button>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           </div>

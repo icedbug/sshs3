@@ -394,6 +394,96 @@ export function AiHubPanel({
           .slice(0, 7)
       : [];
 
+  const slashCommands = [
+    {
+      cmd: "/cluster-exec",
+      title: "⚡ Parallell klusterkörning",
+      subtitle: "Kör kommandon parallellt över alla noder i ett kluster med sshs3_cluster_exec",
+      template:
+        "Kör en parallell hälsokontroll över alla noder i @cluster:NetApp-ONTAP-Prod-SE med sshs3_cluster_exec: ",
+    },
+    {
+      cmd: "/split-cluster",
+      title: "🪟 2×2 Kluster Split-View",
+      subtitle: "Öppna ett helt kluster i en 2×2 Konsole terminal-grid med sshs3_ui_control",
+      template:
+        "Öppna en 2x2 split-view terminal-grid för alla noder i @cluster:NetApp-ONTAP-Prod-SE så att jag kan övervaka dem sida vid sida.",
+    },
+    {
+      cmd: "/diff",
+      title: "🔍 Cross-Server Config Diff",
+      subtitle: "Diffa konfigurationsfiler mellan två noder med sshs3_storage_ops",
+      template:
+        "Jämför (diffa) /etc/multipath.conf mellan k8s-gpu-io-worker-01 och k8s-storage-cp-01 med sshs3_storage_ops och kontrollera mot vår KB-standard.",
+    },
+    {
+      cmd: "/configure",
+      title: "🛠️ Konfigurera sshS3 med AI",
+      subtitle: "Konfigurera SSH-tunnlar, S3-profiler, kortkommandon, teman, dotfiles & Cloud Sync",
+      template:
+        "Konfigurera sshS3 åt mig (SSH-tunnlar, S3-profil, kortkommandon, tema eller dotfiles): ",
+    },
+    {
+      cmd: "/tunnel",
+      title: "🚇 Skapa SSH Port-Forwarding Tunnel",
+      subtitle: "Lägg till lokal, remote eller dynamisk SOCKS5-tunnel på en serverprofil",
+      template:
+        "Skapa en SSH port-forwarding tunnel (local 5432 -> 127.0.0.1:5432) på vår primära nod med sshs3_workspace_admin.",
+    },
+    {
+      cmd: "/kb",
+      title: "📚 Sök i Runbooks & Kunskapsbas",
+      subtitle: "Sök i BM25 Knowledge Base och kombinera med MCP-telemetri",
+      template:
+        "Sök i vår Knowledge Base (@kb) efter relevanta runbooks och standarder för: ",
+    },
+    {
+      cmd: "/memory",
+      title: "🧠 Spara i Team Memory / Skill",
+      subtitle: "Spara en ny lärdom, rutin eller skill i det delade S3-teamminnet",
+      template:
+        "Spara följande rutin som en delad Team Skill i vårt S3 Workspace-minne: ",
+    },
+    {
+      cmd: "/plan",
+      title: "🗺️ Arkitektur- & Åtgärdsplan",
+      subtitle: "Skapa en strukturerad steg-för-steg-plan med riskanalys och rollback",
+      template:
+        "/plan Skapa en strukturerad steg-för-steg åtgärdsplan med riskanalys, verifiering och rollback för: ",
+    },
+    {
+      cmd: "/grill-me",
+      title: "🔥 Grill-Me Design & Säkerhetsgranskning",
+      subtitle: "Låt AI:n intervjua och utmana din arkitektur eller ändring innan produktion",
+      template:
+        "/grill-me Utmana och granska min planerade infrastrukturändring kritiskt innan vi kör i produktion: ",
+    },
+  ];
+
+  const slashMatch = /^\/([a-zA-Z0-9_-]*)$/.exec(prompt.trim());
+  const slashQuery = slashMatch ? slashMatch[1].toLowerCase() : null;
+  const activeSlashSuggestions =
+    slashQuery !== null && atDismissedFor !== prompt
+      ? slashCommands.filter(
+          (item) =>
+            item.cmd.toLowerCase().includes(slashQuery) ||
+            item.title.toLowerCase().includes(slashQuery) ||
+            item.subtitle.toLowerCase().includes(slashQuery),
+        )
+      : [];
+
+  const applySlashSuggestion = (item: {
+    cmd: string;
+    title: string;
+    subtitle: string;
+    template: string;
+  }): void => {
+    setPrompt(item.template);
+    setAtIndex(0);
+    setMenu(null);
+    setTimeout(() => composer.current?.focus(), 10);
+  };
+
   const applyAtSuggestion = (opt: {
     label: string;
     subtitle: string;
@@ -1149,6 +1239,31 @@ export function AiHubPanel({
                         <strong>📚 Sök i Kunskapsbasen (KB) &amp; MCP</strong>
                         <small>Kombinera BM25-runbooks med live-telemetri från anslutna MCP-servrar</small>
                       </button>
+                      <button
+                        type="button"
+                        className="ai-starter-card"
+                        data-testid="ai-starter-configure-sshs3"
+                        onClick={() =>
+                          setPrompt(
+                            "Konfigurera sshS3 åt mig: sätt upp en SSH port-forwarding tunnel (local 5432 -> 127.0.0.1:5432), aktivera prestandaraden i statusfältet och slå på dotfiles-synk för ~/.zshrc och ~/.tmux.conf.",
+                          )
+                        }
+                      >
+                        <strong>🛠️ Konfigurera hela sshS3 med AI</strong>
+                        <small>Tunnlar, S3-profiler, kortkommandon, dotfiles, Cloud Sync &amp; UI-teman</small>
+                      </button>
+                      <button
+                        type="button"
+                        className="ai-starter-card"
+                        onClick={() =>
+                          setPrompt(
+                            "/plan Skapa en säker åtgärdsplan med riskanalys, verifieringssteg och rollback för en rolling uppgradering av @cluster:K8s-Prod-AI-Cluster.",
+                          )
+                        }
+                      >
+                        <strong>🗺️ /plan &amp; /grill-me Arkitekturgranskning</strong>
+                        <small>Skriv / i chatten för slash-kommandon, exekveringsplaner &amp; designgranskning</small>
+                      </button>
                     </div>
                     <div style={{ marginTop: "14px", display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
                       <button
@@ -1807,6 +1922,39 @@ export function AiHubPanel({
                     }
                   }}
                 >
+                  {activeSlashSuggestions.length > 0 && (
+                    <div
+                      className="ai-popover"
+                      data-testid="ai-slash-palette"
+                      aria-label="Slash command palette"
+                      style={{
+                        bottom: "calc(100% + 6px)",
+                        left: 0,
+                        right: 0,
+                        width: "100%",
+                        zIndex: 46,
+                      }}
+                    >
+                      <strong>⚡ Slash Commands (Tab / Enter)</strong>
+                      {activeSlashSuggestions.map((item, idx) => (
+                        <button
+                          key={item.cmd}
+                          type="button"
+                          aria-current={
+                            idx === atIndex % activeSlashSuggestions.length
+                              ? "true"
+                              : undefined
+                          }
+                          onClick={() => applySlashSuggestion(item)}
+                        >
+                          <span>
+                            <code>{item.cmd}</code> · {item.title}
+                          </span>
+                          <small>{item.subtitle}</small>
+                        </button>
+                      ))}
+                    </div>
+                  )}
                   {activeAtSuggestions.length > 0 && (
                     <div
                       className="ai-popover"
@@ -1843,8 +1991,8 @@ export function AiHubPanel({
                     aria-label="Message to agent"
                     placeholder={
                       running
-                        ? "Send a follow-up… (type @ for clusters/nodes, paste or drop images)"
-                        : "Ask anything… (type @ for clusters/nodes, or paste/upload images)"
+                        ? "Send a follow-up… (type / for commands, @ for clusters/nodes, paste images)"
+                        : "Ask anything… (type / for commands, @ for clusters/nodes, or paste images)"
                     }
                     value={prompt}
                     onChange={(e) => {
@@ -1867,6 +2015,39 @@ export function AiHubPanel({
                       }
                     }}
                     onKeyDown={(e) => {
+                      if (activeSlashSuggestions.length > 0) {
+                        if (e.key === "ArrowDown") {
+                          e.preventDefault();
+                          setAtIndex((i) => (i + 1) % activeSlashSuggestions.length);
+                          return;
+                        }
+                        if (e.key === "ArrowUp") {
+                          e.preventDefault();
+                          setAtIndex(
+                            (i) =>
+                              (i - 1 + activeSlashSuggestions.length) %
+                              activeSlashSuggestions.length,
+                          );
+                          return;
+                        }
+                        if (
+                          (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) &&
+                          !e.nativeEvent.isComposing
+                        ) {
+                          e.preventDefault();
+                          const chosen =
+                            activeSlashSuggestions[
+                              atIndex % activeSlashSuggestions.length
+                            ];
+                          if (chosen) applySlashSuggestion(chosen);
+                          return;
+                        }
+                        if (e.key === "Escape") {
+                          e.preventDefault();
+                          setAtDismissedFor(prompt);
+                          return;
+                        }
+                      }
                       if (activeAtSuggestions.length > 0) {
                         if (e.key === "ArrowDown") {
                           e.preventDefault();
