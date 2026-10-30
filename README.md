@@ -1,22 +1,93 @@
-# sshs3
+# sshs3 — The AI-Native SSH, S3, Storage Cluster & Kubernetes Platform
 
 [![CI](https://github.com/alun-hub/sshs3/actions/workflows/ci.yml/badge.svg)](https://github.com/alun-hub/sshs3/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/alun-hub/sshs3?style=flat&color=3388ff)](https://github.com/alun-hub/sshs3/releases/latest)
-![Platform: Linux | Windows](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-blue)
+![Platform: Linux | Windows | Web Server](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20Web%20Server-blue)
 [![Downloads](https://img.shields.io/github/downloads/alun-hub/sshs3/total?color=success)](https://github.com/alun-hub/sshs3/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-> **A modern, security-focused, cross-platform SSH, SFTP, S3, and Kubernetes client** for Linux and Windows, featuring hardware security key & smartcard support (FIDO2 / YubiKey / PKCS#11 / SITHS / Net iD), split terminal views, a dual-pane file manager with live Markdown preview, directory sync, and container exec & log tools.
-
-> [!WARNING]
-> **Early Development Notice**: sshs3 is under active early-stage development. Expect occasional bugs, incomplete edge-case handling, and breaking changes or frequent UI improvements between releases. Feedback and bug reports are warmly welcome — please file any issues or suggestions on [GitHub Issues](https://github.com/alun-hub/sshs3/issues)!
+> **A modern, security-focused, cross-platform SSH, SFTP, S3 Object Storage, Enterprise Storage Cluster (NetApp ONTAP / StorageGRID / Ceph / ZFS), and Kubernetes platform** — available both as a **Desktop App (Linux & Windows)** and a **Self-Hosted Multi-User Web Server**. Built-in **Collaborative AI Hub**, **S3 Team Workspace Sync (`sshs3-team://` InviteCode)**, **`Ctrl+K` Inline Terminal AI**, **FIDO2 / YubiKey / PKCS#11 Smartcard Authentication**, **Konsole-style Split Terminals**, and a **Dual-Pane File Explorer**.
 
 ---
 
-## Screenshots & Interface Tour
+## 🚀 Why sshs3? (Product Presentation)
+
+Infrastructure, Storage, and DevOps teams typically juggle **5+ disconnected tools**: an SSH client, an SFTP/S3 browser, a Kubernetes dashboard, scattered Wiki runbooks, and external AI chats that have zero context of your live clusters or what your teammates just changed.
+
+**sshs3 unifies the entire workflow into one collaborative workspace:**
+
+| Pillar | What `sshs3` Delivers |
+| :--- | :--- |
+| **🤖 Context-Aware AI Hub & Full App Control** | Built-in AI agent with complete awareness of your clusters, VMs, S3 buckets, runbooks, and open terminals. Ask anything about `sshs3`, paste screenshots (`Ctrl+V`), or tell the AI to directly add/organize servers, clusters, folders, S3 profiles, schedules, snippets, and settings via `sshs3_*` tools. |
+| **🧠 Auto-Memory & Live `TerminalObserver`** | Every notable terminal action (`vim /etc/nginx/...`, `systemctl restart`, `kubectl rollout`, ONTAP `volume modify`, `snapmirror resync`, Ceph/ZFS ops) is automatically logged and distilled into shared **Team Memories & Runbooks** — no manual documentation required. |
+| **☁️ S3 Team Workspace & `InviteCode`** | Share your entire server/cluster topology, runbooks, and activity log through your own S3 bucket (AWS S3, NetApp StorageGRID, MinIO, Ceph RGW, R2). Invite teammates with a single `sshs3-team://...` code while **private SSH keys and passwords never leave each user's device**. |
+| **🌐 Self-Hosted Multi-User Web Server** | Deploy `sshs3` on any Linux/Windows VM (`npm run start:web`) and access the full experience in the browser with First-Run Admin setup, Invite Tokens, per-user isolated `~/.ssh/id_ed25519` keys, and live multi-user presence. |
+| **🔐 Hardware-Grade Zero-Knowledge Security** | Native support for **FIDO2 / YubiKey**, **PKCS#11 Smartcards (SITHS, Net iD, PIV/CAC, OpenSC)**, OS Keyring encryption (`safeStorage`), and YubiKey/PIV-backed Team Vaults. |
+
+---
+
+## 📸 Visual Tour & Product Walkthrough
 
 <details open>
-  <summary><b>🖥️ Terminal & Split Views</b> (SSH, Local Shell)</summary>
+  <summary><b>🤖 1. AI Hub, Cluster Grouping & Inline Terminal AI (Ctrl+K)</b></summary>
+  <br>
+  <p align="center">
+    <img src="docs/screenshots/demo-6-clusters-and-nodes.png" alt="Cluster Grouping and Node Roles in sshs3 AI Hub" width="850" />
+    <br><em><b>Cluster & Node Topology:</b> Group storage controllers (NetApp ONTAP, StorageGRID, Ceph, TrueNAS ZFS), Kubernetes nodes, and VMs into logical clusters with roles, tags, and live activity badges.</em>
+  </p>
+  <p align="center">
+    <img src="docs/screenshots/demo-2-edit-and-context.png" alt="Context Autocomplete (@cluster and @node) and Local Auth Override" width="850" />
+    <br><em><b><code>@</code>-Context Mentions & Local Auth Overrides:</b> Type <code>@cluster:</code>, <code>@node</code>, or <code>@team-changes</code> to inject live infrastructure state into the AI chat. Configure per-developer SSH username/key overrides locally without leaking secrets to S3.</em>
+  </p>
+  <p align="center">
+    <img src="docs/screenshots/demo-7-inline-terminal-suggest.png" alt="Ctrl+K Inline Terminal AI Command Bar" width="850" />
+    <br><em><b><code>Ctrl+K</code> Inline Terminal AI:</b> Describe what you want in plain language right inside the terminal to get an OS/shell-aware command suggestion with a one-sentence explanation — press <b>Run (`Enter`)</b> or <b>Insert (`Tab`)</b>.</em>
+  </p>
+  <p align="center">
+    <img src="docs/screenshots/demo-3-team-memory-and-skills.png" alt="Shared Team Memories and Runbook Skills" width="850" />
+    <br><em><b>Always-On Team Memory & Runbooks:</b> Automatically captured node histories alongside shared troubleshooting skills and storage/infrastructure runbooks.</em>
+  </p>
+  <p align="center">
+    <img src="docs/screenshots/demo-1-workspace-dashboard.png" alt="Workspace & VMs Dashboard with Live Team Activity" width="850" />
+    <br><em><b>Workspace & VMs Dashboard:</b> Real-time feed of team changes across servers and storage clusters alongside the AI assistant.</em>
+  </p>
+  <p align="center">
+    <img src="docs/screenshots/demo-5-expanded-chat.png" alt="Expanded Full-Screen AI Hub View" width="850" />
+    <br><em><b>Full-Screen AI Hub:</b> Expand the AI workspace for deep multi-node troubleshooting, architectural Q&amp;A, and image/diagram analysis (<code>Ctrl+V</code> screenshot paste).</em>
+  </p>
+</details>
+
+<details open>
+  <summary><b>🌐 2. Self-Hosted Multi-User Web Server & S3 Team Onboarding</b></summary>
+  <br>
+  <p align="center">
+    <img src="docs/screenshots/web-flow-1-first-run-admin.png" alt="First-Run Admin Account Setup in Browser" width="850" />
+    <br><em><b>Step 1 — First-Run Admin Setup:</b> Deploy <code>sshs3</code> on a VM and open it in any browser. The first visitor creates the Admin account and gets an isolated tenant workspace and dedicated Ed25519 SSH keypair.</em>
+  </p>
+  <p align="center">
+    <img src="docs/screenshots/web-flow-2-onboarded-workspace.png" alt="Onboarded Web Workspace with Demo Servers" width="850" />
+    <br><em><b>Step 2 — Full Browser Workspace:</b> The complete <code>sshs3</code> UI (SSH terminals, SFTP/S3 dual-pane explorer, and AI Hub) runs over an authenticated HTTP + WebSocket bridge.</em>
+  </p>
+  <p align="center">
+    <img src="docs/screenshots/web-flow-3-ssh-key-modal.png" alt="Per-User SSH Public Key Modal" width="850" />
+    <br><em><b>Step 3 — Per-User SSH Identity (<code>🔑 Min SSH-nyckel</code>):</b> Every web user gets their own isolated <code>~/.ssh/id_ed25519</code> keypair with one-click copy and a ready-to-run <code>authorized_keys</code> snippet.</em>
+  </p>
+  <p align="center">
+    <img src="docs/screenshots/web-flow-4-team-invite-admin.png" alt="Admin Generating Team Invite Link and S3 InviteCode" width="850" />
+    <br><em><b>Step 4 — 1-Click Team Invites (<code>👥 Team &amp; Inbjudan</code>):</b> Admins generate single-use Web Invite Tokens or copy the <code>sshs3-team://...</code> S3 InviteCode for desktop teammates.</em>
+  </p>
+  <p align="center">
+    <img src="docs/screenshots/web-flow-5-friend-invite-signup.png" alt="Teammate Redeeming Invite Token" width="850" />
+    <br><em><b>Step 5 — Frictionless Teammate Signup:</b> Teammates redeem their invite code in seconds and get their own personal SSH key while automatically joining the shared team workspace.</em>
+  </p>
+  <p align="center">
+    <img src="docs/screenshots/web-flow-6-multiuser-live-workspace.png" alt="Live Multi-User Collaboration in Shared Workspace" width="850" />
+    <br><em><b>Step 6 — Real-Time Multi-User Collaboration:</b> Multiple engineers work simultaneously with live presence indicators, shared clusters, and synchronized AI memories.</em>
+  </p>
+</details>
+
+<details>
+  <summary><b>🖥️ 3. Terminal & Split Views</b> (SSH, Local Shell)</summary>
   <br>
   <p align="center">
     <img src="docs/screenshots/landing.png" alt="sshS3 start screen" width="850" />
@@ -29,7 +100,7 @@
 </details>
 
 <details>
-  <summary><b>☸️ Kubernetes & OpenShift</b> (Cluster Tree, Pods, Exec, Logs, File Explorer & Live Debugging)</summary>
+  <summary><b>☸️ 4. Kubernetes & OpenShift</b> (Cluster Tree, Pods, Exec, Logs, File Explorer & Live Debugging)</summary>
   <br>
   <p align="center">
     <img src="docs/screenshots/conn-k8s.png" alt="Connection Manager Kubernetes tab" width="850" />
@@ -42,7 +113,7 @@
 </details>
 
 <details>
-  <summary><b>📁 Dual-Pane File Manager & S3 Object Storage</b> (SFTP, S3, Directory Sync)</summary>
+  <summary><b>📁 5. Dual-Pane File Manager & S3 Object Storage</b> (SFTP, S3, Directory Sync)</summary>
   <br>
   <p align="center">
     <img src="docs/screenshots/filemanager.png" alt="Connection Manager S3 tab over the dual-pane file manager" width="850" />
@@ -63,13 +134,29 @@
 </details>
 
 <details>
-  <summary><b>🔀 SSH Tunnels</b> (Local, Remote, SOCKS)</summary>
+  <summary><b>🔀 6. SSH Tunnels</b> (Local, Remote, SOCKS)</summary>
   <br>
   <p align="center">
     <img src="docs/screenshots/ssh-tunnels.png" alt="SSH Tunnels dialog listing saved forwards per connection" width="850" />
     <br><em>Saved port forwards (-L / -R / -D) per connection</em>
   </p>
 </details>
+
+---
+
+## Quick Start: Desktop, Demo Mode & Multi-User Web Server
+
+```bash
+# 1. Install dependencies
+npm install
+
+# 2. Run Desktop App in Enterprise Storage Demo Mode (NetApp ONTAP, StorageGRID S3, Ceph, TrueNAS ZFS, Astra Trident)
+SSHS3_DEMO=1 npm run dev
+
+# 3. Build & Start Self-Hosted Multi-User Web Server (on http://localhost:8080)
+npm run build:web
+SSHS3_DEMO=1 npm run start:web
+```
 
 ---
 
