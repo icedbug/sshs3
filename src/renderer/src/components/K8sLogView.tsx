@@ -211,6 +211,38 @@ export const K8sLogView: React.FC<K8sLogViewProps> = ({
       {!searchOpen && (
         <button
           type="button"
+          data-testid="k8s-log-analyze-ai-btn"
+          title="Skicka de senaste loggraderna från denna Kubernetes-pod till AI Hub för felsökning"
+          onClick={() => {
+            const buf = termRef.current?.buffer?.active;
+            const lines: string[] = [];
+            if (buf) {
+              const total = buf.length;
+              const start = Math.max(0, total - 80);
+              for (let i = start; i < total; i++) {
+                const line = buf.getLine(i)?.translateToString(true);
+                if (line && line.trim()) lines.push(line);
+              }
+            }
+            const logText = lines.length > 0 ? lines.join('\n') : '(Inga loggrader buffrade ännu)';
+            window.dispatchEvent(
+              new CustomEvent('sshs3:ai-attach', {
+                detail: {
+                  label: `@k8s-logs:${target.podName}`,
+                  text: `Kubernetes Container Logs (${target.contextName} · ns=${target.namespace} · pod=${target.podName} · container=${target.containerName}):\n\n${logText}`,
+                  prompt: `Analysera loggarna från @k8s-logs:${target.podName} (${target.namespace}/${target.podName}) och förklara eventuella fel eller varningar samt föreslå åtgärd.`,
+                },
+              })
+            );
+          }}
+          className="absolute right-11 top-2 z-10 inline-flex items-center gap-1 rounded-lg border border-sky-500/40 bg-app-card/95 px-2.5 py-1 text-xs font-semibold text-sky-300 hover:bg-sky-500/20 shadow-sm transition-colors"
+        >
+          <span>✨ Analysera loggar med AI</span>
+        </button>
+      )}
+      {!searchOpen && (
+        <button
+          type="button"
           title="Search logs (Ctrl+F)"
           onClick={() => setSearchOpen(true)}
           className="absolute right-2 top-2 z-10 rounded-lg border border-border-subtle bg-app-card p-1.5 text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary shadow-sm transition-colors"

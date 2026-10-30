@@ -23,6 +23,7 @@ import {
 import type { FileEntry } from '@shared/types/storage';
 import type { ExternalFileStatusEvent, FileReadResult } from '@shared/types/ipc';
 import { classNames, formatBytes, formatDateTime, describeIpcError } from '../../lib/format';
+import { hubRequest } from '../../lib/aiHub';
 import type { SourceType } from './types';
 import { useEscapeToClose } from '../../lib/useModalDismiss';
 
@@ -673,6 +674,57 @@ export const FileEditorModal: React.FC<FileEditorModalProps> = ({
             >
               <RotateCw className={classNames('h-4 w-4', loading && 'animate-spin text-sky-400')} />
             </button>
+
+            {/* AI Analyze & Knowledge Base Integration */}
+            {!isBinary && content && (
+              <>
+                <button
+                  type="button"
+                  data-testid="file-editor-ask-ai-btn"
+                  title="Bifoga filinnehållet till AI Hub för analys, felsökning eller konfigurationsgranskning"
+                  onClick={() => {
+                    window.dispatchEvent(
+                      new CustomEvent('sshs3:ai-attach', {
+                        detail: {
+                          label: `@file:${entry.name}`,
+                          text: `File: ${entry.path} (source: ${providerId}, type: ${sourceType})\n\n${content.slice(0, 12000)}`,
+                          prompt: `Granska och analysera @file:${entry.name} (${entry.path}). Kontrollera om det finns några fel, risker eller förbättringar mot våra klusterstandarder.`,
+                        },
+                      })
+                    );
+                  }}
+                  className="flex items-center gap-1 rounded-lg border border-sky-500/40 bg-sky-500/15 px-2.5 py-1 text-xs font-semibold text-sky-300 hover:bg-sky-500/25 transition-colors"
+                >
+                  <span>✨</span>
+                  <span className="hidden sm:inline">Fråga AI</span>
+                </button>
+                <button
+                  type="button"
+                  data-testid="file-editor-save-kb-btn"
+                  title="Indexera och spara denna fil som ett dokument/runbook i Workspace Knowledge Base (KB)"
+                  onClick={() => {
+                    void hubRequest({
+                      action: 'kb-save',
+                      doc: {
+                        title: `${entry.name} (${providerId})`,
+                        sourceType: sourceType === 's3' ? 's3' : 'upload',
+                        sourceRef: `${providerId}:${entry.path}`,
+                        tags: [sourceType, entry.name.split('.').pop() || 'config'],
+                        content: content.slice(0, 24000),
+                        shared: true,
+                      },
+                    }).then(() => {
+                      setSaveStatus('Sparad i Knowledge Base (KB)!');
+                      setTimeout(() => setSaveStatus(null), 2500);
+                    });
+                  }}
+                  className="flex items-center gap-1 rounded-lg border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-1 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/25 transition-colors"
+                >
+                  <span>📚</span>
+                  <span className="hidden sm:inline">Spara i KB</span>
+                </button>
+              </>
+            )}
 
             {/* Open in external editor */}
             <button

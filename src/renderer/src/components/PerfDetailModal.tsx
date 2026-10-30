@@ -265,14 +265,39 @@ export const PerfDetailModal: React.FC<PerfDetailModalProps> = ({ kind, history,
               {history.length} samples{spanMin > 0 ? ` over the last ${spanMin} min` : ''} (kept up to 15 min while this tab is active)
             </p>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close"
-            className="rounded-md p-1 text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary"
-          >
-            <X className="h-4 w-4" />
-          </button>
+          <div className="flex items-center gap-2">
+            {latest && (
+              <button
+                type="button"
+                data-testid="perf-analyze-ai-btn"
+                title="Skicka aktuell systemlast (CPU, RAM, Disk, I/O, Nätverk) till AI Hub för diagnos"
+                onClick={() => {
+                  const summary = tooltipText(kind, latest, title).replace(/\nClick for history$/, '');
+                  window.dispatchEvent(
+                    new CustomEvent('sshs3:ai-attach', {
+                      detail: {
+                        label: `@perf:${title || kind}`,
+                        text: `Live Performance Telemetry (${title || kind}, ${history.length} samples):\n${summary}`,
+                        prompt: `Analysera aktuell prestanda och resursförbrukning för @perf:${title || kind} och identifiera eventuella flaskhalsar i CPU, minne, disk eller I/O.`,
+                      },
+                    })
+                  );
+                  onClose();
+                }}
+                className="inline-flex items-center gap-1 rounded-lg border border-sky-500/40 bg-sky-500/15 px-2.5 py-1 text-xs font-semibold text-sky-300 hover:bg-sky-500/25 transition-colors"
+              >
+                <span>✨ Analysera med AI</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Close"
+              className="rounded-md p-1 text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
         </div>
         <div className="grid flex-1 grid-cols-1 gap-4 overflow-y-auto p-4 md:grid-cols-2">
           {latest ? (

@@ -157,6 +157,43 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 })}
               </div>
             ))}
+            <div className="mt-auto pt-2 border-t border-divider flex flex-col gap-1">
+              <div className="px-3 pt-1 text-2xs font-semibold uppercase tracking-wide text-sky-400">
+                AI Hub &amp; Workspace
+              </div>
+              <button
+                type="button"
+                data-testid="settings-open-ai-agents-btn"
+                onClick={() => {
+                  onClose();
+                  window.dispatchEvent(
+                    new CustomEvent('sshs3:ai-open', {
+                      detail: { view: 'Agents & MCP', mode: 'hub' },
+                    })
+                  );
+                }}
+                className="flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-medium text-sky-300 hover:bg-sky-500/15 transition-colors text-left"
+              >
+                <span>🤖</span>
+                <span>Mission Agents &amp; MCP</span>
+              </button>
+              <button
+                type="button"
+                data-testid="settings-open-ai-kb-btn"
+                onClick={() => {
+                  onClose();
+                  window.dispatchEvent(
+                    new CustomEvent('sshs3:ai-open', {
+                      detail: { view: 'Knowledge Base', mode: 'hub' },
+                    })
+                  );
+                }}
+                className="flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-medium text-emerald-300 hover:bg-emerald-500/15 transition-colors text-left"
+              >
+                <span>📚</span>
+                <span>Knowledge Base (KB)</span>
+              </button>
+            </div>
           </aside>
 
           {/* Form Content Area */}

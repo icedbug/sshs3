@@ -1,7 +1,8 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useMemo, useRef } from 'react';
 import { Terminal } from 'lucide-react';
 import type { LocalShellType } from '@shared/types/ssh';
 import { FOCUSABLE_OVERLAY_SELECTOR, isElementVisible, navigateInOverlay, type NavigationDirection } from '../lib/spatialNavigation';
+import { useHub } from '../lib/aiHub';
 
 /** Buttons for launching a local shell (no SSH connection) in a pane. */
 export const LocalTerminalButtons: React.FC<{
@@ -111,6 +112,19 @@ export const UnconnectedPanePlaceholder: React.FC<UnconnectedPanePlaceholderProp
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const primaryButtonRef = useRef<HTMLButtonElement>(null);
+  const hub = useHub();
+
+  const workspaceClusters = useMemo(() => {
+    const map = new Map<string, string[]>();
+    for (const s of hub?.workspaceServers ?? []) {
+      if (s.cluster) {
+        const list = map.get(s.cluster) ?? [];
+        list.push(s.id);
+        map.set(s.cluster, list);
+      }
+    }
+    return Array.from(map.entries()).slice(0, 4);
+  }, [hub?.workspaceServers]);
 
   useEffect(() => {
     if (isActive) {
@@ -178,6 +192,46 @@ export const UnconnectedPanePlaceholder: React.FC<UnconnectedPanePlaceholderProp
         platform={platform}
         onOpen={(shellType, wslDistro) => onOpenLocalTerminal(leafId, shellType, wslDistro)}
       />
+      {workspaceClusters.length > 0 && (
+        <div className="mt-2 flex flex-col items-center gap-1.5 max-w-md px-4">
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-txt-muted">
+            Eller öppna Workspace-kluster i 2×2 Split-View:
+          </span>
+          <div className="flex flex-wrap items-center justify-center gap-1.5">
+            {workspaceClusters.map(([cName, ids]) => (
+              <button
+                key={cName}
+                type="button"
+                title={`Öppna alla ${ids.length} noder i ${cName} som en 2×2 Konsole Split-View`}
+                onClick={() =>
+                  window.dispatchEvent(
+                    new CustomEvent('sshs3:open-cluster-split', {
+                      detail: { cluster: cName, serverIds: ids, layout: 'grid' },
+                    })
+                  )
+                }
+                className="inline-flex items-center gap-1 rounded-md border border-indigo-500/40 bg-indigo-500/15 px-2.5 py-1 text-2xs font-medium text-indigo-300 hover:bg-indigo-500/25 transition-colors"
+              >
+                <span>🧩 {cName}</span>
+                <span className="opacity-70">({ids.length})</span>
+              </button>
+            ))}
+            <button
+              type="button"
+              onClick={() =>
+                window.dispatchEvent(
+                  new CustomEvent('sshs3:ai-open', {
+                    detail: { view: 'Work', mode: 'panel' },
+                  })
+                )
+              }
+              className="inline-flex items-center gap-1 rounded-md border border-sky-500/40 bg-sky-500/15 px-2.5 py-1 text-2xs font-medium text-sky-300 hover:bg-sky-500/25 transition-colors"
+            >
+              <span>✨ Fråga AI Hub</span>
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

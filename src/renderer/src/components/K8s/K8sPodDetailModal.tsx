@@ -140,6 +140,38 @@ export const K8sPodDetailModal: React.FC<K8sPodDetailModalProps> = ({
           </div>
 
           <div className="flex items-center gap-2">
+            {pod && (
+              <button
+                type="button"
+                data-testid="k8s-pod-analyze-ai-btn"
+                title="Bifoga poddens status, containers, events och YAML till AI Hub för diagnos"
+                onClick={() => {
+                  const eventsText = (pod.events ?? [])
+                    .slice(0, 15)
+                    .map((ev) => `- [${ev.type}] ${ev.reason}: ${ev.message}`)
+                    .join('\n');
+                  window.dispatchEvent(
+                    new CustomEvent('sshs3:ai-attach', {
+                      detail: {
+                        label: `@k8s-pod:${podName}`,
+                        text: [
+                          `Kubernetes Pod: ${namespace}/${podName} (context: ${contextName})`,
+                          `Phase: ${pod.phase} · Node: ${pod.nodeName || 'N/A'} · IP: ${pod.podIP || 'N/A'}`,
+                          `Containers: ${(pod.containers ?? []).map((c) => `${c.name} [ready=${c.ready}, restarts=${c.restartCount}, state=${c.state}]`).join(', ')}`,
+                          ...(eventsText ? [`Recent Events:\n${eventsText}`] : []),
+                          ...(pod.yaml ? [`\nYAML (excerpt):\n${pod.yaml.slice(0, 6000)}`] : []),
+                        ].join('\n'),
+                        prompt: `Analysera Kubernetes-podden @k8s-pod:${podName} i namespace ${namespace} och kontrollera PVC/CSI-volymer, events och container-status.`,
+                      },
+                    })
+                  );
+                  onClose();
+                }}
+                className="flex items-center gap-1.5 rounded-lg border border-sky-500/40 bg-sky-500/15 px-2.5 py-1.5 text-xs font-semibold text-sky-300 hover:bg-sky-500/25 transition-colors"
+              >
+                <span>✨ Analysera med AI</span>
+              </button>
+            )}
             {onDebug && (
               <button
                 type="button"

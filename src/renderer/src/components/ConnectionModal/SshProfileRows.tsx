@@ -36,8 +36,23 @@ export const SshRecentRow: React.FC<SshProfileRowProps> = ({
     className="flex items-center justify-between gap-2 rounded-lg border border-border-subtle bg-app-surface px-3 py-1.5 hover:border-border-strong transition-colors cursor-pointer"
   >
     <div className="min-w-0">
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 flex-wrap">
         <span className="truncate text-xs font-medium text-txt-primary">{profile.name}</span>
+        {profile.cluster && (
+          <span className="rounded bg-indigo-500/15 border border-indigo-500/35 px-1.5 py-0.2 text-2xs font-medium text-indigo-300">
+            🧩 {profile.cluster}
+          </span>
+        )}
+        {(profile.nodeRole || profile.role) && (
+          <span className="rounded bg-sky-500/15 border border-sky-500/35 px-1.5 py-0.2 text-2xs text-sky-300">
+            {profile.nodeRole || profile.role}
+          </span>
+        )}
+        {profile.shared && (
+          <span className="rounded bg-purple-500/15 border border-purple-500/35 px-1.5 py-0.2 text-2xs text-purple-300">
+            ☁️ S3 Shared
+          </span>
+        )}
         {profile.forwardAgent && (
           <span className="rounded bg-amber-500/15 border border-amber-500/30 px-1.5 py-0.2 text-2xs text-amber-400">
             Agent Fwd
@@ -124,10 +139,25 @@ export const SshProfileRow: React.FC<SshProfileRowProps> = ({
     className="flex items-center justify-between gap-2 rounded-lg border border-border-subtle bg-app-surface px-3 py-1.5 cursor-grab active:cursor-grabbing hover:border-border-strong transition-all select-none"
   >
     <div className="min-w-0">
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 flex-wrap">
         <span className="truncate text-sm text-txt-primary font-medium">
           {profile.name}
         </span>
+        {profile.cluster && (
+          <span className="rounded bg-indigo-500/15 border border-indigo-500/35 px-1.5 py-0.2 text-2xs font-medium text-indigo-300">
+            🧩 {profile.cluster}
+          </span>
+        )}
+        {(profile.nodeRole || profile.role) && (
+          <span className="rounded bg-sky-500/15 border border-sky-500/35 px-1.5 py-0.2 text-2xs text-sky-300">
+            {profile.nodeRole || profile.role}
+          </span>
+        )}
+        {profile.shared && (
+          <span className="rounded bg-purple-500/15 border border-purple-500/35 px-1.5 py-0.2 text-2xs text-purple-300">
+            ☁️ S3 Shared
+          </span>
+        )}
         {profile.proxyJump && (
           <span className="rounded bg-sky-500/15 border border-sky-500/30 px-1.5 py-0.2 text-2xs text-sky-400">
             Jump
@@ -146,9 +176,29 @@ export const SshProfileRow: React.FC<SshProfileRowProps> = ({
       </div>
       <div className="truncate text-xs text-txt-muted">
         {profile.username}@{profile.host}:{profile.port ?? 22} · {profile.authType}
+        {profile.description ? ` · ${profile.description}` : ''}
       </div>
     </div>
     <div className="flex shrink-0 items-center gap-1.5">
+      <button
+        type="button"
+        title={`Fråga AI om ${profile.name}`}
+        onClick={(e) => {
+          e.stopPropagation();
+          window.dispatchEvent(
+            new CustomEvent('sshs3:ai-attach', {
+              detail: {
+                label: `@${profile.name}`,
+                text: `Server: ${profile.name} (${profile.username}@${profile.host}:${profile.port ?? 22})${profile.cluster ? `\nCluster: ${profile.cluster}` : ''}${profile.nodeRole ? `\nNode Role: ${profile.nodeRole}` : ''}${profile.description ? `\nDescription: ${profile.description}` : ''}`,
+                prompt: `Hjälp mig med @${profile.name}: `,
+              },
+            })
+          );
+        }}
+        className="rounded-lg border border-sky-500/40 bg-sky-500/15 px-2 py-1 text-xs font-medium text-sky-300 hover:bg-sky-500/25 transition-colors"
+      >
+        ✨ AI
+      </button>
       {onConnectSSH && (
         <button
           type="button"

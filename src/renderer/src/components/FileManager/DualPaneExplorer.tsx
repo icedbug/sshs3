@@ -619,6 +619,59 @@ export const DualPaneExplorer: React.FC<DualPaneExplorerProps> = ({
         {initError && (
           <div className="border-b border-red-900/60 bg-red-950/40 px-3 py-1.5 text-xs text-red-300">{initError}</div>
         )}
+        <div
+          data-testid="dual-pane-ai-bar"
+          className="flex flex-wrap items-center justify-between gap-2 border-b border-divider bg-app-surface/70 px-3 py-1 text-2xs text-txt-secondary"
+        >
+          <div className="flex items-center gap-2 min-w-0 truncate">
+            <span className="font-semibold text-sky-400">✨ AI Storage &amp; SFTP/S3:</span>
+            <span className="truncate font-mono text-txt-muted">
+              {panes.left.source.label} ({panes.left.path}) ↔ {panes.right.source.label} ({panes.right.path})
+            </span>
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              data-testid="dual-pane-ai-diff-btn"
+              title="Jämför vänster och höger panel med AI (sshs3_storage_ops diff_paths)"
+              onClick={() => {
+                const leftTarget = panes.left.source.providerId.replace(/^(sftp-|s3-)/, '');
+                const rightTarget = panes.right.source.providerId.replace(/^(sftp-|s3-)/, '');
+                window.dispatchEvent(
+                  new CustomEvent('sshs3:ai-attach', {
+                    detail: {
+                      label: `@storage:${panes.left.source.label}↔${panes.right.source.label}`,
+                      text: [
+                        `Dual-Pane Explorer Context:`,
+                        `- Left Pane: ${panes.left.source.label} [provider=${panes.left.source.providerId}, type=${panes.left.source.sourceType}] path=${panes.left.path}`,
+                        `- Right Pane: ${panes.right.source.label} [provider=${panes.right.source.providerId}, type=${panes.right.source.sourceType}] path=${panes.right.path}`,
+                      ].join('\n'),
+                      prompt: `Jämför innehållet och konfigurationsfilerna mellan vänster panel (${leftTarget}:${panes.left.path}) och höger panel (${rightTarget}:${panes.right.path}) med sshs3_storage_ops.`,
+                    },
+                  })
+                );
+              }}
+              className="inline-flex items-center gap-1 rounded border border-sky-500/40 bg-sky-500/15 px-2 py-0.5 text-2xs font-semibold text-sky-300 hover:bg-sky-500/25 transition-colors"
+            >
+              <span>🔍 AI Diff Vänster ↔ Höger</span>
+            </button>
+            <button
+              type="button"
+              data-testid="dual-pane-open-kb-btn"
+              title="Öppna Kunskapsbasen (KB) i AI Hub för att söka eller synka S3/lokala runbooks"
+              onClick={() => {
+                window.dispatchEvent(
+                  new CustomEvent('sshs3:ai-open', {
+                    detail: { view: 'Knowledge Base', mode: 'hub' },
+                  })
+                );
+              }}
+              className="inline-flex items-center gap-1 rounded border border-emerald-500/40 bg-emerald-500/15 px-2 py-0.5 text-2xs font-semibold text-emerald-300 hover:bg-emerald-500/25 transition-colors"
+            >
+              <span>📚 Kunskapsbas (KB)</span>
+            </button>
+          </div>
+        </div>
         <div className="flex min-h-0 flex-1 gap-1.5 p-1.5">
           <FilePane
             side="left"
