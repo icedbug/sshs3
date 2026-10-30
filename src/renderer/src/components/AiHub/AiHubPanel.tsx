@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   ArrowUp,
   Check,
@@ -55,6 +56,155 @@ const modes: Record<AgentMode, string> = {
   autonomous: "Auto",
 };
 
+const DEMO_SHOWCASE_RESPONSE = [
+  "## 🗄️ Klusterdiagnos: `NetApp-ONTAP-Prod-SE` & `K8s-Trident-CSI-Prod`",
+  "",
+  "Jag körde en parallell hälsokontroll över samtliga 4 noder i `@cluster:NetApp-ONTAP-Prod-SE` samt diffade `/etc/multipath.conf` mot vår KB-standard (`@kb:trident-csi-multipath-standard`).",
+  "",
+  "### 1. Sammanställning av Nodstatus & Latens (ONTAP 9.15.1P2)",
+  "",
+  "| Nod | Roll | Aggregat / Kapacitet | Snittlatens | SnapMirror Lag | Status |",
+  "| :--- | :--- | :--- | :--- | :--- | :--- |",
+  "| `netapp-aff-a800-01a` | HA Node A (DC1) | `aggr1_nvme_prod` (64% av 220 TB) | `0.31 ms` | `00:02:44` | **ONLINE · HEALTH_OK** |",
+  "| `netapp-aff-a800-01b` | HA Node B (DC1) | `aggr2_nvme_db` (58% av 180 TB) | `0.48 ms` | `00:03:18` | **ONLINE · HEALTH_OK** |",
+  "| `netapp-fas9000-dr-01` | SnapVault DR (DC2) | `aggr_dr_nlsas` (71% av 1.6 PB) | `1.12 ms` | Synkad (XDP) | **ONLINE · SNAPMIRRORED** |",
+  "| `ontap-aiq-um-01` | Active IQ & Harvest | Prometheus / Grafana | `0.19 ms` | — | **TELEMETRY OK** |",
+  "",
+  "> **Rotorsak & Rekommendation:** Volymen `vol_analytics_sc` slår i QoS-taket `pg-batch-ceiling` (`15 000 IOPS` / `600 MB/s`) under batch-körningar, medan produktionsdatabasen `vol_pg_prod_01` ligger stabilt på `0.31 ms`. På `k8s-gpu-io-worker-01` saknas dessutom `no_path_retry queue` i `/etc/multipath.conf`.",
+  "",
+  "### 2. Cross-Server Config Diff (`/etc/multipath.conf`)",
+  "",
+  "```diff",
+  "--- k8s-storage-cp-01:/etc/multipath.conf",
+  "+++ k8s-gpu-io-worker-01:/etc/multipath.conf",
+  "@@ -8,7 +8,7 @@",
+  "     device {",
+  "         vendor \"NETAPP\"",
+  "         product \"LUN.*\"",
+  "         path_grouping_policy \"group_by_prio\"",
+  "-        features \"2 pg_init_retries 50\"",
+  "-        no_path_retry \"queue\"",
+  "+        features \"0\"",
+  "+        no_path_retry \"fail\"",
+  "     }",
+  "```",
+  "",
+  "### 3. Föreslagna åtgärdskommandon",
+  "",
+  "Höj Adaptive QoS-taket tillfälligt för AI-träningsvolymen på `netapp-aff-a800-01a`:",
+  "",
+  "```bash",
+  "volume modify -vserver svm-prod-nfs -volume vol_analytics_sc -qos-policy-group pg-prod-db-extreme",
+  "qos statistics volume latency show -vserver svm-prod-nfs -volume vol_analytics_sc -iterations 5",
+  "```",
+].join("\n");
+
+function RichMarkdownContent({
+  text,
+  onUseCommand,
+}: {
+  text: string;
+  onUseCommand?: (cmd: string) => void;
+}) {
+  const [copiedBlock, setCopiedBlock] = useState<string | null>(null);
+
+  const handleCopy = (code: string) => {
+    void navigator.clipboard?.writeText(code);
+    setCopiedBlock(code);
+    setTimeout(() => setCopiedBlock((prev) => (prev === code ? null : prev)), 1800);
+  };
+
+  return (
+    <div className="ai-message-body">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          table({ children }) {
+            return (
+              <div className="ai-table-wrap">
+                <table className="ai-md-table">{children}</table>
+              </div>
+            );
+          },
+          code({ className, children, ...props }) {
+            const raw = String(children ?? "").replace(/\n$/, "");
+            const langMatch = /language-([a-zA-Z0-9_-]+)/.exec(className || "");
+            const isBlock = Boolean(langMatch) || raw.includes("\n");
+            if (!isBlock) {
+              return (
+                <code className="ai-inline-code" {...props}>
+                  {children}
+                </code>
+              );
+            }
+            const lang = (langMatch?.[1] || "shell").toLowerCase();
+            const isDiff =
+              lang === "diff" ||
+              (raw.includes("---") && raw.includes("+++")) ||
+              raw.split("\n").some((l) => l.startsWith("@@ "));
+            const isShell = ["bash", "sh", "shell", "zsh", "powershell", "cmd", "ontap-cli"].includes(
+              lang,
+            );
+            return (
+              <div className="ai-code-block">
+                <div className="ai-code-header">
+                  <span className="ai-code-lang">{lang}</span>
+                  <div className="ai-code-actions">
+                    {isShell && onUseCommand && (
+                      <button
+                        type="button"
+                        className="ai-code-btn"
+                        title="Infoga kommando i chatten / terminalen"
+                        onClick={() => onUseCommand(raw)}
+                      >
+                        ▶️ Använd
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="ai-code-btn"
+                      onClick={() => handleCopy(raw)}
+                    >
+                      {copiedBlock === raw ? "✓ Kopierad" : "📋 Kopiera"}
+                    </button>
+                  </div>
+                </div>
+                <pre>
+                  <code>
+                    {isDiff
+                      ? raw.split("\n").map((line, i) => {
+                          const cls =
+                            line.startsWith("+") && !line.startsWith("+++")
+                              ? "ai-diff-line-add"
+                              : line.startsWith("-") && !line.startsWith("---")
+                                ? "ai-diff-line-del"
+                                : line.startsWith("@@")
+                                  ? "ai-diff-line-hunk"
+                                  : undefined;
+                          return (
+                            <span key={i} className={cls}>
+                              {line}
+                              {"\n"}
+                            </span>
+                          );
+                        })
+                      : raw}
+                  </code>
+                </pre>
+              </div>
+            );
+          },
+          pre({ children }) {
+            return <>{children}</>;
+          },
+        }}
+      >
+        {text}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
 export function AiHubPanel({
   mode,
   setMode,
@@ -81,6 +231,8 @@ export function AiHubPanel({
   const [atIndex, setAtIndex] = useState(0);
   const [atDismissedFor, setAtDismissedFor] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [showDemoPreview, setShowDemoPreview] = useState(false);
+  const [copiedMsgId, setCopiedMsgId] = useState<string | null>(null);
   const [connection, setConnection] = useState<{
     id: string;
     generation: string;
@@ -998,21 +1150,132 @@ export function AiHubPanel({
                         <small>Kombinera BM25-runbooks med live-telemetri från anslutna MCP-servrar</small>
                       </button>
                     </div>
+                    <div style={{ marginTop: "14px", display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+                      <button
+                        type="button"
+                        className="ai-btn-accent"
+                        onClick={() => setShowDemoPreview((prev) => !prev)}
+                      >
+                        {showDemoPreview
+                          ? "✕ Dölj exempel-konversation"
+                          : "👁️ Visa exempel på AI-svar (Tabeller, Diff & Kluster-körning)"}
+                      </button>
+                    </div>
+                    {showDemoPreview && (
+                      <div style={{ marginTop: "14px" }}>
+                        <article className="ai-message ai-message-user">
+                          <div className="ai-message-header">
+                            <span className="ai-message-author">
+                              <span className="ai-avatar-badge">👤</span>
+                              <span>You</span>
+                            </span>
+                            <span className="ai-message-meta">Exempel · @cluster:NetApp-ONTAP-Prod-SE</span>
+                          </div>
+                          <p>
+                            Kör en parallell hälsokontroll över @cluster:NetApp-ONTAP-Prod-SE och diffa /etc/multipath.conf mellan k8s-storage-cp-01 och k8s-gpu-io-worker-01.
+                          </p>
+                        </article>
+                        <details className="ai-change ai-change-completed" open>
+                          <summary>
+                            <Terminal size={13} />
+                            <span>Parallell klusterkörning (sshs3_cluster_exec) på 4 noder i NetApp-ONTAP-Prod-SE</span>
+                            <span className="ai-badge ai-badge-success">✓ Utförd (4/4 noder · exit 0)</span>
+                          </summary>
+                          <pre>qos statistics volume latency show -iterations 1; snapmirror show</pre>
+                          <div className="ai-change-meta">
+                            <span className="ai-badge ai-badge-cluster">🧩 NetApp-ONTAP-Prod-SE</span>
+                            <span className="ai-tool-tag">netapp-aff-a800-01a</span>
+                            <span className="ai-tool-tag">netapp-aff-a800-01b</span>
+                            <span className="ai-tool-tag">netapp-fas9000-dr-01</span>
+                            <span className="ai-tool-tag">ontap-aiq-um-01</span>
+                          </div>
+                        </details>
+                        <article className="ai-message ai-message-assistant">
+                          <div className="ai-message-header">
+                            <span className="ai-message-author">
+                              <span className="ai-avatar-badge">🗄️</span>
+                              <span>Assistant</span>
+                              <span className="ai-pill">NetApp ONTAP Storage Architect</span>
+                            </span>
+                            <span className="ai-message-meta">
+                              <button
+                                type="button"
+                                className="ai-code-btn"
+                                onClick={() => {
+                                  void navigator.clipboard?.writeText(DEMO_SHOWCASE_RESPONSE);
+                                  setCopiedMsgId("demo-showcase");
+                                  setTimeout(() => setCopiedMsgId(null), 1800);
+                                }}
+                              >
+                                {copiedMsgId === "demo-showcase" ? "✓ Kopierad" : "📋 Kopiera svar"}
+                              </button>
+                            </span>
+                          </div>
+                          <RichMarkdownContent
+                            text={DEMO_SHOWCASE_RESPONSE}
+                            onUseCommand={(cmd) => setPrompt(cmd)}
+                          />
+                        </article>
+                      </div>
+                    )}
                   </div>
                 )}
-                {timeline.map((item) =>
+                {timeline.map((item, idx) =>
                   item.message ? (
                     <article
                       className={"ai-message ai-message-" + item.message.role}
                       key={item.message.id}
                     >
-                      <small className="ai-message-author">
-                        {item.message.role === "user"
-                          ? "You"
-                          : item.message.role === "assistant"
-                            ? "Assistant"
-                            : "sshs3"}
-                      </small>
+                      <div className="ai-message-header">
+                        <small className="ai-message-author">
+                          <span className="ai-avatar-badge">
+                            {item.message.role === "user"
+                              ? "👤"
+                              : activeAgent?.icon || "✨"}
+                          </span>
+                          <span>
+                            {item.message.role === "user"
+                              ? "You"
+                              : item.message.role === "assistant"
+                                ? "Assistant"
+                                : "sshs3"}
+                          </span>
+                          {item.message.role === "assistant" &&
+                            (task?.agentName || activeAgent?.name) && (
+                              <span className="ai-pill">
+                                {task?.agentName || activeAgent?.name}
+                              </span>
+                            )}
+                        </small>
+                        <span className="ai-message-meta">
+                          {item.message.at > 0 && (
+                            <span>
+                              {new Date(item.message.at).toLocaleTimeString([], {
+                                hour: "2-digit",
+                                minute: "2-digit",
+                              })}
+                            </span>
+                          )}
+                          {item.message.role === "assistant" && (
+                            <button
+                              type="button"
+                              className="ai-code-btn"
+                              title="Kopiera hela svaret"
+                              onClick={() => {
+                                void navigator.clipboard?.writeText(
+                                  item.message!.text,
+                                );
+                                setCopiedMsgId(item.message!.id);
+                                setTimeout(() => setCopiedMsgId(null), 1800);
+                              }}
+                            >
+                              {copiedMsgId === item.message.id
+                                ? "✓ Kopierad"
+                                : "📋 Kopiera"}
+                            </button>
+                          )}
+                        </span>
+                      </div>
                       {item.message.images && item.message.images.length > 0 && (
                         <div
                           style={{
@@ -1022,9 +1285,9 @@ export function AiHubPanel({
                             marginBottom: "8px",
                           }}
                         >
-                          {item.message.images.map((img, idx) => (
+                          {item.message.images.map((img, imgIdx) => (
                             <img
-                              key={idx}
+                              key={imgIdx}
                               src={img.dataUrl}
                               alt={img.label}
                               title={img.label}
@@ -1039,7 +1302,65 @@ export function AiHubPanel({
                           ))}
                         </div>
                       )}
-                      <ReactMarkdown>{item.message.text}</ReactMarkdown>
+                      <RichMarkdownContent
+                        text={item.message.text}
+                        onUseCommand={(cmd) => {
+                          setPrompt(cmd);
+                          setTimeout(() => composer.current?.focus(), 20);
+                        }}
+                      />
+                      {item.message.role === "assistant" &&
+                        idx === timeline.length - 1 &&
+                        !running && (
+                          <div className="ai-message-footer">
+                            <button
+                              type="button"
+                              className="ai-msg-action-btn"
+                              onClick={() => {
+                                void navigator.clipboard?.writeText(
+                                  item.message!.text,
+                                );
+                                setCopiedMsgId(item.message!.id);
+                                setTimeout(() => setCopiedMsgId(null), 1800);
+                              }}
+                            >
+                              {copiedMsgId === item.message.id
+                                ? "✓ Svar kopierat"
+                                : "📋 Kopiera svar"}
+                            </button>
+                            <button
+                              type="button"
+                              className="ai-msg-action-btn"
+                              onClick={() => {
+                                void act({
+                                  action: "memory-save",
+                                  entry: {
+                                    kind: "memory",
+                                    scope: "workspace",
+                                    title:
+                                      task?.title?.slice(0, 60) ||
+                                      "AI-insikt från chatt",
+                                    text: item.message!.text.slice(0, 1200),
+                                  },
+                                });
+                              }}
+                            >
+                              🧠 Spara i Team Memory
+                            </button>
+                            <button
+                              type="button"
+                              className="ai-msg-action-btn"
+                              onClick={() => {
+                                setPrompt(
+                                  "Fortsätt utreda och föreslå nästa konkreta verifieringssteg.",
+                                );
+                                setTimeout(() => composer.current?.focus(), 20);
+                              }}
+                            >
+                              🔄 Följ upp
+                            </button>
+                          </div>
+                        )}
                     </article>
                   ) : item.change && task ? (
                     <details
@@ -1050,13 +1371,40 @@ export function AiHubPanel({
                       <summary>
                         <Terminal size={13} />
                         <span>{item.change.description}</span>
-                        <small>
+                        <small
+                          className={
+                            item.change.status === "pending"
+                              ? "ai-badge ai-badge-mode"
+                              : item.change.status === "completed" ||
+                                  item.change.status === "approved"
+                                ? "ai-badge ai-badge-success"
+                                : "ai-badge"
+                          }
+                        >
                           {item.change.status === "pending"
                             ? "Approval needed"
                             : item.change.status}
                         </small>
                       </summary>
-                      {item.change.command && <pre>{item.change.command}</pre>}
+                      {item.change.command && (
+                        <div className="ai-code-block" style={{ marginTop: "8px" }}>
+                          <div className="ai-code-header">
+                            <span className="ai-code-lang">command</span>
+                            <button
+                              type="button"
+                              className="ai-code-btn"
+                              onClick={() =>
+                                void navigator.clipboard?.writeText(
+                                  item.change!.command!,
+                                )
+                              }
+                            >
+                              📋 Kopiera
+                            </button>
+                          </div>
+                          <pre>{item.change.command}</pre>
+                        </div>
+                      )}
                       {item.change.kind === "file" && (
                         <div className="ai-diff">
                           <strong>Before</strong>
@@ -1066,12 +1414,22 @@ export function AiHubPanel({
                         </div>
                       )}
                       {item.change.output && <pre>{item.change.output}</pre>}
-                      <small>
-                        {item.change.target}
-                        {item.change.exitCode !== undefined
-                          ? " · exit " + item.change.exitCode
-                          : ""}
-                      </small>
+                      <div className="ai-change-meta">
+                        <span className="ai-tool-tag">
+                          🖥 {item.change.target}
+                        </span>
+                        {item.change.exitCode !== undefined && (
+                          <span
+                            className={
+                              item.change.exitCode === 0
+                                ? "ai-badge ai-badge-success"
+                                : "ai-badge ai-badge-mode"
+                            }
+                          >
+                            {"exit " + item.change.exitCode}
+                          </span>
+                        )}
+                      </div>
                       {item.change.status === "pending" && (
                         <div className="ai-approval-actions">
                           <button

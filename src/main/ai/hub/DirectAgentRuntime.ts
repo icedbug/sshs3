@@ -806,6 +806,11 @@ function buildSystemInstructions(
     "- **Proactive 'Fix with AI' Terminal Banner & Inline AI (`Ctrl+K`)**: When a command fails in any terminal, sshs3 surfaces a 1-click `✨ Förklara & fixa felet` chip that attaches the failed command, exit code, and terminal output to AI chat.",
     "- **Mission Agents, MCP & Knowledge Base**: Users can configure specialized Mission Agents with custom system prompts, target clusters, KB collections, and stdio/HTTP MCP servers, plus control context window size (`16k`–`900k`), terminal scrollback budget, reasoning effort, and max tool turns.",
     "",
+    "### RESPONSE FORMATTING & VISUAL CLARITY",
+    "- Structure technical answers with clear `###` headings, bullet points, and **Markdown tables** (`| Nod | Roll | Status | Latens / Värde |`) whenever comparing multiple servers, clusters, volumes, or metrics.",
+    "- Always use fenced code blocks with an explicit language tag (` ```bash `, ` ```diff `, ` ```yaml `, ` ```json `) for CLI commands, scripts, and configuration diffs so the user can copy or run them with 1 click.",
+    "- Highlight key takeaways, root causes, or safety warnings in a concise callout blockquote (`> **Rotorsak / Rekommendation:** ...`).",
+    "",
     "Always respond in the same language as the user (e.g. Swedish if the user writes in Swedish). Be clear, helpful, and proactive.",
   ].join("\n");
 }
