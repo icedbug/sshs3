@@ -13,7 +13,9 @@ import {
   deleteDemoMemory,
   getDemoActivityLog,
   getDemoMemories,
+  getDemoS3Profiles,
   getDemoServers,
+  getDemoSnippets,
   isDemoMode,
   saveDemoMemory,
   updateDemoServer,
@@ -491,9 +493,24 @@ export function createHub(
         bridge.settingsStore?.getSettings?.().catch(() => ({})) ?? Promise.resolve({}),
         bridge.snippetStore?.list?.().catch(() => []) ?? Promise.resolve([]),
       ]);
+      const folderSet = new Set<string>(profiles.folders ?? []);
+      const s3List = [...(profiles.s3 ?? [])];
+      const snippetList = [...(snippets ?? [])];
+      if (isDemoMode()) {
+        for (const d of getDemoServers()) {
+          if (d.folder) folderSet.add(d.folder);
+        }
+        for (const ds3 of getDemoS3Profiles()) {
+          if (ds3.group) folderSet.add(ds3.group);
+          if (!s3List.some((s) => s.id === ds3.id)) s3List.push(ds3);
+        }
+        for (const ds of getDemoSnippets()) {
+          if (!snippetList.some((s) => s.id === ds.id)) snippetList.push(ds);
+        }
+      }
       return {
-        folders: profiles.folders ?? [],
-        s3Profiles: (profiles.s3 ?? []).map((s) => ({
+        folders: Array.from(folderSet),
+        s3Profiles: s3List.map((s) => ({
           id: s.id,
           name: s.name,
           endpoint: s.endpoint,
@@ -501,7 +518,7 @@ export function createHub(
           bucket: s.initialPath,
           group: s.group,
         })),
-        snippets: snippets ?? [],
+        snippets: snippetList,
         appSettings: (settings ?? {}) as unknown as Record<string, unknown>,
       };
     },

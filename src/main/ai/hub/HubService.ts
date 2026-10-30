@@ -26,7 +26,7 @@ import { CodexAuthProvider } from "../CodexAuthProvider";
 import { HermesManager, type HermesModelConfig } from "../HermesManager";
 import { HubStore } from "./HubStore";
 import { S3WorkspaceSyncService } from "./S3WorkspaceSyncService";
-import { isDemoMode, setDemoMode } from "./demoWorkspace";
+import { getDemoSchedules, isDemoMode, setDemoMode } from "./demoWorkspace";
 import {
   TerminalRegistry,
   type DetectedCommandActivity,
@@ -452,7 +452,14 @@ export class HubService {
       sessions: this.terminals.list(),
       tasks: this.store.data.tasks,
       memories: extra.memories ?? this.store.data.memories,
-      schedules: this.store.data.schedules,
+      schedules: isDemoMode()
+        ? [
+            ...this.store.data.schedules,
+            ...getDemoSchedules().filter(
+              (ds) => !this.store.data.schedules.some((s) => s.id === ds.id),
+            ),
+          ]
+        : this.store.data.schedules,
       inventory: this.store.data.inventory,
       activityLog: extra.activityLog ?? this.store.data.activityLog ?? [],
       workspaceServers: extra.workspaceServers ?? [],

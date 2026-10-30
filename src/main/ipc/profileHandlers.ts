@@ -6,7 +6,7 @@ import { IPC_CHANNELS } from '../../shared/types/ipc';
 import type { SSHConnectionConfig } from '../../shared/types/ssh';
 import type { S3Config } from '../../shared/types/storage';
 import type { IpcBridge } from '../IpcBridge';
-import { getDemoServers, isDemoMode } from '../ai/hub/demoWorkspace';
+import { getDemoS3Profiles, getDemoServers, isDemoMode } from '../ai/hub/demoWorkspace';
 
 /** The part of IpcBridge this handler group may use. */
 export type ProfileHost = Pick<
@@ -19,6 +19,7 @@ export function registerProfileHandlers(bridge: ProfileHost): void {
     const profiles = await bridge.profileStore.getProfiles();
     if (isDemoMode()) {
       const ssh = [...profiles.ssh];
+      const s3 = [...profiles.s3];
       const folderSet = new Set<string>(profiles.folders ?? []);
       for (const d of getDemoServers()) {
         if (d.folder) folderSet.add(d.folder);
@@ -42,9 +43,16 @@ export function registerProfileHandlers(bridge: ProfileHost): void {
           });
         }
       }
+      for (const ds3 of getDemoS3Profiles()) {
+        if (ds3.group) folderSet.add(ds3.group);
+        if (!s3.some((p) => p.id === ds3.id)) {
+          s3.push(ds3);
+        }
+      }
       return {
         ...profiles,
         ssh,
+        s3,
         folders: Array.from(folderSet),
       };
     }
