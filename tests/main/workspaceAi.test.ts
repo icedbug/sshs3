@@ -1478,6 +1478,85 @@ describe("Production multi-user workspace sync & auto-memory", () => {
       updatedTask?.messages.some((m) => m.text.includes("Agent Handoff")),
     ).toBe(true);
   });
+
+  it("ships 100% batteries-included out-of-the-box with 6 Mission Agents, 8 @kb Runbooks, 6 Skills + Core Memory, 12 Snippets, and supports 1-click Demo-Lab toggle & Restore Builtins", async () => {
+    const { HubService } = await import("../../src/main/ai/hub/HubService");
+    const { getBuiltinSnippets, setDemoMode } = await import(
+      "../../src/main/ai/hub/demoWorkspace"
+    );
+
+    setDemoMode(false);
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "sshs3-hub-outofthebox-"));
+    disposals.push(() => {
+      setDemoMode(false);
+      return fs.rm(tmpDir, { recursive: true, force: true });
+    });
+
+    const hub = new HubService(
+      {
+        changed: () => {},
+        inventoryTargets: async () => [],
+        backgroundChanged: async () => {},
+        openSchedule: async () => "s1",
+        show: () => {},
+      },
+      tmpDir,
+    );
+    disposals.push(() => hub.dispose());
+    await hub.initialize();
+
+    const snap = await hub.snapshot();
+    // Even with Demo Mode OFF, all 6 built-in specialist agents and 8 KB runbooks are pre-loaded!
+    expect(snap.demoMode).toBe(false);
+    expect((snap.agents ?? []).length).toBe(6);
+    expect(
+      snap.agents?.some((a) => a.id === "builtin-agent-linux-sre"),
+    ).toBe(true);
+    expect(
+      snap.agents?.some((a) => a.id === "builtin-agent-ssh-security"),
+    ).toBe(true);
+    expect((snap.kbDocuments ?? []).length).toBe(8);
+    expect(
+      snap.kbDocuments?.some((d) => d.id === "builtin-kb-linux-use-sre"),
+    ).toBe(true);
+    expect(
+      snap.memories.some((m) => m.id === "builtin-skill-linux-use-triage"),
+    ).toBe(true);
+    expect(
+      snap.memories.some((m) => m.id === "builtin-mem-sre-golden-rules"),
+    ).toBe(true);
+    expect(getBuiltinSnippets().length).toBe(12);
+
+    // Dismissing a built-in agent hides it until restore-builtins is called
+    const afterDelete = await hub.request({
+      action: "agent-delete",
+      id: "builtin-agent-linux-sre",
+    });
+    expect(
+      afterDelete.agents?.some((a) => a.id === "builtin-agent-linux-sre"),
+    ).toBe(false);
+
+    const afterRestore = await hub.request({ action: "restore-builtins" });
+    expect(
+      afterRestore.agents?.some((a) => a.id === "builtin-agent-linux-sre"),
+    ).toBe(true);
+
+    // Toggle Demo-Lab ON at runtime via HubRequest
+    const afterDemoOn = await hub.request({
+      action: "demo-mode-toggle",
+      enabled: true,
+    });
+    expect(afterDemoOn.demoMode).toBe(true);
+    expect(afterDemoOn.preferences.demoLabEnabled).toBe(true);
+    expect((afterDemoOn.tasks ?? []).length).toBeGreaterThanOrEqual(1);
+
+    // Toggle Demo-Lab OFF again
+    const afterDemoOff = await hub.request({
+      action: "demo-mode-toggle",
+      enabled: false,
+    });
+    expect(afterDemoOff.demoMode).toBe(false);
+  });
 });
 
 

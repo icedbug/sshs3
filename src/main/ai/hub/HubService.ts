@@ -44,6 +44,9 @@ import {
   deleteDemoInfraEdge,
   deleteDemoKbDocument,
   deleteDemoMcpServer,
+  getBuiltinAgents,
+  getBuiltinKbDocuments,
+  getBuiltinSkillsAndMemories,
   getDemoAgents,
   getDemoInfraEdges,
   getDemoKbDocuments,
@@ -466,6 +469,9 @@ export class HubService {
       await this.store.load().catch((e) =>
         log.warn("HubStore load failed; using default store", safeError(e)),
       );
+      if (this.store.data.preferences.demoLabEnabled !== undefined) {
+        setDemoMode(this.store.data.preferences.demoLabEnabled);
+      }
       await this.s3Workspace.start().catch((e) =>
         log.warn("S3 workspace start failed", safeError(e)),
       );
@@ -516,10 +522,13 @@ export class HubService {
 
   private getAgentsList(): MissionAgent[] {
     const stored = this.store.data.agents ?? [];
-    if (!isDemoMode()) return stored;
+    const dismissed = new Set(this.store.data.preferences.dismissedBuiltinIds ?? []);
+    const builtins = isDemoMode() ? getDemoAgents() : getBuiltinAgents();
     return [
       ...stored,
-      ...getDemoAgents().filter((da) => !stored.some((a) => a.id === da.id)),
+      ...builtins.filter(
+        (ba) => !dismissed.has(ba.id) && !stored.some((a) => a.id === ba.id),
+      ),
     ];
   }
 
@@ -534,11 +543,21 @@ export class HubService {
 
   private getKbDocumentsList(): KbDocument[] {
     const stored = this.store.data.kbDocuments ?? [];
-    if (!isDemoMode()) return stored;
+    const dismissed = new Set(this.store.data.preferences.dismissedBuiltinIds ?? []);
+    const builtins = isDemoMode() ? getDemoKbDocuments() : getBuiltinKbDocuments();
     return [
       ...stored,
-      ...getDemoKbDocuments().filter((dk) => !stored.some((k) => k.id === dk.id)),
+      ...builtins.filter(
+        (bk) => !dismissed.has(bk.id) && !stored.some((k) => k.id === bk.id),
+      ),
     ];
+  }
+
+  private markBuiltinDismissed(id: string): void {
+    const list = this.store.data.preferences.dismissedBuiltinIds ?? [];
+    if (!list.includes(id)) {
+      this.store.data.preferences.dismissedBuiltinIds = [...list, id];
+    }
   }
 
   private getInfraEdgesList(): InfraGraphEdge[] {
@@ -774,6 +793,7 @@ export class HubService {
         : undefined,
       config: configView,
       preferences: this.store.data.preferences,
+      demoMode: isDemoMode(),
       runtime: {
         bundled: true,
         version: manifest?.tag ?? "native-ts-1.0",
@@ -1050,6 +1070,7 @@ export class HubService {
         this.store.data.memories = this.store.data.memories.filter(
           (m) => m.id !== request.id,
         );
+        this.markBuiltinDismissed(request.id);
         this.store.data.deletedMemoryIds ??= {};
         this.store.data.deletedMemoryIds[request.id] = Date.now();
         await this.host.deleteWorkspaceMemory?.(request.id).catch(() => {});
@@ -1380,6 +1401,21 @@ export class HubService {
           (s) => s.id !== request.id,
         );
         break;
+      case "demo-mode-toggle": {
+        const enabled = Boolean(request.enabled);
+        this.store.data.preferences.demoLabEnabled = enabled;
+        setDemoMode(enabled);
+        break;
+      }
+      case "restore-builtins": {
+        this.store.data.preferences.dismissedBuiltinIds = [];
+        for (const bm of getBuiltinSkillsAndMemories()) {
+          if (this.store.data.deletedMemoryIds?.[bm.id]) {
+            delete this.store.data.deletedMemoryIds[bm.id];
+          }
+        }
+        break;
+      }
       case "agent-save": {
         const a = request.agent;
         const id = a.id?.trim() || crypto.randomUUID();
@@ -1414,6 +1450,7 @@ export class HubService {
         this.store.data.agents = (this.store.data.agents ?? []).filter(
           (a) => a.id !== request.id,
         );
+        this.markBuiltinDismissed(request.id);
         if (isDemoMode()) deleteDemoAgent(request.id);
         break;
       }
@@ -1613,6 +1650,7 @@ export class HubService {
         this.store.data.kbDocuments = (this.store.data.kbDocuments ?? []).filter(
           (d) => d.id !== request.id,
         );
+        this.markBuiltinDismissed(request.id);
         if (isDemoMode()) deleteDemoKbDocument(request.id);
         break;
       }
@@ -2573,6 +2611,7 @@ export class HubService {
     }
 
     const deletedMemoryIds = this.store.data.deletedMemoryIds ?? {};
+    const dismissed = new Set(this.store.data.preferences.dismissedBuiltinIds ?? []);
     const memoryMap = new Map<string, MemoryEntry>();
     for (const m of this.store.data.memories) {
       if ((deletedMemoryIds[m.id] ?? 0) < (m.updatedAt ?? 0)) {
@@ -2583,6 +2622,13 @@ export class HubService {
       if ((deletedMemoryIds[m.id] ?? 0) >= (m.updatedAt ?? 0)) continue;
       const existing = memoryMap.get(m.id);
       if (!existing || m.updatedAt >= existing.updatedAt) {
+        memoryMap.set(m.id, m);
+      }
+    }
+    for (const m of getBuiltinSkillsAndMemories()) {
+      if (dismissed.has(m.id)) continue;
+      if ((deletedMemoryIds[m.id] ?? 0) >= (m.updatedAt ?? 0)) continue;
+      if (!memoryMap.has(m.id)) {
         memoryMap.set(m.id, m);
       }
     }

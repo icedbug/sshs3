@@ -1,5 +1,5 @@
 import { SNIPPET_MAX_NAME_CHARS } from '../../shared/types/snippets';
-import { getDemoSnippets, isDemoMode } from '../ai/hub/demoWorkspace';
+import { getBuiltinSnippets } from '../ai/hub/demoWorkspace';
 import { resolveLogLevel, setLogLevel } from '../log/Logger';
 import { IPC_CHANNELS } from '../../shared/types/ipc';
 import type { SessionData } from '../../shared/types/session';
@@ -62,14 +62,11 @@ export function registerSnippetHandlers(bridge: AppDataHost): void {
       throw new Error('Invalid host key');
     }
     const list = await bridge.snippetStore.list(hostKey);
-    if (isDemoMode()) {
-      const merged = [...list];
-      for (const ds of getDemoSnippets()) {
-        if (!merged.some((s) => s.id === ds.id)) merged.push(ds);
-      }
-      return merged;
+    const merged = [...list];
+    for (const ds of getBuiltinSnippets()) {
+      if (!merged.some((s) => s.id === ds.id)) merged.push(ds);
     }
-    return list;
+    return merged;
   });
 
   bridge.registerHandler(IPC_CHANNELS.SNIPPETS_SAVE, async (_event, input: unknown) => {

@@ -219,6 +219,12 @@ export const LandingView: React.FC<LandingViewProps> = ({
   const [memTier, setMemTier] = useState<'core' | 'archival' | 'episodic'>('archival');
   const [addingMemory, setAddingMemory] = useState(false);
   const [runningDashboardSwarm, setRunningDashboardSwarm] = useState(false);
+  const [quickAiOpen, setQuickAiOpen] = useState(false);
+  const [quickAiDismissed, setQuickAiDismissed] = useState(false);
+  const [quickAiProvider, setQuickAiProvider] = useState<'openai-compatible' | 'anthropic' | 'openrouter'>('openai-compatible');
+  const [quickAiKey, setQuickAiKey] = useState('');
+  const [quickAiSaving, setQuickAiSaving] = useState(false);
+  const [quickAiNotice, setQuickAiNotice] = useState<string | null>(null);
 
   // Auto-focus the first actionable element on mount so keyboard navigation is immediately active
   useEffect(() => {
@@ -788,6 +794,107 @@ export const LandingView: React.FC<LandingViewProps> = ({
     }
   };
 
+  const handleToggleDemoLab = async () => {
+    try {
+      await hubRequest({
+        action: 'demo-mode-toggle',
+        enabled: !hub?.demoMode,
+      });
+    } catch {
+      // Ignore in mocked tests
+    }
+  };
+
+  const handleQuickConnectCodex = async () => {
+    setQuickAiSaving(true);
+    setQuickAiNotice(null);
+    try {
+      await hubRequest({
+        action: 'configure',
+        config: {
+          enabled: true,
+          provider: 'openai-codex',
+          model: hub?.config.codexDefaultModel || 'gpt-6.1-sol',
+          useHermes: false,
+        },
+      });
+      setQuickAiNotice('✅ ChatGPT / Codex OAuth aktiverad!');
+      setTimeout(() => setQuickAiOpen(false), 1200);
+    } catch (err) {
+      setQuickAiNotice(err instanceof Error ? err.message : String(err));
+    } finally {
+      setQuickAiSaving(false);
+    }
+  };
+
+  const handleQuickConnectOllama = async () => {
+    setQuickAiSaving(true);
+    setQuickAiNotice(null);
+    try {
+      await hubRequest({
+        action: 'configure',
+        config: {
+          enabled: true,
+          provider: 'openai-compatible',
+          baseUrl: 'http://127.0.0.1:11434/v1',
+          model: 'qwen2.5-coder:14b',
+          useHermes: false,
+        },
+      });
+      setQuickAiNotice('✅ Lokal AI (Ollama localhost:11434) aktiverad!');
+      setTimeout(() => setQuickAiOpen(false), 1200);
+    } catch (err) {
+      setQuickAiNotice(err instanceof Error ? err.message : String(err));
+    } finally {
+      setQuickAiSaving(false);
+    }
+  };
+
+  const handleQuickConnectApiKey = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!quickAiKey.trim()) return;
+    setQuickAiSaving(true);
+    setQuickAiNotice(null);
+    try {
+      const isAnthropic = quickAiProvider === 'anthropic';
+      const isOpenRouter = quickAiProvider === 'openrouter';
+      await hubRequest({
+        action: 'configure',
+        config: {
+          enabled: true,
+          provider: isAnthropic ? 'anthropic' : 'openai-compatible',
+          baseUrl: isAnthropic
+            ? ''
+            : isOpenRouter
+              ? 'https://openrouter.ai/api/v1'
+              : 'https://api.openai.com/v1',
+          model: isAnthropic
+            ? 'claude-sonnet-4-20250514'
+            : isOpenRouter
+              ? 'anthropic/claude-3.7-sonnet'
+              : 'gpt-4.1',
+          apiKey: quickAiKey.trim(),
+          useHermes: false,
+        },
+      });
+      setQuickAiKey('');
+      setQuickAiNotice('✅ API-nyckel sparad i OS-nyckelringen & AI aktiverad!');
+      setTimeout(() => setQuickAiOpen(false), 1200);
+    } catch (err) {
+      setQuickAiNotice(err instanceof Error ? err.message : String(err));
+    } finally {
+      setQuickAiSaving(false);
+    }
+  };
+
+  const isAiConnected = Boolean(
+    hub?.config.enabled &&
+      (hub?.config.hasApiKey ||
+        hub?.config.codexConnected ||
+        hub?.config.baseUrl?.includes('11434') ||
+        hub?.config.baseUrl?.includes('localhost'))
+  );
+
   const totalMcpTools = useMemo(
     () =>
       (hub?.mcpServers ?? []).reduce(
@@ -1304,6 +1411,37 @@ export const LandingView: React.FC<LandingViewProps> = ({
                 <div className="flex flex-wrap items-center gap-1">
                   <button
                     type="button"
+                    data-testid="workspace-demo-lab-toggle"
+                    onClick={handleToggleDemoLab}
+                    title="Slå på eller av det interaktiva 12-noders Enterprise Demo-Labbet (NetApp ONTAP, StorageGRID, Ceph/ZFS & K8s Trident) direkt i gränssnittet"
+                    className={`rounded-full px-2.5 py-0.5 text-[10.5px] font-semibold transition-all ${
+                      hub?.demoMode
+                        ? 'border border-amber-400/60 bg-amber-500/20 text-amber-200 shadow-sm'
+                        : 'border border-border-subtle bg-app-card text-txt-muted hover:border-amber-500/40 hover:text-amber-200'
+                    }`}
+                  >
+                    {hub?.demoMode ? '🧪 Demo-Lab: PÅ' : '🧪 Demo-Lab: AV'}
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="workspace-quick-connect-ai-toggle"
+                    onClick={() => {
+                      setQuickAiDismissed(false);
+                      setQuickAiOpen((v) => !v);
+                    }}
+                    title="Koppla din AI (ChatGPT OAuth, API-nyckel eller Lokal Ollama) med 1 klick"
+                    className={`rounded-full px-2.5 py-0.5 text-[10.5px] font-semibold transition-all ${
+                      isAiConnected
+                        ? 'border border-emerald-400/50 bg-emerald-500/20 text-emerald-200'
+                        : 'border border-sky-400/60 bg-sky-500/25 text-sky-100 animate-pulse'
+                    }`}
+                  >
+                    {isAiConnected
+                      ? `🟢 AI Kopplad (${hub?.config.model || 'Redo'})`
+                      : '⚡ Koppla din AI (1-klick)'}
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => setAiQuickAgentId('')}
                     className={`rounded-full px-2 py-0.5 text-[10.5px] font-semibold transition-all ${
                       !aiQuickAgentId
@@ -1333,6 +1471,131 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   ))}
                 </div>
               </div>
+
+              {/* 1-Click "Koppla din AI på 10 sekunder" Onboarding Card */}
+              {(quickAiOpen || (Boolean(hub) && !isAiConnected && !quickAiDismissed)) && (
+                <div
+                  data-testid="quick-connect-ai-banner"
+                  className="rounded-xl border border-emerald-500/40 bg-app-card/95 p-3 shadow-inner space-y-2.5"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="rounded-md bg-emerald-500/20 px-2 py-0.5 text-[10.5px] font-bold text-emerald-300 border border-emerald-500/30">
+                        ⚡ Fullspäckad Out-of-the-Box
+                      </span>
+                      <span className="text-xs font-semibold text-txt-primary">
+                        6 Specialist-agenter, 8 @kb Runbooks, 6 Skills & 12 SRE-snippets är redan förladdade — koppla bara din AI:
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setQuickAiOpen(false);
+                        setQuickAiDismissed(true);
+                      }}
+                      className="text-[11px] text-txt-muted hover:text-txt-primary px-1.5 py-0.5"
+                    >
+                      Stäng ✕
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
+                    {/* Option 1: 1-Click ChatGPT / Codex OAuth */}
+                    <div className="flex flex-col justify-between rounded-lg border border-sky-500/30 bg-sky-500/5 p-2.5">
+                      <div>
+                        <div className="text-xs font-bold text-sky-300">
+                          1. 🔐 ChatGPT / Codex (OAuth)
+                        </div>
+                        <p className="mt-0.5 text-[11px] text-txt-muted">
+                          Använd din befintliga ChatGPT Plus/Pro/Team-session (`~/.codex/auth.json` eller `hermes-native`) utan API-nyckel.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        data-testid="quick-connect-codex-btn"
+                        disabled={quickAiSaving}
+                        onClick={handleQuickConnectCodex}
+                        className="mt-2 w-full rounded-md bg-sky-600 px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-sky-500 transition-colors"
+                      >
+                        {hub?.config.codexConnected
+                          ? `✅ Aktivera ChatGPT (${hub.config.codexAccountEmail || 'Redo'})`
+                          : '🔐 Koppla ChatGPT / Codex (1-klick)'}
+                      </button>
+                    </div>
+
+                    {/* Option 2: Paste API Key Directly */}
+                    <form
+                      onSubmit={handleQuickConnectApiKey}
+                      className="flex flex-col justify-between rounded-lg border border-purple-500/30 bg-purple-500/5 p-2.5"
+                    >
+                      <div>
+                        <div className="flex items-center justify-between gap-1">
+                          <span className="text-xs font-bold text-purple-300">
+                            2. 🔑 Klistra in API-nyckel
+                          </span>
+                          <select
+                            aria-label="Snabbval AI-leverantör"
+                            value={quickAiProvider}
+                            onChange={(e) =>
+                              setQuickAiProvider(
+                                e.target.value as 'openai-compatible' | 'anthropic' | 'openrouter'
+                              )
+                            }
+                            className="rounded border border-border-subtle bg-app px-1.5 py-0.5 text-[10px] text-txt-primary"
+                          >
+                            <option value="openai-compatible">OpenAI (GPT-4.1)</option>
+                            <option value="anthropic">Anthropic (Claude Sonnet 4)</option>
+                            <option value="openrouter">OpenRouter</option>
+                          </select>
+                        </div>
+                        <input
+                          type="password"
+                          data-testid="quick-connect-apikey-input"
+                          value={quickAiKey}
+                          onChange={(e) => setQuickAiKey(e.target.value)}
+                          placeholder="sk-... / sk-ant-..."
+                          className="mt-1.5 w-full rounded border border-border-subtle bg-app px-2 py-1 text-[11px] text-txt-primary placeholder:text-txt-muted outline-none focus:border-purple-400"
+                        />
+                      </div>
+                      <button
+                        type="submit"
+                        data-testid="quick-connect-apikey-btn"
+                        disabled={quickAiSaving || !quickAiKey.trim()}
+                        className="mt-2 w-full rounded-md bg-purple-600 px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-purple-500 disabled:opacity-50 transition-colors"
+                      >
+                        🔑 Spara i OS-nyckelring & Aktivera
+                      </button>
+                    </form>
+
+                    {/* Option 3: 1-Click Local Ollama */}
+                    <div className="flex flex-col justify-between rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-2.5">
+                      <div>
+                        <div className="text-xs font-bold text-emerald-300">
+                          3. 🦙 Lokal AI (Ollama / vLLM)
+                        </div>
+                        <p className="mt-0.5 text-[11px] text-txt-muted">
+                          Kör 100 % lokalt och privat mot `http://127.0.0.1:11434/v1` utan externa moln-API:er.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        data-testid="quick-connect-ollama-btn"
+                        disabled={quickAiSaving}
+                        onClick={handleQuickConnectOllama}
+                        className="mt-2 w-full rounded-md bg-emerald-600 px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-emerald-500 transition-colors"
+                      >
+                        🦙 Koppla Lokal Ollama (1-klick)
+                      </button>
+                    </div>
+                  </div>
+
+                  {quickAiNotice && (
+                    <div className="text-[11px] font-medium text-emerald-300">
+                      {quickAiNotice}
+                    </div>
+                  )}
+                </div>
+              )}
 
               <form
                 onSubmit={(e) => {

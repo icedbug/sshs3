@@ -298,6 +298,8 @@ export interface HubPreferences {
   inventory: boolean;
   retentionDays: number;
   sharedWorkspacePath?: string;
+  demoLabEnabled?: boolean;
+  dismissedBuiltinIds?: string[];
 }
 export interface MissionAgent {
   id: string;
@@ -393,6 +395,7 @@ export interface HubSnapshot {
   preview?: ContextSource & { sessionId: string };
   config: AiConfigView;
   preferences: HubPreferences;
+  demoMode?: boolean;
   runtime: { bundled: boolean; version?: string };
   sessions: TerminalSession[];
   tasks: AgentTask[];
@@ -628,6 +631,8 @@ export type HubRequest =
       };
     }
   | { action: "schedule-delete"; id: string }
+  | { action: "demo-mode-toggle"; enabled: boolean }
+  | { action: "restore-builtins" }
   | { action: "inventory-refresh" }
   | { action: "forget-history" }
   | { action: "quit" };

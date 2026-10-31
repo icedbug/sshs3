@@ -756,7 +756,17 @@ export function AiHubPanel({
   async function submit(): Promise<void> {
     const hasImages = attachments.some((a) => !!a.imageDataUrl);
     if (busy || (!prompt.trim() && !hasImages)) return;
-    if (!hub?.config.enabled || !hub.config.model || !hub.runtime.bundled) {
+    if (!hub?.config.enabled) {
+      if (hub?.demoMode || hub?.config.codexConnected || hub?.config.hasApiKey) {
+        await act({
+          action: "configure",
+          config: { enabled: true },
+        });
+      } else {
+        setSettingsOpen(true);
+        return;
+      }
+    } else if (!hub.config.model || !hub.runtime.bundled) {
       setSettingsOpen(true);
       return;
     }
@@ -828,6 +838,23 @@ export function AiHubPanel({
           <strong>Chat</strong>
         </span>
         <div className="ai-header-actions">
+          {hub && (
+            <button
+              type="button"
+              data-testid="ai-hub-demo-toggle"
+              className={`ai-badge ${hub.demoMode ? "ai-badge-warn" : ""}`}
+              style={{ cursor: "pointer", fontSize: 10.5, padding: "3px 8px" }}
+              title="Växla det interaktiva 12-noders Enterprise Demo-Labbet PÅ eller AV direkt i UI:t"
+              onClick={() =>
+                void act({
+                  action: "demo-mode-toggle",
+                  enabled: !hub.demoMode,
+                })
+              }
+            >
+              {hub.demoMode ? "🧪 Demo-Lab: PÅ" : "🧪 Demo-Lab: AV"}
+            </button>
+          )}
           <button
             className="ai-icon-button"
             aria-label="New chat"
@@ -1157,6 +1184,67 @@ export function AiHubPanel({
                     <p>
                       Välj en specialiserad <strong>Mission Agent</strong> eller fråga fritt om dina kluster, VMs, S3-buckets, KB-runbooks och MCP-verktyg.
                     </p>
+                    {!hub.config.hasApiKey &&
+                      !hub.config.codexConnected &&
+                      !hub.config.baseUrl?.includes("11434") && (
+                        <article
+                          className="ai-card ai-card-active"
+                          data-testid="ai-hub-quick-connect-card"
+                          style={{ marginBottom: 14, textAlign: "left" }}
+                        >
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                            <strong>⚡ Koppla din AI på 10 sekunder (Allt annat är förladdat!)</strong>
+                            <span className="ai-badge ai-badge-green">
+                              {(hub.agents ?? []).length} Agenter · {(hub.kbDocuments ?? []).length} Runbooks
+                            </span>
+                          </div>
+                          <p style={{ fontSize: 11.5, margin: "6px 0 10px" }}>
+                            Alla 6 specialist-agenter, 8 @kb-runbooks och 12 SRE-snippets är redan redo. Välj hur du vill ansluta din modell:
+                          </p>
+                          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                            <button
+                              type="button"
+                              className="ai-btn-emerald"
+                              onClick={() =>
+                                void act({
+                                  action: "configure",
+                                  config: {
+                                    enabled: true,
+                                    provider: "openai-codex",
+                                    model: hub.config.codexDefaultModel || "gpt-6.1-sol",
+                                    useHermes: false,
+                                  },
+                                })
+                              }
+                            >
+                              🔐 ChatGPT / Codex OAuth (1-klick)
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                void act({
+                                  action: "configure",
+                                  config: {
+                                    enabled: true,
+                                    provider: "openai-compatible",
+                                    baseUrl: "http://127.0.0.1:11434/v1",
+                                    model: "qwen2.5-coder:14b",
+                                    useHermes: false,
+                                  },
+                                })
+                              }
+                            >
+                              🦙 Lokal Ollama (localhost:11434)
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setSettingsOpen(true)}
+                            >
+                              🔑 Klistra in API-nyckel (OpenAI / Claude)…
+                            </button>
+                          </div>
+                        </article>
+                      )}
                     {(hub.agents ?? []).length > 0 && (
                       <div className="ai-agent-quick-bar" aria-label="Quick select Mission Agent">
                         <button
@@ -2803,6 +2891,25 @@ function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Element {
       }}
     >
       <h2>Your model, your infrastructure</h2>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+        <button
+          type="button"
+          onClick={() =>
+            void act({
+              action: "demo-mode-toggle",
+              enabled: !hub.demoMode,
+            })
+          }
+        >
+          {hub.demoMode ? "🧪 Stäng av Demo-Lab" : "🧪 Aktivera 12-noders Demo-Lab"}
+        </button>
+        <button
+          type="button"
+          onClick={() => void act({ action: "restore-builtins" })}
+        >
+          🔄 Återställ inbyggda Agenter, Runbooks & Skills
+        </button>
+      </div>
       <label>
         <input
           type="checkbox"

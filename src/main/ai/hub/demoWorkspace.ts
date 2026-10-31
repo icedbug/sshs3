@@ -615,6 +615,39 @@ const initialDemoMemories: MemoryEntry[] = [
     author: "linnea@acme.se",
     updatedAt: now - 42 * min,
   },
+  {
+    id: "builtin-skill-linux-use-triage",
+    kind: "skill",
+    scope: "workspace",
+    title: "Runbook: Linux SRE Incident & Performance Triage (USE Method)",
+    text: [
+      "1. Snabb 60-sekunders USE-översikt (Utilization, Saturation, Errors):",
+      "   `uptime && dmesg -T | tail -n 20 && vmstat 1 3 && iostat -xz 1 2`",
+      "2. Identifiera systemd-tjänster som kraschat eller startat om:",
+      "   `systemctl --failed && journalctl -p err..alert -n 40 --no-pager`",
+      "3. Kontrollera öppna lyssnande portar och TCP-köer:",
+      "   `ss -tulnp && ss -s`",
+      "4. Kontrollera diskutrymme, inodes och största loggkataloger:",
+      "   `df -hT && df -i && sudo du -xhd1 /var/log | sort -hr | head -n 10`",
+    ].join("\n"),
+    author: "sshs3-stdlib",
+    updatedAt: now - 55 * min,
+  },
+  {
+    id: "builtin-mem-sre-golden-rules",
+    kind: "memory",
+    tier: "core",
+    updatedCount: 1,
+    scope: "workspace",
+    title: "SRE Säkerhetsprinciper: Read-Only först, Backup före ändring & Verifiering",
+    text: [
+      "- Kör alltid icke-destruktiva diagnostikkommandon (🟢 Safe) för att bekräfta nuläget innan du föreslår tillståndsändrande kommandon (🟡 Modify).",
+      "- Ta alltid backup av konfigurationsfiler (`cp -a fil fil.bak.$(date +%F)`) innan redigering och verifiera syntax (`nginx -t`, `sshd -t`, `multipath -t`) före reload.",
+      "- Verifiera alltid tjänste- och klusterhälsa efter varje utförd ändring.",
+    ].join("\n"),
+    author: "sshs3-stdlib",
+    updatedAt: now - 60 * min,
+  },
 ];
 
 const initialDemoSchedules: AgentSchedule[] = [
@@ -706,6 +739,41 @@ const initialDemoSnippets: Snippet[] = [
     command:
       "zpool status -v && zfs list -o name,used,avail,refer,compressratio,mountpoint",
   },
+  {
+    id: "builtin-snip-linux-use-triage",
+    name: "Linux SRE: 60s USE Performance Triage (CPU/Mem/IO)",
+    command:
+      "uptime && free -h && vmstat 1 3 && iostat -xz 1 2 && dmesg -T | tail -n 15",
+  },
+  {
+    id: "builtin-snip-systemd-failed",
+    name: "Linux SRE: Failed Systemd Services & Recent Critical Logs",
+    command:
+      "systemctl --failed --no-pager && journalctl -p err..alert -n 30 --no-pager",
+  },
+  {
+    id: "builtin-snip-net-ports",
+    name: "Nätverk & Säkerhet: Lyssnande Portar & Aktiva SSH/TCP-sessioner",
+    command: "ss -tulnp && ss -tan state established | head -n 30",
+  },
+  {
+    id: "builtin-snip-disk-inodes",
+    name: "Lagring: Diskutrymme, Inodes & Topp 10 Största Kataloger i /var",
+    command:
+      "df -hT -x tmpfs -x devtmpfs && df -i -x tmpfs && sudo du -xhd1 /var | sort -hr | head -n 10",
+  },
+  {
+    id: "builtin-snip-k8s-events",
+    name: "Kubernetes: Pods Not-Ready & Senaste Warning Events",
+    command:
+      "kubectl get pods -A --field-selector=status.phase!=Running,status.phase!=Succeeded && kubectl get events -A --sort-by='.lastTimestamp' | tail -n 25",
+  },
+  {
+    id: "builtin-snip-docker-health",
+    name: "Containers: Docker / Containerd Status & Resursförbrukning",
+    command:
+      "docker ps --format 'table {{.Names}}\\t{{.Status}}\\t{{.Ports}}' && docker stats --no-stream",
+  },
 ];
 
 const demoServersStore = new Map<string, WorkspaceServerSummary>(
@@ -728,6 +796,16 @@ export function getDemoSchedules(): AgentSchedule[] {
 
 export function getDemoSnippets(): Snippet[] {
   return initialDemoSnippets.map((s) => ({ ...s }));
+}
+
+export function getBuiltinSnippets(): Snippet[] {
+  return initialDemoSnippets.map((s) => ({ ...s }));
+}
+
+export function getBuiltinSkillsAndMemories(): MemoryEntry[] {
+  return initialDemoMemories
+    .filter((m) => m.kind === "skill" || m.id.startsWith("builtin-"))
+    .map((m) => ({ ...m }));
 }
 
 export function updateDemoServer(input: {
@@ -944,6 +1022,44 @@ const initialDemoAgents: MissionAgent[] = [
     updatedAt: now - 18 * min,
     author: "jacob",
   },
+  {
+    id: "builtin-agent-linux-sre",
+    name: "Linux & Systemd SRE Architect",
+    role: "Linux Kernel, Systemd, Performance (USE Method) & Container SRE",
+    icon: "🐧",
+    mission:
+      "Felsök hög CPU/load, OOM-kills, disk-I/O-flaskhalsar, kraschande systemd-tjänster, Docker/Containerd och nätverkslatens på alla Linux-servrar.",
+    systemPrompt: [
+      "Du är en senior Linux & Infrastruktur SRE-arkitekt.",
+      "- Tillämpa alltid Brendan Greggs USE-metod (Utilization, Saturation, Errors) med icke-destruktiva kommandon först (`uptime`, `vmstat`, `iostat -xz`, `systemctl --failed`, `journalctl -p err`).",
+      "- Ta alltid backup av konfigurationsfiler innan du redigerar dem och verifiera syntax före omstart av tjänster.",
+    ].join("\n"),
+    defaultMode: "assisted",
+    allowedTools: ["all"],
+    kbDocIds: ["builtin-kb-linux-use-sre", "builtin-kb-postgres-container"],
+    mcpServerIds: [],
+    updatedAt: now - 10 * min,
+    author: "sshs3-stdlib",
+  },
+  {
+    id: "builtin-agent-ssh-security",
+    name: "SSH, Bastion & Security Auditor",
+    role: "OpenSSH Hardening, ProxyJump, Port-Forwarding & YubiKey/FIDO2 Specialist",
+    icon: "🔐",
+    mission:
+      "Granska och härda `sshd_config`, konfigurera säkra ProxyJump-bastioner, felsök SSH-tunnlar (`-L`/`-R`/`-D`), brandväggsregler (`nftables`/`ufw`) och FIDO2/PIV-nycklar.",
+    systemPrompt: [
+      "Du är en säkerhets- och OpenSSH-specialist för bastion-hopp, krypterade tunnlar och Linux-härdning.",
+      "- Verifiera alltid `sudo sshd -t` innan du laddar om `sshd` så att du aldrig låser ute administratören.",
+      "- Rekommendera Ed25519-SK (FIDO2/YubiKey) eller certifikatbaserad autentisering, `PermitRootLogin prohibit-password` och strikta `AllowUsers`/`Match`-block.",
+    ].join("\n"),
+    defaultMode: "assisted",
+    allowedTools: ["all"],
+    kbDocIds: ["builtin-kb-openssh-fido2"],
+    mcpServerIds: [],
+    updatedAt: now - 15 * min,
+    author: "sshs3-stdlib",
+  },
 ];
 
 const initialDemoMcpServers: McpServerConfig[] = [
@@ -1000,7 +1116,7 @@ const initialDemoMcpServers: McpServerConfig[] = [
 const initialDemoKbDocuments: KbDocument[] = [
   {
     id: "demo-kb-ontap-cli-qos",
-    title: "NetApp ONTAP 9.15 CLI, Adaptive QoS & FabricPool Reference",
+    title: "NetApp ONTAP QoS, 9.15 CLI & FabricPool Reference",
     sourceType: "upload",
     sourceRef: "ontap-9.15-operations-handbook.md",
     cluster: "NetApp-ONTAP-Prod-SE",
@@ -1125,6 +1241,142 @@ const initialDemoKbDocuments: KbDocument[] = [
     updatedAt: now - 28 * min,
     shared: true,
   },
+  {
+    id: "builtin-kb-snapmirror-ransomware",
+    title: "NetApp SnapMirror XDP, SnapLock WORM & Ransomware Recovery SOP",
+    sourceType: "manual",
+    sourceRef: "stdlib://netapp-snapmirror-ransomware-sop.md",
+    cluster: "NetApp-ONTAP-Prod-SE",
+    tags: ["netapp", "snapmirror", "snaplock", "ransomware", "dr"],
+    content: [
+      "# NetApp SnapMirror XDP & Autonomous Ransomware Protection (ARP) SOP",
+      "",
+      "## 1. Diagnosing SnapMirror Lag or Broken-Off State",
+      "- List unhealthy relationships: `snapmirror show -healthy false -fields source-path,destination-path,state,status,lag-time,last-transfer-error`.",
+      "- Verify Intercluster LIF reachability & MTU 9000: `cluster peer ping -aca true`.",
+      "- Resync broken relationship: `snapmirror resync -destination-path <svm>:<vol>`.",
+      "",
+      "## 2. Ransomware Recovery via Tamperproof SnapLock Snapshots",
+      "- Inspect immutable snapshots: `volume snapshot show -vserver <svm> -volume <vol> -fields snaplock-expiry-time`.",
+      "- Restore volume instantaneously (< 10 seconds) using SnapRestore: `volume snapshot restore -vserver <svm> -volume <vol> -snapshot <clean_snap>`.",
+    ].join("\n"),
+    chunks: [
+      {
+        id: "builtin-kb-snapmirror-ransomware#0",
+        heading: "1. Diagnosing SnapMirror Lag or Broken-Off State",
+        text: "List unhealthy relationships: `snapmirror show -healthy false`. Verify Intercluster LIF reachability & MTU 9000: `cluster peer ping -aca true`. Resync broken relationship: `snapmirror resync -destination-path <svm>:<vol>`.",
+      },
+      {
+        id: "builtin-kb-snapmirror-ransomware#1",
+        heading: "2. Ransomware Recovery via Tamperproof SnapLock Snapshots",
+        text: "Inspect immutable snapshots: `volume snapshot show -fields snaplock-expiry-time`. Restore volume instantaneously using SnapRestore: `volume snapshot restore -vserver <svm> -volume <vol> -snapshot <clean_snap>`.",
+      },
+    ],
+    updatedAt: now - 32 * min,
+    shared: true,
+  },
+  {
+    id: "builtin-kb-linux-use-sre",
+    title: "Linux SRE Incident & Performance Triage (USE Method & Systemd)",
+    sourceType: "manual",
+    sourceRef: "stdlib://linux-sre-use-method-runbook.md",
+    tags: ["linux", "sre", "systemd", "performance", "iostat", "oom"],
+    content: [
+      "# Linux SRE 60-Second Performance & Incident Triage (USE Method)",
+      "",
+      "## 1. CPU, Memory, I/O & Kernel Triage",
+      "1. `uptime` — check load averages vs CPU core count (`nproc`).",
+      "2. `dmesg -T | tail -n 25` — check for OOM-killer (`Out of memory: Killed process`), I/O timeouts, or XFS/ext4 errors.",
+      "3. `vmstat 1 5` — inspect runnable queue (`r`), swap in/out (`si`/`so`), and CPU `wa` (I/O wait).",
+      "4. `iostat -xz 1 3` — inspect `%util`, `r_await`, `w_await`, and `aqu-sz` per NVMe/block device.",
+      "",
+      "## 2. Systemd Service & Journal Recovery",
+      "- Check failed units: `systemctl --failed`.",
+      "- Inspect service crash logs: `journalctl -u <service> -n 100 --no-pager`.",
+      "- Verify config before restart: `nginx -t`, `sshd -t`, `haproxy -c -f /etc/haproxy/haproxy.cfg`.",
+    ].join("\n"),
+    chunks: [
+      {
+        id: "builtin-kb-linux-use-sre#0",
+        heading: "1. CPU, Memory, I/O & Kernel Triage",
+        text: "Run `uptime`, `dmesg -T | tail -n 25` (check for OOM-killer or I/O timeouts), `vmstat 1 5`, and `iostat -xz 1 3` (`%util`, `r_await`, `w_await`, `aqu-sz`).",
+      },
+      {
+        id: "builtin-kb-linux-use-sre#1",
+        heading: "2. Systemd Service & Journal Recovery",
+        text: "Check failed units: `systemctl --failed`. Inspect crash logs: `journalctl -u <service> -n 100 --no-pager`. Verify syntax (`nginx -t`, `sshd -t`) before restart.",
+      },
+    ],
+    updatedAt: now - 40 * min,
+    shared: true,
+  },
+  {
+    id: "builtin-kb-openssh-fido2",
+    title: "OpenSSH Hardening, ProxyJump Bastions, Tunnels & YubiKey/FIDO2 Guide",
+    sourceType: "manual",
+    sourceRef: "stdlib://openssh-bastion-fido2-guide.md",
+    tags: ["ssh", "security", "bastion", "fido2", "yubikey", "tunnel"],
+    content: [
+      "# OpenSSH Hardening, Bastion Jump-Hosts & Hardware Key Guide",
+      "",
+      "## 1. Recommended `/etc/ssh/sshd_config` Production Baseline",
+      "- `PermitRootLogin prohibit-password` (or `no` with sudo admin accounts).",
+      "- `PasswordAuthentication no` and `KbdInteractiveAuthentication no`.",
+      "- `PubkeyAuthentication yes` with `ed25519-sk` (FIDO2/YubiKey) and `ssh-ed25519`.",
+      "- Always validate changes with `sudo sshd -t` before `sudo systemctl reload sshd`.",
+      "",
+      "## 2. SSH Port-Forwarding & ProxyJump Patterns",
+      "- Local forward (`-L`): expose internal Grafana/Prometheus/Postgres (`127.0.0.1:5432`) locally through bastion.",
+      "- Dynamic SOCKS5 (`-D 1080`): route browser or MCP inspector traffic through jump host.",
+    ].join("\n"),
+    chunks: [
+      {
+        id: "builtin-kb-openssh-fido2#0",
+        heading: "1. Recommended /etc/ssh/sshd_config Production Baseline",
+        text: "Set `PermitRootLogin prohibit-password`, `PasswordAuthentication no`, `PubkeyAuthentication yes` with `ed25519-sk` (FIDO2/YubiKey). Always validate with `sudo sshd -t` before `sudo systemctl reload sshd`.",
+      },
+      {
+        id: "builtin-kb-openssh-fido2#1",
+        heading: "2. SSH Port-Forwarding & ProxyJump Patterns",
+        text: "Local forward (`-L`) exposes internal Grafana/Prometheus/Postgres locally through bastion. Dynamic SOCKS5 (`-D 1080`) routes traffic through jump host.",
+      },
+    ],
+    updatedAt: now - 45 * min,
+    shared: true,
+  },
+  {
+    id: "builtin-kb-postgres-container",
+    title: "PostgreSQL, Redis & Docker/Containerd Production Recovery Runbook",
+    sourceType: "manual",
+    sourceRef: "stdlib://postgres-redis-container-runbook.md",
+    tags: ["postgres", "database", "redis", "docker", "containerd", "sre"],
+    content: [
+      "# PostgreSQL, Redis & Container Runtime Production Runbook",
+      "",
+      "## 1. PostgreSQL Lock, Connection & Latency Triage",
+      "- Active slow queries (> 5s): `SELECT pid, now() - query_start AS duration, wait_event_type, state, query FROM pg_stat_activity WHERE state != 'idle' ORDER BY duration DESC LIMIT 15;`",
+      "- Check blocking locks: `SELECT pg_blocking_pids(pid), pid, query FROM pg_stat_activity WHERE cardinality(pg_blocking_pids(pid)) > 0;`",
+      "- Check replication lag: `SELECT client_addr, state, sync_state, pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn) AS byte_lag FROM pg_stat_replication;`",
+      "",
+      "## 2. Docker & Containerd Health Triage",
+      "- Inspect restarting containers: `docker ps -a --filter 'status=restarting' --filter 'status=exited'`.",
+      "- Inspect OOMKilled state: `docker inspect <container> --format '{{json .State}}'`.",
+    ].join("\n"),
+    chunks: [
+      {
+        id: "builtin-kb-postgres-container#0",
+        heading: "1. PostgreSQL Lock, Connection & Latency Triage",
+        text: "Check active slow queries via `pg_stat_activity`, blocking locks via `pg_blocking_pids(pid)`, and WAL replication lag via `pg_stat_replication`.",
+      },
+      {
+        id: "builtin-kb-postgres-container#1",
+        heading: "2. Docker & Containerd Health Triage",
+        text: "Inspect restarting containers (`docker ps -a`) and check OOMKilled state (`docker inspect <container> --format '{{json .State}}'`).",
+      },
+    ],
+    updatedAt: now - 48 * min,
+    shared: true,
+  },
 ];
 
 const demoAgentsStore: MissionAgent[] = [...initialDemoAgents];
@@ -1133,6 +1385,10 @@ const demoKbStore: KbDocument[] = [...initialDemoKbDocuments];
 
 export function getDemoAgents(): MissionAgent[] {
   return [...demoAgentsStore];
+}
+
+export function getBuiltinAgents(): MissionAgent[] {
+  return initialDemoAgents.map((a) => ({ ...a }));
 }
 
 export function saveDemoAgent(agent: MissionAgent): void {
@@ -1163,6 +1419,14 @@ export function deleteDemoMcpServer(id: string): void {
 
 export function getDemoKbDocuments(): KbDocument[] {
   return [...demoKbStore];
+}
+
+export function getBuiltinKbDocuments(): KbDocument[] {
+  return initialDemoKbDocuments.map((d) => ({
+    ...d,
+    chunks: d.chunks.map((c) => ({ ...c })),
+    tags: d.tags ? [...d.tags] : undefined,
+  }));
 }
 
 export function saveDemoKbDocument(doc: KbDocument): void {

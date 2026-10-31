@@ -93,11 +93,14 @@ export function buildCodexHeaders(accessToken: string, baseUrl = DEFAULT_CODEX_B
 
 export class CodexAuthProvider {
   private readonly baseDir: string;
+  private readonly isCustomDir: boolean;
 
   constructor(baseDir?: string) {
     if (baseDir) {
       this.baseDir = baseDir;
+      this.isCustomDir = true;
     } else {
+      this.isCustomDir = false;
       try {
         this.baseDir = app.getPath("userData");
       } catch {
@@ -107,10 +110,17 @@ export class CodexAuthProvider {
   }
 
   private candidateAuthPaths(): string[] {
-    return [
+    const paths = [
       path.join(this.baseDir, "hermes-native", "auth.json"),
       path.join(this.baseDir, "ai-auth.json"),
     ];
+    if (!this.isCustomDir) {
+      paths.push(
+        path.join(os.homedir(), ".codex", "auth.json"),
+        path.join(os.homedir(), ".sshs3", "hermes-native", "auth.json"),
+      );
+    }
+    return paths;
   }
 
   private async readConfiguredModel(): Promise<string | undefined> {
