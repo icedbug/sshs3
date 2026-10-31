@@ -11,6 +11,8 @@ import { AskpassServer } from '../smartcard/AskpassServer';
 import { AgentLifecycleManager } from './AgentLifecycleManager';
 import { registerEntry, unregisterEntry } from './AgentRegistry';
 import { K8sShimManager } from '../services/K8sShimManager';
+import { isDemoMode } from '../ai/hub/demoWorkspace';
+import { DemoVirtualPty, isDemoSshTarget } from './DemoVirtualPty';
 import type { SettingsStore } from '../settings/SettingsStore';
 import type {
   SSHConnectionConfig,
@@ -544,6 +546,20 @@ export class SSHPtyManager extends EventEmitter {
     const cols = options?.cols ?? 80;
     const rows = options?.rows ?? 24;
     const cwd = options?.cwd ?? (process.env.HOME || process.cwd());
+
+    if (isDemoSshTarget(config, isDemoMode())) {
+      const demoPty = new DemoVirtualPty(config, cols, rows);
+      const session = new InternalSSHPtySession({
+        sessionId,
+        config,
+        pty: demoPty,
+        cols,
+        rows,
+        manager: this,
+      });
+      this.sessions.set(sessionId, session);
+      return session;
+    }
 
     let askpassServer: AskpassServer | undefined;
     let askpassEnv: Record<string, string> = {};

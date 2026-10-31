@@ -2,6 +2,8 @@ import { LocalStorageProvider } from './LocalStorageProvider';
 import { SFTPStorageProvider } from './SFTPStorageProvider';
 import { S3StorageProvider } from './S3StorageProvider';
 import { K8sPodStorageProvider } from './K8sPodStorageProvider';
+import { DemoStorageProvider } from './DemoStorageProvider';
+import { isDemoMode } from '../ai/hub/demoWorkspace';
 import type { IStorageProvider, SFTPConfig } from '../../shared/types/storage';
 import type { StorageConnectConfig } from '../../shared/types/ipc';
 import type { SshHostVerifier } from '../ssh/HostKeyVerifier';
@@ -51,6 +53,18 @@ export class StorageRegistry {
         if (!config.sftpConfig) {
           throw new Error(`SFTP config is required for provider "${config.id}"`);
         }
+        if (
+          isDemoMode() &&
+          (config.id.includes('demo-') || config.sftpConfig.host.startsWith('10.30.'))
+        ) {
+          provider = new DemoStorageProvider({
+            id: config.id,
+            name: config.name || config.sftpConfig.name || config.sftpConfig.host,
+            type: 'sftp',
+            hostOrBucket: config.sftpConfig.name || config.sftpConfig.host,
+          });
+          break;
+        }
         const port = config.sftpConfig.port ?? 22;
         const hostVerifier = this.options.sftpHostVerifierFactory?.(config.sftpConfig.host, port);
         provider = new SFTPStorageProvider(
@@ -69,6 +83,21 @@ export class StorageRegistry {
       case 's3': {
         if (!config.s3Config) {
           throw new Error(`S3 config is required for provider "${config.id}"`);
+        }
+        if (
+          isDemoMode() &&
+          (config.id.includes('demo-') ||
+            (config.s3Config.endpoint &&
+              (config.s3Config.endpoint.includes('acme.se') ||
+                config.s3Config.endpoint.includes('10.30.'))))
+        ) {
+          provider = new DemoStorageProvider({
+            id: config.id,
+            name: config.name || config.s3Config.name || 'Demo S3 Bucket',
+            type: 's3',
+            hostOrBucket: config.s3Config.initialPath || config.s3Config.name,
+          });
+          break;
         }
         provider = new S3StorageProvider({
           ...config.s3Config,

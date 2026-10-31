@@ -1,5 +1,6 @@
 import type {
   AgentSchedule,
+  AgentTask,
   InfraGraphEdge,
   KbDocument,
   McpCatalogPreset,
@@ -24,6 +25,7 @@ export function isDemoMode(): boolean {
   if (demoOverride !== undefined) return demoOverride;
   return (
     process.env.SSHS3_DEMO === "1" ||
+    process.env.SSHS3_DEMO_WORKSPACE === "1" ||
     process.argv.includes("--demo")
   );
 }
@@ -450,6 +452,8 @@ const initialDemoMemories: MemoryEntry[] = [
   {
     id: "demo-mem-ontap-topology",
     kind: "memory",
+    tier: "core",
+    updatedCount: 5,
     scope: "workspace",
     title: "NetApp AFF A800 (NetApp-ONTAP-Prod-SE) — Aggregat, SVM:er & LIF-topologi",
     text: [
@@ -464,6 +468,8 @@ const initialDemoMemories: MemoryEntry[] = [
   {
     id: "demo-mem-snapmirror-dr",
     kind: "memory",
+    tier: "core",
+    updatedCount: 3,
     scope: "workspace",
     title: "NetApp SnapMirror XDP & SnapLock Ransomware-skydd (Uppsala DC2)",
     text: [
@@ -477,6 +483,8 @@ const initialDemoMemories: MemoryEntry[] = [
   {
     id: "demo-mem-storagegrid-s3",
     kind: "memory",
+    tier: "archival",
+    updatedCount: 2,
     scope: "workspace",
     title: "NetApp StorageGRID 11.8 & MinIO AIStor — S3 Objektlagring & ILM",
     text: [
@@ -490,6 +498,8 @@ const initialDemoMemories: MemoryEntry[] = [
   {
     id: "demo-mem-trident-csi",
     kind: "memory",
+    tier: "core",
+    updatedCount: 4,
     scope: "workspace",
     title: "Kubernetes Astra Trident CSI 24.06 — StorageClasses & Multipath",
     text: [
@@ -504,6 +514,8 @@ const initialDemoMemories: MemoryEntry[] = [
   {
     id: "demo-mem-ceph-truenas",
     kind: "memory",
+    tier: "episodic",
+    updatedCount: 2,
     scope: "workspace",
     title: "Ceph Reef NVMe-pool & TrueNAS ZFS Immutable Backup",
     text: [
@@ -1443,4 +1455,102 @@ export function saveDemoWorkforceRun(run: WorkforceRun): void {
   if (idx >= 0) demoWorkforceRunsStore[idx] = run;
   else demoWorkforceRunsStore.unshift(run);
 }
+
+const initialDemoTasks: AgentTask[] = [
+  {
+    id: "demo-task-ontap-latency-triage",
+    title: "🗄️ ONTAP 9.15 Noisy-Neighbor Latens & K8s Multipath-analys",
+    agentId: "demo-agent-ontap-architect",
+    agentName: "NetApp ONTAP Storage Architect",
+    mode: "assisted",
+    status: "completed",
+    verification: "verified",
+    maxCommands: 15,
+    maxMinutes: 15,
+    createdAt: now - 19 * min,
+    updatedAt: now - 16 * min,
+    sources: [
+      {
+        id: "src-ontap-kb",
+        label: "@kb:netapp-ontap-9-15-cli-qos",
+        text: "NetApp ONTAP 9.15 Operations Handbook — Latency Diagnosis & Adaptive QoS",
+        observedAt: now - 19 * min,
+      },
+    ],
+    messages: [
+      {
+        id: "msg-demo-1",
+        role: "user",
+        text: "Vi ser p99-latensspikar på PostgreSQL-LUN:arna i `aggr2_nvme_db` på @netapp-aff-a800-01b samtidigt som AI-träningsjobben på @k8s-gpu-io-worker-01 kör för fullt. Kan du identifiera rotorsaken och åtgärda den?",
+        at: now - 19 * min,
+      },
+      {
+        id: "msg-demo-2",
+        role: "assistant",
+        text: [
+          "### 🔍 Rotfelsanalys: Noisy-Neighbor på `aggr2_nvme_db` & DM-Multipath ALUA",
+          "",
+          "Jag har kört diagnostik mot **`netapp-aff-a800-01b`** och korrelerat med **`k8s-gpu-io-worker-01`**:",
+          "",
+          "| Volym / Komponent | Nod / SVM | IOPS | Svarstid (p99) | Status / Observation |",
+          "| :--- | :--- | :--- | :--- | :--- |",
+          "| `vol_ai_scratch_03` | `svm-prod-nfs` (`aggr2_nvme_db`) | `48 200 IOPS` | `2.45 ms` | ⚠️ **Saknar QoS-policy (`none`)** — driver upp WAFL/NVMe-ködjupet |",
+          "| `vol_pg_prod_db01` | `svm-prod-iscsi` (`aggr2_nvme_db`) | `28 400 IOPS` | `1.88 ms` | Påverkad av scratch-volymens lästoppar |",
+          "| `/etc/multipath.conf` | `k8s-gpu-io-worker-01` | — | — | ⚠️ Använder `multibus` istället för ALUA `group_by_prio` |",
+          "",
+          "> **Åtgärd utförd & verifierad:** Jag applicerade QoS-policyn `pg-batch-ceiling` (`max 15 000 IOPS, 600 MB/s`) på `vol_ai_scratch_03`. Latensen på `vol_pg_prod_db01` sjönk omedelbart från **1.88 ms till 0.32 ms**.",
+          "",
+          "```bash",
+          "# Verifiera aktuell QoS-latens på ONTAP:",
+          "qos statistics volume latency show -iterations 3",
+          "# Uppdatera multipath till ALUA på K8s GPU-worker:",
+          "sudo multipath -r && sudo multipath -ll",
+          "```",
+        ].join("\n"),
+        at: now - 16 * min,
+      },
+    ],
+    changes: [
+      {
+        id: "chg-demo-safe-1",
+        kind: "command",
+        target: "netapp-aff-a800-01b",
+        description: "Inspektera ONTAP volymlatens och QoS-statistik (Read-Only)",
+        command: "qos statistics volume latency show -iterations 1",
+        status: "completed",
+        riskLevel: "safe",
+        riskReason: "Read-only ONTAP telemetry inspection (qos statistics show).",
+        exitCode: 0,
+        output:
+          "Workload               ID     Latency    Network    Cluster       Data       Disk    QoS-Max      NVRAM       WAFL\nvol_ai_scratch_03    4812     2.45ms     0.06ms     0.03ms     1.92ms     0.09ms     0.00ms     0.01ms     0.11ms\nvol_pg_prod_db01     4109     1.88ms     0.04ms     0.01ms     0.15ms     0.08ms     0.00ms     0.02ms     0.02ms",
+        at: now - 18 * min,
+      },
+      {
+        id: "chg-demo-mod-2",
+        kind: "command",
+        target: "netapp-aff-a800-01b",
+        description: "Applicera Adaptive QoS-tak 'pg-batch-ceiling' (15 000 IOPS) på vol_ai_scratch_03",
+        command:
+          "volume modify -vserver svm-prod-nfs -volume vol_ai_scratch_03 -qos-policy-group pg-batch-ceiling",
+        status: "completed",
+        riskLevel: "modify",
+        riskReason: "State-modifying ONTAP volume configuration change (volume modify -qos-policy-group).",
+        exitCode: 0,
+        output:
+          'Volume modify successful on volume "vol_ai_scratch_03" in Vserver "svm-prod-nfs": QoS policy group set to "pg-batch-ceiling".',
+        at: now - 17 * min,
+      },
+    ],
+  },
+];
+
+export function getDemoTasks(): AgentTask[] {
+  return initialDemoTasks.map((t) => ({
+    ...t,
+    messages: [...t.messages],
+    changes: [...t.changes],
+    sources: [...t.sources],
+  }));
+}
+
 

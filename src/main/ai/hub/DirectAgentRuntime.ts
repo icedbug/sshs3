@@ -8,6 +8,7 @@ import type {
 } from "../../../shared/types/aiHub";
 import type { ToolRequest } from "./ToolBroker";
 import type { AgentRuntime, RunEvent } from "./AgentRuntime";
+import { isDemoMode } from "./demoWorkspace";
 import { boundedContext, safeError } from "./privacy";
 
 export type DirectToolInvoker = (request: ToolRequest) => Promise<unknown>;
@@ -1144,11 +1145,300 @@ export class DirectAgentRuntime implements AgentRuntime {
         onEvent({ type: "run.cancelled" });
         return;
       }
+      if (isDemoMode() && this.fetchImpl === fetch) {
+        try {
+          await this.runDemoInteractiveCopilot(task, onEvent);
+          return;
+        } catch (demoErr) {
+          onEvent({
+            type: "run.failed",
+            error: safeError(demoErr),
+          });
+          return;
+        }
+      }
       onEvent({
         type: "run.failed",
         error: safeError(error),
       });
     }
+  }
+
+  private async runDemoInteractiveCopilot(
+    task: AgentTask,
+    onEvent: (event: RunEvent) => void,
+  ): Promise<void> {
+    const lastUserMsg =
+      [...task.messages].reverse().find((m) => m.role === "user")?.text || "";
+    const lower = lastUserMsg.toLowerCase();
+
+    const detectCluster = (): string => {
+      if (lower.includes("storagegrid") || lower.includes("s3") || lower.includes("minio")) {
+        return "NetApp-StorageGRID-S3";
+      }
+      if (lower.includes("ceph") || lower.includes("zfs") || lower.includes("truenas")) {
+        return "Ceph-NVMe-Block-Pool";
+      }
+      if (lower.includes("k8s") || lower.includes("trident") || lower.includes("kubernetes") || lower.includes("pvc")) {
+        return "K8s-Trident-CSI-Prod";
+      }
+      return "NetApp-ONTAP-Prod-SE";
+    };
+
+    const streamMarkdown = async (markdown: string): Promise<void> => {
+      const chunks = markdown.match(/[\s\S]{1,120}/g) ?? [markdown];
+      for (const chunk of chunks) {
+        if (this.cancelled) return;
+        onEvent({ type: "message.delta", delta: chunk });
+        await new Promise((r) => setTimeout(r, 18));
+      }
+      onEvent({
+        type: "run.completed",
+        output: markdown,
+        usage: { input_tokens: 1840, output_tokens: 420 },
+      });
+    };
+
+    // 1. 2x2 Cluster Split-View orchestration
+    if (
+      lower.includes("split") ||
+      lower.includes("2x2") ||
+      lower.includes("2×2") ||
+      lower.includes("sida vid sida")
+    ) {
+      const cluster = detectCluster();
+      const layoutRes = await this.executeToolCall({
+        id: `demo_split_${Date.now()}`,
+        name: "sshs3_workspace_layout",
+        argumentsJson: JSON.stringify({
+          operation: "open_cluster_split",
+          cluster,
+          layout: "grid",
+        }),
+      });
+      await streamMarkdown(
+        [
+          `### 🪟 Öppnade 2×2 Konsole Split-View för \`${cluster}\``,
+          "",
+          `Jag har nu orkestrerat arbetsytan via \`sshs3_workspace_layout\` (\`open_cluster_split\`) och öppnat samtliga noder i klustret **\`${cluster}\`** i en delad 2×2 terminal-grid.`,
+          "",
+          "- Du kan nu skriva kommandon direkt i varje nod-panel eller klicka på **`✨ AI Split-Analys`** i split-vyns topprad för att jämföra noderna i realtid.",
+          "",
+          "```json",
+          layoutRes,
+          "```",
+        ].join("\n"),
+      );
+      return;
+    }
+
+    // 2. Cross-Server Config Diff
+    if (
+      lower.includes("diff") ||
+      lower.includes("jämför") ||
+      lower.includes("multipath.conf") ||
+      lower.includes("ceph.conf")
+    ) {
+      const pathToDiff = lower.includes("ceph.conf")
+        ? "/etc/ceph/ceph.conf"
+        : "/etc/multipath.conf";
+      const targetA = lower.includes("ceph.conf")
+        ? "ceph-mon-mgr-01"
+        : "k8s-storage-cp-01";
+      const targetB = lower.includes("ceph.conf")
+        ? "ceph-osd-nvme-01"
+        : "k8s-gpu-io-worker-01";
+      const diffResRaw = await this.executeToolCall({
+        id: `demo_diff_${Date.now()}`,
+        name: "sshs3_storage_ops",
+        argumentsJson: JSON.stringify({
+          operation: "diff_paths",
+          targetA,
+          pathA: pathToDiff,
+          targetB,
+          pathB: pathToDiff,
+        }),
+      });
+      let diffText = diffResRaw;
+      try {
+        const parsed = JSON.parse(diffResRaw) as { diff?: string };
+        if (parsed.diff) diffText = parsed.diff;
+      } catch {
+        // keep raw
+      }
+      await streamMarkdown(
+        [
+          `### 🔍 Cross-Server Konfigurations-diff: \`${pathToDiff}\``,
+          "",
+          `Jag jämförde \`${pathToDiff}\` mellan **\`${targetA}\`** och **\`${targetB}\`** via \`sshs3_storage_ops\` (\`diff_paths\`):`,
+          "",
+          "```diff",
+          diffText,
+          "```",
+          "",
+          "> **Rotorsak & Rekommendation:** På `" +
+            targetB +
+            "` saknas ALUA `group_by_prio` (använder `multibus`), vilket gör att I/O kan skickas över icke-optimerade HA-vägar. Uppdatera `/etc/multipath.conf` och ladda om med `sudo systemctl reload multipathd`.",
+        ].join("\n"),
+      );
+      return;
+    }
+
+    // 3. Parallel Cluster Execution
+    if (
+      lower.includes("parallell") ||
+      lower.includes("cluster_exec") ||
+      lower.includes("hälsokontroll") ||
+      lower.includes("alla noder")
+    ) {
+      const cluster = detectCluster();
+      const cmd = cluster.includes("ONTAP")
+        ? "qos statistics volume latency show -iterations 1"
+        : cluster.includes("Ceph")
+          ? "ceph -s && zpool status"
+          : cluster.includes("K8s")
+            ? "kubectl get pvc -A && multipath -ll"
+            : "storagegrid-status";
+
+      if (task.mode !== "advice") {
+        await this.executeToolCall({
+          id: `demo_clexec_${Date.now()}`,
+          name: "sshs3_cluster_exec",
+          argumentsJson: JSON.stringify({
+            cluster,
+            command: cmd,
+            description: `Parallell kluster-hälsokontroll över ${cluster}`,
+          }),
+        });
+      }
+
+      await streamMarkdown(
+        [
+          `### ⚡ Parallell Kluster-Analys: \`${cluster}\``,
+          "",
+          `Jag körde \`${cmd}\` parallellt över alla noder i **\`${cluster}\`** via \`sshs3_cluster_exec\`:`,
+          "",
+          "| Nod | Roll | Status | Svarstid / Telemetri | Observation |",
+          "| :--- | :--- | :--- | :--- | :--- |",
+          cluster.includes("ONTAP")
+            ? "| `netapp-aff-a800-01a` | `ontap-ha-node-a` | 🟢 ONLINE | `0.38 ms` | `aggr1_nvme_prod` 72% (48 TB i FabricPool) |\n| `netapp-aff-a800-01b` | `ontap-ha-node-b` | 🟡 QOS-WARN | `2.45 ms` | `vol_ai_scratch_03` saknar QoS-tak (48k IOPS) |\n| `netapp-fas9000-dr-01` | `snapmirror-dr` | 🟢 ONLINE | `Lag 00:03:18` | SnapMirror XDP + SnapLock WORM aktivt |"
+            : "| `k8s-storage-cp-01` | `control-plane` | 🟢 Ready | `0.4 ms` | Astra Trident 24.06 (3/3 ONTAP backends online) |\n| `k8s-gpu-io-worker-01` | `gpu-io-worker` | 🟡 ALUA-WARN | `1.9 ms` | `/etc/multipath.conf` använder `multibus` |",
+          "",
+          "> **Rekommenderad åtgärd:** Applicera Adaptive QoS-taket `pg-batch-ceiling` på `vol_ai_scratch_03` för att sänka databaslatensen under `0.4 ms`.",
+          "",
+          "```bash",
+          "volume modify -vserver svm-prod-nfs -volume vol_ai_scratch_03 -qos-policy-group pg-batch-ceiling",
+          "```",
+        ].join("\n"),
+      );
+      return;
+    }
+
+    // 4. Multi-Agent Workforce Swarm
+    if (lower.includes("workforce") || lower.includes("swarm")) {
+      const wfResRaw = await this.executeToolCall({
+        id: `demo_wf_${Date.now()}`,
+        name: "sshs3_agent_and_mcp_manage",
+        argumentsJson: JSON.stringify({
+          operation: "run_workforce",
+          prompt: lastUserMsg,
+        }),
+      });
+      let synthesis = wfResRaw;
+      try {
+        const parsed = JSON.parse(wfResRaw) as { run?: { synthesis?: string } };
+        if (parsed.run?.synthesis) synthesis = parsed.run.synthesis;
+      } catch {
+        // keep raw
+      }
+      await streamMarkdown(synthesis);
+      return;
+    }
+
+    // 5. Knowledge Base Search & Runbooks
+    if (
+      lower.includes("runbook") ||
+      lower.includes("@kb") ||
+      lower.includes("kunskapsbas") ||
+      lower.includes("kb")
+    ) {
+      const kbResRaw = await this.executeToolCall({
+        id: `demo_kb_${Date.now()}`,
+        name: "sshs3_kb_search",
+        argumentsJson: JSON.stringify({
+          query: lastUserMsg,
+          limit: 3,
+        }),
+      });
+      await streamMarkdown(
+        [
+          "### 📚 Hybrid BM25 + Orama Semantisk Runbook-sökning (`sshs3_kb_search`)",
+          "",
+          "Jag sökte i vår synkade Knowledge Base med semantisk koncept-expansion (svenska ↔ engelska) och matchade följande runbooks:",
+          "",
+          "1. **NetApp ONTAP 9.15 CLI, Adaptive QoS & FabricPool Reference** (`NetApp-ONTAP-Prod-SE`)",
+          "   - Diagnoskommando (`🟢 Safe`): `qos statistics volume latency show -iterations 5 -rows 15`",
+          "   - Åtgärdskommando (`🟡 Modify`): `volume modify -vserver svm-prod-nfs -volume vol_ai_scratch_03 -qos-policy-group pg-batch-ceiling`",
+          "2. **Astra Trident 24.06 CSI & Linux Multipath Configuration Standard** (`K8s-Trident-CSI-Prod`)",
+          "   - Verifiera ALUA: `sudo multipath -ll && tridentctl get backend -n trident`",
+          "",
+          "```json",
+          boundedContext(kbResRaw, 1800),
+          "```",
+        ].join("\n"),
+      );
+      return;
+    }
+
+    // 6. Terminal command execution & troubleshooting (when connected to a terminal or general prompt)
+    if (task.target?.sessionId && task.mode !== "advice") {
+      const targetLabel = (task.target.label || "").toLowerCase();
+      const isOntap =
+        targetLabel.includes("netapp") ||
+        targetLabel.includes("aff-") ||
+        targetLabel.includes("fas9000");
+
+      const safeDiagCmd = isOntap
+        ? "qos statistics volume latency show -iterations 1"
+        : "uptime && df -h && multipath -ll";
+
+      await this.executeToolCall({
+        id: `demo_diag_${Date.now()}`,
+        name: "terminal_command",
+        argumentsJson: JSON.stringify({
+          command: safeDiagCmd,
+          description: "Kör icke-destruktiv read-only diagnostik i aktiv terminal (🟢 Safe)",
+          sessionId: task.target.sessionId,
+        }),
+      });
+    }
+
+    await streamMarkdown(
+      [
+        "### ✨ Interaktiv AI-Analys & Infrastrukturstatus (Demo Mode)",
+        "",
+        `Jag har analyserat din förfrågan (**"${boundedContext(lastUserMsg, 120)}"**) mot våra 5 kluster i \`sshs3\` (**NetApp ONTAP 9.15**, **StorageGRID 11.8 S3**, **Ceph Reef NVMe**, **TrueNAS ZFS** och **Kubernetes Astra Trident**):`,
+        "",
+        "| Kluster | Noder | Hälsa | Aktiva fynd / Rekommendation |",
+        "| :--- | :--- | :--- | :--- |",
+        "| `NetApp-ONTAP-Prod-SE` | 4 noder | 🟡 `QoS-Warn` | `vol_ai_scratch_03` på `netapp-aff-a800-01b` saknar QoS-tak (`2.45 ms`). |",
+        "| `NetApp-StorageGRID-S3` | 4 noder | 🟢 `HEALTHY` | Erasure Coding 6+3 & WORM Object Lock i fas (`3.4 ms` p99). |",
+        "| `Ceph-NVMe-Block-Pool` | 3 noder | 🟢 `ONLINE` | 314 TiB / 491 TiB NVMe BlueStore + 1.4 PB TrueNAS RAIDZ3. |",
+        "| `K8s-Trident-CSI-Prod` | 2 noder | 🟡 `ALUA-Warn` | `k8s-gpu-io-worker-01` har `multibus` istället för `group_by_prio`. |",
+        "",
+        "> **💡 Tips i Demo-läget:**",
+        "> - Klicka på **Connect** på valfri server på startsidan (eller klicka **`🪟 Split`** på ett kluster) för att öppna en **riktig interaktiv virtuell SSH-terminal**!",
+        "> - Skriv `simulate-error` i terminalen för att testa den proaktiva knappen **`✨ Förklara & fixa felet`**.",
+        "> - Skriv `/split-cluster`, `/diff`, `/cluster-exec` eller `/workforce` här i chatten för att se AI:n styra hela gränssnittet live!",
+        "",
+        "```bash",
+        "# Förslag på kommandon du kan köra med 1 klick i terminalen:",
+        "qos statistics volume latency show -iterations 5 -rows 15",
+        "snapmirror show -fields state,status,healthy,lag-time",
+        "kubectl get pvc,volumeattachment -A -o wide",
+        "```",
+      ].join("\n"),
+    );
   }
 
   private async executeToolCall(call: ParsedToolCall): Promise<string> {

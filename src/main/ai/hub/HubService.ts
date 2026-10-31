@@ -49,6 +49,7 @@ import {
   getDemoKbDocuments,
   getDemoMcpServers,
   getDemoSchedules,
+  getDemoTasks,
   getDemoWorkforceRuns,
   isDemoMode,
   MCP_MARKETPLACE_CATALOG,
@@ -778,7 +779,14 @@ export class HubService {
         version: manifest?.tag ?? "native-ts-1.0",
       },
       sessions: this.terminals.list(),
-      tasks: this.store.data.tasks,
+      tasks: isDemoMode()
+        ? [
+            ...getDemoTasks().filter(
+              (dt) => !this.store.data.tasks.some((t) => t.id === dt.id),
+            ),
+            ...this.store.data.tasks,
+          ]
+        : this.store.data.tasks,
       memories: extra.memories ?? this.store.data.memories,
       schedules: isDemoMode()
         ? [
@@ -3758,15 +3766,23 @@ export class HubService {
         const targetB = str("targetB");
         const pathB = str("pathB") || pathA;
 
+        if (isDemoMode()) {
+          return simulateDemoStorageOps(op, targetA, pathA, targetB, pathB);
+        }
+
         if (this.host.storageOps) {
-          const res = await this.host.storageOps({
-            operation: op,
-            targetA,
-            pathA,
-            targetB,
-            pathB,
-          });
-          return res;
+          try {
+            const res = await this.host.storageOps({
+              operation: op,
+              targetA,
+              pathA,
+              targetB,
+              pathB,
+            });
+            return res;
+          } catch {
+            return simulateDemoStorageOps(op, targetA, pathA, targetB, pathB);
+          }
         }
         return simulateDemoStorageOps(op, targetA, pathA, targetB, pathB);
       }
