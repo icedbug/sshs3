@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { KbDocument } from "../../../shared/types/aiHub";
+import type { KbDocument, MemoryEntry } from "../../../shared/types/aiHub";
 import type { IStorageProvider } from "../../../shared/types/storage";
 
 export interface KbChunkResult {
@@ -13,6 +13,186 @@ export interface KbChunkResult {
   chunkIndex: number;
   snippet: string;
   score: number;
+  bm25Score?: number;
+  semanticScore?: number;
+  matchedConcepts?: string[];
+}
+
+/**
+ * Orama-inspired Hybrid Semantic Concept Dictionary for bilingual (SV/EN) DevOps,
+ * Storage (NetApp ONTAP, Ceph, ZFS, S3), Kubernetes, and Linux infrastructure.
+ */
+const SEMANTIC_CONCEPT_CLUSTERS: Record<string, string[]> = {
+  storage_capacity: [
+    "full",
+    "disk",
+    "utrymme",
+    "lagring",
+    "slut",
+    "capacity",
+    "enospc",
+    "space",
+    "autosize",
+    "aggr",
+    "aggregate",
+    "volume",
+    "volym",
+    "quota",
+    "df",
+    "overprovisioned",
+    "thin",
+    "thick",
+  ],
+  storage_latency_qos: [
+    "långsam",
+    "seg",
+    "svarstid",
+    "latens",
+    "latency",
+    "iops",
+    "throughput",
+    "qos",
+    "adaptive",
+    "wafl",
+    "nvme",
+    "bottleneck",
+    "flaskhals",
+    "performance",
+    "prestanda",
+    "queue",
+  ],
+  replication_dr: [
+    "replikering",
+    "katastrof",
+    "backup",
+    "failover",
+    "snapmirror",
+    "broken-off",
+    "resync",
+    "lag",
+    "dr",
+    "mirror",
+    "sync",
+    "asynkron",
+    "rpo",
+    "rto",
+  ],
+  multipath_io: [
+    "multipath",
+    "pathen",
+    "vägar",
+    "iscsi",
+    "nvme-of",
+    "fc",
+    "san",
+    "lun",
+    "dm-multipath",
+    "round-robin",
+    "alua",
+    "hba",
+    "dead",
+    "flapping",
+  ],
+  ceph_zfs_health: [
+    "ceph",
+    "zfs",
+    "zpool",
+    "osd",
+    "pg",
+    "degraded",
+    "scrub",
+    "heala",
+    "trasig",
+    "corrupt",
+    "checksum",
+    "arc",
+    "l2arc",
+    "zil",
+    "slog",
+    "bluestore",
+  ],
+  k8s_csi_volumes: [
+    "kubernetes",
+    "k8s",
+    "pod",
+    "pvc",
+    "pv",
+    "trident",
+    "csi",
+    "mountvolume",
+    "attachvolume",
+    "storageclass",
+    "statefulset",
+    "stuck",
+    "containercreating",
+    "terminating",
+  ],
+  s3_object_ilm: [
+    "s3",
+    "bucket",
+    "objekt",
+    "object",
+    "storagegrid",
+    "ilm",
+    "lifecycle",
+    "erasure",
+    "replication",
+    "cors",
+    "presigned",
+    "minio",
+    "r2",
+  ],
+  network_ssh_tunnel: [
+    "nätverk",
+    "tunnel",
+    "port",
+    "forwarding",
+    "proxyjump",
+    "bastion",
+    "socks",
+    "mtu",
+    "vlan",
+    "bgp",
+    "firewall",
+    "brandvägg",
+    "timeout",
+    "connection",
+    "unreachable",
+  ],
+};
+
+export function extractSemanticConcepts(tokens: string[]): string[] {
+  const matched: string[] = [];
+  for (const [concept, keywords] of Object.entries(SEMANTIC_CONCEPT_CLUSTERS)) {
+    const hit = tokens.some((tok) =>
+      keywords.some((kw) => tok === kw || (tok.length >= 4 && kw.startsWith(tok)) || (kw.length >= 4 && tok.startsWith(kw))),
+    );
+    if (hit) matched.push(concept);
+  }
+  return matched;
+}
+
+function computeTrigramSimilarity(a: string, b: string): number {
+  const cleanA = a.toLowerCase().replace(/\s+/g, " ").trim();
+  const cleanB = b.toLowerCase().replace(/\s+/g, " ").trim();
+  if (!cleanA || !cleanB) return 0;
+
+  const trigrams = (s: string): Set<string> => {
+    const set = new Set<string>();
+    for (let i = 0; i <= s.length - 3; i++) {
+      set.add(s.slice(i, i + 3));
+    }
+    return set;
+  };
+
+  const setA = trigrams(cleanA);
+  const setB = trigrams(cleanB);
+  if (setA.size === 0 || setB.size === 0) return 0;
+  let intersection = 0;
+  for (const tri of setA) {
+    if (setB.has(tri)) intersection++;
+  }
+  return intersection / Math.sqrt(setA.size * setB.size);
 }
 
 const TEXT_EXTENSIONS = new Set([
@@ -197,7 +377,7 @@ export class KnowledgeBaseService {
       }));
     }
 
-    // BM25 parameters
+    // BM25 + Hybrid Semantic Concept parameters (Orama pattern)
     const k1 = 1.5;
     const b = 0.75;
     const avgLen =
@@ -211,11 +391,12 @@ export class KnowledgeBaseService {
       docFreq.set(q, df);
     }
 
+    const queryConcepts = extractSemanticConcepts(qTokens);
     const scored: KbChunkResult[] = [];
     const N = allChunks.length;
 
     for (const c of allChunks) {
-      let score = 0;
+      let bm25Score = 0;
       const len = c.tokens.length || 1;
       for (const q of qTokens) {
         let tf = 0;
@@ -226,17 +407,34 @@ export class KnowledgeBaseService {
         if (tf === 0) continue;
         const df = docFreq.get(q) ?? 0;
         const idf = Math.log(1 + (N - df + 0.5) / (df + 0.5));
-        score +=
+        bm25Score +=
           idf * ((tf * (k1 + 1)) / (tf + k1 * (1 - b + b * (len / avgLen))));
       }
+
+      // Semantic concept match + character trigram similarity
+      const chunkConcepts = extractSemanticConcepts(c.tokens);
+      const matchedConcepts = queryConcepts.filter((qc) =>
+        chunkConcepts.includes(qc),
+      );
+      const conceptBoost = matchedConcepts.length * 1.45;
+      const trigramSim = computeTrigramSimilarity(
+        query,
+        `${c.doc.title} ${c.text.slice(0, 400)}`,
+      );
+      const semanticScore =
+        Math.round((conceptBoost + (trigramSim >= 0.12 ? trigramSim * 1.8 : 0)) * 1000) /
+        1000;
+
+      let totalScore = bm25Score + semanticScore;
+
       const docCluster = (c.doc.cluster || c.doc.targetCluster || "").toLowerCase();
       if (clusterFilter && docCluster && docCluster === clusterFilter) {
-        score *= 1.35;
+        totalScore *= 1.35;
       }
       if (c.doc.title.toLowerCase().includes(query.toLowerCase().trim())) {
-        score += 2.0;
+        totalScore += 2.0;
       }
-      if (score > 0) {
+      if (totalScore > 0) {
         scored.push({
           docId: c.doc.id,
           title: c.doc.title,
@@ -245,12 +443,132 @@ export class KnowledgeBaseService {
           sourceUri: c.doc.sourceRef || c.doc.sourceUri,
           chunkIndex: c.chunkIndex,
           snippet: c.text,
-          score: Math.round(score * 1000) / 1000,
+          score: Math.round(totalScore * 1000) / 1000,
+          bm25Score: Math.round(bm25Score * 1000) / 1000,
+          semanticScore,
+          matchedConcepts,
         });
       }
     }
 
     return scored.sort((a, b) => b.score - a.score).slice(0, limit);
+  }
+
+  /**
+   * Mem0-inspired automatic memory deduplication & semantic consolidation.
+   * If a memory with the same scope/kind and high title/concept overlap already exists,
+   * merges and updates it in-place rather than creating duplicate entries.
+   */
+  deduplicateOrMergeMemory(
+    existing: MemoryEntry[],
+    incoming: Omit<MemoryEntry, "id" | "updatedAt"> & { id?: string },
+  ): { memories: MemoryEntry[]; saved: MemoryEntry; merged: boolean } {
+    const now = Date.now();
+    const normTitle = incoming.title.trim().toLowerCase();
+    const incomingTokens = tokenize(`${incoming.title} ${incoming.text}`);
+
+    let matchIdx = -1;
+    if (incoming.id) {
+      matchIdx = existing.findIndex((m) => m.id === incoming.id);
+    }
+    if (matchIdx === -1) {
+      matchIdx = existing.findIndex((m) => {
+        if (m.kind !== incoming.kind || m.scope !== incoming.scope) return false;
+        if (m.title.trim().toLowerCase() === normTitle) return true;
+        const mTokens = tokenize(`${m.title} ${m.text}`);
+        if (incomingTokens.length >= 3 && mTokens.length >= 3) {
+          const overlap = incomingTokens.filter((t) => mTokens.includes(t)).length;
+          const ratio = overlap / Math.min(incomingTokens.length, mTokens.length);
+          if (ratio >= 0.78 && m.title.toLowerCase().slice(0, 14) === normTitle.slice(0, 14)) {
+            return true;
+          }
+        }
+        return false;
+      });
+    }
+
+    if (matchIdx >= 0) {
+      const prev = existing[matchIdx];
+      const mergedText =
+        incoming.text.trim() === prev.text.trim() ||
+        incoming.text.includes(prev.text.trim())
+          ? incoming.text.trim()
+          : `${incoming.text.trim()} (Tidigare notering: ${prev.text.trim().slice(0, 240)})`;
+      const updated: MemoryEntry = {
+        ...prev,
+        ...incoming,
+        id: prev.id,
+        title: incoming.title.trim() || prev.title,
+        text: mergedText.slice(0, 1200),
+        tier: incoming.tier ?? prev.tier ?? "archival",
+        cluster: incoming.cluster ?? prev.cluster,
+        updatedCount: (prev.updatedCount ?? 1) + 1,
+        updatedAt: now,
+      };
+      const next = [...existing];
+      next.splice(matchIdx, 1);
+      return {
+        memories: [updated, ...next].slice(0, 80),
+        saved: updated,
+        merged: true,
+      };
+    }
+
+    const created: MemoryEntry = {
+      id: incoming.id || crypto.randomUUID(),
+      kind: incoming.kind,
+      tier: incoming.tier ?? (incoming.kind === "skill" ? "core" : "archival"),
+      cluster: incoming.cluster,
+      scope: incoming.scope.trim().slice(0, 80) || "workspace",
+      title: incoming.title.trim().slice(0, 120),
+      text: incoming.text.trim().slice(0, 1200),
+      author: incoming.author,
+      updatedCount: 1,
+      updatedAt: now,
+    };
+
+    return {
+      memories: [created, ...existing].slice(0, 80),
+      saved: created,
+      merged: false,
+    };
+  }
+
+  /**
+   * Hybrid ranking of Memories & Skills against a prompt or cluster context.
+   * Core memories are always prioritized first, followed by highest Hybrid BM25 + Semantic matches.
+   */
+  rankMemories(
+    memories: MemoryEntry[],
+    query: string,
+    cluster?: string,
+    limit = 16,
+  ): MemoryEntry[] {
+    if (memories.length <= limit && !query.trim()) return memories;
+    const qTokens = tokenize(query);
+    const qConcepts = extractSemanticConcepts(qTokens);
+    const clusterNorm = cluster?.trim().toLowerCase();
+
+    return [...memories]
+      .map((m) => {
+        let score = m.tier === "core" ? 10 : m.tier === "archival" ? 3 : 1;
+        if (clusterNorm && m.cluster?.toLowerCase() === clusterNorm) {
+          score += 6;
+        }
+        if (qTokens.length > 0) {
+          const mTokens = tokenize(`${m.title} ${m.text} ${m.scope} ${m.cluster ?? ""}`);
+          for (const q of qTokens) {
+            if (mTokens.some((t) => t === q || t.includes(q))) score += 2.5;
+          }
+          const mConcepts = extractSemanticConcepts(mTokens);
+          const conceptHits = qConcepts.filter((c) => mConcepts.includes(c)).length;
+          score += conceptHits * 2.0;
+        }
+        return { m, score };
+      })
+      .sort((a, b) => b.score - a.score || b.m.updatedAt - a.m.updatedAt)
+      .slice(0, limit)
+      .map((x) => x.m);
   }
 
   async ingestLocalFolder(

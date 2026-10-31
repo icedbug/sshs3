@@ -287,20 +287,26 @@ const AGENT_TOOLS: FunctionToolDef[] = [
   {
     name: "sshs3_manage_memory_and_activity",
     description:
-      "List, create, update, or delete shared/personal AI memories and reusable troubleshooting skills in sshs3, or log a team activity note.",
+      "List, create, update, deduplicate, or delete shared/personal AI memories (Core Pinned, Archival, or Episodic) and reusable troubleshooting skills in sshs3, or log a team activity note.",
     parameters: {
       type: "object",
       properties: {
         operation: {
           type: "string",
-          enum: ["list", "save", "delete", "log_activity"],
-          description: "Operation: 'list', 'save' (create/update memory or skill), 'delete', or 'log_activity'.",
+          enum: ["list", "save", "core_replace", "core_append", "delete", "log_activity"],
+          description: "Operation: 'list', 'save' (create/update/deduplicate memory or skill), 'core_replace' / 'core_append' (Letta-style Core Pinned Memory update), 'delete', or 'log_activity'.",
         },
         idOrTitle: { type: "string", description: "Memory/skill ID or title to update or delete." },
         title: { type: "string", description: "Title for the memory/skill or target label for activity." },
         text: { type: "string", description: "Content for the memory/skill or summary for activity." },
         detail: { type: "string", description: "Optional command or config detail when logging activity." },
         kind: { type: "string", enum: ["memory", "skill"], description: "Whether entry is a memory or reusable skill." },
+        tier: {
+          type: "string",
+          enum: ["core", "archival", "episodic"],
+          description: "Memory tier: 'core' (always pinned in prompt), 'archival' (searched via Hybrid RAG), or 'episodic' (session fact).",
+        },
+        cluster: { type: "string", description: "Optional cluster binding for the memory/skill." },
         scope: { type: "string", description: "Scope: 'workspace' (shared with team) or 'personal'." },
         activityKind: {
           type: "string",
@@ -709,7 +715,7 @@ const AGENT_TOOLS: FunctionToolDef[] = [
   {
     name: "sshs3_agent_and_mcp_manage",
     description:
-      "List, create, update, delete, or launch specialized AI Mission Agents (with custom missions, system prompts, target clusters, KB docs, and MCP servers), or configure and test Model Context Protocol (MCP) servers.",
+      "List, create, update, delete, delegate to, handoff to, or run a parallel Multi-Agent Workforce of specialized AI Mission Agents; install 1-Click Open-Source MCP Marketplace presets; configure and test MCP servers; or manage the Infrastructure Dependency Graph.",
     parameters: {
       type: "object",
       properties: {
@@ -720,15 +726,62 @@ const AGENT_TOOLS: FunctionToolDef[] = [
             "save_agent",
             "delete_agent",
             "run_agent_mission",
+            "run_workforce",
+            "delegate_to_agent",
+            "handoff_agent",
             "save_mcp_server",
             "delete_mcp_server",
             "test_mcp_server",
+            "install_mcp_preset",
+            "save_infra_edge",
+            "delete_infra_edge",
           ],
           description: "Operation to perform.",
         },
         idOrName: {
           type: "string",
-          description: "Agent or MCP server ID/name when updating, deleting, running, or testing.",
+          description: "Agent, MCP server, MCP preset, or Infra Edge ID/name.",
+        },
+        presetId: {
+          type: "string",
+          description: "MCP Marketplace preset ID when operation is 'install_mcp_preset' (e.g. 'preset-mcp-prometheus', 'preset-mcp-grafana-loki', 'preset-mcp-kubernetes-helm', 'preset-mcp-postgres-tunnel', 'preset-mcp-terraform-ansible', 'preset-mcp-github-gitops').",
+        },
+        prompt: {
+          type: "string",
+          description: "Mission prompt or sub-task when running a multi-agent workforce ('run_workforce') or delegating ('delegate_to_agent').",
+        },
+        agentIds: {
+          type: "array",
+          items: { type: "string" },
+          description: "Optional list of Mission Agent IDs or names to include in 'run_workforce'.",
+        },
+        reason: {
+          type: "string",
+          description: "Handoff reason when operation is 'handoff_agent'.",
+        },
+        fromNode: {
+          type: "string",
+          description: "Source server/node name when operation is 'save_infra_edge'.",
+        },
+        toNode: {
+          type: "string",
+          description: "Target server/node name when operation is 'save_infra_edge'.",
+        },
+        relation: {
+          type: "string",
+          enum: [
+            "depends_on",
+            "mounts_storage",
+            "routes_to",
+            "replicates_to",
+            "ssh_tunnel",
+            "monitors",
+          ],
+          description: "Dependency relation type when operation is 'save_infra_edge'.",
+        },
+        edgeLabel: {
+          type: "string",
+          description: "Optional description label for the infrastructure dependency edge.",
         },
         name: {
           type: "string",

@@ -1,9 +1,12 @@
 import type {
   AgentSchedule,
+  InfraGraphEdge,
   KbDocument,
+  McpCatalogPreset,
   McpServerConfig,
   MemoryEntry,
   MissionAgent,
+  WorkforceRun,
   WorkspaceActivityEvent,
   WorkspaceServerSummary,
 } from "../../../shared/types/aiHub";
@@ -1159,5 +1162,285 @@ export function saveDemoKbDocument(doc: KbDocument): void {
 export function deleteDemoKbDocument(id: string): void {
   const idx = demoKbStore.findIndex((d) => d.id === id);
   if (idx >= 0) demoKbStore.splice(idx, 1);
+}
+
+export const MCP_MARKETPLACE_CATALOG: McpCatalogPreset[] = [
+  {
+    id: "preset-mcp-prometheus",
+    name: "Prometheus & Alertmanager MCP",
+    category: "observability",
+    icon: "📊",
+    description:
+      "Kör PromQL-frågor, inspektera aktiva larm i Alertmanager och korrelera node_exporter-telemetri direkt i AI-chatten.",
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-prometheus", "--url", "http://10.30.10.25:9090"],
+    defaultTools: [
+      {
+        name: "prometheus_query_range",
+        description: "Execute instant or range PromQL queries against Prometheus.",
+      },
+      {
+        name: "alertmanager_list_firing_alerts",
+        description: "List all active firing or silenced alerts in Alertmanager.",
+      },
+    ],
+  },
+  {
+    id: "preset-mcp-grafana-loki",
+    name: "Grafana Dashboards & Loki Logs MCP",
+    category: "observability",
+    icon: "📈",
+    description:
+      "Hämta paneldata från Grafana, sök i Loki-loggströmmar (LogQL) och skapa incident-annoteringar.",
+    transport: "http",
+    url: "http://10.30.10.25:3000/api/mcp",
+    defaultTools: [
+      {
+        name: "grafana_get_dashboard_summary",
+        description: "Retrieve panel metrics and thresholds from a Grafana dashboard.",
+      },
+      {
+        name: "loki_query_logs",
+        description: "Run LogQL queries across cluster syslog and container log streams.",
+      },
+    ],
+  },
+  {
+    id: "preset-mcp-kubernetes-helm",
+    name: "Kubernetes & Helm Official MCP",
+    category: "kubernetes",
+    icon: "☸️",
+    description:
+      "Inspektera K8s pods, PVCs, CSI-events, StatefulSets och Helm-releaser utan att lämna chatten.",
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "mcp-server-kubernetes"],
+    defaultTools: [
+      {
+        name: "k8s_list_pods_and_events",
+        description: "List Kubernetes pods, node conditions, and warning events.",
+      },
+      {
+        name: "helm_list_releases",
+        description: "Inspect deployed Helm charts and revision history.",
+      },
+    ],
+  },
+  {
+    id: "preset-mcp-postgres-tunnel",
+    name: "PostgreSQL & Redis SSH-Tunnel Inspector MCP",
+    category: "database",
+    icon: "🐘",
+    description:
+      "Analysera pg_stat_activity, långsamma SQL-frågor, tabellstorlekar och lås över sshS3:s lokala port-forwarding-tunnlar.",
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-postgres", "postgresql://localhost:5432/prod"],
+    defaultTools: [
+      {
+        name: "pg_stat_slow_queries",
+        description: "Inspect active connections, locks, and top slow queries via pg_stat_statements.",
+      },
+      {
+        name: "pg_describe_schema",
+        description: "Read table schemas, indexes, and bloat metrics safely (read-only).",
+      },
+    ],
+  },
+  {
+    id: "preset-mcp-terraform-ansible",
+    name: "Terraform & Ansible IaC Drift MCP",
+    category: "gitops",
+    icon: "🏗️",
+    description:
+      "Upptäck konfiguration-drift mellan live-servrar och Terraform state / Ansible playbooks.",
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "@hashicorp/terraform-mcp-server"],
+    defaultTools: [
+      {
+        name: "terraform_detect_drift",
+        description: "Compare live infrastructure attributes against Terraform state.",
+      },
+      {
+        name: "ansible_generate_remediation_role",
+        description: "Generate an idempotent Ansible task from verified terminal changes.",
+      },
+    ],
+  },
+  {
+    id: "preset-mcp-github-gitops",
+    name: "GitHub / GitLab Infra PR & Runbook MCP",
+    category: "gitops",
+    icon: "🐙",
+    description:
+      "Sök i infrastruktur-commits, läs post-mortems och öppna en färdig Pull Request med konfigurationsfixar.",
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-github"],
+    defaultTools: [
+      {
+        name: "github_search_infra_commits",
+        description: "Search recent infrastructure repository commits and PRs.",
+      },
+      {
+        name: "github_create_remediation_pr",
+        description: "Create a branch and pull request with updated config or runbook.",
+      },
+    ],
+  },
+];
+
+const initialDemoInfraEdges: InfraGraphEdge[] = [
+  {
+    id: "edge-k8s-mounts-ontap",
+    from: "k8s-gpu-io-worker-01",
+    to: "netapp-aff-a800-01a",
+    relation: "mounts_storage",
+    label: "NFSv4.1 nconnect=8 & iSCSI Multipath (Astra Trident)",
+    updatedAt: now - 15 * min,
+  },
+  {
+    id: "edge-ontap-ha-pair",
+    from: "netapp-aff-a800-01a",
+    to: "netapp-aff-a800-01b",
+    relation: "depends_on",
+    label: "NVMe-oF HA Pair & SyncMirror",
+    updatedAt: now - 30 * min,
+  },
+  {
+    id: "edge-ontap-snapmirror-dr",
+    from: "netapp-aff-a800-01a",
+    to: "netapp-fas9000-dr-01",
+    relation: "replicates_to",
+    label: "SnapMirror XDP -> Uppsala DC2 (RPO 15m)",
+    updatedAt: now - 10 * min,
+  },
+  {
+    id: "edge-ontap-fabricpool-s3",
+    from: "netapp-aff-a800-01b",
+    to: "sg-sn-nvme-01",
+    relation: "routes_to",
+    label: "FabricPool Cold Block Tiering -> StorageGRID S3 (EC 6+3)",
+    updatedAt: now - 25 * min,
+  },
+  {
+    id: "edge-aiq-monitors-ontap",
+    from: "ontap-aiq-um-01",
+    to: "netapp-aff-a800-01a",
+    relation: "monitors",
+    label: "ActiveIQ Unified Manager + Harvest MCP Telemetry",
+    updatedAt: now - 5 * min,
+  },
+  {
+    id: "edge-ceph-replicates-zfs",
+    from: "ceph-nvme-osd-01",
+    to: "truenas-zfs-backup-01",
+    relation: "replicates_to",
+    label: "Nightly RBD Snapshot Export -> Immutable ZFS Pool",
+    updatedAt: now - 45 * min,
+  },
+];
+
+const initialDemoWorkforceRuns: WorkforceRun[] = [
+  {
+    id: "demo-wf-cross-cluster-audit",
+    title: "Cross-Cluster Storage & K8s Latency Triage (Multi-Agent Workforce)",
+    prompt:
+      "Analysera varför AI-träningsjobben i K8s upplever p99 I/O-spikar och verifiera ONTAP QoS, StorageGRID FabricPool och Ceph NVMe-hälsa parallellt.",
+    leadAgentName: "Lead SRE Workforce Orchestrator",
+    targetCluster: "ALL",
+    status: "completed",
+    createdAt: now - 14 * min,
+    updatedAt: now - 13 * min,
+    steps: [
+      {
+        id: "wf-step-1",
+        agentId: "demo-agent-ontap-architect",
+        agentName: "NetApp ONTAP Storage Architect",
+        agentIcon: "🗄️",
+        role: "ONTAP 9.15 SAN/NAS & QoS",
+        targetCluster: "NetApp-ONTAP-Prod-SE",
+        subTask:
+          "Kontrollera WAFL/QoS-latens på aggr2_nvme_db och SnapMirror-status till Uppsala DR.",
+        status: "completed",
+        findings:
+          "Identifierade att scratch-volymen `vol_ai_scratch_03` saknade QoS-tak och drev upp ködjupet på `netapp-aff-a800-01b` (2.4 ms read latency). Rekommenderar `pg-batch-ceiling` (max 15 000 IOPS).",
+        recommendedCommands: [
+          "qos statistics volume latency show -iterations 1",
+          "volume modify -vserver svm_k8s_prod -volume vol_ai_scratch_03 -qos-policy-group pg-batch-ceiling",
+        ],
+        durationMs: 1420,
+      },
+      {
+        id: "wf-step-2",
+        agentId: "demo-agent-k8s-trident-csi",
+        agentName: "Kubernetes Astra Trident CSI Debugger",
+        agentIcon: "☸️",
+        role: "K8s PVC & Multipath Specialist",
+        targetCluster: "K8s-Trident-CSI-Prod",
+        subTask:
+          "Verifiera DM-Multipath ALUA-policy och NFSv4.1 nconnect på k8s-gpu-io-worker-01.",
+        status: "completed",
+        findings:
+          "På `k8s-gpu-io-worker-01` använde `/etc/multipath.conf` `multibus` istället för `group_by_prio` (ALUA), vilket orsakade I/O över non-optimized paths vid hög last.",
+        recommendedCommands: [
+          "multipath -ll",
+          "kubectl get pvc,volumeattachment -n ai-training -o wide",
+        ],
+        durationMs: 1180,
+      },
+      {
+        id: "wf-step-3",
+        agentId: "demo-agent-storagegrid-ilm",
+        agentName: "StorageGRID & S3 ILM Specialist",
+        agentIcon: "🪣",
+        role: "StorageGRID 11.8 & S3 Tiering",
+        targetCluster: "NetApp-StorageGRID-S3",
+        subTask:
+          "Kontrollera S3 PUT/GET-latens och ILM Erasure Coding 6+3-köer under FabricPool-tiering.",
+        status: "completed",
+        findings:
+          "StorageGRID S3-klustret är grönt (p99 GET 3.8 ms på `sg-sn-nvme-01`, ILM-kö < 120 objekt, WORM Object Lock verifierat).",
+        recommendedCommands: ["iostat -xz 1 2"],
+        durationMs: 950,
+      },
+    ],
+    synthesis: [
+      "### Sammanställd Workforce-diagnos (3 specialistagenter körda parallellt)",
+      "1. **Rotorsak 1 (NetApp ONTAP)**: Volymen `vol_ai_scratch_03` på `netapp-aff-a800-01b` saknade Adaptive QoS-tak och skapade noisy-neighbor-latens (`2.4 ms`).",
+      "2. **Rotorsak 2 (Kubernetes Multipath)**: `k8s-gpu-io-worker-01` hade `path_grouping_policy multibus` istället för ALUA `group_by_prio` i `/etc/multipath.conf`.",
+      "3. **S3 & DR-status**: Både StorageGRID S3 (`ILM-Prod-FabricPool-EC63`) och Ceph/ZFS är i `HEALTH_OK`.",
+    ].join("\n"),
+  },
+];
+
+const demoInfraEdgesStore: InfraGraphEdge[] = [...initialDemoInfraEdges];
+const demoWorkforceRunsStore: WorkforceRun[] = [...initialDemoWorkforceRuns];
+
+export function getDemoInfraEdges(): InfraGraphEdge[] {
+  return [...demoInfraEdgesStore];
+}
+
+export function saveDemoInfraEdge(edge: InfraGraphEdge): void {
+  const idx = demoInfraEdgesStore.findIndex((e) => e.id === edge.id);
+  if (idx >= 0) demoInfraEdgesStore[idx] = edge;
+  else demoInfraEdgesStore.unshift(edge);
+}
+
+export function deleteDemoInfraEdge(id: string): void {
+  const idx = demoInfraEdgesStore.findIndex((e) => e.id === id);
+  if (idx >= 0) demoInfraEdgesStore.splice(idx, 1);
+}
+
+export function getDemoWorkforceRuns(): WorkforceRun[] {
+  return [...demoWorkforceRunsStore];
+}
+
+export function saveDemoWorkforceRun(run: WorkforceRun): void {
+  const idx = demoWorkforceRunsStore.findIndex((r) => r.id === run.id);
+  if (idx >= 0) demoWorkforceRunsStore[idx] = run;
+  else demoWorkforceRunsStore.unshift(run);
 }
 

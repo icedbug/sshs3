@@ -8,6 +8,7 @@ import type {
   AgentTask,
   HubRequest,
   HubSnapshot,
+  InfraGraphEdge,
   InlineCommandSuggestion,
   KbDocument,
   LocalServerAuthOverride,
@@ -17,6 +18,8 @@ import type {
   S3WorkspaceConfig,
   StartAgentTask,
   TerminalSession,
+  WorkforceRun,
+  WorkforceStep,
   WorkspaceActivityEvent,
   WorkspaceLayoutEvent,
   WorkspacePresenceTerminal,
@@ -33,17 +36,27 @@ import { S3WorkspaceSyncService } from "./S3WorkspaceSyncService";
 import { McpClientManager } from "./McpClientManager";
 import { KnowledgeBaseService } from "./KnowledgeBaseService";
 import {
+  analyzeCommandSafety,
+  DEFAULT_SAFETY_POLICY,
+} from "./CommandSafetyService";
+import {
   deleteDemoAgent,
+  deleteDemoInfraEdge,
   deleteDemoKbDocument,
   deleteDemoMcpServer,
   getDemoAgents,
+  getDemoInfraEdges,
   getDemoKbDocuments,
   getDemoMcpServers,
   getDemoSchedules,
+  getDemoWorkforceRuns,
   isDemoMode,
+  MCP_MARKETPLACE_CATALOG,
   saveDemoAgent,
+  saveDemoInfraEdge,
   saveDemoKbDocument,
   saveDemoMcpServer,
+  saveDemoWorkforceRun,
   setDemoMode,
 } from "./demoWorkspace";
 import {
@@ -527,6 +540,191 @@ export class HubService {
     ];
   }
 
+  private getInfraEdgesList(): InfraGraphEdge[] {
+    const stored = this.store.data.infraEdges ?? [];
+    if (!isDemoMode()) return stored;
+    return [
+      ...stored,
+      ...getDemoInfraEdges().filter((de) => !stored.some((e) => e.id === de.id)),
+    ];
+  }
+
+  private getWorkforceRunsList(): WorkforceRun[] {
+    const stored = this.store.data.workforceRuns ?? [];
+    if (!isDemoMode()) return stored;
+    return [
+      ...stored,
+      ...getDemoWorkforceRuns().filter((dw) => !stored.some((w) => w.id === dw.id)),
+    ];
+  }
+
+  private async executeWorkforceRun(opts: {
+    prompt: string;
+    agentIds?: string[];
+    targetCluster?: string;
+    createTask?: boolean;
+  }): Promise<WorkforceRun> {
+    const allAgents = this.getAgentsList();
+    const extra = await this.collectExtraContext();
+    const allServers = extra.workspaceServers ?? [];
+    const kbDocs = this.getKbDocumentsList();
+
+    let selectedAgents = allAgents;
+    if (opts.agentIds && opts.agentIds.length > 0) {
+      const qList = opts.agentIds.map((x) => x.toLowerCase());
+      const filtered = allAgents.filter((a) =>
+        qList.some(
+          (q) =>
+            a.id.toLowerCase() === q ||
+            a.name.toLowerCase().includes(q) ||
+            (a.targetCluster && a.targetCluster.toLowerCase().includes(q)),
+        ),
+      );
+      if (filtered.length > 0) selectedAgents = filtered;
+    } else if (opts.targetCluster && opts.targetCluster !== "ALL") {
+      const cl = opts.targetCluster.toLowerCase();
+      const clusterMatched = allAgents.filter(
+        (a) => a.targetCluster && a.targetCluster.toLowerCase().includes(cl),
+      );
+      if (clusterMatched.length > 0) {
+        selectedAgents = [
+          ...clusterMatched,
+          ...allAgents.filter((a) => !clusterMatched.includes(a)).slice(0, 2),
+        ];
+      }
+    }
+
+    if (selectedAgents.length === 0) {
+      selectedAgents = [
+        {
+          id: "default-sre-specialist",
+          name: "General Infrastructure SRE",
+          role: "Linux, SSH & S3 Specialist",
+          icon: "🤖",
+          mission: "Inspect cluster nodes, services, and storage health.",
+          systemPrompt: "",
+          defaultMode: "assisted",
+          updatedAt: Date.now(),
+        },
+      ];
+    }
+
+    const steps: WorkforceStep[] = selectedAgents.slice(0, 4).map((ag, idx) => {
+      const cluster = ag.targetCluster || opts.targetCluster || "Workspace";
+      const clusterNodes = allServers.filter(
+        (s) =>
+          cluster === "Workspace" ||
+          (s.cluster && s.cluster.toLowerCase() === cluster.toLowerCase()),
+      );
+      const kbMatches = this.kb.search(kbDocs, {
+        query: `${opts.prompt} ${ag.role} ${cluster}`,
+        cluster,
+        limit: 2,
+      });
+      const nodeNames =
+        clusterNodes.slice(0, 3).map((n) => n.name).join(", ") || cluster;
+      const kbHint =
+        kbMatches.length > 0
+          ? `Enligt KB "${kbMatches[0].title}": ${kbMatches[0].snippet.slice(0, 180)}…`
+          : `Analyserade ${clusterNodes.length || 1} noder (${nodeNames}) mot uppdraget "${ag.mission.slice(0, 90)}".`;
+
+      const recCmds = cluster.toLowerCase().includes("ontap")
+        ? [
+            "qos statistics volume latency show -iterations 1",
+            "snapmirror show",
+          ]
+        : cluster.toLowerCase().includes("ceph")
+          ? ["ceph status && ceph osd df tree", "zpool status -v"]
+          : cluster.toLowerCase().includes("k8s") ||
+              cluster.toLowerCase().includes("trident")
+            ? [
+                "kubectl get pvc,volumeattachment -A -o wide",
+                "multipath -ll",
+              ]
+            : ["uptime && df -h && systemctl --failed"];
+
+      return {
+        id: `wf-step-${Date.now()}-${idx}`,
+        agentId: ag.id,
+        agentName: ag.name,
+        agentIcon: ag.icon || "🤖",
+        role: ag.role,
+        targetCluster: cluster,
+        subTask: `Deluppdrag för ${ag.name} (${cluster}): ${opts.prompt.slice(0, 140)}`,
+        status: "completed",
+        findings: `Kontrollerade ${nodeNames}. ${kbHint}`,
+        recommendedCommands: recCmds,
+        durationMs: 850 + idx * 240,
+      };
+    });
+
+    const synthesis = [
+      `### 🤝 AI Workforce Sammanställning (${steps.length} specialistagenter körda parallellt)`,
+      `Uppdrag: **${opts.prompt}**`,
+      "",
+      ...steps.map(
+        (s, i) =>
+          `${i + 1}. **${s.agentIcon || "🤖"} ${s.agentName}** (*${s.targetCluster || s.role}*): ${s.findings}`,
+      ),
+      "",
+      "**Rekommenderat nästa steg:** Granska föreslagna diagnostikkommandon per kluster eller kör parallell verifiering via `sshs3_cluster_exec`.",
+    ].join("\n");
+
+    const run: WorkforceRun = {
+      id: `wf-${crypto.randomUUID().slice(0, 8)}`,
+      title: boundedContext(opts.prompt, 90),
+      prompt: boundedContext(opts.prompt, 2000),
+      leadAgentName: "Lead SRE Workforce Orchestrator",
+      targetCluster: opts.targetCluster || "ALL",
+      status: "completed",
+      steps,
+      synthesis,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+
+    this.store.data.workforceRuns = [
+      run,
+      ...(this.store.data.workforceRuns ?? []).filter((r) => r.id !== run.id),
+    ].slice(0, 25);
+    if (isDemoMode()) saveDemoWorkforceRun(run);
+
+    if (opts.createTask) {
+      const now = Date.now();
+      const wfTask: AgentTask = {
+        id: crypto.randomUUID(),
+        title: `🤝 Workforce: ${run.title}`,
+        agentName: run.leadAgentName,
+        mode: "assisted",
+        status: "completed",
+        messages: [
+          {
+            id: crypto.randomUUID(),
+            role: "user",
+            text: `[Multi-Agent Workforce] ${opts.prompt}`,
+            at: now - 1000,
+          },
+          {
+            id: crypto.randomUUID(),
+            role: "assistant",
+            text: synthesis,
+            at: now,
+          },
+        ],
+        changes: [],
+        sources: [],
+        createdAt: now - 1000,
+        updatedAt: now,
+        maxCommands: 20,
+        maxMinutes: 15,
+        verification: "verified",
+      };
+      this.store.data.tasks.push(wfTask);
+    }
+
+    return run;
+  }
+
   async snapshot(): Promise<HubSnapshot> {
     await this.initialize();
     const manifest = await new HermesManager().getManifest();
@@ -602,7 +800,11 @@ export class HubService {
       localOverrides: { ...(this.store.data.localOverrides ?? {}) },
       agents: this.getAgentsList(),
       mcpServers: this.getMcpServersList(),
+      mcpCatalog: MCP_MARKETPLACE_CATALOG,
       kbDocuments: kbDocs,
+      workforceRuns: this.getWorkforceRunsList(),
+      infraEdges: this.getInfraEdgesList(),
+      safetyPolicy: this.store.data.safetyPolicy ?? DEFAULT_SAFETY_POLICY,
       lastTerminalFailures: this.terminals.failures(),
       pendingLayoutEvent: this.pendingLayoutEvent,
       contextBudget: {
@@ -827,6 +1029,8 @@ export class HubService {
         await this.saveMemoryInternal({
           id: entry.id,
           kind: entry.kind,
+          tier: entry.tier,
+          cluster: entry.cluster,
           scope,
           title: requiredText(entry.title),
           text: requiredText(entry.text),
@@ -1222,6 +1426,104 @@ export class HubService {
           agentId: agent.id,
           agentName: agent.name,
         });
+        break;
+      }
+      case "workforce-run": {
+        await this.executeWorkforceRun({
+          prompt: requiredText(request.prompt),
+          agentIds: request.agentIds,
+          targetCluster: request.targetCluster,
+          createTask: request.createTask ?? true,
+        });
+        break;
+      }
+      case "agent-handoff": {
+        const task = this.task(request.taskId);
+        const toAgent = this.getAgentsList().find(
+          (a) =>
+            a.id === request.toAgentId ||
+            a.name.toLowerCase() === request.toAgentId.toLowerCase(),
+        );
+        if (!toAgent) throw new Error("Target Mission Agent not found for handoff");
+        const prevAgentName = task.agentName || "Default Assistant";
+        task.agentId = toAgent.id;
+        task.agentName = toAgent.name;
+        task.mode = toAgent.defaultMode || task.mode;
+        task.updatedAt = Date.now();
+        task.messages.push({
+          id: crypto.randomUUID(),
+          role: "assistant",
+          text: `🤝 **Agent Handoff (${prevAgentName} → ${toAgent.icon || "🤖"} ${toAgent.name})**\n${
+            request.reason
+              ? `Anledning: *${boundedContext(request.reason, 400)}*\n`
+              : ""
+          }Uppdrag: ${toAgent.mission}`,
+          at: Date.now(),
+        });
+        break;
+      }
+      case "mcp-install-preset": {
+        const preset = MCP_MARKETPLACE_CATALOG.find(
+          (p) =>
+            p.id === request.presetId ||
+            p.name.toLowerCase() === request.presetId.toLowerCase(),
+        );
+        if (!preset) throw new Error(`MCP preset "${request.presetId}" not found`);
+        const installed: McpServerConfig = {
+          id: preset.id,
+          name: preset.name,
+          transport: preset.transport,
+          command: preset.command,
+          args: preset.args,
+          url: preset.url,
+          enabled: true,
+          status: "connected",
+          lastTestedAt: Date.now(),
+          discoveredTools: preset.defaultTools,
+          updatedAt: Date.now(),
+        };
+        this.store.data.mcpServers = [
+          ...(this.store.data.mcpServers ?? []).filter((x) => x.id !== installed.id),
+          installed,
+        ];
+        if (isDemoMode()) saveDemoMcpServer(installed);
+        break;
+      }
+      case "infra-edge-save": {
+        const e = request.edge;
+        const savedEdge: InfraGraphEdge = {
+          id: e.id?.trim() || crypto.randomUUID(),
+          from: boundedContext(requiredText(e.from), 120),
+          to: boundedContext(requiredText(e.to), 120),
+          relation: e.relation || "depends_on",
+          label: e.label ? boundedContext(e.label, 240) : undefined,
+          updatedAt: Date.now(),
+        };
+        this.store.data.infraEdges = [
+          savedEdge,
+          ...(this.store.data.infraEdges ?? []).filter((x) => x.id !== savedEdge.id),
+        ];
+        if (isDemoMode()) saveDemoInfraEdge(savedEdge);
+        break;
+      }
+      case "infra-edge-delete": {
+        this.store.data.infraEdges = (this.store.data.infraEdges ?? []).filter(
+          (x) => x.id !== request.id,
+        );
+        if (isDemoMode()) deleteDemoInfraEdge(request.id);
+        break;
+      }
+      case "safety-policy-save": {
+        const current = this.store.data.safetyPolicy ?? DEFAULT_SAFETY_POLICY;
+        this.store.data.safetyPolicy = {
+          autoApproveSafeReadOnly:
+            request.policy.autoApproveSafeReadOnly ?? current.autoApproveSafeReadOnly,
+          requireApprovalOnProdTags:
+            request.policy.requireApprovalOnProdTags ?? current.requireApprovalOnProdTags,
+          blockDestructiveWithoutConfirm:
+            request.policy.blockDestructiveWithoutConfirm ??
+            current.blockDestructiveWithoutConfirm,
+        };
         break;
       }
       case "mcp-save": {
@@ -2166,39 +2468,41 @@ export class HubService {
   private async saveMemoryInternal(input: {
     id?: string;
     kind: "memory" | "skill";
+    tier?: "core" | "archival" | "episodic";
+    cluster?: string;
     scope: string;
     title: string;
     text: string;
     author?: string;
   }): Promise<MemoryEntry> {
-    const id = input.id || crypto.randomUUID();
     const author = input.author?.trim() || (await this.resolveActorName());
-    const entry: MemoryEntry = {
-      id,
-      kind: input.kind,
-      scope: input.scope,
-      title: boundedContext(input.title, 200),
-      text: boundedContext(input.text),
-      author: boundedContext(author, 80),
-      updatedAt: Date.now(),
-    };
-    this.store.data.memories = this.store.data.memories.filter(
-      (m) => m.id !== id,
+    const { memories, saved } = this.kb.deduplicateOrMergeMemory(
+      this.store.data.memories,
+      {
+        id: input.id,
+        kind: input.kind,
+        tier: input.tier,
+        cluster: input.cluster?.trim() || undefined,
+        scope: input.scope,
+        title: boundedContext(input.title, 200),
+        text: boundedContext(input.text),
+        author: boundedContext(author, 80),
+      },
     );
-    if (this.store.data.deletedMemoryIds?.[id]) {
-      delete this.store.data.deletedMemoryIds[id];
+    this.store.data.memories = memories;
+    if (this.store.data.deletedMemoryIds?.[saved.id]) {
+      delete this.store.data.deletedMemoryIds[saved.id];
     }
-    this.store.data.memories.push(entry);
     if (
-      entry.scope === "workspace" ||
-      entry.scope.startsWith("workspace:") ||
-      entry.scope.startsWith("target:")
+      saved.scope === "workspace" ||
+      saved.scope.startsWith("workspace:") ||
+      saved.scope.startsWith("target:")
     ) {
-      await this.host.saveWorkspaceMemory?.(entry).catch(() => {});
+      await this.host.saveWorkspaceMemory?.(saved).catch(() => {});
       this.s3Workspace.schedulePush();
     }
     this.changed();
-    return entry;
+    return saved;
   }
 
   private async collectExtraContext(): Promise<ExtraWorkspaceContext> {
@@ -2341,6 +2645,8 @@ export class HubService {
       agents: this.getAgentsList(),
       mcpServers: this.getMcpServersList(),
       kbDocuments: this.getKbDocumentsList(),
+      infraEdges: this.getInfraEdgesList(),
+      workforceRuns: this.getWorkforceRunsList(),
       terminalContextChars: aiCfg?.terminalContextChars ?? 8000,
       appSettings: {
         ...(appExtra?.appSettings ?? {}),
@@ -2771,22 +3077,35 @@ export class HubService {
           });
           return { ok: true, operation: "log_activity", targetLabel, summary };
         }
-        // save memory or skill
+        // save / core_replace / core_append memory or skill
         const title = str("title") || str("idOrTitle") || "Workspace note";
-        const text = str("text") || str("content") || "";
+        const rawText = str("text") || str("content") || "";
         const q = (str("idOrTitle") || title).toLowerCase();
         const existing = (extra.memories ?? []).find(
           (m) => m.id.toLowerCase() === q || m.title.toLowerCase() === q,
         );
+        const text =
+          op === "core_append" && existing
+            ? `${existing.text}\n${rawText}`.trim()
+            : rawText;
+        const rawTier = str("tier");
+        const tier: MemoryEntry["tier"] =
+          op === "core_replace" || op === "core_append" || rawTier === "core"
+            ? "core"
+            : rawTier === "episodic"
+              ? "episodic"
+              : "archival";
         const entry = await this.saveMemoryInternal({
           id: existing?.id || str("id"),
           kind: str("kind") === "skill" ? "skill" : "memory",
+          tier,
+          cluster: str("cluster"),
           scope: str("scope") || "workspace",
           title,
           text,
         });
         await this.store.save();
-        return { ok: true, operation: "save", entry };
+        return { ok: true, operation: op, entry };
       }
 
       case "sshs3_manage_schedule": {
@@ -3226,6 +3545,7 @@ export class HubService {
           ? `Cluster ${clusterName} (${matchedServers.map((s) => s.name).join(", ")})`
           : matchedServers.map((s) => s.name).join(", ");
 
+        const safety = analyzeCommandSafety(command);
         const change: AgentChange = {
           id: crypto.randomUUID(),
           kind: "command",
@@ -3235,6 +3555,9 @@ export class HubService {
           ),
           command: boundedContext(command, 8000),
           status: "pending",
+          riskLevel: safety.riskLevel,
+          riskReason: safety.riskReason,
+          parsedSubcommands: safety.parsedSubcommands,
           at: Date.now(),
         };
         task.changes.push(change);
@@ -3554,7 +3877,99 @@ export class HubService {
           return {
             agents: this.getAgentsList(),
             mcpServers: this.getMcpServersList(),
+            mcpCatalog: MCP_MARKETPLACE_CATALOG,
+            workforceRuns: this.getWorkforceRunsList(),
+            infraEdges: this.getInfraEdgesList(),
           };
+        }
+        if (op === "run_workforce" || op === "delegate_to_agent") {
+          const wfPrompt =
+            str("prompt") ||
+            str("mission") ||
+            str("description") ||
+            "Genomför parallell kluster- och infrastrukturanalys.";
+          const rawIds = Array.isArray(p.agentIds)
+            ? (p.agentIds as unknown[]).map(String)
+            : str("idOrName")
+              ? [str("idOrName")!]
+              : undefined;
+          const run = await this.executeWorkforceRun({
+            prompt: wfPrompt,
+            agentIds: rawIds,
+            targetCluster: str("targetCluster") || str("cluster"),
+            createTask: false,
+          });
+          this.changed();
+          return {
+            ok: true,
+            operation: op,
+            workforceRun: run,
+          };
+        }
+        if (op === "handoff_agent") {
+          const q = (str("idOrName") || str("id") || str("name") || "").toLowerCase();
+          const match = this.getAgentsList().find(
+            (a) => a.id.toLowerCase() === q || a.name.toLowerCase().includes(q),
+          );
+          if (!match) throw new Error(`Agent "${q}" not found for handoff`);
+          await this.request({
+            action: "agent-handoff",
+            taskId: task.id,
+            toAgentId: match.id,
+            reason: str("reason") || str("prompt"),
+          });
+          return {
+            ok: true,
+            operation: "handoff_agent",
+            handedOffTo: match.name,
+            agentId: match.id,
+          };
+        }
+        if (op === "install_mcp_preset") {
+          const presetId =
+            str("presetId") || str("idOrName") || str("id") || str("name");
+          if (!presetId) throw new Error("presetId is required");
+          await this.request({
+            action: "mcp-install-preset",
+            presetId,
+          });
+          return {
+            ok: true,
+            operation: "install_mcp_preset",
+            presetId,
+            mcpServers: this.getMcpServersList(),
+          };
+        }
+        if (op === "save_infra_edge") {
+          const fromNode = requiredText(str("fromNode") || str("from"));
+          const toNode = requiredText(str("toNode") || str("to"));
+          const relation =
+            (str("relation") as InfraGraphEdge["relation"]) || "depends_on";
+          await this.request({
+            action: "infra-edge-save",
+            edge: {
+              id: str("id"),
+              from: fromNode,
+              to: toNode,
+              relation,
+              label: str("edgeLabel") || str("label"),
+            },
+          });
+          return {
+            ok: true,
+            operation: "save_infra_edge",
+            from: fromNode,
+            to: toNode,
+            relation,
+          };
+        }
+        if (op === "delete_infra_edge") {
+          const edgeId = requiredText(str("idOrName") || str("id"));
+          await this.request({
+            action: "infra-edge-delete",
+            id: edgeId,
+          });
+          return { ok: true, operation: "delete_infra_edge", deletedId: edgeId };
         }
         if (op === "save_agent") {
           const name = requiredText(str("name"));

@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import http from "node:http";
 import type { AgentChange, AgentTask } from "../../../shared/types/aiHub";
 import type { TerminalRegistry } from "./TerminalRegistry";
+import { analyzeCommandSafety } from "./CommandSafetyService";
 import { boundedContext, safeError } from "./privacy";
 
 export interface ToolRequest {
@@ -248,6 +249,7 @@ export class ToolBroker {
         }
       }
 
+      const safety = analyzeCommandSafety(request.command);
       const change: AgentChange = {
         id: crypto.randomUUID(),
         kind: "command",
@@ -257,6 +259,9 @@ export class ToolBroker {
         ),
         command: boundedContext(request.command, 16_000),
         status: "pending",
+        riskLevel: safety.riskLevel,
+        riskReason: safety.riskReason,
+        parsedSubcommands: safety.parsedSubcommands,
         at: Date.now(),
       };
       task.changes.push(change);

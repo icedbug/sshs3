@@ -23,10 +23,13 @@ import {
   type ContextSource,
   type HubRequest,
   type HubSnapshot,
+  type InfraGraphEdge,
   type KbDocument,
+  type McpCatalogPreset,
   type McpServerConfig,
   type MissionAgent,
   type ShellKind,
+  type WorkforceRun,
 } from "@shared/types/aiHub";
 import {
   DEFAULT_AI_MODELS,
@@ -1486,6 +1489,25 @@ export function AiHubPanel({
                       <summary>
                         <Terminal size={13} />
                         <span>{item.change.description}</span>
+                        {item.change.riskLevel && (
+                          <small
+                            className={
+                              item.change.riskLevel === "safe"
+                                ? "ai-badge ai-badge-success"
+                                : item.change.riskLevel === "destructive"
+                                  ? "ai-badge ai-badge-danger"
+                                  : "ai-badge ai-badge-mode"
+                            }
+                            title={item.change.riskReason}
+                            data-testid={`change-risk-${item.change.riskLevel}`}
+                          >
+                            {item.change.riskLevel === "safe"
+                              ? "🟢 Safe"
+                              : item.change.riskLevel === "destructive"
+                                ? "🔴 Destructive"
+                                : "🟡 Modify"}
+                          </small>
+                        )}
                         <small
                           className={
                             item.change.status === "pending"
@@ -1501,6 +1523,21 @@ export function AiHubPanel({
                             : item.change.status}
                         </small>
                       </summary>
+                      {item.change.riskReason && (
+                        <small
+                          style={{
+                            display: "block",
+                            marginTop: 6,
+                            fontSize: 11,
+                            opacity: 0.85,
+                          }}
+                        >
+                          🛡️ {item.change.riskReason}
+                          {(item.change.parsedSubcommands?.length ?? 0) > 1
+                            ? ` · ${item.change.parsedSubcommands!.length} AST pipeline/chain segments`
+                            : ""}
+                        </small>
+                      )}
                       {item.change.command && (
                         <div className="ai-code-block" style={{ marginTop: "8px" }}>
                           <div className="ai-code-header">
@@ -2907,12 +2944,12 @@ function Memory({
   const [kind, setKind] = useState<"memory" | "skill">(
     suggestion ? "skill" : "memory",
   );
+  const [tier, setTier] = useState<"core" | "archival" | "episodic">("core");
   return (
     <div className="ai-scroll">
-      <h2>Memory & skills</h2>
+      <h2>🧠 Smart Memory & Skills (Mem0 + Letta Tiers)</h2>
       <p className="ai-hint">
-        Review the content and choose its environment. Model output never grants
-        new permissions.
+        Overlapping memories are automatically deduplicated & consolidated (Mem0 pattern). Pin critical facts to <code>Core Memory</code> so they are always injected into the system prompt.
       </p>
       <form
         className="ai-form"
@@ -2920,7 +2957,7 @@ function Memory({
           e.preventDefault();
           void act({
             action: "memory-save",
-            entry: { id, title, text, scope, kind },
+            entry: { id, title, text, scope, kind, tier },
           }).then((result) => {
             if (result) {
               setId(undefined);
@@ -2949,6 +2986,17 @@ function Memory({
           </select>
         </label>
         <label>
+          Memory Tier (Letta Architecture)
+          <select
+            value={tier}
+            onChange={(e) => setTier(e.target.value as typeof tier)}
+          >
+            <option value="core">📌 Core Memory (Always pinned in context)</option>
+            <option value="archival">📚 Archival Memory (Hybrid RAG retrieved)</option>
+            <option value="episodic">⚡ Episodic Incident Note</option>
+          </select>
+        </label>
+        <label>
           Scope
           <select value={scope} onChange={(e) => setScope(e.target.value)}>
             <option value="workspace">Shared Workspace (Team Vault)</option>
@@ -2974,11 +3022,29 @@ function Memory({
       </form>
       {hub.memories.map((m) => (
         <article className="ai-card" key={m.id}>
-          <strong>{m.title}</strong>
-          <small>
-            {" "}
-            · {m.kind} · {m.scope}
-          </small>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+            <div>
+              <strong>{m.title}</strong>
+              <small>
+                {" "}
+                · {m.kind} · {m.scope}
+              </small>
+            </div>
+            <div style={{ display: "flex", gap: 4 }}>
+              <span className="ai-badge ai-badge-mode">
+                {m.tier === "archival"
+                  ? "📚 Archival"
+                  : m.tier === "episodic"
+                    ? "⚡ Episodic"
+                    : "📌 Core"}
+              </span>
+              {(m.updatedCount ?? 1) > 1 && (
+                <span className="ai-badge ai-badge-success" title="Antal gånger minnet har konsoliderats automatiskt (Mem0)">
+                  🔄 ×{m.updatedCount} konsoliderad
+                </span>
+              )}
+            </div>
+          </div>
           <p>{m.text}</p>
           <button
             onClick={() => {
@@ -2987,6 +3053,7 @@ function Memory({
               setText(m.text);
               setScope(m.scope);
               setKind(m.kind);
+              setTier(m.tier ?? "core");
             }}
           >
             Edit
@@ -3165,6 +3232,18 @@ function AgentsAndMcpView({
   const [showMcpForm, setShowMcpForm] = useState(false);
   const [testingMcpId, setTestingMcpId] = useState("");
 
+  const [workforceObjective, setWorkforceObjective] = useState(
+    "Kör koordinerad hälsokontroll över NetApp ONTAP, StorageGRID S3 och K8s Trident CSI",
+  );
+  const [runningWorkforce, setRunningWorkforce] = useState(false);
+
+  const [edgeSource, setEdgeSource] = useState("K8s-Trident-CSI-Prod");
+  const [edgeTarget, setEdgeTarget] = useState("NetApp-ONTAP-Prod-SE");
+  const [edgeRel, setEdgeRel] =
+    useState<InfraGraphEdge["relation"]>("mounts_storage");
+  const [edgeLabel, setEdgeLabel] = useState("");
+  const [showEdgeForm, setShowEdgeForm] = useState(false);
+
   const clusters = Array.from(
     new Set(
       (hub.workspaceServers ?? [])
@@ -3176,6 +3255,10 @@ function AgentsAndMcpView({
   const totalMcpTools = (hub.mcpServers ?? []).reduce(
     (sum, s) => sum + (s.discoveredTools?.length ?? 0),
     0,
+  );
+
+  const installedMcpNames = new Set(
+    (hub.mcpServers ?? []).map((s) => s.name.toLowerCase()),
   );
 
   return (
@@ -3194,6 +3277,102 @@ function AgentsAndMcpView({
           <small>🛠️ Discovered MCP Tools</small>
         </div>
       </div>
+
+      {/* PILLAR 1: Multi-Agent Workforce Orchestrator (LangGraph Supervisor / OpenAI Swarm) */}
+      <article className="ai-card" data-testid="workforce-orchestrator-card">
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <div>
+            <strong>🤝 AI Workforce Orchestrator (Multi-Agent Swarm)</strong>
+            <div style={{ marginTop: 2 }}>
+              <small>
+                Lead SRE Supervisor delegerar parallella deluppdrag till dina specialiserade Mission Agents och syntetiserar en gemensam åtgärdsplan.
+              </small>
+            </div>
+          </div>
+          <span className="ai-badge ai-badge-success">
+            {(hub.workforceRuns ?? []).length} körning(ar)
+          </span>
+        </div>
+        <div style={{ display: "flex", gap: 6, marginTop: 10, flexWrap: "wrap" }}>
+          <input
+            style={{ flex: 1, minWidth: 220 }}
+            value={workforceObjective}
+            onChange={(e) => setWorkforceObjective(e.target.value)}
+            placeholder="Beskriv tvärfunktionellt uppdrag för AI Workforce…"
+            data-testid="workforce-objective-input"
+          />
+          <button
+            type="button"
+            className="ai-btn-emerald"
+            disabled={runningWorkforce || !workforceObjective.trim()}
+            data-testid="run-workforce-btn"
+            onClick={() => {
+              setRunningWorkforce(true);
+              const prevIds = new Set(hub.tasks.map((t) => t.id));
+              void act({
+                action: "workforce-run",
+                prompt: workforceObjective.trim(),
+              })
+                .then((nextSnap) => {
+                  const created = nextSnap?.tasks.find((t) => !prevIds.has(t.id));
+                  if (created) {
+                    onStartedMission(created.id);
+                  }
+                })
+                .finally(() => setRunningWorkforce(false));
+            }}
+          >
+            {runningWorkforce
+              ? "⏳ Orkestrerar agenter…"
+              : "🚀 Kör AI Workforce (Parallella Agenter)"}
+          </button>
+        </div>
+
+        {(hub.workforceRuns ?? []).slice(0, 2).map((run: WorkforceRun) => (
+          <details
+            key={run.id}
+            style={{
+              marginTop: 10,
+              padding: "8px 10px",
+              borderRadius: 8,
+              background: "rgba(15, 23, 42, 0.55)",
+              border: "1px solid rgba(56, 189, 248, 0.2)",
+            }}
+          >
+            <summary style={{ cursor: "pointer", fontWeight: 600, fontSize: 12 }}>
+              ⚡ {run.title} · {run.steps.length} agenter ({run.status})
+            </summary>
+            <div style={{ display: "grid", gap: 6, marginTop: 8 }}>
+              {run.steps.map((step) => (
+                <div
+                  key={step.id}
+                  style={{
+                    padding: "6px 8px",
+                    borderRadius: 6,
+                    background: "rgba(30, 41, 59, 0.65)",
+                    fontSize: 12,
+                  }}
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 6 }}>
+                    <strong>🤖 {step.agentName}</strong>
+                    {step.targetCluster && (
+                      <span className="ai-badge ai-badge-cluster">
+                        🧩 {step.targetCluster}
+                      </span>
+                    )}
+                  </div>
+                  <p style={{ margin: "4px 0" }}>{step.findings}</p>
+                  {step.recommendedCommands?.[0] && (
+                    <code style={{ display: "block", fontSize: 11, opacity: 0.9 }}>
+                      $ {step.recommendedCommands[0]}
+                    </code>
+                  )}
+                </div>
+              ))}
+            </div>
+          </details>
+        ))}
+      </article>
 
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
         <h2>🤖 Mission Agents ({(hub.agents ?? []).length})</h2>
@@ -3367,6 +3546,23 @@ function AgentsAndMcpView({
               💬 Use in Chat
             </button>
             <button
+              type="button"
+              onClick={() => {
+                const activeTaskId = hub.tasks[0]?.id;
+                if (activeTaskId) {
+                  void act({
+                    action: "agent-handoff",
+                    taskId: activeTaskId,
+                    toAgentId: ag.id,
+                    reason: `Swarm handoff till ${ag.name}`,
+                  });
+                }
+                onSelectAgentForChat(ag.id);
+              }}
+            >
+              🤝 Swarm Handoff
+            </button>
+            <button
               className="ai-btn-emerald"
               onClick={() => {
                 const prevIds = new Set(hub.tasks.map((t) => t.id));
@@ -3395,10 +3591,69 @@ function AgentsAndMcpView({
 
       <hr style={{ border: "none", borderTop: "1px solid var(--border-subtle, #2a3140)", margin: "18px 0" }} />
 
+      {/* PILLAR 5: 1-Click Open-Source MCP Marketplace */}
+      <h2>🛒 1-Click Open-Source MCP Marketplace ({(hub.mcpCatalog ?? []).length})</h2>
+      <p className="ai-hint">
+        Installera färdigkonfigurerade Open-Source MCP-servrar (Prometheus, Grafana/Loki, Kubernetes/Helm, PostgreSQL, Terraform, GitHub) med ett klick.
+      </p>
+      <div
+        data-testid="mcp-marketplace-grid"
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))",
+          gap: 8,
+          marginBottom: 16,
+        }}
+      >
+        {(hub.mcpCatalog ?? []).map((preset: McpCatalogPreset) => {
+          const isInstalled = installedMcpNames.has(preset.name.toLowerCase());
+          return (
+            <article
+              key={preset.id}
+              className="ai-card"
+              style={{ margin: 0, display: "flex", flexDirection: "column", justifyContent: "space-between", gap: 6 }}
+            >
+              <div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6 }}>
+                  <strong>
+                    {preset.icon} {preset.name}
+                  </strong>
+                  <span className="ai-badge ai-badge-mode">{preset.category}</span>
+                </div>
+                <p style={{ fontSize: 12, margin: "6px 0", opacity: 0.9 }}>
+                  {preset.description}
+                </p>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                  {preset.defaultTools.map((t) => (
+                    <span key={t.name} className="ai-tool-tag" title={t.description}>
+                      🛠️ {t.name}
+                    </span>
+                  ))}
+                </div>
+              </div>
+              <button
+                type="button"
+                className={isInstalled ? "" : "ai-btn-emerald"}
+                disabled={isInstalled}
+                data-testid={`mcp-install-${preset.id}`}
+                onClick={() =>
+                  void act({
+                    action: "mcp-install-preset",
+                    presetId: preset.id,
+                  })
+                }
+              >
+                {isInstalled ? "✅ Installerad" : "⚡ 1-Klick Installera"}
+              </button>
+            </article>
+          );
+        })}
+      </div>
+
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-        <h2>🔌 MCP Servers ({(hub.mcpServers ?? []).length})</h2>
+        <h2>🔌 Installed MCP Servers ({(hub.mcpServers ?? []).length})</h2>
         <button onClick={() => setShowMcpForm((v) => !v)}>
-          {showMcpForm ? "Close Form" : "+ Add MCP Server"}
+          {showMcpForm ? "Close Form" : "+ Custom MCP Server"}
         </button>
       </div>
       <p className="ai-hint">
@@ -3561,6 +3816,182 @@ function AgentsAndMcpView({
           </div>
         </article>
       ))}
+
+      <hr style={{ border: "none", borderTop: "1px solid var(--border-subtle, #2a3140)", margin: "18px 0" }} />
+
+      {/* PILLAR 2B: Temporal Infrastructure & Storage Dependency Graph (Zep / Graphiti) */}
+      <article className="ai-card" data-testid="infra-dependency-graph-card">
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+          <strong>🕸️ Service & Storage Dependency Graph ({(hub.infraEdges ?? []).length})</strong>
+          <button type="button" onClick={() => setShowEdgeForm((v) => !v)}>
+            {showEdgeForm ? "Close" : "+ Add Dependency Link"}
+          </button>
+        </div>
+        <small style={{ display: "block", marginTop: 4 }}>
+          Temporala beroendelänkar mellan kluster, noder och lagring som injiceras automatiskt i AI-kontexten vid rotorsaksanalys.
+        </small>
+        {showEdgeForm && (
+          <form
+            className="ai-form"
+            style={{ marginTop: 8 }}
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (!edgeSource.trim() || !edgeTarget.trim()) return;
+              void act({
+                action: "infra-edge-save",
+                edge: {
+                  from: edgeSource.trim(),
+                  to: edgeTarget.trim(),
+                  relation: edgeRel,
+                  label:
+                    edgeLabel.trim() ||
+                    `${edgeSource.trim()} → ${edgeRel} → ${edgeTarget.trim()}`,
+                },
+              }).then(() => {
+                setEdgeLabel("");
+                setShowEdgeForm(false);
+              });
+            }}
+          >
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6 }}>
+              <input
+                value={edgeSource}
+                onChange={(e) => setEdgeSource(e.target.value)}
+                placeholder="Source (e.g. K8s-Trident-CSI-Prod)"
+              />
+              <select
+                value={edgeRel}
+                onChange={(e) =>
+                  setEdgeRel(e.target.value as InfraGraphEdge["relation"])
+                }
+              >
+                <option value="mounts_storage">mounts_storage</option>
+                <option value="replicates_to">replicates_to</option>
+                <option value="depends_on">depends_on</option>
+                <option value="routes_to">routes_to</option>
+                <option value="monitors">monitors</option>
+                <option value="ssh_tunnel">ssh_tunnel</option>
+              </select>
+              <input
+                value={edgeTarget}
+                onChange={(e) => setEdgeTarget(e.target.value)}
+                placeholder="Target (e.g. NetApp-ONTAP-Prod-SE)"
+              />
+            </div>
+            <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+              <input
+                style={{ flex: 1 }}
+                value={edgeLabel}
+                onChange={(e) => setEdgeLabel(e.target.value)}
+                placeholder="Beskrivning (valfritt, t.ex. SnapMirror XDP lag < 5 min)"
+              />
+              <button type="submit">Save Link</button>
+            </div>
+          </form>
+        )}
+        <div style={{ display: "grid", gap: 6, marginTop: 8 }}>
+          {(hub.infraEdges ?? []).map((edge: InfraGraphEdge) => (
+            <div
+              key={edge.id}
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                gap: 8,
+                padding: "6px 8px",
+                borderRadius: 6,
+                background: "rgba(30, 41, 59, 0.55)",
+                fontSize: 12,
+              }}
+            >
+              <div>
+                <strong>{edge.from}</strong>{" "}
+                <span className="ai-badge ai-badge-mode">{edge.relation}</span>{" "}
+                <strong>{edge.to}</strong>
+                <div style={{ fontSize: 11, opacity: 0.8 }}>{edge.label}</div>
+              </div>
+              <button
+                type="button"
+                onClick={() =>
+                  void act({ action: "infra-edge-delete", id: edge.id })
+                }
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+      </article>
+
+      {/* PILLAR 4: AST Shell Command Safety Guardrails */}
+      <article className="ai-card" data-testid="safety-policy-card">
+        <strong>🛡️ AST Shell Command Safety Guardrails</strong>
+        <small style={{ display: "block", marginTop: 4, marginBottom: 8 }}>
+          Klassificerar automatiskt pipelines (<code>|</code>), kedjor (<code>&amp;&amp;</code>) och subshells i{" "}
+          <span className="ai-badge ai-badge-success">🟢 Safe Read-Only</span>,{" "}
+          <span className="ai-badge ai-badge-mode">🟡 State-Modifying</span> och{" "}
+          <span className="ai-badge ai-badge-danger">🔴 Destructive</span>.
+        </small>
+        <div style={{ display: "grid", gap: 6, fontSize: 12 }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={hub.safetyPolicy?.autoApproveSafeReadOnly ?? true}
+              onChange={(e) =>
+                void act({
+                  action: "safety-policy-save",
+                  policy: {
+                    autoApproveSafeReadOnly: e.target.checked,
+                    requireApprovalOnProdTags:
+                      hub.safetyPolicy?.requireApprovalOnProdTags ?? true,
+                    blockDestructiveWithoutConfirm:
+                      hub.safetyPolicy?.blockDestructiveWithoutConfirm ?? true,
+                  },
+                })
+              }
+            />
+            <span>Auto-godkänn 🟢 Safe Read-Only diagnostikkommandon</span>
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={hub.safetyPolicy?.requireApprovalOnProdTags ?? true}
+              onChange={(e) =>
+                void act({
+                  action: "safety-policy-save",
+                  policy: {
+                    autoApproveSafeReadOnly:
+                      hub.safetyPolicy?.autoApproveSafeReadOnly ?? true,
+                    requireApprovalOnProdTags: e.target.checked,
+                    blockDestructiveWithoutConfirm:
+                      hub.safetyPolicy?.blockDestructiveWithoutConfirm ?? true,
+                  },
+                })
+              }
+            />
+            <span>Kräv manuellt godkännande vid förändringar på produktionsnoder (🟡 Modify)</span>
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={hub.safetyPolicy?.blockDestructiveWithoutConfirm ?? true}
+              onChange={(e) =>
+                void act({
+                  action: "safety-policy-save",
+                  policy: {
+                    autoApproveSafeReadOnly:
+                      hub.safetyPolicy?.autoApproveSafeReadOnly ?? true,
+                    requireApprovalOnProdTags:
+                      hub.safetyPolicy?.requireApprovalOnProdTags ?? true,
+                    blockDestructiveWithoutConfirm: e.target.checked,
+                  },
+                })
+              }
+            />
+            <span>Spärra 🔴 Destructive kommandon utan explicit granskning</span>
+          </label>
+        </div>
+      </article>
     </div>
   );
 }
@@ -3612,8 +4043,8 @@ function KnowledgeBaseView({
           <small>🧩 Indexed BM25 Chunks</small>
         </div>
         <div className="ai-stat-box">
-          <strong>BM25 + Cluster</strong>
-          <small>⚡ Retrieval Engine</small>
+          <strong>Hybrid BM25 + Concept RAG</strong>
+          <small>⚡ Orama Retrieval Engine</small>
         </div>
       </div>
 

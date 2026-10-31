@@ -1418,6 +1418,26 @@ export const LandingView: React.FC<LandingViewProps> = ({
                 >
                   📚 Sök i Runbooks & MCP
                 </button>
+                <button
+                  type="button"
+                  data-testid="landing-run-workforce-btn"
+                  onClick={() => {
+                    void hubRequest({
+                      action: 'workforce-run',
+                      prompt:
+                        'Kör koordinerad hälsokontroll över NetApp ONTAP, StorageGRID S3 och K8s Trident CSI',
+                    }).finally(() => {
+                      window.dispatchEvent(
+                        new CustomEvent('sshs3:ai-open', {
+                          detail: { view: 'Work', mode: 'hub' },
+                        })
+                      );
+                    });
+                  }}
+                  className="rounded-md border border-rose-500/35 bg-rose-500/10 px-2 py-0.5 text-[10.5px] font-semibold text-rose-200 hover:bg-rose-500/20 transition-colors"
+                >
+                  🤝 Kör AI Workforce (Swarm)
+                </button>
               </div>
             </div>
 
@@ -2160,6 +2180,34 @@ export const LandingView: React.FC<LandingViewProps> = ({
                           </div>
                         );
                       })}
+                      {(hub?.infraEdges ?? []).length > 0 && (
+                        <div
+                          data-testid="workspace-infra-dependency-strip"
+                          className="sm:col-span-2 rounded-xl border border-indigo-500/30 bg-indigo-500/5 px-3 py-2"
+                        >
+                          <div className="flex items-center justify-between gap-2 mb-1">
+                            <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-300">
+                              🕸️ Service & Storage Dependency Graph (Zep / Graphiti)
+                            </span>
+                            <span className="text-[10px] text-txt-muted">
+                              Injiceras automatiskt i AI-kontexten
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap gap-1.5">
+                            {(hub?.infraEdges ?? []).slice(0, 4).map((edge) => (
+                              <span
+                                key={edge.id}
+                                title={edge.label}
+                                className="inline-flex items-center gap-1 rounded-md border border-border-subtle bg-app-card px-2 py-0.5 text-[10px] text-txt-secondary"
+                              >
+                                <strong className="text-txt-primary">{edge.from}</strong>
+                                <span className="text-indigo-300">→ {edge.relation} →</span>
+                                <strong className="text-txt-primary">{edge.to}</strong>
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>

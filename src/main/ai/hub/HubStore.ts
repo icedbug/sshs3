@@ -6,12 +6,15 @@ import type {
   AgentTask,
   ContextSource,
   HubPreferences,
+  InfraGraphEdge,
   InventoryEntry,
   KbDocument,
   LocalServerAuthOverride,
   McpServerConfig,
   MemoryEntry,
   MissionAgent,
+  SafetyPolicyConfig,
+  WorkforceRun,
   WorkspaceActivityEvent,
   WorkspaceServerSummary,
 } from "../../../shared/types/aiHub";
@@ -25,6 +28,7 @@ export interface SharedWorkspaceFilePayload {
   activityLog: WorkspaceActivityEvent[];
   agents?: MissionAgent[];
   kbDocuments?: KbDocument[];
+  infraEdges?: InfraGraphEdge[];
   deletedServerIds?: Record<string, string>;
   deletedMemoryIds?: Record<string, number>;
 }
@@ -41,6 +45,9 @@ export interface HubData {
   agents?: MissionAgent[];
   mcpServers?: McpServerConfig[];
   kbDocuments?: KbDocument[];
+  infraEdges?: InfraGraphEdge[];
+  workforceRuns?: WorkforceRun[];
+  safetyPolicy?: SafetyPolicyConfig;
   localOverrides?: Record<string, LocalServerAuthOverride>;
   deletedServerIds?: Record<string, string>;
   deletedMemoryIds?: Record<string, number>;
@@ -63,6 +70,13 @@ export const defaultHubData = (): HubData => ({
   agents: [],
   mcpServers: [],
   kbDocuments: [],
+  infraEdges: [],
+  workforceRuns: [],
+  safetyPolicy: {
+    autoApproveSafeReadOnly: true,
+    requireApprovalOnProdTags: true,
+    blockDestructiveWithoutConfirm: true,
+  },
   localOverrides: {},
   deletedServerIds: {},
   deletedMemoryIds: {},

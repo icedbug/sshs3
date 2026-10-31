@@ -48,6 +48,14 @@ export interface AgentMessage {
   images?: Array<{ label: string; dataUrl: string; mimeType?: string }>;
   at: number;
 }
+export type CommandRiskLevel = "safe" | "modify" | "destructive";
+
+export interface SafetyPolicyConfig {
+  autoApproveSafeReadOnly: boolean;
+  requireApprovalOnProdTags: boolean;
+  blockDestructiveWithoutConfirm: boolean;
+}
+
 export interface AgentChange {
   id: string;
   kind: "command" | "file";
@@ -66,6 +74,9 @@ export interface AgentChange {
     | "uncertain";
   output?: string;
   exitCode?: number;
+  riskLevel?: CommandRiskLevel;
+  riskReason?: string;
+  parsedSubcommands?: string[];
   at: number;
 }
 export interface AgentTask {
@@ -91,11 +102,69 @@ export interface AgentTask {
 export interface MemoryEntry {
   id: string;
   kind: "memory" | "skill";
+  tier?: "core" | "archival" | "episodic";
+  cluster?: string;
   scope: string;
   title: string;
   text: string;
   author?: string;
+  updatedCount?: number;
   updatedAt: number;
+}
+
+export interface InfraGraphEdge {
+  id: string;
+  from: string;
+  to: string;
+  relation:
+    | "depends_on"
+    | "mounts_storage"
+    | "routes_to"
+    | "replicates_to"
+    | "ssh_tunnel"
+    | "monitors";
+  label?: string;
+  updatedAt: number;
+}
+
+export interface WorkforceStep {
+  id: string;
+  agentId: string;
+  agentName: string;
+  agentIcon?: string;
+  role: string;
+  targetCluster?: string;
+  subTask: string;
+  status: "queued" | "running" | "completed" | "failed";
+  findings: string;
+  recommendedCommands?: string[];
+  durationMs?: number;
+}
+
+export interface WorkforceRun {
+  id: string;
+  title: string;
+  prompt: string;
+  leadAgentName: string;
+  targetCluster?: string;
+  status: "running" | "completed" | "failed";
+  steps: WorkforceStep[];
+  synthesis: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface McpCatalogPreset {
+  id: string;
+  name: string;
+  category: "observability" | "kubernetes" | "storage" | "database" | "gitops";
+  icon: string;
+  description: string;
+  transport: "stdio" | "http";
+  command?: string;
+  args?: string[];
+  url?: string;
+  defaultTools: McpToolSummary[];
 }
 export interface LocalServerAuthOverride {
   profileId: string;
@@ -338,7 +407,11 @@ export interface HubSnapshot {
   localOverrides?: Record<string, LocalServerAuthOverride>;
   agents?: MissionAgent[];
   mcpServers?: McpServerConfig[];
+  mcpCatalog?: McpCatalogPreset[];
   kbDocuments?: KbDocument[];
+  workforceRuns?: WorkforceRun[];
+  infraEdges?: InfraGraphEdge[];
+  safetyPolicy?: SafetyPolicyConfig;
   lastTerminalFailures?: Record<string, TerminalCommandFailure>;
   pendingLayoutEvent?: WorkspaceLayoutEvent;
   contextBudget?: {
@@ -399,6 +472,35 @@ export type HubRequest =
       agentId?: string;
       sessionId?: string;
       promptOverride?: string;
+    }
+  | {
+      action: "workforce-run";
+      prompt: string;
+      agentIds?: string[];
+      targetCluster?: string;
+      createTask?: boolean;
+    }
+  | {
+      action: "agent-handoff";
+      taskId: string;
+      toAgentId: string;
+      reason?: string;
+    }
+  | {
+      action: "mcp-install-preset";
+      presetId: string;
+    }
+  | {
+      action: "infra-edge-save";
+      edge: Omit<InfraGraphEdge, "id" | "updatedAt"> & { id?: string };
+    }
+  | {
+      action: "infra-edge-delete";
+      id: string;
+    }
+  | {
+      action: "safety-policy-save";
+      policy: Partial<SafetyPolicyConfig>;
     }
   | {
       action: "mcp-save";

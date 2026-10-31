@@ -1281,6 +1281,204 @@ describe("Production multi-user workspace sync & auto-memory", () => {
     expect(dotfilePools[0].files[0].remotePath).toBe("~/.bashrc");
     expect(appSettings.dotfilesPoolEnabled).toBe(true);
   });
+
+  it("supports all 5 Open-Source AI Pillars: Multi-Agent Workforce & Swarm Handoffs, Mem0/Letta/Zep Smart Memory & Infra Graph, Orama Hybrid Concept RAG, AST Command Safety Classifier, and 1-Click MCP Marketplace", async () => {
+    const { HubService } = await import("../../src/main/ai/hub/HubService");
+    const { analyzeCommandSafety, splitShellAstSegments } = await import(
+      "../../src/main/ai/hub/CommandSafetyService"
+    );
+    const { KnowledgeBaseService } = await import(
+      "../../src/main/ai/hub/KnowledgeBaseService"
+    );
+
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "sshs3-hub-pillars-"));
+    disposals.push(() => fs.rm(tmpDir, { recursive: true, force: true }));
+
+    const hub = new HubService(
+      {
+        changed: () => {},
+        inventoryTargets: async () => [],
+        backgroundChanged: async () => {},
+        openSchedule: async () => "s1",
+        show: () => {},
+      },
+      tmpDir,
+    );
+    disposals.push(() => hub.dispose());
+    await hub.initialize();
+
+    // --- PILLAR 4: AST-style Shell Command Safety Classifier ---
+    const astSegments = splitShellAstSegments(
+      "df -h | grep -E 'vol|aggr' && kubectl get pvc -A",
+    );
+    expect(astSegments).toEqual([
+      "df -h",
+      "grep -E 'vol|aggr'",
+      "kubectl get pvc -A",
+    ]);
+
+    const safeAnalysis = analyzeCommandSafety(
+      "df -h | grep -E 'vol|aggr' && kubectl get pvc -A",
+    );
+    expect(safeAnalysis.riskLevel).toBe("safe");
+
+    const modifyAnalysis = analyzeCommandSafety(
+      "kubectl get pods && systemctl restart trident-csi",
+    );
+    expect(modifyAnalysis.riskLevel).toBe("modify");
+
+    const destructiveAnalysis = analyzeCommandSafety(
+      "ls -la /tmp && rm -rf /var/lib/ceph/osd",
+    );
+    expect(destructiveAnalysis.riskLevel).toBe("destructive");
+
+    // Save Safety Policy via HubRequest
+    const snapPolicy = await hub.request({
+      action: "safety-policy-save",
+      policy: {
+        autoApproveSafeReadOnly: true,
+        requireApprovalOnProdTags: true,
+        blockDestructiveWithoutConfirm: true,
+      },
+    });
+    expect(snapPolicy.safetyPolicy?.autoApproveSafeReadOnly).toBe(true);
+
+    // --- PILLAR 3: Orama-style Hybrid RAG (BM25 + Bilingual Semantic Concept Vectors + Trigram Similarity) ---
+    const kb = new KnowledgeBaseService();
+    const doc = kb.createDocument({
+      title: "NetApp ONTAP NVMe & WAFL IOPS Troubleshooting",
+      collection: "netapp-ontap",
+      cluster: "NetApp-ONTAP-Prod-SE",
+      tags: ["ontap", "nvme"],
+      content:
+        "When read/write latency spikes above 2.5ms, inspect qos statistics volume latency show and verify queue depth.",
+    });
+    // Query in Swedish using synonyms ("hög svarstid disk kötid") that share 0 exact words with the English doc,
+    // proving that SEMANTIC_CONCEPT_CLUSTERS ("storage_latency_qos") bridges the language/terminology gap!
+    const ragResults = kb.search([doc], "hög svarstid disk kötid", {
+      cluster: "NetApp-ONTAP-Prod-SE",
+      limit: 3,
+    });
+    expect(ragResults.length).toBeGreaterThan(0);
+    expect(ragResults[0].matchedConcepts).toContain("storage_latency_qos");
+    expect(ragResults[0].semanticScore).toBeGreaterThan(0);
+
+    // --- PILLAR 2: Mem0 Deduplication + Letta Memory Tiers + Zep/Graphiti Infra Dependency Graph ---
+    await hub.request({
+      action: "memory-save",
+      entry: {
+        title: "NetApp ONTAP SnapMirror Policy",
+        text: "SnapMirror XDP lag must stay below 5 minutes on SVM prod_svm_se.",
+        kind: "memory",
+        scope: "workspace",
+        tier: "core",
+      },
+    });
+    // Save overlapping memory with slightly updated text -> should deduplicate & increment updatedCount!
+    const snapMem = await hub.request({
+      action: "memory-save",
+      entry: {
+        title: "NetApp ONTAP SnapMirror Policy",
+        text: "SnapMirror XDP lag must stay below 5 minutes on SVM prod_svm_se. Alert threshold is 15 minutes.",
+        kind: "memory",
+        scope: "workspace",
+        tier: "core",
+      },
+    });
+    const matchingMemories = snapMem.memories.filter(
+      (m) => m.title === "NetApp ONTAP SnapMirror Policy",
+    );
+    expect(matchingMemories).toHaveLength(1);
+    expect(matchingMemories[0].updatedCount).toBe(2);
+    expect(matchingMemories[0].tier).toBe("core");
+    expect(matchingMemories[0].text).toContain("Alert threshold is 15 minutes");
+
+    // Save Infrastructure Dependency Graph Edge (Zep / Graphiti pattern)
+    const snapEdge = await hub.request({
+      action: "infra-edge-save",
+      edge: {
+        from: "K8s-Trident-CSI-Prod",
+        to: "NetApp-ONTAP-Prod-SE",
+        relation: "mounts_storage",
+        label: "Astra Trident mounts ONTAP FlexVols over NFSv4.1",
+      },
+    });
+    expect(
+      (snapEdge.infraEdges ?? []).some(
+        (e) =>
+          e.from === "K8s-Trident-CSI-Prod" &&
+          e.to === "NetApp-ONTAP-Prod-SE" &&
+          e.relation === "mounts_storage",
+      ),
+    ).toBe(true);
+
+    // --- PILLAR 5: 1-Click Open-Source MCP Marketplace ---
+    const snapMcp = await hub.request({
+      action: "mcp-install-preset",
+      presetId: "preset-mcp-prometheus",
+    });
+    expect((snapMcp.mcpCatalog ?? []).length).toBeGreaterThanOrEqual(6);
+    expect(
+      (snapMcp.mcpServers ?? []).some((s) =>
+        s.name.includes("Prometheus & Alertmanager"),
+      ),
+    ).toBe(true);
+
+    // --- PILLAR 1: Multi-Agent Workforce Orchestrator & Swarm Handoff ---
+    await hub.request({
+      action: "agent-save",
+      agent: {
+        id: "ag-ontap-test",
+        name: "NetApp ONTAP SRE Specialist",
+        role: "ONTAP Architect",
+        mission: "Audit ONTAP aggregates and SnapMirror lag",
+        systemPrompt: "You are an ONTAP specialist.",
+        targetCluster: "NetApp-ONTAP-Prod-SE",
+        defaultMode: "assisted",
+        enabled: true,
+      },
+    });
+    await hub.request({
+      action: "agent-save",
+      agent: {
+        id: "ag-k8s-test",
+        name: "K8s Astra Trident Specialist",
+        role: "Kubernetes Storage Engineer",
+        mission: "Audit PVCs and multipathd health",
+        systemPrompt: "You are a Kubernetes CSI specialist.",
+        targetCluster: "K8s-Trident-CSI-Prod",
+        defaultMode: "assisted",
+        enabled: true,
+      },
+    });
+
+    const snapWorkforce = await hub.request({
+      action: "workforce-run",
+      prompt: "Verify ONTAP aggregates and K8s Trident PVCs simultaneously",
+      agentIds: ["ag-ontap-test", "ag-k8s-test"],
+    });
+    expect((snapWorkforce.workforceRuns ?? []).length).toBeGreaterThanOrEqual(1);
+    const latestRun = snapWorkforce.workforceRuns![0];
+    expect(latestRun.status).toBe("completed");
+    expect(latestRun.steps).toHaveLength(2);
+    expect(latestRun.synthesis).toContain("AI Workforce Sammanställning");
+
+    // Verify Swarm Handoff on the newly created task
+    const createdTask = snapWorkforce.tasks[0];
+    expect(createdTask).toBeDefined();
+    const snapHandoff = await hub.request({
+      action: "agent-handoff",
+      taskId: createdTask.id,
+      toAgentId: "ag-k8s-test",
+      reason: "Focusing on PVC multipath remediation",
+    });
+    const updatedTask = snapHandoff.tasks.find((t) => t.id === createdTask.id);
+    expect(updatedTask?.agentId).toBe("ag-k8s-test");
+    expect(
+      updatedTask?.messages.some((m) => m.text.includes("Agent Handoff")),
+    ).toBe(true);
+  });
 });
+
 
 

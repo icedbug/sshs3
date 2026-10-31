@@ -1,8 +1,10 @@
 import net from "node:net";
 import type {
+  InfraGraphEdge,
   InventoryEntry,
   AgentTask,
   MemoryEntry,
+  WorkforceRun,
   WorkspaceActivityEvent,
   WorkspaceServerSummary,
 } from "../../../shared/types/aiHub";
@@ -58,6 +60,8 @@ export interface ExtraWorkspaceContext {
   agents?: unknown[];
   mcpServers?: unknown[];
   kbDocuments?: unknown[];
+  infraEdges?: InfraGraphEdge[];
+  workforceRuns?: WorkforceRun[];
   terminalContextChars?: number;
 }
 
@@ -121,6 +125,8 @@ export class ContextService {
       agents: extra?.agents ?? this.store.data.agents ?? [],
       mcpServers: extra?.mcpServers ?? this.store.data.mcpServers ?? [],
       kbDocuments: extra?.kbDocuments ?? [],
+      infraDependencyGraph: extra?.infraEdges ?? this.store.data.infraEdges ?? [],
+      recentWorkforceRuns: (extra?.workforceRuns ?? this.store.data.workforceRuns ?? []).slice(0, 5),
       workspaceServers: servers.filter(
         (s) =>
           !q ||
