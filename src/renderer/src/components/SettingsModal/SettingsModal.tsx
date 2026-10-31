@@ -193,6 +193,22 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <span>📚</span>
                 <span>Knowledge Base (KB)</span>
               </button>
+              <button
+                type="button"
+                data-testid="settings-open-ai-memory-btn"
+                onClick={() => {
+                  onClose();
+                  window.dispatchEvent(
+                    new CustomEvent('sshs3:ai-open', {
+                      detail: { view: 'Memory & skills', mode: 'hub' },
+                    })
+                  );
+                }}
+                className="flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-medium text-purple-300 hover:bg-purple-500/15 transition-colors text-left"
+              >
+                <span>🧠</span>
+                <span>Smart Memory &amp; Infra-Graf</span>
+              </button>
             </div>
           </aside>
 

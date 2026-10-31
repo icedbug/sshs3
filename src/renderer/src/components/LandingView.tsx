@@ -212,11 +212,13 @@ export const LandingView: React.FC<LandingViewProps> = ({
   const [aiQuickPrompt, setAiQuickPrompt] = useState('');
   const [aiQuickAgentId, setAiQuickAgentId] = useState('');
   const [showClusterTopology, setShowClusterTopology] = useState(true);
-  const [rightColTab, setRightColTab] = useState<'activity' | 'memory' | 'kb'>('activity');
+  const [rightColTab, setRightColTab] = useState<'activity' | 'memory' | 'kb' | 'workforce'>('activity');
   const [memTitle, setMemTitle] = useState('');
   const [memText, setMemText] = useState('');
   const [memKind, setMemKind] = useState<'memory' | 'skill'>('memory');
+  const [memTier, setMemTier] = useState<'core' | 'archival' | 'episodic'>('archival');
   const [addingMemory, setAddingMemory] = useState(false);
+  const [runningDashboardSwarm, setRunningDashboardSwarm] = useState(false);
 
   // Auto-focus the first actionable element on mount so keyboard navigation is immediately active
   useEffect(() => {
@@ -758,6 +760,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
           title: memTitle.trim(),
           text: memText.trim(),
           kind: memKind,
+          tier: memTier,
           scope: 'workspace',
         },
       });
@@ -767,6 +770,21 @@ export const LandingView: React.FC<LandingViewProps> = ({
       // Non-fatal
     } finally {
       setAddingMemory(false);
+    }
+  };
+
+  const handleRunDashboardWorkforce = async () => {
+    setRunningDashboardSwarm(true);
+    try {
+      await hubRequest({
+        action: 'workforce-run',
+        prompt:
+          'Genomför en koordinerad Multi-Agent Workforce-revision av våra NetApp ONTAP-, StorageGRID S3- och Kubernetes-kluster. Kontrollera replikeringshälsa, S3 ILM-status och öppna rekommenderade read-only diagnossteg.',
+      });
+    } catch {
+      // Non-fatal in offline/mocked tests
+    } finally {
+      setRunningDashboardSwarm(false);
     }
   };
 
@@ -2629,16 +2647,16 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   </button>
                 </div>
 
-                {/* 3-Tab Switcher: Aktivitet / Team Memory / Runbooks (KB) */}
+                {/* 4-Tab Switcher: Aktivitet / Team Memory / Runbooks (KB) / Swarm & MCP */}
                 <div
                   data-testid="workspace-right-tabs"
-                  className="grid grid-cols-3 gap-1 rounded-lg border border-border-subtle bg-app-card p-1"
+                  className="grid grid-cols-2 sm:grid-cols-4 gap-1 rounded-lg border border-border-subtle bg-app-card p-1"
                 >
                   <button
                     type="button"
                     data-testid="right-tab-activity"
                     onClick={() => setRightColTab('activity')}
-                    className={`rounded-md px-2 py-1 text-[10.5px] font-semibold transition-all ${
+                    className={`rounded-md px-1.5 py-1 text-[10px] font-semibold transition-all ${
                       rightColTab === 'activity'
                         ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm'
                         : 'text-txt-muted hover:text-txt-primary'
@@ -2650,7 +2668,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     type="button"
                     data-testid="right-tab-memory"
                     onClick={() => setRightColTab('memory')}
-                    className={`rounded-md px-2 py-1 text-[10.5px] font-semibold transition-all ${
+                    className={`rounded-md px-1.5 py-1 text-[10px] font-semibold transition-all ${
                       rightColTab === 'memory'
                         ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40 shadow-sm'
                         : 'text-txt-muted hover:text-txt-primary'
@@ -2662,13 +2680,25 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     type="button"
                     data-testid="right-tab-kb"
                     onClick={() => setRightColTab('kb')}
-                    className={`rounded-md px-2 py-1 text-[10.5px] font-semibold transition-all ${
+                    className={`rounded-md px-1.5 py-1 text-[10px] font-semibold transition-all ${
                       rightColTab === 'kb'
                         ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm'
                         : 'text-txt-muted hover:text-txt-primary'
                     }`}
                   >
                     📚 Runbooks ({hub?.kbDocuments?.length ?? 0})
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="right-tab-workforce"
+                    onClick={() => setRightColTab('workforce')}
+                    className={`rounded-md px-1.5 py-1 text-[10px] font-semibold transition-all ${
+                      rightColTab === 'workforce'
+                        ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40 shadow-sm'
+                        : 'text-txt-muted hover:text-txt-primary'
+                    }`}
+                  >
+                    🤝 Swarm ({(hub?.workforceRuns ?? []).length})
                   </button>
                 </div>
 
@@ -2757,7 +2787,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                 {rightColTab === 'memory' && (
                   <div data-testid="right-panel-memory" className="space-y-2.5">
                     <p className="text-[11px] text-txt-muted">
-                      Delat AI-minne &amp; Skills synkas i ert S3 Team Workspace och injiceras automatiskt i AI:ns kontext.
+                      Självlärande AI-minne (Mem0 deduplicering + Letta 3-nivåers minne) synkas i ert S3 Team Workspace.
                     </p>
 
                     <form
@@ -2772,6 +2802,16 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         >
                           <option value="memory">🧠 Minne</option>
                           <option value="skill">⚡ Skill</option>
+                        </select>
+                        <select
+                          value={memTier}
+                          onChange={(e) => setMemTier(e.target.value as 'core' | 'archival' | 'episodic')}
+                          title="Letta Memory Tier"
+                          className="rounded border border-border-subtle bg-app px-1.5 py-1 text-[10.5px] text-txt-primary"
+                        >
+                          <option value="core">📌 Core (Pinned)</option>
+                          <option value="archival">📚 Archival (RAG)</option>
+                          <option value="episodic">⚡ Episodic</option>
                         </select>
                         <input
                           type="text"
@@ -2810,13 +2850,38 @@ export const LandingView: React.FC<LandingViewProps> = ({
                             key={mem.id}
                             className="rounded-lg border border-border-subtle bg-app-card p-2.5 text-xs space-y-1"
                           >
-                            <div className="flex items-center justify-between gap-1">
+                            <div className="flex items-center justify-between gap-1 flex-wrap">
                               <span className="font-semibold text-txt-primary truncate">
                                 {mem.kind === 'skill' ? '⚡' : '🧠'} {mem.title}
                               </span>
-                              <span className="rounded-full bg-sky-500/15 px-1.5 py-0.5 text-[9.5px] font-semibold text-sky-300">
-                                {mem.scope === 'workspace' ? 'Team S3' : mem.scope}
-                              </span>
+                              <div className="flex items-center gap-1">
+                                <span
+                                  className={`rounded-full px-1.5 py-0.5 text-[9px] font-semibold ${
+                                    mem.tier === 'core'
+                                      ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30'
+                                      : mem.tier === 'episodic'
+                                        ? 'bg-amber-500/20 text-amber-300'
+                                        : 'bg-emerald-500/15 text-emerald-300'
+                                  }`}
+                                >
+                                  {mem.tier === 'core'
+                                    ? '📌 Core'
+                                    : mem.tier === 'episodic'
+                                      ? '⚡ Episodic'
+                                      : '📚 Archival'}
+                                </span>
+                                {(mem.updatedCount ?? 1) > 1 && (
+                                  <span
+                                    title="Mem0 smart konsolidering"
+                                    className="rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-semibold text-amber-300"
+                                  >
+                                    🔄 ×{mem.updatedCount}
+                                  </span>
+                                )}
+                                <span className="rounded-full bg-sky-500/15 px-1.5 py-0.5 text-[9.5px] font-semibold text-sky-300">
+                                  {mem.scope === 'workspace' ? 'Team S3' : mem.scope}
+                                </span>
+                              </div>
                             </div>
                             <p className="text-[11px] text-txt-secondary line-clamp-2">{mem.text}</p>
                             <div className="flex justify-end">
@@ -2921,6 +2986,119 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         ))
                       )}
                     </div>
+                  </div>
+                )}
+
+                {rightColTab === 'workforce' && (
+                  <div data-testid="right-panel-workforce" className="space-y-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-[11px] text-txt-muted">
+                        CAMEL/CrewAI-inspirerad Multi-Agent Workforce &amp; 1-Click MCP Marketplace.
+                      </p>
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          disabled={runningDashboardSwarm}
+                          data-testid="dashboard-run-workforce-btn"
+                          onClick={handleRunDashboardWorkforce}
+                          className="shrink-0 rounded border border-purple-500/40 bg-purple-500/20 px-2 py-0.5 text-[10px] font-semibold text-purple-200 hover:bg-purple-500/30 disabled:opacity-50"
+                        >
+                          {runningDashboardSwarm ? '⏳ Kör Swarm…' : '🚀 Kör Swarm-revision'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            window.dispatchEvent(
+                              new CustomEvent('sshs3:ai-open', {
+                                detail: { view: 'Agents & MCP', mode: 'hub' },
+                              })
+                            )
+                          }
+                          className="shrink-0 rounded border border-border-subtle bg-app-card px-2 py-0.5 text-[10px] font-semibold text-txt-secondary hover:text-txt-primary"
+                        >
+                          Öppna ↗
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="space-y-2 max-h-[220px] overflow-y-auto pr-1">
+                      {(hub?.workforceRuns ?? []).length === 0 ? (
+                        <div className="rounded-lg border border-dashed border-border-subtle p-3 text-center text-xs text-txt-muted">
+                          Inga Workforce-körningar ännu. Klicka på <strong>🚀 Kör Swarm-revision</strong> för att låta era specialist-agenter analysera klustren parallellt!
+                        </div>
+                      ) : (
+                        (hub?.workforceRuns ?? []).slice(0, 4).map((run) => (
+                          <div
+                            key={run.id}
+                            className="rounded-lg border border-purple-500/30 bg-app-card p-2.5 text-xs space-y-1.5"
+                          >
+                            <div className="flex items-center justify-between gap-1">
+                              <span className="font-semibold text-txt-primary truncate">
+                                🤝 {run.title}
+                              </span>
+                              <span className="rounded-full bg-purple-500/20 px-1.5 py-0.5 text-[9px] font-semibold text-purple-300">
+                                {run.steps.length} agenter · {run.status}
+                              </span>
+                            </div>
+                            <p className="text-[10.5px] text-txt-secondary line-clamp-2">
+                              {run.synthesis}
+                            </p>
+                            <div className="flex flex-wrap gap-1 pt-0.5">
+                              {run.steps.map((st) => (
+                                <span
+                                  key={st.id}
+                                  className="rounded border border-border-subtle bg-app px-1.5 py-0.5 text-[9.5px] text-sky-300"
+                                  title={st.findings}
+                                >
+                                  {st.agentIcon} {st.agentName}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+
+                    {(hub?.mcpCatalog ?? []).length > 0 && (
+                      <div className="rounded-lg border border-border-subtle bg-app-card p-2 space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[10.5px] font-semibold text-txt-primary">
+                            🔌 1-Click Open-Source MCP Marketplace
+                          </span>
+                          <span className="text-[9.5px] text-txt-muted">
+                            {(hub?.mcpServers ?? []).length} aktiva
+                          </span>
+                        </div>
+                        <div className="flex flex-wrap gap-1">
+                          {(hub?.mcpCatalog ?? []).slice(0, 6).map((preset) => {
+                            const installed = (hub?.mcpServers ?? []).some(
+                              (s) => s.name.toLowerCase() === preset.name.toLowerCase()
+                            );
+                            return (
+                              <button
+                                key={preset.id}
+                                type="button"
+                                disabled={installed}
+                                onClick={() =>
+                                  void hubRequest({
+                                    action: 'mcp-install-preset',
+                                    presetId: preset.id,
+                                  })
+                                }
+                                className={`rounded border px-1.5 py-0.5 text-[9.5px] font-medium transition-colors ${
+                                  installed
+                                    ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+                                    : 'border-sky-500/30 bg-sky-500/10 text-sky-300 hover:bg-sky-500/20'
+                                }`}
+                                title={preset.description}
+                              >
+                                {preset.icon} {preset.name} {installed ? '✓' : '+'}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>

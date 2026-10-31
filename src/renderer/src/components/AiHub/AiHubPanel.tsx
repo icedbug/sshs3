@@ -399,6 +399,27 @@ export function AiHubPanel({
 
   const slashCommands = [
     {
+      cmd: "/workforce",
+      title: "🤝 Kör AI Workforce (Multi-Agent Swarm)",
+      subtitle: "Delegera ett tvärfunktionellt mål parallellt över dina Mission Agents och syntetisera en rapport",
+      template:
+        "Kör vår AI Workforce med sshs3_agent_and_mcp_manage (operation=run_workforce) över NetApp ONTAP, StorageGRID S3 och K8s Trident CSI för att utreda: ",
+    },
+    {
+      cmd: "/handoff",
+      title: "🔄 Swarm Agent Handoff",
+      subtitle: "Överlämna den aktiva konversationen till en annan specialiserad Mission Agent",
+      template:
+        "Gör en Swarm Agent Handoff med sshs3_agent_and_mcp_manage (operation=handoff_agent) till vår specialistagent för: ",
+    },
+    {
+      cmd: "/mcp",
+      title: "🛒 1-Click Open-Source MCP Marketplace",
+      subtitle: "Installera Prometheus, Grafana/Loki, Kubernetes/Helm, PostgreSQL eller Terraform MCP",
+      template:
+        "Installera en MCP-server från vår katalog med sshs3_agent_and_mcp_manage (operation=install_mcp_preset, presetId=preset-mcp-prometheus) och lista dess verktyg.",
+    },
+    {
       cmd: "/cluster-exec",
       title: "⚡ Parallell klusterkörning",
       subtitle: "Kör kommandon parallellt över alla noder i ett kluster med sshs3_cluster_exec",
@@ -408,9 +429,9 @@ export function AiHubPanel({
     {
       cmd: "/split-cluster",
       title: "🪟 2×2 Kluster Split-View",
-      subtitle: "Öppna ett helt kluster i en 2×2 Konsole terminal-grid med sshs3_ui_control",
+      subtitle: "Öppna ett helt kluster i en 2×2 Konsole terminal-grid med sshs3_workspace_layout",
       template:
-        "Öppna en 2x2 split-view terminal-grid för alla noder i @cluster:NetApp-ONTAP-Prod-SE så att jag kan övervaka dem sida vid sida.",
+        "Öppna en 2x2 split-view terminal-grid för alla noder i @cluster:NetApp-ONTAP-Prod-SE med sshs3_workspace_layout så att jag kan övervaka dem sida vid sida.",
     },
     {
       cmd: "/diff",
@@ -431,21 +452,21 @@ export function AiHubPanel({
       title: "🚇 Skapa SSH Port-Forwarding Tunnel",
       subtitle: "Lägg till lokal, remote eller dynamisk SOCKS5-tunnel på en serverprofil",
       template:
-        "Skapa en SSH port-forwarding tunnel (local 5432 -> 127.0.0.1:5432) på vår primära nod med sshs3_workspace_admin.",
+        "Skapa en SSH port-forwarding tunnel (local 5432 -> 127.0.0.1:5432) på vår primära nod med sshs3_manage_server (operation=save_tunnel).",
     },
     {
       cmd: "/kb",
       title: "📚 Sök i Runbooks & Kunskapsbas",
-      subtitle: "Sök i BM25 Knowledge Base och kombinera med MCP-telemetri",
+      subtitle: "Sök med Orama Hybrid RAG (BM25 + semantiska koncept) och kombinera med MCP-telemetri",
       template:
         "Sök i vår Knowledge Base (@kb) efter relevanta runbooks och standarder för: ",
     },
     {
       cmd: "/memory",
-      title: "🧠 Spara i Team Memory / Skill",
-      subtitle: "Spara en ny lärdom, rutin eller skill i det delade S3-teamminnet",
+      title: "🧠 Spara i Smart Memory (Mem0 / Letta Core)",
+      subtitle: "Spara eller konsolidera fakta i Core/Archival Memory i det delade S3-teamminnet",
       template:
-        "Spara följande rutin som en delad Team Skill i vårt S3 Workspace-minne: ",
+        "Spara följande rutin som en delad Core Memory / Team Skill med sshs3_manage_memory_and_activity: ",
     },
     {
       cmd: "/plan",
@@ -1079,6 +1100,26 @@ export function AiHubPanel({
                           </div>
                         </button>
                       ))}
+                      <button
+                        type="button"
+                        className="ai-btn-emerald"
+                        style={{ marginTop: 4, fontSize: 11.5, textAlign: "center" }}
+                        onClick={() => {
+                          const prevIds = new Set(hub.tasks.map((t) => t.id));
+                          void act({
+                            action: "workforce-run",
+                            prompt:
+                              "Kör koordinerad AI Workforce-hälsokontroll över alla aktiva kluster (NetApp ONTAP, StorageGRID S3, Ceph & K8s Trident CSI)",
+                          }).then((nextSnap) => {
+                            const created = nextSnap?.tasks.find(
+                              (t) => !prevIds.has(t.id),
+                            );
+                            if (created?.id) setTaskId(created.id);
+                          });
+                        }}
+                      >
+                        🤝 Kör AI Workforce Swarm
+                      </button>
                     </div>
                   </div>
 
@@ -1258,6 +1299,27 @@ export function AiHubPanel({
                       <button
                         type="button"
                         className="ai-starter-card"
+                        data-testid="ai-starter-workforce"
+                        onClick={() => {
+                          const prevIds = new Set(hub.tasks.map((t) => t.id));
+                          void act({
+                            action: "workforce-run",
+                            prompt:
+                              "Kör koordinerad AI Workforce-revision över NetApp ONTAP, StorageGRID S3, Ceph och K8s Trident CSI",
+                          }).then((nextSnap) => {
+                            const created = nextSnap?.tasks.find(
+                              (t) => !prevIds.has(t.id),
+                            );
+                            if (created?.id) setTaskId(created.id);
+                          });
+                        }}
+                      >
+                        <strong>🤝 Kör AI Workforce (Multi-Agent Swarm)</strong>
+                        <small>Lead SRE Supervisor kör alla dina Mission Agents parallellt och syntetiserar en rapport</small>
+                      </button>
+                      <button
+                        type="button"
+                        className="ai-starter-card"
                         onClick={() =>
                           setPrompt(
                             "/plan Skapa en säker åtgärdsplan med riskanalys, verifieringssteg och rollback för en rolling uppgradering av @cluster:K8s-Prod-AI-Cluster.",
@@ -1334,6 +1396,87 @@ export function AiHubPanel({
                             onUseCommand={(cmd) => setPrompt(cmd)}
                           />
                         </article>
+                      </div>
+                    )}
+                  </div>
+                )}
+                {task && (
+                  <div
+                    className="ai-task-context-bar"
+                    data-testid="ai-task-context-bar"
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                      <span className="ai-badge ai-badge-purple">
+                        {activeAgent?.icon || "🤖"}{" "}
+                        {task.agentName || activeAgent?.name || "Standard AI"}
+                      </span>
+                      <span
+                        className="ai-badge ai-badge-success"
+                        title="AST Shell Command Safety Guardrails är aktiva för alla kommandon i denna konversation"
+                      >
+                        🛡️ AST Safety Guard
+                      </span>
+                      {task.changes.some(
+                        (c) => c.status === "pending" && c.riskLevel === "safe",
+                      ) && (
+                        <button
+                          type="button"
+                          className="ai-btn-emerald"
+                          style={{ padding: "2px 8px", fontSize: 10.5 }}
+                          disabled={busy}
+                          onClick={() => {
+                            const safePending = task.changes.filter(
+                              (c) =>
+                                c.status === "pending" && c.riskLevel === "safe",
+                            );
+                            for (const c of safePending) {
+                              void act({
+                                action: "approve",
+                                taskId: task.id,
+                                changeId: c.id,
+                                approved: true,
+                              });
+                            }
+                          }}
+                        >
+                          🟢 Godkänn alla säkra (
+                          {
+                            task.changes.filter(
+                              (c) =>
+                                c.status === "pending" && c.riskLevel === "safe",
+                            ).length
+                          }
+                          )
+                        </button>
+                      )}
+                    </div>
+                    {(hub.agents ?? []).length > 0 && (
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <small>🤝 Swarm Handoff:</small>
+                        <select
+                          aria-label="Swarm Handoff to specialist agent"
+                          data-testid="chat-swarm-handoff-select"
+                          style={{ padding: "2px 6px", fontSize: 11 }}
+                          value={task.agentId || selectedAgentId || ""}
+                          onChange={(e) => {
+                            const nextAgentId = e.target.value;
+                            if (!nextAgentId) return;
+                            setSelectedAgentId(nextAgentId);
+                            void act({
+                              action: "agent-handoff",
+                              taskId: task.id,
+                              toAgentId: nextAgentId,
+                              reason: "Swarm handoff direkt från konversationsvyn",
+                            });
+                          }}
+                        >
+                          <option value="">Välj specialistagent…</option>
+                          {(hub.agents ?? []).map((ag) => (
+                            <option key={ag.id} value={ag.id}>
+                              {ag.icon || "🤖"} {ag.name}
+                            </option>
+                          ))}
+                        </select>
                       </div>
                     )}
                   </div>
@@ -2322,6 +2465,23 @@ export function AiHubPanel({
                 ]);
                 setView("Work");
               }}
+              onRunRunbook={(doc) => {
+                const slug = doc.title.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+                setAttachments((old) => [
+                  ...old.filter((x) => x.label !== `@kb:${slug}`).slice(-9),
+                  {
+                    id: crypto.randomUUID(),
+                    label: `@kb:${slug}`,
+                    text: `# KB Document: ${doc.title} (${doc.collection})\n\n${doc.content.slice(0, 8000)}`,
+                    observedAt: Date.now(),
+                  },
+                ]);
+                setTaskId("");
+                setPrompt(
+                  `Följ och kör vår KB-runbook "${doc.title}" (${doc.collection || "general"}) steg för steg. Börja med read-only verifieringskommandon och sammanfatta status.`,
+                );
+                setView("Work");
+              }}
             />
           )}
           {activeView === "Infrastructure" && (
@@ -2441,11 +2601,36 @@ export function AiHubPanel({
                   </button>
                   {t.changes.map((c) => (
                     <details className="ai-change" key={c.id}>
-                      <summary>
-                        {c.target} · {c.status} ·{" "}
-                        {new Date(c.at).toLocaleString()}
+                      <summary style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                        <span>
+                          {c.target} · {c.status} ·{" "}
+                          {new Date(c.at).toLocaleString()}
+                        </span>
+                        {c.riskLevel && (
+                          <span
+                            className={`ai-badge ${
+                              c.riskLevel === "destructive"
+                                ? "ai-badge-danger"
+                                : c.riskLevel === "modify"
+                                  ? "ai-badge-warn"
+                                  : "ai-badge-green"
+                            }`}
+                            title={c.riskReason ?? `AST Command Safety: ${c.riskLevel}`}
+                          >
+                            {c.riskLevel === "destructive"
+                              ? "🔴 Destructive"
+                              : c.riskLevel === "modify"
+                                ? "🟡 Modify"
+                                : "🟢 Safe"}
+                          </span>
+                        )}
                       </summary>
                       <p>{c.description}</p>
+                      {c.riskReason && (
+                        <small style={{ display: "block", marginBottom: 4, opacity: 0.85 }}>
+                          🛡️ AST Safety Guard: {c.riskReason}
+                        </small>
+                      )}
                       {c.kind === "file" && (
                         <>
                           <strong>Before</strong>
@@ -3996,14 +4181,25 @@ function AgentsAndMcpView({
   );
 }
 
+const KB_SEMANTIC_CONCEPTS: Record<string, string[]> = {
+  latency_perf: ["latency", "latens", "svarstid", "hög svarstid", "iops", "throughput", "qos", "slow", "långsam"],
+  replication_dr: ["snapmirror", "metrocluster", "replication", "replikering", "failover", "switchover", "dr", "sync", "lag"],
+  storage_capacity: ["aggregate", "aggr", "volume", "volym", "inode", "full", "utrymme", "capacity", "kapacitet", "tiering", "fabricpool"],
+  s3_object: ["s3", "storagegrid", "bucket", "ilm", "erasure", "object", "multipart", "rclone", "lifecycle"],
+  multipath_san: ["multipath", "iscsi", "fc", "nvme", "lun", "igrop", "alua", "hba", "path"],
+  kubernetes_csi: ["trident", "csi", "pvc", "pv", "kubernetes", "k8s", "pod", "mount", "storageclass"],
+};
+
 function KnowledgeBaseView({
   hub,
   act,
   onAttachDoc,
+  onRunRunbook,
 }: {
   hub: HubSnapshot;
   act: Act;
   onAttachDoc: (doc: KbDocument) => void;
+  onRunRunbook?: (doc: KbDocument) => void;
 }): JSX.Element {
   const [title, setTitle] = useState("");
   const [collection, setCollection] = useState("netapp-ontap");
@@ -4015,15 +4211,31 @@ function KnowledgeBaseView({
   const [showAddDoc, setShowAddDoc] = useState(false);
   const [expandedDocId, setExpandedDocId] = useState<string | null>(null);
 
+  const activeConcepts = searchFilter.trim()
+    ? Object.entries(KB_SEMANTIC_CONCEPTS)
+        .filter(([, terms]) =>
+          terms.some((term) => searchFilter.toLowerCase().includes(term) || term.includes(searchFilter.toLowerCase())),
+        )
+        .map(([concept]) => concept)
+    : [];
+
+  const getDocMatchedConcepts = (d: KbDocument): string[] => {
+    const hay = `${d.title} ${d.collection ?? ""} ${d.cluster ?? ""} ${(d.tags ?? []).join(" ")} ${d.content}`.toLowerCase();
+    return activeConcepts.filter((concept) =>
+      (KB_SEMANTIC_CONCEPTS[concept] ?? []).some((term) => hay.includes(term)),
+    );
+  };
+
   const docs = (hub.kbDocuments ?? []).filter((d) => {
     if (!searchFilter.trim()) return true;
     const q = searchFilter.toLowerCase();
-    return (
+    const directMatch =
       d.title.toLowerCase().includes(q) ||
       (d.collection ?? d.cluster ?? "").toLowerCase().includes(q) ||
       d.content.toLowerCase().includes(q) ||
-      (d.tags ?? []).some((t: string) => t.toLowerCase().includes(q))
-    );
+      (d.tags ?? []).some((t: string) => t.toLowerCase().includes(q));
+    if (directMatch) return true;
+    return getDocMatchedConcepts(d).length > 0;
   });
 
   const totalChunks = (hub.kbDocuments ?? []).reduce(
@@ -4069,16 +4281,51 @@ function KnowledgeBaseView({
         </div>
       </div>
       <p className="ai-hint">
-        Store NetApp ONTAP, StorageGRID, Ceph, ZFS, and Kubernetes runbooks, CLI cheat-sheets, and architecture docs. Documents are automatically chunked and indexed for BM25 retrieval via <code>sshs3_kb_search</code> and synced with your S3 Team Workspace.
+        Store NetApp ONTAP, StorageGRID, Ceph, ZFS, and Kubernetes runbooks, CLI cheat-sheets, and architecture docs. Documents are automatically chunked and indexed for Hybrid BM25 + Bilingual Semantic Concept RAG via <code>sshs3_kb_search</code> and synced with your S3 Team Workspace.
       </p>
 
-      <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+      <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
         <input
           style={{ flex: 1 }}
-          placeholder="Search KB runbooks, CLI commands, collections, tags…"
+          data-testid="kb-hybrid-search-input"
+          placeholder="Sök med Hybrid BM25 + Semantiska koncept (t.ex. 'hög svarstid', 'snapmirror', 'pvc multipath')…"
           value={searchFilter}
           onChange={(e) => setSearchFilter(e.target.value)}
         />
+        {searchFilter && (
+          <button onClick={() => setSearchFilter("")}>Rensa</button>
+        )}
+      </div>
+
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 10, alignItems: "center" }}>
+        <small style={{ opacity: 0.75 }}>🧠 Orama Concept Clusters:</small>
+        {[
+          { label: "⚡ Latens / QoS", q: "hög svarstid" },
+          { label: "🔄 SnapMirror / DR", q: "replikering" },
+          { label: "☁️ StorageGRID S3", q: "storagegrid ilm" },
+          { label: "☸️ Trident CSI / PVC", q: "trident pvc" },
+          { label: "🔌 SAN Multipath", q: "multipath alua" },
+        ].map((chip) => (
+          <button
+            key={chip.label}
+            type="button"
+            onClick={() => setSearchFilter(searchFilter === chip.q ? "" : chip.q)}
+            style={{
+              padding: "2px 8px",
+              fontSize: 11,
+              borderRadius: 999,
+              border: searchFilter === chip.q ? "1px solid #38bdf8" : "1px solid rgba(148,163,184,0.25)",
+              background: searchFilter === chip.q ? "rgba(56,189,248,0.18)" : "rgba(15,23,42,0.5)",
+            }}
+          >
+            {chip.label}
+          </button>
+        ))}
+        {activeConcepts.length > 0 && (
+          <span className="ai-badge ai-badge-purple" data-testid="kb-active-semantic-concepts">
+            🧠 Semantisk expansion: {activeConcepts.join(", ")}
+          </span>
+        )}
       </div>
 
       {showAddDoc && (
@@ -4181,54 +4428,72 @@ function KnowledgeBaseView({
         </div>
       </form>
 
-      {docs.map((doc: KbDocument) => (
-        <article className="ai-card" key={doc.id}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
-            <div>
-              <strong>📄 {doc.title}</strong>
+      {docs.map((doc: KbDocument) => {
+        const matchedConcepts = getDocMatchedConcepts(doc);
+        return (
+          <article className="ai-card" key={doc.id}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
               <div>
-                <small>
-                  Collection: <code>{doc.collection || doc.cluster || "general"}</code> · {doc.chunks.length} chunk(s)
-                  {doc.cluster ? ` · Cluster: ${doc.cluster}` : ""}
-                </small>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                  <strong>📄 {doc.title}</strong>
+                  {matchedConcepts.map((mc) => (
+                    <span key={mc} className="ai-badge ai-badge-purple">
+                      🧠 {mc}
+                    </span>
+                  ))}
+                </div>
+                <div>
+                  <small>
+                    Collection: <code>{doc.collection || doc.cluster || "general"}</code> · {doc.chunks.length} chunk(s)
+                    {doc.cluster ? ` · Cluster: ${doc.cluster}` : ""}
+                  </small>
+                </div>
               </div>
+              <small>{new Date(doc.updatedAt).toLocaleDateString()}</small>
             </div>
-            <small>{new Date(doc.updatedAt).toLocaleDateString()}</small>
-          </div>
-          {(doc.tags ?? []).length > 0 && (
-            <small style={{ display: "block", marginTop: 4 }}>
-              🏷️ {(doc.tags ?? []).join(", ")}
-            </small>
-          )}
-          {expandedDocId === doc.id ? (
-            <pre style={{ marginTop: 8, maxHeight: 280, overflow: "auto", whiteSpace: "pre-wrap" }}>
-              {doc.content}
-            </pre>
-          ) : (
-            <p style={{ marginTop: 6 }}>
-              {doc.content.slice(0, 200)}
-              {doc.content.length > 200 ? "…" : ""}
-            </p>
-          )}
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
-            <button onClick={() => onAttachDoc(doc)}>
-              📎 Attach to Chat (@kb)
-            </button>
-            <button
-              onClick={() =>
-                setExpandedDocId(expandedDocId === doc.id ? null : doc.id)
-              }
-            >
-              {expandedDocId === doc.id ? "Hide Content" : "Read Full Runbook"}
-            </button>
-            <button
-              onClick={() => void act({ action: "kb-delete", id: doc.id })}
-            >
-              Delete
-            </button>
-          </div>
-        </article>
-      ))}
+            {(doc.tags ?? []).length > 0 && (
+              <small style={{ display: "block", marginTop: 4 }}>
+                🏷️ {(doc.tags ?? []).join(", ")}
+              </small>
+            )}
+            {expandedDocId === doc.id ? (
+              <pre style={{ marginTop: 8, maxHeight: 280, overflow: "auto", whiteSpace: "pre-wrap" }}>
+                {doc.content}
+              </pre>
+            ) : (
+              <p style={{ marginTop: 6 }}>
+                {doc.content.slice(0, 200)}
+                {doc.content.length > 200 ? "…" : ""}
+              </p>
+            )}
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+              {onRunRunbook && (
+                <button
+                  className="ai-btn-accent"
+                  onClick={() => onRunRunbook(doc)}
+                >
+                  🚀 Kör Runbook i Chatten
+                </button>
+              )}
+              <button onClick={() => onAttachDoc(doc)}>
+                📎 Attach to Chat (@kb)
+              </button>
+              <button
+                onClick={() =>
+                  setExpandedDocId(expandedDocId === doc.id ? null : doc.id)
+                }
+              >
+                {expandedDocId === doc.id ? "Hide Content" : "Read Full Runbook"}
+              </button>
+              <button
+                onClick={() => void act({ action: "kb-delete", id: doc.id })}
+              >
+                Delete
+              </button>
+            </div>
+          </article>
+        );
+      })}
     </div>
   );
 }

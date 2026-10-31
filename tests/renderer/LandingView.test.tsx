@@ -331,6 +331,9 @@ describe('LandingView Component', () => {
 
       fireEvent.click(screen.getByTestId('right-tab-kb'));
       expect(screen.getByTestId('right-panel-kb')).toBeInTheDocument();
+      fireEvent.click(screen.getByTestId('right-tab-workforce'));
+      expect(screen.getByTestId('right-panel-workforce')).toBeInTheDocument();
+      expect(screen.getByTestId('dashboard-run-workforce-btn')).toBeInTheDocument();
 
       fireEvent.click(screen.getByTestId('right-tab-activity'));
       expect(screen.queryByTestId('right-panel-kb')).not.toBeInTheDocument();

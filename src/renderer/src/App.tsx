@@ -757,6 +757,25 @@ export const App: React.FC = () => {
                               <div className="flex items-center gap-1">
                                 <button
                                   type="button"
+                                  data-testid="split-view-ask-ai-btn"
+                                  title="Jämför och analysera alla delade terminalpaneler i denna flik med AI"
+                                  onClick={() =>
+                                    window.dispatchEvent(
+                                      new CustomEvent("sshs3:ai-open", {
+                                        detail: {
+                                          view: "Work",
+                                          mode: "panel",
+                                          prompt: `Analysera och jämför de ${totalPanes} delade terminalpanelerna i fliken "${tab.title}". Kontrollera skillnader i status, latens, loggar eller konfiguration mellan noderna.`,
+                                        },
+                                      }),
+                                    )
+                                  }
+                                  className="inline-flex items-center gap-1 rounded border border-sky-500/40 bg-sky-500/15 px-2 py-0.5 text-[10px] font-semibold text-sky-300 hover:bg-sky-500/25 transition-colors mr-1"
+                                >
+                                  <span>✨ AI Split-Analys ({totalPanes})</span>
+                                </button>
+                                <button
+                                  type="button"
                                   title="Split horizontally (add pane below)"
                                   onClick={() =>
                                     handleSplitPane(

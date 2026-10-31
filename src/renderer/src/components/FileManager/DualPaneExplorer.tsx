@@ -657,6 +657,26 @@ export const DualPaneExplorer: React.FC<DualPaneExplorerProps> = ({
             </button>
             <button
               type="button"
+              data-testid="dual-pane-ingest-kb-btn"
+              title="Indexera aktiv mapp eller S3-prefix direkt i Knowledge Base (@kb)"
+              onClick={() => {
+                const activePane = panes[activeSide];
+                window.dispatchEvent(
+                  new CustomEvent('sshs3:ai-attach', {
+                    detail: {
+                      label: `@kb-ingest:${activePane.source.label}`,
+                      text: `KB Ingest Request:\nSource: ${activePane.source.label} (${activePane.source.sourceType})\nProvider ID: ${activePane.source.providerId}\nPath: ${activePane.path}`,
+                      prompt: `Indexera och spara viktig dokumentation/runbooks eller konfigurationsfiler från ${activePane.source.label} (${activePane.path}) in i vår Knowledge Base (@kb).`,
+                    },
+                  })
+                );
+              }}
+              className="inline-flex items-center gap-1 rounded border border-purple-500/40 bg-purple-500/15 px-2 py-0.5 text-2xs font-semibold text-purple-300 hover:bg-purple-500/25 transition-colors"
+            >
+              <span>📥 Indexera i KB</span>
+            </button>
+            <button
+              type="button"
               data-testid="dual-pane-open-kb-btn"
               title="Öppna Kunskapsbasen (KB) i AI Hub för att söka eller synka S3/lokala runbooks"
               onClick={() => {
