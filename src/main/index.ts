@@ -272,7 +272,17 @@ async function createWindow(): Promise<BrowserWindow> {
       revealed = true;
       clearTimeout(fallback);
       splash?.setProgress(100, 'Ready');
-      if (!window.isDestroyed() && !process.argv.includes('--background')) window.show();
+      if (!window.isDestroyed() && !process.argv.includes('--background')) {
+        window.show();
+        window.focus();
+        if (demoMode) {
+          window.setAlwaysOnTop(true);
+          window.focus();
+          setTimeout(() => {
+            if (!window.isDestroyed()) window.setAlwaysOnTop(false);
+          }, 500);
+        }
+      }
       splash?.close();
       splash = null;
     };

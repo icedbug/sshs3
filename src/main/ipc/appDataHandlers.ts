@@ -1,5 +1,5 @@
 import { SNIPPET_MAX_NAME_CHARS } from '../../shared/types/snippets';
-import { getBuiltinSnippets } from '../ai/hub/demoWorkspace';
+import { getBuiltinSnippets, isDemoMode } from '../ai/hub/demoWorkspace';
 import { resolveLogLevel, setLogLevel } from '../log/Logger';
 import { IPC_CHANNELS } from '../../shared/types/ipc';
 import type { SessionData } from '../../shared/types/session';
@@ -17,12 +17,14 @@ export type AppDataHost = Pick<
 
 export function registerSessionHandlers(bridge: AppDataHost): void {
   bridge.registerHandler(IPC_CHANNELS.SESSION_GET, async (): Promise<SessionData | null> => {
+    if (isDemoMode()) return null;
     return await bridge.sessionStore.getSession();
   });
 
   bridge.registerHandler(
     IPC_CHANNELS.SESSION_SAVE,
     async (_event, data: SessionData): Promise<void> => {
+      if (isDemoMode()) return;
       await bridge.sessionStore.saveSession(data);
     }
   );

@@ -469,7 +469,14 @@ export class HubService {
       await this.store.load().catch((e) =>
         log.warn("HubStore load failed; using default store", safeError(e)),
       );
-      if (this.store.data.preferences.demoLabEnabled !== undefined) {
+      const cliDemo =
+        process.env.SSHS3_DEMO === "1" ||
+        process.env.SSHS3_DEMO_WORKSPACE === "1" ||
+        process.argv.includes("--demo");
+      if (cliDemo) {
+        setDemoMode(true);
+        this.store.data.preferences.demoLabEnabled = true;
+      } else if (this.store.data.preferences.demoLabEnabled !== undefined) {
         setDemoMode(this.store.data.preferences.demoLabEnabled);
       }
       await this.s3Workspace.start().catch((e) =>
