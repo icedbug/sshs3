@@ -264,6 +264,7 @@ export class TerminalRegistry extends EventEmitter {
   ): void {
     if (!chunk) return;
     // 1. Check OSC 133;D;<exitCode> shell integration marker
+    // eslint-disable-next-line no-control-regex -- matching terminal escape sequences is the point
     const oscMatch = /\x1b\]133;D;([0-9]+)(?:\x07|\x1b\\)/.exec(chunk);
     if (oscMatch) {
       const code = Number(oscMatch[1]);
@@ -329,6 +330,7 @@ export class TerminalRegistry extends EventEmitter {
       return;
     }
     // Strip ANSI escape sequences (arrow keys, function keys, bracketed paste markers)
+    // eslint-disable-next-line no-control-regex -- matching terminal escape sequences is the point
     const cleaned = data.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "");
     for (const ch of cleaned) {
       if (ch === "\x7f" || ch === "\x08") {

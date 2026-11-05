@@ -1442,7 +1442,7 @@ export class DirectAgentRuntime implements AgentRuntime {
   }
 
   private async executeToolCall(call: ParsedToolCall): Promise<string> {
-    let parsedArgs: Record<string, unknown> = {};
+    let parsedArgs: Record<string, unknown>;
     try {
       parsedArgs = call.argumentsJson ? (JSON.parse(call.argumentsJson) as Record<string, unknown>) : {};
     } catch {
@@ -1946,7 +1946,7 @@ export class DirectAgentRuntime implements AgentRuntime {
       const assistantContent: Array<Record<string, unknown>> = [];
       if (turnText) assistantContent.push({ type: "text", text: turnText });
       for (const c of calls) {
-        let inputObj: Record<string, unknown> = {};
+        let inputObj: Record<string, unknown>;
         try {
           inputObj = c.argumentsJson ? (JSON.parse(c.argumentsJson) as Record<string, unknown>) : {};
         } catch {

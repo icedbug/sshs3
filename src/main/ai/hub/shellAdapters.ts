@@ -55,8 +55,8 @@ export interface CommandFrameOptions {
 }
 function cleanInternalTitleOsc(text: string): string {
   // Strip Windows cmd.exe window-title OSC 0 sequences that leak the internal PowerShell wrapper
-  // eslint-disable-next-line no-control-regex
   return text.replace(
+    // eslint-disable-next-line no-control-regex -- matching terminal escape sequences is the point
     /\x1b\]0;[^\x07\x1b]*(?:EncodedCommand|\]777;SSHS3;)[^\x07\x1b]*(?:\x07|\x1b\\)/g,
     "",
   );

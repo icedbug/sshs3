@@ -314,14 +314,13 @@ export class DemoStorageProvider implements IStorageProvider {
     _options?: WriteStreamOptions
   ): Promise<NodeJS.WritableStream> {
     const chunks: Buffer[] = [];
-    const self = this;
     return new Writable({
-      write(chunk, _encoding, callback) {
+      write: (chunk, _encoding, callback) => {
         chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
         callback();
       },
-      final(callback) {
-        self.addFile(remotePath, Buffer.concat(chunks).toString('utf8'));
+      final: (callback) => {
+        this.addFile(remotePath, Buffer.concat(chunks).toString('utf8'));
         callback();
       },
     });

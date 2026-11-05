@@ -4,6 +4,15 @@ import fs from 'node:fs';
 import { setHeadlessUserDataPath } from './electronShim';
 import { Sshs3WebServer } from './WebServer';
 
+// This is a CLI entry point: the startup banner is meant for the operator's terminal,
+// so it goes straight to stdout/stderr rather than through the levelled main-process logger.
+const out = (line: string): void => {
+  process.stdout.write(`${line}\n`);
+};
+const fail = (line: string, err: unknown): void => {
+  process.stderr.write(`${line} ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);
+};
+
 async function main(): Promise<void> {
   const port = Number(process.env.SSHS3_WEB_PORT || process.env.PORT || 8080);
   const host = process.env.SSHS3_WEB_HOST || process.env.HOST || '0.0.0.0';
@@ -32,16 +41,16 @@ async function main(): Promise<void> {
 
   const info = await server.start();
   const displayHost = info.host === '0.0.0.0' ? 'localhost' : info.host;
-  console.log('============================================================');
-  console.log('  sshs3 Multi-User Web Server is running!');
-  console.log(`  URL:        http://${displayHost}:${info.port}`);
-  console.log(`  Listen:     ${info.host}:${info.port}`);
-  console.log(`  Data Dir:   ${dataDir}`);
-  console.log(`  Static Dir: ${staticDir}`);
-  console.log('============================================================');
+  out('============================================================');
+  out('  sshs3 Multi-User Web Server is running!');
+  out(`  URL:        http://${displayHost}:${info.port}`);
+  out(`  Listen:     ${info.host}:${info.port}`);
+  out(`  Data Dir:   ${dataDir}`);
+  out(`  Static Dir: ${staticDir}`);
+  out('============================================================');
 
   const shutdown = async (signal: string) => {
-    console.log(`\n[sshs3-web] Received ${signal}, shutting down gracefully...`);
+    out(`\n[sshs3-web] Received ${signal}, shutting down gracefully...`);
     await server.stop();
     process.exit(0);
   };
@@ -51,6 +60,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  console.error('[sshs3-web] Fatal startup error:', err);
+  fail('[sshs3-web] Fatal startup error:', err);
   process.exit(1);
 });

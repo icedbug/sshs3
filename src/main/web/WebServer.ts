@@ -7,6 +7,9 @@ import type { Duplex } from 'node:stream';
 import { setWebDataDir } from './electronShim';
 import { WebAuthService, type WebUserPublic } from './WebAuthService';
 import { WebTenantManager } from './WebTenantManager';
+import { createLogger } from '../log';
+
+const log = createLogger('web');
 
 const WS_MAGIC_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const SESSION_COOKIE_NAME = 'sshs3_session';
@@ -275,7 +278,7 @@ export class Sshs3WebServer {
 
     server.on('upgrade', (req, socket, head) => {
       void this.handleWsUpgrade(req, socket, head).catch((err) => {
-        console.error('[WebServer] WS upgrade error:', err);
+        log.error('WS upgrade error', err);
         socket.destroy();
       });
     });
@@ -599,7 +602,7 @@ export class Sshs3WebServer {
     // Serve static frontend files from dist/
     const staticDir =
       this.options.staticDir || path.resolve(process.cwd(), 'dist');
-    let relPath = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
+    const relPath = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
     let candidate = path.resolve(staticDir, relPath);
     if (!candidate.startsWith(path.resolve(staticDir))) {
       res.writeHead(403);

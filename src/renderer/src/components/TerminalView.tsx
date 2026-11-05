@@ -946,6 +946,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                     onTitleChangeRef.current?.(detectedHost);
                   }
                 }
+                // eslint-disable-next-line no-control-regex -- matching terminal escape sequences is the point
                 const oscExitMatch = /\x1b\]133;D;([1-9][0-9]*)(?:\x07|\x1b\\)/.exec(data);
                 if (
                   oscExitMatch ||
