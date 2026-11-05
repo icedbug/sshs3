@@ -1,0 +1,30 @@
+{
+  "name": "sshs3",
+  "image": "mcr.microsoft.com/devcontainers/javascript-node:22-bookworm",
+  "features": {
+    // Lightweight desktop reachable from the browser (noVNC) so the Electron window can be seen.
+    "ghcr.io/devcontainers/features/desktop-lite:1": {
+      "password": "noPassword",
+      "webPort": "6080",
+      "vncPort": "5901"
+    },
+    // Python is needed by node-gyp to build the native modules (node-pty, pkcs11js).
+    "ghcr.io/devcontainers/features/python:1": {},
+    // SSH server so `gh codespace ssh` works.
+    "ghcr.io/devcontainers/features/sshd:1": {}
+  },
+  "forwardPorts": [6080],
+  "portsAttributes": {
+    "6080": { "label": "Desktop (noVNC)", "onAutoForward": "notify" },
+    "5173": { "label": "Vite dev server", "onAutoForward": "silent" }
+  },
+  "hostRequirements": { "cpus": 4, "memory": "16gb" },
+  // Runtime libraries Electron/Chromium needs on Debian, plus build tools and Xvfb for the smoke test.
+  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential libnss3 libatk1.0-0 libatk-bridge2.0-0 libgtk-3-0 libgbm1 libasound2 libxss1 libsecret-1-0 libdrm2 libxkbcommon0 xvfb && npm ci",
+  "containerEnv": { "DISPLAY": ":1" },
+  "customizations": {
+    "vscode": {
+      "extensions": ["dbaeumer.vscode-eslint", "vitest.explorer"]
+    }
+  }
+}
