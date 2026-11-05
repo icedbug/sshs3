@@ -9,7 +9,9 @@
       "vncPort": "5901"
     },
     // Python is needed by node-gyp to build the native modules (node-pty, pkcs11js).
-    "ghcr.io/devcontainers/features/python:1": {}
+    "ghcr.io/devcontainers/features/python:1": {},
+    // SSH server so `gh codespace ssh` works.
+    "ghcr.io/devcontainers/features/sshd:1": {}
   },
   "forwardPorts": [6080],
   "portsAttributes": {
