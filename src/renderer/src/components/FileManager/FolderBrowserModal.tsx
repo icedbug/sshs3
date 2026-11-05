@@ -1,7 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { AlertTriangle, ChevronRight, Folder, Loader2, X } from 'lucide-react';
 import type { FileEntry } from '@shared/types/storage';
 import { useModalDismiss } from '../../lib/useModalDismiss';
+import { useDialogFocus } from '../../lib/useDialogFocus';
 
 interface FolderBrowserModalProps {
   open: boolean;
@@ -70,6 +71,8 @@ export const FolderBrowserModal: React.FC<FolderBrowserModalProps> = ({
   }, [open, providerId, currentPath]);
 
   const handleBackdropClick = useModalDismiss(onClose, open);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(dialogRef, open);
 
   if (!open) return null;
 
@@ -80,10 +83,12 @@ export const FolderBrowserModal: React.FC<FolderBrowserModalProps> = ({
       className="fixed inset-0 z-[60] flex items-center justify-center bg-black/65 p-4"
       onClick={handleBackdropClick}
     >
-      <div role="dialog" aria-modal="true" aria-label="Choose folder" className="w-full max-w-md rounded-xl border border-border-subtle bg-app-card shadow-2xl flex flex-col max-h-[80vh]">
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Choose folder" className="w-full max-w-md rounded-xl border border-border-subtle bg-app-card shadow-2xl flex flex-col max-h-[80vh]">
         <div className="flex items-center justify-between border-b border-divider p-3">
           <div className="text-sm font-semibold text-txt-primary">Choose folder — {providerLabel}</div>
-          <button aria-label="Close" title="Close"
+          <button
+            aria-label="Close"
+            title="Close"
             type="button"
             onClick={onClose}
             className="text-txt-muted hover:text-txt-primary transition-colors"

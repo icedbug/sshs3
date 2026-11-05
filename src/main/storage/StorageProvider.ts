@@ -29,6 +29,7 @@ const MIME_MAP: Record<string, string> = {
   '.htm': 'text/html',
   '.css': 'text/css',
   '.csv': 'text/csv',
+  '.tsv': 'text/tab-separated-values',
   '.xml': 'application/xml',
   '.json': 'application/json',
   '.js': 'application/javascript',
@@ -50,6 +51,7 @@ const MIME_MAP: Record<string, string> = {
   '.svg': 'image/svg+xml',
   '.webp': 'image/webp',
   '.ico': 'image/x-icon',
+  '.bmp': 'image/bmp',
 
   // Archives
   '.zip': 'application/zip',

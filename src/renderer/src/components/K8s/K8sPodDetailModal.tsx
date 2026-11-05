@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState, useRef } from 'react';
 import {
   AlertTriangle,
   ArrowUpRight,
@@ -19,6 +19,7 @@ import {
   Server,
   Tag,
   TerminalSquare,
+  Trash2,
   X,
   XCircle,
 } from 'lucide-react';
@@ -26,9 +27,13 @@ import type {
   K8sPodDescription,
   K8sTerminalTarget,
 } from '@shared/types/kubernetes';
+import { useConfirm } from '../ConfirmDialog';
+import { K8sPodMetrics } from './K8sPodMetrics';
 import { formatDateTime } from '../../lib/dateFormat';
 import { describeIpcError } from '../../lib/format';
 import { useEscapeToClose } from '../../lib/useModalDismiss';
+import { useDialogFocus } from '../../lib/useDialogFocus';
+import { nextTabIndex } from '../../lib/rovingNavigation';
 
 interface K8sPodDetailModalProps {
   contextName: string;
@@ -40,6 +45,7 @@ interface K8sPodDetailModalProps {
   onBrowseFiles?: (target: K8sTerminalTarget) => void;
   onPortForward?: (contextName: string, namespace: string, podName: string, containerPort?: number) => void;
   onDebug?: (contextName: string, namespace: string, podName: string, containers: string[]) => void;
+  onDeleted?: () => void;
 }
 
 type TabType = 'overview' | 'containers' | 'events' | 'yaml';
@@ -54,13 +60,43 @@ export const K8sPodDetailModal: React.FC<K8sPodDetailModalProps> = ({
   onBrowseFiles,
   onPortForward,
   onDebug,
+  onDeleted,
 }) => {
+  const confirm = useConfirm();
   const [activeTab, setActiveTab] = useState<TabType>('overview');
   const [loading, setLoading] = useState(true);
+  const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pod, setPod] = useState<K8sPodDescription | null>(null);
   const [copied, setCopied] = useState(false);
   useEscapeToClose(onClose, true);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(dialogRef, true);
+
+  const handleDeletePod = async () => {
+    const confirmed = await confirm({
+      title: 'Delete Pod',
+      message: (
+        <span>
+          Delete pod <strong className="text-txt-primary">{podName}</strong>?
+          If managed by a Deployment, StatefulSet, or DaemonSet, a new pod will be started in its place.
+        </span>
+      ),
+      confirmLabel: 'Delete',
+      danger: true,
+    });
+    if (!confirmed) return;
+
+    setDeleting(true);
+    try {
+      await window.multissh.k8sDeletePod(contextName, namespace, podName);
+      onDeleted?.();
+      onClose();
+    } catch (err) {
+      setError(describeIpcError(err, String(err)));
+      setDeleting(false);
+    }
+  };
 
   const fetchPod = useCallback(() => {
     setLoading(true);
@@ -106,6 +142,7 @@ export const K8sPodDetailModal: React.FC<K8sPodDetailModalProps> = ({
 
   return (
     <div
+      ref={dialogRef}
       role="dialog"
       aria-modal="true"
       aria-label={`Pod ${podName}`}
@@ -179,7 +216,7 @@ export const K8sPodDetailModal: React.FC<K8sPodDetailModalProps> = ({
                   const containerNames = pod ? pod.containers.map((c) => c.name) : [];
                   onDebug(contextName, namespace, podName, containerNames);
                 }}
-                disabled={loading}
+                disabled={loading || deleting}
                 title="Attach ephemeral debug container (kubectl debug)"
                 className="flex items-center gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-xs text-amber-400 hover:bg-amber-500/20 hover:text-amber-300 transition-colors disabled:opacity-50"
               >
@@ -189,8 +226,22 @@ export const K8sPodDetailModal: React.FC<K8sPodDetailModalProps> = ({
             )}
             <button
               type="button"
+              onClick={handleDeletePod}
+              disabled={deleting}
+              title="Delete or restart pod"
+              className="flex items-center gap-1.5 rounded-lg border border-rose-500/30 bg-rose-500/10 px-2.5 py-1.5 text-xs text-rose-400 hover:bg-rose-500/20 hover:text-rose-300 transition-colors disabled:opacity-50"
+            >
+              {deleting ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Trash2 className="h-3.5 w-3.5" />
+              )}
+              Delete Pod
+            </button>
+            <button
+              type="button"
               onClick={fetchPod}
-              disabled={loading}
+              disabled={loading || deleting}
               title="Refresh pod details"
               className="flex items-center gap-1.5 rounded-lg border border-border-subtle bg-app-surface-subtle px-2.5 py-1.5 text-xs text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary transition-colors disabled:opacity-50"
             >
@@ -198,6 +249,7 @@ export const K8sPodDetailModal: React.FC<K8sPodDetailModalProps> = ({
               Refresh
             </button>
             <button
+              aria-label="Close modal"
               type="button"
               onClick={onClose}
               className="rounded-lg p-1.5 text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
@@ -209,9 +261,26 @@ export const K8sPodDetailModal: React.FC<K8sPodDetailModalProps> = ({
         </div>
 
         {/* Tab navigation */}
-        <div className="flex items-center gap-1 border-b border-divider bg-app-surface-subtle px-5 pt-2">
+        <div
+          role="tablist"
+          aria-label="Pod details"
+          onKeyDown={(e) => {
+            const tabs = Array.from(e.currentTarget.querySelectorAll<HTMLElement>('[role="tab"]'));
+            const next = nextTabIndex(tabs.length, tabs.indexOf(document.activeElement as HTMLElement), e.key);
+            if (next === null) return;
+            e.preventDefault();
+            tabs[next]?.focus();
+            tabs[next]?.click();
+          }}
+          className="flex items-center gap-1 border-b border-divider bg-app-surface-subtle px-5 pt-2"
+        >
           <button
             type="button"
+            id="pod-tab-overview"
+            role="tab"
+            aria-selected={activeTab === 'overview'}
+            aria-controls="pod-tab-panel"
+            tabIndex={activeTab === 'overview' ? 0 : -1}
             onClick={() => setActiveTab('overview')}
             className={`flex items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-medium transition-colors ${
               activeTab === 'overview'
@@ -224,6 +293,11 @@ export const K8sPodDetailModal: React.FC<K8sPodDetailModalProps> = ({
           </button>
           <button
             type="button"
+            id="pod-tab-containers"
+            role="tab"
+            aria-selected={activeTab === 'containers'}
+            aria-controls="pod-tab-panel"
+            tabIndex={activeTab === 'containers' ? 0 : -1}
             onClick={() => setActiveTab('containers')}
             className={`flex items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-medium transition-colors ${
               activeTab === 'containers'
@@ -236,6 +310,11 @@ export const K8sPodDetailModal: React.FC<K8sPodDetailModalProps> = ({
           </button>
           <button
             type="button"
+            id="pod-tab-events"
+            role="tab"
+            aria-selected={activeTab === 'events'}
+            aria-controls="pod-tab-panel"
+            tabIndex={activeTab === 'events' ? 0 : -1}
             onClick={() => setActiveTab('events')}
             className={`flex items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-medium transition-colors ${
               activeTab === 'events'
@@ -251,6 +330,11 @@ export const K8sPodDetailModal: React.FC<K8sPodDetailModalProps> = ({
           </button>
           <button
             type="button"
+            id="pod-tab-yaml"
+            role="tab"
+            aria-selected={activeTab === 'yaml'}
+            aria-controls="pod-tab-panel"
+            tabIndex={activeTab === 'yaml' ? 0 : -1}
             onClick={() => setActiveTab('yaml')}
             className={`flex items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-medium transition-colors ${
               activeTab === 'yaml'
@@ -264,7 +348,12 @@ export const K8sPodDetailModal: React.FC<K8sPodDetailModalProps> = ({
         </div>
 
         {/* Modal Body */}
-        <div className="flex-1 overflow-y-auto p-5">
+        <div
+          id="pod-tab-panel"
+          role="tabpanel"
+          aria-labelledby={`pod-tab-${activeTab}`}
+          className="flex-1 overflow-y-auto p-5"
+        >
           {loading && !pod && (
             <div className="flex h-full flex-col items-center justify-center gap-3 text-txt-muted">
               <Loader2 className="h-6 w-6 animate-spin text-sky-400" />
@@ -273,7 +362,7 @@ export const K8sPodDetailModal: React.FC<K8sPodDetailModalProps> = ({
           )}
 
           {error && (
-            <div className="rounded-xl border border-red-900/60 bg-red-950/40 p-4 text-xs text-red-300">
+            <div role="alert" className="rounded-xl border border-red-900/60 bg-red-950/40 p-4 text-xs text-red-300">
               <div className="flex items-center gap-2 font-semibold">
                 <XCircle className="h-4 w-4" /> Failed to describe pod
               </div>
@@ -317,6 +406,14 @@ export const K8sPodDetailModal: React.FC<K8sPodDetailModalProps> = ({
                       </div>
                     </div>
                   </div>
+
+                  {/* Live Resource Metrics */}
+                  <K8sPodMetrics
+                    contextName={contextName}
+                    namespace={namespace}
+                    podName={podName}
+                    containers={pod.containers.map((c) => c.name)}
+                  />
 
                   {/* Conditions */}
                   <div className="space-y-2">

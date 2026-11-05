@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { Readable, PassThrough } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -289,11 +290,13 @@ describe('S3StorageProvider', () => {
         sso: { startUrl: 'https://example.awsapps.com/start', region: 'us-east-1', accountId: '111', roleName: 'Admin' },
       });
 
+      // The role-credential call must use the profile's proxy/CA-aware handler, not the SDK default.
       expect(fromSSOMock).toHaveBeenCalledWith({
         ssoStartUrl: 'https://example.awsapps.com/start',
         ssoRegion: 'us-east-1',
         ssoAccountId: '111',
         ssoRoleName: 'Admin',
+        clientConfig: { requestHandler: expect.any(NodeHttpHandler) },
       });
       expect(s3ClientConstructorMock).toHaveBeenCalledWith(
         expect.objectContaining({ credentials: fakeCredentialsProvider })
@@ -1224,6 +1227,34 @@ describe('S3StorageProvider', () => {
       expect(uploadDoneMock).toHaveBeenCalled();
     });
 
+    it('reports the object as touched only after the upload has completed (H2)', async () => {
+      let release!: () => void;
+      uploadDoneMock = vi.fn().mockImplementation(
+        () => new Promise((resolve) => { release = () => resolve({}); })
+      );
+      const writeStream = (await provider.createWriteStream('/my-bucket/o.txt')) as NodeJS.WritableStream & { targetTouched: boolean };
+
+      writeStream.write('partial');
+      expect(writeStream.targetTouched).toBe(false);
+
+      release();
+      await new Promise<void>((resolve, reject) => {
+        writeStream.on('finish', () => resolve());
+        writeStream.on('error', reject);
+        writeStream.end();
+      });
+      expect(writeStream.targetTouched).toBe(true);
+    });
+
+    it('stays untouched when the upload fails, so the old object is kept (H2)', async () => {
+      uploadDoneMock = vi.fn().mockRejectedValue(new Error('S3 upload failed'));
+      const writeStream = (await provider.createWriteStream('/my-bucket/o.txt')) as NodeJS.WritableStream & { targetTouched: boolean };
+      const failed = new Promise<void>((resolve) => writeStream.on('error', () => resolve()));
+      writeStream.end('x');
+      await failed;
+      expect(writeStream.targetTouched).toBe(false);
+    });
+
     it('should emit error on writeStream when upload.done() rejects during final', async () => {
       const uploadError = new Error('S3 upload failed');
       uploadDoneMock = vi.fn().mockRejectedValue(uploadError);
@@ -1300,6 +1331,36 @@ describe('S3StorageProvider', () => {
       (writeStream as PassThrough).destroy(new Error('Consumer abort'));
 
       // Wait a tick for event handlers
+      await new Promise((r) => setTimeout(r, 10));
+      expect(uploadAbortMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('aborts the multipart upload when the transfer pipeline is aborted or its source fails', async () => {
+      // pipeline() destroys the sink with the error that ended it, so the sink's 'error' handler runs.
+      const ac = new AbortController();
+      const aborted = await provider.createWriteStream('/my-bucket/aborted.bin');
+      const source = Readable.from(
+        (async function* () {
+          for (;;) {
+            yield Buffer.alloc(8);
+            await new Promise((r) => setTimeout(r, 2));
+          }
+        })()
+      );
+      setTimeout(() => ac.abort(), 10);
+      await expect(pipeline(source, aborted, { signal: ac.signal })).rejects.toThrow();
+      await new Promise((r) => setTimeout(r, 10));
+      expect(uploadAbortMock).toHaveBeenCalledTimes(1);
+
+      uploadAbortMock.mockClear();
+      const failed = await provider.createWriteStream('/my-bucket/failed.bin');
+      const failing = Readable.from(
+        (async function* () {
+          yield Buffer.alloc(8);
+          throw new Error('read failed');
+        })()
+      );
+      await expect(pipeline(failing, failed)).rejects.toThrow('read failed');
       await new Promise((r) => setTimeout(r, 10));
       expect(uploadAbortMock).toHaveBeenCalledTimes(1);
     });

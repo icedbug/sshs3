@@ -3,6 +3,9 @@ import { createPortal } from 'react-dom';
 import { Trash2, X } from 'lucide-react';
 import type { ClipboardHistoryEntry } from '@shared/types/clipboard';
 import { useModalDismiss } from '../lib/useModalDismiss';
+import { useDialogFocus } from '../lib/useDialogFocus';
+import { useConfirm } from './ConfirmDialog';
+import { plural } from '../lib/plural';
 import { formatDateTime } from '../lib/format';
 
 interface ClipboardHistoryModalProps {
@@ -14,6 +17,9 @@ interface ClipboardHistoryModalProps {
 
 export const ClipboardHistoryModal: React.FC<ClipboardHistoryModalProps> = ({ hostKey, onPaste, onClose }) => {
   const onBackdrop = useModalDismiss(onClose, true);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const confirm = useConfirm();
+  useDialogFocus(dialogRef, true);
   const [entries, setEntries] = useState<ClipboardHistoryEntry[]>([]);
   const [query, setQuery] = useState('');
   const searchRef = useRef<HTMLInputElement>(null);
@@ -77,7 +83,13 @@ export const ClipboardHistoryModal: React.FC<ClipboardHistoryModalProps> = ({ ho
     void window.multissh.clipboardHistoryDelete(id);
   };
 
-  const clearAll = (): void => {
+  const clearAll = async (): Promise<void> => {
+    const confirmed = await confirm({
+      title: 'Clear clipboard history',
+      message: `Delete all ${plural(entries.length, 'entry', 'entries')} from the clipboard history? This cannot be undone.`,
+      confirmLabel: 'Clear history',
+    });
+    if (!confirmed) return;
     setEntries([]);
     void window.multissh.clipboardHistoryClear();
   };
@@ -89,6 +101,7 @@ export const ClipboardHistoryModal: React.FC<ClipboardHistoryModalProps> = ({ ho
       data-testid="clipboard-history-modal"
     >
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-label="Clipboard history"
@@ -115,6 +128,9 @@ export const ClipboardHistoryModal: React.FC<ClipboardHistoryModalProps> = ({ ho
           <input
             ref={searchRef}
             type="text"
+            aria-label="Search clipboard history"
+            aria-controls="clipboard-history-list"
+            aria-activedescendant={visible.length > 0 ? `clipboard-history-item-${activeIndex}` : undefined}
             value={query}
             onChange={(e) => {
               setQuery(e.target.value);
@@ -126,7 +142,7 @@ export const ClipboardHistoryModal: React.FC<ClipboardHistoryModalProps> = ({ ho
           />
           <button
             type="button"
-            onClick={clearAll}
+            onClick={() => void clearAll()}
             disabled={entries.length === 0}
             className="shrink-0 rounded-lg border border-border-subtle px-3 py-2 text-xs text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary disabled:opacity-40 cursor-pointer"
           >
@@ -134,7 +150,10 @@ export const ClipboardHistoryModal: React.FC<ClipboardHistoryModalProps> = ({ ho
           </button>
         </div>
 
-        <ul ref={listRef} className="min-h-0 flex-1 overflow-y-auto p-2">
+        <div role="status" aria-live="polite" className="sr-only">
+          {visible.length === 0 ? 'No entries' : plural(visible.length, 'entry', 'entries')}
+        </div>
+        <ul id="clipboard-history-list" ref={listRef} aria-label="Clipboard history" className="min-h-0 flex-1 overflow-y-auto p-2">
           {visible.length === 0 && (
             <li className="px-3 py-6 text-center text-xs text-txt-muted">
               {entries.length === 0 ? 'Nothing copied yet.' : 'No matches.'}
@@ -143,6 +162,8 @@ export const ClipboardHistoryModal: React.FC<ClipboardHistoryModalProps> = ({ ho
           {visible.map((entry, index) => (
             <li
               key={entry.id}
+              id={`clipboard-history-item-${index}`}
+              aria-current={index === activeIndex ? 'true' : undefined}
               data-active={index === activeIndex}
               onMouseMove={() => index !== activeIndex && setSelected(index)}
               className={`group flex items-start gap-2 rounded-lg ${

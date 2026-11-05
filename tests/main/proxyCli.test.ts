@@ -469,4 +469,39 @@ describe('proxyCli.cjs', () => {
     const result = await chunkPromise;
     expect(result).toEqual(Buffer.from([1, 2, 3, 4]));
   });
+
+  // Low finding (code review 2026-11-03): same input checks as proxySocket.ts, before any connection is made.
+  it('refuses a target host with CR/LF, and SOCKS5 fields over 255 bytes, without connecting', () => {
+    const run = (argv: string[], env: Record<string, string> = {}) => {
+      const stderr: string[] = [];
+      let exitCode: number | null = null;
+      const connect = vi.fn();
+      runProxyCli(argv, env, {
+        stderr: { write: (s: string) => (stderr.push(s), true) },
+        exit: (code: number) => {
+          exitCode = code;
+        },
+        connect,
+      });
+      return { stderr: stderr.join(''), exitCode, connect };
+    };
+
+    const injected = run(['http', '127.0.0.1', '3128', 'target.example.com\r\nX-Injected: 1', '22']);
+    expect(injected.exitCode).toBe(1);
+    expect(injected.stderr).toMatch(/invalid target host/i);
+    expect(injected.connect).not.toHaveBeenCalled();
+
+    const longHost = run(['socks5', '127.0.0.1', '1080', `${'h'.repeat(256)}.example.com`, '22']);
+    expect(longHost.exitCode).toBe(1);
+    expect(longHost.stderr).toMatch(/255 bytes/);
+    expect(longHost.connect).not.toHaveBeenCalled();
+
+    const longPassword = run(['socks5', '127.0.0.1', '1080', 'a.example.com', '22'], {
+      SSHS3_PROXY_USERNAME: 'u',
+      SSHS3_PROXY_PASSWORD: 'é'.repeat(128),
+    });
+    expect(longPassword.exitCode).toBe(1);
+    expect(longPassword.stderr).toMatch(/255 bytes/);
+    expect(longPassword.connect).not.toHaveBeenCalled();
+  });
 });

@@ -1,7 +1,8 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState, useRef } from 'react';
 import { History, X, Loader2, RotateCcw, Trash2 } from 'lucide-react';
 import type { ObjectVersionEntry, S3VersioningStatus } from '@shared/types/storage';
 import { useModalDismiss } from '../../lib/useModalDismiss';
+import { useDialogFocus } from '../../lib/useDialogFocus';
 import { useConfirm } from '../ConfirmDialog';
 import { describeIpcError } from '../../lib/format';
 
@@ -56,6 +57,8 @@ export const VersionsModal: React.FC<VersionsModalProps> = ({
   }, [open, load]);
 
   const handleBackdropClick = useModalDismiss(onClose, open, !busy);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(dialogRef, open);
 
   if (!open) return null;
 
@@ -123,7 +126,7 @@ export const VersionsModal: React.FC<VersionsModalProps> = ({
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 animate-in fade-in duration-150 p-4"
       onClick={handleBackdropClick}
     >
-      <div role="dialog" aria-modal="true" aria-label="Object versions" className="flex w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-border-subtle bg-app-card shadow-2xl">
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Object versions" className="flex w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-border-subtle bg-app-card shadow-2xl">
         <div className="flex items-center justify-between border-b border-divider bg-app-surface px-4 py-3">
           <div className="flex items-center gap-2">
             <History className="h-4 w-4 text-sky-400" />
@@ -144,7 +147,7 @@ export const VersionsModal: React.FC<VersionsModalProps> = ({
             </div>
           )}
           {error && (
-            <div className="mb-3 rounded-lg border border-red-800/80 bg-red-950/40 p-2.5 text-xs text-red-300">{error}</div>
+            <div role="alert" className="mb-3 rounded-lg border border-red-800/80 bg-red-950/40 p-2.5 text-xs text-red-300">{error}</div>
           )}
 
           {!loading && mode === 'bucket' && (
@@ -200,6 +203,7 @@ export const VersionsModal: React.FC<VersionsModalProps> = ({
                           <div className="flex items-center justify-end gap-1.5">
                             {!v.isDeleteMarker && !v.isLatest && (
                               <button
+                                aria-label="Restore as current version"
                                 type="button"
                                 title="Restore as current version"
                                 disabled={busy}
@@ -210,6 +214,7 @@ export const VersionsModal: React.FC<VersionsModalProps> = ({
                               </button>
                             )}
                             <button
+                              aria-label="Permanently delete this version"
                               type="button"
                               title="Permanently delete this version"
                               disabled={busy}

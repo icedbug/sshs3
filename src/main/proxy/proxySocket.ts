@@ -92,6 +92,25 @@ class SocketReader {
 }
 
 /**
+ * Why the proxy handshake cannot be built safely from these values, or null when it can. A control character in
+ * the target host would be written into the HTTP CONNECT request (header injection), and the SOCKS5 handshake
+ * stores each of host, user name and password behind a single length byte, which wraps around above 255 bytes.
+ * (The same rules live in proxyCli.cjs, which runs as a separate process and cannot import this file.)
+ */
+export function proxyHandshakeProblem(proxy: ProxyConfig, target: TargetEndpoint): string | null {
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u0020\u007f]/.test(target.host)) return 'Invalid target host: it contains whitespace or control characters';
+  if (proxy.type === 'socks5') {
+    const tooLong = (value: string | undefined) => Buffer.byteLength(value ?? '') > 255;
+    if (tooLong(target.host)) return 'SOCKS5 cannot carry a target host longer than 255 bytes';
+    if (proxy.username && (tooLong(proxy.username) || tooLong(proxy.password))) {
+      return 'SOCKS5 cannot carry a user name or password longer than 255 bytes';
+    }
+  }
+  return null;
+}
+
+/**
  * Creates and establishes a TCP connection to the target host and port
  * through the specified HTTP or SOCKS proxy.
  */
@@ -100,6 +119,8 @@ export async function createProxySocket(
   target: TargetEndpoint,
   timeoutMs = 15000
 ): Promise<net.Socket> {
+  const problem = proxyHandshakeProblem(proxy, target);
+  if (problem) throw new Error(problem);
   const socket = net.connect({ host: proxy.host, port: proxy.port });
 
   return new Promise<net.Socket>((resolve, reject) => {

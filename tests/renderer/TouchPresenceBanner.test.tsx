@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, act } from '@testing-library/react';
+import { render, screen, cleanup, act, within } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import { TouchPresenceBanner } from '../../src/renderer/src/components/TouchPresenceBanner';
 import type { PresencePromptEvent, PresenceClearEvent } from '../../src/shared/types/ipc';
@@ -53,7 +53,29 @@ describe('TouchPresenceBanner Component', () => {
     });
 
     expect(screen.getByTestId('touch-presence-banner')).toBeInTheDocument();
-    expect(screen.getByText('Touch your security key to connect')).toBeInTheDocument();
+    expect(within(screen.getByTestId('touch-presence-banner')).getByText('Touch your security key to connect')).toBeInTheDocument();
+  });
+
+  // A live region inserted together with its text is announced unreliably: the polite region exists before the
+  // prompt, empty, and only its text changes.
+  it('keeps one polite live region mounted, empty until a prompt arrives, and clears it afterwards', () => {
+    render(<TouchPresenceBanner />);
+    const region = screen.getByTestId('touch-presence-announcer');
+    expect(region).toHaveAttribute('role', 'status');
+    expect(region).toBeEmptyDOMElement();
+
+    act(() => {
+      promptCallback!({ id: 'presence-1', sessionId: 'session-123', message: 'Touch your security key to connect' });
+    });
+    expect(screen.getByTestId('touch-presence-announcer')).toBe(region);
+    expect(region).toHaveTextContent('Touch your security key to connect');
+    // The visible banner is not a second live region (it would be announced twice)
+    expect(screen.getByTestId('touch-presence-banner')).not.toHaveAttribute('role');
+
+    act(() => {
+      clearCallback!({ id: 'presence-1' });
+    });
+    expect(region).toBeEmptyDOMElement();
   });
 
   it('clears banner when onPresenceClear is received with matching id', () => {

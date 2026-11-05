@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, act } from '@testing-library/react';
+import { render, screen, waitFor, act, fireEvent } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import { DualPaneExplorer } from '../../src/renderer/src/components/FileManager/DualPaneExplorer';
 import { ConfirmProvider } from '../../src/renderer/src/components/ConfirmDialog';
@@ -59,6 +59,55 @@ describe('DualPaneExplorer SFTP default start path', () => {
     });
   });
 
+  it('only prompts for a remote connection when promptRemote is set', async () => {
+    const { unmount } = render(
+      <ConfirmProvider>
+        <DualPaneExplorer />
+      </ConfirmProvider>
+    );
+    await waitFor(() => expect((window as any).multissh.connectStorage).toHaveBeenCalled());
+    expect(screen.queryByText(/SSH \/ SFTP/)).not.toBeInTheDocument();
+    unmount();
+
+    render(
+      <ConfirmProvider>
+        <DualPaneExplorer promptRemote />
+      </ConfirmProvider>
+    );
+    expect(await screen.findByText(/SSH \/ SFTP/)).toBeInTheDocument();
+  });
+
+  it('prompts for a remote connection even when the right pane was saved in the session', async () => {
+    (window as any).multissh.sessionGet = vi.fn().mockResolvedValue({
+      panes: {
+        left: { providerId: 'local', sourceType: 'local', label: 'Local Disk', path: '/' },
+        right: { providerId: 'local', sourceType: 'local', label: 'Local Disk', path: '/tmp' },
+      },
+    });
+    render(
+      <ConfirmProvider>
+        <DualPaneExplorer promptRemote />
+      </ConfirmProvider>
+    );
+    expect(await screen.findByText(/SSH \/ SFTP/)).toBeInTheDocument();
+  });
+
+  it('connects the right pane to initialS3Config on mount', async () => {
+    const s3 = { id: 'bucket-1', name: 'Archive', region: 'eu-north-1', initialPath: '/logs' } as any;
+
+    render(
+      <ConfirmProvider>
+        <DualPaneExplorer initialS3Config={s3} />
+      </ConfirmProvider>
+    );
+
+    await waitFor(() => {
+      expect((window as any).multissh.connectStorage).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 's3', id: 's3-bucket-1', name: 'Archive' })
+      );
+    });
+  });
+
   it('starts at explicit initialPath when provided in profile', async () => {
     const config: SSHConnectionConfig = {
       id: 'test-profile-2',
@@ -104,5 +153,21 @@ describe('DualPaneExplorer SFTP default start path', () => {
       window.dispatchEvent(new CustomEvent(FILEMANAGER_FOCUS_SIDE_EVENT, { detail: 'right' }));
     });
     expect(document.activeElement).toBe(list);
+  });
+
+  it('renders a resizable divider between the two file panes (§23)', async () => {
+    render(
+      <ConfirmProvider>
+        <DualPaneExplorer />
+      </ConfirmProvider>
+    );
+    await screen.findByTestId('file-pane-left');
+
+    const divider = screen.getByRole('separator', { name: 'Resize file panes' });
+    expect(divider).toBeInTheDocument();
+    expect(divider).toHaveAttribute('aria-valuenow', '50');
+
+    fireEvent.doubleClick(divider);
+    expect(divider).toHaveAttribute('aria-valuenow', '50');
   });
 });

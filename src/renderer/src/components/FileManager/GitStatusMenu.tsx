@@ -60,7 +60,7 @@ export const GitStatusMenu: React.FC<GitStatusMenuProps> = ({
         </button>
 
         {gitMenuOpen && (
-          <div className="absolute right-0 top-full mt-1 z-40 w-64 rounded-xl border border-border-subtle bg-app-card p-2.5 shadow-xl text-xs space-y-2">
+          <div className="absolute left-0 top-full mt-1 z-40 w-64 rounded-xl border border-border-subtle bg-app-card p-2.5 shadow-xl text-xs space-y-2">
             <div className="flex items-center justify-between border-b border-divider pb-1.5">
               <div className="flex items-center gap-1.5 font-semibold text-txt-primary truncate">
                 <GitBranch className="h-4 w-4 text-sky-400 shrink-0" />

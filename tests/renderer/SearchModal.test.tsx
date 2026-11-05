@@ -157,4 +157,55 @@ describe('SearchModal Component', () => {
     fireEvent.mouseMove(window, { clientX: 500 });
     fireEvent.mouseUp(window);
   });
+
+  // M10 (code review 2026-11-03): searchStart resolved after the user had cancelled or closed, and the search kept
+  // running in the main process with nobody to stop it.
+  describe('a search that was cancelled or closed before it had started', () => {
+    function startPending() {
+      let resolveStart!: (value: { searchId: string }) => void;
+      (window.multissh.searchStart as ReturnType<typeof vi.fn>).mockImplementation(
+        () => new Promise((resolve) => (resolveStart = resolve))
+      );
+      return (id: string) => resolveStart({ searchId: id });
+    }
+    const submit = (query: string) => {
+      const input = screen.getByPlaceholderText('Search inside files...');
+      fireEvent.change(input, { target: { value: query } });
+      fireEvent.keyDown(input, { key: 'Enter' });
+    };
+
+    it('stops the search when Cancel was pressed while it was starting', async () => {
+      const finishStart = startPending();
+      render(<SearchModal open={true} providerId="local" sourceType="local" rootPath="/tmp" onClose={vi.fn()} />);
+      submit('needle');
+      fireEvent.click(await screen.findByRole('button', { name: 'Cancel' }));
+
+      await act(async () => finishStart('late-search'));
+
+      expect(window.multissh.searchCancel).toHaveBeenCalledWith('late-search');
+    });
+
+    it('stops the search when the dialog was closed while it was starting', async () => {
+      const finishStart = startPending();
+      const { unmount } = render(<SearchModal open={true} providerId="local" sourceType="local" rootPath="/tmp" onClose={vi.fn()} />);
+      submit('needle');
+      await screen.findByRole('button', { name: 'Cancel' });
+      unmount();
+
+      await act(async () => finishStart('orphan-search'));
+
+      expect(window.multissh.searchCancel).toHaveBeenCalledWith('orphan-search');
+    });
+
+    it('keeps a search that was not cancelled', async () => {
+      const finishStart = startPending();
+      render(<SearchModal open={true} providerId="local" sourceType="local" rootPath="/tmp" onClose={vi.fn()} />);
+      submit('needle');
+      await screen.findByRole('button', { name: 'Cancel' });
+
+      await act(async () => finishStart('wanted-search'));
+
+      expect(window.multissh.searchCancel).not.toHaveBeenCalled();
+    });
+  });
 });

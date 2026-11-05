@@ -28,6 +28,13 @@ repos:
         pass_filenames: false
         files: \.(ts|tsx|cjs|js)$
 
+      - id: docs-lint
+        name: docs style lint (docs/user-guide)
+        language: system
+        entry: npm run docs:lint
+        pass_filenames: false
+        files: ^(docs/user-guide/.*\.md|docs/screenshots/.*|scripts/docs-lint\.mjs)$
+
       - id: vitest
         name: vitest
         language: system

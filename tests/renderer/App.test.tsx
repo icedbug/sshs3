@@ -336,9 +336,16 @@ describe('App Component', () => {
     const unsplitBtn = screen.getByTestId(/^unsplit-/);
     fireEvent.click(unsplitBtn);
 
+    // The other pane has a live session, so closing it must be confirmed first; cancelling keeps it
+    fireEvent.click(await screen.findByRole('button', { name: 'Cancel' }));
+    expect(screen.getAllByTestId(/^terminal-pane-/).length).toBe(2);
+    expect(window.multissh.terminalKill).not.toHaveBeenCalled();
+
+    fireEvent.click(unsplitBtn);
+    fireEvent.click(await screen.findByRole('button', { name: 'Close panes' }));
+
     // Only root pane remains
-    const remainingPanes = screen.getAllByTestId(/^terminal-pane-/);
-    expect(remainingPanes.length).toBe(1);
+    await waitFor(() => expect(screen.getAllByTestId(/^terminal-pane-/).length).toBe(1));
     expect(screen.getByTestId(`terminal-pane-${rootPaneId}`)).toBeInTheDocument();
     // Only other pane's session was killed
     expect(window.multissh.terminalKill).toHaveBeenCalledTimes(1);
@@ -414,10 +421,15 @@ describe('App Component', () => {
     // 1 pane in the first (now hidden) tab + 2 panes in the newly-split active tab
     expect(screen.getAllByTestId(/^terminal-pane-/).length).toBe(3);
 
-    // Trigger Ctrl+W to close active tab
+    // Bare Ctrl+W belongs to the shell/TUI (readline, vim, nano) and must not close the tab
+    fireEvent.keyDown(window, { key: 'w', ctrlKey: true });
+    expect(screen.getAllByRole('tab').length).toBe(2);
+
+    // Trigger Ctrl+Shift+W to close active tab
     fireEvent.keyDown(window, {
-      key: 'w',
+      key: 'W',
       ctrlKey: true,
+      shiftKey: true,
     });
 
     expect(screen.getAllByRole('tab').length).toBe(1);
@@ -507,14 +519,145 @@ describe('App Component', () => {
     expect(screen.getAllByRole('tab')[1]).toHaveAttribute('aria-selected', 'true');
   });
 
-  it('opens Quick Connect on Ctrl+K but not on Ctrl+Shift+K (reserved for Search in Files)', async () => {
+  it('jumps to a tab with Ctrl+<digit> and to the last tab with Ctrl+9', async () => {
+    render(<App />);
+    await screen.findByTestId('tab-term-1');
+    fireEvent.keyDown(window, { key: 'T', ctrlKey: true, shiftKey: true });
+    fireEvent.keyDown(window, { key: 'T', ctrlKey: true, shiftKey: true });
+    expect(screen.getAllByRole('tab')[2]).toHaveAttribute('aria-selected', 'true');
+
+    fireEvent.keyDown(window, { key: '1', code: 'Digit1', ctrlKey: true });
+    expect(screen.getAllByRole('tab')[0]).toHaveAttribute('aria-selected', 'true');
+
+    fireEvent.keyDown(window, { key: '2', code: 'Digit2', ctrlKey: true });
+    expect(screen.getAllByRole('tab')[1]).toHaveAttribute('aria-selected', 'true');
+
+    // Ctrl+8 with only three tabs: no such tab, selection is unchanged
+    fireEvent.keyDown(window, { key: '8', code: 'Digit8', ctrlKey: true });
+    expect(screen.getAllByRole('tab')[1]).toHaveAttribute('aria-selected', 'true');
+
+    fireEvent.keyDown(window, { key: '9', code: 'Digit9', ctrlKey: true });
+    expect(screen.getAllByRole('tab')[2]).toHaveAttribute('aria-selected', 'true');
+  });
+
+  it('zooms the active split pane with Ctrl+Shift+Z and restores it, and closes it with Ctrl+Alt+Shift+W', async () => {
+    render(<App />);
+    await screen.findByTestId('tab-term-1');
+    fireEvent.keyDown(window, { key: 'D', ctrlKey: true, shiftKey: true });
+    expect(screen.getAllByTestId(/^terminal-pane-/).length).toBe(2);
+
+    fireEvent.keyDown(window, { key: 'Z', ctrlKey: true, shiftKey: true });
+    expect(screen.getAllByTestId(/^terminal-pane-/).length).toBe(1);
+
+    fireEvent.keyDown(window, { key: 'Z', ctrlKey: true, shiftKey: true });
+    expect(screen.getAllByTestId(/^terminal-pane-/).length).toBe(2);
+
+    fireEvent.keyDown(window, { key: 'W', code: 'KeyW', ctrlKey: true, shiftKey: true, altKey: true });
+    expect(screen.getAllByTestId(/^terminal-pane-/).length).toBe(1);
+
+    // A sole pane has nothing to close: the shortcut must not close the pane or the tab
+    fireEvent.keyDown(window, { key: 'W', code: 'KeyW', ctrlKey: true, shiftKey: true, altKey: true });
+    expect(screen.getAllByTestId(/^terminal-pane-/).length).toBe(1);
+    expect(screen.getAllByRole('tab').length).toBe(1);
+  });
+
+  it('opens Settings on the Keyboard Shortcuts overview with Ctrl+Shift+H', async () => {
+    render(<App />);
+    await screen.findByTestId('tab-term-1');
+    fireEvent.keyDown(window, { key: 'H', ctrlKey: true, shiftKey: true });
+    expect(await screen.findByText('Close Split Pane')).toBeInTheDocument();
+  });
+
+  it('opens the Connection Manager on Ctrl+Shift+O but leaves Ctrl+K (kill-line) and Ctrl+Shift+K alone', async () => {
     render(<App />);
 
     fireEvent.keyDown(window, { key: 'k', ctrlKey: true, shiftKey: true });
+    fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
     expect(screen.queryByText('Connection Manager')).not.toBeInTheDocument();
 
-    fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
+    fireEvent.keyDown(window, { key: 'O', ctrlKey: true, shiftKey: true });
     expect(screen.getByText('Connection Manager')).toBeInTheDocument();
+  });
+
+  describe('global search', () => {
+    it('opens on Ctrl+Shift+G and from the top bar button, but leaves Ctrl+K (kill-line) alone', async () => {
+      render(<App />);
+      await screen.findByTestId('tab-term-1');
+
+      fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
+      expect(screen.queryByRole('dialog', { name: 'Search' })).not.toBeInTheDocument();
+
+      fireEvent.keyDown(window, { key: 'G', ctrlKey: true, shiftKey: true });
+      expect(await screen.findByRole('dialog', { name: 'Search' })).toBeInTheDocument();
+
+      fireEvent.keyDown(window, { key: 'Escape' });
+      await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Search' })).not.toBeInTheDocument());
+
+      fireEvent.click(screen.getByTestId('global-search-btn'));
+      expect(await screen.findByRole('dialog', { name: 'Search' })).toBeInTheDocument();
+    });
+
+    it('makes the tab bar inert while it is open, like the other top-level dialogs', async () => {
+      render(<App />);
+      await screen.findByTestId('tab-term-1');
+      const header = screen.getByTestId('add-tab-btn').closest('header') as HTMLElement & { inert?: boolean };
+      fireEvent.keyDown(window, { key: 'G', ctrlKey: true, shiftKey: true });
+      await screen.findByRole('dialog', { name: 'Search' });
+      expect(header.inert).toBe(true);
+    });
+
+    it('connects the chosen profile in the empty tab and closes', async () => {
+      (window.multissh.profilesGet as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ssh: [{ id: 'p1', name: 'web-01', host: 'web-01.example.com', username: 'deploy', authType: 'password' }],
+        s3: [],
+      });
+      window.multissh.teamVaultList = vi.fn().mockResolvedValue([]);
+      render(<App />);
+      await screen.findByTestId('tab-term-1');
+
+      fireEvent.keyDown(window, { key: 'G', ctrlKey: true, shiftKey: true });
+      const input = await screen.findByRole('combobox');
+      fireEvent.change(input, { target: { value: 'web-01' } });
+      await waitFor(() => expect(screen.getAllByRole('option').length).toBeGreaterThan(0));
+      fireEvent.keyDown(input, { key: 'Enter' });
+
+      await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Search' })).not.toBeInTheDocument());
+      expect(screen.getAllByRole('tab')).toHaveLength(1);
+      expect(screen.getByRole('tab')).toHaveTextContent('web-01');
+    });
+
+    it('runs an action chosen after > : a new terminal tab, and Settings', async () => {
+      render(<App />);
+      await screen.findByTestId('tab-term-1');
+
+      fireEvent.keyDown(window, { key: 'G', ctrlKey: true, shiftKey: true });
+      let input = await screen.findByRole('combobox');
+      fireEvent.change(input, { target: { value: '>new terminal' } });
+      await waitFor(() => expect(screen.getAllByRole('option')[0]).toHaveTextContent('New Terminal'));
+      fireEvent.keyDown(input, { key: 'Enter' });
+      await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Search' })).not.toBeInTheDocument());
+      expect(screen.getAllByRole('tab')).toHaveLength(2);
+
+      fireEvent.keyDown(window, { key: 'G', ctrlKey: true, shiftKey: true });
+      input = await screen.findByRole('combobox');
+      fireEvent.change(input, { target: { value: '>settings' } });
+      await waitFor(() => expect(screen.getAllByRole('option')[0]).toHaveTextContent('Settings'));
+      fireEvent.keyDown(input, { key: 'Enter' });
+      await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Search' })).not.toBeInTheDocument());
+      expect(screen.getByRole('dialog', { name: /Settings/i })).toBeInTheDocument();
+    });
+
+    it('is switched off by the setting: no button, and the shortcut is left alone', async () => {
+      const { DEFAULT_SETTINGS } = await import('../../src/shared/types/settings');
+      window.multissh.settingsGet = vi.fn().mockResolvedValue({ ...DEFAULT_SETTINGS, enableGlobalSearch: false });
+      render(<App />);
+      await screen.findByTestId('tab-term-1');
+      await waitFor(() => expect(screen.queryByTestId('global-search-btn')).not.toBeInTheDocument());
+
+      const notPrevented = fireEvent.keyDown(window, { key: 'G', ctrlKey: true, shiftKey: true });
+      expect(notPrevented).toBe(true);
+      expect(screen.queryByRole('dialog', { name: 'Search' })).not.toBeInTheDocument();
+    });
   });
 
   it('reuses closed tab numbers instead of incrementing endlessly', async () => {
@@ -663,6 +806,19 @@ describe('App Component', () => {
     // Opening the Connection Manager must release tab-bar focus.
     fireEvent.keyDown(window, { key: 'O', ctrlKey: true, shiftKey: true });
     await waitFor(() => expect(activeTab().className).not.toContain('ring-sky-400'));
+  });
+
+  it('saves a font size change as that one setting, so a stale copy of the others is never sent back', async () => {
+    render(<App />);
+    await screen.findByTestId('tab-term-1');
+
+    fireEvent.keyDown(window, { key: '+', ctrlKey: true });
+
+    await waitFor(() => expect(window.multissh.settingsSave).toHaveBeenCalled());
+    const sent = vi.mocked(window.multissh.settingsSave).mock.calls[0][0];
+    // Not the whole object: connectionManagerVisibleTeamVaults and connectionManagerDefaultTab are written
+    // by their own calls and App's copy of them can be out of date.
+    expect(Object.keys(sent)).toEqual(['terminalFontSize']);
   });
 });
 

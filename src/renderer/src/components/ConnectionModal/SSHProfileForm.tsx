@@ -25,6 +25,9 @@ import { AccessSetupPanel, type AccessState } from '../SSH/AccessSetupPanel';
 import { pickDefaultPkcs11Lib, pkcs11PlaceholderPath } from '../../lib/smartcard';
 import { IS_WINDOWS } from '../../lib/platform';
 import { useEscapeToClose } from '../../lib/useModalDismiss';
+import { useDialogFocus } from '../../lib/useDialogFocus';
+import { ProfileOrganizationFields } from './ProfileOrganizationFields';
+import { SystemMembershipFields } from './SystemMembershipFields';
 
 interface SSHProfileFormProps {
   initial?: SSHConnectionConfig;
@@ -36,6 +39,10 @@ interface SSHProfileFormProps {
    * a Team Vault profile, whose folder tree can be arbitrarily deep (`"Acme Infra/Cluster A"`),
    * so autocomplete matters more than for a personal profile's flat, usually-short list. */
   folderSuggestions?: string[];
+  /** Tags already used on other profiles, offered while typing in the Tags field. */
+  tagSuggestions?: string[];
+  /** Names of the systems that exist, offered while typing in the System field. */
+  systemSuggestions?: string[];
   /** false for a Team Vault member (not admin): the password/passphrase/proxy-password fields
    * are shown disabled with a placeholder instead of the real value — TeamVaultService enforces
    * the same rule server-side regardless of this prop, this only drives the UI. Defaults to true
@@ -73,6 +80,8 @@ export const SSHProfileForm: React.FC<SSHProfileFormProps> = ({
   onCancel,
   dotfilesPoolEnabled = false,
   folderSuggestions,
+  tagSuggestions,
+  systemSuggestions,
   canEditSecret = true,
 }) => {
   const [config, setConfig] = useState<SSHConnectionConfig>(initial ?? emptyConfig());
@@ -82,6 +91,8 @@ export const SSHProfileForm: React.FC<SSHProfileFormProps> = ({
   const [saveReminderOpen, setSaveReminderOpen] = useState(false);
   // Escape backs out of the reminder and returns to the form without saving.
   useEscapeToClose(() => setSaveReminderOpen(false), saveReminderOpen);
+  const reminderDialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(reminderDialogRef, saveReminderOpen);
   const [openInstallSignal, setOpenInstallSignal] = useState(0);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [dotfilePools, setDotfilePools] = useState<DotfilePool[]>([]);
@@ -327,23 +338,25 @@ export const SSHProfileForm: React.FC<SSHProfileFormProps> = ({
             placeholder="e.g. Production Server"
           />
         </label>
-        <label className="flex flex-col gap-1 text-txt-secondary">
-          Group / Folder (optional)
-          <input
-            value={config.group ?? ''}
-            onChange={(e) => update('group', e.target.value)}
-            list={folderSuggestions ? 'ssh-folder-suggestions' : undefined}
-            className="rounded-lg border border-border-subtle bg-app-input px-2.5 py-1.5 text-sm text-txt-primary outline-none focus:border-sky-500 placeholder-txt-muted"
-            placeholder={folderSuggestions ? 'e.g. Acme Infra/Cluster A' : 'e.g. Production or Web Servers'}
+        <ProfileOrganizationFields
+          group={config.group}
+          tags={config.tags}
+          onGroupChange={(group) => update('group', group)}
+          onTagsChange={(tags) => update('tags', tags)}
+          groupPlaceholder="e.g. Production or Web Servers"
+          folderSuggestions={folderSuggestions}
+          tagSuggestions={tagSuggestions}
+          // Only while it is in one: clearing the System field frees the folder in the same save.
+          groupFollowsSystem={!!initial?.system && !!config.system}
+        />
+        <div className="col-span-2">
+          <SystemMembershipFields
+            system={config.system}
+            tunnels={config.tunnels}
+            onChange={(system) => update('system', system)}
+            suggestions={systemSuggestions}
           />
-          {folderSuggestions && (
-            <datalist id="ssh-folder-suggestions">
-              {folderSuggestions.map((path) => (
-                <option key={path} value={path} />
-              ))}
-            </datalist>
-          )}
-        </label>
+        </div>
       </div>
 
       <div className="grid grid-cols-[1fr_80px_1fr] gap-2.5">
@@ -476,6 +489,7 @@ export const SSHProfileForm: React.FC<SSHProfileFormProps> = ({
                 placeholder="~/.ssh/id_ed25519"
               />
               <button
+                aria-label="Browse"
                 type="button"
                 onClick={() => void browseFor('privateKeyPath')}
                 className="rounded-lg border border-border-subtle px-2.5 text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
@@ -500,25 +514,39 @@ export const SSHProfileForm: React.FC<SSHProfileFormProps> = ({
       )}
 
       {config.authType === 'agent' && (
-        <label className="flex flex-col gap-1 text-txt-secondary">
-          Agent Socket (optional, empty = SSH_AUTH_SOCK)
-          <div className="flex gap-1.5">
+        <div className="flex flex-col gap-2">
+          <label className="flex items-center gap-2 text-txt-secondary text-sm cursor-pointer select-none">
             <input
-              value={config.agentPath ?? ''}
-              onChange={(e) => update('agentPath', e.target.value)}
-              className="flex-1 rounded-lg border border-border-subtle bg-app-input px-2.5 py-1.5 text-sm text-txt-primary outline-none focus:border-sky-500 placeholder-txt-muted font-mono"
-              placeholder="/tmp/ssh-agent.sock"
+              type="checkbox"
+              checked={config.useSshCa ?? false}
+              onChange={(e) => update('useSshCa', e.target.checked)}
+              className="rounded border-border-subtle bg-app-input text-sky-500 focus:ring-sky-500/20"
             />
-            <button
-              type="button"
-              onClick={() => void browseFor('agentPath')}
-              className="rounded-lg border border-border-subtle px-2.5 text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
-              title="Browse"
-            >
-              <FolderOpen className="h-4 w-4" />
-            </button>
-          </div>
-        </label>
+            <span>Use active SSH Certificate Authority session</span>
+          </label>
+          {!config.useSshCa && (
+            <label className="flex flex-col gap-1 text-txt-secondary">
+              Agent Socket (optional, empty = SSH_AUTH_SOCK)
+              <div className="flex gap-1.5">
+                <input
+                  value={config.agentPath ?? ''}
+                  onChange={(e) => update('agentPath', e.target.value)}
+                  className="flex-1 rounded-lg border border-border-subtle bg-app-input px-2.5 py-1.5 text-sm text-txt-primary outline-none focus:border-sky-500 placeholder-txt-muted font-mono"
+                  placeholder="/tmp/ssh-agent.sock"
+                />
+                <button
+                  aria-label="Browse"
+                  type="button"
+                  onClick={() => void browseFor('agentPath')}
+                  className="rounded-lg border border-border-subtle px-2.5 text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
+                  title="Browse"
+                >
+                  <FolderOpen className="h-4 w-4" />
+                </button>
+              </div>
+            </label>
+          )}
+        </div>
       )}
 
       {config.authType === 'smartcard' && (
@@ -533,6 +561,7 @@ export const SSHProfileForm: React.FC<SSHProfileFormProps> = ({
                 placeholder={pkcs11PlaceholderPath(pickDefaultPkcs11Lib(smartcardLibs))}
               />
               <button
+                aria-label="Browse"
                 type="button"
                 onClick={() => void browseFor('pkcs11LibPath')}
                 className="rounded-lg border border-border-subtle px-2.5 text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
@@ -572,7 +601,7 @@ export const SSHProfileForm: React.FC<SSHProfileFormProps> = ({
             </div>
           ) : (
             <span className="text-xs text-txt-muted">
-              No PKCS#11 libraries automatically detected. Please enter path or browse manually.
+              No PKCS#11 libraries were detected automatically. Enter the path or browse for it.
             </span>
           )}
 
@@ -693,6 +722,7 @@ export const SSHProfileForm: React.FC<SSHProfileFormProps> = ({
                             </span>
                           ) : (
                             <button
+                              aria-label="Delete this credential from the security key"
                               type="button"
                               onClick={() => {
                                 setFido2DeleteError(null);
@@ -722,6 +752,7 @@ export const SSHProfileForm: React.FC<SSHProfileFormProps> = ({
                     placeholder="~/.ssh/id_ed25519_sk"
                   />
                   <button
+                    aria-label="Browse"
                     type="button"
                     onClick={() => void browseFor('privateKeyPath')}
                     className="rounded-lg border border-border-subtle px-2.5 text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
@@ -854,6 +885,7 @@ export const SSHProfileForm: React.FC<SSHProfileFormProps> = ({
                         {fido2GenResult.publicKey}
                       </code>
                       <button
+                        aria-label="Copy public key"
                         type="button"
                         onClick={() => void navigator.clipboard.writeText(fido2GenResult.publicKey)}
                         className="shrink-0 rounded-md border border-border-subtle p-1.5 text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
@@ -1242,6 +1274,7 @@ export const SSHProfileForm: React.FC<SSHProfileFormProps> = ({
       </div>
       {saveReminderOpen && (
         <div
+          ref={reminderDialogRef}
           role="dialog"
           aria-modal="true"
           aria-labelledby="save-reminder-title"

@@ -8,6 +8,8 @@ export const ShortcutsSettingsSection: React.FC<{ form: SettingsForm }> = ({ for
     shortcuts,
     recordingAction,
     setRecordingAction,
+    recordingPreview,
+    handleKeyUpRecord,
     shortcutSearch,
     setShortcutSearch,
     handleResetShortcuts,
@@ -58,11 +60,13 @@ export const ShortcutsSettingsSection: React.FC<{ form: SettingsForm }> = ({ for
                 {isRecording ? (
                   <button
                     type="button"
+                    data-shortcut-recording="true"
                     onKeyDown={(e) => handleKeyDownRecord(e, def.id)}
+                    onKeyUp={handleKeyUpRecord}
                     autoFocus
                     className="rounded-md border border-sky-500 bg-sky-950 px-2.5 py-0.5 font-mono text-xs text-sky-300 outline-none animate-pulse"
                   >
-                    Press keys (Esc to cancel)...
+                    {recordingPreview ? `${recordingPreview}+...` : 'Press keys (Esc to cancel)...'}
                   </button>
                 ) : (
                   <button

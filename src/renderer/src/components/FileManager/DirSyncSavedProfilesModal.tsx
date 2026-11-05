@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import {
   AlertTriangle,
   ArrowRight,
@@ -18,6 +18,7 @@ import type { SSHConnectionConfig } from '@shared/types/ssh';
 import type { S3Config } from '@shared/types/storage';
 import { formatDateTime, describeIpcError } from '../../lib/format';
 import { useModalDismiss } from '../../lib/useModalDismiss';
+import { useDialogFocus } from '../../lib/useDialogFocus';
 import { useConfirm } from '../ConfirmDialog';
 
 interface DirSyncSavedProfilesModalProps {
@@ -157,6 +158,8 @@ export const DirSyncSavedProfilesModal: React.FC<DirSyncSavedProfilesModalProps>
   };
 
   const handleBackdropClick = useModalDismiss(onClose, open);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(dialogRef, open);
 
   if (!open) return null;
 
@@ -165,14 +168,16 @@ export const DirSyncSavedProfilesModal: React.FC<DirSyncSavedProfilesModalProps>
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 animate-in fade-in duration-150"
       onClick={handleBackdropClick}
     >
-      <div role="dialog" aria-modal="true" aria-label="Saved sync profiles" className="w-full max-w-2xl max-h-[85vh] flex flex-col rounded-xl border border-border-subtle bg-app-card shadow-2xl overflow-hidden">
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Saved sync profiles" className="w-full max-w-2xl max-h-[85vh] flex flex-col rounded-xl border border-border-subtle bg-app-card shadow-2xl overflow-hidden">
         {/* Modal Header */}
         <div className="flex items-center justify-between border-b border-divider bg-app-surface px-4 py-3 shrink-0">
           <div className="flex items-center gap-2">
             <FolderSync className="h-4 w-4 text-sky-400" />
             <h2 className="text-sm font-semibold text-txt-primary">Saved Sync Profiles</h2>
           </div>
-          <button aria-label="Close" title="Close"
+          <button
+            aria-label="Close"
+            title="Close"
             type="button"
             onClick={onClose}
             className="rounded-lg p-1 text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
@@ -184,7 +189,7 @@ export const DirSyncSavedProfilesModal: React.FC<DirSyncSavedProfilesModalProps>
         {/* Profiles List */}
         <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3 text-xs text-txt-secondary">
           {error && (
-            <div className="rounded-lg border border-red-800/80 bg-red-950/40 p-2.5 text-red-300">{error}</div>
+            <div role="alert" className="rounded-lg border border-red-800/80 bg-red-950/40 p-2.5 text-red-300">{error}</div>
           )}
 
           {loading ? (
@@ -237,6 +242,7 @@ export const DirSyncSavedProfilesModal: React.FC<DirSyncSavedProfilesModalProps>
                         Run Sync
                       </button>
                       <button
+                        aria-label="Delete profile"
                         type="button"
                         onClick={() => void handleDelete(profile.id, profile.name)}
                         title="Delete profile"
@@ -267,7 +273,7 @@ export const DirSyncSavedProfilesModal: React.FC<DirSyncSavedProfilesModalProps>
 
                     {/* Direction Indicator */}
                     <div className="flex flex-col items-center justify-center gap-1 px-1 py-1">
-                      <div className="flex items-center justify-center w-7 h-7 rounded-full bg-sky-500/15 border border-sky-500/30 text-sky-400">
+                      <div className="flex items-center justify-center w-7 h-7 rounded-md bg-sky-500/15 border border-sky-500/30 text-sky-400">
                         <ArrowRight className="h-3.5 w-3.5" />
                       </div>
                       <span className="text-2xs font-medium text-txt-muted uppercase tracking-wider whitespace-nowrap">

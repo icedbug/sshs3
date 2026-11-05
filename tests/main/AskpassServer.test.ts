@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import net from 'node:net';
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import os from 'node:os';
@@ -186,5 +187,30 @@ describe('AskpassServer', () => {
 
       expect(fsSync.readdirSync(registryDir)).toHaveLength(0);
     });
+  });
+
+  // Low finding (code review 2026-11-03): a start that failed after the private temp folder was created left the
+  // folder and the registry entry behind.
+  it('removes its temp folder and registry entry when it cannot start listening', async () => {
+    const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'askpass-fail-'));
+    const tmpdir = vi.spyOn(os, 'tmpdir').mockReturnValue(parent);
+    const unregister = vi.spyOn(AgentRegistry, 'unregisterEntry');
+    const failing = Object.assign(new EventEmitter(), {
+      listen: () => void process.nextTick(() => failing.emit('error', new Error('listen EADDRINUSE'))),
+      close: (cb?: () => void) => cb?.(),
+    });
+    const createServer = vi.spyOn(net, 'createServer').mockReturnValue(failing as unknown as net.Server);
+    try {
+      server = new AskpassServer({ promptHandler: async () => '' });
+      await expect(server.start()).rejects.toThrow('EADDRINUSE');
+
+      expect(await fs.readdir(parent)).toEqual([]);
+      expect(unregister).toHaveBeenCalled();
+    } finally {
+      createServer.mockRestore();
+      tmpdir.mockRestore();
+      unregister.mockRestore();
+      await fs.rm(parent, { recursive: true, force: true });
+    }
   });
 });

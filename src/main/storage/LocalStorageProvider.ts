@@ -3,18 +3,25 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import os from 'node:os';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import {
   BaseStorageProvider,
   formatDate,
   getMimeType,
 } from './StorageProvider';
+import { buildAttribFlags, parseAttribOutput, unappliedAttributes } from './winAttributes';
 import type {
   FileEntry,
   SpaceInfo,
   StorageType,
   VolumeInfo,
+  WinAttributes,
   WriteStreamOptions,
 } from '../../shared/types/storage';
+import { defineTargetSettled, defineTargetTouched } from './targetTouched';
+
+const execFileAsync = promisify(execFile);
 
 export interface LocalStorageProviderOptions {
   id?: string;
@@ -164,6 +171,8 @@ export class LocalStorageProvider extends BaseStorageProvider {
             size: itemStats.size,
             isDirectory: isDir,
             isSymlink,
+            // FIFO, socket or device (after following a link, so a link to one counts too): reading it blocks.
+            isSpecial: !isDir && !itemStats.isFile(),
             mtime: formatDate(itemStats.mtime),
             mtimeMs: itemStats.mtime.getTime(),
             mimeType: isDir ? undefined : getMimeType(entry.name),
@@ -178,6 +187,7 @@ export class LocalStorageProvider extends BaseStorageProvider {
             size: 0,
             isDirectory: isDir,
             isSymlink,
+            isSpecial: !isDir && !isSymlink && !entry.isFile(),
             mimeType: isDir ? undefined : getMimeType(entry.name),
           };
         }
@@ -206,6 +216,7 @@ export class LocalStorageProvider extends BaseStorageProvider {
       path: remotePath,
       size: stats.size,
       isDirectory: isDir,
+      isSpecial: !isDir && !stats.isFile(),
       mtime: formatDate(stats.mtime),
       mtimeMs: stats.mtime.getTime(),
       mimeType: isDir ? undefined : getMimeType(name),
@@ -272,7 +283,22 @@ export class LocalStorageProvider extends BaseStorageProvider {
     const fullPath = this.resolvePath(remotePath);
     const parentDir = path.dirname(fullPath);
     await fsp.mkdir(parentDir, { recursive: true });
-    return fs.createWriteStream(fullPath);
+    const stream = fs.createWriteStream(fullPath);
+    // 'open' means the file was opened for writing (and truncated); a failed open leaves the target alone. The open is already
+    // under way when this returns, so `targetSettled` lets a failed transfer wait for it (bounded, see settleTargetTouched)
+    // before it decides whether the target was touched. Not awaited here: a FIFO or a stalled mount would block the cancel.
+    // (`stream.pending` is not usable: it turns true again once the stream has closed.)
+    let opened = false;
+    const settled = new Promise<void>((resolve) => {
+      stream.once('open', () => {
+        opened = true;
+        resolve();
+      });
+      // No 'error' listener on purpose: it would count as a handler and hide an unhandled error from a caller that has none.
+      // A failed open emits 'error' and then 'close', so 'close' settles it.
+      stream.once('close', () => resolve());
+    });
+    return defineTargetSettled(defineTargetTouched(stream, () => opened), () => settled);
   }
 
   async writeFile(
@@ -283,7 +309,7 @@ export class LocalStorageProvider extends BaseStorageProvider {
     const fullPath = this.resolvePath(remotePath);
     const parentDir = path.dirname(fullPath);
     await fsp.mkdir(parentDir, { recursive: true });
-    await fsp.writeFile(fullPath, data, { mode: options?.mode });
+    await fsp.writeFile(fullPath, data, { mode: options?.mode, flag: options?.exclusive ? 'wx' : 'w' });
   }
 
   async readFile(remotePath: string): Promise<Buffer> {
@@ -298,6 +324,30 @@ export class LocalStorageProvider extends BaseStorageProvider {
       throw new Error(`Invalid chmod mode: ${mode}`);
     }
     await fsp.chmod(fullPath, numericMode);
+  }
+
+  /** Windows only: reads the R/H/S/A attributes of a file or folder with `attrib`. */
+  async getWinAttributes(remotePath: string): Promise<WinAttributes> {
+    if (process.platform !== 'win32') throw new Error('Windows attributes are only available on Windows');
+    const { stdout } = await execFileAsync('attrib', [this.resolvePath(remotePath)], { windowsHide: true });
+    return parseAttribOutput(stdout);
+  }
+
+  /** Windows only: applies the given attribute changes with `attrib`, optionally to a folder's whole tree. */
+  async setWinAttributes(remotePath: string, changes: Partial<WinAttributes>, recursive = false): Promise<void> {
+    if (process.platform !== 'win32') throw new Error('Windows attributes are only available on Windows');
+    const fullPath = this.resolvePath(remotePath);
+    const flags = buildAttribFlags(changes, await this.getWinAttributes(remotePath));
+    if (flags.length === 0) return;
+    // No shell is involved, so the path cannot be interpreted as anything but an argument.
+    await execFileAsync('attrib', [...flags, fullPath], { windowsHide: true });
+    // `attrib` can exit 0 without changing anything (hidden/system files), so the result is read back.
+    const unapplied = unappliedAttributes(changes, await this.getWinAttributes(remotePath));
+    if (unapplied.length > 0) throw new Error(`Windows did not apply: ${unapplied.join(', ')}`);
+    if (recursive && (await fsp.stat(fullPath)).isDirectory()) {
+      // Only what was asked for: items inside keep their own H/S, so `attrib` skips hidden/system ones.
+      await execFileAsync('attrib', [...buildAttribFlags(changes), path.join(fullPath, '*'), '/S', '/D'], { windowsHide: true });
+    }
   }
 
   async setModifiedTime(remotePath: string, mtimeMs: number): Promise<void> {

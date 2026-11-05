@@ -118,13 +118,26 @@ npm run test
 - **Date Formatting**: Always format timestamps across UI and logs as `yyyy-mm-dd HH:mm` (24h).
 - **Security & Ephemeral Secrets**: Never log or store PINs, passphrases, or private keys on disk or in persistent memory.
 
+### Packaging
+
+```bash
+npm run package:appimage   # Linux AppImage only
+npm run package:linux      # AppImage, deb and rpm (needs `rpm` installed for the RPM)
+npm run package:win        # Windows (needs a Windows build environment)
+```
+
+#### Building on Windows
+- `node-pty` and `pkcs11js` are native modules. A full rebuild needs **Python** and the **Visual C++ build tools**; without them `electron-builder` stops at `Could not find any Python installation to use`.
+- `node-pty` ships prebuilt Windows binaries, so `npx electron-builder --win --config.npmRebuild=false` works, but `pkcs11js` is then *not* built. Smartcard certificate details fall back to OpenSC's `pkcs11-tool.exe` (see the Windows page of the user guide).
+- `npm install --ignore-scripts` skips these native builds too.
+
 ### Automated Releases
 
 Releases can be deployed automatically via:
 ```bash
 npm run deploy
 # or
-./deploy.sh "chore: release notes"
+./scripts/deploy.sh "chore: release notes"
 ```
 
 ---

@@ -1,10 +1,11 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { CloudDownload, X, Loader2, CheckCircle2, ShieldAlert } from 'lucide-react';
 import type { KnownHostsConflict } from '@shared/types/sync';
 import { SyncTargetForm, emptySyncTargetDraft, buildSyncTarget, validateSyncTargetDraft, type SyncTargetDraft } from './SyncTargetForm';
 import { MasterPasswordDialog } from './MasterPasswordDialog';
 import { formatSyncError } from '../../lib/syncErrors';
 import { useModalDismiss } from '../../lib/useModalDismiss';
+import { useDialogFocus } from '../../lib/useDialogFocus';
 
 interface SyncBootstrapModalProps {
   open: boolean;
@@ -35,6 +36,8 @@ export const SyncBootstrapModal: React.FC<SyncBootstrapModalProps> = ({ open, on
 
   // Escape closes; a stray backdrop click would discard typed input, so it is intentionally ignored.
   useModalDismiss(onClose, open);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(dialogRef, open);
   if (!open) return null;
 
   const handleContinue = async () => {
@@ -75,7 +78,7 @@ export const SyncBootstrapModal: React.FC<SyncBootstrapModalProps> = ({ open, on
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4">
-      <div role="dialog" aria-modal="true" aria-label="Import profile from the cloud" className="flex w-full max-w-md flex-col rounded-xl border border-border-subtle bg-app-card shadow-2xl overflow-hidden">
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Import profile from the cloud" className="flex w-full max-w-md flex-col rounded-xl border border-border-subtle bg-app-card shadow-2xl overflow-hidden">
         <div className="flex h-12 shrink-0 items-center justify-between border-b border-divider bg-app-surface px-5">
           <div className="flex items-center gap-2.5">
             <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-sky-500/10 text-sky-400">
@@ -83,7 +86,9 @@ export const SyncBootstrapModal: React.FC<SyncBootstrapModalProps> = ({ open, on
             </div>
             <h2 className="text-sm font-semibold text-txt-primary">Import profile from the cloud</h2>
           </div>
-          <button aria-label="Close" title="Close"
+          <button
+            aria-label="Close"
+            title="Close"
             type="button"
             onClick={onClose}
             className="rounded-lg p-1.5 text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
@@ -131,7 +136,7 @@ export const SyncBootstrapModal: React.FC<SyncBootstrapModalProps> = ({ open, on
                 settings.
               </p>
               <SyncTargetForm draft={draft} onChange={setDraft} disabled={settingUpTarget} />
-              {targetError && <p className="text-xs text-red-400">{targetError}</p>}
+              {targetError && <p role="alert" className="text-xs text-red-400">{targetError}</p>}
               <button
                 type="button"
                 onClick={handleContinue}

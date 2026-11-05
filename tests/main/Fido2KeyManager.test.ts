@@ -229,6 +229,28 @@ describe('Fido2KeyManager', () => {
       ]);
     });
 
+    it('lists only SSH credentials, not the key\'s web passkeys', async () => {
+      vi.spyOn(YkmanFido, 'isYkmanAvailable').mockResolvedValue(true);
+      vi.spyOn(YkmanFido, 'listYkmanFidoCredentials').mockResolvedValue([
+        { credentialId: 'web1', rpId: 'github.com', userName: 'alun', userDisplayName: 'Alun' },
+        { credentialId: 'ssh1', rpId: 'ssh:work', userName: 'alun', userDisplayName: 'Alun' },
+        { credentialId: 'web2', rpId: 'google.com', userName: 'alun', userDisplayName: 'Alun' },
+        { credentialId: 'ssh2', rpId: 'ssh:', userName: 'alun', userDisplayName: 'Alun' },
+      ]);
+
+      const result = await listFido2ResidentKeys(vi.fn().mockResolvedValue('123456'));
+
+      expect(result.map((k) => k.credentialId)).toEqual(['ssh1', 'ssh2']);
+    });
+
+    it('does not run ykman when the PIN prompt was dismissed', async () => {
+      vi.spyOn(YkmanFido, 'isYkmanAvailable').mockResolvedValue(true);
+      const listSpy = vi.spyOn(YkmanFido, 'listYkmanFidoCredentials');
+
+      await expect(listFido2ResidentKeys(vi.fn().mockResolvedValue(''))).rejects.toThrow(/cancelled/);
+      expect(listSpy).not.toHaveBeenCalled();
+    });
+
     it('never touches ssh-add at all when ykman is available', async () => {
       vi.spyOn(YkmanFido, 'isYkmanAvailable').mockResolvedValue(true);
       vi.spyOn(YkmanFido, 'listYkmanFidoCredentials').mockResolvedValue([]);
@@ -243,6 +265,9 @@ describe('Fido2KeyManager', () => {
   describe('deleteFido2ResidentKey', () => {
     it('prompts for the PIN and deletes the credential via ykman', async () => {
       vi.spyOn(YkmanFido, 'isYkmanAvailable').mockResolvedValue(true);
+      vi.spyOn(YkmanFido, 'listYkmanFidoCredentials').mockResolvedValue([
+        { credentialId: 'abc123', rpId: 'ssh:id_ed25519_sk', userName: 'alun', userDisplayName: 'Alun' },
+      ]);
       const deleteSpy = vi.spyOn(YkmanFido, 'deleteYkmanFidoCredential').mockResolvedValue();
       const promptHandler = vi.fn().mockResolvedValue('123456');
 
@@ -250,6 +275,20 @@ describe('Fido2KeyManager', () => {
 
       expect(promptHandler).toHaveBeenCalledTimes(1);
       expect(deleteSpy).toHaveBeenCalledWith('abc123', '123456');
+    });
+
+    it('refuses to delete a web passkey, or an id that is not on the key, and a dismissed PIN prompt', async () => {
+      vi.spyOn(YkmanFido, 'isYkmanAvailable').mockResolvedValue(true);
+      vi.spyOn(YkmanFido, 'listYkmanFidoCredentials').mockResolvedValue([
+        { credentialId: 'web1', rpId: 'github.com', userName: 'alun', userDisplayName: 'Alun' },
+      ]);
+      const deleteSpy = vi.spyOn(YkmanFido, 'deleteYkmanFidoCredential').mockResolvedValue();
+      const pin = vi.fn().mockResolvedValue('123456');
+
+      await expect(deleteFido2ResidentKey('web1', pin)).rejects.toThrow(/not an SSH key/);
+      await expect(deleteFido2ResidentKey('missing', pin)).rejects.toThrow(/no longer on the security key/);
+      await expect(deleteFido2ResidentKey('web1', vi.fn().mockResolvedValue(''))).rejects.toThrow(/cancelled/);
+      expect(deleteSpy).not.toHaveBeenCalled();
     });
 
     it('refuses without ever prompting for a PIN when ykman is not installed', async () => {

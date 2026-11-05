@@ -17,6 +17,8 @@ import {
 import type { LocalPublicKey } from '@shared/types/ssh';
 import type { GitSigningConfig } from '@shared/types/git';
 import { classNames, describeIpcError } from '../../lib/format';
+import { isFeatureBlocked, usePolicy } from '../../lib/usePolicy';
+import { FeatureBlockedNotice } from './Managed';
 
 const SOURCE_LABEL: Record<string, string> = {
   file: 'File',
@@ -67,6 +69,7 @@ export const GitSettingsPanel: React.FC<GitSettingsPanelProps> = ({
   const [gitUsername, setGitUsername] = useState('');
   const [gitCustomHost, setGitCustomHost] = useState('');
   const [fetchingGit, setFetchingGit] = useState(false);
+  const gitKeyFetchBlocked = isFeatureBlocked(usePolicy(), 'gitKeyFetch');
   const [fetchedKeys, setFetchedKeys] = useState<LocalPublicKey[]>([]);
 
   const loadSigningConfig = useCallback(async (): Promise<GitSigningConfig | null> => {
@@ -235,7 +238,7 @@ export const GitSettingsPanel: React.FC<GitSettingsPanelProps> = ({
 
   const fetchGitKeys = async () => {
     const user = gitUsername.trim();
-    if (!user) return;
+    if (!user || gitKeyFetchBlocked) return;
     setFetchingGit(true);
     setError(null);
     try {
@@ -307,7 +310,7 @@ export const GitSettingsPanel: React.FC<GitSettingsPanelProps> = ({
       )}
 
       {error && (
-        <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-red-300 flex items-center justify-between">
+        <div role="alert" className="rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-red-300 flex items-center justify-between">
           <span>{error}</span>
           <button aria-label="Close" title="Close" type="button" onClick={() => setError(null)} className="text-red-400 hover:text-white">
             <X className="h-3.5 w-3.5" />
@@ -394,7 +397,7 @@ export const GitSettingsPanel: React.FC<GitSettingsPanelProps> = ({
                       {copiedKeyId === k.id && copiedAction === 'copy' ? (
                         <>
                           <Check className="h-3 w-3 text-emerald-400" />
-                          <span>Copied!</span>
+                          <span>Copied</span>
                         </>
                       ) : (
                         <>
@@ -440,7 +443,7 @@ export const GitSettingsPanel: React.FC<GitSettingsPanelProps> = ({
                       {copiedKeyId === k.id && copiedAction === 'github' ? (
                         <>
                           <Check className="h-3 w-3 text-emerald-400" />
-                          <span>Copied!</span>
+                          <span>Copied</span>
                         </>
                       ) : (
                         <>
@@ -465,7 +468,7 @@ export const GitSettingsPanel: React.FC<GitSettingsPanelProps> = ({
                       {copiedKeyId === k.id && copiedAction === 'gitlab' ? (
                         <>
                           <Check className="h-3 w-3 text-emerald-400" />
-                          <span>Copied!</span>
+                          <span>Copied</span>
                         </>
                       ) : (
                         <>
@@ -600,7 +603,7 @@ export const GitSettingsPanel: React.FC<GitSettingsPanelProps> = ({
                 onChange={(e) => onChangeFileManagerGitIntegration(e.target.checked)}
                 className="sr-only peer"
               />
-              <div className="w-9 h-5 bg-app-card peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-border-subtle after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-sky-600 border border-border-subtle"></div>
+              <div className="w-9 h-5 bg-app-card peer-focus-visible:ring-2 peer-focus-visible:ring-sky-500 peer-focus-visible:ring-offset-1 peer-focus-visible:ring-offset-app-surface rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-border-subtle after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-sky-600 border border-border-subtle"></div>
             </label>
           )}
         </div>
@@ -678,6 +681,7 @@ export const GitSettingsPanel: React.FC<GitSettingsPanelProps> = ({
             />
           )}
           <input
+            aria-label={gitProvider === 'github' ? 'GitHub username' : 'GitLab username'}
             type="text"
             value={gitUsername}
             onChange={(e) => setGitUsername(e.target.value)}
@@ -688,13 +692,15 @@ export const GitSettingsPanel: React.FC<GitSettingsPanelProps> = ({
           <button
             type="button"
             onClick={() => void fetchGitKeys()}
-            disabled={!gitUsername.trim() || fetchingGit}
+            disabled={!gitUsername.trim() || fetchingGit || gitKeyFetchBlocked}
+            aria-describedby={gitKeyFetchBlocked ? 'git-key-fetch-blocked' : undefined}
             className="flex items-center gap-1.5 rounded-lg bg-sky-600 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-sky-500 disabled:opacity-50 transition-colors"
           >
             {fetchingGit && <Loader2 className="h-3 w-3 animate-spin" />}
             Fetch keys
           </button>
         </div>
+        <FeatureBlockedNotice blocked={gitKeyFetchBlocked} id="git-key-fetch-blocked" />
 
         {fetchedKeys.length > 0 && (
           <div className="divide-y divide-divider overflow-hidden rounded-lg border border-border-subtle bg-app-card mt-2">

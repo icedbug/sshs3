@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8"?>
+<policyDefinitions revision="1.0" schemaVersion="1.0" xmlns="http://schemas.microsoft.com/GroupPolicy/2006/07/PolicyDefinitions" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <policyNamespaces>
+    <target prefix="sshs3" namespace="Sshs3.Policies" />
+    <using prefix="windows" namespace="Microsoft.Policies.Windows" />
+  </policyNamespaces>
+  <resources minRequiredRevision="1.0" />
+  <categories>
+    <category name="Sshs3" displayName="$(string.Category)" />
+  </categories>
+  <policies>
+    <policy name="AutoCheckUpdates" class="Machine" displayName="$(string.AutoCheckUpdates)" explainText="$(string.AutoCheckUpdates_Help)" key="SOFTWARE\Policies\sshs3" valueName="AutoCheckUpdates">
+      <parentCategory ref="Sshs3" />
+      <supportedOn ref="windows:SUPPORTED_Windows7" />
+      <enabledValue><decimal value="1" /></enabledValue>
+      <disabledValue><decimal value="0" /></disabledValue>
+    </policy>
+    <policy name="SmartcardAuthMode" class="Machine" displayName="$(string.SmartcardAuthMode)" explainText="$(string.SmartcardAuthMode_Help)" key="SOFTWARE\Policies\sshs3">
+      <parentCategory ref="Sshs3" />
+      <supportedOn ref="windows:SUPPORTED_Windows7" />
+      <elements>
+        <enum id="SmartcardAuthModeValue" valueName="SmartcardAuthMode" required="true">
+          <item displayName="$(string.SmartcardAuthMode_always_prompt)"><value><string>always-prompt</string></value></item>
+          <item displayName="$(string.SmartcardAuthMode_agent_per_session)"><value><string>agent-per-session</string></value></item>
+          <item displayName="$(string.SmartcardAuthMode_agent_global)"><value><string>agent-global</string></value></item>
+        </enum>
+      </elements>
+    </policy>
+    <policy name="LocalTerminalAgentMode" class="Machine" displayName="$(string.LocalTerminalAgentMode)" explainText="$(string.LocalTerminalAgentMode_Help)" key="SOFTWARE\Policies\sshs3">
+      <parentCategory ref="Sshs3" />
+      <supportedOn ref="windows:SUPPORTED_Windows7" />
+      <elements>
+        <enum id="LocalTerminalAgentModeValue" valueName="LocalTerminalAgentMode" required="true">
+          <item displayName="$(string.LocalTerminalAgentMode_auto)"><value><string>auto</string></value></item>
+          <item displayName="$(string.LocalTerminalAgentMode_system)"><value><string>system</string></value></item>
+          <item displayName="$(string.LocalTerminalAgentMode_app_managed)"><value><string>app-managed</string></value></item>
+          <item displayName="$(string.LocalTerminalAgentMode_disabled)"><value><string>disabled</string></value></item>
+        </enum>
+      </elements>
+    </policy>
+    <policy name="X11ServerMode" class="Machine" displayName="$(string.X11ServerMode)" explainText="$(string.X11ServerMode_Help)" key="SOFTWARE\Policies\sshs3">
+      <parentCategory ref="Sshs3" />
+      <supportedOn ref="windows:SUPPORTED_Windows7" />
+      <elements>
+        <enum id="X11ServerModeValue" valueName="X11ServerMode" required="true">
+          <item displayName="$(string.X11ServerMode_manual)"><value><string>manual</string></value></item>
+          <item displayName="$(string.X11ServerMode_auto)"><value><string>auto</string></value></item>
+          <item displayName="$(string.X11ServerMode_always)"><value><string>always</string></value></item>
+        </enum>
+      </elements>
+    </policy>
+    <policy name="X11ServerArgs" class="Machine" displayName="$(string.X11ServerArgs)" explainText="$(string.X11ServerArgs_Help)" key="SOFTWARE\Policies\sshs3">
+      <parentCategory ref="Sshs3" />
+      <supportedOn ref="windows:SUPPORTED_Windows7" />
+      <elements>
+        <text id="X11ServerArgsValue" valueName="X11ServerArgs" required="true" maxLength="1024" />
+      </elements>
+    </policy>
+    <policy name="EnableOpenShift" class="Machine" displayName="$(string.EnableOpenShift)" explainText="$(string.EnableOpenShift_Help)" key="SOFTWARE\Policies\sshs3" valueName="EnableOpenShift">
+      <parentCategory ref="Sshs3" />
+      <supportedOn ref="windows:SUPPORTED_Windows7" />
+      <enabledValue><decimal value="1" /></enabledValue>
+      <disabledValue><decimal value="0" /></disabledValue>
+    </policy>
+    <policy name="GitKeyFetch" class="Machine" displayName="$(string.GitKeyFetch)" explainText="$(string.GitKeyFetch_Help)" key="SOFTWARE\Policies\sshs3" valueName="GitKeyFetch">
+      <parentCategory ref="Sshs3" />
+      <supportedOn ref="windows:SUPPORTED_Windows7" />
+      <enabledValue><decimal value="1" /></enabledValue>
+      <disabledValue><decimal value="0" /></disabledValue>
+    </policy>
+    <policy name="DotfileGitImport" class="Machine" displayName="$(string.DotfileGitImport)" explainText="$(string.DotfileGitImport_Help)" key="SOFTWARE\Policies\sshs3" valueName="DotfileGitImport">
+      <parentCategory ref="Sshs3" />
+      <supportedOn ref="windows:SUPPORTED_Windows7" />
+      <enabledValue><decimal value="1" /></enabledValue>
+      <disabledValue><decimal value="0" /></disabledValue>
+    </policy>
+  </policies>
+</policyDefinitions>

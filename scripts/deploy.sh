@@ -16,6 +16,10 @@
 # tag just pushed) and every published release beyond the newest N (default 10, counting the one the
 # workflow is about to publish). Git tags are never deleted. See --keep-releases / --no-prune.
 #
+# Last, it builds the release in Fedora COPR via scripts/copr-build.sh: waits for the release workflow
+# to publish the RPM (about 10-15 minutes), verifies it and uploads a source RPM. By default this happens
+# when copr-cli and a token (~/.config/copr) are present. Ctrl+C skips the wait; run `npm run copr` later.
+#
 
 set -euo pipefail
 
@@ -37,6 +41,7 @@ DRY_RUN=false
 COMMIT_MSG=""
 VERSION_TYPE="patch"
 SITE_MODE="auto"   # auto | on | off
+COPR_MODE="auto"   # auto | on | off
 SITE_DIR="${SSHS3_SITE_DIR:-$REPO_ROOT/../sshs3-site}"
 KEEP_RELEASES="${SSHS3_KEEP_RELEASES:-10}"   # published releases to keep, including the new one
 PRUNE_RELEASES=true
@@ -58,6 +63,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-site)
       SITE_MODE="off"
+      shift
+      ;;
+    --copr)
+      COPR_MODE="on"
+      shift
+      ;;
+    --no-copr)
+      COPR_MODE="off"
       shift
       ;;
     --keep-releases)
@@ -91,7 +104,7 @@ while [[ $# -gt 0 ]]; do
       fi
       ;;
     -h|--help)
-      echo -e "${BOLD}Usage:${RESET} ./deploy.sh [options] [commit_message]"
+      echo -e "${BOLD}Usage:${RESET} ./scripts/deploy.sh [options] [commit_message]"
       echo ""
       echo "Bumps the patch version, drafts a CHANGELOG entry, commits all changes, tags, and pushes to trigger release.yml."
       echo ""
@@ -101,6 +114,8 @@ while [[ $# -gt 0 ]]; do
       echo "  --dry-run             Simulate version bump and commit without pushing or writing git state"
       echo "  --site                Always deploy sshs3-site after the release (default: only if docs/, ipc.ts or settings.ts changed)"
       echo "  --no-site             Never deploy sshs3-site"
+      echo "  --copr                Always build the release in COPR (default: when copr-cli and its token config exist)"
+      echo "  --no-copr             Never build in COPR"
       echo "  --keep-releases <n>   Keep the newest n published GitHub releases (default 10) and delete older ones"
       echo "  --no-prune            Do not delete any old releases or drafts"
       echo "  --minor               Bump minor version instead of patch"
@@ -111,9 +126,9 @@ while [[ $# -gt 0 ]]; do
       echo "             SSHS3_KEEP_RELEASES sets the default for --keep-releases."
       echo ""
       echo -e "${BOLD}Examples:${RESET}"
-      echo "  ./deploy.sh"
-      echo "  ./deploy.sh \"feat: add smartcard support\""
-      echo "  ./deploy.sh --message \"fix: askpass prompt fix\" --skip-checks"
+      echo "  ./scripts/deploy.sh"
+      echo "  ./scripts/deploy.sh \"feat: add smartcard support\""
+      echo "  ./scripts/deploy.sh --message \"fix: askpass prompt fix\" --skip-checks"
       exit 0
       ;;
     *)
@@ -155,15 +170,15 @@ prune_releases() {
 
   local listing
   if ! listing="$(gh api --paginate 'repos/{owner}/{repo}/releases?per_page=100' \
-      --jq '.[] | [.id, .tag_name, (.draft | tostring)] | @tsv' 2>/dev/null)"; then
+      --jq '.[] | [.id, .tag_name, (.draft | tostring), ([.assets[].download_count] | add // 0)] | @tsv' 2>/dev/null)"; then
     PRUNE_RESULT="skipped (could not list releases)"
     echo -e "${YELLOW}Warning: could not list GitHub releases; skipping prune.${RESET}"
     return 0
   fi
 
   local drafts older
-  drafts="$(awk -F'\t' -v tag="$TAG" '$3 == "true" && $2 != tag { print $1 "\t" $2 }' <<<"$listing")"
-  older="$(awk -F'\t' -v tag="$TAG" '$3 == "false" && $2 != tag { print $1 "\t" $2 }' <<<"$listing" \
+  drafts="$(awk -F'\t' -v tag="$TAG" '$3 == "true" && $2 != tag { print $1 "\t" $2 "\t" $4 }' <<<"$listing")"
+  older="$(awk -F'\t' -v tag="$TAG" '$3 == "false" && $2 != tag { print $1 "\t" $2 "\t" $4 }' <<<"$listing" \
     | sort -t $'\t' -k2,2Vr | tail -n +"$KEEP_RELEASES")"
 
   local n_drafts=0 n_old=0
@@ -181,15 +196,27 @@ prune_releases() {
     return 0
   fi
 
-  local id deleted=0 failed=0
-  while IFS=$'\t' read -r id _; do
+  local id dl deleted=0 failed=0 pruned_downloads=0
+  while IFS=$'\t' read -r id _ dl; do
     [[ -z "$id" ]] && continue
     if gh api -X DELETE "repos/{owner}/{repo}/releases/${id}" >/dev/null 2>&1; then
       deleted=$((deleted + 1))
+      pruned_downloads=$((pruned_downloads + ${dl:-0}))
     else
       failed=$((failed + 1))
     fi
   done <<<"${drafts}"$'\n'"${older}"
+
+  # Bank the download counts of the deleted releases so the README badge (downloads-badge.yml)
+  # keeps counting them: DOWNLOADS_PRUNED_BASE + the live total of the remaining releases.
+  if (( pruned_downloads > 0 )); then
+    local base
+    base="$(gh variable get DOWNLOADS_PRUNED_BASE 2>/dev/null || echo 0)"
+    [[ "$base" =~ ^[0-9]+$ ]] || base=0
+    if ! gh variable set DOWNLOADS_PRUNED_BASE --body "$((base + pruned_downloads))" >/dev/null 2>&1; then
+      echo -e "${YELLOW}⚠ Could not bank ${pruned_downloads} pruned downloads: add them to the DOWNLOADS_PRUNED_BASE repo variable by hand.${RESET}"
+    fi
+  fi
 
   PRUNE_RESULT="deleted ${deleted} (${n_drafts} draft(s), ${n_old} older), ${failed} failed; newest ${KEEP_RELEASES} kept"
   if (( failed > 0 )); then
@@ -344,6 +371,21 @@ if [[ -n "$LAST_TAG_FOR_SITE" ]] \
   echo -e "${YELLOW}Reminder: src/ changed since ${LAST_TAG_FOR_SITE} but docs/user-guide did not. Do the user-facing changes need documenting?${RESET}"
 fi
 
+# 4e. Decide whether to build the release in COPR: forced, or copr-cli and a token are available. Every
+# release produces a new RPM, so unlike the site there is no "did anything change" condition.
+DO_COPR=false
+COPR_SKIP_REASON=""
+if [[ "$COPR_MODE" == "off" ]]; then
+  COPR_SKIP_REASON="--no-copr"
+elif [[ "$COPR_MODE" == "on" ]]; then
+  DO_COPR=true
+elif command -v copr-cli >/dev/null 2>&1 \
+  && [[ -n "${COPR_CONFIG:-}" || -f "${HOME}/.config/copr" || -f /etc/copr.conf ]]; then
+  DO_COPR=true
+else
+  COPR_SKIP_REASON="copr-cli or its token config missing"
+fi
+
 # 5. Format commit message
 if [[ -z "$COMMIT_MSG" ]]; then
   FINAL_COMMIT_MSG="chore: release ${TAG}"
@@ -370,7 +412,15 @@ if [[ "$DRY_RUN" == "true" ]]; then
   else
     echo "  7. (release pruning disabled: --no-prune)"
   fi
-  
+  if [[ "$DO_COPR" == "true" ]]; then
+    echo "  8. COPR: wait for the release workflow to publish the RPM, verify it, build a source RPM and run copr-cli build"
+    if ! "$REPO_ROOT/scripts/copr-build.sh" --tag "$TAG" --dry-run; then
+      echo -e "${YELLOW}  ⚠ COPR prerequisites are not met (see above); the real run would report FAILED at this step.${RESET}"
+    fi
+  else
+    echo "  8. (COPR build skipped: ${COPR_SKIP_REASON})"
+  fi
+
   # Revert version bump for dry run
   restore_backups
   echo -e "${GREEN}✓ Dry run complete. No changes were committed or pushed.${RESET}"
@@ -427,7 +477,29 @@ fi
 # 11. Prune old GitHub releases (never fatal).
 prune_releases apply
 
-# 12. Summary
+# 12. Build the release in COPR (never fatal: the release is already pushed). The script waits for the
+# release workflow to publish the RPM, which takes about 10-15 minutes. Ctrl+C is trapped so it only stops
+# the wait; the summary below is still printed and `npm run copr` retries later.
+COPR_RESULT="skipped (${COPR_SKIP_REASON})"
+if [[ "$DO_COPR" == "true" ]]; then
+  echo -e "\n${CYAN}Building ${TAG} in COPR once the release workflow has published the RPM (about 10-15 minutes).${RESET}"
+  echo "  Ctrl+C skips this; the release is already pushed. Retry later with: npm run copr -- --tag ${TAG}"
+  copr_rc=0
+  trap ':' INT
+  "$REPO_ROOT/scripts/copr-build.sh" --tag "$TAG" || copr_rc=$?
+  trap - INT
+  if [[ "$copr_rc" -eq 0 ]]; then
+    COPR_RESULT="built"
+  elif [[ "$copr_rc" -eq 130 ]]; then
+    COPR_RESULT="skipped (interrupted; run: npm run copr -- --tag ${TAG})"
+  else
+    COPR_RESULT="FAILED (retry: npm run copr -- --tag ${TAG})"
+    echo -e "${YELLOW}⚠ COPR build failed. The release itself is unaffected. Fix the cause above, then retry:${RESET}"
+    echo "    npm run copr -- --tag ${TAG}"
+  fi
+fi
+
+# 13. Summary
 echo -e "\n${BOLD}${GREEN}===============================================${RESET}"
 echo -e "${BOLD}${GREEN}🚀 Release ${TAG} successfully pushed!${RESET}"
 echo -e "${BOLD}${GREEN}===============================================${RESET}"
@@ -437,7 +509,12 @@ echo -e "• Branch:         ${BOLD}${CURRENT_BRANCH}${RESET}"
 echo -e "• Commit:         ${FINAL_COMMIT_MSG}"
 echo -e "• sshs3-site:     ${SITE_RESULT}"
 echo -e "• Old releases:   ${PRUNE_RESULT}"
+echo -e "• COPR:           ${COPR_RESULT}"
 echo ""
-echo -e "GitHub Actions will now build and publish the release artifacts:"
+if [[ "$COPR_RESULT" == "built" ]]; then
+  echo -e "GitHub Actions has built and published the release artifacts:"
+else
+  echo -e "GitHub Actions will now build and publish the release artifacts:"
+fi
 echo -e "${CYAN}https://github.com/alun-hub/sshs3/actions${RESET}"
 echo ""

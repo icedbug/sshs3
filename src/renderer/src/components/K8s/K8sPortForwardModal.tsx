@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import {
   ArrowRight,
   ArrowUpRight,
@@ -7,6 +7,7 @@ import {
   Loader2,
   Network,
   Radio,
+  RotateCcw,
   Square,
   X,
   XCircle,
@@ -18,6 +19,7 @@ import type {
 import { formatDateTime } from '../../lib/dateFormat';
 import { describeIpcError } from '../../lib/format';
 import { useEscapeToClose } from '../../lib/useModalDismiss';
+import { useDialogFocus } from '../../lib/useDialogFocus';
 import { createRendererLogger } from '../../lib/log';
 const log = createRendererLogger('K8sPortForwardModal');
 
@@ -60,6 +62,7 @@ export const K8sPortForwardModal: React.FC<K8sPortForwardModalProps> = ({
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [stoppingId, setStoppingId] = useState<string | null>(null);
+  const [reconnectingId, setReconnectingId] = useState<string | null>(null);
 
   // Sync props when initialTarget changes
   useEffect(() => {
@@ -128,13 +131,13 @@ export const K8sPortForwardModal: React.FC<K8sPortForwardModalProps> = ({
     const lPort = localPort ? parseInt(localPort, 10) : 0;
 
     if (!contextName || !namespace || !podName || Number.isNaN(cPort) || cPort <= 0) {
-      setError('Please provide valid pod, namespace, and container port.');
+      setError('Enter a container port between 1 and 65535. The pod and namespace must be set.');
       return;
     }
 
     if (lPort > 0 && lPort < 1024) {
       setError(
-        `Local port ${lPort} is privileged (< 1024) and requires root/administrator privileges. Please choose a port >= 1024 (e.g. ${suggestLocalPort(lPort)}) or 0 for auto-assign.`
+        `Local port ${lPort} needs administrator rights (ports below 1024). Use 1024 or higher, for example ${suggestLocalPort(lPort)}, or 0 to pick one automatically.`
       );
       return;
     }
@@ -175,12 +178,28 @@ export const K8sPortForwardModal: React.FC<K8sPortForwardModalProps> = ({
     }
   };
 
+  const handleReconnect = async (id: string) => {
+    setReconnectingId(id);
+    try {
+      await window.multissh.k8sReconnectPortForward(id);
+      const updated = await window.multissh.k8sListPortForwards();
+      setActiveForwards(updated);
+    } catch (err) {
+      log.error('Failed to reconnect port forward:', err);
+    } finally {
+      setReconnectingId(null);
+    }
+  };
+
   useEscapeToClose(onClose, open);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(dialogRef, open);
 
   if (!open) return null;
 
   return (
     <div
+      ref={dialogRef}
       role="dialog"
       aria-modal="true"
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 animate-in fade-in duration-150"
@@ -199,7 +218,9 @@ export const K8sPortForwardModal: React.FC<K8sPortForwardModalProps> = ({
               </p>
             </div>
           </div>
-          <button aria-label="Close" title="Close"
+          <button
+            aria-label="Close"
+            title="Close"
             type="button"
             onClick={onClose}
             className="rounded-lg p-1.5 text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
@@ -218,7 +239,7 @@ export const K8sPortForwardModal: React.FC<K8sPortForwardModalProps> = ({
             </div>
 
             {error && (
-              <div className="rounded-lg border border-red-900/60 bg-red-950/40 p-2.5 text-xs text-red-300 flex items-center gap-2">
+              <div role="alert" className="rounded-lg border border-red-900/60 bg-red-950/40 p-2.5 text-xs text-red-300 flex items-center gap-2">
                 <XCircle className="h-4 w-4 shrink-0" />
                 <span>{error}</span>
               </div>
@@ -399,7 +420,7 @@ export const K8sPortForwardModal: React.FC<K8sPortForwardModalProps> = ({
                         )}
                       </div>
                       {pf.error && (
-                        <div className="flex items-center gap-1.5 text-xs text-rose-400 pt-0.5">
+                        <div role="alert" className="flex items-center gap-1.5 text-xs text-rose-400 pt-0.5">
                           <XCircle className="h-3 w-3 shrink-0" />
                           <span className="break-all">{pf.error}</span>
                         </div>
@@ -407,6 +428,19 @@ export const K8sPortForwardModal: React.FC<K8sPortForwardModalProps> = ({
                     </div>
 
                     <div className="flex items-center gap-2">
+                      {pf.error && (
+                        <button
+                          type="button"
+                          onClick={() => handleReconnect(pf.id)}
+                          disabled={reconnectingId === pf.id}
+                          title="Reconnect port forward"
+                          className="flex items-center gap-1 rounded-lg border border-sky-500/40 bg-sky-500/10 px-2.5 py-1 text-xs text-sky-400 hover:bg-sky-500/20 hover:text-sky-300 transition-colors disabled:opacity-50"
+                        >
+                          <RotateCcw className={`h-3 w-3 ${reconnectingId === pf.id ? 'animate-spin' : ''}`} />
+                          Reconnect
+                        </button>
+                      )}
+
                       <button
                         type="button"
                         onClick={() => {

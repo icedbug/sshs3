@@ -1,7 +1,12 @@
+import { shell as electronShell } from 'electron';
 import { isPasswordPrompt } from '../ssh/askpassPrompt';
 import { loginWithToken } from '../services/K8sAuthService';
+import { OpenShiftWebLoginService } from '../services/OpenShiftWebLoginService';
+import type { K8sProfileStore } from '../profile/K8sProfileStore';
+import { parseK8sProfile, parseK8sServerArg, parseWebLoginOptions } from './ipcHelpers';
 import { IPC_CHANNELS } from '../../shared/types/ipc';
-import type { K8sClusterNode, K8sNamespaceNode, K8sPodNode, K8sTerminalTarget, K8sPodDescription, K8sPortForwardTarget, K8sActivePortForward, K8sDebugTarget, K8sLoginOptions, K8sLoginResult } from '../../shared/types/kubernetes';
+import { resolveSshConfigForConnect } from './sshConfigResolve';
+import type { K8sClusterNode, K8sNamespaceNode, K8sPodNode, K8sTerminalTarget, K8sPodDescription, K8sPortForwardTarget, K8sActivePortForward, K8sDebugTarget, K8sLoginOptions, K8sLoginResult, K8sOpenShiftProbeResult, K8sProfile, K8sWebLoginResult } from '../../shared/types/kubernetes';
 import type { SSHConnectionConfig, SSHTunnelConfig, SSHActiveTunnel } from '../../shared/types/ssh';
 import type { IpcBridge } from '../IpcBridge';
 import type { SmartcardCoordinator } from '../smartcard/SmartcardCoordinator';
@@ -9,13 +14,44 @@ import type { SmartcardCoordinator } from '../smartcard/SmartcardCoordinator';
 /** The part of IpcBridge this handler group may use. */
 export type K8sHost = Pick<
   IpcBridge,
-  'getWebContents' | 'k8sDebugService' | 'k8sDiscoveryService' | 'k8sLogManager' | 'k8sPortForwardManager' | 'k8sTerminalManager' | 'perfMetricsService' | 'promptForPinDirect' | 'registerHandler' | 'resolveProxyJumpConfig' | 'sshTunnelManager'
+  'assignSession' | 'broadcast' | 'k8sDebugService' | 'k8sDiscoveryService' | 'k8sLogManager' | 'k8sPortForwardManager' | 'k8sProfileStore' | 'k8sTerminalManager' | 'perfMetricsService' | 'promptForPinDirect' | 'registerHandler' | 'resolveProxyJumpConfig' | 'restoreSavedSecrets' | 'scheduleAutoSync' | 'sshTunnelManager' | 'teamVaultService'
 > & {
   aiHub?: IpcBridge['aiHub'];
-  smartcard: Pick<SmartcardCoordinator, 'prepareFido2Config' | 'prepareSmartcardConfig'>;
+  smartcard: Pick<SmartcardCoordinator, 'prepareFido2Config' | 'prepareSmartcardConfig' | 'prepareSshCaConfig'>;
 };
 
-export function registerK8sHandlers(bridge: K8sHost): void {
+export interface K8sHandlerDeps {
+  openShiftWebLogin?: OpenShiftWebLoginService;
+  profileStore?: K8sProfileStore;
+}
+
+/** Opens the OAuth authorization URL in the user's browser; only https URLs are ever launched. */
+function openAuthorizeUrl(url: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error('Refusing to open an invalid sign-in URL');
+  }
+  if (parsed.protocol !== 'https:') {
+    throw new Error('Refusing to open a non-https sign-in URL');
+  }
+  void electronShell?.openExternal?.(url).catch(() => {});
+}
+
+export function registerK8sHandlers(bridge: K8sHost, deps: K8sHandlerDeps = {}): void {
+  const openShiftWebLogin = deps.openShiftWebLogin ?? new OpenShiftWebLoginService();
+  // The same instance profile sync uses, so both share one write queue.
+  const profileStore = deps.profileStore ?? bridge.k8sProfileStore;
+
+  /** Stores the token in the kubeconfig (shared by pasted and browser sign-in) and tells the UI to reload. */
+  const completeLogin = async (options: K8sLoginOptions): Promise<K8sLoginResult> => {
+    const result = await loginWithToken(options);
+    bridge.k8sDiscoveryService.reload();
+    bridge.broadcast(IPC_CHANNELS.K8S_CONFIG_CHANGED);
+    return result;
+  };
+
   bridge.registerHandler(IPC_CHANNELS.K8S_LIST_CONTEXTS, async (): Promise<K8sClusterNode[]> => {
     return bridge.k8sDiscoveryService.listContexts();
   });
@@ -38,27 +74,73 @@ export function registerK8sHandlers(bridge: K8sHost): void {
     bridge.k8sDiscoveryService.reload();
   });
 
+  bridge.registerHandler(IPC_CHANNELS.K8S_LOGIN, async (_event, options: K8sLoginOptions): Promise<K8sLoginResult> => {
+    // Same server rules as saved profiles and browser sign-in: https only (loopback excepted), no embedded credentials.
+    const server = parseK8sServerArg(options?.server);
+    // Explicit fields only: `kubeConfigPath` is a test-only seam and must never be renderer-controlled
+    // (it is the file loginWithToken reads and overwrites).
+    return completeLogin({
+      server,
+      token: options.token,
+      insecureSkipTlsVerify: options.insecureSkipTlsVerify,
+      namespace: options.namespace,
+      username: options.username,
+    });
+  });
+
   bridge.registerHandler(
-    IPC_CHANNELS.K8S_LOGIN,
-    async (_event, options: K8sLoginOptions): Promise<K8sLoginResult> => {
-      const result = await loginWithToken(options);
-      bridge.k8sDiscoveryService.reload();
-      const webContents = bridge.getWebContents();
-      if (webContents && !webContents.isDestroyed?.()) {
-        webContents.send(IPC_CHANNELS.K8S_CONFIG_CHANGED);
-      }
-      return result;
+    IPC_CHANNELS.K8S_OPENSHIFT_PROBE,
+    async (_event, server: unknown, insecureSkipTlsVerify?: unknown): Promise<K8sOpenShiftProbeResult> => {
+      return openShiftWebLogin.probe(parseK8sServerArg(server), insecureSkipTlsVerify === true);
     }
   );
 
   bridge.registerHandler(
+    IPC_CHANNELS.K8S_OPENSHIFT_WEB_LOGIN,
+    async (_event, rawOptions: unknown): Promise<K8sWebLoginResult> => {
+      const options = parseWebLoginOptions(rawOptions);
+      const { token, expiresAt } = await openShiftWebLogin.login(options, { onAuthorizeUrl: openAuthorizeUrl });
+      const result = await completeLogin({
+        server: options.server,
+        token,
+        namespace: options.namespace,
+        insecureSkipTlsVerify: options.insecureSkipTlsVerify,
+      });
+      return { ...result, expiresAt };
+    }
+  );
+
+  bridge.registerHandler(IPC_CHANNELS.K8S_OPENSHIFT_WEB_LOGIN_CANCEL, async (): Promise<void> => {
+    openShiftWebLogin.cancel();
+  });
+
+  bridge.registerHandler(IPC_CHANNELS.K8S_PROFILES_LIST, async (): Promise<K8sProfile[]> => profileStore.list());
+
+  bridge.registerHandler(
+    IPC_CHANNELS.K8S_PROFILES_SAVE,
+    async (_event, raw: unknown): Promise<K8sProfile> => {
+      const saved = await profileStore.save(parseK8sProfile(raw));
+      bridge.scheduleAutoSync?.();
+      return saved;
+    }
+  );
+
+  // Removes only the saved profile; the kubeconfig entries (and their token) are left untouched.
+  bridge.registerHandler(IPC_CHANNELS.K8S_PROFILES_DELETE, async (_event, id: unknown): Promise<void> => {
+    if (typeof id !== 'string' || !id) throw new Error('Invalid profile id');
+    await profileStore.delete(id);
+    bridge.scheduleAutoSync?.();
+  });
+
+  bridge.registerHandler(
     IPC_CHANNELS.K8S_TERMINAL_CREATE,
     async (
-      _event,
+      event,
       target: K8sTerminalTarget,
       options?: { cols?: number; rows?: number }
     ): Promise<{ sessionId: string }> => {
       const sessionId = await bridge.k8sTerminalManager.createSession(target, options);
+      bridge.assignSession(event?.sender, sessionId);
       bridge.aiHub?.terminals.register({ id: sessionId, label: `${target.contextName}/${target.namespace}/${target.podName}:${target.containerName}`, kind: 'k8s', profileId: `k8s:${target.contextName}/${target.namespace}/${target.podName}/${target.containerName}` }, (data) => bridge.k8sTerminalManager.write(sessionId, data));
       return { sessionId };
     }
@@ -93,11 +175,12 @@ export function registerK8sHandlers(bridge: K8sHost): void {
   bridge.registerHandler(
     IPC_CHANNELS.K8S_LOG_START,
     async (
-      _event,
+      event,
       target: K8sTerminalTarget,
       options?: { tailLines?: number; timestamps?: boolean; previous?: boolean }
     ): Promise<{ sessionId: string }> => {
       const sessionId = await bridge.k8sLogManager.startFollow(target, options);
+      bridge.assignSession(event?.sender, sessionId);
       return { sessionId };
     }
   );
@@ -119,6 +202,18 @@ export function registerK8sHandlers(bridge: K8sHost): void {
   );
 
   bridge.registerHandler(
+    IPC_CHANNELS.K8S_POD_DELETE,
+    async (
+      _event,
+      contextName: string,
+      namespace: string,
+      podName: string
+    ): Promise<void> => {
+      await bridge.k8sDiscoveryService.deletePod(contextName, namespace, podName);
+    }
+  );
+
+  bridge.registerHandler(
     IPC_CHANNELS.K8S_PORT_FORWARD_START,
     async (_event, target: K8sPortForwardTarget): Promise<K8sActivePortForward> => {
       return await bridge.k8sPortForwardManager.startPortForward(target);
@@ -129,6 +224,13 @@ export function registerK8sHandlers(bridge: K8sHost): void {
     IPC_CHANNELS.K8S_PORT_FORWARD_STOP,
     async (_event, id: string): Promise<boolean> => {
       return await bridge.k8sPortForwardManager.stopPortForward(id);
+    }
+  );
+
+  bridge.registerHandler(
+    IPC_CHANNELS.K8S_PORT_FORWARD_RECONNECT,
+    async (_event, id: string): Promise<boolean> => {
+      return await bridge.k8sPortForwardManager.reconnect(id);
     }
   );
 
@@ -156,9 +258,12 @@ export function registerK8sHandlers(bridge: K8sHost): void {
       // Same as terminal/SFTP sessions: pre-load a PKCS#11/FIDO2 resident credential
       // into a private agent so the ssh child just points IdentityAgent at it, rather
       // than needing an interactive PIN/passphrase for every standalone tunnel.
-      let config = await bridge.resolveProxyJumpConfig(rawConfig);
+      // Same resolution as a terminal: a Team Vault reference and a saved password/passphrase live in main only.
+      let config = await resolveSshConfigForConnect(bridge, rawConfig);
+      config = await bridge.resolveProxyJumpConfig(config);
       config = await bridge.smartcard.prepareSmartcardConfig(config);
       config = await bridge.smartcard.prepareFido2Config(config);
+      config = await bridge.smartcard.prepareSshCaConfig(config);
       const hostLabel = config.name ? `${config.name} (${config.host})` : config.host;
       return await bridge.sshTunnelManager.startTunnel(config, tunnel, (rawPrompt) => {
         const isPassword = isPasswordPrompt(rawPrompt);

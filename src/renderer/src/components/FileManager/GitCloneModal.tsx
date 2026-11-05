@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { GitBranch, Loader2, ShieldAlert, X } from 'lucide-react';
 import type { SSHConnectionConfig } from '@shared/types/ssh';
 import { useModalDismiss } from '../../lib/useModalDismiss';
+import { useDialogFocus } from '../../lib/useDialogFocus';
 
 interface GitCloneModalProps {
   targetPath: string;
@@ -25,6 +26,8 @@ export const GitCloneModal: React.FC<GitCloneModalProps> = ({
   const [error, setError] = useState<string | null>(null);
 
   const handleBackdrop = useModalDismiss(onClose, true, !cloning);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(dialogRef, true);
 
   const handleUrlChange = (newUrl: string) => {
     setUrl(newUrl);
@@ -67,6 +70,7 @@ export const GitCloneModal: React.FC<GitCloneModalProps> = ({
 
   return (
     <div
+      ref={dialogRef}
       role="dialog"
       aria-modal="true"
       aria-labelledby="git-clone-title"

@@ -1,5 +1,6 @@
 import type { SSHConnectionConfig } from '@shared/types/ssh';
 import type { S3Config } from '@shared/types/storage';
+import { systemNameOf } from '../../lib/systemGrouping';
 
 export const UNGROUPED = 'Ungrouped';
 
@@ -13,6 +14,12 @@ export function parseAdHocTarget(searchQuery: string): { username: string; host:
   return { username: m[1], host: m[2], port: m[3] ? parseInt(m[3], 10) : undefined };
 }
 
+/** True when a tag contains `query` (already lower-cased); a leading `#` is ignored, so "#prod" finds the tag "prod". */
+function matchesTag(tags: string[] | undefined, query: string): boolean {
+  const needle = query.replace(/^#/, '');
+  return needle !== '' && !!tags?.some((tag) => tag.toLowerCase().includes(needle));
+}
+
 /** `query` is already trimmed and lower-cased. */
 export function filterSshProfiles(profiles: SSHConnectionConfig[], query: string): SSHConnectionConfig[] {
   if (!query) return profiles;
@@ -21,7 +28,9 @@ export function filterSshProfiles(profiles: SSHConnectionConfig[], query: string
       p.name.toLowerCase().includes(query) ||
       p.host.toLowerCase().includes(query) ||
       p.username.toLowerCase().includes(query) ||
-      (p.group && p.group.toLowerCase().includes(query))
+      (p.group && p.group.toLowerCase().includes(query)) ||
+      (systemNameOf(p) ?? '').toLowerCase().includes(query) ||
+      matchesTag(p.tags, query)
   );
 }
 
@@ -34,7 +43,8 @@ export function filterS3Profiles(profiles: S3Config[], query: string): S3Config[
       (p.endpoint && p.endpoint.toLowerCase().includes(query)) ||
       (p.region && p.region.toLowerCase().includes(query)) ||
       (p.initialPath && p.initialPath.toLowerCase().includes(query)) ||
-      (p.group && p.group.toLowerCase().includes(query))
+      (p.group && p.group.toLowerCase().includes(query)) ||
+      matchesTag(p.tags, query)
   );
 }
 

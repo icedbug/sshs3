@@ -16,6 +16,29 @@ export function normalizeGitConfigPath(filePath: string): string {
   return filePath.replace(/\\/g, '/');
 }
 
+/** `key::` marks a literal public key in `user.signingkey`; it is not part of the key. */
+const LITERAL_KEY_PREFIX = /^key::\s*/;
+// `<type> <base64 blob> [comment]`: a file called `ecdsa-work.pub` is a path, not a key.
+const PUBLIC_KEY_LINE = /^(?:ssh-|ecdsa-|sk-)\S*\s+[A-Za-z0-9+/]+={0,2}(?:\s|$)/;
+
+/**
+ * The public key line inside a `user.signingkey` value, or null when the value is something else
+ * (a path to a key file). Accepts the value with or without the `key::` prefix.
+ */
+export function literalSigningKey(value: string): string | null {
+  const key = value.trim().replace(LITERAL_KEY_PREFIX, '');
+  return PUBLIC_KEY_LINE.test(key) ? key : null;
+}
+
+/**
+ * What to store in `user.signingkey` for a literal public key. Git recognises a literal key only when
+ * it starts with `ssh-` or `key::`; an `ecdsa-sha2-…` or `sk-ssh-…` (security key) line without the prefix
+ * is read as a file name and `git commit -S` fails with "Couldn't load public key".
+ */
+export function signingKeyConfigValue(literalKey: string): string {
+  return literalKey.startsWith('ssh-') ? literalKey : `key::${literalKey}`;
+}
+
 export class GitConfigService {
   /** Reads global Git signing configuration. */
   public static async getSigningConfig(): Promise<GitSigningConfig> {
@@ -44,7 +67,8 @@ export class GitConfigService {
       return {
         enabled,
         format,
-        signingKey,
+        // Without the `key::` marker, so that it can be compared with the listed public keys.
+        signingKey: signingKey?.replace(LITERAL_KEY_PREFIX, ''),
         allowedSignersFile,
         email,
       };
@@ -83,8 +107,9 @@ export class GitConfigService {
       const allowedSignersPath = path.join(sshDir, 'allowed_signers');
 
       let allowedSignersUpdated = false;
-      if (email && (signingKey.startsWith('ssh-') || signingKey.startsWith('ecdsa-') || signingKey.startsWith('sk-'))) {
-        const parts = signingKey.split(/\s+/);
+      const literalKey = literalSigningKey(signingKey);
+      if (email && literalKey) {
+        const parts = literalKey.split(/\s+/);
         const keyData = parts.slice(0, 2).join(' '); // "<type> <base64>"
         const entryLine = `${email} namespaces="git" ${keyData}`;
 
@@ -109,7 +134,8 @@ export class GitConfigService {
       // 3. Configure Git global settings
       const normalizedPath = normalizeGitConfigPath(allowedSignersPath);
       await execFileAsync(gitBin, ['config', '--global', 'gpg.format', 'ssh'], { timeout: 5000 });
-      await execFileAsync(gitBin, ['config', '--global', 'user.signingkey', signingKey], { timeout: 5000 });
+      const configValue = literalKey ? signingKeyConfigValue(literalKey) : signingKey;
+      await execFileAsync(gitBin, ['config', '--global', 'user.signingkey', configValue], { timeout: 5000 });
       await execFileAsync(gitBin, ['config', '--global', 'commit.gpgsign', 'true'], { timeout: 5000 });
       await execFileAsync(gitBin, ['config', '--global', 'gpg.ssh.allowedSignersFile', normalizedPath], { timeout: 5000 });
 

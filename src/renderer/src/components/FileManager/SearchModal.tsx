@@ -16,6 +16,8 @@ import { classNames, describeIpcError } from '../../lib/format';
 import { SearchResultsList } from './SearchResultsList';
 import { SearchPreviewPane } from './SearchPreviewPane';
 import { useEscapeToClose } from '../../lib/useModalDismiss';
+import { useDialogFocus } from '../../lib/useDialogFocus';
+import { createRequestGuard, startGuarded } from '../../lib/requestGuard';
 
 interface SearchWarning {
   path?: string;
@@ -106,16 +108,22 @@ export const SearchModal: React.FC<SearchModalProps> = ({
     };
   }, []);
 
+  // A start that resolves after Cancel, close or unmount must stop its search instead of orphaning it (M10).
+  const [startGuard] = useState(createRequestGuard);
+
   const stopActiveSearch = useCallback(() => {
+    startGuard.invalidate();
     if (activeSearchIdRef.current) {
       void window.multissh.searchCancel(activeSearchIdRef.current);
       activeSearchIdRef.current = null;
     }
-  }, []);
+  }, [startGuard]);
 
   useEffect(() => {
     if (!open) stopActiveSearch();
   }, [open, stopActiveSearch]);
+
+  useEffect(() => () => stopActiveSearch(), [stopActiveSearch]);
 
   const handleSubmit = useCallback(
     async () => {
@@ -136,29 +144,36 @@ export const SearchModal: React.FC<SearchModalProps> = ({
       setHasSearched(true);
 
       try {
-        const { searchId } = await window.multissh.searchStart({
-          providerId,
-          sourceType,
-          rootPath,
-          query,
-          mode,
-          caseSensitive,
-          includeGlobs: includeGlobs
-            .split(',')
-            .map((g) => g.trim())
-            .filter(Boolean),
-          excludeGlobs: excludeGlobs
-            .split(',')
-            .map((g) => g.trim())
-            .filter(Boolean),
-        });
-        activeSearchIdRef.current = searchId;
+        const started = await startGuarded(
+          startGuard,
+          startGuard.begin(),
+          () =>
+            window.multissh.searchStart({
+              providerId,
+              sourceType,
+              rootPath,
+              query,
+              mode,
+              caseSensitive,
+              includeGlobs: includeGlobs
+                .split(',')
+                .map((g) => g.trim())
+                .filter(Boolean),
+              excludeGlobs: excludeGlobs
+                .split(',')
+                .map((g) => g.trim())
+                .filter(Boolean),
+            }),
+          ({ searchId }) => void window.multissh.searchCancel(searchId)
+        );
+        if (!started) return; // cancelled, closed or restarted while starting: whoever did that owns the state now
+        activeSearchIdRef.current = started.value.searchId;
       } catch (err) {
         setSearching(false);
         setError(describeIpcError(err, 'Failed to start search'));
       }
     },
-    [query, searching, providerId, sourceType, rootPath, mode, caseSensitive, includeGlobs, excludeGlobs, stopActiveSearch]
+    [query, searching, providerId, sourceType, rootPath, mode, caseSensitive, includeGlobs, excludeGlobs, stopActiveSearch, startGuard]
   );
 
   const handleCancel = useCallback(() => {
@@ -219,6 +234,8 @@ export const SearchModal: React.FC<SearchModalProps> = ({
   }, [isDragging]);
 
   useEscapeToClose(handleClose, open);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(dialogRef, open);
 
   if (!open) return null;
 
@@ -230,6 +247,7 @@ export const SearchModal: React.FC<SearchModalProps> = ({
       )}
     >
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-label="Search in Files"
@@ -260,6 +278,7 @@ export const SearchModal: React.FC<SearchModalProps> = ({
               {isMaximized ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
             </button>
             <button
+              aria-label="Close (Esc)"
               type="button"
               onClick={handleClose}
               title="Close (Esc)"
@@ -276,6 +295,7 @@ export const SearchModal: React.FC<SearchModalProps> = ({
               <input
                 aria-label="Search query"
                 ref={queryInputRef}
+                data-autofocus
                 type="text"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
@@ -290,6 +310,7 @@ export const SearchModal: React.FC<SearchModalProps> = ({
               />
               {query.length > 0 && (
                 <button
+                  aria-label="Clear search query"
                   type="button"
                   onClick={() => {
                     setQuery('');
@@ -391,7 +412,7 @@ export const SearchModal: React.FC<SearchModalProps> = ({
         </div>
 
         {error && (
-          <div className="border-b border-red-900/60 bg-red-950/40 px-4 py-1.5 text-xs text-red-300">{error}</div>
+          <div role="alert" className="border-b border-red-900/60 bg-red-950/40 px-4 py-1.5 text-xs text-red-300">{error}</div>
         )}
 
         <div ref={splitContainerRef} className="relative flex min-h-0 flex-1 overflow-hidden">
@@ -445,6 +466,7 @@ export const SearchModal: React.FC<SearchModalProps> = ({
                       <span>{copiedWarnings ? 'Copied' : 'Copy'}</span>
                     </button>
                     <button
+                      aria-label="Dismiss warning bar"
                       type="button"
                       onClick={() => setWarningsDismissed(true)}
                       title="Dismiss warning bar"

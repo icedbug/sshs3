@@ -1,7 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { Check, Cloud, Copy, Loader2 } from 'lucide-react';
 import type { AwsSsoPromptEvent } from '@shared/types/ipc';
 import { useEscapeToClose } from '../lib/useModalDismiss';
+import { useDialogFocus } from '../lib/useDialogFocus';
 import { createRendererLogger } from '../lib/log';
 const log = createRendererLogger('AwsSsoLoginModal');
 
@@ -22,6 +23,13 @@ export const AwsSsoLoginModal: React.FC = () => {
     return () => {
       unsubscribe();
     };
+  }, []);
+
+  useEffect(() => {
+    if (!window.multissh?.onAwsSsoPromptDone) return;
+    return window.multissh.onAwsSsoPromptDone((id) => {
+      setPrompts((prev) => prev.filter((p) => p.id !== id));
+    });
   }, []);
 
   useEffect(() => {
@@ -58,6 +66,8 @@ export const AwsSsoLoginModal: React.FC = () => {
   // focus is elsewhere (e.g. a terminal), unlike a handler attached only to
   // this dialog's own <div>.
   useEscapeToClose(() => void handleCancel(), !!currentPrompt);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(dialogRef, !!currentPrompt);
 
   if (!currentPrompt) {
     return null;
@@ -65,6 +75,7 @@ export const AwsSsoLoginModal: React.FC = () => {
 
   return (
     <div
+      ref={dialogRef}
       role="dialog"
       aria-modal="true"
       aria-labelledby="aws-sso-modal-title"

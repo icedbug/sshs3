@@ -6,14 +6,15 @@ import type { IpcBridge } from '../IpcBridge';
 /** The part of IpcBridge this handler group may use. */
 export type DirSyncHost = Pick<
   IpcBridge,
-  'directorySyncProfileStore' | 'getWebContents' | 'registerHandler' | 'storageRegistry'
+  'directorySyncProfileStore' | 'registerHandler' | 'sendToSender' | 'storageRegistry'
 >;
 import { resolveDirSyncTargetRoot } from './ipcHelpers';
 
 export function registerDirSyncHandlers(bridge: DirSyncHost): void {
   bridge.registerHandler(
     IPC_CHANNELS.DIR_SYNC_COMPUTE_DIFF,
-    async (_event, options: DirSyncComputeDiffOptions): Promise<DirectoryDiffResult> => {
+    async (event, options: DirSyncComputeDiffOptions): Promise<DirectoryDiffResult> => {
+      const sender = event?.sender;
       if (!options?.sourceProviderId || !options?.targetProviderId) {
         throw new Error('sourceProviderId and targetProviderId are required for directory sync');
       }
@@ -38,10 +39,7 @@ export function registerDirSyncHandlers(bridge: DirSyncHost): void {
         targetProvider,
         targetRoot,
         (side, filesCount, currentItem) => {
-          const webContents = bridge.getWebContents();
-          if (webContents && !webContents.isDestroyed?.()) {
-            webContents.send(IPC_CHANNELS.DIR_SYNC_SCAN_PROGRESS, { side, filesCount, currentItem });
-          }
+          bridge.sendToSender(sender, IPC_CHANNELS.DIR_SYNC_SCAN_PROGRESS, { side, filesCount, currentItem });
         }
       );
     }
@@ -49,7 +47,8 @@ export function registerDirSyncHandlers(bridge: DirSyncHost): void {
 
   bridge.registerHandler(
     IPC_CHANNELS.DIR_SYNC_APPLY,
-    async (_event, options: DirSyncApplyOptions): Promise<DirectorySyncApplyResult> => {
+    async (event, options: DirSyncApplyOptions): Promise<DirectorySyncApplyResult> => {
+      const sender = event?.sender;
       if (!options?.sourceProviderId || !options?.targetProviderId) {
         throw new Error('sourceProviderId and targetProviderId are required for directory sync apply');
       }
@@ -75,27 +74,21 @@ export function registerDirSyncHandlers(bridge: DirSyncHost): void {
         targetRoot,
         { deleteExtraneous: Boolean(options.deleteExtraneous) },
         (progress) => {
-          const webContents = bridge.getWebContents();
-          if (webContents && !webContents.isDestroyed?.()) {
-            webContents.send(IPC_CHANNELS.DIR_SYNC_APPLY_PROGRESS, progress);
-          }
+          bridge.sendToSender(sender, IPC_CHANNELS.DIR_SYNC_APPLY_PROGRESS, progress);
         }
       );
 
       // Piggyback a synthetic "completed" TRANSFER_PROGRESS event so any
       // open pane auto-refreshes its listing, same as a regular transfer.
-      const webContents = bridge.getWebContents();
-      if (webContents && !webContents.isDestroyed?.()) {
-        webContents.send(IPC_CHANNELS.TRANSFER_PROGRESS, {
-          jobId: 'dirsync-apply',
-          fileName: '',
-          transferredBytes: 0,
-          totalBytes: 0,
-          percentage: 100,
-          bytesPerSecond: 0,
-          status: 'completed',
-        });
-      }
+      bridge.sendToSender(sender, IPC_CHANNELS.TRANSFER_PROGRESS, {
+        jobId: 'dirsync-apply',
+        fileName: '',
+        transferredBytes: 0,
+        totalBytes: 0,
+        percentage: 100,
+        bytesPerSecond: 0,
+        status: 'completed',
+      });
 
       return result;
     }

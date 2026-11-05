@@ -200,6 +200,36 @@ describe('installPublicKeys', () => {
       expect(ask).toHaveBeenCalledWith('Enter PIN for authenticator: ');
     });
 
+    it('never sends the key passphrase to a server-asked keyboard-interactive prompt', async () => {
+      const ask = vi.fn().mockResolvedValue('typed');
+      const h = await handler({
+        config: { ...baseConfig, authType: 'privateKey', password: undefined, passphrase: 'key-pass' }, // pragma: allowlist secret
+        pinPromptHandler: ask,
+      });
+      expect(await h('(alice@db.internal) Enter passphrase: ')).toBe('typed');
+      expect(ask).toHaveBeenCalledWith('(alice@db.internal) Enter passphrase: ');
+    });
+
+    it("answers ssh's own local key passphrase prompt with the saved passphrase", async () => {
+      const ask = vi.fn().mockResolvedValue('typed');
+      const h = await handler({
+        config: { ...baseConfig, authType: 'privateKey', password: undefined, passphrase: 'key-pass' }, // pragma: allowlist secret
+        pinPromptHandler: ask,
+      });
+      expect(await h("Enter passphrase for key '/home/alice/.ssh/id_ed25519': ")).toBe('key-pass');
+      expect(ask).not.toHaveBeenCalled();
+    });
+
+    it('never sends a saved password on a key-auth profile', async () => {
+      const ask = vi.fn().mockResolvedValue('typed');
+      const h = await handler({
+        config: { ...baseConfig, authType: 'privateKey', password: 'hunter2' }, // pragma: allowlist secret
+        pinPromptHandler: ask,
+      });
+      expect(await h("alice@db.internal's password: ")).toBe('typed');
+      expect(ask).toHaveBeenCalledTimes(1);
+    });
+
     it('rejects an unknown host key when there is no handler (fail closed)', async () => {
       const h = await handler();
       expect(await h('Are you sure you want to continue connecting (yes/no/[fingerprint])? ')).toBe('no');

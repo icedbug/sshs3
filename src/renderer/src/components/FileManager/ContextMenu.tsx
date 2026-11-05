@@ -121,7 +121,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({ x, y, items, onClose }
               item.disabled
                 ? 'cursor-not-allowed text-txt-muted'
                 : item.danger
-                  ? 'text-red-500 hover:bg-red-500/10 dark:text-red-400 dark:hover:bg-red-950/60'
+                  ? 'text-red-400 hover:bg-red-500/10 dark:hover:bg-red-950/60'
                   : 'text-txt-primary hover:bg-app-surface-hover'
             )}
           >

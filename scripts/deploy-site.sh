@@ -29,7 +29,7 @@ TAG=""
 
 # Paths the build/sync may change and that this script commits. Everything else in the site
 # repo must already be committed.
-GENERATED_PATHS=(public/img public/docs content/_generated_metadata.json)
+GENERATED_PATHS=(public/img public/docs public/sitemap.xml content/_generated_metadata.json)
 
 YELLOW="\033[0;33m"; GREEN="\033[0;32m"; CYAN="\033[0;36m"; RED="\033[0;31m"; RESET="\033[0m"
 
@@ -78,6 +78,9 @@ if [[ "$DRY_RUN" == "true" ]]; then
   [[ -d node_modules ]] || echo "     (node_modules missing: npm ci would run first)"
   exit 0
 fi
+
+# 2a. Style lint of the guide itself (docs/user-guide); a failure stops here, before anything is built or pushed.
+node "$REPO_ROOT/scripts/docs-lint.mjs" --strict
 
 # 2. Screenshots (the script writes next to public/docs).
 SSHS3_SITE_DOCS_DIR="$SITE_DIR/public/docs" node "$REPO_ROOT/scripts/sync-docs.mjs" >/dev/null

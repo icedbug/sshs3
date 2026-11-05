@@ -32,6 +32,8 @@ export const BLOCKED_SSH_DIRECTIVES = new Set([
   // Load an arbitrary local library into ssh / spawn a local helper.
   'securitykeyprovider',
   'xauthlocation',
+  // Sends local environment variables (`SendEnv *` would include secrets held in the ssh process's environment).
+  'sendenv',
 ]);
 
 /**
@@ -69,7 +71,8 @@ export const ALLOWED_SSH_EXTRA_OPTIONS = new Set([
   'hashknownhosts',
   'visualhostkey',
   'rekeylimit',
-  'sendenv',
+  // Not 'sendenv': it forwards local environment variables to the server, and the ssh child's environment holds
+  // secrets (e.g. SSHS3_PROXY_PASSWORD). 'setenv' only sets the fixed values written in the option itself.
   'setenv',
 ]);
 

@@ -14,16 +14,28 @@ export class K8sShimManager {
     return path.join(os.homedir(), '.sshs3', 'bin');
   }
 
+  /** Private fallback directory, kept for the life of the app so each terminal does not create another. */
+  private static fallbackBinDir: string | undefined;
+
+  /**
+   * A directory only this user can use, for when the home directory is read-only. It is first on the
+   * PATH of local terminals, so it must not be a fixed, pre-creatable name in the shared temp dir:
+   * another local user could plant `ssh` or `ls` there. mkdtemp picks an unpredictable name and
+   * creates it with mode 0700.
+   */
+  private static getFallbackDir(): string {
+    if (this.fallbackBinDir && fs.existsSync(this.fallbackBinDir)) return this.fallbackBinDir;
+    this.fallbackBinDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sshs3-bin-'));
+    return this.fallbackBinDir;
+  }
+
   public static ensureShim(): string {
-    const binDir = this.getShimDir();
+    let binDir = this.getShimDir();
     if (!fs.existsSync(binDir)) {
       try {
         fs.mkdirSync(binDir, { recursive: true, mode: 0o755 });
       } catch {
-        // Fall back to os.tmpdir() if home is read-only
-        const tmpBin = path.join(os.tmpdir(), 'sshs3-bin');
-        fs.mkdirSync(tmpBin, { recursive: true, mode: 0o755 });
-        return tmpBin;
+        binDir = this.getFallbackDir();
       }
     }
 

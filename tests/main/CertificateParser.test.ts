@@ -1,6 +1,12 @@
 import { X509Certificate } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { extractUpnFromCertificateDer, isAuthCapableCertificate, parseCertificateDer } from '../../src/main/smartcard/CertificateParser';
+import {
+  extractUpnFromCertificateDer,
+  isAuthCapableCertificate,
+  iterateChildren,
+  parseCertificateDer,
+  readTlv,
+} from '../../src/main/smartcard/CertificateParser';
 
 // Self-signed EC (P-256) certificate with a Microsoft UPN otherName in its subjectAltName,
 // generated via:
@@ -75,6 +81,18 @@ describe('CertificateParser', () => {
     expect(parseCertificateDer(Buffer.from([0x00, 0x01, 0x02]))).toBeUndefined();
     expect(extractUpnFromCertificateDer(Buffer.from([0x00, 0x01, 0x02]))).toBeUndefined();
   });
+  it('rejects malformed DER lengths instead of looping or reading out of bounds', () => {
+    // 0x84 ff ff ff ff overflowed a 32-bit shift to a negative length, so iterateChildren walked backwards forever.
+    const overflow = Buffer.from([0x30, 0x84, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00]);
+    expect(() => readTlv(overflow, 0)).toThrow(/DER/);
+    expect(() => [...iterateChildren(Buffer.from([0x04, 0x84, 0xff, 0xff, 0xff, 0xff, 0x00]), 0, 7)]).toThrow(/DER/);
+    expect(() => readTlv(Buffer.from([0x30, 0x80, 0x00]), 0)).toThrow(/DER/); // indefinite length
+    expect(() => readTlv(Buffer.from([0x30, 0x05, 0x00]), 0)).toThrow(/DER/); // longer than the buffer
+    const nested = Buffer.from([0x30, 0x08, 0x30, 0x84, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00]);
+    expect(parseCertificateDer(nested)).toBeUndefined();
+    expect(extractUpnFromCertificateDer(nested)).toBeUndefined();
+  });
+
   describe('authCapable', () => {
     it('accepts digitalSignature + clientAuth', () => {
       expect(authCapable(KU_DIGSIG_EKU_CLIENTAUTH_B64)).toBe(true);

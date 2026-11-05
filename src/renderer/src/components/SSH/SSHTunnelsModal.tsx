@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import {
   ArrowRight,
   Cable,
@@ -17,6 +17,7 @@ import { formatDateTime, describeIpcError } from '../../lib/format';
 import { SSHTunnelWizard } from './SSHTunnelWizard';
 import { useConfirm } from '../ConfirmDialog';
 import { useEscapeToClose } from '../../lib/useModalDismiss';
+import { useDialogFocus } from '../../lib/useDialogFocus';
 import { createRendererLogger } from '../../lib/log';
 const log = createRendererLogger('SSHTunnelsModal');
 
@@ -113,6 +114,16 @@ export const SSHTunnelsModal: React.FC<SSHTunnelsModalProps> = ({
     }
   };
 
+  // A temporary tunnel is not saved: stopping it drops its configuration, so it asks first.
+  const handleStopTemporary = async (activeId: string, label: string) => {
+    const confirmed = await confirm({
+      title: 'Stop temporary tunnel',
+      message: `Stop the temporary tunnel ${label}? It is not saved, so you would have to set it up again.`,
+      confirmLabel: 'Stop tunnel',
+    });
+    if (confirmed) await handleStop(activeId);
+  };
+
   const handleDelete = async (tunnel: SSHTunnelConfig) => {
     if (!(await confirm({ title: 'Delete tunnel', message: `Delete the saved tunnel "${tunnel.name}"?` })))
       return;
@@ -128,6 +139,8 @@ export const SSHTunnelsModal: React.FC<SSHTunnelsModalProps> = ({
   };
 
   useEscapeToClose(onClose, open, !wizardTarget);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(dialogRef, open);
 
   if (!open) return null;
 
@@ -135,6 +148,7 @@ export const SSHTunnelsModal: React.FC<SSHTunnelsModalProps> = ({
 
   return (
     <div
+      ref={dialogRef}
       role="dialog"
       aria-modal="true"
       aria-label="SSH Tunnels"
@@ -154,7 +168,9 @@ export const SSHTunnelsModal: React.FC<SSHTunnelsModalProps> = ({
               </p>
             </div>
           </div>
-          <button aria-label="Close" title="Close"
+          <button
+            aria-label="Close"
+            title="Close"
             type="button"
             onClick={onClose}
             className="rounded-lg p-1.5 text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
@@ -166,7 +182,7 @@ export const SSHTunnelsModal: React.FC<SSHTunnelsModalProps> = ({
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-5 space-y-5">
           {error && (
-            <div className="rounded-lg border border-red-900/60 bg-red-950/40 p-2.5 text-xs text-red-300 flex items-center gap-2">
+            <div role="alert" className="rounded-lg border border-red-900/60 bg-red-950/40 p-2.5 text-xs text-red-300 flex items-center gap-2">
               <XCircle className="h-4 w-4 shrink-0" />
               <span>{error}</span>
             </div>
@@ -263,6 +279,7 @@ export const SSHTunnelsModal: React.FC<SSHTunnelsModalProps> = ({
                           </button>
                         )}
                         <button
+                          aria-label="Edit tunnel"
                           type="button"
                           title="Edit tunnel"
                           onClick={() => setWizardTarget(tunnel.id)}
@@ -271,6 +288,7 @@ export const SSHTunnelsModal: React.FC<SSHTunnelsModalProps> = ({
                           <Pencil className="h-3.5 w-3.5" />
                         </button>
                         <button
+                          aria-label="Delete saved tunnel"
                           type="button"
                           title="Delete saved tunnel"
                           onClick={() => void handleDelete(tunnel)}
@@ -305,7 +323,7 @@ export const SSHTunnelsModal: React.FC<SSHTunnelsModalProps> = ({
                       <button
                         type="button"
                         disabled={busyId === t.id}
-                        onClick={() => handleStop(t.id)}
+                        onClick={() => void handleStopTemporary(t.id, text)}
                         className="flex items-center gap-1 rounded-lg border border-rose-900/60 bg-rose-950/40 px-2.5 py-1 text-xs text-rose-300 hover:bg-rose-900/50 transition-colors disabled:opacity-50"
                       >
                         {busyId === t.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Square className="h-3 w-3" />}

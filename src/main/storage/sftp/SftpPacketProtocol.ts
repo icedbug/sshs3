@@ -7,6 +7,10 @@ import {
   type SftpFileStats,
   type SftpNameEntry,
 } from './SftpConstants';
+import { isSpecialFileMode } from './sftpFileType';
+
+/** Largest data payload per SSH_FXP_WRITE; well under sftp-server's 256 KiB message limit. */
+export const MAX_WRITE_DATA = 64 * 1024;
 
 export class SftpError extends Error {
   public readonly statusCode: number;
@@ -155,13 +159,13 @@ export class SftpPacketProtocol extends EventEmitter {
       switch (type) {
         case FXP.HANDLE: {
           const handleLen = packet.readUInt32BE(5);
-          const handle = Buffer.from(packet.subarray(9, 9 + handleLen));
+          const handle = Buffer.from(packet.subarray(9, fieldEnd(packet, 9, handleLen)));
           pending.resolve(handle);
           break;
         }
         case FXP.DATA: {
           const dataLen = packet.readUInt32BE(5);
-          const data = Buffer.from(packet.subarray(9, 9 + dataLen));
+          const data = Buffer.from(packet.subarray(9, fieldEnd(packet, 9, dataLen)));
           pending.resolve(data);
           break;
         }
@@ -173,13 +177,13 @@ export class SftpPacketProtocol extends EventEmitter {
             if (offset + 4 > packet.length) break;
             const fnLen = packet.readUInt32BE(offset);
             offset += 4;
-            const filename = packet.subarray(offset, offset + fnLen).toString('utf-8');
+            const filename = packet.subarray(offset, fieldEnd(packet, offset, fnLen)).toString('utf-8');
             offset += fnLen;
 
             if (offset + 4 > packet.length) break;
             const lnLen = packet.readUInt32BE(offset);
             offset += 4;
-            const longname = packet.subarray(offset, offset + lnLen).toString('utf-8');
+            const longname = packet.subarray(offset, fieldEnd(packet, offset, lnLen)).toString('utf-8');
             offset += lnLen;
 
             const { stats, nextOffset } = parseAttrs(packet, offset);
@@ -317,7 +321,25 @@ export class SftpPacketProtocol extends EventEmitter {
     );
   }
 
+  /**
+   * Writes `data` at `offset`, split into SSH_FXP_WRITE packets of at most `MAX_WRITE_DATA` bytes:
+   * OpenSSH's sftp-server drops the connection on any message over 256 KiB, so a single packet for
+   * a large buffer would kill the whole session.
+   */
   public async write(
+    handle: Buffer,
+    offset: number,
+    data: Buffer
+  ): Promise<void> {
+    if (data.length <= MAX_WRITE_DATA) {
+      return this.writePacket(handle, offset, data);
+    }
+    for (let pos = 0; pos < data.length; pos += MAX_WRITE_DATA) {
+      await this.writePacket(handle, offset + pos, data.subarray(pos, pos + MAX_WRITE_DATA));
+    }
+  }
+
+  private async writePacket(
     handle: Buffer,
     offset: number,
     data: Buffer
@@ -564,6 +586,16 @@ export class SftpPacketProtocol extends EventEmitter {
   }
 }
 
+/**
+ * End offset of a length-prefixed field. A length that runs past the packet is a malformed reply:
+ * subarray() would silently clamp it, handing back a truncated handle, file chunk or name.
+ */
+function fieldEnd(packet: Buffer, start: number, length: number): number {
+  const end = start + length;
+  if (end > packet.length) throw new Error('Malformed SFTP reply: field length exceeds packet size');
+  return end;
+}
+
 function parseAttrs(
   packet: Buffer,
   startOffset: number
@@ -634,6 +666,7 @@ function parseAttrs(
 
   const isDirectory = mode !== undefined ? (mode & 0o170000) === 0o040000 : false;
   const isSymlink = mode !== undefined ? (mode & 0o170000) === 0o120000 : false;
+  const isSpecial = isSpecialFileMode(mode);
 
   return {
     stats: {
@@ -645,6 +678,7 @@ function parseAttrs(
       mtime,
       isDirectory,
       isSymlink,
+      isSpecial,
     },
     nextOffset: offset,
   };

@@ -5,6 +5,7 @@ import crypto from 'node:crypto';
 import { app } from 'electron';
 import type { DotfileImportedFile, DotfilePool } from '../../shared/types/dotfiles';
 import { defaultDotfileRemotePath } from '../../shared/dotfilePath';
+import { backupCorruptFile, writeFileAtomic } from '../storage/atomicFile';
 
 function formatTimestamp(d = new Date()): string {
   const yyyy = d.getFullYear();
@@ -80,11 +81,14 @@ export class DotfilePoolStore {
   }
 
   private async readRawPools(): Promise<DotfilePool[]> {
+    let raw: string | undefined;
     try {
-      const raw = await fs.readFile(this.filePath, 'utf-8');
+      raw = await fs.readFile(this.filePath, 'utf-8');
       const data = JSON.parse(raw);
       return Array.isArray(data.pools) ? data.pools : [];
-    } catch {
+    } catch (err) {
+      // [] would make the next save drop every pool: keep a copy of an unparsable file first.
+      if (raw !== undefined && err instanceof SyntaxError) await backupCorruptFile(this.filePath, raw);
       return [];
     }
   }
@@ -142,82 +146,102 @@ export class DotfilePoolStore {
       throw new Error('Pool ID is required');
     }
 
-    return this.queueMutation(async () => {
-      const poolDir = this.getPoolDirectory(pool.id);
-      if (pool.deletedAt) {
-        try {
-          await fs.rm(poolDir, { recursive: true, force: true });
-        } catch {
-          // Ignore folder deletion failure
+    return this.queueMutation(() => this.savePoolUnqueued(pool, options));
+  }
+
+  /** The body of `savePool`; callers must already hold the write queue (see `queueMutation`). */
+  private async savePoolUnqueued(pool: DotfilePool, options?: { preserveTimestamps?: boolean }): Promise<void> {
+    const poolDir = this.getPoolDirectory(pool.id);
+    if (pool.deletedAt) {
+      try {
+        await fs.rm(poolDir, { recursive: true, force: true });
+      } catch {
+        // Ignore folder deletion failure
+      }
+    } else {
+      await fs.mkdir(poolDir, { recursive: true });
+    }
+
+    const existingPools = await this.readRawPools();
+    const existingFilesById = new Map(
+      (existingPools.find((p) => p.id === pool.id)?.files ?? []).map((f) => [f.id, f])
+    );
+
+    // Callers (the pool editor) work from getPools(), which hides file tombstones, so saving that
+    // list back would drop them and let other machines resurrect the deleted files. Carry over
+    // any stored tombstone the incoming pool does not mention. (A sync pull passes tombstones itself.)
+    const persistedFiles = [...pool.files];
+    if (!pool.deletedAt) {
+      const incomingIds = new Set(pool.files.map((f) => f.id).filter(Boolean));
+      for (const old of existingPools.find((p) => p.id === pool.id)?.files ?? []) {
+        if (old.deletedAt && !incomingIds.has(old.id)) persistedFiles.push(old);
+      }
+    }
+
+    const now = formatTimestamp();
+    pool.masterDirectory = poolDir;
+    if (!options?.preserveTimestamps) {
+      pool.updatedAt = now;
+    }
+
+    // Write master files to disk (for non-deleted files and pools)
+    if (!pool.deletedAt) {
+      for (const file of pool.files) {
+        if (!file.id) {
+          file.id = crypto.randomUUID();
         }
-      } else {
-        await fs.mkdir(poolDir, { recursive: true });
-      }
+        const masterPath = this.getMasterFilePath(pool.id, file.remotePath);
+        file.masterFilePath = masterPath;
+        file.masterFileName = path.basename(masterPath);
 
-      const existingPools = await this.readRawPools();
-      const existingFilesById = new Map(
-        (existingPools.find((p) => p.id === pool.id)?.files ?? []).map((f) => [f.id, f])
-      );
-
-      const now = formatTimestamp();
-      pool.masterDirectory = poolDir;
-      if (!options?.preserveTimestamps) {
-        pool.updatedAt = now;
-      }
-
-      // Write master files to disk (for non-deleted files and pools)
-      if (!pool.deletedAt) {
-        for (const file of pool.files) {
-          if (!file.id) {
-            file.id = crypto.randomUUID();
+        if (file.deletedAt) {
+          // A tombstone must not delete the master file of an active file that maps to the same path.
+          const sharedWithActive = pool.files.some(
+            (other) => !other.deletedAt && this.getMasterFilePath(pool.id, other.remotePath) === masterPath
+          );
+          if (sharedWithActive) continue;
+          try {
+            await fs.rm(masterPath, { force: true });
+          } catch {
+            // Ignore file deletion failure
           }
-          const masterPath = this.getMasterFilePath(pool.id, file.remotePath);
-          file.masterFilePath = masterPath;
-          file.masterFileName = path.basename(masterPath);
+        } else {
+          await fs.mkdir(path.dirname(masterPath), { recursive: true });
+          await fs.writeFile(masterPath, file.content, 'utf-8');
 
-          if (file.deletedAt) {
+          if (file.mode) {
             try {
-              await fs.rm(masterPath, { force: true });
-            } catch {
-              // Ignore file deletion failure
-            }
-          } else {
-            await fs.mkdir(path.dirname(masterPath), { recursive: true });
-            await fs.writeFile(masterPath, file.content, 'utf-8');
-
-            if (file.mode) {
-              try {
-                const modeNum = parseInt(file.mode, 8);
-                if (!isNaN(modeNum)) {
-                  await fs.chmod(masterPath, modeNum);
-                }
-              } catch {
-                // Ignore chmod failures on non-POSIX filesystems
+              const modeNum = parseInt(file.mode, 8);
+              if (!isNaN(modeNum)) {
+                await fs.chmod(masterPath, modeNum);
               }
+            } catch {
+              // Ignore chmod failures on non-POSIX filesystems
             }
-          }
-
-          if (!options?.preserveTimestamps) {
-            const existingFile = existingFilesById.get(file.id);
-            const contentChanged =
-              !existingFile ||
-              existingFile.content !== file.content ||
-              existingFile.mode !== file.mode ||
-              existingFile.remotePath !== file.remotePath;
-            file.updatedAt = contentChanged ? now : (file.updatedAt ?? existingFile?.updatedAt ?? now);
           }
         }
-      }
 
-      const pools = await this.readRawPools();
-      const index = pools.findIndex((p) => p.id === pool.id);
-      if (index >= 0) {
-        pools[index] = pool;
-      } else {
-        pools.push(pool);
+        if (!options?.preserveTimestamps) {
+          const existingFile = existingFilesById.get(file.id);
+          const contentChanged =
+            !existingFile ||
+            existingFile.content !== file.content ||
+            existingFile.mode !== file.mode ||
+            existingFile.remotePath !== file.remotePath;
+          file.updatedAt = contentChanged ? now : (file.updatedAt ?? existingFile?.updatedAt ?? now);
+        }
       }
-      await this.persist(pools);
-    });
+    }
+
+    const pools = await this.readRawPools();
+    const index = pools.findIndex((p) => p.id === pool.id);
+    const toPersist: DotfilePool = { ...pool, files: persistedFiles };
+    if (index >= 0) {
+      pools[index] = toPersist;
+    } else {
+      pools.push(toPersist);
+    }
+    await this.persist(pools);
   }
 
   public async deletePool(id: string): Promise<void> {
@@ -306,35 +330,38 @@ export class DotfilePoolStore {
     poolId: string,
     fileData: { remotePath: string; content: string; mode?: string; sourcePath?: string }
   ): Promise<DotfilePool> {
-    const pools = await this.getPools();
-    let pool = pools.find((p) => p.id === poolId);
-    if (!pool) {
-      pool = {
-        id: poolId,
-        name: 'Default Pool',
-        files: [],
-      };
-    }
+    // One queued read-modify-write; getPools() → savePool() outside the queue could interleave with another save.
+    return this.queueMutation(async () => {
+      const pools = await this.getPools();
+      let pool = pools.find((p) => p.id === poolId);
+      if (!pool) {
+        pool = {
+          id: poolId,
+          name: 'Default Pool',
+          files: [],
+        };
+      }
 
-    const existingFile = pool.files.find((f) => f.remotePath === fileData.remotePath);
-    if (existingFile) {
-      existingFile.content = fileData.content;
-      if (fileData.mode) existingFile.mode = fileData.mode;
-      if (fileData.sourcePath) existingFile.sourcePath = fileData.sourcePath;
-      existingFile.updatedAt = formatTimestamp();
-    } else {
-      pool.files.push({
-        id: crypto.randomUUID(),
-        remotePath: fileData.remotePath,
-        content: fileData.content,
-        mode: fileData.mode,
-        sourcePath: fileData.sourcePath,
-        updatedAt: formatTimestamp(),
-      });
-    }
+      const existingFile = pool.files.find((f) => f.remotePath === fileData.remotePath);
+      if (existingFile) {
+        existingFile.content = fileData.content;
+        if (fileData.mode) existingFile.mode = fileData.mode;
+        if (fileData.sourcePath) existingFile.sourcePath = fileData.sourcePath;
+        existingFile.updatedAt = formatTimestamp();
+      } else {
+        pool.files.push({
+          id: crypto.randomUUID(),
+          remotePath: fileData.remotePath,
+          content: fileData.content,
+          mode: fileData.mode,
+          sourcePath: fileData.sourcePath,
+          updatedAt: formatTimestamp(),
+        });
+      }
 
-    await this.savePool(pool);
-    return (await this.getPool(poolId))!;
+      await this.savePoolUnqueued(pool);
+      return (await this.getPool(poolId))!;
+    });
   }
 
   private queueMutation<T>(mutation: () => Promise<T>): Promise<T> {
@@ -347,15 +374,6 @@ export class DotfilePoolStore {
   }
 
   private async persist(pools: DotfilePool[]): Promise<void> {
-    await fs.mkdir(path.dirname(this.filePath), { recursive: true });
-    await fs.writeFile(this.filePath, JSON.stringify({ pools }, null, 2), {
-      encoding: 'utf-8',
-      mode: 0o600,
-    });
-    try {
-      await fs.chmod(this.filePath, 0o600);
-    } catch {
-      // Ignore chmod failures on non-POSIX filesystems
-    }
+    await writeFileAtomic(this.filePath, JSON.stringify({ pools }, null, 2), { mode: 0o600 });
   }
 }

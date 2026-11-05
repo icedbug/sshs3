@@ -5,6 +5,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import { Readable, Writable, PassThrough } from 'node:stream';
 import { LocalStorageProvider } from '../../src/main/storage/LocalStorageProvider';
+import { defineTargetTouched } from '../../src/main/storage/targetTouched';
 import {
   TransferPipeline,
   transferFile,
@@ -667,6 +668,38 @@ describe('TransferPipeline', () => {
       expect(mockSource.list).not.toHaveBeenCalledWith('linked-dir');
     });
 
+    // M7 (code review 2026-11-03): reading a FIFO blocks until something writes to it, so a folder transfer
+    // used to hang on one. Special files are skipped like symlinks.
+    it('never copies a special file (FIFO, socket, device) found in a folder', async () => {
+      const mockSource = new MemoryStorageProvider();
+      mockSource.list = vi.fn().mockResolvedValue([
+        { name: 'real.txt', path: 'real.txt', size: 4, isDirectory: false },
+        { name: 'pipe', path: 'pipe', size: 0, isDirectory: false, isSpecial: true },
+      ]);
+      mockSource.files.set('real.txt', Buffer.from('test'));
+      const readSpy = vi.spyOn(mockSource, 'createReadStream');
+      const mockTarget = new MemoryStorageProvider();
+
+      await transferDirectory({ sourceProvider: mockSource, sourcePath: '', targetProvider: mockTarget, targetPath: '' });
+
+      expect(mockTarget.files.has('real.txt')).toBe(true);
+      expect(mockTarget.files.has('pipe')).toBe(false);
+      expect(readSpy).not.toHaveBeenCalledWith('pipe', expect.anything(), expect.anything());
+      expect(readSpy.mock.calls.map((c) => c[0])).toEqual(['real.txt']);
+    });
+
+    it('refuses to transfer a single special file', async () => {
+      const mockSource = new MemoryStorageProvider();
+      mockSource.stat = vi.fn().mockResolvedValue({ name: 'pipe', path: 'pipe', size: 0, isDirectory: false, isSpecial: true });
+      const readSpy = vi.spyOn(mockSource, 'createReadStream');
+      const mockTarget = new MemoryStorageProvider();
+
+      await expect(
+        transferFile({ sourceProvider: mockSource, sourcePath: 'pipe', targetProvider: mockTarget, targetPath: 'pipe' })
+      ).rejects.toThrow('Not a regular file');
+      expect(readSpy).not.toHaveBeenCalled();
+    });
+
     it.skipIf(process.platform === 'win32')(
       'end-to-end: a real symlinked directory inside the source tree is not copied to the target',
       async () => {
@@ -811,6 +844,66 @@ describe('TransferPipeline', () => {
           targetPath: 'data.txt',
         })
       ).rejects.toThrow('Disk full write error');
+
+      expect(deleteSpy).toHaveBeenCalledWith('data.txt', false);
+    });
+
+    // H2 (code review 2026-11-03): the clean-up must not delete a target the provider never opened/replaced
+    // (cancelled S3 overwrite, EACCES on open, SFTP open that never happened).
+    it('does not delete an existing target when the write stream never touched it (H2)', async () => {
+      const memSource = new MemoryStorageProvider();
+      memSource.files.set('data.txt', Buffer.from('new content'));
+      const memTarget = new MemoryStorageProvider();
+      memTarget.files.set('data.txt', Buffer.from('original'));
+      const deleteSpy = vi.spyOn(memTarget, 'delete');
+      memTarget.createWriteStream = vi.fn().mockImplementation(async () =>
+        defineTargetTouched(
+          new Writable({
+            write(_chunk, _enc, cb) {
+              cb(new Error('open failed: EACCES'));
+            },
+          }),
+          () => false
+        )
+      );
+
+      await expect(
+        transferFile({
+          sourceProvider: memSource,
+          sourcePath: 'data.txt',
+          targetProvider: memTarget,
+          targetPath: 'data.txt',
+        })
+      ).rejects.toThrow('open failed: EACCES');
+
+      expect(deleteSpy).not.toHaveBeenCalled();
+      expect(memTarget.files.get('data.txt')?.toString()).toBe('original');
+    });
+
+    it('still deletes the target when the write stream reports it was touched (H2)', async () => {
+      const memSource = new MemoryStorageProvider();
+      memSource.files.set('data.txt', Buffer.from('new content'));
+      const memTarget = new MemoryStorageProvider();
+      const deleteSpy = vi.spyOn(memTarget, 'delete');
+      memTarget.createWriteStream = vi.fn().mockImplementation(async () =>
+        defineTargetTouched(
+          new Writable({
+            write(_chunk, _enc, cb) {
+              cb(new Error('disk full'));
+            },
+          }),
+          () => true
+        )
+      );
+
+      await expect(
+        transferFile({
+          sourceProvider: memSource,
+          sourcePath: 'data.txt',
+          targetProvider: memTarget,
+          targetPath: 'data.txt',
+        })
+      ).rejects.toThrow('disk full');
 
       expect(deleteSpy).toHaveBeenCalledWith('data.txt', false);
     });
@@ -1110,6 +1203,75 @@ describe('TransferQueue', () => {
     await queue.waitForJob(job.id);
     await expect(queue.waitForJob(job.id)).resolves.toBe(job);
     await expect(queue.waitForJob('missing')).rejects.toThrow(/Job not found/);
+  });
+
+  it('finishes a job that was cancelled while its transfer was already completing', async () => {
+    let finishTransfer!: () => void;
+    let signalStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      signalStarted = resolve;
+    });
+    const fakePipeline = {
+      transferFile: () =>
+        new Promise<void>((resolve) => {
+          finishTransfer = resolve;
+          signalStarted();
+        }),
+      transferDirectory: async () => {},
+    };
+    const queue = new TransferQueue({ pipeline: fakePipeline as never });
+    const events: string[] = [];
+    queue.on('completed', () => events.push('completed'));
+    queue.on('cancelled', () => events.push('cancelled'));
+    queue.on('progress', (p: { status: string }) => events.push(`progress:${p.status}`));
+
+    const job = queue.addJob({ sourceProvider, sourcePath: 'f.txt', targetProvider, targetPath: 'f.txt' });
+    await started;
+
+    expect(queue.cancelJob(job.id)).toBe(true);
+    finishTransfer(); // the copy finishes anyway: the verification step does not look at the abort signal
+
+    const outcome = await Promise.race([
+      queue.waitForJob(job.id).then(() => 'resolved'),
+      new Promise<string>((resolve) => setTimeout(() => resolve('hung'), 500)),
+    ]);
+
+    expect(outcome).toBe('resolved');
+    expect(job.progress.status).toBe('cancelled');
+    expect(events).toContain('cancelled');
+    expect(events).not.toContain('completed');
+    expect(events.filter((e) => e === 'cancelled')).toHaveLength(1);
+    expect(queue.hasActiveTransfers()).toBe(false);
+  });
+
+  it('fails a job whose source is a special file without opening it (M7)', async () => {
+    sourceProvider.stat = vi.fn().mockResolvedValue({ name: 'pipe', path: 'pipe', size: 0, isDirectory: false, isSpecial: true });
+    const readSpy = vi.spyOn(sourceProvider, 'createReadStream');
+    const queue = new TransferQueue();
+    const job = queue.addJob({ sourceProvider, sourcePath: 'pipe', targetProvider, targetPath: 'pipe' });
+
+    await queue.waitForJob(job.id);
+
+    expect(job.progress.status).toBe('failed');
+    expect(job.error).toBe('Not a regular file: pipe');
+    expect(readSpy).not.toHaveBeenCalled();
+  });
+
+  it('refuses to copy a file onto itself on the same provider and leaves it intact', async () => {
+    sourceProvider.files.set('same.txt', Buffer.from('keep me'));
+    const queue = new TransferQueue();
+    const job = queue.addJob({
+      sourceProvider,
+      sourcePath: 'same.txt',
+      targetProvider: sourceProvider,
+      targetPath: 'same.txt',
+    });
+
+    await queue.waitForJob(job.id);
+
+    expect(job.progress.status).toBe('failed');
+    expect(job.error).toBe('Source and target are the same file');
+    expect(sourceProvider.files.get('same.txt')?.toString()).toBe('keep me');
   });
 
   it('should reject duplicate job IDs in addJob', () => {
@@ -1536,5 +1698,61 @@ describe('TransferQueue', () => {
       const lastProgress = progressUpdates[progressUpdates.length - 1];
       expect(lastProgress.percentage).toBe(100);
     });
+  });
+});
+
+// The deferred clean-up for an open that answered after the failed transfer stopped waiting for it.
+describe('late open after a failed transfer', () => {
+  function slowOpenStream(touchedAfter: { value: boolean }, settle: Promise<void>) {
+    const stream = defineTargetTouched(
+      new Writable({
+        write(_c, _e, cb) {
+          cb(new Error('source failed'));
+        },
+      }),
+      () => touchedAfter.value
+    );
+    (stream as unknown as { targetSettled: () => Promise<void> }).targetSettled = () => settle;
+    return stream;
+  }
+
+  async function run(targetContent: string | undefined, resolveOpen: (t: { value: boolean }) => void) {
+    const memSource = new MemoryStorageProvider();
+    memSource.files.set('data.txt', Buffer.from('new content'));
+    const memTarget = new MemoryStorageProvider();
+    if (targetContent !== undefined) memTarget.files.set('data.txt', Buffer.from(targetContent));
+    const touched = { value: false };
+    let release!: () => void;
+    let lateRuns = 0;
+    const settle = new Promise<void>((r) => { release = r; }).then(() => { lateRuns++; });
+    memTarget.createWriteStream = vi.fn().mockImplementation(async () => slowOpenStream(touched, settle));
+    const deleteSpy = vi.spyOn(memTarget, 'delete');
+    await expect(
+      transferFile({ sourceProvider: memSource, sourcePath: 'data.txt', targetProvider: memTarget, targetPath: 'data.txt', targetSettleTimeoutMs: 20 })
+    ).rejects.toThrow('source failed');
+    expect(deleteSpy).not.toHaveBeenCalled(); // nothing is deleted while the open is unanswered
+    resolveOpen(touched);
+    release();
+    await new Promise((r) => setTimeout(r, 0));
+    await vi.waitFor(() => expect(lateRuns).toBeGreaterThan(0), { timeout: 2000 });
+    await new Promise((r) => setTimeout(r, 20)); // let the stat and delete after the settle finish
+    return { memTarget, deleteSpy };
+  }
+
+  it('removes the empty file the late open left behind', async () => {
+    const { memTarget, deleteSpy } = await run('', (t) => { t.value = true; });
+    expect(deleteSpy).toHaveBeenCalledTimes(1);
+    expect(memTarget.files.has('data.txt')).toBe(false);
+  });
+
+  it('leaves a file alone that a newer transfer has written since', async () => {
+    const { memTarget, deleteSpy } = await run('written by a newer transfer', (t) => { t.value = true; });
+    expect(deleteSpy).not.toHaveBeenCalled();
+    expect(memTarget.files.get('data.txt')?.toString()).toBe('written by a newer transfer');
+  });
+
+  it('does nothing when the late open turns out not to have touched the target', async () => {
+    const { deleteSpy } = await run('original', () => {});
+    expect(deleteSpy).not.toHaveBeenCalled();
   });
 });

@@ -1,5 +1,5 @@
 import type { SSHConnectionConfig, LocalShellType } from './ssh';
-import type { StorageType } from './storage';
+import type { StorageType, FileEntry } from './storage';
 import type { K8sTerminalTarget } from './kubernetes';
 
 /** 'row' places children side by side (a vertical divider); 'column' stacks them (a horizontal divider). */
@@ -30,6 +30,11 @@ export interface PaneSplit {
   id: string;
   orientation: PaneOrientation;
   children: PaneNode[];
+  /** Relative flex-grow weight per child, parallel to `children` (§23) — absent or
+   * length-mismatched means "equal split", so older saved sessions restore unchanged. Only the
+   * 2-child case is user-resizable today (PaneTree.tsx); a 3+-child split still renders equally
+   * sized panes regardless of this field. */
+  weights?: number[];
 }
 
 /**
@@ -42,13 +47,19 @@ export type PaneNode = PaneLeaf | PaneSplit;
 
 export interface SavedTab {
   id: string;
-  type: 'terminal' | 'filemanager';
+  type: 'terminal' | 'filemanager' | 'editor';
   title: string;
   /** Terminal tabs always carry a pane tree, even when it's a single leaf. */
   paneTree?: PaneNode;
   /** The pane the user last interacted with; keyboard shortcuts (split/close) target this pane. */
   activePaneId?: string;
   initialCwd?: string;
+  /** Set when saving/restoring an editor tab. */
+  editorEntry?: FileEntry;
+  editorProviderId?: string;
+  editorSourceType?: StorageType;
+  editorInitialMode?: 'source' | 'preview';
+  editorTailMode?: boolean;
 }
 
 export interface SavedPaneState {
@@ -58,9 +69,32 @@ export interface SavedPaneState {
   path: string;
 }
 
+/** Window position and size in screen coordinates (DIPs). */
+export interface SavedWindowBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** A secondary window: the main window keeps using the top-level `tabs`/`activeTabId` of SessionData. */
+export interface SavedWindow {
+  /** Stable id of the window across restarts. */
+  key: string;
+  bounds?: SavedWindowBounds;
+  maximized?: boolean;
+  tabs: SavedTab[];
+  activeTabId: string;
+}
+
 export interface SessionData {
   tabs: SavedTab[];
   activeTabId: string;
+  /** Position of the main window (the one whose tabs are the top-level `tabs`). */
+  mainBounds?: SavedWindowBounds;
+  mainMaximized?: boolean;
+  /** Secondary windows, restored after the main one. */
+  windows?: SavedWindow[];
   lastPaths?: Record<string, string>;
   panes?: {
     left: SavedPaneState;

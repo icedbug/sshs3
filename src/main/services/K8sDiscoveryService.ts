@@ -347,10 +347,19 @@ export class K8sDiscoveryService {
         return node;
       });
 
+      const rawCreated = pod.metadata?.creationTimestamp;
+      const creationTimestamp =
+        rawCreated instanceof Date
+          ? rawCreated.toISOString()
+          : typeof rawCreated === 'string'
+            ? rawCreated
+            : undefined;
+
       return {
         name: pod.metadata?.name || '',
         namespace,
         phase: pod.status?.phase || 'Unknown',
+        creationTimestamp,
         containers: [...regularContainers, ...ephemeralContainers],
       };
     });
@@ -516,5 +525,19 @@ export class K8sDiscoveryService {
       events,
       yaml,
     };
+  }
+
+  /**
+   * Deletes a pod in the specified namespace and context.
+   * If the pod is owned by a controller (Deployment, ReplicaSet, StatefulSet, DaemonSet),
+   * Kubernetes will automatically create a replacement pod.
+   */
+  public async deletePod(
+    contextName: string,
+    namespace: string,
+    podName: string
+  ): Promise<void> {
+    const client = await this.getApiClient(contextName);
+    await client.deleteNamespacedPod({ name: podName, namespace });
   }
 }

@@ -1,0 +1,47 @@
+name: CLI dependency watch
+
+# Watches upstream releases for the external CLI binaries we shell out to (ssh, age,
+# ykman) so we can check our flag/output-parsing assumptions before Linux/Windows
+# distros package a new version. See docs/security-audit-plan.md.
+on:
+  schedule:
+    - cron: '0 6 * * 1'   # weekly, Monday morning
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  watch:
+    name: Check upstream CLI versions
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Ensure cli-watch label exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh label create cli-watch --color 5319e7 --description "Upstream CLI dependency version change" || true
+
+      - name: Check for new releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/cli-watch.mjs
+
+      - name: Commit updated baseline
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet -- .github/cli-watch/baseline.json; then
+            git add .github/cli-watch/baseline.json
+            git commit -m "chore(cli-watch): update upstream version baseline"
+            git push
+          else
+            echo "No baseline changes to commit."
+          fi

@@ -8,6 +8,7 @@ import {
   type WorkspaceServerSummary,
 } from "../../../shared/types/aiHub";
 import { DEFAULT_SHORTCUTS } from "../../../shared/types/settings";
+import type { TeamVaultPayload } from "../../../shared/types/teamVault";
 import type { InventoryTarget } from "./ContextService";
 import {
   appendDemoActivity,
@@ -38,6 +39,25 @@ export function createHub(
   lifecycle: Pick<HubHost, "backgroundChanged" | "show">,
   options?: CreateHubOptions,
 ): HubService {
+  // Team Vault keeps one vault per team (every call takes a vaultId); the hooks below use each vault unlocked here.
+  const unlockedVaultIds = async (): Promise<string[]> => {
+    const vaultIds = await bridge.teamVaultService
+      .listVaultIds()
+      .catch((): string[] => []);
+    return vaultIds.filter((vaultId) =>
+      bridge.teamVaultService.isUnlocked(vaultId),
+    );
+  };
+  /** The first unlocked Team Vault holding SSH profile `profileId`, with that profile. */
+  const findTeamVaultProfile = async (profileId: string) => {
+    for (const vaultId of await unlockedVaultIds()) {
+      const profile = (
+        await bridge.teamVaultService.getPayload(vaultId)
+      ).ssh.find((p) => p.id === profileId);
+      if (profile) return { vaultId, profile };
+    }
+    return undefined;
+  };
   const hub: HubService = new HubService({
     ...lifecycle,
     aiConfigFilePath: options?.aiConfigFilePath,
@@ -47,18 +67,18 @@ export function createHub(
     onSharedWorkspaceChanged: options?.onSharedWorkspaceChanged,
     file: (...args) => files.invoke(...args),
     changed: () => {
-      const contents = bridge.getWebContents();
-      if (contents && !contents.isDestroyed()) contents.send(HUB_CHANGED);
+      bridge.broadcast(HUB_CHANGED);
       if (process.env.SSHS3_NATIVE_HERMES === '1') nativeEvents.emit('toolsChanged');
       options?.onSharedWorkspaceChanged?.();
     },
     workspaceServers: async (): Promise<WorkspaceServerSummary[]> => {
       const servers: WorkspaceServerSummary[] = [];
-      try {
-        if (bridge.teamVaultService?.isUnlocked?.()) {
+      for (const vaultId of await unlockedVaultIds()) {
+        try {
           const teamPayload =
-            await bridge.teamVaultService.getPayloadForRenderer();
+            await bridge.teamVaultService.getPayloadForRenderer(vaultId);
           for (const p of teamPayload.ssh ?? []) {
+            if (servers.some((s) => s.id === p.id)) continue;
             servers.push({
               id: p.id,
               name: p.name || p.host,
@@ -96,9 +116,9 @@ export function createHub(
               updatedBy: p.updatedBy,
             });
           }
+        } catch {
+          // Ignore if team vault is locked or unconfigured
         }
-      } catch {
-        // Ignore if team vault is locked or unconfigured
       }
       try {
         const profiles = await bridge.profileStore.getProfiles();
@@ -154,13 +174,22 @@ export function createHub(
       return servers;
     },
     getTeamWorkspaceData: async () => {
-      try {
-        if (bridge.teamVaultService?.isUnlocked?.()) {
-          const payload =
-            await bridge.teamVaultService.getPayloadForRenderer();
-          return {
-            memories: [
-              ...(payload.workspaceMemories ?? []).map((m) => ({
+      const vaultIds = await unlockedVaultIds();
+      const payloads: TeamVaultPayload[] = [];
+      for (const vaultId of vaultIds) {
+        try {
+          payloads.push(
+            await bridge.teamVaultService.getPayloadForRenderer(vaultId),
+          );
+        } catch {
+          // Non-fatal
+        }
+      }
+      if (payloads.length > 0) {
+        return {
+          memories: [
+            ...payloads.flatMap((payload) =>
+              (payload.workspaceMemories ?? []).map((m) => ({
                 id: m.id,
                 kind: m.kind,
                 scope: m.scope,
@@ -169,18 +198,17 @@ export function createHub(
                 author: m.author,
                 updatedAt: m.updatedAt,
               })),
-              ...(isDemoMode() ? getDemoMemories() : []),
-            ],
-            activityLog: [
-              ...(payload.activityLog ?? []),
-              ...(isDemoMode() ? getDemoActivityLog() : []),
-            ],
-            actor:
-              bridge.teamVaultService.getUnlockedRecipientId?.() ?? undefined,
-          };
-        }
-      } catch {
-        // Non-fatal
+            ),
+            ...(isDemoMode() ? getDemoMemories() : []),
+          ],
+          activityLog: [
+            ...payloads.flatMap((payload) => payload.activityLog ?? []),
+            ...(isDemoMode() ? getDemoActivityLog() : []),
+          ],
+          actor:
+            bridge.teamVaultService.getUnlockedRecipientId(vaultIds[0]) ??
+            undefined,
+        };
       }
       if (isDemoMode()) {
         return {
@@ -195,9 +223,9 @@ export function createHub(
       if (isDemoMode()) {
         appendDemoActivity(event);
       }
-      if (bridge.teamVaultService?.isUnlocked?.()) {
-        await bridge.teamVaultService.recordWorkspaceActivity(event);
-        bridge.scheduleTeamVaultAutoPush?.();
+      for (const vaultId of await unlockedVaultIds()) {
+        await bridge.teamVaultService.recordWorkspaceActivity(vaultId, event);
+        bridge.scheduleTeamVaultAutoPush?.(vaultId);
       }
       bridge.scheduleAutoSync?.();
     },
@@ -205,9 +233,9 @@ export function createHub(
       if (isDemoMode()) {
         saveDemoMemory(entry);
       }
-      if (bridge.teamVaultService?.isUnlocked?.()) {
-        await bridge.teamVaultService.saveWorkspaceMemory(entry);
-        bridge.scheduleTeamVaultAutoPush?.();
+      for (const vaultId of await unlockedVaultIds()) {
+        await bridge.teamVaultService.saveWorkspaceMemory(vaultId, entry);
+        bridge.scheduleTeamVaultAutoPush?.(vaultId);
       }
       bridge.scheduleAutoSync?.();
     },
@@ -215,9 +243,9 @@ export function createHub(
       if (isDemoMode()) {
         deleteDemoMemory(id);
       }
-      if (bridge.teamVaultService?.isUnlocked?.()) {
-        await bridge.teamVaultService.deleteWorkspaceMemory(id);
-        bridge.scheduleTeamVaultAutoPush?.();
+      for (const vaultId of await unlockedVaultIds()) {
+        await bridge.teamVaultService.deleteWorkspaceMemory(vaultId, id);
+        bridge.scheduleTeamVaultAutoPush?.(vaultId);
       }
       bridge.scheduleAutoSync?.();
     },
@@ -239,11 +267,11 @@ export function createHub(
       ) {
         return;
       }
-      if (input.shared && bridge.teamVaultService?.isUnlocked?.()) {
-        const payload = await bridge.teamVaultService.getPayload();
-        const existing = payload.ssh.find((p) => p.id === input.profileId);
-        if (existing) {
-          await bridge.teamVaultService.saveSSHProfile({
+      if (input.shared) {
+        const team = await findTeamVaultProfile(input.profileId);
+        if (team) {
+          const existing = team.profile;
+          await bridge.teamVaultService.saveSSHProfile(team.vaultId, {
             ...existing,
             cluster:
               input.cluster !== undefined
@@ -258,10 +286,10 @@ export function createHub(
             tags: cleanTags?.length ? cleanTags : undefined,
             updatedAt: new Date().toISOString(),
             updatedBy:
-              bridge.teamVaultService.getUnlockedRecipientId?.() ??
+              bridge.teamVaultService.getUnlockedRecipientId(team.vaultId) ??
               existing.updatedBy,
           });
-          bridge.scheduleTeamVaultAutoPush?.();
+          bridge.scheduleTeamVaultAutoPush?.(team.vaultId);
           return;
         }
       }
@@ -301,12 +329,16 @@ export function createHub(
           tags: cleanTags,
         });
       }
-      if (isShared && bridge.teamVaultService?.isUnlocked?.()) {
-        const payload = await bridge.teamVaultService.getPayload();
-        const existing = payload.ssh.find((p) => p.id === id);
+      const team = isShared ? await findTeamVaultProfile(id) : undefined;
+      // A server not yet in any Team Vault goes to the first unlocked one.
+      const teamVaultId =
+        team?.vaultId ?? (isShared ? (await unlockedVaultIds())[0] : undefined);
+      if (teamVaultId) {
+        const existing = team?.profile;
         const actor =
-          bridge.teamVaultService.getUnlockedRecipientId?.() ?? "team-member";
-        await bridge.teamVaultService.saveSSHProfile({
+          bridge.teamVaultService.getUnlockedRecipientId(teamVaultId) ??
+          "team-member";
+        await bridge.teamVaultService.saveSSHProfile(teamVaultId, {
           ...existing,
           id,
           name: input.name.trim(),
@@ -343,7 +375,7 @@ export function createHub(
           updatedAt: nowIso,
           updatedBy: actor,
         });
-        bridge.scheduleTeamVaultAutoPush?.();
+        bridge.scheduleTeamVaultAutoPush?.(teamVaultId);
       }
       const profiles = await bridge.profileStore.getProfiles();
       const existing = profiles.ssh.find((p) => p.id === id);
@@ -426,11 +458,11 @@ export function createHub(
         deleteDemoServer(profileId);
       }
       try {
-        if (bridge.teamVaultService?.isUnlocked?.()) {
+        for (const vaultId of await unlockedVaultIds()) {
           await bridge.teamVaultService
-            .deleteSSHProfile(profileId)
+            .deleteSSHProfile(vaultId, profileId)
             .catch(() => {});
-          bridge.scheduleTeamVaultAutoPush?.();
+          bridge.scheduleTeamVaultAutoPush?.(vaultId);
         }
       } catch {
         // Ignore

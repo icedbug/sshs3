@@ -1,7 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { Copy, FileWarning, SkipForward } from 'lucide-react';
 import type { TransferConflictPromptEvent, TransferConflictResolution } from '@shared/types/ipc';
 import { useEscapeToClose } from '../lib/useModalDismiss';
+import { useDialogFocus } from '../lib/useDialogFocus';
 import { createRendererLogger } from '../lib/log';
 const log = createRendererLogger('TransferConflictModal');
 
@@ -63,6 +64,8 @@ export const TransferConflictModal: React.FC = () => {
   // focus is elsewhere (e.g. a terminal), unlike a handler attached only to
   // this dialog's own <div>.
   useEscapeToClose(() => void respond('skip'), !!currentPrompt);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(dialogRef, !!currentPrompt);
 
   if (!currentPrompt) {
     return null;
@@ -70,6 +73,7 @@ export const TransferConflictModal: React.FC = () => {
 
   return (
     <div
+      ref={dialogRef}
       role="dialog"
       aria-modal="true"
       aria-labelledby="transfer-conflict-modal-title"

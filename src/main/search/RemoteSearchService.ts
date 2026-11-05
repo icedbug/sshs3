@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import type { StorageRegistry } from '../storage/StorageRegistry';
 import { SFTPStorageProvider } from '../storage/SFTPStorageProvider';
-import { quoteShellArg } from './shellQuote';
+import { anchorPath, quotePathOperand, quoteShellArg } from './shellQuote';
 import { buildLineMatcher } from './lineMatcher';
 import type {
   SearchDoneEvent,
@@ -27,10 +27,10 @@ interface ActiveSearchSession {
   markCancelled: () => void;
 }
 
-function buildFindGrepCommand(resolvedRoot: string, options: SearchStartOptions): string {
-  const parts: string[] = ['find', quoteShellArg(resolvedRoot)];
+export function buildFindGrepCommand(resolvedRoot: string, options: SearchStartOptions): string {
+  const parts: string[] = ['find', quotePathOperand(resolvedRoot)];
 
-  if (typeof options.maxDepth === 'number' && options.maxDepth >= 0) {
+  if (Number.isInteger(options.maxDepth) && (options.maxDepth as number) >= 0) {
     parts.push('-maxdepth', String(options.maxDepth));
   }
   parts.push('-type', 'f', '!', '-type', 'l');
@@ -52,12 +52,13 @@ function buildFindGrepCommand(resolvedRoot: string, options: SearchStartOptions)
   if (!options.caseSensitive) grepFlags.push('-i');
   grepFlags.push(options.mode === 'regex' ? '-E' : '-F');
 
-  const maxResults = options.maxResults ?? 500;
+  // maxResults crosses the IPC boundary untyped and is interpolated into the command line unquoted.
+  const maxResults = Number.isInteger(options.maxResults) && (options.maxResults as number) > 0 ? (options.maxResults as number) : 500;
   const cap = Math.max(maxResults, Math.ceil(maxResults * RESULT_CAP_SAFETY_FACTOR));
 
   return (
     parts.join(' ') +
-    ` | xargs -0 -r grep ${grepFlags.join(' ')} -e ${quoteShellArg(options.query)}` +
+    ` | xargs -0 -r grep ${grepFlags.join(' ')} -e ${quoteShellArg(options.query)} --` +
     ` | head -n ${cap}`
   );
 }
@@ -99,7 +100,8 @@ export class RemoteSearchService {
       throw new Error('This SFTP connection does not support running remote commands');
     }
 
-    const resolvedRoot = await provider.resolveRemotePath(options.rootPath);
+    // Anchored like the `find` operand, because that is how `find` prints the root in every result path.
+    const resolvedRoot = anchorPath(await provider.resolveRemotePath(options.rootPath));
     const searchId = crypto.randomUUID();
     const cmd = buildFindGrepCommand(resolvedRoot, options);
 
@@ -290,7 +292,7 @@ export class RemoteSearchService {
     const safeContext = Number.isInteger(contextLines) && contextLines >= 0 ? contextLines : 0;
     const startLine = Math.max(1, safeLine - safeContext);
     const endLine = safeLine + safeContext;
-    const cmd = `sed -n '${startLine},${endLine}p' ${quoteShellArg(resolvedPath)}`;
+    const cmd = `sed -n '${startLine},${endLine}p' ${quotePathOperand(resolvedPath)}`;
 
     // stderr is non-fatal for preview purposes (e.g. permission edge cases); an empty
     // result surfaces as "no preview available" in the UI.

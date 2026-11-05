@@ -7,17 +7,23 @@ import type { ConfigureGitSigningRequest, ConfigureGitSigningResult, DotfilesImp
 import { IPC_CHANNELS } from '../../shared/types/ipc';
 import type { SSHConnectionConfig } from '../../shared/types/ssh';
 import type { IpcBridge } from '../IpcBridge';
+import { isFeatureAllowed } from '../policy/policyApply';
+
+const DISABLED_BY_POLICY = 'Disabled by your administrator.';
 
 /** The part of IpcBridge this handler group may use. */
 export type GitHost = Pick<
   IpcBridge,
-  'dotfilePoolStore' | 'profileStore' | 'registerHandler' | 'resolveProxyJumpConfig' | 'restoreSavedSecrets' | 'scheduleAutoSync' | 'storageRegistry'
+  'dotfilePoolStore' | 'policy' | 'profileStore' | 'registerHandler' | 'resolveProxyJumpConfig' | 'restoreSavedSecrets' | 'scheduleAutoSync' | 'storageRegistry'
 >;
 
 export function registerGitHandlers(bridge: GitHost): void {
   bridge.registerHandler(
     IPC_CHANNELS.GIT_FETCH_PUBLIC_KEYS,
     async (_event, request: FetchGitKeysRequest): Promise<FetchGitKeysResult> => {
+      if (!isFeatureAllowed(bridge.policy.policy, 'gitKeyFetch')) {
+        return { success: false, keys: [], error: DISABLED_BY_POLICY };
+      }
       return await fetchGitPublicKeys(request);
     }
   );
@@ -92,6 +98,9 @@ export function registerGitHandlers(bridge: GitHost): void {
   bridge.registerHandler(
     IPC_CHANNELS.DOTFILES_IMPORT_FROM_GIT,
     async (_event, request: DotfilesImportFromGitRequest): Promise<DotfilesImportFromGitResult> => {
+      if (!isFeatureAllowed(bridge.policy.policy, 'dotfileGitImport')) {
+        return { success: false, error: DISABLED_BY_POLICY };
+      }
       const res = await DotfileGitImporter.importFromGit(request, bridge.dotfilePoolStore);
       if (res.success) {
         bridge.scheduleAutoSync();

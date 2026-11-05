@@ -8,6 +8,7 @@ import {
   joinPaths,
   type TransferOptions,
 } from './TransferPipeline';
+import { SAME_FILE_ERROR, isSameFileOnProvider, resolverFor } from './transferPaths';
 import type {
   IStorageProvider,
   TransferProgress,
@@ -358,8 +359,10 @@ export class TransferQueue extends EventEmitter {
 
     try {
       if (!job.isDirectory) {
+        let isSpecial = false;
         try {
           const srcStat = await job.sourceProvider.stat(job.sourcePath);
+          isSpecial = Boolean(srcStat.isSpecial);
           if (srcStat.isDirectory) {
             job.isDirectory = true;
           }
@@ -372,6 +375,10 @@ export class TransferQueue extends EventEmitter {
         } catch {
           // ignore
         }
+        if (isSpecial) {
+          // A FIFO, socket or device: reading it would block, and there is nothing to copy.
+          throw new Error(`Not a regular file: ${getBaseName(job.sourcePath) || job.sourcePath}`);
+        }
       }
 
       let resolvedTargetPath = job.targetPath;
@@ -382,6 +389,14 @@ export class TransferQueue extends EventEmitter {
         (await isDirectoryPath(job.targetProvider, resolvedTargetPath))
       ) {
         resolvedTargetPath = joinPaths(job.targetProvider.type, resolvedTargetPath, baseName);
+      }
+
+      // Same provider and same file: opening the target would truncate the source before it is read.
+      if (
+        job.sourceProvider === job.targetProvider &&
+        (await isSameFileOnProvider(job.sourceProvider.type, job.sourcePath, resolvedTargetPath, resolverFor(job.sourceProvider)))
+      ) {
+        throw new Error(SAME_FILE_ERROR);
       }
 
       const transferOptions: TransferOptions = {
@@ -415,7 +430,12 @@ export class TransferQueue extends EventEmitter {
       }
 
       const currentStatus = job.progress.status as TransferProgress['status'];
-      if (currentStatus !== 'cancelled') {
+      if (currentStatus === 'cancelled' || abortController.signal.aborted) {
+        // The cancel arrived while the copy was finishing (e.g. during the integrity checks, which do not
+        // look at the abort signal), so nothing threw. The job still needs its terminal state and its
+        // waiters released, or it would sit as "running" for ever (M8).
+        this.finishCancelled(job, context);
+      } else {
         job.progress.status = 'completed';
         job.progress.percentage = 100;
         job.completedAt = new Date();
@@ -431,11 +451,7 @@ export class TransferQueue extends EventEmitter {
         currentStatus === 'cancelled' ||
         err.name === 'AbortError'
       ) {
-        job.progress.status = 'cancelled';
-        job.progress.statusMessage = 'Cancelled';
-        this.emit('progress', job.progress, job);
-        this.emit('cancelled', job);
-        context.resolveWait(job);
+        this.finishCancelled(job, context);
       } else {
         job.progress.status = 'failed';
         job.error = err?.message || String(err);
@@ -451,6 +467,15 @@ export class TransferQueue extends EventEmitter {
       this.processQueue();
       this.checkDrain();
     }
+  }
+
+  /** Terminal state of a cancelled job that was running: final progress, the event, and the waiters released. */
+  private finishCancelled(job: TransferJob, context: InternalJobContext): void {
+    job.progress.status = 'cancelled';
+    job.progress.statusMessage = 'Cancelled';
+    this.emit('progress', job.progress, job);
+    this.emit('cancelled', job);
+    context.resolveWait(job);
   }
 
   private checkDrain(): void {

@@ -2,6 +2,7 @@ import React, { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useStat
 import {
   AlertCircle,
   AlertTriangle,
+  AppWindow,
   Check,
   Code,
   Eye,
@@ -15,6 +16,8 @@ import {
   RotateCw,
   Save,
   Search,
+  Sparkles,
+  Table,
   Terminal,
   Unlock,
   WrapText,
@@ -26,16 +29,31 @@ import { classNames, formatBytes, formatDateTime, describeIpcError } from '../..
 import { hubRequest } from '../../lib/aiHub';
 import type { SourceType } from './types';
 import { useEscapeToClose } from '../../lib/useModalDismiss';
+import { useDialogFocus } from '../../lib/useDialogFocus';
+import { useConfirm } from '../ConfirmDialog';
+import { openEditorTab } from '../../lib/editorTabEvents';
+import { CodeEditor, type CodeEditorHandle } from '../Editor/CodeEditor';
+import {
+  isMarkdownFile,
+  isHtmlFile,
+  isRasterImageFile,
+  isSvgFile,
+  isPdfFile,
+  isCsvFile,
+  isJsonFile,
+  isDualModeFile,
+  getPreviewLabel,
+  isDirectPreviewFile,
+} from './fileTypeHelpers';
+import { formatJson } from '../../lib/jsonFormatter';
+import { createRequestGuard, startGuarded } from '../../lib/requestGuard';
+import { appendCapped } from '../../lib/tailBuffer';
 
 const MarkdownPreview = lazy(() => import('./MarkdownPreview'));
-
-const MARKDOWN_EXTENSIONS = new Set(['md', 'markdown', 'mdx']);
-
-function isMarkdownFile(name: string): boolean {
-  const idx = name.lastIndexOf('.');
-  if (idx === -1) return false;
-  return MARKDOWN_EXTENSIONS.has(name.slice(idx + 1).toLowerCase());
-}
+const ImageViewer = lazy(() => import('./ImageViewer'));
+const HtmlPreview = lazy(() => import('./HtmlPreview'));
+const CsvTablePreview = lazy(() => import('./CsvTablePreview'));
+const PdfViewer = lazy(() => import('./PdfViewer'));
 
 interface FileEditorModalProps {
   open: boolean;
@@ -43,8 +61,12 @@ interface FileEditorModalProps {
   sourceType: SourceType;
   entry: FileEntry | null;
   isTailMode?: boolean;
+  initialMode?: 'source' | 'preview';
+  embedded?: boolean;
+  initialContentOverride?: string;
   onClose: () => void;
   onSaved?: () => void;
+  onDirtyChange?: (isDirty: boolean) => void;
 }
 
 export const FileEditorModal: React.FC<FileEditorModalProps> = ({
@@ -53,8 +75,12 @@ export const FileEditorModal: React.FC<FileEditorModalProps> = ({
   sourceType,
   entry,
   isTailMode = false,
+  initialMode,
+  embedded = false,
+  initialContentOverride,
   onClose,
   onSaved,
+  onDirtyChange,
 }) => {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -64,15 +90,30 @@ export const FileEditorModal: React.FC<FileEditorModalProps> = ({
   const [isBinary, setIsBinary] = useState(false);
   const [truncated, setTruncated] = useState(false);
   const [notUtf8, setNotUtf8] = useState(false);
+  const [base64, setBase64] = useState<string | undefined>(undefined);
+  const [mimeType, setMimeType] = useState<string | undefined>(undefined);
+  const [loadedSize, setLoadedSize] = useState<number | undefined>(undefined);
   const [readOnly, setReadOnly] = useState(false);
+
+  const entryName = entry?.name ?? '';
+  const isDirectPreview = useMemo(() => isDirectPreviewFile(entryName), [entryName]);
+  const isRasterImage = useMemo(() => isRasterImageFile(entryName), [entryName]);
+  const isSvg = useMemo(() => isSvgFile(entryName), [entryName]);
+  const isPdf = useMemo(() => isPdfFile(entryName), [entryName]);
+  const isHtml = useMemo(() => isHtmlFile(entryName), [entryName]);
+  const isCsv = useMemo(() => isCsvFile(entryName), [entryName]);
+  const isMarkdown = useMemo(() => isMarkdownFile(entryName), [entryName]);
+  const isJson = useMemo(() => isJsonFile(entryName), [entryName]);
+  const hasDualMode = useMemo(() => isDualModeFile(entryName), [entryName]);
+  const previewLabel = useMemo(() => getPreviewLabel(entryName), [entryName]);
+
   // Saving a partial (truncated), binary or non-UTF-8 read would overwrite the file with damaged content.
-  const saveBlocked = isBinary || truncated || notUtf8;
+  // Direct preview files (raster images, PDFs) are never edited as plain text.
+  const saveBlocked = isBinary || truncated || notUtf8 || isDirectPreview;
   const [wordWrap, setWordWrap] = useState(true);
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
   const [isMaximized, setIsMaximized] = useState(false);
-  const [markdownPreview, setMarkdownPreview] = useState(false);
-
-  const isMarkdown = useMemo(() => (entry ? isMarkdownFile(entry.name) : false), [entry]);
+  const [viewMode, setViewMode] = useState<'source' | 'preview'>('source');
 
   // Tail state
   const [tailModeActive, setTailModeActive] = useState(false);
@@ -84,6 +125,7 @@ export const FileEditorModal: React.FC<FileEditorModalProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [currentMatchIdx, setCurrentMatchIdx] = useState(0);
   const [previewMatchesCount, setPreviewMatchesCount] = useState(0);
+  const [editorMatchesCount, setEditorMatchesCount] = useState(0);
 
   // Cursor position
   const [cursorPos, setCursorPos] = useState({ line: 1, col: 1 });
@@ -93,50 +135,110 @@ export const FileEditorModal: React.FC<FileEditorModalProps> = ({
   const [externalStatus, setExternalStatus] = useState<string | null>(null);
   const [externalLaunching, setExternalLaunching] = useState(false);
 
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const lineNumbersRef = useRef<HTMLDivElement>(null);
-  const backdropRef = useRef<HTMLDivElement>(null);
+  const confirm = useConfirm();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const editorRef = useRef<CodeEditorHandle>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const originalEolRef = useRef<'\r\n' | '\n'>('\n');
+  const initialContentUsedRef = useRef(false);
+  // Only the latest load may write state; a slower earlier read must not overwrite a newer file.
+  const loadSeqRef = useRef(0);
+  const sessionsRef = useRef<{ tailId: string | null; externalToken: string | null }>({
+    tailId: null,
+    externalToken: null,
+  });
+  sessionsRef.current = { tailId, externalToken: externalSessionToken };
+
+  // A tail that is still starting when the editor closes or unmounts must be stopped when its start finishes (M10).
+  const [tailGuard] = useState(createRequestGuard);
+
+  // An embedded editor tab is unmounted by its parent; release the tail/external sessions then.
+  useEffect(
+    () => () => {
+      tailGuard.invalidate();
+      const { tailId: t, externalToken } = sessionsRef.current;
+      if (t) void window.multissh?.fileTailStop?.(t);
+      if (externalToken) void window.multissh?.fileCloseExternal?.(externalToken);
+    },
+    [tailGuard]
+  );
 
   const isDirty = useMemo(
-    () => !tailModeActive && content !== originalContent,
+    () => !tailModeActive && content.replace(/\r\n/g, '\n') !== originalContent.replace(/\r\n/g, '\n'),
     [tailModeActive, content, originalContent]
   );
 
+  useEffect(() => {
+    onDirtyChange?.(isDirty);
+  }, [isDirty, onDirtyChange]);
+
+  // Read by the external-editor listener, which must not be re-subscribed on every keystroke.
+  const isDirtyRef = useRef(isDirty);
+  isDirtyRef.current = isDirty;
+  const confirmRef = useRef(confirm);
+  confirmRef.current = confirm;
+
   // Stop tail session helper
   const stopTailSession = useCallback(async () => {
+    // Also cancels a tail that is still starting (its result is then stopped on arrival), and ends its spinner.
+    tailGuard.invalidate();
+    setLoading(false);
     if (tailId) {
       await window.multissh?.fileTailStop?.(tailId);
       setTailId(null);
     }
     setTailModeActive(false);
-  }, [tailId]);
+  }, [tailId, tailGuard]);
+
+  const entryPath = entry?.path;
+  const isDirectory = entry?.isDirectory;
 
   // Load file content normally
   const loadFile = useCallback(async () => {
-    if (!entry || entry.isDirectory) return;
+    const seq = ++loadSeqRef.current;
+    if (!entryPath || isDirectory) return;
     await stopTailSession();
     setLoading(true);
     setError(null);
     setSaveStatus(null);
     try {
-      const res: FileReadResult = await window.multissh.fileRead(providerId, entry.path);
-      setContent(res.content);
-      setOriginalContent(res.content);
+      const res: FileReadResult = isDirectPreview
+        ? await window.multissh.fileRead(providerId, entryPath, 100 * 1024 * 1024)
+        : await window.multissh.fileRead(providerId, entryPath);
+      if (seq !== loadSeqRef.current) return;
+      if (res.isDirectory) {
+        setError('Target is a directory, not a regular file.');
+        setReadOnly(true);
+        return;
+      }
+      const hasCrlf = typeof res.content === 'string' && res.content.includes('\r\n');
+      originalEolRef.current = hasCrlf ? '\r\n' : '\n';
+      const normalized = hasCrlf ? res.content.replace(/\r\n/g, '\n') : res.content;
+      let initialVal = normalized;
+      if (!initialContentUsedRef.current && initialContentOverride !== undefined) {
+        initialVal = initialContentOverride;
+        initialContentUsedRef.current = true;
+      }
+      setContent(initialVal);
+      setOriginalContent(normalized);
       setIsBinary(res.isBinary);
       setTruncated(res.truncated);
       setNotUtf8(!!res.notUtf8);
+      setBase64(res.base64);
+      setMimeType(res.mimeType);
+      setLoadedSize(res.size);
       setReadOnly(res.isBinary || res.truncated || !!res.notUtf8);
     } catch (err: any) {
+      if (seq !== loadSeqRef.current) return;
       setError(describeIpcError(err, 'Failed to load file content'));
     } finally {
-      setLoading(false);
+      if (seq === loadSeqRef.current) setLoading(false);
     }
-  }, [providerId, entry, stopTailSession]);
+  }, [providerId, entryPath, isDirectory, isDirectPreview, stopTailSession, initialContentOverride]);
 
   // Start tail session
   const startTailSession = useCallback(async () => {
-    if (!entry || entry.isDirectory) return;
+    if (!entryPath || isDirectory) return;
     setLoading(true);
     setError(null);
     setSaveStatus(null);
@@ -149,7 +251,15 @@ export const FileEditorModal: React.FC<FileEditorModalProps> = ({
     }
 
     try {
-      const res = await window.multissh.fileTailStart(providerId, entry.path);
+      const started = await startGuarded(
+        tailGuard,
+        tailGuard.begin(),
+        () => window.multissh.fileTailStart(providerId, entryPath),
+        (res) => void window.multissh?.fileTailStop?.(res.tailId)
+      );
+      // Closed, switched to normal mode or restarted while starting: that tail has been stopped above.
+      if (!started) return;
+      const res = started.value;
       setTailId(res.tailId);
       setContent(res.initialContent);
       setOriginalContent(res.initialContent);
@@ -157,9 +267,7 @@ export const FileEditorModal: React.FC<FileEditorModalProps> = ({
       setTruncated(false);
 
       setTimeout(() => {
-        if (textareaRef.current) {
-          textareaRef.current.scrollTop = textareaRef.current.scrollHeight;
-        }
+        editorRef.current?.scrollToBottom();
       }, 50);
     } catch (err: any) {
       setError(describeIpcError(err, 'Failed to start live log stream'));
@@ -167,13 +275,18 @@ export const FileEditorModal: React.FC<FileEditorModalProps> = ({
     } finally {
       setLoading(false);
     }
-  }, [providerId, entry, tailId]);
+  }, [providerId, entryPath, isDirectory, tailId, tailGuard]);
 
   // Open modal effect
   useEffect(() => {
     if (!open || !entry) {
+      tailGuard.invalidate();
       setContent('');
       setOriginalContent('');
+      originalEolRef.current = '\n';
+      setBase64(undefined);
+      setMimeType(undefined);
+      setLoadedSize(undefined);
       setError(null);
       setSaveStatus(null);
       setExternalStatus(null);
@@ -189,7 +302,15 @@ export const FileEditorModal: React.FC<FileEditorModalProps> = ({
       return;
     }
 
-    setMarkdownPreview(isMarkdownFile(entry.name));
+    if (isDirectPreviewFile(entry.name)) {
+      setViewMode('preview');
+    } else if (initialMode) {
+      setViewMode(initialMode);
+    } else if (isDualModeFile(entry.name)) {
+      setViewMode('preview');
+    } else {
+      setViewMode('source');
+    }
 
     if (isTailMode) {
       void startTailSession();
@@ -197,7 +318,21 @@ export const FileEditorModal: React.FC<FileEditorModalProps> = ({
       void loadFile();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, entry, isTailMode, providerId]);
+  }, [open, entryPath, isTailMode, providerId, initialMode]);
+
+  // Auto-focus editor when loaded and in source mode (not binary/direct preview)
+  useEffect(() => {
+    if (open && !loading && viewMode === 'source' && !isDirectPreview && !isBinary) {
+      const timer = setTimeout(() => {
+        // Something opened in the meantime (a confirmation dialog) owns the focus now: do not take it back.
+        const owner = document.activeElement?.closest('[aria-modal="true"]');
+        if (owner && owner !== dialogRef.current) return;
+        editorRef.current?.focus();
+      }, 50);
+      return () => clearTimeout(timer);
+    }
+    return undefined;
+  }, [open, loading, viewMode, isDirectPreview, isBinary]);
 
   // Tail data stream listener
   useEffect(() => {
@@ -205,12 +340,10 @@ export const FileEditorModal: React.FC<FileEditorModalProps> = ({
 
     const dataCleanup = window.multissh.onFileTailData((event) => {
       if (event.tailId === tailId) {
-        setContent((prev) => prev + event.chunk);
+        setContent((prev) => appendCapped(prev, event.chunk));
         if (autoScroll) {
           setTimeout(() => {
-            if (textareaRef.current) {
-              textareaRef.current.scrollTop = textareaRef.current.scrollHeight;
-            }
+            editorRef.current?.scrollToBottom();
           }, 10);
         }
       }
@@ -233,50 +366,41 @@ export const FileEditorModal: React.FC<FileEditorModalProps> = ({
     if (!open || !window.multissh?.onExternalFileStatus) return;
 
     const cleanup = window.multissh.onExternalFileStatus((event: ExternalFileStatusEvent) => {
-      if (event.sessionToken === externalSessionToken || event.remotePath === entry?.path) {
-        if (event.status === 'uploaded') {
-          setSaveStatus(`Uploaded from external editor at ${event.timestamp}`);
-          setExternalStatus(`Auto-uploaded from external editor at ${event.timestamp}`);
+      // This tab's own session, or the same file on the same storage. A bare path match is not enough: the same
+      // path exists on every server (M11).
+      const isOurs =
+        event.sessionToken === externalSessionToken ||
+        (event.providerId === providerId && event.remotePath === entry?.path);
+      if (!isOurs) return;
+      if (event.status === 'uploaded') {
+        setSaveStatus(`Uploaded from external editor at ${event.timestamp}`);
+        setExternalStatus(`Auto-uploaded from external editor at ${event.timestamp}`);
+        void (async () => {
+          // Reloading replaces the editor buffer: never do that over unsaved edits without asking.
+          if (
+            isDirtyRef.current &&
+            !(await confirmRef.current({
+              title: 'File changed externally',
+              message: `${entry?.name ?? 'This file'} was changed by the external editor. Reload it and discard your unsaved edits?`,
+              confirmLabel: 'Reload and discard',
+              cancelLabel: 'Keep my edits',
+            }))
+          ) {
+            setExternalStatus('The external editor saved a newer version. Your unsaved edits here were kept.');
+            return;
+          }
           void loadFile();
-          onSaved?.();
-        } else if (event.status === 'error') {
-          setError(`External editor upload failed: ${event.error}`);
-        }
+        })();
+        onSaved?.();
+      } else if (event.status === 'error') {
+        setError(`External editor upload failed: ${event.error}`);
       }
     });
 
     return () => cleanup();
-  }, [open, externalSessionToken, entry?.path, loadFile, onSaved]);
+  }, [open, externalSessionToken, providerId, entry?.path, entry?.name, loadFile, onSaved]);
 
-  // Sync scroll & auto-scroll tracking
-  const handleScroll = useCallback(() => {
-    if (textareaRef.current) {
-      if (lineNumbersRef.current) {
-        lineNumbersRef.current.scrollTop = textareaRef.current.scrollTop;
-      }
-      if (backdropRef.current) {
-        backdropRef.current.scrollTop = textareaRef.current.scrollTop;
-        backdropRef.current.scrollLeft = textareaRef.current.scrollLeft;
-      }
-      if (tailModeActive) {
-        const el = textareaRef.current;
-        const isNearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-        setAutoScroll(isNearBottom);
-      }
-    }
-  }, [tailModeActive]);
 
-  // Track cursor line & col
-  const updateCursorPosition = useCallback(() => {
-    const el = textareaRef.current;
-    if (!el) return;
-    const pos = el.selectionStart;
-    const textBefore = el.value.slice(0, pos);
-    const lines = textBefore.split('\n');
-    const line = lines.length;
-    const col = lines[lines.length - 1].length + 1;
-    setCursorPos({ line, col });
-  }, []);
 
   // Save file content
   const handleSave = useCallback(async () => {
@@ -284,7 +408,10 @@ export const FileEditorModal: React.FC<FileEditorModalProps> = ({
     setSaving(true);
     setError(null);
     try {
-      await window.multissh.fileSave(providerId, entry.path, content);
+      const contentToSave = originalEolRef.current === '\r\n'
+        ? content.replace(/\r?\n/g, '\r\n')
+        : content;
+      await window.multissh.fileSave(providerId, entry.path, contentToSave);
       setOriginalContent(content);
       const timestamp = formatDateTime(new Date());
       setSaveStatus(`Saved at ${timestamp}`);
@@ -313,12 +440,43 @@ export const FileEditorModal: React.FC<FileEditorModalProps> = ({
   }, [providerId, entry]);
 
   // Close confirmation if dirty
-  const handleRequestClose = useCallback(() => {
-    if (isDirty && !tailModeActive) {
-      if (!window.confirm('You have unsaved changes. Discard them?')) {
-        return;
-      }
+  const handleRequestClose = useCallback(async () => {
+    if (!embedded && isDirty && !tailModeActive) {
+      const discard = await confirm({
+        title: 'Discard unsaved changes',
+        message: `Discard your unsaved changes to ${entry?.name ?? 'this file'}?`,
+        confirmLabel: 'Discard changes',
+        cancelLabel: 'Keep editing',
+      });
+      if (!discard) return;
     }
+    // An embedded tab releases its sessions on unmount, once the parent has actually closed it.
+    if (!embedded) {
+      if (tailId) {
+        void window.multissh?.fileTailStop?.(tailId);
+        setTailId(null);
+      }
+      if (externalSessionToken) {
+        void window.multissh?.fileCloseExternal?.(externalSessionToken);
+        setExternalSessionToken(null);
+      }
+      // Already released: keep the unmount cleanup from stopping them a second time.
+      sessionsRef.current = { tailId: null, externalToken: null };
+    }
+    onClose();
+  }, [embedded, isDirty, tailModeActive, tailId, externalSessionToken, onClose, confirm, entry?.name]);
+
+  // Detach modal to a standalone tab
+  const handleDetachToTab = useCallback(() => {
+    if (!entry) return;
+    openEditorTab({
+      providerId,
+      sourceType,
+      entry,
+      initialMode: viewMode,
+      isTailMode: tailModeActive,
+      initialContent: content,
+    });
     if (tailId) {
       void window.multissh?.fileTailStop?.(tailId);
       setTailId(null);
@@ -327,8 +485,9 @@ export const FileEditorModal: React.FC<FileEditorModalProps> = ({
       void window.multissh?.fileCloseExternal?.(externalSessionToken);
       setExternalSessionToken(null);
     }
+    sessionsRef.current = { tailId: null, externalToken: null };
     onClose();
-  }, [isDirty, tailModeActive, tailId, externalSessionToken, onClose]);
+  }, [entry, providerId, sourceType, viewMode, tailModeActive, content, tailId, externalSessionToken, onClose]);
 
   // Global Escape key handling
   useEscapeToClose(() => {
@@ -336,157 +495,46 @@ export const FileEditorModal: React.FC<FileEditorModalProps> = ({
       setShowSearch(false);
       return;
     }
-    handleRequestClose();
-  }, open);
+    if (!embedded) {
+      void handleRequestClose();
+    }
+  }, open && !embedded);
+  useDialogFocus(dialogRef, open && !embedded && !!entry);
 
-  // Textarea key handling
-  const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
-        e.preventDefault();
-        void handleSave();
-        return;
-      }
-
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
-        e.preventDefault();
-        setShowSearch(true);
-        setTimeout(() => searchInputRef.current?.focus(), 50);
-        return;
-      }
-
-      if (e.key === 'Tab' && !readOnly) {
-        e.preventDefault();
-        const el = textareaRef.current;
-        if (!el) return;
-        const start = el.selectionStart;
-        const end = el.selectionEnd;
-        const insertText = '  ';
-        const newText = el.value.slice(0, start) + insertText + el.value.slice(end);
-        setContent(newText);
-        setTimeout(() => {
-          el.selectionStart = el.selectionEnd = start + insertText.length;
-          updateCursorPosition();
-        }, 0);
-      }
-    },
-    [handleSave, readOnly, updateCursorPosition]
-  );
+  // Format JSON helper
+  const handleFormatJson = useCallback(() => {
+    const res = formatJson(content, 2);
+    if (res.error || res.formatted === undefined) {
+      setError(`JSON Formatting failed: ${res.error || 'Unknown error'}`);
+    } else {
+      setContent(res.formatted);
+      setError(null);
+    }
+  }, [content]);
 
   // Search logic
-  const searchMatches = useMemo(() => {
-    if (!searchQuery.trim()) return [];
-    const query = searchQuery.toLowerCase();
-    const matches: number[] = [];
-    let pos = 0;
-    const lowerContent = content.toLowerCase();
-    while ((pos = lowerContent.indexOf(query, pos)) !== -1) {
-      matches.push(pos);
-      pos += query.length;
-    }
-    return matches;
-  }, [content, searchQuery]);
-
-  const totalMatches = isMarkdown && markdownPreview ? previewMatchesCount : searchMatches.length;
+  const totalMatches = isMarkdown && viewMode === 'preview' ? previewMatchesCount : editorMatchesCount;
   const safeCurrentMatchIdx = totalMatches > 0 ? Math.min(currentMatchIdx, totalMatches - 1) : 0;
 
   const handleSearchNext = useCallback(() => {
     if (totalMatches === 0) return;
-    setCurrentMatchIdx((prev) => (prev + 1) % totalMatches);
-  }, [totalMatches]);
+    if (isMarkdown && viewMode === 'preview') {
+      setCurrentMatchIdx((prev) => (prev + 1) % totalMatches);
+    } else {
+      editorRef.current?.findNext();
+      setCurrentMatchIdx((prev) => (prev + 1) % totalMatches);
+    }
+  }, [totalMatches, isMarkdown, viewMode]);
 
   const handleSearchPrev = useCallback(() => {
     if (totalMatches === 0) return;
-    setCurrentMatchIdx((prev) => (prev - 1 + totalMatches) % totalMatches);
-  }, [totalMatches]);
-
-  // Scroll to current match in Edit mode
-  const scrollToCurrentEditMatch = useCallback(() => {
-    if (searchMatches.length === 0 || safeCurrentMatchIdx >= searchMatches.length) return;
-    const matchPos = searchMatches[safeCurrentMatchIdx];
-    const textarea = textareaRef.current;
-    if (!textarea) return;
-
-    // Update selection range
-    textarea.setSelectionRange(matchPos, matchPos + searchQuery.length);
-    updateCursorPosition();
-
-    // Scroll textarea to the match
-    const activeMark = backdropRef.current?.querySelector('[data-active="true"]') as HTMLElement | null;
-    if (activeMark) {
-      const targetTop = Math.max(0, activeMark.offsetTop - textarea.clientHeight / 2 + activeMark.clientHeight / 2);
-      textarea.scrollTop = targetTop;
-      if (lineNumbersRef.current) lineNumbersRef.current.scrollTop = targetTop;
-      if (backdropRef.current) backdropRef.current.scrollTop = targetTop;
-
-      if (!wordWrap) {
-        const targetLeft = Math.max(0, activeMark.offsetLeft - textarea.clientWidth / 2);
-        textarea.scrollLeft = targetLeft;
-        if (backdropRef.current) backdropRef.current.scrollLeft = targetLeft;
-      }
+    if (isMarkdown && viewMode === 'preview') {
+      setCurrentMatchIdx((prev) => (prev - 1 + totalMatches) % totalMatches);
     } else {
-      const linesBefore = content.slice(0, matchPos).split('\n');
-      const lineIndex = linesBefore.length - 1;
-      const lineHeight = 20; // 20px per line
-      const targetTop = Math.max(0, lineIndex * lineHeight - textarea.clientHeight / 2 + lineHeight / 2);
-      textarea.scrollTop = targetTop;
-      if (lineNumbersRef.current) lineNumbersRef.current.scrollTop = targetTop;
-      if (backdropRef.current) backdropRef.current.scrollTop = targetTop;
+      editorRef.current?.findPrevious();
+      setCurrentMatchIdx((prev) => (prev - 1 + totalMatches) % totalMatches);
     }
-  }, [searchMatches, safeCurrentMatchIdx, searchQuery.length, updateCursorPosition, wordWrap, content]);
-
-  useEffect(() => {
-    if (!showSearch || !searchQuery.trim() || searchMatches.length === 0) return;
-    if (isMarkdown && markdownPreview) return;
-
-    scrollToCurrentEditMatch();
-  }, [showSearch, searchQuery, safeCurrentMatchIdx, searchMatches, isMarkdown, markdownPreview, scrollToCurrentEditMatch]);
-
-  // Render search highlight backdrop in Edit mode
-  const renderBackdrop = useCallback(() => {
-    if (!showSearch || !searchQuery.trim() || searchMatches.length === 0) return null;
-
-    const elements: React.ReactNode[] = [];
-    let lastIdx = 0;
-    const matchLen = searchQuery.length;
-    const maxMatches = Math.min(searchMatches.length, 1000);
-
-    for (let i = 0; i < maxMatches; i++) {
-      const matchPos = searchMatches[i];
-      if (matchPos > lastIdx) {
-        elements.push(
-          <span key={`text-${lastIdx}`} className="text-transparent">
-            {content.slice(lastIdx, matchPos)}
-          </span>
-        );
-      }
-      const isCurrent = i === safeCurrentMatchIdx;
-      elements.push(
-        <mark
-          key={`mark-${matchPos}`}
-          data-match-idx={i}
-          data-active={isCurrent ? 'true' : undefined}
-          className={classNames(
-            'text-transparent rounded-xs',
-            isCurrent ? 'bg-sky-500/60 ring-1 ring-sky-400' : 'bg-amber-400/35'
-          )}
-        >
-          {content.slice(matchPos, matchPos + matchLen)}
-        </mark>
-      );
-      lastIdx = matchPos + matchLen;
-    }
-
-    if (lastIdx < content.length) {
-      elements.push(
-        <span key="text-tail" className="text-transparent">
-          {content.slice(lastIdx)}
-        </span>
-      );
-    }
-
-    return elements;
-  }, [showSearch, searchQuery, searchMatches, content, safeCurrentMatchIdx]);
+  }, [totalMatches, isMarkdown, viewMode]);
 
   // Line count
   const lineCount = useMemo(() => {
@@ -495,25 +543,24 @@ export const FileEditorModal: React.FC<FileEditorModalProps> = ({
 
   if (!open || !entry) return null;
 
-  return (
+  const innerContent = (
     <div
-      role="dialog"
-      aria-modal="true"
-      aria-label={`Editing ${entry.name}`}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-3 sm:p-5 animate-in fade-in duration-150"
+      className={classNames(
+        'flex flex-col bg-app-card overflow-hidden transition-all duration-150',
+        embedded
+          ? 'h-full w-full'
+          : classNames(
+              'rounded-xl border border-border-subtle shadow-2xl',
+              isMaximized ? 'w-[98vw] h-[96vh] max-w-none' : 'w-[94vw] max-w-[1500px] h-[88vh]'
+            )
+      )}
     >
+      {/* Header */}
       <div
-        className={classNames(
-          'flex flex-col rounded-xl border border-border-subtle bg-app-card shadow-2xl overflow-hidden transition-all duration-150',
-          isMaximized ? 'w-[98vw] h-[96vh] max-w-none' : 'w-[94vw] max-w-[1500px] h-[88vh]'
-        )}
+        onDoubleClick={embedded ? undefined : () => setIsMaximized((m) => !m)}
+        title={embedded ? undefined : 'Double-click header to maximize / restore'}
+        className="flex items-center justify-between border-b border-divider bg-app-surface px-4 py-2.5 select-none shrink-0 cursor-default"
       >
-        {/* Header */}
-        <div
-          onDoubleClick={() => setIsMaximized((m) => !m)}
-          title="Double-click header to maximize / restore"
-          className="flex items-center justify-between border-b border-divider bg-app-surface px-4 py-2.5 select-none shrink-0 cursor-default"
-        >
           <div className="flex items-center gap-2.5 min-w-0">
             <FileText className="h-4 w-4 text-sky-400 shrink-0" />
             <div className="flex items-center gap-2 min-w-0">
@@ -542,50 +589,52 @@ export const FileEditorModal: React.FC<FileEditorModalProps> = ({
           {/* Action buttons */}
           <div className="flex items-center gap-1">
             {/* Tail -f Toggle */}
-            <button
-              type="button"
-              title={tailModeActive ? 'Stop Tail -f' : 'Start Tail -f (Live log stream)'}
-              onClick={() => {
-                if (tailModeActive) {
-                  void stopTailSession();
-                  void loadFile();
-                } else {
-                  void startTailSession();
-                }
-              }}
-              className={classNames(
-                'flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-semibold transition-colors',
-                tailModeActive
-                  ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 animate-pulse'
-                  : 'text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary'
-              )}
-            >
-              <Terminal className="h-3.5 w-3.5" />
-              <span>{tailModeActive ? 'TAILING...' : 'Tail -f'}</span>
-            </button>
+            {!isDirectPreview && (
+              <button
+                type="button"
+                title={tailModeActive ? 'Stop Tail -f' : 'Start Tail -f (Live log stream)'}
+                onClick={() => {
+                  if (tailModeActive) {
+                    void stopTailSession();
+                    void loadFile();
+                  } else {
+                    void startTailSession();
+                  }
+                }}
+                className={classNames(
+                  'flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-semibold transition-colors',
+                  tailModeActive
+                    ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 animate-pulse'
+                    : 'text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary'
+                )}
+              >
+                <Terminal className="h-3.5 w-3.5" />
+                <span>{tailModeActive ? 'TAILING...' : 'Tail -f'}</span>
+              </button>
+            )}
 
-            {/* Markdown Source / Preview: a segmented control so the current mode is always visible */}
-            {isMarkdown && (
+            {/* Dual Mode Source / Preview: a segmented control so the current mode is always visible */}
+            {hasDualMode && (
               <div
                 role="group"
-                aria-label="Markdown view"
+                aria-label={`${previewLabel} view`}
                 className="flex items-center rounded-lg border border-border-subtle bg-app-input p-0.5 text-xs font-semibold"
               >
                 {(
                   [
                     { preview: false, label: 'Source', title: 'Switch to Source (Edit)', icon: <Pencil className="h-3.5 w-3.5" /> },
-                    { preview: true, label: 'Preview', title: 'Switch to Preview', icon: <Eye className="h-3.5 w-3.5" /> },
+                    { preview: true, label: previewLabel, title: `Switch to ${previewLabel}`, icon: isCsv ? <Table className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" /> },
                   ] as const
                 ).map((opt) => (
                   <button
                     key={opt.label}
                     type="button"
                     title={opt.title}
-                    aria-pressed={markdownPreview === opt.preview}
-                    onClick={() => setMarkdownPreview(opt.preview)}
+                    aria-pressed={viewMode === (opt.preview ? 'preview' : 'source')}
+                    onClick={() => setViewMode(opt.preview ? 'preview' : 'source')}
                     className={classNames(
                       'flex items-center gap-1 rounded-md px-2 py-0.5 transition-colors',
-                      markdownPreview === opt.preview
+                      viewMode === (opt.preview ? 'preview' : 'source')
                         ? 'bg-sky-500/20 text-sky-400'
                         : 'text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary'
                     )}
@@ -597,73 +646,105 @@ export const FileEditorModal: React.FC<FileEditorModalProps> = ({
               </div>
             )}
 
+            {/* Format JSON button */}
+            {isJson && viewMode === 'source' && !readOnly && !tailModeActive && (
+              <button
+                type="button"
+                title="Format JSON (Prettify with 2-space indentation)"
+                onClick={handleFormatJson}
+                className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-semibold text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
+              >
+                <Sparkles className="h-3.5 w-3.5 text-amber-400" />
+                <span>Format</span>
+              </button>
+            )}
+
             {/* Search Toggle */}
-            <button
-              type="button"
-              title="Search (Ctrl+F)"
-              onClick={() => {
-                setShowSearch((prev) => {
-                  const next = !prev;
-                  if (next) setTimeout(() => searchInputRef.current?.focus(), 50);
-                  return next;
-                });
-              }}
-              className={classNames(
-                'rounded-lg p-1.5 transition-colors',
-                showSearch
-                  ? 'bg-sky-500/20 text-sky-400'
-                  : 'text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary'
-              )}
-            >
-              <Search className="h-4 w-4" />
-            </button>
+            {!isDirectPreview && !(hasDualMode && viewMode === 'preview' && !isMarkdown) && (
+              <button
+                aria-label="Search (Ctrl+F)"
+                type="button"
+                title="Search (Ctrl+F)"
+                onClick={() => {
+                  setShowSearch((prev) => {
+                    const next = !prev;
+                    if (next) setTimeout(() => searchInputRef.current?.focus(), 50);
+                    return next;
+                  });
+                }}
+                className={classNames(
+                  'rounded-lg p-1.5 transition-colors',
+                  showSearch
+                    ? 'bg-sky-500/20 text-sky-400'
+                    : 'text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary'
+                )}
+              >
+                <Search className="h-4 w-4" />
+              </button>
+            )}
 
             {/* Word wrap toggle */}
-            <button
-              type="button"
-              title={wordWrap ? 'Disable Word Wrap' : 'Enable Word Wrap'}
-              onClick={() => setWordWrap((w) => !w)}
-              className={classNames(
-                'rounded-lg p-1.5 transition-colors',
-                wordWrap
-                  ? 'bg-sky-500/20 text-sky-400'
-                  : 'text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary'
-              )}
-            >
-              <WrapText className="h-4 w-4" />
-            </button>
+            {!isDirectPreview && viewMode === 'source' && (
+              <button
+                type="button"
+                title={wordWrap ? 'Disable Word Wrap' : 'Enable Word Wrap'}
+                aria-label={wordWrap ? 'Disable Word Wrap' : 'Enable Word Wrap'}
+                onClick={() => setWordWrap((w) => !w)}
+                className={classNames(
+                  'rounded-lg p-1.5 transition-colors',
+                  wordWrap
+                    ? 'bg-sky-500/20 text-sky-400'
+                    : 'text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary'
+                )}
+              >
+                <WrapText className="h-4 w-4" />
+              </button>
+            )}
 
             {/* Read-only toggle */}
-            <button
-              type="button"
-              disabled={tailModeActive || saveBlocked}
-              title={
-                saveBlocked
-                  ? 'This file cannot be edited safely (truncated, binary or not UTF-8)'
-                  : tailModeActive
-                  ? 'Read-only during Tail -f mode'
-                  : readOnly
-                  ? 'Switch to Edit Mode'
-                  : 'Switch to Read-Only Mode'
-              }
-              onClick={() => setReadOnly((r) => !r)}
-              className={classNames(
-                'rounded-lg p-1.5 transition-colors disabled:opacity-40',
-                readOnly
-                  ? 'text-amber-400 hover:bg-app-surface-hover'
-                  : 'text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary'
-              )}
-            >
-              {readOnly ? <Lock className="h-4 w-4" /> : <Unlock className="h-4 w-4" />}
-            </button>
+            {!isDirectPreview && viewMode === 'source' && (
+              <button
+                type="button"
+                disabled={tailModeActive || saveBlocked}
+                title={
+                  saveBlocked
+                    ? 'This file cannot be edited safely (truncated, binary or not UTF-8)'
+                    : tailModeActive
+                    ? 'Read-only during Tail -f mode'
+                    : readOnly
+                    ? 'Switch to Edit Mode'
+                    : 'Switch to Read-Only Mode'
+                }
+                onClick={() => setReadOnly((r) => !r)}
+                className={classNames(
+                  'rounded-lg p-1.5 transition-colors disabled:opacity-40',
+                  readOnly
+                    ? 'text-amber-400 hover:bg-app-surface-hover'
+                    : 'text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary'
+                )}
+              >
+                {readOnly ? <Lock className="h-4 w-4" /> : <Unlock className="h-4 w-4" />}
+              </button>
+            )}
 
             {/* Reload from server */}
             <button
+              aria-label="Reload from storage"
               type="button"
               title="Reload from storage"
               disabled={loading || saving}
-              onClick={() => {
-                if (isDirty && !window.confirm('Discard unsaved changes and reload?')) return;
+              onClick={async () => {
+                if (
+                  isDirty &&
+                  !(await confirm({
+                    title: 'Reload from storage',
+                    message: 'Reloading discards your unsaved changes. Continue?',
+                    confirmLabel: 'Reload and discard',
+                    cancelLabel: 'Keep editing',
+                  }))
+                ) {
+                  return;
+                }
                 if (tailModeActive) {
                   void startTailSession();
                 } else {
@@ -729,7 +810,7 @@ export const FileEditorModal: React.FC<FileEditorModalProps> = ({
             {/* Open in external editor */}
             <button
               type="button"
-              title="Open in External Editor (auto-uploads on save)"
+              title={isDirectPreview ? 'Open in External App' : 'Open in External Editor (auto-uploads on save)'}
               disabled={externalLaunching || loading}
               onClick={() => void handleOpenExternal()}
               className="flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-medium text-txt-primary hover:bg-app-surface-hover transition-colors"
@@ -739,40 +820,59 @@ export const FileEditorModal: React.FC<FileEditorModalProps> = ({
               ) : (
                 <ExternalLink className="h-3.5 w-3.5 text-sky-400" />
               )}
-              <span className="hidden sm:inline">External Editor</span>
+              <span className="hidden sm:inline">{isDirectPreview ? 'External App' : 'External Editor'}</span>
             </button>
 
             {/* Save button */}
-            <button
-              type="button"
-              title="Save changes (Ctrl+S)"
-              disabled={!isDirty || readOnly || saving || loading || tailModeActive || saveBlocked}
-              onClick={() => void handleSave()}
-              className="flex items-center gap-1.5 rounded-lg bg-sky-500 px-3 py-1 text-xs font-semibold text-white shadow-sm hover:bg-sky-400 disabled:opacity-40 transition-colors ml-1"
-            >
-              {saving ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Save className="h-3.5 w-3.5" />
-              )}
-              <span>Save</span>
-            </button>
+            {!isDirectPreview && viewMode === 'source' && (
+              <button
+                type="button"
+                title="Save changes (Ctrl+S)"
+                disabled={!isDirty || readOnly || saving || loading || tailModeActive || saveBlocked}
+                onClick={() => void handleSave()}
+                className="flex items-center gap-1.5 rounded-lg bg-sky-500 px-3 py-1 text-xs font-semibold text-white shadow-sm hover:bg-sky-400 disabled:opacity-40 transition-colors ml-1"
+              >
+                {saving ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Save className="h-3.5 w-3.5" />
+                )}
+                <span>Save</span>
+              </button>
+            )}
+
+            {/* Detach to Tab */}
+            {!embedded && (
+              <button
+                type="button"
+                title="Detach to tab"
+                aria-label="Detach to tab"
+                onClick={handleDetachToTab}
+                className="rounded-lg p-1.5 text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary transition-colors ml-1"
+              >
+                <AppWindow className="h-4 w-4" />
+              </button>
+            )}
 
             {/* Maximize / Restore toggle */}
-            <button
-              type="button"
-              title={isMaximized ? 'Restore size' : 'Maximize editor'}
-              onClick={() => setIsMaximized((m) => !m)}
-              className="rounded-lg p-1.5 text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary transition-colors ml-1"
-            >
-              {isMaximized ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
-            </button>
+            {!embedded && (
+              <button
+                type="button"
+                title={isMaximized ? 'Restore size' : 'Maximize editor'}
+                aria-label={isMaximized ? 'Restore size' : 'Maximize editor'}
+                onClick={() => setIsMaximized((m) => !m)}
+                className="rounded-lg p-1.5 text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary transition-colors ml-1"
+              >
+                {isMaximized ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+              </button>
+            )}
 
             {/* Close button */}
             <button
               type="button"
-              title="Close editor (Esc)"
-              onClick={handleRequestClose}
+              title={embedded ? 'Close tab' : 'Close editor (Esc)'}
+              aria-label={embedded ? 'Close tab' : 'Close editor'}
+              onClick={() => void handleRequestClose()}
               className="rounded-lg p-1.5 text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary transition-colors ml-1"
             >
               <X className="h-4 w-4" />
@@ -850,7 +950,7 @@ export const FileEditorModal: React.FC<FileEditorModalProps> = ({
                 }
                 if (e.key === 'Escape') {
                   setShowSearch(false);
-                  textareaRef.current?.focus();
+                  editorRef.current?.focus();
                 }
               }}
               className="flex-1 bg-transparent text-xs text-txt-primary placeholder-txt-muted outline-none"
@@ -878,11 +978,13 @@ export const FileEditorModal: React.FC<FileEditorModalProps> = ({
             >
               Next
             </button>
-            <button aria-label="Close" title="Close"
+            <button
+              aria-label="Close"
+              title="Close"
               type="button"
               onClick={() => {
                 setShowSearch(false);
-                textareaRef.current?.focus();
+                editorRef.current?.focus();
               }}
               className="rounded p-1 text-txt-muted hover:text-txt-primary"
             >
@@ -893,12 +995,14 @@ export const FileEditorModal: React.FC<FileEditorModalProps> = ({
 
         {/* Error banner */}
         {error && (
-          <div className="flex items-center justify-between gap-2 border-b border-red-900/60 bg-red-950/40 px-3 py-1.5 text-xs text-red-300">
+          <div role="alert" className="flex items-center justify-between gap-2 border-b border-red-900/60 bg-red-950/40 px-3 py-1.5 text-xs text-red-300">
             <div className="flex items-center gap-1.5 truncate">
               <AlertCircle className="h-4 w-4 shrink-0 text-red-400" />
               <span className="truncate">{error}</span>
             </div>
-            <button aria-label="Close" title="Close"
+            <button
+              aria-label="Close"
+              title="Close"
               type="button"
               onClick={() => setError(null)}
               className="rounded p-0.5 hover:bg-red-900/40 text-red-300"
@@ -909,7 +1013,7 @@ export const FileEditorModal: React.FC<FileEditorModalProps> = ({
         )}
 
         {/* Binary warning banner */}
-        {isBinary && (
+        {isBinary && !isRasterImage && !isPdf && (
           <div className="flex items-center justify-between gap-2 border-b border-amber-900/60 bg-amber-950/40 px-3 py-1.5 text-xs text-amber-300">
             <div className="flex items-center gap-1.5">
               <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400" />
@@ -931,7 +1035,11 @@ export const FileEditorModal: React.FC<FileEditorModalProps> = ({
         {truncated && !tailModeActive && (
           <div className="flex items-center gap-1.5 border-b border-amber-900/60 bg-amber-950/40 px-3 py-1.5 text-xs text-amber-300">
             <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400" />
-            <span>File exceeds 5 MB. Displaying the first 5 MB (read-only, so the file cannot be overwritten with a partial copy).</span>
+            <span>
+              {isDirectPreview
+                ? 'File exceeds 100 MB. Displaying the first 100 MB.'
+                : 'File exceeds 5 MB. Displaying the first 5 MB (read-only, so the file cannot be overwritten with a partial copy).'}
+            </span>
           </div>
         )}
 
@@ -949,7 +1057,9 @@ export const FileEditorModal: React.FC<FileEditorModalProps> = ({
               <Code className="h-4 w-4 shrink-0 text-sky-400" />
               <span>{externalStatus}</span>
             </div>
-            <button aria-label="Close" title="Close"
+            <button
+              aria-label="Close"
+              title="Close"
               type="button"
               onClick={() => setExternalStatus(null)}
               className="rounded p-0.5 hover:bg-sky-900/40 text-sky-300"
@@ -966,7 +1076,83 @@ export const FileEditorModal: React.FC<FileEditorModalProps> = ({
               <Loader2 className="h-6 w-6 animate-spin text-sky-400" />
               <span>{tailModeActive ? 'Starting Tail -f stream...' : 'Loading file...'}</span>
             </div>
-          ) : isMarkdown && markdownPreview ? (
+          ) : isPdf ? (
+            <Suspense
+              fallback={
+                <div className="flex-1 flex items-center justify-center gap-2 text-txt-muted text-sm">
+                  <Loader2 className="h-5 w-5 animate-spin text-sky-400" />
+                  <span>Loading PDF...</span>
+                </div>
+              }
+            >
+              <PdfViewer
+                fileName={entry.name}
+                base64={base64}
+                onOpenExternal={handleOpenExternal}
+              />
+            </Suspense>
+          ) : isRasterImage ? (
+            <Suspense
+              fallback={
+                <div className="flex-1 flex items-center justify-center gap-2 text-txt-muted text-sm">
+                  <Loader2 className="h-5 w-5 animate-spin text-sky-400" />
+                  <span>Loading image...</span>
+                </div>
+              }
+            >
+              <ImageViewer
+                fileName={entry.name}
+                fileSize={loadedSize ?? entry.size}
+                mimeType={mimeType || 'image/png'}
+                base64={base64}
+              />
+            </Suspense>
+          ) : viewMode === 'preview' && isSvg ? (
+            <Suspense
+              fallback={
+                <div className="flex-1 flex items-center justify-center gap-2 text-txt-muted text-sm">
+                  <Loader2 className="h-5 w-5 animate-spin text-sky-400" />
+                  <span>Loading SVG...</span>
+                </div>
+              }
+            >
+              <ImageViewer
+                fileName={entry.name}
+                fileSize={loadedSize ?? entry.size}
+                mimeType="image/svg+xml"
+                svgContent={content}
+              />
+            </Suspense>
+          ) : viewMode === 'preview' && isHtml ? (
+            <Suspense
+              fallback={
+                <div className="flex-1 flex items-center justify-center gap-2 text-txt-muted text-sm">
+                  <Loader2 className="h-5 w-5 animate-spin text-sky-400" />
+                  <span>Loading HTML preview...</span>
+                </div>
+              }
+            >
+              <HtmlPreview
+                fileName={entry.name}
+                htmlContent={content}
+                onOpenInBrowser={handleOpenExternal}
+              />
+            </Suspense>
+          ) : viewMode === 'preview' && isCsv ? (
+            <Suspense
+              fallback={
+                <div className="flex-1 flex items-center justify-center gap-2 text-txt-muted text-sm">
+                  <Loader2 className="h-5 w-5 animate-spin text-sky-400" />
+                  <span>Loading CSV table...</span>
+                </div>
+              }
+            >
+              <CsvTablePreview
+                fileName={entry.name}
+                csvContent={content}
+              />
+            </Suspense>
+          ) : viewMode === 'preview' && isMarkdown ? (
             <div className="flex-1 h-full overflow-auto p-6">
               <div className="markdown-preview max-w-3xl mx-auto prose prose-sm sm:prose-base prose-headings:font-semibold prose-a:text-sky-400 prose-pre:bg-app-surface prose-pre:border prose-pre:border-border-subtle prose-code:text-sky-300">
                 <Suspense
@@ -987,94 +1173,115 @@ export const FileEditorModal: React.FC<FileEditorModalProps> = ({
               </div>
             </div>
           ) : (
-            <>
-              {/* Line Numbers Gutter */}
-              <div
-                ref={lineNumbersRef}
-                aria-hidden="true"
-                className="w-12 sm:w-14 shrink-0 select-none bg-app-surface border-r border-divider text-right font-mono text-xs leading-5 text-txt-muted py-2.5 pr-2.5 overflow-hidden"
-              >
-                {Array.from({ length: lineCount }, (_, i) => (
-                  <div key={i + 1} className="h-5 leading-5">
-                    {i + 1}
-                  </div>
-                ))}
-              </div>
-
-              {/* Text Area Container */}
-              <div className="relative flex-1 h-full min-w-0 overflow-hidden">
-                {/* Search Highlight Backdrop */}
-                {showSearch && searchQuery.trim() && searchMatches.length > 0 && (
-                  <div
-                    ref={backdropRef}
-                    aria-hidden="true"
-                    className={classNames(
-                      'absolute inset-0 pointer-events-none p-2.5 font-mono text-xs leading-5 overflow-hidden select-none z-0',
-                      wordWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'
-                    )}
-                  >
-                    {renderBackdrop()}
-                  </div>
-                )}
-
-                {/* Text Area */}
-                <textarea
-                  aria-label={`Contents of ${entry.name}`}
-                  ref={textareaRef}
-                  value={content}
-                  readOnly={readOnly || saving || tailModeActive}
-                  spellCheck={false}
-                  wrap={wordWrap ? 'soft' : 'off'}
-                  onChange={(e) => {
-                    setContent(e.target.value);
-                    updateCursorPosition();
-                  }}
-                  onScroll={handleScroll}
-                  onClick={updateCursorPosition}
-                  onKeyUp={updateCursorPosition}
-                  onSelect={updateCursorPosition}
-                  onKeyDown={handleKeyDown}
-                  className={classNames(
-                    'relative z-10 flex-1 h-full w-full bg-transparent p-2.5 font-mono text-xs leading-5 text-txt-primary outline-none resize-none overflow-auto border-none select-text',
-                    (readOnly || tailModeActive) && 'opacity-90'
-                  )}
-                  placeholder="Empty file"
-                />
-              </div>
-            </>
+            <CodeEditor
+              ref={editorRef}
+              value={content}
+              fileName={entry.name}
+              readOnly={readOnly || saving || tailModeActive}
+              wordWrap={wordWrap}
+              searchQuery={showSearch ? searchQuery : ''}
+              ariaLabel={`Contents of ${entry.name}`}
+              onChange={setContent}
+              onSave={() => void handleSave()}
+              onSearchRequested={() => {
+                setShowSearch(true);
+                setTimeout(() => searchInputRef.current?.focus(), 50);
+              }}
+              onCursorChange={setCursorPos}
+              onMatchesCountChange={(count) => {
+                if (!isMarkdown || viewMode !== 'preview') {
+                  setEditorMatchesCount(count);
+                }
+              }}
+              onScrollNearBottomChange={(nearBottom) => {
+                if (tailModeActive) {
+                  setAutoScroll(nearBottom);
+                }
+              }}
+            />
           )}
         </div>
 
         {/* Status Bar */}
-        <div className="flex items-center justify-between border-t border-divider bg-app-surface px-3 py-1.5 text-xs text-txt-muted select-none shrink-0 font-mono">
-          <div className="flex items-center gap-3">
-            <span>
-              Ln {cursorPos.line}, Col {cursorPos.col}
-            </span>
-            <span>{lineCount} lines</span>
-            <span>{content.length} chars</span>
-          </div>
-
-          <div className="flex items-center gap-3">
-            {saveStatus && (
-              <span className="text-txt-secondary">{saveStatus}</span>
-            )}
-            <span
-              className={classNames(
-                'font-sans uppercase text-2xs font-semibold px-1.5 py-0.5 rounded',
-                tailModeActive
-                  ? 'bg-emerald-500/20 text-emerald-400'
-                  : readOnly
-                  ? 'bg-amber-500/20 text-amber-400'
-                  : 'bg-sky-500/20 text-sky-400'
+        {!isRasterImage && (
+          <div className="flex items-center justify-between border-t border-divider bg-app-surface px-3 py-1.5 text-xs text-txt-muted select-none shrink-0 font-mono">
+            <div className="flex items-center gap-3">
+              {viewMode === 'source' && !isDirectPreview ? (
+                <>
+                  <span>
+                    Ln {cursorPos.line}, Col {cursorPos.col}
+                  </span>
+                  <span>{lineCount} lines</span>
+                  <span>{content.length} chars</span>
+                </>
+              ) : isPdf ? (
+                <span>PDF Document</span>
+              ) : isCsv && viewMode === 'preview' ? (
+                <span>Table View</span>
+              ) : (
+                <>
+                  <span>Preview Mode</span>
+                  <span>{lineCount} lines</span>
+                </>
               )}
-            >
-              {tailModeActive ? 'Tail -f' : isMarkdown && markdownPreview ? 'Preview' : readOnly ? 'Read-Only' : 'Edit'}
-            </span>
-            <span>UTF-8</span>
+            </div>
+
+            <div className="flex items-center gap-3">
+              {saveStatus && (
+                <span className="text-txt-secondary">{saveStatus}</span>
+              )}
+              <span
+                className={classNames(
+                  'font-sans uppercase text-2xs font-semibold px-1.5 py-0.5 rounded',
+                  tailModeActive
+                    ? 'bg-emerald-500/20 text-emerald-400'
+                    : isPdf
+                    ? 'bg-rose-500/20 text-rose-400'
+                    : hasDualMode && viewMode === 'preview'
+                    ? 'bg-sky-500/20 text-sky-400'
+                    : readOnly
+                    ? 'bg-amber-500/20 text-amber-400'
+                    : 'bg-sky-500/20 text-sky-400'
+                )}
+              >
+                {tailModeActive
+                  ? 'Tail -f'
+                  : isPdf
+                  ? 'PDF'
+                  : hasDualMode && viewMode === 'preview'
+                  ? previewLabel
+                  : readOnly
+                  ? 'Read-Only'
+                  : 'Edit'}
+              </span>
+              <span>{isPdf ? 'Binary' : 'UTF-8'}</span>
+            </div>
           </div>
-        </div>
+        )}
+    </div>
+  );
+
+  if (embedded) {
+    return (
+      <div
+        role="region"
+        aria-label={`Editing ${entry.name}`}
+        className="flex flex-col h-full w-full bg-app-card overflow-hidden"
+      >
+        {innerContent}
       </div>
+    );
+  }
+
+  return (
+    <div
+      ref={dialogRef}
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Editing ${entry.name}`}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-3 sm:p-5 animate-in fade-in duration-150"
+    >
+      {innerContent}
     </div>
   );
 };

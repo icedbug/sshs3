@@ -65,6 +65,28 @@ describe('SmartcardPinModal Component', () => {
     expect(input.type).toBe('password');
   });
 
+  it('puts focus in the PIN field as soon as the prompt appears, even from another element, and keeps Tab inside', () => {
+    const terminal = document.createElement('textarea');
+    document.body.appendChild(terminal);
+    terminal.focus();
+    render(<SmartcardPinModal />);
+
+    act(() => {
+      promptCallback!({ id: 'askpass-focus', prompt: "Enter PIN for 'Net iD PKCS#11':" });
+    });
+
+    const input = screen.getByTestId('smartcard-pin-input');
+    expect(input).toHaveFocus();
+
+    const dialog = screen.getByTestId('smartcard-pin-modal');
+    const buttons = dialog.querySelectorAll('button');
+    const last = buttons[buttons.length - 1];
+    last.focus();
+    fireEvent.keyDown(last, { key: 'Tab' });
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    terminal.remove();
+  });
+
   it('submits PIN and closes modal when OK button is clicked or Enter is pressed', async () => {
     render(<SmartcardPinModal />);
 

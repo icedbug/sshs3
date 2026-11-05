@@ -1,4 +1,5 @@
-import { X509Certificate, createHash, type KeyObject } from 'node:crypto';
+import { X509Certificate, type KeyObject } from 'node:crypto';
+import { exportSshWirePublicKey } from '../ca/sshPublicKeyFormat';
 
 /** Certificate details extracted for display in the "cached smartcard identities" UI. */
 export interface SmartcardCertificateDetails {
@@ -34,7 +35,7 @@ const AUTH_EKU_OIDS = new Set([
 // --- Minimal definite-length DER/BER TLV reader --------------------------------------------
 // X.509 certificates always use definite-length DER encoding, so a full BER parser isn't needed.
 
-interface Tlv {
+export interface Tlv {
   tag: number;
   /** Start of the value bytes (i.e. right after tag + length octets). */
   start: number;
@@ -43,22 +44,28 @@ interface Tlv {
 }
 
 function readLength(buf: Buffer, pos: number): { length: number; bytesRead: number } {
+  if (pos >= buf.length) throw new Error('DER: truncated length');
   const first = buf[pos];
   if ((first & 0x80) === 0) return { length: first, bytesRead: 1 };
   const numBytes = first & 0x7f;
+  // DER has no indefinite form; more than 4 length bytes cannot describe a certificate (and would
+  // overflow a 32-bit shift into a negative length, sending iterateChildren backwards forever).
+  if (numBytes < 1 || numBytes > 4 || pos + numBytes >= buf.length) throw new Error('DER: invalid length encoding');
   let length = 0;
-  for (let i = 0; i < numBytes; i++) length = (length << 8) | buf[pos + 1 + i];
+  for (let i = 0; i < numBytes; i++) length = length * 256 + buf[pos + 1 + i];
   return { length, bytesRead: 1 + numBytes };
 }
 
-function readTlv(buf: Buffer, pos: number): Tlv {
+export function readTlv(buf: Buffer, pos: number): Tlv {
+  if (pos >= buf.length) throw new Error('DER: truncated element');
   const tag = buf[pos];
   const { length, bytesRead } = readLength(buf, pos + 1);
   const start = pos + 1 + bytesRead;
+  if (start + length > buf.length) throw new Error('DER: element exceeds buffer');
   return { tag, start, end: start + length };
 }
 
-function* iterateChildren(buf: Buffer, start: number, end: number): Generator<Tlv> {
+export function* iterateChildren(buf: Buffer, start: number, end: number): Generator<Tlv> {
   let pos = start;
   while (pos < end) {
     const tlv = readTlv(buf, pos);
@@ -67,7 +74,7 @@ function* iterateChildren(buf: Buffer, start: number, end: number): Generator<Tl
   }
 }
 
-function decodeOid(buf: Buffer, start: number, end: number): string {
+export function decodeOid(buf: Buffer, start: number, end: number): string {
   const bytes = buf.subarray(start, end);
   const parts: number[] = [Math.floor(bytes[0] / 40), bytes[0] % 40];
   let value = 0;
@@ -188,61 +195,15 @@ function readKeyUsageFirstByte(der: Buffer): number | undefined {
 // `ssh-add -l` reports for the same key pair, without relying on CKA_ID/label conventions
 // that vary between PKCS#11 providers (OpenSC vs. Net iD vs. p11-kit).
 
-function encodeUint32(n: number): Buffer {
-  const b = Buffer.alloc(4);
-  b.writeUInt32BE(n, 0);
-  return b;
-}
-
-function encodeSshString(data: Buffer): Buffer {
-  return Buffer.concat([encodeUint32(data.length), data]);
-}
-
-function encodeMpint(bytesIn: Buffer): Buffer {
-  let bytes = bytesIn;
-  let i = 0;
-  while (i < bytes.length - 1 && bytes[i] === 0) i++;
-  bytes = bytes.subarray(i);
-  if (bytes.length === 0) bytes = Buffer.from([0]);
-  if (bytes[0] & 0x80) bytes = Buffer.concat([Buffer.from([0]), bytes]);
-  return encodeSshString(bytes);
-}
-
-const EC_CURVE_NAMES: Record<string, string> = {
-  'P-256': 'nistp256',
-  'P-384': 'nistp384',
-  'P-521': 'nistp521',
-};
-
-/** Builds the RFC 4253 wire-format public key blob SSH hashes to produce its fingerprint. */
-function buildSshWireKey(publicKey: KeyObject): Buffer | undefined {
-  if (publicKey.asymmetricKeyType === 'rsa') {
-    const jwk = publicKey.export({ format: 'jwk' }) as { n: string; e: string };
-    const n = Buffer.from(jwk.n, 'base64url');
-    const e = Buffer.from(jwk.e, 'base64url');
-    return Buffer.concat([encodeSshString(Buffer.from('ssh-rsa')), encodeMpint(e), encodeMpint(n)]);
-  }
-  if (publicKey.asymmetricKeyType === 'ec') {
-    const jwk = publicKey.export({ format: 'jwk' }) as { crv: string; x: string; y: string };
-    const curve = EC_CURVE_NAMES[jwk.crv];
-    if (!curve) return undefined;
-    const x = Buffer.from(jwk.x, 'base64url');
-    const y = Buffer.from(jwk.y, 'base64url');
-    const point = Buffer.concat([Buffer.from([0x04]), x, y]);
-    return Buffer.concat([
-      encodeSshString(Buffer.from(`ecdsa-sha2-${curve}`)),
-      encodeSshString(Buffer.from(curve)),
-      encodeSshString(point),
-    ]);
-  }
-  return undefined;
-}
-
+/** Only RSA and ECDSA keys are fingerprinted (the PKCS#11 authentication certificates this reads are never ed25519). */
 function computeSshFingerprint(publicKey: KeyObject): string | undefined {
-  const wireKey = buildSshWireKey(publicKey);
-  if (!wireKey) return undefined;
-  const digest = createHash('sha256').update(wireKey).digest('base64');
-  return `SHA256:${digest.replace(/=+$/, '')}`;
+  const type = publicKey.asymmetricKeyType;
+  if (type !== 'rsa' && type !== 'ec') return undefined;
+  try {
+    return exportSshWirePublicKey(publicKey).fingerprint;
+  } catch {
+    return undefined; // e.g. an EC curve OpenSSH has no name for
+  }
 }
 
 /**

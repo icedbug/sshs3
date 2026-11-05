@@ -24,6 +24,26 @@ export function findLeaf(node: PaneNode, id: string): PaneLeaf | null {
   return null;
 }
 
+/** Panes other than `exceptId` that hold a live or connectable session (not an empty placeholder). */
+export function countOtherSessionPanes(node: PaneNode, exceptId: string): number {
+  return collectLeaves(node).filter(
+    (leaf) => leaf.id !== exceptId && Boolean(leaf.config || leaf.local || leaf.k8sTarget || leaf.k8sLogTarget)
+  ).length;
+}
+
+/** True for a plain local-shell pane (the same precedence PaneLeafContent uses to pick the view). */
+export function isLocalShellLeaf(leaf: PaneLeaf): boolean {
+  return Boolean(leaf.local && !leaf.config && !leaf.k8sTarget && !leaf.k8sLogTarget);
+}
+
+/**
+ * Two or more local shells in one tab would each sample and draw the same machine's metrics, so the tab shows
+ * a single shared bar instead. A lone local pane keeps its own bar.
+ */
+export function shouldHoistLocalPerf(node: PaneNode): boolean {
+  return collectLeaves(node).filter(isLocalShellLeaf).length >= 2;
+}
+
 export function getFirstLeafId(node: PaneNode): string {
   return node.type === 'leaf' ? node.id : getFirstLeafId(node.children[0]);
 }
@@ -48,6 +68,21 @@ export function updateLeaf(node: PaneNode, id: string, updater: (leaf: PaneLeaf)
   let changed = false;
   const children = node.children.map((c) => {
     const next = updateLeaf(c, id, updater);
+    if (next !== c) changed = true;
+    return next;
+  });
+  return changed ? { ...node, children } : node;
+}
+
+/** Returns a new tree with the split node `splitId`'s `weights` set (§23) — other nodes keep
+ * their identity, same convention as `updateLeaf`. No-op (returns the same tree) if `splitId`
+ * isn't found or isn't a split. */
+export function updateSplitWeights(node: PaneNode, splitId: string, weights: number[]): PaneNode {
+  if (node.type === 'leaf') return node;
+  if (node.id === splitId) return { ...node, weights };
+  let changed = false;
+  const children = node.children.map((c) => {
+    const next = updateSplitWeights(c, splitId, weights);
     if (next !== c) changed = true;
     return next;
   });

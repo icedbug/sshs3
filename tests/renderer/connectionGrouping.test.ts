@@ -35,6 +35,25 @@ describe('connectionGrouping', () => {
     expect(filterS3Profiles(buckets, 'us-east').map((p) => p.id)).toEqual(['b']);
   });
 
+  it('matches tags in the SSH and S3 filters, with or without a leading #, and keeps the input order', () => {
+    const profiles = [ssh('a', { tags: ['Prod', 'web'] }), ssh('b'), ssh('c', { tags: ['db', 'prod-eu'] })];
+    expect(filterSshProfiles(profiles, 'prod').map((p) => p.id)).toEqual(['a', 'c']);
+    expect(filterSshProfiles(profiles, '#prod').map((p) => p.id)).toEqual(['a', 'c']);
+    expect(filterSshProfiles(profiles, '#db').map((p) => p.id)).toEqual(['c']);
+    expect(filterSshProfiles(profiles, '#').map((p) => p.id)).toEqual([]);
+
+    const buckets = [s3('x', { tags: ['assets'] }), s3('y')];
+    expect(filterS3Profiles(buckets, '#assets').map((p) => p.id)).toEqual(['x']);
+    expect(filterS3Profiles(buckets, 'asset').map((p) => p.id)).toEqual(['x']);
+  });
+
+  it('matches the name of the system a profile belongs to, so a search for the system shows all its servers', () => {
+    const profiles = [ssh('a', { system: { name: 'Shop' } }), ssh('b', { system: { name: 'shop checkout' } }), ssh('c')];
+    expect(filterSshProfiles(profiles, 'shop').map((p) => p.id)).toEqual(['a', 'b']);
+    expect(filterSshProfiles(profiles, 'checkout').map((p) => p.id)).toEqual(['b']);
+    expect(filterSshProfiles(profiles, 'nope')).toEqual([]);
+  });
+
   it('collects saved folders and profile groups, sorted and trimmed', () => {
     expect(collectFolderNames(['Zeta'], [ssh('a', { group: ' Alpha ' })], [s3('b', { group: 'Mid' })])).toEqual([
       'Alpha',

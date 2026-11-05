@@ -17,7 +17,12 @@ import type { DotfileImportedFile } from '@shared/types/dotfiles';
 import { DotfilePoolFileTable, type DotfileSourceStatus } from './DotfilePoolFileTable';
 import { Button } from '../ui/Button';
 import { useModalDismiss } from '../../lib/useModalDismiss';
+import { useDialogFocus } from '../../lib/useDialogFocus';
+import { useConfirm } from '../ConfirmDialog';
 import { createRendererLogger } from '../../lib/log';
+import { isFeatureBlocked, usePolicy } from '../../lib/usePolicy';
+import { formatDateTime } from '../../lib/dateFormat';
+import { FeatureBlockedNotice } from './Managed';
 const log = createRendererLogger('DotfilePoolManagerModal');
 
 interface DotfilePoolManagerModalProps {
@@ -25,14 +30,7 @@ interface DotfilePoolManagerModalProps {
   onClose: () => void;
 }
 
-function formatTimestamp(d = new Date()): string {
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
-  const hh = String(d.getHours()).padStart(2, '0');
-  const min = String(d.getMinutes()).padStart(2, '0');
-  return `${yyyy}-${mm}-${dd} ${hh}:${min}`;
-}
+const formatTimestamp = (): string => formatDateTime(new Date());
 
 /** Stable fingerprint of what Save would persist (ignores timestamps), used for the unsaved-changes indicator. */
 function poolSnapshot(pool: DotfilePool): string {
@@ -68,6 +66,7 @@ export const DotfilePoolManagerModal: React.FC<DotfilePoolManagerModalProps> = (
 
   // Git import state
   const [gitImportOpen, setGitImportOpen] = useState(false);
+  const gitImportBlocked = isFeatureBlocked(usePolicy(), 'dotfileGitImport');
   const [gitImportUrl, setGitImportUrl] = useState('');
   const [gitImporting, setGitImporting] = useState(false);
   const [gitImportError, setGitImportError] = useState<string | null>(null);
@@ -119,6 +118,11 @@ export const DotfilePoolManagerModal: React.FC<DotfilePoolManagerModalProps> = (
   // Escape closes; a stray backdrop click would discard typed input, so it is intentionally ignored.
   useModalDismiss(onClose, open);
   useModalDismiss(() => setGitImportOpen(false), gitImportOpen, !gitImporting);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const confirm = useConfirm();
+  const gitImportDialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(dialogRef, open);
+  useDialogFocus(gitImportDialogRef, gitImportOpen);
   if (!open) return null;
 
   const dirty = draft ? savedSnapshot === null || poolSnapshot(draft) !== savedSnapshot : false;
@@ -303,6 +307,13 @@ export const DotfilePoolManagerModal: React.FC<DotfilePoolManagerModalProps> = (
   };
 
   const handleDelete = async (id: string) => {
+    const name = pools.find((p) => p.id === id)?.name ?? draft?.name ?? 'this pool';
+    const confirmed = await confirm({
+      title: 'Delete dotfile pool',
+      message: `Delete the pool "${name}"? Its files and master directory on this device are removed, and the deletion syncs to your other devices. This cannot be undone.`,
+      confirmLabel: 'Delete pool',
+    });
+    if (!confirmed) return;
     await window.multissh.dotfilePoolsDelete(id);
     setSelectedId(null);
     setDraft(null);
@@ -311,7 +322,7 @@ export const DotfilePoolManagerModal: React.FC<DotfilePoolManagerModalProps> = (
 
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/65 p-4">
-      <div role="dialog" aria-modal="true" aria-label="Dotfile pools and master files" className="flex h-[600px] w-full max-w-3xl flex-col rounded-xl border border-border-subtle bg-app-card shadow-2xl overflow-hidden">
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Dotfile pools and master files" className="flex h-[600px] w-full max-w-3xl flex-col rounded-xl border border-border-subtle bg-app-card shadow-2xl overflow-hidden">
         <div className="flex h-12 shrink-0 items-center justify-between border-b border-divider bg-app-surface px-5">
           <div className="flex items-center gap-2.5">
             <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-sky-500/10 text-sky-400">
@@ -322,7 +333,9 @@ export const DotfilePoolManagerModal: React.FC<DotfilePoolManagerModalProps> = (
               <p className="text-xs text-txt-muted">Choose the files that are synced to your servers</p>
             </div>
           </div>
-          <button aria-label="Close" title="Close"
+          <button
+            aria-label="Close"
+            title="Close"
             type="button"
             onClick={onClose}
             className="rounded-lg p-1.5 text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
@@ -344,16 +357,19 @@ export const DotfilePoolManagerModal: React.FC<DotfilePoolManagerModalProps> = (
               </button>
               <button
                 type="button"
+                disabled={gitImportBlocked}
+                aria-describedby={gitImportBlocked ? 'dotfile-git-import-blocked' : undefined}
                 onClick={() => {
                   setGitImportError(null);
                   setGitImportOpen(true);
                 }}
-                className="flex items-center justify-center gap-1 rounded-lg border border-border-subtle bg-app-surface-subtle px-2 py-1.5 text-xs font-medium text-sky-400 hover:bg-app-surface-hover transition-colors"
+                className="flex items-center justify-center gap-1 disabled:opacity-50 rounded-lg border border-border-subtle bg-app-surface-subtle px-2 py-1.5 text-xs font-medium text-sky-400 hover:bg-app-surface-hover transition-colors"
               >
                 <GitBranch className="h-3.5 w-3.5" />
                 From Git
               </button>
             </div>
+            <FeatureBlockedNotice blocked={gitImportBlocked} id="dotfile-git-import-blocked" />
             {loading ? (
               <div className="flex items-center justify-center py-4 text-txt-muted">
                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -526,13 +542,15 @@ export const DotfilePoolManagerModal: React.FC<DotfilePoolManagerModalProps> = (
 
       {gitImportOpen && (
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4">
-          <div role="dialog" aria-modal="true" aria-label="Import dotfiles from Git" className="flex w-full max-w-md flex-col rounded-xl border border-border-subtle bg-app-card shadow-2xl overflow-hidden">
+          <div ref={gitImportDialogRef} role="dialog" aria-modal="true" aria-label="Import dotfiles from Git" className="flex w-full max-w-md flex-col rounded-xl border border-border-subtle bg-app-card shadow-2xl overflow-hidden">
             <div className="flex items-center justify-between border-b border-divider bg-app-surface px-4 py-3">
               <div className="flex items-center gap-2">
                 <GitBranch className="h-4 w-4 text-sky-400" />
                 <span className="text-sm font-semibold text-txt-primary">Import Dotfiles from Git</span>
               </div>
-              <button aria-label="Close" title="Close"
+              <button
+                aria-label="Close"
+                title="Close"
                 type="button"
                 onClick={() => setGitImportOpen(false)}
                 disabled={gitImporting}
@@ -556,7 +574,7 @@ export const DotfilePoolManagerModal: React.FC<DotfilePoolManagerModalProps> = (
                 className="w-full rounded-lg border border-border-subtle bg-app-surface px-3 py-2 text-txt-primary placeholder:text-txt-muted/60 focus:border-sky-500 focus:outline-none"
               />
               {gitImportError && (
-                <div className="flex items-start gap-1.5 rounded-lg border border-red-500/30 bg-red-500/10 p-2.5 text-red-300">
+                <div role="alert" className="flex items-start gap-1.5 rounded-lg border border-red-500/30 bg-red-500/10 p-2.5 text-red-300">
                   <ShieldAlert className="h-3.5 w-3.5 mt-0.5 shrink-0" />
                   <span>{gitImportError}</span>
                 </div>

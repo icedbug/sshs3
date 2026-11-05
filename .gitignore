@@ -25,6 +25,16 @@ GEMINI.md
 *.gemini*
 *.claude*
 .antigravity/
+skills-lock.json
+AI-*.md
+*-audit.md
+
+# Design specifications & roadmaps (local only)
+docs/*plan*.md
+todo.md
+
+# Audit reports and working notes (local only; docs/audit/FIXES.md was committed earlier and stays tracked)
+docs/audit/
 
 
 # Test coverage output

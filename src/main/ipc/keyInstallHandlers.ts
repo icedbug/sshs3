@@ -18,7 +18,7 @@ export type KeyInstallHost = Pick<
 > & {
   smartcard: Pick<
     SmartcardCoordinator,
-    'appAgentSocketIfUnlocked' | 'cleanupSmartcardSessionAgent' | 'listSessionAgents' | 'prepareFido2SftpConfig' | 'prepareSftpSmartcardConfig'
+    'appAgentSocketIfUnlocked' | 'cleanupSmartcardSessionAgent' | 'listSessionAgents' | 'prepareFido2SftpConfig' | 'prepareSftpSmartcardConfig' | 'prepareSshCaConfig'
   >;
 };
 
@@ -63,6 +63,7 @@ export function registerKeyInstallHandlers(bridge: KeyInstallHost): void {
   const prepareHardware = async (config: SSHConnectionConfig, agentId: string): Promise<SSHConnectionConfig> => {
     let prepared = (await bridge.smartcard.prepareSftpSmartcardConfig(config as unknown as SFTPConfig, agentId)) as unknown as SSHConnectionConfig;
     prepared = (await bridge.smartcard.prepareFido2SftpConfig(prepared as unknown as SFTPConfig, agentId)) as unknown as SSHConnectionConfig;
+    prepared = await bridge.smartcard.prepareSshCaConfig(prepared);
     return prepared;
   };
 

@@ -36,6 +36,7 @@ import { DirSyncSavedProfilesModal } from './DirSyncSavedProfilesModal';
 import { classNames, formatBytes, formatDateTime, describeIpcError } from '../../lib/format';
 import type { SourceType } from './types';
 import { useEscapeToClose } from '../../lib/useModalDismiss';
+import { useDialogFocus } from '../../lib/useDialogFocus';
 
 /** Last path segment, used to preview the nested sync root under the chosen target parent. */
 function baseName(path: string): string {
@@ -252,6 +253,8 @@ export const DirectorySyncModal: React.FC<DirectorySyncModalProps> = ({
   }, [diff, included, deleteExtraneous]);
 
   useEscapeToClose(onClose, open);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(dialogRef, open);
 
   // Reset + prefill only on the rising edge of `open` (closed -> open), not
   // on every re-render while already open — otherwise an unrelated prop
@@ -324,7 +327,7 @@ export const DirectorySyncModal: React.FC<DirectorySyncModalProps> = ({
       setDiff(result);
       const initialIncluded: Record<string, boolean> = {};
       for (const entry of result.entries) {
-        initialIncluded[entry.relativePath] = entry.status !== 'only-target';
+        initialIncluded[entry.relativePath] = entry.status !== 'only-target' && entry.status !== 'conflict';
       }
       setIncluded(initialIncluded);
       setStep('diff');
@@ -449,8 +452,9 @@ export const DirectorySyncModal: React.FC<DirectorySyncModalProps> = ({
   };
 
   const grouped = useMemo(() => {
-    if (!diff) return { new: [], changed: [], onlyTarget: [] } as Record<string, DirectoryDiffEntry[]>;
+    if (!diff) return { new: [], changed: [], onlyTarget: [], conflict: [] } as Record<string, DirectoryDiffEntry[]>;
     return {
+      conflict: diff.entries.filter((e) => e.status === 'conflict'),
       new: diff.entries.filter((e) => e.status === 'new'),
       changed: diff.entries.filter((e) => e.status === 'changed'),
       onlyTarget: diff.entries.filter((e) => e.status === 'only-target'),
@@ -517,6 +521,7 @@ export const DirectorySyncModal: React.FC<DirectorySyncModalProps> = ({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 animate-in fade-in duration-150">
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-label="Sync Directory"
@@ -544,6 +549,7 @@ export const DirectorySyncModal: React.FC<DirectorySyncModalProps> = ({
               {isMaximized ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
             </button>
             <button
+              aria-label="Close (Esc)"
               type="button"
               title="Close (Esc)"
               onClick={onClose}
@@ -556,7 +562,7 @@ export const DirectorySyncModal: React.FC<DirectorySyncModalProps> = ({
 
         <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-4 text-xs text-txt-secondary">
           {error && (
-            <div className="flex items-start gap-2 rounded-lg border border-red-800/80 bg-red-950/40 p-2.5 text-xs text-red-300">
+            <div role="alert" className="flex items-start gap-2 rounded-lg border border-red-800/80 bg-red-950/40 p-2.5 text-xs text-red-300">
               <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
               <span>{error}</span>
             </div>
@@ -713,7 +719,7 @@ export const DirectorySyncModal: React.FC<DirectorySyncModalProps> = ({
 
               {/* Direction Indicator */}
               <div className="flex flex-col items-center justify-center gap-1 px-1 py-1">
-                <div className="flex items-center justify-center w-8 h-8 rounded-full bg-sky-500/15 border border-sky-500/30 text-sky-400">
+                <div className="flex items-center justify-center w-8 h-8 rounded-md bg-sky-500/15 border border-sky-500/30 text-sky-400">
                   <ArrowRight className="h-4 w-4" />
                 </div>
                 <span className="text-2xs font-semibold text-txt-muted uppercase tracking-wider whitespace-nowrap">
@@ -760,6 +766,20 @@ export const DirectorySyncModal: React.FC<DirectorySyncModalProps> = ({
                 </div>
               )}
 
+              {(diff.skippedSymlinks.source.length > 0 || diff.skippedSymlinks.target.length > 0) && (
+                <div className="rounded-lg border border-border-subtle bg-app-surface p-2 text-xs text-txt-muted">
+                  {(['source', 'target'] as const).map((side) =>
+                    diff.skippedSymlinks[side].length > 0 ? (
+                      <div key={side}>
+                        {diff.skippedSymlinks[side].length} symbolic link(s) in the {side} are not synced:{' '}
+                        {diff.skippedSymlinks[side].slice(0, 5).join(', ')}
+                        {diff.skippedSymlinks[side].length > 5 ? ', …' : ''}
+                      </div>
+                    ) : null
+                  )}
+                </div>
+              )}
+
               {/* Mirror / Safe Sync policy banner & toggle */}
               <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border-subtle bg-app-surface px-3 py-2 text-xs">
                 <div className="flex items-center gap-2">
@@ -785,6 +805,21 @@ export const DirectorySyncModal: React.FC<DirectorySyncModalProps> = ({
                   <span>Enable mirror (delete extraneous files in target)</span>
                 </label>
               </div>
+
+              {diff.counts.conflict > 0 && (
+                <div
+                  role="alert"
+                  className="flex items-start gap-2 rounded-lg border border-amber-800/80 bg-amber-950/40 p-2.5 text-xs text-amber-300"
+                >
+                  <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                  <span>
+                    {diff.counts.conflict === 1
+                      ? '1 path is a file on one side and a folder on the other.'
+                      : `${diff.counts.conflict} paths are a file on one side and a folder on the other.`}{' '}
+                    They are not copied or deleted, and nothing below them is compared. Rename or remove one side, then scan again.
+                  </span>
+                </div>
+              )}
 
               {/* Stat Cards */}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center">
@@ -829,6 +864,45 @@ export const DirectorySyncModal: React.FC<DirectorySyncModalProps> = ({
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-divider">
+                      {grouped.conflict.length > 0 && (
+                        <React.Fragment key="conflict">
+                          <tr className="bg-app-surface-hover/50">
+                            <td colSpan={3} className="px-2 py-1.5">
+                              <span className="flex items-center gap-1.5 text-xs font-semibold text-amber-400">
+                                <AlertTriangle className="h-3.5 w-3.5" />
+                                File and folder with the same name ({grouped.conflict.length}) — skipped
+                              </span>
+                            </td>
+                          </tr>
+                          {grouped.conflict.map((entry) => (
+                            <tr key={entry.relativePath}>
+                              <td className="px-2 py-1.5 align-top">
+                                <span title="Skipped: file on one side, folder on the other" className="inline-flex">
+                                  <AlertTriangle className="h-3.5 w-3.5 text-amber-400 mt-0.5" />
+                                </span>
+                              </td>
+                              <td className="px-2 py-1.5 align-top max-w-0">
+                                <div className="font-mono text-txt-primary truncate">{entry.relativePath}</div>
+                                <div className="mt-1 space-y-0.5 text-xs leading-snug text-txt-muted">
+                                  <div>
+                                    <span className="text-txt-secondary font-medium">Source:</span>{' '}
+                                    {entry.sourceEntry?.isDirectory ? 'folder' : 'file'}
+                                  </div>
+                                  <div>
+                                    <span className="text-txt-secondary font-medium">Target:</span>{' '}
+                                    {entry.targetEntry?.isDirectory ? 'folder' : 'file'}
+                                  </div>
+                                </div>
+                              </td>
+                              <td className="px-2 py-1.5 align-top text-right pr-3">
+                                <span className="inline-flex items-center gap-1 rounded bg-amber-500/15 border border-amber-500/30 px-2 py-0.5 text-xs font-medium text-amber-400 whitespace-nowrap">
+                                  Skipped (type conflict)
+                                </span>
+                              </td>
+                            </tr>
+                          ))}
+                        </React.Fragment>
+                      )}
                       {(['new', 'changed', 'only-target'] as const).map((status) => {
                         const entries =
                           status === 'new' ? grouped.new : status === 'changed' ? grouped.changed : grouped.onlyTarget;

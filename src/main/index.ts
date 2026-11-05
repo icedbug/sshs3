@@ -1,11 +1,13 @@
-import { app, BrowserWindow, Menu, nativeImage, Tray } from 'electron';
+import crypto from 'node:crypto';
+import { app, BrowserWindow, Menu, nativeImage, safeStorage, screen, Tray } from 'electron';
 import { createHub } from './ai/hub/createHub';
+import { isDemoMode } from './ai/hub/demoWorkspace';
 import { NativeDesktopShell } from './ai/desktop/NativeDesktopShell';
 import { getNativeWindow } from './ai/desktop/nativeWindow';
 import { nativeTools, setNativeHub } from './ai/desktop/nativeTools';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { IpcBridge } from './IpcBridge';
 import { showSplash, type SplashController } from './splash/SplashWindow';
 import { SystemTrustStore } from './crypto/SystemTrustStore';
@@ -13,11 +15,41 @@ import { AgentLifecycleManager } from './ssh/AgentLifecycleManager';
 import { applyLoginShellEnv } from './ssh/LoginShellEnv';
 import { configureRegistryDir } from './ssh/AgentRegistry';
 import { isEncryptionAvailable } from './crypto/SecretFieldCrypto';
+import { WindowManager } from './windows/WindowManager';
+import { createAppWindow } from './windows/createAppWindow';
+import { placeNewWindow, resolveWindowBounds, type Rect } from './windows/windowBounds';
+import type { WindowActions } from './windows/WindowManager';
+import { IPC_CHANNELS, type TabHandoff } from '../shared/types/ipc';
+import { restorableWindows } from './session/windowSessions';
+import type { SessionData } from '../shared/types/session';
 import { configureLogging, createLogger, flushLogs, resolveLogLevel, setLogLevel } from './log';
+import { resolvePasswordStore } from './crypto/passwordStore';
+import { loadPolicy } from './policy/loadPolicy';
 
 app.setName('sshs3');
 if (process.platform === 'linux') {
   app.setDesktopName('sshs3.desktop');
+  // Chromium's os_crypt auto-detection picks the native 'kwallet6' backend on a KDE session
+  // (safeStorage.isEncryptionAvailable() === true, getSelectedStorageBackend() === 'kwallet6'),
+  // but on at least one real KDE Plasma 6 / kwalletd6 setup that backend never actually writes
+  // the encryption key into KWallet — confirmed by inspecting KWallet's on-disk store directly
+  // (~/.local/share/kwalletd/kdewallet_attributes.json) before and after an encrypt call: no
+  // entry appears, and no file mtime changes, even though encryptString() "succeeds". The key
+  // then lives only in that process's memory, so every restart gets a fresh one and everything
+  // encrypted in a prior run (saved passwords, Team Vault's S3 secret, ...) becomes
+  // undecryptable — surfacing downstream as garbage credentials (e.g. AWS SignatureDoesNotMatch).
+  //
+  // Forcing 'gnome-libsecret' instead routes through ksecretd (KWallet's freedesktop Secret
+  // Service compatibility layer) via libsecret, verified via `secret-tool search` to actually
+  // persist the key and survive a restart. This used to be gated on detecting a KDE session via
+  // XDG_CURRENT_DESKTOP/KDE_FULL_SESSION, but that's unreliable: a real user's app process
+  // (launched via `npm run dev:prod` from their own terminal) had neither variable in its
+  // environment at all, despite genuinely running on KDE, so the override silently never
+  // applied and the bug kept recurring. Apply it unconditionally on Linux instead:
+  // gnome-libsecret is also the normal, already-working backend on a vanilla GNOME session, and
+  // if no Secret-Service-compatible store exists at all, Chromium just falls back to
+  // 'basic_text', which the `!isEncryptionAvailable()` check below already warns about.
+  app.commandLine.appendSwitch('password-store', resolvePasswordStore(process.env, app.isPackaged));
 }
 
 // Redirect userData to <exe-dir>/data if running as a portable executable (set by electron-builder)
@@ -44,12 +76,13 @@ if (!nativeHermes && !demoMode && process.env.NODE_ENV !== 'test' && !process.en
     app.quit();
   } else {
     app.on('second-instance', () => {
-      if (mainWindow) {
-        if (mainWindow.isMinimized()) {
-          mainWindow.restore();
+      const win = windowManager.focused();
+      if (win) {
+        if (win.isMinimized()) {
+          win.restore();
         }
-        mainWindow.focus();
-        mainWindow.show();
+        win.focus();
+        win.show();
       }
     });
   }
@@ -135,6 +168,11 @@ process.on('unhandledRejection', (reason) => {
   log.error('unhandled promise rejection in main process', reason);
 });
 
+// Every renderer window; routes IPC events to the right one (see windows/WindowManager).
+const windowManager = new WindowManager<BrowserWindow>();
+// Secondary windows whose close was confirmed (or needs no confirmation) and may now go through.
+const closeConfirmed = new Set<number>();
+// The main window (key null), or the native Hermes host window; used by the AI Hub and its tray.
 let mainWindow: BrowserWindow | null = null;
 let nativeShell: NativeDesktopShell | null = null;
 let backgroundTray: Tray | null = null;
@@ -193,93 +231,141 @@ async function confirmQuit(): Promise<boolean> {
   return true;
 }
 
-async function createWindow(): Promise<BrowserWindow> {
-  if (nativeHermes) {
-    mainWindow = await getNativeWindow();
-    if (!nativeShell) nativeShell = new NativeDesktopShell(mainWindow, path.join(__dirname, 'index.cjs'), path.join(__dirname, '../dist/index.html'));
-    mainWindow.once('closed', () => { nativeShell = null; mainWindow = null; });
-    return mainWindow;
-  }
-  const iconPath = process.env.VITE_DEV_SERVER_URL
-    ? path.join(__dirname, '../../build/icon.png')
-    : path.join(__dirname, '../build/icon.png');
-  const appIcon = nativeImage.createFromPath(iconPath);
+/**
+ * Native Hermes mode: Hermes owns the host window and sshs3 runs as a view inside it (see
+ * ./ai/desktop/NativeDesktopShell), so no regular app window is created.
+ */
+async function createNativeHermesWindow(): Promise<BrowserWindow> {
+  mainWindow = await getNativeWindow();
+  if (!nativeShell) nativeShell = new NativeDesktopShell(mainWindow, path.join(__dirname, 'index.cjs'), path.join(__dirname, '../dist/index.html'));
+  mainWindow.once('closed', () => { nativeShell = null; mainWindow = null; });
+  return mainWindow;
+}
 
-  mainWindow = new BrowserWindow({
-    width: demoMode ? 1480 : 1200,
-    height: demoMode ? 920 : 800,
-    icon: appIcon,
+/** Bounds changes are saved after the window has been still for this long. */
+const BOUNDS_SAVE_DEBOUNCE_MS = 500;
+
+function currentWorkAreas(): { workAreas: Rect[]; primary: Rect } {
+  return {
+    workAreas: screen.getAllDisplays().map((d) => d.workArea),
+    primary: screen.getPrimaryDisplay().workArea,
+  };
+}
+
+/** Bounds for a new window: on the monitor the pointer is on, cascaded from the focused window. */
+function boundsForNewWindow(): Rect {
+  const cursorWorkArea = screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea;
+  const focused = windowManager.focused();
+  const focusedInfo =
+    focused && !focused.isDestroyed()
+      ? { bounds: focused.getNormalBounds(), workArea: screen.getDisplayMatching(focused.getBounds()).workArea }
+      : null;
+  return placeNewWindow(cursorWorkArea, focusedInfo);
+}
+
+/**
+ * Creates a window. `key` is its persistence key: null for the main window (whose tabs are the
+ * top-level session fields), a string for secondary windows. Saved bounds are checked against the
+ * monitors that are connected now, so a window saved on an unplugged monitor reopens on the primary.
+ */
+function createWindow(key: string | null = null, saved?: { bounds?: Rect; maximized?: boolean }): BrowserWindow {
+  const isMain = key === null;
+  const { workAreas, primary } = currentWorkAreas();
+  const devServerUrl = process.env.VITE_DEV_SERVER_URL || undefined;
+
+  const htmlPath = path.join(__dirname, '../dist/index.html');
+  // Demo mode: the renderer detects it via ?demo=1, so the page is loaded with that query
+  // (as a file:// URL in production, since createAppWindow's loadFile takes no query).
+  const loadUrl = demoMode
+    ? devServerUrl
+      ? `${devServerUrl}${devServerUrl.includes('?') ? '&' : '?'}demo=1`
+      : `${pathToFileURL(htmlPath).href}?demo=1`
+    : devServerUrl;
+
+  const win = createAppWindow({
+    bounds: saved?.bounds ? resolveWindowBounds(saved.bounds, workAreas, primary) : undefined,
+    maximized: saved?.maximized,
     // On Windows the splash stays up until the renderer has loaded, so the main
     // window is created hidden instead of flashing an empty frame.
-    show: process.platform !== 'win32' && !(process.argv.includes('--background') && ipcBridge?.aiHub?.background),
-    webPreferences: {
-      preload: path.join(__dirname, 'index.cjs'),
-      sandbox: true,
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
+    show:
+      !(isMain && process.platform === 'win32') &&
+      !(isMain && process.argv.includes('--background') && ipcBridge?.aiHub?.background),
+    preloadPath: path.join(__dirname, 'index.cjs'),
+    iconPath: devServerUrl ? path.join(__dirname, '../../build/icon.png') : path.join(__dirname, '../build/icon.png'),
+    devServerUrl: loadUrl,
+    htmlPath,
   });
 
-  if (!appIcon.isEmpty()) {
-    mainWindow.setIcon(appIcon);
+  if (demoMode && isMain && !saved?.bounds) {
+    win.setSize(1480, 920);
+    win.center();
   }
 
-  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  const windowId = win.webContents.id;
+  windowManager.register(win, key);
+  if (isMain) mainWindow = win;
+  win.on('focus', () => windowManager.setFocused(windowId));
 
-  mainWindow.webContents.on('will-navigate', (event, navigationUrl) => {
-    if (process.env.VITE_DEV_SERVER_URL && navigationUrl.startsWith(process.env.VITE_DEV_SERVER_URL)) {
-      return;
+  // Remember where the window is (debounced; the normal bounds, so un-maximizing restores them).
+  // Demo mode leaves the real session untouched, like SESSION_SAVE does.
+  let boundsTimer: NodeJS.Timeout | undefined;
+  const saveBounds = (): void => {
+    if (isDemoMode() || win.isDestroyed() || win.isMinimized() || win.isFullScreen()) return;
+    void ipcBridge?.sessionStore.saveWindowBounds(key, win.getNormalBounds(), win.isMaximized()).catch(() => {});
+  };
+  const scheduleSaveBounds = (): void => {
+    clearTimeout(boundsTimer);
+    boundsTimer = setTimeout(saveBounds, BOUNDS_SAVE_DEBOUNCE_MS);
+  };
+  win.on('resize', scheduleSaveBounds);
+  win.on('move', scheduleSaveBounds);
+  win.once('ready-to-show', saveBounds);
+
+  win.on('close', (event) => {
+    clearTimeout(boundsTimer);
+    saveBounds();
+    if (isQuitting || closeConfirmed.has(windowId)) return;
+    event.preventDefault();
+    if (isMain) {
+      if (ipcBridge?.aiHub?.background) { win.hide(); return; }
+      // Always defer to app.quit() (handled by 'before-quit' below) instead of
+      // letting the window close on its own, so a plain window-close ("X" the
+      // window) goes through the same graceful shutdown — ipcBridge.dispose(),
+      // killing SSH tunnels/agents — as Cmd+Q or the app menu, rather than
+      // tearing everything down hard. Closing the main window therefore closes
+      // every other window too.
+      void (async () => {
+        if (!(await confirmQuit())) return;
+        app.quit();
+      })();
+    } else {
+      void closeSecondaryWindow(win, key);
     }
-    event.preventDefault();
   });
 
-  mainWindow.webContents.on('will-redirect', (event, navigationUrl) => {
-    // Same dev-server carve-out as will-navigate above (LOW finding, code
-    // review) — blocking every redirect unconditionally has no effect today
-    // (nothing in the app currently redirects), but would silently break a
-    // future redirect-based flow (e.g. an in-window OAuth callback) even in
-    // dev, where Vite's own HMR/dev-server traffic should be allowed through.
-    if (process.env.VITE_DEV_SERVER_URL && navigationUrl.startsWith(process.env.VITE_DEV_SERVER_URL)) {
-      return;
-    }
-    event.preventDefault();
+  win.on('closed', () => {
+    clearTimeout(boundsTimer);
+    closeConfirmed.delete(windowId);
+    if (mainWindow === win) mainWindow = null;
+    // Whatever way the window went away, the sessions it owned have nobody left to show them.
+    endSessions(windowManager.unregister(windowId));
   });
 
-  mainWindow.on('close', (event) => {
-    if (isQuitting) return;
-    if (ipcBridge?.aiHub?.background) { event.preventDefault(); mainWindow?.hide(); return; }
-    // Always defer to app.quit() (handled by 'before-quit' below) instead of
-    // letting the window close on its own, so a plain window-close ("X" the
-    // window) goes through the same graceful shutdown — ipcBridge.dispose(),
-    // killing SSH tunnels/agents — as Cmd+Q or the app menu, rather than
-    // tearing everything down hard.
-    event.preventDefault();
-    void (async () => {
-      if (!(await confirmQuit())) return;
-      app.quit();
-    })();
-  });
-
-  mainWindow.on('closed', () => {
-    mainWindow = null;
-  });
-
-  if (process.platform === 'win32') {
-    const window = mainWindow;
+  if (isMain && process.platform === 'win32') {
     let revealed = false;
     const reveal = (): void => {
       if (revealed) return;
       revealed = true;
       clearTimeout(fallback);
       splash?.setProgress(100, 'Ready');
-      if (!window.isDestroyed() && !process.argv.includes('--background')) {
-        window.show();
-        window.focus();
+      if (!win.isDestroyed() && !process.argv.includes('--background')) {
+        win.show();
+        win.focus();
         if (demoMode) {
-          window.setAlwaysOnTop(true);
-          window.focus();
+          win.setAlwaysOnTop(true);
+          win.focus();
           setTimeout(() => {
-            if (!window.isDestroyed()) window.setAlwaysOnTop(false);
+            if (!win.isDestroyed()) win.setAlwaysOnTop(false);
           }, 500);
         }
       }
@@ -288,30 +374,95 @@ async function createWindow(): Promise<BrowserWindow> {
     };
     // Never leave the user stuck on the splash if the renderer fails to load.
     const fallback = setTimeout(reveal, 30_000);
-    window.webContents.on('did-start-loading', () => splash?.setProgress(70, 'Loading interface…'));
-    window.webContents.on('dom-ready', () => splash?.setProgress(85, 'Starting interface…'));
-    window.webContents.once('did-finish-load', reveal);
-    window.webContents.once('did-fail-load', reveal);
-    window.once('closed', () => {
+    win.webContents.on('did-start-loading', () => splash?.setProgress(70, 'Loading interface…'));
+    win.webContents.on('dom-ready', () => splash?.setProgress(85, 'Starting interface…'));
+    win.webContents.once('did-finish-load', reveal);
+    win.webContents.once('did-fail-load', reveal);
+    win.once('closed', () => {
       clearTimeout(fallback);
       splash?.close();
       splash = null;
     });
   }
 
-  if (process.env.VITE_DEV_SERVER_URL) {
-    const url = demoMode
-      ? `${process.env.VITE_DEV_SERVER_URL}${process.env.VITE_DEV_SERVER_URL.includes('?') ? '&' : '?'}demo=1`
-      : process.env.VITE_DEV_SERVER_URL;
-    mainWindow.loadURL(url);
-  } else {
-    mainWindow.loadFile(
-      path.join(__dirname, '../dist/index.html'),
-      demoMode ? { query: { demo: '1' } } : undefined,
-    );
-  }
+  return win;
+}
 
-  return mainWindow;
+/** Ends terminal/log sessions (each manager ignores ids that are not its own). */
+function endSessions(sessionIds: string[]): void {
+  for (const sessionId of sessionIds) {
+    ipcBridge?.sshPtyManager.kill(sessionId);
+    ipcBridge?.k8sTerminalManager.kill(sessionId);
+    ipcBridge?.k8sLogManager.stop(sessionId);
+  }
+}
+
+/**
+ * Closing a secondary window ends its sessions and removes it from the saved layout (the main
+ * window and the app keep running). Asks first when it still has live sessions.
+ */
+async function closeSecondaryWindow(win: BrowserWindow, key: string | null): Promise<void> {
+  const windowId = win.webContents.id;
+  const sessionIds = windowManager.sessionsOf(windowId);
+  if (sessionIds.length > 0 && ipcBridge) {
+    if (!win.isDestroyed()) win.focus();
+    const proceed = await ipcBridge.promptQuitConfirm({ kind: 'close-window', sessionCount: sessionIds.length });
+    if (!proceed) return;
+  }
+  if (win.isDestroyed()) return;
+  if (key !== null && !isDemoMode()) void ipcBridge?.sessionStore.forgetWindow(key).catch(() => {});
+  endSessions(sessionIds);
+  closeConfirmed.add(windowId);
+  win.close();
+}
+
+/** Opens a window on the monitor the pointer is on; with a handoff it opens for that moved tab. */
+function openNewWindow(handoff?: TabHandoff): void {
+  const key = `w-${crypto.randomUUID().slice(0, 8)}`;
+  const win = createWindow(key, { bounds: boundsForNewWindow() });
+  if (handoff) {
+    const windowId = win.webContents.id;
+    windowManager.setHandoff(windowId, handoff);
+    windowManager.reserve(handoff.sessions.map((s) => s.sessionId), windowId);
+  }
+}
+
+const windowActions: WindowActions = {
+  open: openNewWindow,
+  adopt(targetWindowId, handoff, fromWindowId) {
+    const target = windowManager.get(targetWindowId);
+    if (!target || target.isDestroyed() || targetWindowId === fromWindowId) return false;
+    windowManager.reserve(handoff.sessions.map((s) => s.sessionId), targetWindowId);
+    target.webContents.send(IPC_CHANNELS.WINDOW_ADOPT_TAB, handoff);
+    if (target.isMinimized()) target.restore();
+    target.focus();
+    return true;
+  },
+  takeHandoff: (windowId) => (windowManager.takeHandoff(windowId) as TabHandoff | undefined) ?? null,
+  list: (currentWindowId) =>
+    windowManager.describe().map((w, index) => ({
+      id: w.id,
+      label: `Window ${index + 1}`,
+      current: w.id === currentWindowId,
+    })),
+};
+
+/** Reopens the windows of the last run: the main one first, then the saved secondary ones. */
+async function restoreWindows(): Promise<void> {
+  let session: SessionData | null = null;
+  // Demo mode opens a clean Demo Workspace: no previous windows (or their tabs) are restored.
+  // isDemoMode() (CLI flag or Demo Lab preference, resolved by aiHub.initialize()) matches SESSION_GET.
+  if (!isDemoMode()) {
+    try {
+      session = (await ipcBridge?.sessionStore.getSession()) ?? null;
+    } catch {
+      // Unreadable session: just open one default window.
+    }
+  }
+  createWindow(null, { bounds: session?.mainBounds, maximized: session?.mainMaximized });
+  for (const saved of restorableWindows(session)) {
+    createWindow(saved.key, { bounds: saved.bounds, maximized: saved.maximized });
+  }
 }
 
 // Initialize IPC bridge before or when app is ready
@@ -323,6 +474,10 @@ async function initializeApp(): Promise<void> {
   const { IpcBridge } = await import('./IpcBridge');
   splash?.setProgress(35, 'Loading services…');
 
+  // Read the machine policy before any store exists, so every settings read already sees it.
+  const policy = await loadPolicy();
+  for (const warning of policy.warnings) log.warn(warning);
+
   // Set registry directory for ssh-agents
   configureRegistryDir(path.join(app.getPath('userData'), 'runtime-agents'));
 
@@ -331,7 +486,17 @@ async function initializeApp(): Promise<void> {
 
   // Initialize and register IPC bridge
   ipcBridge = new IpcBridge({
-    getWebContents: () => nativeHermes ? nativeShell?.getWebContents() : mainWindow?.webContents,
+    policy,
+    // Native Hermes mode has a single sshs3 view inside Hermes' window, not WindowManager windows,
+    // so IPC there targets (and trusts) only that view, as before multi-window support.
+    ...(nativeHermes
+      ? { getWebContents: () => nativeShell?.getWebContents() }
+      : {
+          getWebContents: () => windowManager.focusedWebContents() as Electron.WebContents | undefined,
+          isTrustedFrame: (frame: Electron.WebFrameMain | null) => windowManager.isTrustedFrame(frame),
+          windows: windowManager,
+          windowActions,
+        }),
     confirmQuit,
   });
   ipcBridge.aiHub = createHub(ipcBridge, {
@@ -373,8 +538,12 @@ async function initializeApp(): Promise<void> {
   void ipcBridge.clearClipboardHistoryIfConfigured().catch(() => {});
 
   // Create the main window immediately so the UI starts loading without waiting for subshells
-  await createWindow();
-  if (!nativeHermes) ipcBridge.startUpdateChecks();
+  if (nativeHermes) {
+    await createNativeHermesWindow();
+  } else {
+    await restoreWindows();
+    ipcBridge.startUpdateChecks();
+  }
 
   // Run background tasks (orphan cleanup, login shell environment, trust store, ~/.ssh/config sync)
   // in parallel with window loading so startup time is not penalized
@@ -396,6 +565,19 @@ async function initializeApp(): Promise<void> {
       'no OS keyring available (safeStorage.isEncryptionAvailable() === false): ' +
         'saved credentials will be stored in PLAINTEXT on disk instead of encrypted'
     );
+  } else {
+    // On Linux, safeStorage auto-selects a keyring backend (gnome_libsecret/kwallet*/basic_text)
+    // at startup unless pinned via `--password-store=...` (pinned above on Linux) — if the
+    // backend selected differs between runs (e.g. depending on which keyring daemon happens to be
+    // reachable at the exact moment Electron starts), a secret encrypted under one backend's key
+    // can silently fail to decrypt under a different one chosen on a later run (see
+    // decryptSecretValue's empty-string-on-failure fallback). Logged every startup specifically so
+    // a future "my saved credentials stopped working" report can be checked against this.
+    try {
+      log.info(`OS keyring backend for encrypted credentials: ${safeStorage.getSelectedStorageBackend?.() ?? '(unknown — Electron API unavailable)'}`);
+    } catch (err) {
+      log.warn('Failed to read the selected OS keyring backend (non-fatal):', err);
+    }
   }
 }
 
@@ -428,9 +610,25 @@ app.on('before-quit', (event) => {
         quitLog.info('dispose finished; quitting');
         // Bounded so a stuck disk can never block quit (or the relaunch that follows an update).
         await Promise.race([flushLogs(), new Promise((resolve) => setTimeout(resolve, 1000))]);
+        if (hasSingleInstanceLock) {
+          hasSingleInstanceLock = false;
+          try {
+            app.releaseSingleInstanceLock();
+          } catch {
+            // ignore
+          }
+        }
         app.quit();
       } else {
         AgentLifecycleManager.killAllPrivateAgents();
+        if (hasSingleInstanceLock) {
+          hasSingleInstanceLock = false;
+          try {
+            app.releaseSingleInstanceLock();
+          } catch {
+            // ignore
+          }
+        }
         app.quit();
       }
     })();
@@ -453,7 +651,7 @@ app.on('window-all-closed', () => {
 
 app.on('activate', () => {
   if (!nativeHermes && BrowserWindow.getAllWindows().length === 0) {
-    void createWindow();
+    createWindow();
   }
 });
 

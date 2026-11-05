@@ -5,39 +5,28 @@ import type { IpcBridge } from '../IpcBridge';
 /** The part of IpcBridge this handler group may use. */
 export type SearchHost = Pick<
   IpcBridge,
-  'getWebContents' | 'registerHandler' | 'searchOrchestrator' | 'storageRegistry'
+  'registerHandler' | 'sendToSender' | 'searchOrchestrator' | 'storageRegistry'
 >;
 
 export function registerSearchHandlers(bridge: SearchHost): void {
   bridge.registerHandler(
     IPC_CHANNELS.SEARCH_START,
-    async (_event, options: SearchStartOptions) => {
+    async (event, options: SearchStartOptions) => {
+      const sender = event?.sender;
       return await bridge.searchOrchestrator.startSearch(
         bridge.storageRegistry,
         options,
         (resultEvent) => {
-          const webContents = bridge.getWebContents();
-          if (webContents && !webContents.isDestroyed?.()) {
-            webContents.send(IPC_CHANNELS.SEARCH_RESULT, resultEvent);
-          }
+          bridge.sendToSender(sender, IPC_CHANNELS.SEARCH_RESULT, resultEvent);
         },
         (errorEvent) => {
-          const webContents = bridge.getWebContents();
-          if (webContents && !webContents.isDestroyed?.()) {
-            webContents.send(IPC_CHANNELS.SEARCH_ERROR, errorEvent);
-          }
+          bridge.sendToSender(sender, IPC_CHANNELS.SEARCH_ERROR, errorEvent);
         },
         (doneEvent) => {
-          const webContents = bridge.getWebContents();
-          if (webContents && !webContents.isDestroyed?.()) {
-            webContents.send(IPC_CHANNELS.SEARCH_DONE, doneEvent);
-          }
+          bridge.sendToSender(sender, IPC_CHANNELS.SEARCH_DONE, doneEvent);
         },
         (progressEvent) => {
-          const webContents = bridge.getWebContents();
-          if (webContents && !webContents.isDestroyed?.()) {
-            webContents.send(IPC_CHANNELS.SEARCH_PROGRESS, progressEvent);
-          }
+          bridge.sendToSender(sender, IPC_CHANNELS.SEARCH_PROGRESS, progressEvent);
         }
       );
     }

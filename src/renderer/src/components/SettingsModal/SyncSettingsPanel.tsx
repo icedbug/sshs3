@@ -31,23 +31,16 @@ import {
 } from './SyncTargetForm';
 import { MasterPasswordDialog } from './MasterPasswordDialog';
 import { Button } from '../ui/Button';
+import { useConfirm } from '../ConfirmDialog';
 import { formatSyncError } from '../../lib/syncErrors';
 import { formatDateTime as formatDateTimeCanonical } from '../../lib/dateFormat';
+import { formatRelativeTime } from '../../lib/relativeTime';
 import { createRendererLogger } from '../../lib/log';
 const log = createRendererLogger('SyncSettingsPanel');
 
 function formatRelative(iso?: string): string {
   if (!iso) return 'Never';
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return iso;
-  const diffMs = Date.now() - date.getTime();
-  const diffMin = Math.round(diffMs / 60000);
-  if (diffMin < 1) return 'Just now';
-  if (diffMin < 60) return `${diffMin}m ago`;
-  const diffHr = Math.round(diffMin / 60);
-  if (diffHr < 24) return `${diffHr}h ago`;
-  const diffDay = Math.round(diffHr / 24);
-  return `${diffDay}d ago`;
+  return formatRelativeTime(iso, { dateAfterDays: Infinity }) || iso;
 }
 
 // Thin wrapper for this panel's own "Never" fallback (LOW finding, code
@@ -92,6 +85,7 @@ export const SyncSettingsPanel: React.FC = () => {
   const [unlockingSmartcard, setUnlockingSmartcard] = useState(false);
   const [linkingSmartcard, setLinkingSmartcard] = useState(false);
   const [unlinkingSmartcard, setUnlinkingSmartcard] = useState(false);
+  const confirm = useConfirm();
   const [isLinkingDialog, setIsLinkingDialog] = useState(false);
   const [detectedLibs, setDetectedLibs] = useState<DetectedSmartcardLib[]>([]);
   const [selectedLibPath, setSelectedLibPath] = useState('');
@@ -245,7 +239,7 @@ export const SyncSettingsPanel: React.FC = () => {
         libPath = detected?.[0]?.path;
       }
       if (!libPath) {
-        throw new Error('No smartcard PKCS#11 library found. Please ensure your card/reader is connected.');
+        throw new Error('No smartcard PKCS#11 library found. Make sure your card or reader is connected.');
       }
       const s = await window.multissh?.profileSyncLinkSmartcard?.({
         pkcs11LibPath: libPath,
@@ -262,6 +256,13 @@ export const SyncSettingsPanel: React.FC = () => {
   };
 
   const handleUnlinkSmartcard = async () => {
+    const confirmed = await confirm({
+      title: 'Unlink smartcard',
+      message:
+        'Remove the smartcard from profile sync? Sync will ask for the master password instead of the card until you link a card again.',
+      confirmLabel: 'Unlink card',
+    });
+    if (!confirmed) return;
     setUnlinkingSmartcard(true);
     setActionError(null);
     setActionMessage(null);
@@ -487,7 +488,7 @@ export const SyncSettingsPanel: React.FC = () => {
                 disabled={togglingAutoSync}
                 className="peer sr-only"
               />
-              <div className="peer h-5 w-9 rounded-full bg-app-input border border-border-subtle after:absolute after:left-[2px] after:top-[2px] after:h-4 after:w-4 after:rounded-full after:bg-txt-muted after:transition-all after:content-[''] peer-checked:bg-sky-600 peer-checked:after:translate-x-full peer-checked:after:bg-white peer-focus:outline-none" />
+              <div className="peer h-5 w-9 rounded-full bg-app-input border border-border-subtle after:absolute after:left-[2px] after:top-[2px] after:h-4 after:w-4 after:rounded-full after:bg-txt-muted after:transition-all after:content-[''] peer-checked:bg-sky-600 peer-checked:after:translate-x-full peer-checked:after:bg-white peer-focus-visible:ring-2 peer-focus-visible:ring-sky-500 peer-focus-visible:ring-offset-1 peer-focus-visible:ring-offset-app-surface" />
             </label>
           </div>
 
@@ -559,37 +560,37 @@ export const SyncSettingsPanel: React.FC = () => {
                   ) : comparison ? (
                     <div className="flex items-center gap-2">
                       {comparison.state === 'in_sync' && (
-                        <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-0.5 text-xs font-medium text-emerald-400">
+                        <span className="inline-flex items-center gap-1.5 rounded bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-0.5 text-xs font-medium text-emerald-400">
                           <CheckCircle2 className="h-3.5 w-3.5" />
                           In sync with remote
                         </span>
                       )}
                       {comparison.state === 'ahead' && (
-                        <span className="inline-flex items-center gap-1.5 rounded-full bg-sky-500/10 border border-sky-500/20 px-2.5 py-0.5 text-xs font-medium text-sky-400">
+                        <span className="inline-flex items-center gap-1.5 rounded bg-sky-500/10 border border-sky-500/20 px-2.5 py-0.5 text-xs font-medium text-sky-400">
                           <ArrowUpCircle className="h-3.5 w-3.5" />
                           Client ahead ({comparison.aheadCount} unpushed {comparison.aheadCount === 1 ? 'change' : 'changes'})
                         </span>
                       )}
                       {comparison.state === 'behind' && (
-                        <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-500/10 border border-amber-500/20 px-2.5 py-0.5 text-xs font-medium text-amber-400">
+                        <span className="inline-flex items-center gap-1.5 rounded bg-amber-500/10 border border-amber-500/20 px-2.5 py-0.5 text-xs font-medium text-amber-400">
                           <ArrowDownCircle className="h-3.5 w-3.5" />
                           Client behind ({comparison.behindCount} remote {comparison.behindCount === 1 ? 'change' : 'changes'})
                         </span>
                       )}
                       {comparison.state === 'diverged' && (
-                        <span className="inline-flex items-center gap-1.5 rounded-full bg-purple-500/10 border border-purple-500/20 px-2.5 py-0.5 text-xs font-medium text-purple-400">
+                        <span className="inline-flex items-center gap-1.5 rounded bg-purple-500/10 border border-purple-500/20 px-2.5 py-0.5 text-xs font-medium text-purple-400">
                           <GitCompare className="h-3.5 w-3.5" />
                           Diverged ({comparison.aheadCount} ahead, {comparison.behindCount} behind)
                         </span>
                       )}
                       {comparison.state === 'not_initialized' && (
-                        <span className="inline-flex items-center gap-1.5 rounded-full bg-indigo-500/10 border border-indigo-500/20 px-2.5 py-0.5 text-xs font-medium text-indigo-400">
+                        <span className="inline-flex items-center gap-1.5 rounded bg-indigo-500/10 border border-indigo-500/20 px-2.5 py-0.5 text-xs font-medium text-indigo-400">
                           <UploadCloud className="h-3.5 w-3.5" />
                           Remote not initialized ({comparison.aheadCount} {comparison.aheadCount === 1 ? 'item' : 'items'} to push)
                         </span>
                       )}
                       {comparison.state === 'error' && (
-                        <span className="inline-flex items-center gap-1.5 rounded-full bg-red-500/10 border border-red-500/20 px-2.5 py-0.5 text-xs font-medium text-red-400">
+                        <span className="inline-flex items-center gap-1.5 rounded bg-red-500/10 border border-red-500/20 px-2.5 py-0.5 text-xs font-medium text-red-400">
                           <ShieldAlert className="h-3.5 w-3.5" />
                           Sync check failed
                         </span>
@@ -649,7 +650,7 @@ export const SyncSettingsPanel: React.FC = () => {
                 </div>
               )}
 
-              {checkError && <p className="text-xs text-red-400">{checkError}</p>}
+              {checkError && <p role="alert" className="text-xs text-red-400">{checkError}</p>}
             </div>
           )}
 
@@ -698,7 +699,7 @@ export const SyncSettingsPanel: React.FC = () => {
                   {pushing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <UploadCloud className="h-3.5 w-3.5" />}
                   <span>Push</span>
                   {comparison?.aheadCount && comparison.aheadCount > 0 ? (
-                    <span className="rounded-full bg-sky-500/20 px-1.5 py-0.2 text-2xs font-semibold text-sky-300">
+                    <span className="rounded bg-sky-500/20 px-1.5 py-0.2 text-2xs font-semibold text-sky-300">
                       {comparison.aheadCount}
                     </span>
                   ) : null}
@@ -716,7 +717,7 @@ export const SyncSettingsPanel: React.FC = () => {
                   {pulling ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <DownloadCloud className="h-3.5 w-3.5" />}
                   <span>Pull</span>
                   {comparison?.behindCount && comparison.behindCount > 0 ? (
-                    <span className="rounded-full bg-amber-500/20 px-1.5 py-0.2 text-2xs font-semibold text-amber-300">
+                    <span className="rounded bg-amber-500/20 px-1.5 py-0.2 text-2xs font-semibold text-amber-300">
                       {comparison.behindCount}
                     </span>
                   ) : null}
@@ -726,7 +727,7 @@ export const SyncSettingsPanel: React.FC = () => {
           </div>
 
           {actionMessage && <p className="text-xs text-emerald-400">{actionMessage}</p>}
-          {actionError && <p className="text-xs text-red-400">{actionError}</p>}
+          {actionError && <p role="alert" className="text-xs text-red-400">{actionError}</p>}
 
           {conflicts.length > 0 && (
             <div className="space-y-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 p-2.5">
@@ -811,7 +812,7 @@ export const SyncSettingsPanel: React.FC = () => {
                     Yes, delete everything
                   </button>
                 </div>
-                {wipeError && <p className="text-xs text-red-400">{wipeError}</p>}
+                {wipeError && <p role="alert" className="text-xs text-red-400">{wipeError}</p>}
               </div>
             )}
 
@@ -833,7 +834,7 @@ export const SyncSettingsPanel: React.FC = () => {
       {editingTarget && (
         <div className="space-y-3 rounded-lg border border-border-subtle bg-app-surface p-3.5">
           <SyncTargetForm draft={targetDraft} onChange={setTargetDraft} disabled={savingTarget} />
-          {targetError && <p className="text-xs text-red-400">{targetError}</p>}
+          {targetError && <p role="alert" className="text-xs text-red-400">{targetError}</p>}
           <div className="flex items-center justify-end gap-2">
             {status?.configured && (
               <button

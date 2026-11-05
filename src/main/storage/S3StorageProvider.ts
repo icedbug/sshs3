@@ -1,11 +1,5 @@
-import fs from 'node:fs';
 import path from 'node:path';
-import http from 'node:http';
-import https from 'node:https';
-import tls from 'node:tls';
 import { PassThrough } from 'node:stream';
-import { createProxySocket } from '../proxy/proxySocket';
-import { SystemTrustStore } from '../crypto/SystemTrustStore';
 import {
   S3Client,
   type S3ClientConfig,
@@ -43,7 +37,9 @@ import {
 import { Upload } from '@aws-sdk/lib-storage';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { fromSSO } from '@aws-sdk/credential-provider-sso';
-import { NodeHttpHandler } from '@smithy/node-http-handler';
+import { buildAwsNodeHttpHandler } from '../aws/buildAwsNodeHttpHandler';
+import { describeS3Error, isAwsCredentialsError, isAwsSsoSessionError } from '../aws/awsErrors';
+import { createLogger } from '../log';
 import {
   BaseStorageProvider,
   formatDate,
@@ -60,6 +56,7 @@ import type {
   StorageType,
   WriteStreamOptions,
 } from '../../shared/types/storage';
+import { defineTargetTouched } from './targetTouched';
 
 /**
  * Parses a remote S3 path into bucket and key components.
@@ -85,6 +82,10 @@ export function parseS3Path(remotePath: string): { bucket: string; key: string }
   return { bucket, key };
 }
 
+/** A stalled proxy/TLS handshake should fail visibly instead of leaving the pane loading forever. */
+const S3_CONNECTION_TIMEOUT_MS = 15_000;
+const s3Log = createLogger('s3');
+
 export class S3StorageProvider extends BaseStorageProvider implements IStorageProvider {
   readonly id: string;
   readonly name: string;
@@ -98,6 +99,12 @@ export class S3StorageProvider extends BaseStorageProvider implements IStoragePr
     this.name = config.name;
     this.config = config;
 
+    const networkOptions = {
+      customCaPath: config.customCaPath,
+      rejectUnauthorized: config.rejectUnauthorized,
+      proxy: config.proxy,
+    };
+
     const s3ClientConfig: S3ClientConfig = {
       region: config.region || 'us-east-1',
       endpoint: config.endpoint,
@@ -109,6 +116,10 @@ export class S3StorageProvider extends BaseStorageProvider implements IStoragePr
               ssoRegion: config.sso.region,
               ssoAccountId: config.sso.accountId,
               ssoRoleName: config.sso.roleName,
+              // Without this the role-credential call goes straight out, ignoring the profile's proxy/CA, and hangs.
+              clientConfig: {
+                requestHandler: buildAwsNodeHttpHandler(networkOptions),
+              },
             })
           : {
               accessKeyId: config.accessKeyId,
@@ -117,69 +128,31 @@ export class S3StorageProvider extends BaseStorageProvider implements IStoragePr
             },
     };
 
-    const systemCAs = SystemTrustStore.getCAs();
-    const effectiveCa = config.customCaPath
-      ? fs.readFileSync(config.customCaPath)
-      : systemCAs.length > 0
-      ? SystemTrustStore.getMergedRootCertificates()
-      : undefined;
-
-    const hasProxy = Boolean(config.proxy?.enabled && config.proxy.host);
-    const hasCustomTls = config.rejectUnauthorized !== undefined || effectiveCa !== undefined;
-
-    if (hasProxy || hasCustomTls) {
-      const httpsAgentOptions: https.AgentOptions = {};
-      if (config.rejectUnauthorized !== undefined) {
-        httpsAgentOptions.rejectUnauthorized = config.rejectUnauthorized;
-      }
-      if (effectiveCa !== undefined) {
-        httpsAgentOptions.ca = effectiveCa;
-      }
-
-      if (hasProxy && config.proxy) {
-        const proxyCfg = config.proxy;
-        const httpAgent = new http.Agent();
-        (httpAgent as any).createConnection = (opts: any, cb: any) => {
-          createProxySocket(proxyCfg, {
-            host: opts.host || opts.hostname,
-            port: Number(opts.port) || 80,
-          })
-            .then((socket) => cb(null, socket))
-            .catch((err) => cb(err));
-        };
-
-        const httpsAgent = new https.Agent(httpsAgentOptions);
-        (httpsAgent as any).createConnection = (opts: any, cb: any) => {
-          createProxySocket(proxyCfg, {
-            host: opts.host || opts.hostname,
-            port: Number(opts.port) || 443,
-          })
-            .then((socket) => {
-              const tlsSocket = tls.connect({
-                socket,
-                host: opts.host || opts.hostname,
-                servername: opts.servername || opts.host || opts.hostname,
-                rejectUnauthorized: config.rejectUnauthorized ?? true,
-                ca: effectiveCa,
-              });
-              tlsSocket.on('error', (err) => cb(err));
-              cb(null, tlsSocket);
-            })
-            .catch((err) => cb(err));
-        };
-
-        s3ClientConfig.requestHandler = new NodeHttpHandler({
-          httpAgent,
-          httpsAgent,
-        });
-      } else {
-        s3ClientConfig.requestHandler = new NodeHttpHandler({
-          httpsAgent: new https.Agent(httpsAgentOptions),
-        });
-      }
-    }
+    // Same proxy/CA handling as the SSO calls. No request timeout: transfers may run long.
+    s3ClientConfig.requestHandler = buildAwsNodeHttpHandler(networkOptions, {
+      connectionTimeout: S3_CONNECTION_TIMEOUT_MS,
+    });
 
     this.client = new S3Client(s3ClientConfig);
+
+    if (config.authMode === 'sso') {
+      // Every operation (not just listing) reports a lapsed SSO session the same way, so the pane can offer a sign-in.
+      this.client.middlewareStack?.add(
+        (next) => async (args) => {
+          try {
+            return await next(args);
+          } catch (err) {
+            if (isAwsSsoSessionError(err) || isAwsCredentialsError(err)) {
+              const e = err as Error;
+              s3Log.warn(`SSO credential problem for "${config.name}": ${e.name}: ${e.message}`);
+              throw new Error(describeS3Error(err, true), { cause: err });
+            }
+            throw err;
+          }
+        },
+        { step: 'initialize', name: 'ssoSessionErrorTranslator', priority: 'high' }
+      );
+    }
   }
 
   private listCache: Map<string, { entries: FileEntry[]; timestamp: number }> = new Map();
@@ -736,8 +709,11 @@ export class S3StorageProvider extends BaseStorageProvider implements IStoragePr
 
     // Start consuming stream data immediately to avoid backpressure deadlocks
     const uploadPromise = upload.done();
+    // An S3 object is only replaced when the (multipart) upload completes; an aborted one leaves the old object intact.
+    let uploaded = false;
     uploadPromise
       .then(() => {
+        uploaded = true;
         this.clearCache();
       })
       .catch((err) => {
@@ -765,7 +741,7 @@ export class S3StorageProvider extends BaseStorageProvider implements IStoragePr
       upload.abort();
     });
 
-    return passThrough;
+    return defineTargetTouched(passThrough, () => uploaded);
   }
 
   async writeFile(

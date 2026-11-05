@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import { Pencil } from 'lucide-react';
 import { classNames, pathSegments } from '../../lib/format';
 
@@ -6,9 +6,20 @@ interface BreadcrumbsProps {
   currentPath: string;
   onNavigate: (path: string) => void;
   onDropToPath?: (targetPath: string, e: React.DragEvent) => void;
+  /** Clicking a Windows drive root ("C:") calls this (to show the drive list) instead of navigating to it. */
+  onDriveRootClick?: () => void;
 }
 
-export const Breadcrumbs: React.FC<BreadcrumbsProps> = ({ currentPath, onNavigate, onDropToPath }) => {
+export interface BreadcrumbsHandle {
+  /** Enters path-editing mode with the whole path selected — used by FilePane's Ctrl+L/Alt+D
+   * shortcut (§25), the same convention browser address bars use. */
+  startEditing: () => void;
+}
+
+export const Breadcrumbs = forwardRef<BreadcrumbsHandle, BreadcrumbsProps>(function Breadcrumbs(
+  { currentPath, onNavigate, onDropToPath, onDriveRootClick },
+  ref
+) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(currentPath);
   const [dragOverSegment, setDragOverSegment] = useState<string | null>(null);
@@ -24,6 +35,10 @@ export const Breadcrumbs: React.FC<BreadcrumbsProps> = ({ currentPath, onNavigat
     }
     springTargetRef.current = null;
   }, []);
+
+  useImperativeHandle(ref, () => ({
+    startEditing: () => setEditing(true),
+  }));
 
   useEffect(() => {
     setDraft(currentPath);
@@ -101,7 +116,11 @@ export const Breadcrumbs: React.FC<BreadcrumbsProps> = ({ currentPath, onNavigat
             {idx > 0 && segments[idx - 1].label !== '/' && <span className="text-txt-muted">/</span>}
             <button
               type="button"
-              onClick={() => onNavigate(segment.path)}
+              onClick={() =>
+                idx === 0 && onDriveRootClick && /^[A-Za-z]:\\$/.test(segment.path)
+                  ? onDriveRootClick()
+                  : onNavigate(segment.path)
+              }
               onDragOver={(e) => {
                 e.preventDefault();
                 e.stopPropagation();
@@ -136,7 +155,7 @@ export const Breadcrumbs: React.FC<BreadcrumbsProps> = ({ currentPath, onNavigat
                 onDropToPath?.(segment.path, e);
               }}
               className={classNames(
-                'shrink-0 rounded px-1.5 py-0.5 transition-colors font-medium',
+                'min-w-6 shrink-0 rounded px-1.5 py-1 text-center transition-colors font-medium',
                 isHovered
                   ? 'bg-sky-500/25 text-sky-400 ring-1 ring-inset ring-sky-400 font-semibold'
                   : 'text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary'
@@ -149,18 +168,19 @@ export const Breadcrumbs: React.FC<BreadcrumbsProps> = ({ currentPath, onNavigat
       })}
       </div>
       <button
+        aria-label="Edit path manually"
         type="button"
         title="Edit path manually"
         onClick={(e) => {
           e.stopPropagation();
           setEditing(true);
         }}
-        className="opacity-0 group-hover/bc:opacity-100 shrink-0 rounded p-1 text-txt-muted hover:text-txt-primary hover:bg-app-surface-hover transition-opacity"
+        className="opacity-0 group-hover/bc:opacity-100 focus-visible:opacity-100 shrink-0 rounded p-1.5 text-txt-muted hover:text-txt-primary hover:bg-app-surface-hover transition-opacity"
       >
         <Pencil className="h-3 w-3" />
       </button>
     </div>
   );
-};
+});
 
 export default Breadcrumbs;

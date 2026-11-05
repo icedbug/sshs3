@@ -86,6 +86,8 @@ export interface SftpFileStats {
   mtime?: number;
   isDirectory: boolean;
   isSymlink: boolean;
+  /** FIFO, socket or device (see `isSpecialFileMode`). */
+  isSpecial?: boolean;
 }
 
 export interface SftpNameEntry {

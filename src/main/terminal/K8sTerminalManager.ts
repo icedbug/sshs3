@@ -5,6 +5,7 @@ import type * as k8s from '@kubernetes/client-node';
 import { loadK8sClient } from '../services/k8sClient';
 import { loadKubeConfigForContext } from '../services/k8sKubeConfig';
 import type { K8sTerminalExitEvent, K8sTerminalTarget } from '../../shared/types/kubernetes';
+import { StringDecoder } from 'node:string_decoder';
 
 type ExecConnection = Awaited<ReturnType<k8s.Exec['exec']>>;
 
@@ -78,8 +79,11 @@ export class K8sTerminalManager extends EventEmitter {
     stdin.on('error', () => {});
     const session: K8sTerminalSession = { sessionId, target, output, stdin, disposed: false };
 
+    // A multi-byte character can be split across two chunks; the decoder holds back the incomplete bytes.
+    const decoder = new StringDecoder('utf8');
     output.on('data', (chunk: Buffer) => {
-      this.emit('data', { sessionId, data: chunk.toString('utf-8') });
+      const data = decoder.write(chunk);
+      if (data) this.emit('data', { sessionId, data });
     });
 
     const [kc, { Exec }] = await Promise.all([

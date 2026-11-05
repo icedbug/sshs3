@@ -5,10 +5,14 @@ vi.mock('electron', () => {
   return { ...mockObj, default: mockObj };
 });
 
+import { SmartcardDetector } from '../../src/main/smartcard/SmartcardDetector';
 import * as SmartcardCertificateReader from '../../src/main/smartcard/SmartcardCertificateReader';
+import type { SmartcardCertificateDetails } from '../../src/main/smartcard/CertificateParser';
 import { AgentLifecycleManager } from '../../src/main/ssh/AgentLifecycleManager';
-import { AppAgent } from '../../src/main/ssh/AppAgent';
-import { SmartcardCoordinator, type SmartcardDeps } from '../../src/main/smartcard/SmartcardCoordinator';
+import { AppAgent, KeysLockedWhileLoadingError } from '../../src/main/ssh/AppAgent';
+import { SmartcardCoordinator, TokenNotInsertedError, type SmartcardDeps } from '../../src/main/smartcard/SmartcardCoordinator';
+import type { SSHConnectionConfig } from '../../src/shared/types/ssh';
+import type { SFTPConfig } from '../../src/shared/types/storage';
 
 const LIB = '/usr/lib/opensc-pkcs11.so';
 
@@ -21,6 +25,7 @@ function makeDeps(calls: string[] = []): SmartcardDeps {
     sshPtyManager: {} as any,
     getWebContents: () => null,
     promptForPin: vi.fn().mockResolvedValue('123456'),
+    waitForToken: vi.fn().mockResolvedValue(true),
     makePresenceNotifier: vi.fn().mockReturnValue({ onPresenceRequested: vi.fn(), onPresenceCleared: vi.fn() }),
     clearPresence: vi.fn((id: string) => void calls.push(`clearPresence:${id}`)),
     syncAgentBlock: vi.fn(async (entries: unknown) => void calls.push(`syncAgentBlock:${entries === null ? 'null' : 'entries'}`)),
@@ -37,6 +42,8 @@ function makeFakeAgent(calls: string[] = []) {
     addPkcs11: vi.fn().mockResolvedValue(undefined),
     remove: vi.fn().mockResolvedValue(undefined),
     removeIdentities: vi.fn().mockResolvedValue(0),
+    adoptIdentities: vi.fn().mockResolvedValue(undefined),
+    evictIdentities: vi.fn().mockResolvedValue(undefined),
     shutdown: vi.fn(async () => void calls.push('appAgent.shutdown')),
   };
 }
@@ -84,6 +91,142 @@ describe('SmartcardCoordinator', () => {
     expect(agent.addPkcs11).toHaveBeenCalledTimes(1);
   });
 
+  describe('card not plugged in', () => {
+    it('waits for the card, then loads it', async () => {
+      const { coordinator, deps, agent } = build();
+      vi.spyOn(SmartcardCertificateReader, 'isSmartcardTokenPresent').mockResolvedValue(false);
+
+      await coordinator.getOrLoadGlobalSmartcardAgent(LIB, 'session-1', 'connect to host');
+
+      expect(deps.waitForToken).toHaveBeenCalledWith('smartcard', 'connect to host', expect.any(Function));
+      expect(agent.addPkcs11).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not ask when the card is there or presence is unknown', async () => {
+      for (const present of [true, undefined]) {
+        const { coordinator, deps } = build();
+        vi.spyOn(SmartcardCertificateReader, 'isSmartcardTokenPresent').mockResolvedValue(present);
+        await coordinator.getOrLoadGlobalSmartcardAgent(LIB, 'session-1', 'connect');
+        expect(deps.waitForToken).not.toHaveBeenCalled();
+      }
+    });
+
+    it('also waits before a private-agent load that names its purpose (e.g. profile sync)', async () => {
+      const { coordinator, deps } = build();
+      vi.spyOn(SmartcardCertificateReader, 'isSmartcardTokenPresent').mockResolvedValue(false);
+      vi.mocked(deps.waitForToken).mockResolvedValue(false);
+
+      await expect(
+        coordinator.loadSmartcardIntoPrivateAgentWithPresence(LIB, async () => 'pin', undefined, 'Remote Profile Sync')
+      ).rejects.toBeInstanceOf(TokenNotInsertedError);
+      expect(deps.waitForToken).toHaveBeenCalledWith('smartcard', 'Remote Profile Sync', expect.any(Function));
+    });
+
+    it('checks the default PIV module for flows without a library of their own (Team Vault)', async () => {
+      const { coordinator, deps } = build();
+      vi.spyOn(SmartcardDetector, 'detectAvailableLibraries').mockResolvedValue([
+        { name: 'p11-kit', path: '/usr/lib/p11-kit-proxy.so', platform: 'linux', exists: true },
+        { name: 'OpenSC', path: LIB, platform: 'linux', exists: true },
+      ]);
+      const present = vi.spyOn(SmartcardCertificateReader, 'isSmartcardTokenPresent').mockResolvedValue(false);
+
+      await coordinator.ensureDefaultPivPresent('Team Vault: Acme');
+
+      expect(present).toHaveBeenCalledWith('/usr/lib/p11-kit-proxy.so');
+      expect(deps.waitForToken).toHaveBeenCalledWith('smartcard', 'Team Vault: Acme', expect.any(Function));
+    });
+
+    it('stops without a PIN prompt or a cooldown when the user dismisses the prompt', async () => {
+      const { coordinator, deps, agent } = build();
+      vi.spyOn(SmartcardCertificateReader, 'isSmartcardTokenPresent').mockResolvedValue(false);
+      vi.mocked(deps.waitForToken).mockResolvedValue(false);
+
+      await expect(coordinator.getOrLoadGlobalSmartcardAgent(LIB, 'session-1', 'connect')).rejects.toBeInstanceOf(
+        TokenNotInsertedError
+      );
+      await expect(coordinator.getOrLoadGlobalSmartcardAgent(LIB, 'session-1', 'connect')).rejects.toBeInstanceOf(
+        TokenNotInsertedError
+      );
+      expect(deps.waitForToken).toHaveBeenCalledTimes(2);
+      expect(agent.addPkcs11).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Windows shared agent', () => {
+    const origPlatform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    const LIB2 = 'C:/OpenSC/opensc-pkcs11.dll';
+    const card = (fingerprint: string) =>
+      new Map([[fingerprint, { authCapable: true } as unknown as SmartcardCertificateDetails]]);
+    const identity = (fingerprint: string) => ({ fingerprint, keyType: 'ecdsa-sha2-nistp256' }) as any;
+
+    beforeEach(() => Object.defineProperty(process, 'platform', { value: 'win32' }));
+    afterEach(() => Object.defineProperty(process, 'platform', origPlatform));
+
+    it('evicts a key left in the service by an earlier run and loads the card afresh', async () => {
+      const { coordinator, agent } = build();
+      vi.mocked(SmartcardCertificateReader.readSmartcardCertificates).mockResolvedValue(card('SHA256:old'));
+      agent.list.mockResolvedValue([identity('SHA256:old')]);
+
+      await coordinator.getOrLoadGlobalSmartcardAgent(LIB, async () => 'pin');
+
+      expect(agent.evictIdentities).toHaveBeenCalledWith(['SHA256:old']);
+      expect(agent.addPkcs11).toHaveBeenCalledTimes(1);
+      expect(agent.adoptIdentities).toHaveBeenCalledWith(new Set(['SHA256:old']));
+    });
+
+    it('lets a second module for the same card wait instead of evicting the keys the first just added', async () => {
+      const { coordinator, agent } = build();
+      vi.mocked(SmartcardCertificateReader.readSmartcardCertificates).mockResolvedValue(card('SHA256:card'));
+      // Empty for the first load's "before" snapshot; the card's key is in the agent from then on.
+      agent.list.mockResolvedValueOnce([]).mockResolvedValue([identity('SHA256:card')]);
+      let release!: () => void;
+      agent.addPkcs11.mockImplementationOnce(() => new Promise<void>((resolve) => (release = resolve)));
+
+      const first = coordinator.getOrLoadGlobalSmartcardAgent(LIB, async () => 'pin');
+      await vi.waitFor(() => expect(agent.addPkcs11).toHaveBeenCalledTimes(1));
+      const second = coordinator.getOrLoadGlobalSmartcardAgent(LIB2, async () => 'pin');
+      // The second load has not looked at the agent while the first is still adding its key.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(agent.list).toHaveBeenCalledTimes(1);
+
+      release();
+      await Promise.all([first, second]);
+
+      expect(agent.evictIdentities).not.toHaveBeenCalled();
+      expect(agent.addPkcs11).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not wait for earlier loads on other platforms', async () => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      const { coordinator, agent } = build();
+      let release!: () => void;
+      agent.addPkcs11.mockImplementationOnce(() => new Promise<void>((resolve) => (release = resolve)));
+
+      const first = coordinator.getOrLoadGlobalSmartcardAgent(LIB, async () => 'pin');
+      await vi.waitFor(() => expect(agent.addPkcs11).toHaveBeenCalledTimes(1));
+      const second = coordinator.getOrLoadGlobalSmartcardAgent(LIB2, async () => 'pin');
+      await vi.waitFor(() => expect(agent.addPkcs11).toHaveBeenCalledTimes(2));
+
+      release();
+      await Promise.all([first, second]);
+    });
+
+    it('a failed earlier load does not stop the next one', async () => {
+      const { coordinator, agent } = build();
+      let fail!: (err: Error) => void;
+      agent.addPkcs11.mockImplementationOnce(() => new Promise<void>((_, reject) => (fail = reject)));
+
+      const first = coordinator.getOrLoadGlobalSmartcardAgent(LIB, async () => 'pin');
+      const firstResult = first.catch((err: Error) => err.message);
+      await vi.waitFor(() => expect(agent.addPkcs11).toHaveBeenCalledTimes(1));
+      const second = coordinator.getOrLoadGlobalSmartcardAgent(LIB2, async () => 'pin');
+
+      fail(new Error('wrong PIN'));
+      await expect(firstResult).resolves.toBe('wrong PIN');
+      await expect(second).resolves.toBe('/run/sshs3/agent.sock');
+    });
+  });
+
   it('cools down for 30 s after a failed load instead of prompting for the PIN again', async () => {
     const { coordinator, agent } = build();
     agent.addPkcs11.mockRejectedValueOnce(new Error('wrong PIN'));
@@ -94,6 +237,15 @@ describe('SmartcardCoordinator', () => {
 
     await expect(coordinator.getOrLoadGlobalSmartcardAgent(LIB, async () => 'again')).rejects.toThrow(/cooling down/);
     expect(agent.addPkcs11).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not start a cooldown for a load that the user cancelled by locking the keys (M12)', async () => {
+    const { coordinator, agent } = build();
+    agent.addPkcs11.mockRejectedValueOnce(new KeysLockedWhileLoadingError());
+
+    await expect(coordinator.getOrLoadGlobalSmartcardAgent(LIB, async () => '123456')).rejects.toBeInstanceOf(KeysLockedWhileLoadingError);
+
+    expect(coordinator.isInLoadCooldown(LIB)).toBe(false);
   });
 
   it('forgets a card after a failed use, but not when a private agent was involved', async () => {
@@ -406,6 +558,98 @@ describe('SmartcardCoordinator', () => {
       coordinator.refreshAgentSshConfig();
       await (coordinator as any).agentConfigRefresh;
       expect(deps.syncAgentBlock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('prepareSshCaConfig / prepareSftpSshCaConfig', () => {
+    it('sets agentPath and attaches active certificateFile for agent profiles with useSshCa', async () => {
+      const { coordinator } = build();
+      const mockCaService = {
+        getActiveCertificateFilePath: vi.fn().mockReturnValue('/tmp/certs/piv-cert.pub'),
+      } as any;
+      coordinator.setSshCaService(mockCaService);
+
+      const sshConfig: SSHConnectionConfig = {
+        id: 'cfg-1',
+        name: 'CA Target',
+        host: 'ca.example.com',
+        username: 'alun',
+        authType: 'agent',
+        useSshCa: true,
+      };
+
+      const prepared = await coordinator.prepareSshCaConfig(sshConfig);
+      expect(prepared.agentPath).toBe('/run/sshs3/agent.sock');
+      expect(prepared.certificateFile).toBe('/tmp/certs/piv-cert.pub');
+
+      const sftpConfig: SFTPConfig = {
+        id: 'cfg-sftp',
+        name: 'CA SFTP Target',
+        host: 'sftp.example.com',
+        port: 22,
+        username: 'alun',
+        authType: 'agent',
+        useSshCa: true,
+      };
+
+      const preparedSftp = await coordinator.prepareSftpSshCaConfig(sftpConfig);
+      expect(preparedSftp.agentPath).toBe('/run/sshs3/agent.sock');
+      expect(preparedSftp.certificateFile).toBe('/tmp/certs/piv-cert.pub');
+    });
+
+    it('leaves configs untouched when useSshCa is false or authType is not agent', async () => {
+      const { coordinator } = build();
+      const sshConfig: SSHConnectionConfig = {
+        id: 'cfg-2',
+        name: 'Plain Key',
+        host: 'server.example.com',
+        username: 'alun',
+        authType: 'privateKey',
+        privateKeyPath: '/home/alun/.ssh/id_rsa',
+      };
+
+      const prepared = await coordinator.prepareSshCaConfig(sshConfig);
+      expect(prepared).toBe(sshConfig);
+    });
+
+    describe('with a PIV card also unlocked in the app agent', () => {
+      const PIV_PUB = '/run/sshs3/keys/piv.pub';
+      const sshCaProfile: SSHConnectionConfig = {
+        id: 'cfg-3', name: 'CA Target', host: 'ca.example.com', username: 'alun', authType: 'agent', useSshCa: true,
+      };
+      const sftpCaProfile: SFTPConfig = {
+        id: 'cfg-4', name: 'CA SFTP', host: 'sftp.example.com', port: 22, username: 'alun', authType: 'agent', useSshCa: true,
+      };
+
+      function withUnlockedPivCard(certFile: string | undefined) {
+        const { coordinator, agent } = build();
+        (agent as any).writePublicKeyFiles = vi.fn().mockResolvedValue([PIV_PUB]);
+        (coordinator as any).globalCards.set(LIB, { fingerprints: new Set(['SHA256:piv']) });
+        coordinator.setSshCaService({ getActiveCertificateFilePath: vi.fn().mockReturnValue(certFile) } as any);
+        return coordinator;
+      }
+
+      it('pins a PIV session to the card key (IdentitiesOnly + its public key file)', async () => {
+        const coordinator = withUnlockedPivCard('/run/sshs3/certs/piv-cert.pub');
+
+        const ssh = await coordinator.prepareSshCaConfig(sshCaProfile);
+        const sftp = await coordinator.prepareSftpSshCaConfig(sftpCaProfile);
+
+        expect(ssh.agentIdentityFiles).toEqual([PIV_PUB]);
+        expect(ssh.certificateFile).toBe('/run/sshs3/certs/piv-cert.pub');
+        expect(sftp.agentIdentityFiles).toEqual([PIV_PUB]);
+      });
+
+      it('does not pin an ephemeral-key session, so its certified key in the agent stays offered', async () => {
+        const coordinator = withUnlockedPivCard(undefined);
+
+        const ssh = await coordinator.prepareSshCaConfig(sshCaProfile);
+        const sftp = await coordinator.prepareSftpSshCaConfig(sftpCaProfile);
+
+        expect(ssh.agentIdentityFiles).toBeUndefined();
+        expect(ssh.agentPath).toBe('/run/sshs3/agent.sock');
+        expect(sftp.agentIdentityFiles).toBeUndefined();
+      });
     });
   });
 });

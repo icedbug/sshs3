@@ -104,14 +104,28 @@ export class K8sLogManager extends EventEmitter {
 
     try {
       const controller = await log.log(target.namespace, target.podName, target.containerName, output, {
-        follow: true,
+        follow: !options?.previous,
         tailLines: options?.tailLines ?? 200,
         timestamps: options?.timestamps ?? false,
         previous: options?.previous ?? false,
       });
       session.controller = controller;
-    } catch (err) {
+    } catch (err: unknown) {
       output.removeAllListeners();
+      if (options?.previous) {
+        const anyErr = err as Record<string, unknown> | null;
+        const msg = String(err);
+        if (
+          anyErr?.statusCode === 400 ||
+          anyErr?.code === 400 ||
+          /400|previous terminated container/i.test(msg)
+        ) {
+          throw new Error(
+            `previous terminated container "${target.containerName}" in pod "${target.podName}" not found`,
+            { cause: err }
+          );
+        }
+      }
       throw err;
     }
 

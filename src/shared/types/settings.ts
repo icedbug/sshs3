@@ -1,4 +1,5 @@
 import type { LogLevel } from './log';
+import type { SshCaConfig } from './sshCa';
 import { DEFAULT_K8S_DEBUG_IMAGES, type K8sDebugImage } from './kubernetes';
 import { DEFAULT_PERF_ITEMS, type PerfLayout, type PerfMetricId } from './perf';
 
@@ -12,12 +13,27 @@ export interface ShortcutDefinition {
   category: 'Tabs' | 'Terminal' | 'General';
 }
 
+// defaultKeys use the canonical modifier order Ctrl+Cmd+Alt+Shift (see comboFromKeyboardEvent): a
+// binding is matched as a plain string, so any other order would never match a real keypress.
 export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
   { id: 'newTerminal', name: 'New Terminal', defaultKeys: 'Ctrl+Shift+T', category: 'Tabs' },
   { id: 'newFileManager', name: 'New File Manager', defaultKeys: 'Ctrl+Shift+F', category: 'Tabs' },
-  { id: 'closeTab', name: 'Close Tab', defaultKeys: 'Ctrl+W', category: 'Tabs' },
+  { id: 'newRemoteFileManager', name: 'New Remote File Manager', defaultKeys: 'Ctrl+Alt+Shift+F', category: 'Tabs' },
+  { id: 'newWindow', name: 'New Window', defaultKeys: 'Ctrl+Alt+Shift+N', category: 'Tabs' },
+  { id: 'openTabMenu', name: 'Tab Actions (Move to Window)', defaultKeys: 'Ctrl+Alt+Shift+K', category: 'Tabs' },
+  { id: 'moveTabToNewWindow', name: 'Move Tab to New Window', defaultKeys: 'Ctrl+Alt+Shift+M', category: 'Tabs' },
+  { id: 'closeTab', name: 'Close Tab', defaultKeys: 'Ctrl+Shift+W', category: 'Tabs' },
   { id: 'nextTab', name: 'Next Tab', defaultKeys: 'Ctrl+Tab', category: 'Tabs' },
   { id: 'prevTab', name: 'Previous Tab', defaultKeys: 'Ctrl+Shift+Tab', category: 'Tabs' },
+  // Ctrl+1..8 jump to that tab, Ctrl+9 to the last one (browser convention). Not Alt+<digit>: a
+  // shell or TUI receives that as ESC+digit (readline digit-argument, weechat/irssi buffer switch).
+  ...Array.from({ length: 9 }, (_, i): ShortcutDefinition => ({
+    id: `selectTab${i + 1}`,
+    name: i === 8 ? 'Go to Last Tab' : `Go to Tab ${i + 1}`,
+    defaultKeys: `Ctrl+${i + 1}`,
+    category: 'Tabs',
+  })),
+  { id: 'showShortcuts', name: 'Keyboard Shortcuts', defaultKeys: 'Ctrl+Shift+H', category: 'General' },
   { id: 'openProfiles', name: 'Connection Manager', defaultKeys: 'Ctrl+Shift+O', category: 'General' },
   { id: 'openSettings', name: 'Settings', defaultKeys: 'Ctrl+,', category: 'General' },
   { id: 'navigateLeft', name: 'Navigate Left (Split / Panel)', defaultKeys: 'Ctrl+Shift+Left', category: 'General' },
@@ -26,6 +42,11 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
   { id: 'navigateDown', name: 'Navigate Down (Split / Into Tab)', defaultKeys: 'Ctrl+Shift+Down', category: 'General' },
   { id: 'splitVertical', name: 'Split Terminal Vertically', defaultKeys: 'Ctrl+Shift+D', category: 'Terminal' },
   { id: 'splitHorizontal', name: 'Split Terminal Horizontally', defaultKeys: 'Ctrl+Shift+E', category: 'Terminal' },
+  { id: 'closePane', name: 'Close Split Pane', defaultKeys: 'Ctrl+Alt+Shift+W', category: 'Terminal' },
+  { id: 'zoomPane', name: 'Zoom Split Pane', defaultKeys: 'Ctrl+Shift+Z', category: 'Terminal' },
+  // Terminal-focused bindings avoid bare Ctrl+<letter> and Alt+<letter>: a TUI or shell receives
+  // those as control characters / ESC prefixes (readline, vim, nano, fzf, tmux, emacs), so the app
+  // must not swallow them. Ctrl+Shift+<letter> is the convention of Gnome Terminal and Konsole.
   // Letters, not punctuation: Shift+<punctuation key> produces a different character on
   // different keyboard layouts (e.g. Shift+, is '<' on a US layout, ';' on Swedish/Nordic
   // ISO layouts), and matching that reliably across every layout/browser combo isn't
@@ -37,9 +58,11 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
   { id: 'resetFontSize', name: 'Reset Font Size', defaultKeys: 'Ctrl+0', category: 'Terminal' },
   { id: 'clipboardHistory', name: 'Clipboard History', defaultKeys: 'Ctrl+Shift+R', category: 'Terminal' },
   { id: 'terminalSearch', name: 'Search in Terminal', defaultKeys: 'Ctrl+Shift+S', category: 'Terminal' },
-  { id: 'copyLastOutput', name: 'Copy Last Command Output', defaultKeys: 'Ctrl+Shift+G', category: 'Terminal' },
+  { id: 'copyLastOutput', name: 'Copy Last Command Output', defaultKeys: 'Ctrl+Shift+Y', category: 'Terminal' },
+  { id: 'rerunWithSudo', name: 'Re-run Last Command with sudo', defaultKeys: 'Ctrl+Shift+X', category: 'Terminal' },
   { id: 'snippets', name: 'Snippets', defaultKeys: 'Ctrl+Shift+L', category: 'Terminal' },
   { id: 'searchInFiles', name: 'Search in Files', defaultKeys: 'Ctrl+Shift+K', category: 'General' },
+  { id: 'globalSearch', name: 'Search Profiles, Tabs and Hosts', defaultKeys: 'Ctrl+Shift+G', category: 'General' },
 ];
 
 export const DEFAULT_SHORTCUTS: Record<string, string> = SHORTCUT_DEFINITIONS.reduce(
@@ -77,6 +100,16 @@ export interface AppSettings {
   terminalFontFamily: string;
   terminalCursorStyle?: 'block' | 'underline' | 'bar';
   terminalScrollback?: number;
+  /** Show interactive preview card when hovering over file paths in the terminal. Default true. */
+  terminalPathHoverPreview?: boolean;
+  /** When the path hover card opens: on hover, or only while Ctrl/Cmd is held. Default 'hover'. */
+  terminalPathHoverMode?: 'hover' | 'ctrl';
+  /** Offer to re-run a command with sudo when it fails with a permission error. Default true. */
+  terminalSudoRetryPrompt?: boolean;
+  /** Auto-detect web services/ports in terminal output and prompt to port forward. Default true. */
+  terminalPortForwardAutoDetect?: boolean;
+  /** Optional custom regular expression for matching service ports in terminal output. */
+  terminalPortForwardCustomRegex?: string;
   copyOnSelect?: boolean;
   /** Whether the terminal selection history is shared by all hosts ('global') or kept per connection ('host'). */
   clipboardHistoryScope?: 'global' | 'host';
@@ -128,6 +161,8 @@ export interface AppSettings {
   updatedAt?: string;
   /** Master switch for OpenShift support and tools (e.g. oc login, oc CLI shim). Off by default. */
   enableOpenShift?: boolean;
+  /** Global search (the top bar button and its shortcut) for profiles, tabs and user@host. On by default. */
+  enableGlobalSearch?: boolean;
   /**
    * SSH/SFTP and S3 profiles share one flat folder namespace on disk. Off by
    * default, the Connection Manager hides a folder from a tab unless it holds
@@ -153,6 +188,23 @@ export interface AppSettings {
   localTerminalAgentMode?: 'auto' | 'system' | 'app-managed' | 'disabled';
   /** Keep the sshs3-managed block in ~/.ssh/config in sync with saved SSH profiles. On by default. */
   autoSyncLocalSshConfig?: boolean;
+  /**
+   * Local, per-device preference (never synced — not part of a Team Vault's own synced data):
+   * whether each unlocked Team Vault should show up as its own tab in the Connection Manager,
+   * keyed by `vaultId`. Missing entry (including for a team never seen before) defaults to
+   * `true` — a newly joined/unlocked team shows up as a tab without the member needing to opt in.
+   */
+  connectionManagerVisibleTeamVaults?: Record<string, boolean>;
+  /**
+   * Local, per-device preference: which Connection Manager tab opens by default — `'personal'`
+   * or a `vaultId`. Falls back to `'personal'`/`'ssh'` when unset or when the referenced vault no
+   * longer exists/isn't visible.
+   */
+  connectionManagerDefaultTab?: string;
+  /** SSH Certificate Authority configurations. */
+  sshCaConfigs?: SshCaConfig[];
+  /** Default SSH CA configuration ID to use for login/renewal. */
+  defaultSshCaConfigId?: string;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -161,6 +213,11 @@ export const DEFAULT_SETTINGS: AppSettings = {
   terminalFontFamily: 'JetBrains Mono, monospace',
   terminalCursorStyle: 'block',
   terminalScrollback: 5000,
+  terminalPathHoverPreview: true,
+  terminalPathHoverMode: 'hover',
+  terminalSudoRetryPrompt: true,
+  terminalPortForwardAutoDetect: true,
+  terminalPortForwardCustomRegex: '',
   copyOnSelect: false,
   clipboardHistoryScope: 'global',
   clipboardHistoryClearOnExit: false,
@@ -171,7 +228,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   verifyTransferIntegrity: true,
   shortcuts: { ...DEFAULT_SHORTCUTS },
   dotfilesPoolEnabled: false,
+  sshCaConfigs: [],
   enableOpenShift: false,
+  enableGlobalSearch: true,
   shareFoldersAcrossTypes: false,
   perfMetricsEnabled: false,
   perfMetricsLayout: 'text',

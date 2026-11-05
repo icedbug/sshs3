@@ -102,6 +102,22 @@ export async function readSmartcardCertificates(
   return results;
 }
 
+/**
+ * Whether the module reports a token in any slot (`C_GetSlotList(tokenPresent)`), without a PIN.
+ * `undefined` when that can't be told (worker unavailable or failed): callers then proceed as if a
+ * token were there rather than blocking a card that works.
+ */
+export async function isSmartcardTokenPresent(pkcs11LibPath: string): Promise<boolean | undefined> {
+  try {
+    const stdout = await withPkcs11Lock(() => runCertWorker(pkcs11LibPath));
+    const parsed: { tokenPresent?: boolean; error?: string } = JSON.parse(stdout.trim().split('\n').pop() ?? '');
+    if (parsed.error) return undefined;
+    return typeof parsed.tokenPresent === 'boolean' ? parsed.tokenPresent : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Finds OpenSC's `pkcs11-tool.exe` for a module path like `...\OpenSC\pkcs11\opensc-pkcs11.dll`
  * (the tool lives in the sibling `tools` directory), or undefined when this isn't an OpenSC install. */
 function findPkcs11Tool(pkcs11LibPath: string): string | undefined {

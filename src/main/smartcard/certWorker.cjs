@@ -11,7 +11,7 @@
 // worker the same as "no certificate details available" and carries on.
 //
 // Invoked as: ELECTRON_RUN_AS_NODE=1 <electron-binary> certWorker.cjs <pkcs11LibPath>
-// Prints exactly one line of JSON to stdout: {"certs":["<base64 DER>", ...]} on success,
+// Prints exactly one line of JSON to stdout: {"certs":["<base64 DER>", ...],"tokenPresent":bool} on success,
 // or {"error":"..."} on failure. Never throws past top level — always exits 0 with best-effort
 // output, since the caller only cares whether it got certs or not.
 
@@ -94,7 +94,7 @@ async function runCertWorker(argv = process.argv.slice(2), stdout = process.stdo
   // must reach the parent process over the stdout pipe first. If Finalize then crashes the
   // worker, that's fine — the parent only reads this one line and doesn't care how the worker's
   // process itself ends.
-  stdout.write(JSON.stringify({ certs: derList }) + '\n');
+  stdout.write(JSON.stringify({ certs: derList, tokenPresent: slots.length > 0 }) + '\n');
 
   try {
     pkcs11.C_Finalize();

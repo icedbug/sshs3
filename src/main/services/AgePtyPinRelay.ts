@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
 import type { IPty } from 'node-pty';
 import * as nodePty from 'node-pty';
@@ -84,6 +85,16 @@ const DEFAULT_CREDENTIALS_WIZARD_RE = /choose a new (pin|puk)|enter.*new (piv )?
  * unconfigured), so it's stripped before the text ever reaches `callbacks.requestPin`. */
 function cleanPinPrompt(text: string): string {
   return text.replace(/\s*\(default is \d+\)/i, '').trim();
+}
+
+// Windows' ConPTY wraps everything in terminal control sequences (screen clears, cursor moves,
+// window-title OSC) that a Linux pty doesn't emit; they can land in the middle of a phrase and
+// would otherwise leak into the PIN modal's prompt text.
+// eslint-disable-next-line no-control-regex
+const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
+
+export function stripAnsi(text: string): string {
+  return text.replace(ANSI_RE, '');
 }
 
 /**
@@ -186,7 +197,9 @@ export function runAgeCommandViaPty(
         pendingChunk = pendingChunk.slice(-MAX_PENDING_CHUNK);
       }
 
-      if (DEFAULT_CREDENTIALS_WIZARD_RE.test(pendingChunk)) {
+      const view = stripAnsi(pendingChunk);
+
+      if (DEFAULT_CREDENTIALS_WIZARD_RE.test(view)) {
         finish(() => reject(new TeamVaultDefaultCredentialsError()));
         term.kill();
         return;
@@ -194,7 +207,7 @@ export function runAgeCommandViaPty(
 
       // The card's own message is authoritative on how many tries are left — once it says 0,
       // the PIN is about to be (or already is) blocked, so this gives up rather than retrying.
-      const wrongPinMatch = pendingChunk.match(WRONG_PIN_RE);
+      const wrongPinMatch = view.match(WRONG_PIN_RE);
       if (wrongPinMatch) {
         pendingChunk = '';
         const triesRemaining = Number(wrongPinMatch[1]);
@@ -214,9 +227,11 @@ export function runAgeCommandViaPty(
         return;
       }
 
-      if (PIN_PROMPT_RE.test(pendingChunk) && pinAttempt === 0 && !awaitingPinResponse) {
+      if (PIN_PROMPT_RE.test(view) && pinAttempt === 0 && !awaitingPinResponse) {
         pinAttempt = 1;
-        const promptText = cleanPinPrompt(pendingChunk);
+        // Start at the prompt itself: on Windows the chunk also carries the plugin's preceding
+        // status line ("Generating key...") with only cursor moves between it and the prompt.
+        const promptText = cleanPinPrompt(view.slice(view.search(PIN_PROMPT_RE)));
         pendingChunk = '';
         requestAndWritePin(promptText);
         return;
@@ -267,6 +282,45 @@ export function readFifoOnce(fifoPath: string): Promise<Buffer> {
   });
 }
 
+/**
+ * Lets a reader that is still waiting for a writer give up. `readFifoOnce` opens the FIFO for reading, and that open()
+ * blocks one of libuv's four threadpool threads until some writer opens the other end. If `age` fails before it opens
+ * `-o <fifo>` (wrong PIN, bad identity, cancelled), no writer ever comes: removing the FIFO does not wake the reader, the
+ * thread stays blocked for the life of the process, and after four such failures every async fs call in the app hangs.
+ * Opening the write end without writing a byte releases the reader, which then sees end-of-file. It does nothing when no
+ * reader is waiting (ENXIO) or the FIFO is already gone, and it runs on the calling thread (O_NONBLOCK) so it cannot
+ * itself get stuck behind a starved threadpool.
+ */
+export function releaseFifoReader(fifoPath: string): void {
+  try {
+    const fd = fs.openSync(fifoPath, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK);
+    fs.closeSync(fd);
+  } catch {
+    // ENXIO: nobody is waiting (the reader already finished). ENOENT: already removed.
+  }
+}
+
+// After `age` has exited successfully, its output is already in the FIFO. If the reader still has nothing after this
+// long, `age` did not deliver it (seen once in a while on a heavily loaded machine: `age` exits 0 but the reader's open()
+// never completes) and waiting longer only freezes the unlock.
+export const CHANNEL_GRACE_MS = 5000;
+
+/**
+ * `channel.read()`, but bounded: rejects with a clear error instead of waiting forever when `age` finished without
+ * delivering its output. The caller's `dispose()` then releases the blocked reader.
+ */
+export async function readChannelAfterExit(channel: SecretOutputChannel, graceMs: number = CHANNEL_GRACE_MS): Promise<Buffer> {
+  let timer: NodeJS.Timeout | undefined;
+  const giveUp = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error('"age" finished but wrote no output')), graceMs);
+  });
+  try {
+    return await Promise.race([channel.read(), giveUp]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** Removes a FIFO created by `createFifo`. A no-op if it's already gone. */
 export async function removeFifo(fifoPath: string): Promise<void> {
   try {
@@ -274,4 +328,116 @@ export async function removeFifo(fifoPath: string): Promise<void> {
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
   }
+}
+
+/**
+ * A one-shot, never-on-disk channel for a secret that `age` writes with `-o <path>`: a FIFO on
+ * Linux/macOS, a named pipe on Windows, where `mkfifo` doesn't exist. Listening/reading starts
+ * immediately — `age` blocks opening a FIFO until a reader is there — so create the channel
+ * BEFORE spawning `age`, then call `read()` once it has exited.
+ */
+export interface SecretOutputChannel {
+  /** The path to hand `age` as `-o`. */
+  path: string;
+  /** The bytes `age` wrote. Call after the `age` process finished. */
+  read(): Promise<Buffer>;
+  /** Tears the channel down; safe to call more than once. */
+  dispose(): Promise<void>;
+}
+
+// After `age` has exited, how long a Windows pipe waits for a connection that carries data
+// before concluding `age` produced no output. Only reached on a broken run; a normal one has
+// already delivered the bytes by then.
+const PIPE_GRACE_MS = 3000;
+
+const BACKSLASH = String.fromCharCode(92);
+
+/** `\\.\pipe\<name>` — the Windows named-pipe namespace. */
+function windowsPipePath(name: string): string {
+  return [BACKSLASH, BACKSLASH, '.', BACKSLASH, 'pipe', BACKSLASH, name].join('');
+}
+
+export async function createSecretOutputChannel(dir: string): Promise<SecretOutputChannel> {
+  if (process.platform !== 'win32') {
+    const fifoPath = await createFifo(dir);
+    const readPromise = readFifoOnce(fifoPath);
+    // A failed run never calls read(), so don't let this surface as an unhandled rejection.
+    readPromise.catch(() => {});
+    return {
+      path: fifoPath,
+      read: () => readPromise,
+      dispose: async () => {
+        releaseFifoReader(fifoPath);
+        await removeFifo(fifoPath);
+      },
+    };
+  }
+
+  const pipePath = windowsPipePath(`sshs3-${crypto.randomUUID()}`);
+  // `age` opens its `-o` target several times (verified against age v1.3.2: two empty probe
+  // connections, then the one that carries the data), so the first connection to close can't be
+  // taken as the answer — the first non-empty one is.
+  let data: Buffer | undefined;
+  let waiter: { resolve: (b: Buffer) => void; reject: (e: Error) => void; timer: NodeJS.Timeout } | undefined;
+  let disposed = false;
+  const sockets = new Set<net.Socket>();
+
+  const server = net.createServer((socket) => {
+    sockets.add(socket);
+    const chunks: Buffer[] = [];
+    let total = 0;
+    socket.on('data', (c: Buffer) => {
+      total += c.length;
+      if (total > MAX_OUTPUT_BYTES) {
+        socket.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    socket.on('error', () => {});
+    socket.on('close', () => {
+      sockets.delete(socket);
+      const buf = Buffer.concat(chunks);
+      if (buf.length === 0 || data) return;
+      data = buf;
+      if (waiter) {
+        clearTimeout(waiter.timer);
+        waiter.resolve(buf);
+        waiter = undefined;
+      }
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(pipePath, () => {
+      server.off('error', reject);
+      server.on('error', () => {});
+      resolve();
+    });
+  });
+
+  return {
+    path: pipePath,
+    read: () => {
+      if (data) return Promise.resolve(data);
+      if (disposed) return Promise.reject(new Error('Secret output channel was closed before any data arrived'));
+      return new Promise<Buffer>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          waiter = undefined;
+          reject(new Error('"age" finished but wrote no output'));
+        }, PIPE_GRACE_MS);
+        waiter = { resolve, reject, timer };
+      });
+    },
+    dispose: async () => {
+      disposed = true;
+      if (waiter) {
+        clearTimeout(waiter.timer);
+        waiter.reject(new Error('Secret output channel was closed before any data arrived'));
+        waiter = undefined;
+      }
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    },
+  };
 }

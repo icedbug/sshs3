@@ -87,7 +87,7 @@ export const UpdateBanner: React.FC = () => {
           type="button"
           aria-label="Dismiss"
           onClick={() => setDismissedKey(key)}
-          className="text-txt-muted hover:text-txt-primary"
+          className="rounded p-1.5 text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary"
         >
           <X className="h-3.5 w-3.5" />
         </button>

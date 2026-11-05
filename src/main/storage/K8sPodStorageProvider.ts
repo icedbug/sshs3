@@ -1,5 +1,5 @@
 import path from 'node:path';
-import stream, { PassThrough } from 'node:stream';
+import stream, { PassThrough, Writable } from 'node:stream';
 import type * as k8s from '@kubernetes/client-node';
 import { loadK8sClient } from '../services/k8sClient';
 import { loadKubeConfigForContext } from '../services/k8sKubeConfig';
@@ -14,6 +14,22 @@ import type {
   WriteStreamOptions,
 } from '../../shared/types/storage';
 import type { K8sStorageConfig } from '../../shared/types/kubernetes';
+import { defineTargetTouched } from './targetTouched';
+
+/** How long a write stream waits, after its last byte, for the command in the pod to report back. */
+const WRITE_FINISH_TIMEOUT_MS = 60_000;
+
+/**
+ * Runs in the pod for every write ($1 = path, $2 = optional octal mode). `cat` must be allowed to fail the
+ * script: without `|| exit $?` the status of the trailing `if` (0 when there is no mode) hid a failed write
+ * such as "Permission denied" or "No space left on device", and the editor reported the file as saved.
+ * A failing `chmod` still fails the script, so a file is never silently left with the wrong permissions.
+ */
+export const POD_WRITE_SCRIPT = `
+mkdir -p "$(dirname "$1")" 2>/dev/null
+cat > "$1" || exit $?
+if [ -n "$2" ]; then chmod "$2" "$1" 2>/dev/null; fi
+`;
 
 export class K8sPodStorageProvider extends BaseStorageProvider {
   readonly id: string;
@@ -142,12 +158,11 @@ for f in .* *; do
   [ "$f" = "." ] || [ "$f" = ".." ] && continue
   [ ! -e "$f" ] && [ ! -L "$f" ] && continue
   if [ -d "$f" ]; then isDir="1"; else isDir="0"; fi
+  if [ -L "$f" ]; then isLink="1"; else isLink="0"; fi
+  if [ -f "$f" ]; then isReg="1"; else isReg="0"; fi
   out=$(stat -c "%s %Y %a" "$f" 2>/dev/null || stat -f "%z %m %p" "$f" 2>/dev/null)
-  if [ -n "$out" ]; then
-    printf "%s\t%s\t%s\n" "$f" "$isDir" "$out"
-  else
-    printf "%s\t%s\t0 0 755\n" "$f" "$isDir"
-  fi
+  [ -n "$out" ] || out="0 0 755"
+  printf "%s\t%s\t%s\t%s\t%s\n" "$f" "$isDir" "$out" "$isLink" "$isReg"
 done
 `;
 
@@ -171,6 +186,10 @@ done
 
       const name = parts[0];
       const isDirectory = parts[1] === '1';
+      // Trailing flags (absent in older output): symlink / regular-file. Symlinks must be reported
+      // so TransferPipeline.scanDirectory skips them instead of following them out of the tree.
+      const isSymlink = parts[3]?.trim() === '1';
+      const isSpecial = parts[4] !== undefined && !isDirectory && parts[4].trim() !== '1';
       const statParts = parts[2].trim().split(/\s+/);
       const size = parseInt(statParts[0], 10) || 0;
       const mtimeSec = parseInt(statParts[1], 10);
@@ -189,6 +208,8 @@ done
         mtimeMs,
         mimeType: isDirectory ? undefined : getMimeType(name),
         permissions,
+        isSymlink,
+        isSpecial,
       });
     }
 
@@ -219,12 +240,11 @@ if [ ! -e "$f" ] && [ ! -L "$f" ]; then
   exit 2
 fi
 if [ -d "$f" ]; then isDir="1"; else isDir="0"; fi
+if [ -L "$f" ]; then isLink="1"; else isLink="0"; fi
+if [ -f "$f" ]; then isReg="1"; else isReg="0"; fi
 out=$(stat -c "%s %Y %a" "$f" 2>/dev/null || stat -f "%z %m %p" "$f" 2>/dev/null)
-if [ -n "$out" ]; then
-  printf "%s\t%s\n" "$isDir" "$out"
-else
-  printf "%s\t0 0 755\n" "$isDir"
-fi
+[ -n "$out" ] || out="0 0 755"
+printf "%s\t%s\t%s\t%s\n" "$isDir" "$out" "$isLink" "$isReg"
 `;
 
     let res: { stdout: Buffer; stderr: string };
@@ -242,8 +262,10 @@ fi
       throw new Error(`Could not stat path: ${targetPath}`);
     }
 
-    const [isDirStr, statDetails] = line.split('\t');
+    const [isDirStr, statDetails, isLinkStr, isRegStr] = line.split('\t');
     const isDirectory = isDirStr === '1';
+    const isSymlink = isLinkStr?.trim() === '1';
+    const isSpecial = isRegStr !== undefined && !isDirectory && isRegStr.trim() !== '1';
     const statParts = (statDetails || '').trim().split(/\s+/);
     const size = parseInt(statParts[0], 10) || 0;
     const mtimeSec = parseInt(statParts[1], 10);
@@ -261,6 +283,8 @@ fi
       mtimeMs,
       mimeType: isDirectory ? undefined : getMimeType(name),
       permissions,
+      isSymlink,
+      isSpecial,
     };
   }
 
@@ -303,13 +327,8 @@ fi
   ): Promise<void> {
     const targetPath = path.posix.normalize(remotePath);
     const modeStr = options?.mode ? (options.mode & 0o777).toString(8) : '';
-    const script = `
-mkdir -p "$(dirname "$1")" 2>/dev/null
-cat > "$1"
-if [ -n "$2" ]; then chmod "$2" "$1" 2>/dev/null; fi
-`;
     const inStream = stream.Readable.from([Buffer.from(data)]);
-    await this.runCommand(['sh', '-c', script, '--', targetPath, modeStr], inStream);
+    await this.runCommand(['sh', '-c', POD_WRITE_SCRIPT, '--', targetPath, modeStr], inStream);
   }
 
   public async createReadStream(
@@ -375,19 +394,83 @@ if [ -n "$2" ]; then chmod "$2" "$1" 2>/dev/null; fi
 
     errStream.on('data', (c: Buffer) => stderrChunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
 
+    // Settles when the command in the pod has exited. The stream must not report 'finish' before that:
+    // a PassThrough finishes once its last chunk is buffered, while `cat` is still writing to the pod's
+    // disk, so the caller would verify (and report success on) a file that is not complete yet and
+    // would never see a write error such as "No space left on device".
+    let settleRemote!: { resolve: () => void; reject: (err: Error) => void };
+    let execConnection: { close?: () => void } | undefined;
+    /** Ends the exec session, so `cat` in the pod does not outlive a write that has already failed. */
+    let finishTimer: ReturnType<typeof setTimeout> | undefined;
+    let execClosed = false;
+    // `cat > file` truncates the target as soon as the command starts in the pod.
+    let execStarted = false;
+    const closeExec = (): void => {
+      if (execClosed) return;
+      execClosed = true;
+      try {
+        execConnection?.close?.();
+      } catch {
+        // already closed
+      }
+    };
+    let remoteSettled = false;
+    const remoteDone = new Promise<void>((resolve, reject) => {
+      settleRemote = {
+        resolve: () => {
+          remoteSettled = true;
+          resolve();
+        },
+        reject: (err) => {
+          remoteSettled = true;
+          reject(err);
+        },
+      };
+    });
+    remoteDone.catch(() => {}); // surfaced through the stream; never an unhandled rejection
+
+    // What callers get: it feeds the exec's stdin and only finishes once the command has reported back.
+    const out = new Writable({
+      write(chunk, encoding, callback) {
+        inStream.write(chunk, encoding, callback);
+      },
+      final(callback) {
+        inStream.end();
+        // All data has been handed over, so the command should exit promptly; do not wait on it forever.
+        finishTimer = setTimeout(() => {
+          settleRemote.reject(new Error('Timed out waiting for the pod to finish writing the file'));
+          closeExec();
+        }, WRITE_FINISH_TIMEOUT_MS);
+        remoteDone.then(
+          () => {
+            clearTimeout(finishTimer);
+            callback();
+          },
+          (remoteErr) => {
+            clearTimeout(finishTimer);
+            callback(remoteErr);
+          }
+        );
+      },
+      destroy(err, callback) {
+        clearTimeout(finishTimer); // a write abandoned while final() waits must not leave its timer behind
+        inStream.destroy();
+        // An aborted or failed write ends the session; a finished one (destroyed automatically afterwards)
+        // has nothing left to end, its command has already exited.
+        if (!out.writableFinished) closeExec();
+        callback(err);
+      },
+    });
+    inStream.on('error', (err) => out.destroy(err));
+
     const modeStr = options?.mode ? (options.mode & 0o777).toString(8) : '';
-    const script = `
-mkdir -p "$(dirname "$1")" 2>/dev/null
-cat > "$1"
-if [ -n "$2" ]; then chmod "$2" "$1" 2>/dev/null; fi
-`;
 
     try {
       const conn = await exec.exec(
         this.config.namespace,
         this.config.podName,
         this.config.containerName,
-        ['sh', '-c', script, '--', targetPath, modeStr],
+        ['sh', '-c', POD_WRITE_SCRIPT, '--', targetPath, modeStr],
         null,
         errStream,
         inStream,
@@ -395,19 +478,44 @@ if [ -n "$2" ]; then chmod "$2" "$1" 2>/dev/null; fi
         (status) => {
           if (status?.status === 'Failure') {
             const msg = Buffer.concat(stderrChunks).toString('utf-8').trim() || status.message || 'Failed to write file to pod';
-            inStream.destroy(new Error(msg));
+            const failure = new Error(msg);
+            settleRemote.reject(failure);
+            out.destroy(failure);
+          } else {
+            settleRemote.resolve();
           }
         }
       );
 
+      execConnection = conn;
+      execStarted = true;
+      if (execClosed) {
+        // The write was already abandoned while the session was still being opened.
+        try {
+          conn.close?.();
+        } catch {
+          // already closed
+        }
+      }
       conn.on('error', (err: any) => {
-        inStream.destroy(err);
+        settleRemote.reject(err instanceof Error ? err : new Error(String(err)));
+        out.destroy(err instanceof Error ? err : new Error(String(err)));
+      });
+      conn.on('close', () => {
+        // No status message before the socket closed: fail the writer now. Nothing reads the exec's stdin
+        // any more, so a write in progress would otherwise wait for room in the buffer for ever.
+        if (remoteSettled) return;
+        const failure = new Error('Connection to the pod closed before the write finished');
+        settleRemote.reject(failure);
+        if (!out.destroyed) out.destroy(failure);
       });
     } catch (err) {
-      inStream.destroy(err instanceof Error ? err : new Error(String(err)));
+      const failure = err instanceof Error ? err : new Error(String(err));
+      settleRemote.reject(failure);
+      out.destroy(failure);
     }
 
-    return inStream;
+    return defineTargetTouched(out, () => execStarted);
   }
 
   public async disconnect(): Promise<void> {

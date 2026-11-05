@@ -40,6 +40,13 @@
   --text-2xs--line-height: 1rem;
   --text-xs: 0.8125rem; /* 13px, was 12px */
   --text-xs--line-height: 1.125rem;
+
+  /* Tighter corner radii for a denser, more precise look. Overrides Tailwind's
+     built-in rounded-* scale sitewide (md 6->4, lg 8->6, xl 12->8, 2xl 16->10px). */
+  --radius-md: 0.25rem; /* 4px, was 6px */
+  --radius-lg: 0.375rem; /* 6px, was 8px */
+  --radius-xl: 0.5rem; /* 8px, was 12px */
+  --radius-2xl: 0.625rem; /* 10px, was 16px */
 }
 
 :root {
@@ -415,6 +422,98 @@ html:not(.light) .disabled\:opacity-40:disabled {
   --tw-prose-pre-bg: var(--bg-surface);
   --tw-prose-th-borders: var(--border-strong);
   --tw-prose-td-borders: var(--border-subtle);
+
+  /* Syntax colours of fenced code (dark themes); the light theme overrides them below. */
+  --md-tok-keyword: #ff7b72;
+  --md-tok-literal: #79c0ff;
+  --md-tok-string: #a5d6ff;
+  --md-tok-comment: #9aa4af;
+  --md-tok-name: #ffa657;
+  --md-tok-type: #7ee787;
+  --md-tok-meta: #d2a8ff;
+}
+.light .markdown-preview {
+  --md-tok-keyword: #cf222e;
+  --md-tok-literal: #0550ae;
+  --md-tok-string: #0a3069;
+  --md-tok-comment: #57606a;
+  --md-tok-name: #953800;
+  --md-tok-type: #116329;
+  --md-tok-meta: #6639ba;
+}
+
+/* Like GitHub: no literal backticks around inline code, a quiet background instead. */
+.markdown-preview :where(code)::before,
+.markdown-preview :where(code)::after {
+  content: none;
+}
+.markdown-preview :not(pre) > code {
+  background: var(--bg-surface);
+  border-radius: 0.25rem;
+  padding: 0.15em 0.35em;
+}
+
+/* Tables with a full grid. */
+.markdown-preview table {
+  border-collapse: collapse;
+}
+.markdown-preview th,
+.markdown-preview td {
+  border: 1px solid var(--border-subtle);
+  padding: 0.4rem 0.75rem;
+}
+.markdown-preview thead th {
+  background: var(--bg-surface);
+}
+
+/* Task lists (- [x]): the checkbox is the marker, no bullet as well. */
+.markdown-preview .contains-task-list {
+  list-style: none;
+  padding-inline-start: 0;
+}
+.markdown-preview .contains-task-list .contains-task-list {
+  padding-inline-start: 1.5em;
+}
+.markdown-preview .task-list-item input {
+  margin-inline-end: 0.5em;
+  vertical-align: middle;
+}
+
+/* Syntax tokens of fenced code (classes from @lezer/highlight's classHighlighter). */
+.markdown-preview .tok-keyword,
+.markdown-preview .tok-operator,
+.markdown-preview .tok-modifier {
+  color: var(--md-tok-keyword);
+}
+.markdown-preview .tok-atom,
+.markdown-preview .tok-bool,
+.markdown-preview .tok-number,
+.markdown-preview .tok-literal {
+  color: var(--md-tok-literal);
+}
+.markdown-preview .tok-string,
+.markdown-preview .tok-string2,
+.markdown-preview .tok-url {
+  color: var(--md-tok-string);
+}
+.markdown-preview .tok-comment {
+  color: var(--md-tok-comment);
+  font-style: italic;
+}
+.markdown-preview .tok-variableName,
+.markdown-preview .tok-propertyName,
+.markdown-preview .tok-attributeName,
+.markdown-preview .tok-labelName {
+  color: var(--md-tok-name);
+}
+.markdown-preview .tok-typeName,
+.markdown-preview .tok-className,
+.markdown-preview .tok-namespace {
+  color: var(--md-tok-type);
+}
+.markdown-preview .tok-meta,
+.markdown-preview .tok-macroName {
+  color: var(--md-tok-meta);
 }
 
 /* Custom scrollbar */

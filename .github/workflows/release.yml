@@ -10,6 +10,10 @@ on:
         description: 'Tag name for release (e.g. v0.1.0)'
         required: true
         default: 'v0.1.0'
+      publish:
+        description: 'Publish the GitHub release. Untick to only build and keep the files as workflow artifacts (for testing).'
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -140,6 +144,17 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Package policy templates (ADMX/ADML and policy.conf example)
+        if: runner.os == 'Linux'
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          stage="sshs3-policy-templates-${version}"
+          mkdir -p "$stage/en-US" release
+          cp packaging/windows/policy/sshs3.admx "$stage/"
+          cp packaging/windows/policy/en-US/sshs3.adml "$stage/en-US/"
+          cp packaging/policy.conf.example "$stage/"
+          zip -r "release/${stage}.zip" "$stage"
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -149,6 +164,7 @@ jobs:
             release/*.deb
             release/*.rpm
             release/*.exe
+            release/*.msi
             release/*.zip
             release/*.blockmap
             release/latest*.yml
@@ -158,6 +174,7 @@ jobs:
   publish:
     name: Publish GitHub Release
     needs: build
+    if: github.event_name != 'workflow_dispatch' || inputs.publish
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -192,7 +209,7 @@ jobs:
 
       - name: Generate SHA256SUMS
         working-directory: dist-artifacts
-        run: sha256sum *.AppImage *.deb *.rpm *.exe *.zip > SHA256SUMS
+        run: sha256sum *.AppImage *.deb *.rpm *.exe *.msi *.zip > SHA256SUMS
 
       - name: Setup Node.js (for SBOM)
         uses: actions/setup-node@v7
@@ -210,6 +227,7 @@ jobs:
             dist-artifacts/*.deb
             dist-artifacts/*.rpm
             dist-artifacts/*.exe
+            dist-artifacts/*.msi
             dist-artifacts/*.zip
 
       - name: Create GitHub Release
@@ -225,6 +243,7 @@ jobs:
             dist-artifacts/*.deb
             dist-artifacts/*.rpm
             dist-artifacts/*.exe
+            dist-artifacts/*.msi
             dist-artifacts/*.zip
             dist-artifacts/*.blockmap
             dist-artifacts/latest*.yml

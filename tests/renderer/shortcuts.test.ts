@@ -1,11 +1,43 @@
 import { describe, it, expect } from 'vitest';
 import { comboFromKeyboardEvent } from '../../src/renderer/src/lib/shortcuts';
+import { SHORTCUT_DEFINITIONS } from '../../src/shared/types/settings';
+
+describe('default shortcuts', () => {
+  it('never bind the same key combo to two actions', () => {
+    const seen = new Map<string, string>();
+    for (const def of SHORTCUT_DEFINITIONS) {
+      const key = def.defaultKeys.toLowerCase();
+      expect(seen.get(key), `${def.id} duplicates ${seen.get(key)} (${def.defaultKeys})`).toBeUndefined();
+      seen.set(key, def.id);
+    }
+  });
+
+  it('list modifiers in the order comboFromKeyboardEvent produces, or they could never match a keypress', () => {
+    for (const def of SHORTCUT_DEFINITIONS) {
+      const rest = def.defaultKeys.replace(/^(?:Ctrl\+)?(?:Cmd\+)?(?:Alt\+)?(?:Shift\+)?/, '');
+      expect(rest, def.id).not.toMatch(/^(?:Ctrl|Cmd|Alt|Shift)\+/);
+    }
+  });
+
+  it('leave bare Alt+<key> and Ctrl+<letter> to the shell, which reads them as ESC prefixes and control codes', () => {
+    const terminalFacing = SHORTCUT_DEFINITIONS.filter((d) => d.category === 'Terminal').map((d) => d.defaultKeys);
+    for (const keys of terminalFacing) {
+      expect(keys).not.toMatch(/^Alt\+/);
+      expect(keys).not.toMatch(/^Ctrl\+[A-Za-z]$/);
+    }
+  });
+});
 
 describe('comboFromKeyboardEvent', () => {
   it('builds a combo string from modifiers and an uppercased letter', () => {
     expect(comboFromKeyboardEvent({ key: 'n', code: 'KeyN', ctrlKey: true, metaKey: false, altKey: false, shiftKey: true })).toBe(
       'Ctrl+Shift+N'
     );
+  });
+
+  it('returns null rather than throwing when key is missing or empty (dead-key/compose/IME events)', () => {
+    expect(comboFromKeyboardEvent({ key: undefined as unknown as string, ctrlKey: true, metaKey: false, altKey: false, shiftKey: false })).toBeNull();
+    expect(comboFromKeyboardEvent({ key: '', ctrlKey: true, metaKey: false, altKey: false, shiftKey: false })).toBeNull();
   });
 
   it('returns null for a lone modifier keypress', () => {
@@ -20,6 +52,24 @@ describe('comboFromKeyboardEvent', () => {
 
     expect(usLayout).toBe('Ctrl+Shift+,');
     expect(swedishLayout).toBe('Ctrl+Shift+,');
+  });
+
+  it('keeps Swedish/Nordic å/ä/ö letters instead of the US punctuation that shares their physical key code', () => {
+    // On a Swedish ISO layout, å/ä/ö sit at the same physical codes as US [ / ' / ; — Shift+å
+    // must stay 'Å', not get overwritten with the US-layout bracket that shares BracketLeft.
+    expect(comboFromKeyboardEvent({ key: 'Å', code: 'BracketLeft', ctrlKey: true, metaKey: false, altKey: false, shiftKey: true })).toBe(
+      'Ctrl+Shift+Å'
+    );
+    expect(comboFromKeyboardEvent({ key: 'Ä', code: 'Quote', ctrlKey: true, metaKey: false, altKey: false, shiftKey: true })).toBe(
+      'Ctrl+Shift+Ä'
+    );
+    expect(comboFromKeyboardEvent({ key: 'Ö', code: 'Semicolon', ctrlKey: true, metaKey: false, altKey: false, shiftKey: true })).toBe(
+      'Ctrl+Shift+Ö'
+    );
+    // Unshifted å/ä/ö (no Shift held) were already unaffected, but keep covering them too.
+    expect(comboFromKeyboardEvent({ key: 'å', code: 'BracketLeft', ctrlKey: true, metaKey: false, altKey: false, shiftKey: false })).toBe(
+      'Ctrl+Å'
+    );
   });
 
   it('falls back to the raw e.key when e.code is missing or unrecognized, so recorder and matcher stay consistent with each other even then', () => {

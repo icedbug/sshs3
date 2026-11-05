@@ -106,6 +106,23 @@ describe('K8sTerminalManager', () => {
     expect(onData).toHaveBeenCalledWith({ sessionId, data: 'hello\r\n' });
   });
 
+  // Low finding (code review 2026-11-03): each chunk was decoded on its own, so a character split across two
+  // chunks (any multi-byte UTF-8 character) came out as replacement characters.
+  it('keeps a multi-byte character that arrives split across two chunks intact', async () => {
+    const manager = new K8sTerminalManager();
+    await manager.createSession(TARGET);
+    const received: string[] = [];
+    manager.on('data', (e: { data: string }) => received.push(e.data));
+
+    const euro = Buffer.from('€'); // 3 bytes
+    calls[0].stdout.write(euro.subarray(0, 2));
+    await new Promise((resolve) => setImmediate(resolve));
+    calls[0].stdout.write(Buffer.concat([euro.subarray(2), Buffer.from('\r\n')]));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(received.join('')).toBe('€\r\n');
+  });
+
   it('writes terminal input into the session stdin stream', async () => {
     const manager = new K8sTerminalManager();
     const sessionId = await manager.createSession(TARGET);

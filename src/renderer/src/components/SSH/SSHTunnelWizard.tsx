@@ -163,10 +163,13 @@ export const SSHTunnelWizard: React.FC<SSHTunnelWizardProps> = ({
   return (
     <div className="rounded-xl border border-border-subtle bg-app-surface p-4 space-y-4 text-xs text-txt-secondary">
       {/* Step indicator */}
-      <div className="flex items-center gap-2 text-xs text-txt-muted">
+      <ol aria-label="Progress" className="flex items-center gap-2 text-xs text-txt-muted">
         {steps.map((label, i) => (
           <React.Fragment key={label}>
-            <div className={`flex items-center gap-1.5 ${i === step ? 'text-sky-400 font-semibold' : i < step ? 'text-emerald-400' : ''}`}>
+            <li
+              aria-current={i === step ? 'step' : undefined}
+              className={`flex items-center gap-1.5 ${i === step ? 'text-sky-400 font-semibold' : i < step ? 'text-emerald-400' : ''}`}
+            >
               <span
                 className={`flex h-4 w-4 items-center justify-center rounded-full border text-xs ${
                   i < step
@@ -179,14 +182,15 @@ export const SSHTunnelWizard: React.FC<SSHTunnelWizardProps> = ({
                 {i < step ? <Check className="h-2.5 w-2.5" /> : i + 1}
               </span>
               {label}
-            </div>
-            {i < steps.length - 1 && <div className="h-px w-4 bg-border-subtle" />}
+              {i < step && <span className="sr-only"> (completed)</span>}
+            </li>
+            {i < steps.length - 1 && <li aria-hidden="true" className="h-px w-4 bg-border-subtle" />}
           </React.Fragment>
         ))}
-      </div>
+      </ol>
 
       {error && (
-        <div className="rounded-lg border border-red-900/60 bg-red-950/40 p-2.5 text-xs text-red-300 flex items-center gap-2">
+        <div role="alert" className="rounded-lg border border-red-900/60 bg-red-950/40 p-2.5 text-xs text-red-300 flex items-center gap-2">
           <XCircle className="h-4 w-4 shrink-0" />
           <span>{error}</span>
         </div>
@@ -200,6 +204,7 @@ export const SSHTunnelWizard: React.FC<SSHTunnelWizardProps> = ({
             <button
               key={t}
               type="button"
+              aria-pressed={type === t}
               onClick={() => setType(t)}
               className={`flex w-full items-start gap-3 rounded-lg border p-3 text-left transition-colors ${
                 type === t
@@ -237,10 +242,11 @@ export const SSHTunnelWizard: React.FC<SSHTunnelWizardProps> = ({
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-txt-muted mb-1">
+            <label htmlFor="tunnel-wizard-local-port" className="block text-xs font-medium text-txt-muted mb-1">
               {type === 'remote' ? 'Port opened on the server' : 'Local port (on your computer)'}
             </label>
             <input
+              id="tunnel-wizard-local-port"
               type="number"
               min={1}
               max={65535}

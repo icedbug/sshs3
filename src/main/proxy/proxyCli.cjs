@@ -57,6 +57,25 @@ function runProxyCli(argv, env = process.env, streams = {}) {
     return exit(1);
   }
 
+  // Same rules as proxyHandshakeProblem() in proxySocket.ts: control characters in the target host would end up in
+  // the CONNECT request, and SOCKS5 stores host, user name and password behind one length byte each.
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u0020\u007f]/.test(targetHost)) {
+    stderr.write('Invalid target host: it contains whitespace or control characters\n');
+    return exit(1);
+  }
+  if (type === 'socks5') {
+    const tooLong = (value) => Buffer.byteLength(value || '') > 255;
+    if (tooLong(targetHost)) {
+      stderr.write('SOCKS5 cannot carry a target host longer than 255 bytes\n');
+      return exit(1);
+    }
+    if (username && (tooLong(username) || tooLong(password))) {
+      stderr.write('SOCKS5 cannot carry a user name or password longer than 255 bytes\n');
+      return exit(1);
+    }
+  }
+
   const socket = connectFn({ host: proxyHost, port: proxyPort });
 
   socket.on('error', (err) => {

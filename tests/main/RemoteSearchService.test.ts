@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { RemoteSearchService } from '../../src/main/search/RemoteSearchService';
+import { RemoteSearchService, buildFindGrepCommand } from '../../src/main/search/RemoteSearchService';
 import { StorageRegistry } from '../../src/main/storage/StorageRegistry';
 import { SFTPStorageProvider } from '../../src/main/storage/SFTPStorageProvider';
 import type { SFTPConfig } from '../../src/shared/types/storage';
@@ -130,6 +130,19 @@ describe('RemoteSearchService', () => {
     expect(done[0]).toMatchObject({ matchCount: 2, cancelled: false, truncated: false });
   });
 
+  it('strips an anchored relative root from the displayed path of each result', async () => {
+    const { provider, stream, exec } = createProviderWithFakeExec();
+    registry.register(provider);
+    const results: any[] = [];
+
+    await service.startSearch(registry, baseOptions({ rootPath: 'logs' }), (e) => results.push(...e.matches), () => {}, () => {});
+    stream.emit('data', Buffer.from('./logs/a.txt:1:needle\n./logs/sub/b.txt:2:needle\n'));
+    stream.emit('close');
+
+    expect(exec.mock.calls[0][0]).toContain("find './logs'");
+    expect(results.map((m) => m.displayPath)).toEqual(['a.txt', 'sub/b.txt']);
+  });
+
   it('reports stderr lines as non-fatal errors without aborting the search', async () => {
     const { provider, stream } = createProviderWithFakeExec();
     registry.register(provider);
@@ -220,5 +233,22 @@ describe('RemoteSearchService', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('buildFindGrepCommand hardening', () => {
+  const base = { query: 'needle', mode: 'literal' as const, caseSensitive: true };
+
+  it('anchors a dash-leading root, ends grep options and sanitises numeric limits', () => {
+    const cmd = buildFindGrepCommand('-evil', {
+      ...base,
+      maxDepth: '1; id' as never,
+      maxResults: '5; id' as never,
+    } as never);
+    expect(cmd).toContain("find './-evil'");
+    expect(cmd).not.toContain('-maxdepth');
+    expect(cmd).toContain("-e 'needle' --");
+    expect(cmd).toContain('| head -n 600');
+    expect(cmd).not.toContain('; id');
   });
 });

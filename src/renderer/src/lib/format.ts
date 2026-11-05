@@ -66,7 +66,7 @@ export { formatDateTime } from './dateFormat';
 
 // Electron wraps every main-process throw with this prefix, which leaks the
 // internal IPC channel name (e.g. "fs:readFile") into user-facing error text.
-const ELECTRON_IPC_PREFIX = /^Error invoking remote method '[^']*':\s*/;
+export const ELECTRON_IPC_PREFIX = /^Error invoking remote method '[^']*':\s*(?:Error:\s*)?/;
 
 /**
  * Renders a caught error for display to the user, stripping Electron's

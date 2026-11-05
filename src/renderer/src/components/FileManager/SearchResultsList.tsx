@@ -109,6 +109,7 @@ export const SearchResultsList: React.FC<SearchResultsListProps> = ({
                 </span>
                 {onJumpToFile && (
                   <button
+                    aria-label="Jump to file in pane"
                     type="button"
                     title="Jump to file in pane"
                     onClick={(e) => {

@@ -21,6 +21,47 @@ describe('redact', () => {
     }
   });
 
+  it('masks a URL password even when the text is long enough to be truncated at it', () => {
+    // The password starts just before the 2000-character cut and its "@" lies after it.
+    const text = `${'x'.repeat(1980)} https://bob:hunter2hunter2hunter2@example.com tail`;  // pragma: allowlist secret -- synthetic fixture for the redaction test
+    const out = redactString(text);
+    expect(out).not.toContain('hunter2');
+    expect(out).toContain('…[truncated]');
+    expect(out.length).toBeLessThanOrEqual(2000 + '…[truncated]'.length);
+  });
+
+  it('masks an age private key, whole or cut short', () => {
+    const key = `AGE-SECRET-KEY-1${'Q'.repeat(58)}`;  // pragma: allowlist secret -- synthetic fixture for the redaction test
+    const out = redactString(`unlock failed for ${key} and ${key.slice(0, 30)}`);
+    expect(out).not.toContain('AGE-SECRET-KEY');
+    expect(out).not.toContain('QQQQ');
+    expect(out).toContain('unlock failed for [redacted] and [redacted]');
+  });
+
+  it('masks the signature, credential and token of a presigned S3 URL but keeps the rest', () => {
+    const url = 'https://b.s3.amazonaws.com/k?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIDEXAMPLE%2F20260101&X-Amz-Expires=60&X-Amz-Signature=deadbeef01&X-Amz-Security-Token=tok123';  // pragma: allowlist secret -- synthetic fixture for the redaction test
+    const out = redactString(url);
+    for (const secret of ['AKIDEXAMPLE', 'deadbeef01', 'tok123']) expect(out).not.toContain(secret);  // pragma: allowlist secret -- synthetic fixture for the redaction test
+    expect(out).toContain('X-Amz-Algorithm=AWS4-HMAC-SHA256');
+    expect(out).toContain('X-Amz-Expires=60');
+  });
+
+  it('leaves ordinary text and short strings unchanged and handles very long input quickly', () => {
+    expect(redactString('connected to host:22 in 30ms')).toBe('connected to host:22 in 30ms');
+    const out = redactString('a'.repeat(5_000_000));
+    expect(out.endsWith('…[truncated]')).toBe(true);
+  });
+
+  it('stays fast on input that makes the URL and KEY=value patterns backtrack', () => {
+    // 200 000 characters of this took about 15 s when the whole input was scanned.
+    for (const unit of ['a.', 'a-', 'password']) {
+      const start = Date.now();
+      const out = redactString(unit.repeat(100_000));
+      expect(Date.now() - start).toBeLessThan(500);
+      expect(out.endsWith('…[truncated]')).toBe(true);
+    }
+  });
+
   it('handles errors, binary, circular and over-deep values without throwing', () => {
     const circular: Record<string, unknown> = {};
     circular.self = circular;

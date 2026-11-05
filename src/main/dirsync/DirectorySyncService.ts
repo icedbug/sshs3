@@ -10,8 +10,10 @@ export type ScanProgressCallback = (side: ScanSide, filesCount: number, currentI
 
 function isNotFoundError(err: unknown): boolean {
   // Codes only: matching message text would also accept e.g. "bucket does not exist" or "network path not found".
-  const code = (err as { code?: unknown } | null)?.code;
-  return code === 'ENOENT' || code === 'NoSuchKey' || code === 2;
+  const e = err as { code?: unknown; name?: unknown; statusCode?: unknown } | null;
+  // The OpenSSH SFTP engine reports SSH_FX_NO_SUCH_FILE as SftpError.statusCode 2 and sets no `code`.
+  if (e?.name === 'SftpError' && e.statusCode === 2) return true;
+  return e?.code === 'ENOENT' || e?.code === 'NoSuchKey' || e?.code === 2;
 }
 
 /** True when `relativePath` is one of `skipped` or lies below one of them. */
@@ -30,7 +32,8 @@ export async function buildTree(
   rootPath: string,
   onScanProgress?: (filesCount: number, currentItem: string) => void,
   state: { count: number } = { count: 0 },
-  skipped: string[] = []
+  skipped: string[] = [],
+  symlinks: string[] = []
 ): Promise<Map<string, FileEntry>> {
   const result = new Map<string, FileEntry>();
 
@@ -60,20 +63,26 @@ export async function buildTree(
       if (!baseName || baseName === '.' || baseName === '..') {
         continue;
       }
+      // FIFOs, sockets and devices are never copied, so they are not part of the comparison either.
+      if (entry.isSpecial) continue;
       const relativePath = relPrefix ? `${relPrefix}/${baseName}` : baseName;
       const childPath = entry.path || joinPaths(provider.type, currentPath, baseName);
+
+      // Symbolic links, files and folders alike, are left out and only reported (as transfers do). A folder link
+      // is never followed: a link back to an ancestor would expand into phantom entries until the OS gives up
+      // (ELOOP). A file link is not copied as content, and a link on the target is never written through (that
+      // could overwrite a file outside the target folder). Because the path is reported as skipped, nothing at or
+      // below it is copied as "new" or deleted as "extraneous" on the strength of the other side alone.
+      if (entry.isSymlink) {
+        symlinks.push(relativePath);
+        continue;
+      }
 
       result.set(relativePath, entry);
       state.count++;
       onScanProgress?.(state.count, relativePath);
 
-      // Symlinked directories are listed but never followed: a link back to an ancestor
-      // would otherwise expand into phantom entries until the OS gives up (ELOOP).
-      // Its contents are unknown to the diff, so it is reported as skipped: nothing below it may be
-      // copied as "new" or deleted as "extraneous" on the strength of the other side alone.
-      if (entry.isDirectory && entry.isSymlink) {
-        skipped.push(relativePath);
-      } else if (entry.isDirectory) {
+      if (entry.isDirectory) {
         await walk(childPath, relativePath, false);
       }
     }
@@ -87,7 +96,8 @@ export async function buildTree(
  * Compares a source and target directory tree (both walked in parallel) and
  * classifies each relative path as 'new' (source only), 'changed' (both
  * present but size/mtime differ beyond tolerance), 'only-target' (target
- * only), or 'same' (excluded from `entries`, counted only).
+ * only), 'conflict' (a file on one side and a folder on the other), or
+ * 'same' (excluded from `entries`, counted only).
  */
 export async function computeDiff(
   sourceProvider: IStorageProvider,
@@ -96,15 +106,32 @@ export async function computeDiff(
   targetPath: string,
   onScanProgress?: ScanProgressCallback
 ): Promise<DirectoryDiffResult> {
-  const skippedSource: string[] = [];
-  const skippedTarget: string[] = [];
+  const unreadableSource: string[] = [];
+  const unreadableTarget: string[] = [];
+  const symlinksSource: string[] = [];
+  const symlinksTarget: string[] = [];
   const [sourceMap, targetMap] = await Promise.all([
-    buildTree(sourceProvider, sourcePath, (count, item) => onScanProgress?.('source', count, item), { count: 0 }, skippedSource),
-    buildTree(targetProvider, targetPath, (count, item) => onScanProgress?.('target', count, item), { count: 0 }, skippedTarget),
+    buildTree(sourceProvider, sourcePath, (count, item) => onScanProgress?.('source', count, item), { count: 0 }, unreadableSource, symlinksSource),
+    buildTree(targetProvider, targetPath, (count, item) => onScanProgress?.('target', count, item), { count: 0 }, unreadableTarget, symlinksTarget),
   ]);
+  // For the "unknown, not new/extraneous" rule an unreadable folder and a symlink behave the same.
+  const skippedSource = [...unreadableSource, ...symlinksSource];
+  const skippedTarget = [...unreadableTarget, ...symlinksTarget];
 
   const entries: DirectoryDiffEntry[] = [];
-  const counts = { new: 0, changed: 0, onlyTarget: 0, same: 0 };
+  const counts = { new: 0, changed: 0, onlyTarget: 0, same: 0, conflict: 0 };
+
+  // A path that is a file on one side and a folder on the other. What lies below it is unknown territory, so
+  // nothing under it may be copied as "new" or deleted as "extraneous" on the strength of one side alone.
+  const conflictPaths: string[] = [];
+  for (const [relativePath, sourceEntry] of sourceMap) {
+    const targetEntry = targetMap.get(relativePath);
+    if (targetEntry && Boolean(sourceEntry.isDirectory) !== Boolean(targetEntry.isDirectory)) {
+      conflictPaths.push(relativePath);
+    }
+  }
+  const isBelowConflict = (relativePath: string): boolean =>
+    conflictPaths.some((p) => relativePath.startsWith(`${p}/`));
 
   const allKeys = new Set<string>([...sourceMap.keys(), ...targetMap.keys()]);
   const sortedKeys = Array.from(allKeys).sort((a, b) => a.localeCompare(b));
@@ -115,7 +142,7 @@ export async function computeDiff(
 
     if (sourceEntry && !targetEntry) {
       // Under a target folder that could not be read this only means "unknown", not "new".
-      if (isUnderSkipped(relativePath, skippedTarget)) continue;
+      if (isUnderSkipped(relativePath, skippedTarget) || isBelowConflict(relativePath)) continue;
       entries.push({ relativePath, isDirectory: sourceEntry.isDirectory, status: 'new', sourceEntry });
       counts.new++;
       continue;
@@ -123,15 +150,21 @@ export async function computeDiff(
 
     if (!sourceEntry && targetEntry) {
       // Under a source folder that could not be read this only means "unknown", not "extraneous".
-      if (isUnderSkipped(relativePath, skippedSource)) continue;
+      if (isUnderSkipped(relativePath, skippedSource) || isBelowConflict(relativePath)) continue;
       entries.push({ relativePath, isDirectory: targetEntry.isDirectory, status: 'only-target', targetEntry });
       counts.onlyTarget++;
       continue;
     }
 
     if (sourceEntry && targetEntry) {
+      if (Boolean(sourceEntry.isDirectory) !== Boolean(targetEntry.isDirectory)) {
+        entries.push({ relativePath, isDirectory: sourceEntry.isDirectory, status: 'conflict', sourceEntry, targetEntry });
+        counts.conflict++;
+        continue;
+      }
+
       // Directories match on presence alone; there's no meaningful size/mtime to diff.
-      if (sourceEntry.isDirectory || targetEntry.isDirectory) {
+      if (sourceEntry.isDirectory) {
         counts.same++;
         continue;
       }
@@ -155,7 +188,8 @@ export async function computeDiff(
     entries,
     counts,
     scannedAt: new Date().toISOString(),
-    skippedPaths: { source: skippedSource, target: skippedTarget },
+    skippedPaths: { source: unreadableSource, target: unreadableTarget },
+    skippedSymlinks: { source: symlinksSource, target: symlinksTarget },
   };
 }
 
@@ -167,6 +201,7 @@ export interface ApplyOptions {
  * Applies a (possibly filtered) set of diff entries: copies included
  * new/changed entries from source to target (creating target folders first),
  * and — when deleteExtraneous is set — deletes included only-target entries.
+ * 'conflict' entries (file vs folder) are never acted on, whatever the caller passes in.
  */
 export async function apply(
   entries: DirectoryDiffEntry[],

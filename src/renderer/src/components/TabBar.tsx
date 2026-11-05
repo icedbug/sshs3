@@ -1,8 +1,10 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { pkcs11LibDisplayName, looksLikeLibraryPath } from '../lib/smartcard';
+import { nextMenuIndex, nextTabIndex } from '../lib/rovingNavigation';
 import {
   Terminal,
   Folder,
+  FolderSymlink,
   X,
   Plus,
   Server,
@@ -17,16 +19,26 @@ import {
   ChevronDown,
   Boxes,
   Cable,
+  FileText,
 } from 'lucide-react';
 import type { CachedSmartcardAgent, SSHActiveTunnel } from '@shared/types/ssh';
-import { Kbd } from './ui/Kbd';
+import type { MoveTabTarget, WindowInfo } from '@shared/types/ipc';
+import { Shortcut } from './ui/Shortcut';
+import { GlobalSearchButton } from './GlobalSearchButton';
+import { TabContextMenu } from './TabContextMenu';
+import { watchDragReleasedOutsideWindow } from '../lib/dragLeaveWindow';
+import { OPEN_TAB_MENU_EVENT } from '../lib/tabMenuEvents';
+import { getShortcutKeys } from '../lib/shortcuts';
+import { formatDate } from '../lib/dateFormat';
+import { SshCaStatusBadge } from './ca/SshCaStatusBadge';
 
-export type TabType = 'terminal' | 'filemanager';
+export type TabType = 'terminal' | 'filemanager' | 'editor';
 
 export interface TabItem {
   id: string;
   type: TabType;
   title: string;
+  isDirty?: boolean;
 }
 
 export interface TabBarProps {
@@ -35,10 +47,16 @@ export interface TabBarProps {
   tabBarFocused?: boolean;
   onSelectTab: (id: string) => void;
   onCloseTab: (id: string) => void;
-  onNewTab: (type: TabType) => void;
+  /** Moves a tab (with its running sessions) to a new or another window. Omit to hide the feature. */
+  onMoveTab?: (id: string, target: MoveTabTarget) => void;
+  /** The other open windows, for the tab menu. */
+  onListWindows?: () => Promise<WindowInfo[]>;
+  onNewTab: (type: TabType, options?: { remote?: boolean }) => void;
   /** Opens the Connection Manager directly on the Kubernetes tab, for picking a pod/container to exec into or follow logs from. */
   onNewK8sSession?: () => void;
   onOpenProfiles?: () => void;
+  /** Opens the global search. Omit to hide its button (it can be switched off in Settings). */
+  onOpenGlobalSearch?: () => void;
   onOpenSettings?: () => void;
   onOpenDirSyncProfiles?: () => void;
   onOpenTunnels?: () => void;
@@ -48,6 +66,7 @@ export interface TabBarProps {
   /** Unlocks the cards/keys that aren't cached yet (prompts for the PIN); resolves once detection has decided whether anything was started. */
   onUnlockSmartcard?: () => Promise<{ started: boolean }>;
   onListCachedSmartcards?: () => Promise<CachedSmartcardAgent[]>;
+  shortcuts?: Record<string, string>;
 }
 
 export const TabBar: React.FC<TabBarProps> = ({
@@ -56,9 +75,12 @@ export const TabBar: React.FC<TabBarProps> = ({
   tabBarFocused = false,
   onSelectTab,
   onCloseTab,
+  onMoveTab,
+  onListWindows,
   onNewTab,
   onNewK8sSession,
   onOpenProfiles,
+  onOpenGlobalSearch,
   onOpenSettings,
   onOpenDirSyncProfiles,
   onOpenTunnels,
@@ -66,9 +88,51 @@ export const TabBar: React.FC<TabBarProps> = ({
   onLockSmartcard,
   onUnlockSmartcard,
   onListCachedSmartcards,
+  shortcuts,
 }) => {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [tabMenu, setTabMenu] = useState<{ tabId: string; x: number; y: number; windows: WindowInfo[] } | null>(null);
+  const tabMenuReturnFocus = useRef<HTMLElement | null>(null);
+
+  /** Opens the tab's menu at a screen position; the list of other windows is fetched first so it opens complete. */
+  const openTabMenu = (tabId: string, x: number, y: number, opener: HTMLElement | null) => {
+    if (!onMoveTab) return;
+    tabMenuReturnFocus.current = opener;
+    void (onListWindows?.() ?? Promise.resolve([]))
+      .catch(() => [] as WindowInfo[])
+      .then((windows) => setTabMenu({ tabId, x, y, windows: windows.filter((w) => !w.current) }));
+  };
+  // The "Tab Actions" shortcut opens the menu of the active tab, below its tab.
+  const openTabMenuRef = useRef(openTabMenu);
+  openTabMenuRef.current = openTabMenu;
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const tabId = (e as CustomEvent<string>).detail;
+      const el = document.querySelector<HTMLElement>(`[data-testid="tab-${tabId}"]`);
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      openTabMenuRef.current(tabId, rect.left, rect.bottom, el);
+    };
+    window.addEventListener(OPEN_TAB_MENU_EVENT, handler);
+    return () => window.removeEventListener(OPEN_TAB_MENU_EVENT, handler);
+  }, []);
+  const closeTabMenu = () => {
+    setTabMenu(null);
+    tabMenuReturnFocus.current?.focus();
+  };
   const menuRef = useRef<HTMLDivElement>(null);
+  const newTabMenuRef = useRef<HTMLDivElement>(null);
+  // Opening the new-tab menu puts focus on its first item, and the arrow keys move through the items.
+  useEffect(() => {
+    if (isMenuOpen) newTabMenuRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
+  }, [isMenuOpen]);
+  const onNewTabMenuKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const items = Array.from(e.currentTarget.querySelectorAll<HTMLElement>('[role="menuitem"]'));
+    const next = nextMenuIndex(items.length, items.indexOf(document.activeElement as HTMLElement), e.key);
+    if (next === null) return;
+    e.preventDefault();
+    items[next]?.focus();
+  };
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const [lockingSmartcard, setLockingSmartcard] = useState(false);
   const [unlockingSmartcard, setUnlockingSmartcard] = useState(false);
@@ -117,11 +181,6 @@ export const TabBar: React.FC<TabBarProps> = ({
 
   const liveTunnelCount = activeTunnels.filter((t) => t.status === 'active').length;
   const erroredTunnelCount = activeTunnels.filter((t) => t.status === 'error').length;
-
-  const formatCertDate = (isoLike: string): string => {
-    const d = new Date(isoLike);
-    return Number.isNaN(d.getTime()) ? isoLike : d.toLocaleDateString();
-  };
 
   const certSubjectCN = (subject: string): string => {
     const line = subject.split('\n').find((l) => l.startsWith('CN='));
@@ -174,26 +233,56 @@ export const TabBar: React.FC<TabBarProps> = ({
 
   return (
     <>
-    <div
-      role="tablist"
-      aria-label="Open tabs"
-      className="flex h-full w-full items-end bg-app-surface px-2 select-none"
-    >
-      <div className="flex min-w-0 flex-1 items-end gap-1 self-stretch overflow-x-auto no-scrollbar">
+    <div className="flex h-full w-full items-end bg-app-surface px-2 select-none">
+      {/* The tablist holds the tabs only: the new-tab menu and the toolbar buttons beside it are not tabs. */}
+      <div
+        role="tablist"
+        aria-label="Open tabs"
+        className="flex min-w-0 flex-1 items-end gap-1 self-stretch overflow-x-auto no-scrollbar"
+      >
         {tabs.map((tab) => {
           const isActive = tab.id === activeTabId;
           return (
             <div
               key={tab.id}
+              id={`tab-button-${tab.id}`}
               role="tab"
               aria-selected={isActive}
-              tabIndex={0}
+              aria-controls={`tab-panel-${tab.id}`}
+              // Roving tabindex: the tab strip is one Tab stop (the active tab, or the first when none is active);
+              // the arrow keys move between tabs.
+              tabIndex={isActive || (!tabs.some((t) => t.id === activeTabId) && tab.id === tabs[0]?.id) ? 0 : -1}
               data-testid={`tab-${tab.id}`}
               onClick={() => onSelectTab(tab.id)}
+              onContextMenu={(e) => {
+                if (!onMoveTab) return;
+                e.preventDefault();
+                openTabMenu(tab.id, e.clientX, e.clientY, e.currentTarget);
+              }}
+              // Dragging a tab out of the window moves it to a new window.
+              draggable={!!onMoveTab && !tab.isDirty}
+              onDragStart={(e) => {
+                e.dataTransfer.setData('application/x-sshs3-tab', tab.id);
+                e.dataTransfer.effectAllowed = 'copyMove';
+                watchDragReleasedOutsideWindow(() => onMoveTab?.(tab.id, 'new'));
+              }}
               onKeyDown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
+                // Keys that bubble up from the close button inside the tab belong to that button (Enter closes the tab).
+                if (e.target !== e.currentTarget) return;
+                if (!e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey && nextTabIndex(1, 0, e.key) !== null) {
+                  const strip = Array.from(
+                    e.currentTarget.parentElement?.querySelectorAll<HTMLElement>('[role="tab"]') ?? []
+                  );
+                  const next = nextTabIndex(strip.length, strip.indexOf(e.currentTarget), e.key);
+                  e.preventDefault();
+                  if (next !== null) strip[next]?.focus();
+                } else if (e.key === 'Enter' || e.key === ' ') {
                   e.preventDefault();
                   onSelectTab(tab.id);
+                } else if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
+                  e.preventDefault();
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  openTabMenu(tab.id, rect.left, rect.bottom, e.currentTarget);
                 }
               }}
               className={`group relative flex max-w-[220px] min-w-[120px] cursor-pointer items-center justify-between rounded-t-lg px-3 text-xs transition-colors ${
@@ -212,6 +301,13 @@ export const TabBar: React.FC<TabBarProps> = ({
                     }`}
                     data-testid={`tab-icon-${tab.id}`}
                   />
+                ) : tab.type === 'editor' ? (
+                  <FileText
+                    className={`h-3.5 w-3.5 flex-shrink-0 ${
+                      isActive ? 'text-emerald-400' : 'text-txt-muted group-hover:text-txt-secondary'
+                    }`}
+                    data-testid={`tab-icon-${tab.id}`}
+                  />
                 ) : (
                   <Folder
                     className={`h-3.5 w-3.5 flex-shrink-0 ${
@@ -220,7 +316,15 @@ export const TabBar: React.FC<TabBarProps> = ({
                     data-testid={`tab-icon-${tab.id}`}
                   />
                 )}
-                <span className="truncate">{tab.title}</span>
+                <span className="truncate" title={tab.title}>{tab.title}</span>
+                {tab.isDirty && <span className="sr-only"> (unsaved changes)</span>}
+                {tab.isDirty && (
+                  <span
+                    className="h-1.5 w-1.5 rounded-full bg-amber-400 shrink-0"
+                    title="Unsaved changes"
+                    data-testid={`tab-dirty-${tab.id}`}
+                  />
+                )}
               </div>
 
               <button
@@ -231,7 +335,7 @@ export const TabBar: React.FC<TabBarProps> = ({
                   e.stopPropagation();
                   onCloseTab(tab.id);
                 }}
-                className="ml-2 rounded p-0.5 text-txt-muted opacity-60 hover:bg-app-surface-hover hover:text-txt-primary hover:opacity-100 transition-opacity"
+                className="ml-2 rounded p-1.5 text-txt-muted opacity-60 hover:bg-app-surface-hover hover:text-txt-primary hover:opacity-100 focus-visible:opacity-100 transition-opacity"
               >
                 <X className="h-3.5 w-3.5" />
               </button>
@@ -257,7 +361,7 @@ export const TabBar: React.FC<TabBarProps> = ({
         </button>
 
         {isMenuOpen && (
-          <div role="menu" className="absolute top-8 right-0 z-50 min-w-[210px] whitespace-nowrap rounded-xl border border-border-subtle bg-app-card p-1 shadow-2xl animate-in fade-in zoom-in-95 duration-100">
+          <div ref={newTabMenuRef} role="menu" aria-label="New tab" onKeyDown={onNewTabMenuKeyDown} className="absolute top-8 right-0 z-50 min-w-[210px] whitespace-nowrap rounded-xl border border-border-subtle bg-app-card p-1 shadow-2xl animate-in fade-in zoom-in-95 duration-100">
             <button
               role="menuitem"
               type="button"
@@ -272,7 +376,7 @@ export const TabBar: React.FC<TabBarProps> = ({
                 <Terminal className="h-3.5 w-3.5 text-sky-400" />
                 <span>New Terminal</span>
               </div>
-              <Kbd>Ctrl+Shift+T</Kbd>
+              <Shortcut id="newTerminal" shortcuts={shortcuts} />
             </button>
             <button
               role="menuitem"
@@ -288,7 +392,23 @@ export const TabBar: React.FC<TabBarProps> = ({
                 <Folder className="h-3.5 w-3.5 text-amber-400" />
                 <span>New File Manager</span>
               </div>
-              <Kbd>Ctrl+Shift+F</Kbd>
+              <Shortcut id="newFileManager" shortcuts={shortcuts} />
+            </button>
+            <button
+              role="menuitem"
+              type="button"
+              data-testid="new-remote-filemanager-btn"
+              onClick={() => {
+                setIsMenuOpen(false);
+                onNewTab('filemanager', { remote: true });
+              }}
+              className="flex w-full items-center justify-between gap-3 rounded-lg px-2.5 py-1.5 text-left text-xs text-txt-primary hover:bg-app-surface-hover transition-colors"
+            >
+              <div className="flex items-center gap-2">
+                <FolderSymlink className="h-3.5 w-3.5 text-amber-400" />
+                <span>New Remote File Manager…</span>
+              </div>
+              <Shortcut id="newRemoteFileManager" shortcuts={shortcuts} />
             </button>
             {onNewK8sSession && (
               <button
@@ -309,8 +429,9 @@ export const TabBar: React.FC<TabBarProps> = ({
         )}
       </div>
 
-      {/* Quick links: Smartcard lock, Connections & Settings */}
+      {/* Quick links: Search, Smartcard lock, Connections & Settings */}
       <div className="flex items-center gap-1 self-center border-l border-divider pl-2">
+        {onOpenGlobalSearch && <GlobalSearchButton onOpen={onOpenGlobalSearch} shortcuts={shortcuts} />}
         {showLockSmartcardButton && (
           <div className="relative flex items-center" ref={smartcardMenuRef}>
             <button
@@ -319,7 +440,7 @@ export const TabBar: React.FC<TabBarProps> = ({
               data-testid="quick-lock-smartcard-btn"
               title="Cached smartcard identities"
               aria-label="Cached smartcard identities"
-              aria-haspopup="menu"
+              aria-haspopup="true"
               aria-expanded={isSmartcardMenuOpen}
               onClick={() => {
                 const next = !isSmartcardMenuOpen;
@@ -338,7 +459,7 @@ export const TabBar: React.FC<TabBarProps> = ({
             </button>
 
             {isSmartcardMenuOpen && (
-              <div role="menu" className="absolute top-8 right-0 z-50 w-72 rounded-xl border border-border-subtle bg-app-card p-2.5 shadow-2xl">
+              <div role="region" aria-label="Cached smartcard identities" className="absolute top-8 right-0 z-50 w-72 rounded-xl border border-border-subtle bg-app-card p-2.5 shadow-2xl">
                 <div className="mb-1.5 text-xs font-semibold text-txt-primary">Cached smartcard identities</div>
 
                 {loadingCachedAgents ? (
@@ -426,7 +547,7 @@ export const TabBar: React.FC<TabBarProps> = ({
                                       <div className="flex gap-1">
                                         <dt className="shrink-0 text-txt-muted/70">Valid:</dt>
                                         <dd className="truncate select-text text-txt-primary">
-                                          {formatCertDate(id.certificate.validFrom)} – {formatCertDate(id.certificate.validTo)}
+                                          {formatDate(id.certificate.validFrom)} – {formatDate(id.certificate.validTo)}
                                         </dd>
                                       </div>
                                     </dl>
@@ -500,10 +621,11 @@ export const TabBar: React.FC<TabBarProps> = ({
             )}
           </div>
         )}
+        <SshCaStatusBadge onOpenSettings={onOpenSettings} />
         <button
           type="button"
           data-testid="quick-profiles-btn"
-          title="Connections & Profiles (Ctrl+Shift+O)"
+          title={`Connections & Profiles (${getShortcutKeys('openProfiles', shortcuts)})`}
           aria-label="Connections & Profiles"
           onClick={onOpenProfiles}
           className="flex h-6 w-6 items-center justify-center rounded-md text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
@@ -545,7 +667,7 @@ export const TabBar: React.FC<TabBarProps> = ({
         <button
           type="button"
           data-testid="quick-settings-btn"
-          title="Settings (Ctrl+,)"
+          title={`Settings (${getShortcutKeys('openSettings', shortcuts)})`}
           aria-label="Settings"
           onClick={onOpenSettings}
           className="flex h-6 w-6 items-center justify-center rounded-md text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
@@ -554,6 +676,22 @@ export const TabBar: React.FC<TabBarProps> = ({
         </button>
       </div>
     </div>
+
+    {tabMenu && onMoveTab && (
+      <TabContextMenu
+        x={tabMenu.x}
+        y={tabMenu.y}
+        windows={tabMenu.windows}
+        canMove={!tabs.find((t) => t.id === tabMenu.tabId)?.isDirty}
+        shortcuts={shortcuts}
+        onMove={(target) => {
+          const id = tabMenu.tabId;
+          setTabMenu(null);
+          onMoveTab(id, target);
+        }}
+        onClose={closeTabMenu}
+      />
+    )}
 
     {lockFeedback && (
       <div

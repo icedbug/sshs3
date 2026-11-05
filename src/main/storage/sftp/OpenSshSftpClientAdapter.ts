@@ -38,15 +38,18 @@ export class OpenSshSftpClientAdapter extends EventEmitter implements ISftpBacke
   private onPresence?: (prompt: string) => void;
   private onPresenceCleared?: () => void;
   private hostKeyPromptHandler?: (info: HostKeyPromptInfo) => Promise<boolean>;
+  private sharedControlPath?: string;
 
   constructor(
     config: SFTPConfig,
     pinPromptHandler?: (prompt: string) => Promise<string> | string,
     onPresence?: (prompt: string) => void,
     hostKeyPromptHandler?: (info: HostKeyPromptInfo) => Promise<boolean>,
-    onPresenceCleared?: () => void
+    onPresenceCleared?: () => void,
+    controlPath?: string
   ) {
     super();
+    this.sharedControlPath = controlPath;
     this.config = config;
     this.pinPromptHandler = pinPromptHandler;
     this.onPresence = onPresence;
@@ -61,8 +64,12 @@ export class OpenSshSftpClientAdapter extends EventEmitter implements ISftpBacke
   }
 
   public async connect(): Promise<void> {
+    // The shared master belongs to a terminal and may be gone on a reconnect, so only the first connect uses it.
+    const controlPath = this.sharedControlPath;
+    this.sharedControlPath = undefined;
     this.protocol = await this.process.start({
       config: this.config,
+      controlPath,
       pinPromptHandler: this.pinPromptHandler,
       onPresence: this.onPresence,
       onPresenceCleared: this.onPresenceCleared,
@@ -82,10 +89,14 @@ export class OpenSshSftpClientAdapter extends EventEmitter implements ISftpBacke
         if (!entries || entries.length === 0) break;
         for (const e of entries) {
           if (e.filename === '.' || e.filename === '..') continue;
+          // A directory entry is one path component: a name with a separator or NUL would make
+          // path.posix.join() (rmdir -r, list paths) leave the directory being listed.
+          if (e.filename === '' || e.filename.includes('/') || e.filename.includes('\0')) continue;
           results.push({
             name: e.filename,
             type: e.attrs.isDirectory ? 'd' : e.attrs.isSymlink ? 'l' : '-',
             isDirectory: e.attrs.isDirectory,
+            isSpecial: e.attrs.isSpecial,
             size: e.attrs.size,
             modifyTime: e.attrs.mtime ? e.attrs.mtime * 1000 : undefined,
             permissions: e.attrs.mode ? (e.attrs.mode & 0o777).toString(8).padStart(3, '0') : undefined,
@@ -105,6 +116,7 @@ export class OpenSshSftpClientAdapter extends EventEmitter implements ISftpBacke
       size: s.size,
       isDirectory: s.isDirectory,
       isSymlink: s.isSymlink,
+      isSpecial: s.isSpecial,
       modifyTime: s.mtime ? s.mtime * 1000 : undefined,
       mode: s.mode,
       permissions: s.mode ? (s.mode & 0o777).toString(8).padStart(3, '0') : undefined,
@@ -126,12 +138,16 @@ export class OpenSshSftpClientAdapter extends EventEmitter implements ISftpBacke
     if (recursive) {
       const parts = remotePath.split('/').filter(Boolean);
       let current = remotePath.startsWith('/') ? '' : '.';
-      for (const part of parts) {
+      for (const [index, part] of parts.entries()) {
         current = current === '' ? `/${part}` : `${current}/${part}`;
         try {
           await this.protocol.mkdir(current);
-        } catch {
-          // Directory may already exist
+        } catch (err) {
+          // A parent that already exists makes mkdir fail; that is fine, and if one really cannot be
+          // created the last step below fails too. Only the folder that was asked for must end up a directory.
+          if (index < parts.length - 1) continue;
+          const existing = await this.protocol.stat(current).catch(() => null);
+          if (!existing?.isDirectory) throw err;
         }
       }
       return;

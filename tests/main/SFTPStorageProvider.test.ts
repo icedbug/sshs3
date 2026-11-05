@@ -291,6 +291,20 @@ describe('SFTPStorageProvider', () => {
       expect(entries[0].isDirectory).toBe(false);
     });
 
+    // M7 (code review 2026-11-03): a FIFO or device on the server must be flagged so transfers skip it
+    // (opening it over SFTP blocks until something writes to it).
+    it('flags a special file (FIFO, socket, device) as isSpecial, but not a regular file', async () => {
+      mockList.mockResolvedValue([
+        { name: 'pipe', type: '-', size: 0, isSpecial: true },
+        { name: 'plain.txt', type: '-', size: 3 },
+      ]);
+
+      const entries = await new SFTPStorageProvider(baseConfig).list('/folder');
+
+      expect(entries.find((e) => e.name === 'pipe')?.isSpecial).toBe(true);
+      expect(entries.find((e) => e.name === 'plain.txt')?.isSpecial).toBeFalsy();
+    });
+
     it('should sort directories first, then files alphabetically', async () => {
       const now = Date.now();
       mockList.mockResolvedValue([
@@ -720,6 +734,50 @@ describe('SFTPStorageProvider', () => {
   });
 
   describe('error handling and reconnection', () => {
+    it('does not reopen a connection that was closed on purpose while a call was in flight', async () => {
+      const provider = new SFTPStorageProvider(baseConfig);
+      mockList.mockResolvedValueOnce([]);
+      await provider.list('/warm-up'); // connected
+      expect(mockConnect).toHaveBeenCalledTimes(1);
+
+      // The call is running when the user disconnects; the engine then fails it with "stream closed".
+      mockList.mockImplementationOnce(async () => {
+        await provider.disconnect();
+        throw new Error('SFTP stream closed');
+      });
+
+      await expect(provider.list('/in-flight')).rejects.toThrow('SFTP stream closed');
+      expect(mockConnect).toHaveBeenCalledTimes(1); // no new ssh process
+    });
+
+    it('does not run the call again when a disconnect() comes during the reconnect of a retry', async () => {
+      const provider = new SFTPStorageProvider(baseConfig);
+      mockList.mockResolvedValueOnce([]);
+      await provider.list('/warm-up');
+      mockList.mockRejectedValueOnce(new Error('SFTP stream closed'));
+      // The reconnect the retry starts is where the user disconnects.
+      mockConnect.mockImplementationOnce(async () => {
+        await provider.disconnect();
+      });
+
+      await expect(provider.list('/racy')).rejects.toThrow('SFTP stream closed');
+      expect(mockList).toHaveBeenCalledTimes(2); // the warm-up and the failed call, not a third
+    });
+
+    it.each(['SFTP stream closed', 'SFTP connection is closed'])(
+      'retries the call that was in flight when the ssh process went away ("%s")',
+      async (message) => {
+        mockList.mockRejectedValueOnce(new Error(message));
+        mockList.mockResolvedValueOnce([]);
+        const provider = new SFTPStorageProvider(baseConfig);
+
+        await expect(provider.list('/data')).resolves.toEqual([]);
+
+        expect(mockList).toHaveBeenCalledTimes(2);
+        expect(mockConnect).toHaveBeenCalledTimes(2); // reconnected once in between
+      }
+    );
+
     it('should reject when connect fails and allow subsequent connection attempt', async () => {
       mockConnect.mockRejectedValueOnce(new Error('Connection refused'));
       mockConnect.mockResolvedValueOnce(undefined);

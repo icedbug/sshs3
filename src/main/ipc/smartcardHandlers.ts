@@ -10,7 +10,7 @@ import type { SmartcardCoordinator } from '../smartcard/SmartcardCoordinator';
 /** The part of IpcBridge this handler group may use. */
 export type SmartcardHost = Pick<
   IpcBridge,
-  'makePresenceNotifier' | 'pendingAskpass' | 'pendingHostKeyPrompts' | 'promptForPinDirect' | 'registerHandler'
+  'makePresenceNotifier' | 'pendingAskpass' | 'pendingInsertTokens' | 'pendingHostKeyPrompts' | 'promptForPinDirect' | 'registerHandler'
 > & {
   smartcard: Pick<
     SmartcardCoordinator,
@@ -68,6 +68,11 @@ export function registerSmartcardHandlers(bridge: SmartcardHost): void {
       prompt.callback(pin);
     }
   );
+
+  bridge.registerHandler(IPC_CHANNELS.INSERT_TOKEN_CANCEL, async (_event, id: string) => {
+    // Already finished (token inserted, or cancelled twice): nothing to do.
+    if (typeof id === 'string') bridge.pendingInsertTokens.get(id)?.();
+  });
 
   bridge.registerHandler(IPC_CHANNELS.SMARTCARD_LOCK_ALL, async () => {
     return { locked: await bridge.smartcard.lockAllGlobalSmartcardAgents() };

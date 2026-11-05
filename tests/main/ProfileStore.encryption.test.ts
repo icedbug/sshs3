@@ -36,7 +36,8 @@ describe('ProfileStore encryption', () => {
   beforeEach(async () => {
     mockIsEncryptionAvailable.mockReturnValue(true);
     mockEncryptString.mockClear();
-    mockDecryptString.mockClear();
+    mockDecryptString.mockReset();
+    mockDecryptString.mockImplementation((buf: Buffer) => buf.toString('utf-8').replace(/^cipher:/, ''));
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'multissh-profiles-enc-test-'));
     storePath = path.join(tempDir, 'profiles.json');
   });
@@ -68,6 +69,69 @@ describe('ProfileStore encryption', () => {
 
     mockIsEncryptionAvailable.mockReturnValue(true);
     expect((await store.getProfiles()).ssh[0].password).toBe('super-secret');
+  });
+
+  describe('countUndecryptableSecrets', () => {
+    async function seed(store: ProfileStore) {
+      await store.saveSSH({
+        id: 'ssh-1',
+        name: 'Prod',
+        host: 'prod.example.com',
+        username: 'admin',
+        authType: 'password',
+        password: 'super-secret',
+        passphrase: 'key-phrase',
+      });
+      await store.saveS3({
+        id: 's3-1',
+        name: 'MinIO',
+        accessKeyId: 'AKIA',
+        secretAccessKey: 'fixture-key-value', // pragma: allowlist secret
+        endpoint: 'https://minio.example.com',
+        region: 'us-east-1',
+      } as S3Config);
+      await store.saveSSH({
+        id: 'ssh-2',
+        name: 'Plain key login',
+        host: 'dev.example.com',
+        username: 'dev',
+        authType: 'agent',
+      });
+    }
+
+    it('is 0 while every secret still decrypts', async () => {
+      const store = new ProfileStore(storePath);
+      await seed(store);
+      expect(await store.countUndecryptableSecrets()).toBe(0);
+    });
+
+    it('counts each encrypted secret that can no longer be decrypted (the keyring key was replaced)', async () => {
+      const store = new ProfileStore(storePath);
+      await seed(store);
+
+      mockDecryptString.mockImplementation(() => {
+        throw new Error('Error while decrypting the ciphertext provided to safeStorage.decryptString.');
+      });
+      // password + passphrase + S3 secret; the profile without secrets adds nothing
+      expect(await store.countUndecryptableSecrets()).toBe(3);
+
+      // The ciphertext is still on disk, untouched: counting never rewrites the file
+      const raw = JSON.parse(await fs.readFile(storePath, 'utf-8'));
+      expect(raw.ssh[0].password).toMatch(/^enc:v1:/);
+    });
+
+    it('counts everything when no keyring is available at all, and ignores deleted profiles', async () => {
+      const store = new ProfileStore(storePath);
+      await seed(store);
+      await store.deleteS3('s3-1');
+
+      mockIsEncryptionAvailable.mockReturnValue(false);
+      expect(await store.countUndecryptableSecrets()).toBe(2);
+    });
+
+    it('is 0 for a missing profiles file', async () => {
+      expect(await new ProfileStore(storePath).countUndecryptableSecrets()).toBe(0);
+    });
   });
 
   it('copies an unparsable profiles.json aside before overwriting it', async () => {

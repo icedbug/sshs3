@@ -1,10 +1,22 @@
 // @vitest-environment jsdom
+import { createRef } from 'react';
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
-import { Breadcrumbs } from '../../src/renderer/src/components/FileManager/Breadcrumbs';
+import { Breadcrumbs, type BreadcrumbsHandle } from '../../src/renderer/src/components/FileManager/Breadcrumbs';
 
 describe('Breadcrumbs Component', () => {
+  it('enters editing mode via the imperative startEditing handle, with the whole path selected (§25)', () => {
+    const ref = createRef<BreadcrumbsHandle>();
+    render(<Breadcrumbs ref={ref} currentPath="/var/log" onNavigate={vi.fn()} />);
+
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    act(() => ref.current?.startEditing());
+
+    const input = screen.getByRole('textbox') as HTMLInputElement;
+    expect(input.value).toBe('/var/log');
+  });
+
   it('renders path segments and handles segment navigation', () => {
     const onNavigate = vi.fn();
     render(<Breadcrumbs currentPath="/home/alun/projects" onNavigate={onNavigate} />);

@@ -25,16 +25,28 @@ export interface OpenSshProcessOptions {
 
 /** SFTPConfig är en delmängd av SSHConnectionConfig; OpenSSH-argumentbyggaren kräver id/name. */
 function toSshConfig(config: SFTPConfig): SSHConnectionConfig {
-  return { ...config, id: config.id ?? '', name: config.name ?? config.host } as unknown as SSHConnectionConfig;
+  // Saved tunnels are only started from the Tunnels panel, never by an SFTP channel. Besides racing the panel
+  // for the port, a -L/-R on a multiplexed client makes the master refuse it and ssh then falls back to a
+  // brand-new connection (a second authentication) instead of sharing the master.
+  return {
+    ...config,
+    id: config.id ?? '',
+    name: config.name ?? config.host,
+    tunnels: undefined,
+  } as unknown as SSHConnectionConfig;
 }
 
 const HOST_KEY_CONFIRM_RE = /are you sure you want to continue connecting/i;
 
 export function parseHostKeyPrompt(prompt: string, config: SFTPConfig): HostKeyPromptInfo {
-  const m = /(\S+) key fingerprint is (\S+?)\.?(?:\s|$)/i.exec(prompt);
+  const m = /(\S+) key fingerprint is:? (\S+?)\.?(?:\s|$)/i.exec(prompt);
+  // The question can be about a jump host rather than the target: name the host ssh actually asks about.
+  const asked = /authenticity of host '(?:\[([^\]']+)\]:(\d+)|([^\s']+))/i.exec(prompt);
+  const askedHost = asked?.[1] ?? asked?.[3];
+  const sameHost = !askedHost || askedHost === config.host;
   return {
-    host: config.host,
-    port: config.port ?? 22,
+    host: sameHost ? config.host : askedHost,
+    port: sameHost ? (config.port ?? 22) : asked?.[2] ? Number(asked[2]) : 22,
     keyType: m?.[1] ?? 'unknown',
     fingerprint: m?.[2] ?? 'unknown',
     status: 'unknown',
@@ -222,64 +234,86 @@ export class OpenSshSftpProcess {
     return this.controlPath;
   }
 
-  public async exec(cmd: string): Promise<{ stdout: Buffer; stderr: string }> {
-    const sshBinary = resolveSshBinary();
-
-    // If ControlPath is available, use multiplexed master (fastest)
-    if (this.controlPath && fs.existsSync(this.controlPath)) {
-      return new Promise<{ stdout: Buffer; stderr: string }>((resolve, reject) => {
-        execFile(
-          sshBinary,
-          ['-S', this.controlPath!, '-o', 'BatchMode=yes', '--', this.host, cmd],
-          { maxBuffer: 10 * 1024 * 1024 },
-          (err, stdout, stderr) => {
-            if (err) return reject(err);
-            resolve({ stdout: Buffer.from(stdout), stderr: stderr.toString() });
-          }
-        );
-      });
+  /**
+   * The ssh command line and environment for one remote command, which must be non-interactive (BatchMode):
+   * - Through the live control socket: ssh only talks to the master. `ProxyCommand=false` makes it fail
+   *   closed if the socket turns out to be stale; without it ssh falls back to a fresh connection to
+   *   `host` on port 22 as the local user, past the profile's port, user, proxy and jump host.
+   * - Otherwise (or with `useControlSocket` off) an independent connection built from the profile, with the
+   *   proxy credentials and agent socket in the environment like the SFTP process itself (a ProxyCommand
+   *   with no ELECTRON_RUN_AS_NODE starts a second copy of the app).
+   */
+  private buildExecInvocation(
+    cmd: string,
+    useControlSocket = true
+  ): { args: string[]; env?: Record<string, string>; viaControlSocket: boolean } {
+    if (useControlSocket && this.controlPath && fs.existsSync(this.controlPath)) {
+      return {
+        args: ['-S', this.controlPath, '-o', 'BatchMode=yes', '-o', 'ProxyCommand=false', '--', this.host, cmd],
+        viaControlSocket: true,
+      };
     }
-
-    // Fallback: spawn independent command
     if (!this.config) {
       throw new Error('Cannot run exec: process configuration not available');
     }
     const args = SmartcardDetector.buildSSHArguments(toSshConfig(this.config));
-    args.push(cmd); // builder already ended with `-- [user@]host`
+    // The builder ends with `-- [user@]host`; options go before that pair and the command after it.
+    const destination = args.splice(-2);
+    args.push('-o', 'BatchMode=yes', ...destination, cmd);
+    const env: Record<string, string> = {
+      ...(process.env as Record<string, string>),
+      ...SmartcardDetector.buildProxyEnv(toSshConfig(this.config)),
+    };
+    if (this.config.agentPath) {
+      env.SSH_AUTH_SOCK = this.config.agentPath;
+    }
+    return { args, env, viaControlSocket: false };
+  }
 
-    return new Promise<{ stdout: Buffer; stderr: string }>((resolve, reject) => {
-      execFile(
-        sshBinary,
-        args,
-        { maxBuffer: 10 * 1024 * 1024 },
-        (err, stdout, stderr) => {
-          if (err) return reject(err);
-          resolve({ stdout: Buffer.from(stdout), stderr: stderr.toString() });
-        }
+  /** Asks the master behind the control socket whether it is alive (`ssh -O check`); its answer does not depend on any remote output. */
+  private masterIsAlive(sshBinary: string): Promise<boolean> {
+    if (!this.controlPath) return Promise.resolve(false);
+    return new Promise<boolean>((resolve) => {
+      execFile(sshBinary, ['-S', this.controlPath!, '-O', 'check', '--', this.host], { timeout: 5000 }, (err) =>
+        resolve(!err)
       );
     });
   }
 
-  public createExecStream(cmd: string): NodeJS.ReadableStream {
+  public async exec(cmd: string): Promise<{ stdout: Buffer; stderr: string }> {
     const sshBinary = resolveSshBinary();
-    let childProc: ChildProcess;
+    // Decided before the command runs, never by retrying afterwards: a failed run says nothing about whether
+    // the remote command already ran, and its stderr is the remote side's to write. A socket file whose
+    // master is gone is skipped here; the independent connection is built from the profile.
+    const useControlSocket = Boolean(this.controlPath && fs.existsSync(this.controlPath)) && (await this.masterIsAlive(sshBinary));
+    const { args, env } = this.buildExecInvocation(cmd, useControlSocket);
 
-    if (this.controlPath && fs.existsSync(this.controlPath)) {
-      childProc = spawn(sshBinary, ['-S', this.controlPath, '-o', 'BatchMode=yes', '--', this.host, cmd], {
-        stdio: ['ignore', 'pipe', 'pipe'],
+    return new Promise<{ stdout: Buffer; stderr: string }>((resolve, reject) => {
+      execFile(sshBinary, args, { maxBuffer: 10 * 1024 * 1024, ...(env ? { env } : {}) }, (err, stdout, stderr) => {
+        if (err) return reject(err);
+        resolve({ stdout: Buffer.from(stdout), stderr: stderr.toString() });
       });
-    } else if (this.config) {
-      const args = SmartcardDetector.buildSSHArguments(toSshConfig(this.config));
-      args.push(cmd);
-      childProc = spawn(sshBinary, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-    } else {
+    });
+  }
+
+  public createExecStream(cmd: string): NodeJS.ReadableStream {
+    let invocation: ReturnType<OpenSshSftpProcess['buildExecInvocation']>;
+    try {
+      invocation = this.buildExecInvocation(cmd);
+    } catch (err) {
       const errStream = new Readable({ read() {} });
-      errStream.destroy(new Error('Process not initialized'));
+      errStream.destroy(err instanceof Error ? err : new Error(String(err)));
       return errStream;
     }
+    const sshBinary = resolveSshBinary();
+    const { args, env } = invocation;
+    const childProc = spawn(sshBinary, args, { stdio: ['ignore', 'pipe', 'pipe'], ...(env ? { env } : {}) });
 
     childProc.stderr?.resume();
     const stdout = childProc.stdout!;
+    // A failed spawn (ssh missing, bad cwd) is reported on the child, not on its pipes: without a
+    // listener it would be an uncaught exception in the main process.
+    childProc.on('error', (err) => stdout.destroy(err));
     stdout.on('close', () => {
       try {
         if (!childProc.killed) {
@@ -315,7 +349,8 @@ export class OpenSshSftpProcess {
       this.askpassServer = undefined;
     }
 
-    if (this.controlPath && fs.existsSync(this.controlPath)) {
+    // A socket handed in by the caller (a terminal's master) is not ours to remove.
+    if (this.controlDir && this.controlPath && fs.existsSync(this.controlPath)) {
       try {
         fs.unlinkSync(this.controlPath);
       } catch {

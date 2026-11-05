@@ -314,6 +314,13 @@ export class SmartcardDetector {
       }
     }
 
+    // Agent authentication (custom agentPath or SSH CA certificate loaded into app agent)
+    if (config.authType === 'agent' && config.agentPath) {
+      if (process.platform !== 'win32') {
+        args.push('-o', `IdentityAgent=${config.agentPath}`);
+      }
+    }
+
     // Shared (app-wide) agent: restrict ssh to this connection's own keys so it neither exhausts the
     // server's MaxAuthTries with every unlocked card's keys nor touches an unrelated security key.
     if (config.agentPath && config.agentIdentityFiles && config.agentIdentityFiles.length > 0) {
@@ -321,6 +328,14 @@ export class SmartcardDetector {
       for (const file of config.agentIdentityFiles) {
         args.push('-i', file);
       }
+    }
+
+    // Certificate file for SSH CA authentication (e.g. a PIV smartcard paired with a signed cert)
+    if (config.certificateFile) {
+      if (/[\r\n]/.test(config.certificateFile) || config.certificateFile.startsWith('-')) {
+        throw new Error('Invalid CertificateFile: path contains illegal characters');
+      }
+      args.push('-o', `CertificateFile=${config.certificateFile}`);
     }
 
     // Identity file / private key argument (-i <path>)

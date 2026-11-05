@@ -1,6 +1,6 @@
 ## Security, Hardware Keys & Smartcards
 
-Security and cryptographic isolation form the foundation of **sshs3**. The application is designed around the principles of **Zero Private Key Extraction**, strict memory sandboxing, and Zero Trust authentication.
+Security and cryptographic isolation form the foundation of **sshs3**. The application is engineered around the principles of **Zero Private Key Extraction**, strict memory sandboxing, and Zero Trust identity verification.
 
 ![Security Settings](/img/docs/settings-security.png)
 
@@ -8,14 +8,17 @@ Security and cryptographic isolation form the foundation of **sshs3**. The appli
 
 ## 1. Zero Private Key Extraction Architecture
 
-A critical distinction between sshs3 and other commercial clients is that **private cryptographic keys are never extracted, loaded, or exposed inside JavaScript, Node.js, or Chromium memory**:
+A critical security principle of sshs3 is that **private cryptographic keys are never extracted, loaded, or exposed inside JavaScript, Node.js, or Chromium heaps**:
 
-- **FIDO2 / WebAuthn Keys (YubiKey 5 / Security Key)**:
-  All cryptographic signing operations execute directly on the hardware security chip. Private keys physically cannot be exported by software.
-- **Smartcards (PKCS#11 / SITHS / PIV / CAC)**:
-  Keys reside inside the tamper-resistant Secure Element of the physical card. Signing requests are delegated via system PKCS#11 modules (`p11-kit`, `opensc`, `libykcs11`).
-- **Software Keys on Disk (`id_ed25519`, `id_rsa`)**:
-  Loaded and read exclusively by your operating system's native `ssh` binary. sshs3 never parses, reads, or stores your private key bytes in application memory.
+| Credential Type | Cryptographic Isolation Mechanism | Private Key Exposure |
+| :--- | :--- | :--- |
+| **FIDO2 / WebAuthn Keys** | Signing occurs entirely on the hardware token chip (YubiKey 5). | **Physically impossible to export** |
+| **PKCS#11 Smartcards** | Keys reside in the Secure Element of the physical card (PIV, CAC, SITHS). Delegated via system modules (`p11-kit`, `libykcs11`, `opensc`). | **Physically impossible to export** |
+| **Software Disk Keys** | Loaded and parsed strictly by your OS's native OpenSSH client process. | **Zero exposure in app runtime** |
+| **Saved Passwords & Secrets** | Encrypted via Electron `safeStorage` using the OS keyring (DPAPI on Windows, Secret Service/libsecret on Linux). | **Encrypted at rest** |
+
+> [!WARNING]
+> **Keyring Unavailable Warning**: In headless Linux environments or minimal sessions lacking a D-Bus Secret Service, sshs3 surfaces an active alert: *"Credential encryption unavailable"*. In this mode, sensitive credentials are held in volatile memory only and are never written unencrypted to disk.
 
 ---
 
@@ -23,88 +26,90 @@ A critical distinction between sshs3 and other commercial clients is that **priv
 
 Authenticating with a FIDO2 hardware token (`ed25519-sk`, `ecdsa-sk`) requires physical user presence:
 
-```
+```text
 ┌────────────────────────────────────────────────────────────────────────┐
 │ 🔑 Touch your security key to authenticate...                          │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Feature: Real-Time Hardware Interaction Notification
+In standard command-line tools, terminal sessions appear to hang while the user is unaware that a security key is flashing under their desk. sshs3 detects OpenSSH user presence events in real time and illuminates an animated banner the exact millisecond user touch is requested, dismissing it immediately once presence is registered.
 
-#### 🎯 Purpose
-In standard command-line terminals, connections often appear to hang while the user is unaware that a YubiKey is blinking under their desk. sshs3 surfaces an animated visual banner the exact millisecond user presence is requested.
+> [!IMPORTANT]
+> **Good to know**
+> - If the token is not touched within OpenSSH's timeout window (typically 30 seconds), the connection aborts.
+> - FIDO2/U2F keys require OS-level driver support.
 
-#### 🛠️ How to Use
-When authenticating via a FIDO2 key, an animated gold banner illuminates at the top of the workspace: *"Touch your security key to authenticate..."*. Tap the hardware token to complete the handshake.
+### Technical Internals: Stderr Pattern Matching & IPC Dispatch
 
-#### ⚠️ Limitations & Caveats
-- If the token is not touched within OpenSSH's timeout window (typically 30 seconds), the connection aborts.
-- Requires OS-level FIDO2/U2F driver support.
-
-#### ⚙️ Technical Internals & Architecture
-`SSHPtyManager` and `OpenSshSftpProcess` inspect process stderr in real time for OpenSSH prompt markers:
+`SSHPtyManager` and `OpenSshSftpProcess` inspect process stderr streams in real time for OpenSSH prompt markers:
 `Confirm user presence for key...`
-Upon detection, an `IPC_CHANNELS.PRESENCE_PROMPT` (`presence:prompt`) event dispatches to React to mount the banner. As soon as the touch completes or the operation finishes, an `IPC_CHANNELS.PRESENCE_CLEAR` (`presence:clear`) event dismisses the banner automatically.
+Upon detection, an `IPC_CHANNELS.PRESENCE_PROMPT` event dispatches to React to mount the visual touch banner. Once the signature completes or OpenSSH exits, `IPC_CHANNELS.PRESENCE_CLEAR` dismisses the banner automatically.
 
 ---
 
-## 3. Ephemeral PIN Caching Strategies & `AppAgent`
+## 3. Ephemeral PIN Caching Policies & `AppAgent`
 
 To protect smartcards and PIN-protected hardware keys against unauthorized physical access while preventing user fatigue, sshs3 provides three distinct policies under *Settings → Security & Smartcard*:
 
-### A. Always Prompt (Default / Maximum Security)
-- **Behavior**: No caching across connections. Prompts for your smartcard PIN via a modal dialog for every new SSH or SFTP connection; reconnecting asks for the PIN again. Use this where policy requires re-authenticating the card on every single login.
-- **Memory**: The PIN is wiped from memory the instant the cryptographic handshake completes.
+| Policy | PIN Lifetime | Best Used For |
+| :--- | :--- | :--- |
+| **Always Prompt (Default)** | Cleared from memory immediately after each handshake. | Maximum security; strict organizational zero-cache compliance. |
+| **Once Per Terminal Connection** | Cached inside a private, per-connection `ssh-agent`. Destroyed when the terminal or SFTP tab disconnects. | Multi-tab sessions on high-security workstations. |
+| **Global (App Lifetime)** | Maintained in memory inside the single app-wide `AppAgent` socket until locked or application exit. | Full Single Sign-On across all app tabs and external CLI terminals. |
 
-### B. Once Per Terminal Connection
-- **Behavior**: The PIN is entered once into a private, app-managed `ssh-agent` shared by that terminal tab and its dotfiles sync.
-- **Lifecycle**: The agent process is killed when the terminal disconnects, and reconnecting asks again. Automatic reconnects after a dropped connection reuse the open agent while active.
+### Global (App Lifetime) & External Terminal Superpowers
+Under Global PIN caching, sshs3 unlocks seamless Single Sign-On:
+- **Stable Socket:** The agent listens on a dedicated Unix socket (`$XDG_RUNTIME_DIR/sshs3/agent.sock` with `0700` permissions).
+- **Lock / Unlock Action:** Click **Lock All Now** in the top toolbar to flush all loaded keys immediately (`ssh-add -D`). A card load that is running or queued when you lock is cancelled and its keys are removed again, so no PIN prompt appears after the lock. Click **Unlock Now** to reload keys upon PIN entry.
+- **FIDO2 verify-required PIN Caching:** For FIDO2 keys requiring PIN + touch per signature, the PIN entered during unlock is cached in process memory (never on disk) so subsequent connections only require a physical touch. If a touch signature fails, the cached PIN is invalidated immediately to prevent authenticator lockouts. The same applies if the PIN is asked for again right after it was supplied from the cache: it is then not sent a second time, and you are asked.
+- **Local Shells & External CLI:** External terminal windows, VS Code, and local tabs automatically receive the `SSH_AUTH_SOCK` environment variable. Furthermore, sshs3 injects a temporary local-only block into your `~/.ssh/config`:
+  ```ssh-config
+  # BEGIN sshs3-agent (local only -- regenerated by sshs3 while cards are unlocked, never synced)
+  Host prod-db
+      IdentityAgent /run/user/1000/sshs3/agent.sock
+      IdentityFile <public key file of the unlocked card>
+      IdentitiesOnly yes
+      PKCS11Provider none
+  # END sshs3-agent
+  ```
+  When sshs3 shuts down, the block is cleaned up and the socket destroyed.
 
-### C. Global (App Lifetime) — Full SSO for Terminal & External CLI
-- **Single App-Wide Agent (`AppAgent`)**: All unlocked smartcards and FIDO2 keys reside in **one app-wide `ssh-agent`** on a stable socket (`$XDG_RUNTIME_DIR/sshs3/agent.sock`, or `<tmpdir>/sshs3-<uid>/agent.sock` when `XDG_RUNTIME_DIR` is not set; the directory is created with `0700` and refused if it is not owned by you or is accessible to others).
-- **Dynamic Lock/Unlock Toggle**: A smartcard icon in the top toolbar indicates cached status and features an interactive toggle:
-  - **Lock All Now**: Prompts the agent to flush all loaded cryptographic keys immediately (`ssh-add -D`) without terminating or changing the socket.
-  - **Unlock Now**: Prompts for your PIN to reload keys back into the agent without restarting the application.
-- **FIDO2 PIN and touch**: A FIDO2 key created with **Require PIN + touch on every use** asks for its PIN and a touch on every signature. The PIN you enter when unlocking is kept in memory only (never on disk) and reused for those signatures until you lock, so connecting asks only for the touch. It is cleared on **Lock All Now**, on quit and if the agent restarts, and it is never replayed twice in a row: if the key asks again right away (the PIN was wrong or changed) you are asked instead, so a wrong PIN cannot use up the authenticator's retries.
-- **Card Isolation & Touch Protection (`IdentitiesOnly`)**: When sshs3 connects to a server using the agent, it locks the session strictly to that specific profile's card (`IdentitiesOnly` plus public key file). Remote servers never see other loaded keys, and FIDO2 security keys do not receive spurious touch requests!
-- **Cards with several certificates (authentication vs. signing)**: A PIV card often holds more than one certificate, for example an authentication certificate (slot 9A) and a signing certificate (slot 9C). The PKCS#11 loader (`ssh-add -s`) loads every key the card exposes, so sshs3 reads the card's certificates first (public objects, no PIN) and only uses the ones meant for authentication:
-  - A certificate counts as an authentication certificate when its Key Usage includes `digitalSignature` and, if it has an Extended Key Usage, that includes `clientAuth`, smartcard logon or any purpose. A certificate that also sets `nonRepudiation` (the usual PIV signing certificate) needs such an Extended Key Usage to count. A certificate without these extensions is treated as an authentication certificate.
-  - Only those keys are listed in the cached smartcard identities menu and pinned to your profiles with `IdentitiesOnly`, so signing and key-management keys are never offered to a server. Right after the card is unlocked, the other keys are also removed from the app agent (Linux and macOS; best effort), so a plain `ssh` in another terminal does not offer them either.
-  - If no certificate on the card looks like an authentication certificate, or the certificates cannot be read, all keys are kept, as before. The key linked for smartcard sync is never removed.
-  - Limits: this applies to Global (App Lifetime) caching only; on Windows the agent is the shared OpenSSH service and nothing is removed from it.
-- **Local Shells & External CLI Superpower**: Local shell tabs automatically receive this stable socket via `SSH_AUTH_SOCK`. Because the socket path is stable, shells opened *before* unlocking a card immediately work once unlocked! Furthermore, sshs3 injects a temporary local-only block into your `~/.ssh/config`:
+### Card or Key Not Plugged In
 
-```ssh-config
-# BEGIN sshs3-agent (temporary local-only, managed by sshs3)
-Host *
-  IdentityAgent /tmp/sshs3-agent-1000/agent.sock
-# END sshs3-agent
-```
+sshs3 checks that the smartcard or security key is present before it asks for a PIN. Unlock at startup stays silent when nothing is plugged in. When a terminal, an SFTP connection, Remote Profile Sync or a Team Vault needs the token, an **Insert your smartcard / security key** dialog waits for it and gives way to the PIN dialog as soon as the token is detected. **Cancel** (or <kbd>Esc</kbd>) stops the operation without asking for a PIN.
 
-This ensures that **external command-line terminals, IDEs (VS Code), and automated scripts outside sshs3 can immediately use your unlocked smartcard without prompting for a PIN!** When sshs3 exits, the block is cleanly removed and the socket destroyed. The agent block is refreshed after every profile config sync in serialized order with hardened marker parsing.
+> [!NOTE]
+> Detecting a FIDO2 key works on Linux only. On macOS the PIN dialog appears as before, and a key connected over NFC or Bluetooth is not detected.
 
-### Feature: Ephemeral PIN Delivery via `AskpassServer`
+PIN caching is strictly memory-only and is wiped on reboot or application exit. If the application crashes, stale sockets are cleaned up automatically on the next launch.
 
-#### 🎯 Purpose
-Deliver seamless Single Sign-On across complex server topologies without ever writing PIN codes to disk or plaintext files.
+### Security Architecture: Slot Separation (Authentication 9A vs. Signing 9C)
 
-#### 🛠️ How to Use
-Select your preferred policy under *Settings → Security & Smartcard*. Enter your PIN in the secure dialog when prompted.
+PIV smartcards typically expose multiple slots: an authentication slot (`9A`) and a digital signature slot (`9C`). Standard OpenSSH `ssh-add -s` loads all exposed slots indiscriminately. sshs3 inspects the card's X.509 certificates first:
+- Only certificates bearing the `digitalSignature` Key Usage and `clientAuth` Extended Key Usage are offered for SSH authentication.
+- Dedicated signing keys (with `nonRepudiation`) are excluded and removed from the active agent to prevent accidental key exposure during SSH handshakes.
 
-#### ⚠️ Limitations & Caveats
-- If the application crashes unexpectedly, stale sockets are cleaned up automatically on the next launch.
-- PIN caching is strictly memory-only and is wiped upon reboot or application exit.
+### Technical Architecture: Secure PIN Delivery via AskpassServer
 
-#### ⚙️ Technical Internals & Architecture
-`AskpassServer` (`src/main/smartcard/AskpassServer.ts`) establishes an isolated Unix domain socket with strict `0700` permissions. OpenSSH is launched with `SSH_ASKPASS_REQUIRE=force`, pointing `SSH_ASKPASS` to the app binary running in node mode (`ELECTRON_RUN_AS_NODE=1`). Communication is isolated from other users on multi-tenant workstations.
+`AskpassServer` (`src/main/smartcard/AskpassServer.ts`) runs an isolated Unix domain socket with strict `0700` filesystem permissions. When OpenSSH executes with `SSH_ASKPASS_REQUIRE=force`, helper scripts communicate directly with `AskpassServer` using process memory IPC. Plaintext PINs are never written to disk or configuration files.
 
 ---
 
-## 4. Troubleshooting & Diagnostics Runbook
+## 4. SSH Certificate Authority (SSH CA)
 
-| Symptom / Error Message | Probable Root Cause | Corrective Action |
+sshs3 can sign you in with short-lived OpenSSH user certificates issued by Smallstep Step-CA or HashiCorp Vault / OpenBao after you authenticate with your identity provider (OIDC). The private key is either generated in memory for each login or stays on your smartcard. Setup, daily use and troubleshooting are on their own page: [SSH Certificate Authority (SSH CA)](/docs/security/ssh-ca/).
+
+> [!WARNING]
+> **The smartcard key source unlocks the card for your other profiles under the Global policy**: The **Smartcard / PIV (PKCS#11)** key source loads the card into `AppAgent`, the same agent the **Global (App Lifetime)** policy uses. The card then appears under **Cached smartcard identities** in the toolbar, and the PIN you entered for SSH CA also covers every profile that uses this card (PKCS#11 profiles, and external terminals through the `sshs3-agent` block in `~/.ssh/config`). They connect without asking for the PIN again. The card stays unlocked until you click **Lock All Now** or quit sshs3; logging out of SSH CA does not lock it. Under **Always Prompt** and **Once Per Terminal Connection**, PKCS#11 profiles keep using their own per-connection prompts.
+
+---
+
+## 5. Troubleshooting & Diagnostics
+
+| Symptom / Error | Probable Root Cause | Corrective Action |
 | :--- | :--- | :--- |
-| `Smartcard module not found` | PKCS#11 library package missing in operating system | Install `p11-kit` (`sudo apt install p11-kit` or `sudo dnf install p11-kit`). |
-| `PIN locked / CKR_PIN_LOCKED` | Incorrect PIN entered too many times | Card is locked. Unlock using your PUK code via your card provider's utility (e.g. Net iD Client). |
-| Touch banner does not disappear | OpenSSH timeout occurred or missed signal | Touch the YubiKey immediately when it flashes. Verify the key is securely seated in USB. |
-| Login asks for PIN despite Global Caching | The local tab was opened before PIN caching was switched to Global (a shell's environment is fixed when it starts), or **Settings → Terminal → Local Terminal SSH Agent** is **System Only** / **Disabled** | Open a fresh tab, and keep **Local Terminal SSH Agent** on **Auto** so the tab receives the `AppAgent` socket. |
+| `Smartcard module not found` | PKCS#11 provider library missing | Install `p11-kit` (`sudo apt install p11-kit` or `sudo dnf install p11-kit`). |
+| `PIN locked / CKR_PIN_LOCKED` | Incorrect PIN entered too many times | Card is locked. Unlock using PUK code via your provider tool (e.g. Net iD Client). |
+| Touch banner does not disappear | YubiKey timed out or missed touch | Tap the key immediately when flashing. Verify key is securely inserted into USB port. |
+| Local shell asks for PIN despite Global Caching | Tab was opened before card was unlocked | Open a fresh tab, and ensure *Settings → Terminal → Local Terminal SSH Agent* is set to **Auto**. |
+| PKCS#11 profiles no longer ask for the PIN after an SSH CA login with the smartcard key source | Under the Global policy the SSH CA login loaded the card into the shared `AppAgent` | Click **Lock All Now** when you want PIN prompts again, or use **Once Per Terminal Connection** or **Always Prompt**. See [SSH Certificate Authority (SSH CA)](/docs/security/ssh-ca/). |

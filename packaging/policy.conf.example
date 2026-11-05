@@ -1,0 +1,42 @@
+# sshs3 machine policy (policy.conf)
+#
+# Linux:  sudo install -d -m 0755 -o root -g root /etc/sshs3
+#         sudo install -m 0644 -o root -g root policy.conf /etc/sshs3/policy.conf
+# macOS:  /Library/Application Support/sshs3/policy.conf
+# Windows reads the registry (HKLM\SOFTWARE\Policies\sshs3, see the ADMX templates) and ignores this file.
+#
+# The file and its folder must be owned by root and not writable by group or others;
+# otherwise the whole policy is ignored and Settings shows a warning.
+# Restart sshs3 after changing it.
+#
+# One "name = value" per line. Remove the leading "# " from a line to enforce it.
+# A setting that is not enabled below stays under the user's control.
+# A value is the rest of the line; there are no quotes and no comments after a value.
+# Yes/no values are exactly true, false, 1 or 0.
+#
+# Reference: https://docs.sshs3.com/docs/reference/enterprise-deployment/
+
+# Check GitHub Releases for new versions. false stops all update traffic, including "Check now";
+# true keeps the check on and locks the option.
+# autoCheckUpdates = false
+
+# Smartcard / FIDO2 PIN caching: always-prompt, agent-per-session or agent-global.
+# smartcardAuthMode = always-prompt
+
+# Which SSH agent local shell tabs inherit: auto, system, app-managed or disabled.
+# localTerminalAgentMode = auto
+
+# Windows only. When the bundled X server starts: manual, auto or always.
+# x11ServerMode = auto
+
+# Windows only. Command-line arguments for the X server (up to 1024 characters).
+# x11ServerArgs = :0 -multiwindow -clipboard -wgl
+
+# OpenShift login and the oc CLI shim: true or false.
+# enableOpenShift = false
+
+# Allow fetching public SSH keys from GitHub, GitLab or a custom Git host. false blocks it.
+# gitKeyFetch = false
+
+# Allow importing dotfiles from a Git repository. false blocks it.
+# dotfileGitImport = false

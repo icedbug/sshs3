@@ -1,6 +1,7 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { FileJson, X, Loader2 } from 'lucide-react';
 import { useModalDismiss } from '../../lib/useModalDismiss';
+import { useDialogFocus } from '../../lib/useDialogFocus';
 import { useConfirm } from '../ConfirmDialog';
 import { describeIpcError } from '../../lib/format';
 
@@ -57,6 +58,8 @@ export const BucketPolicyModal: React.FC<BucketPolicyModalProps> = ({
   }, [open, providerId, bucketPath]);
 
   const handleBackdropClick = useModalDismiss(onClose, open, !saving);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(dialogRef, open);
 
   if (!open) return null;
 
@@ -112,7 +115,7 @@ export const BucketPolicyModal: React.FC<BucketPolicyModalProps> = ({
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 animate-in fade-in duration-150 p-4"
       onClick={handleBackdropClick}
     >
-      <div role="dialog" aria-modal="true" aria-label="Bucket policy and CORS" className="flex w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-border-subtle bg-app-card shadow-2xl">
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Bucket policy and CORS" className="flex w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-border-subtle bg-app-card shadow-2xl">
         <div className="flex items-center justify-between border-b border-divider bg-app-surface px-4 py-3">
           <div className="flex items-center gap-2">
             <FileJson className="h-4 w-4 text-sky-400" />
@@ -149,7 +152,7 @@ export const BucketPolicyModal: React.FC<BucketPolicyModalProps> = ({
             </div>
           )}
           {error && (
-            <div className="mb-3 rounded-lg border border-red-800/80 bg-red-950/40 p-2.5 text-xs text-red-300">{error}</div>
+            <div role="alert" className="mb-3 rounded-lg border border-red-800/80 bg-red-950/40 p-2.5 text-xs text-red-300">{error}</div>
           )}
           {!loading && tab === 'policy' && (
             <textarea

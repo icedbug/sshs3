@@ -53,6 +53,10 @@ import {
   createFifo,
   readFifoOnce,
   removeFifo,
+  createSecretOutputChannel,
+  releaseFifoReader,
+  readChannelAfterExit,
+  stripAnsi,
   TeamVaultWrongPinError,
   TeamVaultDefaultCredentialsError,
   type AgePtyPromptCallbacks,
@@ -74,9 +78,31 @@ function makeCallbacks(pins: string[]): AgePtyPromptCallbacks & { calls: unknown
   };
 }
 
+describe('stripAnsi', () => {
+  it('removes CSI and OSC sequences but keeps the text', () => {
+    expect(stripAnsi('[2J[H🎲 Generating key...]0;C:\\x.exe[?25hok')).toBe('🎲 Generating key...ok');
+  });
+});
+
 describe('runAgeCommandViaPty', () => {
   beforeEach(() => {
     mockPtyInstances.length = 0;
+  });
+
+  it('recognizes the PIN prompt through ConPTY control sequences and shows only the prompt text', async () => {
+    const callbacks = makeCallbacks(['123456']);
+    const promise = runAgeCommandViaPty('age', ['-d'], process.env, callbacks);
+    const term = mockPtyInstances[0];
+
+    // Captured from age-plugin-yubikey 0.5.0 under ConPTY on Windows.
+    term.emitData('[?9001h[?1004h[?25l[2J[m[H🎲 Generating key...]0;C:\\p\\age-plugin-yubikey.exe');
+    term.emitData('[?25h[?25l[3;1HEnter PIN for YubiKey with serial 7015986 (default is 123456): [?25h');
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(callbacks.requestPin).toHaveBeenCalledWith('Enter PIN for YubiKey with serial 7015986:', undefined);
+
+    term.emitExit(0);
+    await promise;
   });
 
   it('shows the touch hint immediately on spawn (before any PIN prompt), and relays the PIN prompt without the "(default is ...)" hint', async () => {
@@ -331,7 +357,8 @@ describe('runAgeCommandViaPty', () => {
 // to write binary to a terminal) — instead `age -d ... -o <fifo>` writes them to a FIFO, a kernel
 // pipe that never touches disk. Verified byte-exact against real hardware; these tests cover the
 // FIFO plumbing itself with a real (but disposable, non-sensitive) temp FIFO.
-describe('FIFO helpers (binary-safe path for unwrapVaultKey)', () => {
+// POSIX only: Windows has no mkfifo — see the secret output channel tests below.
+describe.skipIf(process.platform === 'win32')('FIFO helpers (binary-safe path for unwrapVaultKey)', () => {
   let tempDir: string;
 
   beforeEach(async () => {
@@ -360,5 +387,92 @@ describe('FIFO helpers (binary-safe path for unwrapVaultKey)', () => {
   it('removeFifo is a no-op if the path is already gone', async () => {
     const fifoPath = path.join(tempDir, 'already-gone.fifo');
     await expect(removeFifo(fifoPath)).resolves.toBeUndefined();
+  });
+});
+
+describe('readChannelAfterExit', () => {
+  const channelOf = (read: () => Promise<Buffer>) => ({ path: '/x', read, dispose: async () => undefined });
+
+  it('returns what the channel delivers', async () => {
+    const data = Buffer.from([1, 2, 3]);
+    await expect(readChannelAfterExit(channelOf(() => Promise.resolve(data)), 1000)).resolves.toBe(data);
+  });
+
+  it('passes a read failure through', async () => {
+    await expect(readChannelAfterExit(channelOf(() => Promise.reject(new Error('boom'))), 1000)).rejects.toThrow('boom');
+  });
+
+  it('gives up with a clear error when age finished but nothing ever arrives', async () => {
+    await expect(readChannelAfterExit(channelOf(() => new Promise<Buffer>(() => undefined)), 30)).rejects.toThrow(
+      '"age" finished but wrote no output'
+    );
+  });
+});
+
+describe('createSecretOutputChannel', () => {
+  const payload = Buffer.from([0x00, 0x0a, 0x0d, 0xff, 0x41, 0x04]); // LF/CR/EOF-like bytes
+
+  it.skipIf(process.platform !== 'win32')(
+    'on Windows serves a named pipe, ignores the empty probe connections age makes, and returns the data one',
+    async () => {
+      const net = await import('node:net');
+      const channel = await createSecretOutputChannel(os.tmpdir());
+      expect(channel.path.startsWith(String.fromCharCode(92, 92, 46, 92) + 'pipe')).toBe(true);
+
+      const connect = () =>
+        new Promise<import('node:net').Socket>((resolve, reject) => {
+          const sock = net.connect(channel.path, () => resolve(sock));
+          sock.on('error', reject);
+        });
+      // Two empty probes, then the real write — what age v1.3.2 does with `-o <pipe>`.
+      (await connect()).end();
+      (await connect()).end();
+      (await connect()).end(payload);
+
+      expect((await channel.read()).equals(payload)).toBe(true);
+      await channel.dispose();
+    }
+  );
+
+  it.skipIf(process.platform !== 'win32')('on Windows read() fails instead of hanging when nothing was ever written', async () => {
+    const channel = await createSecretOutputChannel(os.tmpdir());
+    await expect(channel.read()).rejects.toThrow('wrote no output');
+    await channel.dispose();
+  }, 10000);
+
+  it.skipIf(process.platform === 'win32')('on POSIX serves a FIFO and removes it on dispose', async () => {
+    const channel = await createSecretOutputChannel(os.tmpdir());
+    expect(fs.statSync(channel.path).isFIFO()).toBe(true);
+    await fsp.writeFile(channel.path, payload);
+    expect((await channel.read()).equals(payload)).toBe(true);
+    await channel.dispose();
+    expect(fs.existsSync(channel.path)).toBe(false);
+  });
+
+  // A failed `age` run never opens the FIFO for writing. The reader's blocking open() then holds one of libuv's four
+  // threadpool threads forever unless dispose() releases it; four failures used to hang every async fs call.
+  it.skipIf(process.platform === 'win32')(
+    'on POSIX dispose releases a reader that never got a writer, so failed runs do not exhaust the threadpool',
+    async () => {
+      // One failed run after another, as in the app: each reader is blocked in open() when its run "fails" and the
+      // channel is disposed. Without the release the fifth iteration would hang (all four threads blocked).
+      for (let i = 0; i < 8; i++) {
+        const channel = await createSecretOutputChannel(os.tmpdir());
+        const read = channel.read();
+        await new Promise((resolve) => setTimeout(resolve, 40)); // let the reader reach its blocking open()
+        await channel.dispose();
+        expect((await read).length).toBe(0);
+      }
+      // The threadpool still serves other fs work.
+      await expect(fsp.readFile(__filename, 'utf-8')).resolves.toContain('releaseFifoReader');
+    },
+    10000
+  );
+
+  it.skipIf(process.platform === 'win32')('releaseFifoReader does nothing for a missing path or a FIFO without a waiting reader', async () => {
+    expect(() => releaseFifoReader(path.join(os.tmpdir(), 'no-such.fifo'))).not.toThrow();
+    const fifoPath = await createFifo(os.tmpdir());
+    expect(() => releaseFifoReader(fifoPath)).not.toThrow();
+    await removeFifo(fifoPath);
   });
 });

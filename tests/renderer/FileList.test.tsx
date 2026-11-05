@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, within } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import { FileList } from '../../src/renderer/src/components/FileManager/FileList';
 import type { FileEntry } from '../../src/shared/types/storage';
@@ -78,8 +78,54 @@ describe('FileList Component', () => {
       />
     );
 
-    expect(screen.getByRole('button', { name: 'Permissions' })).toBeInTheDocument();
+    // The accessible name starts with the visible text ("Perms"), then spells it out.
+    expect(screen.getByRole('button', { name: 'Perms (permissions)' })).toBeInTheDocument();
     expect(screen.getByText('755')).toBeInTheDocument();
+  });
+
+  it('is a grid: named, with column headers that expose the sort order, and rows of cells', () => {
+    render(
+      <FileList
+        entries={mockEntries}
+        loading={false}
+        selectedPaths={new Set(['/config.json'])}
+        onSelectionChange={vi.fn()}
+        onOpen={vi.fn()}
+      />
+    );
+
+    const grid = screen.getByRole('grid', { name: 'Files' });
+    expect(grid).toHaveAttribute('aria-multiselectable', 'true');
+    expect(grid).toHaveAttribute('aria-rowcount', String(mockEntries.length + 1));
+
+    const headers = within(grid).getAllByRole('columnheader');
+    expect(headers.map((h) => h.textContent?.replace(/[▲▼]/g, '').trim())).toEqual(['Name', 'Size', 'Perms', 'Modified']);
+    // Name is the default sort: the header says so, the others are sortable but unsorted.
+    expect(headers[0]).toHaveAttribute('aria-sort', 'ascending');
+    expect(headers[1]).toHaveAttribute('aria-sort', 'none');
+
+    // Rows (header row + one per entry) know their position, and each carries four cells.
+    const rows = within(grid).getAllByRole('row');
+    expect(rows).toHaveLength(mockEntries.length + 1);
+    const firstDataRow = rows[1];
+    expect(firstDataRow).toHaveAttribute('aria-rowindex', '2');
+    expect(within(firstDataRow).getAllByRole('gridcell')).toHaveLength(4);
+    expect(within(grid).getAllByRole('row', { selected: true })).toHaveLength(1);
+  });
+
+  it('flips the Name header to descending when it is clicked again', () => {
+    render(
+      <FileList
+        entries={mockEntries}
+        loading={false}
+        selectedPaths={new Set()}
+        onSelectionChange={vi.fn()}
+        onOpen={vi.fn()}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /^Name/ }));
+    expect(screen.getAllByRole('columnheader')[0]).toHaveAttribute('aria-sort', 'descending');
   });
 
   it('virtualizes large collections of files efficiently', () => {
@@ -173,6 +219,23 @@ describe('FileList Component', () => {
     // Dropping on file calls onPaneDrop
     fireEvent.drop(fileRow, { dataTransfer: {} });
     expect(onPaneDrop).toHaveBeenCalled();
+  });
+
+  it('moves keyboard focus to the requested path, so Enter opens the highlighted entry', () => {
+    const onOpen = vi.fn();
+    const props = { entries: mockEntries, loading: false, onSelectionChange: vi.fn(), onOpen };
+    const { container, rerender } = render(<FileList {...props} selectedPaths={new Set(['/config.json'])} />);
+    const listContainer = container.querySelector('[tabindex="0"]')!;
+
+    // The user clicked config.json last; a later action selects documents programmatically.
+    fireEvent.click(screen.getByText('config.json').closest('[role="row"]') as HTMLElement);
+    rerender(<FileList {...props} selectedPaths={new Set(['/documents'])} />);
+    fireEvent.keyDown(listContainer, { key: 'Enter' });
+    expect(onOpen).toHaveBeenLastCalledWith(expect.objectContaining({ path: '/config.json' }));
+
+    rerender(<FileList {...props} selectedPaths={new Set(['/documents'])} focusRequest={{ path: '/documents', id: 1 }} />);
+    fireEvent.keyDown(listContainer, { key: 'Enter' });
+    expect(onOpen).toHaveBeenLastCalledWith(expect.objectContaining({ path: '/documents' }));
   });
 
   describe('Type-ahead search', () => {
@@ -817,5 +880,34 @@ describe('FileList Component', () => {
 
     expect(document.activeElement).toBe(list);
   });
-});
 
+  it('leaves the selection alone for the click that follows a drag handed to the OS', () => {
+    const onSelectionChange = vi.fn();
+    render(
+      <FileList
+        entries={mockEntries}
+        loading={false}
+        selectedPaths={new Set(['/config.json'])}
+        onSelectionChange={onSelectionChange}
+        onOpen={vi.fn()}
+        onDraggableStart={(_entry, e) => {
+          e.preventDefault();
+          return true;
+        }}
+      />
+    );
+    const row = screen.getByText('image.png').closest('[role="row"]') as HTMLElement;
+
+    fireEvent.dragStart(row);
+    fireEvent.click(row, { shiftKey: true });
+    expect(onSelectionChange).not.toHaveBeenCalled();
+
+    // the suppression is single-use, and a new mousedown clears it
+    fireEvent.click(row);
+    expect(onSelectionChange).toHaveBeenCalledTimes(1);
+    fireEvent.dragStart(row);
+    fireEvent.mouseDown(row);
+    fireEvent.click(row);
+    expect(onSelectionChange).toHaveBeenCalledTimes(2);
+  });
+});

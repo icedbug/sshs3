@@ -278,4 +278,239 @@ describe('FilePane Home Button', () => {
     fireEvent.doubleClick(row);
     expect((await screen.findByTestId('editor')).getAttribute('data-tail')).toBe('false');
   });
+
+  it('enters breadcrumb path-editing on Ctrl+L and Alt+D (§25)', async () => {
+    render(
+      <ConfirmProvider>
+        <DragDropProvider>
+          <FilePane
+            side="left"
+            source={{ providerId: 'local', sourceType: 'local', label: 'Local Disk' }}
+            currentPath="/var/log"
+            onPathChange={() => {}}
+            onSourceTypeRequest={vi.fn()}
+            onTransferRequested={vi.fn()}
+            refreshToken={0}
+          />
+        </DragDropProvider>
+      </ConfirmProvider>
+    );
+
+    const pane = screen.getByTestId('file-pane-left');
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+
+    fireEvent.keyDown(pane, { key: 'l', ctrlKey: true });
+    const input = (await screen.findByRole('textbox')) as HTMLInputElement;
+    expect(input.value).toBe('/var/log');
+
+    fireEvent.keyDown(input, { key: 'Escape' });
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+
+    fireEvent.keyDown(pane, { key: 'd', altKey: true });
+    expect(await screen.findByRole('textbox')).toBeInTheDocument();
+  });
+
+  it('shows item count, selection count, and selected size in the status bar (§24)', async () => {
+    (window as any).multissh.storageList = vi.fn().mockResolvedValue([
+      { name: 'a.txt', path: '/var/log/a.txt', size: 1024, isDirectory: false },
+      { name: 'b.txt', path: '/var/log/b.txt', size: 2048, isDirectory: false },
+    ]);
+
+    render(
+      <ConfirmProvider>
+        <DragDropProvider>
+          <FilePane
+            side="left"
+            source={{ providerId: 'local', sourceType: 'local', label: 'Local Disk' }}
+            currentPath="/var/log"
+            onPathChange={() => {}}
+            onSourceTypeRequest={vi.fn()}
+            onTransferRequested={vi.fn()}
+            refreshToken={0}
+          />
+        </DragDropProvider>
+      </ConfirmProvider>
+    );
+
+    await screen.findByText('a.txt');
+    expect(screen.getByText('2 items')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('a.txt'));
+    expect(screen.getByText(/1 selected.*1\.00 KB/)).toBeInTheDocument();
+  });
+
+  it("reflects the active text filter in the status bar's item count, not the pre-filter count", async () => {
+    (window as any).multissh.storageList = vi.fn().mockResolvedValue([
+      { name: 'apple.txt', path: '/var/log/apple.txt', size: 100, isDirectory: false },
+      { name: 'banana.txt', path: '/var/log/banana.txt', size: 100, isDirectory: false },
+      { name: 'cherry.txt', path: '/var/log/cherry.txt', size: 100, isDirectory: false },
+    ]);
+
+    render(
+      <ConfirmProvider>
+        <DragDropProvider>
+          <FilePane
+            side="left"
+            source={{ providerId: 'local', sourceType: 'local', label: 'Local Disk' }}
+            currentPath="/var/log"
+            onPathChange={() => {}}
+            onSourceTypeRequest={vi.fn()}
+            onTransferRequested={vi.fn()}
+            refreshToken={0}
+          />
+        </DragDropProvider>
+      </ConfirmProvider>
+    );
+
+    await screen.findByText('apple.txt');
+    expect(screen.getByText('3 items')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTitle('Search / Filter files (Ctrl+F)'));
+    const filterInput = await screen.findByPlaceholderText(/Filter files in current folder/);
+    fireEvent.change(filterInput, { target: { value: 'an' } });
+
+    await waitFor(() => {
+      expect(screen.queryByText('apple.txt')).not.toBeInTheDocument();
+      expect(screen.getByText('banana.txt')).toBeInTheDocument();
+    });
+    expect(screen.getByText('1 item')).toBeInTheDocument();
+  });
+
+  it('pre-selects and highlights initialSelectedPath upon directory load', async () => {
+    (window as any).multissh.storageList = vi.fn().mockResolvedValue([
+      { name: 'apple.txt', path: '/var/log/apple.txt', size: 100, isDirectory: false },
+      { name: 'banana.txt', path: '/var/log/banana.txt', size: 200, isDirectory: false },
+    ]);
+
+    render(
+      <ConfirmProvider>
+        <DragDropProvider>
+          <FilePane
+            side="left"
+            source={{ providerId: 'local', sourceType: 'local', label: 'Local Disk' }}
+            currentPath="/var/log"
+            initialSelectedPath="/var/log/banana.txt"
+            onPathChange={() => {}}
+            onSourceTypeRequest={vi.fn()}
+            onTransferRequested={vi.fn()}
+            refreshToken={0}
+          />
+        </DragDropProvider>
+      </ConfirmProvider>
+    );
+
+    await screen.findByText('banana.txt');
+    await waitFor(() => {
+      expect(screen.getByText(/1 selected/)).toBeInTheDocument();
+    });
+  });
+});
+
+describe('FilePane AWS SSO sign-in', () => {
+  const expired = 'AWS SSO session expired: sign in again to continue.';
+  let api: Record<string, any>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    api = {
+      storageList: vi.fn().mockRejectedValue(new Error(expired)),
+      awsSsoReloginProvider: vi.fn().mockResolvedValue(undefined),
+      getHomeDir: vi.fn().mockResolvedValue('/home/localuser'),
+      onTransferProgress: vi.fn().mockReturnValue(() => {}),
+      onSearchResult: vi.fn().mockReturnValue(() => {}),
+      onSearchProgress: vi.fn().mockReturnValue(() => {}),
+      onSearchError: vi.fn().mockReturnValue(() => {}),
+      onSearchDone: vi.fn().mockReturnValue(() => {}),
+    };
+    (window as any).multissh = api;
+  });
+
+  const renderPane = (sourceType: 's3' | 'sftp' = 's3') =>
+    render(
+      <ConfirmProvider>
+        <DragDropProvider>
+          <FilePane
+            side="left"
+            source={{ providerId: 's3-1', sourceType, label: 'Bucket' }}
+            currentPath="/"
+            onPathChange={vi.fn()}
+            onSourceTypeRequest={vi.fn()}
+            onTransferRequested={vi.fn()}
+            refreshToken={0}
+          />
+        </DragDropProvider>
+      </ConfirmProvider>
+    );
+
+  it('offers Sign in again for an expired session and reloads the folder after signing in', async () => {
+    renderPane();
+    fireEvent.click(await screen.findByRole('button', { name: 'Sign in again' }));
+
+    await waitFor(() => expect(api.awsSsoReloginProvider).toHaveBeenCalledWith('s3-1'));
+    await waitFor(() => expect(api.storageList).toHaveBeenCalledTimes(2));
+  });
+
+  it('keeps the button when the sign-in is cancelled, and shows why', async () => {
+    api.awsSsoReloginProvider.mockRejectedValue(new Error('Error: AWS SSO login was cancelled'));
+    renderPane();
+    fireEvent.click(await screen.findByRole('button', { name: 'Sign in again' }));
+
+    expect(await screen.findByText(/AWS SSO login was cancelled/)).toBeInTheDocument();
+    expect(screen.getByText(/AWS SSO login was cancelled/).textContent).not.toMatch(/Error:/);
+    expect(screen.getByRole('button', { name: 'Sign in again' })).toBeEnabled();
+  });
+
+  it('reloads an S3 listing when the window regains focus after a long idle, but not for a fresh one or SFTP', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const { unmount } = renderPane();
+      await waitFor(() => expect(api.storageList).toHaveBeenCalledTimes(1));
+
+      fireEvent.focus(window);
+      expect(api.storageList).toHaveBeenCalledTimes(1);
+
+      vi.setSystemTime(Date.now() + 6 * 60_000);
+      fireEvent.focus(window);
+      await waitFor(() => expect(api.storageList).toHaveBeenCalledTimes(2));
+      unmount();
+
+      api.storageList.mockClear();
+      renderPane('sftp');
+      await waitFor(() => expect(api.storageList).toHaveBeenCalledTimes(1));
+      vi.setSystemTime(Date.now() + 6 * 60_000);
+      fireEvent.focus(window);
+      expect(api.storageList).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not reload on refocus while a browser sign-in is pending', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      let finishSignIn: () => void = () => {};
+      api.awsSsoReloginProvider.mockReturnValue(new Promise<void>((resolve) => { finishSignIn = resolve; }));
+      renderPane();
+      fireEvent.click(await screen.findByRole('button', { name: 'Sign in again' }));
+      await waitFor(() => expect(api.awsSsoReloginProvider).toHaveBeenCalled());
+      expect(api.storageList).toHaveBeenCalledTimes(1);
+
+      vi.setSystemTime(Date.now() + 6 * 60_000);
+      fireEvent.focus(window);
+      expect(api.storageList).toHaveBeenCalledTimes(1);
+      expect(screen.getByRole('button', { name: /Waiting for browser/ })).toBeInTheDocument();
+
+      finishSignIn();
+      await waitFor(() => expect(api.storageList).toHaveBeenCalledTimes(2));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not offer Sign in again for other errors or other storage types', async () => {
+    api.storageList.mockRejectedValue(new Error('Access denied: nope'));
+    renderPane();
+    await screen.findByText(/Access denied/);
+    expect(screen.queryByRole('button', { name: 'Sign in again' })).toBeNull();
+  });
 });

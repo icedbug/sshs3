@@ -1,14 +1,17 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { FolderPlus, X, Loader2 } from 'lucide-react';
+import { FilePlus, FolderPlus, X, Loader2 } from 'lucide-react';
 import type { SourceType } from './types';
 import { describeIpcError } from '../../lib/format';
 import { Button } from '../ui/Button';
 import { useModalDismiss } from '../../lib/useModalDismiss';
+import { useDialogFocus } from '../../lib/useDialogFocus';
 
 interface NewFolderModalProps {
   open: boolean;
   currentPath: string;
   sourceType: SourceType;
+  /** What gets created; defaults to a folder (or a bucket at the S3 root). */
+  kind?: 'folder' | 'file';
   onClose: () => void;
   onCreate: (name: string) => Promise<void>;
 }
@@ -17,6 +20,7 @@ export const NewFolderModal: React.FC<NewFolderModalProps> = ({
   open,
   currentPath,
   sourceType,
+  kind = 'folder',
   onClose,
   onCreate,
 }) => {
@@ -25,11 +29,15 @@ export const NewFolderModal: React.FC<NewFolderModalProps> = ({
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const handleBackdropClick = useModalDismiss(onClose, open, !submitting);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(dialogRef, open);
 
-  const isS3Root = sourceType === 's3' && (currentPath === '/' || currentPath === '');
-  const title = isS3Root ? 'Create S3 Bucket' : 'Create New Folder';
-  const label = isS3Root ? 'Bucket Name' : 'Folder Name';
-  const placeholder = isS3Root ? 'my-new-bucket' : 'New folder name';
+  const isFile = kind === 'file';
+  const isS3Root = !isFile && sourceType === 's3' && (currentPath === '/' || currentPath === '');
+  const title = isFile ? 'Create New File' : isS3Root ? 'Create S3 Bucket' : 'Create New Folder';
+  const noun = isFile ? 'File' : isS3Root ? 'Bucket' : 'Folder';
+  const label = `${noun} Name`;
+  const placeholder = isFile ? 'New file name' : isS3Root ? 'my-new-bucket' : 'New folder name';
 
   useEffect(() => {
     if (open) {
@@ -46,7 +54,12 @@ export const NewFolderModal: React.FC<NewFolderModalProps> = ({
     e.preventDefault();
     const trimmed = name.trim();
     if (!trimmed) {
-      setError(isS3Root ? 'Bucket name cannot be empty' : 'Folder name cannot be empty');
+      setError(`${noun} name cannot be empty`);
+      return;
+    }
+
+    if (isFile && /[/\0]/.test(trimmed)) {
+      setError('File names cannot contain "/".');
       return;
     }
 
@@ -63,7 +76,7 @@ export const NewFolderModal: React.FC<NewFolderModalProps> = ({
       await onCreate(trimmed);
       onClose();
     } catch (err) {
-      setError(describeIpcError(err, 'Failed to create folder'));
+      setError(describeIpcError(err, `Failed to create ${noun.toLowerCase()}`));
     } finally {
       setSubmitting(false);
     }
@@ -75,16 +88,23 @@ export const NewFolderModal: React.FC<NewFolderModalProps> = ({
       onClick={handleBackdropClick}
     >
       <div
+        ref={dialogRef}
         className="w-full max-w-sm rounded-xl border border-border-subtle bg-app-card p-5 shadow-2xl space-y-4"
         role="dialog"
         aria-modal="true"
       >
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2 font-semibold text-txt-primary">
-            <FolderPlus className="h-5 w-5 text-sky-400 shrink-0" />
+            {isFile ? (
+              <FilePlus className="h-5 w-5 text-sky-400 shrink-0" />
+            ) : (
+              <FolderPlus className="h-5 w-5 text-sky-400 shrink-0" />
+            )}
             <span>{title}</span>
           </div>
-          <button aria-label="Close" title="Close"
+          <button
+            aria-label="Close"
+            title="Close"
             type="button"
             onClick={onClose}
             disabled={submitting}
@@ -101,6 +121,7 @@ export const NewFolderModal: React.FC<NewFolderModalProps> = ({
             </label>
             <input
               ref={inputRef}
+              data-autofocus
               type="text"
               value={name}
               onChange={(e) => {
@@ -119,7 +140,7 @@ export const NewFolderModal: React.FC<NewFolderModalProps> = ({
           </div>
 
           {error && (
-            <div className="rounded-lg border border-red-500/20 bg-red-500/10 p-2.5 text-xs text-red-400">
+            <div role="alert" className="rounded-lg border border-red-500/20 bg-red-500/10 p-2.5 text-xs text-red-400">
               {error}
             </div>
           )}

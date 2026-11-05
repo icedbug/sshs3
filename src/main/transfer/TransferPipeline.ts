@@ -8,6 +8,7 @@ import type {
   StorageType,
   TransferProgress,
 } from '../../shared/types/storage';
+import { settleTargetTouched, wasTargetTouched, whenTargetSettledLater } from '../storage/targetTouched';
 
 /**
  * Controller to pause and resume streaming in TransferPipeline.
@@ -266,6 +267,8 @@ export interface TransferOptions {
   onProgress?: (progress: TransferProgress) => void;
   throttleIntervalMs?: number;
   emitCompleted?: boolean;
+  /** How long a failed transfer waits for an open that is still on the wire (default 5 s); tests shorten it. */
+  targetSettleTimeoutMs?: number;
   verifyIntegrity?: boolean;
   verifyChecksum?: boolean | 'sha256' | 'md5';
   expectedChecksum?: string;
@@ -462,12 +465,16 @@ async function executeTransferFile(options: TransferOptions): Promise<void> {
 
   let totalBytes = options.totalBytes;
   if (totalBytes === undefined || totalBytes < 0) {
+    let stat: FileEntry | undefined;
     try {
-      const stat = await options.sourceProvider.stat(options.sourcePath);
-      totalBytes = stat.size >= 0 ? stat.size : 0;
+      stat = await options.sourceProvider.stat(options.sourcePath);
     } catch {
-      totalBytes = 0;
+      stat = undefined;
     }
+    if (stat?.isSpecial) {
+      throw new Error(`Not a regular file: ${fileName}`);
+    }
+    totalBytes = stat && stat.size >= 0 ? stat.size : 0;
   }
 
   const readStream = await options.sourceProvider.createReadStream(
@@ -602,8 +609,21 @@ async function executeTransferFile(options: TransferOptions): Promise<void> {
     // complete one. Only attempted once writeStream exists (some bytes may
     // already be on disk); best-effort, since some providers/paths may
     // reject deleting a file that's still open or was never created.
-    if (writeStream) {
+    // H2 (code review 2026-11-03): only when the provider has actually opened
+    // or replaced the target. A cancelled S3 overwrite, a read-only file that
+    // could not be opened or an SFTP open that never happened leave the
+    // original in place, and deleting it would destroy the user's data.
+    const settled = writeStream ? await settleTargetTouched(writeStream, options.targetSettleTimeoutMs) : true;
+    if (writeStream && wasTargetTouched(writeStream)) {
       await options.targetProvider.delete(resolvedTargetPath, false).catch(() => {});
+    } else if (writeStream && !settled) {
+      // The server has not answered the open yet and may still truncate the file: clean up if it did, without holding up the error.
+      whenTargetSettledLater(writeStream, async () => {
+        if (!wasTargetTouched(writeStream)) return;
+        // Only the empty file our own late open left behind: a newer transfer may have written the path since.
+        const now = await options.targetProvider.stat(resolvedTargetPath).catch(() => null);
+        if (now && now.size === 0) await options.targetProvider.delete(resolvedTargetPath, false).catch(() => {});
+      });
     }
     throw err;
   }
@@ -663,6 +683,10 @@ async function scanDirectory(
     // cycle, since no cycle detection exists here. Matches the same
     // skip-symlinks policy LocalContentSearchService already uses.
     if (entry.isSymlink) {
+      continue;
+    }
+    // FIFOs, sockets and devices cannot be copied: reading a FIFO blocks until something writes to it (M7).
+    if (entry.isSpecial) {
       continue;
     }
     const childTargetPath = joinPaths(targetType, currentTargetPath, baseName);

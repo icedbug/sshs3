@@ -144,4 +144,48 @@ describe('K8sPortForwardManager', () => {
       })
     ).rejects.toThrow(/privileged \(< 1024\)/);
   });
+
+  it('automatically resolves replacement pod and connects when old pod returns 404', async () => {
+    const listPodsMock = vi.fn().mockResolvedValue([
+      {
+        name: 'web-deploy-new-hash',
+        namespace: 'default',
+        phase: 'Running',
+        creationTimestamp: '2026-10-16T15:00:00Z',
+        containers: [{ name: 'web', image: 'nginx', ready: true, state: 'running', ports: [{ containerPort: 8080 }] }],
+      },
+    ]);
+
+    manager.setDiscoveryService({ listPods: listPodsMock });
+
+    mockPortForwardFn
+      .mockRejectedValueOnce(new Error('Pod web-deploy-old-hash not found (404)'))
+      .mockResolvedValueOnce(() => ({ close: vi.fn() }));
+
+    const session = await manager.startPortForward({
+      contextName: 'minikube',
+      namespace: 'default',
+      podName: 'web-deploy-old-hash',
+      containerPort: 8080,
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      const client = net.createConnection({ port: session.localPort, host: '127.0.0.1' }, () => {
+        client.end();
+        resolve();
+      });
+      client.on('error', reject);
+    });
+
+    expect(listPodsMock).toHaveBeenCalledWith('minikube', 'default');
+    expect(mockPortForwardFn).toHaveBeenLastCalledWith(
+      'default',
+      'web-deploy-new-hash',
+      [8080],
+      expect.anything(),
+      expect.anything(),
+      expect.anything()
+    );
+    expect(manager.listActive()[0].podName).toBe('web-deploy-new-hash');
+  });
 });

@@ -31,6 +31,37 @@ describe('SftpPacketProtocol', () => {
     expect(errors).toHaveLength(1);
   });
 
+  it('splits a large write into packets below the sftp-server 256 KiB message limit', async () => {
+    const packets: { offset: number; length: number; size: number }[] = [];
+    clientOut.on('data', (buf: Buffer) => {
+      expect(buf.readUInt8(4)).toBe(FXP.WRITE);
+      const reqId = buf.readUInt32BE(5);
+      const handleLen = buf.readUInt32BE(9);
+      const offset = Number(buf.readBigUInt64BE(13 + handleLen));
+      const length = buf.readUInt32BE(21 + handleLen);
+      packets.push({ offset, length, size: buf.length });
+      const resp = Buffer.alloc(4 + 1 + 4 + 4 + 4);
+      resp.writeUInt32BE(1 + 4 + 4 + 4, 0);
+      resp.writeUInt8(FXP.STATUS, 4);
+      resp.writeUInt32BE(reqId, 5);
+      resp.writeUInt32BE(FX_STATUS.OK, 9);
+      resp.writeUInt32BE(0, 13);
+      clientIn.write(resp);
+    });
+
+    await protocol.write(Buffer.from('h1'), 1000, Buffer.alloc(300 * 1024, 1));
+
+    expect(packets.length).toBeGreaterThan(1);
+    expect(packets.every((pk) => pk.size < 256 * 1024)).toBe(true);
+    expect(packets.reduce((sum, pk) => sum + pk.length, 0)).toBe(300 * 1024);
+    // Consecutive, gap-free offsets starting where the caller asked.
+    let expected = 1000;
+    for (const pk of packets) {
+      expect(pk.offset).toBe(expected);
+      expected += pk.length;
+    }
+  });
+
   it('performs init handshake and receives version packet', async () => {
     // Listen for client init packet
     const clientPromise = protocol.init();
@@ -212,6 +243,51 @@ describe('SftpPacketProtocol', () => {
     expect(entries![0].filename).toBe('syslog');
     expect(entries![0].attrs.size).toBe(1024);
     expect(entries![0].attrs.isDirectory).toBe(false);
+  });
+
+  describe('malformed replies', () => {
+    /** Answers the next request with `type`, a request id and `body` (the bytes after the id). */
+    function replyToNext(type: number, body: Buffer): void {
+      clientOut.once('data', (data: Buffer) => {
+        const resp = Buffer.alloc(4 + 1 + 4 + body.length);
+        resp.writeUInt32BE(1 + 4 + body.length, 0);
+        resp.writeUInt8(type, 4);
+        resp.writeUInt32BE(data.readUInt32BE(5), 5);
+        body.copy(resp, 9);
+        clientIn.write(resp);
+      });
+    }
+
+    function lengthPrefixed(declared: number, actual: Buffer): Buffer {
+      const b = Buffer.alloc(4 + actual.length);
+      b.writeUInt32BE(declared, 0);
+      actual.copy(b, 4);
+      return b;
+    }
+
+    it('rejects a handle whose length runs past the packet', async () => {
+      replyToNext(FXP.HANDLE, lengthPrefixed(100, Buffer.from('abc')));
+      await expect(protocol.opendir('/x')).rejects.toThrow(/Malformed SFTP reply/);
+    });
+
+    it('rejects a data chunk whose length runs past the packet instead of returning it truncated', async () => {
+      replyToNext(FXP.DATA, lengthPrefixed(1000, Buffer.from('short')));
+      await expect(protocol.read(Buffer.from('h'), 0, 1000)).rejects.toThrow(/Malformed SFTP reply/);
+    });
+
+    it('rejects a name entry whose filename length runs past the packet', async () => {
+      const count = Buffer.alloc(4);
+      count.writeUInt32BE(1, 0);
+      replyToNext(FXP.NAME, Buffer.concat([count, lengthPrefixed(500, Buffer.from('name'))]));
+      await expect(protocol.readdir(Buffer.from('h'))).rejects.toThrow(/Malformed SFTP reply/);
+    });
+
+    it('still accepts a handle and a data chunk that exactly fill the packet', async () => {
+      replyToNext(FXP.HANDLE, lengthPrefixed(3, Buffer.from('abc')));
+      await expect(protocol.opendir('/x')).resolves.toEqual(Buffer.from('abc'));
+      replyToNext(FXP.DATA, lengthPrefixed(5, Buffer.from('hello')));
+      await expect(protocol.read(Buffer.from('h'), 0, 5)).resolves.toEqual(Buffer.from('hello'));
+    });
   });
 });
 

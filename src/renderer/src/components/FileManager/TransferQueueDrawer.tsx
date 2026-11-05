@@ -52,17 +52,26 @@ export const TransferQueueDrawer: React.FC = () => {
 
   return (
     <div className="flex flex-col border-t border-divider bg-app-surface text-txt-primary">
-      <button
-        type="button"
+      <div
+        role="button"
+        tabIndex={0}
+        aria-expanded={expanded}
         onClick={() => setExpanded((v) => !v)}
-        className="flex items-center justify-between px-3 py-1 text-xs font-medium text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
+        onKeyDown={(e) => {
+          if (e.target !== e.currentTarget) return;
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            setExpanded((v) => !v);
+          }
+        }}
+        className="flex items-center justify-between px-3 py-1 text-xs font-medium text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary transition-colors cursor-pointer"
       >
         <div className="flex items-center gap-2">
           <span>
             Transfers {activeCount > 0 ? `(${activeCount} active)` : jobs.length === 0 ? '· none active' : ''}
           </span>
           {failedCount > 0 && (
-            <span className="rounded-full bg-red-500/20 border border-red-500/30 px-2 py-0.5 text-2xs font-semibold text-red-400">
+            <span className="rounded bg-red-500/20 border border-red-500/30 px-2 py-0.5 text-2xs font-semibold text-red-400">
               {failedCount} failed
             </span>
           )}
@@ -86,7 +95,7 @@ export const TransferQueueDrawer: React.FC = () => {
           )}
           {expanded ? <ChevronDown className="h-3.5 w-3.5 text-txt-muted" /> : <ChevronUp className="h-3.5 w-3.5 text-txt-muted" />}
         </span>
-      </button>
+      </div>
 
       {expanded && jobs.length > 0 && (
         <div className="max-h-48 overflow-y-auto px-3 pb-2">

@@ -20,8 +20,9 @@ const mockSsh: SSHConnectionConfig[] = [
 
 const mockDiff: DirectoryDiffResult = {
   scannedAt: '2026-09-26T12:00:00.000Z',
-  counts: { new: 2, changed: 1, onlyTarget: 1, same: 5 },
+  counts: { new: 2, changed: 1, onlyTarget: 1, same: 5, conflict: 0 },
   skippedPaths: { source: [], target: [] },
+  skippedSymlinks: { source: [], target: [] },
   entries: [
     {
       relativePath: 'assets/app.js',
@@ -166,5 +167,67 @@ describe('DirectorySyncModal', () => {
     // Now button should show 3 to copy, 1 to delete!
     expect(screen.getByRole('button', { name: /Run sync \(3 to copy, 1 to delete\)/ })).toBeInTheDocument();
     expect(screen.getByText('Delete from target')).toBeInTheDocument();
+  });
+
+  // H6 (code review 2026-11-03): a file and a folder with the same name used to be shown as identical.
+  it('shows a file/folder name clash as a skipped conflict that is never part of the run', async () => {
+    const conflictDiff: DirectoryDiffResult = {
+      scannedAt: '2026-11-03T12:00:00.000Z',
+      counts: { new: 1, changed: 0, onlyTarget: 0, same: 0, conflict: 1 },
+      skippedPaths: { source: [], target: [] },
+  skippedSymlinks: { source: [], target: [] },
+      entries: [
+        {
+          relativePath: 'build',
+          isDirectory: false,
+          status: 'conflict',
+          sourceEntry: { name: 'build', path: '/var/www/build', size: 5, isDirectory: false },
+          targetEntry: { name: 'build', path: '/backups/build', size: 0, isDirectory: true },
+        },
+        {
+          relativePath: 'index.html',
+          isDirectory: false,
+          status: 'new',
+          sourceEntry: { name: 'index.html', path: '/var/www/index.html', size: 10, isDirectory: false },
+        },
+      ],
+    };
+    (window.multissh as any).dirSyncComputeDiff = vi.fn().mockResolvedValue(conflictDiff);
+
+    render(
+      <ConfirmProvider>
+        <DirectorySyncModal open={true} onClose={() => {}} runProfile={mockProfile} />
+      </ConfirmProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText(/File and folder with the same name \(1\) — skipped/)).toBeInTheDocument();
+    });
+    expect(screen.getByRole('alert')).toHaveTextContent(/1 path is a file on one side and a folder on the other/);
+    expect(screen.getByText('Skipped (type conflict)')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /Run sync \(1 to copy\)/ }));
+    await waitFor(() => expect(window.multissh.dirSyncApply).toHaveBeenCalled());
+    const sent = (window.multissh.dirSyncApply as any).mock.calls[0][0].entries as Array<{ relativePath: string }>;
+    expect(sent.map((e) => e.relativePath)).toEqual(['index.html']);
+  });
+
+  it('says which symbolic links were left out, without calling them unreadable', async () => {
+    (window.multissh as any).dirSyncComputeDiff = vi.fn().mockResolvedValue({
+      ...mockDiff,
+      skippedSymlinks: { source: ['current.log', 'node_modules/.bin'], target: ['shortcut'] },
+    });
+
+    render(
+      <ConfirmProvider>
+        <DirectorySyncModal open={true} onClose={() => {}} runProfile={mockProfile} />
+      </ConfirmProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText(/2 symbolic link\(s\) in the source are not synced/)).toBeInTheDocument();
+    });
+    expect(screen.getByText(/1 symbolic link\(s\) in the target are not synced/)).toBeInTheDocument();
+    expect(screen.queryByText(/could not be read/)).not.toBeInTheDocument();
   });
 });

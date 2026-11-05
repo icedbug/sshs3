@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { KeyRound, ShieldCheck, Cpu, Lock, Server, Layers, FolderSync } from 'lucide-react';
+import { KeyRound, ShieldCheck, Cpu, Lock, Server, Layers, FolderSync, Users } from 'lucide-react';
 import type { AskpassPromptKind } from '@shared/types/ipc';
 import { useEscapeToClose } from '../lib/useModalDismiss';
+import { useDialogFocus } from '../lib/useDialogFocus';
 import { createRendererLogger } from '../lib/log';
 const log = createRendererLogger('SmartcardPinModal');
 
@@ -121,6 +122,9 @@ function resolvePromptContext(
   }
   if (/dotfile/i.test(raw)) {
     return { label: raw, icon: FolderSync };
+  }
+  if (/team vault/i.test(raw)) {
+    return { label: raw, icon: Users };
   }
   return { label: raw, icon: Server };
 }
@@ -270,6 +274,8 @@ export const SmartcardPinModal: React.FC = () => {
   // stays on the dialog's onKeyDown: it's only meaningful once the user is
   // actively typing in the focused PIN input anyway.
   useEscapeToClose(handleCancel, !!currentPrompt);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(dialogRef, !!currentPrompt);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter') {
@@ -301,6 +307,7 @@ export const SmartcardPinModal: React.FC = () => {
     <>
       {awaitingTouchBanner}
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="smartcard-modal-title"
@@ -341,7 +348,7 @@ export const SmartcardPinModal: React.FC = () => {
                   <span className="text-txt-muted text-2xs uppercase tracking-wider block font-semibold leading-tight">
                     Target / Purpose
                   </span>
-                  <span className="font-mono text-xs text-txt-primary font-medium truncate block">
+                  <span className="font-mono text-xs text-txt-primary font-medium break-all block">
                     {contextInfo.label}
                   </span>
                 </div>
@@ -398,6 +405,7 @@ export const SmartcardPinModal: React.FC = () => {
                         }}
                         placeholder={visuals.inputPlaceholder}
                         data-testid="smartcard-pin-input"
+                        data-autofocus
                         autoComplete="off"
                         className={`w-full rounded-lg border border-border-subtle bg-app-input px-3.5 py-2 text-sm text-txt-primary placeholder-txt-muted ${visuals.focusBorderClass} focus:outline-none`}
                       />

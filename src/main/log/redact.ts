@@ -28,14 +28,33 @@ const SECRET_PATTERNS: RegExp[] = [
   /\b([a-z0-9_]*(?:password|passphrase|passwd|secret|token)[a-z0-9_]*|pin)\s*[=:]\s*\S+/gi,
 ];
 
+/** Team Vault / age private identities (Bech32, upper case); a truncated one is masked too. */
+const AGE_SECRET_KEY = /AGE-SECRET-KEY-1[A-Z0-9]*/gi;
+
+/** Signature, credential and session-token parameters of a presigned S3 URL. */
+const PRESIGNED_URL_PARAM = /\b(X-Amz-(?:Signature|Credential|Security-Token))=[^&\s"'<>]+/gi;
+
+/**
+ * Only this much input is scanned. A few times MAX_STRING_LENGTH, so a secret that starts in the kept
+ * text still ends inside the scanned text, but small: the URL and KEY=value patterns are quadratic on
+ * input such as "a.a.a." (200 000 characters took 15 s, on the main process).
+ */
+const MAX_SCAN_LENGTH = 4 * MAX_STRING_LENGTH;
+
 export function redactString(input: string): string {
-  let out = input.length > MAX_STRING_LENGTH ? `${input.slice(0, MAX_STRING_LENGTH)}…[truncated]` : input;
+  // Mask before truncating: cutting first can split a secret (a URL password before its "@", a key
+  // header) so that no pattern matches the remainder.
+  const cut = input.length > MAX_SCAN_LENGTH;
+  let out = cut ? input.slice(0, MAX_SCAN_LENGTH) : input;
+  out = out.replace(AGE_SECRET_KEY, REDACTED);
+  out = out.replace(PRESIGNED_URL_PARAM, `$1=${REDACTED}`);
   out = out.replace(SECRET_PATTERNS[0], REDACTED);
   out = out.replace(SECRET_PATTERNS[1], REDACTED);
   out = out.replace(SECRET_PATTERNS[2], `$1=${REDACTED}`);
   out = out.replace(SECRET_PATTERNS[3], `Bearer ${REDACTED}`);
   out = out.replace(SECRET_PATTERNS[4], `$1${REDACTED}@`);
   out = out.replace(SECRET_PATTERNS[5], `$1=${REDACTED}`);
+  if (cut || out.length > MAX_STRING_LENGTH) out = `${out.slice(0, MAX_STRING_LENGTH)}…[truncated]`;
   return out;
 }
 

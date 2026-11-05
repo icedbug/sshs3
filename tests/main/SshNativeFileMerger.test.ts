@@ -202,6 +202,19 @@ describe('SshNativeFileMerger — generating the managed block from SSH profiles
     expect(body).toContain('Compression yes');
   });
 
+  it('never writes SendEnv into the managed block and strips it from a received one (M4)', () => {
+    const { body } = buildManagedSshConfigBlockFromProfiles(
+      [profile({ id: 'ssh-1', host: 'h.example.com', username: 'u', extraOptions: { SendEnv: '*', SetEnv: 'FOO=bar' } })],
+      null
+    );
+    expect(body).not.toMatch(/SendEnv/i);
+    expect(body).toContain('SetEnv FOO=bar');
+
+    const received = sanitizeSshConfigBody(['Host box', '    HostName box.example.com', '    SendEnv *', '    SetEnv FOO=bar'].join('\n'));
+    expect(received.removedLines.map((l) => l.trim())).toEqual(['SendEnv *']);
+    expect(received.body).toContain('SetEnv FOO=bar');
+  });
+
   it('only emits allowlisted extraOptions, so a directive smuggled in via sync never reaches the file', () => {
     const { body } = buildManagedSshConfigBlockFromProfiles(
       [
@@ -330,6 +343,105 @@ describe('SshNativeFileMerger — known_hosts', () => {
     const result = mergeKnownHosts(local, remote);
     expect(result.changed).toBe(true);
     expect(result.addedCount).toBe(1);
+  });
+
+  it('checks every name of a comma list, so an alias cannot hide a key clash', () => {
+    const local = `prod.example.com ssh-ed25519 ${KEY_A}\n`;
+    const remote = `prod.example.com,10.0.0.1 ssh-ed25519 ${KEY_B}\n`;
+
+    const result = mergeKnownHosts(local, remote);
+
+    expect(result.changed).toBe(false);
+    expect(result.conflicts).toHaveLength(1);
+    expect(result.conflicts[0].hostPatternField).toBe('prod.example.com,10.0.0.1');
+    // The same applies when the local line is the list.
+    const listed = mergeKnownHosts(`prod.example.com,10.0.0.1 ssh-ed25519 ${KEY_A}\n`, `10.0.0.1 ssh-ed25519 ${KEY_B}\n`);
+    expect(listed.conflicts).toHaveLength(1);
+    expect(listed.changed).toBe(false);
+  });
+
+  it('treats a wildcard that covers a known host with another key as a conflict', () => {
+    const local = `prod.example.com ssh-ed25519 ${KEY_A}\n`;
+
+    const wild = mergeKnownHosts(local, `*.example.com ssh-ed25519 ${KEY_B}\n`);
+    expect(wild.changed).toBe(false);
+    expect(wild.conflicts).toHaveLength(1);
+
+    const single = mergeKnownHosts(local, `prod.exampl?.com ssh-ed25519 ${KEY_B}\n`);
+    expect(single.conflicts).toHaveLength(1);
+
+    // A literal host that a local wildcard line already covers, with another key, clashes too.
+    const reverse = mergeKnownHosts(`*.example.com ssh-ed25519 ${KEY_A}\n`, `prod.example.com ssh-ed25519 ${KEY_B}\n`);
+    expect(reverse.conflicts).toHaveLength(1);
+    expect(reverse.changed).toBe(false);
+  });
+
+  it('still adds a narrow wildcard or a new host that clashes with nothing', () => {
+    const local = `prod.example.com ssh-ed25519 ${KEY_A}\n`;
+
+    const narrow = mergeKnownHosts(local, `*.corp.internal ssh-ed25519 ${KEY_B}\n`);
+    expect(narrow.conflicts).toHaveLength(0);
+    expect(narrow.addedCount).toBe(1);
+
+    const sameKey = mergeKnownHosts(local, `*.example.com ssh-ed25519 ${KEY_A}\n`);
+    expect(sameKey.conflicts).toHaveLength(0);
+    expect(sameKey.addedCount).toBe(1);
+
+    const hashed = mergeKnownHosts(local, `|1|c2FsdA==|aGFzaA== ssh-ed25519 ${KEY_B}\n`);
+    expect(hashed.addedCount).toBe(1);
+  });
+
+  it('never imports a catch-all or negated pattern, or a line that is not a key', () => {
+    const local = `prod.example.com ssh-ed25519 ${KEY_A}\n`;
+    for (const line of [
+      `* ssh-ed25519 ${KEY_B}`,
+      `*.* ssh-ed25519 ${KEY_B}`,
+      `? ssh-ed25519 ${KEY_B}`,
+      `new.example.com,* ssh-ed25519 ${KEY_B}`,
+      `*.example.com,!prod.example.com ssh-ed25519 ${KEY_B}`,
+      `new.example.com ssh-ed25519 not*base64!`,
+      `new.example.com bad/type ${KEY_B}`,
+    ]) {
+      const result = mergeKnownHosts(local, `${line}\n`);
+      expect(result.changed, line).toBe(false);
+      expect(result.addedCount, line).toBe(0);
+      expect(result.mergedContent, line).toBe(local);
+    }
+  });
+
+  it('matches wildcards without regex blow-up on a hostile pattern', () => {
+    // A hostile wildcard on the local side is matched against a long remote name.
+    const local = `${'*a'.repeat(40)}*b ssh-ed25519 ${KEY_A}\n`;
+    const started = Date.now();
+    mergeKnownHosts(local, `${'a'.repeat(200)}.example.com ssh-ed25519 ${KEY_B}\n`);
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
+  it('compares host names case-insensitively, but not hashed entries', () => {
+    const local = `github.com ssh-ed25519 ${KEY_A}\n`;
+    const upper = mergeKnownHosts(local, `GITHUB.COM ssh-ed25519 ${KEY_B}\n`);
+    expect(upper.changed).toBe(false);
+    expect(upper.conflicts).toHaveLength(1);
+    const listed = mergeKnownHosts(local, `x.example.com,GitHub.Com ssh-ed25519 ${KEY_B}\n`);
+    expect(listed.conflicts).toHaveLength(1);
+
+    // Two different hashes only differ in case: they are different hosts, not a clash.
+    const hashedLocal = `|1|AAAA|BBBB ssh-ed25519 ${KEY_A}\n`;
+    const hashed = mergeKnownHosts(hashedLocal, `|1|aaaa|bbbb ssh-ed25519 ${KEY_B}\n`);
+    expect(hashed.conflicts).toHaveLength(0);
+    expect(hashed.addedCount).toBe(1);
+  });
+
+  it('refuses a wildcard that covers a whole class of hosts, but keeps one that names its domain', () => {
+    const local = `prod.example.com ssh-ed25519 ${KEY_A}\n`;
+    for (const pattern of ['*e*', '*.com', '10.*', 'prod-*', '?', '*.*.*', '[*]:22']) {
+      const result = mergeKnownHosts(local, `${pattern} ssh-ed25519 ${KEY_B}\n`);
+      expect(result.addedCount, pattern).toBe(0);
+      expect(result.conflicts, pattern).toHaveLength(0);
+    }
+    for (const pattern of ['*.corp.internal', 'web?.corp.internal', '192.168.*', '[*.corp.internal]:2222']) {
+      expect(mergeKnownHosts(local, `${pattern} ssh-ed25519 ${KEY_B}\n`).addedCount, pattern).toBe(1);
+    }
   });
 });
 

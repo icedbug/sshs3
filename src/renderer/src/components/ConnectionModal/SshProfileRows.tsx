@@ -3,8 +3,10 @@ import type { Dispatch, SetStateAction } from 'react';
 import { Cable, Copy, Folder, KeyRound, Pencil, Trash2 } from 'lucide-react';
 import type { SSHConnectionConfig } from '@shared/types/ssh';
 import { SftpButton } from '../SftpButton';
-import { ProfileRowMenu } from './ProfileRowMenu';
-import type { EditingState } from './types';
+import { OverflowMenu } from '../ui/OverflowMenu';
+import { TagChips } from '../ui/TagChips';
+import { ProfileRowCheckbox } from './ProfileRowCheckbox';
+import type { EditingState, RowSelect } from './types';
 
 interface SshProfileRowProps {
   profile: SSHConnectionConfig;
@@ -16,6 +18,8 @@ interface SshProfileRowProps {
   setEditing: Dispatch<SetStateAction<EditingState | null>>;
   setInstallKeyProfile: (profile: SSHConnectionConfig) => void;
   setTunnelsProfile: (profile: SSHConnectionConfig) => void;
+  /** Set by a list that supports selecting several profiles. */
+  select?: RowSelect;
 }
 
 /** One entry of the "Recently Used" box for SSH profiles. */
@@ -94,8 +98,9 @@ export const SshRecentRow: React.FC<SshProfileRowProps> = ({
           also had Tunnels/Duplicate/Edit/Delete — same entity, two
           different action sets depending on where you saw it. */}
       <button
+        aria-label="Edit profile"
         type="button"
-        title="Edit Profile"
+        title="Edit profile"
         onClick={(e) => {
           e.stopPropagation();
           setEditing({ type: 'ssh', config: profile });
@@ -104,7 +109,7 @@ export const SshRecentRow: React.FC<SshProfileRowProps> = ({
       >
         <Pencil className="h-3.5 w-3.5" />
       </button>
-        <ProfileRowMenu
+        <OverflowMenu
         items={[
           { label: 'Install public key', icon: <KeyRound className="h-3.5 w-3.5" />, onSelect: () => setInstallKeyProfile(profile) },
           { label: 'Manage tunnels', icon: <Cable className="h-3.5 w-3.5" />, onSelect: () => setTunnelsProfile(profile) },
@@ -127,6 +132,7 @@ export const SshProfileRow: React.FC<SshProfileRowProps> = ({
   setEditing,
   setInstallKeyProfile,
   setTunnelsProfile,
+  select,
 }) => (
   <div
     draggable
@@ -136,9 +142,10 @@ export const SshProfileRow: React.FC<SshProfileRowProps> = ({
     }}
     onDoubleClick={() => void handleConnectSSH(profile)}
     title="Double-click to connect (or drag to folder)"
-    className="flex items-center justify-between gap-2 rounded-lg border border-border-subtle bg-app-surface px-3 py-1.5 cursor-grab active:cursor-grabbing hover:border-border-strong transition-all select-none"
+    className="group flex items-center justify-between gap-2 rounded-lg border border-border-subtle bg-app-surface px-3 py-1.5 cursor-grab active:cursor-grabbing hover:border-border-strong transition-all select-none"
   >
-    <div className="min-w-0">
+    {select && <ProfileRowCheckbox name={profile.name} select={select} />}
+    <div className="min-w-0 flex-1">
       <div className="flex items-center gap-2 flex-wrap">
         <span className="truncate text-sm text-txt-primary font-medium">
           {profile.name}
@@ -158,6 +165,7 @@ export const SshProfileRow: React.FC<SshProfileRowProps> = ({
             ☁️ S3 Shared
           </span>
         )}
+        <TagChips tags={profile.tags} />
         {profile.proxyJump && (
           <span className="rounded bg-sky-500/15 border border-sky-500/30 px-1.5 py-0.2 text-2xs text-sky-400">
             Jump
@@ -216,8 +224,9 @@ export const SshProfileRow: React.FC<SshProfileRowProps> = ({
           <SftpButton authType={profile.authType} onOpen={() => onConnectSFTP(profile)} /> 
         )}
       <button
+        aria-label="Edit profile"
         type="button"
-        title="Edit Profile"
+        title="Edit profile"
         onClick={(e) => {
           e.stopPropagation();
           setEditing({ type: 'ssh', config: profile });
@@ -226,7 +235,7 @@ export const SshProfileRow: React.FC<SshProfileRowProps> = ({
       >
         <Pencil className="h-3.5 w-3.5" />
       </button>
-        <ProfileRowMenu
+        <OverflowMenu
         items={[
           { label: 'Install public key', icon: <KeyRound className="h-3.5 w-3.5" />, onSelect: () => setInstallKeyProfile(profile) },
           { label: 'Manage tunnels', icon: <Cable className="h-3.5 w-3.5" />, onSelect: () => setTunnelsProfile(profile) },

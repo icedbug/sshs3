@@ -28,6 +28,18 @@ export interface SSHActiveTunnel {
   pid?: number;
 }
 
+/** What one profile contributes when its system is connected to. */
+export interface SSHSystemMembership {
+  /** The system's name; see `SSHConnectionConfig.system`. */
+  name: string;
+  /** Open a terminal to this server. On unless set to false (then the server only contributes tunnels). */
+  shell?: boolean;
+  /** Directory the terminal starts in. */
+  startDirectory?: string;
+  /** Ids of this profile's own `tunnels` that are started with the system. */
+  tunnelIds?: string[];
+}
+
 export interface SSHConnectionConfig {
   id: string;
   name: string;
@@ -51,6 +63,17 @@ export interface SSHConnectionConfig {
   pin?: string;
   agentPath?: string;
   /**
+   * Whether to authenticate using the active SSH Certificate Authority session.
+   * Applied when authType is 'agent', ensuring the connection uses the app-managed
+   * agent holding the issued OpenSSH user certificate.
+   */
+  useSshCa?: boolean;
+  /**
+   * Runtime only, never persisted: Path to an OpenSSH certificate file (`-o CertificateFile=...`)
+   * used with SSH CA authentication when pairing a hardware token / PIV key with its signed certificate.
+   */
+  certificateFile?: string;
+  /**
    * Runtime only, never persisted or synced: public key files selecting which of the keys in a shared
    * agent (`agentPath`) this connection may use. Set when the agent holds more than this profile's
    * card (the app-wide agent); makes ssh run with IdentitiesOnly and one `-i` per file.
@@ -68,6 +91,15 @@ export interface SSHConnectionConfig {
   initialPath?: string;
   proxy?: ProxyConfig;
   group?: string;
+  /** Free-form labels for searching and filtering; cleaned by `normalizeTags` (shared/tags.ts) on every save. */
+  tags?: string[];
+  /**
+   * Makes this profile one server of a system: profiles with the same `name` (ignoring case), in the
+   * same place (personal, or one Team Vault), form it, the way a shared `group` forms a folder. A
+   * system is connected to in one go ("Connect all"). Cleaned by `normalizeSystem` (shared/system.ts)
+   * on every save.
+   */
+  system?: SSHSystemMembership;
   lastUsedAt?: string;
   /** ISO 8601 timestamp of the last edit. Used by remote profile sync to resolve conflicts. */
   updatedAt?: string;
@@ -111,8 +143,6 @@ export interface SSHConnectionConfig {
   nodeRole?: string;
   /** Infrastructure role (e.g. 'web', 'database', 'proxy', 'k8s', 'worker', 'bastion', 'storage'). */
   role?: string;
-  /** Services or tags running on this host (e.g. ['nginx', 'docker', 'postgres']). */
-  tags?: string[];
   /** Team member / user who last updated this profile's metadata. */
   updatedBy?: string;
   /** Whether this SSH node is shared in the S3 Team Workspace. */

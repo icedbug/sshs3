@@ -1,8 +1,47 @@
 import React, { useEffect, useMemo, useRef } from 'react';
-import { Terminal } from 'lucide-react';
+import { Shield, Terminal } from 'lucide-react';
 import type { LocalShellType } from '@shared/types/ssh';
+import { describeIpcError } from '../lib/format';
 import { FOCUSABLE_OVERLAY_SELECTOR, isElementVisible, navigateInOverlay, type NavigationDirection } from '../lib/spatialNavigation';
 import { useHub } from '../lib/aiHub';
+
+const SHELL_BUTTON_CLASS =
+  'border border-border-subtle px-3 py-1 text-xs font-medium text-txt-secondary hover:bg-app-surface-hover transition-colors';
+
+/** A Windows shell button; the shield next to it starts the same shell as administrator (UAC, separate window). */
+const WindowsShellButton: React.FC<{
+  label: string;
+  title?: string;
+  shell: 'cmd' | 'powershell' | 'pwsh';
+  onOpen: (shellType?: LocalShellType) => void;
+}> = ({ label, title, shell, onOpen }) => {
+  const [error, setError] = React.useState<string | null>(null);
+  const openElevated = (): void => {
+    setError(null);
+    void window.multissh
+      ?.openElevatedShell?.(shell)
+      .catch((err: unknown) => setError(describeIpcError(err, 'Could not start the elevated shell')));
+  };
+  return (
+    <span className="inline-flex flex-col items-center">
+      <span className="inline-flex">
+        <button type="button" onClick={() => onOpen(shell)} title={title} className={`${SHELL_BUTTON_CLASS} rounded-l-lg`}>
+          {label}
+        </button>
+        <button
+          type="button"
+          onClick={openElevated}
+          title={`Open ${label} as administrator (UAC prompt, separate window)`}
+          aria-label={`Open ${label} as administrator`}
+          className={`${SHELL_BUTTON_CLASS} -ml-px rounded-r-lg px-1.5`}
+        >
+          <Shield className="h-3.5 w-3.5" />
+        </button>
+      </span>
+      {error && <span role="alert" className="mt-0.5 max-w-48 text-center text-2xs text-red-400">{error}</span>}
+    </span>
+  );
+};
 
 /** Buttons for launching a local shell (no SSH connection) in a pane. */
 export const LocalTerminalButtons: React.FC<{
@@ -36,29 +75,10 @@ export const LocalTerminalButtons: React.FC<{
   }
   return (
     <div className="flex flex-wrap items-center justify-center gap-1.5">
-      <button
-        type="button"
-        onClick={() => onOpen('cmd')}
-        className="rounded-lg border border-border-subtle px-3 py-1 text-xs font-medium text-txt-secondary hover:bg-app-surface-hover transition-colors"
-      >
-        Command Prompt
-      </button>
-      <button
-        type="button"
-        onClick={() => onOpen('powershell')}
-        className="rounded-lg border border-border-subtle px-3 py-1 text-xs font-medium text-txt-secondary hover:bg-app-surface-hover transition-colors"
-      >
-        PowerShell
-      </button>
+      <WindowsShellButton label="Command Prompt" shell="cmd" onOpen={onOpen} />
+      <WindowsShellButton label="PowerShell" shell="powershell" onOpen={onOpen} />
       {pwshAvailable && (
-        <button
-          type="button"
-          onClick={() => onOpen('pwsh')}
-          title="PowerShell 7+ (pwsh.exe)"
-          className="rounded-lg border border-border-subtle px-3 py-1 text-xs font-medium text-txt-secondary hover:bg-app-surface-hover transition-colors"
-        >
-          PowerShell 7
-        </button>
+        <WindowsShellButton label="PowerShell 7" title="PowerShell 7+ (pwsh.exe)" shell="pwsh" onOpen={onOpen} />
       )}
       {wslAvailable &&
         (wslDistros.length > 1 ? (

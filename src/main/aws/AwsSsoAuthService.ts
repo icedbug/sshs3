@@ -13,8 +13,15 @@ import {
   SlowDownException,
 } from '@aws-sdk/client-sso-oidc';
 import { SSOClient, ListAccountsCommand, ListAccountRolesCommand } from '@aws-sdk/client-sso';
-import type { AwsSsoAccount, AwsSsoAccountRole, AwsSsoDevicePrompt, AwsSsoLoginResult } from '../../shared/types/aws';
+import type {
+  AwsSsoAccount,
+  AwsSsoAccountRole,
+  AwsSsoDevicePrompt,
+  AwsSsoLoginResult,
+  AwsSsoNetworkOptions,
+} from '../../shared/types/aws';
 import { encryptSecretValue, decryptSecretValue } from '../crypto/SecretFieldCrypto';
+import { buildAwsNodeHttpHandler } from './buildAwsNodeHttpHandler';
 
 export class AwsSsoLoginCancelledError extends Error {
   constructor() {
@@ -101,9 +108,13 @@ export class AwsSsoAuthService extends EventEmitter {
   public async login(
     startUrl: string,
     region: string,
-    options?: { onPrompt?: (prompt: AwsSsoDevicePrompt) => void; signal?: AbortSignal }
+    options?: {
+      onPrompt?: (prompt: AwsSsoDevicePrompt) => void;
+      signal?: AbortSignal;
+      network?: AwsSsoNetworkOptions;
+    }
   ): Promise<AwsSsoLoginResult> {
-    const client = new SSOOIDCClient({ region });
+    const client = new SSOOIDCClient({ region, requestHandler: buildAwsNodeHttpHandler(options?.network) });
     const registration = await this.getOrRegisterClient(client, startUrl, region);
 
     const deviceAuth = await client.send(
@@ -178,8 +189,12 @@ export class AwsSsoAuthService extends EventEmitter {
     }
   }
 
-  public async listAccounts(accessToken: string, region: string): Promise<AwsSsoAccount[]> {
-    const client = new SSOClient({ region });
+  public async listAccounts(
+    accessToken: string,
+    region: string,
+    network?: AwsSsoNetworkOptions
+  ): Promise<AwsSsoAccount[]> {
+    const client = new SSOClient({ region, requestHandler: buildAwsNodeHttpHandler(network) });
     const results: AwsSsoAccount[] = [];
     let nextToken: string | undefined;
     do {
@@ -198,9 +213,10 @@ export class AwsSsoAuthService extends EventEmitter {
   public async listAccountRoles(
     accessToken: string,
     region: string,
-    accountId: string
+    accountId: string,
+    network?: AwsSsoNetworkOptions
   ): Promise<AwsSsoAccountRole[]> {
-    const client = new SSOClient({ region });
+    const client = new SSOClient({ region, requestHandler: buildAwsNodeHttpHandler(network) });
     const results: AwsSsoAccountRole[] = [];
     let nextToken: string | undefined;
     do {

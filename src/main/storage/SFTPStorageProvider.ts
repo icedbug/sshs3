@@ -117,6 +117,8 @@ export class SFTPStorageProvider extends BaseStorageProvider implements IStorage
   private isConnected: boolean = false;
   private connectionPromise: Promise<void> | null = null;
   private cachedHomeDir?: string;
+  /** Counts deliberate `disconnect()` calls, so a call in flight when one happens is not retried onto a new connection. */
+  private disconnectCount = 0;
   private pinPromptHandler?: (prompt: string) => Promise<string> | string;
 
   constructor(
@@ -124,7 +126,9 @@ export class SFTPStorageProvider extends BaseStorageProvider implements IStorage
     client?: ISftpBackendClient | any,
     hostVerifier?: SshHostVerifier,
     pinPromptHandler?: (prompt: string) => Promise<string> | string,
-    presence?: { onPresence?: (prompt: string) => void; onPresenceCleared?: () => void }
+    presence?: { onPresence?: (prompt: string) => void; onPresenceCleared?: () => void },
+    /** SSH master socket to share for the first connect (a terminal's), instead of authenticating again. */
+    controlPath?: string
   ) {
     super();
     this.config = { ...config };
@@ -137,7 +141,8 @@ export class SFTPStorageProvider extends BaseStorageProvider implements IStorage
         this.pinPromptHandler,
         presence?.onPresence,
         hostVerifier?.hostKeyPrompt,
-        presence?.onPresenceCleared
+        presence?.onPresenceCleared,
+        controlPath
       );
     this.attachLifecycleListeners(this.client);
   }
@@ -233,18 +238,26 @@ export class SFTPStorageProvider extends BaseStorageProvider implements IStorage
       msg.includes('ECONNRESET') ||
       msg.includes('EPIPE') ||
       msg.includes('Not connected') ||
-      msg.includes('No SFTP connection')
+      msg.includes('No SFTP connection') ||
+      // What SftpPacketProtocol rejects with when the ssh process went away under a call.
+      msg.includes('SFTP stream closed') ||
+      msg.includes('SFTP connection is closed')
     );
   }
 
   private async executeWithReconnect<T>(fn: () => Promise<T>): Promise<T> {
+    const generation = this.disconnectCount;
     await this.ensureConnected();
     try {
       return await fn();
     } catch (err: any) {
-      if (this.isConnectionDropError(err)) {
+      // A disconnect() while the call was running also ends it with a "stream closed" error; reconnecting
+      // then would reopen a connection nobody holds a reference to any more.
+      if (this.isConnectionDropError(err) && generation === this.disconnectCount) {
         this.isConnected = false;
         await this.ensureConnected();
+        // disconnect() can also come while the reconnect is under way.
+        if (generation !== this.disconnectCount) throw err;
         return await fn();
       }
       throw err;
@@ -320,6 +333,7 @@ export class SFTPStorageProvider extends BaseStorageProvider implements IStorage
           size: item.size,
           isDirectory: isDir,
           isSymlink: item.type === 'l' || (item as any).isSymlink === true,
+          isSpecial: (item as any).isSpecial === true || undefined,
           mtime,
           mtimeMs,
           mimeType: isDir ? undefined : getMimeType(item.name),
@@ -353,6 +367,7 @@ export class SFTPStorageProvider extends BaseStorageProvider implements IStorage
         size: stats.size,
         isDirectory: isDir,
         isSymlink: stats.isSymlink === true,
+        isSpecial: (stats as any).isSpecial === true || undefined,
         mtime,
         mtimeMs,
         mimeType: isDir ? undefined : getMimeType(name),
@@ -549,6 +564,7 @@ export class SFTPStorageProvider extends BaseStorageProvider implements IStorage
   }
 
   async disconnect(): Promise<void> {
+    this.disconnectCount += 1;
     if (this.connectionPromise) {
       try {
         await this.connectionPromise;

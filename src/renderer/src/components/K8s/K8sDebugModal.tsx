@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import {
   AlertCircle,
   Bug,
@@ -16,6 +16,7 @@ import {
 } from '@shared/types/kubernetes';
 import { describeIpcError } from '../../lib/format';
 import { useModalDismiss } from '../../lib/useModalDismiss';
+import { useDialogFocus } from '../../lib/useDialogFocus';
 
 export interface K8sDebugModalProps {
   target: {
@@ -85,6 +86,8 @@ export const K8sDebugModal: React.FC<K8sDebugModalProps> = ({
 
   // Escape closes; a stray backdrop click would discard typed input, so it is intentionally ignored.
   useModalDismiss(onClose, open && !!target);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(dialogRef, open && !!target);
   if (!open || !target) return null;
 
   const handlePresetChange = (presetId: string) => {
@@ -138,7 +141,7 @@ export const K8sDebugModal: React.FC<K8sDebugModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 animate-in fade-in duration-150">
-      <div role="dialog" aria-modal="true" aria-label="Attach debug container" className="flex w-full max-w-xl flex-col rounded-xl border border-border-subtle bg-app-card shadow-2xl overflow-hidden">
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Attach debug container" className="flex w-full max-w-xl flex-col rounded-xl border border-border-subtle bg-app-card shadow-2xl overflow-hidden">
         {/* Header */}
         <div className="flex h-12 shrink-0 items-center justify-between border-b border-divider bg-app-surface px-5">
           <div className="flex items-center gap-2.5">
@@ -149,7 +152,9 @@ export const K8sDebugModal: React.FC<K8sDebugModalProps> = ({
               <h2 className="text-sm font-semibold text-txt-primary">Attach Debug Container</h2>
             </div>
           </div>
-          <button aria-label="Close" title="Close"
+          <button
+            aria-label="Close"
+            title="Close"
             type="button"
             onClick={onClose}
             disabled={submitting}
@@ -178,11 +183,12 @@ export const K8sDebugModal: React.FC<K8sDebugModalProps> = ({
 
           {/* Preset image selector */}
           <div className="space-y-1.5">
-            <label className="font-medium text-txt-primary flex items-center justify-between">
+            <label htmlFor="k8s-debug-preset" className="font-medium text-txt-primary flex items-center justify-between">
               <span>Debug Toolset / Image Preset</span>
               <span className="text-xs font-normal text-txt-muted">Configurable in Settings</span>
             </label>
             <select
+              id="k8s-debug-preset"
               value={selectedPresetId}
               onChange={(e) => handlePresetChange(e.target.value)}
               disabled={submitting}
@@ -227,11 +233,12 @@ export const K8sDebugModal: React.FC<K8sDebugModalProps> = ({
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {/* Target Container for Process Namespace Sharing */}
             <div className="space-y-1.5">
-              <label className="font-medium text-txt-primary flex items-center gap-1.5">
+              <label htmlFor="k8s-debug-target-container" className="font-medium text-txt-primary flex items-center gap-1.5">
                 <Cpu className="h-3.5 w-3.5 text-txt-muted" />
                 <span>Target Container (PID Sharing)</span>
               </label>
               <select
+                id="k8s-debug-target-container"
                 value={targetContainer}
                 onChange={(e) => setTargetContainer(e.target.value)}
                 disabled={submitting}
@@ -296,7 +303,7 @@ export const K8sDebugModal: React.FC<K8sDebugModalProps> = ({
 
           {/* Error Message */}
           {error && (
-            <div className="flex items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-300">
+            <div role="alert" className="flex items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-300">
               <AlertCircle className="h-4 w-4 shrink-0 text-red-400 mt-0.5" />
               <div className="min-w-0 flex-1 break-words">{error}</div>
             </div>

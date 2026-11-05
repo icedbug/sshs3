@@ -7,9 +7,10 @@ import { isEncryptionAvailable } from '../crypto/SecretFieldCrypto';
 import { XServerManager } from '../x11/XServerManager';
 import { IPC_CHANNELS } from '../../shared/types/ipc';
 import type { IpcBridge } from '../IpcBridge';
+import { elevatedShellExecutable, elevatedStartCommand, isUacDeclined } from './elevatedShell';
 
 /** The part of IpcBridge this handler group may use. */
-export type GeneralHost = Pick<IpcBridge, 'getUpdateService' | 'registerHandler' | 'tenantHomeDir'>;
+export type GeneralHost = Pick<IpcBridge, 'getUpdateService' | 'registerHandler' | 'profileStore' | 'tenantHomeDir'>;
 
 const execFileAsync = promisify(execFile);
 
@@ -48,7 +49,9 @@ export function registerGeneralHandlers(bridge: GeneralHost): void {
   });
 
   bridge.registerHandler(IPC_CHANNELS.APP_GET_SECURITY_STATUS, async () => {
-    return { credentialEncryptionAvailable: isEncryptionAvailable() };
+    // Never let a failed read of the profile file turn into a failed security check: report 0 and carry on.
+    const undecryptableSecretCount = await bridge.profileStore.countUndecryptableSecrets().catch(() => 0);
+    return { credentialEncryptionAvailable: isEncryptionAvailable(), undecryptableSecretCount };
   });
 
   bridge.registerHandler(IPC_CHANNELS.APP_DETECT_LOCAL_SHELLS, async () => {
@@ -81,6 +84,39 @@ export function registerGeneralHandlers(bridge: GeneralHost): void {
     }
     return { pwsh, wsl, wslDistros };
   });
+
+  // Windows: opens cmd / PowerShell in its own elevated window through the normal UAC prompt. An
+  // elevated process cannot be hosted in this (non-elevated) app's terminal, so it is a separate window.
+  bridge.registerHandler(
+    IPC_CHANNELS.APP_OPEN_ELEVATED_SHELL,
+    async (_event, shellType: unknown): Promise<{ started: boolean }> => {
+      if (process.platform !== 'win32') {
+        throw new Error('Running a shell as administrator is only available on Windows');
+      }
+      const exe = elevatedShellExecutable(shellType);
+      if (!exe) {
+        throw new Error(`Unsupported shell for elevation: ${String(shellType)}`);
+      }
+      try {
+        // Fixed program and arguments only: the renderer chooses from a whitelist, never a command line.
+        await execFileAsync(
+          'powershell.exe',
+          [
+            '-NoProfile',
+            '-NonInteractive',
+            '-Command',
+            elevatedStartCommand(exe),
+          ],
+          { windowsHide: true }
+        );
+        return { started: true };
+      } catch (err) {
+        // Declining the UAC prompt is not an error.
+        if (isUacDeclined(err)) return { started: false };
+        throw err;
+      }
+    }
+  );
 
   bridge.registerHandler(
     IPC_CHANNELS.APP_CHECK_X11_SERVER,

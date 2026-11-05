@@ -1,9 +1,19 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
+import { render as rtlRender, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import { SyncSettingsPanel } from '../../src/renderer/src/components/SettingsModal/SyncSettingsPanel';
+import { ConfirmProvider } from '../../src/renderer/src/components/ConfirmDialog';
 import type { ProfileSyncStatus } from '../../src/shared/types/sync';
+
+// The panel asks for confirmations through the app's ConfirmDialog, which needs its provider.
+function render(ui: React.ReactElement) {
+  const result = rtlRender(<ConfirmProvider>{ui}</ConfirmProvider>);
+  return {
+    ...result,
+    rerender: (next: React.ReactElement) => result.rerender(<ConfirmProvider>{next}</ConfirmProvider>),
+  };
+}
 
 function statusFixture(overrides: Partial<ProfileSyncStatus> = {}): ProfileSyncStatus {
   return {
@@ -429,7 +439,16 @@ describe('SyncSettingsPanel', () => {
     const unlinkBtn = await screen.findByRole('button', { name: /Unlink card/i });
     expect(unlinkBtn).toBeInTheDocument();
 
+    // Unlinking changes how sync unlocks, so it asks first; Cancel leaves the link alone.
     fireEvent.click(unlinkBtn);
+    const dialog = await screen.findByRole('alertdialog');
+    expect(dialog).toHaveTextContent('Sync will ask for the master password instead of the card');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+    expect(profileSyncUnlinkSmartcard).not.toHaveBeenCalled();
+
+    fireEvent.click(unlinkBtn);
+    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Unlink card' }));
     await waitFor(() => {
       expect(profileSyncUnlinkSmartcard).toHaveBeenCalled();
       expect(screen.getByText('Smartcard unlinked from sync.')).toBeInTheDocument();

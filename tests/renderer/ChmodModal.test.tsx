@@ -69,6 +69,37 @@ describe('ChmodModal', () => {
     expect(octalInput).toBeInTheDocument();
   });
 
+  it('names every permission checkbox and the octal field for assistive technology', () => {
+    render(
+      <ChmodModal
+        open={true}
+        providerId="local"
+        entries={[sampleFile]}
+        onClose={vi.fn()}
+        onSaved={vi.fn()}
+      />
+    );
+
+    // 0755: owner rwx, group r-x, others r-x
+    const expected: Record<string, boolean> = {
+      'Owner read': true,
+      'Owner write': true,
+      'Owner execute': true,
+      'Group read': true,
+      'Group write': false,
+      'Group execute': true,
+      'Others read': true,
+      'Others write': false,
+      'Others execute': true,
+    };
+    for (const [name, checked] of Object.entries(expected)) {
+      const box = screen.getByRole('checkbox', { name });
+      if (checked) expect(box).toBeChecked();
+      else expect(box).not.toBeChecked();
+    }
+    expect(screen.getByLabelText('Octal notation:')).toHaveValue('0755');
+  });
+
   it('updates octal input when checkbox is toggled', () => {
     render(
       <ChmodModal

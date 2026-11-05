@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, act } from '@testing-library/react';
+import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import type { SSHConnectionConfig } from '../../src/shared/types/ssh';
 import { TerminalView } from '../../src/renderer/src/components/TerminalView';
+import * as terminalLinksModule from '../../src/renderer/src/lib/terminalLinks';
 
 // Polyfill ResizeObserver and matchMedia for JSDOM
 let resizeCallback: ((entries: any[], observer: any) => void) | null = null;
@@ -387,5 +388,664 @@ describe('TerminalView Component', () => {
     // Terminal container handles DOM paste listener without errors
     expect(container).toBeInTheDocument();
   });
+
+  it('configures linkHandler to open external URLs via window.multissh.openExternal', async () => {
+    const mockOpenExternal = vi.fn();
+    window.multissh.openExternal = mockOpenExternal;
+
+    let capturedLinkHandler: any = null;
+    const { Terminal } = await import('@xterm/xterm');
+    const openSpy = vi.spyOn(Terminal.prototype, 'open').mockImplementation(function (this: any, element: HTMLElement) {
+      capturedLinkHandler = this.options.linkHandler;
+      return openSpy.getMockImplementation() ? undefined : (openSpy as any)(element);
+    });
+
+    render(<TerminalView config={sampleConfig} />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(capturedLinkHandler).toBeDefined();
+    capturedLinkHandler.activate({} as any, 'https://github.com/remotion-dev/remotion');
+    expect(mockOpenExternal).toHaveBeenCalledWith('https://github.com/remotion-dev/remotion');
+
+    openSpy.mockRestore();
+  });
+
+  it('connects the SFTP provider lazily, only once a path is actually used', async () => {
+    let capturedHandlers: any;
+    const registerSpy = vi.spyOn(terminalLinksModule, 'registerTerminalLinks').mockImplementation((_term, handlers) => {
+      capturedHandlers = handlers;
+      return { dispose: vi.fn() };
+    });
+    const mockConnectStorage = vi.fn().mockResolvedValue({ id: 'sftp-ssh-1' });
+    window.multissh.connectStorage = mockConnectStorage;
+
+    render(<TerminalView config={sampleConfig} initialCwd="/srv" onOpenPath={vi.fn()} />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(mockConnectStorage).not.toHaveBeenCalled();
+
+    await capturedHandlers.openPath('notes.txt');
+    await capturedHandlers.openPath('other.txt');
+    expect(mockConnectStorage).toHaveBeenCalledTimes(1);
+    expect(mockConnectStorage).toHaveBeenCalledWith(
+      expect.objectContaining({ id: expect.stringMatching(/^sftp-/), type: 'sftp' })
+    );
+
+    registerSpy.mockRestore();
+  });
+
+  it('resolves relative paths and standalone files against currentCwd when Ctrl+clicked via openPath', async () => {
+    let capturedHandlers: any;
+    const registerSpy = vi.spyOn(terminalLinksModule, 'registerTerminalLinks').mockImplementation((_term, handlers) => {
+      capturedHandlers = handlers;
+      return { dispose: vi.fn() };
+    });
+
+    const onOpenPath = vi.fn();
+    render(
+      <TerminalView
+        config={sampleConfig}
+        initialCwd="/var/www/html"
+        onOpenPath={onOpenPath}
+      />
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(capturedHandlers).toBeDefined();
+    await capturedHandlers.openPath('notes');
+    expect(onOpenPath).toHaveBeenCalledWith('/var/www/html/notes');
+
+    await capturedHandlers.openPath('src/App.tsx');
+    expect(onOpenPath).toHaveBeenCalledWith('/var/www/html/src/App.tsx');
+
+    await capturedHandlers.openPath('/etc/nginx/nginx.conf');
+    expect(onOpenPath).toHaveBeenCalledWith('/etc/nginx/nginx.conf');
+
+    registerSpy.mockRestore();
+  });
+
+  it('pastes from system clipboard on Shift+Insert and Ctrl+Shift+V', async () => {
+    let capturedKeyHandler: any = null;
+    const { Terminal } = await import('@xterm/xterm');
+    const pasteSpy = vi.spyOn(Terminal.prototype, 'paste').mockImplementation(() => {});
+    const attachSpy = vi.spyOn(Terminal.prototype, 'attachCustomKeyEventHandler').mockImplementation(function (this: any, handler: any) {
+      capturedKeyHandler = handler;
+    });
+
+    const mockReadText = vi.fn().mockResolvedValue('git status --short');
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { readText: mockReadText },
+      configurable: true,
+      writable: true,
+    });
+
+    render(<TerminalView config={sampleConfig} />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(capturedKeyHandler).toBeDefined();
+
+    // 1. Shift+Insert
+    const shiftInsertEvt = {
+      type: 'keydown',
+      shiftKey: true,
+      key: 'Insert',
+      preventDefault: vi.fn(),
+    };
+    const resShiftInsert = capturedKeyHandler(shiftInsertEvt);
+    expect(resShiftInsert).toBe(false);
+    expect(shiftInsertEvt.preventDefault).toHaveBeenCalled();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(mockReadText).toHaveBeenCalled();
+    expect(pasteSpy).toHaveBeenCalledWith('git status --short');
+
+    // 2. Ctrl+Shift+V
+    pasteSpy.mockClear();
+    mockReadText.mockResolvedValueOnce('curl -s https://api.example.com');
+    const ctrlShiftVEvt = {
+      type: 'keydown',
+      ctrlKey: true,
+      shiftKey: true,
+      key: 'V',
+      code: 'KeyV',
+      preventDefault: vi.fn(),
+    };
+    const resCtrlShiftV = capturedKeyHandler(ctrlShiftVEvt);
+    expect(resCtrlShiftV).toBe(false);
+    expect(ctrlShiftVEvt.preventDefault).toHaveBeenCalled();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(pasteSpy).toHaveBeenCalledWith('curl -s https://api.example.com');
+
+    // 3. Fallback to clipboard history if navigator.clipboard fails
+    pasteSpy.mockClear();
+    mockReadText.mockRejectedValueOnce(new Error('Permission denied'));
+    window.multissh.clipboardHistoryList = vi.fn().mockResolvedValueOnce([
+      { id: '1', text: 'fallback-from-history', timestamp: Date.now() },
+    ]);
+
+    const resFallback = capturedKeyHandler(ctrlShiftVEvt);
+    expect(resFallback).toBe(false);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(pasteSpy).toHaveBeenCalledWith('fallback-from-history');
+
+    attachSpy.mockRestore();
+    pasteSpy.mockRestore();
+  });
+
+  it('suppresses hover card preview when pathHoverPreview is false', async () => {
+    let capturedHandlers: any;
+    const registerSpy = vi.spyOn(terminalLinksModule, 'registerTerminalLinks').mockImplementation((_term, handlers) => {
+      capturedHandlers = handlers;
+      return { dispose: vi.fn() };
+    });
+
+    render(
+      <TerminalView
+        config={sampleConfig}
+        pathHoverPreview={false}
+      />
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(capturedHandlers).toBeDefined();
+
+    // Trigger hoverPath
+    act(() => {
+      capturedHandlers.hoverPath({ clientX: 100, clientY: 100 }, '/var/log/syslog');
+    });
+
+    // Advance dwell timer
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    });
+
+    // Hover card should NOT be in document
+    expect(screen.queryByTestId('terminal-path-hover-card')).not.toBeInTheDocument();
+
+    registerSpy.mockRestore();
+  });
+
+  describe('path hover card gating', () => {
+    let capturedHandlers: any;
+    let registerSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      registerSpy = vi.spyOn(terminalLinksModule, 'registerTerminalLinks').mockImplementation((_term, handlers) => {
+        capturedHandlers = handlers;
+        return { dispose: vi.fn() };
+      });
+    });
+
+    afterEach(() => {
+      registerSpy.mockRestore();
+      delete (window.multissh as any).storageLookup;
+      delete (window.multissh as any).connectStorage;
+      delete (window.multissh as any).terminalHasSshClient;
+    });
+
+    const dwell = () =>
+      act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 400));
+      });
+
+    it('does not open the card for a path that does not exist', async () => {
+      const storageLookup = vi.fn().mockResolvedValue(null);
+      (window.multissh as any).storageLookup = storageLookup;
+      render(<TerminalView config={sampleConfig} />);
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      act(() => {
+        capturedHandlers.hoverPath({ clientX: 10, clientY: 10, ctrlKey: false, metaKey: false }, '/srv/app/not-there.ts');
+      });
+      await dwell();
+
+      expect(storageLookup).toHaveBeenCalled();
+      expect(screen.queryByTestId('terminal-path-hover-card')).not.toBeInTheDocument();
+    });
+
+    it('opens the card for a path that exists', async () => {
+      (window.multissh as any).storageLookup = vi.fn().mockResolvedValue({ name: 'syslog', isDirectory: false, size: 1 });
+      render(<TerminalView config={sampleConfig} />);
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      act(() => {
+        capturedHandlers.hoverPath({ clientX: 10, clientY: 10, ctrlKey: false, metaKey: false }, '/var/log/syslog');
+      });
+      await dwell();
+
+      expect(screen.getByTestId('terminal-path-hover-card')).toBeInTheDocument();
+    });
+
+    it('does not judge a relative path while the working directory is only a guess', async () => {
+      const storageLookup = vi.fn().mockResolvedValue(null);
+      (window.multissh as any).storageLookup = storageLookup;
+      render(<TerminalView config={sampleConfig} />);
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      act(() => {
+        capturedHandlers.hoverPath({ clientX: 10, clientY: 10, ctrlKey: false, metaKey: false }, 'src/app/main.ts');
+      });
+      await dwell();
+
+      // An SSH terminal has no OSC 7 or process to ask, so a miss would only reflect a wrong directory.
+      expect(storageLookup).not.toHaveBeenCalled();
+      expect(screen.getByTestId('terminal-path-hover-card')).toBeInTheDocument();
+    });
+
+    it('shows the card as before when the lookup is too slow to answer', async () => {
+      (window.multissh as any).storageLookup = vi.fn().mockReturnValue(new Promise(() => {}));
+      render(<TerminalView config={sampleConfig} />);
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      act(() => {
+        capturedHandlers.hoverPath({ clientX: 10, clientY: 10, ctrlKey: false, metaKey: false }, '/var/log/syslog');
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      });
+
+      expect(screen.getByTestId('terminal-path-hover-card')).toBeInTheDocument();
+    });
+
+    it('registers the local storage provider before looking a path up in a local terminal', async () => {
+      const calls: string[] = [];
+      (window.multissh as any).connectStorage = vi.fn().mockImplementation(async (config: { id: string }) => {
+        calls.push(`connect:${config.id}`);
+        return { id: config.id };
+      });
+      (window.multissh as any).storageLookup = vi.fn().mockImplementation(async () => {
+        calls.push('lookup');
+        return { name: 'syslog', isDirectory: false, size: 1 };
+      });
+      render(<TerminalView local />);
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      act(() => {
+        capturedHandlers.hoverPath({ clientX: 10, clientY: 10, ctrlKey: false, metaKey: false }, '/var/log/syslog');
+      });
+      await dwell();
+
+      expect(calls.indexOf('connect:local')).toBeGreaterThanOrEqual(0);
+      expect(calls.indexOf('connect:local')).toBeLessThan(calls.indexOf('lookup'));
+    });
+
+    it('does not offer the card while a local shell runs ssh, but does otherwise', async () => {
+      (window.multissh as any).connectStorage = vi.fn().mockResolvedValue({ id: 'local' });
+      (window.multissh as any).storageLookup = vi.fn().mockResolvedValue({ name: 'syslog', isDirectory: false, size: 1 });
+      const terminalHasSshClient = vi.fn().mockResolvedValue(true);
+      (window.multissh as any).terminalHasSshClient = terminalHasSshClient;
+      render(<TerminalView local />);
+      await act(async () => {
+        await Promise.resolve();
+      });
+      const hover = { clientX: 10, clientY: 10, ctrlKey: false, metaKey: false };
+
+      act(() => {
+        capturedHandlers.hoverPath(hover, '/var/log/syslog');
+      });
+      await dwell();
+      expect(terminalHasSshClient).toHaveBeenCalled();
+      expect(screen.queryByTestId('terminal-path-hover-card')).not.toBeInTheDocument();
+
+      terminalHasSshClient.mockResolvedValue(false);
+      act(() => {
+        capturedHandlers.leavePath({}, '/var/log/syslog');
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      });
+      act(() => {
+        capturedHandlers.hoverPath(hover, '/var/log/syslog');
+      });
+      await dwell();
+      expect(screen.getByTestId('terminal-path-hover-card')).toBeInTheDocument();
+    });
+
+    it('keeps an open card when a repaint makes xterm report leave and hover for the same path', async () => {
+      (window.multissh as any).storageLookup = vi.fn().mockResolvedValue({ name: 'syslog', isDirectory: false, size: 1 });
+      render(<TerminalView config={sampleConfig} />);
+      await act(async () => {
+        await Promise.resolve();
+      });
+      const hover = { clientX: 10, clientY: 10, ctrlKey: false, metaKey: false };
+
+      act(() => {
+        capturedHandlers.hoverPath(hover, '/var/log/syslog');
+      });
+      await dwell();
+      expect(screen.getByTestId('terminal-path-hover-card')).toBeInTheDocument();
+
+      // The pointer has not moved; the rows were repainted.
+      act(() => {
+        capturedHandlers.leavePath({}, '/var/log/syslog');
+        capturedHandlers.hoverPath(hover, '/var/log/syslog');
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 700));
+      });
+      expect(screen.getByTestId('terminal-path-hover-card')).toBeInTheDocument();
+    });
+
+    it('keeps the open card while the pointer moves from one path to the next', async () => {
+      (window.multissh as any).storageLookup = vi.fn().mockResolvedValue({ name: 'f', isDirectory: false, size: 1 });
+      render(<TerminalView config={sampleConfig} />);
+      await act(async () => {
+        await Promise.resolve();
+      });
+      const hover = { clientX: 10, clientY: 10, ctrlKey: false, metaKey: false };
+
+      act(() => {
+        capturedHandlers.hoverPath(hover, '/var/log/a.log');
+      });
+      await dwell();
+      expect(screen.getByTestId('terminal-path-hover-card')).toBeInTheDocument();
+
+      // Sweep across three paths within a few milliseconds each, like a pointer crossing an ls listing.
+      for (const p of ['/var/log/b.log', '/var/log/c.log', '/var/log/d.log']) {
+        act(() => {
+          capturedHandlers.leavePath({}, p);
+          capturedHandlers.hoverPath(hover, p);
+        });
+      }
+      // The old card must not be closed by timers left over from the earlier leaves (400 ms), and the
+      // card for the path the pointer ended on must open (500 ms dwell) and stay.
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 900));
+      });
+      expect(screen.getByTestId('terminal-path-hover-card')).toBeInTheDocument();
+      expect(screen.getByTestId('terminal-path-hover-card').textContent).toContain('d.log');
+    });
+
+    it('places the card relative to where the pointer is when it opens, not where it entered the link', async () => {
+      (window.multissh as any).storageLookup = vi.fn().mockResolvedValue({ name: 'f', isDirectory: false, size: 1 });
+      render(<TerminalView config={sampleConfig} />);
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      act(() => {
+        capturedHandlers.hoverPath({ clientX: 10, clientY: 10, ctrlKey: false, metaKey: false }, '/var/log/syslog');
+      });
+      // The pointer moves on while the card waits to open.
+      act(() => {
+        window.dispatchEvent(new MouseEvent('mousemove', { clientX: 300, clientY: 120 }));
+      });
+      await dwell();
+
+      const card = screen.getByTestId('terminal-path-hover-card');
+      expect(card.style.left).toBe('312px');
+    });
+
+    it('keeps the card when the pointer enters it right after leaving the link, and closes it after it leaves', async () => {
+      (window.multissh as any).storageLookup = vi.fn().mockResolvedValue({ name: 'f', isDirectory: false, size: 1 });
+      render(<TerminalView config={sampleConfig} />);
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      act(() => {
+        capturedHandlers.hoverPath({ clientX: 10, clientY: 10, ctrlKey: false, metaKey: false }, '/var/log/syslog');
+      });
+      await dwell();
+      const card = screen.getByTestId('terminal-path-hover-card');
+
+      // The pointer leaves the link and is in the card before the leave has been confirmed.
+      act(() => {
+        capturedHandlers.leavePath({}, '/var/log/syslog');
+        fireEvent.mouseEnter(card);
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 700));
+      });
+      expect(screen.getByTestId('terminal-path-hover-card')).toBeInTheDocument();
+
+      act(() => {
+        fireEvent.mouseLeave(card);
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 450));
+      });
+      expect(screen.queryByTestId('terminal-path-hover-card')).not.toBeInTheDocument();
+    });
+
+    it('still closes the card once the pointer really leaves', async () => {
+      (window.multissh as any).storageLookup = vi.fn().mockResolvedValue({ name: 'syslog', isDirectory: false, size: 1 });
+      render(<TerminalView config={sampleConfig} />);
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      act(() => {
+        capturedHandlers.hoverPath({ clientX: 10, clientY: 10, ctrlKey: false, metaKey: false }, '/var/log/syslog');
+      });
+      await dwell();
+      expect(screen.getByTestId('terminal-path-hover-card')).toBeInTheDocument();
+
+      act(() => {
+        capturedHandlers.leavePath({}, '/var/log/syslog');
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 700));
+      });
+      expect(screen.queryByTestId('terminal-path-hover-card')).not.toBeInTheDocument();
+    });
+
+    it('does not restart the dwell when a repaint reports leave and hover while the card is opening', async () => {
+      const storageLookup = vi.fn().mockResolvedValue({ name: 'syslog', isDirectory: false, size: 1 });
+      (window.multissh as any).storageLookup = storageLookup;
+      render(<TerminalView config={sampleConfig} />);
+      await act(async () => {
+        await Promise.resolve();
+      });
+      const hover = { clientX: 10, clientY: 10, ctrlKey: false, metaKey: false };
+
+      act(() => {
+        capturedHandlers.hoverPath(hover, '/var/log/syslog');
+      });
+      // Repaints every 100 ms, which is faster than the 150 ms dwell: it must still complete.
+      for (let i = 0; i < 3; i++) {
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        });
+        act(() => {
+          capturedHandlers.leavePath({}, '/var/log/syslog');
+          capturedHandlers.hoverPath(hover, '/var/log/syslog');
+        });
+      }
+      await dwell();
+      expect(screen.getByTestId('terminal-path-hover-card')).toBeInTheDocument();
+      expect(storageLookup).toHaveBeenCalledTimes(1);
+    });
+
+    it('still opens the card when the lookup fails for a reason other than a missing file', async () => {
+      (window.multissh as any).storageLookup = vi.fn().mockRejectedValue(new Error('Connection lost'));
+      render(<TerminalView config={sampleConfig} />);
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      act(() => {
+        capturedHandlers.hoverPath({ clientX: 10, clientY: 10, ctrlKey: false, metaKey: false }, '/var/log/syslog');
+      });
+      await dwell();
+
+      expect(screen.getByTestId('terminal-path-hover-card')).toBeInTheDocument();
+    });
+
+    it('does not open the card when the pointer leaves while the lookup is in flight', async () => {
+      let resolveLookup: (v: unknown) => void = () => {};
+      (window.multissh as any).storageLookup = vi.fn().mockReturnValue(
+        new Promise((resolve) => {
+          resolveLookup = resolve;
+        })
+      );
+      render(<TerminalView config={sampleConfig} />);
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      act(() => {
+        capturedHandlers.hoverPath({ clientX: 10, clientY: 10, ctrlKey: false, metaKey: false }, '/var/log/syslog');
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      });
+      act(() => {
+        capturedHandlers.leavePath({}, '/var/log/syslog');
+      });
+      // A leave only counts once no hover of the same path follows within the repaint grace time.
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      });
+      await act(async () => {
+        resolveLookup({ name: 'syslog', isDirectory: false, size: 1 });
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      });
+
+      expect(screen.queryByTestId('terminal-path-hover-card')).not.toBeInTheDocument();
+    });
+
+    it('in ctrl mode waits for Ctrl before checking and opening the card', async () => {
+      const storageLookup = vi.fn().mockResolvedValue({ name: 'syslog', isDirectory: false, size: 1 });
+      (window.multissh as any).storageLookup = storageLookup;
+      render(<TerminalView config={sampleConfig} pathHoverMode="ctrl" />);
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      act(() => {
+        capturedHandlers.hoverPath({ clientX: 10, clientY: 10, ctrlKey: false, metaKey: false }, '/var/log/syslog');
+      });
+      await dwell();
+      expect(storageLookup).not.toHaveBeenCalled();
+      expect(screen.queryByTestId('terminal-path-hover-card')).not.toBeInTheDocument();
+
+      act(() => {
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Control' }));
+      });
+      await dwell();
+      expect(screen.getByTestId('terminal-path-hover-card')).toBeInTheDocument();
+    });
+
+    it('in ctrl mode opens the card at once when Ctrl is already held', async () => {
+      (window.multissh as any).storageLookup = vi.fn().mockResolvedValue({ name: 'syslog', isDirectory: false, size: 1 });
+      render(<TerminalView config={sampleConfig} pathHoverMode="ctrl" />);
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      act(() => {
+        capturedHandlers.hoverPath({ clientX: 10, clientY: 10, ctrlKey: true, metaKey: false }, '/var/log/syslog');
+      });
+      await dwell();
+      expect(screen.getByTestId('terminal-path-hover-card')).toBeInTheDocument();
+    });
+
+    it('forgets the waiting path when the pointer leaves it', async () => {
+      (window.multissh as any).storageLookup = vi.fn().mockResolvedValue({ name: 'syslog', isDirectory: false, size: 1 });
+      render(<TerminalView config={sampleConfig} pathHoverMode="ctrl" />);
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      act(() => {
+        capturedHandlers.hoverPath({ clientX: 10, clientY: 10, ctrlKey: false, metaKey: false }, '/var/log/syslog');
+        capturedHandlers.leavePath({}, '/var/log/syslog');
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      });
+      act(() => {
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Control' }));
+      });
+      await dwell();
+      expect(screen.queryByTestId('terminal-path-hover-card')).not.toBeInTheDocument();
+    });
+  });
+
+  it('detects listening ports in terminal output and displays TerminalPortPill', async () => {
+    render(<TerminalView config={sampleConfig} />);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    act(() => {
+      dataCallback?.('session-123', 'Vite dev server running at: http://localhost:5173\n');
+    });
+
+    expect(screen.getByTestId('terminal-port-pill-5173')).toBeInTheDocument();
+    expect(screen.getByText('5173')).toBeInTheDocument();
+  });
+
+  it('shows drop overlay on drag enter and handles file drop', async () => {
+    window.multissh.connectStorage = vi.fn().mockResolvedValue({ id: 'sftp-ssh-1' });
+    window.multissh.transferAdd = vi.fn().mockResolvedValue({ jobId: 'job-1' });
+
+    render(<TerminalView config={sampleConfig} initialCwd="/var/www/site" />);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const terminalView = screen.getByTestId('terminal-view');
+
+    // 1. Drag enter
+    act(() => {
+      const dragEnterEvt = new Event('dragenter', { bubbles: true }) as any;
+      dragEnterEvt.dataTransfer = { types: ['Files'] };
+      terminalView.dispatchEvent(dragEnterEvt);
+    });
+
+    expect(screen.getByTestId('terminal-drop-overlay')).toBeInTheDocument();
+    expect(screen.getByText('/var/www/site')).toBeInTheDocument();
+
+    // 2. Drop file
+    await act(async () => {
+      const dropEvt = new Event('drop', { bubbles: true }) as any;
+      dropEvt.dataTransfer = {
+        files: [{ name: 'bundle.js', path: '/home/user/build/bundle.js' }],
+      };
+      terminalView.dispatchEvent(dropEvt);
+    });
+
+    expect(screen.queryByTestId('terminal-drop-overlay')).not.toBeInTheDocument();
+    expect(window.multissh.transferAdd).toHaveBeenCalledWith({
+      sourceProviderId: 'local',
+      sourcePath: '/home/user/build/bundle.js',
+      targetProviderId: 'sftp-ssh-1',
+      targetPath: '/var/www/site/bundle.js',
+    });
+  });
 });
+
+
 

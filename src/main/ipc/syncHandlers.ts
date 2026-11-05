@@ -2,10 +2,11 @@ import crypto from 'node:crypto';
 import { AgentLifecycleManager } from '../ssh/AgentLifecycleManager';
 import type { AskpassPromptRetryContext } from '../smartcard/AskpassServer';
 import { getAgentIdentities, signChallengeWithAgent, verifyAgentSignature, getKeyAlgorithm } from '../smartcard/SmartcardSyncService';
-import { encryptSecretValue } from '../crypto/SecretFieldCrypto';
+import { encryptSecretValue, isEncryptedSecret } from '../crypto/SecretFieldCrypto';
 import { IPC_CHANNELS, type StorageConnectConfig } from '../../shared/types/ipc';
 import type { ProfileSyncStatus, ProfileSyncPullResult, SyncComparisonResult } from '../../shared/types/sync';
 import type { IpcBridge } from '../IpcBridge';
+import { isSyncTargetChanged } from '../services/syncTargetIdentity';
 import type { SmartcardCoordinator } from '../smartcard/SmartcardCoordinator';
 
 /** The part of IpcBridge this handler group may use. */
@@ -33,7 +34,17 @@ export function registerSyncHandlers(bridge: SyncHost): void {
       if (target.type === 's3' && !payload.remoteBasePath?.trim()) {
         throw new Error('An S3 target requires a bucket (optionally "bucket/prefix") to sync to');
       }
-      await bridge.syncConfigStore.setTarget(target, payload.remoteBasePath ?? '');
+      const previous = await bridge.syncConfigStore.getConfig();
+      if (isSyncTargetChanged(previous, { target, remoteBasePath: payload.remoteBasePath })) {
+        // The cached key and salts belong to the data on the old target. Left in place, the next auto-push would
+        // encrypt with them and overwrite whatever another device stored on the new one. Lock first, so nothing
+        // can push in the gap, then drop salts and switch auto-sync off; unlocking again goes through a pull.
+        bridge.syncCryptoService.lock();
+        bridge.stopAutoPullTimer();
+        await bridge.syncConfigStore.replaceTarget(target, payload.remoteBasePath ?? '');
+      } else {
+        await bridge.syncConfigStore.setTarget(target, payload.remoteBasePath ?? '');
+      }
       await bridge.storageRegistry.disconnect?.(target.id);
       await bridge.storageRegistry.disconnect?.('sshs3-remote-profile-sync');
       // The (app-lifetime) ProfileSyncService instance otherwise keeps comparing
@@ -169,9 +180,14 @@ export function registerSyncHandlers(bridge: SyncHost): void {
       if (unlockedSocket) {
         socketPath = unlockedSocket;
       } else if (mode === 'agent-global') {
-        socketPath = await bridge.smartcard.getOrLoadGlobalSmartcardAgent(options.pkcs11LibPath, pinHandler);
+        socketPath = await bridge.smartcard.getOrLoadGlobalSmartcardAgent(options.pkcs11LibPath, pinHandler, 'Remote Profile Sync');
       } else {
-        const agent = await bridge.smartcard.loadSmartcardIntoPrivateAgentWithPresence(options.pkcs11LibPath, pinHandler);
+        const agent = await bridge.smartcard.loadSmartcardIntoPrivateAgentWithPresence(
+          options.pkcs11LibPath,
+          pinHandler,
+          undefined,
+          'Remote Profile Sync'
+        );
         socketPath = agent.socketPath;
         privateAgentPid = agent.pid;
       }
@@ -212,6 +228,12 @@ export function registerSyncHandlers(bridge: SyncHost): void {
         let wrappedPasswordsEncrypted: string | undefined;
         if (options.passwords?.topologyPassword && options.passwords?.credentialsPassword) {
           wrappedPasswordsEncrypted = encryptSecretValue(JSON.stringify(options.passwords));
+          // encryptSecretValue falls back to plaintext without an OS keyring; the master passwords must never reach disk that way.
+          if (!isEncryptedSecret(wrappedPasswordsEncrypted)) {
+            throw new Error(
+              'The OS keyring is unavailable, so the master passwords cannot be stored securely. Unlock your keyring (or install libsecret/kwallet) and try again.'
+            );
+          }
           if (!bridge.syncCryptoService.isUnlocked('topology') || !bridge.syncCryptoService.isUnlocked('credentials')) {
             await bridge.unlockSyncInternal(options.passwords);
           }

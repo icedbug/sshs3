@@ -1,6 +1,7 @@
-import React, { createContext, useCallback, useContext, useState } from 'react';
+import React, { createContext, useCallback, useContext, useRef, useState } from 'react';
 import { AlertTriangle, HelpCircle } from 'lucide-react';
 import { useModalDismiss } from '../lib/useModalDismiss';
+import { useDialogFocus } from '../lib/useDialogFocus';
 
 /**
  * In-app replacement for window.confirm() for destructive/consequential
@@ -28,35 +29,47 @@ const ConfirmContext = createContext<((options: ConfirmOptions) => Promise<boole
 
 export const ConfirmProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [pending, setPending] = useState<PendingConfirm | null>(null);
+  // The request on screen, readable outside render: a second confirm() while one is open must not leave the first
+  // promise unresolved for ever (its caller would hang), so it is answered "no" before the new one replaces it.
+  const pendingRef = useRef<PendingConfirm | null>(null);
 
   const confirm = useCallback((options: ConfirmOptions): Promise<boolean> => {
     return new Promise<boolean>((resolve) => {
+      pendingRef.current?.resolve(false);
       // options.danger explicitly set to undefined (e.g. a caller passing a
       // possibly-undefined variable through) must still fall back to the
       // default — a trailing `...options` spread would otherwise let an
       // explicit `undefined` key override it.
-      setPending({ ...options, danger: options.danger ?? true, resolve });
+      const next: PendingConfirm = { ...options, danger: options.danger ?? true, resolve };
+      pendingRef.current = next;
+      setPending(next);
     });
   }, []);
 
   const settle = useCallback(
     (result: boolean) => {
       pending?.resolve(result);
+      if (pendingRef.current === pending) pendingRef.current = null;
       setPending(null);
     },
     [pending]
   );
 
   const handleBackdropClick = useModalDismiss(() => settle(false), pending !== null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  // The Cancel button's `autoFocus` below runs first, so useDialogFocus leaves the default focus on Cancel.
+  useDialogFocus(dialogRef, pending !== null);
 
   return (
     <ConfirmContext.Provider value={confirm}>
       {children}
       {pending && (
         <div
+          ref={dialogRef}
           role="alertdialog"
           aria-modal="true"
-          aria-labelledby="confirm-dialog-title"
+          aria-labelledby={pending.title ? 'confirm-dialog-title' : undefined}
+          aria-label={pending.title ? undefined : 'Confirm'}
           data-testid="confirm-dialog"
           onClick={handleBackdropClick}
           className="fixed inset-0 z-[150] flex items-center justify-center bg-black/65 animate-in fade-in duration-150 p-4"

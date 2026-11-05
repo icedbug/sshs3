@@ -35,7 +35,7 @@ if (fs.existsSync(targetSiteDir)) {
   const destDocsScreenshots = path.join(destScreenshots, 'docs');
   if (fs.existsSync(srcScreenshots) && fs.existsSync(destScreenshots)) {
     fs.mkdirSync(destDocsScreenshots, { recursive: true });
-    const images = fs.readdirSync(srcScreenshots).filter(f => f.endsWith('.png') || f.endsWith('.svg'));
+    const images = fs.readdirSync(srcScreenshots).filter(f => f.endsWith('.png') || f.endsWith('.svg') || f.endsWith('.mp4') || f.endsWith('.webm'));
     for (const img of images) {
       fs.copyFileSync(path.join(srcScreenshots, img), path.join(destScreenshots, img));
       fs.copyFileSync(path.join(srcScreenshots, img), path.join(destDocsScreenshots, img));

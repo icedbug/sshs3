@@ -10,6 +10,7 @@ const CATEGORY_TO_GROUP: Record<SyncDataCategory, SyncKeyGroup> = {
   'dotfile-pools': 'credentials',
   'ssh-native': 'credentials',
   'dirsync-profiles': 'topology',
+  'k8s-profiles': 'topology',
 };
 
 const FORMAT_VERSION = 1;
@@ -73,6 +74,22 @@ export function deriveKey(password: string, salt: Buffer, params: ScryptParams =
   });
 }
 
+/**
+ * Same key as `deriveKey`, but scrypt runs on libuv's thread pool, so the main process (UI, IPC, terminals) keeps
+ * running during the 1-4 seconds a production derivation takes.
+ */
+export function deriveKeyAsync(password: string, salt: Buffer, params: ScryptParams = DEFAULT_SCRYPT_PARAMS): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    crypto.scrypt(
+      password,
+      salt,
+      KEY_LENGTH,
+      { N: params.N, r: params.r, p: params.p, maxmem: params.maxmem },
+      (err, key) => (err ? reject(err) : resolve(key))
+    );
+  });
+}
+
 interface CachedKey {
   key: Buffer;
   salt: Buffer;
@@ -100,6 +117,12 @@ export class SyncCryptoService {
   /** Derives and caches the key for a group. Expensive — call once, not per file. */
   unlock(group: SyncKeyGroup, password: string, salt: Buffer): void {
     this.keys.set(group, { key: deriveKey(password, salt, this.scryptParams), salt: Buffer.from(salt) });
+  }
+
+  /** `unlock` without blocking the main process while the key is derived. */
+  async unlockAsync(group: SyncKeyGroup, password: string, salt: Buffer): Promise<void> {
+    const key = await deriveKeyAsync(password, salt, this.scryptParams);
+    this.keys.set(group, { key, salt: Buffer.from(salt) });
   }
 
   /** Drops all cached keys from memory (e.g. on app lock/quit). */
@@ -139,6 +162,27 @@ export class SyncCryptoService {
    * cached for subsequent calls in this group.
    */
   decrypt(category: SyncDataCategory, data: Buffer, password?: string): string {
+    const blob = this.parseBlob(data);
+    const group = CATEGORY_TO_GROUP[category];
+    const cached = this.keys.get(group);
+    if (cached) return this.open(category, group, blob, cached.key);
+    if (!password) throw new SyncLockedError(group);
+    const key = deriveKey(password, blob.salt, this.scryptParams);
+    return this.open(category, group, blob, key, { key, salt: Buffer.from(blob.salt) });
+  }
+
+  /** `decrypt` without blocking the main process while a key is derived from `password`. */
+  async decryptAsync(category: SyncDataCategory, data: Buffer, password?: string): Promise<string> {
+    const blob = this.parseBlob(data);
+    const group = CATEGORY_TO_GROUP[category];
+    const cached = this.keys.get(group);
+    if (cached) return this.open(category, group, blob, cached.key);
+    if (!password) throw new SyncLockedError(group);
+    const key = await deriveKeyAsync(password, blob.salt, this.scryptParams);
+    return this.open(category, group, blob, key, { key, salt: Buffer.from(blob.salt) });
+  }
+
+  private parseBlob(data: Buffer): { salt: Buffer; iv: Buffer; authTag: Buffer; ciphertext: Buffer } {
     if (!Buffer.isBuffer(data) || data.length < HEADER_LENGTH) {
       throw new SyncDecryptionError('Encrypted file is truncated or corrupt');
     }
@@ -155,30 +199,25 @@ export class SyncCryptoService {
     offset += IV_LENGTH;
     const authTag = data.subarray(offset, offset + AUTH_TAG_LENGTH);
     offset += AUTH_TAG_LENGTH;
-    const ciphertext = data.subarray(offset);
+    return { salt, iv, authTag, ciphertext: data.subarray(offset) };
+  }
 
-    const group = CATEGORY_TO_GROUP[category];
-    let key: Buffer;
-    const cached = this.keys.get(group);
-    // A key derived from a password supplied here is only cached once the
-    // auth tag verifies — otherwise a wrong password would leave the group
-    // "unlocked" with a bad key.
-    let derived: CachedKey | undefined;
-    if (cached) {
-      key = cached.key;
-    } else {
-      if (!password) {
-        throw new SyncLockedError(group);
-      }
-      key = deriveKey(password, salt, this.scryptParams);
-      derived = { key, salt: Buffer.from(salt) };
-    }
-
+  /**
+   * Decrypts with `key`. A key derived from a password supplied by the caller (`derived`) is only cached once the
+   * auth tag verifies, otherwise a wrong password would leave the group "unlocked" with a bad key.
+   */
+  private open(
+    category: SyncDataCategory,
+    group: SyncKeyGroup,
+    blob: { iv: Buffer; authTag: Buffer; ciphertext: Buffer },
+    key: Buffer,
+    derived?: CachedKey
+  ): string {
     try {
-      const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv, { authTagLength: 16 });
+      const decipher = crypto.createDecipheriv('aes-256-gcm', key, blob.iv, { authTagLength: 16 });
       decipher.setAAD(Buffer.from(category, 'utf8'));
-      decipher.setAuthTag(authTag);
-      const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+      decipher.setAuthTag(blob.authTag);
+      const plaintext = Buffer.concat([decipher.update(blob.ciphertext), decipher.final()]);
       if (derived) this.keys.set(group, derived);
       return plaintext.toString('utf8');
     } catch {

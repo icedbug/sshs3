@@ -5,6 +5,8 @@ export interface FileEntry {
   path: string;
   size: number;
   isDirectory: boolean;
+  /** True for non-regular files (FIFOs, devices, sockets) that must not be read to completion. */
+  isSpecial?: boolean;
   /**
    * True when this entry is a symbolic link (reported via lstat-like
    * semantics, not resolved through to the link's target). Populated by
@@ -37,6 +39,8 @@ export interface TransferProgress {
 export interface WriteStreamOptions {
   size?: number;
   mode?: number;
+  /** Fail instead of replacing something already at the path (local disk only; other providers ignore it). */
+  exclusive?: boolean;
 }
 
 export interface ObjectMetadata {
@@ -76,6 +80,10 @@ export interface IStorageProvider {
   writeFile?(remotePath: string, data: Buffer | Uint8Array, options?: WriteStreamOptions): Promise<void>;
   readFile?(remotePath: string): Promise<Buffer>;
   chmod?(remotePath: string, mode: number | string): Promise<void>;
+  /** Windows file attributes (local provider on Windows only). */
+  getWinAttributes?(remotePath: string): Promise<WinAttributes>;
+  /** Sets the given attributes (others untouched); `recursive` also covers a folder's contents. */
+  setWinAttributes?(remotePath: string, changes: Partial<WinAttributes>, recursive?: boolean): Promise<void>;
   setMetadata?(remotePath: string, metadata: ObjectMetadata): Promise<void>;
   /**
    * Sets a file's modification time (epoch ms) after it's written, so a copy
@@ -114,6 +122,14 @@ export interface SpaceInfo {
   freeBytes: number;
 }
 
+/** The Windows file attributes the file manager can show and change (the `attrib` flags R, H, S, A). */
+export interface WinAttributes {
+  readOnly: boolean;
+  hidden: boolean;
+  system: boolean;
+  archive: boolean;
+}
+
 export interface VolumeInfo extends SpaceInfo {
   /** Root to navigate to: "C:\" on Windows, the mount point elsewhere. */
   path: string;
@@ -150,6 +166,10 @@ export interface SFTPConfig {
   /** Team Vault only — see `SSHConnectionConfig.teamVaultProfileRef`. */
   teamVaultProfileRef?: { vaultId: string; profileId: string };
   agentPath?: string;
+  /** Whether to use the active SSH Certificate Authority session when authType is 'agent'. */
+  useSshCa?: boolean;
+  /** Runtime only: path to an OpenSSH certificate file (`-o CertificateFile=...`). */
+  certificateFile?: string;
   /** Runtime only: public key files selecting this connection's keys in a shared agent — see SSHConnectionConfig.agentIdentityFiles. */
   agentIdentityFiles?: string[];
   pkcs11LibPath?: string;
@@ -207,6 +227,8 @@ export interface S3Config {
   initialPath?: string;
   proxy?: ProxyConfig;
   group?: string;
+  /** Free-form labels for searching and filtering; cleaned by `normalizeTags` (shared/tags.ts) on every save. */
+  tags?: string[];
   lastUsedAt?: string;
   /** ISO 8601 timestamp of the last edit. Used by remote profile sync to resolve conflicts. */
   updatedAt?: string;

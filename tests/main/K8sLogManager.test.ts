@@ -80,10 +80,18 @@ describe('K8sLogManager', () => {
     expect(onData).toHaveBeenCalledWith({ sessionId, data: 'line one\n' });
   });
 
-  it('passes through custom tailLines/timestamps/previous options', async () => {
+  it('passes through custom tailLines/timestamps/previous options and disables follow for previous', async () => {
     const manager = new K8sLogManager();
     await manager.startFollow(TARGET, { tailLines: 50, timestamps: true, previous: true });
-    expect(calls[0].options).toMatchObject({ tailLines: 50, timestamps: true, previous: true });
+    expect(calls[0].options).toMatchObject({ follow: false, tailLines: 50, timestamps: true, previous: true });
+  });
+
+  it('translates HTTP 400 into descriptive previous container not found error', async () => {
+    const manager = new K8sLogManager();
+    logMock.mockRejectedValueOnce(new Error('HTTP-Code: 400\nMessage: Error occurred in log request'));
+    await expect(manager.startFollow(TARGET, { previous: true })).rejects.toThrow(
+      /previous terminated container "nginx" in pod "nginx-1" not found/
+    );
   });
 
   it('emits end and stops accepting further stop() calls once the stream naturally ends', async () => {

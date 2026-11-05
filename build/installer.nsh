@@ -16,7 +16,7 @@
   ; disabled by default on Windows. Only needed for smartcard "Once Per Terminal
   ; Connection" / "Global" PIN caching modes (Win32-OpenSSH's ssh-agent.exe can
   ; only run as this single system service, never as a per-app private agent —
-  ; see the README's "Smartcard PIN Caching" section). Everything else,
+  ; see the user guide's Windows page, docs.sshs3.com/docs/windows/). Everything else,
   ; including "Always Prompt" mode, works without it, so this is best-effort:
   ; failure (declined UAC prompt, OpenSSH Client feature not installed, locked
   ; -down group policy, ...) is silently ignored rather than blocking install.

@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import fs from 'node:fs';
 import type { IPty, IDisposable } from 'node-pty';
 import { SmartcardDetector } from '../../src/main/smartcard/SmartcardDetector';
 import { SSHPtyManager } from '../../src/main/ssh/SSHPtyManager';
@@ -144,6 +145,30 @@ describe('SSHPtyManager', () => {
       expect(options.cwd).toBe('/tmp');
       expect(options.env.CUSTOM_VAR).toBe('xyz');
       expect(options.env.TERM).toBe('xterm-256color');
+    });
+
+    // M3 (code review 2026-11-03): the multiplexing socket used to be os.tmpdir()/s3m-<8 hex>.sock, a predictable
+    // name in a shared folder that is reused on reconnect.
+    it.skipIf(process.platform === 'win32')('keeps the multiplexing socket in the private app folder, not in the shared temp folder', async () => {
+      const os = await import('node:os');
+      const path = await import('node:path');
+      const runtime = fs.mkdtempSync(path.join(os.tmpdir(), 'pty-runtime-'));
+      const saved = process.env.XDG_RUNTIME_DIR;
+      process.env.XDG_RUNTIME_DIR = runtime;
+      try {
+        await manager.createSession({
+          id: 'mux-1', name: 'Mux', host: 'example.com', port: 22, username: 'u', authType: 'password', // pragma: allowlist secret
+        } as SSHConnectionConfig);
+
+        const { args } = (mockPtyInstances[mockPtyInstances.length - 1] as any)._spawnArgs as { args: string[] };
+        const controlPath = args.find((a) => a.startsWith('ControlPath='))!.slice('ControlPath='.length);
+        expect(path.dirname(controlPath)).toBe(path.join(runtime, 'sshs3'));
+        expect(fs.statSync(path.dirname(controlPath)).mode & 0o777).toBe(0o700);
+      } finally {
+        if (saved === undefined) delete process.env.XDG_RUNTIME_DIR;
+        else process.env.XDG_RUNTIME_DIR = saved;
+        fs.rmSync(runtime, { recursive: true, force: true });
+      }
     });
 
     it('should support SSH agent socket configuration', async () => {
@@ -517,6 +542,66 @@ describe('SSHPtyManager', () => {
     });
   });
 
+  describe('hasSshClient', () => {
+    const config: SSHConnectionConfig = {
+      id: 'sess-ssh-child',
+      name: 'Ssh child',
+      host: 'host.local',
+      username: 'tester',
+      authType: 'password',
+    };
+
+    // /proc is Linux only, and so is the detection.
+    const onLinux = it.skipIf(process.platform !== 'linux');
+
+    function fakeProc(children: string, comm: Record<string, string>) {
+      return vi.spyOn(fs, 'readFileSync').mockImplementation(((file: any) => {
+        const f = String(file);
+        if (f === '/proc/12345/task/12345/children') return children;
+        const m = f.match(/^\/proc\/(\d+)\/comm$/);
+        if (m && comm[m[1]] !== undefined) return comm[m[1]];
+        throw new Error(`ENOENT ${f}`);
+      }) as any);
+    }
+
+    afterEach(() => vi.restoreAllMocks());
+
+    onLinux('is true when the shell has an ssh child, and the cwd is then not reported', async () => {
+      const session = (await manager.createSession(config)) as any;
+      fakeProc('222 333', { '222': 'vim\n', '333': 'ssh\n' });
+      expect(session.hasSshClient()).toBe(true);
+      expect(manager.sessionHasSshClient(session.sessionId)).toBe(true);
+      expect(session.getCwd()).toBeNull();
+    });
+
+    onLinux('is false for ssh-add, ssh-agent and sshfs, which are not a login to another host', async () => {
+      const session = (await manager.createSession(config)) as any;
+      for (const comm of ['ssh-add\n', 'ssh-agent\n', 'sshfs\n']) {
+        vi.restoreAllMocks();
+        fakeProc('222', { '222': comm });
+        expect(session.hasSshClient()).toBe(false);
+      }
+    });
+
+    onLinux('is false without children, with other children, or when /proc cannot be read', async () => {
+      const session = (await manager.createSession(config)) as any;
+      fakeProc('', {});
+      expect(session.hasSshClient()).toBe(false);
+      vi.restoreAllMocks();
+      fakeProc('222', { '222': 'vim\n' });
+      expect(session.hasSshClient()).toBe(false);
+      vi.restoreAllMocks();
+      vi.spyOn(fs, 'readFileSync').mockImplementation(() => {
+        throw new Error('EACCES');
+      });
+      expect(session.hasSshClient()).toBe(false);
+    });
+
+    it('is false for an unknown session', () => {
+      expect(manager.sessionHasSshClient('no-such-session')).toBe(false);
+    });
+  });
+
   describe('getAllSessions and killAll', () => {
     it('should track multiple active sessions and kill all on killAll', async () => {
       const config1: SSHConnectionConfig = {
@@ -603,6 +688,59 @@ describe('SSHPtyManager', () => {
       expect(mockPtyInstances).toHaveLength(2);
       expect(manager.getSession('sess-reconnect')).toBeDefined();
 
+      vi.useRealTimers();
+    });
+
+    // Low finding (code review 2026-11-03): any non-zero exit reconnected, including `exit 1` typed in the shell or
+    // a remote command failing. ssh itself ends with 255 when the connection fails.
+    it('does not reconnect when the session ended with an ordinary non-zero exit code', async () => {
+      vi.useFakeTimers();
+      const session = await manager.createSession({
+        id: 'sess-exit1', name: 'Exit', host: 'host.local', username: 'tester', authType: 'password', // pragma: allowlist secret
+        autoReconnect: true, maxReconnectAttempts: 2, reconnectDelayMs: 50,
+      } as SSHConnectionConfig);
+      const reconnectingSpy = vi.fn();
+      manager.on('reconnecting', reconnectingSpy);
+
+      // node-pty reports signal 0, not undefined, for a process that exited by itself.
+      mockPtyInstances[0].emitExit(1, 0);
+      await vi.advanceTimersByTimeAsync(200);
+
+      expect(reconnectingSpy).not.toHaveBeenCalled();
+      expect(session.isReconnecting?.()).toBe(false);
+      expect(mockPtyInstances).toHaveLength(1);
+      vi.useRealTimers();
+    });
+
+    it('still reconnects on exit code 255, also with the signal 0 node-pty reports for it', async () => {
+      vi.useFakeTimers();
+      await manager.createSession({
+        id: 'sess-255', name: '255', host: 'host.local', username: 'tester', authType: 'password', // pragma: allowlist secret
+        autoReconnect: true, maxReconnectAttempts: 2, reconnectDelayMs: 50,
+      } as SSHConnectionConfig);
+      const reconnectingSpy = vi.fn();
+      manager.on('reconnecting', reconnectingSpy);
+
+      mockPtyInstances[0].emitExit(255, 0);
+
+      expect(reconnectingSpy).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(100);
+      vi.useRealTimers();
+    });
+
+    it('still reconnects when ssh was killed by a signal', async () => {
+      vi.useFakeTimers();
+      await manager.createSession({
+        id: 'sess-sig', name: 'Sig', host: 'host.local', username: 'tester', authType: 'password', // pragma: allowlist secret
+        autoReconnect: true, maxReconnectAttempts: 2, reconnectDelayMs: 50,
+      } as SSHConnectionConfig);
+      const reconnectingSpy = vi.fn();
+      manager.on('reconnecting', reconnectingSpy);
+
+      mockPtyInstances[0].emitExit(0, 15);
+
+      expect(reconnectingSpy).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(100);
       vi.useRealTimers();
     });
 
@@ -838,7 +976,7 @@ describe('SSHPtyManager', () => {
       await customManager.createShellSession({ cols: 80, rows: 24, env: { PATH: '/usr/bin' } });
 
       const { options } = (mockPtyInstances[mockPtyInstances.length - 1] as any)._spawnArgs;
-      expect(options.env.PATH).toContain('.sshs3');
+      expect(options.env.PATH).toMatch(/(\.sshs3|sshs3-bin)/);
       expect(options.env.PATH).toContain('/usr/bin');
     });
 

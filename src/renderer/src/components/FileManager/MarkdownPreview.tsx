@@ -1,6 +1,11 @@
 import React, { useEffect, useRef } from 'react';
-import ReactMarkdown from 'react-markdown';
+import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { HighlightedCodeBlock, PlainCodeBlock } from './MarkdownCodeBlock';
+import { MarkdownLink } from './MarkdownLink';
+
+const HIGHLIGHTED_COMPONENTS: Components = { pre: HighlightedCodeBlock, a: MarkdownLink };
+const PLAIN_COMPONENTS: Components = { pre: PlainCodeBlock, a: MarkdownLink };
 
 interface MarkdownPreviewProps {
   content: string;
@@ -143,8 +148,14 @@ const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({
   }, [currentMatchIdx]);
 
   return (
-    <div ref={containerRef} className="markdown-preview-root">
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{content || '*Empty file*'}</ReactMarkdown>
+    // The app's <body> is select-none; the preview is read like a document, so its text must be selectable.
+    <div ref={containerRef} className="markdown-preview-root select-text">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={searchQuery.trim() ? PLAIN_COMPONENTS : HIGHLIGHTED_COMPONENTS}
+      >
+        {content || '*Empty file*'}
+      </ReactMarkdown>
     </div>
   );
 };

@@ -188,4 +188,77 @@ describe('PaneTree Component', () => {
 
     expect(screen.getByText('WSL: Ubuntu-24.04')).toBeInTheDocument();
   });
+
+  it('renders a resizable divider for a 2-child split and reports the new weights on change (§23)', () => {
+    const splitNode = {
+      type: 'split' as const,
+      id: 'split-1',
+      orientation: 'row' as const,
+      children: [
+        { type: 'leaf' as const, id: 'pane-1' },
+        { type: 'leaf' as const, id: 'pane-2' },
+      ],
+    };
+    const onResizeSplit = vi.fn();
+
+    render(
+      <PaneTreeView
+        node={splitNode}
+        isActive={true}
+        activePaneId="pane-1"
+        totalPanes={2}
+        settings={dummySettings}
+        platform="linux"
+        onSelectPane={vi.fn()}
+        onSplitPane={vi.fn()}
+        onResizeSplit={onResizeSplit}
+        onClosePane={vi.fn()}
+        onChangeConnection={vi.fn()}
+        onOpenLocalTerminal={vi.fn()}
+        onCloseTab={vi.fn()}
+      />
+    );
+
+    const divider = screen.getByRole('separator', { name: 'Resize terminal panes' });
+    expect(divider).toHaveAttribute('aria-valuenow', '50');
+
+    fireEvent.keyDown(divider, { key: 'ArrowRight', ctrlKey: true, altKey: true });
+    expect(onResizeSplit).toHaveBeenCalledTimes(1);
+    const [splitId, [first, second]] = onResizeSplit.mock.calls[0];
+    expect(splitId).toBe('split-1');
+    expect(first).toBeCloseTo(0.55);
+    expect(second).toBeCloseTo(0.45);
+  });
+
+  it('does not render a divider for a 3-child split (not yet resizable)', () => {
+    const splitNode = {
+      type: 'split' as const,
+      id: 'split-1',
+      orientation: 'row' as const,
+      children: [
+        { type: 'leaf' as const, id: 'pane-1' },
+        { type: 'leaf' as const, id: 'pane-2' },
+        { type: 'leaf' as const, id: 'pane-3' },
+      ],
+    };
+
+    render(
+      <PaneTreeView
+        node={splitNode}
+        isActive={true}
+        activePaneId="pane-1"
+        totalPanes={3}
+        settings={dummySettings}
+        platform="linux"
+        onSelectPane={vi.fn()}
+        onSplitPane={vi.fn()}
+        onClosePane={vi.fn()}
+        onChangeConnection={vi.fn()}
+        onOpenLocalTerminal={vi.fn()}
+        onCloseTab={vi.fn()}
+      />
+    );
+
+    expect(screen.queryByRole('separator')).not.toBeInTheDocument();
+  });
 });

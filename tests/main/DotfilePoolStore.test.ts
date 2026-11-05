@@ -157,6 +157,52 @@ describe('DotfilePoolStore with Master Files', () => {
     expect(poolAfterUpdate!.files[0].content).toBe('set -g mouse on\nbind r source-file ~/.tmux.conf');
   });
 
+  it('keeps stored file tombstones when the pool is saved back from the (tombstone-free) getPools() list', async () => {
+    await store.savePool({
+      id: 'p',
+      name: 'P',
+      files: [
+        { id: 'f1', remotePath: '~/.a', content: 'a', deletedAt: '2026-10-01 10:00' },
+        { id: 'f2', remotePath: '~/.b', content: 'b' },
+      ],
+    });
+
+    // The pool editor loads via getPools() (tombstones hidden) and saves that list back.
+    const visible = (await store.getPools())[0];
+    expect(visible.files.map((f) => f.id)).toEqual(['f2']);
+    await store.savePool(visible);
+
+    const raw = (await store.getPoolsIncludingTombstones())[0];
+    expect(raw.files.find((f) => f.id === 'f1')?.deletedAt).toBe('2026-10-01 10:00');
+    // The caller's object is not polluted with the tombstone.
+    expect(visible.files.map((f) => f.id)).toEqual(['f2']);
+  });
+
+  it('does not delete the master file of an active file that shares a path with a tombstone', async () => {
+    await store.savePool({
+      id: 'p',
+      name: 'P',
+      files: [
+        { id: 'new', remotePath: '~/.bashrc', content: 'fresh' },
+        { id: 'old', remotePath: '~/.bashrc', content: 'stale', deletedAt: '2026-10-01 10:00' },
+      ],
+    });
+
+    const active = (await store.getPools())[0].files[0];
+    expect(active.id).toBe('new');
+    expect(await fs.readFile(active.masterFilePath!, 'utf-8')).toBe('fresh');
+  });
+
+  it('serializes concurrent addFileToPool calls instead of losing files', async () => {
+    await Promise.all([
+      store.addFileToPool('p', { remotePath: '~/.one', content: '1' }),
+      store.addFileToPool('p', { remotePath: '~/.two', content: '2' }),
+      store.addFileToPool('p', { remotePath: '~/.three', content: '3' }),
+    ]);
+    const paths = (await store.getPools())[0].files.map((f) => f.remotePath).sort();
+    expect(paths).toEqual(['~/.one', '~/.three', '~/.two']);
+  });
+
   it('deletes pool and removes master file directory from disk', async () => {
     const pool: DotfilePool = {
       id: 'pool-to-delete',

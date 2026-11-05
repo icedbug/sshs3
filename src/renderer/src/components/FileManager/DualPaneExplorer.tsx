@@ -7,14 +7,19 @@ import type { K8sTerminalTarget, K8sStorageConfig } from '@shared/types/kubernet
 import { ConnectionManagerModal } from '../ConnectionModal/ConnectionManagerModal';
 import { DragDropProvider } from './DragDropLayer';
 import { FilePane } from './FilePane';
+import { SplitDivider } from '../ui/SplitDivider';
 import { TransferQueueDrawer } from './TransferQueueDrawer';
 import { FILEMANAGER_FOCUS_SIDE_EVENT, type PaneSide, type PaneSource, type SourceType } from './types';
 import type { TransferConflictResolution } from '@shared/types/ipc';
 import { isElementVisible } from '../../lib/spatialNavigation';
 import { describeIpcError } from '../../lib/format';
 import { sftpUnavailableReason } from '../../lib/platform';
+import { withSavedS3Secrets, withSavedSshSecrets } from '../../lib/savedSecrets';
 import { useModalDismiss } from '../../lib/useModalDismiss';
+import { updateSession } from '../../lib/sessionUpdate';
+import { useDialogFocus } from '../../lib/useDialogFocus';
 import { createRendererLogger } from '../../lib/log';
+import { registerFileManager, type FileManagerSnapshot } from '../../lib/fileManagerState';
 const log = createRendererLogger('DualPaneExplorer');
 
 const DEFAULT_SOURCE: Record<PaneSide, PaneSource> = {
@@ -32,12 +37,25 @@ interface DualPaneExplorerProps {
   onOpenK8sTerminal?: (target: K8sTerminalTarget, path: string) => void;
   /** Current keyboard shortcut bindings, forwarded to each pane for Search in Files. */
   shortcuts?: Record<string, string>;
+  /** Id of the tab this explorer fills; lets the tab be moved to another window with its panes. */
+  tabId?: string;
+  /** Show these panes as they were (tab moved from another window); their providers are still connected. */
+  restoredPanes?: FileManagerSnapshot;
   /** Automatically connect one of the panes to this K8s container on mount. */
   initialK8sTarget?: K8sTerminalTarget;
   /** Automatically connect the right pane to this SSH/SFTP profile on mount. */
   initialSSHConfig?: SSHConnectionConfig;
+  /** Automatically connect the right pane to this S3 profile on mount. */
+  initialS3Config?: S3Config;
+  /** Ask for a remote connection for the right pane when the tab opens ("New Remote File Manager"). */
+  promptRemote?: boolean;
+  /** Focus local disk pane on this folder on mount. */
+  initialLocalPath?: string;
+  /** Optional file or folder path to highlight and scroll to upon loading. */
+  initialSelectedPath?: string;
   /** Settings > Files & Storage > "Show hidden files and dotfiles". Off by default. */
   showHiddenFiles?: boolean;
+  onToggleHiddenFiles?: () => void;
   /** Settings > Git & GitHub > "SFTP & File Manager Git Integration". On by default. */
   gitIntegrationEnabled?: boolean;
 }
@@ -46,16 +64,23 @@ export const DualPaneExplorer: React.FC<DualPaneExplorerProps> = ({
   onOpenTerminal,
   onOpenK8sTerminal,
   shortcuts,
+  tabId,
+  restoredPanes,
   initialK8sTarget,
   initialSSHConfig,
+  initialS3Config,
+  promptRemote = false,
+  initialLocalPath,
+  initialSelectedPath,
   showHiddenFiles = false,
+  onToggleHiddenFiles,
   gitIntegrationEnabled = true,
 }) => {
   const [panes, setPanes] = useState<Record<PaneSide, PaneState>>({
     left: { source: DEFAULT_SOURCE.left, path: '/' },
     right: { source: DEFAULT_SOURCE.right, path: '/' },
   });
-  const [activeSide, setActiveSide] = useState<PaneSide>('left');
+  const [activeSide, setActiveSide] = useState<PaneSide>(initialSSHConfig || initialS3Config ? 'right' : 'left');
   const [refreshToken, setRefreshToken] = useState(0);
   const [ready, setReady] = useState(false);
   const [initError, setInitError] = useState<string | null>(null);
@@ -68,10 +93,19 @@ export const DualPaneExplorer: React.FC<DualPaneExplorerProps> = ({
   } | null>(null);
   const [promptPassword, setPromptPassword] = useState('');
   useModalDismiss(() => setPasswordPrompt(null), !!passwordPrompt, !connecting);
+  const passwordDialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(passwordDialogRef, !!passwordPrompt);
   const [savePasswordToProfile, setSavePasswordToProfile] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
+  const splitContainerRef = useRef<HTMLDivElement>(null);
+  const [splitRatio, setSplitRatio] = useState(0.5);
+  const snapshotRef = useRef<FileManagerSnapshot | null>(null);
+  snapshotRef.current = { left: panes.left, right: panes.right, activeSide, splitRatio };
+  useEffect(() => (tabId ? registerFileManager(tabId, () => snapshotRef.current) : undefined), [tabId]);
   const autoConnectedK8sRef = useRef(false);
   const autoConnectedSSHRef = useRef(false);
+  const autoConnectedS3Ref = useRef(false);
+  const autoConnectedLocalRef = useRef(false);
 
   useEffect(() => {
     const handleFocusSide = (e: Event) => {
@@ -96,6 +130,19 @@ export const DualPaneExplorer: React.FC<DualPaneExplorerProps> = ({
       .connectStorage({ id: 'local', name: 'Local Disk', type: 'local' })
       .then(async () => {
         if (!mounted) return;
+        if (restoredPanes) {
+          // Moved here from another window: the panes are still connected, just show them.
+          autoConnectedLocalRef.current = true;
+          autoConnectedSSHRef.current = true;
+          autoConnectedS3Ref.current = true;
+          autoConnectedK8sRef.current = true;
+          void window.multissh.getHomeDir?.().then((home) => mounted && home && setHomeDir(home)).catch(() => {});
+          setPanes({ left: restoredPanes.left, right: restoredPanes.right });
+          setActiveSide(restoredPanes.activeSide);
+          setSplitRatio(restoredPanes.splitRatio);
+          setReady(true);
+          return;
+        }
         const [session, profiles, userHome] = await Promise.all([
           window.multissh.sessionGet?.(),
           window.multissh.profilesGet?.(),
@@ -225,18 +272,21 @@ export const DualPaneExplorer: React.FC<DualPaneExplorerProps> = ({
           };
         };
 
-        const left = await restoreSide('left', session?.panes?.left);
+        const left = initialLocalPath
+          ? { source: { providerId: 'local', sourceType: 'local' as const, label: 'Local Disk' }, path: initialLocalPath }
+          : await restoreSide('left', session?.panes?.left);
         const right = await restoreSide('right', session?.panes?.right);
 
         if (mounted) {
+          if (initialLocalPath) {
+            autoConnectedLocalRef.current = true;
+          }
           setPanes({ left, right });
           setReady(true);
-          // UX audit finding #7: a brand-new File Manager tab used to default
-          // both panes to Local Disk — two identical, useless mirrors of the
-          // same folder. When there's nothing saved for the right pane and
-          // it isn't being auto-connected to a specific target, prompt for a
-          // remote connection instead of silently leaving it on Local Disk.
-          if (!session?.panes?.right && !initialSSHConfig && !initialK8sTarget) {
+          // "New Remote File Manager" opens the Connection Manager on top of the file manager for the right
+          // pane, even when a previous connection was restored there (Escape keeps that one). A plain new
+          // File Manager never asks.
+          if (promptRemote && !initialSSHConfig && !initialS3Config && !initialK8sTarget) {
             setConnectionRequest({ side: 'right', type: 'sftp' });
           }
         }
@@ -270,31 +320,31 @@ export const DualPaneExplorer: React.FC<DualPaneExplorerProps> = ({
   }, []);
 
   const persistPaneState = (updatedPanes: Record<PaneSide, PaneState>) => {
-    void window.multissh.sessionGet?.().then((session) => {
-      const lastPaths = {
+    // Queued with the tab saves (see sessionUpdate.ts), so neither can write the other's part back stale.
+    updateSession((session) => ({
+      tabs: session?.tabs || [],
+      activeTabId: session?.activeTabId || '',
+      lastPaths: {
         ...(session?.lastPaths || {}),
         [updatedPanes.left.source.providerId]: updatedPanes.left.path,
         [updatedPanes.right.source.providerId]: updatedPanes.right.path,
-      };
-      void window.multissh.sessionSave?.({
-        tabs: session?.tabs || [],
-        activeTabId: session?.activeTabId || '',
-        lastPaths,
-        panes: {
-          left: {
-            sourceType: updatedPanes.left.source.sourceType,
-            providerId: updatedPanes.left.source.providerId,
-            label: updatedPanes.left.source.label,
-            path: updatedPanes.left.path,
-          },
-          right: {
-            sourceType: updatedPanes.right.source.sourceType,
-            providerId: updatedPanes.right.source.providerId,
-            label: updatedPanes.right.source.label,
-            path: updatedPanes.right.path,
-          },
+      },
+      panes: {
+        left: {
+          sourceType: updatedPanes.left.source.sourceType,
+          providerId: updatedPanes.left.source.providerId,
+          label: updatedPanes.left.source.label,
+          path: updatedPanes.left.path,
         },
-      });
+        right: {
+          sourceType: updatedPanes.right.source.sourceType,
+          providerId: updatedPanes.right.source.providerId,
+          label: updatedPanes.right.source.label,
+          path: updatedPanes.right.path,
+        },
+      },
+    })).catch(() => {
+      // Best effort: the next change saves the pane state again.
     });
   };
 
@@ -395,8 +445,7 @@ export const DualPaneExplorer: React.FC<DualPaneExplorerProps> = ({
         setConnectionRequest(null);
         setPasswordPrompt(null);
       } catch (err) {
-        let msg = describeIpcError(err, 'Could not connect to the SFTP server');
-        msg = msg.replace(/^Error invoking remote method '[^']+':\s*(Error:\s*)?/i, '');
+        const msg = describeIpcError(err, 'Could not connect to the SFTP server');
         window.alert(msg);
       } finally {
         setConnecting(false);
@@ -421,9 +470,9 @@ export const DualPaneExplorer: React.FC<DualPaneExplorerProps> = ({
   };
 
   const connectPaneToS3 = useCallback(
-    async (config: S3Config) => {
-      if (!connectionRequest) return;
-      const { side } = connectionRequest;
+    async (config: S3Config, targetSide?: PaneSide) => {
+      const side = targetSide || connectionRequest?.side;
+      if (!side) return;
       setConnecting(true);
       try {
         const providerId = `s3-${config.id}`;
@@ -510,11 +559,40 @@ export const DualPaneExplorer: React.FC<DualPaneExplorerProps> = ({
   useEffect(() => {
     if (initialSSHConfig && ready && !autoConnectedSSHRef.current) {
       autoConnectedSSHRef.current = true;
-      void connectPaneToSSH(initialSSHConfig, undefined, 'right');
+      // A tab restored after a restart has no secrets (they are not kept in the session): take them from its profile.
+      void (async () => {
+        const profiles = await window.multissh.profilesGet?.().catch(() => undefined);
+        await connectPaneToSSH(withSavedSshSecrets(initialSSHConfig, profiles?.ssh), undefined, 'right');
+      })();
     }
     // Runs once per mount, for the same reason as the k8s effect above.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialSSHConfig, ready]);
+
+  useEffect(() => {
+    if (initialS3Config && ready && !autoConnectedS3Ref.current) {
+      autoConnectedS3Ref.current = true;
+      void (async () => {
+        const profiles = await window.multissh.profilesGet?.().catch(() => undefined);
+        await connectPaneToS3(withSavedS3Secrets(initialS3Config, profiles?.s3), 'right');
+      })();
+    }
+    // Runs once per mount, for the same reason as the k8s effect above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialS3Config, ready]);
+
+  useEffect(() => {
+    if (initialLocalPath && ready && !autoConnectedLocalRef.current) {
+      autoConnectedLocalRef.current = true;
+      setPanes((prev) => ({
+        ...prev,
+        left: {
+          source: { providerId: 'local', sourceType: 'local', label: 'Local Disk' },
+          path: initialLocalPath,
+        },
+      }));
+    }
+  }, [initialLocalPath, ready]);
 
   const handleOpenTerminal = useCallback(
     async (providerId: string, path: string) => {
@@ -617,7 +695,7 @@ export const DualPaneExplorer: React.FC<DualPaneExplorerProps> = ({
         }}
       >
         {initError && (
-          <div className="border-b border-red-900/60 bg-red-950/40 px-3 py-1.5 text-xs text-red-300">{initError}</div>
+          <div role="alert" className="border-b border-red-900/60 bg-red-950/40 px-3 py-1.5 text-xs text-red-300">{initError}</div>
         )}
         <div
           data-testid="dual-pane-ai-bar"
@@ -692,11 +770,13 @@ export const DualPaneExplorer: React.FC<DualPaneExplorerProps> = ({
             </button>
           </div>
         </div>
-        <div className="flex min-h-0 flex-1 gap-1.5 p-1.5">
+        <div ref={splitContainerRef} className="flex min-h-0 flex-1 p-1.5">
+          <div style={{ flexGrow: splitRatio, flexBasis: 0, minWidth: 0 }} className="flex min-w-0">
           <FilePane
             side="left"
             source={panes.left.source}
             currentPath={panes.left.path}
+            initialSelectedPath={initialLocalPath ? initialSelectedPath : undefined}
             isActive={activeSide === 'left'}
             onFocus={handleLeftFocus}
             onPathChange={handleLeftPathChange}
@@ -707,12 +787,23 @@ export const DualPaneExplorer: React.FC<DualPaneExplorerProps> = ({
             otherPane={otherPaneForLeft}
             shortcuts={shortcuts}
             showHiddenFiles={showHiddenFiles}
+            onToggleHiddenFiles={onToggleHiddenFiles}
             gitIntegrationEnabled={gitIntegrationEnabled}
           />
+          </div>
+          <SplitDivider
+            orientation="vertical"
+            ratio={splitRatio}
+            onChange={setSplitRatio}
+            containerRef={splitContainerRef}
+            label="Resize file panes"
+          />
+          <div style={{ flexGrow: 1 - splitRatio, flexBasis: 0, minWidth: 0 }} className="flex min-w-0">
           <FilePane
             side="right"
             source={panes.right.source}
             currentPath={panes.right.path}
+            initialSelectedPath={initialSSHConfig ? initialSelectedPath : undefined}
             isActive={activeSide === 'right'}
             onFocus={handleRightFocus}
             onPathChange={handleRightPathChange}
@@ -723,8 +814,10 @@ export const DualPaneExplorer: React.FC<DualPaneExplorerProps> = ({
             otherPane={otherPaneForRight}
             shortcuts={shortcuts}
             showHiddenFiles={showHiddenFiles}
+            onToggleHiddenFiles={onToggleHiddenFiles}
             gitIntegrationEnabled={gitIntegrationEnabled}
           />
+          </div>
         </div>
         <TransferQueueDrawer />
       </div>
@@ -746,7 +839,7 @@ export const DualPaneExplorer: React.FC<DualPaneExplorerProps> = ({
       />
       {passwordPrompt && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4">
-          <div role="dialog" aria-modal="true" aria-label="Password required for SFTP" className="w-full max-w-sm rounded-xl border border-border-subtle bg-app-surface p-5 shadow-2xl space-y-4 text-xs">
+          <div ref={passwordDialogRef} role="dialog" aria-modal="true" aria-label="Password required for SFTP" className="w-full max-w-sm rounded-xl border border-border-subtle bg-app-surface p-5 shadow-2xl space-y-4 text-xs">
             <div className="flex items-center gap-2 text-sky-400 font-semibold text-sm">
               <KeyRound className="h-4 w-4" />
               <span>Password Required for SFTP</span>

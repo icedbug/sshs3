@@ -27,3 +27,31 @@ export function sanitizePaneNode(node: PaneNode): PaneNode {
   }
   return node;
 }
+
+function withoutSecrets<T extends object>(config: T, secretFields: readonly string[]): T {
+  const result = { ...config } as Record<string, unknown>;
+  for (const field of secretFields) delete result[field];
+  const proxy = result.proxy;
+  if (proxy && typeof proxy === 'object') {
+    const { password: _proxyPassword, ...restProxy } = proxy as Record<string, unknown>;
+    result.proxy = restProxy;
+  }
+  return result as T;
+}
+
+/**
+ * Strips the credentials a file manager tab carries in `initialSSHConfig` / `initialS3Config`
+ * (the connection it was opened with, secrets included) before the tab is persisted. Applies to
+ * any tab, with or without a pane tree. Shared by the renderer and the main process (SessionStore),
+ * so a tab saved by an older or buggy caller is cleaned on the way to disk as well.
+ */
+export function sanitizeTabConfigs<T extends object>(tab: T): T {
+  const source = tab as Record<string, unknown>;
+  const ssh = source.initialSSHConfig;
+  const s3 = source.initialS3Config;
+  if (!ssh && !s3) return tab;
+  const result: Record<string, unknown> = { ...source };
+  if (ssh && typeof ssh === 'object') result.initialSSHConfig = withoutSecrets(ssh, ['password', 'passphrase', 'pin']);
+  if (s3 && typeof s3 === 'object') result.initialS3Config = withoutSecrets(s3, ['secretAccessKey', 'sessionToken']);
+  return result as T;
+}

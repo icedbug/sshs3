@@ -3,6 +3,7 @@ import { AlertTriangle, CheckCircle2, Cloud, FolderOpen, KeyRound, Loader2 } fro
 import type { S3Config } from '@shared/types/storage';
 import type { AwsSsoAccount, AwsSsoAccountRole } from '@shared/types/aws';
 import { describeIpcError } from '../../lib/format';
+import { ProfileOrganizationFields } from './ProfileOrganizationFields';
 
 interface S3ProfileFormProps {
   initial?: S3Config;
@@ -10,6 +11,8 @@ interface S3ProfileFormProps {
   onCancel: () => void;
   /** See `SSHProfileFormProps.folderSuggestions` — same Team Vault folder-path autocomplete. */
   folderSuggestions?: string[];
+  /** See `SSHProfileFormProps.tagSuggestions`. */
+  tagSuggestions?: string[];
   /** See `SSHProfileFormProps.canEditSecret` — same Team Vault admin-only secret gate, applied
    * here to `secretAccessKey`/`sessionToken`. */
   canEditSecret?: boolean;
@@ -34,6 +37,7 @@ export const S3ProfileForm: React.FC<S3ProfileFormProps> = ({
   onSave,
   onCancel,
   folderSuggestions,
+  tagSuggestions,
   canEditSecret = true,
 }) => {
   const [config, setConfig] = useState<S3Config>(initial ?? emptyConfig());
@@ -72,6 +76,15 @@ export const S3ProfileForm: React.FC<S3ProfileFormProps> = ({
     setTestResult(null);
   };
 
+  // Same proxy/custom-CA override the S3 client itself uses, so SSO sign-in
+  // behind a corporate TLS-intercepting proxy hits the OIDC endpoint the
+  // same way the S3 calls will once the profile is saved.
+  const ssoNetworkOptions = () => ({
+    customCaPath: config.customCaPath,
+    rejectUnauthorized: config.rejectUnauthorized,
+    proxy: config.proxy,
+  });
+
   const handleAwsSsoLogin = async () => {
     const startUrl = config.sso?.startUrl?.trim();
     const region = config.sso?.region?.trim() || config.region || 'us-east-1';
@@ -84,10 +97,10 @@ export const S3ProfileForm: React.FC<S3ProfileFormProps> = ({
     setSsoManualEntry(false);
     setSsoLoggingIn(true);
     try {
-      const { accessToken } = await window.multissh.awsSsoLogin(startUrl, region);
+      const { accessToken } = await window.multissh.awsSsoLogin(startUrl, region, ssoNetworkOptions());
       setSsoAccessToken(accessToken);
       try {
-        const accounts = await window.multissh.awsSsoListAccounts(accessToken, region);
+        const accounts = await window.multissh.awsSsoListAccounts(accessToken, region, ssoNetworkOptions());
         setSsoAccounts(accounts);
       } catch {
         // Some IAM Identity Center permission sets can't list accounts/roles
@@ -108,7 +121,7 @@ export const S3ProfileForm: React.FC<S3ProfileFormProps> = ({
     const region = config.sso?.region?.trim() || config.region || 'us-east-1';
     setLoadingRoles(true);
     try {
-      const roles = await window.multissh.awsSsoListRoles(ssoAccessToken, region, accountId);
+      const roles = await window.multissh.awsSsoListRoles(ssoAccessToken, region, accountId, ssoNetworkOptions());
       setSsoRoles(roles);
     } catch (err) {
       setSsoError(describeIpcError(err, 'Failed to list roles for this account'));
@@ -172,23 +185,15 @@ export const S3ProfileForm: React.FC<S3ProfileFormProps> = ({
             placeholder="e.g. Backup Bucket"
           />
         </label>
-        <label className="flex flex-col gap-1 text-txt-secondary">
-          Group / Folder (optional)
-          <input
-            value={config.group ?? ''}
-            onChange={(e) => update('group', e.target.value)}
-            list={folderSuggestions ? 's3-folder-suggestions' : undefined}
-            className="rounded-lg border border-border-subtle bg-app-input px-2.5 py-1.5 text-sm text-txt-primary outline-none focus:border-sky-500 placeholder-txt-muted"
-            placeholder={folderSuggestions ? 'e.g. Acme Infra/Cluster A' : 'e.g. Production or MinIO'}
-          />
-          {folderSuggestions && (
-            <datalist id="s3-folder-suggestions">
-              {folderSuggestions.map((path) => (
-                <option key={path} value={path} />
-              ))}
-            </datalist>
-          )}
-        </label>
+        <ProfileOrganizationFields
+          group={config.group}
+          tags={config.tags}
+          onGroupChange={(group) => update('group', group)}
+          onTagsChange={(tags) => update('tags', tags)}
+          groupPlaceholder="e.g. Production or MinIO"
+          folderSuggestions={folderSuggestions}
+          tagSuggestions={tagSuggestions}
+        />
       </div>
 
       <div className="grid grid-cols-2 gap-3">
@@ -328,7 +333,7 @@ export const S3ProfileForm: React.FC<S3ProfileFormProps> = ({
           </button>
 
           {ssoError && (
-            <p className="rounded-lg border border-red-800/60 bg-red-950/40 px-3 py-2 text-red-300">{ssoError}</p>
+            <p role="alert" className="rounded-lg border border-red-800/60 bg-red-950/40 px-3 py-2 text-red-300">{ssoError}</p>
           )}
 
           {ssoAccessToken && !ssoManualEntry && (
@@ -429,6 +434,7 @@ export const S3ProfileForm: React.FC<S3ProfileFormProps> = ({
                 placeholder="Path to CA certificate (.pem)"
               />
               <button
+                aria-label="Browse"
                 type="button"
                 onClick={() => void browseForCa()}
                 className="rounded-lg border border-border-subtle px-2.5 text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary transition-colors"

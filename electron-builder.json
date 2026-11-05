@@ -7,6 +7,7 @@
   "files": [
     "dist/**/*",
     "dist-electron/**/*",
+    "build/icon.png",
     "package.json"
   ],
   "icon": "build/icon.png",
@@ -76,7 +77,8 @@
     "target": [
       "nsis",
       "portable",
-      "zip"
+      "zip",
+      "msi"
     ],
     "artifactName": "${name}-${version}.${ext}",
     "extraResources": [
@@ -95,6 +97,48 @@
         ]
       }
     ]
+  },
+  "deb": {
+    "depends": [
+      "libgtk-3-0",
+      "libnotify4",
+      "libnss3",
+      "libxss1",
+      "libxtst6",
+      "xdg-utils",
+      "libatspi2.0-0",
+      "libuuid1",
+      "libsecret-1-0",
+      "libasound2t64 | libasound2",
+      "libgbm1"
+    ]
+  },
+  "rpm": {
+    "depends": [
+      "gtk3",
+      "libnotify",
+      "nss",
+      "libXScrnSaver",
+      "(libXtst or libXtst6)",
+      "xdg-utils",
+      "at-spi2-core",
+      "(libuuid or libuuid1)",
+      "(alsa-lib or libasound2)",
+      "(mesa-libgbm or libgbm1)"
+    ],
+    "afterRemove": "build/linux/rpm-after-remove.sh",
+    "fpm": [
+      "--rpm-posttrans",
+      "build/linux/rpm-posttrans.sh"
+    ]
+  },
+  "msi": {
+    "oneClick": true,
+    "perMachine": true,
+    "upgradeCode": "E2342C4F-1463-4420-BB6B-CA3BDB735CB3",
+    "runAfterFinish": false,
+    "createDesktopShortcut": false,
+    "createStartMenuShortcut": true
   },
   "nsis": {
     "oneClick": false,

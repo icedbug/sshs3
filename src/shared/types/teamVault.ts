@@ -1,5 +1,6 @@
 import type { SSHConnectionConfig } from './ssh';
 import type { S3Config } from './storage';
+import type { K8sProfile } from './kubernetes';
 
 export type TeamVaultRole = 'admin' | 'member';
 
@@ -36,6 +37,15 @@ export interface WorkspaceMemoryEntry {
   author?: string;
   updatedAt: number;
 }
+
+/** Sentinel `vaultId` key `TeamVaultConfigStore` entries are parked under when a device has
+ * configured an S3 target for a team it hasn't pulled from yet — joining a vault requires a
+ * configured target to pull from, but the real `vaultId` isn't known until that first pull
+ * succeeds (chicken-and-egg). The handler that performs the first successful pull is responsible
+ * for moving the entry from this key to the real `vaultId` (see
+ * `TeamVaultConfigStore.promotePendingConfig`). Never written to a `TeamVaultFile` itself — only
+ * ever a `TeamVaultConfigStore` key. */
+export const TEAM_VAULT_PENDING_VAULT_ID = '__pending__';
 
 /** The decrypted shape of `TeamVaultFile.encryptedPayload` — reuses the same domain models as
  * local profiles (`ProfileStore`'s `SSHConnectionConfig`/`S3Config`), per docs/team-vault-plan.md
@@ -74,6 +84,15 @@ export interface TeamVaultPayload {
   workspaceMemories?: WorkspaceMemoryEntry[];
   /** Shared activity & configuration change log across team members. */
   activityLog?: WorkspaceActivityEvent[];
+  /** Shared Kubernetes/OpenShift cluster templates (server, project, TLS option: no secret, no
+   * kubeconfig context, which is per member). Flat, no folders. Absent on a payload written
+   * before this field existed; treat as `[]`. An app version without this field drops it the next
+   * time it writes the payload, so members should update before K8s profiles are shared. */
+  k8s?: K8sProfile[];
+  /** Top-level payload keys this version does not know (written by a newer version). Kept as they are when the payload is
+   * written, so an older client never deletes a newer feature's data; never sent to the renderer (`getPayloadForRenderer`
+   * returns only the known fields). Internal: not part of the serialized payload under this name. */
+  unknownKeys?: Record<string, unknown>;
 }
 
 /** The fixed set of icons a Team Vault folder can be given (`TeamVaultPayload.folderIcons`) —
@@ -130,7 +149,10 @@ export interface TeamVaultRecovery {
 }
 
 export interface TeamVaultFile {
-  formatVersion: 1;
+  /** 1: the original format (header-only MAC). 2: the MAC also covers the payload ciphertext, `updatedAt`, `updatedBy`,
+   * the format version and the recovery note — see `TeamVaultCryptoService.computeFileMac`. Existing v1 vaults are
+   * upgraded to 2 automatically on unlock (`TeamVaultService.upgradeFormatIfNeeded`). */
+  formatVersion: 1 | 2;
   vaultId: string;
   /** Creator-chosen descriptive name (e.g. "Acme Infra Team"), shown in the UI instead of the
    * opaque `vaultId`. Optional for files written before this field existed — the UI falls back to
@@ -138,6 +160,13 @@ export interface TeamVaultFile {
    * `accessHeaderMac` (see below), so changing it requires the real Vault Key, not just S3 write
    * access. */
   vaultName?: string;
+  /** Admin-set free-text description of what this team/vault is for (e.g. "Acme Infra —
+   * production SSH/S3 access"), shown in the Connection Manager's per-team tab so a member who
+   * isn't the admin can tell what the team is without asking. Plaintext metadata, not a secret —
+   * same trust/protection level as `vaultName`: included in `accessHeaderMac` (see below), so
+   * changing it requires the real Vault Key, not just S3 write access. Optional/absent on a vault
+   * created before this field existed. */
+  vaultDescription?: string;
   /** Monotonically incremented on every mutating write (create=1, then +1 per add/remove/role
    * change). Rollback/replay guard: anyone with mere S3 write access to the vault's path (not
    * necessarily a real recipient — bucket permissions and "is a vault member" are different
@@ -180,6 +209,7 @@ export interface TeamVaultStatus {
   exists: boolean;
   vaultId?: string;
   vaultName?: string;
+  vaultDescription?: string;
   members?: TeamVaultMemberSummary[];
   adminCount?: number;
   unlocked: boolean;
@@ -191,10 +221,47 @@ export interface TeamVaultStatus {
    * `TeamVaultConfigStore`'s job) — only `IpcBridge.buildTeamVaultStatus()`, which merges both,
    * always sets it for a real IPC response. */
   remoteConfigured?: boolean;
+  /** Non-secret target connection fields (region, endpoint, access key id, ...), for autofilling
+   * the target editor form without re-typing them — the admin previously had to retype everything
+   * from scratch every time, since nothing round-tripped them back. Redacted the same way a
+   * member's own shared S3 profile already is (`TeamVaultService.redactS3Secrets`):
+   * `secretAccessKey`/`sessionToken`/`proxy.password` are stripped and never sent to the renderer
+   * at all — unlike `ProfileSyncStatus.targetConfig` (which does send those, for the general
+   * Synchronization panel), a Team Vault's target secret is shared infrastructure for a whole
+   * team, not a single user's own credential, so it's held to a stricter bar.
+   * `s3Config.hasSecretAccessKey` tells the editor a secret is already saved, so it can show the
+   * field as optional ("leave blank to keep it") instead of requiring a retype;
+   * `teamVaultHandlers.ts`'s `TEAM_VAULT_SET_TARGET` preserves the existing secret when the
+   * resubmitted one for the same target id is blank. */
+  targetConfig?: { type: 's3'; s3Config: S3Config };
+  /** `bucket[/prefix]` the vault syncs under — an S3 target carries no bucket of its own (see
+   * `TeamVaultService.remoteVaultPath`'s doc comment), so this is also needed to fully prefill
+   * the target editor form. */
+  remoteBasePath?: string;
   lastSyncAt?: string;
   /** This machine's last-known own recipient id / PIV identity file path (see
    * `TeamVaultConfigStore.setSelfIdentity`) — lets the UI prefill the unlock form instead of
    * making the admin retype or relocate them every session. Neither is a secret. */
   selfRecipientId?: string;
   selfIdentityFilePath?: string;
+  /** This machine's own role within this specific vault (looked up from `members` by
+   * `selfRecipientId` — see `IpcBridge.buildTeamVaultStatus`), e.g. to show an "admin"/"member"
+   * badge per team in a multi-team list without a second round trip. `undefined` when locked,
+   * when `selfRecipientId` isn't a current member (e.g. just removed), or when the vault doesn't
+   * exist locally yet. */
+  selfRole?: TeamVaultRole;
+}
+
+/**
+ * What Push/Pull would actually do, checked before either button is pressed (§14) — built from
+ * the same cheap, metadata-only checks the background auto-poll already uses
+ * (`TeamVaultService.hasUnpushedLocalChanges`/`hasRemoteChangedSinceLastSync`), not a full
+ * download/diff. `remoteChanged` is relative to this instance's last-known remote state, which is
+ * in-memory only (`VaultRuntimeState.lastKnownRemoteEntry`) — a fresh app session that has never
+ * pushed or pulled this vault yet reports `remoteChanged: true` whenever anything exists on the
+ * remote at all, same "nothing observed yet" fallback the auto-poll already relies on.
+ */
+export interface TeamVaultSyncPreview {
+  hasUnpushedLocalChanges: boolean;
+  remoteChanged: boolean;
 }

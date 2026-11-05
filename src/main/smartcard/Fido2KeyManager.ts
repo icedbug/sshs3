@@ -126,6 +126,19 @@ export async function generateFido2Key(options: GenerateFido2KeyOptions): Promis
   return { publicKey, privateKeyPath: outPath, publicKeyPath };
 }
 
+/** OpenSSH only ever creates resident credentials for a relying party starting with "ssh:" (`-O application=ssh:…`). */
+function isSshCredential(credential: { rpId: string }): boolean {
+  return credential.rpId.startsWith('ssh:');
+}
+
+/**
+ * An empty PIN means the prompt was dismissed (or there was nothing to ask on). Running ykman with it
+ * would send an empty PIN to the key (at best a pointless failure, at worst a counted wrong attempt).
+ */
+function requirePin(pin: string): void {
+  if (!pin) throw new Error('PIN entry was cancelled');
+}
+
 /**
  * Lists the FIDO2 discoverable ("resident") credentials stored on whatever
  * security key is currently plugged in, without leaving any new key files
@@ -148,9 +161,10 @@ export async function listFido2ResidentKeys(
 ): Promise<Fido2ResidentKey[]> {
   if (await isYkmanAvailable()) {
     const pin = await promptHandler("Enter your security key's PIN:");
+    requirePin(pin);
     try {
       const creds = await listYkmanFidoCredentials(pin);
-      return creds.map((c) => ({
+      return creds.filter(isSshCredential).map((c) => ({
         fingerprint: c.credentialId,
         comment: c.userDisplayName || c.userName || c.rpId,
         keyType: c.rpId,
@@ -186,6 +200,13 @@ export async function deleteFido2ResidentKey(credentialId: string, promptHandler
     throw new Error('Deleting individual resident credentials requires ykman (YubiKey Manager) to be installed.');
   }
   const pin = await promptHandler("Enter your security key's PIN to delete this credential:");
+  requirePin(pin);
+  // The id comes from the renderer, and the key also holds the user's web passkeys: only ever delete an SSH credential.
+  const target = (await listYkmanFidoCredentials(pin)).find((c) => c.credentialId === credentialId);
+  if (!target) throw new Error('That credential is no longer on the security key');
+  if (!isSshCredential(target)) {
+    throw new Error(`Refusing to delete "${target.rpId}": it is not an SSH key (only credentials for "ssh:" are managed here)`);
+  }
   await deleteYkmanFidoCredential(credentialId, pin);
 }
 

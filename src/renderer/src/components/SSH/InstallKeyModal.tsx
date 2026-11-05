@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import {
   Check,
   CheckCircle2,
@@ -20,6 +20,9 @@ import type {
 import { classNames, describeIpcError } from '../../lib/format';
 import { chooseLoginOrder, LOGIN_STEP_LABELS } from '@shared/loginOrder';
 import { useModalDismiss } from '../../lib/useModalDismiss';
+import { useDialogFocus } from '../../lib/useDialogFocus';
+import { isFeatureBlocked, usePolicy } from '../../lib/usePolicy';
+import { FeatureBlockedNotice } from '../SettingsModal/Managed';
 
 interface InstallKeyModalProps {
   /** Profilen att installera nycklar på; får vara osparad. */
@@ -79,6 +82,7 @@ export const InstallKeyModal: React.FC<InstallKeyModalProps> = ({ connection, on
 
   // Git public key import state
   const [gitProvider, setGitProvider] = useState<'github' | 'gitlab' | 'custom'>('github');
+  const gitKeyFetchBlocked = isFeatureBlocked(usePolicy(), 'gitKeyFetch');
   const [gitUsername, setGitUsername] = useState('');
   const [gitCustomHost, setGitCustomHost] = useState('');
   const [fetchingGit, setFetchingGit] = useState(false);
@@ -86,6 +90,8 @@ export const InstallKeyModal: React.FC<InstallKeyModalProps> = ({ connection, on
 
   const busy = installing || loadingHardware || fetchingGit;
   const handleBackdrop = useModalDismiss(onClose, true, !busy);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(dialogRef, true);
   const hasHardware =
     (connection.authType === 'smartcard' && !!connection.pkcs11LibPath) ||
     (connection.authType === 'fido2' && !!connection.fido2Resident);
@@ -255,6 +261,7 @@ export const InstallKeyModal: React.FC<InstallKeyModalProps> = ({ connection, on
   };
 
   const fetchGitKeys = async () => {
+    if (gitKeyFetchBlocked) return;
     const user = gitUsername.trim();
     if (!user) return;
     setFetchingGit(true);
@@ -314,6 +321,7 @@ export const InstallKeyModal: React.FC<InstallKeyModalProps> = ({ connection, on
 
   return (
     <div
+      ref={dialogRef}
       role="dialog"
       aria-modal="true"
       aria-labelledby="install-key-title"
@@ -417,7 +425,7 @@ export const InstallKeyModal: React.FC<InstallKeyModalProps> = ({ connection, on
                       {copiedKeyId === k.id ? (
                         <>
                           <Check className="h-3 w-3 text-emerald-400" />
-                          <span>Copied!</span>
+                          <span>Copied</span>
                         </>
                       ) : (
                         <>
@@ -497,6 +505,7 @@ export const InstallKeyModal: React.FC<InstallKeyModalProps> = ({ connection, on
                 />
               )}
               <input
+                aria-label={gitProvider === 'github' ? 'GitHub username' : 'GitLab username'}
                 type="text"
                 value={gitUsername}
                 onChange={(e) => setGitUsername(e.target.value)}
@@ -507,13 +516,15 @@ export const InstallKeyModal: React.FC<InstallKeyModalProps> = ({ connection, on
               <button
                 type="button"
                 onClick={() => void fetchGitKeys()}
-                disabled={!gitUsername.trim() || fetchingGit || busy}
+                disabled={!gitUsername.trim() || fetchingGit || busy || gitKeyFetchBlocked}
+                aria-describedby={gitKeyFetchBlocked ? 'install-git-key-fetch-blocked' : undefined}
                 className="flex items-center gap-1.5 rounded-lg border border-border-subtle px-3 py-1 text-xs text-txt-primary transition-colors hover:bg-app-surface-hover disabled:opacity-50"
               >
                 {fetchingGit && <Loader2 className="h-3 w-3 animate-spin" />}
                 Fetch keys
               </button>
             </div>
+            <FeatureBlockedNotice blocked={gitKeyFetchBlocked} id="install-git-key-fetch-blocked" />
           </div>
 
           <div className="space-y-1.5">

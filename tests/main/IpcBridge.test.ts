@@ -70,6 +70,7 @@ import { api as preloadApi, exposePreloadApi } from '../../src/preload/index';
 import { SmartcardDetector } from '../../src/main/smartcard/SmartcardDetector';
 import * as SmartcardAgentLoader from '../../src/main/smartcard/SmartcardAgentLoader';
 import * as SmartcardCertificateReader from '../../src/main/smartcard/SmartcardCertificateReader';
+import * as Fido2DeviceDetector from '../../src/main/smartcard/Fido2DeviceDetector';
 import { fingerprintOfKeyBlob } from '../../src/main/ssh/AppAgent';
 import type { IStorageProvider, FileEntry } from '../../src/shared/types/storage';
 import type { SSHConnectionConfig } from '../../src/shared/types/ssh';
@@ -141,6 +142,8 @@ function makeFakeAppAgent() {
     shutdown: vi.fn().mockResolvedValue(undefined),
     writePublicKeyFiles: vi.fn().mockResolvedValue([]),
     removeIdentities: vi.fn().mockResolvedValue(0),
+    adoptIdentities: vi.fn().mockResolvedValue(undefined),
+    evictIdentities: vi.fn().mockResolvedValue(undefined),
     noteLoadedLibrary: vi.fn(),
   };
   return fake;
@@ -166,6 +169,9 @@ describe('IpcBridge', () => {
   beforeEach(() => {
     mockIpc = new MockIpcMain();
     mockWebContents = new MockWebContents();
+    // Card / key presence checks would read sysfs or spawn a PKCS#11 worker: tests run with the token plugged in.
+    vi.spyOn(Fido2DeviceDetector, 'isFido2DeviceConnected').mockResolvedValue(true);
+    vi.spyOn(SmartcardCertificateReader, 'isSmartcardTokenPresent').mockResolvedValue(true);
     mockIpc.defaultSenderFrame = mockWebContents.mainFrame;
 
     const ptyEmitter = new EventEmitter();
@@ -242,6 +248,8 @@ describe('IpcBridge', () => {
     mockSessionStore = {
       getSession: vi.fn().mockResolvedValue({ tabs: [], activeTabId: 't1' }),
       saveSession: vi.fn().mockResolvedValue(undefined),
+      getSessionForWindow: vi.fn().mockResolvedValue({ tabs: [], activeTabId: 't1' }),
+      saveSessionForWindow: vi.fn().mockResolvedValue(undefined),
     };
 
     mockSettingsStore = {
@@ -280,6 +288,7 @@ describe('IpcBridge', () => {
 
   afterEach(async () => {
     await bridge.dispose();
+    vi.mocked(Fido2DeviceDetector.isFido2DeviceConnected).mockRestore?.();
   });
 
   // Regression test for the H3 finding (code review): registerHandler now
@@ -605,10 +614,86 @@ describe('IpcBridge', () => {
     });
 
     describe('smartcardUnlockAtStartup', () => {
+      let tokenPresentSpy: ReturnType<typeof vi.spyOn>;
+      beforeEach(() => {
+        // The card/key presence checks spawn a real worker / read sysfs: pin them to "present".
+        tokenPresentSpy = vi.spyOn(SmartcardCertificateReader, 'isSmartcardTokenPresent').mockResolvedValue(true);
+      });
+      afterEach(() => tokenPresentSpy.mockRestore());
+
       it('does nothing when the setting is off', async () => {
         mockSettingsStore.getSettings.mockResolvedValue({ smartcardUnlockAtStartup: false, smartcardAuthMode: 'agent-global' });
         const res = await mockIpc.invoke(IPC_CHANNELS.SMARTCARD_UNLOCK_AT_STARTUP);
         expect(res).toEqual({ started: false });
+      });
+
+      describe('waitForTokenDirect', () => {
+        beforeEach(() => vi.useFakeTimers());
+        afterEach(() => vi.useRealTimers());
+
+        it('prompts, polls, and dismisses the prompt once the token shows up', async () => {
+          const isPresent = vi.fn().mockResolvedValueOnce(false).mockResolvedValue(true);
+
+          const waiting = bridge.waitForTokenDirect('fido2', 'SSH: host', isPresent, 100);
+          const prompt = mockWebContents.events.find((e) => e.channel === IPC_CHANNELS.INSERT_TOKEN_PROMPT);
+          expect(prompt?.args[0]).toMatchObject({ kind: 'fido2', context: 'SSH: host' });
+
+          await vi.advanceTimersByTimeAsync(100);
+          expect(isPresent).toHaveBeenCalledTimes(1);
+          await vi.advanceTimersByTimeAsync(100);
+
+          await expect(waiting).resolves.toBe(true);
+          expect(mockWebContents.events).toContainEqual({
+            channel: IPC_CHANNELS.INSERT_TOKEN_DISMISS,
+            args: [{ id: prompt!.args[0].id }],
+          });
+          expect(bridge.pendingInsertTokens.size).toBe(0);
+        });
+
+        it('resolves false when the user cancels, and stops polling', async () => {
+          const isPresent = vi.fn().mockResolvedValue(false);
+
+          const waiting = bridge.waitForTokenDirect('smartcard', undefined, isPresent, 100);
+          const id = mockWebContents.events.find((e) => e.channel === IPC_CHANNELS.INSERT_TOKEN_PROMPT)!.args[0].id;
+          await mockIpc.invoke(IPC_CHANNELS.INSERT_TOKEN_CANCEL, id);
+
+          await expect(waiting).resolves.toBe(false);
+          await vi.advanceTimersByTimeAsync(500);
+          expect(isPresent).not.toHaveBeenCalled();
+        });
+      });
+
+      it('does not prompt for a PIN when the module reports no card in the reader', async () => {
+        mockSettingsStore.getSettings.mockResolvedValue({ smartcardUnlockAtStartup: true, smartcardAuthMode: 'agent-global' });
+        const detectSpy = vi.spyOn(SmartcardDetector, 'detectAvailableLibraries').mockResolvedValue([
+          { name: 'OpenSC', path: '/usr/lib/opensc-pkcs11.so', platform: 'linux', exists: true },
+        ]);
+        tokenPresentSpy.mockResolvedValue(false);
+        fakeAppAgent.addPkcs11.mockClear();
+
+        expect(await mockIpc.invoke(IPC_CHANNELS.SMARTCARD_UNLOCK_AT_STARTUP)).toEqual({ started: true });
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(fakeAppAgent.addPkcs11).not.toHaveBeenCalled();
+
+        detectSpy.mockRestore();
+      });
+
+      it('does not load FIDO2 keys (or prompt for a PIN) when no security key is connected', async () => {
+        pretendUnix(); // Windows skips the FIDO2 startup step altogether
+        mockSettingsStore.getSettings.mockResolvedValue({ smartcardUnlockAtStartup: true, smartcardAuthMode: 'agent-global' });
+        const detectSpy = vi.spyOn(SmartcardDetector, 'detectAvailableLibraries').mockResolvedValue([]);
+        const fidoSpy = vi.spyOn(Fido2DeviceDetector, 'isFido2DeviceConnected').mockResolvedValue(false);
+        mockProfileStore.getProfiles.mockResolvedValue({
+          ssh: [{ id: 'p', name: 'fido host', host: 'h', username: 'u', authType: 'fido2', fido2Resident: true }],
+        });
+        fakeAppAgent.addFido2Resident.mockClear();
+
+        expect(await mockIpc.invoke(IPC_CHANNELS.SMARTCARD_UNLOCK_AT_STARTUP)).toEqual({ started: true });
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(fakeAppAgent.addFido2Resident).not.toHaveBeenCalled();
+
+        detectSpy.mockRestore();
+        fidoSpy.mockRestore();
       });
 
       it('the on-demand Unlock runs even when the "unlock at startup" setting is off', async () => {
@@ -1265,14 +1350,77 @@ describe('IpcBridge', () => {
       await expect(loginPromise).rejects.toThrow();
     });
 
+    const ssoS3Provider = (overrides: Record<string, unknown> = {}) => ({
+      id: 's3-sso',
+      type: 's3',
+      clearCache: vi.fn(),
+      list: vi.fn(),
+      config: {
+        authMode: 'sso',
+        region: 'eu-west-1',
+        sso: { startUrl: 'https://start.example.com', region: 'eu-north-1', accountId: '1', roleName: 'R' },
+        customCaPath: '/ca.pem',
+        proxy: { enabled: true, host: 'proxy', port: 3128 },
+        ...overrides,
+      },
+    });
+
+    it('AWS_SSO_RELOGIN_PROVIDER signs in with the provider profile and clears its listing cache', async () => {
+      const provider = ssoS3Provider();
+      mockStorageRegistry.providers.set('s3-sso', provider);
+      mockAwsSsoAuthService.login.mockResolvedValue({ accessToken: 't', expiresAt: '2099-01-01T00:00:00.000Z' });
+
+      await mockIpc.invoke(IPC_CHANNELS.AWS_SSO_RELOGIN_PROVIDER, 's3-sso');
+
+      expect(mockAwsSsoAuthService.login).toHaveBeenCalledWith(
+        'https://start.example.com',
+        'eu-north-1',
+        expect.objectContaining({
+          network: { customCaPath: '/ca.pem', rejectUnauthorized: undefined, proxy: provider.config.proxy },
+        })
+      );
+      expect(provider.clearCache).toHaveBeenCalled();
+    });
+
+    it('AWS_SSO_RELOGIN_PROVIDER rejects unknown and non-SSO providers without signing in', async () => {
+      mockStorageRegistry.providers.set('s3-static', ssoS3Provider({ authMode: 'static' }));
+      mockStorageRegistry.providers.set('sftp-1', { id: 'sftp-1', type: 'sftp' });
+
+      for (const id of ['missing', 's3-static', 'sftp-1']) {
+        await expect(mockIpc.invoke(IPC_CHANNELS.AWS_SSO_RELOGIN_PROVIDER, id)).rejects.toThrow(
+          'does not use AWS SSO'
+        );
+      }
+      expect(mockAwsSsoAuthService.login).not.toHaveBeenCalled();
+    });
+
+    it('STORAGE_LIST turns an expired SSO session on an S3 provider into the sign-in message', async () => {
+      const provider = ssoS3Provider();
+      const err = new Error('The SSO session associated with this profile has expired');
+      err.name = 'TokenProviderError';
+      provider.list.mockRejectedValue(err);
+      mockStorageRegistry.providers.set('s3-sso', provider);
+
+      await expect(mockIpc.invoke(IPC_CHANNELS.STORAGE_LIST, 's3-sso', '/')).rejects.toThrow(
+        'AWS SSO session expired'
+      );
+    });
+
+    it('STORAGE_LIST leaves errors from non-S3 providers untouched', async () => {
+      const list = vi.fn().mockRejectedValue(new Error('boom'));
+      mockStorageRegistry.providers.set('sftp-1', { id: 'sftp-1', type: 'sftp', list });
+
+      await expect(mockIpc.invoke(IPC_CHANNELS.STORAGE_LIST, 'sftp-1', '/')).rejects.toThrow('boom');
+    });
+
     it('lists accounts and roles via the injected AwsSsoAuthService', async () => {
       const accounts = await mockIpc.invoke(IPC_CHANNELS.AWS_SSO_LIST_ACCOUNTS, 'token', 'us-east-1');
       expect(accounts).toEqual([{ accountId: '123', accountName: 'Prod' }]);
-      expect(mockAwsSsoAuthService.listAccounts).toHaveBeenCalledWith('token', 'us-east-1');
+      expect(mockAwsSsoAuthService.listAccounts).toHaveBeenCalledWith('token', 'us-east-1', undefined);
 
       const roles = await mockIpc.invoke(IPC_CHANNELS.AWS_SSO_LIST_ROLES, 'token', 'us-east-1', '123');
       expect(roles).toEqual([{ roleName: 'Admin' }]);
-      expect(mockAwsSsoAuthService.listAccountRoles).toHaveBeenCalledWith('token', 'us-east-1', '123');
+      expect(mockAwsSsoAuthService.listAccountRoles).toHaveBeenCalledWith('token', 'us-east-1', '123', undefined);
     });
   });
 
@@ -1298,6 +1446,10 @@ describe('IpcBridge', () => {
       const stat: FileEntry = await mockIpc.invoke(IPC_CHANNELS.STORAGE_STAT, 'test-storage', '/file.txt');
       expect(stat.size).toBe(100);
 
+      await expect(mockIpc.invoke(IPC_CHANNELS.STORAGE_LOOKUP, 'test-storage', '/file.txt')).resolves.toMatchObject({
+        size: 100,
+      });
+
       await mockIpc.invoke(IPC_CHANNELS.STORAGE_CREATE_FOLDER, 'test-storage', '/new-folder');
       await mockIpc.invoke(IPC_CHANNELS.STORAGE_DELETE, 'test-storage', '/file.txt', false);
       await mockIpc.invoke(IPC_CHANNELS.STORAGE_RENAME, 'test-storage', '/file.txt', '/renamed.txt');
@@ -1306,6 +1458,17 @@ describe('IpcBridge', () => {
       expect(provider.createFolder).toHaveBeenCalledWith('/new-folder');
       expect(provider.delete).toHaveBeenCalledWith('/file.txt', false);
       expect(provider.rename).toHaveBeenCalledWith('/file.txt', '/renamed.txt');
+    });
+
+    it('storage:lookup resolves to null for a missing path but rejects for other failures', async () => {
+      const provider = mockStorageRegistry.get('test-storage');
+      provider.stat.mockRejectedValueOnce(Object.assign(new Error('no such file'), { code: 'ENOENT' }));
+      await expect(mockIpc.invoke(IPC_CHANNELS.STORAGE_LOOKUP, 'test-storage', '/nope')).resolves.toBeNull();
+
+      provider.stat.mockRejectedValueOnce(new Error('Connection lost'));
+      await expect(mockIpc.invoke(IPC_CHANNELS.STORAGE_LOOKUP, 'test-storage', '/x')).rejects.toThrow('Connection lost');
+
+      await expect(mockIpc.invoke(IPC_CHANNELS.STORAGE_LOOKUP, 'test-storage', 42)).rejects.toThrow('Invalid arguments');
     });
 
     it('handles storage getHomeDir', async () => {
@@ -1323,6 +1486,9 @@ describe('IpcBridge', () => {
         'Storage provider not found: unknown-id'
       );
       await expect(mockIpc.invoke(IPC_CHANNELS.STORAGE_STAT, 'unknown-id', '/')).rejects.toThrow(
+        'Storage provider not found: unknown-id'
+      );
+      await expect(mockIpc.invoke(IPC_CHANNELS.STORAGE_LOOKUP, 'unknown-id', '/')).rejects.toThrow(
         'Storage provider not found: unknown-id'
       );
       await expect(mockIpc.invoke(IPC_CHANNELS.STORAGE_CREATE_FOLDER, 'unknown-id', '/')).rejects.toThrow(
@@ -1358,6 +1524,41 @@ describe('IpcBridge', () => {
           totalBytes: 100,
         })
       );
+    });
+
+    it('rejects a special file (FIFO, socket, device) in transferAdd and queues nothing (M7)', async () => {
+      const special = {
+        ...mockStorageRegistry.providers.get('test-storage'),
+        stat: vi.fn().mockResolvedValue({ name: 'pipe', path: '/src/pipe', size: 0, isDirectory: false, isSpecial: true }),
+      };
+      mockStorageRegistry.providers.set('special-storage', special as any);
+      mockTransferQueue.addJob.mockClear();
+
+      await expect(
+        mockIpc.invoke(IPC_CHANNELS.TRANSFER_ADD, {
+          sourceProviderId: 'special-storage',
+          sourcePath: '/src/pipe',
+          targetProviderId: 'test-storage',
+          targetPath: '/dst/pipe',
+          conflictPolicy: 'overwrite',
+        })
+      ).rejects.toThrow('Not a regular file: pipe');
+      expect(mockTransferQueue.addJob).not.toHaveBeenCalled();
+    });
+
+    it('rejects overwriting a file with itself in transferAdd and queues nothing', async () => {
+      mockTransferQueue.addJob.mockClear();
+
+      await expect(
+        mockIpc.invoke(IPC_CHANNELS.TRANSFER_ADD, {
+          sourceProviderId: 'test-storage',
+          sourcePath: '/src/file.txt',
+          targetProviderId: 'test-storage',
+          targetPath: '/src//file.txt',
+          conflictPolicy: 'overwrite',
+        })
+      ).rejects.toThrow('Source and target are the same file');
+      expect(mockTransferQueue.addJob).not.toHaveBeenCalled();
     });
 
     it('resolves targetPath when target is a directory in transferAdd', async () => {
@@ -1598,7 +1799,7 @@ describe('IpcBridge', () => {
       await mockIpc.invoke(IPC_CHANNELS.TRANSFER_CONFLICT_RESPOND, promptId, 'skip', true);
 
       const res = await resultPromise;
-      expect(res).toEqual({ jobId: null, skipped: true, resolvedPolicy: 'skip', appliedToAll: true });
+      expect(res).toEqual({ jobId: null, skipped: true, resolvedPolicy: 'skip', appliedToAll: true, targetPath: '/dst/exists.txt' });
       expect(mockTransferQueue.addJob).not.toHaveBeenCalled();
     });
 
@@ -1921,6 +2122,12 @@ describe('IpcBridge', () => {
       await preloadApi.storageStat('loc', '/f');
       expect(mockIpcRenderer.invoke).toHaveBeenCalledWith(IPC_CHANNELS.STORAGE_STAT, 'loc', '/f');
 
+      await preloadApi.storageLookup('loc', '/f');
+      expect(mockIpcRenderer.invoke).toHaveBeenCalledWith(IPC_CHANNELS.STORAGE_LOOKUP, 'loc', '/f');
+
+      await preloadApi.terminalHasSshClient('sess-1');
+      expect(mockIpcRenderer.invoke).toHaveBeenCalledWith(IPC_CHANNELS.TERMINAL_HAS_SSH_CLIENT, 'sess-1');
+
       await preloadApi.storageCreateFolder('loc', '/dir');
       expect(mockIpcRenderer.invoke).toHaveBeenCalledWith(IPC_CHANNELS.STORAGE_CREATE_FOLDER, 'loc', '/dir');
 
@@ -2121,13 +2328,14 @@ describe('IpcBridge', () => {
     it('retrieves session data', async () => {
       const data = await mockIpc.invoke(IPC_CHANNELS.SESSION_GET);
       expect(data).toEqual({ tabs: [], activeTabId: 't1' });
-      expect(mockSessionStore.getSession).toHaveBeenCalled();
+      // No window router in this test: the sender counts as the main window (key null).
+      expect(mockSessionStore.getSessionForWindow).toHaveBeenCalledWith(null);
     });
 
     it('saves session data', async () => {
       const session = { tabs: [{ id: 'tab-1', title: 'SSH', type: 'terminal' }], activeTabId: 'tab-1' };
       await mockIpc.invoke(IPC_CHANNELS.SESSION_SAVE, session);
-      expect(mockSessionStore.saveSession).toHaveBeenCalledWith(session);
+      expect(mockSessionStore.saveSessionForWindow).toHaveBeenCalledWith(null, session);
     });
   });
 

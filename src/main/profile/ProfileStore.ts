@@ -4,7 +4,10 @@ import os from 'node:os';
 import { app } from 'electron';
 import type { SSHConnectionConfig, SSHTunnelConfig } from '../../shared/types/ssh';
 import type { S3Config } from '../../shared/types/storage';
+import { withNormalizedTags } from '../../shared/tags';
+import { withNormalizedSystem } from '../../shared/system';
 import { encryptSecretValue, decryptSecretValue, isEncryptedSecret, transformEntrySecrets } from '../crypto/SecretFieldCrypto';
+import { backupCorruptFile, writeFileAtomic } from '../storage/atomicFile';
 
 /** Fills in `name` for tunnels saved before it existed, so old profiles.json files still load. */
 function defaultTunnelName(tunnel: SSHTunnelConfig): string {
@@ -107,7 +110,11 @@ export class ProfileStore {
 
     return this.queueMutation(async () => {
       const profiles = await this.getProfilesIncludingTombstones();
-      const stamped: SSHConnectionConfig = { ...config, updatedAt: new Date().toISOString(), deletedAt: undefined };
+      const stamped: SSHConnectionConfig = {
+        ...withNormalizedSystem(withNormalizedTags(config)),
+        updatedAt: new Date().toISOString(),
+        deletedAt: undefined,
+      };
       const index = profiles.ssh.findIndex((p) => p.id === config.id);
       if (index >= 0) {
         profiles.ssh[index] = stamped;
@@ -139,7 +146,11 @@ export class ProfileStore {
 
     return this.queueMutation(async () => {
       const profiles = await this.getProfilesIncludingTombstones();
-      const stamped: S3Config = { ...config, updatedAt: new Date().toISOString(), deletedAt: undefined };
+      const stamped: S3Config = {
+        ...withNormalizedTags(config),
+        updatedAt: new Date().toISOString(),
+        deletedAt: undefined,
+      };
       const index = profiles.s3.findIndex((p) => p.id === config.id);
       if (index >= 0) {
         profiles.s3[index] = stamped;
@@ -258,6 +269,21 @@ export class ProfileStore {
   }
 
   /**
+   * Read, merge and write as ONE step in this store's queue (tombstones included, no timestamps stamped).
+   * `compute` gets the current data and returns what to write, or null to leave the file alone. Remote profile
+   * sync used to read first and call replaceAll afterwards, so a profile saved in between was overwritten by the
+   * stale snapshot. `compute` must be synchronous and must not call this store. Returns whether anything was written.
+   */
+  public async mergeAll(compute: (current: ProfilesData) => ProfilesData | null): Promise<boolean> {
+    return this.queueMutation(async () => {
+      const next = compute(await this.getProfilesIncludingTombstones());
+      if (!next) return false;
+      await this.persist(next);
+      return true;
+    });
+  }
+
+  /**
    * Reads the current file's raw entries by id, so persist() can keep secrets that
    * could not be decrypted (locked/unavailable keyring, file moved between machines).
    * Those load as '' and would otherwise be overwritten with '' on the next save,
@@ -281,13 +307,32 @@ export class ProfileStore {
         }
       }
     } catch {
-      try {
-        await fs.writeFile(`${this.filePath}.corrupt`, raw, { encoding: 'utf-8', mode: 0o600 });
-      } catch {
-        // Best effort only.
-      }
+      await backupCorruptFile(this.filePath, raw);
     }
     return byId;
+  }
+
+  /**
+   * How many saved secrets (SSH passwords/passphrases, S3 secret keys/session tokens, proxy passwords) are encrypted on
+   * disk but cannot be decrypted now. They load as empty ("no credential saved"), so the user has to enter them again; this
+   * lets the UI say so instead of leaving them wondering why a login or an S3 call fails. Deleted entries do not count.
+   */
+  public async countUndecryptableSecrets(): Promise<number> {
+    // Inside the write queue: persist() rewrites the file in place, and a read that lands in the middle of a write sees
+    // truncated JSON (readRawEntries would then copy it aside as ".corrupt").
+    return this.queueMutation(async () => {
+      const entries = await this.readRawEntries();
+      const lost = (value: unknown): boolean => isEncryptedSecret(value) && decryptSecretValue(value) === '';
+      let count = 0;
+      for (const entry of entries.values()) {
+        if (entry.deletedAt) continue;
+        for (const field of [...SSH_SECRET_FIELDS, ...S3_SECRET_FIELDS]) {
+          if (lost(entry[field as string])) count++;
+        }
+        if (entry.proxy && lost(entry.proxy.password)) count++;
+      }
+      return count;
+    });
   }
 
   private keepUndecryptableSecrets<T extends { id: string; proxy?: any }>(
@@ -327,15 +372,6 @@ export class ProfileStore {
     if (data.folders && data.folders.length > 0) {
       onDisk.folders = data.folders;
     }
-    await fs.mkdir(path.dirname(this.filePath), { recursive: true });
-    await fs.writeFile(this.filePath, JSON.stringify(onDisk, null, 2), {
-      encoding: 'utf-8',
-      mode: 0o600,
-    });
-    try {
-      await fs.chmod(this.filePath, 0o600);
-    } catch {
-      // Ignore chmod failures (e.g. on certain filesystems or platforms)
-    }
+    await writeFileAtomic(this.filePath, JSON.stringify(onDisk, null, 2), { mode: 0o600 });
   }
 }

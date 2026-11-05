@@ -1,7 +1,8 @@
 import { SNIPPET_MAX_NAME_CHARS } from '../../shared/types/snippets';
 import { getBuiltinSnippets, isDemoMode } from '../ai/hub/demoWorkspace';
 import { resolveLogLevel, setLogLevel } from '../log/Logger';
-import { IPC_CHANNELS } from '../../shared/types/ipc';
+import { IPC_CHANNELS, type TabHandoff, type WindowInfo } from '../../shared/types/ipc';
+import { parseMoveTarget, parseTabHandoff } from './windowHelpers';
 import type { SessionData } from '../../shared/types/session';
 import type { AppSettings } from '../../shared/types/settings';
 import type { IpcBridge } from '../IpcBridge';
@@ -10,24 +11,41 @@ import type { SmartcardCoordinator } from '../smartcard/SmartcardCoordinator';
 /** The part of IpcBridge this handler group may use. */
 export type AppDataHost = Pick<
   IpcBridge,
-  'clipboardHistoryStore' | 'profileSyncService' | 'registerHandler' | 'scheduleAutoSync' | 'sessionStore' | 'settingsStore' | 'snippetStore'
+  'clipboardHistoryStore' | 'listWindows' | 'moveTab' | 'openWindow' | 'profileSyncService' | 'takeHandoff' | 'windowKeyOf' | 'registerHandler' | 'scheduleAutoSync' | 'sessionStore' | 'settingsStore' | 'snippetStore'
 > & {
   smartcard: Pick<SmartcardCoordinator, 'refreshAgentSshConfig'>;
 };
 
 export function registerSessionHandlers(bridge: AppDataHost): void {
-  bridge.registerHandler(IPC_CHANNELS.SESSION_GET, async (): Promise<SessionData | null> => {
+  // Each window reads and writes only its own tabs; the store merges them (see session/windowSessions.ts).
+  bridge.registerHandler(IPC_CHANNELS.SESSION_GET, async (event): Promise<SessionData | null> => {
     if (isDemoMode()) return null;
-    return await bridge.sessionStore.getSession();
+    return await bridge.sessionStore.getSessionForWindow(bridge.windowKeyOf(event?.sender));
   });
 
   bridge.registerHandler(
     IPC_CHANNELS.SESSION_SAVE,
-    async (_event, data: SessionData): Promise<void> => {
+    async (event, data: SessionData): Promise<void> => {
       if (isDemoMode()) return;
-      await bridge.sessionStore.saveSession(data);
+      await bridge.sessionStore.saveSessionForWindow(bridge.windowKeyOf(event?.sender), data);
     }
   );
+
+  bridge.registerHandler(IPC_CHANNELS.WINDOW_NEW, async (): Promise<void> => {
+    bridge.openWindow();
+  });
+
+  bridge.registerHandler(IPC_CHANNELS.WINDOW_MOVE_TAB, async (event, handoff: unknown, target: unknown): Promise<void> => {
+    bridge.moveTab(event?.sender, parseTabHandoff(handoff), parseMoveTarget(target));
+  });
+
+  bridge.registerHandler(IPC_CHANNELS.WINDOW_TAKE_HANDOFF, async (event): Promise<TabHandoff | null> => {
+    return bridge.takeHandoff(event?.sender);
+  });
+
+  bridge.registerHandler(IPC_CHANNELS.WINDOW_LIST, async (event): Promise<WindowInfo[]> => {
+    return bridge.listWindows(event?.sender);
+  });
 }
 
 export function registerClipboardHistoryHandlers(bridge: AppDataHost): void {
@@ -116,6 +134,19 @@ export function registerSettingsHandlers(bridge: AppDataHost): void {
       else if ('smartcardAuthMode' in settings) bridge.smartcard.refreshAgentSshConfig();
       bridge.scheduleAutoSync();
       return saved;
+    }
+  );
+
+  bridge.registerHandler(
+    IPC_CHANNELS.SETTINGS_SET_TEAM_VAULT_TAB_VISIBLE,
+    async (_event, vaultId: unknown, visible: unknown): Promise<AppSettings> => {
+      if (typeof vaultId !== 'string' || !vaultId.trim() || vaultId.length > 128) {
+        throw new Error('A valid vaultId is required');
+      }
+      if (typeof visible !== 'boolean') {
+        throw new Error('visible must be a boolean');
+      }
+      return await bridge.settingsStore.setTeamVaultTabVisible(vaultId, visible);
     }
   );
 }

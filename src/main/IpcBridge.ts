@@ -1,7 +1,8 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import type { HubService } from './ai/hub/HubService';
 import { HUB_CHANNEL, type HubRequest } from '../shared/types/aiHub';
-import { ipcMain as electronIpcMain } from 'electron';
+import { ipcMain as electronIpcMain, shell } from 'electron';
 import type { IpcMain } from 'electron';
 import { SSHPtyManager, type InternalSSHPtySession } from './ssh/SSHPtyManager';
 import { withResolvedProxyJump } from './ssh/resolveProxyJump';
@@ -16,11 +17,14 @@ import { ClipboardHistoryStore } from './clipboard/ClipboardHistoryStore';
 import { SnippetStore } from './snippets/SnippetStore';
 import { SettingsStore } from './settings/SettingsStore';
 import { UpdateService } from './update/UpdateService';
+import type { WindowActions, WindowRouter } from './windows/WindowManager';
+import { ScrollbackBuffer } from './terminal/ScrollbackBuffer';
 import { SmartcardCoordinator } from './smartcard/SmartcardCoordinator';
 import { createHostVerifier, type HostKeyPromptInfo } from './ssh/HostKeyVerifier';
 import { DotfilePoolStore } from './dotfiles/DotfilePoolStore';
 import { DotfileSyncService } from './dotfiles/DotfileSyncService';
 import { DirectorySyncProfileStore } from './dirsync/DirectorySyncProfileStore';
+import { K8sProfileStore } from './profile/K8sProfileStore';
 import { FileEditorService } from './editor/FileEditorService';
 import { FileTailService } from './editor/FileTailService';
 import { SearchOrchestrator } from './search/SearchOrchestrator';
@@ -33,14 +37,20 @@ import { PerfMetricsService } from './services/PerfMetricsService';
 import { K8sLogManager } from './terminal/K8sLogManager';
 import { AwsSsoAuthService } from './aws/AwsSsoAuthService';
 import { SyncConfigStore, type SyncConfigData } from './services/SyncConfigStore';
-import { TeamVaultService } from './services/TeamVaultService';
+import { syncTargetConnectionKey } from './services/syncTargetIdentity';
+import { TeamVaultService, redactS3Secrets } from './services/TeamVaultService';
 import { TeamVaultConfigStore } from './services/TeamVaultConfigStore';
+import {
+  migrateLegacyTeamVaultLayout,
+  relocateMigratedIdentityPath,
+  resolveTeamVaultBaseDir,
+} from './services/teamVaultMigration';
 import { SyncCryptoService, SyncDecryptionError, generateSalt } from './services/SyncCryptoService';
 import { ProfileSyncService } from './services/ProfileSyncService';
 import { getAgentIdentities, signChallengeWithAgent, verifyAgentSignature, deriveSecretFromSignature, getKeyAlgorithm, KEY_DERIVATION_MESSAGE } from './smartcard/SmartcardSyncService';
 import { decryptSecretValue } from './crypto/SecretFieldCrypto';
 import { XServerManager } from './x11/XServerManager';
-import { IPC_CHANNELS, type StorageConnectConfig, type HostKeyPromptEvent, type PresencePromptEvent, type PresenceClearEvent, type TransferConflictPromptEvent, type TransferConflictResolution, type QuitConfirmPromptEvent, type AskpassPromptKind } from '../shared/types/ipc';
+import { IPC_CHANNELS, type StorageConnectConfig, type HostKeyPromptEvent, type PresencePromptEvent, type PresenceClearEvent, type TransferConflictPromptEvent, type TransferConflictResolution, type QuitConfirmPromptEvent, type AskpassPromptKind, type TabHandoff, type MoveTabTarget, type WindowInfo } from '../shared/types/ipc';
 import type { K8sActivePortForward } from '../shared/types/kubernetes';
 import type { DotfilesSyncPromptEvent, DotfilesSyncResolution } from '../shared/types/dotfiles';
 import type { SSHConnectionConfig, SSHPtyExitEvent, SSHActiveTunnel } from '../shared/types/ssh';
@@ -50,15 +60,22 @@ import type { TeamVaultStatus } from '../shared/types/teamVault';
 import { registerSessionHandlers, registerClipboardHistoryHandlers, registerSnippetHandlers, registerSettingsHandlers } from './ipc/appDataHandlers';
 import { registerFileEditorHandlers } from './ipc/fileEditorHandlers';
 import { registerSearchHandlers } from './ipc/searchHandlers';
+import { addGuardedPrompt } from './ipc/promptWindowGuard';
 import { registerAwsSsoHandlers } from './ipc/awsSsoHandlers';
 import { registerDirSyncHandlers } from './ipc/dirSyncHandlers';
+import { registerDragOutHandlers, createDragOutService } from './ipc/dragOutHandlers';
+import type { DragOutService } from './dragout/DragOutService';
 import { registerGeneralHandlers } from './ipc/generalHandlers';
 import { registerLogHandlers } from './ipc/logHandlers';
+import { registerPolicyHandlers } from './ipc/policyHandlers';
+import { NO_POLICY, type LoadedPolicy } from './policy/loadPolicy';
+import { isUpdateCheckDisabled } from './policy/policyApply';
 import { registerConnectionTestHandlers } from './ipc/connectionTestHandlers';
 import { registerGitHandlers } from './ipc/gitHandlers';
 import { registerTerminalHandlers } from './ipc/terminalHandlers';
 import { registerSmartcardHandlers } from './ipc/smartcardHandlers';
 import { registerStorageHandlers } from './ipc/storageHandlers';
+import { registerArchiveHandlers } from './ipc/archiveHandlers';
 import { registerTransferHandlers } from './ipc/transferHandlers';
 import { registerProfileHandlers } from './ipc/profileHandlers';
 import { registerDotfileHandlers } from './ipc/dotfileHandlers';
@@ -66,6 +83,9 @@ import { registerK8sHandlers } from './ipc/k8sHandlers';
 import { registerKeyInstallHandlers } from './ipc/keyInstallHandlers';
 import { registerSyncHandlers } from './ipc/syncHandlers';
 import { registerTeamVaultHandlers } from './ipc/teamVaultHandlers';
+import { registerSshCaHandlers } from './ipc/sshCaHandlers';
+import { SshCaService } from './ca/SshCaService';
+import { handleHostKeyChanged } from './ssh/hostKeyChanged';
 import { createLogger } from './log';
 const ipcLog = createLogger('ipc');
 const sshLog = createLogger('ssh');
@@ -100,6 +120,14 @@ interface PendingAwsSsoLogin {
 
 export interface IpcBridgeOptions {
   ipcMain?: IpcMain;
+  /** Machine policy loaded at startup (see src/main/policy); none when omitted. */
+  policy?: LoadedPolicy;
+  /** Multi-window: true for the top-level frame of any app window. Falls back to the focused window's main frame. */
+  isTrustedFrame?: (frame: Electron.WebFrameMain | null) => boolean;
+  /** Creating windows and moving tabs between them (main process only). */
+  windowActions?: WindowActions;
+  /** Multi-window event routing; without it every event goes to the focused window (getWebContents). */
+  windows?: WindowRouter;
   sshPtyManager?: SSHPtyManager;
   storageRegistry?: StorageRegistry;
   transferQueue?: TransferQueue;
@@ -111,6 +139,7 @@ export interface IpcBridgeOptions {
   dotfilePoolStore?: DotfilePoolStore;
   dotfileSyncService?: DotfileSyncService;
   directorySyncProfileStore?: DirectorySyncProfileStore;
+  k8sProfileStore?: K8sProfileStore;
   fileEditorService?: FileEditorService;
   fileTailService?: FileTailService;
   searchOrchestrator?: SearchOrchestrator;
@@ -126,6 +155,7 @@ export interface IpcBridgeOptions {
   k8sLogManager?: K8sLogManager;
   k8sPortForwardManager?: K8sPortForwardManager;
   sshTunnelManager?: SSHTunnelManager;
+  sshCaService?: SshCaService;
   getWebContents?: () => Electron.WebContents | null | undefined;
   /** Quit confirmation (transfers, confirm-before-quit) run before an update restart. */
   confirmQuit?: () => Promise<boolean>;
@@ -141,14 +171,17 @@ export class IpcBridge {
   public readonly sshPtyManager: SSHPtyManager;
   public readonly storageRegistry: StorageRegistry;
   public readonly transferQueue: TransferQueue;
+  public readonly dragOutService: DragOutService;
   public readonly profileStore: ProfileStore;
   public readonly sessionStore: SessionStore;
   public readonly clipboardHistoryStore: ClipboardHistoryStore;
   public readonly snippetStore: SnippetStore;
   public readonly settingsStore: SettingsStore;
+  public readonly policy: LoadedPolicy;
   public readonly dotfilePoolStore: DotfilePoolStore;
   public readonly dotfileSyncService: DotfileSyncService;
   public readonly directorySyncProfileStore: DirectorySyncProfileStore;
+  public readonly k8sProfileStore: K8sProfileStore;
   public readonly fileEditorService: FileEditorService;
   public readonly fileTailService: FileTailService;
   public readonly searchOrchestrator: SearchOrchestrator;
@@ -165,14 +198,22 @@ export class IpcBridge {
   public readonly k8sLogManager: K8sLogManager;
   public readonly k8sPortForwardManager: K8sPortForwardManager;
   public readonly sshTunnelManager: SSHTunnelManager;
+  public readonly sshCaService: SshCaService;
   private updateService: UpdateService | null = null;
   private confirmQuit: (() => Promise<boolean>) | undefined;
   public getWebContents: () => Electron.WebContents | null | undefined;
+  private isTrustedFrame: ((frame: Electron.WebFrameMain | null) => boolean) | undefined;
+  private windows: WindowRouter | undefined;
+  private windowActions: WindowActions | undefined;
+  /** Recent output per terminal session, replayed when a terminal moves to another window. */
+  public readonly scrollback = new ScrollbackBuffer();
 
   // The members below are public only so the handler groups in src/main/ipc can reach them. Each group
   // declares the exact subset it uses as a Pick<IpcBridge, ...> (see ipc/*Handlers.ts), and
   // tests/main/ipcHostAccess.test.ts pins which groups may touch the prompt maps and agent state.
   public pendingAskpass = new Map<string, PendingAskpassPrompt>();
+  /** id -> ends the wait of an "insert your token" prompt (see waitForTokenDirect). */
+  public pendingInsertTokens = new Map<string, () => void>();
   public pendingHostKeyPrompts = new Map<string, PendingHostKeyPrompt>();
   public pendingTransferConflicts = new Map<string, PendingTransferConflictPrompt>();
   public pendingQuitConfirms = new Map<string, PendingQuitConfirmPrompt>();
@@ -182,9 +223,19 @@ export class IpcBridge {
   /** Owns the smartcard/FIDO2 agent state and its lifecycle (see smartcard/SmartcardCoordinator.ts). */
   public readonly smartcard: SmartcardCoordinator;
   private autoSyncTimer: NodeJS.Timeout | null = null;
+  /** Connection the cached sync provider was created for; see getSyncProvider. */
+  private syncProviderKey: string | undefined;
   private autoPullTimer: NodeJS.Timeout | null = null;
-  private teamVaultAutoPollTimer: NodeJS.Timeout | null = null;
-  private teamVaultAutoPushTimer: NodeJS.Timeout | null = null;
+  // Per-vaultId: a team's auto-poll/auto-push timer must never be confused with another team's,
+  // and starting/stopping one must never disturb another's (see TeamVaultService's class doc
+  // comment on the same per-vaultId isolation requirement for runtime state).
+  private readonly teamVaultAutoPollTimers = new Map<string, NodeJS.Timeout>();
+  private readonly teamVaultAutoPushTimers = new Map<string, NodeJS.Timeout>();
+  // In-flight push/pull count per vaultId, driving TEAM_VAULT_SYNC_STATUS — a concurrent
+  // auto-push and auto-poll pull for the same vaultId must not have whichever finishes first
+  // turn the sync dot off while the other is still running. See
+  // `beginTeamVaultSync`/`endTeamVaultSync`'s doc comment.
+  private readonly teamVaultSyncInFlight = new Map<string, number>();
   private lastSmartcardAutoUnlockAttempt = 0;
   private static readonly AUTO_PULL_INTERVAL_MS = 10 * 60 * 1000;
   private static readonly SMARTCARD_AUTO_UNLOCK_COOLDOWN_MS = 5 * 60 * 1000;
@@ -219,8 +270,28 @@ export class IpcBridge {
   private unsubscribeK8sConfig?: () => void;
 
   constructor(options: IpcBridgeOptions = {}) {
+    // Must run before TeamVaultService/TeamVaultConfigStore are constructed just below — it's
+    // the one-time move from the single-team on-disk layout to the multi-team one (see its doc
+    // comment), and both services assume that layout already exists by the time they first touch
+    // disk. Skipped when a test injects its own teamVaultService/teamVaultConfigStore (pointed at
+    // an isolated temp directory, not the real userData path this migration always targets) —
+    // production always constructs both from defaults, so this only ever runs for real.
+    // Set below, used after `this.teamVaultConfigStore` is constructed a few lines down, to
+    // promote that single discovered team's config out of the pending sentinel onto its real
+    // vaultId — see the promotion call at the end of this constructor for why this can't happen
+    // here directly (TeamVaultConfigStore doesn't exist as `this.teamVaultConfigStore` yet, and a
+    // constructor can't `await` the async store methods either way).
+    let migratedVaultId: string | undefined;
+    if (!options.teamVaultService && !options.teamVaultConfigStore) {
+      try {
+        migratedVaultId = migrateLegacyTeamVaultLayout(resolveTeamVaultBaseDir());
+      } catch (err) {
+        ipcLog.warn('Team Vault legacy layout migration failed (non-fatal, continuing):', err);
+      }
+    }
     this.ipcMain = options.ipcMain ?? electronIpcMain;
-    this.settingsStore = options.settingsStore ?? new SettingsStore();
+    this.policy = options.policy ?? NO_POLICY;
+    this.settingsStore = options.settingsStore ?? new SettingsStore(undefined, this.policy.policy);
     this.sshPtyManager =
       options.sshPtyManager ??
       new SSHPtyManager({
@@ -232,6 +303,7 @@ export class IpcBridge {
           this.sshTunnelManager
             .listActive()
             .some((t) => t.connectionId === connectionId && t.tunnel.id === tunnelId),
+        hostKeyPromptHandler: (info) => this.promptHostKeyTrust(info),
       });
     this.storageRegistry =
       options.storageRegistry ??
@@ -254,6 +326,7 @@ export class IpcBridge {
           ),
       });
     this.transferQueue = options.transferQueue ?? new TransferQueue();
+    this.dragOutService = createDragOutService(this);
     this.profileStore = options.profileStore ?? new ProfileStore();
     this.sessionStore = options.sessionStore ?? new SessionStore();
     this.clipboardHistoryStore = options.clipboardHistoryStore ?? new ClipboardHistoryStore();
@@ -261,6 +334,7 @@ export class IpcBridge {
     this.dotfilePoolStore = options.dotfilePoolStore ?? new DotfilePoolStore();
     this.dotfileSyncService = options.dotfileSyncService ?? new DotfileSyncService();
     this.directorySyncProfileStore = options.directorySyncProfileStore ?? new DirectorySyncProfileStore();
+    this.k8sProfileStore = options.k8sProfileStore ?? new K8sProfileStore();
     this.fileEditorService = options.fileEditorService ?? new FileEditorService();
     this.fileTailService = options.fileTailService ?? new FileTailService();
     this.searchOrchestrator = options.searchOrchestrator ?? new SearchOrchestrator();
@@ -275,13 +349,40 @@ export class IpcBridge {
         pinPrompter: {
           promptForPinDirect: (prompt, kind, context, retry) => this.promptForPinDirect(prompt, kind, context, retry),
           makePresenceNotifier: (sessionId, message) => this.makePresenceNotifier(sessionId, message),
+          ensurePivPresent: (context) => this.smartcard.ensureDefaultPivPresent(context),
         },
+        // Lazily bound, same reasoning as `pinPrompter` above: `teamVaultConfigStore` is
+        // constructed a few lines below this one, so this arrow only needs it to exist by the
+        // time `buildInvite()` actually calls it, not at this object literal's own construction.
+        configStore: {
+          getConfig: (vaultId) => this.teamVaultConfigStore.getConfig(vaultId),
+          // Every argument is forwarded: the synced revision (unpushed-changes guard) and the highest remote format (downgrade
+          // barrier) are only worth anything if they survive a restart. clearSyncState is what resetRemoteState relies on.
+          setLastKnownRemoteEntry: (vaultId, entry, lastSyncedRevision, remoteFormatVersion) =>
+            this.teamVaultConfigStore.setLastKnownRemoteEntry(vaultId, entry, lastSyncedRevision, remoteFormatVersion),
+          clearSyncState: (vaultId) => this.teamVaultConfigStore.clearSyncState(vaultId),
+        },
+        // After a vault was upgraded to the current format on this machine, push it (auto-push does nothing without a target).
+        onFormatUpgraded: (vaultId) => this.scheduleTeamVaultAutoPush(vaultId),
       });
     this.teamVaultConfigStore = options.teamVaultConfigStore ?? new TeamVaultConfigStore();
+    if (migratedVaultId) {
+      // Fire-and-forget: this only matters before the first IPC call touches this vault's config
+      // (TEAM_VAULT_PULL's own promotePendingConfig call would otherwise reach the same end state
+      // eventually, but only once a pull actually succeeds — an upgrading install's already-
+      // configured S3 target/credentials/lastSyncAt/selfIdentity would otherwise sit unreachable
+      // under the pending sentinel in the meantime, invisible to `buildAllTeamVaultStatuses()`'s
+      // per-vaultId union). `queueMutation` inside the store serializes this against any other
+      // config write that happens to race it.
+      this.teamVaultConfigStore.promotePendingConfig(migratedVaultId).catch((err) => {
+        ipcLog.warn('Failed to promote the migrated Team Vault config to its real vaultId (non-fatal):', err);
+      });
+    }
     this.profileSyncService =
       options.profileSyncService ??
       new ProfileSyncService(this.profileStore, this.dotfilePoolStore, this.settingsStore, this.syncCryptoService, {
         directorySyncProfileStore: this.directorySyncProfileStore,
+        k8sProfileStore: this.k8sProfileStore,
       });
     this.smartcard = new SmartcardCoordinator({
       settingsStore: this.settingsStore,
@@ -291,12 +392,29 @@ export class IpcBridge {
       sshPtyManager: this.sshPtyManager,
       getWebContents: () => this.getWebContents(),
       promptForPin: (prompt, kind, context, retry) => this.promptForPinDirect(prompt, kind, context, retry),
+      waitForToken: (kind, context, isPresent) => this.waitForTokenDirect(kind, context, isPresent),
       makePresenceNotifier: (sessionId, message) => this.makePresenceNotifier(sessionId, message),
       clearPresence: (sessionId) => this.clearPresence(sessionId),
       syncAgentBlock: (entries) => this.profileSyncService.syncAgentBlockToLocalSshConfig(entries),
     });
     // The local agent block is derived from the managed block, so refresh it after every managed-block sync.
     this.profileSyncService.onLocalSshConfigSynced = () => this.smartcard.refreshAgentSshConfig();
+    this.sshCaService = options.sshCaService ?? new SshCaService({
+      appAgent: this.smartcard.getAppAgent(),
+      openExternal: (url: string) => shell.openExternal(url),
+      getSettings: () => this.settingsStore.getSettings(),
+      getPivPublicKey: () => this.smartcard.getPivPublicKey(),
+    });
+    this.smartcard.setSshCaService(this.sshCaService);
+    this.sshCaService.onStatusChanged((status) => {
+      // The window router already reaches every window, the main one included; the focused-window
+      // fallback is only for a bridge without a router (sending to both delivers the event twice).
+      if (this.windows) {
+        this.windows.broadcast(IPC_CHANNELS.SSH_CA_STATUS_CHANGED, status);
+      } else {
+        this.getWebContents()?.send(IPC_CHANNELS.SSH_CA_STATUS_CHANGED, status);
+      }
+    });
     this.k8sDiscoveryService = options.k8sDiscoveryService ?? new K8sDiscoveryService();
     this.k8sDebugService = options.k8sDebugService ?? new K8sDebugService();
     this.k8sTerminalManager = options.k8sTerminalManager ?? new K8sTerminalManager();
@@ -312,12 +430,81 @@ export class IpcBridge {
         : undefined;
     });
     this.k8sLogManager = options.k8sLogManager ?? new K8sLogManager();
-    this.k8sPortForwardManager = options.k8sPortForwardManager ?? new K8sPortForwardManager();
+    this.k8sPortForwardManager = options.k8sPortForwardManager ?? new K8sPortForwardManager(undefined, this.k8sDiscoveryService);
+    this.k8sPortForwardManager.setDiscoveryService(this.k8sDiscoveryService);
     this.sshTunnelManager = options.sshTunnelManager ?? new SSHTunnelManager();
     this.getWebContents = options.getWebContents ?? (() => null);
     this.confirmQuit = options.confirmQuit;
     this.tenantHomeDir = options.tenantHomeDir;
     this.tenantSshPrivateKeyPath = options.tenantSshPrivateKeyPath;
+    this.isTrustedFrame = options.isTrustedFrame;
+    this.windows = options.windows;
+    this.windowActions = options.windowActions;
+  }
+
+  /** Prompts and other global dialogs: the window the user is looking at. */
+  public sendToFocused(channel: string, ...args: unknown[]): boolean {
+    const webContents = this.getWebContents();
+    if (!webContents || webContents.isDestroyed?.()) return false;
+    webContents.send(channel, ...args);
+    return true;
+  }
+
+  /** Session-bound events go to the window that owns the session (focused window if it has none). */
+  public sendToSession(sessionId: string | undefined, channel: string, ...args: unknown[]): boolean {
+    if (sessionId && this.windows) return this.windows.sendToSession(sessionId, channel, ...args);
+    return this.sendToFocused(channel, ...args);
+  }
+
+  /** Replies to the window that issued an IPC request (search, dir-sync, AWS SSO ...). */
+  public sendToSender(sender: Electron.WebContents | null | undefined, channel: string, ...args: unknown[]): boolean {
+    if (sender && !sender.isDestroyed?.()) {
+      sender.send(channel, ...args);
+      return true;
+    }
+    return this.sendToFocused(channel, ...args);
+  }
+
+  /** App-wide state changes every window must see (settings, sync, transfers, tunnels, updates). */
+  public broadcast(channel: string, ...args: unknown[]): void {
+    if (this.windows) this.windows.broadcast(channel, ...args);
+    else this.sendToFocused(channel, ...args);
+  }
+
+  /** Persistence key of the window behind an IPC call: null for the main window. */
+  public windowKeyOf(sender: Electron.WebContents | null | undefined): string | null {
+    return this.windows?.keyOfSender(sender) ?? null;
+  }
+
+  /** Opens another app window (set by the main process; absent in tests). */
+  public openWindow(): void {
+    this.windowActions?.open();
+  }
+
+  /** Moves a tab to a new or another window. Throws when the request cannot be carried out. */
+  public moveTab(sender: Electron.WebContents | null | undefined, handoff: TabHandoff, target: MoveTabTarget): void {
+    const fromId = this.windows?.windowIdOfSender(sender);
+    if (fromId === undefined || !this.windowActions) throw new Error('Cannot move tabs from this window');
+    if (target === 'new') {
+      this.windowActions.open(handoff);
+    } else if (!this.windowActions.adopt(target, handoff, fromId)) {
+      throw new Error('That window is no longer available');
+    }
+  }
+
+  public takeHandoff(sender: Electron.WebContents | null | undefined): TabHandoff | null {
+    const id = this.windows?.windowIdOfSender(sender);
+    return id === undefined ? null : (this.windowActions?.takeHandoff(id) ?? null);
+  }
+
+  public listWindows(sender: Electron.WebContents | null | undefined): WindowInfo[] {
+    return this.windowActions?.list(this.windows?.windowIdOfSender(sender)) ?? [];
+  }
+
+  /** Records that the window behind this IPC call owns the session, so its output is routed there. */
+  public assignSession(sender: Electron.WebContents | null | undefined, sessionId: string): void {
+    const windowId = this.windows?.windowIdOfSender(sender);
+    if (windowId !== undefined) this.windows?.assign(sessionId, windowId);
   }
 
   public setWebContentsGetter(getter: () => Electron.WebContents | null | undefined): void {
@@ -332,13 +519,16 @@ export class IpcBridge {
     registerTerminalHandlers(this);
     registerSmartcardHandlers(this);
     registerStorageHandlers(this);
+    registerArchiveHandlers(this);
     registerTransferHandlers(this);
+    registerDragOutHandlers(this);
     registerProfileHandlers(this);
     registerDotfileHandlers(this);
     registerSessionHandlers(this);
     registerClipboardHistoryHandlers(this);
     registerSnippetHandlers(this);
     registerSettingsHandlers(this);
+    registerPolicyHandlers(this);
     registerSyncHandlers(this);
     registerTeamVaultHandlers(this);
     void this.syncConfigStore
@@ -359,6 +549,7 @@ export class IpcBridge {
     registerLogHandlers(this);
     registerDirSyncHandlers(this);
     registerK8sHandlers(this);
+    registerSshCaHandlers(this);
     this.setupEventListeners();
 
     if (process.platform === 'win32') {
@@ -391,6 +582,12 @@ export class IpcBridge {
    * failing every handler.
    */
   private assertTrustedSender(event: Electron.IpcMainInvokeEvent): void {
+    if (this.isTrustedFrame) {
+      if (!this.isTrustedFrame(event.senderFrame)) {
+        throw new Error('Rejected IPC call from an untrusted frame');
+      }
+      return;
+    }
     const webContents = this.getWebContents();
     if (!webContents || webContents.isDestroyed()) return;
     if (event.senderFrame !== webContents.mainFrame) {
@@ -424,7 +621,7 @@ export class IpcBridge {
       }
 
       const id = crypto.randomUUID();
-      this.pendingHostKeyPrompts.set(id, { callback: resolve });
+      if (!addGuardedPrompt(this.pendingHostKeyPrompts, id, webContents, () => resolve(false) /* fail closed */, resolve)) return;
 
       const event: HostKeyPromptEvent = { id, ...info };
       webContents.send(IPC_CHANNELS.HOSTKEY_PROMPT, event);
@@ -452,7 +649,7 @@ export class IpcBridge {
       }
 
       const id = crypto.randomUUID();
-      this.pendingAskpass.set(id, { callback: resolve });
+      if (!addGuardedPrompt(this.pendingAskpass, id, webContents, () => resolve(''), resolve)) return;
       webContents.send(IPC_CHANNELS.ASKPASS_PROMPT, {
         id,
         prompt,
@@ -465,15 +662,58 @@ export class IpcBridge {
     });
   }
 
+  /**
+   * Shows an "insert your smartcard / security key" prompt and polls `isPresent` until the token is
+   * plugged in (resolves true: the prompt is dismissed so the PIN prompt can take over) or the user
+   * cancels (resolves false). Resolves true at once when nothing is listening, so a headless caller
+   * keeps its old behavior.
+   */
+  public waitForTokenDirect(
+    kind: 'smartcard' | 'fido2',
+    context: string | undefined,
+    isPresent: () => Promise<boolean | undefined>,
+    pollMs = 1500
+  ): Promise<boolean> {
+    return new Promise((resolve) => {
+      const webContents = this.getWebContents();
+      if (!webContents || webContents.isDestroyed?.()) {
+        resolve(true);
+        return;
+      }
+
+      const id = crypto.randomUUID();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let finished = false;
+      const finish = (inserted: boolean) => {
+        if (finished) return;
+        finished = true;
+        if (timer) clearTimeout(timer);
+        this.pendingInsertTokens.delete(id);
+        if (!webContents.isDestroyed?.()) webContents.send(IPC_CHANNELS.INSERT_TOKEN_DISMISS, { id });
+        resolve(inserted);
+      };
+      const poll = async () => {
+        if (finished) return;
+        // Unknown (undefined) counts as present: never trap the user behind a prompt we cannot clear.
+        if ((await isPresent()) !== false) {
+          finish(true);
+          return;
+        }
+        if (!finished) timer = setTimeout(() => void poll(), pollMs);
+      };
+
+      this.pendingInsertTokens.set(id, () => finish(false));
+      webContents.send(IPC_CHANNELS.INSERT_TOKEN_PROMPT, { id, kind, context });
+      timer = setTimeout(() => void poll(), pollMs);
+    });
+  }
+
   /** Clears the "touch your key" banner of a session, if one is showing (SmartcardCoordinator dependency). */
   private clearPresence(sessionId: string): void {
     if (this.activePresenceSessions.has(sessionId)) {
       this.activePresenceSessions.delete(sessionId);
-      const webContents = this.getWebContents();
-      if (webContents && !webContents.isDestroyed?.()) {
-        const event: PresenceClearEvent = { sessionId };
-        webContents.send(IPC_CHANNELS.PRESENCE_CLEAR, event);
-      }
+      const event: PresenceClearEvent = { sessionId };
+      this.sendToSession(sessionId, IPC_CHANNELS.PRESENCE_CLEAR, event);
     }
   }
 
@@ -494,19 +734,15 @@ export class IpcBridge {
         if (sessionId) {
           this.activePresenceSessions.add(sessionId);
         }
-        const webContents = this.getWebContents();
-        if (!webContents || webContents.isDestroyed?.()) return;
         const event: PresencePromptEvent = { id, sessionId, message };
-        webContents.send(IPC_CHANNELS.PRESENCE_PROMPT, event);
+        this.sendToSession(sessionId, IPC_CHANNELS.PRESENCE_PROMPT, event);
       },
       onPresenceCleared: () => {
         if (sessionId) {
           this.activePresenceSessions.delete(sessionId);
         }
-        const webContents = this.getWebContents();
-        if (!webContents || webContents.isDestroyed?.()) return;
         const event: PresenceClearEvent = { id, sessionId };
-        webContents.send(IPC_CHANNELS.PRESENCE_CLEAR, event);
+        this.sendToSession(sessionId, IPC_CHANNELS.PRESENCE_CLEAR, event);
       },
     };
   }
@@ -527,9 +763,14 @@ export class IpcBridge {
       }
 
       const id = crypto.randomUUID();
-      this.pendingTransferConflicts.set(id, {
-        callback: (resolution, applyToAll) => resolve({ resolution, applyToAll }),
-      });
+      const registered = addGuardedPrompt(
+        this.pendingTransferConflicts,
+        id,
+        webContents,
+        () => resolve({ resolution: 'skip', applyToAll: false }),
+        (resolution, applyToAll) => resolve({ resolution, applyToAll })
+      );
+      if (!registered) return;
 
       const event: TransferConflictPromptEvent = { id, ...info };
       webContents.send(IPC_CHANNELS.TRANSFER_CONFLICT_PROMPT, event);
@@ -552,7 +793,8 @@ export class IpcBridge {
       }
 
       const id = crypto.randomUUID();
-      this.pendingQuitConfirms.set(id, { callback: resolve });
+      // No window left to ask: quit, as when there was no window to begin with.
+      if (!addGuardedPrompt(this.pendingQuitConfirms, id, webContents, () => resolve(true), resolve)) return;
 
       const event: QuitConfirmPromptEvent = { id, ...info };
       webContents.send(IPC_CHANNELS.QUIT_CONFIRM_PROMPT, event);
@@ -652,6 +894,12 @@ export class IpcBridge {
    * PIN prompt whose answer then fell through to a password prompt and failed.
    */
   public async getSyncProvider(target: StorageConnectConfig): ReturnType<StorageRegistry["getOrCreate"]> {
+    // Every sync target has the same registry id, so a provider cached for a previous location would be reused.
+    const connectionKey = syncTargetConnectionKey(target);
+    if (this.syncProviderKey !== undefined && this.syncProviderKey !== connectionKey) {
+      await this.storageRegistry.disconnect?.(target.id);
+    }
+    this.syncProviderKey = connectionKey;
     // Windows-only: Linux keeps creating the sync provider straight from its saved config.
     if (process.platform !== 'win32' || target.type !== 'sftp' || !target.sftpConfig || this.storageRegistry.has(target.id)) {
       return await this.storageRegistry.getOrCreate(target);
@@ -668,6 +916,7 @@ export class IpcBridge {
     }
     sftpConfig = await this.smartcard.prepareSftpSmartcardConfig(sftpConfig, target.id);
     sftpConfig = await this.smartcard.prepareFido2SftpConfig(sftpConfig, target.id);
+    sftpConfig = await this.smartcard.prepareSftpSshCaConfig(sftpConfig);
     return await this.storageRegistry.getOrCreate({ ...target, sftpConfig });
   }
 
@@ -762,7 +1011,7 @@ export class IpcBridge {
       }
 
       const id = crypto.randomUUID();
-      this.pendingDotfilesSyncPrompts.set(id, { callback: resolve });
+      if (!addGuardedPrompt(this.pendingDotfilesSyncPrompts, id, webContents, () => resolve('ignore'), resolve)) return;
 
       const event: DotfilesSyncPromptEvent = { id, ...info };
       webContents.send(IPC_CHANNELS.DOTFILES_SYNC_PROMPT, event);
@@ -775,10 +1024,7 @@ export class IpcBridge {
     updatedCount?: number;
     error?: string;
   }): void {
-    const webContents = this.getWebContents();
-    if (webContents && !webContents.isDestroyed?.()) {
-      webContents.send(IPC_CHANNELS.DOTFILES_SYNC_STATUS, event);
-    }
+    this.sendToSession(event.sessionId, IPC_CHANNELS.DOTFILES_SYNC_STATUS, event);
   }
 
 
@@ -821,34 +1067,41 @@ export class IpcBridge {
    * any other failure is logged, not surfaced — the next save retries, and the
    * background auto-poll will pick up the other member's change regardless.
    */
-  public scheduleTeamVaultAutoPush(delayMs = 2000): void {
-    if (this.teamVaultAutoPushTimer) {
-      clearTimeout(this.teamVaultAutoPushTimer);
+  public scheduleTeamVaultAutoPush(vaultId: string, delayMs = 2000): void {
+    const existing = this.teamVaultAutoPushTimers.get(vaultId);
+    if (existing) {
+      clearTimeout(existing);
     }
-    this.teamVaultAutoPushTimer = setTimeout(async () => {
-      this.teamVaultAutoPushTimer = null;
+    const timer = setTimeout(async () => {
+      this.teamVaultAutoPushTimers.delete(vaultId);
       try {
-        const config = await this.teamVaultConfigStore.getConfig();
+        const config = await this.teamVaultConfigStore.getConfig(vaultId);
         if (!config.target) {
           return;
         }
-        const provider = await this.storageRegistry.getOrCreate(config.target);
+        this.beginTeamVaultSync(vaultId);
         try {
-          await this.teamVaultService.pushToRemote(provider, config.remoteBasePath ?? '');
-        } catch (pushErr: any) {
-          if (pushErr?.name === 'TeamVaultSyncConflictError' && this.teamVaultService.isUnlocked()) {
-            const merged = await this.teamVaultService.mergeWithRemote(provider, config.remoteBasePath ?? '');
-            if (merged) this.aiHub?.changed();
-            else throw pushErr;
-          } else {
-            throw pushErr;
+          const provider = await this.storageRegistry.getOrCreate(config.target);
+          try {
+            await this.teamVaultService.pushToRemote(vaultId, provider, config.remoteBasePath ?? '');
+          } catch (pushErr: any) {
+            if (pushErr?.name === 'TeamVaultSyncConflictError' && this.teamVaultService.isUnlocked(vaultId)) {
+              const merged = await this.teamVaultService.mergeWithRemote(vaultId, provider, config.remoteBasePath ?? '');
+              if (merged) this.aiHub?.changed();
+              else throw pushErr;
+            } else {
+              throw pushErr;
+            }
           }
+          await this.teamVaultConfigStore.setLastSyncAt(vaultId, new Date().toISOString());
+        } finally {
+          this.endTeamVaultSync(vaultId);
         }
-        await this.teamVaultConfigStore.setLastSyncAt(new Date().toISOString());
       } catch (err) {
-        autosyncLog.warn('Team Vault background push failed:', err);
+        autosyncLog.warn(`Team Vault background push failed (vaultId=${vaultId}):`, err);
       }
     }, delayMs);
+    this.teamVaultAutoPushTimers.set(vaultId, timer);
   }
 
   /**
@@ -901,11 +1154,8 @@ export class IpcBridge {
   }
 
   private async pushSyncStatusToRenderer(): Promise<void> {
-    const webContents = this.getWebContents();
-    if (webContents && !webContents.isDestroyed?.()) {
-      const status = await this.buildSyncStatus();
-      webContents.send(IPC_CHANNELS.PROFILE_SYNC_STATUS, status);
-    }
+    if (!this.getWebContents()) return;
+    this.broadcast(IPC_CHANNELS.PROFILE_SYNC_STATUS, await this.buildSyncStatus());
   }
 
   /** Starts (or restarts) the Team Vault background poll — see
@@ -914,62 +1164,112 @@ export class IpcBridge {
    * unlock/create and after the target changes; a no-op tick (see `runTeamVaultAutoPoll`) stops
    * itself if the vault isn't actually unlocked or has no remote target configured, so callers
    * don't need to check either condition themselves before calling this. */
-  public startTeamVaultAutoPollTimer(): void {
-    this.stopTeamVaultAutoPollTimer();
-    this.teamVaultAutoPollTimer = setInterval(() => {
-      void this.runTeamVaultAutoPoll();
+  public startTeamVaultAutoPollTimer(vaultId: string): void {
+    this.stopTeamVaultAutoPollTimer(vaultId);
+    const timer = setInterval(() => {
+      void this.runTeamVaultAutoPoll(vaultId);
     }, IpcBridge.TEAM_VAULT_AUTO_POLL_INTERVAL_MS);
-    this.teamVaultAutoPollTimer.unref?.();
+    timer.unref?.();
+    this.teamVaultAutoPollTimers.set(vaultId, timer);
   }
 
-  public stopTeamVaultAutoPollTimer(): void {
-    if (this.teamVaultAutoPollTimer) {
-      clearInterval(this.teamVaultAutoPollTimer);
-      this.teamVaultAutoPollTimer = null;
+  public stopTeamVaultAutoPollTimer(vaultId: string): void {
+    const timer = this.teamVaultAutoPollTimers.get(vaultId);
+    if (timer) {
+      clearInterval(timer);
+      this.teamVaultAutoPollTimers.delete(vaultId);
     }
   }
 
   /**
-   * One tick of the background poll (docs/team-vault-plan.md's connection-manager plan, point 4):
-   * a cheap stat()-only check for whether the remote vault changed since this instance last
-   * observed it. On a change, either auto-pulls (when this machine has no unpushed local
-   * mutations — safe, since there's nothing to lose) or just notifies the renderer that a pull is
-   * needed (when it does — auto-pulling then would silently discard those local changes, exactly
-   * what `TeamVaultUnpushedChangesError` exists to prevent on the interactive path too).
+   * One tick of the background poll (docs/team-vault-plan.md's connection-manager plan, point 4),
+   * for one specific team: a cheap stat()-only check for whether that vault's remote file changed
+   * since this instance last observed it. On a change, either auto-pulls (when this machine has
+   * no unpushed local mutations — safe, since there's nothing to lose) or just notifies the
+   * renderer that a pull is needed (when it does — auto-pulling then would silently discard those
+   * local changes, exactly what `TeamVaultUnpushedChangesError` exists to prevent on the
+   * interactive path too). Every per-vault timer runs this independently, so one team's poll
+   * failing or being slow never blocks another's.
    */
-  private async runTeamVaultAutoPoll(): Promise<void> {
+  private async runTeamVaultAutoPoll(vaultId: string): Promise<void> {
     try {
-      if (!this.teamVaultService.isUnlocked()) {
-        this.stopTeamVaultAutoPollTimer();
+      if (!this.teamVaultService.isUnlocked(vaultId)) {
+        this.stopTeamVaultAutoPollTimer(vaultId);
         return;
       }
-      const config = await this.teamVaultConfigStore.getConfig();
+      const config = await this.teamVaultConfigStore.getConfig(vaultId);
       if (!config.target) {
-        this.stopTeamVaultAutoPollTimer();
+        this.stopTeamVaultAutoPollTimer(vaultId);
         return;
       }
       const provider = await this.storageRegistry.getOrCreate(config.target);
       const remoteBasePath = config.remoteBasePath ?? '';
-      const changed = await this.teamVaultService.hasRemoteChangedSinceLastSync(provider, remoteBasePath);
+      const changed = await this.teamVaultService.hasRemoteChangedSinceLastSync(vaultId, provider, remoteBasePath);
       if (!changed) return;
 
-      const webContents = this.getWebContents();
-      if (await this.teamVaultService.hasUnpushedLocalChanges()) {
-        if (webContents && !webContents.isDestroyed?.()) {
-          webContents.send(IPC_CHANNELS.TEAM_VAULT_REMOTE_CHANGED);
-        }
+      if (await this.teamVaultService.hasUnpushedLocalChanges(vaultId)) {
+        this.broadcast(IPC_CHANNELS.TEAM_VAULT_REMOTE_CHANGED, { vaultId });
         return;
       }
 
-      await this.teamVaultService.pullFromRemote(provider, remoteBasePath);
-      this.aiHub?.changed();
-      await this.teamVaultConfigStore.setLastSyncAt(new Date().toISOString());
-      if (webContents && !webContents.isDestroyed?.()) {
-        webContents.send(IPC_CHANNELS.TEAM_VAULT_AUTO_PULLED);
+      this.beginTeamVaultSync(vaultId);
+      try {
+        await this.teamVaultService.pullFromRemote(vaultId, provider, remoteBasePath);
+        this.aiHub?.changed();
+        await this.teamVaultConfigStore.setLastSyncAt(vaultId, new Date().toISOString());
+        this.broadcast(IPC_CHANNELS.TEAM_VAULT_AUTO_PULLED, { vaultId });
+      } finally {
+        this.endTeamVaultSync(vaultId);
       }
     } catch (err) {
-      autosyncLog.warn('Team Vault background poll failed:', err);
+      autosyncLog.warn(`Team Vault background poll failed (vaultId=${vaultId}):`, err);
+      // A remote file in an older format than the one already seen on it is refused (see TeamVaultFormatDowngradeError), and the
+      // user should know the remote changed, not only find a line in the log.
+      if ((err as { name?: string } | null)?.name === 'TeamVaultFormatDowngradeError') {
+        this.broadcast(IPC_CHANNELS.TEAM_VAULT_REMOTE_CHANGED, { vaultId });
+      }
     }
+  }
+
+  /**
+   * Reference-counted start of a background push/pull for `vaultId` — fires
+   * `TEAM_VAULT_SYNC_STATUS` with `syncing: true` only on the 0->1 transition, so the per-team-tab
+   * sync dot in the Connection Manager turns on once regardless of how many operations are
+   * concurrently in flight for the same vault. Always pair with `endTeamVaultSync` in a `finally`.
+   */
+  private beginTeamVaultSync(vaultId: string): void {
+    const count = (this.teamVaultSyncInFlight.get(vaultId) ?? 0) + 1;
+    this.teamVaultSyncInFlight.set(vaultId, count);
+    if (count === 1) {
+      this.sendTeamVaultSyncStatus(vaultId, true);
+    }
+  }
+
+  /**
+   * Counterpart to `beginTeamVaultSync` — fires `TEAM_VAULT_SYNC_STATUS` with `syncing: false`
+   * only once the count drops back to 0. Without this reference count, a concurrent auto-push
+   * (`scheduleTeamVaultAutoPush`) and auto-poll pull (`runTeamVaultAutoPoll`) for the same vaultId
+   * could race: whichever finishes first would send `syncing: false` and turn the dot off while
+   * the other operation is still genuinely in progress.
+   */
+  private endTeamVaultSync(vaultId: string): void {
+    const count = (this.teamVaultSyncInFlight.get(vaultId) ?? 1) - 1;
+    if (count <= 0) {
+      this.teamVaultSyncInFlight.delete(vaultId);
+      this.sendTeamVaultSyncStatus(vaultId, false);
+    } else {
+      this.teamVaultSyncInFlight.set(vaultId, count);
+    }
+  }
+
+  /** Fires `TEAM_VAULT_SYNC_STATUS` — drives the per-team-tab sync dot in the Connection Manager
+   * (a discreet "syncing now" indicator, not just the after-the-fact
+   * `TEAM_VAULT_AUTO_PULLED`/`TEAM_VAULT_REMOTE_CHANGED` result). Best-effort, same as the rest of
+   * this file's `webContents.send` calls — no renderer window to notify is not an error. Always
+   * called through `beginTeamVaultSync`/`endTeamVaultSync`, never directly, so the reference count
+   * and the emitted event can't drift apart. */
+  private sendTeamVaultSyncStatus(vaultId: string, syncing: boolean): void {
+    this.broadcast(IPC_CHANNELS.TEAM_VAULT_SYNC_STATUS, { vaultId, syncing });
   }
 
   /**
@@ -1039,15 +1339,68 @@ export class IpcBridge {
    * target config — same separation `buildSyncStatus()` keeps between `ProfileSyncService` and
    * `SyncConfigStore` above, so `TeamVaultService` stays unaware of where (or whether) its file
    * is pushed/pulled from. */
-  public async buildTeamVaultStatus(): Promise<TeamVaultStatus> {
-    const [status, config] = await Promise.all([this.teamVaultService.getStatus(), this.teamVaultConfigStore.getConfig()]);
+  public async buildTeamVaultStatus(vaultId: string): Promise<TeamVaultStatus> {
+    const [status, config] = await Promise.all([
+      this.teamVaultService.getStatus(vaultId),
+      this.teamVaultConfigStore.getConfig(vaultId),
+    ]);
+    // A remembered identity path from before the single-team -> multi-team migration still
+    // points at the old flat identities directory, which migrateLegacyIdentitiesDir has since
+    // moved out from under it — self-heal it here (checked, not assumed, every time the status is
+    // read) rather than only once at startup, so this also covers installs that migrated before
+    // this fix existed. Without it, a returning member's one-click unlock silently regresses to
+    // the manual path-entry form (see relocateMigratedIdentityPath's doc comment).
+    let selfIdentityFilePath = config.selfIdentityFilePath;
+    if (selfIdentityFilePath && !fs.existsSync(selfIdentityFilePath)) {
+      const relocated = relocateMigratedIdentityPath(selfIdentityFilePath, vaultId);
+      if (relocated) {
+        selfIdentityFilePath = relocated;
+        this.teamVaultConfigStore.setSelfIdentity(vaultId, undefined, relocated).catch((err) => {
+          ipcLog.warn('Failed to persist the relocated Team Vault identity path (non-fatal):', err);
+        });
+      }
+    }
     return {
       ...status,
+      // `TeamVaultService.getStatus` only knows `vaultId` once a local file exists — a
+      // configured-but-never-pulled (or orphaned-pending) entry has none, and without this the
+      // renderer gets back `vaultId: undefined` and can't act on the row (e.g. "forget" sends
+      // `undefined` to an IPC handler that requires a real id). The vaultId we were asked about
+      // is always the right one to report back, file or no file.
+      vaultId: status.vaultId ?? vaultId,
       remoteConfigured: !!config.target,
+      // Decrypted, for autofilling the target editor form — same precedent buildSyncStatus()
+      // already set for the general Synchronization panel's own target (§ edit-target prefill).
+      targetConfig:
+        config.target?.type === 's3' && config.target.s3Config
+          ? { type: 's3', s3Config: redactS3Secrets(config.target.s3Config) }
+          : undefined,
+      remoteBasePath: config.remoteBasePath,
       lastSyncAt: config.lastSyncAt,
       selfRecipientId: config.selfRecipientId,
-      selfIdentityFilePath: config.selfIdentityFilePath,
+      selfIdentityFilePath,
+      selfRole: config.selfRecipientId
+        ? status.members?.find((m) => m.recipientId === config.selfRecipientId)?.role
+        : undefined,
     };
+  }
+
+  /** Every vault this device knows about, merging `TeamVaultService`'s local-file-derived
+   * statuses with `TeamVaultConfigStore`'s per-team S3 target configs in one round trip — the
+   * only call a multi-team list/switcher UI needs at mount (`TEAM_VAULT_LIST`). Includes a vault
+   * that has a configured S3 target but no local file yet (join-in-progress, parked under the
+   * pending sentinel — see `TEAM_VAULT_PENDING_VAULT_ID`'s doc comment), which `listStatuses()`
+   * alone (local-file-derived only) would otherwise miss entirely. */
+  public async buildAllTeamVaultStatuses(): Promise<TeamVaultStatus[]> {
+    const [localVaultIds, allConfigs] = await Promise.all([
+      this.teamVaultService.listVaultIds(),
+      this.teamVaultConfigStore.getAllConfigs(),
+    ]);
+    const vaultIds = new Set<string>(localVaultIds);
+    for (const vaultId of Object.keys(allConfigs)) {
+      vaultIds.add(vaultId);
+    }
+    return Promise.all(Array.from(vaultIds).map((vaultId) => this.buildTeamVaultStatus(vaultId)));
   }
 
   /**
@@ -1112,9 +1465,9 @@ export class IpcBridge {
     } else if (sameCardSocket) {
       socketPath = sameCardSocket;
     } else if (mode === 'agent-global') {
-      socketPath = await this.smartcard.getOrLoadGlobalSmartcardAgent(libPath, pinHandler);
+      socketPath = await this.smartcard.getOrLoadGlobalSmartcardAgent(libPath, pinHandler, 'Remote Profile Sync');
     } else {
-      const agent = await this.smartcard.loadSmartcardIntoPrivateAgentWithPresence(libPath, pinHandler);
+      const agent = await this.smartcard.loadSmartcardIntoPrivateAgentWithPresence(libPath, pinHandler, undefined, 'Remote Profile Sync');
       socketPath = agent.socketPath;
       privateAgentPid = agent.pid;
     }
@@ -1207,12 +1560,12 @@ export class IpcBridge {
     const provider = await this.getSyncProvider(config.target);
 
     if (config.topologySaltBase64 && config.credentialsSaltBase64) {
-      this.syncCryptoService.unlock(
+      await this.syncCryptoService.unlockAsync(
         'topology',
         passwords.topologyPassword,
         Buffer.from(config.topologySaltBase64, 'base64')
       );
-      this.syncCryptoService.unlock(
+      await this.syncCryptoService.unlockAsync(
         'credentials',
         passwords.credentialsPassword,
         Buffer.from(config.credentialsSaltBase64, 'base64')
@@ -1244,8 +1597,8 @@ export class IpcBridge {
       }
       const topologySalt = generateSalt();
       const credentialsSalt = generateSalt();
-      this.syncCryptoService.unlock('topology', passwords.topologyPassword, topologySalt);
-      this.syncCryptoService.unlock('credentials', passwords.credentialsPassword, credentialsSalt);
+      await this.syncCryptoService.unlockAsync('topology', passwords.topologyPassword, topologySalt);
+      await this.syncCryptoService.unlockAsync('credentials', passwords.credentialsPassword, credentialsSalt);
       await this.syncConfigStore.setSalts({ topologySalt, credentialsSalt });
       await this.profileSyncService.pushToRemote(provider, config.remoteBasePath ?? '');
     }
@@ -1257,14 +1610,11 @@ export class IpcBridge {
   public getUpdateService(): UpdateService {
     if (!this.updateService) {
       this.updateService = new UpdateService({
-        disabled: process.env.SSHS3_DISABLE_UPDATES === '1',
+        disabled: isUpdateCheckDisabled(process.env, this.policy.policy),
         confirmQuit: this.confirmQuit,
         getAutoCheck: async () => (await this.settingsStore.getSettings()).autoCheckUpdates !== false,
         send: (state) => {
-          const webContents = this.getWebContents();
-          if (webContents && !webContents.isDestroyed?.()) {
-            webContents.send(IPC_CHANNELS.UPDATE_STATE, state);
-          }
+          this.broadcast(IPC_CHANNELS.UPDATE_STATE, state);
         },
       });
     }
@@ -1282,15 +1632,12 @@ export class IpcBridge {
       const displayData = this.aiHub ? this.aiHub.terminals.feed(sessionId, data) : data;
       if (sessionId && this.activePresenceSessions.has(sessionId)) {
         this.activePresenceSessions.delete(sessionId);
-        const webContents = this.getWebContents();
-        if (webContents && !webContents.isDestroyed?.()) {
-          const event: PresenceClearEvent = { sessionId };
-          webContents.send(IPC_CHANNELS.PRESENCE_CLEAR, event);
-        }
+        const event: PresenceClearEvent = { sessionId };
+        this.sendToSession(sessionId, IPC_CHANNELS.PRESENCE_CLEAR, event);
       }
-      const webContents = this.getWebContents();
-      if (webContents && !webContents.isDestroyed?.()) {
-        if (displayData) webContents.send(IPC_CHANNELS.TERMINAL_DATA, sessionId, displayData);
+      if (displayData) {
+        this.scrollback.append(sessionId, displayData);
+        this.sendToSession(sessionId, IPC_CHANNELS.TERMINAL_DATA, sessionId, displayData);
       }
     };
     this.sshPtyManager.on('data', this.onPtyData);
@@ -1299,11 +1646,8 @@ export class IpcBridge {
       this.aiHub?.terminals.invalidate(sessionId, 'Terminal exited', true);
       if (sessionId && this.activePresenceSessions.has(sessionId)) {
         this.activePresenceSessions.delete(sessionId);
-        const webContents = this.getWebContents();
-        if (webContents && !webContents.isDestroyed?.()) {
-          const event: PresenceClearEvent = { sessionId };
-          webContents.send(IPC_CHANNELS.PRESENCE_CLEAR, event);
-        }
+        const event: PresenceClearEvent = { sessionId };
+        this.sendToSession(sessionId, IPC_CHANNELS.PRESENCE_CLEAR, event);
       }
 
       // Reject and remove any pending askpass prompts matching that sessionId
@@ -1321,11 +1665,9 @@ export class IpcBridge {
       // Tear down any private smartcard agent that was pre-loaded for this session.
       void this.smartcard.cleanupSmartcardSessionAgent(sessionId);
 
-      const webContents = this.getWebContents();
-      if (webContents && !webContents.isDestroyed?.()) {
-        const event: SSHPtyExitEvent = { exitCode, signal };
-        webContents.send(IPC_CHANNELS.TERMINAL_EXIT, sessionId, event);
-      }
+      this.scrollback.delete(sessionId);
+      const event: SSHPtyExitEvent = { exitCode, signal };
+      this.sendToSession(sessionId, IPC_CHANNELS.TERMINAL_EXIT, sessionId, event);
     };
     this.sshPtyManager.on('exit', this.onPtyExit);
 
@@ -1337,19 +1679,16 @@ export class IpcBridge {
         this.activePresenceSessions.add(sessionId);
       }
 
-      const webContents = this.getWebContents();
-      if (webContents && !webContents.isDestroyed?.()) {
-        webContents.send(IPC_CHANNELS.ASKPASS_PROMPT, {
-          id,
-          prompt,
-          sessionId,
-          kind,
-          context,
-          error: retry?.error,
-          attempt: retry?.attempt,
-          maxAttempts: retry?.maxAttempts,
-        });
-      }
+      this.sendToSession(sessionId, IPC_CHANNELS.ASKPASS_PROMPT, {
+        id,
+        prompt,
+        sessionId,
+        kind,
+        context,
+        error: retry?.error,
+        attempt: retry?.attempt,
+        maxAttempts: retry?.maxAttempts,
+      });
     };
     this.sshPtyManager.on('askpass', this.onPtyAskpass);
 
@@ -1358,89 +1697,73 @@ export class IpcBridge {
       if (sessionId) {
         this.activePresenceSessions.add(sessionId);
       }
-      const webContents = this.getWebContents();
-      if (webContents && !webContents.isDestroyed?.()) {
-        const message = /touch/i.test(prompt) ? prompt : 'Touch your security key to confirm';
-        const event: PresencePromptEvent = { id, sessionId, message };
-        webContents.send(IPC_CHANNELS.PRESENCE_PROMPT, event);
-      }
+      const message = /touch/i.test(prompt) ? prompt : 'Touch your security key to confirm';
+      const event: PresencePromptEvent = { id, sessionId, message };
+      this.sendToSession(sessionId, IPC_CHANNELS.PRESENCE_PROMPT, event);
     };
     this.sshPtyManager.on('presence', this.onPtyPresence);
 
     this.sshPtyManager.on('reconnecting', ({ sessionId, attempt, maxAttempts }) => {
       this.aiHub?.terminals.invalidate(sessionId, 'Connection lost or reconnecting');
-      const webContents = this.getWebContents();
-      if (webContents && !webContents.isDestroyed?.()) {
-        webContents.send(IPC_CHANNELS.TERMINAL_RECONNECTING, sessionId, { attempt, maxAttempts });
-      }
+      this.sendToSession(sessionId, IPC_CHANNELS.TERMINAL_RECONNECTING, sessionId, { attempt, maxAttempts });
+    });
+
+    this.sshPtyManager.on('hostkey-changed', ({ sessionId, ...target }) => {
+      handleHostKeyChanged(target, {
+        promptHostKeyTrust: (info) => this.promptHostKeyTrust(info),
+        notify: (data) => this.onPtyData?.({ sessionId, data }),
+      }).catch((err) => ipcLog.warn('Changed host key handling failed:', err));
     });
 
     this.onTransferProgress = (progress) => {
-      const webContents = this.getWebContents();
-      if (webContents && !webContents.isDestroyed?.()) {
-        webContents.send(IPC_CHANNELS.TRANSFER_PROGRESS, progress);
-      }
+      this.broadcast(IPC_CHANNELS.TRANSFER_PROGRESS, progress);
     };
     this.transferQueue.on('progress', this.onTransferProgress);
 
     this.onK8sTerminalData = ({ sessionId, data }) => {
       const displayData = this.aiHub ? this.aiHub.terminals.feed(sessionId, data) : data;
-      const webContents = this.getWebContents();
-      if (webContents && !webContents.isDestroyed?.()) {
-        if (displayData) webContents.send(IPC_CHANNELS.K8S_TERMINAL_DATA, sessionId, displayData);
+      if (displayData) {
+        this.scrollback.append(sessionId, displayData);
+        this.sendToSession(sessionId, IPC_CHANNELS.K8S_TERMINAL_DATA, sessionId, displayData);
       }
     };
     this.k8sTerminalManager.on('data', this.onK8sTerminalData);
 
     this.onK8sTerminalExit = ({ sessionId, status }) => {
       this.aiHub?.terminals.invalidate(sessionId, 'Kubernetes terminal exited', true);
-      const webContents = this.getWebContents();
-      if (webContents && !webContents.isDestroyed?.()) {
-        webContents.send(IPC_CHANNELS.K8S_TERMINAL_EXIT, sessionId, { status });
-      }
+      this.scrollback.delete(sessionId);
+      this.sendToSession(sessionId, IPC_CHANNELS.K8S_TERMINAL_EXIT, sessionId, { status });
     };
     this.k8sTerminalManager.on('exit', this.onK8sTerminalExit);
 
     this.onK8sLogData = ({ sessionId, data }) => {
-      const webContents = this.getWebContents();
-      if (webContents && !webContents.isDestroyed?.()) {
-        webContents.send(IPC_CHANNELS.K8S_LOG_DATA, sessionId, data);
-      }
+      this.sendToSession(sessionId, IPC_CHANNELS.K8S_LOG_DATA, sessionId, data);
     };
     this.k8sLogManager.on('data', this.onK8sLogData);
 
     this.onK8sLogEnd = ({ sessionId }) => {
-      const webContents = this.getWebContents();
-      if (webContents && !webContents.isDestroyed?.()) {
-        webContents.send(IPC_CHANNELS.K8S_LOG_END, sessionId);
-      }
+      this.sendToSession(sessionId, IPC_CHANNELS.K8S_LOG_END, sessionId);
     };
     this.k8sLogManager.on('end', this.onK8sLogEnd);
 
     this.onK8sPortForwardChange = (activeForwards) => {
-      const webContents = this.getWebContents();
-      if (webContents && !webContents.isDestroyed?.()) {
-        webContents.send(IPC_CHANNELS.K8S_PORT_FORWARD_EVENT, activeForwards);
-      }
+      this.broadcast(IPC_CHANNELS.K8S_PORT_FORWARD_EVENT, activeForwards);
     };
     this.k8sPortForwardManager.on('change', this.onK8sPortForwardChange);
 
     this.onSshTunnelChange = (active) => {
-      const webContents = this.getWebContents();
-      if (webContents && !webContents.isDestroyed?.()) {
-        webContents.send(IPC_CHANNELS.SSH_TUNNEL_EVENT, active);
-      }
+      this.broadcast(IPC_CHANNELS.SSH_TUNNEL_EVENT, active);
     };
     this.sshTunnelManager.on('change', this.onSshTunnelChange);
 
     this.onK8sConfigChanged = () => {
-      const webContents = this.getWebContents();
-      if (webContents && !webContents.isDestroyed?.()) {
-        // Carries an optional warning (H8 code-review finding) when this
-        // reload just introduced a new exec-auth user — see
-        // K8sDiscoveryService.checkExecAuthChange.
-        webContents.send(IPC_CHANNELS.K8S_CONFIG_CHANGED, this.k8sDiscoveryService.consumePendingExecAuthWarning());
-      }
+      // Carries an optional warning (H8 code-review finding) when this
+      // reload just introduced a new exec-auth user — see
+      // K8sDiscoveryService.checkExecAuthChange. The warning is consumed once, so it goes to the
+      // focused window only; the others just reload.
+      const warning = this.k8sDiscoveryService.consumePendingExecAuthWarning();
+      this.windows?.broadcastExcept(this.getWebContents()?.id, IPC_CHANNELS.K8S_CONFIG_CHANGED);
+      this.sendToFocused(IPC_CHANNELS.K8S_CONFIG_CHANGED, warning);
     };
     this.unsubscribeK8sConfig = this.k8sDiscoveryService.onConfigChanged(this.onK8sConfigChanged);
   }
@@ -1547,6 +1870,8 @@ export class IpcBridge {
     }
     this.pendingAskpass.clear();
 
+    for (const cancel of [...this.pendingInsertTokens.values()]) cancel();
+
     for (const prompt of this.pendingHostKeyPrompts.values()) {
       try {
         prompt.callback(false);
@@ -1595,6 +1920,7 @@ export class IpcBridge {
     await this.sshPtyManager.killAll();
     await this.storageRegistry.disconnectAll?.();
     await this.fileEditorService.dispose();
+    await this.dragOutService.dispose();
     this.fileTailService.dispose();
     this.searchOrchestrator.dispose();
     if (this.autoSyncTimer) {
@@ -1602,16 +1928,22 @@ export class IpcBridge {
       this.autoSyncTimer = null;
     }
     this.stopAutoPullTimer();
-    this.stopTeamVaultAutoPollTimer();
-    if (this.teamVaultAutoPushTimer) {
-      clearTimeout(this.teamVaultAutoPushTimer);
-      this.teamVaultAutoPushTimer = null;
+    for (const vaultId of Array.from(this.teamVaultAutoPollTimers.keys())) {
+      this.stopTeamVaultAutoPollTimer(vaultId);
     }
+    for (const timer of this.teamVaultAutoPushTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.teamVaultAutoPushTimers.clear();
     // The PTY-exit listener that normally drives cleanupSmartcardSessionAgent()
     // was already detached above, so killAll() won't trigger it — kill every
     // remaining per-session ('agent-per-session' mode) private agent explicitly,
     // in addition to the global ones, or their ssh-agent processes and sockets
     // under ~/.ssh/agent leak past app quit.
+    // Ends the SSH CA session first: it cancels a pending sign-in and the renewal timers, removes the
+    // certified key from the app agent and deletes the PIV certificate file, which the app agent
+    // shutdown below does not know about.
+    await this.disposeStep('sshCaService.logout', () => this.sshCaService.logout());
     await this.smartcard.dispose();
     AgentLifecycleManager.killAllPrivateAgents();
     await AgentLifecycleManager.stopManagedAgent();

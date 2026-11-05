@@ -263,4 +263,111 @@ describe('ProfileStore', () => {
     expect(profiles.folders).toEqual(['Staging']);
     expect(profiles.ssh[0].group).toBeUndefined();
   });
+
+  describe('tags', () => {
+    const ssh: SSHConnectionConfig = {
+      id: 'ssh-1',
+      name: 'Web',
+      host: 'web.example.com',
+      username: 'deploy',
+      authType: 'password',
+    };
+    const s3: S3Config = {
+      id: 's3-1',
+      name: 'Assets',
+      region: 'eu-north-1',
+      accessKeyId: 'AKIA',
+      secretAccessKey: 'secret',
+    };
+
+    it('stores normalized tags on SSH profiles and keeps them across a reload', async () => {
+      const store = new ProfileStore(storePath);
+      await store.saveSSH({ ...ssh, tags: ['#web', 'Prod', 'prod', 'bad tag'] });
+
+      const reloaded = await new ProfileStore(storePath).getProfiles();
+      expect(reloaded.ssh[0].tags).toEqual(['Prod', 'web']);
+    });
+
+    it('stores normalized tags on S3 profiles', async () => {
+      const store = new ProfileStore(storePath);
+      await store.saveS3({ ...s3, tags: ['b', 'A'] });
+
+      const profiles = await store.getProfiles();
+      expect(profiles.s3[0].tags).toEqual(['A', 'b']);
+    });
+
+    it('drops the field when no valid tag is left, so the stored record has no tags key', async () => {
+      const store = new ProfileStore(storePath);
+      await store.saveSSH({ ...ssh, tags: ['', 5 as unknown as string] });
+      await store.saveS3({ ...s3, tags: [] });
+
+      const profiles = await store.getProfiles();
+      expect('tags' in profiles.ssh[0]).toBe(false);
+      expect('tags' in profiles.s3[0]).toBe(false);
+    });
+
+    it('ignores a tags value of the wrong type instead of persisting it', async () => {
+      const store = new ProfileStore(storePath);
+      await store.saveSSH({ ...ssh, tags: 'prod' as unknown as string[] });
+
+      const profiles = await store.getProfiles();
+      expect('tags' in profiles.ssh[0]).toBe(false);
+    });
+
+    it('leaves profiles without tags untouched', async () => {
+      const store = new ProfileStore(storePath);
+      await store.saveSSH(ssh);
+
+      const profiles = await store.getProfiles();
+      expect(profiles.ssh[0]).toEqual({ ...ssh, updatedAt: expect.any(String) });
+    });
+  });
+
+  describe('system', () => {
+    const ssh: SSHConnectionConfig = {
+      id: 'ssh-1',
+      name: 'Web',
+      host: 'web.example.com',
+      username: 'deploy',
+      authType: 'password',
+      tunnels: [
+        { id: 't1', name: 'db', type: 'local', localPort: 5432, remoteHost: 'localhost', remotePort: 5432 },
+        { id: 't2', name: 'cache', type: 'local', localPort: 6379, remoteHost: 'localhost', remotePort: 6379 },
+      ],
+    };
+
+    it('stores a cleaned system membership and keeps it across a reload', async () => {
+      const store = new ProfileStore(storePath);
+      await store.saveSSH({ ...ssh, system: { name: '  shop  ', startDirectory: ' /srv ', tunnelIds: ['t2', 'gone', 't2'] } });
+
+      const reloaded = await new ProfileStore(storePath).getProfiles();
+      expect(reloaded.ssh[0].system).toEqual({ name: 'shop', startDirectory: '/srv', tunnelIds: ['t2'] });
+    });
+
+    it('drops a membership that has no usable name', async () => {
+      const store = new ProfileStore(storePath);
+      await store.saveSSH({ ...ssh, system: { name: '   ' } });
+      await store.saveSSH({ ...ssh, id: 'ssh-2', system: 'shop' as never });
+
+      const profiles = await store.getProfiles();
+      expect(profiles.ssh.every((p) => !('system' in p))).toBe(true);
+    });
+
+    it('forgets a tunnel that was removed from the profile the next time it is saved', async () => {
+      const store = new ProfileStore(storePath);
+      await store.saveSSH({ ...ssh, system: { name: 'shop', tunnelIds: ['t1', 't2'] } });
+
+      const [saved] = (await store.getProfiles()).ssh;
+      await store.saveSSH({ ...saved, tunnels: [saved.tunnels![0]] });
+
+      expect((await store.getProfiles()).ssh[0].system).toEqual({ name: 'shop', tunnelIds: ['t1'] });
+    });
+
+    it('leaves profiles without a system untouched', async () => {
+      const store = new ProfileStore(storePath);
+      await store.saveSSH(ssh);
+      const [saved] = (await store.getProfiles()).ssh;
+      expect('system' in saved).toBe(false);
+    });
+  });
 });

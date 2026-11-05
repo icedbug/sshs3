@@ -374,4 +374,70 @@ describe('SSHProfileForm', () => {
       expect(onSave).toHaveBeenCalledTimes(1);
     });
   });
+
+  describe('system', () => {
+    const base: SSHConnectionConfig = {
+      id: 'test-1',
+      name: 'Web',
+      host: 'web.example.com',
+      port: 22,
+      username: 'deploy',
+      authType: 'privateKey',
+      tunnels: [{ id: 't1', name: 'Database', type: 'local', localPort: 5432, remoteHost: 'localhost', remotePort: 5432 }],
+    };
+
+    it('puts the server into a system, with its terminal start directory and tunnels, when it is saved', async () => {
+      const onSave = vi.fn();
+      render(<SSHProfileForm initial={base} onSave={onSave} onCancel={vi.fn()} systemSuggestions={['shop']} />);
+
+      fireEvent.change(screen.getByLabelText('System (optional)'), { target: { value: 'shop' } });
+      fireEvent.change(screen.getByLabelText('Start directory'), { target: { value: '/srv/web' } });
+      fireEvent.click(screen.getByLabelText('Database'));
+      fireEvent.click(screen.getByRole('button', { name: /Save Profile/i }));
+
+      await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+      expect(onSave.mock.calls[0][0].system).toEqual({ name: 'shop', startDirectory: '/srv/web', tunnelIds: ['t1'] });
+    });
+
+    it('shows the folder of a server in a system but does not let it be edited there', () => {
+      render(<SSHProfileForm initial={{ ...base, group: 'Prod', system: { name: 'shop' } }} onSave={vi.fn()} onCancel={vi.fn()} />);
+      const folder = screen.getByLabelText(/Group \/ Folder/);
+      expect(folder).toHaveValue('Prod');
+      expect(folder).toHaveAttribute('readonly');
+      expect(screen.getByText('Follows the system')).toBeInTheDocument();
+    });
+
+    it('frees the folder as soon as the System field is cleared', () => {
+      render(<SSHProfileForm initial={{ ...base, group: 'Prod', system: { name: 'shop' } }} onSave={vi.fn()} onCancel={vi.fn()} />);
+      fireEvent.change(screen.getByLabelText('System (optional)'), { target: { value: '' } });
+      expect(screen.getByLabelText(/Group \/ Folder/)).not.toHaveAttribute('readonly');
+    });
+
+    it('lets the folder be edited for a server that is in no system', () => {
+      render(<SSHProfileForm initial={{ ...base, group: 'Prod' }} onSave={vi.fn()} onCancel={vi.fn()} />);
+      expect(screen.getByLabelText(/Group \/ Folder/)).not.toHaveAttribute('readonly');
+      expect(screen.queryByText('Follows the system')).not.toBeInTheDocument();
+    });
+
+    it('shows the system a server is already in, and takes it out when the name is cleared', async () => {
+      const onSave = vi.fn();
+      render(<SSHProfileForm initial={{ ...base, system: { name: 'shop', shell: false } }} onSave={onSave} onCancel={vi.fn()} />);
+      expect(screen.getByLabelText('System (optional)')).toHaveValue('shop');
+      expect(screen.getByLabelText('Open a terminal to this server')).not.toBeChecked();
+
+      fireEvent.change(screen.getByLabelText('System (optional)'), { target: { value: '' } });
+      fireEvent.click(screen.getByRole('button', { name: /Save Profile/i }));
+
+      await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+      expect(onSave.mock.calls[0][0].system).toBeUndefined();
+    });
+
+    it('does not add a system to a profile that has none', async () => {
+      const onSave = vi.fn();
+      render(<SSHProfileForm initial={base} onSave={onSave} onCancel={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /Save Profile/i }));
+      await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+      expect('system' in onSave.mock.calls[0][0] && onSave.mock.calls[0][0].system !== undefined).toBe(false);
+    });
+  });
 });

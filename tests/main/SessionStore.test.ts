@@ -22,6 +22,27 @@ describe('SessionStore', () => {
     }
   });
 
+  it('never writes file manager connection secrets to disk, even from a caller that did not sanitize', async () => {
+    await store.saveSession({
+      tabs: [
+        {
+          id: 'fm1',
+          type: 'filemanager',
+          title: 'FM',
+          initialSSHConfig: { id: 'c', host: 'h', username: 'u', authType: 'password', password: 'pw-secret', passphrase: 'pp-secret' }, // pragma: allowlist secret
+          initialS3Config: { id: 's', name: 'S', region: 'r', accessKeyId: 'AKIA', secretAccessKey: 's3-secret', sessionToken: 'tok-secret' }, // pragma: allowlist secret
+        },
+      ],
+      activeTabId: 'fm1',
+    } as unknown as SessionData);
+
+    const onDisk = await fs.readFile(sessionFile, 'utf-8');
+    for (const secret of ['pw-secret', 'pp-secret', 's3-secret', 'tok-secret']) {
+      expect(onDisk).not.toContain(secret);
+    }
+    expect(onDisk).toContain('"host": "h"');
+  });
+
   it('returns null when session file does not exist', async () => {
     const session = await store.getSession();
     expect(session).toBeNull();
@@ -126,5 +147,50 @@ describe('SessionStore', () => {
     expect(leaf.config.password).toBeUndefined();
     expect(leaf.config.passphrase).toBeUndefined();
     expect(leaf.config.username).toBe('admin');
+  });
+
+  describe('per-window sessions', () => {
+    const tab = (id: string) => ({ id, type: 'terminal' as const, title: id });
+
+    it('keeps the main window and secondary windows apart across saves', async () => {
+      await store.saveSessionForWindow(null, { tabs: [tab('a')], activeTabId: 'a' });
+      await store.saveSessionForWindow('w-1', { tabs: [tab('b')], activeTabId: 'b' });
+      await store.saveSessionForWindow(null, { tabs: [tab('a'), tab('c')], activeTabId: 'c' });
+
+      expect((await store.getSessionForWindow(null))?.tabs.map((t) => t.id)).toEqual(['a', 'c']);
+      expect((await store.getSessionForWindow('w-1'))?.tabs.map((t) => t.id)).toEqual(['b']);
+      expect((await store.getSession())?.windows?.[0].key).toBe('w-1');
+    });
+
+    it('saves bounds and restores them next to the tabs', async () => {
+      const bounds = { x: 5, y: 6, width: 700, height: 500 };
+      await store.saveWindowBounds('w-1', bounds, true);
+      await store.saveSessionForWindow('w-1', { tabs: [tab('b')], activeTabId: 'b' });
+      await store.saveWindowBounds(null, bounds, false);
+
+      const stored = await store.getSession();
+      expect(stored?.windows?.[0]).toMatchObject({ key: 'w-1', bounds, maximized: true });
+      expect(stored?.mainBounds).toEqual(bounds);
+    });
+
+    it('does not let a late save bring back a window that was closed on purpose', async () => {
+      await store.saveSessionForWindow('w-1', { tabs: [tab('b')], activeTabId: 'b' });
+      await store.forgetWindow('w-1');
+      await store.saveSessionForWindow('w-1', { tabs: [tab('b')], activeTabId: 'b' });
+      await store.saveWindowBounds('w-1', { x: 0, y: 0, width: 500, height: 400 }, false);
+
+      expect((await store.getSession())?.windows).toBeUndefined();
+    });
+
+    it('ignores a save without a tab list', async () => {
+      await store.saveSessionForWindow('w-1', { activeTabId: 'x' } as unknown as SessionData);
+      expect(await store.getSession()).toBeNull();
+    });
+
+    it('still reads an old single-window session file as the main window', async () => {
+      await fs.writeFile(sessionFile, JSON.stringify({ tabs: [tab('a')], activeTabId: 'a' }));
+      expect((await store.getSessionForWindow(null))?.tabs).toHaveLength(1);
+      expect((await store.getSessionForWindow('w-1'))?.tabs).toEqual([]);
+    });
   });
 });

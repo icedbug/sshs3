@@ -2,8 +2,16 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { app } from 'electron';
-import type { SessionData } from '../../shared/types/session';
-import { sanitizePaneNode } from '../../shared/sessionSanitize';
+import type { SavedTab, SavedWindowBounds, SessionData } from '../../shared/types/session';
+import { sanitizePaneNode, sanitizeTabConfigs } from '../../shared/sessionSanitize';
+import {
+  mergeWindowBounds,
+  mergeWindowSave,
+  removeWindow,
+  sessionViewForWindow,
+  type WindowKey,
+} from './windowSessions';
+import { writeFileAtomic } from '../storage/atomicFile';
 
 export function sanitizeSessionData(data: SessionData): SessionData {
   if (!data || !Array.isArray(data.tabs)) {
@@ -11,19 +19,29 @@ export function sanitizeSessionData(data: SessionData): SessionData {
   }
   return {
     ...data,
-    tabs: data.tabs.map((tab) => {
-      if (!tab.paneTree) return tab;
-      return {
-        ...tab,
-        paneTree: sanitizePaneNode(tab.paneTree),
-      };
-    }),
+    tabs: sanitizeTabs(data.tabs),
+    ...(Array.isArray(data.windows)
+      ? { windows: data.windows.map((w) => ({ ...w, tabs: sanitizeTabs(Array.isArray(w.tabs) ? w.tabs : []) })) }
+      : {}),
   };
+}
+
+function sanitizeTabs(tabs: SavedTab[]): SavedTab[] {
+  return tabs.map((rawTab) => {
+    const tab = sanitizeTabConfigs(rawTab);
+    if (!tab.paneTree) return tab;
+    return {
+      ...tab,
+      paneTree: sanitizePaneNode(tab.paneTree),
+    };
+  });
 }
 
 export class SessionStore {
   private filePath: string;
   private writeQueue: Promise<void> = Promise.resolve();
+  /** Keys of windows closed on purpose; a save still in flight from one must not bring it back. */
+  private readonly forgottenWindows = new Set<string>();
 
   constructor(customPath?: string) {
     if (customPath) {
@@ -60,18 +78,42 @@ export class SessionStore {
     if (!data) return;
     const cleanData = sanitizeSessionData(data);
 
+    return this.queueMutation(() => this.writeData(cleanData));
+  }
+
+  /** The session as one window's renderer sees it (its own tabs, shared lastPaths/panes). */
+  public async getSessionForWindow(key: WindowKey): Promise<SessionData | null> {
+    return sessionViewForWindow(await this.getSession(), key);
+  }
+
+  /** Saves one window's tabs without clobbering the others; the read happens inside the write queue. */
+  public async saveSessionForWindow(key: WindowKey, data: SessionData): Promise<void> {
+    if (!data || !Array.isArray(data.tabs)) return;
+    if (key !== null && this.forgottenWindows.has(key)) return;
+    const cleanData = sanitizeSessionData(data);
     return this.queueMutation(async () => {
-      await fs.mkdir(path.dirname(this.filePath), { recursive: true });
-      await fs.writeFile(this.filePath, JSON.stringify(cleanData, null, 2), {
-        encoding: 'utf-8',
-        mode: 0o600,
-      });
-      try {
-        await fs.chmod(this.filePath, 0o600);
-      } catch {
-        // Ignore chmod failures on non-POSIX filesystems
-      }
+      await this.writeData(mergeWindowSave(await this.getSession(), key, cleanData));
     });
+  }
+
+  public async saveWindowBounds(key: WindowKey, bounds: SavedWindowBounds, maximized: boolean): Promise<void> {
+    if (key !== null && this.forgottenWindows.has(key)) return;
+    return this.queueMutation(async () => {
+      await this.writeData(mergeWindowBounds(await this.getSession(), key, bounds, maximized));
+    });
+  }
+
+  /** Drops a secondary window the user closed on purpose, so it is not reopened next start. */
+  public async forgetWindow(key: string): Promise<void> {
+    this.forgottenWindows.add(key);
+    return this.queueMutation(async () => {
+      const next = removeWindow(await this.getSession(), key);
+      if (next) await this.writeData(next);
+    });
+  }
+
+  private async writeData(data: SessionData): Promise<void> {
+    await writeFileAtomic(this.filePath, JSON.stringify(data, null, 2), { mode: 0o600 });
   }
 
   private queueMutation<T>(mutation: () => Promise<T>): Promise<T> {

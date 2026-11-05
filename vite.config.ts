@@ -121,7 +121,7 @@ export default defineConfig({
     },
   },
   test: {
-    include: ['tests/**/*.test.{ts,tsx,js,cjs,mjs}'],
+    include: ['tests/**/*.test.{ts,tsx,js,cjs,mjs}', 'src/**/*.test.{ts,tsx}'],
     globals: true,
     environment: 'node',
     passWithNoTests: true,

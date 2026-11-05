@@ -1,16 +1,84 @@
-import React from 'react';
+import React, { useId } from 'react';
 import { Monitor, CheckCircle2, RefreshCw, Play, Square, FolderOpen } from 'lucide-react';
 import type { SettingsForm } from './useSettingsForm';
+import { ManagedNotice } from './Managed';
+
+const MODE_OPTIONS = [
+  { value: 'auto', title: 'Auto-start (Default)', hint: 'Starts VcXsrv on demand when an X11 session opens.' },
+  { value: 'always', title: 'Always Running', hint: 'Launches in background when sshs3 starts up.' },
+  { value: 'manual', title: 'Manual / External', hint: 'Manage server manually or use WSLg / external X server.' },
+] as const;
+
+/** The three X server start modes; read-only with an explanation when an administrator's policy locks them. */
+const X11ModeOptions: React.FC<{ form: SettingsForm }> = ({ form }) => {
+  const { x11ServerMode, setX11ServerMode, isManaged } = form;
+  const managed = isManaged('x11ServerMode');
+  const noticeId = useId();
+  return (
+    <>
+      <div
+        role="radiogroup"
+        aria-label="X server mode"
+        className={`grid grid-cols-1 sm:grid-cols-3 gap-2 ${managed ? 'opacity-70' : ''}`}
+      >
+        {MODE_OPTIONS.map((option) => (
+          <label
+            key={option.value}
+            className={`flex flex-col gap-1 rounded-lg border p-2.5 text-xs cursor-pointer transition-colors has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-sky-500 has-[:focus-visible]:ring-offset-1 has-[:focus-visible]:ring-offset-app-surface ${
+              x11ServerMode === option.value
+                ? 'border-sky-500 bg-sky-500/15 text-sky-300'
+                : 'border-border-subtle bg-app-surface text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary'
+            }`}
+          >
+            <div className="flex items-center gap-2 font-medium">
+              <input
+                type="radio"
+                name="x11ServerMode"
+                disabled={managed}
+                aria-describedby={managed ? noticeId : undefined}
+                checked={x11ServerMode === option.value}
+                onChange={() => setX11ServerMode(option.value)}
+                className="sr-only"
+              />
+              <span>{option.title}</span>
+            </div>
+            <span className="text-xs text-txt-muted leading-tight">{option.hint}</span>
+          </label>
+        ))}
+      </div>
+      <ManagedNotice managed={managed} id={noticeId} />
+    </>
+  );
+};
+
+/** The X server command-line arguments field; locked like the mode when managed. */
+const X11ArgsField: React.FC<{ form: SettingsForm }> = ({ form }) => {
+  const { x11ServerArgs, setX11ServerArgs, isManaged } = form;
+  const managed = isManaged('x11ServerArgs');
+  const noticeId = useId();
+  return (
+    <div className="space-y-1.5">
+      <label className="text-xs font-medium text-txt-primary">Server Arguments</label>
+      <input
+        aria-label="X server arguments"
+        aria-describedby={managed ? noticeId : undefined}
+        disabled={managed}
+        type="text"
+        value={x11ServerArgs}
+        onChange={(e) => setX11ServerArgs(e.target.value)}
+        placeholder=":0 -multiwindow -clipboard -wgl -ac"
+        className="w-full rounded-lg border border-border-subtle bg-app-input px-3 py-1.5 font-mono text-xs text-txt-primary outline-none focus:border-sky-500"
+      />
+      <ManagedNotice managed={managed} id={noticeId} />
+    </div>
+  );
+};
 
 /** Local X11 server controls (Windows GUI forwarding) and the Linux notice, shown under Terminal settings. */
 export const X11ServerSection: React.FC<{ form: SettingsForm }> = ({ form }) => {
   const {
-    x11ServerMode,
-    setX11ServerMode,
     x11ServerPath,
     setX11ServerPath,
-    x11ServerArgs,
-    setX11ServerArgs,
     x11Status,
     x11Operating,
     isLinux,
@@ -33,17 +101,18 @@ export const X11ServerSection: React.FC<{ form: SettingsForm }> = ({ form }) => 
         </div>
         <div className="flex items-center gap-2">
           {x11Status?.running ? (
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-2xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-2xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
               Running ({x11Status.display})
               {x11Status.managedByApp && x11Status.pid ? ` [PID ${x11Status.pid}]` : ''}
             </span>
           ) : (
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-2xs font-medium bg-slate-500/10 text-txt-muted border border-slate-500/20">
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-2xs font-medium bg-slate-500/10 text-txt-muted border border-slate-500/20">
               Stopped
             </span>
           )}
           <button
+            aria-label="Refresh X server status"
             type="button"
             onClick={() => void refreshX11Status()}
             className="p-1 text-txt-muted hover:text-txt-primary hover:bg-app-surface-hover rounded transition-colors"
@@ -103,73 +172,7 @@ export const X11ServerSection: React.FC<{ form: SettingsForm }> = ({ form }) => 
             </p>
 
             {/* Server Mode */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-              <label
-                className={`flex flex-col gap-1 rounded-lg border p-2.5 text-xs cursor-pointer transition-colors ${
-                  x11ServerMode === 'auto'
-                    ? 'border-sky-500 bg-sky-500/15 text-sky-300'
-                    : 'border-border-subtle bg-app-surface text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary'
-                }`}
-              >
-                <div className="flex items-center gap-2 font-medium">
-                  <input
-                    type="radio"
-                    name="x11ServerMode"
-                    checked={x11ServerMode === 'auto'}
-                    onChange={() => setX11ServerMode('auto')}
-                    className="hidden"
-                  />
-                  <span>Auto-start (Default)</span>
-                </div>
-                <span className="text-xs text-txt-muted leading-tight">
-                  Starts VcXsrv on demand when an X11 session opens.
-                </span>
-              </label>
-
-              <label
-                className={`flex flex-col gap-1 rounded-lg border p-2.5 text-xs cursor-pointer transition-colors ${
-                  x11ServerMode === 'always'
-                    ? 'border-sky-500 bg-sky-500/15 text-sky-300'
-                    : 'border-border-subtle bg-app-surface text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary'
-                }`}
-              >
-                <div className="flex items-center gap-2 font-medium">
-                  <input
-                    type="radio"
-                    name="x11ServerMode"
-                    checked={x11ServerMode === 'always'}
-                    onChange={() => setX11ServerMode('always')}
-                    className="hidden"
-                  />
-                  <span>Always Running</span>
-                </div>
-                <span className="text-xs text-txt-muted leading-tight">
-                  Launches in background when sshs3 starts up.
-                </span>
-              </label>
-
-              <label
-                className={`flex flex-col gap-1 rounded-lg border p-2.5 text-xs cursor-pointer transition-colors ${
-                  x11ServerMode === 'manual'
-                    ? 'border-sky-500 bg-sky-500/15 text-sky-300'
-                    : 'border-border-subtle bg-app-surface text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary'
-                }`}
-              >
-                <div className="flex items-center gap-2 font-medium">
-                  <input
-                    type="radio"
-                    name="x11ServerMode"
-                    checked={x11ServerMode === 'manual'}
-                    onChange={() => setX11ServerMode('manual')}
-                    className="hidden"
-                  />
-                  <span>Manual / External</span>
-                </div>
-                <span className="text-xs text-txt-muted leading-tight">
-                  Manage server manually or use WSLg / external X server.
-                </span>
-              </label>
-            </div>
+            <X11ModeOptions form={form} />
 
             {/* Path & Controls */}
             <div className="space-y-2">
@@ -199,89 +202,14 @@ export const X11ServerSection: React.FC<{ form: SettingsForm }> = ({ form }) => 
             </div>
 
             {/* Custom Arguments */}
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium text-txt-primary">Server Arguments</label>
-              <input
-                aria-label="X server arguments"
-                type="text"
-                value={x11ServerArgs}
-                onChange={(e) => setX11ServerArgs(e.target.value)}
-                placeholder=":0 -multiwindow -clipboard -wgl -ac"
-                className="w-full rounded-lg border border-border-subtle bg-app-input px-3 py-1.5 font-mono text-xs text-txt-primary outline-none focus:border-sky-500"
-              />
-            </div>
+            <X11ArgsField form={form} />
+
           </div>
         </details>
       ) : (
         <>
           {/* Server Mode */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-            <label
-              className={`flex flex-col gap-1 rounded-lg border p-2.5 text-xs cursor-pointer transition-colors ${
-                x11ServerMode === 'auto'
-                  ? 'border-sky-500 bg-sky-500/15 text-sky-300'
-                  : 'border-border-subtle bg-app-surface text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary'
-              }`}
-            >
-              <div className="flex items-center gap-2 font-medium">
-                <input
-                  type="radio"
-                  name="x11ServerMode"
-                  checked={x11ServerMode === 'auto'}
-                  onChange={() => setX11ServerMode('auto')}
-                  className="hidden"
-                />
-                <span>Auto-start (Default)</span>
-              </div>
-              <span className="text-xs text-txt-muted leading-tight">
-                Starts VcXsrv on demand when an X11 session opens.
-              </span>
-            </label>
-
-            <label
-              className={`flex flex-col gap-1 rounded-lg border p-2.5 text-xs cursor-pointer transition-colors ${
-                x11ServerMode === 'always'
-                  ? 'border-sky-500 bg-sky-500/15 text-sky-300'
-                  : 'border-border-subtle bg-app-surface text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary'
-              }`}
-            >
-              <div className="flex items-center gap-2 font-medium">
-                <input
-                  type="radio"
-                  name="x11ServerMode"
-                  checked={x11ServerMode === 'always'}
-                  onChange={() => setX11ServerMode('always')}
-                  className="hidden"
-                />
-                <span>Always Running</span>
-              </div>
-              <span className="text-xs text-txt-muted leading-tight">
-                Launches in background when sshs3 starts up.
-              </span>
-            </label>
-
-            <label
-              className={`flex flex-col gap-1 rounded-lg border p-2.5 text-xs cursor-pointer transition-colors ${
-                x11ServerMode === 'manual'
-                  ? 'border-sky-500 bg-sky-500/15 text-sky-300'
-                  : 'border-border-subtle bg-app-surface text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary'
-              }`}
-            >
-              <div className="flex items-center gap-2 font-medium">
-                <input
-                  type="radio"
-                  name="x11ServerMode"
-                  checked={x11ServerMode === 'manual'}
-                  onChange={() => setX11ServerMode('manual')}
-                  className="hidden"
-                />
-                <span>Manual / External</span>
-              </div>
-              <span className="text-xs text-txt-muted leading-tight">
-                Manage server manually or use WSLg / external X server.
-              </span>
-            </label>
-          </div>
+          <X11ModeOptions form={form} />
 
           {/* Path & Controls */}
           <div className="space-y-2">
@@ -317,17 +245,7 @@ export const X11ServerSection: React.FC<{ form: SettingsForm }> = ({ form }) => 
           </div>
 
           {/* Custom Arguments */}
-          <div className="space-y-1.5">
-            <label className="text-xs font-medium text-txt-primary">Server Arguments</label>
-            <input
-              aria-label="X server arguments"
-              type="text"
-              value={x11ServerArgs}
-              onChange={(e) => setX11ServerArgs(e.target.value)}
-              placeholder=":0 -multiwindow -clipboard -wgl -ac"
-              className="w-full rounded-lg border border-border-subtle bg-app-input px-3 py-1.5 font-mono text-xs text-txt-primary outline-none focus:border-sky-500"
-            />
-          </div>
+          <X11ArgsField form={form} />
 
           {/* Manual start/stop actions */}
           <div className="flex items-center gap-2 pt-1">
@@ -355,7 +273,7 @@ export const X11ServerSection: React.FC<{ form: SettingsForm }> = ({ form }) => 
             )}
             {!x11Status?.running && !x11Status?.available && !x11ServerPath && (
               <span className="text-xs text-amber-400">
-                VcXsrv not detected. Please install VcXsrv or specify path above.
+                VcXsrv not detected. Install VcXsrv or enter its path above.
               </span>
             )}
           </div>

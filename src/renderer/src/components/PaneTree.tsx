@@ -1,14 +1,16 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { Columns2, RefreshCw, Rows2, X } from 'lucide-react';
+import { Columns2, Maximize2, Minimize2, RefreshCw, Rows2, X } from 'lucide-react';
 import { TerminalView } from './TerminalView';
 import { K8sLogView } from './K8sLogView';
-import { collectLeaves } from '../lib/paneTree';
+import { collectLeaves, findLeaf } from '../lib/paneTree';
+import { getShortcutKeys } from '../lib/shortcuts';
 import type { AppSettings } from '@shared/types/settings';
 import { DEFAULT_PERF_ITEMS } from '@shared/types/perf';
 import type { LocalShellType, SSHConnectionConfig } from '@shared/types/ssh';
 import type { PaneLeaf, PaneNode, PaneOrientation } from '@shared/types/session';
 import { UnconnectedPanePlaceholder } from './UnconnectedPanePlaceholder';
+import { SplitDivider } from './ui/SplitDivider';
 
 export interface PaneTreeViewProps {
   node: PaneNode;
@@ -19,16 +21,24 @@ export interface PaneTreeViewProps {
   platform: string;
   onSelectPane: (paneId: string) => void;
   onSplitPane: (paneId: string, orientation: PaneOrientation) => void;
+  /** Sets a 2-child split node's relative pane sizes (§23) — the divider drag handler. */
+  onResizeSplit?: (splitId: string, weights: number[]) => void;
   onClosePane: (paneId: string) => void;
+  /** Pane shown alone, full-size (the other panes keep running hidden); undefined = normal layout. */
+  zoomedPaneId?: string;
+  onToggleZoom?: (paneId: string) => void;
   onChangeConnection: (paneId: string) => void;
   onOpenLocalTerminal: (paneId: string, shellType?: LocalShellType, wslDistro?: string) => void;
   onCloseTab: () => void;
   onTitleChange?: (paneId: string, title: string) => void;
   onOpenRemotePath?: (config: SSHConnectionConfig, path: string) => void;
+  onOpenLocalPath?: (path: string) => void;
   /** Remote directory to `cd` into once this specific pane's shell prompt appears. */
   initialCwdPaneId?: string;
   initialCwd?: string;
   onNavigateToTabBar?: () => void;
+  /** Local shells share one perf bar in the tab header, so they skip their own bar and sampling. */
+  hoistLocalPerf?: boolean;
 }
 
 interface PaneTreeLayoutProps extends PaneTreeViewProps {
@@ -63,8 +73,36 @@ const PaneSlot: React.FC<{
 
 const PaneTreeLayout: React.FC<PaneTreeLayoutProps> = (props) => {
   const { node } = props;
+  const splitContainerRef = useRef<HTMLDivElement>(null);
 
   if (node.type === 'split') {
+    // Only the common 2-child case is user-resizable (§23) — a 3+-child split still renders
+    // equally sized panes, same as before.
+    if (node.children.length === 2) {
+      const [a, b] = node.children;
+      const weights = node.weights?.length === 2 ? node.weights : [1, 1];
+      const ratio = weights[0] / (weights[0] + weights[1]);
+      return (
+        <div
+          ref={splitContainerRef}
+          className={`flex h-full w-full ${node.orientation === 'row' ? 'flex-row' : 'flex-col'}`}
+        >
+          <div style={{ flexGrow: ratio, flexBasis: 0, minHeight: 0, minWidth: 0 }} className="flex flex-col overflow-hidden">
+            <PaneTreeLayout {...props} node={a} />
+          </div>
+          <SplitDivider
+            orientation={node.orientation === 'row' ? 'vertical' : 'horizontal'}
+            ratio={ratio}
+            onChange={(r) => props.onResizeSplit?.(node.id, [r, 1 - r])}
+            containerRef={splitContainerRef}
+            label="Resize terminal panes"
+          />
+          <div style={{ flexGrow: 1 - ratio, flexBasis: 0, minHeight: 0, minWidth: 0 }} className="flex flex-col overflow-hidden">
+            <PaneTreeLayout {...props} node={b} />
+          </div>
+        </div>
+      );
+    }
     return (
       <div className={`flex h-full w-full ${node.orientation === 'row' ? 'flex-row' : 'flex-col'}`}>
         {node.children.map((child, i) => (
@@ -131,39 +169,54 @@ const PaneTreeLayout: React.FC<PaneTreeLayoutProps> = (props) => {
         </div>
         <div className="flex items-center gap-0.5">
           <button
+            aria-label="Change connection"
             type="button"
             title="Change connection"
             data-testid={`change-pane-${node.id}`}
             onClick={() => props.onChangeConnection(node.id)}
-            className="rounded p-0.5 hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
+            className="rounded p-1.5 hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
           >
             <RefreshCw className="h-3 w-3" />
           </button>
+          {!isSole && props.onToggleZoom && (
+            <button
+              type="button"
+              title={`${props.zoomedPaneId === node.id ? 'Restore' : 'Zoom'} pane (${getShortcutKeys('zoomPane', props.settings.shortcuts)})`}
+              data-testid={`zoom-pane-${node.id}`}
+              onClick={() => props.onToggleZoom?.(node.id)}
+              className="rounded p-1.5 hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
+            >
+              {props.zoomedPaneId === node.id ? <Minimize2 className="h-3 w-3" /> : <Maximize2 className="h-3 w-3" />}
+            </button>
+          )}
           <button
+            aria-label="Split right"
             type="button"
             title="Split right"
             data-testid={`split-row-${node.id}`}
             onClick={() => props.onSplitPane(node.id, 'row')}
-            className="rounded p-0.5 hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
+            className="rounded p-1.5 hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
           >
             <Columns2 className="h-3 w-3" />
           </button>
           <button
+            aria-label="Split down"
             type="button"
             title="Split down"
             data-testid={`split-column-${node.id}`}
             onClick={() => props.onSplitPane(node.id, 'column')}
-            className="rounded p-0.5 hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
+            className="rounded p-1.5 hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
           >
             <Rows2 className="h-3 w-3" />
           </button>
           {!isSole && (
             <button
+              aria-label="Close this pane"
               type="button"
               title="Close this pane"
               data-testid={`close-pane-${node.id}`}
               onClick={() => props.onClosePane(node.id)}
-              className="rounded p-0.5 hover:bg-red-500/20 hover:text-red-400 transition-colors"
+              className="rounded p-1.5 hover:bg-red-500/20 hover:text-red-400 transition-colors"
             >
               <X className="h-3 w-3" />
             </button>
@@ -190,8 +243,10 @@ const PaneLeafContent: React.FC<{
   onOpenLocalTerminal: (paneId: string, shellType?: LocalShellType, wslDistro?: string) => void;
   onTitleChange?: (paneId: string, title: string) => void;
   onOpenRemotePath?: (config: SSHConnectionConfig, path: string) => void;
+  onOpenLocalPath?: (path: string) => void;
   onSelectPane: (paneId: string) => void;
   onNavigateToTabBar?: () => void;
+  hoistLocalPerf?: boolean;
 }> = ({
   leaf,
   isActive,
@@ -206,8 +261,10 @@ const PaneLeafContent: React.FC<{
   onOpenLocalTerminal,
   onTitleChange,
   onOpenRemotePath,
+  onOpenLocalPath,
   onSelectPane,
   onNavigateToTabBar,
+  hoistLocalPerf,
 }) => {
   const isSole = totalPanes === 1;
   const perfEnabled = settings.perfMetricsEnabled === true;
@@ -226,6 +283,7 @@ const PaneLeafContent: React.FC<{
   if (leaf.config) {
     content = (
       <TerminalView
+        paneId={leaf.id}
         config={leaf.config}
         perfMetrics={perfMetrics}
         isActive={isActive}
@@ -233,6 +291,11 @@ const PaneLeafContent: React.FC<{
         fontFamily={settings.terminalFontFamily}
         theme={settings.theme}
         scrollback={settings.terminalScrollback}
+        pathHoverPreview={settings.terminalPathHoverPreview}
+        pathHoverMode={settings.terminalPathHoverMode}
+        sudoRetryPrompt={settings.terminalSudoRetryPrompt}
+        portForwardAutoDetect={settings.terminalPortForwardAutoDetect}
+        portForwardCustomRegex={settings.terminalPortForwardCustomRegex}
         initialCwd={initialCwdPaneId === leaf.id ? initialCwd : undefined}
         sessionExitAction={settings.sessionExitAction}
         copyOnSelect={settings.copyOnSelect}
@@ -245,6 +308,7 @@ const PaneLeafContent: React.FC<{
   } else if (leaf.k8sTarget) {
     content = (
       <TerminalView
+        paneId={leaf.id}
         k8sTarget={leaf.k8sTarget}
         perfMetrics={perfMetrics}
         isActive={isActive}
@@ -252,6 +316,11 @@ const PaneLeafContent: React.FC<{
         fontFamily={settings.terminalFontFamily}
         theme={settings.theme}
         scrollback={settings.terminalScrollback}
+        pathHoverPreview={settings.terminalPathHoverPreview}
+        pathHoverMode={settings.terminalPathHoverMode}
+        sudoRetryPrompt={settings.terminalSudoRetryPrompt}
+        portForwardAutoDetect={settings.terminalPortForwardAutoDetect}
+        portForwardCustomRegex={settings.terminalPortForwardCustomRegex}
         sessionExitAction={settings.sessionExitAction}
         copyOnSelect={settings.copyOnSelect}
         clipboardHistoryScope={settings.clipboardHistoryScope}
@@ -271,8 +340,9 @@ const PaneLeafContent: React.FC<{
   } else if (leaf.local) {
     content = (
       <TerminalView
+        paneId={leaf.id}
         local
-        perfMetrics={perfMetrics}
+        perfMetrics={hoistLocalPerf ? undefined : perfMetrics}
         shellType={leaf.shellType}
         wslDistro={leaf.wslDistro}
         isActive={isActive}
@@ -280,9 +350,15 @@ const PaneLeafContent: React.FC<{
         fontFamily={settings.terminalFontFamily}
         theme={settings.theme}
         scrollback={settings.terminalScrollback}
+        pathHoverPreview={settings.terminalPathHoverPreview}
+        pathHoverMode={settings.terminalPathHoverMode}
+        sudoRetryPrompt={settings.terminalSudoRetryPrompt}
+        portForwardAutoDetect={settings.terminalPortForwardAutoDetect}
+        portForwardCustomRegex={settings.terminalPortForwardCustomRegex}
         sessionExitAction={settings.sessionExitAction}
         copyOnSelect={settings.copyOnSelect}
         clipboardHistoryScope={settings.clipboardHistoryScope}
+        onOpenPath={onOpenLocalPath ? (path) => onOpenLocalPath(path) : undefined}
         onCloseTab={isSole ? onCloseTab : () => onClosePane(leaf.id)}
         onTitleChange={onTitleChange ? (title) => onTitleChange(leaf.id, title) : undefined}
       />
@@ -353,9 +429,13 @@ export const PaneTreeView: React.FC<PaneTreeViewProps> = (props) => {
     }
   }, [leaves]);
 
+  // A zoomed pane is laid out alone. The hidden panes keep their portal content (and sessions)
+  // mounted in detached containers and are re-attached by their PaneSlot when the zoom ends.
+  const zoomedLeaf = props.zoomedPaneId ? findLeaf(props.node, props.zoomedPaneId) : null;
+
   return (
     <>
-      <PaneTreeLayout {...props} getPaneContainer={getPaneContainer} />
+      <PaneTreeLayout {...props} node={zoomedLeaf ?? props.node} getPaneContainer={getPaneContainer} />
       {leaves.map((leaf) => {
         const container = getPaneContainer(leaf.id);
         return createPortal(
@@ -374,8 +454,10 @@ export const PaneTreeView: React.FC<PaneTreeViewProps> = (props) => {
             onOpenLocalTerminal={props.onOpenLocalTerminal}
             onTitleChange={props.onTitleChange}
             onOpenRemotePath={props.onOpenRemotePath}
+            onOpenLocalPath={props.onOpenLocalPath}
             onSelectPane={props.onSelectPane}
             onNavigateToTabBar={props.onNavigateToTabBar}
+            hoistLocalPerf={props.hoistLocalPerf}
           />,
           container,
           leaf.id

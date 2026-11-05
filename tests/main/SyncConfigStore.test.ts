@@ -63,6 +63,37 @@ describe('SyncConfigStore', () => {
     expect(config.target?.s3Config?.accessKeyId).toBe('AKIA');
   });
 
+  it('keeps target secrets it cannot decrypt when an unrelated field is saved with the keyring unavailable', async () => {
+    const store = new SyncConfigStore(storePath);
+    await store.setTarget({
+      id: 'sync-target',
+      name: 'My Sync Bucket',
+      type: 's3',
+      s3Config: { id: 'sync-target', name: 'My Sync Bucket', region: 'us-east-1', accessKeyId: 'AKIA', secretAccessKey: 'top-secret' },
+    });
+
+    mockIsEncryptionAvailable.mockReturnValue(false);
+    expect((await store.getConfig()).target?.s3Config?.secretAccessKey).toBe('');
+    await store.setLastSyncAt('2026-10-27 20:00');
+
+    mockIsEncryptionAvailable.mockReturnValue(true);
+    const config = await store.getConfig();
+    expect(config.lastSyncAt).toBe('2026-10-27 20:00');
+    expect(config.target?.s3Config?.secretAccessKey).toBe('top-secret');
+  });
+
+  it('copies an unparsable config file aside instead of silently discarding it', async () => {
+    await fs.writeFile(storePath, '{"target": {', 'utf-8');
+    const store = new SyncConfigStore(storePath);
+    await store.setTarget({
+      id: 't',
+      name: 'T',
+      type: 's3',
+      s3Config: { id: 't', name: 'T', region: 'us-east-1', accessKeyId: 'A', secretAccessKey: 's' },
+    });
+    expect(await fs.readFile(`${storePath}.corrupt`, 'utf-8')).toBe('{"target": {');
+  });
+
   it('persists salts independently without clobbering the other one', async () => {
     const store = new SyncConfigStore(storePath);
     const topologySalt = Buffer.from('topology-salt-bytes');
@@ -93,6 +124,29 @@ describe('SyncConfigStore', () => {
     expect((await store.getConfig()).autoSync).toBe(true);
     await store.setAutoSync(false);
     expect((await store.getConfig()).autoSync).toBe(false);
+  });
+
+  it('replaceTarget() swaps the location and drops the salts, last sync and auto-sync, but keeps the smartcard link', async () => {
+    const store = new SyncConfigStore(storePath);
+    const target = (host: string): StorageConnectConfig => ({
+      id: 'sync', name: 'Sync', type: 'sftp', sftpConfig: { host, port: 22, username: 'u', authType: 'password', password: 'pw' } as any, // pragma: allowlist secret
+    });
+    await store.setTarget(target('old.example.com'), '/old');
+    await store.setSalts({ topologySalt: Buffer.from('a'), credentialsSalt: Buffer.from('b') });
+    await store.setLastSyncAt('2026-11-03T10:00:00.000Z');
+    await store.setAutoSync(true);
+    await store.setSmartcardSync({ pkcs11LibPath: '/lib/x.so' });
+
+    await store.replaceTarget(target('new.example.com'), '/new');
+
+    const config = await store.getConfig();
+    expect(config.target?.sftpConfig?.host).toBe('new.example.com');
+    expect(config.remoteBasePath).toBe('/new');
+    expect(config.topologySaltBase64).toBeUndefined();
+    expect(config.credentialsSaltBase64).toBeUndefined();
+    expect(config.lastSyncAt).toBeUndefined();
+    expect(config.autoSync).toBe(false);
+    expect(config.smartcardSync?.pkcs11LibPath).toBe('/lib/x.so');
   });
 
   it('clear() resets the target, salts, and every other field for the "delete all sync data" action', async () => {

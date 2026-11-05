@@ -30,11 +30,33 @@ const REASONS: Record<string, string> = {
 };
 
 /**
+ * Local metrics describe this machine whichever pane samples them, so the history is kept outside the hook:
+ * when the tab's layout moves the sampler between a pane bar and the shared header bar, the graph carries over.
+ * Stale entries are dropped so a long-closed pane does not resurface old data.
+ */
+const LOCAL_HISTORY_MAX_AGE_MS = 120_000;
+let localHistory: PerfSample[] = [];
+
+const recentLocalHistory = (): PerfSample[] => {
+  const last = localHistory[localHistory.length - 1];
+  return last && Date.now() - last.t <= LOCAL_HISTORY_MAX_AGE_MS ? localHistory : [];
+};
+
+/** Test hook: forget the shared local history. */
+export function resetLocalPerfHistory(): void {
+  localHistory = [];
+}
+
+/**
  * Polls the main process for performance samples. Main is stateless (raw counters only); deltas and the history
  * ring buffer live here. Chained timeouts rather than setInterval so a slow ssh round-trip can never overlap itself.
  */
 export function usePerfSamples({ local, sshSessionId, k8sTarget, intervalSec, active }: Options): PerfSamplesState {
-  const [state, setState] = useState<PerfSamplesState>({ history: [], status: 'loading' });
+  const isLocal = Boolean(local) && !k8sTarget;
+  const [state, setState] = useState<PerfSamplesState>(() => {
+    const history = isLocal ? recentLocalHistory() : [];
+    return { history, status: history.length ? 'ok' : 'loading' };
+  });
   const k8sKey = k8sTarget
     ? `${k8sTarget.contextName}\n${k8sTarget.namespace}\n${k8sTarget.podName}\n${k8sTarget.containerName}`
     : '';
@@ -46,8 +68,9 @@ export function usePerfSamples({ local, sshSessionId, k8sTarget, intervalSec, ac
   // History belongs to the session, not to the pane being visible: reset only when the target changes, so switching
   // tabs (which pauses polling) keeps the graph.
   useEffect(() => {
-    setState({ history: [], status: 'loading' });
-  }, [kind, local, target, k8sKey]);
+    const history = isLocal ? recentLocalHistory() : [];
+    setState({ history, status: history.length ? 'ok' : 'loading' });
+  }, [kind, local, isLocal, target, k8sKey]);
 
   useEffect(() => {
     if (!active || (kind === 'ssh' && !local && !target) || !window.multissh) return undefined;
@@ -75,7 +98,11 @@ export function usePerfSamples({ local, sshSessionId, k8sTarget, intervalSec, ac
             if (res.ok) {
               const sample = computeSshSample(prev, res.raw);
               prev = res.raw;
-              setState((s) => ({ history: pushHistory(s.history, sample), status: 'ok' }));
+              setState((s) => {
+                const history = pushHistory(s.history, sample);
+                if (local) localHistory = history;
+                return { history, status: 'ok' };
+              });
             } else if (res.reason === 'unsupported' || res.reason === 'auth-unsupported') {
               setState({ history: [], status: 'unavailable', reason: REASONS[res.reason] });
               return; // permanent for this session: stop polling

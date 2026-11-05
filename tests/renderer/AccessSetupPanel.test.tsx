@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import { AccessSetupPanel } from '../../src/renderer/src/components/SSH/AccessSetupPanel';
 import type { SSHConnectionConfig } from '../../src/shared/types/ssh';
@@ -46,6 +46,19 @@ describe('AccessSetupPanel', () => {
     // Login already works, so nothing needs installing.
     expect(status('installed')).toBe('skipped');
     expect(onStateChange).toHaveBeenLastCalledWith('verified');
+  });
+
+  it('names the state of every step for assistive technology, not only with an icon', async () => {
+    render(<AccessSetupPanel config={config} onStateChange={onStateChange} />);
+    const icon = (id: string) => within(screen.getByTestId(`access-step-${id}`)).getByRole('img');
+
+    // Before the test runs nothing has happened yet
+    expect(icon('reach')).toHaveAccessibleName('Not started');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    await waitFor(() => expect(status('verified')).toBe('ok'));
+    expect(icon('reach')).toHaveAccessibleName('OK');
+    expect(icon('installed')).toHaveAccessibleName('Skipped');
   });
 
   it('stops at the first broken link and says why', async () => {

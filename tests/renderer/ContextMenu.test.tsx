@@ -16,6 +16,17 @@ function makeItems(onSelect: (key: string) => void): ContextMenuItem[] {
 describe('ContextMenu (M13)', () => {
   afterEach(() => cleanup());
 
+  // `text-red-500` is not remapped for the Breeze theme (only red-400 is, in every theme), and a `dark:` variant never
+  // applies there either, so the danger item measured 3.2:1 on Breeze. red-400 is the per-theme token.
+  it('colors the danger item with the per-theme red-400 token, not red-500 or a dark: variant', () => {
+    render(<ContextMenu x={10} y={10} items={makeItems(vi.fn())} onClose={vi.fn()} />);
+
+    const danger = screen.getByRole('menuitem', { name: 'Delete' });
+    expect(danger.className).toContain('text-red-400');
+    expect(danger.className).not.toContain('text-red-500');
+    expect(danger.className).not.toContain('dark:text-');
+  });
+
   it('moves focus into the first enabled item once opened', () => {
     const onSelect = vi.fn();
     render(<ContextMenu x={10} y={10} items={makeItems(onSelect)} onClose={vi.fn()} />);

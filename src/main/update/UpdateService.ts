@@ -2,6 +2,8 @@ import { app } from 'electron';
 import electronUpdater from 'electron-updater';
 import { createLogger } from '../log';
 import type { UpdateState, UpdateUnsupportedReason } from '../../shared/types/update';
+import { startLinuxRelaunch, type LinuxRelaunchHandle } from './linuxRelaunch';
+import { isNsisInstall } from './installKind';
 
 const INITIAL_CHECK_DELAY_MS = 30_000;
 const POLL_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -22,6 +24,7 @@ export interface UpdaterLike {
   autoInstallOnAppQuit: boolean;
   allowPrerelease: boolean;
   allowDowngrade: boolean;
+  autoRunAppAfterInstall?: boolean;
   /** electron-updater's own diagnostics (download, install command, relaunch) go here. */
   logger?: unknown;
   on(event: 'checking-for-update', cb: () => void): unknown;
@@ -42,8 +45,10 @@ export interface UpdateServiceOptions {
   isPackaged?: boolean;
   /** Defaults to process.platform. Windows is unsupported until the installer is code-signed. */
   platform?: NodeJS.Platform;
-  /** Administrator switch (SSHS3_DISABLE_UPDATES=1): no update traffic at all. */
+  /** Administrator switch (SSHS3_DISABLE_UPDATES=1, or the autoCheckUpdates policy set to false): no update traffic at all, including a manual check. */
   disabled?: boolean;
+  /** Whether this copy was installed by the NSIS installer (Windows only matters). Defaults to checking the install folder. */
+  isNsisInstall?: boolean;
   /** Whether periodic background checks are enabled (user setting). */
   getAutoCheck: () => Promise<boolean> | boolean;
   /**
@@ -59,6 +64,11 @@ export interface UpdateServiceOptions {
    * synchronous installer blocks the main process. Defaults to 300 ms; 0 skips the wait.
    */
   paintDelayMs?: number;
+  /**
+   * Custom Linux relaunch hook (overrides startLinuxRelaunch, e.g. in tests). A returned handle is
+   * cancelled when the install fails or is cancelled, so the helper does not relaunch the app later.
+   */
+  relaunchOnLinux?: () => LinuxRelaunchHandle | boolean | void;
 }
 
 /** Reduces an updater error to one short line; never forwards stacks or raw payloads. */
@@ -82,6 +92,7 @@ export class UpdateService {
   private initialTimer: NodeJS.Timeout | null = null;
   private pollTimer: NodeJS.Timeout | null = null;
   private installing = false;
+  private pendingRelaunch?: LinuxRelaunchHandle;
 
   constructor(options: UpdateServiceOptions) {
     this.options = options;
@@ -91,7 +102,9 @@ export class UpdateService {
       : !isPackaged
         ? 'dev'
         : (options.platform ?? process.platform) === 'win32'
-          ? 'windows-unsigned'
+          ? (options.isNsisInstall ?? isNsisInstall()) === false
+            ? 'not-installer'
+            : 'windows-unsigned'
           : null;
     this.state = {
       status: this.unsupportedReason ? 'unsupported' : 'idle',
@@ -189,10 +202,31 @@ export class UpdateService {
       const paintDelay = this.options.paintDelayMs ?? 300;
       if (paintDelay > 0) await new Promise((resolve) => setTimeout(resolve, paintDelay));
       log.info('quitAndInstall', { version: this.state.version });
-      this.updater.quitAndInstall(false, true);
+      if ((this.options.platform ?? process.platform) === 'linux') {
+        // A helper from an earlier attempt that did not go through must not stay behind a new one.
+        this.cancelPendingRelaunch();
+        const relaunch = this.options.relaunchOnLinux ?? (() => startLinuxRelaunch());
+        const started = relaunch();
+        this.pendingRelaunch = typeof started === 'object' && started !== null ? started : undefined;
+        this.updater.autoRunAppAfterInstall = false;
+        this.updater.quitAndInstall(false, false);
+      } else {
+        this.updater.quitAndInstall(false, true);
+      }
+    } catch (err) {
+      this.cancelPendingRelaunch();
+      // Like a failed install reported through the updater's 'error' event: stay retryable instead of
+      // leaving the installing overlay up for good.
+      if (this.getState().status === 'installing') this.setState({ status: 'ready', error: sanitizeUpdateError(err) });
+      throw err;
     } finally {
       this.installing = false;
     }
+  }
+
+  private cancelPendingRelaunch(): void {
+    this.pendingRelaunch?.cancel();
+    this.pendingRelaunch = undefined;
   }
 
   private isBusy(): boolean {
@@ -227,6 +261,7 @@ export class UpdateService {
     updater.on('error', (err) => {
       // A failed or cancelled install (e.g. dismissed polkit prompt) keeps the downloaded update retryable.
       const status = this.state.status === 'installing' ? 'ready' : 'error';
+      if (this.state.status === 'installing') this.cancelPendingRelaunch();
       this.setState({ status, error: sanitizeUpdateError(err), progress: undefined });
     });
   }

@@ -1,22 +1,45 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { Terminal } from 'xterm';
+import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { SearchAddon } from '@xterm/addon-search';
-import 'xterm/css/xterm.css';
+import '@xterm/xterm/css/xterm.css';
 import { ChevronDown, ChevronUp, RotateCcw, Search, Sparkles, X } from 'lucide-react';
 import type { SSHConnectionConfig, SSHPtyExitEvent, LocalShellType } from '@shared/types/ssh';
 import type { SessionExitAction, AppSettings } from '@shared/types/settings';
 import type { K8sTerminalTarget } from '@shared/types/kubernetes';
 import { registerTerminalLinks } from '../lib/terminalLinks';
-import { CommandOutputTracker } from '../lib/terminalOutput';
+import { useTerminalPathHover } from '../lib/useTerminalPathHover';
+import { CommandOutputTracker, isAtEmptyPrompt } from '../lib/terminalOutput';
+import { useSudoRetry } from '../lib/useSudoRetry';
+import { isTerminalReply, printableInput } from '../lib/terminalInput';
+import { hasControlChars } from '../lib/shellSafety';
+import { IS_WINDOWS } from '../lib/platform';
+import { SudoRetryPrompt } from './SudoRetryPrompt';
 import { TERMINAL_ACTION_EVENT, type TerminalAction } from '../lib/terminalActionEvents';
 import { SnippetPaletteModal } from './SnippetPaletteModal';
 import { PerfBar } from './PerfBar';
 import { ClipboardHistoryModal } from './ClipboardHistoryModal';
+import { TerminalPathHoverCard } from './TerminalPathHoverCard';
+import { FileEditorModal } from './FileManager/FileEditorModal';
+import { DragOutDialog } from './FileManager/DragOutDialog';
+import { isDirectPreviewFile, isDualModeFile } from './FileManager/fileTypeHelpers';
 import { OPEN_CLIPBOARD_HISTORY_EVENT } from '../lib/clipboardHistoryEvents';
 import { usePerfSamples } from '../lib/usePerfSamples';
 import type { PerfLayout, PerfMetricId } from '@shared/types/perf';
 import { extractHostnameFromCommand, scanOutputForHost } from '../lib/terminalTitle';
+import { cdCommand } from '../lib/cdCommand';
+import { usePortDetection } from '../lib/usePortDetection';
+import { TerminalPortPill } from './TerminalPortPill';
+import { useTerminalDropUpload } from '../lib/useTerminalDropUpload';
+import { TerminalDropOverlay } from './TerminalDropOverlay';
+import {
+  consumeDetached,
+  killUnlessReclaimed,
+  registerLiveSession,
+  takeAttach,
+  unregisterLiveSession,
+} from '../lib/liveSessions';
+import { isTerminalZoomShortcut } from '../lib/terminalZoomKey';
 
 import { TerminalControl } from './AiHub/TerminalControl';
 import { hubRequest, selectAiTerminal } from '../lib/aiHub';
@@ -32,6 +55,8 @@ export interface TerminalViewProps {
   wslDistro?: string;
   /** Set to run an interactive exec session inside a Kubernetes/OpenShift container instead of SSH or a local shell. */
   k8sTarget?: K8sTerminalTarget;
+  /** Id of the pane this terminal fills; lets a terminal moved from another window attach to its running session. */
+  paneId?: string;
   isActive?: boolean;
   onExit?: (event: SSHPtyExitEvent) => void;
   className?: string;
@@ -48,6 +73,16 @@ export interface TerminalViewProps {
   copyOnSelect?: boolean;
   /** Whether the selection history is shared by all hosts or kept per connection. */
   clipboardHistoryScope?: AppSettings['clipboardHistoryScope'];
+  /** Whether hovering over file paths shows an interactive preview card. Default true. */
+  pathHoverPreview?: boolean;
+  /** Open the hover card on hover (default) or only while Ctrl/Cmd is held. */
+  pathHoverMode?: 'hover' | 'ctrl';
+  /** Whether a failed command with a permission error offers to re-run with sudo. Default true. */
+  sudoRetryPrompt?: boolean;
+  /** Whether web services/listening ports in output are auto-detected for quick port forwarding. Default true. */
+  portForwardAutoDetect?: boolean;
+  /** Optional custom regular expression for matching service ports in terminal output. */
+  portForwardCustomRegex?: string;
   /** Ctrl+click on a file path in the output (SSH sessions only). Receives the path as printed, e.g. `/var/log/x` or `~/x`. */
   onOpenPath?: (path: string) => void;
   /** Performance bar above the terminal (SSH, local shell and Kubernetes sessions). Omit to disable it entirely — nothing is polled. */
@@ -56,10 +91,6 @@ export interface TerminalViewProps {
   onCloseTab?: () => void;
   /** Emitted when an OSC 0 or OSC 2 title sequence is received from the shell. */
   onTitleChange?: (title: string) => void;
-}
-
-function shellQuote(path: string): string {
-  return `'${path.replace(/'/g, `'\\''`)}'`;
 }
 
 // Every ANSI foreground is >= 7:1 on the #f8fafc background, so `minimumContrastRatio` 7 never has to
@@ -120,7 +151,7 @@ const XTERM_BREEZE_THEME = {
   foreground: '#fcfcfc',
   cursor: '#3daee9',
   cursorAccent: '#232627',
-  selectionBackground: '#31363b',
+  selectionBackground: '#1e5774',
   black: '#232627',
   red: '#ed1515',
   green: '#11d116',
@@ -164,6 +195,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   shellType,
   wslDistro,
   k8sTarget,
+  paneId,
   isActive = true,
   onExit,
   className = '',
@@ -175,6 +207,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   sessionExitAction = 'reconnect',
   copyOnSelect = false,
   clipboardHistoryScope = 'global',
+  pathHoverPreview = true,
+  pathHoverMode = 'hover',
+  sudoRetryPrompt = true,
+  portForwardAutoDetect = true,
+  portForwardCustomRegex,
   onOpenPath,
   perfMetrics,
   onCloseTab,
@@ -234,8 +271,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   copyOnSelectRef.current = copyOnSelect;
   const clipboardScopeRef = useRef(clipboardHistoryScope);
   clipboardScopeRef.current = clipboardHistoryScope;
-  const onOpenPathRef = useRef(onOpenPath);
-  onOpenPathRef.current = onOpenPath;
   const rootRef = useRef<HTMLDivElement>(null);
   const searchAddonRef = useRef<SearchAddon | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -263,6 +298,85 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const [inlineLoading, setInlineLoading] = useState(false);
   const [terminalErrorHint, setTerminalErrorHint] = useState<string | null>(null);
   const inlineAiInputRef = useRef<HTMLInputElement>(null);
+  const notifyTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const notify = useCallback((message: string, durationMs = 2000) => {
+    clearTimeout(notifyTimerRef.current);
+    setCopyNotice(message);
+    notifyTimerRef.current = setTimeout(() => setCopyNotice(null), durationMs);
+  }, []);
+  useEffect(() => () => clearTimeout(notifyTimerRef.current), []);
+  const pathHover = useTerminalPathHover({
+    target: { local, config, k8sTarget },
+    initialCwd,
+    wsl: Boolean(local && shellType === 'wsl'),
+    wslDistro,
+    pathHoverPreview,
+    pathHoverMode,
+    onOpenPath,
+    termRef,
+    sessionIdRef,
+    notify,
+  });
+  const pathHoverRef = useRef(pathHover);
+  pathHoverRef.current = pathHover;
+
+  // `sudo` does not exist in PowerShell or cmd.
+  const sudoAvailable = !(
+    local &&
+    (shellType === 'cmd' || shellType === 'powershell' || shellType === 'pwsh' || (IS_WINDOWS && (!shellType || shellType === 'default')))
+  );
+  const sudoAvailableRef = useRef(sudoAvailable);
+  sudoAvailableRef.current = sudoAvailable;
+  const sudoRetry = useSudoRetry({
+    rootUser: config?.username === 'root',
+    enabled: sudoRetryPrompt && sudoAvailable,
+    termRef,
+    trackerRef: outputTrackerRef,
+    run: (sudoCommand) => {
+      const term = termRef.current;
+      const sid = sessionIdRef.current;
+      if (!term || !sid) return;
+      const write = k8sTarget ? window.multissh?.k8sTerminalWrite : window.multissh?.terminalWrite;
+      // Typed onto the prompt without Enter: the user sees the whole command on the real line, can edit
+      // it, and runs it with a second Enter. Written straight to the PTY, like typing it, so it does not
+      // go through onData, whose line buffer only tracks what the user typed. The command is a single
+      // plain line (see detectSudoRetry).
+      // The echo of this is the user's own line, not output that moves the prompt (see PromptAnchorTracker).
+      outputTrackerRef.current?.noteInput();
+      write?.(sid, sudoCommand);
+      term.focus();
+      // Typing scrolls xterm to the bottom, a direct PTY write does not. The bar also disappears now,
+      // which resizes the terminal, so scroll again once that refit (next frame) has happened.
+      term.scrollToBottom();
+      requestAnimationFrame(() => requestAnimationFrame(() => termRef.current?.scrollToBottom()));
+    },
+  });
+  const sudoRetryRef = useRef(sudoRetry);
+  sudoRetryRef.current = sudoRetry;
+
+  const portDetection = usePortDetection({
+    // Kubernetes terminals have no port-forward path here, so a pod's ports must not be offered as local ones
+    enabled: portForwardAutoDetect && !k8sTarget,
+    customRegex: portForwardCustomRegex,
+    isRemote: Boolean(config),
+    config,
+  });
+  const scanPortsRef = useRef(portDetection.scanOutput);
+  scanPortsRef.current = portDetection.scanOutput;
+
+  const dropUpload = useTerminalDropUpload({
+    isRemote: Boolean(config),
+    wsl: Boolean(local && shellType === 'wsl'),
+    config,
+    k8sTarget,
+    targetFolder: pathHover.cardCwd || '',
+    onPaste: (text) => {
+      termRef.current?.paste(text);
+      termRef.current?.focus();
+    },
+    onNotice: notify,
+  });
+
   const isActiveRef = useRef(isActive);
   isActiveRef.current = isActive;
   // Tracks the size last reported to the PTY, shared between the resize observer and the
@@ -422,6 +536,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       minimumContrastRatio: minContrastFor(currentTheme),
       scrollback: scrollbackRef.current ?? 5000,
       allowProposedApi: true,
+      linkHandler: {
+        activate: (_event, text) => {
+          void window.multissh?.openExternal(text);
+        },
+      },
     });
     termRef.current = term;
 
@@ -436,10 +555,12 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     );
     registerTerminalLinks(term, {
       openUrl: (url) => void window.multissh.openExternal(url),
-      openPath: onOpenPathRef.current ? (path) => onOpenPathRef.current?.(path) : undefined,
+      ...pathHoverRef.current.createLinkHandlers(),
     });
     const outputTracker = new CommandOutputTracker(term);
     outputTrackerRef.current = outputTracker;
+
+    const osc7Handler = term.parser.registerOscHandler(7, (data) => pathHoverRef.current.handleOsc7(data));
 
     term.open(containerRef.current);
     if (isActiveRef.current) {
@@ -452,6 +573,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
     const titleSub = term.onTitleChange((title) => {
       onTitleChangeRef.current?.(title);
+      pathHoverRef.current.detectCwdFromText(title);
     });
 
     // Copy-on-select mirrors the selection into the system CLIPBOARD (not just the
@@ -480,35 +602,43 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       }, 350);
     });
 
-    // Shift+Insert and middle-click paste the most recent history entry; without
-    // copy-on-select (or with an empty history) they fall back to the system clipboard.
-    const pasteLatest = (): void => {
-      const fallback = (): void => {
+    // Shift+Insert, Ctrl+Shift+V and middle-click paste from the system clipboard,
+    // falling back to the most recent encrypted history entry if clipboard access is denied.
+    const pasteFromClipboard = (): void => {
+      const fallbackToHistory = (): void => {
+        if (!window.multissh?.clipboardHistoryList) return;
+        window.multissh
+          .clipboardHistoryList(historyScope())
+          .then((entries) => {
+            if (entries.length > 0) term.paste(entries[0].text);
+          })
+          .catch(() => {});
+      };
+
+      if (typeof navigator !== 'undefined' && navigator.clipboard?.readText) {
         navigator.clipboard
-          ?.readText()
+          .readText()
           .then((text) => {
-            if (text) term.paste(text);
+            if (text) {
+              term.paste(text);
+            } else {
+              fallbackToHistory();
+            }
           })
           .catch(() => {
-            // Ignore: clipboard access can be denied
+            fallbackToHistory();
           });
-      };
-      if (!copyOnSelectRef.current || !window.multissh?.clipboardHistoryList) {
-        fallback();
-        return;
+      } else {
+        fallbackToHistory();
       }
-      window.multissh
-        .clipboardHistoryList(historyScope())
-        .then((entries) => (entries.length > 0 ? term.paste(entries[0].text) : fallback()))
-        .catch(fallback);
     };
 
     const handleMiddleClick = (e: MouseEvent) => {
       if (e.button !== 1 || !copyOnSelectRef.current) return;
-      // Stop Chromium's native PRIMARY-selection paste so only the history entry is pasted.
+      // Stop Chromium's native PRIMARY-selection paste so the system clipboard/history entry is pasted.
       e.preventDefault();
       e.stopPropagation();
-      if (e.type === 'auxclick') pasteLatest();
+      if (e.type === 'auxclick') pasteFromClipboard();
     };
     container.addEventListener('mouseup', handleMiddleClick, true);
     container.addEventListener('auxclick', handleMiddleClick, true);
@@ -546,22 +676,45 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       } else if (action === 'snippets') {
         setSnippetsOpen(true);
       } else if (action === 'copyLastOutput') {
-        const output = outputTracker.lastOutput();
-        if (!output) {
-          showNotice('No command output to copy');
-          return;
-        }
-        const lines = output.split('\n').length;
-        (navigator.clipboard ? navigator.clipboard.writeText(output) : Promise.reject(new Error('no clipboard')))
-          .then(() => {
-            if (copyOnSelectRef.current) {
-              void window.multissh?.clipboardHistoryAdd(output, hostKeyRef.current, hostLabelRef.current).catch(() => {});
-            }
-            showNotice(`Copied last output (${lines} line${lines === 1 ? '' : 's'})`);
-          })
-          .catch(() => showNotice('Could not access the clipboard'));
+        copyLastCommandOutput();
+      } else if (action === 'rerunWithSudo') {
+        rerunLastWithSudo();
       }
     };
+
+    const rerunLastWithSudo = (): void => {
+      if (!sudoAvailableRef.current) {
+        showNotice('sudo is not available in this shell');
+        return;
+      }
+      // Only onto an empty prompt: a half-typed line, a running program or an unanswered question would
+      // receive the text as input instead.
+      if (!isAtEmptyPrompt(term)) {
+        showNotice('Wait for an empty prompt to re-run with sudo');
+        return;
+      }
+      const kind = sudoRetryRef.current.rerunWithSudo(outputTracker.lastCommand());
+      if (kind === 'refused') showNotice('This command cannot be re-run with sudo');
+      else if (kind === 'history') showNotice("Typed 'sudo !!' (works in bash and zsh)");
+    };
+
+    const copyLastCommandOutput = (): void => {
+      const output = outputTracker.lastOutput();
+      if (!output) {
+        showNotice('No command output to copy');
+        return;
+      }
+      const lines = output.split('\n').length;
+      (navigator.clipboard ? navigator.clipboard.writeText(output) : Promise.reject(new Error('no clipboard')))
+        .then(() => {
+          if (copyOnSelectRef.current) {
+            void window.multissh?.clipboardHistoryAdd(output, hostKeyRef.current, hostLabelRef.current).catch(() => {});
+          }
+          showNotice(`Copied last output (${lines} line${lines === 1 ? '' : 's'})`);
+        })
+        .catch(() => showNotice('Could not access the clipboard'));
+    };
+
     window.addEventListener(TERMINAL_ACTION_EVENT, handleTerminalAction);
     container.addEventListener('contextmenu', handleContextMenu, true);
 
@@ -595,6 +748,16 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     // so it's wired up explicitly here.
     // Also prevent xterm from intercepting/swallowing tab switching shortcuts (Ctrl+Tab, Ctrl+Shift+Tab).
     term.attachCustomKeyEventHandler((e) => {
+      if (pathHoverRef.current.isEditorOpen()) {
+        return false;
+      }
+      if (sudoRetryRef.current.handleKey(e)) {
+        return false;
+      }
+      if (e.type === 'keydown' && e.key === 'Escape' && pathHoverRef.current.dismissCardOnEscape()) {
+        e.preventDefault();
+        return false;
+      }
       if (e.type === 'keydown' && (e.ctrlKey || e.metaKey) && !e.altKey) {
         const keyLower = e.key.toLowerCase();
         // Ctrl+K: Open Inline Terminal AI bar (VS Code / Cursor style)
@@ -624,9 +787,12 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           return false;
         }
       }
-      if (e.type === 'keydown' && e.shiftKey && e.key === 'Insert') {
+      if (
+        (e.type === 'keydown' && e.shiftKey && (e.key === 'Insert' || e.code === 'Insert')) ||
+        (e.type === 'keydown' && (e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'v' || e.key === 'V' || e.code === 'KeyV'))
+      ) {
         e.preventDefault();
-        pasteLatest();
+        pasteFromClipboard();
         return false;
       }
       if (
@@ -635,18 +801,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       ) {
         return false;
       }
-      if (
-        (e.ctrlKey || e.metaKey) &&
-        (e.key === '+' ||
-          e.key === '=' ||
-          e.key === '-' ||
-          e.key === '0' ||
-          e.code === 'NumpadAdd' ||
-          e.code === 'NumpadSubtract' ||
-          e.code === 'Minus' ||
-          e.code === 'Equal' ||
-          e.code === 'Digit0')
-      ) {
+      if (isTerminalZoomShortcut(e)) {
         return false;
       }
       return true;
@@ -677,9 +832,17 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     // StrictMode's dev-mode double-invoke) collide on the same map entry in
     // SSHPtyManager, so killing one session tears down the other instead.
     const activeConfig = configRef.current;
+    // A tab moved here from another window brings its running session: attach to it (and redraw
+    // its output so far) instead of starting a new one.
+    const attachTo = paneId ? takeAttach(paneId) : undefined;
     if (local || activeConfig || k8sTarget) {
       const killSession = k8sTarget ? window.multissh?.k8sTerminalKill : window.multissh?.terminalKill;
-      const createPromise = k8sTarget
+      const createPromise = attachTo
+        ? window.multissh?.terminalAttach?.(attachTo.sessionId, attachTo.kind).then(({ scrollback: output }) => {
+            if (output && !isDisposed) term.write(output);
+            return { sessionId: attachTo.sessionId };
+          })
+        : k8sTarget
         ? window.multissh?.k8sTerminalCreate?.(k8sTarget, { cols, rows })
         : window.multissh?.terminalCreate?.(
             local
@@ -690,11 +853,14 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         ?.then(({ sessionId }) => {
           if (isDisposed) {
             // Already unmounted while waiting for session creation
-            killSession?.(sessionId);
+            if (attachTo) killUnlessReclaimed(sessionId, (id) => killSession?.(id));
+            else killSession?.(sessionId);
             return;
           }
           sessionIdRef.current = sessionId;
+          if (paneId) registerLiveSession(paneId, { sessionId, kind: k8sTarget ? 'k8s' : 'ssh' });
           setPerfSessionId(sessionId);
+          pathHoverRef.current.onSessionStarted(sessionId, () => isDisposed);
 
           // Force PTY size synchronization once session ID is established.
           // On app launch or tab restoration, the session was spawned with provisional
@@ -710,15 +876,17 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           // shell has had a moment to print its prompt. There's no "wait for
           // prompt" signal from the PTY, so we send it shortly after the
           // first data arrives from the remote side.
-          let cwdSent = false;
+          // An attached session is long past its first prompt: never `cd` again.
+          let cwdSent = !!attachTo;
           const sendInitialCwd = () => {
             if (cwdSent) return;
             cwdSent = true;
             const cwd = initialCwdRef.current;
-            if (cwd && sessionIdRef.current && window.multissh?.terminalWrite) {
+            // A cwd with control characters (it comes from the shell's own report) must not be typed back in.
+            if (cwd && !hasControlChars(cwd) && sessionIdRef.current && window.multissh?.terminalWrite) {
               setTimeout(() => {
                 if (!isDisposed && sessionIdRef.current) {
-                  window.multissh.terminalWrite(sessionIdRef.current, `cd ${shellQuote(cwd)}\n`);
+                  window.multissh.terminalWrite(sessionIdRef.current, `${cdCommand(cwd)}\n`);
                 }
               }, 400);
             }
@@ -731,8 +899,12 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             if (sessionIdRef.current && write) {
               void write(sessionIdRef.current, data).catch(() => { window.dispatchEvent(new CustomEvent('sshs3:ai-open')); });
             }
-            if (data.includes('\r') || data.includes('\n')) {
+            if (!isTerminalReply(data)) outputTracker.noteInput();
+            if (isTerminalReply(data)) {
+              // The terminal answering a query from the program (fish asks before every prompt), not typing.
+            } else if (data.includes('\r') || data.includes('\n')) {
               outputTracker.recordEnter();
+              sudoRetryRef.current.notifyEnter();
               const parts = data.split(/[\r\n]+/);
               const cmd = (inputLineBuffer + (parts[0] || '')).trim();
               inputLineBuffer = parts.length > 1 ? parts[parts.length - 1] : '';
@@ -743,14 +915,16 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 onTitleChangeRef.current?.('__EXIT__');
               }
             } else if (data === '\x04') {
+              sudoRetryRef.current.notifyInput();
               // Ctrl+D (EOF/exit)
               onTitleChangeRef.current?.('__EXIT__');
             } else if (data === '\x7f' || data === '\b') {
+              sudoRetryRef.current.notifyInput();
               inputLineBuffer = inputLineBuffer.slice(0, -1);
             } else {
-              // Strip control escape characters, retain printable text (including pasted commands)
-              // eslint-disable-next-line no-control-regex
-              const printable = data.replace(/[\x00-\x1f\x7f-\x9f]/g, '');
+              sudoRetryRef.current.notifyInput();
+              // Retain printable text (including pasted commands), not escape sequences or controls
+              const printable = printableInput(data);
               inputLineBuffer += printable;
             }
           });
@@ -761,7 +935,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             unsubData = onData((sessId, data) => {
               if (sessId === sessionIdRef.current) {
                 term.write(data);
+                outputTracker.noteOutput();
+                sudoRetryRef.current.notifyOutput();
                 sendInitialCwd();
+                pathHoverRef.current.detectCwdFromText(data);
+                scanPortsRef.current(data);
                 if (!k8sTarget) {
                   const detectedHost = scanOutputForHost(data);
                   if (detectedHost) {
@@ -855,14 +1033,22 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       selectionSub.dispose();
       resultsSub.dispose();
       outputTracker.dispose();
+      osc7Handler.dispose();
       outputTrackerRef.current = null;
       searchAddonRef.current = null;
       clearTimeout(settleTimer);
       clearTimeout(noticeTimer);
       const sid = sessionIdRef.current;
       const killSession = k8sTarget ? window.multissh?.k8sTerminalKill : window.multissh?.terminalKill;
+      if (sid && paneId) unregisterLiveSession(paneId, sid);
       if (sid && killSession) {
-        killSession(sid);
+        if (consumeDetached(sid)) {
+          // The tab moved to another window and takes the running session along: leave it alone.
+        } else if (attachTo) {
+          killUnlessReclaimed(sid, killSession);
+        } else {
+          killSession(sid);
+        }
       }
       term.dispose();
       if (container) {
@@ -948,7 +1134,13 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       className={`relative flex h-full w-full flex-col overflow-hidden ${
         isBreeze ? 'bg-[#232627]' : isLight ? 'bg-[#f8fafc]' : 'bg-[#0f172a]'
       } ${className}`}
+      {...dropUpload.dragHandlers}
     >
+      <TerminalDropOverlay
+        isDragging={dropUpload.isDragging}
+        isRemote={Boolean(config || k8sTarget)}
+        targetFolder={pathHover.cardCwd || ''}
+      />
       {perfMetrics && perfKind && (
         <PerfBar kind={perfKind} state={perfState} layout={perfMetrics.layout} items={perfMetrics.items} title={perfTitle} local={Boolean(local)} />
       )}
@@ -1175,6 +1367,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             </button>
             <button
               type="button"
+              aria-label="Close inline AI"
               onClick={() => {
                 setInlineAiOpen(false);
                 setInlineSuggestion(null);
@@ -1246,6 +1439,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           className="h-full w-full overflow-hidden focus:outline-none"
         />
       </div>
+      {sudoRetry.suggestion && !exitEvent && <SudoRetryPrompt command={sudoRetry.suggestion.sudoCommand} />}
 
       {searchOpen && (
         <div
@@ -1319,6 +1513,43 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         </div>
       )}
 
+      {pathHover.hoverCardData && (
+        <TerminalPathHoverCard
+          path={pathHover.hoverCardData.path}
+          x={pathHover.hoverCardData.x}
+          y={pathHover.hoverCardData.y}
+          userHome={pathHover.userHomeDir}
+          currentCwd={pathHover.cardCwd}
+          providerId={pathHover.providerId}
+          toStoragePath={pathHover.toStoragePath}
+          {...pathHover.cardProps}
+        />
+      )}
+
+      {pathHover.dragOutPath && pathHover.providerId && (
+        <DragOutDialog
+          providerId={pathHover.providerId}
+          paths={[pathHover.dragOutPath]}
+          onClose={pathHover.closeDragOut}
+        />
+      )}
+
+      {pathHover.editorEntry && (
+        <FileEditorModal
+          open={true}
+          providerId={pathHover.providerId}
+          sourceType={local ? 'local' : k8sTarget ? 'k8s' : 'sftp'}
+          initialMode={
+            isDirectPreviewFile(pathHover.editorEntry.name) || isDualModeFile(pathHover.editorEntry.name)
+              ? 'preview'
+              : 'source'
+          }
+          entry={pathHover.editorEntry}
+          onSaved={() => notify(`Saved: ${pathHover.editorEntry?.name}`, 2500)}
+          onClose={pathHover.closeEditor}
+        />
+      )}
+
       {snippetsOpen && (
         <SnippetPaletteModal
           hostKey={connectionKey}
@@ -1373,7 +1604,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                   : 'bg-rose-500 shadow-[0_0_8px_rgba(244,63,94,0.5)]'
               }`}
             />
-            <span className="font-medium text-slate-200">
+            <span role="status" className="font-medium text-slate-200">
               Session ended{exitEvent.exitCode !== undefined ? ` (code ${exitEvent.exitCode})` : ''}
             </span>
           </div>
@@ -1403,6 +1634,13 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           </div>
         </div>
       )}
+
+      <TerminalPortPill
+        ports={portDetection.detectedPorts}
+        isRemote={Boolean(config)}
+        onForwardAndOpen={portDetection.handleForwardAndOpen}
+        onDismiss={portDetection.dismissPort}
+      />
     </div>
   );
 };

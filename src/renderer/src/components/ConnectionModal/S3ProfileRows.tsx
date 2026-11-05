@@ -2,7 +2,9 @@ import React from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 import { Copy, Folder, Pencil, Trash2 } from 'lucide-react';
 import type { S3Config } from '@shared/types/storage';
-import type { EditingState } from './types';
+import { TagChips } from '../ui/TagChips';
+import { ProfileRowCheckbox } from './ProfileRowCheckbox';
+import type { EditingState, RowSelect } from './types';
 
 interface S3ProfileRowProps {
   profile: S3Config;
@@ -11,6 +13,8 @@ interface S3ProfileRowProps {
   handleCloneS3: (profile: S3Config) => Promise<void> | void;
   handleDeleteS3: (id: string, name: string) => Promise<void> | void;
   setEditing: Dispatch<SetStateAction<EditingState | null>>;
+  /** Set by a list that supports selecting several profiles. */
+  select?: RowSelect;
 }
 
 /** One entry of the "Recently Used" box for S3 profiles. */
@@ -61,6 +65,7 @@ export const S3RecentRow: React.FC<S3ProfileRowProps> = ({
       {/* UX audit finding #11: match the action set this profile gets
           further down in its folder listing. */}
       <button
+        aria-label="Duplicate / Clone Profile"
         type="button"
         title="Duplicate / Clone Profile"
         onClick={(e) => {
@@ -72,8 +77,9 @@ export const S3RecentRow: React.FC<S3ProfileRowProps> = ({
         <Copy className="h-3.5 w-3.5" />
       </button>
       <button
+        aria-label="Edit profile"
         type="button"
-        title="Edit Profile"
+        title="Edit profile"
         onClick={(e) => {
           e.stopPropagation();
           setEditing({ type: 's3', config: profile });
@@ -83,8 +89,9 @@ export const S3RecentRow: React.FC<S3ProfileRowProps> = ({
         <Pencil className="h-3.5 w-3.5" />
       </button>
       <button
+        aria-label="Delete profile"
         type="button"
-        title="Delete Profile"
+        title="Delete profile"
         onClick={(e) => {
           e.stopPropagation();
           void handleDeleteS3(profile.id, profile.name);
@@ -105,6 +112,7 @@ export const S3ProfileRow: React.FC<S3ProfileRowProps> = ({
   handleCloneS3,
   handleDeleteS3,
   setEditing,
+  select,
 }) => (
   <div
     draggable
@@ -114,10 +122,14 @@ export const S3ProfileRow: React.FC<S3ProfileRowProps> = ({
     }}
     onDoubleClick={() => void handleConnectS3(profile)}
     title="Double-click to connect (or drag to folder)"
-    className="flex items-center justify-between gap-2 rounded-lg border border-border-subtle bg-app-surface px-3 py-1.5 cursor-grab active:cursor-grabbing hover:border-border-strong transition-all select-none"
+    className="group flex items-center justify-between gap-2 rounded-lg border border-border-subtle bg-app-surface px-3 py-1.5 cursor-grab active:cursor-grabbing hover:border-border-strong transition-all select-none"
   >
-    <div className="min-w-0">
-      <div className="truncate text-sm font-medium text-txt-primary">{profile.name}</div>
+    {select && <ProfileRowCheckbox name={profile.name} select={select} />}
+    <div className="min-w-0 flex-1">
+      <div className="flex items-center gap-2">
+        <span className="truncate text-sm font-medium text-txt-primary">{profile.name}</span>
+        <TagChips tags={profile.tags} />
+      </div>
       <div className="truncate text-xs text-txt-muted">
         {profile.endpoint || 'AWS S3'} · {profile.region}
       </div>
@@ -137,6 +149,7 @@ export const S3ProfileRow: React.FC<S3ProfileRowProps> = ({
         </button>
       )}
       <button
+        aria-label="Duplicate / Clone Profile"
         type="button"
         title="Duplicate / Clone Profile"
         onClick={(e) => {
@@ -148,8 +161,9 @@ export const S3ProfileRow: React.FC<S3ProfileRowProps> = ({
         <Copy className="h-3.5 w-3.5" />
       </button>
       <button
+        aria-label="Edit profile"
         type="button"
-        title="Edit Profile"
+        title="Edit profile"
         onClick={(e) => {
           e.stopPropagation();
           setEditing({ type: 's3', config: profile });
@@ -159,8 +173,9 @@ export const S3ProfileRow: React.FC<S3ProfileRowProps> = ({
         <Pencil className="h-3.5 w-3.5" />
       </button>
       <button
+        aria-label="Delete profile"
         type="button"
-        title="Delete Profile"
+        title="Delete profile"
         onClick={(e) => {
           e.stopPropagation();
           void handleDeleteS3(profile.id, profile.name);

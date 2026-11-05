@@ -364,6 +364,25 @@ describe('SmartcardDetector', () => {
       expect(optionArgs.filter((o) => /Tunnel|PermitRemoteOpen|ForwardAgent|SomeFuture/.test(o))).toEqual([]);
     });
 
+    // M4 (code review 2026-11-03): SendEnv sends local environment variables to the server, and the ssh child's
+    // environment carries secrets such as SSHS3_PROXY_PASSWORD. A synced or imported profile must not be able to
+    // ask for them (SetEnv only sets fixed values given in the option itself, so it stays allowed).
+    it('drops SendEnv from extraOptions but still passes SetEnv', () => {
+      const config: SSHConnectionConfig = {
+        id: 'opt-sendenv',
+        name: 'SendEnv Host',
+        host: 'custom.host',
+        username: 'root',
+        authType: 'password',
+        extraOptions: { SendEnv: '*', sendenv: 'SSHS3_PROXY_PASSWORD', SetEnv: 'FOO=bar' },
+      };
+
+      const optionArgs = SmartcardDetector.buildSSHArguments(config).filter((_, i, a) => a[i - 1] === '-o');
+
+      expect(optionArgs.filter((o) => /sendenv/i.test(o))).toEqual([]);
+      expect(optionArgs).toContain('SetEnv=FOO=bar');
+    });
+
     it('blocks extraOptions keys that smuggle a directive via whitespace, quotes or "="', () => {
       const config: SSHConnectionConfig = {
         id: 'opt-3',
@@ -744,6 +763,48 @@ describe('SmartcardDetector', () => {
       expect(args).toContain('-D');
       expect(args).toContain('1088');
       expect(args).not.toContain('5432:localhost:5432');
+    });
+
+    it('adds CertificateFile option when certificateFile is provided', () => {
+      const config: SSHConnectionConfig = {
+        id: 'cfg-ca',
+        name: 'SSH CA Server',
+        host: 'server.example.com',
+        username: 'alun',
+        authType: 'agent',
+        useSshCa: true,
+        certificateFile: '/tmp/run/user/1000/sshs3/certs/serial-cert.pub',
+      };
+
+      const args = SmartcardDetector.buildSSHArguments(config);
+      expect(args).toContain('-o');
+      expect(args).toContain('CertificateFile=/tmp/run/user/1000/sshs3/certs/serial-cert.pub');
+    });
+
+    it('rejects CertificateFile containing newlines or leading dashes', () => {
+      expect(() =>
+        SmartcardDetector.buildSSHArguments({
+          id: 'cfg-ca-inject',
+          name: 'SSH CA Server',
+          host: 'server.example.com',
+          username: 'alun',
+          authType: 'agent',
+          useSshCa: true,
+          certificateFile: '/tmp/cert.pub\nPermitLocalCommand yes',
+        })
+      ).toThrow('Invalid CertificateFile');
+
+      expect(() =>
+        SmartcardDetector.buildSSHArguments({
+          id: 'cfg-ca-flag',
+          name: 'SSH CA Server',
+          host: 'server.example.com',
+          username: 'alun',
+          authType: 'agent',
+          useSshCa: true,
+          certificateFile: '-F/tmp/evil_config',
+        })
+      ).toThrow('Invalid CertificateFile');
     });
   });
 });

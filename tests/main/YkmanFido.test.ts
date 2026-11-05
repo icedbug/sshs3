@@ -124,6 +124,12 @@ describe.skipIf(process.platform === 'win32')('listYkmanFidoCredentials / delete
     await expect(listYkmanFidoCredentials('000000')).rejects.toThrow(/Wrong PIN/);
   });
 
+  it('rejects cleanly, without an unhandled EPIPE, when ykman exits before reading the PIN', async () => {
+    await installFakeYkman('#!/bin/sh\necho "No YubiKey found" 1>&2\nexit 1\n');
+    // Large enough that the write cannot all sit in the pipe buffer of a process that is already gone.
+    await expect(listYkmanFidoCredentials('1'.repeat(1_000_000))).rejects.toThrow(/No YubiKey found|exited with code 1/);
+  });
+
   it('deletes a credential by id with --force, feeding the PIN over stdin', async () => {
     const dir = await installFakeYkman('#!/bin/sh\ncat > /dev/null\nexit 0\n');
     const argsFile = path.join(dir, 'captured-args.txt');

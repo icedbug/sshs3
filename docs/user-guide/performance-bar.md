@@ -1,6 +1,6 @@
-## Live Performance & Diagnostics Bar
+## Live Telemetry & Diagnostics Bar
 
-The Performance Bar in **sshs3** is a compact, real-time telemetry strip positioned directly above terminal sessions. It offers continuous visibility into remote host health and resource saturation without requiring sysadmins to open a second window to run `top`, `htop`, or `vmstat`.
+The Performance Bar in **sshs3** is a compact, real-time telemetry strip positioned directly above terminal sessions. It provides continuous visibility into remote host health and resource saturation without requiring sysadmins to open a second window to run `top`, `htop`, or `vmstat`.
 
 ![Terminal Performance Bar](/img/docs/terminal-metrics.png)
 
@@ -15,64 +15,49 @@ Unlike traditional monitoring agents (Datadog, Prometheus node_exporter, Zabbix)
 
 ![Performance Details and History Modal](/img/docs/performance-detail.png)
 
-### Feature: Non-Invasive `/proc` Sampling
-
-#### 🎯 Purpose
-Provide sysadmins with immediate visual feedback regarding resource bottlenecks (CPU compile spikes, memory leaks, I/O wait on slow disks, hypervisor steal) without requiring agent daemons or credentials.
-
-#### 🛠️ How to Use
+### Telemetry Modes & Visual Styles
 1. Open **Settings → Performance** and tick **Show performance bar above terminals**.
-2. Choose a display mode:
-   - **Compact Text**: Clean textual readouts (e.g. `CPU: 14% | RAM: 3.8/16 GB | Load: 0.42 | Ping: 8ms`).
-   - **Bars**: Color-coded meters that dynamically shift from green to amber and red during high load.
-   - **Sparklines**: Real-time miniature line graphs charting recent history.
-3. Select an update interval (2s, 5s, 10s, or 30s).
-4. **Hover over the bar**: Reveals a comprehensive tooltip listing *all* available metrics for that session, including fields not selected in the compact bar.
-5. **Click the bar**: Opens the 15-minute diagnostic history view featuring time-series charts and donut meters for CPU time (user, system, iowait, steal), memory allocation (used, cache, free), and disk capacity.
+2. Select your preferred display mode:
+   - **Compact text:** Minimalist text readouts (e.g. `CPU: 14% | RAM: 3.8/16 GB | Load: 0.42 | Ping: 8ms`).
+   - **Bars:** Color-coded progress bars that dynamically transition from green to amber and red as thresholds are approached.
+   - **Sparklines:** Real-time mini line charts graphing recent 60-second trends.
+3. **Hover Tooltip:** Hovering over the telemetry bar opens a comprehensive HUD listing *all* available metrics, including secondary metrics omitted from the compact bar.
+4. **Historical Modal:** Clicking the bar opens the 15-minute diagnostic view with interactive time-series graphs and breakdown donuts for CPU states (user, system, iowait, steal) and memory buffers.
 
 ![Performance Settings](/img/docs/settings-performance.png)
 
-#### ⚠️ Limitations & Caveats
-- SSH telemetry requires Linux servers with a mounted `/proc` virtual filesystem (standard across RHEL, Debian, Ubuntu, Rocky, Alpine, Arch, etc.).
-- On Windows workstations, the sampling interval is enforced to a minimum of 10 seconds to eliminate TCP socket overhead.
-- Non-Linux platforms (FreeBSD, OpenBSD, AIX) are not supported by the `/proc` parser.
+### Technical Architecture: Non-Invasive ControlMaster Multiplexing
 
-#### ⚙️ Technical Internals & Architecture
-Sampling executes over the **already active OpenSSH ControlMaster socket** used by the terminal:
-- The argument `-o BatchMode=yes` is strictly enforced, guaranteeing that samples **never trigger password prompts, smartcard PIN dialogs, or YubiKey touch requests**.
-- Each sample runs an atomic, read-only POSIX inspection command:
-  ```bash
-  cat /proc/stat /proc/meminfo /proc/loadavg /proc/net/dev 2>/dev/null
-  ```
-- Raw metrics are parsed inside Node.js by `PerfMetricsService` (`src/main/services/PerfMetricsService.ts`) and pushed across IPC to React. Samples timeout after 3 seconds to avoid terminal stalls.
+Sampling executes over the **already open OpenSSH ControlMaster socket** used by the active terminal:
+- **No Extra Touch Prompts:** The command strictly passes `-o BatchMode=yes`, guaranteeing that background samples **never trigger password prompts, smartcard PIN dialogs, or YubiKey touch requests**.
+- **Fixed Read-Only Script:** Each sample runs a hardcoded, read-only script reading `/proc/stat`, `/proc/loadavg`, `/proc/meminfo`, `/proc/net/dev`, `/proc/uptime`, `/proc/diskstats`, and `df -Pk`. User inputs are never interpolated.
+- **Safety Timeout:** Samples time out after 4 seconds (12 seconds on Windows fallback) so high-load or unresponsive hosts never stall the terminal.
+
+> [!IMPORTANT]
+> **Good to know**
+> - SSH telemetry needs a Linux server with a mounted `/proc` filesystem (RHEL, Debian, Ubuntu, Rocky, Alpine, Arch and similar). Non-Linux hosts such as FreeBSD, OpenBSD or AIX are not supported.
+> - **Windows:** OpenSSH has no `ControlMaster`, so every sample is a short-lived non-interactive connection and the interval is at least 10 seconds. It only works for sessions that need no interaction per login: not FIDO2, not a smartcard without a cached agent, and not a password that is not saved.
 
 ---
 
 ## 2. Kubernetes Pod Telemetry (`metrics.k8s.io`)
 
-When connected to a container exec terminal, the performance bar automatically switches into Kubernetes telemetry mode.
+When connected to a container exec terminal, the performance bar automatically switches into Kubernetes container telemetry mode:
 
-### Feature: Real-Time Container Resource Telemetry
+- **Requests & Limits:** Visualizes real-time container CPU and memory usage against the pod's configured Resource Requests and Limits, alerting against imminent OOMKilled evictions or CPU throttling.
+- **Container Health:** Displays restart counts, container age, node placement, and pod Ready condition.
 
-#### 🎯 Purpose
-Give DevOps engineers immediate insight into container resource consumption relative to its **configured Resource Requests and Limits**, alerting against potential OOMKilled evictions or CPU throttling.
+### Architecture: How Kubernetes Metrics Are Queried
 
-#### 🛠️ How to Use
-- Open an exec session in any pod.
-- The performance bar renders container CPU and memory usage against configured limits, restart counters, pod age, node location, and Ready state.
-
-#### ⚠️ Limitations & Caveats
-- Requires an active `metrics-server` deployment in the cluster. If absent, the indicator displays *"metrics-server not available"*.
-- The Kubernetes Metrics API refreshes every 15–60 seconds; sshs3 polls at most once every 10 seconds to avoid API server load.
-
-#### ⚙️ Technical Internals & Architecture
-An authenticated HTTPS request is sent directly to the Kubernetes API server via `@kubernetes/client-node`:
-`/apis/metrics.k8s.io/v1beta1/namespaces/{ns}/pods/{name}`
-The resulting usage metrics are reconciled against the pod's PodSpec definition.
+An authenticated HTTPS request is dispatched directly to the Kubernetes API server:
+```http
+GET /apis/metrics.k8s.io/v1beta1/namespaces/{namespace}/pods/{pod-name}
+```
+Requires the standard Kubernetes `metrics-server` to be active in the cluster; if it is missing, the bar shows *"metrics-server not available"*. The Metrics API itself refreshes every 15–60 seconds, and sshs3 polls at most once every 10 seconds to minimize load on cluster API controllers.
 
 ---
 
-## 3. Telemetry Metric Reference Table
+## 3. Telemetry Metrics Reference
 
 | Metric | Source / API | Operational Diagnosis |
 | :--- | :--- | :--- |
@@ -81,18 +66,18 @@ The resulting usage metrics are reconciled against the pod's PodSpec definition.
 | **Load (1m / 5m / 15m)** | `/proc/loadavg` | System run-queue saturation relative to total CPU core count. |
 | **I/O Wait (`iowait`)** | `/proc/stat` | CPU cycles blocked waiting on storage disk operations. |
 | **CPU Steal (`steal`)** | `/proc/stat` | CPU cycles taken by the hypervisor (detects noisy neighbors in VPS/cloud). |
-| **Disk Capacity** | `statvfs()` | Percentage utilization across `/` and all mounted filesystems. |
+| **Disk Capacity** | `df -Pk` | Percentage utilization across `/` and all mounted filesystems. |
 | **Network I/O (↓/↑)** | `/proc/net/dev` | Real-time network throughput in bytes/s across network interfaces. |
 | **Disk Throughput** | `/proc/diskstats` | Block device read/write throughput in MB/s. |
-| **Latency ("Ping")** | TCP RTT | Round-trip socket latency in milliseconds over the active SSH channel. |
+| **Latency ("Ping")** | Sample round trip | Time for the sampling command to complete over the open SSH connection. |
 
 ---
 
-## 4. Troubleshooting & Diagnostics Runbook
+## 4. Troubleshooting & Diagnostics
 
-| Symptom / Error Message | Probable Root Cause | Corrective Action |
+| Symptom / Error | Probable Root Cause | Corrective Action |
 | :--- | :--- | :--- |
 | No metrics bar appears above terminal | Feature disabled in settings | Open *Settings → Performance* and tick **Show performance bar above terminals**. |
-| `metrics-server not available` | Kubernetes cluster lacks `metrics-server` | Deploy metrics-server to your cluster (`kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/...`). |
-| Ping metric displays `N/A` | ControlMaster connection multiplexing disabled | Socket RTT requires connection multiplexing. Ensure `ControlMaster` is supported by your server. |
-| Metric updates stall | Server under extreme load or network dropped | Sampler enforces a 3-second timeout. Updates resume automatically once the host responds. |
+| `metrics-server not available` | Kubernetes cluster lacks `metrics-server` | Deploy metrics-server: `kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/...` |
+| Latency displays `N/A` | Round-trip could not be measured | Host may be temporarily unreachable or dropping keep-alive packets. |
+| Metric updates freeze | Target host under extreme load | Sampler enforces a 4-second timeout. Updates resume automatically once the host responds. |

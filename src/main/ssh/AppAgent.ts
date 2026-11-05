@@ -11,10 +11,12 @@ import {
   listAgentIdentities,
   addSmartcardToAgent,
   addFido2ResidentKeysToAgent,
+  FIDO2_PIN_REPLAY_WINDOW_MS,
   type AgentIdentity,
   type AgentTarget,
   type LoadIntoPrivateAgentOptions,
 } from '../smartcard/SmartcardAgentLoader';
+import { addCertifiedEd25519KeyToAgent, type AddCertifiedEd25519KeyOptions } from '../ca/agentProtocol';
 import { createLogger } from '../log';
 const appAgentLog = createLogger('app-agent');
 
@@ -25,7 +27,17 @@ const EVICT_TIMEOUT_MS = 3000;
 
 /** "Enter PIN and confirm user presence for ED25519-SK key SHA256:…" — a FIDO2 signature asking for its PIN. */
 const FIDO2_SIGNATURE_PIN_PROMPT = /\bPIN\b.*(-SK\b|authenticator|security key|user presence)/i;
-const FIDO2_PIN_REPLAY_WINDOW_MS = 3000;
+
+/**
+ * Why a load that was running or waiting when the user locked is reported as failed. Not a fault of the card or
+ * the PIN, so callers must not treat it like a failed load (no cooldown).
+ */
+export class KeysLockedWhileLoadingError extends Error {
+  constructor() {
+    super('The keys were locked while they were being loaded');
+    this.name = 'KeysLockedWhileLoadingError';
+  }
+}
 
 /** sun_path is 104 bytes on macOS/BSD and 108 on Linux; stay below both. */
 const MAX_UNIX_SOCKET_PATH = 100;
@@ -45,7 +57,7 @@ export function fingerprintOfKeyBlob(keyBlob: Buffer): string {
 /** Directory holding the app agent's socket; created 0700 and verified before use. */
 export function resolveAppAgentDir(): string {
   const runtimeDir = process.env.XDG_RUNTIME_DIR;
-  if (runtimeDir && path.isAbsolute(runtimeDir)) {
+  if (runtimeDir && path.isAbsolute(runtimeDir) && fs.existsSync(runtimeDir)) {
     return path.join(runtimeDir, 'sshs3');
   }
   const uid = typeof process.getuid === 'function' ? String(process.getuid()) : 'user';
@@ -58,22 +70,35 @@ export function resolveAppAgentDir(): string {
  * where another user could otherwise pre-create the path (or a symlink to somewhere they control)
  * and have the agent socket land in a place they can reach.
  */
-async function ensureSecureDir(dir: string): Promise<void> {
+export async function ensureSecureDir(dir: string): Promise<void> {
   try {
     await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
   }
   const st = await fs.promises.lstat(dir);
-  if (st.isSymbolicLink() || !st.isDirectory()) {
-    throw new Error(`Refusing to use ${dir} for the app ssh-agent: not a plain directory`);
+  const reason = insecureDirReason(st, process.platform, typeof process.getuid === 'function' ? process.getuid() : undefined);
+  if (reason) {
+    throw new Error(`Refusing to use ${dir} for the app ssh-agent: ${reason}`);
   }
-  if (typeof process.getuid === 'function' && st.uid !== process.getuid()) {
-    throw new Error(`Refusing to use ${dir} for the app ssh-agent: owned by another user`);
-  }
-  if ((st.mode & 0o077) !== 0) {
-    throw new Error(`Refusing to use ${dir} for the app ssh-agent: accessible by group/others`);
-  }
+}
+
+/**
+ * Why a directory must not hold the app agent's files, or null when it is fine. A symlink or a non-directory is
+ * refused everywhere. The owner and group/other checks use POSIX permission bits, which Windows does not have
+ * (its stat reports 0o666/0o777 for everything); there the per-user temp directory is protected by its ACL, so
+ * those two checks are skipped.
+ */
+export function insecureDirReason(
+  st: Pick<fs.Stats, 'mode' | 'uid' | 'isSymbolicLink' | 'isDirectory'>,
+  platform: NodeJS.Platform,
+  uid: number | undefined
+): string | null {
+  if (st.isSymbolicLink() || !st.isDirectory()) return 'not a plain directory';
+  if (platform === 'win32') return null;
+  if (uid !== undefined && st.uid !== uid) return 'owned by another user';
+  if ((st.mode & 0o077) !== 0) return 'accessible by group/others';
+  return null;
 }
 
 /**
@@ -97,6 +122,8 @@ export class AppAgent {
   private handlers: AppAgentHandlers = {};
   private onExit?: () => void;
   private addQueue: Promise<unknown> = Promise.resolve();
+  /** Bumped by every lock. A load requested before a lock must not leave its keys (or PIN) behind after it. */
+  private lockEpoch = 0;
 
   /**
    * The PIN entered when the FIDO2 keys were loaded, kept in memory only until the keys are locked.
@@ -235,8 +262,13 @@ export class AppAgent {
     promptHandler: AskpassPromptHandler,
     options?: LoadIntoPrivateAgentOptions
   ): Promise<void> {
-    await this.runAdd((target) => addSmartcardToAgent(target, pkcs11LibPath, promptHandler, options));
-    this.noteLoadedLibrary(pkcs11LibPath);
+    await this.runAdd(async (target) => {
+      const loaded = await addSmartcardToAgent(target, pkcs11LibPath, promptHandler, options);
+      // Recorded here, not after runAdd returns: if the user locked meanwhile, runAdd throws and its clean-up
+      // (which on Windows evicts only recorded libraries) must already know about this one.
+      this.noteLoadedLibrary(pkcs11LibPath);
+      return loaded;
+    });
   }
 
   /** Loads the connected security key's FIDO2 resident credentials into the agent. */
@@ -267,14 +299,46 @@ export class AppAgent {
   }
 
   /**
+   * Loads an OpenSSH Ed25519 certificate and its private key directly into the agent
+   * over the agent wire protocol (SSH2_AGENTC_ADD_ID_CONSTRAINED), constrained by certificate lifetime.
+   */
+  public async addCertifiedEd25519Key(options: Omit<AddCertifiedEd25519KeyOptions, 'socketPath'>): Promise<void> {
+    await this.runAdd(async ({ socketPath }) => {
+      await addCertifiedEd25519KeyToAgent(socketPath, options);
+      if (process.platform === 'win32') {
+        const fp = fingerprintOfKeyBlob(options.certificateWire);
+        this.loadedKeys.set(fp, options.certificateWire);
+      }
+    });
+  }
+
+  /**
    * Adds are serialized: most readers only allow one PKCS#11/FIDO2 transaction at a time. Each add
    * prompts through its own askpass server (see AgentTarget), so the agent's askpass server — which
    * answers signature-time prompts — is never involved and keeps using this owner's handlers.
    */
-  private runAdd(add: (target: AgentTarget) => Promise<unknown>): Promise<unknown> {
+  private runAdd(add: (target: AgentTarget) => Promise<unknown>, options: { guardLock?: boolean } = {}): Promise<unknown> {
+    const guardLock = options.guardLock ?? true;
+    // Taken when the load is requested, not when it starts: one still waiting its turn when the user locks is
+    // part of what the lock cancels.
+    const epoch = this.lockEpoch;
     const task = this.addQueue.then(async () => {
+      if (guardLock && this.lockEpoch !== epoch) throw new KeysLockedWhileLoadingError();
       const socketPath = await this.ensure();
-      return add({ pid: this.pid, socketPath });
+      let result: unknown;
+      let failure: unknown;
+      try {
+        result = await add({ pid: this.pid, socketPath });
+      } catch (err) {
+        failure = err;
+      }
+      if (guardLock && this.lockEpoch !== epoch) {
+        // Locked while this load ran: lockAll() already wiped, so whatever the load added since must go too.
+        await this.forgetKeys(socketPath);
+        throw new KeysLockedWhileLoadingError();
+      }
+      if (failure) throw failure;
+      return result;
     });
     this.addQueue = task.catch(() => {});
     return task;
@@ -313,12 +377,22 @@ export class AppAgent {
    * Evicts the agent keys with the given fingerprints (`ssh-add -d` with the key's public half), leaving
    * every other key loaded. Used to drop keys a card contributed that must not be offered (e.g. signing
    * certificates). Best-effort: returns how many were removed, and a failure for one key never stops the
-   * rest. Unix only — on Windows the agent is the shared system service and nothing is evicted here.
+   * rest. On Windows (the shared system service) only these exact keys are evicted, never anything else.
    */
   public async removeIdentities(fingerprints: Iterable<string>): Promise<number> {
     const unwanted = new Set(fingerprints);
-    if (!this.socketPath || process.platform === 'win32' || unwanted.size === 0) return 0;
+    if (!this.socketPath || unwanted.size === 0) return 0;
 
+    if (process.platform === 'win32') {
+      const socketPath = this.socketPath;
+      let removed = 0;
+      for (const [fp, blob] of await this.identityBlobs(socketPath)) {
+        if (unwanted.has(fp) && (await this.evictBlob(socketPath, blob))) removed++;
+      }
+      return removed;
+    }
+
+    // Only evicts keys, so a lock that happens meanwhile has nothing to undo: not guarded.
     return (await this.runAdd(async ({ socketPath }) => {
       const dir = path.join(resolveAppAgentDir(), 'keys');
       await ensureSecureDir(path.dirname(dir));
@@ -341,7 +415,7 @@ export class AppAgent {
         }
       }
       return removed;
-    })) as number;
+    }, { guardLock: false })) as number;
   }
 
   public async list(): Promise<AgentIdentity[]> {
@@ -357,9 +431,15 @@ export class AppAgent {
 
   /** Forgets every key (the "lock" action) without stopping the agent, so its socket stays valid for open terminals. */
   public async lockAll(): Promise<void> {
+    this.lockEpoch++;
     this.fido2Pin = undefined;
     const socketPath = this.socketPath;
     if (!socketPath) return;
+    await this.forgetKeys(socketPath);
+  }
+
+  /** Removes the loaded keys from the agent (everything it holds on Unix, only what we loaded on Windows). */
+  private async forgetKeys(socketPath: string): Promise<void> {
     if (process.platform === 'win32') {
       for (const lib of this.loadedLibs) {
         await AgentLifecycleManager.unloadCard(socketPath, lib);
@@ -386,24 +466,58 @@ export class AppAgent {
     return blobs;
   }
 
+  /**
+   * Windows only: records the shared agent's identities with these fingerprints as ours, so lock/quit
+   * evicts them. Needed for keys the app did not add itself this run (already in the service from an
+   * earlier run, or loaded by `ssh-add -s` whose `-e` counterpart does not reliably work there).
+   */
+  public async adoptIdentities(fingerprints: Iterable<string>): Promise<void> {
+    if (process.platform !== 'win32' || !this.socketPath) return;
+    const wanted = new Set(fingerprints);
+    for (const [fp, blob] of await this.identityBlobs(this.socketPath)) {
+      if (wanted.has(fp)) this.loadedKeys.set(fp, blob);
+    }
+  }
+
+  /** Windows only: evicts the identities with these fingerprints from the shared agent. Best-effort. */
+  public async evictIdentities(fingerprints: Iterable<string>): Promise<void> {
+    if (process.platform !== 'win32' || !this.socketPath) return;
+    const wanted = new Set(fingerprints);
+    for (const [fp, blob] of await this.identityBlobs(this.socketPath)) {
+      if (!wanted.has(fp)) continue;
+      await this.evictBlob(this.socketPath, blob);
+      this.loadedKeys.delete(fp);
+    }
+  }
+
   /** Windows: `ssh-add -d` each identity recorded in `loadedKeys`, leaving everything else in the shared agent. Best-effort. */
   private async evictLoadedKeys(socketPath: string): Promise<void> {
-    for (const blob of this.loadedKeys.values()) {
-      const file = path.join(os.tmpdir(), `sshs3-evict-${crypto.randomUUID()}.pub`);
-      try {
-        await fs.promises.writeFile(file, `${getKeyAlgorithm(blob)} ${blob.toString('base64')}\n`);
-        // Bounded: quit waits for this, and a stopped/hung agent service must not keep the app from exiting.
-        await execFileAsync('ssh-add.exe', ['-d', file], {
-          env: { ...process.env, SSH_AUTH_SOCK: socketPath },
-          timeout: EVICT_TIMEOUT_MS,
-        });
-      } catch (err) {
-        appAgentLog.warn('could not evict an identity from the agent:', (err as Error).message);
-      } finally {
-        await fs.promises.rm(file, { force: true }).catch(() => {});
-      }
+    // Skip keys that are already gone (e.g. removed with their PKCS#11 library): `ssh-add -d` reports
+    // those as "agent refused operation".
+    const present = await this.identityBlobs(socketPath);
+    for (const [fp, blob] of this.loadedKeys) {
+      if (present.has(fp)) await this.evictBlob(socketPath, blob);
     }
     this.loadedKeys.clear();
+  }
+
+  /** Windows: `ssh-add -d` for one identity. Returns whether it was removed. */
+  private async evictBlob(socketPath: string, blob: Buffer): Promise<boolean> {
+    const file = path.join(os.tmpdir(), `sshs3-evict-${crypto.randomUUID()}.pub`);
+    try {
+      await fs.promises.writeFile(file, `${getKeyAlgorithm(blob)} ${blob.toString('base64')}\n`);
+      // Bounded: quit waits for this, and a stopped/hung agent service must not keep the app from exiting.
+      await execFileAsync('ssh-add.exe', ['-d', file], {
+        env: { ...process.env, SSH_AUTH_SOCK: socketPath },
+        timeout: EVICT_TIMEOUT_MS,
+      });
+      return true;
+    } catch (err) {
+      appAgentLog.warn('could not evict an identity from the agent:', (err as Error).message);
+      return false;
+    } finally {
+      await fs.promises.rm(file, { force: true }).catch(() => {});
+    }
   }
 
   /** Stops the agent and its askpass server and removes the socket. Safe to call repeatedly. */

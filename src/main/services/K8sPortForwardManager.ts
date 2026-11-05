@@ -4,12 +4,18 @@ import net from 'node:net';
 import stream from 'node:stream';
 import { loadK8sClient } from './k8sClient';
 import { loadKubeConfigForContext } from './k8sKubeConfig';
+import { isPodNotFoundError, findReplacementPod, extractErrorMessage } from '../../shared/k8sPodHelpers';
 import type {
   K8sPortForwardTarget,
   K8sActivePortForward,
+  K8sPodNode,
 } from '../../shared/types/kubernetes';
 import { createLogger } from '../log';
 const k8sportforwardLog = createLogger('K8sPortForward');
+
+export interface K8sPortForwardDiscovery {
+  listPods(contextName: string, namespace: string): Promise<K8sPodNode[]>;
+}
 
 interface ActiveSession {
   id: string;
@@ -28,10 +34,70 @@ interface ActiveSession {
 export class K8sPortForwardManager extends EventEmitter {
   private sessions: Map<string, ActiveSession> = new Map();
   private kubeConfigPath?: string;
+  private discoveryService?: K8sPortForwardDiscovery;
 
-  constructor(kubeConfigPath?: string) {
+  constructor(kubeConfigPath?: string, discoveryService?: K8sPortForwardDiscovery) {
     super();
     this.kubeConfigPath = kubeConfigPath;
+    this.discoveryService = discoveryService;
+  }
+
+  public setDiscoveryService(discoveryService: K8sPortForwardDiscovery): void {
+    this.discoveryService = discoveryService;
+  }
+
+  /**
+   * Attempts to discover a newly created replacement pod for the given port-forward session
+   * when the previous pod terminated or was replaced by a controller (e.g. Deployment rollout).
+   */
+  public async tryResolveReplacement(id: string, maxAttempts = 6, delayMs = 500): Promise<boolean> {
+    const session = this.sessions.get(id);
+    if (!session || !this.discoveryService) return false;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const pods = await this.discoveryService.listPods(
+          session.target.contextName,
+          session.target.namespace
+        );
+        const replacement = findReplacementPod(
+          session.target.podName,
+          session.target.containerPort,
+          pods
+        );
+        if (replacement && replacement.name && replacement.name !== session.target.podName) {
+          k8sportforwardLog.info(
+            `Port-forward ${id}: Pod ${session.target.podName} replaced by ${replacement.name}; re-targeting port-forward`
+          );
+          session.target.podName = replacement.name;
+          session.error = undefined;
+          this.emitChange();
+          return true;
+        }
+      } catch (err) {
+        k8sportforwardLog.warn(`Port-forward ${id}: Failed to resolve replacement pod (attempt ${attempt}):`, err);
+      }
+
+      if (attempt < maxAttempts) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Reconnects an existing port-forward tunnel by clearing any error state and
+   * searching for replacement pods.
+   */
+  public async reconnect(id: string): Promise<boolean> {
+    const session = this.sessions.get(id);
+    if (!session) return false;
+    session.error = undefined;
+    this.emitChange();
+    if (this.discoveryService) {
+      await this.tryResolveReplacement(id, 4, 300);
+    }
+    return true;
   }
 
   /**
@@ -76,34 +142,58 @@ export class K8sPortForwardManager extends EventEmitter {
 
       const errStream = new stream.PassThrough();
       errStream.on('error', () => cleanup());
-      errStream.on('data', (errChunk) => {
+      errStream.on('data', async (errChunk) => {
         const msg = errChunk.toString().trim();
-        k8sportforwardLog.warn(`Pod ${target.podName}:${target.containerPort} error:`, msg);
         const currentSession = this.sessions.get(id);
+        const currentPodName = currentSession?.target.podName || target.podName;
+        k8sportforwardLog.warn(`Pod ${currentPodName}:${target.containerPort} error:`, msg);
         if (currentSession) {
           currentSession.error = msg;
           this.emitChange();
+        }
+        if (isPodNotFoundError(msg)) {
+          void this.tryResolveReplacement(id, 8, 1000);
         }
         cleanup();
         socket.destroy(new Error(msg));
       });
 
-      // Open a WebSocket port-forward stream for this incoming TCP connection
-      pf.portForward(
-        target.namespace,
-        target.podName,
-        [target.containerPort],
-        socket,
-        errStream,
-        socket
-      )
-        .then((ws) => {
+      const attemptForward = async (attemptResolve = true): Promise<void> => {
+        const currentSession = this.sessions.get(id);
+        const currentPodName = currentSession?.target.podName || target.podName;
+        const currentPort = currentSession?.target.containerPort || target.containerPort;
+
+        try {
+          const ws = await pf.portForward(
+            target.namespace,
+            currentPodName,
+            [currentPort],
+            socket,
+            errStream,
+            socket
+          );
+
+          if (closed) {
+            try {
+              if (typeof ws === 'function') (ws as any)()?.close();
+              else if (ws && typeof (ws as any).close === 'function') (ws as any).close();
+            } catch {
+              // Ignore teardown error on closed socket
+            }
+            return;
+          }
+
+          if (currentSession?.error) {
+            currentSession.error = undefined;
+            this.emitChange();
+          }
+
           socket.resume();
 
           socket.on('close', () => {
             try {
               if (typeof ws === 'function') {
-                const sock = ws();
+                const sock = (ws as any)();
                 sock?.close();
               } else if (ws && typeof (ws as any).close === 'function') {
                 (ws as any).close();
@@ -112,17 +202,28 @@ export class K8sPortForwardManager extends EventEmitter {
               // Ignore teardown error on closed socket
             }
           });
-        })
-        .catch((err) => {
-          const errMsg = err instanceof Error ? err.message : String(err);
-          const currentSession = this.sessions.get(id);
+        } catch (err) {
+          if (attemptResolve && isPodNotFoundError(err)) {
+            const resolved = await this.tryResolveReplacement(id, 3, 400);
+            if (resolved) {
+              return await attemptForward(false);
+            }
+          }
+          const errMsg = extractErrorMessage(err);
           if (currentSession) {
             currentSession.error = errMsg;
             this.emitChange();
           }
           cleanup();
-          socket.destroy(err instanceof Error ? err : new Error(String(err)));
-        });
+          socket.destroy(err instanceof Error ? err : new Error(errMsg));
+
+          if (isPodNotFoundError(err)) {
+            void this.tryResolveReplacement(id, 8, 1000);
+          }
+        }
+      };
+
+      attemptForward();
     });
 
     await new Promise<void>((resolve, reject) => {

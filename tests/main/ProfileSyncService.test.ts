@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import path from 'node:path';
@@ -9,6 +9,7 @@ import { ProfileStore } from '../../src/main/profile/ProfileStore';
 import { DotfilePoolStore } from '../../src/main/dotfiles/DotfilePoolStore';
 import { SettingsStore } from '../../src/main/settings/SettingsStore';
 import { DirectorySyncProfileStore } from '../../src/main/dirsync/DirectorySyncProfileStore';
+import { K8sProfileStore } from '../../src/main/profile/K8sProfileStore';
 import { SyncCryptoService, generateSalt, type ScryptParams } from '../../src/main/services/SyncCryptoService';
 import {
   ProfileSyncService,
@@ -23,6 +24,7 @@ import {
 } from '../../src/main/services/ProfileSyncService';
 import type { SSHConnectionConfig } from '../../src/shared/types/ssh';
 import type { DotfilePool } from '../../src/shared/types/dotfiles';
+import type { PolicyDocument } from '../../src/shared/types/policy';
 
 const FAST_PARAMS: ScryptParams = { N: 16, r: 1, p: 1, maxmem: 4 * 1024 * 1024 };
 
@@ -126,26 +128,29 @@ interface Harness {
   dotfilePoolStore: DotfilePoolStore;
   settingsStore: SettingsStore;
   dirSyncStore: DirectorySyncProfileStore;
+  k8sStore: K8sProfileStore;
   sync: ProfileSyncService;
   dir: string;
   sshConfigPath: string;
   knownHostsPath: string;
 }
 
-async function makeHarness(topologySalt: Buffer, credentialsSalt: Buffer): Promise<Harness> {
+async function makeHarness(topologySalt: Buffer, credentialsSalt: Buffer, policy?: PolicyDocument): Promise<Harness> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'sshs3-sync-test-'));
   const sshConfigPath = path.join(dir, 'ssh_config');
   const knownHostsPath = path.join(dir, 'known_hosts');
   const profileStore = new ProfileStore(path.join(dir, 'profiles.json'));
   const dotfilePoolStore = new DotfilePoolStore(path.join(dir, 'dotfile-pools.json'));
-  const settingsStore = new SettingsStore(path.join(dir, 'settings.json'));
+  const settingsStore = new SettingsStore(path.join(dir, 'settings.json'), policy);
   const dirSyncStore = new DirectorySyncProfileStore(path.join(dir, 'directory-sync-profiles.json'));
+  const k8sStore = new K8sProfileStore(path.join(dir, 'k8s-profiles.json'));
   const sync = new ProfileSyncService(profileStore, dotfilePoolStore, settingsStore, makeCrypto(topologySalt, credentialsSalt), {
     sshConfigPath,
     knownHostsPath,
     directorySyncProfileStore: dirSyncStore,
+    k8sProfileStore: k8sStore,
   });
-  return { profileStore, dotfilePoolStore, settingsStore, dirSyncStore, sync, dir, sshConfigPath, knownHostsPath };
+  return { profileStore, dotfilePoolStore, settingsStore, dirSyncStore, k8sStore, sync, dir, sshConfigPath, knownHostsPath };
 }
 
 describe('ProfileSyncService', () => {
@@ -172,8 +177,8 @@ describe('ProfileSyncService', () => {
   });
 
   /** A "machine" already joined to the same sync setup as every other harness() call within one test. */
-  async function harness(): Promise<Harness> {
-    const h = await makeHarness(sharedTopologySalt, sharedCredentialsSalt);
+  async function harness(policy?: PolicyDocument): Promise<Harness> {
+    const h = await makeHarness(sharedTopologySalt, sharedCredentialsSalt, policy);
     dirs.push(h.dir);
     return h;
   }
@@ -241,6 +246,135 @@ describe('ProfileSyncService', () => {
 
     expect(result.changedCategories).not.toContain('dirsync-profiles');
     expect(await machineB.dirSyncStore.list()).toHaveLength(1);
+  });
+
+  const k8sProfile = (id: string, name: string, over: Record<string, unknown> = {}) => ({
+    id,
+    name,
+    server: 'https://api.example.com:6443',
+    namespace: 'team-a',
+    ...over,
+  });
+
+  it('round-trips saved K8s profiles but never the machine-local kubeconfig context', async () => {
+    const machineA = await harness();
+    await machineA.k8sStore.save(k8sProfile('k-1', 'Prod', { contextName: 'team-a/api/alice', insecureSkipTlsVerify: true }));
+    await machineA.sync.pushToRemote(provider);
+    expect(provider.getRawBuffer('~/.sshs3/k8s-profiles.enc')).toBeDefined();
+
+    const machineB = await harness();
+    const result = await machineB.sync.pullFromRemote(provider);
+
+    expect(result.changedCategories).toContain('k8s-profiles');
+    const profiles = await machineB.k8sStore.list();
+    expect(profiles).toHaveLength(1);
+    expect(profiles[0]).toMatchObject({ id: 'k-1', name: 'Prod', namespace: 'team-a', insecureSkipTlsVerify: true });
+    expect(profiles[0].contextName).toBeUndefined();
+  });
+
+  it('keeps this machine\'s own context name when a newer remote copy wins', async () => {
+    const machineA = await harness();
+    await machineA.k8sStore.save(k8sProfile('k-1', 'Prod'));
+    await machineA.sync.pushToRemote(provider);
+    const machineB = await harness();
+    await machineB.sync.pullFromRemote(provider);
+    await machineB.k8sStore.save({ ...(await machineB.k8sStore.list())[0], contextName: 'local-context' });
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await machineA.k8sStore.save(k8sProfile('k-1', 'Prod renamed'));
+    await machineA.sync.pushToRemote(provider);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await machineB.sync.pullFromRemote(provider);
+
+    expect((await machineB.k8sStore.list())[0]).toMatchObject({ name: 'Prod renamed', contextName: 'local-context' });
+  });
+
+  it('propagates the deletion of a K8s profile', async () => {
+    const machineA = await harness();
+    await machineA.k8sStore.save(k8sProfile('k-1', 'Prod'));
+    await machineA.sync.pushToRemote(provider);
+    const machineB = await harness();
+    await machineB.sync.pullFromRemote(provider);
+    expect(await machineB.k8sStore.list()).toHaveLength(1);
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await machineA.k8sStore.delete('k-1');
+    await machineA.sync.pushToRemote(provider);
+    await machineB.sync.pullFromRemote(provider);
+
+    expect(await machineB.k8sStore.list()).toHaveLength(0);
+  });
+
+  it('reports K8s profile differences in compareWithRemote', async () => {
+    const machineA = await harness();
+    await machineA.sync.pushToRemote(provider);
+    await machineA.k8sStore.save(k8sProfile('k-1', 'Prod'));
+
+    const comparison = await machineA.sync.compareWithRemote(provider);
+    expect(comparison.categories.find((c) => c.category === 'k8s-profiles')).toMatchObject({
+      state: 'ahead',
+      ahead: 1,
+      behind: 0,
+    });
+  });
+
+  it('pulls fine from a remote pushed before K8s profiles were synced', async () => {
+    const machineA = await harness();
+    await machineA.sync.pushToRemote(provider);
+    await provider.delete('~/.sshs3/k8s-profiles.enc');
+
+    const machineB = await harness();
+    await machineB.k8sStore.save(k8sProfile('k-local', 'Local only'));
+    const result = await machineB.sync.pullFromRemote(provider);
+
+    expect(result.changedCategories).not.toContain('k8s-profiles');
+    expect(await machineB.k8sStore.list()).toHaveLength(1);
+  });
+
+  it('keeps local folders when a pull changes profiles', async () => {
+    const machineA = await harness();
+    await machineA.profileStore.saveSSH({
+      id: 'ssh-1',
+      name: 'Prod',
+      host: 'prod.example.com',
+      username: 'admin',
+      authType: 'password',
+      password: 'pw', // pragma: allowlist secret
+    });
+    await machineA.sync.pushToRemote(provider);
+
+    const machineB = await harness();
+    await machineB.profileStore.saveFolder('Staging');
+    const result = await machineB.sync.pullFromRemote(provider);
+
+    expect(result.changedCategories).toContain('topology');
+    expect((await machineB.profileStore.getProfiles()).folders).toEqual(['Staging']);
+  });
+
+  // M6 (code review 2026-11-03): the pull read the local profiles outside the store's write queue and wrote the
+  // merged result back afterwards, so a profile saved in between was dropped.
+  it('does not lose a profile saved while a pull is merging', async () => {
+    const machineA = await harness();
+    await machineA.profileStore.saveSSH({ id: 'ssh-remote', name: 'Remote', host: 'r.example.com', username: 'a', authType: 'password', password: 'pw' }); // pragma: allowlist secret
+    await machineA.sync.pushToRemote(provider);
+
+    const machineB = await harness();
+    const store = machineB.profileStore;
+    const read = store.getProfilesIncludingTombstones.bind(store);
+    let racingSave: Promise<void> | undefined;
+    vi.spyOn(store, 'getProfilesIncludingTombstones').mockImplementationOnce(async () => {
+      const snapshot = await read();
+      // A save arrives right after the pull took its snapshot, and gets time to run.
+      racingSave = store.saveSSH({ id: 'ssh-local', name: 'Local', host: 'l.example.com', username: 'b', authType: 'password', password: 'pw' }); // pragma: allowlist secret
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return snapshot;
+    });
+
+    await machineB.sync.pullFromRemote(provider);
+    await racingSave;
+
+    const ids = (await store.getProfiles()).ssh.map((p) => p.id).sort();
+    expect(ids).toEqual(['ssh-local', 'ssh-remote']);
   });
 
   it('round-trips an SSH profile between two machines, splitting secrets into credentials.enc', async () => {
@@ -314,6 +448,192 @@ describe('ProfileSyncService', () => {
     const profiles = await machineB.profileStore.getProfiles();
     expect(profiles.ssh[0].name).toBe('Prod v2 renamed');
     expect(profiles.ssh[0].privateKeyPath).toBe('C:\\Users\\bob\\.ssh\\id_ed25519');
+  });
+
+  it('clears an optional field on a pull when it was cleared on the other machine, and then reports in sync', async () => {
+    const base = { id: 'ssh-1', name: 'Prod', host: 'h', username: 'u', authType: 'password' as const };
+    const machineA = await harness();
+    await machineA.profileStore.saveSSH({ ...base, group: 'OldFolder', proxyJump: 'bastion' });
+    await machineA.sync.pushToRemote(provider);
+
+    const machineB = await harness();
+    await machineB.sync.pullFromRemote(provider);
+    expect((await machineB.profileStore.getProfiles()).ssh[0]).toMatchObject({ group: 'OldFolder', proxyJump: 'bastion' });
+
+    await new Promise((r) => setTimeout(r, 2));
+    await machineA.profileStore.saveSSH(base); // folder and jump host removed
+    await machineA.sync.pushToRemote(provider);
+
+    await machineB.sync.pullFromRemote(provider);
+    const pulled = (await machineB.profileStore.getProfiles()).ssh[0];
+    expect(pulled.group).toBeUndefined();
+    expect(pulled.proxyJump).toBeUndefined();
+    const comparison = await machineB.sync.compareWithRemote(provider);
+    expect(comparison.state).toBe('in_sync');
+  });
+
+  it('carries tags on SSH and S3 profiles to the other machine, normalized, and then reports in sync', async () => {
+    const machineA = await harness();
+    await machineA.profileStore.saveSSH({
+      id: 'ssh-1',
+      name: 'Prod',
+      host: 'h',
+      username: 'u',
+      authType: 'password',
+      tags: ['web', '#Prod'],
+    });
+    await machineA.profileStore.saveS3({
+      id: 's3-1',
+      name: 'Assets',
+      region: 'eu-north-1',
+      accessKeyId: 'AKIA',
+      secretAccessKey: 'secret', // pragma: allowlist secret
+      tags: ['b', 'A'],
+    });
+    await machineA.sync.pushToRemote(provider);
+
+    const machineB = await harness();
+    await machineB.sync.pullFromRemote(provider);
+    const pulled = await machineB.profileStore.getProfiles();
+    expect(pulled.ssh[0].tags).toEqual(['Prod', 'web']);
+    expect(pulled.s3[0].tags).toEqual(['A', 'b']);
+    expect((await machineB.sync.compareWithRemote(provider)).state).toBe('in_sync');
+  });
+
+  it('removes tags on a pull when they were cleared on the other machine, and then reports in sync', async () => {
+    const base = { id: 'ssh-1', name: 'Prod', host: 'h', username: 'u', authType: 'password' as const };
+    const machineA = await harness();
+    await machineA.profileStore.saveSSH({ ...base, tags: ['prod'] });
+    await machineA.sync.pushToRemote(provider);
+
+    const machineB = await harness();
+    await machineB.sync.pullFromRemote(provider);
+    expect((await machineB.profileStore.getProfiles()).ssh[0].tags).toEqual(['prod']);
+
+    await new Promise((r) => setTimeout(r, 2));
+    await machineA.profileStore.saveSSH(base);
+    await machineA.sync.pushToRemote(provider);
+
+    await machineB.sync.pullFromRemote(provider);
+    expect((await machineB.profileStore.getProfiles()).ssh[0].tags).toBeUndefined();
+    expect((await machineB.sync.compareWithRemote(provider)).state).toBe('in_sync');
+  });
+
+  it('carries the system membership of each server to the other machine, and removes it again when it is taken away', async () => {
+    const machineA = await harness();
+    const base = { host: 'h', username: 'u', authType: 'password' as const };
+    await machineA.profileStore.saveSSH({
+      ...base,
+      id: 'ssh-1',
+      name: 'Web',
+      tunnels: [{ id: 't1', name: 'db', type: 'local', localPort: 5432, remoteHost: 'localhost', remotePort: 5432 }],
+      system: { name: 'shop', startDirectory: '/srv/web', tunnelIds: ['t1'] },
+    });
+    await machineA.profileStore.saveSSH({ ...base, id: 'ssh-2', name: 'Db', system: { name: 'shop', shell: false } });
+    await machineA.sync.pushToRemote(provider);
+
+    const machineB = await harness();
+    await machineB.sync.pullFromRemote(provider);
+    const pulled = (await machineB.profileStore.getProfiles()).ssh;
+    expect(pulled.find((p) => p.id === 'ssh-1')?.system).toEqual({ name: 'shop', startDirectory: '/srv/web', tunnelIds: ['t1'] });
+    expect(pulled.find((p) => p.id === 'ssh-2')?.system).toEqual({ name: 'shop', shell: false });
+    expect((await machineB.sync.compareWithRemote(provider)).state).toBe('in_sync');
+
+    await new Promise((r) => setTimeout(r, 2));
+    await machineA.profileStore.saveSSH({ ...base, id: 'ssh-2', name: 'Db' });
+    await machineA.sync.pushToRemote(provider);
+    await machineB.sync.pullFromRemote(provider);
+    const after = (await machineB.profileStore.getProfiles()).ssh;
+    expect(after.find((p) => p.id === 'ssh-2')?.system).toBeUndefined();
+    expect(after.find((p) => p.id === 'ssh-1')?.system?.name).toBe('shop');
+    expect((await machineB.sync.compareWithRemote(provider)).state).toBe('in_sync');
+  });
+
+  it('keeps when this device last opened a profile when a newer remote edit does not carry it, and takes a later remote value', async () => {
+    const base = { id: 'ssh-1', name: 'Prod', host: 'h', username: 'u', authType: 'password' as const };
+    const machineA = await harness();
+    await machineA.profileStore.saveSSH(base);
+    await machineA.sync.pushToRemote(provider);
+
+    const machineB = await harness();
+    await machineB.sync.pullFromRemote(provider);
+    // B opens the profile (and this is saved on the profile); A has never opened it.
+    await new Promise((r) => setTimeout(r, 2));
+    await machineB.profileStore.saveSSH({ ...base, lastUsedAt: '2026-10-20T10:00:00.000Z' });
+
+    // A edits the profile afterwards: its record is newer and has no lastUsedAt at all.
+    await new Promise((r) => setTimeout(r, 2));
+    await machineA.profileStore.saveSSH({ ...base, name: 'Prod renamed' });
+    await machineA.sync.pushToRemote(provider);
+    await machineB.sync.pullFromRemote(provider);
+
+    let pulled = (await machineB.profileStore.getProfiles()).ssh[0];
+    expect(pulled.name).toBe('Prod renamed');
+    expect(pulled.lastUsedAt).toBe('2026-10-20T10:00:00.000Z');
+
+    // A then opens it later than B did: that later time wins.
+    await new Promise((r) => setTimeout(r, 2));
+    await machineA.profileStore.saveSSH({ ...base, name: 'Prod renamed', lastUsedAt: '2026-10-25T08:30:00.000Z' });
+    await machineA.sync.pushToRemote(provider);
+    await machineB.sync.pullFromRemote(provider);
+    pulled = (await machineB.profileStore.getProfiles()).ssh[0];
+    expect(pulled.lastUsedAt).toBe('2026-10-25T08:30:00.000Z');
+  });
+
+  it('keeps the local credentials when the remote has no credentials half to offer', async () => {
+    const machineB = await harness();
+    await machineB.profileStore.saveSSH({ id: 'ssh-1', name: 'Local', host: 'h', username: 'local-user', authType: 'password', password: 'local-pw' }); // pragma: allowlist secret
+
+    await new Promise((r) => setTimeout(r, 2));
+    const machineA = await harness();
+    await machineA.profileStore.saveSSH({ id: 'ssh-1', name: 'Renamed', host: 'h', username: 'remote-user', authType: 'password', password: 'remote-pw' }); // pragma: allowlist secret
+    await machineA.sync.pushToRemote(provider);
+    await provider.delete('~/.sshs3/credentials.enc');
+
+    await machineB.sync.pullFromRemote(provider);
+
+    const pulled = (await machineB.profileStore.getProfiles()).ssh[0];
+    expect(pulled.name).toBe('Renamed');
+    expect(pulled.username).toBe('local-user');
+    expect(pulled.password).toBe('local-pw'); // pragma: allowlist secret
+  });
+
+  it('still regenerates the local ssh block from the pulled profiles when applying the remote block fails', async () => {
+    const machineA = await harness();
+    await machineA.profileStore.saveSSH({ id: 'ssh-1', name: 'Prod', host: 'h', username: 'u', authType: 'password' });
+    await machineA.sync.pushToRemote(provider);
+
+    const machineB = await harness();
+    vi.spyOn(machineB.sync as any, 'applySshNativePayload').mockRejectedValue(new Error('cannot apply'));
+    const regenerate = vi.spyOn(machineB.sync, 'autoSyncLocalSshConfig').mockResolvedValue();
+
+    await expect(machineB.sync.pullFromRemote(provider)).rejects.toThrow('cannot apply');
+
+    expect((await machineB.profileStore.getProfiles()).ssh).toHaveLength(1); // already replaced
+    expect(regenerate).toHaveBeenCalledTimes(1);
+  });
+
+  it('runs a push and a pull started together one after the other instead of tripping over each other', async () => {
+    const machineA = await harness();
+    await machineA.profileStore.saveSSH({ id: 'ssh-1', name: 'Prod', host: 'h', username: 'u', authType: 'password' });
+    await machineA.sync.pushToRemote(provider);
+    await new Promise((r) => setTimeout(r, 2));
+    await machineA.profileStore.saveSSH({ id: 'ssh-1', name: 'Prod 2', host: 'h', username: 'u', authType: 'password' });
+
+    // A slow remote lets the operations overlap; unserialised, the pull would see the push's own
+    // in-progress marker and throw SyncInProgressError.
+    const realStat = provider.stat.bind(provider);
+    provider.stat = async (remotePath: string) => {
+      await new Promise((r) => setTimeout(r, 3));
+      return realStat(remotePath);
+    };
+    const results = await Promise.allSettled([
+      machineA.sync.pushToRemote(provider),
+      machineA.sync.pullFromRemote(provider),
+      machineA.sync.compareWithRemote(provider),
+      machineA.sync.pushToRemote(provider),
+    ]);
+    expect(results.map((r) => r.status)).toEqual(['fulfilled', 'fulfilled', 'fulfilled', 'fulfilled']);
   });
 
   it('does not let an older remote copy overwrite a newer local edit', async () => {
@@ -456,6 +776,63 @@ describe('ProfileSyncService', () => {
     expect(merged).toContain('other-host.example.com');
   });
 
+  // Low finding (code review 2026-11-03): known_hosts was read, merged and written without checking that ssh had not
+  // appended a host key in between; that key was lost when the merged text replaced the file.
+  it('keeps a host key that ssh appended to known_hosts while the pull was merging', async () => {
+    const machineA = await harness();
+    await fs.writeFile(machineA.knownHostsPath, 'from-remote.example.com ssh-ed25519 AAAAremote\n', 'utf-8');
+    await machineA.sync.pushToRemote(provider);
+
+    const machineB = await harness();
+    await fs.writeFile(machineB.knownHostsPath, 'already-here.example.com ssh-ed25519 AAAAlocal\n', 'utf-8');
+    const service = machineB.sync as any;
+    const realRead = service.readLocalFile.bind(service);
+    let appended = false;
+    vi.spyOn(service, 'readLocalFile').mockImplementation(async (...args: unknown[]) => {
+      const filePath = args[0] as string;
+      const content = await realRead(filePath);
+      if (filePath === machineB.knownHostsPath && !appended) {
+        appended = true;
+        // ssh connects to a new host right now and appends its key.
+        await fs.appendFile(machineB.knownHostsPath, 'just-connected.example.com ssh-ed25519 AAAAappended\n', 'utf-8');
+      }
+      return content;
+    });
+
+    await machineB.sync.pullFromRemote(provider);
+
+    const merged = await fs.readFile(machineB.knownHostsPath, 'utf-8');
+    expect(merged).toContain('from-remote.example.com');
+    expect(merged).toContain('already-here.example.com');
+    expect(merged).toContain('just-connected.example.com');
+  });
+
+  // Code review of the unpushed commits: after five "file moved" rounds the merge used to give up without a word.
+  it('fails the pull, instead of reporting success, when known_hosts keeps changing under the merge', async () => {
+    const machineA = await harness();
+    await fs.writeFile(machineA.knownHostsPath, 'from-remote.example.com ssh-ed25519 AAAAremote\n', 'utf-8');
+    await machineA.sync.pushToRemote(provider);
+
+    const machineB = await harness();
+    await fs.writeFile(machineB.knownHostsPath, 'already-here.example.com ssh-ed25519 AAAAlocal\n', 'utf-8');
+    const service = machineB.sync as any;
+    const realRead = service.readLocalFile.bind(service);
+    let n = 0;
+    vi.spyOn(service, 'readLocalFile').mockImplementation(async (...args: unknown[]) => {
+      const filePath = args[0] as string;
+      const content = await realRead(filePath);
+      if (filePath === machineB.knownHostsPath && n % 2 === 0) {
+        // ssh keeps appending between our read and the re-read
+        await fs.appendFile(machineB.knownHostsPath, `host${n}.example.com ssh-ed25519 AAAA${n}\n`, 'utf-8');
+      }
+      if (filePath === machineB.knownHostsPath) n++;
+      return content;
+    });
+
+    await expect(machineB.sync.pullFromRemote(provider)).rejects.toThrow(/known_hosts kept changing/);
+    expect(await fs.readFile(machineB.knownHostsPath, 'utf-8')).not.toContain('from-remote.example.com'); // nothing half-applied
+  });
+
   it('generates a managed ~/.ssh/config block from SSH profiles on push, so native ssh sees the same host', async () => {
     const machineA = await harness();
     await machineA.profileStore.saveSSH({
@@ -576,7 +953,7 @@ describe('ProfileSyncService', () => {
     const result = await machineA.sync.wipeRemote(provider);
 
     expect(result.errors).toEqual([]);
-    expect(result.deletedCount).toBe(6);
+    expect(result.deletedCount).toBe(7);
     for (const file of [
       'topology.enc',
       'credentials.enc',
@@ -584,6 +961,7 @@ describe('ProfileSyncService', () => {
       'settings.enc',
       'ssh-native.enc',
       'dirsync-profiles.enc',
+      'k8s-profiles.enc',
     ]) {
       expect(provider.hasFile(`~/.sshs3/${file}`)).toBe(false);
     }
@@ -661,6 +1039,40 @@ describe('ProfileSyncService', () => {
     expect(settings.x11ServerPath).toBe('/usr/bin/Xorg');
     expect(settings.x11ServerArgs).toBeUndefined();
     expect(settings.smartcardLibPath).toBeUndefined();
+  });
+
+  describe('with a machine policy', () => {
+    const policy: PolicyDocument = { settings: { x11ServerMode: 'always' }, features: {} };
+
+    it('pushes the user\'s stored value, never the policy value, so unmanaged machines are unaffected', async () => {
+      const managed = await harness(policy);
+      await fs.writeFile(
+        path.join(managed.dir, 'settings.json'),
+        JSON.stringify({ x11ServerMode: 'manual', updatedAt: new Date().toISOString() })
+      );
+      expect((await managed.settingsStore.getSettings()).x11ServerMode).toBe('always');
+      await managed.sync.pushToRemote(provider);
+
+      const other = await harness();
+      await other.sync.pullFromRemote(provider);
+      expect((await other.settingsStore.getSettings()).x11ServerMode).toBe('manual');
+    });
+
+    it('keeps a pulled value for a managed setting underneath the policy value', async () => {
+      const managed = await harness(policy);
+      await managed.settingsStore.saveSettings({ theme: 'dark' });
+      await new Promise((resolve) => setTimeout(resolve, 5));
+
+      const other = await harness();
+      await other.settingsStore.saveSettings({ theme: 'light', x11ServerMode: 'manual' });
+      await other.sync.pushToRemote(provider);
+      await managed.sync.pullFromRemote(provider);
+
+      expect((await managed.settingsStore.getSettings()).theme).toBe('light');
+      expect((await managed.settingsStore.getSettings()).x11ServerMode).toBe('always');
+      // The synced value is kept underneath, so this machine's next push cannot revert it on the others.
+      expect((await managed.settingsStore.getStoredSettings()).x11ServerMode).toBe('manual');
+    });
   });
 
   it('keeps the whole settings object with the newer updatedAt (last-write-wins)', async () => {

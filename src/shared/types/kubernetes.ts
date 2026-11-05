@@ -11,6 +11,7 @@ export interface K8sPodNode {
   name: string;
   namespace: string;
   phase: string;
+  creationTimestamp?: string;
   containers: K8sContainerNode[];
 }
 
@@ -208,4 +209,41 @@ export interface K8sLoginResult {
   server: string;
   namespace: string;
   projects: string[];
+}
+
+/** Whether a cluster offers the OpenShift browser sign-in (built-in OAuth server, OpenShift 4.13+). */
+export interface K8sOpenShiftProbeResult {
+  supported: boolean;
+  reason?: string;
+}
+
+export interface K8sWebLoginOptions {
+  server: string;
+  insecureSkipTlsVerify?: boolean;
+  namespace?: string;
+  /** Fixed loopback port for the sign-in callback; a random free port is used when omitted. */
+  callbackPort?: number;
+}
+
+export interface K8sWebLoginResult extends K8sLoginResult {
+  /** ISO timestamp of the token expiry, when the OAuth server reported it. */
+  expiresAt?: string;
+}
+
+/**
+ * A saved cluster. Holds no secret: the token only ever lives in the kubeconfig.
+ * `namespace` is the project the user explicitly chose, and restricts the tree to it.
+ */
+export interface K8sProfile {
+  id: string;
+  name: string;
+  server: string;
+  insecureSkipTlsVerify?: boolean;
+  namespace?: string;
+  /** Kubeconfig context written by the latest sign-in with this profile. */
+  contextName?: string;
+  lastUsedAt?: string;
+  updatedAt?: string;
+  /** Set when the profile was deleted; kept so the deletion can sync to other devices. */
+  deletedAt?: string;
 }

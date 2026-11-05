@@ -7,6 +7,7 @@ const loadFromOptionsMock = vi.fn();
 const listNamespaceMock = vi.fn();
 const listNamespacedPodMock = vi.fn();
 const readNamespacedPodMock = vi.fn();
+const deleteNamespacedPodMock = vi.fn();
 const listNamespacedEventMock = vi.fn();
 const dumpYamlMock = vi.fn((obj: any) => `yaml-output: ${obj?.metadata?.name || 'unknown'}`);
 const coreV1ApiConstructorMock = vi.fn();
@@ -50,6 +51,7 @@ vi.mock('@kubernetes/client-node', () => {
         listNamespace: listNamespaceMock,
         listNamespacedPod: listNamespacedPodMock,
         readNamespacedPod: readNamespacedPodMock,
+        deleteNamespacedPod: deleteNamespacedPodMock,
         listNamespacedEvent: listNamespacedEventMock,
       };
     });
@@ -434,6 +436,27 @@ describe('K8sDiscoveryService', () => {
 
       expect(details.events).toHaveLength(1);
       expect(details.events[0].reason).toBe('Pulling');
+    });
+  });
+
+  describe('deletePod', () => {
+    it('calls CoreV1Api.deleteNamespacedPod with name and namespace', async () => {
+      deleteNamespacedPodMock.mockResolvedValue({});
+      const svc = new K8sDiscoveryService('/fake/kubeconfig');
+
+      await svc.deletePod('default', 'kube-system', 'coredns-xyz');
+
+      expect(deleteNamespacedPodMock).toHaveBeenCalledWith({
+        name: 'coredns-xyz',
+        namespace: 'kube-system',
+      });
+    });
+
+    it('propagates API errors when delete fails', async () => {
+      deleteNamespacedPodMock.mockRejectedValue(new Error('Pod not found'));
+      const svc = new K8sDiscoveryService('/fake/kubeconfig');
+
+      await expect(svc.deletePod('default', 'default', 'nonexistent')).rejects.toThrow('Pod not found');
     });
   });
 

@@ -1,14 +1,17 @@
 import crypto from 'node:crypto';
-import { describeFido2StartupError, paneTreeHasAuthType } from '../ipc/ipcHelpers';
+import { describeFido2StartupError, sessionUsesAuthType } from '../ipc/ipcHelpers';
 import { AgentLifecycleManager } from '../ssh/AgentLifecycleManager';
-import { AppAgent, fingerprintOfKeyBlob } from '../ssh/AppAgent';
+import { AppAgent, KeysLockedWhileLoadingError, fingerprintOfKeyBlob } from '../ssh/AppAgent';
 import { assignHostAliases, type AgentHostEntry } from '../services/SshNativeFileMerger';
 import { SmartcardDetector } from './SmartcardDetector';
 import { loadSmartcardIntoPrivateAgent, loadFido2ResidentKeysIntoPrivateAgent, pinPromptKind } from './SmartcardAgentLoader';
 import type { AskpassPromptHandler, AskpassPromptRetryContext, AskpassServer } from './AskpassServer';
-import { readSmartcardCertificates } from './SmartcardCertificateReader';
+import { isSmartcardTokenPresent, readSmartcardCertificates } from './SmartcardCertificateReader';
+import { isFido2DeviceConnected } from './Fido2DeviceDetector';
 import type { SmartcardCertificateDetails } from './CertificateParser';
-import { getAgentIdentities } from './SmartcardSyncService';
+import { getAgentIdentities, getKeyAlgorithm } from './SmartcardSyncService';
+import { parseSshWirePublicKey, type SshWireKeyInfo } from '../ca/sshPublicKeyFormat';
+import type { SshCaService } from '../ca/SshCaService';
 import { IPC_CHANNELS, type AskpassPromptKind } from '../../shared/types/ipc';
 import type { SSHConnectionConfig, CachedSmartcardAgent } from '../../shared/types/ssh';
 import type { SFTPConfig } from '../../shared/types/storage';
@@ -37,6 +40,15 @@ export interface SmartcardDeps {
     context?: string,
     retry?: AskpassPromptRetryContext
   ) => Promise<string>;
+  /**
+   * Shows an "insert your token" prompt until `isPresent` stops reporting false: true once the token is
+   * there, false when the user cancelled (IpcBridge.waitForTokenDirect).
+   */
+  waitForToken: (
+    kind: 'smartcard' | 'fido2',
+    context: string | undefined,
+    isPresent: () => Promise<boolean | undefined>
+  ) => Promise<boolean>;
   makePresenceNotifier: (
     sessionId: string | undefined,
     message: string
@@ -47,10 +59,27 @@ export interface SmartcardDeps {
   syncAgentBlock: (entries: AgentHostEntry[] | null) => Promise<void>;
 }
 
+/** The fields of an SSH or SFTP connection config that SSH CA routing reads and sets. */
+interface SshCaConnection {
+  authType?: string;
+  useSshCa?: boolean;
+  agentPath?: string;
+  certificateFile?: string;
+  agentIdentityFiles?: string[];
+}
+
 /** Key of the FIDO2 resident keys in `globalCards` and the load/failure maps (PKCS#11 cards use their library path). */
 const FIDO2_KEY = '__fido2__';
 /** After a failed load of a card, wait this long before prompting for its PIN again. */
 const LOAD_COOLDOWN_MS = 30_000;
+
+/** The user dismissed the "insert your token" prompt: the connection must stop, not fall back to another PIN prompt. */
+export class TokenNotInsertedError extends Error {
+  constructor(kind: 'smartcard' | 'fido2') {
+    super(kind === 'fido2' ? 'No security key inserted' : 'No smartcard inserted');
+    this.name = 'TokenNotInsertedError';
+  }
+}
 
 export class SmartcardCoordinator {
   /** sessionId -> the private ssh-agent pre-loaded with a smartcard for 'agent-per-session' mode. */
@@ -80,6 +109,7 @@ export class SmartcardCoordinator {
 
   private startupUnlockPromise?: Promise<void>;
   private disposed = false;
+  private sshCaService?: SshCaService;
 
   /**
    * pkcs11LibPath -> certificate details read once, right after the card is loaded into its
@@ -151,6 +181,11 @@ export class SmartcardCoordinator {
   private ensureAgent(): Promise<string> {
     if (this.disposed) return Promise.reject(new Error('SmartcardCoordinator is disposed'));
     return this.appAgent.ensure();
+  }
+
+  /** Returns the app-wide SSH agent instance. */
+  public getAppAgent(): AppAgent {
+    return this.appAgent;
   }
 
   /** True when a PIV/PKCS#11 card (not just a FIDO2 key) is unlocked in the app agent. */
@@ -327,6 +362,114 @@ export class SmartcardCoordinator {
     return agentPath ? { ...config, agentPath, ...(await this.agentIdentityFilesFor(agentPath, FIDO2_KEY)) } : config;
   }
 
+  /** Sets the SSH CA service instance to retrieve active certificate files. */
+  public setSshCaService(service: SshCaService): void {
+    this.sshCaService = service;
+  }
+
+  /** Public key files pinning a connection to the first unlocked PIV card of the shared app agent (none if there is none). */
+  private async pivIdentityFilesFor(socketPath: string): Promise<{ agentIdentityFiles?: string[] }> {
+    for (const cardKey of this.globalCards.keys()) {
+      if (cardKey === FIDO2_KEY) continue;
+      const files = await this.agentIdentityFilesFor(socketPath, cardKey);
+      if (files.agentIdentityFiles && files.agentIdentityFiles.length > 0) return files;
+    }
+    return {};
+  }
+
+  /**
+   * Prepares an SSH connection config that uses SSH CA certificate authentication (`useSshCa`).
+   * When `authType === 'agent'` and `useSshCa` is true:
+   * 1. Routes the connection through the app-managed SSH agent socket holding the user certificate / PIV key.
+   * 2. Attaches the signed certificate file (`-o CertificateFile=...`) if one is active (e.g. for PIV).
+   * 3. For a PIV session only, attaches the PIV card's public key identity files (`agentIdentityFiles`)
+   *    to restrict agent offerings; an ephemeral session's key is offered from the agent unrestricted.
+   */
+  public prepareSshCaConfig(config: SSHConnectionConfig): Promise<SSHConnectionConfig> {
+    return this.applySshCa(config);
+  }
+
+  /** Same rationale as prepareSshCaConfig, applied to an SFTP connection. */
+  public prepareSftpSshCaConfig(config: SFTPConfig): Promise<SFTPConfig> {
+    return this.applySshCa(config);
+  }
+
+  private async applySshCa<T extends SshCaConnection>(config: T): Promise<T> {
+    if (config.authType !== 'agent' || !config.useSshCa) {
+      return config;
+    }
+    const certFile = this.sshCaService?.getActiveCertificateFilePath();
+    const socketPath = config.agentPath ?? (await this.ensureAgent());
+    const updated: T = {
+      ...config,
+      agentPath: socketPath,
+      certificateFile: certFile ?? config.certificateFile,
+    };
+    // Only a PIV session (it has a certificate file) is pinned to the card's key. An ephemeral session's
+    // certified key lives in the agent without any public-key file, and `IdentitiesOnly` + `-i <card>.pub`
+    // would hide it from ssh even though it is the identity this connection needs.
+    return certFile ? { ...updated, ...(await this.pivIdentityFilesFor(socketPath)) } : updated;
+  }
+
+  /**
+   * Discovers and retrieves the OpenSSH public key for the connected smartcard (any PKCS#11 card, e.g. a YubiKey or another PIV card).
+   * If not already unlocked in the app agent, attempts to unlock/load it first.
+   */
+  public async getPivPublicKey(): Promise<SshWireKeyInfo | null> {
+    // 1. Check if an auth key is already present in the active app agent
+    const socketPath = this.appAgent.getSocketPath();
+    if (socketPath && this.hasPivCard()) {
+      const identities = await getAgentIdentities(socketPath);
+      for (const card of this.globalCards.values()) {
+        const matching = identities.find(
+          (id) => card.fingerprints.has(fingerprintOfKeyBlob(id.keyBlob)) && !getKeyAlgorithm(id.keyBlob).endsWith('-sk')
+        );
+        if (matching) {
+          return parseSshWirePublicKey(matching.keyBlob, matching.comment);
+        }
+      }
+    }
+
+    // 2. Discover PIV library
+    const preferred = (await this.deps.settingsStore.getSettings()).smartcardLibPath;
+    const libs = await SmartcardDetector.detectAvailableLibraries(undefined, { onlyExisting: true });
+    const chosen =
+      (preferred ? libs.find((l) => l.path === preferred) : undefined) ??
+      libs.find((l) => l.name === 'p11-kit') ??
+      libs[0];
+
+    if (!chosen) {
+      throw new Error('No smartcard PKCS#11 module (e.g. OpenSC or libykcs11) detected on this system');
+    }
+
+    // 3. Ensure token is plugged in
+    await this.ensureTokenPresent('smartcard', 'SSH CA authentication', chosen.path);
+
+    // 4. Load into app agent (prompts for PIN if needed). An explicit user login
+    // bypasses any previous background-failure cooldown on this library.
+    this.globalSmartcardAgentFailures.delete(chosen.path);
+    await this.getOrLoadGlobalSmartcardAgent(
+      chosen.path,
+      (prompt, retry) => this.deps.promptForPin(prompt.trim(), 'smartcard', 'SSH CA', retry),
+      'unlock the smartcard for SSH CA'
+    );
+
+    // 5. Retrieve the loaded identity from the agent
+    const liveSocket = this.appAgent.getSocketPath();
+    if (!liveSocket) return null;
+
+    const identities = await getAgentIdentities(liveSocket);
+    const card = this.globalCards.get(chosen.path);
+    if (!card) return null;
+
+    const matching = identities.find(
+      (id) => card.fingerprints.has(fingerprintOfKeyBlob(id.keyBlob)) && !getKeyAlgorithm(id.keyBlob).endsWith('-sk')
+    );
+    if (!matching) return null;
+
+    return parseSshWirePublicKey(matching.keyBlob, matching.comment);
+  }
+
   /**
    * When `agentPath` is the shared app agent (which holds every unlocked card), the public key files
    * that pin a connection to just this card's keys (see SSHConnectionConfig.agentIdentityFiles).
@@ -348,6 +491,35 @@ export class SmartcardCoordinator {
   }
 
   /**
+   * Makes sure the card / security key is plugged in before anything asks for its PIN: when it is not,
+   * the user gets an "insert your token" prompt that gives way to the PIN prompt once it is detected.
+   * An unknown answer (presence can't be told) lets the load go ahead as before. Throws
+   * TokenNotInsertedError when the prompt is dismissed.
+   */
+  private async ensureTokenPresent(kind: 'smartcard' | 'fido2', context: string, pkcs11LibPath?: string): Promise<void> {
+    const check = () => (pkcs11LibPath ? isSmartcardTokenPresent(pkcs11LibPath) : isFido2DeviceConnected());
+    if ((await check()) !== false) return;
+    smartcardLog.info(`${kind}: not plugged in; asking the user to insert it`);
+    if (!(await this.deps.waitForToken(kind, context, check))) throw new TokenNotInsertedError(kind);
+  }
+
+  /**
+   * For flows that talk to the PIV card without a PKCS#11 library of their own (Team Vault's
+   * age-plugin-yubikey): waits for a card in the configured (or only / p11-kit) module. Nothing to
+   * check against when no module can be picked, so that case goes ahead as before. Must run before
+   * the caller takes the PKCS#11 lock, since the check takes it too.
+   */
+  public async ensureDefaultPivPresent(context: string): Promise<void> {
+    const preferred = (await this.deps.settingsStore.getSettings()).smartcardLibPath;
+    const libs = await SmartcardDetector.detectAvailableLibraries(undefined, { onlyExisting: true });
+    const chosen =
+      (preferred ? libs.find((lib) => lib.path === preferred) : undefined) ??
+      libs.find((lib) => lib.name === 'p11-kit') ??
+      (libs.length === 1 ? libs[0] : undefined);
+    if (chosen) await this.ensureTokenPresent('smartcard', context, chosen.path);
+  }
+
+  /**
    * Resolves (loading it if necessary) the ssh-agent socket to use for a PKCS#11 library, per the
    * user's Settings > Security > Smartcard PIN Caching mode. Returns undefined only if loading the
    * agent fails — callers should then fall back to a direct `-I` login (SSH) or their own ephemeral
@@ -365,6 +537,7 @@ export class SmartcardCoordinator {
       try {
         return await this.getOrLoadGlobalSmartcardAgent(pkcs11LibPath, sessionId, promptLabel);
       } catch (err) {
+        if (err instanceof TokenNotInsertedError) throw err;
         smartcardLog.warn(
           'SmartcardCoordinator: failed to load smartcard into the global agent, falling back to per-connection prompts:',
           err
@@ -387,13 +560,15 @@ export class SmartcardCoordinator {
       const { pid, socketPath } = await this.loadSmartcardIntoPrivateAgentWithPresence(
         pkcs11LibPath,
         () => this.deps.sshPtyManager.promptForPin(sessionId, `Enter your smartcard PIN to ${promptLabel}:`, 'smartcard', promptLabel),
-        sessionId
+        sessionId,
+        promptLabel
       );
       smartcardLog.info(`resolveSmartcardAgentPath: shared agent loaded OK for session ${sessionId}, pid=${pid}, socket=${socketPath}`
       );
       this.smartcardSessionAgents.set(sessionId, { pid, socketPath, kind: 'pkcs11', pkcs11LibPath });
       return socketPath;
     } catch (err) {
+      if (err instanceof TokenNotInsertedError) throw err;
       smartcardLog.warn(
         'SmartcardCoordinator: failed to load smartcard into a private session agent, falling back to per-connection prompts:',
         err
@@ -418,6 +593,7 @@ export class SmartcardCoordinator {
       try {
         return await this.getOrLoadGlobalFido2Agent(sessionId, promptLabel, pinPromptKind);
       } catch (err) {
+        if (err instanceof TokenNotInsertedError) throw err;
         smartcardLog.warn(
           'SmartcardCoordinator: failed to load FIDO2 resident keys into the global agent, falling back to per-connection prompts:',
           err
@@ -431,6 +607,7 @@ export class SmartcardCoordinator {
     }
 
     fido2Log.info(`resolveFido2AgentPath: starting shared-agent preload for session ${sessionId}`);
+    await this.ensureTokenPresent('fido2', promptLabel);
     const { onPresenceRequested, onPresenceCleared } = this.deps.makePresenceNotifier(
       sessionId,
       'Touch your security key to connect'
@@ -490,7 +667,16 @@ export class SmartcardCoordinator {
               retry
             );
 
+    // Windows: loads of different modules must not overlap, or one sees the other's freshly added keys
+    // as stale (globalCards is only filled at the end of a load) and evicts them. Captured before this
+    // load registers itself, so it only waits for loads that started earlier.
+    const earlierLoads = process.platform === 'win32' ? [...this.globalSmartcardAgentLoads.values()] : [];
     const loadPromise = (async () => {
+      await Promise.allSettled(earlierLoads);
+      // The startup unlock passes no label: it has already checked presence itself.
+      if (promptLabel !== undefined) {
+        await this.ensureTokenPresent('smartcard', promptLabel, pkcs11LibPath);
+      }
       // Read the certificate details *before* handing the module to `ssh-add -s` below (see
       // the doc comment on `globalSmartcardCerts` for why we want them at all). This must run
       // strictly before, not concurrently with or fire-and-forget after: once `ssh-add -s`
@@ -516,7 +702,21 @@ export class SmartcardCoordinator {
       // libykcs11, OpenSC, …). If one of this module's keys is already in the agent, loading it again
       // would prompt for the PIN a second time and open a second PKCS#11 session against the same
       // token (which most readers reject), for keys the agent already holds.
-      const alreadyLoaded = Array.from(certs.keys()).filter((fingerprint) => before.has(fingerprint));
+      let alreadyLoaded = Array.from(certs.keys()).filter((fingerprint) => before.has(fingerprint));
+      if (process.platform === 'win32' && alreadyLoaded.length > 0) {
+        // The shared Windows ssh-agent service outlives this app, so a key still in it is left over
+        // from an earlier run (or a manual `ssh-add`), not one this process unlocked — reusing it
+        // would skip the PIN prompt and leave "lock" unable to evict it. Evict it and load afresh,
+        // unless another module of this run already owns it.
+        const owned = new Set<string>();
+        for (const card of this.globalCards.values()) card.fingerprints.forEach((f) => owned.add(f));
+        const stale = alreadyLoaded.filter((fingerprint) => !owned.has(fingerprint));
+        if (stale.length > 0) {
+          smartcardLog.info(`getOrLoadGlobalSmartcardAgent: evicting ${stale.length} stale key(s) left in the Windows ssh-agent to force a PIN prompt`);
+          await this.appAgent.evictIdentities(stale);
+          alreadyLoaded = alreadyLoaded.filter((fingerprint) => !stale.includes(fingerprint));
+        }
+      }
       const authFingerprints = await this.selectAuthFingerprints(certs);
       if (alreadyLoaded.length > 0) {
         smartcardLog.info(`getOrLoadGlobalSmartcardAgent: ${pkcs11LibPath} is the same card as one already loaded; not loading it again`
@@ -551,6 +751,8 @@ export class SmartcardCoordinator {
         if (fingerprints.size === 0) nonSecurityKeys.forEach((i) => fingerprints.add(i.fingerprint));
       }
       this.globalCards.set(pkcs11LibPath, { fingerprints });
+      // Windows: make lock/quit evict these by fingerprint (`ssh-add -e <lib>` is unreliable there).
+      await this.appAgent.adoptIdentities(fingerprints);
       this.refreshAgentSshConfig();
       return socketPath;
     })();
@@ -562,7 +764,10 @@ export class SmartcardCoordinator {
       smartcardLog.info(`getOrLoadGlobalSmartcardAgent: loaded OK for ${pkcs11LibPath}, socket=${socketPath}`);
       return socketPath;
     } catch (err) {
-      this.globalSmartcardAgentFailures.set(pkcs11LibPath, Date.now());
+      // A dismissed "insert your token" prompt is not a failed load: no cooldown before the next try.
+      if (!(err instanceof TokenNotInsertedError) && !(err instanceof KeysLockedWhileLoadingError)) {
+        this.globalSmartcardAgentFailures.set(pkcs11LibPath, Date.now());
+      }
       throw err;
     } finally {
       this.globalSmartcardAgentLoads.delete(pkcs11LibPath);
@@ -605,6 +810,8 @@ export class SmartcardCoordinator {
     const promptPin = this.fido2PinPrompt(sessionId, promptLabel, pinPromptKind);
 
     const loadPromise = (async () => {
+      // The startup unlock has already checked for the key itself.
+      if (sessionId !== 'startup') await this.ensureTokenPresent('fido2', promptLabel);
       await this.appAgent.addFido2Resident(promptPin, { onPresenceRequested, onPresenceCleared });
       const socketPath = await this.ensureAgent();
       // Every security-key (`*-SK`) identity in the agent belongs to FIDO2; PIV keys never are.
@@ -623,7 +830,9 @@ export class SmartcardCoordinator {
       fido2Log.info(`getOrLoadGlobalFido2Agent: loaded OK, socket=${socketPath}`);
       return socketPath;
     } catch (err) {
-      this.globalSmartcardAgentFailures.set(FIDO2_KEY, Date.now());
+      if (!(err instanceof TokenNotInsertedError) && !(err instanceof KeysLockedWhileLoadingError)) {
+        this.globalSmartcardAgentFailures.set(FIDO2_KEY, Date.now());
+      }
       throw err;
     } finally {
       this.globalSmartcardAgentLoads.delete(FIDO2_KEY);
@@ -710,11 +919,14 @@ export class SmartcardCoordinator {
    * directly, so the banner appears consistently regardless of which flow
    * (interactive connect, background sync, vault unlock/link) triggered it.
    */
-  public loadSmartcardIntoPrivateAgentWithPresence(
+  public async loadSmartcardIntoPrivateAgentWithPresence(
     pkcs11LibPath: string,
     promptHandler: AskpassPromptHandler,
-    sessionId?: string
+    sessionId?: string,
+    /** What the card is for; when given, an unplugged card gets an "insert your token" prompt first. */
+    context?: string
   ): ReturnType<typeof loadSmartcardIntoPrivateAgent> {
+    if (context !== undefined) await this.ensureTokenPresent('smartcard', context, pkcs11LibPath);
     const { onPresenceRequested, onPresenceCleared } = this.deps.makePresenceNotifier(
       sessionId,
       'Touch your YubiKey / smartcard to confirm'
@@ -876,12 +1088,8 @@ export class SmartcardCoordinator {
 
     try {
       const session = await this.deps.sessionStore.getSession();
-      if (session?.tabs) {
-        for (const tab of session.tabs) {
-          if (paneTreeHasAuthType(tab.paneTree, 'fido2')) hasFido2 = true;
-          if (paneTreeHasAuthType(tab.paneTree, 'smartcard')) hasSmartcard = true;
-        }
-      }
+      if (sessionUsesAuthType(session, 'fido2')) hasFido2 = true;
+      if (sessionUsesAuthType(session, 'smartcard')) hasSmartcard = true;
     } catch {
       // Ignore session read errors on startup
     }
@@ -949,8 +1157,18 @@ export class SmartcardCoordinator {
           };
 
           try {
-            await this.prefetchSmartcardCertificates(pathsNeedingUnlock);
+            // A PKCS#11 module can load (and ssh-add can ask for a PIN) with no card in the reader: only
+            // prompt for modules that report a token. Unknown (undefined) keeps the old behavior.
+            const loadable: string[] = [];
             for (const libPath of pathsNeedingUnlock) {
+              if ((await isSmartcardTokenPresent(libPath)) === false) {
+                smartcardLog.info(`Startup unlock: no card present for ${libPath}; skipping`);
+              } else {
+                loadable.push(libPath);
+              }
+            }
+            await this.prefetchSmartcardCertificates(loadable);
+            for (const libPath of loadable) {
               try {
                 await this.getOrLoadGlobalSmartcardAgent(libPath, startupPinPrompt);
                 this.sendSmartcardStartupUnlockStatus({ kind: 'smartcard', status: 'unlocked', libPath });
@@ -977,6 +1195,10 @@ export class SmartcardCoordinator {
       // PIN+touch per signature (verify-required) can only be asked for one once it is in the agent, so
       // loading it after the PIV card keeps those prompts out of the way of the PIV load.
       if (hasFido2 && !this.globalCards.has(FIDO2_KEY) && !this.globalSmartcardAgentLoads.has(FIDO2_KEY)) {
+        if ((await isFido2DeviceConnected()) === false) {
+          fido2Log.info('Startup unlock: no security key connected; skipping');
+          return;
+        }
         try {
           fido2Log.info('Startup unlock: loading FIDO2 resident keys into global agent...');
           await this.getOrLoadGlobalFido2Agent('startup', 'Startup: Global Agent Cache', 'direct');

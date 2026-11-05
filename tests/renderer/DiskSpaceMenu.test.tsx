@@ -28,6 +28,10 @@ describe('DiskSpaceMenu', () => {
     await screen.findByText('25.0 GB free');
 
     fireEvent.click(screen.getByRole('button', { name: 'Drives and volumes' }));
+    const menu = await screen.findByRole('menu');
+    expect(menu).toBeInTheDocument();
+    expect(menu).toHaveClass('left-0');
+    expect(menu).not.toHaveClass('right-0');
     expect(await screen.findByText('D:')).toBeInTheDocument();
     expect(screen.getByText('900.0 GB free of 1000.0 GB')).toBeInTheDocument();
 

@@ -1,6 +1,14 @@
 import type { AiHubApi } from './aiHub';
 import type { NativeHermesApi } from './nativeHermes';
 import type { UpdateState } from './update';
+import type {
+  SshCaConfig,
+  SshCaDetectRequest,
+  SshCaDetectResult,
+  SshCaStatus,
+  SshCaVaultDetectRequest,
+  SshCaVaultDetectResult,
+} from './sshCa';
 import type { LogLevel } from './log';
 import type { PerfK8sResult, PerfK8sTarget, PerfSshResult } from './perf';
 import type {
@@ -25,6 +33,7 @@ import type {
 import type {
   FileEntry,
   ObjectMetadata,
+  WinAttributes,
   TransferProgress,
   SFTPConfig,
   S3Config,
@@ -34,11 +43,19 @@ import type {
   SpaceInfo,
   VolumeInfo,
 } from './storage';
-import type { AwsSsoAccount, AwsSsoAccountRole, AwsSsoDevicePrompt, AwsSsoLoginResult } from './aws';
+import type {
+  AwsSsoAccount,
+  AwsSsoAccountRole,
+  AwsSsoDevicePrompt,
+  AwsSsoLoginResult,
+  AwsSsoNetworkOptions,
+} from './aws';
 import type { SessionData } from './session';
 import type { ClipboardHistoryEntry } from './clipboard';
 import type { Snippet } from './snippets';
 import type { AppSettings } from './settings';
+import type { PolicyInfo } from './policy';
+import type { CertificatePreviewResult } from './certificate';
 import type {
   DotfileImportedFile,
   DotfilePool,
@@ -47,7 +64,7 @@ import type {
   DotfilesSyncStatusEvent,
 } from './dotfiles';
 import type { ProfileSyncStatus, ProfileSyncPullResult, SyncComparisonResult } from './sync';
-import type { TeamVaultPayload, TeamVaultRole, TeamVaultStatus } from './teamVault';
+import type { TeamVaultPayload, TeamVaultRole, TeamVaultStatus, TeamVaultSyncPreview } from './teamVault';
 import type { DirectoryDiffEntry, DirectoryDiffResult, DirectorySyncApplyResult, DirectorySyncProfile } from './dirsync';
 import type {
   ConfigureGitSigningRequest,
@@ -84,6 +101,10 @@ import type {
   K8sDebugTarget,
   K8sLoginOptions,
   K8sLoginResult,
+  K8sOpenShiftProbeResult,
+  K8sProfile,
+  K8sWebLoginOptions,
+  K8sWebLoginResult,
 } from './kubernetes';
 
 export const IPC_CHANNELS = {
@@ -93,9 +114,12 @@ export const IPC_CHANNELS = {
   TERMINAL_RESIZE: 'terminal:resize',
   TERMINAL_KILL: 'terminal:kill',
   TERMINAL_RECONNECT: 'terminal:reconnect',
+  TERMINAL_ATTACH: 'terminal:attach',
   TERMINAL_DATA: 'terminal:data',
   TERMINAL_EXIT: 'terminal:exit',
   TERMINAL_RECONNECTING: 'terminal:reconnecting',
+  TERMINAL_GET_CWD: 'terminal:getCwd',
+  TERMINAL_HAS_SSH_CLIENT: 'terminal:hasSshClient',
 
   // Smartcard
   SMARTCARD_DETECT: 'smartcard:detect',
@@ -109,6 +133,9 @@ export const IPC_CHANNELS = {
   SMARTCARD_STARTUP_UNLOCK_STATUS: 'smartcard:startup-unlock-status',
   ASKPASS_PROMPT: 'askpass:prompt',
   ASKPASS_SUBMIT_PIN: 'askpass:submit-pin',
+  INSERT_TOKEN_PROMPT: 'insert-token:prompt',
+  INSERT_TOKEN_DISMISS: 'insert-token:dismiss',
+  INSERT_TOKEN_CANCEL: 'insert-token:cancel',
   PRESENCE_PROMPT: 'presence:prompt',
   PRESENCE_CLEAR: 'presence:clear',
   FIDO2_GENERATE_KEY: 'fido2:generate-key',
@@ -124,10 +151,16 @@ export const IPC_CHANNELS = {
   STORAGE_DISCONNECT: 'storage:disconnect',
   STORAGE_LIST: 'storage:list',
   STORAGE_STAT: 'storage:stat',
+  STORAGE_LOOKUP: 'storage:lookup',
   STORAGE_CREATE_FOLDER: 'storage:create-folder',
+  STORAGE_CREATE_FILE: 'storage:create-file',
+  ARCHIVE_COMPRESS: 'archive:compress',
+  ARCHIVE_EXTRACT: 'archive:extract',
   STORAGE_DELETE: 'storage:delete',
   STORAGE_RENAME: 'storage:rename',
   STORAGE_CHMOD: 'storage:chmod',
+  STORAGE_GET_WIN_ATTRIBUTES: 'storage:get-win-attributes',
+  STORAGE_SET_WIN_ATTRIBUTES: 'storage:set-win-attributes',
   STORAGE_SET_METADATA: 'storage:set-metadata',
   STORAGE_GET_TAGS: 'storage:get-tags',
   STORAGE_SET_TAGS: 'storage:set-tags',
@@ -176,6 +209,11 @@ export const IPC_CHANNELS = {
   // Session & Tabs
   SESSION_GET: 'session:get',
   SESSION_SAVE: 'session:save',
+  WINDOW_NEW: 'window:new',
+  WINDOW_MOVE_TAB: 'window:move-tab',
+  WINDOW_TAKE_HANDOFF: 'window:take-handoff',
+  WINDOW_LIST: 'window:list',
+  WINDOW_ADOPT_TAB: 'window:adopt-tab',
   CLIPBOARD_HISTORY_LIST: 'clipboardHistory:list',
   CLIPBOARD_HISTORY_ADD: 'clipboardHistory:add',
   CLIPBOARD_HISTORY_DELETE: 'clipboardHistory:delete',
@@ -187,6 +225,11 @@ export const IPC_CHANNELS = {
   // Settings
   SETTINGS_GET: 'settings:get',
   SETTINGS_SAVE: 'settings:save',
+  // Machine policy (which settings an administrator locks); read-only for the renderer.
+  POLICY_GET: 'policy:get',
+  // Atomic read-modify-write for one team's entry in connectionManagerVisibleTeamVaults — see
+  // SettingsStore.setTeamVaultTabVisible's doc comment for why this isn't just settingsSave().
+  SETTINGS_SET_TEAM_VAULT_TAB_VISIBLE: 'settings:set-team-vault-tab-visible',
 
   // Remote profile sync ("Remote Profile Sync" — distinct from the
   // dotfiles:sync-* channels above, which deploy a dotfile pool to a remote
@@ -207,6 +250,8 @@ export const IPC_CHANNELS = {
   // Team Vault (docs/team-vault-plan.md) — separate trust model and feature from the password-
   // based Remote Profile Sync above; see TeamVaultService for the local-only Fas 2 scope.
   TEAM_VAULT_GET_STATUS: 'team-vault:get-status',
+  // Merged statuses+configs across every known vault — drives a multi-team list/switcher.
+  TEAM_VAULT_LIST: 'team-vault:list',
   TEAM_VAULT_ENROLL_RECIPIENT: 'team-vault:enroll-recipient',
   TEAM_VAULT_CREATE: 'team-vault:create',
   TEAM_VAULT_ADD_MEMBER: 'team-vault:add-member',
@@ -217,22 +262,37 @@ export const IPC_CHANNELS = {
   TEAM_VAULT_UNLOCK_WITH_RECOVERY_TEXT: 'team-vault:unlock-with-recovery-text',
   TEAM_VAULT_LOCK: 'team-vault:lock',
   TEAM_VAULT_DELETE: 'team-vault:delete',
+  // Removes a LOCKED vault's local file/identity/config from this device only — see
+  // teamVaultHandlers.ts's doc comment for how this differs from TEAM_VAULT_DELETE.
+  TEAM_VAULT_FORGET: 'team-vault:forget',
   TEAM_VAULT_SET_TARGET: 'team-vault:set-target',
   TEAM_VAULT_PUSH: 'team-vault:push',
   TEAM_VAULT_PULL: 'team-vault:pull',
   TEAM_VAULT_HAS_REMOTE_VAULT: 'team-vault:has-remote-vault',
+  TEAM_VAULT_GET_SYNC_PREVIEW: 'team-vault:get-sync-preview',
+  TEAM_VAULT_TEST_TARGET: 'team-vault:test-target',
   TEAM_VAULT_GET_PAYLOAD: 'team-vault:get-payload',
   TEAM_VAULT_SAVE_SSH_PROFILE: 'team-vault:save-ssh-profile',
   TEAM_VAULT_DELETE_SSH_PROFILE: 'team-vault:delete-ssh-profile',
+  TEAM_VAULT_SAVE_K8S_PROFILE: 'team-vault:save-k8s-profile',
+  TEAM_VAULT_DELETE_K8S_PROFILE: 'team-vault:delete-k8s-profile',
   TEAM_VAULT_SAVE_S3_PROFILE: 'team-vault:save-s3-profile',
   TEAM_VAULT_DELETE_S3_PROFILE: 'team-vault:delete-s3-profile',
   TEAM_VAULT_SAVE_FOLDER: 'team-vault:save-folder',
   TEAM_VAULT_RENAME_FOLDER: 'team-vault:rename-folder',
   TEAM_VAULT_DELETE_FOLDER: 'team-vault:delete-folder',
   TEAM_VAULT_SET_FOLDER_ICON: 'team-vault:set-folder-icon',
+  // Age-encrypted invite blob (join-flow simplification): admin side builds one for a specific
+  // member, new-member side decodes it to recover the S3 target without typing it by hand.
+  TEAM_VAULT_BUILD_INVITE: 'team-vault:build-invite',
+  TEAM_VAULT_DECODE_INVITE: 'team-vault:decode-invite',
+  TEAM_VAULT_SET_DESCRIPTION: 'team-vault:set-description',
   // Push-only (main -> renderer), fired by the background auto-poll (IpcBridge.runTeamVaultAutoPoll).
   TEAM_VAULT_AUTO_PULLED: 'team-vault:auto-pulled',
   TEAM_VAULT_REMOTE_CHANGED: 'team-vault:remote-changed',
+  // Push-only (main -> renderer): fired right before/after each background push/pull, so the UI
+  // can show a discreet per-team "syncing now" indicator (not just the after-the-fact result).
+  TEAM_VAULT_SYNC_STATUS: 'team-vault:sync-status',
 
   // Connection Testing
   CONNECTION_TEST_SSH: 'connection:test-ssh',
@@ -249,8 +309,10 @@ export const IPC_CHANNELS = {
   AWS_SSO_LOGIN: 'aws-sso:login',
   AWS_SSO_LOGIN_CANCEL: 'aws-sso:login-cancel',
   AWS_SSO_PROMPT: 'aws-sso:prompt',
+  AWS_SSO_PROMPT_DONE: 'aws-sso:prompt-done',
   AWS_SSO_LIST_ACCOUNTS: 'aws-sso:list-accounts',
   AWS_SSO_LIST_ROLES: 'aws-sso:list-roles',
+  AWS_SSO_RELOGIN_PROVIDER: 'aws-sso:relogin-provider',
 
   // Git & Git Provider Integration
   GIT_FETCH_PUBLIC_KEYS: 'git:fetch-public-keys',
@@ -266,6 +328,15 @@ export const IPC_CHANNELS = {
   // SSH Agent
   SSH_AGENT_STATUS: 'ssh:agent-status',
 
+  // SSH CA (Step-CA, OIDC Certificate Authority)
+  SSH_CA_GET_STATUS: 'ssh-ca:get-status',
+  SSH_CA_LOGIN: 'ssh-ca:login',
+  SSH_CA_LOGOUT: 'ssh-ca:logout',
+  SSH_CA_RENEW: 'ssh-ca:renew',
+  SSH_CA_DETECT: 'ssh-ca:detect',
+  SSH_CA_DETECT_VAULT: 'ssh-ca:detect-vault',
+  SSH_CA_STATUS_CHANGED: 'ssh-ca:status-changed',
+
   // Dotfiles pools (opt-in, see AppSettings.dotfilesPoolEnabled)
   DOTFILES_POOLS_GET: 'dotfiles:pools-get',
   DOTFILES_POOLS_SAVE: 'dotfiles:pools-save',
@@ -280,6 +351,7 @@ export const IPC_CHANNELS = {
 
   // File Editor
   FILE_READ: 'file:read',
+  CERTIFICATE_PREVIEW: 'certificate:preview',
   FILE_SAVE: 'file:save',
   FILE_OPEN_EXTERNAL: 'file:open-external',
   FILE_CLOSE_EXTERNAL: 'file:close-external',
@@ -299,6 +371,8 @@ export const IPC_CHANNELS = {
   SEARCH_DONE: 'search:done',
 
   // General
+  DRAG_OUT_START: 'drag-out:start',
+  DRAG_OUT_PREPARE: 'drag-out:prepare',
   APP_OPEN_EXTERNAL: 'app:open-external',
   APP_GET_VERSION: 'app:get-version',
   UPDATE_GET_STATE: 'update:get-state',
@@ -314,6 +388,7 @@ export const IPC_CHANNELS = {
   APP_GET_HOSTNAME: 'app:get-hostname',
   APP_GET_SECURITY_STATUS: 'app:get-security-status',
   APP_DETECT_LOCAL_SHELLS: 'app:detect-local-shells',
+  APP_OPEN_ELEVATED_SHELL: 'app:open-elevated-shell',
   APP_CHECK_X11_SERVER: 'app:check-x11-server',
   X11_GET_STATUS: 'x11:get-status',
   X11_START_SERVER: 'x11:start-server',
@@ -337,7 +412,13 @@ export const IPC_CHANNELS = {
   K8S_LIST_PODS: 'k8s:list-pods',
   K8S_RELOAD: 'k8s:reload',
   K8S_LOGIN: 'k8s:login',
+  K8S_OPENSHIFT_PROBE: 'k8s:openshift-probe',
+  K8S_OPENSHIFT_WEB_LOGIN: 'k8s:openshift-web-login',
+  K8S_OPENSHIFT_WEB_LOGIN_CANCEL: 'k8s:openshift-web-login-cancel',
   K8S_CONFIG_CHANGED: 'k8s:config-changed',
+  K8S_PROFILES_LIST: 'k8s:profiles-list',
+  K8S_PROFILES_SAVE: 'k8s:profiles-save',
+  K8S_PROFILES_DELETE: 'k8s:profiles-delete',
 
   // Kubernetes / OpenShift interactive exec terminal
   K8S_TERMINAL_CREATE: 'k8s-terminal:create',
@@ -358,10 +439,12 @@ export const IPC_CHANNELS = {
 
   // Kubernetes / OpenShift pod describe & details
   K8S_POD_DESCRIBE: 'k8s:pod-describe',
+  K8S_POD_DELETE: 'k8s:pod-delete',
 
   // Kubernetes / OpenShift port forward
   K8S_PORT_FORWARD_START: 'k8s-port-forward:start',
   K8S_PORT_FORWARD_STOP: 'k8s-port-forward:stop',
+  K8S_PORT_FORWARD_RECONNECT: 'k8s-port-forward:reconnect',
   K8S_PORT_FORWARD_LIST: 'k8s-port-forward:list',
   K8S_PORT_FORWARD_EVENT: 'k8s-port-forward:event',
 
@@ -415,6 +498,13 @@ export interface AskpassPromptEvent {
   maxAttempts?: number;
 }
 
+/** Asks the user to plug in the smartcard / security key an operation needs; dismissed once it is detected. */
+export interface InsertTokenPromptEvent {
+  id: string;
+  kind: 'smartcard' | 'fido2';
+  context?: string;
+}
+
 export interface SmartcardStartupUnlockStatusEvent {
   kind: 'smartcard' | 'fido2';
   status: 'unlocked' | 'error';
@@ -453,10 +543,35 @@ export interface TransferConflictPromptEvent {
  * process now asks the renderer to show its own dialog and awaits the
  * result over this same request/response IPC pattern as transfer conflicts.
  */
+/** A live terminal session that moves along with a tab (keyed by the pane that shows it). */
+export interface TabHandoffSession {
+  paneId: string;
+  sessionId: string;
+  kind: 'ssh' | 'k8s';
+}
+
+/** A tab moving between windows. `tab` is the renderer's tab, already stripped of secrets. */
+export interface TabHandoff {
+  tab: Record<string, unknown>;
+  sessions: TabHandoffSession[];
+}
+
+/** Where a moved tab goes: a new window, or the window with this id. */
+export type MoveTabTarget = 'new' | number;
+
+export interface WindowInfo {
+  id: number;
+  label: string;
+  /** True for the window that asked. */
+  current: boolean;
+}
+
 export interface QuitConfirmPromptEvent {
   id: string;
-  kind: 'active-transfers' | 'confirm-before-quit';
+  kind: 'active-transfers' | 'confirm-before-quit' | 'close-window';
   activeTransferCount?: number;
+  /** For 'close-window': how many live sessions closing the window will end. */
+  sessionCount?: number;
 }
 
 export interface DirSyncComputeDiffOptions {
@@ -489,6 +604,8 @@ export interface StorageConnectConfig {
   sftpConfig?: SFTPConfig;
   s3Config?: S3Config;
   k8sConfig?: K8sStorageConfig;
+  /** SSH terminal this provider serves; main lets its SFTP channel share the terminal's SSH connection. */
+  terminalSessionId?: string;
 }
 
 export interface MultiSSHApi extends AiHubApi {
@@ -504,6 +621,9 @@ export interface MultiSSHApi extends AiHubApi {
   terminalResize(sessionId: string, cols: number, rows: number): Promise<void>;
   terminalKill(sessionId: string): Promise<void>;
   terminalReconnect(sessionId: string): Promise<boolean>;
+  terminalGetCwd(sessionId: string): Promise<string | null>;
+  /** Whether the local shell of a terminal currently runs an interactive ssh client (Linux only). */
+  terminalHasSshClient(sessionId: string): Promise<boolean>;
   onTerminalData(callback: (sessionId: string, data: string) => void): () => void;
   onTerminalExit(callback: (sessionId: string, event: SSHPtyExitEvent) => void): () => void;
   onTerminalReconnecting?(callback: (sessionId: string, event: { attempt: number; maxAttempts: number }) => void): () => void;
@@ -525,6 +645,11 @@ export interface MultiSSHApi extends AiHubApi {
   onSmartcardStartupUnlockStatus(callback: (event: SmartcardStartupUnlockStatusEvent) => void): () => void;
   onAskpassPrompt(callback: (event: AskpassPromptEvent) => void): () => void;
   submitAskpassPin(id: string, pin: string): Promise<void>;
+  /** Fired when an operation needs a smartcard / security key that is not plugged in. */
+  onInsertTokenPrompt(callback: (event: InsertTokenPromptEvent) => void): () => void;
+  /** Fired when the token has been detected (the operation continues with its PIN prompt) or the wait ended. */
+  onInsertTokenDismiss(callback: (event: { id: string }) => void): () => void;
+  cancelInsertToken(id: string): Promise<void>;
   /** Fired when a smartcard/FIDO2 operation is blocked waiting for a physical touch. Informational only. */
   onPresencePrompt(callback: (event: PresencePromptEvent) => void): () => void;
   /** Fired once the operation that triggered a matching `onPresencePrompt` id has finished. */
@@ -553,10 +678,20 @@ export interface MultiSSHApi extends AiHubApi {
   disconnectStorage(providerId: string): Promise<void>;
   storageList(providerId: string, remotePath: string, force?: boolean): Promise<FileEntry[]>;
   storageStat(providerId: string, remotePath: string): Promise<FileEntry>;
+  /** Like `storageStat`, but a path that does not exist resolves to `null` instead of rejecting. */
+  storageLookup(providerId: string, remotePath: string): Promise<FileEntry | null>;
   storageCreateFolder(providerId: string, remotePath: string): Promise<void>;
+  /** Creates an empty file; rejects when something already exists at `remotePath`. */
+  storageCreateFile(providerId: string, remotePath: string): Promise<void>;
+  /** Packs children of `parentDir` into a new archive beside them (local and SFTP only); resolves to the archive's file name. */
+  archiveCompress(providerId: string, parentDir: string, names: string[], format: 'tar.gz' | 'zip'): Promise<string>;
+  /** Unpacks an archive into a new folder named after it, beside it; resolves to the folder's name. */
+  archiveExtract(providerId: string, archivePath: string): Promise<string>;
   storageDelete(providerId: string, remotePath: string, isDirectory: boolean): Promise<void>;
   storageRename(providerId: string, oldPath: string, newPath: string): Promise<void>;
   storageChmod(providerId: string, remotePath: string, mode: number | string): Promise<void>;
+  storageGetWinAttributes(providerId: string, remotePath: string): Promise<WinAttributes>;
+  storageSetWinAttributes(providerId: string, remotePath: string, changes: Partial<WinAttributes>, recursive?: boolean): Promise<void>;
   storageSetMetadata(providerId: string, remotePath: string, metadata: ObjectMetadata): Promise<void>;
   storageGetTags(providerId: string, remotePath: string): Promise<S3Tag[]>;
   storageSetTags(providerId: string, remotePath: string, tags: S3Tag[]): Promise<void>;
@@ -584,7 +719,7 @@ export interface MultiSSHApi extends AiHubApi {
     verifyIntegrity?: boolean;
     verifyChecksum?: boolean | 'sha256' | 'md5';
     expectedChecksum?: string;
-  }): Promise<{ jobId: string | null; skipped?: boolean; resolvedPolicy?: TransferConflictResolution; appliedToAll?: boolean }>;
+  }): Promise<{ jobId: string | null; skipped?: boolean; resolvedPolicy?: TransferConflictResolution; appliedToAll?: boolean; targetPath?: string }>;
   transferPause(jobId: string): Promise<void>;
   transferResume(jobId: string): Promise<void>;
   transferCancel(jobId: string): Promise<void>;
@@ -609,6 +744,16 @@ export interface MultiSSHApi extends AiHubApi {
   // Session
   sessionGet(): Promise<SessionData | null>;
   sessionSave(data: SessionData): Promise<void>;
+  /** Opens another app window (e.g. for a second monitor). */
+  windowNew(): Promise<void>;
+  /** Hands a tab (and its live terminal sessions) to a new or another window. */
+  windowMoveTab(handoff: TabHandoff, target: MoveTabTarget): Promise<void>;
+  /** The tab this window was opened for, if any (fetched once at start-up). */
+  windowTakeHandoff(): Promise<TabHandoff | null>;
+  windowList(): Promise<WindowInfo[]>;
+  onWindowAdoptTab(callback: (handoff: TabHandoff) => void): () => void;
+  /** Claims a live terminal session for this window and returns the output it printed so far. */
+  terminalAttach(sessionId: string, kind: 'ssh' | 'k8s'): Promise<{ scrollback: string }>;
   clipboardHistoryList(hostKey?: string): Promise<ClipboardHistoryEntry[]>;
   clipboardHistoryAdd(text: string, hostKey: string, hostLabel: string): Promise<void>;
   clipboardHistoryDelete(id: string): Promise<void>;
@@ -620,6 +765,11 @@ export interface MultiSSHApi extends AiHubApi {
   // Settings
   settingsGet(): Promise<AppSettings>;
   settingsSave(settings: Partial<AppSettings>): Promise<AppSettings>;
+  policyGet(): Promise<PolicyInfo>;
+  /** Atomically flips one team's `connectionManagerVisibleTeamVaults` entry — see
+   * `SettingsStore.setTeamVaultTabVisible`'s doc comment for why this exists instead of a plain
+   * `settingsGet()` -> mutate -> `settingsSave()` round trip. */
+  settingsSetTeamVaultTabVisible(vaultId: string, visible: boolean): Promise<AppSettings>;
 
   // Remote profile sync
   profileSyncSetup(payload: { target: StorageConnectConfig; remoteBasePath?: string }): Promise<void>;
@@ -643,40 +793,86 @@ export interface MultiSSHApi extends AiHubApi {
   profileSyncWipe(): Promise<ProfileSyncStatus & { remoteWipeErrors: string[] }>;
   onProfileSyncStatus?(callback: (status: ProfileSyncStatus) => void): () => void;
 
-  // Team Vault (docs/team-vault-plan.md Fas 2 — local-only, no S3 sync yet)
-  teamVaultGetStatus(): Promise<TeamVaultStatus>;
-  teamVaultEnrollRecipient(): Promise<{ recipient: string; identityFilePath: string; suggestedLabel?: string }>;
+  // Team Vault (docs/team-vault-plan.md) — multi-team: every method below takes a leading
+  // `vaultId`, except `teamVaultCreate` (mints one and returns it) and `teamVaultEnrollRecipient`
+  // (generating a recipient to create/join a vault has no vaultId to pass yet — see
+  // TeamVaultService.enrollOwnPivRecipient's doc comment).
+  teamVaultGetStatus(vaultId: string): Promise<TeamVaultStatus>;
+  /** Merged statuses+configs across every vault this device knows about — the one call a
+   * team-list/switcher UI needs at mount. */
+  teamVaultList(): Promise<TeamVaultStatus[]>;
+  teamVaultEnrollRecipient(
+    vaultId?: string
+  ): Promise<{ recipient: string; identityFilePath: string; suggestedLabel?: string }>;
   teamVaultCreate(
     selfRecipientId: string,
     selfAgeRecipient: string,
-    vaultName?: string
-  ): Promise<{ recoveryIdentity: string }>;
-  teamVaultAddMember(recipientId: string, ageRecipient: string, role: TeamVaultRole): Promise<void>;
-  teamVaultRemoveMember(recipientId: string): Promise<{ remainingAdmins: number }>;
-  teamVaultSetRole(recipientId: string, role: TeamVaultRole): Promise<void>;
-  teamVaultRename(vaultName: string): Promise<void>;
-  teamVaultUnlock(recipientId: string, identityFilePath: string): Promise<void>;
-  teamVaultUnlockWithRecoveryText(identityText: string): Promise<void>;
-  teamVaultLock(): Promise<void>;
-  teamVaultDelete(): Promise<void>;
-  teamVaultSetTarget(target: StorageConnectConfig, remoteBasePath?: string): Promise<void>;
-  teamVaultPush(): Promise<void>;
-  teamVaultPull(options?: { force?: boolean }): Promise<void>;
-  teamVaultHasRemoteVault(): Promise<boolean>;
+    vaultName?: string,
+    selfIdentityFilePath?: string
+  ): Promise<{ vaultId: string; recoveryIdentity: string }>;
+  teamVaultAddMember(vaultId: string, recipientId: string, ageRecipient: string, role: TeamVaultRole): Promise<void>;
+  teamVaultRemoveMember(vaultId: string, recipientId: string): Promise<{ remainingAdmins: number }>;
+  teamVaultSetRole(vaultId: string, recipientId: string, role: TeamVaultRole): Promise<void>;
+  teamVaultRename(vaultId: string, vaultName: string): Promise<void>;
+  teamVaultUnlock(vaultId: string, recipientId: string, identityFilePath: string): Promise<void>;
+  teamVaultUnlockWithRecoveryText(vaultId: string, identityText: string): Promise<void>;
+  teamVaultLock(vaultId: string): Promise<void>;
+  teamVaultDelete(vaultId: string): Promise<void>;
+  /** Removes a LOCKED vault's local file/identity/config from this device only — distinct from
+   * `teamVaultDelete`, an authenticated whole-team-affecting action; see teamVaultHandlers.ts. */
+  teamVaultForget(vaultId: string): Promise<void>;
+  teamVaultSetTarget(vaultId: string, target: StorageConnectConfig, remoteBasePath?: string): Promise<void>;
+  // Both return the post-push/pull TeamVaultStatus (same as teamVaultGetStatus would right
+  // after) — used by TeamVaultListPanel's join flow to learn the real vaultId a pending-sentinel
+  // pull resolves to, without a second round trip.
+  teamVaultPush(vaultId: string): Promise<TeamVaultStatus>;
+  teamVaultPull(vaultId: string, options?: { force?: boolean }): Promise<TeamVaultStatus>;
+  teamVaultHasRemoteVault(vaultId: string): Promise<boolean>;
+  /** Best-effort: resolves to `{ hasUnpushedLocalChanges: false, remoteChanged: false }` (shown
+   * as "Up to date") if the preview check itself fails, e.g. no target configured yet or the
+   * vault is locked — see teamVaultHandlers.ts. */
+  teamVaultGetSyncPreview(vaultId: string): Promise<TeamVaultSyncPreview>;
+  /** Like `testS3Connection`, but for a Team Vault's own sync target: if `config.secretAccessKey`
+   * is blank, substitutes the vault's already-saved secret before testing — the target editor
+   * never round-trips the real secret to the renderer (see `TeamVaultStatus.targetConfig`'s doc
+   * comment), so a blank field here means "use the saved one", not "no secret". */
+  teamVaultTestTarget(vaultId: string, config: S3Config): Promise<{ success: boolean; error?: string }>;
   /** Null when the vault doesn't exist or isn't unlocked — best-effort, see teamVaultHandlers.ts. */
-  teamVaultGetPayload(): Promise<TeamVaultPayload | null>;
-  teamVaultSaveSSHProfile(profile: SSHConnectionConfig): Promise<void>;
-  teamVaultDeleteSSHProfile(id: string): Promise<void>;
-  teamVaultSaveS3Profile(profile: S3Config): Promise<void>;
-  teamVaultDeleteS3Profile(id: string): Promise<void>;
-  teamVaultSaveFolder(folderPath: string): Promise<void>;
-  teamVaultRenameFolder(oldPath: string, newPath: string): Promise<void>;
-  teamVaultDeleteFolder(folderPath: string, deleteProfiles?: boolean): Promise<void>;
-  teamVaultSetFolderIcon(folderPath: string, icon: string | undefined): Promise<void>;
+  teamVaultGetPayload(vaultId: string): Promise<TeamVaultPayload | null>;
+  teamVaultSaveSSHProfile(vaultId: string, profile: SSHConnectionConfig): Promise<void>;
+  teamVaultDeleteSSHProfile(vaultId: string, id: string): Promise<void>;
+  teamVaultSaveK8sProfile(vaultId: string, profile: K8sProfile): Promise<void>;
+  teamVaultDeleteK8sProfile(vaultId: string, id: string): Promise<void>;
+  teamVaultSaveS3Profile(vaultId: string, profile: S3Config): Promise<void>;
+  teamVaultDeleteS3Profile(vaultId: string, id: string): Promise<void>;
+  teamVaultSaveFolder(vaultId: string, folderPath: string): Promise<void>;
+  teamVaultRenameFolder(vaultId: string, oldPath: string, newPath: string): Promise<void>;
+  teamVaultDeleteFolder(vaultId: string, folderPath: string, deleteProfiles?: boolean): Promise<void>;
+  teamVaultSetFolderIcon(vaultId: string, folderPath: string, icon: string | undefined): Promise<void>;
+  /** Admin-only (see `TeamVaultService.buildInvite`'s doc comment): builds an age-encrypted
+   * invite blob for `recipientId`, already a member (added via `teamVaultAddMember`), containing
+   * the vault's configured S3 target — so the new member never has to type it in by hand. Returns
+   * the blob as a single string, ready to copy/paste out of band (chat, email, ...). */
+  teamVaultBuildInvite(vaultId: string, recipientId: string): Promise<string>;
+  /** New-member side of `teamVaultBuildInvite`: decrypts a pasted invite blob with the identity at
+   * `identityFilePath` (prompts for PIN/touch like any other PIV operation) and returns the S3
+   * target it carries. Throws a user-facing error on a malformed/truncated paste or a mismatched
+   * identity. */
+  teamVaultDecodeInvite(
+    inviteText: string,
+    identityFilePath: string
+  ): Promise<{ vaultId: string; target: StorageConnectConfig; remoteBasePath?: string }>;
+  /** Admin-only: sets (or, with an empty string, clears) the vault's free-text description shown
+   * in the Connection Manager's per-team tab. */
+  teamVaultSetDescription(vaultId: string, description: string): Promise<void>;
   /** Fired by the main-process background poll (IpcBridge.runTeamVaultAutoPoll) when it detected
-   * and auto-applied a remote change, or detected one it couldn't safely auto-apply. */
-  onTeamVaultAutoPulled?(callback: () => void): () => void;
-  onTeamVaultRemoteChanged?(callback: () => void): () => void;
+   * and auto-applied a remote change, or detected one it couldn't safely auto-apply —
+   * `vaultId` tells the renderer which team's UI to refresh. */
+  onTeamVaultAutoPulled?(callback: (payload: { vaultId: string }) => void): () => void;
+  onTeamVaultRemoteChanged?(callback: (payload: { vaultId: string }) => void): () => void;
+  /** Fired right before (`syncing: true`) and after (`syncing: false`) each background
+   * push/pull for `vaultId` — drives the per-team-tab sync dot (§C/§D of the join-flow plan). */
+  onTeamVaultSyncStatus?(callback: (payload: { vaultId: string; syncing: boolean }) => void): () => void;
 
   // Connection Testing
   testSSHConnection(config: SSHConnectionConfig): Promise<{ success: boolean; error?: string }>;
@@ -690,11 +886,24 @@ export interface MultiSSHApi extends AiHubApi {
   testS3Connection(config: S3Config): Promise<{ success: boolean; error?: string }>;
 
   // AWS SSO login (device-authorization flow)
-  awsSsoLogin(startUrl: string, region: string): Promise<AwsSsoLoginResult>;
+  awsSsoLogin(startUrl: string, region: string, network?: AwsSsoNetworkOptions): Promise<AwsSsoLoginResult>;
   awsSsoCancelLogin(id: string): Promise<void>;
   onAwsSsoPrompt(callback: (event: AwsSsoPromptEvent) => void): () => void;
-  awsSsoListAccounts(accessToken: string, region: string): Promise<AwsSsoAccount[]>;
-  awsSsoListRoles(accessToken: string, region: string, accountId: string): Promise<AwsSsoAccountRole[]>;
+  /** Fires with the prompt id once a login attempt has ended (approved, failed, expired or cancelled). */
+  onAwsSsoPromptDone(callback: (id: string) => void): () => void;
+  awsSsoListAccounts(
+    accessToken: string,
+    region: string,
+    network?: AwsSsoNetworkOptions
+  ): Promise<AwsSsoAccount[]>;
+  awsSsoListRoles(
+    accessToken: string,
+    region: string,
+    accountId: string,
+    network?: AwsSsoNetworkOptions
+  ): Promise<AwsSsoAccountRole[]>;
+  /** Signs an already-connected S3 provider in again with the SSO settings of its own profile. */
+  awsSsoReloginProvider(providerId: string): Promise<void>;
 
   // SSH Agent
   getSshAgentStatus(): Promise<SshAgentStatus>;
@@ -730,6 +939,8 @@ export interface MultiSSHApi extends AiHubApi {
 
   // File Editor
   fileRead(providerId: string, remotePath: string, maxBytes?: number): Promise<FileReadResult>;
+  /** Human-readable facts about the certificates in a file, parsed locally; never returns file text or key material. With `host`, also checks whether each certificate is valid for that name. */
+  certificatePreview(providerId: string, remotePath: string, host?: string): Promise<CertificatePreviewResult>;
   fileSave(providerId: string, remotePath: string, content: string): Promise<void>;
   fileOpenExternal(providerId: string, remotePath: string): Promise<{ sessionToken: string; localPath: string }>;
   fileCloseExternal(sessionToken: string): Promise<void>;
@@ -759,6 +970,12 @@ export interface MultiSSHApi extends AiHubApi {
   k8sListPods(contextName: string, namespace: string): Promise<K8sPodNode[]>;
   k8sReload(): Promise<void>;
   k8sLogin(options: K8sLoginOptions): Promise<K8sLoginResult>;
+  k8sOpenShiftProbe(server: string, insecureSkipTlsVerify?: boolean): Promise<K8sOpenShiftProbeResult>;
+  k8sOpenShiftWebLogin(options: K8sWebLoginOptions): Promise<K8sWebLoginResult>;
+  k8sOpenShiftWebLoginCancel(): Promise<void>;
+  k8sProfilesList(): Promise<K8sProfile[]>;
+  k8sProfilesSave(profile: K8sProfile): Promise<K8sProfile>;
+  k8sProfilesDelete(id: string): Promise<void>;
   onK8sConfigChanged(callback: (execAuthWarning?: string | null) => void): () => void;
   k8sTerminalCreate(target: K8sTerminalTarget, options?: { cols?: number; rows?: number }): Promise<{ sessionId: string }>;
   k8sTerminalWrite(sessionId: string, data: string): Promise<void>;
@@ -777,8 +994,10 @@ export interface MultiSSHApi extends AiHubApi {
   onK8sLogData(callback: (sessionId: string, data: string) => void): () => void;
   onK8sLogEnd(callback: (sessionId: string) => void): () => void;
   k8sDescribePod(contextName: string, namespace: string, podName: string): Promise<K8sPodDescription>;
+  k8sDeletePod(contextName: string, namespace: string, podName: string): Promise<void>;
   k8sStartPortForward(target: K8sPortForwardTarget): Promise<K8sActivePortForward>;
   k8sStopPortForward(id: string): Promise<boolean>;
+  k8sReconnectPortForward(id: string): Promise<boolean>;
   k8sListPortForwards(): Promise<K8sActivePortForward[]>;
   onK8sPortForwardEvent(callback: (activeForwards: K8sActivePortForward[]) => void): () => void;
   k8sAttachDebugContainer(target: K8sDebugTarget): Promise<{ containerName: string }>;
@@ -792,6 +1011,10 @@ export interface MultiSSHApi extends AiHubApi {
   sshTunnelCheckPort(port: number): Promise<boolean>;
 
   // Window / General
+  /** Starts a native OS drag of local files/folders (call from a `dragstart` handler after `preventDefault()`). Resolves false when no path was draggable. */
+  dragOutStart(paths: string[]): Promise<boolean>;
+  /** Downloads remote files/folders into a private temp dir and resolves to the local paths (same order), ready for `dragOutStart`. */
+  dragOutPrepare(providerId: string, paths: string[]): Promise<string[]>;
   openExternal(url: string): Promise<void>;
   getVersion(): Promise<string>;
   getUpdateState(): Promise<UpdateState>;
@@ -813,9 +1036,11 @@ export interface MultiSSHApi extends AiHubApi {
    * (safeStorage). When false — no keyring/libsecret backend available,
    * common on minimal Linux setups — they're stored in plaintext instead.
    */
-  getSecurityStatus(): Promise<{ credentialEncryptionAvailable: boolean }>;
+  getSecurityStatus(): Promise<{ credentialEncryptionAvailable: boolean; undecryptableSecretCount: number }>;
   /** Windows only: which optional local shells (PowerShell 7 / pwsh, WSL / wsl) and distributions are actually installed and available. */
   detectLocalShells(): Promise<{ pwsh: boolean; wsl: boolean; wslDistros: string[] }>;
+  /** Windows only: opens cmd / PowerShell / pwsh in a separate elevated window via UAC. `started` is false if UAC was declined. */
+  openElevatedShell(shellType: 'cmd' | 'powershell' | 'pwsh'): Promise<{ started: boolean }>;
   /** Windows/Linux: check whether an X11 server is actively listening on the target display. */
   checkX11Server(display?: string): Promise<{ running: boolean; display: string; platform?: string }>;
   /** Windows: Get current status of managed/detected X server. */
@@ -836,6 +1061,15 @@ export interface MultiSSHApi extends AiHubApi {
   dirSyncProfileList(): Promise<DirectorySyncProfile[]>;
   dirSyncProfileSave(profile: DirectorySyncProfile): Promise<DirectorySyncProfile>;
   dirSyncProfileDelete(id: string): Promise<void>;
+
+  // SSH CA
+  sshCaGetStatus(): Promise<SshCaStatus>;
+  sshCaLogin(config?: SshCaConfig): Promise<SshCaStatus>;
+  sshCaLogout(): Promise<void>;
+  sshCaRenew(): Promise<SshCaStatus>;
+  sshCaDetect(request: SshCaDetectRequest): Promise<SshCaDetectResult>;
+  sshCaDetectVault(request: SshCaVaultDetectRequest): Promise<SshCaVaultDetectResult>;
+  onSshCaStatusChanged(callback: (status: SshCaStatus) => void): () => void;
 }
 
 export interface FileReadResult {
@@ -843,12 +1077,20 @@ export interface FileReadResult {
   size: number;
   isBinary: boolean;
   truncated: boolean;
+  /** True when the target path is a directory rather than a file. */
+  isDirectory?: boolean;
   /** The content is not valid UTF-8, so saving it back would corrupt the file. */
   notUtf8?: boolean;
+  /** Base64-encoded file bytes, provided for binary media (images, PDFs). */
+  base64?: string;
+  /** Inferred or detected MIME type (e.g. image/png, application/pdf). */
+  mimeType?: string;
 }
 
 export interface ExternalFileStatusEvent {
   sessionToken: string;
+  /** The storage the file belongs to: the same path can exist on several servers. */
+  providerId: string;
   remotePath: string;
   status: 'uploaded' | 'error';
   error?: string;

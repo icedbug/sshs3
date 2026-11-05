@@ -1,0 +1,56 @@
+name: Downloads badge
+
+# Total download count for the README badge. shields.io's own /github/downloads/.../total only
+# sums the releases that still exist, so it drops when deploy.sh prunes old releases. Here the
+# total is DOWNLOADS_PRUNED_BASE (banked by deploy.sh before it deletes a release) plus the live
+# download_count of every remaining release. Published as a shields.io endpoint JSON on the
+# orphan `badges` branch.
+on:
+  schedule:
+    - cron: '17 3 * * *'   # daily
+  release:
+    types: [published]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: downloads-badge
+  cancel-in-progress: false
+
+jobs:
+  badge:
+    name: Update downloads badge
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Compute total
+        id: total
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRUNED_BASE: ${{ vars.DOWNLOADS_PRUNED_BASE }}
+        run: |
+          live="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq '.[] | .assets[].download_count' | awk '{ s += $1 } END { print s + 0 }')"
+          base="${PRUNED_BASE:-0}"
+          [[ "$base" =~ ^[0-9]+$ ]] || base=0
+          echo "live=${live} base=${base}"
+          echo "total=$((live + base))" >> "$GITHUB_OUTPUT"
+
+      - name: Publish to badges branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TOTAL: ${{ steps.total.outputs.total }}
+        run: |
+          git clone --quiet --branch badges --single-branch \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" badges 2>/dev/null || {
+            mkdir badges && git -C badges init --quiet -b badges
+            git -C badges remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          }
+          cd badges
+          printf '{"schemaVersion":1,"label":"downloads","message":"%s","color":"success"}\n' "$TOTAL" > downloads.json
+          git add downloads.json
+          if git diff --cached --quiet; then echo "No change"; exit 0; fi
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit --quiet -m "chore: downloads ${TOTAL}"
+          git push --quiet origin badges

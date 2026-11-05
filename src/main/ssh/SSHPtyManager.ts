@@ -57,16 +57,26 @@ function getSpawn(): typeof nodePty.spawn {
 }
 
 import type { AskpassPromptKind } from '../../shared/types/ipc';
-import { describeAskpassPrompt } from './askpassPrompt';
+import { describeAskpassPrompt, isHostKeyConfirmPrompt, savedAskpassAnswer } from './askpassPrompt';
+import { isHostKeyChangedOutput } from './hostKeyChanged';
+import { parseHostKeyPrompt } from '../storage/sftp/OpenSshSftpProcess';
+import type { HostKeyPromptInfo } from './HostKeyVerifier';
+import type { SFTPConfig } from '../../shared/types/storage';
 import { listAgentPublicKeys } from './PublicKeyDiscovery';
 import type { AskpassPromptRetryContext } from '../smartcard/AskpassServer';
 import { createLogger } from '../log';
+import { createMuxControlPath } from './muxControlPath';
 const sshLog = createLogger('ssh');
 export interface SSHPtyManagerEvents {
   data: (event: { sessionId: string; data: string }) => void;
   exit: (event: { sessionId: string; exitCode: number; signal?: number }) => void;
   reconnecting: (event: { sessionId: string; attempt: number; maxAttempts: number }) => void;
   reconnected: (event: { sessionId: string }) => void;
+  'hostkey-changed': (event: {
+    sessionId: string;
+    host: string;
+    port: number;
+  }) => void;
   presence: (event: { sessionId: string; prompt: string }) => void;
   askpass: (event: {
     sessionId: string;
@@ -103,6 +113,9 @@ export class InternalSSHPtySession implements SSHPtySession {
 
   private scrollbackChunks: string[] = [];
   private scrollbackLength: number = 0;
+  /** Output of the current ssh process only (unlike the scrollback, which spans reconnects). */
+  private recentOutput: string = '';
+  private static readonly RECENT_OUTPUT_CHARS = 8192;
   private static readonly MAX_SCROLLBACK_BYTES = 128 * 1024; // 128 KB
 
   constructor(params: {
@@ -150,8 +163,10 @@ export class InternalSSHPtySession implements SSHPtySession {
   public bindPty(newPty: IPty): void {
     this.pty = newPty;
     this.pid = newPty.pid;
+    this.recentOutput = '';
 
     newPty.onData((data: string) => {
+      this.recentOutput = (this.recentOutput + data).slice(-InternalSSHPtySession.RECENT_OUTPUT_CHARS);
       this.appendScrollback(data);
       for (const listener of this.dataListeners) {
         listener(data);
@@ -170,10 +185,29 @@ export class InternalSSHPtySession implements SSHPtySession {
       clearTimeout(this.reconnectStableTimer);
       this.reconnectStableTimer = undefined;
     }
+    // A changed host key never fixes itself, so retrying would only repeat the warning.
+    const changedKey = !this.disposed && event.exitCode !== 0 && isHostKeyChangedOutput(this.recentOutput);
+    if (changedKey) {
+      const msg =
+        `\r\n\x1b[31m[sshs3: ssh reported that the host key for ${this.config.host} has changed. ` +
+        `The server may have been reinstalled, or the connection is being intercepted. Checking...]\x1b[0m\r\n`;
+      this.appendScrollback(msg);
+      for (const listener of this.dataListeners) listener(msg);
+      this.manager.emit('data', { sessionId: this.sessionId, data: msg });
+      this.manager.emit('hostkey-changed', {
+        sessionId: this.sessionId,
+        host: this.config.host,
+        port: this.config.port ?? 22,
+      });
+    }
     const shouldReconnect =
       !this.disposed &&
+      !changedKey &&
       Boolean(this.config.autoReconnect) &&
-      (event.exitCode !== 0 || event.signal !== undefined) &&
+      // 255 is ssh's own "the connection failed or dropped" code; any other non-zero code is the remote shell or
+      // command ending (e.g. `exit 1`), which is not a reason to connect again. node-pty reports signal 0 (not
+      // undefined) for a normal exit, so only a real signal counts.
+      (event.exitCode === 255 || Boolean(event.signal)) &&
       this.reconnectAttempts < (this.config.maxReconnectAttempts ?? 3);
 
     if (shouldReconnect) {
@@ -249,6 +283,49 @@ export class InternalSSHPtySession implements SSHPtySession {
       this.rows = rows;
       this.pty.resize(cols, rows);
     }
+  }
+
+  /**
+   * True when the shell has spawned an interactive ssh client (Linux only; false when it cannot be
+   * told). What the terminal then shows belongs to the remote host, not to this machine.
+   */
+  public hasSshClient(): boolean {
+    if (this.disposed || !this.pty) return false;
+    const pid = (this.pty as any).pid;
+    if (!pid || process.platform !== 'linux') return false;
+    try {
+      const childrenStr = fs.readFileSync(`/proc/${pid}/task/${pid}/children`, 'utf8').trim();
+      if (!childrenStr) return false;
+      for (const cPid of childrenStr.split(/\s+/).filter(Boolean)) {
+        try {
+          // The client only: `ssh-add`, `ssh-agent` and `sshfs` are not a login to another host.
+          if (fs.readFileSync(`/proc/${cPid}/comm`, 'utf8').trim() === 'ssh') return true;
+        } catch {
+          // Child process may have already exited
+        }
+      }
+    } catch {
+      // Ignore error checking children
+    }
+    return false;
+  }
+
+  public getCwd(): string | null {
+    if (this.disposed || !this.pty) return null;
+    const pid = (this.pty as any).pid;
+    if (!pid) return null;
+    if (process.platform === 'linux') {
+      // If the shell process has spawned an interactive ssh client, its local /proc/pid/cwd
+      // is just the local directory where ssh was launched, not the remote CWD.
+      // In that case, return null so caller falls back to remote prompt detection.
+      if (this.hasSshClient()) return null;
+      try {
+        return fs.readlinkSync(`/proc/${pid}/cwd`);
+      } catch {
+        return null;
+      }
+    }
+    return null;
   }
 
   public kill(signal?: string): void {
@@ -392,12 +469,15 @@ export interface SSHPtyManagerOptions {
    * nothing left for this to disambiguate. Kept for now so existing callers don't need to change.
    */
   isTunnelActive?: (connectionId: string, tunnelId: string) => boolean;
+  /** Answers OpenSSH's unknown-host-key question; absent means "no" (fail closed). */
+  hostKeyPromptHandler?: (info: HostKeyPromptInfo) => Promise<boolean>;
 }
 
 export class SSHPtyManager extends EventEmitter {
   private sessions: Map<string, SSHPtySession> = new Map();
   private sessionOptions: Map<string, PtyOptions | undefined> = new Map();
   private settingsStore?: SettingsStore;
+  private hostKeyPromptHandler?: (info: HostKeyPromptInfo) => Promise<boolean>;
   /**
    * Local ports our own already-open sessions have bound a tunnel for, keyed by the owning
    * session id. Terminal sessions no longer auto-embed saved tunnels (only the Tunnels panel
@@ -409,6 +489,7 @@ export class SSHPtyManager extends EventEmitter {
   constructor(options?: SSHPtyManagerOptions) {
     super();
     this.settingsStore = options?.settingsStore;
+    this.hostKeyPromptHandler = options?.hostKeyPromptHandler;
   }
 
   public static getControlPath(config: SSHConnectionConfig): string {
@@ -578,25 +659,24 @@ export class SSHPtyManager extends EventEmitter {
           this.emit('presence', { sessionId, prompt });
         },
         promptHandler: async (rawPrompt: string, retry?: AskpassPromptRetryContext) => {
+          // ssh asks "continue connecting?" through askpass too; it must never reach the PIN modal.
+          if (isHostKeyConfirmPrompt(rawPrompt)) {
+            if (!this.hostKeyPromptHandler) return 'no';
+            const info = parseHostKeyPrompt(rawPrompt, { host: config.host, port: config.port ?? 22 } as SFTPConfig);
+            return (await this.hostKeyPromptHandler(info)) ? 'yes' : 'no';
+          }
           // Kind only, never the answer. A 'password' prompt on a key-based profile means ssh could not
           // authenticate with the agent and fell back to asking for the account password.
           const promptKind = describeAskpassPrompt(rawPrompt, config).kind ?? 'passphrase';
-          const savedAnswer = Boolean(
-            (config.authType === 'password' && config.password) || config.passphrase
-          );
+          const saved = savedAskpassAnswer(rawPrompt, config);
           sshLog.info('askpass prompt', {
             sessionId,
             kind: promptKind,
             authType: config.authType,
-            answeredFrom: savedAnswer ? 'saved' : 'ui',
+            answeredFrom: saved ? 'saved' : 'ui',
             retry: Boolean(retry),
           });
-          if (config.authType === 'password' && config.password) {
-            return config.password;
-          }
-          if (config.passphrase) {
-            return config.passphrase;
-          }
+          if (saved) return saved;
           if (this.listenerCount('askpass') > 0) {
             const { kind, prompt: promptText, context } = describeAskpassPrompt(rawPrompt, config);
             return new Promise<string>((resolve) => {
@@ -610,7 +690,7 @@ export class SSHPtyManager extends EventEmitter {
               });
             });
           }
-          return config.passphrase || config.password || '';
+          return '';
         },
       });
 
@@ -618,10 +698,8 @@ export class SSHPtyManager extends EventEmitter {
       askpassEnv = askpassServer.getEnv();
     }
 
-    const controlPath =
-      process.platform !== 'win32'
-        ? this.getControlPath(config)
-        : undefined;
+    // In the app's private 0700 folder rather than the shared temp folder (M3); undefined means no multiplexing.
+    const controlPath = process.platform !== 'win32' ? await createMuxControlPath() : undefined;
     let muxRegistryId: string | null = null;
     let filteredConfig: SSHConnectionConfig;
     let ptyProcess: IPty;
@@ -883,6 +961,20 @@ export class SSHPtyManager extends EventEmitter {
     if (session) {
       session.kill(signal);
     }
+  }
+
+  /**
+   * Returns the current working directory of an active local shell session, or null if unknown.
+   */
+  public getSessionCwd(sessionId: string): string | null {
+    const session = this.sessions.get(sessionId);
+    return session && 'getCwd' in session ? (session as any).getCwd() : null;
+  }
+
+  /** Whether the local shell of this session currently runs an interactive ssh client. */
+  public sessionHasSshClient(sessionId: string): boolean {
+    const session = this.sessions.get(sessionId);
+    return session && 'hasSshClient' in session ? Boolean((session as any).hasSshClient()) : false;
   }
 
   /**

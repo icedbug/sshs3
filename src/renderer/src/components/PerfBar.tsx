@@ -20,6 +20,8 @@ export interface PerfBarProps {
   title?: string;
   /** Local shell pane: there is no remote host to ping, so the Ping cell is hidden. */
   local?: boolean;
+  /** Sits inside another bar (the split-view header): no own background, border or full width. */
+  embedded?: boolean;
 }
 
 const levelClass = (pct: number | null): string =>
@@ -56,14 +58,15 @@ const CoreBars: React.FC<{ pcts: number[] }> = ({ pcts }) => (
 );
 
 /** One-row performance bar rendered above a terminal. Layout, metrics and polling are decided by the caller. */
-export const PerfBar: React.FC<PerfBarProps> = ({ kind, state, layout, items, title, local }) => {
+export const PerfBar: React.FC<PerfBarProps> = ({ kind, state, layout, items, title, local, embedded }) => {
   const [detailOpen, setDetailOpen] = useState(false);
   const latest = state.history[state.history.length - 1];
   const shown = items.filter((id) => metricApplies(kind, id) && !(local && id === 'latency'));
   const recent = state.history.slice(-PERF_SPARK_POINTS);
   // Theme tokens (not fixed slate shades) so the bar matches the pane header in dark, light and breeze alike.
-  const base =
-    'flex items-center gap-2.5 px-2.5 h-5 shrink-0 overflow-hidden whitespace-nowrap text-2xs font-mono tabular-nums border-b w-full text-left bg-app-surface-subtle text-txt-secondary border-border-subtle';
+  const base = embedded
+    ? 'flex items-center gap-2.5 h-6 min-w-0 overflow-hidden whitespace-nowrap text-2xs font-mono tabular-nums text-left text-txt-secondary'
+    : 'flex items-center gap-2.5 px-2.5 h-6 shrink-0 overflow-hidden whitespace-nowrap text-2xs font-mono tabular-nums border-b w-full text-left bg-app-surface-subtle text-txt-secondary border-border-subtle';
 
   if (!latest) {
     return (
@@ -84,7 +87,11 @@ export const PerfBar: React.FC<PerfBarProps> = ({ kind, state, layout, items, ti
         title={tooltipText(kind, latest, title)}
         aria-label="Performance metrics, click for history"
         onClick={() => setDetailOpen(true)}
-        className={`${base} cursor-pointer hover:brightness-125`}
+        className={`${base} cursor-pointer ${
+          embedded
+            ? 'rounded px-1.5 hover:bg-app-surface-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-500'
+            : 'hover:brightness-125'
+        }`}
       >
         {shown.map((id, idx) => {
           const sep = idx > 0 ? ' border-l border-border-strong pl-2.5' : '';

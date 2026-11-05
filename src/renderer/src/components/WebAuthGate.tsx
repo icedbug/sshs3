@@ -448,7 +448,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
           )}
 
           {authError && (
-            <div className="rounded-lg bg-rose-500/10 border border-rose-500/30 px-3.5 py-2.5 text-xs text-rose-300">
+            <div role="alert" className="rounded-lg bg-rose-500/10 border border-rose-500/30 px-3.5 py-2.5 text-xs text-rose-300">
               {authError}
             </div>
           )}
@@ -654,6 +654,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
             <button
               type="button"
               onClick={() => setJustOnboarded(false)}
+              aria-label="Dismiss"
               className="text-slate-400 hover:text-white px-1.5 py-0.5"
             >
               ✕

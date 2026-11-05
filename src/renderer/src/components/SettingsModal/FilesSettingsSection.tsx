@@ -36,7 +36,7 @@ export const FilesSettingsSection: React.FC<{ form: SettingsForm }> = ({ form })
           ].map((opt) => (
             <label
               key={opt.id}
-              className={`flex flex-col gap-0.5 rounded-lg border p-3 cursor-pointer transition-colors ${
+              className={`flex flex-col gap-0.5 rounded-lg border p-3 cursor-pointer transition-colors has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-sky-500 has-[:focus-visible]:ring-offset-1 has-[:focus-visible]:ring-offset-app-surface ${
                 defaultConflictPolicy === opt.id
                   ? 'border-sky-500 bg-sky-500/15 text-sky-200'
                   : 'border-border-subtle bg-app-surface hover:bg-app-surface-hover text-txt-secondary'
@@ -48,7 +48,7 @@ export const FilesSettingsSection: React.FC<{ form: SettingsForm }> = ({ form })
                   name="conflictPolicy"
                   checked={defaultConflictPolicy === opt.id}
                   onChange={() => setDefaultConflictPolicy(opt.id as any)}
-                  className="hidden"
+                  className="sr-only"
                 />
                 <span className="font-semibold text-xs text-txt-primary">{opt.label}</span>
               </div>

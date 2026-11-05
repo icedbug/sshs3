@@ -44,6 +44,7 @@ export const SmartcardStartupUnlockBanner: React.FC = () => {
           </p>
         </div>
         <button
+          aria-label="Dismiss"
           type="button"
           onClick={() => setStatus(null)}
           className="rounded p-1 text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary transition-colors"

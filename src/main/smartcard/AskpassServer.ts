@@ -80,56 +80,62 @@ export class AskpassServer extends EventEmitter {
       return { port: this.port, scriptPath: this.scriptPath };
     }
 
-    // 1. Create the private (mode 0700) temp directory first — on POSIX the
-    // server's Unix socket file lives inside it, so it must exist before
-    // the server starts listening.
-    this.tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sshs3-askpass-'));
-    await fs.chmod(this.tempDir, 0o700);
-    this.registryId = await AgentRegistry.registerEntry({
-      kind: 'askpass',
-      ownerPid: process.pid,
-      tempDir: this.tempDir,
-      createdAt: new Date().toISOString(),
-    });
-
-    const isWindows = process.platform === 'win32';
-
-    // 2. Start the server: a Unix domain socket on POSIX, TCP loopback on
-    // Windows (which has no equivalent mode-restricted socket file).
-    await new Promise<void>((resolve, reject) => {
-      const server = net.createServer((socket) => {
-        this.handleConnection(socket);
+    try {
+      // 1. Create the private (mode 0700) temp directory first — on POSIX the
+      // server's Unix socket file lives inside it, so it must exist before
+      // the server starts listening.
+      this.tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sshs3-askpass-'));
+      await fs.chmod(this.tempDir, 0o700);
+      this.registryId = await AgentRegistry.registerEntry({
+        kind: 'askpass',
+        ownerPid: process.pid,
+        tempDir: this.tempDir,
+        createdAt: new Date().toISOString(),
       });
 
-      server.once('error', reject);
+      const isWindows = process.platform === 'win32';
 
-      if (isWindows) {
-        server.listen(0, '127.0.0.1', () => {
-          const address = server.address();
-          if (address && typeof address === 'object') {
-            this.port = address.port;
+      // 2. Start the server: a Unix domain socket on POSIX, TCP loopback on
+      // Windows (which has no equivalent mode-restricted socket file).
+      await new Promise<void>((resolve, reject) => {
+        const server = net.createServer((socket) => {
+          this.handleConnection(socket);
+        });
+
+        server.once('error', reject);
+
+        if (isWindows) {
+          server.listen(0, '127.0.0.1', () => {
+            const address = server.address();
+            if (address && typeof address === 'object') {
+              this.port = address.port;
+              this.server = server;
+              resolve();
+            } else {
+              reject(new Error('Failed to obtain server address'));
+            }
+          });
+        } else {
+          const socketPath = path.join(this.tempDir!, 'askpass.sock');
+          server.listen(socketPath, () => {
+            this.socketPath = socketPath;
             this.server = server;
             resolve();
-          } else {
-            reject(new Error('Failed to obtain server address'));
-          }
-        });
-      } else {
-        const socketPath = path.join(this.tempDir!, 'askpass.sock');
-        server.listen(socketPath, () => {
-          this.socketPath = socketPath;
-          this.server = server;
-          resolve();
-        });
-      }
-    });
+          });
+        }
+      });
 
-    // 3. Create the askpass script.
-    this.scriptPath = await this.generateAskpassScript(this.tempDir, this.token, {
-      port: this.port,
-      socketPath: this.socketPath,
-    });
-    this.running = true;
+      // 3. Create the askpass script.
+      this.scriptPath = await this.generateAskpassScript(this.tempDir, this.token, {
+        port: this.port,
+        socketPath: this.socketPath,
+      });
+      this.running = true;
+    } catch (err) {
+      // Whatever was set up before the failure (temp folder, registry entry, half-started server) must not stay behind.
+      await this.stop().catch(() => {});
+      throw err;
+    }
 
     return { port: this.port, scriptPath: this.scriptPath };
   }

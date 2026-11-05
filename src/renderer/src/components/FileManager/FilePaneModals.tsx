@@ -2,13 +2,17 @@ import React from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 import type { FileEntry } from '@shared/types/storage';
 import { parentPath } from '../../lib/format';
+import { IS_WINDOWS } from '../../lib/platform';
 import { ChmodModal } from './ChmodModal';
+import { WinAttributesModal } from './WinAttributesModal';
 import { PropertiesModal } from './PropertiesModal';
+import { CertificateModal } from './CertificateModal';
 import { TagsModal } from './TagsModal';
 import { BucketPolicyModal } from './BucketPolicyModal';
 import { VersionsModal } from './VersionsModal';
 import { PresignedUrlModal } from './PresignedUrlModal';
 import { NewFolderModal } from './NewFolderModal';
+import { SelectByPatternModal } from './SelectByPatternModal';
 import { AddToDotfilePoolModal } from './AddToDotfilePoolModal';
 import { FileEditorModal } from './FileEditorModal';
 import { DirectorySyncModal, type DirectorySyncModalSource } from './DirectorySyncModal';
@@ -30,6 +34,8 @@ export interface FilePaneModalsProps {
   setChmodOpen: SetFlag;
   propertiesOpen: boolean;
   setPropertiesOpen: SetFlag;
+  certificateOpen: boolean;
+  setCertificateOpen: SetFlag;
   tagsOpen: boolean;
   setTagsOpen: SetFlag;
   bucketPolicyOpen: boolean;
@@ -44,6 +50,13 @@ export interface FilePaneModalsProps {
   newFolderOpen: boolean;
   setNewFolderOpen: SetFlag;
   handleCreateFolderCommit: (name: string) => Promise<void>;
+  newFileOpen: boolean;
+  setNewFileOpen: SetFlag;
+  handleCreateFileCommit: (name: string) => Promise<void>;
+  patternOpen: boolean;
+  setPatternOpen: SetFlag;
+  displayedEntries: FileEntry[];
+  handlePatternApply: (paths: string[], mode: 'select' | 'deselect') => void;
   addToDotfilesOpen: boolean;
   setAddToDotfilesOpen: SetFlag;
   setDotfilesFeedback: Dispatch<SetStateAction<string | null>>;
@@ -72,6 +85,8 @@ export const FilePaneModals: React.FC<FilePaneModalsProps> = ({
   setChmodOpen,
   propertiesOpen,
   setPropertiesOpen,
+  certificateOpen,
+  setCertificateOpen,
   tagsOpen,
   setTagsOpen,
   bucketPolicyOpen,
@@ -86,6 +101,13 @@ export const FilePaneModals: React.FC<FilePaneModalsProps> = ({
   newFolderOpen,
   setNewFolderOpen,
   handleCreateFolderCommit,
+  newFileOpen,
+  setNewFileOpen,
+  handleCreateFileCommit,
+  patternOpen,
+  setPatternOpen,
+  displayedEntries,
+  handlePatternApply,
   addToDotfilesOpen,
   setAddToDotfilesOpen,
   setDotfilesFeedback,
@@ -101,13 +123,23 @@ export const FilePaneModals: React.FC<FilePaneModalsProps> = ({
   onPathChange,
 }) => (
   <>
-    <ChmodModal
-      open={chmodOpen}
-      providerId={source.providerId}
-      entries={selectedEntries}
-      onClose={() => setChmodOpen(false)}
-      onSaved={() => void load()}
-    />
+    {IS_WINDOWS && source.sourceType === 'local' ? (
+      <WinAttributesModal
+        open={chmodOpen}
+        providerId={source.providerId}
+        entries={selectedEntries}
+        onClose={() => setChmodOpen(false)}
+        onSaved={() => void load()}
+      />
+    ) : (
+      <ChmodModal
+        open={chmodOpen}
+        providerId={source.providerId}
+        entries={selectedEntries}
+        onClose={() => setChmodOpen(false)}
+        onSaved={() => void load()}
+      />
+    )}
 
     <PropertiesModal
       open={propertiesOpen}
@@ -116,6 +148,13 @@ export const FilePaneModals: React.FC<FilePaneModalsProps> = ({
       entries={selectedEntries}
       onClose={() => setPropertiesOpen(false)}
       onSaved={() => void load()}
+    />
+
+    <CertificateModal
+      open={certificateOpen}
+      providerId={source.providerId}
+      entry={selectedEntries[0]}
+      onClose={() => setCertificateOpen(false)}
     />
 
     {(isBucketEntry || isS3ObjectEntry) && selectedEntries.length === 1 && (
@@ -175,6 +214,22 @@ export const FilePaneModals: React.FC<FilePaneModalsProps> = ({
       sourceType={source.sourceType}
       onClose={() => setNewFolderOpen(false)}
       onCreate={handleCreateFolderCommit}
+    />
+
+    <NewFolderModal
+      kind="file"
+      open={newFileOpen}
+      currentPath={currentPath}
+      sourceType={source.sourceType}
+      onClose={() => setNewFileOpen(false)}
+      onCreate={handleCreateFileCommit}
+    />
+
+    <SelectByPatternModal
+      open={patternOpen}
+      entries={displayedEntries}
+      onClose={() => setPatternOpen(false)}
+      onApply={handlePatternApply}
     />
 
     <AddToDotfilePoolModal

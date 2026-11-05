@@ -3,21 +3,27 @@ import {
   Copy,
   Download,
   ExternalLink,
+  FileArchive,
   FileCode,
+  FilePlus,
   FileJson,
   FileText,
   FolderOpen,
   FolderPlus,
   FolderSync,
   GitBranch,
+  GripVertical,
   History,
   Info,
   Link2,
+  PackageOpen,
+  ListChecks,
   Pencil,
   RefreshCw,
   Scissors,
   Search,
   Shield,
+  ShieldCheck,
   Tag,
   Terminal,
   Trash2,
@@ -25,8 +31,13 @@ import {
 import type { FileEntry } from '@shared/types/storage';
 import type { GitRepoStatus } from '@shared/types/git';
 import { parentPath } from '../../lib/format';
+import { IS_WINDOWS } from '../../lib/platform';
 import type { ContextMenuItem } from './ContextMenu';
 import type { SourceType } from './types';
+import { canCreateFileIn } from './filePaneHelpers';
+import { supportsArchives } from './useArchiveActions';
+import { detectArchiveKind } from '@shared/archiveNames';
+import { isCertificateFileName } from '@shared/certificateFileName';
 import type { FileClipboard } from './DragDropContext';
 import { toWebRepoUrl } from './filePaneHelpers';
 
@@ -49,9 +60,16 @@ export interface FilePaneContextMenuInput {
   handlePaste: () => void;
   handleRenameStart: () => void;
   handleDownloadTo: () => Promise<void> | void;
+  /** Remote panes only: opens the "Drag out of sshs3" dialog for the selection. */
+  handleDragOut?: () => void;
   handleGitPull: () => Promise<void> | void;
   handleDelete: () => Promise<void> | void;
   handleNewFolder: () => Promise<void> | void;
+  handleNewFile: () => Promise<void> | void;
+  handleCompress: (format: 'tar.gz' | 'zip') => Promise<void> | void;
+  handleExtract: () => Promise<void> | void;
+  setPatternOpen: (open: boolean) => void;
+  handleInvertSelection: () => void;
   load: (force?: boolean) => Promise<void> | void;
   setSyncModalOpen: (open: boolean) => void;
   setEditorTailMode: (tail: boolean) => void;
@@ -65,6 +83,7 @@ export interface FilePaneContextMenuInput {
   setGitCloneTargetDir: (dir: string | null) => void;
   setGitCloneOpen: (open: boolean) => void;
   setPropertiesOpen: (open: boolean) => void;
+  setCertificateOpen: (open: boolean) => void;
   setSearchOpen: (open: boolean) => void;
 }
 
@@ -89,9 +108,15 @@ export function buildContextMenuItems(input: FilePaneContextMenuInput): ContextM
     handlePaste,
     handleRenameStart,
     handleDownloadTo,
+    handleDragOut,
     handleGitPull,
     handleDelete,
     handleNewFolder,
+    handleNewFile,
+    handleCompress,
+    handleExtract,
+    setPatternOpen,
+    handleInvertSelection,
     load,
     setSyncModalOpen,
     setEditorTailMode,
@@ -105,6 +130,7 @@ export function buildContextMenuItems(input: FilePaneContextMenuInput): ContextM
     setGitCloneTargetDir,
     setGitCloneOpen,
     setPropertiesOpen,
+    setCertificateOpen,
     setSearchOpen,
   } = input;
 
@@ -134,6 +160,16 @@ export function buildContextMenuItems(input: FilePaneContextMenuInput): ContextM
                     setEditorEntry(selectedEntries[0]);
                   },
                 },
+                ...(isCertificateFileName(selectedEntries[0].name)
+                  ? [
+                      {
+                        key: 'view-certificate',
+                        label: 'View Certificate...',
+                        icon: ShieldCheck,
+                        onSelect: () => setCertificateOpen(true),
+                      },
+                    ]
+                  : []),
                 {
                   key: 'tail',
                   label: 'Tail -f (Stream Log)',
@@ -179,9 +215,24 @@ export function buildContextMenuItems(input: FilePaneContextMenuInput): ContextM
             disabled: selectedEntries.length !== 1,
             onSelect: handleRenameStart,
           },
+          ...(supportsArchives(sourceType)
+            ? [
+                {
+                  key: 'compress-targz',
+                  label: 'Compress to .tar.gz',
+                  icon: FileArchive,
+                  separatorBefore: true,
+                  onSelect: () => void handleCompress('tar.gz'),
+                },
+                { key: 'compress-zip', label: 'Compress to .zip', icon: FileArchive, onSelect: () => void handleCompress('zip') },
+                ...(selectedEntries.length === 1 && !selectedEntries[0].isDirectory && detectArchiveKind(selectedEntries[0].name)
+                  ? [{ key: 'extract', label: 'Extract to Folder', icon: PackageOpen, onSelect: () => void handleExtract() }]
+                  : []),
+              ]
+            : []),
           {
             key: 'chmod',
-            label: 'Change Permissions (chmod)...',
+            label: IS_WINDOWS && sourceType === 'local' ? 'Change Attributes...' : 'Change Permissions (chmod)...',
             icon: Shield,
             disabled: !supportsChmod,
             onSelect: () => setChmodOpen(true),
@@ -218,6 +269,16 @@ export function buildContextMenuItems(input: FilePaneContextMenuInput): ContextM
                   label: 'Download to...',
                   icon: Download,
                   onSelect: () => void handleDownloadTo(),
+                },
+              ]
+            : []),
+          ...(handleDragOut
+            ? [
+                {
+                  key: 'drag-out',
+                  label: 'Drag out of sshs3...',
+                  icon: GripVertical,
+                  onSelect: handleDragOut,
                 },
               ]
             : []),
@@ -331,6 +392,9 @@ export function buildContextMenuItems(input: FilePaneContextMenuInput): ContextM
         ]
       : [
           { key: 'newfolder', label: 'New Folder', icon: FolderPlus, onSelect: () => void handleNewFolder() },
+          ...(canCreateFileIn(sourceType, currentPath)
+            ? [{ key: 'newfile', label: 'New File', icon: FilePlus, onSelect: () => void handleNewFile() }]
+            : []),
           {
             key: 'paste',
             label: 'Paste (Ctrl+V)',
@@ -338,6 +402,8 @@ export function buildContextMenuItems(input: FilePaneContextMenuInput): ContextM
             disabled: !clipboard || clipboard.sourcePaths.length === 0,
             onSelect: handlePaste,
           },
+          { key: 'select-pattern', label: 'Select by Pattern... (Ctrl+S)', icon: ListChecks, onSelect: () => setPatternOpen(true) },
+          { key: 'invert-selection', label: 'Invert Selection (Ctrl+Shift+A)', icon: ListChecks, onSelect: handleInvertSelection },
           { key: 'refresh', label: 'Refresh', icon: RefreshCw, onSelect: () => void load(true) },
           {
             key: 'search-in-files',

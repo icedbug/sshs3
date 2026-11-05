@@ -4,12 +4,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-const { mockExecFile, mockRunAgeCommandViaPty, mockCreateFifo, mockReadFifoOnce, mockRemoveFifo } = vi.hoisted(() => ({
+const { mockExecFile, mockRunAgeCommandViaPty, mockCreateChannel } = vi.hoisted(() => ({
   mockExecFile: vi.fn(),
   mockRunAgeCommandViaPty: vi.fn(),
-  mockCreateFifo: vi.fn(),
-  mockReadFifoOnce: vi.fn(),
-  mockRemoveFifo: vi.fn(),
+  mockCreateChannel: vi.fn(),
 }));
 
 vi.mock('node:child_process', async (importOriginal) => {
@@ -32,13 +30,18 @@ vi.mock('../../src/main/services/AgePtyPinRelay', async (importOriginal) => {
   return {
     ...actual,
     runAgeCommandViaPty: mockRunAgeCommandViaPty,
-    createFifo: mockCreateFifo,
-    readFifoOnce: mockReadFifoOnce,
-    removeFifo: mockRemoveFifo,
+    createSecretOutputChannel: mockCreateChannel,
   };
 });
 
-import { TeamVaultCryptoService, TeamVaultDecryptionError } from '../../src/main/services/TeamVaultCryptoService';
+import {
+  TeamVaultCryptoService,
+  TeamVaultDecryptionError,
+  TEAM_VAULT_FILE_FIELD_COVERAGE,
+  normalizeAsciiArmoredAge,
+  payloadDigest,
+  type TeamVaultMacInput,
+} from '../../src/main/services/TeamVaultCryptoService';
 import type { AgePtyPromptCallbacks } from '../../src/main/services/AgePtyPinRelay';
 
 function noopCallbacks(): AgePtyPromptCallbacks {
@@ -48,6 +51,15 @@ function noopCallbacks(): AgePtyPromptCallbacks {
     onTouchCleared: vi.fn(),
   };
 }
+
+const armor = (body: string) => `-----BEGIN AGE ENCRYPTED FILE-----\n${body}\n-----END AGE ENCRYPTED FILE-----\n`;
+const ARMOR = armor('YWdlLWVuY3J5cHRpb24ub3JnL3YxCg==');
+const ARMOR_1 = armor('QUFBQQ==');
+const ARMOR_2 = armor('QkJCQg==');
+// Malformed variants of ARMOR, built from its lines rather than by replacing characters in it.
+const [ARMOR_HEADER, ...ARMOR_AFTER_HEADER] = ARMOR.split('\n');
+const ARMOR_WITH_BLANK_LINE = [ARMOR_HEADER, '', ...ARMOR_AFTER_HEADER].join('\n'); // text between the lines
+const ARMOR_WITH_BARE_CR = `${ARMOR_HEADER}\r${ARMOR_AFTER_HEADER.join('\n')}`; // header ended by a lone CR
 
 describe('TeamVaultCryptoService', () => {
   const service = new TeamVaultCryptoService();
@@ -113,7 +125,14 @@ describe('TeamVaultCryptoService', () => {
     });
   });
 
-  describe('wrapVaultKeyForRecipient / unwrapVaultKey against the real `age` CLI', () => {
+  describe('wrapVaultKeyForRecipient / unwrapVaultKey against the real `age` CLI', { retry: 2 }, () => {
+    // Real age + pty + FIFO subprocesses: now and then (a few percent of full-suite runs) age exits 0 but the FIFO reader's
+    // open() never completes, which readChannelAfterExit turns into a 5 s "wrote no output" error. The round trip has
+    // no PIN or card, so a retry is harmless. The root cause is not found (CPU load alone does not reproduce it).
+    // Prefer the CI-fetched copy (build-resources/age/<platform>) so this also runs on a machine
+    // without a system-wide age: the real service resolves a bare `age` via PATH in this file.
+    const bundledDir = path.join(process.cwd(), 'build-resources', 'age', process.platform === 'win32' ? 'win' : 'linux');
+    if (fs.existsSync(bundledDir)) process.env.PATH = bundledDir + path.delimiter + process.env.PATH;
     const hasAge = !spawnSync('age', ['--version'], { stdio: 'ignore' }).error;
     const hasAgeKeygen = !spawnSync('age-keygen', ['--version'], { stdio: 'ignore' }).error;
 
@@ -122,7 +141,7 @@ describe('TeamVaultCryptoService', () => {
       async () => {
         // Unmock node:child_process and AgePtyPinRelay for this one real-binary round trip.
         // A software (non-PIV) identity never prompts for anything, so the real
-        // runAgeCommandViaPty/createFifo/readFifoOnce/removeFifo can run unmocked too.
+        // runAgeCommandViaPty/createSecretOutputChannel can run unmocked too.
         vi.doUnmock('node:child_process');
         vi.doUnmock('../../src/main/services/AgePtyPinRelay');
         vi.resetModules();
@@ -143,59 +162,220 @@ describe('TeamVaultCryptoService', () => {
         const wrapped = await realService.wrapVaultKeyForRecipient(vaultKey, recipientLine!);
         const unwrapped = await realService.unwrapVaultKey(wrapped, identityPath, noopCallbacks());
         expect(unwrapped.equals(vaultKey)).toBe(true);
-      }
+      },
+      // A real subprocess round trip (age-keygen + age wrap + age unwrap via pty) is slower than
+      // the default 5s under full-suite parallel load (many vitest workers competing for CPU) —
+      // seen flaking in pre-commit's `npm test` even though it's consistently <1s in isolation.
+      60000
     );
   });
 
-  describe('unwrapVaultKey (pty + FIFO path, mocked)', () => {
+  describe('encryptForRecipient / decryptWithIdentity against the real `age` CLI', { retry: 2 }, () => {
+    // Real age + pty + FIFO subprocesses: now and then (a few percent of full-suite runs) age exits 0 but the FIFO reader's
+    // open() never completes, which readChannelAfterExit turns into a 5 s "wrote no output" error. The round trip has
+    // no PIN or card, so a retry is harmless. The root cause is not found (CPU load alone does not reproduce it).
+    const hasAge = !spawnSync('age', ['--version'], { stdio: 'ignore' }).error;
+    const hasAgeKeygen = !spawnSync('age-keygen', ['--version'], { stdio: 'ignore' }).error;
+
+    it.skipIf(!hasAge || !hasAgeKeygen)(
+      'round-trips an arbitrary JSON string (the invite payload) for a software age identity',
+      async () => {
+        vi.doUnmock('node:child_process');
+        vi.doUnmock('../../src/main/services/AgePtyPinRelay');
+        vi.resetModules();
+        const real = await vi.importActual<typeof import('../../src/main/services/TeamVaultCryptoService')>(
+          '../../src/main/services/TeamVaultCryptoService'
+        );
+        const realService = new real.TeamVaultCryptoService();
+
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sshs3-invite-it-'));
+        const identityPath = path.join(dir, 'identity.txt');
+        const keygen = spawnSync('age-keygen', ['-o', identityPath]);
+        expect(keygen.status).toBe(0);
+        const identity = fs.readFileSync(identityPath, 'utf8');
+        const recipientLine = identity.match(/# public key: (age1\S+)/)?.[1];
+        expect(recipientLine).toBeTruthy();
+
+        const plaintext = JSON.stringify({ vaultId: 'vlt_1', target: { id: 't1', name: 'x', type: 's3' } });
+        const armored = await realService.encryptForRecipient(plaintext, recipientLine!);
+        const decrypted = await realService.decryptWithIdentity(armored, identityPath, noopCallbacks());
+        expect(decrypted).toBe(plaintext);
+      },
+      // Same reasoning as the real round-trip test above — a real subprocess, not mocked.
+      60000
+    );
+  });
+
+  describe('decryptWithIdentity (pty + secret output channel, mocked)', () => {
+    function fakeChannel(bytes: Buffer = Buffer.from('{"vaultId":"vlt_1"}', 'utf8')) {
+      const channel = {
+        path: '/tmp/fake-invite.fifo',
+        read: vi.fn(() => Promise.resolve(bytes)),
+        dispose: vi.fn().mockResolvedValue(undefined),
+      };
+      mockCreateChannel.mockResolvedValue(channel);
+      return channel;
+    }
+
     beforeEach(() => {
       mockRunAgeCommandViaPty.mockReset();
-      mockCreateFifo.mockReset();
-      mockReadFifoOnce.mockReset();
-      mockRemoveFifo.mockReset();
+      mockCreateChannel.mockReset();
     });
 
-    it('creates a FIFO, decrypts via the pty with -o <fifo>, reads the result from the FIFO, and cleans up', async () => {
-      mockCreateFifo.mockResolvedValue('/tmp/fake.fifo');
-      mockReadFifoOnce.mockResolvedValue(Buffer.from('raw-vault-key-bytes'));
+    it('decrypts via the pty with -o <channel>, reads the result as text, and cleans up', async () => {
+      const channel = fakeChannel();
       mockRunAgeCommandViaPty.mockResolvedValue('# some human-readable status text\n');
-      mockRemoveFifo.mockResolvedValue(undefined);
 
       const callbacks = noopCallbacks();
       const service2 = new TeamVaultCryptoService();
-      const result = await service2.unwrapVaultKey('wrapped-blob', '/tmp/identity.txt', callbacks);
+      const result = await service2.decryptWithIdentity(ARMOR, '/tmp/identity.txt', callbacks);
 
-      expect(result.toString('utf8')).toBe('raw-vault-key-bytes');
-      expect(mockCreateFifo).toHaveBeenCalledTimes(1);
-      expect(mockRunAgeCommandViaPty).toHaveBeenCalledTimes(1);
+      expect(result).toBe('{"vaultId":"vlt_1"}');
+      expect(mockCreateChannel).toHaveBeenCalledTimes(1);
       const [binary, args, , cbArg, , stdinArg] = mockRunAgeCommandViaPty.mock.calls[0];
-      expect(binary).toMatch(/age$/);
-      expect(args).toEqual(['-d', '-i', '/tmp/identity.txt', '-o', '/tmp/fake.fifo']);
+      expect(binary).toMatch(/age(\.exe)?$/);
+      expect(args.slice(0, 5)).toEqual(['-d', '-i', '/tmp/identity.txt', '-o', '/tmp/fake-invite.fifo']);
       expect(cbArg).toBe(callbacks);
-      expect(stdinArg).toBe('wrapped-blob');
-      expect(mockRemoveFifo).toHaveBeenCalledWith('/tmp/fake.fifo');
+      if (process.platform !== 'win32') expect(stdinArg).toBe(ARMOR);
+      expect(channel.dispose).toHaveBeenCalledTimes(1);
     });
 
-    it('still cleans up the FIFO when the pty run rejects', async () => {
-      mockCreateFifo.mockResolvedValue('/tmp/fake.fifo');
-      mockReadFifoOnce.mockResolvedValue(Buffer.alloc(0));
-      mockRunAgeCommandViaPty.mockRejectedValue(new Error('age: error: no YubiKey detected'));
-      mockRemoveFifo.mockResolvedValue(undefined);
+    it('sends the validated, whitespace-trimmed text rather than what it was given', async () => {
+      fakeChannel();
+      mockRunAgeCommandViaPty.mockResolvedValue('');
+      await new TeamVaultCryptoService().decryptWithIdentity(`\n\n${ARMOR}  \n\n`, '/tmp/identity.txt', noopCallbacks());
+      const stdinArg = mockRunAgeCommandViaPty.mock.calls[0][5];
+      if (process.platform !== 'win32') expect(stdinArg).toBe(ARMOR);
+    });
 
+    it('refuses anything but a single armored age file before it can reach the pty', async () => {
+      fakeChannel();
       const service2 = new TeamVaultCryptoService();
-      await expect(service2.unwrapVaultKey('wrapped-blob', '/tmp/identity.txt', noopCallbacks())).rejects.toThrow(
-        'no YubiKey detected'
-      );
-      expect(mockRemoveFifo).toHaveBeenCalledWith('/tmp/fake.fifo');
+      const hostile = [
+        `${ARMOR}000000\n000000\n000000\n`, // PIN guesses typed after the footer
+        ARMOR.replace('YWdl', 'YW\u0015dl'), // Ctrl+U inside the body
+        `${ARMOR}\u0003`, // Ctrl+C after the footer
+        ARMOR_WITH_BLANK_LINE,
+        `echo hi\n${ARMOR}`, // text before the header
+        'armored-blob',
+        '',
+      ];
+      for (const text of hostile) {
+        await expect(service2.decryptWithIdentity(text, '/tmp/identity.txt', noopCallbacks())).rejects.toThrow(
+          /valid ASCII-armored age ciphertext/
+        );
+        await expect(service2.unwrapVaultKey(text, '/tmp/identity.txt', noopCallbacks())).rejects.toThrow(
+          /valid ASCII-armored age ciphertext/
+        );
+      }
+      expect(mockRunAgeCommandViaPty).not.toHaveBeenCalled();
+      expect(mockCreateChannel).not.toHaveBeenCalled();
     });
 
-    it('rejects a flag-like identity file path before ever creating a FIFO or spawning (argument-injection guard)', async () => {
+    it('still cleans up the channel when the pty run rejects (e.g. mismatched identity)', async () => {
+      const channel = fakeChannel(Buffer.alloc(0));
+      mockRunAgeCommandViaPty.mockRejectedValue(new Error('age: error: no identity matched any of the recipients'));
+
       const service2 = new TeamVaultCryptoService();
       await expect(
-        service2.unwrapVaultKey('wrapped-blob', '--output=/etc/passwd', noopCallbacks())
+        service2.decryptWithIdentity(ARMOR, '/tmp/identity.txt', noopCallbacks())
+      ).rejects.toThrow('no identity matched');
+      expect(channel.dispose).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects a flag-like identity file path before ever creating a channel or spawning (argument-injection guard)', async () => {
+      const service2 = new TeamVaultCryptoService();
+      await expect(
+        service2.decryptWithIdentity(ARMOR, '--output=/etc/passwd', noopCallbacks())
       ).rejects.toThrow('Invalid identity file path');
-      expect(mockCreateFifo).not.toHaveBeenCalled();
+      expect(mockCreateChannel).not.toHaveBeenCalled();
       expect(mockRunAgeCommandViaPty).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('unwrapVaultKey (pty + secret output channel, mocked)', () => {
+    function fakeChannel(bytes: Buffer = Buffer.from('raw-vault-key-bytes')) {
+      const channel = {
+        path: '/tmp/fake.fifo',
+        read: vi.fn(() => Promise.resolve(bytes)),
+        dispose: vi.fn().mockResolvedValue(undefined),
+      };
+      mockCreateChannel.mockResolvedValue(channel);
+      return channel;
+    }
+
+    beforeEach(() => {
+      mockRunAgeCommandViaPty.mockReset();
+      mockCreateChannel.mockReset();
+    });
+
+    it('creates the channel, decrypts via the pty with -o <channel>, reads the result from it, and cleans up', async () => {
+      const channel = fakeChannel();
+      mockRunAgeCommandViaPty.mockResolvedValue('# some human-readable status text\n');
+
+      const callbacks = noopCallbacks();
+      const service2 = new TeamVaultCryptoService();
+      const result = await service2.unwrapVaultKey(ARMOR, '/tmp/identity.txt', callbacks);
+
+      expect(result.toString('utf8')).toBe('raw-vault-key-bytes');
+      expect(mockCreateChannel).toHaveBeenCalledTimes(1);
+      expect(mockRunAgeCommandViaPty).toHaveBeenCalledTimes(1);
+      const [binary, args, , cbArg, , stdinArg] = mockRunAgeCommandViaPty.mock.calls[0];
+      expect(binary).toMatch(/age(\.exe)?$/);
+      expect(cbArg).toBe(callbacks);
+      if (process.platform === 'win32') {
+        // A ConPTY has no Ctrl-D EOF: the (non-secret) ciphertext goes in as a file argument.
+        expect(args.slice(0, 5)).toEqual(['-d', '-i', '/tmp/identity.txt', '-o', '/tmp/fake.fifo']);
+        expect(args).toHaveLength(6);
+        expect(stdinArg).toBeUndefined();
+        expect(fs.existsSync(args[5])).toBe(false);
+      } else {
+        expect(args).toEqual(['-d', '-i', '/tmp/identity.txt', '-o', '/tmp/fake.fifo']);
+        expect(stdinArg).toBe(ARMOR);
+      }
+      expect(channel.dispose).toHaveBeenCalledTimes(1);
+    });
+
+    it('still cleans up the channel when the pty run rejects', async () => {
+      const channel = fakeChannel(Buffer.alloc(0));
+      mockRunAgeCommandViaPty.mockRejectedValue(new Error('age: error: no YubiKey detected'));
+
+      const service2 = new TeamVaultCryptoService();
+      await expect(service2.unwrapVaultKey(ARMOR, '/tmp/identity.txt', noopCallbacks())).rejects.toThrow(
+        'no YubiKey detected'
+      );
+      expect(channel.dispose).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects a flag-like identity file path before ever creating a channel or spawning (argument-injection guard)', async () => {
+      const service2 = new TeamVaultCryptoService();
+      await expect(
+        service2.unwrapVaultKey(ARMOR, '--output=/etc/passwd', noopCallbacks())
+      ).rejects.toThrow('Invalid identity file path');
+      expect(mockCreateChannel).not.toHaveBeenCalled();
+      expect(mockRunAgeCommandViaPty).not.toHaveBeenCalled();
+    });
+
+    it('serializes concurrent unwrapVaultKey calls app-wide (Pkcs11Lock) — two different vaults unlocked at once must never run age-plugin-yubikey concurrently against the same physical card', async () => {
+      fakeChannel();
+      let inFlight = 0;
+      let maxInFlight = 0;
+      mockRunAgeCommandViaPty.mockImplementation(async () => {
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        inFlight -= 1;
+        return '';
+      });
+
+      const service2 = new TeamVaultCryptoService();
+      await Promise.all([
+        service2.unwrapVaultKey(ARMOR_1, '/tmp/identity-1.txt', noopCallbacks()),
+        service2.unwrapVaultKey(ARMOR_2, '/tmp/identity-2.txt', noopCallbacks()),
+      ]);
+
+      expect(maxInFlight).toBe(1);
+      expect(mockRunAgeCommandViaPty).toHaveBeenCalledTimes(2);
     });
   });
 
@@ -340,87 +520,88 @@ describe('TeamVaultCryptoService', () => {
   });
 
   // The recovery identity is a private key — CLAUDE.md forbids writing it to disk, so it reaches
-  // `age` through a real FIFO. These tests use the real createFifo/removeFifo (not the file-level
-  // mocks above) to prove what `fn` receives is a pipe and that nothing is left behind.
-  describe('withRecoveryIdentity (FIFO, never a file on disk)', () => {
+  // `age` on stdin (`-i -`) and the Vault Key comes back on stdout; no pty, FIFO or pipe, which
+  // is also what makes this path work on Windows.
+  describe('unwrapVaultKeyWithRecoveryIdentity (stdin identity, never a file on disk)', () => {
     const CLEAN = '# created: 2026-01-01T00:00:00Z\n# public key: age1fakerecovery\nAGE-SECRET-KEY-1FAKERECOVERYTEXT\n';
 
-    beforeEach(async () => {
-      const actual = await vi.importActual<typeof import('../../src/main/services/AgePtyPinRelay')>(
-        '../../src/main/services/AgePtyPinRelay'
-      );
-      mockCreateFifo.mockReset().mockImplementation(actual.createFifo);
-      mockRemoveFifo.mockReset().mockImplementation(actual.removeFifo);
-      mockReadFifoOnce.mockReset().mockImplementation(actual.readFifoOnce);
-      // The real createFifo shells out to `mkfifo` via execFile, which this file mocks globally.
-      const realChildProcess = await vi.importActual<typeof import('node:child_process')>('node:child_process');
-      mockExecFile.mockReset().mockImplementation(realChildProcess.execFile as any);
+    beforeEach(() => {
+      mockExecFile.mockReset();
     });
 
-    it('hands fn a FIFO (not a regular file) carrying the stanza, and removes it afterwards', async () => {
-      const service2 = new TeamVaultCryptoService();
-      let seenPath = '';
-      const read = await service2.withRecoveryIdentity(CLEAN, async (p) => {
-        seenPath = p;
-        expect(fs.statSync(p).isFIFO()).toBe(true);
-        return (await mockReadFifoOnce(p)).toString('utf8');
+    function fakeAge(stdout: Buffer) {
+      const stdinEnd = vi.fn();
+      mockExecFile.mockImplementation((_bin: string, _args: string[], _opts: unknown, cb: (...a: unknown[]) => void) => {
+        queueMicrotask(() => cb(null, stdout, Buffer.alloc(0)));
+        return { stdin: { end: stdinEnd } };
       });
-      expect(read).toBe(CLEAN);
-      expect(fs.existsSync(seenPath)).toBe(false);
+      return stdinEnd;
+    }
+
+    it('feeds only the stanza on stdin, passes the ciphertext as a temp file, and removes that file', async () => {
+      const stdinEnd = fakeAge(Buffer.from('vault-key'));
+      const service2 = new TeamVaultCryptoService();
+      const result = await service2.unwrapVaultKeyWithRecoveryIdentity(ARMOR, CLEAN);
+
+      expect(result.toString('utf8')).toBe('vault-key');
+      const [, args] = mockExecFile.mock.calls[0];
+      expect(args.slice(0, 3)).toEqual(['-d', '-i', '-']);
+      expect(args).toHaveLength(4);
+      expect(fs.existsSync(args[3])).toBe(false);
+      expect(stdinEnd.mock.calls[0][0].toString('utf8')).toBe(CLEAN);
     });
 
     it('tolerates surrounding chat/email quoting, passing only the real stanza', async () => {
+      const stdinEnd = fakeAge(Buffer.from('vault-key'));
       const service2 = new TeamVaultCryptoService();
       const pasted = `Hey, here is the recovery key we printed:\n\n${CLEAN}\n-- sent from my phone`;
-      const read = await service2.withRecoveryIdentity(pasted, async (p) => (await mockReadFifoOnce(p)).toString('utf8'));
-      expect(read).toBe(CLEAN);
+      await service2.unwrapVaultKeyWithRecoveryIdentity(ARMOR, pasted);
+      expect(stdinEnd.mock.calls[0][0].toString('utf8')).toBe(CLEAN);
     });
 
-    it('rejects text with no recognizable AGE-SECRET-KEY-1... line without calling fn', async () => {
+    it('rejects text with no recognizable AGE-SECRET-KEY-1... line without spawning age', async () => {
       const service2 = new TeamVaultCryptoService();
-      const fn = vi.fn();
-      await expect(service2.withRecoveryIdentity('not a key at all', fn)).rejects.toThrow(
+      await expect(service2.unwrapVaultKeyWithRecoveryIdentity(ARMOR, 'not a key at all')).rejects.toThrow(
         'does not look like a Team Vault recovery key'
       );
-      expect(fn).not.toHaveBeenCalled();
-      expect(mockCreateFifo).not.toHaveBeenCalled();
+      expect(mockExecFile).not.toHaveBeenCalled();
     });
 
-    it('does not hang and still cleans up when fn fails before ever reading the FIFO', async () => {
+    it('removes the temp ciphertext file even when age fails', async () => {
+      let seen = '';
+      mockExecFile.mockImplementation((_bin: string, args: string[], _opts: unknown, cb: (...a: unknown[]) => void) => {
+        seen = args[3];
+        queueMicrotask(() =>
+          cb(new Error('exit 1'), Buffer.alloc(0), Buffer.from('age: error: no identity matched any of the recipients'))
+        );
+        return { stdin: { end: vi.fn() } };
+      });
       const service2 = new TeamVaultCryptoService();
-      let seenPath = '';
-      await expect(
-        service2.withRecoveryIdentity(CLEAN, async (p) => {
-          seenPath = p;
-          throw new Error('age failed before opening its identity');
-        })
-      ).rejects.toThrow('age failed before opening its identity');
-      expect(fs.existsSync(seenPath)).toBe(false);
+      await expect(service2.unwrapVaultKeyWithRecoveryIdentity(ARMOR, CLEAN)).rejects.toThrow('no identity matched');
+      expect(fs.existsSync(seen)).toBe(false);
     });
 
-    const realAge = [path.join(process.cwd(), 'build-resources', 'age', 'linux'), ''].map((dir) => ({
-      age: dir ? path.join(dir, 'age') : 'age',
-      keygen: dir ? path.join(dir, 'age-keygen') : 'age-keygen',
-    })).find((b) => !spawnSync(b.age, ['--version'], { stdio: 'ignore' }).error && !spawnSync(b.keygen, ['--version'], { stdio: 'ignore' }).error);
+    const platformDir = process.platform === 'win32' ? 'win' : 'linux';
+    const exe = (n: string) => (process.platform === 'win32' ? `${n}.exe` : n);
+    const realAge = [path.join(process.cwd(), 'build-resources', 'age', platformDir), '']
+      .map((dir) => ({
+        age: dir ? path.join(dir, exe('age')) : 'age',
+        keygen: dir ? path.join(dir, exe('age-keygen')) : 'age-keygen',
+      }))
+      .find((b) => !spawnSync(b.age, ['--version'], { stdio: 'ignore' }).error && !spawnSync(b.keygen, ['--version'], { stdio: 'ignore' }).error);
 
-    it.skipIf(!realAge)('real `age -d -i <fifo>` decrypts with a recovery identity fed through it', async () => {
-      const { spawn } = await vi.importActual<typeof import('node:child_process')>('node:child_process');
+    it.skipIf(!realAge)('real `age -d -i -` recovers the Vault Key with a pasted recovery identity', async () => {
       const identity = spawnSync(realAge!.keygen, [], { encoding: 'utf8' }).stdout;
       const recipient = identity.match(/# public key: (age1\S+)/)![1];
-      const ciphertext = spawnSync(realAge!.age, ['-r', recipient, '-a'], { input: 'vault-key-bytes' }).stdout;
+      const ciphertext = spawnSync(realAge!.age, ['-r', recipient, '-a'], { input: 'vault-key-bytes', encoding: 'utf8' }).stdout;
+
+      const realChildProcess = await vi.importActual<typeof import('node:child_process')>('node:child_process');
+      mockExecFile.mockReset().mockImplementation(((_bin: string, args: string[], opts: unknown, cb: unknown) =>
+        (realChildProcess.execFile as any)(realAge!.age, args, opts, cb)) as any);
 
       const service2 = new TeamVaultCryptoService();
-      const plaintext = await service2.withRecoveryIdentity(`pasted:\n${identity}\nthanks`, (p) =>
-        new Promise<string>((resolve, reject) => {
-          const child = spawn(realAge!.age, ['-d', '-i', p]);
-          let out = '';
-          child.stdout.on('data', (d) => (out += d));
-          child.on('error', reject);
-          child.on('close', (code) => (code === 0 ? resolve(out) : reject(new Error(`age exited ${code}`))));
-          child.stdin.end(ciphertext);
-        })
-      );
-      expect(plaintext).toBe('vault-key-bytes');
+      const plaintext = await service2.unwrapVaultKeyWithRecoveryIdentity(ciphertext, `pasted:\n${identity}\nthanks`);
+      expect(plaintext.toString('utf8')).toBe('vault-key-bytes');
     });
   });
 
@@ -491,6 +672,71 @@ describe('TeamVaultCryptoService', () => {
       const reversed = svc.computeAccessHeaderMac(key, 'vlt_1', 1, '', [second, accessHeader[0]], recovery);
       expect(forward).toBe(reversed);
     });
+
+    it('changes if vaultDescription differs, and defaults to the empty string when omitted', () => {
+      const svc = new TeamVaultCryptoService();
+      const key = Buffer.alloc(32, 1);
+      const withoutDescription = svc.computeAccessHeaderMac(key, 'vlt_1', 1, '', accessHeader, recovery);
+      const withEmptyDescription = svc.computeAccessHeaderMac(key, 'vlt_1', 1, '', accessHeader, recovery, '');
+      const withDescription = svc.computeAccessHeaderMac(key, 'vlt_1', 1, '', accessHeader, recovery, 'Acme Infra team');
+      expect(withoutDescription).toBe(withEmptyDescription);
+      expect(withDescription).not.toBe(withoutDescription);
+    });
+
+    it('reproduces the exact pre-vaultDescription MAC (golden value) for a vault with no description, so every vault written before this field existed keeps unlocking', () => {
+      // Regression pin: an earlier version of this canonicalization always appended a
+      // `\u0002${vaultDescription}` segment, even when empty — which changed the canonical bytes
+      // (and therefore the MAC) for every vault that predates the `vaultDescription` field,
+      // breaking unlock with TeamVaultHeaderIntegrityError on real installs the moment it shipped.
+      // This golden value was computed once against the fixed (backward-compatible) 3-field
+      // header line and must never change for a description-less vault.
+      const svc = new TeamVaultCryptoService();
+      const key = Buffer.alloc(32, 7);
+      const entry = [
+        {
+          recipientId: 'alice@piv:abc',
+          role: 'admin' as const,
+          method: 'piv-rsa-oaep' as const,
+          ageRecipient: 'age1yubikey1alice',
+          wrappedVaultKey: 'wrapped-alice',
+          addedAt: '2026-01-01T00:00:00Z',
+          addedBy: 'alice@piv:abc',
+        },
+      ];
+      const goldenRecovery = {
+        recipientId: 'recovery-key-1',
+        ageRecipient: 'age1fakerecovery',
+        wrappedVaultKey: 'wrapped-recovery',
+      };
+      const mac = svc.computeAccessHeaderMac(key, 'vlt_golden', 1, 'Golden Team', entry, goldenRecovery);
+      expect(mac).toBe('uQ8waktnAlCZTy3zVUd8AZuBWXyqv7e6LuHJ+vUr3gw='); // pragma: allowlist secret
+    });
+
+    it('throws rather than silently computing an ambiguous MAC when a field contains a canonicalization delimiter — defense in depth, even though every known caller already rejects these at its own input boundary', () => {
+      const svc = new TeamVaultCryptoService();
+      const key = Buffer.alloc(32, 1);
+      // vaultName "Foo\u0002Bar" with no description would otherwise canonicalize identically to
+      // vaultName "Foo" with description "Bar" — the exact collision this check closes.
+      expect(() => svc.computeAccessHeaderMac(key, 'vlt_1', 1, 'Foo\u0002Bar', accessHeader, recovery)).toThrow(
+        /reserved control character/
+      );
+      expect(() =>
+        svc.computeAccessHeaderMac(key, 'vlt_1', 1, '', accessHeader, recovery, 'desc\u0003injected')
+      ).toThrow(/reserved control character/);
+      expect(() =>
+        svc.computeAccessHeaderMac(
+          key,
+          'vlt_1',
+          1,
+          '',
+          [{ ...accessHeader[0], recipientId: 'alice\u0001evil' }],
+          recovery
+        )
+      ).toThrow(/reserved control character/);
+      expect(() =>
+        svc.computeAccessHeaderMac(key, 'vlt_1', 1, '', accessHeader, { ...recovery, recipientId: 'r\u0002x' })
+      ).toThrow(/reserved control character/);
+    });
   });
 
   describe('computeRotationProof', () => {
@@ -554,5 +800,143 @@ describe('TeamVaultCryptoService', () => {
       const forgedProof = svc.computeRotationProof(attackerGeneratedKey, 'vlt_1', 2, '', accessHeader, recovery);
       expect(forgedProof).not.toBe(realProof);
     });
+  });
+});
+
+describe('format v2: computeFileMac / computeFileRotationProof', () => {
+  const svc = new TeamVaultCryptoService();
+  const key = Buffer.alloc(32, 9);
+  const oldKey = Buffer.alloc(32, 3);
+
+  const v2File = (over: Partial<TeamVaultMacInput> = {}): TeamVaultMacInput => ({
+    formatVersion: 2,
+    vaultId: 'vlt_1',
+    vaultName: 'Acme',
+    vaultDescription: 'Acme infra',
+    revision: 5,
+    updatedAt: '2026-11-04T10:00:00.000Z',
+    updatedBy: 'alice@piv:abc',
+    accessHeader: [
+      {
+        recipientId: 'alice@piv:abc',
+        role: 'admin',
+        method: 'piv-rsa-oaep',
+        ageRecipient: 'age1yubikey1alice',
+        wrappedVaultKey: 'wrapped-alice',
+        addedAt: '2026-01-01T00:00:00Z',
+        addedBy: 'alice@piv:abc',
+      },
+    ],
+    recovery: { recipientId: 'recovery-key-1', ageRecipient: 'age1recovery', wrappedVaultKey: 'wrapped-recovery', note: 'in the safe' },
+    encryptedPayload: 'cGF5bG9hZC1vbmU=',
+    ...over,
+  });
+
+  it('is deterministic, and ignores the two tags it produces', () => {
+    const base = v2File();
+    expect(svc.computeFileMac(key, base)).toBe(svc.computeFileMac(key, v2File()));
+    // The tags are not part of the input type, but a whole file passed in (as the service does) must give the same MAC.
+    expect(svc.computeFileMac(key, { ...base, accessHeaderMac: 'x', prevKeyProof: 'y' } as TeamVaultMacInput)).toBe(svc.computeFileMac(key, base));
+  });
+
+  // Cross-checked against an independent implementation (HKDF-SHA256 + HMAC-SHA256 written separately), not just this code.
+  it('pins the v2 MAC so the canonicalization cannot change by accident', () => {
+    expect(svc.computeFileMac(key, v2File())).toBe('3DAi/EdOEVbZxC0sDxV+yQwGw/BTUbegWQdopqU+VNU='); // pragma: allowlist secret
+  });
+
+  // M1 (code review 2026-11-03): the header MAC did not cover the payload, so an older payload could be placed under a
+  // current header. In v2 any change of the ciphertext changes the MAC.
+  it('changes when the payload ciphertext changes (the M1 splice)', () => {
+    expect(svc.computeFileMac(key, v2File({ encryptedPayload: 'b2xkZXItcGF5bG9hZA==' }))).not.toBe(svc.computeFileMac(key, v2File()));
+  });
+
+  // Every field classified 'mac' must really be covered: a compile error if a field is added without a mutator here.
+  const mutators: Record<Exclude<keyof typeof TEAM_VAULT_FILE_FIELD_COVERAGE, 'accessHeaderMac' | 'prevKeyProof'>, (f: TeamVaultMacInput) => TeamVaultMacInput> = {
+    formatVersion: (f) => ({ ...f, formatVersion: 1 }),
+    vaultId: (f) => ({ ...f, vaultId: 'vlt_2' }),
+    vaultName: (f) => ({ ...f, vaultName: 'Other' }),
+    vaultDescription: (f) => ({ ...f, vaultDescription: 'Other description' }),
+    revision: (f) => ({ ...f, revision: f.revision + 1 }),
+    updatedAt: (f) => ({ ...f, updatedAt: '2026-11-04T11:00:00.000Z' }),
+    updatedBy: (f) => ({ ...f, updatedBy: 'mallory' }),
+    accessHeader: (f) => ({ ...f, accessHeader: [{ ...f.accessHeader[0], role: 'member' }] }),
+    recovery: (f) => ({ ...f, recovery: { ...f.recovery, note: 'tampered note' } }),
+    encryptedPayload: (f) => ({ ...f, encryptedPayload: 'dGFtcGVyZWQ=' }),
+  };
+
+  it('covers every field the coverage table marks as authenticated', () => {
+    const base = svc.computeFileMac(key, v2File());
+    const covered = Object.entries(TEAM_VAULT_FILE_FIELD_COVERAGE).filter(([, c]) => c === 'mac').map(([field]) => field);
+    expect(covered.sort()).toEqual(Object.keys(mutators).sort());
+    for (const [field, mutate] of Object.entries(mutators)) {
+      expect(svc.computeFileMac(key, mutate(v2File())), `changing ${field} must change the MAC`).not.toBe(base);
+    }
+  });
+
+  it('keeps the two tags out of the authenticated set', () => {
+    expect(TEAM_VAULT_FILE_FIELD_COVERAGE.accessHeaderMac).toBe('unauthenticated');
+    expect(TEAM_VAULT_FILE_FIELD_COVERAGE.prevKeyProof).toBe('unauthenticated');
+  });
+
+  it('keeps v1 exactly as it was, and a v1 MAC can never verify as a v2 MAC (or the other way round)', () => {
+    const v1 = v2File({ formatVersion: 1 });
+    expect(svc.computeFileMac(key, v1)).toBe(
+      svc.computeAccessHeaderMac(key, v1.vaultId, v1.revision, v1.vaultName ?? '', v1.accessHeader, v1.recovery, v1.vaultDescription ?? '')
+    );
+    expect(svc.computeFileMac(key, v1)).not.toBe(svc.computeFileMac(key, v2File()));
+  });
+
+  it('refuses a format it does not know', () => {
+    expect(() => svc.computeFileMac(key, v2File({ formatVersion: 3 as never }))).toThrow(/Unsupported Team Vault format version 3/);
+  });
+
+  it('throws instead of computing an ambiguous MAC when a field contains a canonicalization delimiter', () => {
+    expect(() => svc.computeFileMac(key, v2File({ updatedBy: 'a\u0002b' }))).toThrow(/updatedBy/);
+    expect(() => svc.computeFileMac(key, v2File({ recovery: { ...v2File().recovery, note: 'n\u0003x' } }))).toThrow(/recovery.note/);
+  });
+
+  it('rotation proof: keyed from the old key, covers the new payload, and is never equal to the file MAC', () => {
+    const file = v2File();
+    const proof = svc.computeFileRotationProof(oldKey, file);
+    expect(proof).toBe(svc.computeFileRotationProof(oldKey, v2File()));
+    expect(svc.computeFileRotationProof(oldKey, v2File({ encryptedPayload: 'dGFtcGVyZWQ=' }))).not.toBe(proof);
+    expect(svc.computeFileRotationProof(Buffer.alloc(32, 4), file)).not.toBe(proof);
+    expect(svc.computeFileMac(oldKey, file)).not.toBe(proof);
+    const v1 = v2File({ formatVersion: 1 });
+    expect(svc.computeFileRotationProof(oldKey, v1)).toBe(
+      svc.computeRotationProof(oldKey, v1.vaultId, v1.revision, v1.vaultName ?? '', v1.accessHeader, v1.recovery, v1.vaultDescription ?? '')
+    );
+  });
+
+  it('payloadDigest is SHA-256 of the ciphertext string, base64', () => {
+    expect(payloadDigest('abc')).toBe('ungWv48Bz+pBQUDeXa4iI7ADYaOWF3qctBD/YfIAFa0='); // pragma: allowlist secret
+  });
+});
+
+describe('normalizeAsciiArmoredAge', () => {
+  it('accepts one armored file, with LF or CRLF lines, and returns it with a single final newline', () => {
+    const multi = `-----BEGIN AGE ENCRYPTED FILE-----\nQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=\nYWJj\n-----END AGE ENCRYPTED FILE-----`;
+    expect(normalizeAsciiArmoredAge(multi)).toBe(`${multi}\n`);
+    expect(normalizeAsciiArmoredAge(`${multi}\n`)).toBe(`${multi}\n`);
+    expect(normalizeAsciiArmoredAge(multi.replace(/\n/g, '\r\n'))).toBe(`${multi}\n`);
+  });
+
+  it('drops surrounding whitespace that a paste or an edit leaves behind, and returns what it validated', () => {
+    expect(normalizeAsciiArmoredAge(`\n\n  ${ARMOR}  \n\n`)).toBe(ARMOR);
+  });
+
+  it('trims only ASCII whitespace: a BOM, NBSP or U+2028 around the armor is not "blank"', () => {
+    for (const edge of ['\uFEFF', '\u00A0', '\u2028', '\u000B']) {
+      expect(() => normalizeAsciiArmoredAge(`${edge}${ARMOR}`)).toThrow();
+      expect(() => normalizeAsciiArmoredAge(`${ARMOR.trimEnd()}${edge}`)).toThrow();
+    }
+  });
+
+  it('rejects an empty body, a bare carriage return, text around the file and a non-string', () => {
+    expect(() => normalizeAsciiArmoredAge('-----BEGIN AGE ENCRYPTED FILE-----\n-----END AGE ENCRYPTED FILE-----\n')).toThrow();
+    expect(() => normalizeAsciiArmoredAge(ARMOR_WITH_BARE_CR)).toThrow();
+    expect(() => normalizeAsciiArmoredAge(`x ${ARMOR}`)).toThrow();
+    expect(() => normalizeAsciiArmoredAge(`${ARMOR}x`)).toThrow();
+    expect(() => normalizeAsciiArmoredAge(undefined as unknown as string)).toThrow();
   });
 });

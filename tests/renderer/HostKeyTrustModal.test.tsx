@@ -69,7 +69,7 @@ describe('HostKeyTrustModal Component', () => {
     });
 
     expect(screen.getByText('Host Key Changed!')).toBeInTheDocument();
-    expect(screen.getByTestId('hostkey-trust-accept')).toHaveTextContent('Trust Anyway');
+    expect(screen.getByTestId('hostkey-trust-accept')).toHaveTextContent('Replace Key');
   });
 
   it('accepting calls respondHostKeyPrompt with trust=true and closes the modal', async () => {
@@ -144,6 +144,37 @@ describe('HostKeyTrustModal Component', () => {
 
     fireEvent.keyDown(document.body, { key: 'Escape', code: 'Escape' });
     expect(mockRespond).toHaveBeenCalledWith('hk-6', false);
+  });
+
+  // The safe action keeps the default focus even while focus was in a terminal, and Tab never reaches the
+  // page behind the prompt.
+  it('takes focus from the element that had it, defaults to Cancel and keeps Tab inside the dialog', () => {
+    const terminal = document.createElement('textarea');
+    document.body.appendChild(terminal);
+    terminal.focus();
+    render(<HostKeyTrustModal />);
+
+    act(() => {
+      promptCallback!({
+        id: 'hk-7',
+        host: 'focus.example.com',
+        port: 22,
+        keyType: 'ssh-ed25519',
+        fingerprint: 'SHA256:fff000',
+        status: 'mismatch',
+      });
+    });
+
+    const cancel = screen.getByTestId('hostkey-trust-cancel');
+    const accept = screen.getByTestId('hostkey-trust-accept');
+    expect(cancel).toHaveFocus();
+
+    accept.focus();
+    fireEvent.keyDown(accept, { key: 'Tab' });
+    expect(cancel).toHaveFocus();
+    fireEvent.keyDown(cancel, { key: 'Tab', shiftKey: true });
+    expect(accept).toHaveFocus();
+    terminal.remove();
   });
 
   it('cleans up host key prompt listener on unmount', () => {

@@ -4,8 +4,10 @@ import { AlertTriangle, Copy, Pencil, Trash2 } from 'lucide-react';
 import type { SSHConnectionConfig } from '@shared/types/ssh';
 import type { S3Config } from '@shared/types/storage';
 import { SftpButton } from '../SftpButton';
-import { ProfileRowMenu } from './ProfileRowMenu';
-import type { EditingState } from './types';
+import { OverflowMenu } from '../ui/OverflowMenu';
+import { TagChips } from '../ui/TagChips';
+import { ProfileRowCheckbox } from './ProfileRowCheckbox';
+import type { EditingState, RowSelect } from './types';
 
 interface TeamSshProfileRowProps {
   profile: SSHConnectionConfig;
@@ -14,6 +16,8 @@ interface TeamSshProfileRowProps {
   handleCloneSSH: (profile: SSHConnectionConfig) => Promise<void> | void;
   handleDeleteSSH: (id: string, name: string) => Promise<void> | void;
   setEditing: Dispatch<SetStateAction<EditingState | null>>;
+  /** Set by a list that supports selecting several profiles. */
+  select?: RowSelect;
 }
 
 /**
@@ -31,6 +35,7 @@ export const TeamSshProfileRow: React.FC<TeamSshProfileRowProps> = ({
   handleCloneSSH,
   handleDeleteSSH,
   setEditing,
+  select,
 }) => (
   <div className="flex flex-col gap-1">
     <div
@@ -39,10 +44,14 @@ export const TeamSshProfileRow: React.FC<TeamSshProfileRowProps> = ({
         e.dataTransfer.setData('text/plain', JSON.stringify({ type: 'ssh', id: profile.id }));
         e.dataTransfer.effectAllowed = 'move';
       }}
-      className="flex items-center justify-between gap-2 rounded-lg border border-border-subtle bg-app-surface px-3 py-1.5 hover:border-border-strong transition-colors"
+      className="group flex items-center justify-between gap-2 rounded-lg border border-border-subtle bg-app-surface px-3 py-1.5 hover:border-border-strong transition-colors"
     >
-      <div className="min-w-0">
-        <span className="truncate text-sm font-medium text-txt-primary">{profile.name}</span>
+      {select && <ProfileRowCheckbox name={profile.name} select={select} />}
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <span className="truncate text-sm font-medium text-txt-primary">{profile.name}</span>
+          <TagChips tags={profile.tags} />
+        </div>
         <div className="truncate text-xs text-txt-muted">
           {profile.username}@{profile.host}:{profile.port ?? 22} · {profile.authType}
         </div>
@@ -60,14 +69,15 @@ export const TeamSshProfileRow: React.FC<TeamSshProfileRowProps> = ({
         )}
         {onConnectSFTP && <SftpButton authType={profile.authType} onOpen={() => onConnectSFTP(profile)} />}
         <button
+          aria-label="Edit profile"
           type="button"
-          title="Edit Profile"
+          title="Edit profile"
           onClick={() => setEditing({ type: 'ssh', config: profile })}
           className="rounded-lg p-1.5 text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
         >
           <Pencil className="h-3.5 w-3.5" />
         </button>
-        <ProfileRowMenu
+        <OverflowMenu
           items={[
             { label: 'Duplicate profile', icon: <Copy className="h-3.5 w-3.5" />, onSelect: () => void handleCloneSSH(profile) },
             {
@@ -96,6 +106,8 @@ interface TeamS3ProfileRowProps {
   handleCloneS3: (profile: S3Config) => Promise<void> | void;
   handleDeleteS3: (id: string, name: string) => Promise<void> | void;
   setEditing: Dispatch<SetStateAction<EditingState | null>>;
+  /** Set by a list that supports selecting several profiles. */
+  select?: RowSelect;
 }
 
 export const TeamS3ProfileRow: React.FC<TeamS3ProfileRowProps> = ({
@@ -104,6 +116,7 @@ export const TeamS3ProfileRow: React.FC<TeamS3ProfileRowProps> = ({
   handleCloneS3,
   handleDeleteS3,
   setEditing,
+  select,
 }) => (
   <div
     draggable
@@ -111,10 +124,14 @@ export const TeamS3ProfileRow: React.FC<TeamS3ProfileRowProps> = ({
       e.dataTransfer.setData('text/plain', JSON.stringify({ type: 's3', id: profile.id }));
       e.dataTransfer.effectAllowed = 'move';
     }}
-    className="flex items-center justify-between gap-2 rounded-lg border border-border-subtle bg-app-surface px-3 py-1.5 hover:border-border-strong transition-colors"
+    className="group flex items-center justify-between gap-2 rounded-lg border border-border-subtle bg-app-surface px-3 py-1.5 hover:border-border-strong transition-colors"
   >
-    <div className="min-w-0">
-      <span className="truncate text-sm font-medium text-txt-primary">{profile.name}</span>
+    {select && <ProfileRowCheckbox name={profile.name} select={select} />}
+    <div className="min-w-0 flex-1">
+      <div className="flex items-center gap-2">
+        <span className="truncate text-sm font-medium text-txt-primary">{profile.name}</span>
+        <TagChips tags={profile.tags} />
+      </div>
       <div className="truncate text-xs text-txt-muted">
         {profile.endpoint || 'AWS S3'} · {profile.region}
       </div>
@@ -130,14 +147,15 @@ export const TeamS3ProfileRow: React.FC<TeamS3ProfileRowProps> = ({
         </button>
       )}
       <button
+        aria-label="Edit profile"
         type="button"
-        title="Edit Profile"
+        title="Edit profile"
         onClick={() => setEditing({ type: 's3', config: profile })}
         className="rounded-lg p-1.5 text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
       >
         <Pencil className="h-3.5 w-3.5" />
       </button>
-      <ProfileRowMenu
+      <OverflowMenu
         items={[
           { label: 'Duplicate profile', icon: <Copy className="h-3.5 w-3.5" />, onSelect: () => void handleCloneS3(profile) },
           {

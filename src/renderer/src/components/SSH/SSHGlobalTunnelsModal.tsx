@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState, useRef } from 'react';
 import {
   ArrowRight,
   Cable,
@@ -17,6 +17,7 @@ import { formatDateTime, describeIpcError } from '../../lib/format';
 import { SSHTunnelWizard } from './SSHTunnelWizard';
 import { useConfirm } from '../ConfirmDialog';
 import { useEscapeToClose } from '../../lib/useModalDismiss';
+import { useDialogFocus } from '../../lib/useDialogFocus';
 
 interface SSHGlobalTunnelsModalProps {
   open: boolean;
@@ -119,11 +120,14 @@ export const SSHGlobalTunnelsModal: React.FC<SSHGlobalTunnelsModalProps> = ({ op
   };
 
   useEscapeToClose(onClose, open, !wizardTarget);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(dialogRef, open);
 
   if (!open) return null;
 
   return (
     <div
+      ref={dialogRef}
       role="dialog"
       aria-modal="true"
       aria-label="All SSH tunnels"
@@ -141,7 +145,9 @@ export const SSHGlobalTunnelsModal: React.FC<SSHGlobalTunnelsModalProps> = ({ op
               <p className="text-xs text-txt-muted">All connections</p>
             </div>
           </div>
-          <button aria-label="Close" title="Close"
+          <button
+            aria-label="Close"
+            title="Close"
             type="button"
             onClick={onClose}
             className="rounded-lg p-1.5 text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
@@ -153,7 +159,7 @@ export const SSHGlobalTunnelsModal: React.FC<SSHGlobalTunnelsModalProps> = ({ op
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-5 space-y-5">
           {error && (
-            <div className="rounded-lg border border-red-900/60 bg-red-950/40 p-2.5 text-xs text-red-300 flex items-center gap-2">
+            <div role="alert" className="rounded-lg border border-red-900/60 bg-red-950/40 p-2.5 text-xs text-red-300 flex items-center gap-2">
               <XCircle className="h-4 w-4 shrink-0" />
               <span>{error}</span>
             </div>
@@ -186,6 +192,7 @@ export const SSHGlobalTunnelsModal: React.FC<SSHGlobalTunnelsModalProps> = ({ op
           {!loading && !wizardConnection && (
             <div className="flex items-center gap-2 rounded-xl border border-border-subtle bg-app-surface p-3">
               <select
+                aria-label="Connection for the new tunnel"
                 value={newTunnelConnectionId}
                 onChange={(e) => setNewTunnelConnectionId(e.target.value)}
                 className="flex-1 rounded-lg border border-border-subtle bg-app-surface-subtle px-2.5 py-1.5 text-sm text-txt-primary focus:border-sky-500/50 focus:outline-none"
@@ -258,6 +265,7 @@ export const SSHGlobalTunnelsModal: React.FC<SSHGlobalTunnelsModalProps> = ({ op
                             </div>
                             <div className="flex items-center gap-2">
                               <button
+                                aria-label="Edit tunnel"
                                 type="button"
                                 title="Edit tunnel"
                                 onClick={() => setWizardTarget({ connectionId: profile.id, tunnelId: tunnel.id })}

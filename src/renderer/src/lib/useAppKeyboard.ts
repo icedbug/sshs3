@@ -4,11 +4,13 @@ import type { TabType } from '../components/TabBar';
 import { FILEMANAGER_FOCUS_SIDE_EVENT } from '../components/FileManager/types';
 import { DEFAULT_SETTINGS, DEFAULT_SHORTCUTS, type AppSettings } from '@shared/types/settings';
 import type { PaneOrientation } from '@shared/types/session';
-import type { AppTab } from './tabs';
+import { tabForNumber, type AppTab } from './tabs';
 import { collectLeafIds } from './paneTree';
 import { comboFromKeyboardEvent } from './shortcuts';
+import { isGlobalActionId, runGlobalAction } from './globalActions';
 import { OPEN_CLIPBOARD_HISTORY_EVENT } from './clipboardHistoryEvents';
 import { dispatchTerminalAction } from './terminalActionEvents';
+import { openTabMenuFor } from './tabMenuEvents';
 import {
   findAdjacentPane,
   getTopmostOverlay,
@@ -28,11 +30,18 @@ export interface AppKeyboardContext {
   setSettings: Dispatch<SetStateAction<AppSettings>>;
   setProfilesModalOpen: Dispatch<SetStateAction<boolean>>;
   setSettingsModalOpen: Dispatch<SetStateAction<boolean>>;
+  setGlobalSearchOpen: Dispatch<SetStateAction<boolean>>;
   openTopLevelModal: (open: () => void) => void;
-  handleNewTab: (type?: TabType) => void;
+  handleNewTab: (type?: TabType, options?: { remote?: boolean }) => void;
   handleCloseTab: (id: string) => void;
+  /** Moves a tab (and its running sessions) to a new window. */
+  handleMoveTabToNewWindow: (id: string) => void;
   handleSplitPane: (tabId: string, orientation: PaneOrientation, paneId?: string) => void;
+  handleClosePane: (tabId: string, paneId: string) => void;
+  handleToggleZoom: (tabId: string, paneId?: string) => void;
   handleSelectPane: (tabId: string, paneId: string) => void;
+  /** Opens Settings on the keyboard shortcuts overview. */
+  openShortcutsHelp: () => void;
   focusActiveTabContent: () => void;
 }
 
@@ -52,16 +61,30 @@ export function useAppKeyboard(ctx: AppKeyboardContext): void {
     setSettings,
     setProfilesModalOpen,
     setSettingsModalOpen,
+    setGlobalSearchOpen,
     openTopLevelModal,
     handleNewTab,
     handleCloseTab,
+    handleMoveTabToNewWindow,
     handleSplitPane,
+    handleClosePane,
+    handleToggleZoom,
     handleSelectPane,
+    openShortcutsHelp,
     focusActiveTabContent,
   } = ctx;
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // While the Settings shortcut recorder is capturing a new binding, every app-level shortcut
+      // must stay silent — otherwise a combo that matches an existing binding (including the one
+      // being rebound) gets consumed here first (preventDefault+stopPropagation in the capture
+      // phase, before the recorder's own onKeyDown ever runs), so the recorder looks unresponsive
+      // and the matched action fires in the background instead (e.g. closing a tab on Ctrl+W).
+      if (document.querySelector('[data-shortcut-recording="true"]')) {
+        return;
+      }
+
       // If TabBar is focused and user presses Enter or Escape: descend into active tab
       if (tabBarFocused && (e.key === 'Enter' || e.key === 'Escape') && !getTopmostOverlay()) {
         e.preventDefault();
@@ -131,7 +154,7 @@ export function useAppKeyboard(ctx: AppKeyboardContext): void {
         }
       }
 
-      // Quick Connect shortcut Ctrl+K (not Ctrl+Shift+K, which is a separate,
+      // Inline Terminal AI shortcut Ctrl+K (not Ctrl+Shift+K, which is a separate,
       // user-rebindable shortcut — see 'searchInFiles' below).
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'k') {
         const inlineAiBtn = Array.from(
@@ -143,9 +166,6 @@ export function useAppKeyboard(ctx: AppKeyboardContext): void {
           inlineAiBtn.click();
           return;
         }
-        e.preventDefault();
-        openTopLevelModal(() => setProfilesModalOpen(true));
-        return;
       }
 
       const rawCombo = comboFromKeyboardEvent(e);
@@ -167,7 +187,11 @@ export function useAppKeyboard(ctx: AppKeyboardContext): void {
             (normalizedCombo === 'ctrl+-' || normalizedCombo === 'ctrl+shift+-'));
 
         // These only act on the focused terminal; elsewhere the keys must stay free for other uses.
-        const terminalOnly = actionId === 'terminalSearch' || actionId === 'copyLastOutput' || actionId === 'snippets';
+        const terminalOnly =
+          actionId === 'terminalSearch' ||
+          actionId === 'copyLastOutput' ||
+          actionId === 'snippets' ||
+          actionId === 'rerunWithSudo';
         if (
           isMatch &&
           terminalOnly &&
@@ -175,17 +199,24 @@ export function useAppKeyboard(ctx: AppKeyboardContext): void {
         ) {
           continue;
         }
+        // Switched off in Settings: leave the key free instead of swallowing it.
+        if (isMatch && actionId === 'globalSearch' && settings.enableGlobalSearch === false) continue;
 
         if (isMatch) {
           e.preventDefault();
           e.stopPropagation();
+          // The focus-independent actions are shared with the global search (see globalActions.ts).
+          if (isGlobalActionId(actionId)) {
+            runGlobalAction(actionId, {
+              newTab: handleNewTab,
+              openProfiles: () => openTopLevelModal(() => setProfilesModalOpen(true)),
+              openSettings: () => openTopLevelModal(() => setSettingsModalOpen(true)),
+              newWindow: () => void window.multissh.windowNew(),
+              showShortcuts: openShortcutsHelp,
+            });
+            break;
+          }
           switch (actionId) {
-            case 'newTerminal':
-              handleNewTab('terminal');
-              break;
-            case 'newFileManager':
-              handleNewTab('filemanager');
-              break;
             case 'closeTab':
               if (activeTabId) handleCloseTab(activeTabId);
               break;
@@ -207,17 +238,29 @@ export function useAppKeyboard(ctx: AppKeyboardContext): void {
               }
               break;
             }
-            case 'openProfiles':
-              openTopLevelModal(() => setProfilesModalOpen(true));
-              break;
-            case 'openSettings':
-              openTopLevelModal(() => setSettingsModalOpen(true));
+            case 'globalSearch':
+              openTopLevelModal(() => setGlobalSearchOpen(true));
               break;
             case 'splitVertical':
               if (activeTabId) handleSplitPane(activeTabId, 'row');
               break;
             case 'splitHorizontal':
               if (activeTabId) handleSplitPane(activeTabId, 'column');
+              break;
+            case 'closePane':
+            case 'zoomPane': {
+              const activeTab = tabs.find((t) => t.id === activeTabId);
+              if (!activeTab || activeTab.type !== 'terminal' || !activeTab.paneTree) break;
+              if (collectLeafIds(activeTab.paneTree).length < 2) break; // a sole pane has nothing to close or zoom
+              if (actionId === 'zoomPane') handleToggleZoom(activeTab.id, activeTab.activePaneId);
+              else if (activeTab.activePaneId) handleClosePane(activeTab.id, activeTab.activePaneId);
+              break;
+            }
+            case 'openTabMenu':
+              if (activeTabId) openTabMenuFor(activeTabId);
+              break;
+            case 'moveTabToNewWindow':
+              if (activeTabId) handleMoveTabToNewWindow(activeTabId);
               break;
             case 'navigateLeft':
             case 'navigateRight':
@@ -348,7 +391,7 @@ export function useAppKeyboard(ctx: AppKeyboardContext): void {
               const activeTab = tabs.find((t) => t.id === activeTabId);
               if (!activeTab || activeTab.type !== 'terminal' || !activeTab.paneTree) break;
               const leafIds = collectLeafIds(activeTab.paneTree);
-              if (leafIds.length < 2) break;
+              if (leafIds.length < 2 || activeTab.zoomedPaneId) break; // zoomed: the other panes are hidden
               const currentIdx = activeTab.activePaneId ? leafIds.indexOf(activeTab.activePaneId) : -1;
               const step = actionId === 'nextPane' ? 1 : -1;
               const nextIdx = currentIdx === -1 ? 0 : (currentIdx + step + leafIds.length) % leafIds.length;
@@ -367,39 +410,30 @@ export function useAppKeyboard(ctx: AppKeyboardContext): void {
             case 'terminalSearch':
             case 'copyLastOutput':
             case 'snippets':
+            case 'rerunWithSudo':
               dispatchTerminalAction(actionId === 'terminalSearch' ? 'search' : actionId);
               break;
-            case 'increaseFontSize': {
-              setSettings((prev) => {
-                const current = prev.terminalFontSize || DEFAULT_SETTINGS.terminalFontSize;
-                const next = Math.min(current + 1, 32);
-                if (next === current) return prev;
-                const updated = { ...prev, terminalFontSize: next };
-                void window.multissh?.settingsSave?.(updated);
-                return updated;
-              });
-              break;
-            }
-            case 'decreaseFontSize': {
-              setSettings((prev) => {
-                const current = prev.terminalFontSize || DEFAULT_SETTINGS.terminalFontSize;
-                const next = Math.max(current - 1, 8);
-                if (next === current) return prev;
-                const updated = { ...prev, terminalFontSize: next };
-                void window.multissh?.settingsSave?.(updated);
-                return updated;
-              });
-              break;
-            }
+            case 'increaseFontSize':
+            case 'decreaseFontSize':
             case 'resetFontSize': {
-              setSettings((prev) => {
-                const defaultSize = DEFAULT_SETTINGS.terminalFontSize;
-                if (prev.terminalFontSize === defaultSize) return prev;
-                const updated = { ...prev, terminalFontSize: defaultSize };
-                void window.multissh?.settingsSave?.(updated);
-                return updated;
-              });
+              const current = settings.terminalFontSize || DEFAULT_SETTINGS.terminalFontSize;
+              const next =
+                actionId === 'increaseFontSize'
+                  ? Math.min(current + 1, 32)
+                  : actionId === 'decreaseFontSize'
+                    ? Math.max(current - 1, 8)
+                    : DEFAULT_SETTINGS.terminalFontSize;
+              if (next === current) break;
+              setSettings((prev) => ({ ...prev, terminalFontSize: next }));
+              // Only this key (the app's copy of the others can be out of date, see settingsSave.ts), and
+              // outside the updater, which has to be pure.
+              void window.multissh?.settingsSave?.({ terminalFontSize: next });
               break;
+            }
+            default: {
+              const tabNumber = /^selectTab([1-9])$/.exec(actionId)?.[1];
+              const tab = tabNumber ? tabForNumber(tabs, Number(tabNumber)) : null;
+              if (tab) setActiveTabId(tab.id);
             }
           }
           break;
@@ -417,16 +451,23 @@ export function useAppKeyboard(ctx: AppKeyboardContext): void {
     tabBarFocused,
     anyTopLevelModalOpen,
     settings.shortcuts,
+    settings.terminalFontSize,
+    settings.enableGlobalSearch,
     setActiveTabId,
     setTabBarFocused,
     setSettings,
     setProfilesModalOpen,
     setSettingsModalOpen,
+    setGlobalSearchOpen,
     openTopLevelModal,
     handleNewTab,
     handleCloseTab,
+    handleMoveTabToNewWindow,
     handleSplitPane,
+    handleClosePane,
+    handleToggleZoom,
     handleSelectPane,
+    openShortcutsHelp,
     focusActiveTabContent,
   ]);
 }

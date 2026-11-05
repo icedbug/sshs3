@@ -4,6 +4,7 @@ import net from 'node:net';
 import crypto from 'node:crypto';
 import { SmartcardDetector } from '../smartcard/SmartcardDetector';
 import { AskpassServer } from '../smartcard/AskpassServer';
+import { isHostKeyConfirmPrompt, savedAskpassAnswer } from '../ssh/askpassPrompt';
 import type { SSHConnectionConfig, SSHTunnelConfig } from '../../shared/types/ssh';
 import type { SSHActiveTunnel } from '../../shared/types/ssh';
 
@@ -82,8 +83,10 @@ export class SSHTunnelManager extends EventEmitter {
     if (needsAskpass) {
       askpassServer = new AskpassServer({
         promptHandler: async (rawPrompt) => {
-          if (config.password) return config.password;
-          if (config.passphrase) return config.passphrase;
+          // No trust dialog here: fail closed, and never answer a trust question with a secret.
+          if (isHostKeyConfirmPrompt(rawPrompt)) return 'no';
+          const saved = savedAskpassAnswer(rawPrompt, config);
+          if (saved) return saved;
           if (promptHandler) return promptHandler(rawPrompt);
           return '';
         },
@@ -110,13 +113,21 @@ export class SSHTunnelManager extends EventEmitter {
       ...config,
       tunnels: [{ ...tunnel, enabled: true }],
     };
-    const sshArgs = SmartcardDetector.buildSSHArguments(singleTunnelConfig);
-    // -N: no remote command (forwarding only). ExitOnForwardFailure: fail fast
-    // instead of silently keeping a session open on a port bind error.
-    sshArgs.unshift('-N', '-o', 'ExitOnForwardFailure=yes');
-    const sshBinary = process.platform === 'win32' ? 'ssh.exe' : 'ssh';
+    let child: ChildProcess;
+    try {
+      const sshArgs = SmartcardDetector.buildSSHArguments(singleTunnelConfig);
+      // -N: no remote command (forwarding only). ExitOnForwardFailure: fail fast
+      // instead of silently keeping a session open on a port bind error.
+      sshArgs.unshift('-N', '-o', 'ExitOnForwardFailure=yes');
+      const sshBinary = process.platform === 'win32' ? 'ssh.exe' : 'ssh';
 
-    const child = spawn(sshBinary, sshArgs, { env, stdio: ['ignore', 'ignore', 'pipe'] });
+      child = spawn(sshBinary, sshArgs, { env, stdio: ['ignore', 'ignore', 'pipe'] });
+    } catch (err) {
+      // An invalid port, jump host or proxy throws here; the askpass server started above would otherwise
+      // keep its socket, temp directory and registry entry for the rest of the app's life.
+      void askpassServer?.stop().catch(() => {});
+      throw err;
+    }
 
     const session: TunnelSession = {
       id,
@@ -135,6 +146,12 @@ export class SSHTunnelManager extends EventEmitter {
       stderrTail = (stderrTail + chunk.toString()).slice(-2000);
     });
 
+    // A missing `ssh` is not thrown by spawn(): it arrives here, and with no listener it would be an uncaught
+    // exception in the main process.
+    child.on('error', (err) => {
+      stderrTail = (stderrTail + err.message).slice(-2000);
+    });
+
     child.on('exit', (code, signal) => {
       const current = this.sessions.get(id);
       if (!current) return;
@@ -143,7 +160,7 @@ export class SSHTunnelManager extends EventEmitter {
         ? `Terminated (${signal})`
         : stderrTail.trim() || `ssh exited with code ${code}`;
       current.child = undefined;
-      void current.askpassServer?.stop();
+      void current.askpassServer?.stop().catch(() => {});
       this.emitChange();
     });
 
@@ -155,11 +172,22 @@ export class SSHTunnelManager extends EventEmitter {
         clearTimeout(timer);
         resolve(stderrTail.trim() || 'ssh exited immediately');
       });
+      // spawn failed (e.g. ENOENT): there may be no 'exit' at all.
+      child.once('error', () => {
+        clearTimeout(timer);
+        resolve(stderrTail.trim() || 'ssh could not be started');
+      });
     });
 
     if (startupError) {
+      // 'error' is also emitted when a process that is running could not be signalled: do not leave it bound.
+      try {
+        child.kill();
+      } catch {
+        // already gone
+      }
       this.sessions.delete(id);
-      void askpassServer?.stop();
+      void askpassServer?.stop().catch(() => {});
       // The generic 'exit' handler above already fired and broadcast this session as
       // 'error' (still in the map at that point) to every listening renderer — without this,
       // that phantom entry would linger in the UI forever, since deleting it here alone never

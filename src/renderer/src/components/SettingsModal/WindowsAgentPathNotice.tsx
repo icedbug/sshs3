@@ -94,7 +94,7 @@ export const WindowsAgentPathNotice: React.FC<WindowsAgentPathNoticeProps> = ({ 
         OpenSSH Authentication Agent (this clears keys currently loaded in it). Windows will ask for administrator
         approval. The driver's own DLLs become visible to every program, so only do this for a driver you trust.
       </p>
-      {error && <p className="text-red-300">{error}</p>}
+      {error && <p role="alert" className="text-red-300">{error}</p>}
       <button
         type="button"
         onClick={() => void fix()}

@@ -358,5 +358,21 @@ describe('InstallKeyModal', () => {
       expect(navigator.clipboard.writeText).toHaveBeenCalledWith(ownKey.line);
     });
   });
-});
 
+  it('disables Fetch keys with an explanation when an administrator blocks it', async () => {
+    const gitFetchPublicKeys = vi.fn();
+    window.multissh = {
+      ...window.multissh,
+      gitFetchPublicKeys,
+      policyGet: vi.fn().mockResolvedValue({ managed: [], features: { gitKeyFetch: false }, warnings: [] }),
+    } as any;
+    render(<InstallKeyModal connection={conn} onClose={onClose} />);
+
+    expect(await screen.findByRole('note')).toHaveTextContent('Disabled by your administrator.');
+    const input = screen.getByRole('textbox', { name: 'GitHub username' });
+    fireEvent.change(input, { target: { value: 'octocat' } });
+    expect(screen.getByRole('button', { name: /Fetch keys/ })).toBeDisabled();
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(gitFetchPublicKeys).not.toHaveBeenCalled();
+  });
+});

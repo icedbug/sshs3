@@ -29,7 +29,8 @@ export const DotfilesSyncBanner: React.FC = () => {
     const unsubscribe = window.multissh.onDotfilesSyncStatus((event) => {
       clearTimeout(hideTimer);
       setStatus(event);
-      hideTimer = setTimeout(() => setStatus(null), 4000);
+      // A success confirmation fades away; a failure stays until it is dismissed, so it cannot be missed.
+      if (event.status === 'updated') hideTimer = setTimeout(() => setStatus(null), 4000);
     });
     return () => {
       clearTimeout(hideTimer);
@@ -52,7 +53,10 @@ export const DotfilesSyncBanner: React.FC = () => {
     <>
       {currentPrompt && (
         <div
-          role="alertdialog"
+          // Not a dialog: an `alertdialog` is taken for a modal overlay by getTopmostOverlay(), which
+          // would capture Ctrl+Shift+Arrow and stop all navigation while this banner is up. `status` is
+          // announced when it appears (a live region that is created already filled often is not).
+          role="status"
           aria-labelledby="dotfiles-sync-banner-title"
           data-testid="dotfiles-sync-banner"
           className="w-full rounded-xl border border-border-subtle bg-app-card shadow-2xl animate-in fade-in slide-in-from-top-2 duration-150"
@@ -72,7 +76,7 @@ export const DotfilesSyncBanner: React.FC = () => {
               </p>
               <ul className="mt-1.5 space-y-0.5 font-mono text-2xs text-txt-muted">
                 {(currentPrompt.entries ?? []).slice(0, 4).map((entry) => (
-                  <li key={entry.fileId} className="truncate">
+                  <li key={entry.fileId} className="truncate" title={entry.remotePath}>
                     {entry.remotePath} {entry.reason === 'missing' ? '(missing)' : '(changed)'}
                   </li>
                 ))}
@@ -103,6 +107,7 @@ export const DotfilesSyncBanner: React.FC = () => {
               </div>
             </div>
             <button
+              aria-label="Dismiss"
               type="button"
               onClick={() => void respond('ignore')}
               className="rounded p-1 text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
@@ -117,14 +122,26 @@ export const DotfilesSyncBanner: React.FC = () => {
       {!currentPrompt && status && (
         <div
           data-testid="dotfiles-sync-status"
-          className="w-full rounded-lg border border-border-subtle bg-app-card px-3 py-2 text-xs shadow-lg animate-in fade-in slide-in-from-top-2 duration-150"
+          role={status.status === 'updated' ? 'status' : 'alert'}
+          className="flex w-full items-start justify-between gap-2 rounded-lg border border-border-subtle bg-app-card px-3 py-2 text-xs shadow-lg animate-in fade-in slide-in-from-top-2 duration-150"
         >
           {status.status === 'updated' ? (
             <span className="text-emerald-400">
               ✓ {status.updatedCount ?? 0} dotfile{status.updatedCount === 1 ? '' : 's'} updated
             </span>
           ) : (
-            <span className="text-red-400">Dotfiles sync failed: {status.error}</span>
+            <>
+              <span className="text-red-400">Dotfiles sync failed: {status.error}</span>
+              <button
+                type="button"
+                aria-label="Dismiss"
+                title="Dismiss"
+                onClick={() => setStatus(null)}
+                className="shrink-0 rounded p-1.5 text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </>
           )}
         </div>
       )}

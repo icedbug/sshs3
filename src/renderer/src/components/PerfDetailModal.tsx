@@ -1,8 +1,9 @@
-import React from 'react';
+import React, { useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 import { PERF_HISTORY_MS, type PerfSample } from '@shared/types/perf';
 import { useModalDismiss } from '../lib/useModalDismiss';
+import { useDialogFocus } from '../lib/useDialogFocus';
 import {
   chartDefs,
   cpuSplit,
@@ -243,6 +244,8 @@ export interface PerfDetailModalProps {
 /** Larger view of the performance history (up to the last 15 minutes) plus every current value. */
 export const PerfDetailModal: React.FC<PerfDetailModalProps> = ({ kind, history, title, onClose }) => {
   const onBackdrop = useModalDismiss(onClose, true);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(dialogRef, true);
   const latest = history[history.length - 1];
   const now = latest?.t ?? 0;
   const spanMin = history.length > 1 ? Math.round((now - history[0].t) / 60000) : 0;
@@ -253,6 +256,7 @@ export const PerfDetailModal: React.FC<PerfDetailModalProps> = ({ kind, history,
       data-testid="perf-detail"
     >
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-label="Performance history"

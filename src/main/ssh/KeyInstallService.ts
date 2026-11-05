@@ -12,6 +12,7 @@ import type {
   TestLoginResult,
 } from '../../shared/types/ssh';
 import { chooseLoginOrder } from '../../shared/loginOrder';
+import { isPasswordPrompt, savedAskpassAnswer } from './askpassPrompt';
 import type { SFTPConfig } from '../../shared/types/storage';
 import {
   parsePublicKeyLine,
@@ -59,8 +60,6 @@ export interface KeyInstallOptions extends PromptHandlers {
 }
 
 const HOST_KEY_CONFIRM_RE = /are you sure you want to continue connecting/i;
-const PASSWORD_PROMPT_RE = /password/i;
-const PASSPHRASE_PROMPT_RE = /passphrase|pin\b/i;
 const PRESENCE_RE = /confirm user presence|touch (your )?security key/i;
 const MAX_STDOUT = 64 * 1024;
 
@@ -132,13 +131,15 @@ export async function runSshCommand(
         hostKey = trusted ? 'accepted' : 'rejected';
         return trusted ? 'yes' : 'no';
       }
-      // Sparat lösen används högst en gång (NumberOfPasswordPrompts=1) och aldrig till PIN/lösenfras.
-      if (config.password && !passwordAnswered && PASSWORD_PROMPT_RE.test(rawPrompt) && !PASSPHRASE_PROMPT_RE.test(rawPrompt)) {
-        passwordAnswered = true;
-        return config.password;
-      }
-      if (config.passphrase && /passphrase/i.test(rawPrompt)) {
-        return config.passphrase;
+      // Sparade uppgifter via savedAskpassAnswer: lösen bara på lösenprofil, lösenfras bara på sshs egen lokala
+      // nyckelfråga, aldrig på en fråga servern ställt. Lösen används högst en gång (NumberOfPasswordPrompts=1).
+      const saved = savedAskpassAnswer(rawPrompt, config);
+      if (saved !== undefined) {
+        if (!isPasswordPrompt(rawPrompt)) return saved;
+        if (!passwordAnswered) {
+          passwordAnswered = true;
+          return saved;
+        }
       }
       return pinPromptHandler ? await pinPromptHandler(rawPrompt) : '';
     },

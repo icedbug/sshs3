@@ -3,6 +3,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { app } from 'electron';
 import type { DirectorySyncProfile } from '../../shared/types/dirsync';
+import { backupCorruptFile, writeFileAtomic } from '../storage/atomicFile';
 
 export class DirectorySyncProfileStore {
   private filePath: string;
@@ -36,11 +37,14 @@ export class DirectorySyncProfileStore {
    * see and propagate deletions; every other caller should use list().
    */
   public async listIncludingTombstones(): Promise<DirectorySyncProfile[]> {
+    let raw: string | undefined;
     try {
-      const raw = await fs.readFile(this.filePath, 'utf-8');
+      raw = await fs.readFile(this.filePath, 'utf-8');
       const data = JSON.parse(raw);
       return Array.isArray(data.profiles) ? data.profiles : [];
-    } catch {
+    } catch (err) {
+      // [] would make the next save wipe every profile: keep a copy of an unparsable file first.
+      if (raw !== undefined && err instanceof SyntaxError) await backupCorruptFile(this.filePath, raw);
       return [];
     }
   }
@@ -96,16 +100,17 @@ export class DirectorySyncProfileStore {
     return this.queueMutation(() => this.persist(profiles));
   }
 
-  private async persist(profiles: DirectorySyncProfile[]): Promise<void> {
-    await fs.mkdir(path.dirname(this.filePath), { recursive: true });
-    await fs.writeFile(this.filePath, JSON.stringify({ profiles }, null, 2), {
-      encoding: 'utf-8',
-      mode: 0o600,
+  /** Read, merge and write as one queued step (see `ProfileStore.mergeAll`); `compute` returns null to write nothing. */
+  public async mergeAll(compute: (current: DirectorySyncProfile[]) => DirectorySyncProfile[] | null): Promise<boolean> {
+    return this.queueMutation(async () => {
+      const next = compute(await this.listIncludingTombstones());
+      if (!next) return false;
+      await this.persist(next);
+      return true;
     });
-    try {
-      await fs.chmod(this.filePath, 0o600);
-    } catch {
-      // Ignore chmod failures (e.g. on certain filesystems or platforms)
-    }
+  }
+
+  private async persist(profiles: DirectorySyncProfile[]): Promise<void> {
+    await writeFileAtomic(this.filePath, JSON.stringify({ profiles }, null, 2), { mode: 0o600 });
   }
 }

@@ -4204,6 +4204,7 @@ function AgentsAndMcpView({
               </div>
               <button
                 type="button"
+                aria-label="Delete dependency link"
                 onClick={() =>
                   void act({ action: "infra-edge-delete", id: edge.id })
                 }

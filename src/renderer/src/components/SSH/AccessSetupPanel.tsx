@@ -37,17 +37,17 @@ function initialSteps(): Record<StepId, Step> {
 function StepIcon({ status }: { status: StepStatus }) {
   switch (status) {
     case 'running':
-      return <Loader2 className="h-4 w-4 animate-spin text-sky-400" />;
+      return <Loader2 role="img" aria-label="Running" className="h-4 w-4 animate-spin text-sky-400" />;
     case 'ok':
-      return <CheckCircle2 className="h-4 w-4 text-emerald-400" />;
+      return <CheckCircle2 role="img" aria-label="OK" className="h-4 w-4 text-emerald-400" />;
     case 'warn':
-      return <AlertTriangle className="h-4 w-4 text-amber-400" />;
+      return <AlertTriangle role="img" aria-label="Warning" className="h-4 w-4 text-amber-400" />;
     case 'failed':
-      return <XCircle className="h-4 w-4 text-red-400" />;
+      return <XCircle role="img" aria-label="Failed" className="h-4 w-4 text-red-400" />;
     case 'skipped':
-      return <MinusCircle className="h-4 w-4 text-txt-muted" />;
+      return <MinusCircle role="img" aria-label="Skipped" className="h-4 w-4 text-txt-muted" />;
     default:
-      return <Circle className="h-4 w-4 text-txt-muted" />;
+      return <Circle role="img" aria-label="Not started" className="h-4 w-4 text-txt-muted" />;
   }
 }
 

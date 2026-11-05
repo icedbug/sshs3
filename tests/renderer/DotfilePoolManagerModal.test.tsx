@@ -1,9 +1,19 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
+import { render as rtlRender, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import { DotfilePoolManagerModal } from '../../src/renderer/src/components/SettingsModal/DotfilePoolManagerModal';
+import { ConfirmProvider } from '../../src/renderer/src/components/ConfirmDialog';
 import type { DotfilePool } from '../../src/shared/types/dotfiles';
+
+// Asks for confirmations through the app's ConfirmDialog, which needs its provider.
+function render(ui: React.ReactElement) {
+  const result = rtlRender(<ConfirmProvider>{ui}</ConfirmProvider>);
+  return {
+    ...result,
+    rerender: (next: React.ReactElement) => result.rerender(<ConfirmProvider>{next}</ConfirmProvider>),
+  };
+}
 
 describe('DotfilePoolManagerModal Component', () => {
   const mockPools: DotfilePool[] = [
@@ -91,6 +101,25 @@ describe('DotfilePoolManagerModal Component', () => {
     expect(screen.getByText('Open Master Directory')).toBeInTheDocument();
   });
 
+  it('asks before deleting a pool and only deletes it once confirmed', async () => {
+    render(<DotfilePoolManagerModal open={true} onClose={vi.fn()} />);
+    await waitFor(() => expect(screen.getByText('Linux Servers')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('Linux Servers'));
+
+    fireEvent.click(screen.getByRole('button', { name: /Delete Pool/ }));
+    const dialog = await screen.findByRole('alertdialog');
+    expect(dialog).toHaveTextContent('Delete the pool "Linux Servers"?');
+    expect(dialog).toHaveTextContent('cannot be undone');
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+    expect(window.multissh.dotfilePoolsDelete).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: /Delete Pool/ }));
+    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Delete pool' }));
+    await waitFor(() => expect(window.multissh.dotfilePoolsDelete).toHaveBeenCalledWith('p1'));
+  });
+
   it('flags changed sources and refreshes the stored copy', async () => {
     render(<DotfilePoolManagerModal open={true} onClose={vi.fn()} />);
     await waitFor(() => expect(screen.getByText('Linux Servers')).toBeInTheDocument());
@@ -164,5 +193,16 @@ describe('DotfilePoolManagerModal Component', () => {
     expect(screen.queryByText('Unsaved changes')).toBeNull();
     // The pool stays open after saving.
     expect(screen.getByDisplayValue('Linux Servers')).toBeInTheDocument();
+  });
+
+  it('disables importing from Git when an administrator blocks it', async () => {
+    window.multissh = {
+      ...window.multissh,
+      policyGet: vi.fn().mockResolvedValue({ managed: [], features: { dotfileGitImport: false }, warnings: [] }),
+    } as unknown as typeof window.multissh;
+    render(<DotfilePoolManagerModal open={true} onClose={vi.fn()} />);
+
+    expect(await screen.findByRole('note')).toHaveTextContent('Disabled by your administrator.');
+    expect(screen.getByRole('button', { name: /From Git/ })).toBeDisabled();
   });
 });

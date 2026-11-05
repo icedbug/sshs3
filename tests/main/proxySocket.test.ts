@@ -199,4 +199,43 @@ describe('createProxySocket', () => {
       ).rejects.toThrow(/SOCKS4 CONNECT failed/);
     });
   });
+
+  // Low finding (code review 2026-11-03): a CR/LF in the target host went straight into the CONNECT request (header
+  // injection), and SOCKS5 length bytes wrapped around for fields over 255 bytes (a corrupt handshake).
+  describe('input that would corrupt the handshake', () => {
+    // Nothing may even connect: the proxy here records whether anyone did.
+    async function unreachableProxy() {
+      let connections = 0;
+      const { port } = await startServer(() => {
+        connections++;
+      });
+      return { port, connections: () => connections };
+    }
+
+    it('refuses a target host with CR/LF or other control characters for an HTTP proxy', async () => {
+      const proxy = await unreachableProxy();
+      await expect(
+        createProxySocket(
+          { enabled: true, type: 'http', host: '127.0.0.1', port: proxy.port },
+          { host: 'target.example.com\r\nX-Injected: 1', port: 22 }
+        )
+      ).rejects.toThrow(/invalid target host/i);
+      expect(proxy.connections()).toBe(0);
+    });
+
+    it('refuses a SOCKS5 target host, user name or password longer than 255 bytes', async () => {
+      const proxy = await unreachableProxy();
+      const base = { enabled: true, type: 'socks5' as const, host: '127.0.0.1', port: proxy.port };
+
+      await expect(createProxySocket(base, { host: `${'h'.repeat(256)}.example.com`, port: 22 })).rejects.toThrow(/255 bytes/);
+      await expect(
+        createProxySocket({ ...base, username: 'u'.repeat(256), password: 'p' }, { host: 'a.example.com', port: 22 })
+      ).rejects.toThrow(/255 bytes/);
+      // Counted in bytes, not characters: 128 two-byte characters are 256 bytes.
+      await expect(
+        createProxySocket({ ...base, username: 'u', password: 'é'.repeat(128) }, { host: 'a.example.com', port: 22 })
+      ).rejects.toThrow(/255 bytes/);
+      expect(proxy.connections()).toBe(0);
+    });
+  });
 });

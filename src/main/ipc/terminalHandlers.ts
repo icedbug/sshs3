@@ -1,5 +1,6 @@
 import { XServerManager } from '../x11/XServerManager';
 import { IPC_CHANNELS } from '../../shared/types/ipc';
+import { resolveSshConfigForConnect } from './sshConfigResolve';
 import type { SSHConnectionConfig, PtyOptions } from '../../shared/types/ssh';
 import type { ShellKind } from '../../shared/types/aiHub';
 import type { IpcBridge } from '../IpcBridge';
@@ -31,6 +32,9 @@ function resolveLocalShellKind(ptyOptions?: PtyOptions): ShellKind {
 /** The part of IpcBridge this handler group may use. */
 export type TerminalHost = Pick<
   IpcBridge,
+  | 'assignSession'
+  | 'k8sTerminalManager'
+  | 'scrollback'
   | 'registerHandler'
   | 'resolveProxyJumpConfig'
   | 'restoreSavedSecrets'
@@ -42,7 +46,7 @@ export type TerminalHost = Pick<
 > & {
   smartcard: Pick<
     SmartcardCoordinator,
-    'awaitStartupUnlock' | 'prepareFido2Config' | 'prepareSmartcardConfig' | 'resolveLocalShellAgentSocket'
+    'awaitStartupUnlock' | 'prepareFido2Config' | 'prepareSmartcardConfig' | 'prepareSshCaConfig' | 'resolveLocalShellAgentSocket'
   >;
 };
 
@@ -50,7 +54,7 @@ export function registerTerminalHandlers(bridge: TerminalHost): void {
   bridge.registerHandler(
     IPC_CHANNELS.TERMINAL_CREATE,
     async (
-      _event,
+      event,
       options: { config?: SSHConnectionConfig; local?: boolean; ptyOptions?: PtyOptions; profileId?: string }
     ) => {
       if (!options || (!options.config && !options.local)) {
@@ -62,20 +66,13 @@ export function registerTerminalHandlers(bridge: TerminalHost): void {
 
       let config = options.config;
       if (!options.local && config) {
-        if (config.teamVaultProfileRef) {
-          // Resolves the real secret fields server-side — a member's copy of this config may
-          // have had them stripped (TeamVaultService.getPayloadForRenderer), so never trust
-          // `config.password`/`passphrase` here when this ref is present.
-          const resolved = await bridge.teamVaultService.resolveProfileForConnect(
-            'ssh',
-            config.teamVaultProfileRef.profileId
-          );
-          config = { ...(resolved as SSHConnectionConfig), id: config.id };
-        }
-        config = await bridge.restoreSavedSecrets(config);
+        // Real secrets are resolved server-side: a member's copy of a shared config has them stripped
+        // (TeamVaultService.getPayloadForRenderer), so never trust `config.password`/`passphrase` here.
+        config = await resolveSshConfigForConnect(bridge, config);
         config = await bridge.resolveProxyJumpConfig(config);
         config = await bridge.smartcard.prepareSmartcardConfig(config);
         config = await bridge.smartcard.prepareFido2Config(config);
+        config = await bridge.smartcard.prepareSshCaConfig(config);
 
         if (config.x11Forwarding && process.platform === 'win32') {
           try {
@@ -120,6 +117,8 @@ export function registerTerminalHandlers(bridge: TerminalHost): void {
         (data) => bridge.sshPtyManager.write(session.sessionId, data)
       );
 
+      bridge.assignSession(event?.sender, session.sessionId);
+
       if (!options.local && config) {
         // Fire-and-forget: never let the dotfiles check delay or fail the
         // terminal session itself, and give the PTY a moment to become
@@ -132,6 +131,23 @@ export function registerTerminalHandlers(bridge: TerminalHost): void {
       }
 
       return { sessionId: session.sessionId };
+    }
+  );
+
+  // A terminal that moved to this window claims its running session. Ownership changes in the same
+  // step the output so far is read, so every later chunk reaches this window and none is lost or
+  // shown twice (the renderer queues what arrives while it waits for this reply).
+  bridge.registerHandler(
+    IPC_CHANNELS.TERMINAL_ATTACH,
+    async (event, sessionId: unknown, kind: unknown): Promise<{ scrollback: string }> => {
+      if (typeof sessionId !== 'string' || !sessionId || (kind !== 'ssh' && kind !== 'k8s')) {
+        throw new Error('Invalid terminal session');
+      }
+      const exists =
+        kind === 'ssh' ? !!bridge.sshPtyManager.getSession(sessionId) : !!bridge.k8sTerminalManager.getSession(sessionId);
+      if (!exists) throw new Error('The terminal session has ended');
+      bridge.assignSession(event?.sender, sessionId);
+      return { scrollback: bridge.scrollback.get(sessionId) };
     }
   );
 
@@ -166,6 +182,22 @@ export function registerTerminalHandlers(bridge: TerminalHost): void {
         return await session.reconnect();
       }
       return false;
+    }
+  );
+
+  bridge.registerHandler(
+    IPC_CHANNELS.TERMINAL_GET_CWD,
+    async (_event, sessionId: string): Promise<string | null> => {
+      if (typeof sessionId !== 'string') return null;
+      return bridge.sshPtyManager.getSessionCwd(sessionId);
+    }
+  );
+
+  bridge.registerHandler(
+    IPC_CHANNELS.TERMINAL_HAS_SSH_CLIENT,
+    async (_event, sessionId: string): Promise<boolean> => {
+      if (typeof sessionId !== 'string') return false;
+      return bridge.sshPtyManager.sessionHasSshClient(sessionId);
     }
   );
 }

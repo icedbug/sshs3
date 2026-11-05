@@ -18,3 +18,9 @@ export function formatDateTime(input?: string | number | Date | null): string {
 
   return `${yyyy}-${mm}-${dd} ${hh}:${min}`;
 }
+
+/** Same as formatDateTime but date only (yyyy-mm-dd); for validity ranges and other day-granular values. */
+export function formatDate(input?: string | number | Date | null): string {
+  const formatted = formatDateTime(input);
+  return formatted.length === 16 ? formatted.slice(0, 10) : formatted;
+}

@@ -1,6 +1,6 @@
 ## Dual-Pane File Manager & SFTP Engine
 
-The File Manager in **sshs3** provides a high-performance, keyboard-driven dual-pane explorer modeled after Midnight Commander and WinSCP, modernized for hybrid cloud infrastructure. It enables transparent file operations across local disks, remote OpenSSH SFTP servers, S3 object storage, and running Kubernetes containers.
+The File Manager in **sshs3** provides a high-performance, keyboard-driven dual-pane explorer modeled after Midnight Commander and WinSCP, modernized for hybrid cloud infrastructure. It enables transparent file operations across local disks, remote OpenSSH SFTP servers, Amazon S3 object storage, and running Kubernetes containers.
 
 ![Dual-Pane File Manager](/img/filemanager.png)
 
@@ -8,202 +8,169 @@ The File Manager in **sshs3** provides a high-performance, keyboard-driven dual-
 
 ## 1. Native OpenSSH SFTP v3 Engine
 
-### Feature: Subsystem Execution via System OpenSSH
+Unlike tools relying on JavaScript SSH emulators, sshs3 executes your operating system's real `ssh` binary in SFTP subsystem mode (`ssh -s sftp`). All hardware security tokens (YubiKey PIV, FIDO2), smartcards, `~/.ssh/config` directives, and proxy bastions function out of the box with zero emulation layers.
 
-#### 🎯 Purpose
-Replace vulnerable JavaScript SSH libraries with the operating system's native OpenSSH client to ensure uncompromising cryptographic security, hardware token compatibility, and seamless proxy routing.
+### Navigation & Spatial Keyboard Ergonomics
 
-#### 🛠️ How to Use
-1. Launch the file manager via <kbd>Ctrl+Shift+F</kbd> or double-click an SFTP profile.
-2. Navigate via keyboard (<kbd>Tab</kbd> switches active pane, <kbd>Enter</kbd> enters directories or opens files, <kbd>Backspace</kbd> ascends to parent folder).
-3. Drag and drop files between panes or directly from your workstation's desktop.
-4. Manage permissions via right-click → **Change Permissions (chmod)...** with octal (e.g. `0755`, `0644`) and symbolic checkboxes. Tick **Apply recursively to underlying files and folders** to apply the mode to everything inside a selected folder.
-
-### Drives, Volumes & Free Space
-
-The disk icon at the right of the pane toolbar shows how much space is free where you are (the equivalent of `df <path>`) as a fill bar plus a "NN GB free" label.
-- **Local panes:** click it to list every drive (Windows: `C:`, `D:`, ...) or mounted filesystem (Linux/macOS) with its fill level, and pick one to jump to its root. Offline network drives are skipped rather than freezing the list. **Up one level** from a drive root stays on that drive.
-- **SFTP panes:** shows the free space of the filesystem holding the current folder. It needs a server with the `statvfs@openssh.com` extension (OpenSSH servers have it); otherwise the indicator is hidden. A remote list of all mounts is in the [Performance Bar](performance-bar.md).
-
-### Search in Files (<kbd>Ctrl+Shift+K</kbd>)
-
-Opens **Search in Files** for the active pane's source: local disk, SFTP or S3.
-- Choose **Literal** or **Regex**, and tick **Case sensitive** if needed.
-- Narrow the search with **Include:** and **Exclude:** globs (for example `*.log, *.csv` and `*.min.js`).
-- Matches stream in as they are found; select one to preview the surrounding lines, and use **Jump to file in pane** to open its location.
-- The search stops at 500 matches (**Result limit reached — narrow your search to see more.**). On local disk, files larger than 50 MB are skipped, and on S3 objects larger than 10 MB; unreadable entries (sockets, system-protected files) are reported as warnings.
-
-### Keyboard Ergonomics & Spatial Navigation
-
-The file manager is designed to be fully operable without a mouse:
-- **Spatial Navigation (<kbd>Ctrl+Shift+Arrows</kbd>)**:
-  - <kbd>Ctrl+Shift+Left</kbd> / <kbd>Right</kbd>: Toggles focus directly between the left and right file pane.
-  - <kbd>Ctrl+Shift+Up</kbd>: Shifts focus up to the **Tab Bar** (where <kbd>Left</kbd>/<kbd>Right</kbd> switches active workspace tabs, and <kbd>Down</kbd> or <kbd>Enter</kbd> returns focus into the file pane).
-  - <kbd>Ctrl+Shift+Down</kbd>: Returns focus from the toolbar directly into the active pane's file list.
-- **In the File List**:
-  - <kbd>Up</kbd> / <kbd>Down</kbd>: Moves selection up and down.
-  - <kbd>Enter</kbd>: Enters the selected folder or opens the file in the built-in viewer (focus remains in the file list).
-  - <kbd>Escape</kbd>: Clears the current selection.
+The dual-pane explorer is engineered to be 100% operable without a mouse:
 
 | Key / Shortcut | Action | Description |
 | :--- | :--- | :--- |
-| <kbd>Enter</kbd> | Open / Edit | Opens the selected folder, or opens the file in the built-in text editor. |
-| <kbd>Backspace</kbd> / <kbd>Alt+Up</kbd> | Up Directory | Ascends one directory level up the tree. |
-| <kbd>Alt+Left</kbd> / <kbd>Alt+Right</kbd> | History Back / Forward | Navigates through previously visited folders. |
-| <kbd>Ctrl+C</kbd> / <kbd>Ctrl+X</kbd> / <kbd>Ctrl+V</kbd> | Copy / Cut / Paste | Clipboard operations across folders and protocols (cut items dim until pasted). |
-| <kbd>Ctrl+A</kbd> | Select All | Highlights all files and folders in the active pane. |
-| <kbd>Escape</kbd> | Clear Selection | Clears current file selections without changing directory. |
+| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Left</kbd> / <kbd>Right</kbd> | Switch Active Pane | Toggles keyboard focus between the left and right file panes. |
+| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Up</kbd> | Escape to Tab Bar | Focuses the Tab Bar to switch active workspace tabs with <kbd>Left</kbd>/<kbd>Right</kbd>. |
+| <kbd>Enter</kbd> | Open / Edit | Enters the highlighted directory, or opens file in built-in editor. |
+| <kbd>Backspace</kbd> / <kbd>Alt</kbd>+<kbd>Up</kbd> | Ascend Directory | Navigates one directory level up the folder hierarchy. |
+| <kbd>Alt</kbd>+<kbd>Left</kbd> / <kbd>Right</kbd> | History Back / Forward | Navigates backward and forward through visited directories. |
+| <kbd>Ctrl</kbd>+<kbd>L</kbd> / <kbd>Alt</kbd>+<kbd>D</kbd> | Edit Path | Edits the breadcrumb path directly as text; press <kbd>Enter</kbd> to jump. |
+| <kbd>Ctrl</kbd>+<kbd>C</kbd> / <kbd>X</kbd> / <kbd>V</kbd> | Copy / Cut / Paste | Clipboard file operations across folders, servers, and protocols. |
+| <kbd>Ctrl</kbd>+<kbd>F</kbd> | Filter Items | Real-time wildcard filter (e.g. `*.log`, `data-?-final.csv`). |
+| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>K</kbd> | Search in Files | Recursive text search (with regex support) across SFTP, S3, or local disk. |
+| <kbd>Ctrl</kbd>+<kbd>H</kbd> | Toggle Hidden Files | Shows or hides dotfiles and hidden directories. |
 | <kbd>F2</kbd> | Rename | Renames the selected file or folder in place. |
-| <kbd>Delete</kbd> | Delete | Prompts for confirmation and deletes selected items. |
 | <kbd>F5</kbd> | Refresh | Re-reads directory listings from the underlying storage provider. |
-| <kbd>Home</kbd> / <kbd>End</kbd> | First / Last Item | Jumps directly to the start or end of the directory list. |
-| *Type letters* | Quick Jump | Typing characters immediately jumps focus to the matching file name. |
-| <kbd>Ctrl+F</kbd> | Filter List | Filters visible items with wildcard matching (e.g. `*.log`, `data-?-final.csv`). |
-| <kbd>Ctrl+Shift+K</kbd> | Search in Files | Recursive content search (with regex support) across local disk, SFTP, and S3. |
+| <kbd>Delete</kbd> | Delete | Prompts for confirmation and deletes selected items. |
 
-#### ⚠️ Limitations & Caveats
-- SFTP v3 does not natively support advanced POSIX Access Control Lists (ACLs) within the protocol frame.
-- Exceptionally large directory listings (>100,000 files) may take a few seconds to parse depending on network latency.
+> [!TIP]
+> **Type to Jump:** Typing letters anywhere in the file list instantly jumps selection to the first file or folder matching those characters.
 
-#### ⚙️ Technical Internals & Architecture
-`SFTPStorageProvider` (`src/main/storage/SFTPStorageProvider.ts`) spawns the OpenSSH client in subsystem mode:
+### Disk Space, Search & Archives
+- **Disk space indicator (local panes):** Click it to list every drive (Windows: `C:`, `D:`, ...) or mounted filesystem (Linux/macOS) with its fill level, and pick one to jump to its root. Offline network drives are skipped rather than freezing the list. **Up one level** from a drive root stays on that drive.
+- **Disk space indicator (SFTP panes):** Shows the free space of the filesystem holding the current folder. It needs a server with the `statvfs@openssh.com` extension (OpenSSH servers have it); otherwise the indicator is hidden. For a list of all remote mounts, see the [Performance Bar](/docs/workspace/telemetry/).
+- **Search in Files options:** Choose **Literal** or **Regex**, tick **Case sensitive** if needed, and narrow the search with **Include:** and **Exclude:** globs (for example `*.log, *.csv` and `*.min.js`).
+- **Compress / Extract** (local disk and SFTP panes): Right-click a selection and choose **Compress to .tar.gz** or **Compress to .zip**. The archive is created next to the selection and never replaces an existing one (`archive (1).zip`). Right-click an archive (`.zip`, `.tar`, `.tar.gz`, `.tgz`, `.tar.bz2`, `.tar.xz`) and choose **Extract to Folder** to unpack it into a new folder named after the archive. On SFTP the work runs on the server, so `tar` (and `zip`/`unzip` for zip files) must be installed there; on a local Linux machine zip files also need `zip`/`unzip`.
+
+### Technical Architecture: SFTP Subsystem & Packet Guard
+
+`SFTPStorageProvider` (`src/main/storage/SFTPStorageProvider.ts`) spawns the system OpenSSH binary:
 ```bash
-ssh <args from SmartcardDetector> -o BatchMode=no -s -- [user@]host sftp
+ssh <SmartcardFlags> -o BatchMode=no -s -- [user@]host sftp
 ```
-- `SftpPacketProtocol` processes binary SFTP v3 packets (`SSH_FXP_INIT`, `SSH_FXP_OPEN`, `SSH_FXP_READ`, etc.) and rejects any packet larger than 16 MB, protecting against faulty or hostile servers.
-- `SftpStreams` delivers `ReadableStream` and `WritableStream` with Node.js backpressure management, preventing memory exhaustion over saturated links.
-- Hardware token touch prompts and smartcard PIN requests are handled transparently via the app's `AskpassServer`.
+- **Packet Protection:** `SftpPacketProtocol` processes binary SFTP v3 packets (`SSH_FXP_INIT`, `SSH_FXP_OPEN`, `SSH_FXP_READ`, etc.) and enforces a strict 16 MB maximum packet ceiling, shielding the client against malicious or misconfigured remote servers.
+- **Backpressure Streaming:** `SftpStreams` uses Node.js `ReadableStream` and `WritableStream` with adaptive backpressure, preventing memory exhaustion when reading from high-bandwidth LAN servers.
+- **Zero-Touch Askpass:** Smartcard PIN requests and FIDO2 touch prompts route seamlessly through the internal `AskpassServer`.
+
+### Good to Know & Limitations: SFTP Subsystem & Directory Listings
+- **POSIX ACLs:** SFTP v3 does not natively support advanced POSIX Access Control Lists (ACLs) or extended attributes (`xattr`) within the protocol frame; standard POSIX mode bits (`0755`, `0644`) are preserved.
+- **Large Directories:** Exceptionally large directory listings (>100,000 files) may take a few seconds to enumerate over high-latency WAN links.
+
+### Reopening Tabs After a Restart
+
+File manager tabs come back when you restart sshs3. A tab that was opened from a saved connection reconnects by itself with that connection's saved password, key passphrase or S3 secret key, so you are not asked again. The saved session itself never contains those secrets.
+
+- If the profile has no saved password, the tab asks for it (**Password Required for SFTP**).
+- If the profile's host, port or user (SFTP), or its endpoint, region or access key (S3), was changed after the tab was saved, the tab asks again instead of sending the saved secret to the new address.
+- A tab opened from a quick `user@host` has no profile behind it and always asks.
 
 ---
 
-## 2. In-Memory Streaming Across Storage Providers
+## 2. In-Memory Streaming Across Storage Backends
 
-sshs3 implements a unified `IStorageProvider` abstraction for all storage backends:
+sshs3 implements a unified `IStorageProvider` interface across all storage engines, enabling direct file transfers without writing intermediate staging files to your workstation's disk:
 
 ```mermaid
 flowchart LR
     SFTP["SFTP Server (OpenSSH)"] <--> |In-Memory Stream| Pipeline["TransferPipeline & ByteMeter"]
-    S3["S3 Bucket (AWS/MinIO)"] <--> |In-Memory Stream| Pipeline
+    S3["S3 Bucket (AWS / MinIO / R2)"] <--> |In-Memory Stream| Pipeline
     Local["Workstation Local Disk"] <--> |In-Memory Stream| Pipeline
     K8s["Kubernetes Pod Container"] <--> |In-Memory Stream| Pipeline
 ```
 
-### Feature: Zero Disk Staging Transfers
+### Transfer Queue & Conflict Resolution
 
-#### 🎯 Purpose
-Enable direct file transfers between disparate storage systems (e.g., from an SFTP server directly to an Amazon S3 bucket, or from a Kubernetes pod to a local disk) without writing intermediate staging files to your workstation's hard drive.
+- **Zero-Disk Staging:** When copying from SFTP directly to an Amazon S3 bucket (or between two remote servers), bytes stream directly through workstation memory via Node.js stream pipes.
+- **Interactive Collision Handling:** When a destination file already exists, choose **Overwrite**, **Skip**, or **Rename** with an optional *Apply to all remaining conflicts* checkbox.
+- **Default Action:** Configure your preferred collision policy under *Settings → Files & Storage*.
+- **A Failed or Cancelled Transfer Keeps Your Original:** sshs3 only removes a partly written target when the transfer had already opened (and so replaced) it. A transfer that fails or is cancelled before that leaves an existing file untouched. A size or checksum mismatch after a complete write still removes the bad copy.
+- **Same File:** Copying a file onto itself is refused ("Source and target are the same file"), including through a hard link or symbolic link on a local disk. **Rename** still copies into the same folder as a duplicate.
+- **Special Files:** Named pipes (FIFOs), sockets and devices are skipped when copying folders, and a single one fails with "Not a regular file", instead of hanging the transfer.
+- **Write Errors on Close:** If the server reports a failed write only when the file is closed (disk full, quota), the transfer fails instead of looking successful.
 
-#### 🛠️ How to Use
-- Open an SFTP server in the left pane and an S3 bucket in the right pane.
-- Select files and press <kbd>F5</kbd> (Copy) or drag and drop across panes.
-- The transfer queue dock at the bottom displays progress, speed (MB/s), and estimated time to completion.
-- Transfers can be paused and resumed at any time.
-
-#### ⚠️ Limitations & Caveats
-- Data streams through your workstation's network interface; transfer speed is bound by the slowest link.
-- Suspending your workstation suspends the stream.
-
-#### ⚙️ Technical Internals & Architecture
-`TransferPipeline` (`src/main/transfer/TransferPipeline.ts`) pipes the source `createReadStream()` into the target `createWriteStream()`. `ByteMeter` calculates transfer velocity using a sliding 100ms window. `PauseController` suspends the Node.js stream flow without terminating underlying TCP sockets.
+### Good to Know & Limitations: In-Memory Stream Transfers
+- **Workstation Bandwidth:** When copying between two remote servers (or from SFTP directly to S3), data streams through your local workstation's network interface; transfer speed is bound by your local upload and download bandwidth.
+- **Laptop Sleep / Suspend:** Suspending your workstation pauses and interrupts active network streams; keep the workstation awake during massive multi-gigabyte cloud transfers.
 
 ---
 
-## 3. Conflict Resolution
+## 3. Directory Diff & Synchronization Engine
 
-When a destination file already exists, sshs3 presents an interactive collision dialog:
+Compare two directory trees (local vs. remote, or remote vs. remote) and synchronize changes with a visual diff preview before touching the filesystem:
 
-![File Conflict Options](/img/file-options.png)
+1. Right-click any folder and select **Sync to...**, then select your target directory.
+2. Review the computed diff preview:
+   - **New on source:** Will be copied to target.
+   - **Modified:** Will overwrite target (newer target files are flagged with a warning).
+   - **Only in target:** Preserved by default (*safe sync*).
+   - **File and folder with the same name:** Shown as a skipped type conflict (a file on one side, a folder on the other). It is never copied or deleted, not even in Mirror mode, and nothing below it is compared. Rename or remove one side and scan again.
+3. **Mirror Mode:** Enable *Mirror (delete extraneous files in target)* to delete target files that no longer exist on the source.
+4. **Saved Sync Profiles:** Enter a **Profile name** before running to save the configuration as a reusable profile. Saved profiles are listed under **Saved Sync Profiles**, where **Compute diff and run sync** repeats them.
 
-- **Overwrite**: Overwrites the existing destination file.
-- **Skip**: Skips the file and advances the queue.
-- **Rename**: Automatically saves the file under a new name instead of replacing the existing one.
+### Technical Architecture: How Directory Diff Compares Files Across Drifted Clocks
 
-Renaming a file in place (<kbd>F2</kbd>) to a name that already exists in the same folder is refused instead of silently replacing it.
-- **Apply to all remaining conflicts in this transfer**: Applies the chosen action to all subsequent conflicts in the batch.
+Files are compared using file size and last modification timestamp. A configurable 2-second timestamp tolerance accommodates clock drift between servers and timezone differences across FAT32, NTFS, ext4, and S3 object metadata.
 
-Under **Settings → Files & Storage → Default Conflict Resolution for File Transfers** you can choose **Ask** (the default), **Overwrite**, **Skip** or **Rename** so the dialog does not appear. Transfers in the queue can be paused, resumed and cancelled.
+### Good to Know & Limitations: Directory Synchronization & Mirroring
+- **One-Way Sync:** Synchronization is strictly one-way from the selected source to the target directory.
+- **New Target Folders:** The target folder does not have to exist: the first sync creates it, over SFTP as well.
+- **Symlinks & Unreadable Folders:** Symbolic links, to files and to folders, on the source or the target are not synced: they are never copied, compared, written through or deleted, and nothing below a linked folder is compared. The preview lists them as *symbolic links not synced*. (Copying files in the file manager also skips symbolic links.) Folders that cannot be read (e.g. permission denied) are reported as skipped; nothing below a skipped folder is copied or, in Mirror mode, deleted, because its contents cannot be verified. If the root folder of the source or target cannot be listed for any reason other than not existing yet, the comparison stops with an error instead of treating it as empty.
 
 ---
 
-## 4. Directory Diff & Synchronization Engine
+## 4. Built-in CodeMirror 6 Editor & Multi-Format Previews
+
+### Built-in Editor
+Inspect, edit, and preview remote files or monitor live server logs without opening an external editor:
 
 ![File Settings](/img/docs/settings-files.png)
 
-### Feature: Directory Synchronization
+### Editor & Preview Capabilities
 
-#### 🎯 Purpose
-Compare a source directory with a target directory (on the same or different servers) and synchronize the differences, with a diff preview before anything is copied.
+| Format / Tool | Capabilities |
+| :--- | :--- |
+| **CodeMirror 6 Editor** | Syntax highlighting for 15+ languages (JS, TS, Python, Bash, Nginx, YAML, JSON, SQL, Rust, Go). Monospaced font with line numbers, active line highlight, bracket matching, cursor coordinates (`Ln X, Col Y`), word-wrap toggle, and <kbd>Ctrl</kbd>+<kbd>F</kbd> search. For JSON files, **Format JSON** beautifies and re-indents minified payloads. |
+| **Atomic Save (<kbd>Ctrl</kbd>+<kbd>S</kbd>)** | Saves updates back to remote SFTP, S3, or Kubernetes with timestamp confirmation (`yyyy-mm-dd HH:mm`). CRLF line endings are preserved. |
+| **Markdown Preview** | Toggle between raw source and rendered GitHub Flavored Markdown with tables and task lists. You can select and copy any text. Links to web pages (`http` or `https`) open in your browser; hover over one to see where it really goes. Other links, such as links to another file or to a heading, are shown as plain text. Code blocks in common languages are colored and have a copy button (hover over the block, or tab to it). While you search, code blocks show without colors so that a phrase is found even where the colors would split it. |
+| **HTML Sandbox** | Static preview in a hardened, sandboxed iframe (`sandbox=""` with external scripts and navigation blocked). |
+| **CSV / TSV Data Grid** | Parses tabular data into an interactive, sortable grid with column headers and text filter. |
+| **Media & Image Viewer** | Interactive zoom, pan dragging, and 90° rotation for `.png`, `.jpg`, `.webp`, `.gif`, `.svg` with dimensions and file size display. |
+| **PDF Documents** | Native PDF document preview powered by Chromium's embedded PDF engine. |
+| **Certificate Viewer** | Right-click a `.crt`, `.cer`, `.cert`, `.pem` or `.der` file and select **View Certificate...** for subject, issuer, validity, SANs, key, key usage, revocation URLs, fingerprints and the bundle's chain in plain language, with copy buttons and a host name check. It is decoded inside sshs3, so `openssl` is not needed on the server. Details: [Certificate Preview](/docs/workspace/terminal/#certificate-preview). |
+| **Live Log Tail (`tail -f`)** | Right-click any server log (e.g. `access.log`) and select **Tail -f**. Streams growing logs in real time with auto-scroll and pause/resume without loading giant files into memory. |
 
-#### 🛠️ How to Use
-1. Right-click a folder and select **Sync to...**, then pick the target folder. The **Sync Directory** dialog opens with the **Source** and **Target**.
-2. Review the diff:
-   - **New on source**: will be copied to the target.
-   - **Modified**: will overwrite the target (newer target files are flagged).
-   - **Only in target**: kept by default (*safe sync*).
-   - **Identical**: nothing to do.
-3. Optionally tick **Enable mirror (delete extraneous files in target)** to also delete files that exist only in the target. Deletions happen only for the files you select.
-4. Run the sync. Enter a **Profile name** to save the configuration as a saved sync profile; saved profiles are listed under **Saved Sync Profiles**, where **Compute diff and run sync** repeats them.
+### External Editor Integration
+Right-click any file and select **Open in External Editor** to edit in your local desktop IDE (VS Code, Neovim, Sublime):
+- The file opens in your local editor.
+- When you save locally (<kbd>Ctrl</kbd>+<kbd>S</kbd>), sshs3 detects the filesystem event and streams the updated buffer back to the remote server automatically in the background!
+- **Saving by rename:** Editors that save by writing a new file and renaming it over the old one (Vim, JetBrains IDEs and others) keep working: sshs3 follows the new file. Saves made close together are uploaded one at a time, and a save made just before you close the editor tab is uploaded before the temporary copy is removed.
+- **Open in sshs3 as well:** If the same file is open in the built-in editor, it reloads after the upload. When it has unsaved edits, sshs3 asks first (**Reload and discard** or **Keep my edits**). Only the file on the same server and path is touched, never a file with the same path on another server.
+- **Security Guard:** For workstation security, executable binaries and scripts (`.exe`, `.bat`, `.ps1`, `.sh`, `.vbs`, `.jar`) are blocked from external launching to prevent accidental execution of untrusted remote payloads.
 
-#### ⚠️ Limitations & Caveats
-- The sync is one-way, from source to target.
-- Symbolic links to folders are listed but not followed, and a folder that cannot be read (for example permission denied) is reported as skipped. Nothing below a skipped folder is copied or, in mirror mode, deleted, because its real contents are unknown. If the *root* folder of the source or target cannot be listed for any reason other than not existing yet, the comparison stops with an error instead of treating it as empty.
-- Files are compared by size and modification time, with a fixed 2-second tolerance because SFTP and S3 backends truncate timestamps and clocks drift.
-
-#### ⚙️ Technical Internals & Architecture
-`DirectorySyncService` (`src/main/dirsync/DirectorySyncService.ts`) traverses directory hierarchies in memory, categorizes files, and enqueues sync tasks through `TransferQueue`.
-
----
-
-## 5. Built-in Editor, Live Log Tail & External Editor
-
-### Feature: In-App Editing, Live Markdown & `tail -f`
-
-#### 🎯 Purpose
-Inspect and modify remote files or monitor server logs without launching an external editor or switching to a terminal window.
-
-#### 🛠️ How to Use
-- **Built-in Editor**: Double-click or press <kbd>Enter</kbd> on a text file to open it in the built-in viewer. Press <kbd>Ctrl+S</kbd> to save directly back to the remote server. For documentation files, toggle the **Source / Preview** switch for an instant live-rendered Markdown preview.
-- **Live Log Tail**: Right-click a growing log file (e.g. `access.log`, `app.log`) and select **Tail -f (Stream Log)**. The editor streams new lines in real time and is read-only while tailing; click **Stop Tail -f** to end the stream.
-- **External Editor**: Right-click any file and select **Open in External Editor**. The file opens in your local desktop IDE (VS Code, Neovim, Sublime). Press <kbd>Ctrl+S</kbd> locally, and sshs3 automatically detects the file write and streams updates back to the server in the background!
-
-#### ⚠️ Limitations & Caveats
-- The built-in editor is optimized for lightweight text/markdown editing without heavy syntax trees. For complex multi-file projects, use External Editor hand-off.
-- Files larger than 5 MB (only the first 5 MB are loaded), binary files and files that are not valid UTF-8 (for example ISO-8859-1) open **read-only**, and the lock button is disabled, so saving can never overwrite the file with a partial or re-encoded copy. Use **Open in External Editor** to change them.
-- External editors must save files in place without breaking filesystem inode watches.
-
-#### ⚙️ Technical Internals & Architecture
-`FileEditorService` downloads target files into an isolated temporary directory with `0700` permissions, launches the local application via Electron `shell.openPath()`, and registers an `fs.watch` event listener. When change events fire, modified buffers stream back across `TransferPipeline`.
+### Good to Know & Limitations: Editor File Size Caps & Safety Locks
+- **5 MB Text Editor Safety Threshold:** Text files load up to 5 MB into the built-in editor. Files exceeding 5 MB (only the first 5 MB are read), binary files, and non-UTF-8 encodings open strictly **read-only**, and save operations are disabled to prevent corrupting remote files with partial or re-encoded data. Use **Open in External Editor** to modify larger files.
+- **100 MB Media Preview Ceiling:** Image and PDF previews stream up to 100 MB directly from remote SFTP or S3 backends.
+- **External Editor Inode Watches:** Local editors must save files in place without breaking filesystem inode watches (e.g. `:set backupcopy=yes` in Vim).
 
 ---
 
-## 6. Git Integration in the File Manager
+## 5. Visual Git Integration
 
-### Feature: Visual Git Status & SFTP Repository Management
+When browsing any local or remote directory containing a `.git` repository, sshs3 automatically activates the Git indicator toolbar:
 
-#### 🎯 Purpose
-Inspect Git repository status, pull updates, or clone repositories directly within remote SFTP folders without opening a separate terminal session.
+- **Branch & Delta:** Displays the active branch name, uncommitted changes, and commit delta ahead (↑) or behind (↓) `origin`.
+- **One-Click Pull:** Click the pull icon to synchronize the remote repository directly over the active SFTP session.
+- **Repository Link:** Click the provider badge (**Open in GitHub/GitLab**) to open the repository homepage in your default browser. It appears when `remote.origin.url` is configured.
+- **Remote Clone:** Right-click an empty area and select **Git Clone to here...** with optional shallow clone (`--depth 1`).
 
-#### 🛠️ How to Use
-1. When browsing a folder containing a `.git` directory (locally or over SFTP), sshs3 automatically detects the repository:
-   - **Branch & Status Indicator**: Displays active branch, uncommitted/untracked changes, and commit delta ahead (↑) or behind (↓) `origin`.
-   - **Git Pull**: Click the pull icon to synchronize the remote repository with upstream in a single click.
-   - **Open in GitHub/GitLab**: Opens the repository homepage in your default browser when `remote.origin.url` is configured.
-   - **Clone Git repository here...**: Right-click any folder to clone a repository with optional shallow-clone depth (`--depth=1`).
-2. Git polling can be toggled on or off under *Settings → Git & GitHub* to eliminate background network checks on constrained servers.
-
-#### ⚠️ Limitations & Caveats
-- Remote Git operations over SFTP require `git` to be installed on the remote server.
-
-#### ⚙️ Technical Internals & Architecture
-Driven by `GitStatusService` (`src/main/git/GitStatusService.ts`) and `RemoteGitService` (`src/main/git/RemoteGitService.ts`). Remote status inspections run non-blocking `git status --porcelain=v2` commands over the ControlMaster channel.
+### Good to Know & Limitations: Remote Git Integration
+- **Remote Git CLI Required:** Displaying Git status indicators and pulling remote repositories over SFTP requires `git` to be installed and accessible on the remote server's system `$PATH`.
 
 ---
 
-## 7. Troubleshooting & Diagnostics Runbook
+## 6. Troubleshooting & Diagnostics
 
-| Symptom / Error Message | Probable Root Cause | Corrective Action |
+| Symptom / Error | Probable Root Cause | Corrective Action |
 | :--- | :--- | :--- |
-| `Permission denied` on file upload | Remote directory lacks write permissions for user | Verify directory permissions via `ls -ld <folder>`. Run `chmod 755` or elevate via sudo in a terminal. |
-| `SFTP subsystem not found` | Remote server's `sshd_config` lacks SFTP subsystem | Ensure `Subsystem sftp /usr/lib/openssh/sftp-server` is configured in `/etc/ssh/sshd_config`. |
-| External editor edits do not upload | Editor saves via atomic temporary files | Configure your editor to write in place (e.g. in Vim: `:set backupcopy=yes`). |
-| Transfer hangs at 99% | Remote partition exhausted available disk space | Run `df -h` on the remote server to ensure free space is available. |
+| `Permission denied` on file upload | Remote directory lacks write permissions | Check folder mode via `ls -ld <folder>`. Use `chmod 755` or connect as an authorized user. |
+| `SFTP subsystem not found` | Remote `sshd_config` lacks subsystem definition | Verify `Subsystem sftp /usr/lib/openssh/sftp-server` exists in `/etc/ssh/sshd_config`. |
+| External editor edits do not upload | Editor saves via atomic temporary files | Configure editor to write in-place (e.g. in Vim: `:set backupcopy=yes`). |
+| "Forbidden" cursor while dragging (Linux) | Upstream Chromium / Wayland cursor quirk | Cosmetic issue: the drop operation completes normally when you release the mouse button. |
+| **Password Required for SFTP** appears after a restart although a password is saved | The tab was saved for another host, port or user than the profile has now | Reconnect from **Saved Connections**; the tab then uses the current profile. |

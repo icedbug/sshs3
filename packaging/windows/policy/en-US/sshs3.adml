@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<policyDefinitionResources revision="1.0" schemaVersion="1.0" xmlns="http://schemas.microsoft.com/GroupPolicy/2006/07/PolicyDefinitions" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <displayName>sshs3</displayName>
+  <description>Group Policy settings for sshs3.</description>
+  <resources>
+    <stringTable>
+      <string id="Category">sshs3</string>
+      <string id="AutoCheckUpdates">Check for updates automatically</string>
+      <string id="AutoCheckUpdates_Help">Controls whether sshs3 checks GitHub Releases for new versions.
+
+Enabled: the check runs and users cannot turn it off.
+Disabled: no update traffic at all, the Check now button is unavailable, and users cannot turn the setting on.
+Not configured: each user decides.</string>
+      <string id="SmartcardAuthMode">Smartcard and security key PIN caching</string>
+      <string id="SmartcardAuthMode_Help">Sets how smartcard and FIDO2 PINs are cached and locks the choice for users.
+
+Always prompt asks for the PIN each time. Per terminal keeps unlocked keys for one terminal connection. Global keeps them unlocked in one app-wide agent until the app quits or the keys are locked.
+
+Not configured: each user decides.</string>
+      <string id="SmartcardAuthMode_always_prompt">Always prompt</string>
+      <string id="SmartcardAuthMode_agent_per_session">Once per terminal connection</string>
+      <string id="SmartcardAuthMode_agent_global">Global (app lifetime)</string>
+      <string id="LocalTerminalAgentMode">Local terminal SSH agent</string>
+      <string id="LocalTerminalAgentMode_Help">Sets which SSH agent local shell tabs inherit (SSH_AUTH_SOCK) and locks the choice for users.
+
+Not configured: each user decides.</string>
+      <string id="LocalTerminalAgentMode_auto">Auto</string>
+      <string id="LocalTerminalAgentMode_system">System only</string>
+      <string id="LocalTerminalAgentMode_app_managed">App managed (legacy alias of Auto)</string>
+      <string id="LocalTerminalAgentMode_disabled">Disabled</string>
+      <string id="X11ServerMode">X server start mode</string>
+      <string id="X11ServerMode_Help">Sets when the bundled X server starts and locks the choice for users.
+
+Not configured: each user decides.</string>
+      <string id="X11ServerMode_manual">Manual</string>
+      <string id="X11ServerMode_auto">Automatic</string>
+      <string id="X11ServerMode_always">Always on app launch</string>
+      <string id="X11ServerArgs">X server arguments</string>
+      <string id="X11ServerArgs_Help">Sets the command-line arguments used to start the X server and locks them for users.
+
+Not configured: each user decides.</string>
+      <string id="EnableOpenShift">OpenShift support</string>
+      <string id="EnableOpenShift_Help">Enabled: OpenShift login and the oc CLI shim are available and cannot be turned off.
+Disabled: OpenShift support is off and cannot be turned on.
+Not configured: each user decides.</string>
+      <string id="GitKeyFetch">Fetch public SSH keys from Git hosts</string>
+      <string id="GitKeyFetch_Help">Allows fetching public SSH keys from GitHub, GitLab or a custom Git host.
+
+Disabled: the feature is blocked. Enabled or Not configured: allowed.</string>
+      <string id="DotfileGitImport">Import dotfiles from Git</string>
+      <string id="DotfileGitImport_Help">Allows importing dotfiles from a Git repository.
+
+Disabled: the feature is blocked. Enabled or Not configured: allowed.</string>
+    </stringTable>
+  </resources>
+</policyDefinitionResources>

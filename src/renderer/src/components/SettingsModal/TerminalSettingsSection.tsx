@@ -3,6 +3,9 @@ import { X, Terminal, RotateCcw } from 'lucide-react';
 import { FONT_PRESETS } from './settingsConstants';
 import { X11ServerSection } from './X11ServerSection';
 import type { SettingsForm } from './useSettingsForm';
+import { validateCustomPortRegex } from '../../lib/portDetection';
+import { useConfirm } from '../ConfirmDialog';
+import { ManagedGroup } from './Managed';
 
 /** The "Terminal" page of the settings dialog. */
 export const TerminalSettingsSection: React.FC<{ form: SettingsForm }> = ({ form }) => {
@@ -16,6 +19,16 @@ export const TerminalSettingsSection: React.FC<{ form: SettingsForm }> = ({ form
     setCursorStyle,
     scrollback,
     setScrollback,
+    terminalPathHoverPreview,
+    setTerminalPathHoverPreview,
+    terminalPathHoverMode,
+    setTerminalPathHoverMode,
+    terminalSudoRetryPrompt,
+    setTerminalSudoRetryPrompt,
+    terminalPortForwardAutoDetect,
+    setTerminalPortForwardAutoDetect,
+    terminalPortForwardCustomRegex,
+    setTerminalPortForwardCustomRegex,
     copyOnSelect,
     setCopyOnSelect,
     clipboardScope,
@@ -28,18 +41,30 @@ export const TerminalSettingsSection: React.FC<{ form: SettingsForm }> = ({ form
     setAutoSyncLocalSshConfig,
     localTerminalAgentMode,
     setLocalTerminalAgentMode,
+    isManaged,
   } = form;
+  const portRegexError = validateCustomPortRegex(terminalPortForwardCustomRegex).error;
+  const confirm = useConfirm();
+  const clearClipboardHistory = async () => {
+    const confirmed = await confirm({
+      title: 'Clear clipboard history',
+      message: 'Delete every entry from the clipboard history on this device? This cannot be undone.',
+      confirmLabel: 'Clear history',
+    });
+    if (confirmed) await window.multissh.clipboardHistoryClear();
+  };
 
   return (
     <div className="space-y-4">
       {/* Font Size */}
       <div className="space-y-2">
         <div className="flex items-center justify-between">
-          <label className="text-xs font-medium text-txt-primary">Terminal Font Size</label>
+          <label htmlFor="terminal-font-size" className="text-xs font-medium text-txt-primary">Terminal Font Size</label>
           <span className="font-mono text-sky-400 font-semibold">{fontSize} px</span>
         </div>
         <div className="flex items-center gap-3">
           <input
+            id="terminal-font-size"
             type="range"
             min={8}
             max={32}
@@ -49,6 +74,7 @@ export const TerminalSettingsSection: React.FC<{ form: SettingsForm }> = ({ form
             className="flex-1 accent-sky-500 cursor-pointer"
           />
           <input
+            aria-label="Terminal font size in pixels"
             type="number"
             min={8}
             max={32}
@@ -66,8 +92,9 @@ export const TerminalSettingsSection: React.FC<{ form: SettingsForm }> = ({ form
 
       {/* Font Family */}
       <div className="space-y-2">
-        <label className="text-xs font-medium text-txt-primary">Terminal Font Family</label>
+        <label htmlFor="terminal-font-family" className="text-xs font-medium text-txt-primary">Terminal Font Family</label>
         <select
+          id="terminal-font-family"
           value={FONT_PRESETS.some((f) => f.value === fontFamily) ? fontFamily : 'custom'}
           onChange={(e) => {
             if (e.target.value !== 'custom') {
@@ -95,9 +122,9 @@ export const TerminalSettingsSection: React.FC<{ form: SettingsForm }> = ({ form
 
       {/* Terminal Live Preview */}
       <div className="space-y-1.5">
-        <label className="text-xs font-semibold text-txt-muted uppercase tracking-wider">
+        <div className="text-xs font-semibold text-txt-muted uppercase tracking-wider">
           Terminal Live Preview
-        </label>
+        </div>
         <div
           className={`rounded-lg border p-3 font-mono transition-colors shadow-inner ${
             theme === 'breeze'
@@ -121,8 +148,9 @@ export const TerminalSettingsSection: React.FC<{ form: SettingsForm }> = ({ form
       {/* Cursor Style & Scrollback */}
       <div className="grid grid-cols-2 gap-3 pt-2 border-t border-divider">
         <div className="space-y-1.5">
-          <label className="text-xs font-medium text-txt-primary">Cursor Style</label>
+          <label htmlFor="terminal-cursor-style" className="text-xs font-medium text-txt-primary">Cursor Style</label>
           <select
+            id="terminal-cursor-style"
             value={cursorStyle}
             onChange={(e) => setCursorStyle(e.target.value as any)}
             className="w-full rounded-lg border border-border-subtle bg-app-surface px-3 py-2 text-xs text-txt-primary outline-none focus:border-sky-500"
@@ -134,8 +162,9 @@ export const TerminalSettingsSection: React.FC<{ form: SettingsForm }> = ({ form
         </div>
 
         <div className="space-y-1.5">
-          <label className="text-xs font-medium text-txt-primary">Scrollback Buffer (lines)</label>
+          <label htmlFor="terminal-scrollback" className="text-xs font-medium text-txt-primary">Scrollback Buffer (lines)</label>
           <input
+            id="terminal-scrollback"
             type="number"
             min={500}
             max={50000}
@@ -158,7 +187,7 @@ export const TerminalSettingsSection: React.FC<{ form: SettingsForm }> = ({ form
         <span className="text-xs text-txt-primary">Copy text automatically on selection</span>
       </label>
       <p className="text-xs text-txt-muted -mt-1 pl-6">
-        Selections are kept in an encrypted history. Shift+Insert and middle-click paste the latest one;
+        Selections are kept in an encrypted history. Ctrl+Shift+V, Shift+Insert and middle-click paste from the clipboard;
         right-click opens the full history.
       </p>
 
@@ -178,7 +207,7 @@ export const TerminalSettingsSection: React.FC<{ form: SettingsForm }> = ({ form
           </select>
           <button
             type="button"
-            onClick={() => void window.multissh.clipboardHistoryClear()}
+            onClick={() => void clearClipboardHistory()}
             className="rounded-lg border border-border-subtle px-3 py-2 text-xs text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary cursor-pointer"
           >
             Clear history
@@ -198,12 +227,12 @@ export const TerminalSettingsSection: React.FC<{ form: SettingsForm }> = ({ form
       {/* Session Exit Action */}
       <div className="space-y-2 pt-2 border-t border-divider">
         <div>
-          <label className="text-xs font-medium text-txt-primary">On Logout / Session End</label>
+          <div id="session-exit-action-label" className="text-xs font-medium text-txt-primary">On Logout / Session End</div>
           <p className="text-xs text-txt-muted">Choose what happens when an SSH session or local terminal ends.</p>
         </div>
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+        <div role="radiogroup" aria-labelledby="session-exit-action-label" className="grid grid-cols-1 sm:grid-cols-3 gap-2">
           <label
-            className={`flex flex-col gap-1.5 rounded-lg border p-2.5 text-xs cursor-pointer transition-colors ${
+            className={`flex flex-col gap-1.5 rounded-lg border p-2.5 text-xs cursor-pointer transition-colors has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-sky-500 has-[:focus-visible]:ring-offset-1 has-[:focus-visible]:ring-offset-app-surface ${
               sessionExitAction === 'reconnect'
                 ? 'border-sky-500 bg-sky-500/15 text-sky-300'
                 : 'border-border-subtle bg-app-surface text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary'
@@ -215,7 +244,7 @@ export const TerminalSettingsSection: React.FC<{ form: SettingsForm }> = ({ form
                 name="sessionExitAction"
                 checked={sessionExitAction === 'reconnect'}
                 onChange={() => setSessionExitAction('reconnect')}
-                className="hidden"
+                className="sr-only"
               />
               <RotateCcw className="h-3.5 w-3.5 text-sky-400" />
               <span>Reconnect (Default)</span>
@@ -226,7 +255,7 @@ export const TerminalSettingsSection: React.FC<{ form: SettingsForm }> = ({ form
           </label>
 
           <label
-            className={`flex flex-col gap-1.5 rounded-lg border p-2.5 text-xs cursor-pointer transition-colors ${
+            className={`flex flex-col gap-1.5 rounded-lg border p-2.5 text-xs cursor-pointer transition-colors has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-sky-500 has-[:focus-visible]:ring-offset-1 has-[:focus-visible]:ring-offset-app-surface ${
               sessionExitAction === 'close'
                 ? 'border-sky-500 bg-sky-500/15 text-sky-300'
                 : 'border-border-subtle bg-app-surface text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary'
@@ -238,7 +267,7 @@ export const TerminalSettingsSection: React.FC<{ form: SettingsForm }> = ({ form
                 name="sessionExitAction"
                 checked={sessionExitAction === 'close'}
                 onChange={() => setSessionExitAction('close')}
-                className="hidden"
+                className="sr-only"
               />
               <X className="h-3.5 w-3.5 text-amber-400" />
               <span>Close Tab Immediately</span>
@@ -249,7 +278,7 @@ export const TerminalSettingsSection: React.FC<{ form: SettingsForm }> = ({ form
           </label>
 
           <label
-            className={`flex flex-col gap-1.5 rounded-lg border p-2.5 text-xs cursor-pointer transition-colors ${
+            className={`flex flex-col gap-1.5 rounded-lg border p-2.5 text-xs cursor-pointer transition-colors has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-sky-500 has-[:focus-visible]:ring-offset-1 has-[:focus-visible]:ring-offset-app-surface ${
               sessionExitAction === 'keep'
                 ? 'border-sky-500 bg-sky-500/15 text-sky-300'
                 : 'border-border-subtle bg-app-surface text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary'
@@ -261,7 +290,7 @@ export const TerminalSettingsSection: React.FC<{ form: SettingsForm }> = ({ form
                 name="sessionExitAction"
                 checked={sessionExitAction === 'keep'}
                 onChange={() => setSessionExitAction('keep')}
-                className="hidden"
+                className="sr-only"
               />
               <Terminal className="h-3.5 w-3.5 text-txt-muted" />
               <span>Keep Open</span>
@@ -276,24 +305,27 @@ export const TerminalSettingsSection: React.FC<{ form: SettingsForm }> = ({ form
       {/* SSH CLI & Agent Integration */}
       <div className="space-y-3 pt-3 border-t border-divider">
         <div>
-          <label className="text-xs font-medium text-txt-primary">Local Terminal SSH Agent</label>
+          <label htmlFor="local-terminal-agent-mode" className="text-xs font-medium text-txt-primary">Local Terminal SSH Agent</label>
           <p className="text-xs text-txt-muted">
             Configure how the <code>SSH_AUTH_SOCK</code> environment variable is set in local shell terminals.
           </p>
         </div>
-        <select
-          value={localTerminalAgentMode}
-          onChange={(e) =>
-            setLocalTerminalAgentMode(
-              e.target.value as 'auto' | 'system' | 'app-managed' | 'disabled'
-            )
-          }
-          className="w-full rounded-lg border border-border-subtle bg-app-surface px-3 py-2 text-xs text-txt-primary outline-none focus:border-sky-500"
-        >
-          <option value="auto">Auto (Active smartcard agent, else system/login shell agent, else sshs3-managed)</option>
-          <option value="system">System Only (Inherit system or login shell SSH_AUTH_SOCK)</option>
-          <option value="disabled">Disabled (Do not set SSH_AUTH_SOCK)</option>
-        </select>
+        <ManagedGroup managed={isManaged('localTerminalAgentMode')}>
+          <select
+            id="local-terminal-agent-mode"
+            value={localTerminalAgentMode}
+            onChange={(e) =>
+              setLocalTerminalAgentMode(
+                e.target.value as 'auto' | 'system' | 'app-managed' | 'disabled'
+              )
+            }
+            className="w-full rounded-lg border border-border-subtle bg-app-surface px-3 py-2 text-xs text-txt-primary outline-none focus:border-sky-500"
+          >
+            <option value="auto">Auto (Active smartcard agent, else system/login shell agent, else sshs3-managed)</option>
+            <option value="system">System Only (Inherit system or login shell SSH_AUTH_SOCK)</option>
+            <option value="disabled">Disabled (Do not set SSH_AUTH_SOCK)</option>
+          </select>
+        </ManagedGroup>
       </div>
 
       <div className="space-y-2 pt-3 border-t border-divider">
@@ -312,6 +344,98 @@ export const TerminalSettingsSection: React.FC<{ form: SettingsForm }> = ({ form
             </span>
           </span>
         </label>
+      </div>
+
+      <div className="space-y-2 pt-3 border-t border-divider">
+        <label className="flex items-start gap-2 text-xs text-txt-primary cursor-pointer">
+          <input
+            type="checkbox"
+            checked={terminalPathHoverPreview}
+            onChange={(e) => setTerminalPathHoverPreview(e.target.checked)}
+            className="mt-0.5 h-4 w-4 rounded border-border-subtle text-sky-600 focus:ring-sky-500"
+          />
+          <span>
+            Enable file path hover preview
+            <span className="block text-txt-muted">
+              Shows an interactive preview card with file details, thumbnail, and actions when hovering over paths in the terminal.
+              Only files that exist are previewed.
+            </span>
+          </span>
+        </label>
+        <div className="flex items-center gap-2 pl-6">
+          <label htmlFor="path-hover-mode" className="text-xs text-txt-muted">
+            Show the card
+          </label>
+          <select
+            id="path-hover-mode"
+            value={terminalPathHoverMode}
+            disabled={!terminalPathHoverPreview}
+            onChange={(e) => setTerminalPathHoverMode(e.target.value === 'ctrl' ? 'ctrl' : 'hover')}
+            className="rounded-lg border border-border-subtle bg-app-input px-3 py-1.5 text-xs text-txt-primary outline-none focus:border-sky-500 disabled:opacity-50"
+          >
+            <option value="hover">When hovering over a path</option>
+            <option value="ctrl">Only while Ctrl is held</option>
+          </select>
+        </div>
+      </div>
+
+      <div className="space-y-2 pt-3 border-t border-divider">
+        <label className="flex items-start gap-2 text-xs text-txt-primary cursor-pointer">
+          <input
+            type="checkbox"
+            checked={terminalSudoRetryPrompt}
+            onChange={(e) => setTerminalSudoRetryPrompt(e.target.checked)}
+            className="mt-0.5 h-4 w-4 rounded border-border-subtle text-sky-600 focus:ring-sky-500"
+          />
+          <span>
+            Offer to re-run failed commands with sudo
+            <span className="block text-txt-muted">
+              When a command fails with a permission error, shows a prompt: press Enter to re-run it with <code>sudo</code>, or Esc to dismiss.
+            </span>
+          </span>
+        </label>
+      </div>
+
+      <div className="space-y-3 pt-3 border-t border-divider">
+        <label className="flex items-start gap-2 text-xs text-txt-primary cursor-pointer">
+          <input
+            type="checkbox"
+            checked={terminalPortForwardAutoDetect}
+            onChange={(e) => setTerminalPortForwardAutoDetect(e.target.checked)}
+            className="mt-0.5 h-4 w-4 rounded border-border-subtle text-sky-600 focus:ring-sky-500"
+          />
+          <span>
+            Enable web service & port forward auto-detection
+            <span className="block text-txt-muted">
+              Detects web servers and listening ports (e.g. Vite, Next.js, Django, Flask, Express) in terminal output and shows a quick-forward banner.
+            </span>
+          </span>
+        </label>
+
+        {terminalPortForwardAutoDetect && (
+          <div className="pl-6 space-y-1.5">
+            <label className="text-xs font-medium text-txt-primary" htmlFor="custom-port-regex">
+              Custom port detection regex (optional)
+            </label>
+            <input
+              id="custom-port-regex"
+              type="text"
+              value={terminalPortForwardCustomRegex}
+              onChange={(e) => setTerminalPortForwardCustomRegex(e.target.value)}
+              placeholder="e.g. Service started on :(?<port>\d+) or port (\d+)"
+              className="w-full rounded-lg border border-border-subtle bg-app-input px-3 py-2 text-xs text-txt-primary outline-none focus:border-sky-500 font-mono"
+            />
+            {portRegexError ? (
+              <p className="text-[11px] text-rose-400" role="alert">
+                {portRegexError} The pattern is ignored until fixed.
+              </p>
+            ) : (
+              <p className="text-[11px] text-txt-muted">
+                Optional regular expression to capture service ports from proprietary or custom application logs.
+              </p>
+            )}
+          </div>
+        )}
       </div>
 
       <X11ServerSection form={form} />

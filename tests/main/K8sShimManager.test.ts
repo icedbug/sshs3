@@ -7,6 +7,7 @@ const { mockFs } = vi.hoisted(() => ({
     existsSync: vi.fn(),
     mkdirSync: vi.fn(),
     writeFileSync: vi.fn(),
+    mkdtempSync: vi.fn(),
   },
 }));
 
@@ -17,6 +18,7 @@ vi.mock('node:fs', async (importOriginal) => {
     existsSync: (...args: any[]) => mockFs.existsSync(...args),
     mkdirSync: (...args: any[]) => mockFs.mkdirSync(...args),
     writeFileSync: (...args: any[]) => mockFs.writeFileSync(...args),
+    mkdtempSync: (...args: any[]) => mockFs.mkdtempSync(...args),
   };
   return {
     ...customFs,
@@ -34,6 +36,8 @@ describe('K8sShimManager', () => {
     mockFs.existsSync.mockReset();
     mockFs.mkdirSync.mockReset();
     mockFs.writeFileSync.mockReset();
+    mockFs.mkdtempSync.mockReset();
+    (K8sShimManager as unknown as { fallbackBinDir?: string }).fallbackBinDir = undefined;
   });
 
   afterEach(() => {
@@ -68,19 +72,47 @@ describe('K8sShimManager', () => {
     );
   });
 
-  it('falls back to tmp directory if creating ~/.sshs3/bin fails', () => {
-    Object.defineProperty(process, 'platform', { value: 'linux' });
-    mockFs.existsSync.mockReturnValue(false);
-    mockFs.mkdirSync.mockImplementationOnce(() => {
-      throw new Error('EACCES: permission denied');
+  describe('when ~/.sshs3/bin cannot be created', () => {
+    const fallback = path.join(os.tmpdir(), 'sshs3-bin-Ab12Cd');
+
+    beforeEach(() => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      mockFs.existsSync.mockImplementation((p: string) => (p.includes('.sshs3') ? false : true));
+      mockFs.mkdirSync.mockImplementation(() => {
+        throw new Error('EACCES: permission denied');
+      });
+      mockFs.mkdtempSync.mockReturnValue(fallback);
     });
 
-    const tmpBin = path.join(os.tmpdir(), 'sshs3-bin');
-    const result = K8sShimManager.ensureShim();
+    it('uses an unpredictable private directory, not a fixed name in the shared temp dir', () => {
+      expect(K8sShimManager.ensureShim()).toBe(fallback);
+      expect(mockFs.mkdtempSync).toHaveBeenCalledWith(path.join(os.tmpdir(), 'sshs3-bin-'));
+      // Nothing is created at the old, pre-creatable path.
+      expect(mockFs.mkdirSync).not.toHaveBeenCalledWith(path.join(os.tmpdir(), 'sshs3-bin'), expect.anything());
+    });
 
-    expect(result).toBe(tmpBin);
-    expect(mockFs.mkdirSync).toHaveBeenCalledTimes(2);
-    expect(mockFs.mkdirSync).toHaveBeenLastCalledWith(tmpBin, { recursive: true, mode: 0o755 });
+    it('still writes the oc shim into the fallback directory', () => {
+      K8sShimManager.ensureShim();
+      expect(mockFs.writeFileSync).toHaveBeenCalledWith(
+        path.join(fallback, 'oc'),
+        expect.stringContaining('#!/bin/sh'),
+        { encoding: 'utf8', mode: 0o755 }
+      );
+    });
+
+    it('reuses the same fallback directory for later terminals while it exists', () => {
+      mockFs.existsSync.mockImplementation((p: string) => (p.includes('.sshs3') ? false : true));
+      expect(K8sShimManager.ensureShim()).toBe(fallback);
+      expect(K8sShimManager.ensureShim()).toBe(fallback);
+      expect(mockFs.mkdtempSync).toHaveBeenCalledTimes(1);
+    });
+
+    it('creates a new one if the temp cleaner removed it', () => {
+      K8sShimManager.ensureShim();
+      mockFs.existsSync.mockReturnValue(false);
+      mockFs.mkdtempSync.mockReturnValue(`${fallback}2`);
+      expect(K8sShimManager.ensureShim()).toBe(`${fallback}2`);
+    });
   });
 
   it('writes cmd and ps1 scripts on Windows', () => {

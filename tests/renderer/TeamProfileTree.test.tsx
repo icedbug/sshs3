@@ -4,7 +4,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, within } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import { TeamProfileTree } from '../../src/renderer/src/components/ConnectionModal/TeamProfileTree';
-import { buildTeamFolderTree } from '../../src/renderer/src/components/ConnectionModal/teamProfileTreeModel';
+import { buildTeamFolderTree } from '../../src/renderer/src/components/ConnectionModal/teamFolderTree';
 
 interface P {
   id: string;
@@ -14,7 +14,7 @@ interface P {
 
 type TreeProps = Parameters<typeof TeamProfileTree<P>>[0];
 
-/** Manages `currentPath` as real state (like `ConnectionManagerModal` does) so clicking a card
+/** Manages `currentPath` as real state (like `ConnectionManagerModal` does) so clicking a folder row
  * or breadcrumb segment actually navigates, instead of requiring the test to manually re-render
  * with a new `currentPath` prop every time. */
 function Harness(props: Omit<TreeProps, 'currentPath' | 'onNavigate'> & { initialPath?: string[] }) {
@@ -51,7 +51,7 @@ function renderTree(
   return { ...utils, onDropProfile, onCreateFolder, onRenameFolder, onDeleteFolder, onSetFolderIcon };
 }
 
-/** The card for a folder path, via the stable `data-folder-path` attribute set on its container
+/** The row for a folder path, via the stable `data-folder-path` attribute set on its container
  * (not derived from any button title, which can be ambiguous or change). */
 function getCard(path: string): HTMLElement {
   return document.querySelector(`[data-folder-path="${path}"]`) as HTMLElement;
@@ -60,7 +60,7 @@ function getCard(path: string): HTMLElement {
 describe('TeamProfileTree', () => {
   afterEach(() => cleanup());
 
-  it('shows top-level folders as cards, not their nested contents', () => {
+  it('shows top-level folders as rows, not their nested contents', () => {
     const profiles: P[] = [
       { id: 'p1', name: 'web-1', group: 'Acme Infra' },
       { id: 'p2', name: 'node-1', group: 'Acme Infra/Cluster A' },
@@ -73,13 +73,41 @@ describe('TeamProfileTree', () => {
     expect(screen.queryByText('node-1')).not.toBeInTheDocument();
   });
 
+  it('describes each folder row by what it holds: profiles, subfolders, or that it is empty', () => {
+    const profiles: P[] = [
+      { id: 'p1', name: 'web-1', group: 'Acme Infra' },
+      { id: 'p2', name: 'web-2', group: 'Acme Infra' },
+      { id: 'p3', name: 'node-1', group: 'Acme Infra/Cluster A' },
+      { id: 'p4', name: 'solo', group: 'Solo' },
+    ];
+    renderTree(['Acme Infra', 'Acme Infra/Cluster A', 'Solo', 'Nothing here'], profiles);
+
+    expect(within(getCard('Acme Infra')).getByText('2 profiles · 1 subfolder')).toBeInTheDocument();
+    expect(within(getCard('Solo')).getByText('1 profile')).toBeInTheDocument();
+    expect(within(getCard('Nothing here')).getByText('Empty')).toBeInTheDocument();
+  });
+
+  it('keeps rename and delete in the page for every folder row, so they are reachable with the keyboard without hovering', () => {
+    renderTree(['A', 'B'], []);
+    expect(screen.getAllByRole('button', { name: 'Rename folder' })).toHaveLength(2);
+    expect(screen.getAllByRole('button', { name: /Delete folder/ })).toHaveLength(2);
+  });
+
+  it('lists the folder rows one under the other', () => {
+    renderTree(['A', 'B', 'C'], []);
+    const rows = ['A', 'B', 'C'].map((name) => getCard(name));
+    expect(new Set(rows.map((row) => row.parentElement)).size).toBe(1);
+    expect(rows[0].parentElement).toHaveClass('flex-col');
+    expect(rows[0].parentElement).not.toHaveClass('grid');
+  });
+
   it('shows an ungrouped section at the top level for profiles without a group', () => {
     renderTree([], [{ id: 'p1', name: 'standalone' }]);
     expect(screen.getByText('Ungrouped')).toBeInTheDocument();
     expect(screen.getByText('standalone')).toBeInTheDocument();
   });
 
-  it('clicking into a folder card shows a breadcrumb and that folder\'s profiles/subfolders', () => {
+  it('clicking into a folder row shows a breadcrumb and that folder\'s profiles/subfolders', () => {
     const profiles: P[] = [
       { id: 'p1', name: 'web-1', group: 'Acme Infra' },
       { id: 'p2', name: 'node-1', group: 'Acme Infra/Cluster A' },
@@ -95,17 +123,17 @@ describe('TeamProfileTree', () => {
     expect(screen.queryByText('node-1')).not.toBeInTheDocument();
   });
 
-  it('clicking anywhere on the card container (upper or lower area) opens the folder', () => {
+  it('clicking anywhere on the folder row opens the folder', () => {
     renderTree(['Acme Infra'], [{ id: 'p1', name: 'web-1', group: 'Acme Infra' }]);
 
-    // Click directly on the outer card container (not the inner text)
+    // Click directly on the outer row container (not the inner text)
     fireEvent.click(getCard('Acme Infra'));
 
     expect(screen.getByRole('button', { name: 'Back' })).toBeInTheDocument();
     expect(screen.getByText('web-1')).toBeInTheDocument();
   });
 
-  it('pressing Enter on the card container opens the folder', () => {
+  it('pressing Enter on the folder row opens the folder', () => {
     renderTree(['Acme Infra'], [{ id: 'p1', name: 'web-1', group: 'Acme Infra' }]);
 
     const card = getCard('Acme Infra');
@@ -148,7 +176,7 @@ describe('TeamProfileTree', () => {
     expect(onCreateFolder).toHaveBeenCalledWith('Acme Infra/Cluster A');
   });
 
-  it('renaming a folder card calls onRenameFolder with the old and new full paths', () => {
+  it('renaming a folder row calls onRenameFolder with the old and new full paths', () => {
     const { onRenameFolder } = renderTree(['Acme Infra/Cluster A'], [], { initialPath: ['Acme Infra'] });
 
     const card = getCard('Acme Infra/Cluster A');
@@ -206,14 +234,14 @@ describe('TeamProfileTree', () => {
     expect(onSetFolderIcon).not.toHaveBeenCalled();
   });
 
-  it('deleting a folder card calls onDeleteFolder with its full path', () => {
+  it('deleting a folder row calls onDeleteFolder with its full path', () => {
     const { onDeleteFolder } = renderTree(['Acme Infra'], []);
 
     fireEvent.click(screen.getByTitle(/Delete folder/));
     expect(onDeleteFolder).toHaveBeenCalledWith('Acme Infra');
   });
 
-  it('dropping a profile on a folder card calls onDropProfile with that folder path', () => {
+  it('dropping a profile on a folder row calls onDropProfile with that folder path', () => {
     const { onDropProfile } = renderTree(['Acme Infra'], []);
     const card = getCard('Acme Infra');
 
@@ -240,6 +268,44 @@ describe('TeamProfileTree', () => {
     fireEvent.drop(zone, { dataTransfer });
 
     expect(onDropProfile).toHaveBeenCalledWith(undefined, expect.anything());
+  });
+
+  describe('renderProfileList', () => {
+    const profiles: P[] = [
+      { id: 'p1', name: 'web-1', group: 'Acme Infra' },
+      { id: 'p2', name: 'web-2', group: 'Acme Infra' },
+      { id: 'p3', name: 'loose' },
+    ];
+
+    it('draws one row per profile with renderProfile when no list renderer is given', () => {
+      renderTree(['Acme Infra'], profiles);
+      expect(screen.getByText('loose')).toBeInTheDocument();
+      fireEvent.click(screen.getByText('Acme Infra'));
+      expect(screen.getByText('web-1')).toBeInTheDocument();
+      expect(screen.getByText('web-2')).toBeInTheDocument();
+    });
+
+    it('hands the profiles of the folder being browsed to the list renderer, instead of drawing them one by one', () => {
+      const renderProfileList = vi.fn((list: P[]) => <div data-testid="custom">{list.map((p) => p.name).join('+')}</div>);
+      renderTree(['Acme Infra'], profiles, { renderProfileList });
+      fireEvent.click(screen.getByText('Acme Infra'));
+      expect(renderProfileList).toHaveBeenLastCalledWith([profiles[0], profiles[1]]);
+      expect(screen.getByTestId('custom')).toHaveTextContent('web-1+web-2');
+    });
+
+    it('hands the ungrouped profiles to it at the top level', () => {
+      const renderProfileList = vi.fn((list: P[]) => <div data-testid="custom">{list.map((p) => p.name).join('+')}</div>);
+      renderTree(['Acme Infra'], profiles, { renderProfileList });
+      expect(renderProfileList).toHaveBeenCalledWith([profiles[2]]);
+      expect(screen.getByTestId('custom')).toHaveTextContent('loose');
+    });
+
+    it('is not used for search results, which stay one labelled row per match', () => {
+      const renderProfileList = vi.fn(() => <div data-testid="custom" />);
+      renderTree(['Acme Infra'], profiles, { renderProfileList, query: 'web' });
+      expect(renderProfileList).not.toHaveBeenCalled();
+      expect(screen.getByText('web-1')).toBeInTheDocument();
+    });
   });
 
   describe('search mode', () => {

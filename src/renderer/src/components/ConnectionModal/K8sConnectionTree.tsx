@@ -16,65 +16,29 @@ import {
   ScrollText,
   Search,
   TerminalSquare,
+  Trash2,
   X,
 } from 'lucide-react';
-import type { K8sClusterNode, K8sNamespaceNode, K8sPodNode, K8sTerminalTarget } from '@shared/types/kubernetes';
+import type { K8sClusterNode, K8sNamespaceNode, K8sPodNode, K8sProfile, K8sTerminalTarget } from '@shared/types/kubernetes';
+import { useConfirm } from '../ConfirmDialog';
 import { K8sPodDetailModal } from '../K8s/K8sPodDetailModal';
 import { K8sPortForwardModal } from '../K8s/K8sPortForwardModal';
 import { K8sDebugModal } from '../K8s/K8sDebugModal';
 import { K8sLoginModal } from '../K8s/K8sLoginModal';
+import { K8sProfileActions, K8sUnattachedProfileRow } from '../K8s/K8sProfileRow';
+import { K8sSharePicker, K8sTeamVaultSection } from '../K8s/K8sTeamVaultSection';
+import { K8sTeamProfileForm } from '../K8s/K8sTeamProfileForm';
+import { describeError } from '../../lib/k8sErrors';
+import {
+  personalProfileFromTemplate,
+  profileForContext,
+  restrictedNamespaces,
+  templateFromProfile,
+  unattachedProfiles,
+} from '../../lib/k8sProfiles';
+import { useK8sTeamProfiles, type TeamK8sGroup } from '../../lib/useK8sTeamProfiles';
 
 type Loadable<T> = { status: 'loading' } | { status: 'error'; error: string } | { status: 'ready'; data: T };
-
-// Electron wraps every main-process throw with this prefix, which leaks the
-// internal IPC channel name (e.g. "k8s:list-namespaces") to the user.
-const ELECTRON_IPC_PREFIX = /^Error invoking remote method '[^']*':\s*/;
-
-/** Known technical failure substrings mapped to actionable, user-facing text. */
-const KNOWN_ERROR_HINTS: Array<{ match: RegExp; hint: string }> = [
-  {
-    match: /HTTP protocol is not allowed when skipTLSVerify is not set or false/i,
-    hint:
-      "This cluster's API server uses plain HTTP. Enable \"Skip TLS verification\" for this context, or update your kubeconfig to use an HTTPS endpoint.",
-  },
-  {
-    match: /ECONNREFUSED/,
-    hint:
-      "Connection refused — the cluster's API server is unreachable at this address. Check that any required port-forward, VPN or proxy is running.",
-  },
-  {
-    match: /ENOTFOUND|EAI_AGAIN/,
-    hint: "Host not found — check the cluster's API server address in your kubeconfig.",
-  },
-  {
-    match: /certificate|x509|self[- ]signed/i,
-    hint:
-      'TLS certificate problem — this app does not trust the certificate presented by the cluster. Check your kubeconfig\'s certificate authority, or enable "Skip TLS verification" if you trust this cluster.',
-  },
-  {
-    match: /\b401\b|unauthorized/i,
-    hint: 'Not authorized — your credentials for this context have expired or are invalid. Try logging in again.',
-  },
-];
-
-/**
- * The k8s client wraps connection failures in a bare `TypeError: fetch failed`
- * with the actual reason (e.g. ECONNREFUSED) nested in `.cause`. Walk the
- * chain, strip Electron's internal IPC error prefix, and map known causes to
- * actionable text instead of showing raw system errors (UX review #12).
- */
-function describeError(err: unknown): string {
-  if (!(err instanceof Error)) return String(err);
-  const parts: string[] = [err.message];
-  let cause: unknown = (err as { cause?: unknown }).cause;
-  while (cause instanceof Error) {
-    parts.push(cause.message);
-    cause = (cause as { cause?: unknown }).cause;
-  }
-  const raw = parts.join(' — caused by: ').replace(ELECTRON_IPC_PREFIX, '');
-  const known = KNOWN_ERROR_HINTS.find((h) => h.match.test(raw));
-  return known ? known.hint : raw;
-}
 
 const stateDotClass: Record<string, string> = {
   running: 'bg-emerald-500',
@@ -135,6 +99,7 @@ export const K8sConnectionTree: React.FC<K8sConnectionTreeProps> = ({
   }, [enableOpenShiftProp]);
   const [contexts, setContexts] = useState<Loadable<K8sClusterNode[]>>({ status: 'loading' });
   const [execAuthWarning, setExecAuthWarning] = useState<string | null>(null);
+  const [shareError, setShareError] = useState<string | null>(null);
   const [expandedContexts, setExpandedContexts] = useState<Set<string>>(new Set());
   const [namespacesByContext, setNamespacesByContext] = useState<Record<string, Loadable<K8sNamespaceNode[]>>>({});
   const [expandedNamespaces, setExpandedNamespaces] = useState<Set<string>>(new Set());
@@ -161,6 +126,11 @@ export const K8sConnectionTree: React.FC<K8sConnectionTreeProps> = ({
   } | null>(null);
   const [debugModalOpen, setDebugModalOpen] = useState(false);
   const [loginModalOpen, setLoginModalOpen] = useState(false);
+  const [profiles, setProfiles] = useState<K8sProfile[]>([]);
+  const [loginProfile, setLoginProfile] = useState<K8sProfile | null>(null);
+  const teamK8s = useK8sTeamProfiles(enableOpenShift);
+  const [teamForm, setTeamForm] = useState<{ group: TeamK8sGroup; template: K8sProfile | null } | null>(null);
+  const [sharing, setSharing] = useState<K8sProfile | null>(null);
   const [activePortForwardsCount, setActivePortForwardsCount] = useState(0);
 
   useEffect(() => {
@@ -199,66 +169,237 @@ export const K8sConnectionTree: React.FC<K8sConnectionTreeProps> = ({
     };
   }, []);
 
+  const loadProfiles = async (): Promise<K8sProfile[]> => {
+    try {
+      const list = (await window.multissh.k8sProfilesList?.()) ?? [];
+      setProfiles(list);
+      return list;
+    } catch {
+      return [];
+    }
+  };
+
+  useEffect(() => {
+    void loadProfiles();
+  }, []);
+
+  const openLogin = (profile: K8sProfile | null) => {
+    setLoginProfile(profile);
+    setLoginModalOpen(true);
+  };
+
   const handleRefresh = async () => {
     try {
       await window.multissh.k8sReload();
     } catch {
       // Ignored
     }
+    void loadProfiles();
+    void teamK8s.reload();
     setNamespacesByContext({});
     setPodsByNamespace({});
     setExpandedContexts(new Set());
     setExpandedNamespaces(new Set());
+    setExpandedPods(new Set());
     loadContexts();
   };
 
+  /** A profile limited to one project shows just that project, so the cluster-wide list is never requested. */
+  const loadNamespaces = (contextName: string, knownProfiles: K8sProfile[] = profiles) => {
+    const restricted = restrictedNamespaces(profileForContext(knownProfiles, contextName));
+    if (restricted) {
+      setNamespacesByContext((p) => ({ ...p, [contextName]: { status: 'ready', data: restricted } }));
+      return;
+    }
+    setNamespacesByContext((p) => ({ ...p, [contextName]: { status: 'loading' } }));
+    window.multissh
+      .k8sListNamespaces(contextName)
+      .then((data) => setNamespacesByContext((p) => ({ ...p, [contextName]: { status: 'ready', data } })))
+      .catch((err) =>
+        setNamespacesByContext((p) => ({
+          ...p,
+          [contextName]: { status: 'error', error: describeError(err) },
+        }))
+      );
+  };
+
   const toggleContext = (contextName: string) => {
+    const opening = !expandedContexts.has(contextName);
     setExpandedContexts((prev) => {
       const next = new Set(prev);
-      if (next.has(contextName)) {
-        next.delete(contextName);
-        return next;
-      }
-      next.add(contextName);
-      if (!namespacesByContext[contextName]) {
-        setNamespacesByContext((p) => ({ ...p, [contextName]: { status: 'loading' } }));
-        window.multissh
-          .k8sListNamespaces(contextName)
-          .then((data) => setNamespacesByContext((p) => ({ ...p, [contextName]: { status: 'ready', data } })))
-          .catch((err) =>
-            setNamespacesByContext((p) => ({
-              ...p,
-              [contextName]: { status: 'error', error: describeError(err) },
-            }))
-          );
-      }
+      if (next.has(contextName)) next.delete(contextName);
+      else next.add(contextName);
       return next;
     });
+    // Outside the updater: a state updater must be pure (StrictMode runs it twice, which sent the request twice).
+    if (opening && !namespacesByContext[contextName]) loadNamespaces(contextName);
   };
+
+  const confirm = useConfirm();
+
+  const refreshPods = (contextName: string, namespace: string) => {
+    const key = `${contextName}/${namespace}`;
+    window.multissh
+      .k8sListPods(contextName, namespace)
+      .then((data) => setPodsByNamespace((p) => ({ ...p, [key]: { status: 'ready', data } })))
+      .catch((err) =>
+        setPodsByNamespace((p) => ({
+          ...p,
+          [key]: { status: 'error', error: describeError(err) },
+        }))
+      );
+  };
+
+  const handleDeletePod = async (contextName: string, namespace: string, podName: string) => {
+    const confirmed = await confirm({
+      title: 'Delete Pod',
+      message: (
+        <span>
+          Delete pod <strong className="text-txt-primary">{podName}</strong>?
+          If managed by a controller, a replacement will start automatically.
+        </span>
+      ),
+      confirmLabel: 'Delete',
+      danger: true,
+    });
+    if (!confirmed) return;
+    try {
+      await window.multissh.k8sDeletePod(contextName, namespace, podName);
+      refreshPods(contextName, namespace);
+    } catch {
+      refreshPods(contextName, namespace);
+    }
+  };
+
+  const handleRemoveProfile = async (profile: K8sProfile) => {
+    const confirmed = await confirm({
+      title: 'Remove profile',
+      message: (
+        <span>
+          Remove the saved cluster <strong className="text-txt-primary">{profile.name}</strong>? Its entry in your
+          kubeconfig (and any stored token) is kept.
+        </span>
+      ),
+      confirmLabel: 'Remove',
+      danger: true,
+    });
+    if (!confirmed) return;
+    try {
+      await window.multissh.k8sProfilesDelete(profile.id);
+    } catch {
+      // The reload below shows the actual state.
+    }
+    const list = await loadProfiles();
+    // A context that was limited to one project goes back to listing the whole cluster.
+    if (profile.contextName && !profileForContext(list, profile.contextName)) {
+      setNamespacesByContext((p) => {
+        const { [profile.contextName as string]: _dropped, ...rest } = p;
+        return rest;
+      });
+      setExpandedContexts((prev) => {
+        const next = new Set(prev);
+        next.delete(profile.contextName as string);
+        return next;
+      });
+    }
+  };
+
+  const loginSuccess = async (result?: { contextName?: string }) => {
+    await handleRefresh();
+    const list = await loadProfiles();
+    if (result?.contextName) {
+      setExpandedContexts((prev) => new Set(prev).add(result.contextName as string));
+      loadNamespaces(result.contextName, list);
+    }
+  };
+
+  const saveTeamTemplate = async (group: TeamK8sGroup, template: K8sProfile) => {
+    await window.multissh.teamVaultSaveK8sProfile(group.vaultId, template);
+    await teamK8s.reload();
+  };
+
+  const removeTeamTemplate = async (group: TeamK8sGroup, template: K8sProfile) => {
+    const confirmed = await confirm({
+      title: 'Remove shared cluster',
+      message: (
+        <span>
+          Remove <strong className="text-txt-primary">{template.name}</strong> from {group.vaultName} for everyone on the
+          team? Members keep their own profiles and kubeconfig entries.
+        </span>
+      ),
+      confirmLabel: 'Remove',
+      danger: true,
+    });
+    if (!confirmed) return;
+    try {
+      await window.multissh.teamVaultDeleteK8sProfile(group.vaultId, template.id);
+    } catch {
+      // The reload below shows the actual state.
+    }
+    await teamK8s.reload();
+  };
+
+  /** Sharing is started from a button with nothing waiting for the result, so a failure is shown here. */
+  const shareTemplate = async (group: TeamK8sGroup, template: K8sProfile) => {
+    setShareError(null);
+    try {
+      await saveTeamTemplate(group, template);
+    } catch (err) {
+      setShareError(describeError(err));
+    }
+  };
+
+  const shareProfile = (profile: K8sProfile) => {
+    if (teamK8s.groups.length === 1) void shareTemplate(teamK8s.groups[0], templateFromProfile(profile));
+    else setSharing(profile);
+  };
+  const onShare = teamK8s.groups.length > 0 ? shareProfile : undefined;
+
+  const teamSection = enableOpenShift ? (
+    <K8sTeamVaultSection
+      groups={teamK8s.groups}
+      lockedCount={teamK8s.lockedCount}
+      onSignIn={(template) => openLogin(personalProfileFromTemplate(profiles, template))}
+      onAdd={(group) => setTeamForm({ group, template: null })}
+      onEdit={(group, template) => setTeamForm({ group, template })}
+      onRemove={(group, template) => void removeTeamTemplate(group, template)}
+    />
+  ) : null;
+
+  const teamModals = enableOpenShift ? (
+    <>
+      <K8sTeamProfileForm
+        open={teamForm !== null}
+        vaultName={teamForm?.group.vaultName ?? ''}
+        initial={teamForm?.template ?? null}
+        onSave={(template) => saveTeamTemplate(teamForm!.group, template)}
+        onClose={() => setTeamForm(null)}
+      />
+      <K8sSharePicker
+        profile={sharing}
+        groups={teamK8s.groups}
+        onPick={(group) => {
+          if (sharing) void shareTemplate(group, templateFromProfile(sharing));
+          setSharing(null);
+        }}
+        onClose={() => setSharing(null)}
+      />
+    </>
+  ) : null;
 
   const toggleNamespace = (contextName: string, namespace: string) => {
     const key = `${contextName}/${namespace}`;
+    const opening = !expandedNamespaces.has(key);
     setExpandedNamespaces((prev) => {
       const next = new Set(prev);
-      if (next.has(key)) {
-        next.delete(key);
-        return next;
-      }
-      next.add(key);
-      if (!podsByNamespace[key]) {
-        setPodsByNamespace((p) => ({ ...p, [key]: { status: 'loading' } }));
-        window.multissh
-          .k8sListPods(contextName, namespace)
-          .then((data) => setPodsByNamespace((p) => ({ ...p, [key]: { status: 'ready', data } })))
-          .catch((err) =>
-            setPodsByNamespace((p) => ({
-              ...p,
-              [key]: { status: 'error', error: describeError(err) },
-            }))
-          );
-      }
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
       return next;
     });
+    if (opening && !podsByNamespace[key]) {
+      setPodsByNamespace((p) => ({ ...p, [key]: { status: 'loading' } }));
+      refreshPods(contextName, namespace);
+    }
   };
 
   const togglePod = (podKey: string) => {
@@ -300,7 +441,7 @@ export const K8sConnectionTree: React.FC<K8sConnectionTreeProps> = ({
           <>
             <button
               type="button"
-              onClick={() => setLoginModalOpen(true)}
+              onClick={() => openLogin(null)}
               className="flex items-center gap-2 rounded-lg bg-red-600 hover:bg-red-500 text-white px-4 py-2 text-xs font-medium shadow-sm transition-colors"
             >
               <LogIn className="h-4 w-4" />
@@ -308,14 +449,25 @@ export const K8sConnectionTree: React.FC<K8sConnectionTreeProps> = ({
             </button>
             <K8sLoginModal
               open={loginModalOpen}
+              initialProfile={loginProfile}
               onClose={() => setLoginModalOpen(false)}
-              onSuccess={(result) => {
-                handleRefresh();
-                if (result?.contextName) {
-                  setExpandedContexts((prev) => new Set(prev).add(result.contextName));
-                }
-              }}
+              onSuccess={(result) => void loginSuccess(result)}
             />
+            {unattachedProfiles(profiles, []).length > 0 && (
+              <div className="w-full space-y-1 text-left">
+                {unattachedProfiles(profiles, []).map((profile) => (
+                  <K8sUnattachedProfileRow
+                    key={profile.id}
+                    profile={profile}
+                    onSignIn={openLogin}
+                    onRemove={(p) => void handleRemoveProfile(p)}
+                    onShare={onShare}
+                  />
+                ))}
+              </div>
+            )}
+            <div className="w-full text-left">{teamSection}</div>
+            {teamModals}
           </>
         )}
       </div>
@@ -327,10 +479,27 @@ export const K8sConnectionTree: React.FC<K8sConnectionTreeProps> = ({
       {execAuthWarning && (
         <ExecAuthWarningBanner warning={execAuthWarning} onDismiss={() => setExecAuthWarning(null)} />
       )}
+      {shareError && (
+        <div
+          role="alert"
+          className="mb-2 flex items-start gap-2 rounded-lg border border-red-900/60 bg-red-950/40 px-3 py-2 text-xs text-red-300"
+        >
+          <span className="flex-1">Could not share the cluster with the team: {shareError}</span>
+          <button
+            type="button"
+            aria-label="Dismiss error"
+            title="Dismiss"
+            onClick={() => setShareError(null)}
+            className="shrink-0 rounded p-0.5 transition-colors hover:bg-red-500/20"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
       <div className="space-y-2">
       <p className="text-2xs text-txt-muted">
-        Clusters below are read from your local kubeconfig — unlike the SSH/SFTP and S3 tabs,
-        there's nothing to save or organize into folders here.
+        Clusters below are read from your local kubeconfig. Clusters you sign in to from here are also saved as
+        profiles, so you can sign in again later.
       </p>
       <div className="flex items-center gap-2">
         <div className="relative flex-1">
@@ -345,6 +514,7 @@ export const K8sConnectionTree: React.FC<K8sConnectionTreeProps> = ({
           />
           {filter && (
             <button
+              aria-label="Clear filter"
               type="button"
               onClick={() => setFilter('')}
               className="absolute right-2 top-1/2 -translate-y-1/2 text-txt-muted hover:text-txt-primary p-0.5 rounded transition-colors"
@@ -357,7 +527,7 @@ export const K8sConnectionTree: React.FC<K8sConnectionTreeProps> = ({
         {enableOpenShift && (
           <button
             type="button"
-            onClick={() => setLoginModalOpen(true)}
+            onClick={() => openLogin(null)}
             className="flex items-center gap-1.5 rounded-lg border border-red-500/30 bg-red-500/10 px-2.5 py-1 text-xs text-red-300 hover:bg-red-500/20 hover:text-red-200 transition-colors"
             title="Log in to OpenShift or Kubernetes with token"
           >
@@ -377,7 +547,7 @@ export const K8sConnectionTree: React.FC<K8sConnectionTreeProps> = ({
           <Network className="h-3.5 w-3.5 text-sky-400" />
           Port Forwards
           {activePortForwardsCount > 0 && (
-            <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-emerald-500/20 text-2xs font-bold text-emerald-400 px-1">
+            <span className="flex h-4 min-w-4 items-center justify-center rounded bg-emerald-500/20 text-2xs font-bold text-emerald-400 px-1">
               {activePortForwardsCount}
             </span>
           )}
@@ -392,11 +562,31 @@ export const K8sConnectionTree: React.FC<K8sConnectionTreeProps> = ({
         </button>
       </div>
 
+      {enableOpenShift &&
+        unattachedProfiles(profiles, contexts.data)
+          .filter((profile) => {
+            const q = filter.trim().toLowerCase();
+            return !q || profile.name.toLowerCase().includes(q) || profile.server.toLowerCase().includes(q);
+          })
+          .map((profile) => (
+            <K8sUnattachedProfileRow
+              key={profile.id}
+              profile={profile}
+              onSignIn={openLogin}
+              onRemove={(p) => void handleRemoveProfile(p)}
+              onShare={onShare}
+            />
+          ))}
+
+      {teamSection}
+
       {contexts.data
         .filter((ctx) => {
           if (!filter.trim()) return true;
           const q = filter.trim().toLowerCase();
+          const profileName = profileForContext(profiles, ctx.contextName)?.name.toLowerCase();
           if (ctx.contextName.toLowerCase().includes(q) || ctx.server.toLowerCase().includes(q)) return true;
+          if (profileName?.includes(q)) return true;
           const nsState = namespacesByContext[ctx.contextName];
           if (nsState?.status === 'ready') {
             return nsState.data.some(
@@ -410,12 +600,15 @@ export const K8sConnectionTree: React.FC<K8sConnectionTreeProps> = ({
         .map((ctx) => {
         const isExpanded = expandedContexts.has(ctx.contextName);
         const nsState = namespacesByContext[ctx.contextName];
+        const profile = profileForContext(profiles, ctx.contextName);
         return (
           <div key={ctx.contextName} className="space-y-1">
+            <div className="group flex items-center gap-1 rounded-lg hover:bg-app-surface-hover transition-colors">
             <button
               type="button"
               onClick={() => toggleContext(ctx.contextName)}
-              className="flex w-full items-center gap-1.5 rounded-lg px-2 py-1.5 text-xs font-semibold text-txt-secondary hover:bg-app-surface-hover transition-colors"
+              title={profile ? ctx.contextName : undefined}
+              className="flex min-w-0 flex-1 items-center gap-1.5 rounded-lg px-2 py-1.5 text-left text-xs font-semibold text-txt-secondary"
             >
               {isExpanded ? (
                 <ChevronDown className="h-3.5 w-3.5 text-txt-muted" />
@@ -423,7 +616,12 @@ export const K8sConnectionTree: React.FC<K8sConnectionTreeProps> = ({
                 <ChevronRight className="h-3.5 w-3.5 text-txt-muted" />
               )}
               <Network className="h-3.5 w-3.5 text-sky-400" />
-              <span className="truncate">{ctx.contextName}</span>
+              <span className="truncate">{profile?.name ?? ctx.contextName}</span>
+              {profile?.namespace && (
+                <span className="rounded bg-amber-500/15 border border-amber-500/30 px-1.5 py-0.2 text-2xs text-amber-400">
+                  {profile.namespace}
+                </span>
+              )}
               {ctx.isOpenShift && (
                 <span className="rounded bg-rose-500/15 border border-rose-500/30 px-1.5 py-0.2 text-2xs font-medium text-rose-400">
                   OpenShift
@@ -436,6 +634,15 @@ export const K8sConnectionTree: React.FC<K8sConnectionTreeProps> = ({
               )}
               <span className="truncate text-xs font-normal text-txt-muted">{ctx.server}</span>
             </button>
+            {profile && enableOpenShift && (
+              <K8sProfileActions
+                profile={profile}
+                onSignIn={openLogin}
+                onRemove={(p) => void handleRemoveProfile(p)}
+                onShare={onShare}
+              />
+            )}
+            </div>
 
             {isExpanded && (
               <div className="flex flex-col gap-1 pl-5">
@@ -522,7 +729,7 @@ export const K8sConnectionTree: React.FC<K8sConnectionTreeProps> = ({
                                         <span className="truncate">{pod.name}</span>
                                         <span className="truncate text-2xs text-txt-muted">{pod.phase}</span>
                                       </button>
-                                      <div className="flex shrink-0 items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                      <div className="flex shrink-0 items-center gap-1 opacity-75 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity">
                                         <button
                                           type="button"
                                           onClick={(e) => {
@@ -533,11 +740,11 @@ export const K8sConnectionTree: React.FC<K8sConnectionTreeProps> = ({
                                               podName: pod.name,
                                             });
                                           }}
-                                          title="Describe pod details & events"
+                                          title="View pod metrics, details & events"
                                           className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-txt-muted hover:bg-app-surface hover:text-txt-primary border border-transparent hover:border-border-subtle transition-colors"
                                         >
                                           <Info className="h-3 w-3" />
-                                          <span className="hidden sm:inline">Describe</span>
+                                          <span className="hidden sm:inline">Metrics</span>
                                         </button>
                                         <button
                                           type="button"
@@ -575,6 +782,18 @@ export const K8sConnectionTree: React.FC<K8sConnectionTreeProps> = ({
                                         >
                                           <Bug className="h-3 w-3" />
                                           <span className="hidden sm:inline">Debug</span>
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleDeletePod(ctx.contextName, ns.name, pod.name);
+                                          }}
+                                          title="Delete or restart pod"
+                                          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-rose-400 hover:bg-app-surface hover:text-rose-300 border border-transparent hover:border-rose-500/30 transition-colors"
+                                        >
+                                          <Trash2 className="h-3 w-3" />
+                                          <span className="hidden sm:inline">Delete</span>
                                         </button>
                                       </div>
                                     </div>
@@ -707,6 +926,7 @@ export const K8sConnectionTree: React.FC<K8sConnectionTreeProps> = ({
           namespace={describeTarget.namespace}
           podName={describeTarget.podName}
           onClose={() => setDescribeTarget(null)}
+          onDeleted={() => refreshPods(describeTarget.contextName, describeTarget.namespace)}
           onExec={onExec}
           onViewLogs={onViewLogs}
           onBrowseFiles={onBrowseFiles}
@@ -752,15 +972,12 @@ export const K8sConnectionTree: React.FC<K8sConnectionTreeProps> = ({
       {enableOpenShift && (
         <K8sLoginModal
           open={loginModalOpen}
+          initialProfile={loginProfile}
           onClose={() => setLoginModalOpen(false)}
-          onSuccess={(result) => {
-            handleRefresh();
-            if (result?.contextName) {
-              setExpandedContexts((prev) => new Set(prev).add(result.contextName));
-            }
-          }}
+          onSuccess={(result) => void loginSuccess(result)}
         />
       )}
+      {teamModals}
     </>
   );
 };

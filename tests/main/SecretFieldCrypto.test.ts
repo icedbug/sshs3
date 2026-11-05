@@ -20,7 +20,14 @@ vi.mock('electron', () => {
   return { ...mockObj, default: mockObj };
 });
 
-import { encryptSecretValue, decryptSecretValue } from '../../src/main/crypto/SecretFieldCrypto';
+import {
+  encryptSecretValue,
+  decryptSecretValue,
+  isEncryptionAvailable,
+  isEncryptedSecret,
+  transformSecretFields,
+  transformEntrySecrets,
+} from '../../src/main/crypto/SecretFieldCrypto';
 
 describe('decryptSecretValue', () => {
   beforeEach(() => {
@@ -115,5 +122,83 @@ describe('encryptSecretValue (M2)', () => {
     expect(result).toBe('super-secret');
     expect(warnSpy.lines).toHaveLength(1);
     warnSpy.restore();
+  });
+});
+
+describe('isEncryptionAvailable', () => {
+  beforeEach(() => {
+    mockIsEncryptionAvailable.mockReset();
+  });
+
+  it('follows what the OS keyring reports', () => {
+    mockIsEncryptionAvailable.mockReturnValue(true);
+    expect(isEncryptionAvailable()).toBe(true);
+    mockIsEncryptionAvailable.mockReturnValue(false);
+    expect(isEncryptionAvailable()).toBe(false);
+  });
+
+  it('reports "not available" instead of throwing when the keyring probe itself fails', () => {
+    mockIsEncryptionAvailable.mockImplementation(() => {
+      throw new Error('keyring locked');
+    });
+    expect(isEncryptionAvailable()).toBe(false);
+  });
+});
+
+describe('isEncryptedSecret', () => {
+  it('is true only for a string that starts with the ciphertext prefix', () => {
+    expect(isEncryptedSecret('enc:v1:abc')).toBe(true);
+    expect(isEncryptedSecret('plain')).toBe(false);
+    expect(isEncryptedSecret('')).toBe(false);
+    expect(isEncryptedSecret(undefined)).toBe(false);
+    expect(isEncryptedSecret(null)).toBe(false);
+    expect(isEncryptedSecret(42)).toBe(false);
+    expect(isEncryptedSecret({ startsWith: () => true })).toBe(false);
+  });
+});
+
+describe('transformSecretFields', () => {
+  const upper = (v: string) => v.toUpperCase();
+
+  it('transforms the named string fields and returns a copy, leaving the input untouched', () => {
+    const entry = { name: 'prod', first: 'a1', second: 'b2' };
+    const result = transformSecretFields(entry, ['first', 'second'], upper);
+    expect(result).toEqual({ name: 'prod', first: 'A1', second: 'B2' });
+    expect(entry).toEqual({ name: 'prod', first: 'a1', second: 'b2' });
+    expect(result).not.toBe(entry);
+  });
+
+  it('skips empty strings and values that are not strings, without calling the transform for them', () => {
+    const transform = vi.fn(upper);
+    const entry = { empty: '', zero: 0, flag: false, nothing: null, object: { a: 1 }, secret: 'x' } as Record<string, unknown>;
+    const result = transformSecretFields(entry, ['empty', 'zero', 'flag', 'nothing', 'object', 'secret', 'missing'], transform);
+    expect(result).toEqual({ empty: '', zero: 0, flag: false, nothing: null, object: { a: 1 }, secret: 'X' });
+    expect(transform).toHaveBeenCalledTimes(1);
+    expect(transform).toHaveBeenCalledWith('x');
+    expect(result).not.toHaveProperty('missing');
+  });
+});
+
+describe('transformEntrySecrets', () => {
+  const upper = (v: string) => v.toUpperCase();
+
+  it('also transforms proxy.password and keeps the rest of the proxy', () => {
+    const value = 'pw';
+    const proxy = { host: 'proxy.example.com', port: 8080, password: value };
+    const entry = { token: 'abc', proxy };
+    const result = transformEntrySecrets(entry, ['token'], upper);
+    expect(result).toEqual({ token: 'ABC', proxy: { host: 'proxy.example.com', port: 8080, password: upper(value) } });
+    expect(proxy.password).toBe(value); // the original proxy object is not modified
+  });
+
+  it('leaves an entry without a proxy, a proxy without a password and an empty proxy password alone', () => {
+    const transform = vi.fn(upper);
+    type Entry = { password?: string; proxy?: { host?: string; password?: unknown } };
+    const plain: Entry = { password: 'a' };
+    expect(transformEntrySecrets(plain, ['password'], transform)).toEqual({ password: 'A' });
+    expect(transformEntrySecrets({ proxy: { host: 'h' } }, [], transform)).toEqual({ proxy: { host: 'h' } });
+    expect(transformEntrySecrets({ proxy: { password: '' } }, [], transform)).toEqual({ proxy: { password: '' } });
+    expect(transformEntrySecrets({ proxy: { password: 12345 } }, [], transform)).toEqual({ proxy: { password: 12345 } });
+    expect(transform).toHaveBeenCalledTimes(1);
   });
 });

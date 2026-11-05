@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { ShieldAlert, X } from 'lucide-react';
+import { plural } from '../lib/plural';
 
 /**
  * Warns the user when the OS keyring backend (safeStorage) isn't available,
@@ -8,16 +9,25 @@ import { ShieldAlert, X } from 'lucide-react';
  * fallback). Most common on Linux without libsecret/kwallet/gnome-keyring
  * running. Dismissible per app session; reappears next launch since the
  * underlying condition hasn't changed.
+ *
+ * Also tells the user when saved secrets exist on disk but cannot be decrypted any more (the keyring's key
+ * was replaced, or the profile file came from another machine/user): they load as empty, so logins and S3 calls
+ * fail without any hint why. The ciphertext cannot be recovered; the secrets have to be entered again.
  */
 export const CredentialEncryptionWarningBanner: React.FC = () => {
   const [show, setShow] = useState(false);
+  const [lostSecrets, setLostSecrets] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
     window.multissh
       ?.getSecurityStatus?.()
       .then((status) => {
-        if (!cancelled && status && status.credentialEncryptionAvailable === false) {
+        if (cancelled || !status) return;
+        if (status.credentialEncryptionAvailable === false) {
+          setShow(true);
+        } else if (status.undecryptableSecretCount > 0) {
+          setLostSecrets(status.undecryptableSecretCount);
           setShow(true);
         }
       })
@@ -43,13 +53,29 @@ export const CredentialEncryptionWarningBanner: React.FC = () => {
           <ShieldAlert className="h-4 w-4" />
         </div>
         <div className="min-w-0 flex-1">
-          <p className="text-sm font-medium text-txt-primary">Saved passwords are not encrypted</p>
-          <p className="mt-0.5 text-xs text-txt-secondary">
-            No OS keyring (Secret Service / KWallet / gnome-keyring, etc.) was found, so sshs3 cannot
-            encrypt saved SSH and S3 credentials at rest. Any password, passphrase, or proxy password
-            you save will be stored in plaintext in your profile file. Install and unlock a keyring
-            service to enable encryption, or avoid saving credentials.
-          </p>
+          {lostSecrets > 0 ? (
+            <>
+              <p className="text-sm font-medium text-txt-primary">
+                {plural(lostSecrets, 'saved secret')} could not be decrypted
+              </p>
+              <p className="mt-0.5 text-xs text-txt-secondary">
+                They load as empty, so logins and S3 requests will fail. If your OS keyring was locked or not
+                ready when sshs3 started, unlock it and restart sshs3: they may come back. If the keyring key
+                was replaced or reset they cannot be recovered: open each affected profile in the Connection
+                Manager and enter the secret again.
+              </p>
+            </>
+          ) : (
+            <>
+              <p className="text-sm font-medium text-txt-primary">Saved passwords are not encrypted</p>
+              <p className="mt-0.5 text-xs text-txt-secondary">
+                No OS keyring (Secret Service / KWallet / gnome-keyring, etc.) was found, so sshs3 cannot
+                encrypt saved SSH and S3 credentials at rest. Any password, passphrase, or proxy password
+                you save will be stored in plaintext in your profile file. Install and unlock a keyring
+                service to enable encryption, or avoid saving credentials.
+              </p>
+            </>
+          )}
         </div>
         <button
           type="button"

@@ -1,3 +1,5 @@
+import { ELECTRON_IPC_PREFIX } from './format';
+
 /**
  * Turns a raw sync error (as it arrives in the renderer — Electron's
  * ipcRenderer.invoke wraps whatever the main process threw into a single
@@ -19,12 +21,11 @@ export interface FormattedSyncError {
   message: string;
 }
 
-const IPC_WRAPPER_RE = /^Error invoking remote method '[^']*':\s*/;
 const NAMED_ERROR_RE = /^(SyncDecryptionError|SyncConflictError|SyncInProgressError|SyncLockedError):\s*/;
 
 export function formatSyncError(err: unknown, fallback = 'Something went wrong.'): FormattedSyncError {
   const raw = err instanceof Error ? err.message : typeof err === 'string' ? err : fallback;
-  let message = raw.replace(IPC_WRAPPER_RE, '').trim();
+  let message = raw.replace(ELECTRON_IPC_PREFIX, '').trim();
 
   const nameMatch = message.match(NAMED_ERROR_RE);
   const name = nameMatch?.[1];

@@ -1,5 +1,6 @@
 import React from 'react';
 import { SmartcardPinModal } from './SmartcardPinModal';
+import { InsertTokenModal } from './InsertTokenModal';
 import { TouchPresenceBanner } from './TouchPresenceBanner';
 import { HostKeyTrustModal } from './HostKeyTrustModal';
 import { AwsSsoLoginModal } from './AwsSsoLoginModal';
@@ -15,6 +16,9 @@ export const GlobalOverlays: React.FC = () => (
   <>
     {/* Global Smartcard PIN Modal */}
     <SmartcardPinModal />
+
+    {/* Global "insert your smartcard / security key" prompt; gives way to the PIN modal once detected */}
+    <InsertTokenModal />
 
     {/* Global "touch your YubiKey/smartcard" banner */}
     <TouchPresenceBanner />

@@ -7,6 +7,7 @@ import type { AwsSsoPromptEvent } from '../../src/shared/types/ipc';
 
 describe('AwsSsoLoginModal Component', () => {
   let promptCallback: ((event: AwsSsoPromptEvent) => void) | null = null;
+  let doneCallback: ((id: string) => void) | null = null;
   const mockUnsubscribe = vi.fn();
   const mockCancel = vi.fn().mockResolvedValue(undefined);
 
@@ -21,12 +22,27 @@ describe('AwsSsoLoginModal Component', () => {
         promptCallback = cb;
         return mockUnsubscribe;
       }),
+      onAwsSsoPromptDone: vi.fn((cb) => {
+        doneCallback = cb;
+        return vi.fn();
+      }),
       awsSsoCancelLogin: mockCancel,
     } as any;
   });
 
   afterEach(() => {
     cleanup();
+  });
+
+  it('closes by itself when the login attempt ends', () => {
+    render(<AwsSsoLoginModal />);
+    act(() => {
+      promptCallback!({ id: 'sso-1', userCode: 'ABCD-1234', verificationUri: 'https://x.awsapps.com/device', expiresIn: 600 });
+    });
+    expect(screen.getByTestId('aws-sso-login-modal')).toBeInTheDocument();
+
+    act(() => doneCallback!('sso-1'));
+    expect(screen.queryByTestId('aws-sso-login-modal')).not.toBeInTheDocument();
   });
 
   it('renders nothing when there is no active prompt', () => {

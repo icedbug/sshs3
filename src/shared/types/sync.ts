@@ -17,11 +17,13 @@ export type SyncDataCategory =
   | 'dotfile-pools'
   | 'settings'
   | 'ssh-native'
-  | 'dirsync-profiles';
+  | 'dirsync-profiles'
+  | 'k8s-profiles';
 
 /**
  * The two independent key groups. `topology`/`settings`/`dirsync-profiles` (saved
- * directory-sync pairs: provider references and paths only) share the
+ * directory-sync pairs: provider references and paths only) and `k8s-profiles` (saved clusters:
+ * server, project and TLS option only, never a token) share the
  * "topology" master password so that data can be shared with a team in the
  * future without also exposing private credentials; `credentials`,
  * `dotfile-pools` (file contents may embed arbitrary secrets) and

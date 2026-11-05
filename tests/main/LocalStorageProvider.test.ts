@@ -36,6 +36,23 @@ describe('LocalStorageProvider', () => {
     expect(customProvider.name).toBe('My Computer');
   });
 
+  describe('list: special files (M7)', () => {
+    it.skipIf(process.platform === 'win32')('flags a FIFO as isSpecial, and a regular file, folder and symlink as not', async () => {
+      const { execFileSync } = await import('node:child_process');
+      await fs.writeFile(path.join(testDir, 'plain.txt'), 'x');
+      await fs.mkdir(path.join(testDir, 'folder'));
+      await fs.symlink(path.join(testDir, 'plain.txt'), path.join(testDir, 'link'));
+      execFileSync('mkfifo', [path.join(testDir, 'pipe')]);
+
+      const byName = new Map((await provider.list(testDir)).map((e) => [e.name, e]));
+
+      expect(byName.get('pipe')?.isSpecial).toBe(true);
+      expect(byName.get('plain.txt')?.isSpecial).toBeFalsy();
+      expect(byName.get('folder')?.isSpecial).toBeFalsy();
+      expect(byName.get('link')?.isSpecial).toBeFalsy();
+    });
+  });
+
   describe('createFolder', () => {
     it('should create a single directory', async () => {
       const folderPath = path.join(testDir, 'test-folder');
@@ -70,6 +87,40 @@ describe('LocalStorageProvider', () => {
       expect(content).toBe('Hello, MultiSSH Storage Engine!');
     });
 
+    it('reports the target as touched only once the file has been opened (H2)', async () => {
+      const filePath = path.join(testDir, 'touched.txt');
+      const writeStream = (await provider.createWriteStream(filePath)) as NodeJS.WritableStream & { targetTouched: boolean };
+
+      await new Promise<void>((resolve, reject) => {
+        writeStream.on('finish', () => resolve());
+        writeStream.on('error', reject);
+        writeStream.end('x');
+      });
+      expect(writeStream.targetTouched).toBe(true);
+    });
+
+    it('leaves the target untouched when it cannot be opened (H2)', async () => {
+      // A directory cannot be opened for writing (EISDIR), on every platform.
+      const dirPath = path.join(testDir, 'a-directory');
+      await fs.mkdir(dirPath);
+      const writeStream = (await provider.createWriteStream(dirPath)) as NodeJS.WritableStream & { targetTouched: boolean; targetSettled(): Promise<void> };
+      writeStream.on('error', () => {});
+      writeStream.end('x');
+      await writeStream.targetSettled();
+      expect(writeStream.targetTouched).toBe(false);
+    });
+
+    // Code review of the unpushed commits: the open is already under way when the stream is returned.
+    it('says the file was truncated once targetSettled resolves, even if the stream is destroyed straight away', async () => {
+      const filePath = path.join(testDir, 'existing.txt');
+      await fs.writeFile(filePath, 'original content');
+      const writeStream = (await provider.createWriteStream(filePath)) as NodeJS.WritableStream & { targetTouched: boolean; targetSettled(): Promise<void> };
+      (writeStream as unknown as { destroy(): void }).destroy();
+      await writeStream.targetSettled();
+      expect(writeStream.targetTouched).toBe(true);
+      expect(await fs.readFile(filePath, 'utf-8')).toBe('');
+    });
+
     it('should automatically create parent directories when writing a file', async () => {
       const filePath = path.join(testDir, 'nested', 'deeply', 'output.txt');
       const writeStream = await provider.createWriteStream(filePath);
@@ -83,6 +134,20 @@ describe('LocalStorageProvider', () => {
 
       const content = await fs.readFile(filePath, 'utf-8');
       expect(content).toBe('Parent dirs created automatically');
+    });
+  });
+
+  describe('writeFile', () => {
+    it('replaces existing content by default and refuses to when exclusive', async () => {
+      const file = path.join(testDir, 'w.txt');
+      await provider.writeFile(file, Buffer.from('one'));
+      await provider.writeFile(file, Buffer.from('two'));
+      expect(await fs.readFile(file, 'utf8')).toBe('two');
+
+      await expect(provider.writeFile(file, Buffer.from('three'), { exclusive: true })).rejects.toMatchObject({
+        code: 'EEXIST',
+      });
+      expect(await fs.readFile(file, 'utf8')).toBe('two');
     });
   });
 
@@ -214,9 +279,12 @@ describe('LocalStorageProvider', () => {
 
     it('keeps metadata and directories-first ordering when listing more entries than the stat concurrency limit', async () => {
       const count = 200;
-      for (let i = 0; i < count; i++) {
-        await fs.writeFile(path.join(testDir, `file-${String(i).padStart(3, '0')}.txt`), 'x'.repeat(i));
-      }
+      // Written in parallel: 200 sequential writes took over the 5 s default on a Windows CI runner (Defender scans each one).
+      await Promise.all(
+        Array.from({ length: count }, (_, i) =>
+          fs.writeFile(path.join(testDir, `file-${String(i).padStart(3, '0')}.txt`), 'x'.repeat(i))
+        )
+      );
       await fs.mkdir(path.join(testDir, 'zdir'));
 
       const entries = await provider.list(testDir);
@@ -230,7 +298,7 @@ describe('LocalStorageProvider', () => {
         expect(entry.size).toBe(Number(entry.name.slice(5, 8)));
         expect(entry.mtimeMs).toBeGreaterThan(0);
       }
-    });
+    }, 30_000);
 
     // Regression tests for the H6 finding (code review): TransferPipeline's
     // directory scan decides whether to recurse using isDirectory, which

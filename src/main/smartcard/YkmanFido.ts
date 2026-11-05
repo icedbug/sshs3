@@ -31,6 +31,8 @@ function runYkman(args: string[], pin: string, timeoutMs = 20000): Promise<strin
       stderr += chunk.toString();
     });
 
+    // ykman may exit before it reads the PIN; that surfaces as EPIPE here and as a non-zero exit via 'close' below.
+    child.stdin.on('error', () => {});
     child.stdin.write(`${pin}\n`);
     child.stdin.end();
 

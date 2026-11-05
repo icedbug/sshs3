@@ -40,6 +40,7 @@ describe('LandingView Component', () => {
         recentSSH={mockRecentSSH}
         onConnectRecentSSH={vi.fn()}
         onConnectSFTP={vi.fn()}
+        onQuickConnectSSH={vi.fn()}
         onQuickStartTerminal={vi.fn()}
         onNewTab={vi.fn()}
         onOpenProfiles={vi.fn()}
@@ -56,12 +57,176 @@ describe('LandingView Component', () => {
     expect(screen.getByTestId('landing-file-manager-btn')).toBeInTheDocument();
   });
 
-  it('auto-focuses the first button after mount', () => {
+  describe('searching saved profiles from the quick-connect box', () => {
+    const allSSH: SSHConnectionConfig[] = [
+      ...mockRecentSSH,
+      { id: 'conn-3', name: 'build-box', host: 'ci.example.com', port: 22, username: 'deploy', authType: 'password' },
+    ];
+
+    const renderLanding = (overrides: Partial<React.ComponentProps<typeof LandingView>> = {}) =>
+      render(
+        <LandingView
+          recentSSH={mockRecentSSH}
+          allSSH={allSSH}
+          onConnectRecentSSH={vi.fn()}
+          onConnectSFTP={vi.fn()}
+          onQuickConnectSSH={vi.fn()}
+          onQuickStartTerminal={vi.fn()}
+          onNewTab={vi.fn()}
+          onOpenProfiles={vi.fn()}
+          onNewProfile={vi.fn()}
+          onOpenSyncBootstrap={vi.fn()}
+          onNavigateToTabBar={vi.fn()}
+          {...overrides}
+        />
+      );
+
+    const type = (text: string) =>
+      fireEvent.change(screen.getByPlaceholderText(/search saved profiles/i), { target: { value: text } });
+
+    it('lists profiles outside the recent ones that match what is typed', () => {
+      renderLanding();
+      type('build');
+      expect(screen.getByText('Matching Profiles')).toBeInTheDocument();
+      expect(screen.getByTitle('build-box')).toBeInTheDocument();
+      expect(screen.queryByTitle('demoserver')).not.toBeInTheDocument();
+    });
+
+    it('matches fuzzily like the global search, and highlights the matched letters', () => {
+      renderLanding();
+      type('bdbx');
+      const row = screen.getByTitle('build-box');
+      expect(row).toBeInTheDocument();
+      expect(row.querySelectorAll('mark').length).toBeGreaterThan(0);
+    });
+
+    it('moves the selection with the arrows and connects to the selected match', () => {
+      const onConnectRecentSSH = vi.fn();
+      renderLanding({ onConnectRecentSSH });
+      type('e');
+      const input = screen.getByPlaceholderText(/search saved profiles/i);
+      fireEvent.keyDown(input, { key: 'ArrowDown' });
+      fireEvent.click(screen.getByTestId('quick-connect-btn'));
+      expect(onConnectRecentSSH).toHaveBeenCalledTimes(1);
+      const first = onConnectRecentSSH.mock.calls[0][0];
+      onConnectRecentSSH.mockClear();
+      type('e');
+      fireEvent.click(screen.getByTestId('quick-connect-btn'));
+      expect(onConnectRecentSSH.mock.calls[0][0].id).not.toBe(first.id);
+    });
+
+    it('exposes the matches as a listbox with the selected one as the active descendant', () => {
+      renderLanding();
+      type('e');
+      const input = screen.getByRole('combobox', { name: /quick connect/i });
+      const options = screen.getAllByRole('option');
+      expect(screen.getByRole('listbox')).toBeInTheDocument();
+      expect(options[0]).toHaveAttribute('aria-selected', 'true');
+      expect(input).toHaveAttribute('aria-activedescendant', options[0].id);
+      fireEvent.keyDown(input, { key: 'ArrowDown' });
+      expect(screen.getAllByRole('option')[1]).toHaveAttribute('aria-selected', 'true');
+      expect(input).toHaveAttribute('aria-activedescendant', screen.getAllByRole('option')[1].id);
+    });
+
+    it('moves the selection to the row under the mouse', () => {
+      renderLanding();
+      type('e');
+      fireEvent.mouseMove(screen.getAllByRole('option')[1]);
+      expect(screen.getAllByRole('option')[1]).toHaveAttribute('aria-selected', 'true');
+    });
+
+    it('shows no selection while a user@host target is typed, and the arrows leave the matches alone', () => {
+      const onConnectRecentSSH = vi.fn();
+      const onQuickConnectSSH = vi.fn();
+      renderLanding({ onConnectRecentSSH, onQuickConnectSSH });
+      type('alun@gnarg');
+      const input = screen.getByRole('combobox', { name: /quick connect/i });
+      expect(input).not.toHaveAttribute('aria-activedescendant');
+      fireEvent.keyDown(input, { key: 'ArrowDown' });
+      // Only the search result rows; the workspace team-note <select> has native <option>s of its own.
+      screen
+        .queryAllByRole('option')
+        .filter((o) => o.closest('#landing-search-results'))
+        .forEach((o) => expect(o).toHaveAttribute('aria-selected', 'false'));
+      fireEvent.click(screen.getByTestId('quick-connect-btn'));
+      expect(onQuickConnectSSH).toHaveBeenCalledWith(expect.objectContaining({ host: 'gnarg', username: 'alun' }));
+      expect(onConnectRecentSSH).not.toHaveBeenCalled();
+    });
+
+    it('leaves Left/Right to the text caret unless it is at the start or end', () => {
+      const onNavigateToTabBar = vi.fn();
+      renderLanding({ onNavigateToTabBar });
+      type('build');
+      const input = screen.getByRole('combobox', { name: /quick connect/i }) as HTMLInputElement;
+      input.focus();
+      input.setSelectionRange(2, 2);
+      const mid = fireEvent.keyDown(input, { key: 'ArrowLeft' });
+      expect(mid).toBe(true); // not default-prevented: the caret may move
+      input.setSelectionRange(0, 0);
+      expect(fireEvent.keyDown(input, { key: 'ArrowLeft' })).toBe(false); // at the edge: spatial navigation takes over
+    });
+
+    it('opens SFTP to the selected match on Shift+Enter', () => {
+      const onConnectSFTP = vi.fn();
+      renderLanding({ onConnectSFTP });
+      type('build');
+      fireEvent.keyDown(screen.getByPlaceholderText(/search saved profiles/i), { key: 'Enter', shiftKey: true });
+      expect(onConnectSFTP).toHaveBeenCalledWith(expect.objectContaining({ id: 'conn-3' }));
+    });
+
+    it('matches on host and user too, and says so when nothing matches', () => {
+      renderLanding();
+      type('ci.example');
+      expect(screen.getByTitle('build-box')).toBeInTheDocument();
+      type('zzz-nothing');
+      expect(screen.getByText(/No saved profile matches/)).toBeInTheDocument();
+    });
+
+    it('connects to the first match on submit', () => {
+      const onConnectRecentSSH = vi.fn();
+      const onQuickConnectSSH = vi.fn();
+      renderLanding({ onConnectRecentSSH, onQuickConnectSSH });
+      type('build');
+      fireEvent.click(screen.getByTestId('quick-connect-btn'));
+      expect(onConnectRecentSSH).toHaveBeenCalledWith(expect.objectContaining({ id: 'conn-3' }));
+      expect(onQuickConnectSSH).not.toHaveBeenCalled();
+    });
+
+    it('keeps user@host as an ad-hoc connection', () => {
+      const onConnectRecentSSH = vi.fn();
+      const onQuickConnectSSH = vi.fn();
+      renderLanding({ onConnectRecentSSH, onQuickConnectSSH });
+      type('deploy@ci.example.com');
+      fireEvent.click(screen.getByTestId('quick-connect-btn'));
+      expect(onQuickConnectSSH).toHaveBeenCalledWith(expect.objectContaining({ host: 'ci.example.com', username: 'deploy' }));
+      expect(onConnectRecentSSH).not.toHaveBeenCalled();
+    });
+
+    it('greys out SFTP together with Connect while there is nothing to open', () => {
+      renderLanding();
+      const sftp = () => screen.getAllByRole('button', { name: /SFTP/ })[0];
+      expect(screen.getByTestId('quick-connect-btn')).toBeDisabled();
+      expect(sftp()).toBeDisabled();
+      type('build');
+      expect(screen.getByTestId('quick-connect-btn')).toBeEnabled();
+      expect(sftp()).toBeEnabled();
+    });
+
+    it('shows recent connections again when the box is cleared', () => {
+      renderLanding();
+      type('build');
+      type('');
+      expect(screen.getByText('Recent Connections')).toBeInTheDocument();
+    });
+  });
+
+  it('auto-focuses the quick-connect field after mount', () => {
     render(
       <LandingView
         recentSSH={mockRecentSSH}
         onConnectRecentSSH={vi.fn()}
         onConnectSFTP={vi.fn()}
+        onQuickConnectSSH={vi.fn()}
         onQuickStartTerminal={vi.fn()}
         onNewTab={vi.fn()}
         onOpenProfiles={vi.fn()}
@@ -75,17 +240,17 @@ describe('LandingView Component', () => {
       vi.advanceTimersByTime(100);
     });
 
-    const firstConnectBtn = screen.getByTestId('recent-connect-conn-1');
-    expect(document.activeElement).toBe(firstConnectBtn);
+    expect(document.activeElement).toBe(screen.getByPlaceholderText(/Type user@host to connect/));
   });
 
-  it('navigates with ArrowDown and ArrowUp between buttons', () => {
+  it('jumps to TabBar on ArrowUp from anywhere in the quick-connect row (the first row)', () => {
     const onNavigateToTabBar = vi.fn();
     const { container } = render(
       <LandingView
         recentSSH={mockRecentSSH}
         onConnectRecentSSH={vi.fn()}
         onConnectSFTP={vi.fn()}
+        onQuickConnectSSH={vi.fn()}
         onQuickStartTerminal={vi.fn()}
         onNewTab={vi.fn()}
         onOpenProfiles={vi.fn()}
@@ -95,10 +260,8 @@ describe('LandingView Component', () => {
       />
     );
 
-    const firstConnectBtn = screen.getByTestId('recent-connect-conn-1');
-    firstConnectBtn.focus();
-
-    // ArrowUp on the very first element jumps up to TabBar
+    const quickConnectInput = screen.getByPlaceholderText(/Type user@host to connect/);
+    quickConnectInput.focus();
     fireEvent.keyDown(container.firstChild as HTMLElement, { key: 'ArrowUp' });
     expect(onNavigateToTabBar).toHaveBeenCalledTimes(1);
   });
@@ -110,6 +273,7 @@ describe('LandingView Component', () => {
         recentSSH={mockRecentSSH}
         onConnectRecentSSH={vi.fn()}
         onConnectSFTP={vi.fn()}
+        onQuickConnectSSH={vi.fn()}
         onQuickStartTerminal={vi.fn()}
         onNewTab={vi.fn()}
         onOpenProfiles={vi.fn()}
@@ -130,6 +294,7 @@ describe('LandingView Component', () => {
         recentSSH={mockRecentSSH}
         onConnectRecentSSH={onConnectRecentSSH}
         onConnectSFTP={vi.fn()}
+        onQuickConnectSSH={vi.fn()}
         onQuickStartTerminal={vi.fn()}
         onNewTab={vi.fn()}
         onOpenProfiles={vi.fn()}
@@ -151,6 +316,7 @@ describe('LandingView Component', () => {
           recentSSH={mockRecentSSH}
           onConnectRecentSSH={vi.fn()}
           onConnectSFTP={vi.fn()}
+          onQuickConnectSSH={vi.fn()}
           onQuickStartTerminal={vi.fn()}
           onNewTab={vi.fn()}
           onOpenProfiles={vi.fn()}
@@ -298,6 +464,7 @@ describe('LandingView Component', () => {
           recentSSH={mockRecentSSH}
           onConnectRecentSSH={vi.fn()}
           onConnectSFTP={vi.fn()}
+          onQuickConnectSSH={vi.fn()}
           onQuickStartTerminal={vi.fn()}
           onNewTab={vi.fn()}
           onOpenProfiles={vi.fn()}
@@ -340,5 +507,55 @@ describe('LandingView Component', () => {
     } finally {
       window.removeEventListener('sshs3:ai-open', listener);
     }
+  });
+
+  it('connects via the quick-connect field for a typed user@host, without saving it as a profile', () => {
+    const onQuickConnectSSH = vi.fn();
+    render(
+      <LandingView
+        recentSSH={mockRecentSSH}
+        onConnectRecentSSH={vi.fn()}
+        onConnectSFTP={vi.fn()}
+        onQuickConnectSSH={onQuickConnectSSH}
+        onQuickStartTerminal={vi.fn()}
+        onNewTab={vi.fn()}
+        onOpenProfiles={vi.fn()}
+        onNewProfile={vi.fn()}
+        onOpenSyncBootstrap={vi.fn()}
+        onNavigateToTabBar={vi.fn()}
+      />
+    );
+
+    const input = screen.getByPlaceholderText(/Type user@host to connect/);
+    fireEvent.change(input, { target: { value: 'deploy@staging.example.com' } });
+    fireEvent.click(screen.getByTestId('quick-connect-btn'));
+
+    expect(onQuickConnectSSH).toHaveBeenCalledWith(
+      expect.objectContaining({ host: 'staging.example.com', username: 'deploy', authType: 'password' })
+    );
+    expect(input).toHaveValue('');
+  });
+
+  it('disables the quick-connect Connect button until the typed value looks like user@host', () => {
+    render(
+      <LandingView
+        recentSSH={mockRecentSSH}
+        onConnectRecentSSH={vi.fn()}
+        onConnectSFTP={vi.fn()}
+        onQuickConnectSSH={vi.fn()}
+        onQuickStartTerminal={vi.fn()}
+        onNewTab={vi.fn()}
+        onOpenProfiles={vi.fn()}
+        onNewProfile={vi.fn()}
+        onOpenSyncBootstrap={vi.fn()}
+        onNavigateToTabBar={vi.fn()}
+      />
+    );
+
+    expect(screen.getByTestId('quick-connect-btn')).toBeDisabled();
+    fireEvent.change(screen.getByPlaceholderText(/Type user@host to connect/), { target: { value: 'not a target' } });
+    expect(screen.getByTestId('quick-connect-btn')).toBeDisabled();
+    fireEvent.change(screen.getByPlaceholderText(/Type user@host to connect/), { target: { value: 'root@example.com' } });
+    expect(screen.getByTestId('quick-connect-btn')).not.toBeDisabled();
   });
 });

@@ -4,6 +4,9 @@ import { Pencil, Plus, Trash2, X } from 'lucide-react';
 import type { Snippet } from '@shared/types/snippets';
 import { SNIPPET_MAX_COMMAND_CHARS, SNIPPET_MAX_NAME_CHARS } from '@shared/types/snippets';
 import { useModalDismiss } from '../lib/useModalDismiss';
+import { useDialogFocus } from '../lib/useDialogFocus';
+import { useConfirm } from './ConfirmDialog';
+import { plural } from '../lib/plural';
 import { expandSnippet, type SnippetContext } from '../lib/snippets';
 
 interface SnippetPaletteModalProps {
@@ -26,6 +29,9 @@ export const SnippetPaletteModal: React.FC<SnippetPaletteModalProps> = ({
   onClose,
 }) => {
   const onBackdrop = useModalDismiss(onClose, true);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const confirm = useConfirm();
+  useDialogFocus(dialogRef, true);
   const [snippets, setSnippets] = useState<Snippet[]>([]);
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState(0);
@@ -120,7 +126,14 @@ export const SnippetPaletteModal: React.FC<SnippetPaletteModalProps> = ({
     }
   };
 
-  const remove = (id: string): void => {
+  const remove = async (id: string): Promise<void> => {
+    const name = snippets.find((s) => s.id === id)?.name;
+    const confirmed = await confirm({
+      title: 'Delete snippet',
+      message: name ? `Delete the snippet "${name}"? This cannot be undone.` : 'Delete this snippet? This cannot be undone.',
+      confirmLabel: 'Delete snippet',
+    });
+    if (!confirmed) return;
     setSnippets((prev) => prev.filter((s) => s.id !== id));
     window.multissh.snippetsDelete(id).catch(() => {
       // Deleting failed: show what is really stored again.
@@ -135,6 +148,7 @@ export const SnippetPaletteModal: React.FC<SnippetPaletteModalProps> = ({
       data-testid="snippet-palette-modal"
     >
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-label="Snippets"
@@ -223,6 +237,8 @@ export const SnippetPaletteModal: React.FC<SnippetPaletteModalProps> = ({
                 ref={searchRef}
                 type="text"
                 aria-label="Search snippets"
+                aria-controls="snippet-list"
+                aria-activedescendant={visible.length > 0 ? `snippet-item-${activeIndex}` : undefined}
                 value={query}
                 onChange={(e) => {
                   setQuery(e.target.value);
@@ -242,7 +258,10 @@ export const SnippetPaletteModal: React.FC<SnippetPaletteModalProps> = ({
               </button>
             </div>
 
-            <ul ref={listRef} className="min-h-0 flex-1 overflow-y-auto p-2">
+            <div role="status" aria-live="polite" className="sr-only">
+              {visible.length === 0 ? 'No snippets' : plural(visible.length, 'snippet')}
+            </div>
+            <ul id="snippet-list" ref={listRef} aria-label="Snippets" className="min-h-0 flex-1 overflow-y-auto p-2">
               {visible.length === 0 && (
                 <li className="px-3 py-6 text-center text-xs text-txt-muted">
                   {snippets.length === 0 ? 'No snippets yet. Click New to add one.' : 'No matches.'}
@@ -251,6 +270,8 @@ export const SnippetPaletteModal: React.FC<SnippetPaletteModalProps> = ({
               {visible.map((snippet, index) => (
                 <li
                   key={snippet.id}
+                  id={`snippet-item-${index}`}
+                  aria-current={index === activeIndex ? 'true' : undefined}
                   data-active={index === activeIndex}
                   onMouseMove={() => index !== activeIndex && setSelected(index)}
                   className={`group flex items-start gap-1 rounded-lg ${
@@ -284,7 +305,7 @@ export const SnippetPaletteModal: React.FC<SnippetPaletteModalProps> = ({
                   </button>
                   <button
                     type="button"
-                    onClick={() => remove(snippet.id)}
+                    onClick={() => void remove(snippet.id)}
                     aria-label="Delete snippet"
                     className="my-2 mr-2 rounded-md p-1.5 text-txt-muted opacity-0 hover:text-rose-400 focus:opacity-100 group-hover:opacity-100 cursor-pointer"
                   >

@@ -10,6 +10,7 @@ import type { UpdateState } from '../../shared/types/update';
 class FakeUpdater extends EventEmitter {
   autoDownload = true;
   autoInstallOnAppQuit = false;
+  autoRunAppAfterInstall = true;
   allowPrerelease = true;
   allowDowngrade = true;
   checkForUpdates = vi.fn(async () => {
@@ -52,11 +53,17 @@ describe('UpdateService', () => {
     await dev.service.check();
     expect(dev.updater.checkForUpdates).not.toHaveBeenCalled();
 
-    const win = create({ isPackaged: true, platform: 'win32' });
+    const win = create({ isPackaged: true, platform: 'win32', isNsisInstall: true });
     expect(win.service.getState()).toMatchObject({ status: 'unsupported', unsupportedReason: 'windows-unsigned' });
     win.service.start();
     await vi.advanceTimersByTimeAsync(10 * 60 * 60 * 1000);
     expect(win.updater.checkForUpdates).not.toHaveBeenCalled();
+
+    const msi = create({ isPackaged: true, platform: 'win32', isNsisInstall: false });
+    expect(msi.service.getState()).toMatchObject({ status: 'unsupported', unsupportedReason: 'not-installer' });
+    msi.service.start();
+    await vi.advanceTimersByTimeAsync(10 * 60 * 60 * 1000);
+    expect(msi.updater.checkForUpdates).not.toHaveBeenCalled();
 
     const off = create({ isPackaged: true, platform: 'linux', disabled: true });
     expect(off.service.getState()).toMatchObject({ status: 'unsupported', unsupportedReason: 'disabled' });
@@ -79,7 +86,7 @@ describe('UpdateService', () => {
     expect(service.getState().status).toBe('ready');
 
     await service.install();
-    expect(updater.quitAndInstall).toHaveBeenCalledWith(false, true);
+    expect(updater.quitAndInstall).toHaveBeenCalledWith(false, false);
     expect(send).toHaveBeenCalled();
   });
 
@@ -183,5 +190,58 @@ describe('UpdateService', () => {
     await service.download();
     await service.check();
     expect(updater.checkForUpdates).not.toHaveBeenCalled();
+  });
+
+  it('invokes relaunchOnLinux and sets autoRunAppAfterInstall to false on Linux install', async () => {
+    const relaunchOnLinux = vi.fn();
+    const { updater, service } = create({ platform: 'linux', relaunchOnLinux });
+    updater.emit('update-downloaded', { version: '2.0.0' });
+    await service.install();
+    expect(relaunchOnLinux).toHaveBeenCalledOnce();
+    expect((updater as any).autoRunAppAfterInstall).toBe(false);
+    expect(updater.quitAndInstall).toHaveBeenCalledWith(false, false);
+  });
+
+  it('stops the Linux relaunch helper when the install fails or is cancelled, so a later quit does not restart the app', async () => {
+    const cancel = vi.fn();
+    const relaunchOnLinux = vi.fn(() => ({ cancel }));
+    const { updater, service } = create({ platform: 'linux', relaunchOnLinux });
+    updater.emit('update-downloaded', { version: '2.0.0' });
+    updater.quitAndInstall.mockImplementationOnce(() => {
+      updater.emit('error', new Error('polkit dismissed'));
+    });
+    await service.install();
+    expect(service.getState().status).toBe('ready');
+    expect(cancel).toHaveBeenCalledOnce();
+
+    // A second attempt starts a new helper, and an install that goes through leaves it running.
+    await service.install();
+    expect(relaunchOnLinux).toHaveBeenCalledTimes(2);
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it('stops the relaunch helper and stays retryable when quitAndInstall throws', async () => {
+    const cancel = vi.fn();
+    const relaunchOnLinux = vi.fn(() => ({ cancel }));
+    const { updater, service } = create({ platform: 'linux', relaunchOnLinux });
+    updater.emit('update-downloaded', { version: '2.0.0' });
+    updater.quitAndInstall.mockImplementationOnce(() => {
+      throw new Error('spawn failed');
+    });
+    await expect(service.install()).rejects.toThrow('spawn failed');
+    expect(cancel).toHaveBeenCalledOnce();
+    // Not stuck on the installing overlay: the user can try again.
+    expect(service.getState()).toMatchObject({ status: 'ready', error: 'spawn failed' });
+    await service.install();
+    expect(relaunchOnLinux).toHaveBeenCalledTimes(2);
+  });
+
+  it('calls quitAndInstall(false, true) on non-Linux platforms', async () => {
+    const relaunchOnLinux = vi.fn();
+    const { updater, service } = create({ platform: 'darwin', relaunchOnLinux });
+    updater.emit('update-downloaded', { version: '2.0.0' });
+    await service.install();
+    expect(relaunchOnLinux).not.toHaveBeenCalled();
+    expect(updater.quitAndInstall).toHaveBeenCalledWith(false, true);
   });
 });

@@ -1,4 +1,5 @@
 import { getBaseName, isDirectoryPath, pathExists, resolveNonConflictingPath, joinPaths } from '../transfer/TransferPipeline';
+import { SAME_FILE_ERROR, isSameFileOnProvider, resolverFor } from '../transfer/transferPaths';
 import { IPC_CHANNELS, type TransferConflictResolution } from '../../shared/types/ipc';
 import type { TransferProgress } from '../../shared/types/storage';
 import type { IpcBridge } from '../IpcBridge';
@@ -29,6 +30,8 @@ export function registerTransferHandlers(bridge: TransferHost): void {
       skipped?: boolean;
       resolvedPolicy?: TransferConflictResolution;
       appliedToAll?: boolean;
+      /** The path the transfer writes to (differs from the requested one after nesting or "rename"). */
+      targetPath?: string;
     }> => {
       if (!options?.sourceProviderId || !options?.targetProviderId) {
         throw new Error('sourceProviderId and targetProviderId are required for transfer');
@@ -44,12 +47,18 @@ export function registerTransferHandlers(bridge: TransferHost): void {
 
       let isDirectory = false;
       let totalBytes: number | undefined;
+      let isSpecial = false;
       try {
         const srcStat = await sourceProvider.stat(options.sourcePath);
         isDirectory = Boolean(srcStat.isDirectory);
         totalBytes = srcStat.size;
+        isSpecial = Boolean(srcStat.isSpecial);
       } catch {
         // ignore error if stat not available
+      }
+      if (isSpecial) {
+        // A FIFO, socket or device: reading it would block, and there is nothing to copy.
+        throw new Error(`Not a regular file: ${getBaseName(options.sourcePath) || options.sourcePath}`);
       }
 
       let resolvedTargetPath = options.targetPath;
@@ -77,7 +86,7 @@ export function registerTransferHandlers(bridge: TransferHost): void {
         }
 
         if (resolvedPolicy === 'skip') {
-          return { jobId: null, skipped: true, resolvedPolicy, appliedToAll };
+          return { jobId: null, skipped: true, resolvedPolicy, appliedToAll, targetPath: resolvedTargetPath };
         }
         if (resolvedPolicy === 'rename') {
           resolvedTargetPath = await resolveNonConflictingPath(
@@ -87,6 +96,15 @@ export function registerTransferHandlers(bridge: TransferHost): void {
           );
         }
         // 'overwrite' proceeds with resolvedTargetPath unchanged.
+      }
+
+      // Overwriting a file with itself would truncate it while it is still being read ("rename" has already
+      // produced a different path by now, so copying into the same folder still works as a duplicate).
+      if (
+        options.sourceProviderId === options.targetProviderId &&
+        (await isSameFileOnProvider(sourceProvider.type, options.sourcePath, resolvedTargetPath, resolverFor(sourceProvider)))
+      ) {
+        throw new Error(SAME_FILE_ERROR);
       }
 
       const settings = await bridge.settingsStore.getSettings();
@@ -104,7 +122,7 @@ export function registerTransferHandlers(bridge: TransferHost): void {
         expectedChecksum: options.expectedChecksum,
       });
 
-      return { jobId: job.id, resolvedPolicy, appliedToAll };
+      return { jobId: job.id, resolvedPolicy, appliedToAll, targetPath: resolvedTargetPath };
     }
   );
 

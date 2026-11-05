@@ -5,7 +5,12 @@ import {
 import type { FileEntry } from '@shared/types/storage';
 import type { TransferConflictResolution } from '@shared/types/ipc';
 import type { GitRepoStatus } from '@shared/types/git';
-import { joinPath, parentPath, describeIpcError } from '../../lib/format';
+import { joinPath, parentPath, describeIpcError, formatBytes } from '../../lib/format';
+import { DragOutDialog } from './DragOutDialog';
+import { watchDragReleasedOutsideWindow } from '../../lib/dragLeaveWindow';
+import { makeNameMatcher } from '../../lib/nameFilter';
+import { invertSelection } from '../../lib/selectionOps';
+import { useArchiveActions } from './useArchiveActions';
 import { FileList } from './FileList';
 import { useDragDrop } from './DragDropContext';
 import { useConfirm } from '../ConfirmDialog';
@@ -15,11 +20,14 @@ import { buildContextMenuItems } from './filePaneContextMenu';
 import { FilePaneModals } from './FilePaneModals';
 import { GitStatusMenu } from './GitStatusMenu';
 import { FilePaneToolbar } from './FilePaneToolbar';
+import type { BreadcrumbsHandle } from './Breadcrumbs';
 import { FilePaneFilterBar } from './FilePaneFilterBar';
 import { useNavHistory } from '../../lib/useNavHistory';
-import { SOURCE_ICONS } from './filePaneHelpers';
+import { SOURCE_ICONS, isNoopOsDrop } from './filePaneHelpers';
 import { recursiveFilterFiles, RECURSIVE_MAX_RESULTS } from '../../lib/recursiveFilter';
 import { buildDragPayload, type PaneSide, type PaneSource, type SourceType } from './types';
+import { offersAwsSsoSignIn } from '@shared/types/aws';
+import { isListingStale } from '../../lib/staleListing';
 import { comboFromKeyboardEvent } from '../../lib/shortcuts';
 import { DEFAULT_SHORTCUTS } from '@shared/types/settings';
 import { createRendererLogger } from '../../lib/log';
@@ -42,8 +50,12 @@ interface FilePaneProps {
   shortcuts?: Record<string, string>;
   /** Settings > Files & Storage > "Show hidden files and dotfiles". Off by default — entries whose name starts with "." are filtered out of the list (but still counted/selectable if already selected). */
   showHiddenFiles?: boolean;
+  /** Toolbar toggle for the setting above. */
+  onToggleHiddenFiles?: () => void;
   /** Settings > Git & GitHub > "SFTP & File Manager Git Integration". On by default. */
   gitIntegrationEnabled?: boolean;
+  /** Optional file or folder path to highlight upon loading. */
+  initialSelectedPath?: string;
 }
 
 export const FilePane: React.FC<FilePaneProps> = ({
@@ -60,11 +72,20 @@ export const FilePane: React.FC<FilePaneProps> = ({
   otherPane,
   shortcuts,
   showHiddenFiles = false,
+  onToggleHiddenFiles,
   gitIntegrationEnabled = true,
+  initialSelectedPath,
 }) => {
   const onPathChangeRef = useRef(onPathChange);
   onPathChangeRef.current = onPathChange;
   const lastPasteTimeRef = useRef(0);
+  const pendingSelectPathRef = useRef<string | undefined>(initialSelectedPath);
+
+  useEffect(() => {
+    if (initialSelectedPath) {
+      pendingSelectPathRef.current = initialSelectedPath;
+    }
+  }, [initialSelectedPath]);
 
   const [entries, setEntries] = useState<FileEntry[]>([]);
   // UX audit finding #1: Settings > Files & Storage > "Show hidden files and
@@ -80,24 +101,48 @@ export const FilePane: React.FC<FilePaneProps> = ({
   const recursiveActive = recursiveFilter && filterText.trim().length > 0;
   // While a recursive filter is active the list shows the walk's hits (names are
   // relative paths, `path` is the real full path) instead of the current folder.
+  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
   const activeEntries = recursiveActive ? recursiveEntries : entries;
   const visibleEntries = useMemo(
     () =>
-      showHiddenFiles || recursiveActive ? activeEntries : activeEntries.filter((e) => !e.name.startsWith('.')),
-    [activeEntries, showHiddenFiles, recursiveActive]
+      showHiddenFiles || recursiveActive
+        ? activeEntries
+        : activeEntries.filter((e) => !e.name.startsWith('.') || selectedPaths.has(e.path)),
+    [activeEntries, showHiddenFiles, recursiveActive, selectedPaths]
   );
+  // What FileList actually renders once its own (non-recursive) text filter narrows the list —
+  // recursive mode already reflects filterText in recursiveEntries itself, so only the plain
+  // case needs the same matcher FileList applies internally.
+  const displayedEntries = useMemo(() => {
+    if (recursiveActive || !filterText.trim()) return visibleEntries;
+    const matches = makeNameMatcher(filterText);
+    return visibleEntries.filter((e) => matches(e.name.slice(e.name.lastIndexOf('/') + 1)));
+  }, [visibleEntries, filterText, recursiveActive]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
+  const [ssoSigningIn, setSsoSigningIn] = useState(false);
+  // Kept apart from `error` so a failed or cancelled sign-in leaves the expiry error, and its button, in place.
+  const [ssoLoginError, setSsoLoginError] = useState<string | null>(null);
+  const providerIdRef = useRef(source.providerId);
+  const lastLoadAtRef = useRef(0);
+  const loadingRef = useRef(false);
+  /** A browser sign-in is pending; a refocus reload meanwhile would hide the sign-in button and its status. */
+  const ssoSigningInRef = useRef(false);
+  /** Remote paths the user asked to drag out of sshs3 (shows DragOutDialog). */
+  const [dragOutPaths, setDragOutPaths] = useState<string[] | null>(null);
   const [dragOverPath, setDragOverPath] = useState<string | null>(null);
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
   const [chmodOpen, setChmodOpen] = useState(false);
   const [propertiesOpen, setPropertiesOpen] = useState(false);
+  const [certificateOpen, setCertificateOpen] = useState(false);
   const [tagsOpen, setTagsOpen] = useState(false);
   const [bucketPolicyOpen, setBucketPolicyOpen] = useState(false);
   const [versionsOpen, setVersionsOpen] = useState(false);
   const [presignedOpen, setPresignedOpen] = useState(false);
   const [newFolderOpen, setNewFolderOpen] = useState(false);
+  const [newFileOpen, setNewFileOpen] = useState(false);
+  const [patternOpen, setPatternOpen] = useState(false);
+  const [focusRequest, setFocusRequest] = useState<{ path: string; id: number } | null>(null);
   const [addToDotfilesOpen, setAddToDotfilesOpen] = useState(false);
   const [syncModalOpen, setSyncModalOpen] = useState(false);
   const [editorEntry, setEditorEntry] = useState<FileEntry | null>(null);
@@ -189,6 +234,8 @@ export const FilePane: React.FC<FilePaneProps> = ({
     async (force?: boolean) => {
       const requestKey = `${source.providerId}::${currentPath}`;
       latestRequestRef.current = requestKey;
+      lastLoadAtRef.current = Date.now();
+      loadingRef.current = true;
       setLoading(true);
       setError(null);
       try {
@@ -198,6 +245,21 @@ export const FilePane: React.FC<FilePaneProps> = ({
         // a stale response instead of clobbering the pane with the wrong host's content.
         if (latestRequestRef.current !== requestKey) return;
         setEntries(result);
+
+        if (pendingSelectPathRef.current) {
+          const target = pendingSelectPathRef.current;
+          const targetBasename = target.split(/[\\/]/).filter(Boolean).pop();
+          const match = result.find(
+            (e) =>
+              e.path === target ||
+              e.path === target.replace(/\/+$/, '') ||
+              (targetBasename && e.name === targetBasename)
+          );
+          if (match) {
+            setSelectedPaths(new Set([match.path]));
+            pendingSelectPathRef.current = undefined;
+          }
+        }
 
         if (gitIntegrationEnabled && (source.sourceType === 'local' || source.sourceType === 'sftp')) {
           window.multissh
@@ -235,7 +297,6 @@ export const FilePane: React.FC<FilePaneProps> = ({
           }
         }
         let msg = describeIpcError(err, 'Could not read the folder contents');
-        msg = msg.replace(/^Error invoking remote method '[^']+':\s*(Error:\s*)?/i, '');
         if (msg.includes('All configured authentication methods failed') || msg.toLowerCase().includes('authentication failed')) {
           msg = 'Authentication failed: The password or key was rejected by the server.';
         } else if (msg.includes('getConnection')) {
@@ -245,11 +306,40 @@ export const FilePane: React.FC<FilePaneProps> = ({
         setError(msg);
         setEntries([]);
       } finally {
-        if (latestRequestRef.current === requestKey) setLoading(false);
+        if (latestRequestRef.current === requestKey) {
+          loadingRef.current = false;
+          setLoading(false);
+        }
       }
     },
     [source.providerId, source.sourceType, currentPath, gitIntegrationEnabled]
   );
+
+  useEffect(() => {
+    providerIdRef.current = source.providerId;
+    ssoSigningInRef.current = false;
+    setSsoSigningIn(false);
+    setSsoLoginError(null);
+  }, [source.providerId]);
+
+  const handleSsoRelogin = useCallback(async () => {
+    const providerId = source.providerId;
+    ssoSigningInRef.current = true;
+    setSsoSigningIn(true);
+    setSsoLoginError(null);
+    try {
+      await window.multissh.awsSsoReloginProvider(providerId);
+      // The pane may have moved to another connection while the browser sign-in was pending.
+      if (providerIdRef.current === providerId) await load(true);
+    } catch (err) {
+      if (providerIdRef.current === providerId) {
+        setSsoLoginError(describeIpcError(err, 'AWS SSO sign-in failed').replace(/^Error:\s*/, ''));
+      }
+    } finally {
+      ssoSigningInRef.current = false;
+      if (providerIdRef.current === providerId) setSsoSigningIn(false);
+    }
+  }, [source.providerId, load]);
 
   const handleGitPull = useCallback(async () => {
     setGitPulling(true);
@@ -277,6 +367,22 @@ export const FilePane: React.FC<FilePaneProps> = ({
     setSelectedPaths(new Set());
     void load(true);
   }, [load, refreshToken, currentPath]);
+
+  // An S3 session can lapse while the window sits idle; reloading on return surfaces that (and the sign-in
+  // button) instead of leaving an old listing that looks fine.
+  useEffect(() => {
+    if (source.sourceType !== 's3') return;
+    const reloadIfStale = () => {
+      if (document.visibilityState !== 'visible' || loadingRef.current || ssoSigningInRef.current) return;
+      if (isListingStale(lastLoadAtRef.current, Date.now())) void load(true);
+    };
+    window.addEventListener('focus', reloadIfStale);
+    document.addEventListener('visibilitychange', reloadIfStale);
+    return () => {
+      window.removeEventListener('focus', reloadIfStale);
+      document.removeEventListener('visibilitychange', reloadIfStale);
+    };
+  }, [source.sourceType, load]);
 
   // Only navigation resets the filter; a refresh (e.g. after a finished transfer) keeps it.
   useEffect(() => {
@@ -353,6 +459,33 @@ export const FilePane: React.FC<FilePaneProps> = ({
     [source.providerId, currentPath, load]
   );
 
+  const handleNewFile = useCallback(() => {
+    setNewFileOpen(true);
+  }, []);
+
+  const handleCreateFileCommit = useCallback(
+    async (name: string) => {
+      await window.multissh.storageCreateFile(source.providerId, joinPath(currentPath, name));
+      await load(true);
+    },
+    [source.providerId, currentPath, load]
+  );
+
+  const handlePatternApply = useCallback((paths: string[], mode: 'select' | 'deselect') => {
+    setSelectedPaths((prev) => {
+      const next = new Set(prev);
+      for (const p of paths) {
+        if (mode === 'select') next.add(p);
+        else next.delete(p);
+      }
+      return next;
+    });
+  }, []);
+
+  const handleInvertSelection = useCallback(() => {
+    setSelectedPaths((prev) => invertSelection(displayedEntries, prev));
+  }, [displayedEntries]);
+
   const handleDelete = useCallback(async () => {
     if (selectedPaths.size === 0) return;
     const targets = activeEntries.filter((e) => selectedPaths.has(e.path));
@@ -385,8 +518,7 @@ export const FilePane: React.FC<FilePaneProps> = ({
       setSelectedPaths(new Set());
       await load(true);
     } catch (err) {
-      let msg = describeIpcError(err, 'Failed to delete item(s)');
-      msg = msg.replace(/^Error invoking remote method '[^']+':\s*(Error:\s*)?/i, '');
+      const msg = describeIpcError(err, 'Failed to delete item(s)');
       setError(msg);
     } finally {
       setLoading(false);
@@ -456,6 +588,11 @@ export const FilePane: React.FC<FilePaneProps> = ({
       setDragOverPath(null);
       const osPaths = readOsFilePaths(e.dataTransfer);
       if (osPaths.length > 0) {
+        // A native drag from this list dropped onto one of its own entries, or onto the folder it is already in
+        if (source.sourceType === 'local' && isNoopOsDrop(osPaths, targetEntry.path)) {
+          endDrag();
+          return;
+        }
         onTransferRequested({
           sourceProviderId: 'local',
           sourcePaths: osPaths,
@@ -477,7 +614,7 @@ export const FilePane: React.FC<FilePaneProps> = ({
       });
       endDrag();
     },
-    [readOsFilePaths, readDropPayload, onTransferRequested, endDrag]
+    [readOsFilePaths, readDropPayload, onTransferRequested, endDrag, source.sourceType]
   );
 
   const handlePaneDrop = useCallback(
@@ -486,6 +623,11 @@ export const FilePane: React.FC<FilePaneProps> = ({
       e.stopPropagation();
       const osPaths = readOsFilePaths(e.dataTransfer);
       if (osPaths.length > 0) {
+        // A native drag from this very folder dropped back onto it is a no-op
+        if (source.sourceType === 'local' && isNoopOsDrop(osPaths, currentPath)) {
+          endDrag();
+          return;
+        }
         onTransferRequested({
           sourceProviderId: 'local',
           sourcePaths: osPaths,
@@ -507,7 +649,7 @@ export const FilePane: React.FC<FilePaneProps> = ({
       });
       endDrag();
     },
-    [readOsFilePaths, readDropPayload, onTransferRequested, currentPath, source.providerId, side, endDrag]
+    [readOsFilePaths, readDropPayload, onTransferRequested, currentPath, source.providerId, source.sourceType, side, endDrag]
   );
 
   const handleBreadcrumbDrop = useCallback(
@@ -517,6 +659,10 @@ export const FilePane: React.FC<FilePaneProps> = ({
       setDragOverPath(null);
       const osPaths = readOsFilePaths(e.dataTransfer);
       if (osPaths.length > 0) {
+        if (source.sourceType === 'local' && isNoopOsDrop(osPaths, targetPath)) {
+          endDrag();
+          return;
+        }
         onTransferRequested({
           sourceProviderId: 'local',
           sourcePaths: osPaths,
@@ -542,11 +688,26 @@ export const FilePane: React.FC<FilePaneProps> = ({
       });
       endDrag();
     },
-    [readOsFilePaths, readDropPayload, onTransferRequested, endDrag, side, source.providerId, currentPath]
+    [readOsFilePaths, readDropPayload, onTransferRequested, endDrag, side, source.providerId, source.sourceType, currentPath]
   );
 
   const supportsChmod = source.sourceType !== 's3';
   const selectedEntries = activeEntries.filter((e) => selectedPaths.has(e.path));
+
+  const requestFocus = useCallback(
+    (path: string) => setFocusRequest((prev) => ({ path, id: (prev?.id ?? 0) + 1 })),
+    []
+  );
+  const { handleCompress, handleExtract } = useArchiveActions({
+    providerId: source.providerId,
+    currentPath,
+    selectedEntries,
+    load,
+    setLoading,
+    setError,
+    setSelectedPaths,
+    requestFocus,
+  });
 
   const isAtBucketRoot = source.sourceType === 's3' && (currentPath === '' || currentPath === '/');
   const isBucketEntry =
@@ -557,6 +718,10 @@ export const FilePane: React.FC<FilePaneProps> = ({
     selectedEntries.length === 1 &&
     !selectedEntries[0].isDirectory;
   const selectedAreAllFiles = selectedEntries.length > 0 && selectedEntries.every((e) => !e.isDirectory);
+
+  const stopOutsideWatchRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => stopOutsideWatchRef.current?.(), []);
+  const canDragOut = source.sourceType !== 'local' && Boolean(window.multissh?.dragOutPrepare);
 
   const contextMenuItems: ContextMenuItem[] = buildContextMenuItems({
     contextMenuOpen: contextMenu !== null,
@@ -577,9 +742,15 @@ export const FilePane: React.FC<FilePaneProps> = ({
     handlePaste,
     handleRenameStart,
     handleDownloadTo,
+    handleDragOut: canDragOut ? () => setDragOutPaths(selectedEntries.map((e) => e.path)) : undefined,
     handleGitPull,
     handleDelete,
     handleNewFolder,
+    handleNewFile,
+    handleCompress,
+    handleExtract,
+    setPatternOpen,
+    handleInvertSelection,
     load,
     setSyncModalOpen,
     setEditorTailMode,
@@ -593,10 +764,12 @@ export const FilePane: React.FC<FilePaneProps> = ({
     setGitCloneTargetDir,
     setGitCloneOpen,
     setPropertiesOpen,
+    setCertificateOpen,
     setSearchOpen,
   });
 
   const SourceIcon = SOURCE_ICONS[source.sourceType];
+  const breadcrumbsRef = useRef<BreadcrumbsHandle>(null);
   const isReceivingForeignDrag = activeDrag !== null && activeDrag.fromPane !== side;
 
   const handlePaneKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
@@ -631,6 +804,31 @@ export const FilePane: React.FC<FilePaneProps> = ({
     if (e.key === 'ArrowRight' && e.altKey) {
       e.preventDefault();
       handleGoForward();
+      return;
+    }
+
+    // Browser-address-bar convention (§25): edit the path with the whole thing selected.
+    if ((e.key === 'l' && (e.ctrlKey || e.metaKey)) || (e.key === 'd' && e.altKey)) {
+      e.preventDefault();
+      breadcrumbsRef.current?.startEditing();
+      return;
+    }
+
+    if (e.key.toLowerCase() === 's' && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
+      e.preventDefault();
+      setPatternOpen(true);
+      return;
+    }
+
+    if (e.key.toLowerCase() === 'a' && (e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey) {
+      e.preventDefault();
+      handleInvertSelection();
+      return;
+    }
+
+    if (e.key === 'h' && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && onToggleHiddenFiles) {
+      e.preventDefault();
+      onToggleHiddenFiles();
       return;
     }
 
@@ -712,9 +910,10 @@ export const FilePane: React.FC<FilePaneProps> = ({
                   key={type}
                   type="button"
                   title={titleMap[type]}
+                  aria-label={titleMap[type]}
                   onClick={() => onSourceTypeRequest(type)}
                   className={
-                    'rounded-md p-1 transition-colors ' +
+                    'rounded-md p-[5px] transition-colors ' +
                     (source.sourceType === type
                       ? 'bg-sky-600 text-white font-medium shadow-sm'
                       : 'text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary')
@@ -731,7 +930,7 @@ export const FilePane: React.FC<FilePaneProps> = ({
           </span>
         </div>
         {isActive && (
-          <span className="rounded-full bg-sky-500/15 border border-sky-500/30 px-2 py-0.5 text-2xs font-semibold text-sky-400 select-none">
+          <span className="rounded bg-sky-500/15 border border-sky-500/30 px-2 py-0.5 text-2xs font-semibold text-sky-400 select-none">
             Active
           </span>
         )}
@@ -739,6 +938,7 @@ export const FilePane: React.FC<FilePaneProps> = ({
 
       {/* Pane Action Toolbar */}
       <FilePaneToolbar
+        breadcrumbsRef={breadcrumbsRef}
         sourceType={source.sourceType}
         providerId={source.providerId}
         currentPath={currentPath}
@@ -757,12 +957,15 @@ export const FilePane: React.FC<FilePaneProps> = ({
         handleBreadcrumbDrop={handleBreadcrumbDrop}
         load={load}
         handleNewFolder={handleNewFolder}
+        handleNewFile={handleNewFile}
         handleRenameStart={handleRenameStart}
         handleDelete={handleDelete}
         setEditorEntry={setEditorEntry}
         setChmodOpen={setChmodOpen}
         setSearchOpen={setSearchOpen}
         onOpenTerminal={onOpenTerminal}
+        showHiddenFiles={showHiddenFiles}
+        onToggleHiddenFiles={onToggleHiddenFiles}
       >
         <GitStatusMenu
           enabled={gitIntegrationEnabled}
@@ -796,11 +999,21 @@ export const FilePane: React.FC<FilePaneProps> = ({
       )}
 
       {error && (
-        <div className="flex items-center justify-between gap-1.5 border-b border-red-900/60 bg-red-950/40 px-2.5 py-1 text-xs text-red-300">
+        <div role="alert" className="flex items-center justify-between gap-1.5 border-b border-red-900/60 bg-red-950/40 px-2.5 py-1 text-xs text-red-300">
           <div className="flex min-w-0 items-center gap-1.5 truncate">
             <AlertCircle className="h-3.5 w-3.5 shrink-0" />
-            <span className="truncate">{error}</span>
+            <span className="truncate">{ssoLoginError ? `${error} ${ssoLoginError}` : error}</span>
           </div>
+          {source.sourceType === 's3' && offersAwsSsoSignIn(error) && (
+            <button
+              type="button"
+              disabled={ssoSigningIn}
+              onClick={() => void handleSsoRelogin()}
+              className="ml-2 shrink-0 rounded-md bg-sky-600 px-2 py-0.5 text-xs font-medium text-white hover:bg-sky-500 disabled:opacity-50"
+            >
+              {ssoSigningIn ? 'Waiting for browser…' : 'Sign in again'}
+            </button>
+          )}
           {source.sourceType !== 'local' && (
             <button
               type="button"
@@ -824,12 +1037,28 @@ export const FilePane: React.FC<FilePaneProps> = ({
           loading={loading}
           selectedPaths={selectedPaths}
           onSelectionChange={setSelectedPaths}
+          focusRequest={focusRequest}
           onOpen={handleOpen}
           filterText={filterText}
           onDraggableStart={(entry, e) => {
             const items = selectedPaths.has(entry.path)
               ? activeEntries.filter((it) => selectedPaths.has(it.path))
               : [entry];
+            // Local files become a native OS drag so they can also be dropped outside sshs3
+            // (in-app drops then arrive as OS file drops, see readOsFilePaths).
+            if (source.sourceType === 'local' && window.multissh?.dragOutStart) {
+              e.preventDefault();
+              void window.multissh.dragOutStart(items.map((it) => it.path)).catch(() => {});
+              return true;
+            }
+            // A remote item released outside the window can not be handed to another app directly:
+            // offer the "Drag out of sshs3" copy instead.
+            if (canDragOut) {
+              stopOutsideWatchRef.current?.();
+              stopOutsideWatchRef.current = watchDragReleasedOutsideWindow(() =>
+                setDragOutPaths(items.map((it) => it.path))
+              );
+            }
             beginDrag(buildDragPayload(side, source.providerId, currentPath, items), e.dataTransfer);
           }}
           onDraggableEnd={endDrag}
@@ -861,6 +1090,20 @@ export const FilePane: React.FC<FilePaneProps> = ({
         />
       </div>
 
+      {/* Status Bar (§24): item count, selection count, and total size of the selection. */}
+      <div className="flex items-center justify-between gap-2 border-t border-divider bg-app-surface-subtle px-2.5 py-1 text-2xs text-txt-muted">
+        <span>
+          {displayedEntries.length} item{displayedEntries.length === 1 ? '' : 's'}
+        </span>
+        {selectedEntries.length > 0 && (
+          <span>
+            {selectedEntries.length} selected
+            {selectedEntries.some((e) => typeof e.size === 'number') &&
+              ` · ${formatBytes(selectedEntries.reduce((sum, e) => sum + (e.size ?? 0), 0))}`}
+          </span>
+        )}
+      </div>
+
       {contextMenu && (
         <ContextMenu
           x={contextMenu.x}
@@ -868,6 +1111,10 @@ export const FilePane: React.FC<FilePaneProps> = ({
           items={contextMenuItems}
           onClose={() => setContextMenu(null)}
         />
+      )}
+
+      {dragOutPaths && (
+        <DragOutDialog providerId={source.providerId} paths={dragOutPaths} onClose={() => setDragOutPaths(null)} />
       )}
 
       <FilePaneModals
@@ -882,6 +1129,8 @@ export const FilePane: React.FC<FilePaneProps> = ({
         setChmodOpen={setChmodOpen}
         propertiesOpen={propertiesOpen}
         setPropertiesOpen={setPropertiesOpen}
+        certificateOpen={certificateOpen}
+        setCertificateOpen={setCertificateOpen}
         tagsOpen={tagsOpen}
         setTagsOpen={setTagsOpen}
         bucketPolicyOpen={bucketPolicyOpen}
@@ -900,6 +1149,13 @@ export const FilePane: React.FC<FilePaneProps> = ({
         newFolderOpen={newFolderOpen}
         setNewFolderOpen={setNewFolderOpen}
         handleCreateFolderCommit={handleCreateFolderCommit}
+        newFileOpen={newFileOpen}
+        setNewFileOpen={setNewFileOpen}
+        handleCreateFileCommit={handleCreateFileCommit}
+        patternOpen={patternOpen}
+        setPatternOpen={setPatternOpen}
+        displayedEntries={displayedEntries}
+        handlePatternApply={handlePatternApply}
         addToDotfilesOpen={addToDotfilesOpen}
         setAddToDotfilesOpen={setAddToDotfilesOpen}
         setDotfilesFeedback={setDotfilesFeedback}

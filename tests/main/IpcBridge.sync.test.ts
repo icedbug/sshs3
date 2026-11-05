@@ -149,6 +149,8 @@ async function makeHarness(sharedProvider: FakeStorageProvider): Promise<Harness
   const storageRegistry = {
     getOrCreate: vi.fn().mockResolvedValue(sharedProvider),
     disconnect: vi.fn().mockResolvedValue(undefined),
+    // IpcBridge.getSyncProvider asks this on Windows before creating an SFTP provider.
+    has: vi.fn().mockReturnValue(true),
   };
 
   const ipc = new MockIpcMain();
@@ -182,6 +184,8 @@ async function makeHarness(sharedProvider: FakeStorageProvider): Promise<Harness
     shutdown: vi.fn().mockResolvedValue(undefined),
     writePublicKeyFiles: vi.fn().mockResolvedValue([]),
     noteLoadedLibrary: vi.fn(),
+    adoptIdentities: vi.fn().mockResolvedValue(undefined),
+    evictIdentities: vi.fn().mockResolvedValue(undefined),
   };
   (bridge as any).smartcard.appAgent = appAgent;
   bridge.register();
@@ -245,6 +249,90 @@ describe('IpcBridge — remote profile sync handlers', () => {
     expect(status.credentialsUnlocked).toBe(true);
     expect(status.lastSyncAt).toBeTruthy();
     expect(status.target).toEqual({ id: 'sync-target', name: 'My Sync Bucket', type: 's3' });
+  });
+
+  // H4 (code review 2026-11-03): changing the target used to keep the old key and salts unlocked, so the next
+  // auto-push encrypted with the old key and overwrote whatever another device had stored on the new target.
+  describe('changing the sync target location', () => {
+    const PW = { topologyPassword: 'topology-pw', credentialsPassword: 'credentials-pw' };
+
+    it('locks sync, forgets the salts and turns auto-sync off', async () => {
+      const { ipc } = await harness();
+      await ipc.invoke(IPC_CHANNELS.PROFILE_SYNC_SETUP, { target: TARGET, remoteBasePath: 'test-bucket' });
+      await ipc.invoke(IPC_CHANNELS.PROFILE_SYNC_ENABLE, PW);
+      await ipc.invoke(IPC_CHANNELS.PROFILE_SYNC_SET_AUTO_SYNC, true);
+      const before = await ipc.invoke(IPC_CHANNELS.PROFILE_SYNC_STATUS);
+      expect(before).toMatchObject({ topologyUnlocked: true, hasLocalSalts: true, autoSync: true });
+
+      await ipc.invoke(IPC_CHANNELS.PROFILE_SYNC_SETUP, { target: TARGET, remoteBasePath: 'another-bucket' });
+
+      const after = await ipc.invoke(IPC_CHANNELS.PROFILE_SYNC_STATUS);
+      expect(after).toMatchObject({
+        topologyUnlocked: false,
+        credentialsUnlocked: false,
+        hasLocalSalts: false,
+        autoSync: false,
+        remoteBasePath: 'another-bucket',
+      });
+      expect(after.lastSyncAt).toBeUndefined();
+      await expect(ipc.invoke(IPC_CHANNELS.PROFILE_SYNC_PUSH)).rejects.toThrow();
+    });
+
+    it('does not write to the new target when a push was already scheduled', async () => {
+      const { ipc, bridge } = await harness();
+      await ipc.invoke(IPC_CHANNELS.PROFILE_SYNC_SETUP, { target: TARGET, remoteBasePath: 'test-bucket' });
+      await ipc.invoke(IPC_CHANNELS.PROFILE_SYNC_ENABLE, PW);
+      await ipc.invoke(IPC_CHANNELS.PROFILE_SYNC_SET_AUTO_SYNC, true);
+      await ipc.invoke(IPC_CHANNELS.PROFILE_SYNC_SETUP, { target: TARGET, remoteBasePath: 'another-bucket' });
+
+      const write = vi.spyOn(provider, 'createWriteStream');
+      bridge.scheduleAutoSync(0);
+      await new Promise((r) => setTimeout(r, 50));
+
+      expect(write).not.toHaveBeenCalled();
+    });
+
+    // The renderer gives every sync target the same id, and the registry reuses a provider per id. A job that was
+    // already running when the target changed could re-create the old provider after the handler dropped it,
+    // and the next use of the new target would then talk to the old host.
+    it('never hands out a cached provider that belongs to another location', async () => {
+      const { bridge } = await harness();
+      const registry = (bridge as any).storageRegistry as { getOrCreate: ReturnType<typeof vi.fn>; disconnect: ReturnType<typeof vi.fn> };
+      const sftp = (host: string): StorageConnectConfig => ({
+        id: 'sshs3-remote-profile-sync', name: 'Remote profile sync', type: 'sftp',
+        sftpConfig: { host, port: 22, username: 'sync', authType: 'password', password: 'pw' } as any, // pragma: allowlist secret
+      });
+      registry.disconnect.mockClear();
+
+      await bridge.getSyncProvider(sftp('old.example.com'));
+      expect(registry.disconnect).not.toHaveBeenCalled();
+
+      await bridge.getSyncProvider(sftp('old.example.com'));
+      expect(registry.disconnect).not.toHaveBeenCalled();
+
+      await bridge.getSyncProvider(sftp('new.example.com'));
+      expect(registry.disconnect).toHaveBeenCalledTimes(1);
+      expect(registry.disconnect).toHaveBeenCalledWith('sshs3-remote-profile-sync');
+      // The cache entry is dropped before the new provider is requested.
+      expect(registry.disconnect.mock.invocationCallOrder[0]).toBeLessThan(registry.getOrCreate.mock.invocationCallOrder.at(-1)!);
+    });
+
+    it('keeps everything when the same location is saved again with other credentials', async () => {
+      const { ipc } = await harness();
+      await ipc.invoke(IPC_CHANNELS.PROFILE_SYNC_SETUP, { target: TARGET, remoteBasePath: 'test-bucket' });
+      await ipc.invoke(IPC_CHANNELS.PROFILE_SYNC_ENABLE, PW);
+      await ipc.invoke(IPC_CHANNELS.PROFILE_SYNC_SET_AUTO_SYNC, true);
+
+      const rotated: StorageConnectConfig = { ...TARGET, s3Config: { ...TARGET.s3Config!, accessKeyId: 'ROTATED', secretAccessKey: 'rotated' } }; // pragma: allowlist secret
+      await ipc.invoke(IPC_CHANNELS.PROFILE_SYNC_SETUP, { target: rotated, remoteBasePath: 'test-bucket/' });
+
+      expect(await ipc.invoke(IPC_CHANNELS.PROFILE_SYNC_STATUS)).toMatchObject({
+        topologyUnlocked: true,
+        credentialsUnlocked: true,
+        hasLocalSalts: true,
+        autoSync: true,
+      });
+    });
   });
 
   it('refuses to enable with fresh salts when the target already has remote data from elsewhere', async () => {

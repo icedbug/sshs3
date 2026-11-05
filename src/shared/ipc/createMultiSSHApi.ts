@@ -1,5 +1,6 @@
 import type { UpdateState } from '../types/update';
 import type { LogLevel } from '../types/log';
+import type { CertificatePreviewResult } from '../types/certificate';
 import {
   IPC_CHANNELS,
   type MultiSSHApi,
@@ -8,10 +9,14 @@ import {
   type PresencePromptEvent,
   type PresenceClearEvent,
   type AskpassPromptEvent,
+  type InsertTokenPromptEvent,
   type SmartcardStartupUnlockStatusEvent,
   type TransferConflictPromptEvent,
   type TransferConflictResolution,
   type QuitConfirmPromptEvent,
+  type TabHandoff,
+  type MoveTabTarget,
+  type WindowInfo,
   type SshAgentStatus,
   type FileReadResult,
   type ExternalFileStatusEvent,
@@ -31,9 +36,21 @@ import type {
   K8sDebugTarget,
   K8sLoginOptions,
   K8sLoginResult,
+  K8sOpenShiftProbeResult,
+  K8sProfile,
+  K8sWebLoginOptions,
+  K8sWebLoginResult,
 } from '../types/kubernetes';
 import type { DirectoryDiffResult, DirectorySyncApplyResult, DirectorySyncProfile } from '../types/dirsync';
-import type { AwsSsoAccount, AwsSsoAccountRole, AwsSsoLoginResult } from '../types/aws';
+import type {
+  SshCaConfig,
+  SshCaDetectRequest,
+  SshCaDetectResult,
+  SshCaStatus,
+  SshCaVaultDetectRequest,
+  SshCaVaultDetectResult,
+} from '../types/sshCa';
+import type { AwsSsoAccount, AwsSsoAccountRole, AwsSsoLoginResult, AwsSsoNetworkOptions } from '../types/aws';
 import type {
   DotfileImportedFile,
   DotfilePool,
@@ -77,6 +94,7 @@ import type {
 import type {
   FileEntry,
   ObjectMetadata,
+  WinAttributes,
   TransferProgress,
   S3Config,
   S3Tag,
@@ -89,9 +107,10 @@ import type { SessionData } from '../types/session';
 import type { ClipboardHistoryEntry } from '../types/clipboard';
 import type { Snippet } from '../types/snippets';
 import type { AppSettings } from '../types/settings';
+import type { PolicyInfo } from '../types/policy';
 import type { PerfK8sResult, PerfK8sTarget, PerfSshResult } from '../types/perf';
 import type { ProfileSyncStatus, ProfileSyncPullResult, SyncComparisonResult } from '../types/sync';
-import type { TeamVaultPayload, TeamVaultRole, TeamVaultStatus } from '../types/teamVault';
+import type { TeamVaultPayload, TeamVaultRole, TeamVaultStatus, TeamVaultSyncPreview } from '../types/teamVault';
 import type {
   SearchDoneEvent,
   SearchErrorEvent,
@@ -160,8 +179,15 @@ export function createMultiSSHApi(ipcRenderer: IpcRendererTransport): MultiSSHAp
     terminalReconnect: (sessionId: string): Promise<boolean> =>
       ipcRenderer.invoke(IPC_CHANNELS.TERMINAL_RECONNECT, sessionId),
 
+    terminalGetCwd: (sessionId: string): Promise<string | null> =>
+      ipcRenderer.invoke(IPC_CHANNELS.TERMINAL_GET_CWD, sessionId),
+
+    terminalHasSshClient: (sessionId: string): Promise<boolean> =>
+      ipcRenderer.invoke(IPC_CHANNELS.TERMINAL_HAS_SSH_CLIENT, sessionId),
+
     onTerminalData: (callback: (sessionId: string, data: string) => void): (() => void) => {
-      const listener = (_event: any, sessionId: string, data: string) => callback(sessionId, data);
+      const listener = (_event: any, sessionId: string, data: string) =>
+        callback(sessionId, data);
       ipcRenderer.on(IPC_CHANNELS.TERMINAL_DATA, listener);
       return () => {
         ipcRenderer.removeListener(IPC_CHANNELS.TERMINAL_DATA, listener);
@@ -169,7 +195,8 @@ export function createMultiSSHApi(ipcRenderer: IpcRendererTransport): MultiSSHAp
     },
 
     onTerminalExit: (callback: (sessionId: string, event: SSHPtyExitEvent) => void): (() => void) => {
-      const listener = (_event: any, sessionId: string, event: SSHPtyExitEvent) => callback(sessionId, event);
+      const listener = (_event: any, sessionId: string, event: SSHPtyExitEvent) =>
+        callback(sessionId, event);
       ipcRenderer.on(IPC_CHANNELS.TERMINAL_EXIT, listener);
       return () => {
         ipcRenderer.removeListener(IPC_CHANNELS.TERMINAL_EXIT, listener);
@@ -179,8 +206,11 @@ export function createMultiSSHApi(ipcRenderer: IpcRendererTransport): MultiSSHAp
     onTerminalReconnecting: (
       callback: (sessionId: string, event: { attempt: number; maxAttempts: number }) => void
     ): (() => void) => {
-      const listener = (_event: any, sessionId: string, event: { attempt: number; maxAttempts: number }) =>
-        callback(sessionId, event);
+      const listener = (
+        _event: any,
+        sessionId: string,
+        event: { attempt: number; maxAttempts: number }
+      ) => callback(sessionId, event);
       ipcRenderer.on(IPC_CHANNELS.TERMINAL_RECONNECTING, listener);
       return () => {
         ipcRenderer.removeListener(IPC_CHANNELS.TERMINAL_RECONNECTING, listener);
@@ -188,7 +218,8 @@ export function createMultiSSHApi(ipcRenderer: IpcRendererTransport): MultiSSHAp
     },
 
     // Smartcard
-    smartcardDetect: (): Promise<DetectedSmartcardLib[]> => ipcRenderer.invoke(IPC_CHANNELS.SMARTCARD_DETECT),
+    smartcardDetect: (): Promise<DetectedSmartcardLib[]> =>
+      ipcRenderer.invoke(IPC_CHANNELS.SMARTCARD_DETECT),
 
     smartcardValidate: (path: string): Promise<{ valid: boolean; error?: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.SMARTCARD_VALIDATE, path),
@@ -203,7 +234,8 @@ export function createMultiSSHApi(ipcRenderer: IpcRendererTransport): MultiSSHAp
 
     smartcardLockAll: (): Promise<{ locked: number }> => ipcRenderer.invoke(IPC_CHANNELS.SMARTCARD_LOCK_ALL),
 
-    smartcardListCached: (): Promise<CachedSmartcardAgent[]> => ipcRenderer.invoke(IPC_CHANNELS.SMARTCARD_LIST_CACHED),
+    smartcardListCached: (): Promise<CachedSmartcardAgent[]> =>
+      ipcRenderer.invoke(IPC_CHANNELS.SMARTCARD_LIST_CACHED),
 
     smartcardUnlockAtStartup: (): Promise<{ started: boolean }> =>
       ipcRenderer.invoke(IPC_CHANNELS.SMARTCARD_UNLOCK_AT_STARTUP),
@@ -213,7 +245,8 @@ export function createMultiSSHApi(ipcRenderer: IpcRendererTransport): MultiSSHAp
     onSmartcardStartupUnlockStatus: (
       callback: (event: SmartcardStartupUnlockStatusEvent) => void
     ): (() => void) => {
-      const listener = (_event: any, event: SmartcardStartupUnlockStatusEvent) => callback(event);
+      const listener = (_event: any, event: SmartcardStartupUnlockStatusEvent) =>
+        callback(event);
       ipcRenderer.on(IPC_CHANNELS.SMARTCARD_STARTUP_UNLOCK_STATUS, listener);
       return () => {
         ipcRenderer.removeListener(IPC_CHANNELS.SMARTCARD_STARTUP_UNLOCK_STATUS, listener);
@@ -230,6 +263,24 @@ export function createMultiSSHApi(ipcRenderer: IpcRendererTransport): MultiSSHAp
 
     submitAskpassPin: (id: string, pin: string): Promise<void> =>
       ipcRenderer.invoke(IPC_CHANNELS.ASKPASS_SUBMIT_PIN, id, pin),
+
+    onInsertTokenPrompt: (callback: (event: InsertTokenPromptEvent) => void): (() => void) => {
+      const listener = (_event: any, event: InsertTokenPromptEvent) => callback(event);
+      ipcRenderer.on(IPC_CHANNELS.INSERT_TOKEN_PROMPT, listener);
+      return () => {
+        ipcRenderer.removeListener(IPC_CHANNELS.INSERT_TOKEN_PROMPT, listener);
+      };
+    },
+
+    onInsertTokenDismiss: (callback: (event: { id: string }) => void): (() => void) => {
+      const listener = (_event: any, event: { id: string }) => callback(event);
+      ipcRenderer.on(IPC_CHANNELS.INSERT_TOKEN_DISMISS, listener);
+      return () => {
+        ipcRenderer.removeListener(IPC_CHANNELS.INSERT_TOKEN_DISMISS, listener);
+      };
+    },
+
+    cancelInsertToken: (id: string): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.INSERT_TOKEN_CANCEL, id),
 
     onPresencePrompt: (callback: (event: PresencePromptEvent) => void): (() => void) => {
       const listener = (_event: any, event: PresencePromptEvent) => callback(event);
@@ -304,8 +355,17 @@ export function createMultiSSHApi(ipcRenderer: IpcRendererTransport): MultiSSHAp
     storageStat: (providerId: string, remotePath: string): Promise<FileEntry> =>
       ipcRenderer.invoke(IPC_CHANNELS.STORAGE_STAT, providerId, remotePath),
 
+    storageLookup: (providerId: string, remotePath: string): Promise<FileEntry | null> =>
+      ipcRenderer.invoke(IPC_CHANNELS.STORAGE_LOOKUP, providerId, remotePath),
+
     storageCreateFolder: (providerId: string, remotePath: string): Promise<void> =>
       ipcRenderer.invoke(IPC_CHANNELS.STORAGE_CREATE_FOLDER, providerId, remotePath),
+    storageCreateFile: (providerId: string, remotePath: string): Promise<void> =>
+      ipcRenderer.invoke(IPC_CHANNELS.STORAGE_CREATE_FILE, providerId, remotePath),
+    archiveCompress: (providerId: string, parentDir: string, names: string[], format: 'tar.gz' | 'zip'): Promise<string> =>
+      ipcRenderer.invoke(IPC_CHANNELS.ARCHIVE_COMPRESS, providerId, parentDir, names, format),
+    archiveExtract: (providerId: string, archivePath: string): Promise<string> =>
+      ipcRenderer.invoke(IPC_CHANNELS.ARCHIVE_EXTRACT, providerId, archivePath),
 
     storageDelete: (providerId: string, remotePath: string, isDirectory: boolean): Promise<void> =>
       ipcRenderer.invoke(IPC_CHANNELS.STORAGE_DELETE, providerId, remotePath, isDirectory),
@@ -315,6 +375,12 @@ export function createMultiSSHApi(ipcRenderer: IpcRendererTransport): MultiSSHAp
 
     storageChmod: (providerId: string, remotePath: string, mode: number | string): Promise<void> =>
       ipcRenderer.invoke(IPC_CHANNELS.STORAGE_CHMOD, providerId, remotePath, mode),
+
+    storageGetWinAttributes: (providerId: string, remotePath: string): Promise<WinAttributes> =>
+      ipcRenderer.invoke(IPC_CHANNELS.STORAGE_GET_WIN_ATTRIBUTES, providerId, remotePath),
+
+    storageSetWinAttributes: (providerId: string, remotePath: string, changes: Partial<WinAttributes>, recursive?: boolean): Promise<void> =>
+      ipcRenderer.invoke(IPC_CHANNELS.STORAGE_SET_WIN_ATTRIBUTES, providerId, remotePath, changes, recursive === true),
 
     storageSetMetadata: (providerId: string, remotePath: string, metadata: ObjectMetadata): Promise<void> =>
       ipcRenderer.invoke(IPC_CHANNELS.STORAGE_SET_METADATA, providerId, remotePath, metadata),
@@ -371,25 +437,27 @@ export function createMultiSSHApi(ipcRenderer: IpcRendererTransport): MultiSSHAp
       targetProviderId: string;
       targetPath: string;
       conflictPolicy?: TransferConflictResolution;
-    }): Promise<{
-      jobId: string | null;
-      skipped?: boolean;
-      resolvedPolicy?: TransferConflictResolution;
-      appliedToAll?: boolean;
-    }> => ipcRenderer.invoke(IPC_CHANNELS.TRANSFER_ADD, options),
+    }): Promise<{ jobId: string | null; skipped?: boolean; resolvedPolicy?: TransferConflictResolution; appliedToAll?: boolean; targetPath?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.TRANSFER_ADD, options),
 
-    transferPause: (jobId: string): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.TRANSFER_PAUSE, jobId),
+    transferPause: (jobId: string): Promise<void> =>
+      ipcRenderer.invoke(IPC_CHANNELS.TRANSFER_PAUSE, jobId),
 
-    transferResume: (jobId: string): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.TRANSFER_RESUME, jobId),
+    transferResume: (jobId: string): Promise<void> =>
+      ipcRenderer.invoke(IPC_CHANNELS.TRANSFER_RESUME, jobId),
 
-    transferCancel: (jobId: string): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.TRANSFER_CANCEL, jobId),
+    transferCancel: (jobId: string): Promise<void> =>
+      ipcRenderer.invoke(IPC_CHANNELS.TRANSFER_CANCEL, jobId),
 
-    transferGetJobs: (): Promise<TransferProgress[]> => ipcRenderer.invoke(IPC_CHANNELS.TRANSFER_GET_JOBS),
+    transferGetJobs: (): Promise<TransferProgress[]> =>
+      ipcRenderer.invoke(IPC_CHANNELS.TRANSFER_GET_JOBS),
 
-    transferClearCompleted: (): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.TRANSFER_CLEAR_COMPLETED),
+    transferClearCompleted: (): Promise<void> =>
+      ipcRenderer.invoke(IPC_CHANNELS.TRANSFER_CLEAR_COMPLETED),
 
     onTransferProgress: (callback: (progress: TransferProgress) => void): (() => void) => {
-      const listener = (_event: any, progress: TransferProgress) => callback(progress);
+      const listener = (_event: any, progress: TransferProgress) =>
+        callback(progress);
       ipcRenderer.on(IPC_CHANNELS.TRANSFER_PROGRESS, listener);
       return () => {
         ipcRenderer.removeListener(IPC_CHANNELS.TRANSFER_PROGRESS, listener);
@@ -432,6 +500,14 @@ export function createMultiSSHApi(ipcRenderer: IpcRendererTransport): MultiSSHAp
     profilesRenameFolder: (oldName: string, newName: string): Promise<void> =>
       ipcRenderer.invoke(IPC_CHANNELS.PROFILES_RENAME_FOLDER, oldName, newName),
 
+    // No filePath argument (H4, code review): these three used to accept an
+    // optional caller-supplied path that went straight to fs.readFile/
+    // writeFile in the main process, bypassing the save/open dialog entirely.
+    // The real UI never passed one — only a compromised renderer could — so
+    // the parameter is removed from this exposed surface rather than merely
+    // left "optional but trusted"; the main process always resolves the path
+    // itself (a fixed default for SSH config, an electronDialog prompt for
+    // JSON export/import).
     profilesImportSshConfig: (): Promise<{ profiles: SSHConnectionConfig[]; filePath: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.PROFILES_IMPORT_SSH_CONFIG),
 
@@ -442,9 +518,31 @@ export function createMultiSSHApi(ipcRenderer: IpcRendererTransport): MultiSSHAp
       ipcRenderer.invoke(IPC_CHANNELS.PROFILES_IMPORT_JSON),
 
     // Session
-    sessionGet: (): Promise<SessionData | null> => ipcRenderer.invoke(IPC_CHANNELS.SESSION_GET),
+    sessionGet: (): Promise<SessionData | null> =>
+      ipcRenderer.invoke(IPC_CHANNELS.SESSION_GET),
 
-    sessionSave: (data: SessionData): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.SESSION_SAVE, data),
+    sessionSave: (data: SessionData): Promise<void> =>
+      ipcRenderer.invoke(IPC_CHANNELS.SESSION_SAVE, data),
+
+    windowNew: (): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.WINDOW_NEW),
+
+    windowMoveTab: (handoff: TabHandoff, target: MoveTabTarget): Promise<void> =>
+      ipcRenderer.invoke(IPC_CHANNELS.WINDOW_MOVE_TAB, handoff, target),
+
+    windowTakeHandoff: (): Promise<TabHandoff | null> => ipcRenderer.invoke(IPC_CHANNELS.WINDOW_TAKE_HANDOFF),
+
+    windowList: (): Promise<WindowInfo[]> => ipcRenderer.invoke(IPC_CHANNELS.WINDOW_LIST),
+
+    onWindowAdoptTab: (callback: (handoff: TabHandoff) => void): (() => void) => {
+      const listener = (_event: any, handoff: TabHandoff) => callback(handoff);
+      ipcRenderer.on(IPC_CHANNELS.WINDOW_ADOPT_TAB, listener);
+      return () => {
+        ipcRenderer.removeListener(IPC_CHANNELS.WINDOW_ADOPT_TAB, listener);
+      };
+    },
+
+    terminalAttach: (sessionId: string, kind: 'ssh' | 'k8s'): Promise<{ scrollback: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.TERMINAL_ATTACH, sessionId, kind),
 
     // Clipboard history
     clipboardHistoryList: (hostKey?: string): Promise<ClipboardHistoryEntry[]> =>
@@ -470,10 +568,16 @@ export function createMultiSSHApi(ipcRenderer: IpcRendererTransport): MultiSSHAp
       ipcRenderer.invoke(IPC_CHANNELS.SNIPPETS_DELETE, id),
 
     // Settings
-    settingsGet: (): Promise<AppSettings> => ipcRenderer.invoke(IPC_CHANNELS.SETTINGS_GET),
+    settingsGet: (): Promise<AppSettings> =>
+      ipcRenderer.invoke(IPC_CHANNELS.SETTINGS_GET),
 
     settingsSave: (settings: Partial<AppSettings>): Promise<AppSettings> =>
       ipcRenderer.invoke(IPC_CHANNELS.SETTINGS_SAVE, settings),
+
+    policyGet: (): Promise<PolicyInfo> => ipcRenderer.invoke(IPC_CHANNELS.POLICY_GET),
+
+    settingsSetTeamVaultTabVisible: (vaultId: string, visible: boolean): Promise<AppSettings> =>
+      ipcRenderer.invoke(IPC_CHANNELS.SETTINGS_SET_TEAM_VAULT_TAB_VISIBLE, vaultId, visible),
 
     // Remote profile sync
     profileSyncSetup: (payload: { target: StorageConnectConfig; remoteBasePath?: string }): Promise<void> =>
@@ -513,62 +617,94 @@ export function createMultiSSHApi(ipcRenderer: IpcRendererTransport): MultiSSHAp
       return () => ipcRenderer.removeListener(IPC_CHANNELS.PROFILE_SYNC_STATUS, subscription);
     },
 
-    // Team Vault
-    teamVaultGetStatus: (): Promise<TeamVaultStatus> => ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_GET_STATUS),
-    teamVaultEnrollRecipient: (): Promise<{ recipient: string; identityFilePath: string; suggestedLabel?: string }> =>
-      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_ENROLL_RECIPIENT),
+    // Team Vault (docs/team-vault-plan.md) — multi-team: every method takes a leading `vaultId`,
+    // except `teamVaultCreate` (mints one, returns it) and `teamVaultEnrollRecipient` (see
+    // TeamVaultService.enrollOwnPivRecipient's doc comment for why it has no vaultId to take yet).
+    teamVaultGetStatus: (vaultId: string): Promise<TeamVaultStatus> =>
+      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_GET_STATUS, vaultId),
+    teamVaultList: (): Promise<TeamVaultStatus[]> => ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_LIST),
+    teamVaultEnrollRecipient: (
+      vaultId?: string
+    ): Promise<{ recipient: string; identityFilePath: string; suggestedLabel?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_ENROLL_RECIPIENT, vaultId),
     teamVaultCreate: (
       selfRecipientId: string,
       selfAgeRecipient: string,
-      vaultName?: string
-    ): Promise<{ recoveryIdentity: string }> =>
-      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_CREATE, selfRecipientId, selfAgeRecipient, vaultName),
-    teamVaultAddMember: (recipientId: string, ageRecipient: string, role: TeamVaultRole): Promise<void> =>
-      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_ADD_MEMBER, recipientId, ageRecipient, role),
-    teamVaultRemoveMember: (recipientId: string): Promise<{ remainingAdmins: number }> =>
-      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_REMOVE_MEMBER, recipientId),
-    teamVaultSetRole: (recipientId: string, role: TeamVaultRole): Promise<void> =>
-      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_SET_ROLE, recipientId, role),
-    teamVaultRename: (vaultName: string): Promise<void> =>
-      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_RENAME, vaultName),
-    teamVaultUnlock: (recipientId: string, identityFilePath: string): Promise<void> =>
-      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_UNLOCK, recipientId, identityFilePath),
-    teamVaultUnlockWithRecoveryText: (identityText: string): Promise<void> =>
-      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_UNLOCK_WITH_RECOVERY_TEXT, identityText),
-    teamVaultLock: (): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_LOCK),
-    teamVaultDelete: (): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_DELETE),
-    teamVaultSetTarget: (target: StorageConnectConfig, remoteBasePath?: string): Promise<void> =>
-      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_SET_TARGET, target, remoteBasePath),
-    teamVaultPush: (): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_PUSH),
-    teamVaultPull: (options?: { force?: boolean }): Promise<void> =>
-      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_PULL, options),
-    teamVaultHasRemoteVault: (): Promise<boolean> => ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_HAS_REMOTE_VAULT),
-    teamVaultGetPayload: (): Promise<TeamVaultPayload | null> => ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_GET_PAYLOAD),
-    teamVaultSaveSSHProfile: (profile: SSHConnectionConfig): Promise<void> =>
-      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_SAVE_SSH_PROFILE, profile),
-    teamVaultDeleteSSHProfile: (id: string): Promise<void> =>
-      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_DELETE_SSH_PROFILE, id),
-    teamVaultSaveS3Profile: (profile: S3Config): Promise<void> =>
-      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_SAVE_S3_PROFILE, profile),
-    teamVaultDeleteS3Profile: (id: string): Promise<void> =>
-      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_DELETE_S3_PROFILE, id),
-    teamVaultSaveFolder: (folderPath: string): Promise<void> =>
-      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_SAVE_FOLDER, folderPath),
-    teamVaultRenameFolder: (oldPath: string, newPath: string): Promise<void> =>
-      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_RENAME_FOLDER, oldPath, newPath),
-    teamVaultDeleteFolder: (folderPath: string, deleteProfiles?: boolean): Promise<void> =>
-      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_DELETE_FOLDER, folderPath, deleteProfiles),
-    teamVaultSetFolderIcon: (folderPath: string, icon: string | undefined): Promise<void> =>
-      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_SET_FOLDER_ICON, folderPath, icon),
-    onTeamVaultAutoPulled: (callback: () => void): (() => void) => {
-      const listener = () => callback();
+      vaultName?: string,
+      selfIdentityFilePath?: string
+    ): Promise<{ vaultId: string; recoveryIdentity: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_CREATE, selfRecipientId, selfAgeRecipient, vaultName, selfIdentityFilePath),
+    teamVaultAddMember: (vaultId: string, recipientId: string, ageRecipient: string, role: TeamVaultRole): Promise<void> =>
+      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_ADD_MEMBER, vaultId, recipientId, ageRecipient, role),
+    teamVaultRemoveMember: (vaultId: string, recipientId: string): Promise<{ remainingAdmins: number }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_REMOVE_MEMBER, vaultId, recipientId),
+    teamVaultSetRole: (vaultId: string, recipientId: string, role: TeamVaultRole): Promise<void> =>
+      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_SET_ROLE, vaultId, recipientId, role),
+    teamVaultRename: (vaultId: string, vaultName: string): Promise<void> =>
+      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_RENAME, vaultId, vaultName),
+    teamVaultUnlock: (vaultId: string, recipientId: string, identityFilePath: string): Promise<void> =>
+      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_UNLOCK, vaultId, recipientId, identityFilePath),
+    teamVaultUnlockWithRecoveryText: (vaultId: string, identityText: string): Promise<void> =>
+      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_UNLOCK_WITH_RECOVERY_TEXT, vaultId, identityText),
+    teamVaultLock: (vaultId: string): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_LOCK, vaultId),
+    teamVaultDelete: (vaultId: string): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_DELETE, vaultId),
+    teamVaultForget: (vaultId: string): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_FORGET, vaultId),
+    teamVaultSetTarget: (vaultId: string, target: StorageConnectConfig, remoteBasePath?: string): Promise<void> =>
+      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_SET_TARGET, vaultId, target, remoteBasePath),
+    teamVaultPush: (vaultId: string): Promise<TeamVaultStatus> => ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_PUSH, vaultId),
+    teamVaultPull: (vaultId: string, options?: { force?: boolean }): Promise<TeamVaultStatus> =>
+      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_PULL, vaultId, options),
+    teamVaultHasRemoteVault: (vaultId: string): Promise<boolean> =>
+      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_HAS_REMOTE_VAULT, vaultId),
+    teamVaultGetSyncPreview: (vaultId: string): Promise<TeamVaultSyncPreview> =>
+      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_GET_SYNC_PREVIEW, vaultId),
+    teamVaultTestTarget: (vaultId: string, config: S3Config): Promise<{ success: boolean; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_TEST_TARGET, vaultId, config),
+    teamVaultGetPayload: (vaultId: string): Promise<TeamVaultPayload | null> =>
+      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_GET_PAYLOAD, vaultId),
+    teamVaultSaveSSHProfile: (vaultId: string, profile: SSHConnectionConfig): Promise<void> =>
+      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_SAVE_SSH_PROFILE, vaultId, profile),
+    teamVaultDeleteSSHProfile: (vaultId: string, id: string): Promise<void> =>
+      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_DELETE_SSH_PROFILE, vaultId, id),
+    teamVaultSaveK8sProfile: (vaultId: string, profile: K8sProfile): Promise<void> =>
+      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_SAVE_K8S_PROFILE, vaultId, profile),
+    teamVaultDeleteK8sProfile: (vaultId: string, id: string): Promise<void> =>
+      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_DELETE_K8S_PROFILE, vaultId, id),
+    teamVaultSaveS3Profile: (vaultId: string, profile: S3Config): Promise<void> =>
+      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_SAVE_S3_PROFILE, vaultId, profile),
+    teamVaultDeleteS3Profile: (vaultId: string, id: string): Promise<void> =>
+      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_DELETE_S3_PROFILE, vaultId, id),
+    teamVaultSaveFolder: (vaultId: string, folderPath: string): Promise<void> =>
+      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_SAVE_FOLDER, vaultId, folderPath),
+    teamVaultRenameFolder: (vaultId: string, oldPath: string, newPath: string): Promise<void> =>
+      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_RENAME_FOLDER, vaultId, oldPath, newPath),
+    teamVaultDeleteFolder: (vaultId: string, folderPath: string, deleteProfiles?: boolean): Promise<void> =>
+      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_DELETE_FOLDER, vaultId, folderPath, deleteProfiles),
+    teamVaultSetFolderIcon: (vaultId: string, folderPath: string, icon: string | undefined): Promise<void> =>
+      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_SET_FOLDER_ICON, vaultId, folderPath, icon),
+    teamVaultBuildInvite: (vaultId: string, recipientId: string): Promise<string> =>
+      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_BUILD_INVITE, vaultId, recipientId),
+    teamVaultDecodeInvite: (
+      inviteText: string,
+      identityFilePath: string
+    ): Promise<{ vaultId: string; target: StorageConnectConfig; remoteBasePath?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_DECODE_INVITE, inviteText, identityFilePath),
+    teamVaultSetDescription: (vaultId: string, description: string): Promise<void> =>
+      ipcRenderer.invoke(IPC_CHANNELS.TEAM_VAULT_SET_DESCRIPTION, vaultId, description),
+    onTeamVaultAutoPulled: (callback: (payload: { vaultId: string }) => void): (() => void) => {
+      const listener = (_event: any, payload: { vaultId: string }) => callback(payload);
       ipcRenderer.on(IPC_CHANNELS.TEAM_VAULT_AUTO_PULLED, listener);
       return () => ipcRenderer.removeListener(IPC_CHANNELS.TEAM_VAULT_AUTO_PULLED, listener);
     },
-    onTeamVaultRemoteChanged: (callback: () => void): (() => void) => {
-      const listener = () => callback();
+    onTeamVaultRemoteChanged: (callback: (payload: { vaultId: string }) => void): (() => void) => {
+      const listener = (_event: any, payload: { vaultId: string }) => callback(payload);
       ipcRenderer.on(IPC_CHANNELS.TEAM_VAULT_REMOTE_CHANGED, listener);
       return () => ipcRenderer.removeListener(IPC_CHANNELS.TEAM_VAULT_REMOTE_CHANGED, listener);
+    },
+    onTeamVaultSyncStatus: (callback: (payload: { vaultId: string; syncing: boolean }) => void): (() => void) => {
+      const listener = (_event: any, payload: { vaultId: string; syncing: boolean }) => callback(payload);
+      ipcRenderer.on(IPC_CHANNELS.TEAM_VAULT_SYNC_STATUS, listener);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.TEAM_VAULT_SYNC_STATUS, listener);
     },
 
     // Connection Testing
@@ -595,8 +731,11 @@ export function createMultiSSHApi(ipcRenderer: IpcRendererTransport): MultiSSHAp
       ipcRenderer.invoke(IPC_CHANNELS.CONNECTION_TEST_S3, config),
 
     // AWS SSO login (device-authorization flow)
-    awsSsoLogin: (startUrl: string, region: string): Promise<AwsSsoLoginResult> =>
-      ipcRenderer.invoke(IPC_CHANNELS.AWS_SSO_LOGIN, startUrl, region),
+    awsSsoLogin: (
+      startUrl: string,
+      region: string,
+      network?: AwsSsoNetworkOptions
+    ): Promise<AwsSsoLoginResult> => ipcRenderer.invoke(IPC_CHANNELS.AWS_SSO_LOGIN, startUrl, region, network),
 
     awsSsoCancelLogin: (id: string): Promise<void> =>
       ipcRenderer.invoke(IPC_CHANNELS.AWS_SSO_LOGIN_CANCEL, id),
@@ -609,11 +748,31 @@ export function createMultiSSHApi(ipcRenderer: IpcRendererTransport): MultiSSHAp
       };
     },
 
-    awsSsoListAccounts: (accessToken: string, region: string): Promise<AwsSsoAccount[]> =>
-      ipcRenderer.invoke(IPC_CHANNELS.AWS_SSO_LIST_ACCOUNTS, accessToken, region),
+    onAwsSsoPromptDone: (callback: (id: string) => void): (() => void) => {
+      const listener = (_event: any, id: string) => callback(id);
+      ipcRenderer.on(IPC_CHANNELS.AWS_SSO_PROMPT_DONE, listener);
+      return () => {
+        ipcRenderer.removeListener(IPC_CHANNELS.AWS_SSO_PROMPT_DONE, listener);
+      };
+    },
 
-    awsSsoListRoles: (accessToken: string, region: string, accountId: string): Promise<AwsSsoAccountRole[]> =>
-      ipcRenderer.invoke(IPC_CHANNELS.AWS_SSO_LIST_ROLES, accessToken, region, accountId),
+    awsSsoListAccounts: (
+      accessToken: string,
+      region: string,
+      network?: AwsSsoNetworkOptions
+    ): Promise<AwsSsoAccount[]> =>
+      ipcRenderer.invoke(IPC_CHANNELS.AWS_SSO_LIST_ACCOUNTS, accessToken, region, network),
+
+    awsSsoListRoles: (
+      accessToken: string,
+      region: string,
+      accountId: string,
+      network?: AwsSsoNetworkOptions
+    ): Promise<AwsSsoAccountRole[]> =>
+      ipcRenderer.invoke(IPC_CHANNELS.AWS_SSO_LIST_ROLES, accessToken, region, accountId, network),
+
+    awsSsoReloginProvider: (providerId: string): Promise<void> =>
+      ipcRenderer.invoke(IPC_CHANNELS.AWS_SSO_RELOGIN_PROVIDER, providerId),
 
     // SSH Agent
     getSshAgentStatus: (): Promise<SshAgentStatus> =>
@@ -697,6 +856,9 @@ export function createMultiSSHApi(ipcRenderer: IpcRendererTransport): MultiSSHAp
     fileRead: (providerId: string, remotePath: string, maxBytes?: number): Promise<FileReadResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.FILE_READ, providerId, remotePath, maxBytes),
 
+    certificatePreview: (providerId: string, remotePath: string, host?: string): Promise<CertificatePreviewResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.CERTIFICATE_PREVIEW, providerId, remotePath, host),
+
     fileSave: (providerId: string, remotePath: string, content: string): Promise<void> =>
       ipcRenderer.invoke(IPC_CHANNELS.FILE_SAVE, providerId, remotePath, content),
 
@@ -710,7 +872,8 @@ export function createMultiSSHApi(ipcRenderer: IpcRendererTransport): MultiSSHAp
       ipcRenderer.invoke(IPC_CHANNELS.FILE_CLOSE_EXTERNAL, sessionToken),
 
     onExternalFileStatus: (callback: (event: ExternalFileStatusEvent) => void): (() => void) => {
-      const listener = (_event: any, event: ExternalFileStatusEvent) => callback(event);
+      const listener = (_event: any, event: ExternalFileStatusEvent) =>
+        callback(event);
       ipcRenderer.on(IPC_CHANNELS.FILE_EXTERNAL_STATUS, listener);
       return () => {
         ipcRenderer.removeListener(IPC_CHANNELS.FILE_EXTERNAL_STATUS, listener);
@@ -729,7 +892,8 @@ export function createMultiSSHApi(ipcRenderer: IpcRendererTransport): MultiSSHAp
     onFileTailData: (
       callback: (event: { tailId: string; chunk: string }) => void
     ): (() => void) => {
-      const listener = (_event: any, event: { tailId: string; chunk: string }) => callback(event);
+      const listener = (_event: any, event: { tailId: string; chunk: string }) =>
+        callback(event);
       ipcRenderer.on(IPC_CHANNELS.FILE_TAIL_DATA, listener);
       return () => {
         ipcRenderer.removeListener(IPC_CHANNELS.FILE_TAIL_DATA, listener);
@@ -739,7 +903,8 @@ export function createMultiSSHApi(ipcRenderer: IpcRendererTransport): MultiSSHAp
     onFileTailError: (
       callback: (event: { tailId: string; error: string }) => void
     ): (() => void) => {
-      const listener = (_event: any, event: { tailId: string; error: string }) => callback(event);
+      const listener = (_event: any, event: { tailId: string; error: string }) =>
+        callback(event);
       ipcRenderer.on(IPC_CHANNELS.FILE_TAIL_ERROR, listener);
       return () => {
         ipcRenderer.removeListener(IPC_CHANNELS.FILE_TAIL_ERROR, listener);
@@ -807,6 +972,19 @@ export function createMultiSSHApi(ipcRenderer: IpcRendererTransport): MultiSSHAp
     k8sLogin: (options: K8sLoginOptions): Promise<K8sLoginResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.K8S_LOGIN, options),
 
+    k8sOpenShiftProbe: (server: string, insecureSkipTlsVerify?: boolean): Promise<K8sOpenShiftProbeResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.K8S_OPENSHIFT_PROBE, server, insecureSkipTlsVerify),
+
+    k8sOpenShiftWebLogin: (options: K8sWebLoginOptions): Promise<K8sWebLoginResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.K8S_OPENSHIFT_WEB_LOGIN, options),
+
+    k8sOpenShiftWebLoginCancel: (): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.K8S_OPENSHIFT_WEB_LOGIN_CANCEL),
+
+    k8sProfilesList: (): Promise<K8sProfile[]> => ipcRenderer.invoke(IPC_CHANNELS.K8S_PROFILES_LIST),
+    k8sProfilesSave: (profile: K8sProfile): Promise<K8sProfile> =>
+      ipcRenderer.invoke(IPC_CHANNELS.K8S_PROFILES_SAVE, profile),
+    k8sProfilesDelete: (id: string): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.K8S_PROFILES_DELETE, id),
+
     onK8sConfigChanged: (callback: (execAuthWarning?: string | null) => void): (() => void) => {
       const listener = (_event: unknown, execAuthWarning?: string | null) => callback(execAuthWarning);
       ipcRenderer.on(IPC_CHANNELS.K8S_CONFIG_CHANGED, listener);
@@ -838,7 +1016,8 @@ export function createMultiSSHApi(ipcRenderer: IpcRendererTransport): MultiSSHAp
     perfLocalSample: (): Promise<PerfSshResult> => ipcRenderer.invoke(IPC_CHANNELS.PERF_LOCAL_SAMPLE),
 
     onK8sTerminalData: (callback: (sessionId: string, data: string) => void): (() => void) => {
-      const listener = (_event: any, sessionId: string, data: string) => callback(sessionId, data);
+      const listener = (_event: any, sessionId: string, data: string) =>
+        callback(sessionId, data);
       ipcRenderer.on(IPC_CHANNELS.K8S_TERMINAL_DATA, listener);
       return () => {
         ipcRenderer.removeListener(IPC_CHANNELS.K8S_TERMINAL_DATA, listener);
@@ -846,7 +1025,8 @@ export function createMultiSSHApi(ipcRenderer: IpcRendererTransport): MultiSSHAp
     },
 
     onK8sTerminalExit: (callback: (sessionId: string, event: { status: string }) => void): (() => void) => {
-      const listener = (_event: any, sessionId: string, event: { status: string }) => callback(sessionId, event);
+      const listener = (_event: any, sessionId: string, event: { status: string }) =>
+        callback(sessionId, event);
       ipcRenderer.on(IPC_CHANNELS.K8S_TERMINAL_EXIT, listener);
       return () => {
         ipcRenderer.removeListener(IPC_CHANNELS.K8S_TERMINAL_EXIT, listener);
@@ -883,11 +1063,21 @@ export function createMultiSSHApi(ipcRenderer: IpcRendererTransport): MultiSSHAp
     ): Promise<K8sPodDescription> =>
       ipcRenderer.invoke(IPC_CHANNELS.K8S_POD_DESCRIBE, contextName, namespace, podName),
 
+    k8sDeletePod: (
+      contextName: string,
+      namespace: string,
+      podName: string
+    ): Promise<void> =>
+      ipcRenderer.invoke(IPC_CHANNELS.K8S_POD_DELETE, contextName, namespace, podName),
+
     k8sStartPortForward: (target: K8sPortForwardTarget): Promise<K8sActivePortForward> =>
       ipcRenderer.invoke(IPC_CHANNELS.K8S_PORT_FORWARD_START, target),
 
     k8sStopPortForward: (id: string): Promise<boolean> =>
       ipcRenderer.invoke(IPC_CHANNELS.K8S_PORT_FORWARD_STOP, id),
+
+    k8sReconnectPortForward: (id: string): Promise<boolean> =>
+      ipcRenderer.invoke(IPC_CHANNELS.K8S_PORT_FORWARD_RECONNECT, id),
 
     k8sListPortForwards: (): Promise<K8sActivePortForward[]> =>
       ipcRenderer.invoke(IPC_CHANNELS.K8S_PORT_FORWARD_LIST),
@@ -895,7 +1085,10 @@ export function createMultiSSHApi(ipcRenderer: IpcRendererTransport): MultiSSHAp
     onK8sPortForwardEvent: (
       callback: (activeForwards: K8sActivePortForward[]) => void
     ): (() => void) => {
-      const listener = (_event: any, activeForwards: K8sActivePortForward[]) => callback(activeForwards);
+      const listener = (
+        _event: any,
+        activeForwards: K8sActivePortForward[]
+      ) => callback(activeForwards);
       ipcRenderer.on(IPC_CHANNELS.K8S_PORT_FORWARD_EVENT, listener);
       return () => {
         ipcRenderer.removeListener(IPC_CHANNELS.K8S_PORT_FORWARD_EVENT, listener);
@@ -915,7 +1108,8 @@ export function createMultiSSHApi(ipcRenderer: IpcRendererTransport): MultiSSHAp
       ipcRenderer.invoke(IPC_CHANNELS.SSH_TUNNEL_LIST),
 
     onSshTunnelEvent: (callback: (active: SSHActiveTunnel[]) => void): (() => void) => {
-      const listener = (_event: any, active: SSHActiveTunnel[]) => callback(active);
+      const listener = (_event: any, active: SSHActiveTunnel[]) =>
+        callback(active);
       ipcRenderer.on(IPC_CHANNELS.SSH_TUNNEL_EVENT, listener);
       return () => {
         ipcRenderer.removeListener(IPC_CHANNELS.SSH_TUNNEL_EVENT, listener);
@@ -926,6 +1120,12 @@ export function createMultiSSHApi(ipcRenderer: IpcRendererTransport): MultiSSHAp
       ipcRenderer.invoke(IPC_CHANNELS.SSH_TUNNEL_CHECK_PORT, port),
 
     // Window / General
+    dragOutStart: (paths: string[]): Promise<boolean> =>
+      ipcRenderer.invoke(IPC_CHANNELS.DRAG_OUT_START, paths),
+
+    dragOutPrepare: (providerId: string, paths: string[]): Promise<string[]> =>
+      ipcRenderer.invoke(IPC_CHANNELS.DRAG_OUT_PREPARE, providerId, paths),
+
     openExternal: (url: string): Promise<void> =>
       ipcRenderer.invoke(IPC_CHANNELS.APP_OPEN_EXTERNAL, url),
 
@@ -964,11 +1164,14 @@ export function createMultiSSHApi(ipcRenderer: IpcRendererTransport): MultiSSHAp
     getHostname: (): Promise<string> =>
       ipcRenderer.invoke(IPC_CHANNELS.APP_GET_HOSTNAME),
 
-    getSecurityStatus: (): Promise<{ credentialEncryptionAvailable: boolean }> =>
+    getSecurityStatus: (): Promise<{ credentialEncryptionAvailable: boolean; undecryptableSecretCount: number }> =>
       ipcRenderer.invoke(IPC_CHANNELS.APP_GET_SECURITY_STATUS),
 
     detectLocalShells: (): Promise<{ pwsh: boolean; wsl: boolean; wslDistros: string[] }> =>
       ipcRenderer.invoke(IPC_CHANNELS.APP_DETECT_LOCAL_SHELLS),
+
+    openElevatedShell: (shellType: 'cmd' | 'powershell' | 'pwsh'): Promise<{ started: boolean }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.APP_OPEN_ELEVATED_SHELL, shellType),
 
     checkX11Server: (display?: string): Promise<{ running: boolean; display: string; platform?: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.APP_CHECK_X11_SERVER, display),
@@ -1022,5 +1225,33 @@ export function createMultiSSHApi(ipcRenderer: IpcRendererTransport): MultiSSHAp
 
     dirSyncProfileDelete: (id: string): Promise<void> =>
       ipcRenderer.invoke(IPC_CHANNELS.DIR_SYNC_PROFILE_DELETE, id),
+
+    // SSH CA
+    sshCaGetStatus: (): Promise<SshCaStatus> =>
+      ipcRenderer.invoke(IPC_CHANNELS.SSH_CA_GET_STATUS),
+
+    sshCaLogin: (config?: SshCaConfig): Promise<SshCaStatus> =>
+      ipcRenderer.invoke(IPC_CHANNELS.SSH_CA_LOGIN, config),
+
+    sshCaLogout: (): Promise<void> =>
+      ipcRenderer.invoke(IPC_CHANNELS.SSH_CA_LOGOUT),
+
+    sshCaRenew: (): Promise<SshCaStatus> =>
+      ipcRenderer.invoke(IPC_CHANNELS.SSH_CA_RENEW),
+
+    sshCaDetect: (request: SshCaDetectRequest): Promise<SshCaDetectResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.SSH_CA_DETECT, request),
+
+    sshCaDetectVault: (request: SshCaVaultDetectRequest): Promise<SshCaVaultDetectResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.SSH_CA_DETECT_VAULT, request),
+
+    onSshCaStatusChanged: (callback: (status: SshCaStatus) => void): (() => void) => {
+      const listener = (_event: any, status: SshCaStatus) => callback(status);
+      ipcRenderer.on(IPC_CHANNELS.SSH_CA_STATUS_CHANGED, listener);
+      return () => {
+        ipcRenderer.removeListener(IPC_CHANNELS.SSH_CA_STATUS_CHANGED, listener);
+      };
+    },
   };
 }
+
