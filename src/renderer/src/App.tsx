@@ -43,6 +43,9 @@ const log = createRendererLogger('App');
 
 const AppContent: React.FC = () => {
   const confirm = useConfirm();
+  const isDemoQuery =
+    typeof window !== "undefined" &&
+    new URLSearchParams(window.location.search).get("demo") === "1";
   const [aiMode, setAiMode] = useState<"closed" | "panel" | "hub">("closed");
   const [aiPanelWidth, setAiPanelWidth] = useState<number>(() => {
     try {
