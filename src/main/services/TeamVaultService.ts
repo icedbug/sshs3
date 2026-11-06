@@ -24,6 +24,7 @@ import { createLogger } from '../log/Logger';
 import { normalizeK8sList, removeK8sProfile, toTeamK8sProfile, upsertK8sProfile } from './teamVaultK8s';
 import type { K8sProfile } from '../../shared/types/kubernetes';
 import { writeFileAtomic } from '../storage/atomicFile';
+import { assertOutwardSyncAllowed } from '../demo/outwardSync';
 
 import {
   CURRENT_FORMAT_VERSION,
@@ -1677,6 +1678,9 @@ export class TeamVaultService {
    * existing vault" instead of "Create Vault" when no local file exists yet (§4.3: a new member
    * joins an existing team vault, they don't create their own). */
   async hasRemoteVault(vaultId: string, provider: IStorageProvider, remoteBasePath = ''): Promise<boolean> {
+    // Like every method here that touches the remote target: never in demo mode (demo/outwardSync.ts).
+    // Refused rather than answered with `false`, which the join flow would show as "no vault found".
+    assertOutwardSyncAllowed('Team Vault sync');
     return (await this.statOrNull(provider, this.remoteVaultPath(remoteBasePath, vaultId))) !== null;
   }
 
@@ -1707,6 +1711,7 @@ export class TeamVaultService {
    * collide on the same S3 object regardless of what either admin configures.
    */
   async pushToRemote(vaultId: string, provider: IStorageProvider, remoteBasePath = ''): Promise<void> {
+    assertOutwardSyncAllowed('Team Vault sync');
     return this.queueMutation(vaultId, async () => {
       const file = await this.requireFile(vaultId);
       const remotePath = this.remoteVaultPath(remoteBasePath, vaultId);
@@ -1773,6 +1778,7 @@ export class TeamVaultService {
     remoteBasePath = '',
     options: { force?: boolean } = {}
   ): Promise<void> {
+    assertOutwardSyncAllowed('Team Vault sync');
     await this.pullFromRemoteQueued(vaultId, provider, remoteBasePath, options);
     // A pulled older-format file (a mixed team that has not upgraded yet) is brought to the current format straight away.
     await this.upgradeFormatIfNeeded(vaultId);
@@ -1934,6 +1940,7 @@ export class TeamVaultService {
    * multiple teammates are working simultaneously while the vault is unlocked.
    */
   async mergeWithRemote(vaultId: string, provider: IStorageProvider, remoteBasePath = ''): Promise<boolean> {
+    assertOutwardSyncAllowed('Team Vault sync');
     if (!this.isUnlocked(vaultId)) return false;
     return this.queueMutation(vaultId, async () => {
       const localFile = await this.readFile(vaultId);
@@ -2054,6 +2061,8 @@ export class TeamVaultService {
    * conflicts with a push/pull's own state) so a poll never has to wait behind an unrelated
    * pending push/pull. */
   async hasRemoteChangedSinceLastSync(vaultId: string, provider: IStorageProvider, remoteBasePath = ''): Promise<boolean> {
+    // Also covers getSyncPreview, which asks this for its remote half.
+    assertOutwardSyncAllowed('Team Vault sync');
     const remotePath = this.remoteVaultPath(remoteBasePath, vaultId);
     const current = await this.statOrNull(provider, remotePath);
     const state = await this.hydratedState(vaultId);

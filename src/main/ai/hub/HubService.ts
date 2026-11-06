@@ -47,9 +47,7 @@ import {
   getBuiltinAgents,
   getBuiltinKbDocuments,
   getBuiltinSkillsAndMemories,
-  getDemoAgents,
   getDemoInfraEdges,
-  getDemoKbDocuments,
   getDemoMcpServers,
   getDemoSchedules,
   getDemoTasks,
@@ -61,8 +59,8 @@ import {
   saveDemoKbDocument,
   saveDemoMcpServer,
   saveDemoWorkforceRun,
-  setDemoMode,
 } from "./demoWorkspace";
+import { isDemoTarget } from "../../demo/demoMode";
 import {
   TerminalRegistry,
   type DetectedCommandActivity,
@@ -91,6 +89,12 @@ export interface HubHost {
   openSchedule(schedule: AgentSchedule): Promise<string>;
   backgroundChanged(background: boolean, autoStart: boolean): Promise<void>;
   show(): void;
+  /**
+   * Desktop only: asks the user to confirm, then restarts sshs3 with demo mode on or off (demo mode never
+   * changes inside a running process). Resolves false when the user declines. Absent in web mode, where
+   * demo mode is fixed when the server starts.
+   */
+  relaunchForDemoMode?(demoMode: boolean): Promise<boolean>;
   file?: ToolDependencies["file"];
   workspaceServers?(): Promise<WorkspaceServerSummary[]>;
   getTeamWorkspaceData?(): Promise<{
@@ -469,16 +473,9 @@ export class HubService {
       await this.store.load().catch((e) =>
         log.warn("HubStore load failed; using default store", safeError(e)),
       );
-      const cliDemo =
-        process.env.SSHS3_DEMO === "1" ||
-        process.env.SSHS3_DEMO_WORKSPACE === "1" ||
-        process.argv.includes("--demo");
-      if (cliDemo) {
-        setDemoMode(true);
-        this.store.data.preferences.demoLabEnabled = true;
-      } else if (this.store.data.preferences.demoLabEnabled !== undefined) {
-        setDemoMode(this.store.data.preferences.demoLabEnabled);
-      }
+      // Demo mode is decided once at launch (demo/demoMode.ts) and is never stored: drop the Demo-Lab
+      // preference that older builds persisted, so it is neither read nor written back.
+      Reflect.deleteProperty(this.store.data.preferences, "demoLabEnabled");
       await this.s3Workspace.start().catch((e) =>
         log.warn("S3 workspace start failed", safeError(e)),
       );
@@ -527,10 +524,12 @@ export class HubService {
     return this.store.data.preferences.background;
   }
 
+  // Built-ins depend on the mode (demoWorkspace getBuiltin*): the demo workspace's fixtures in demo mode,
+  // otherwise the neutral defaults of builtins.ts. They are merged in here, never stored.
   private getAgentsList(): MissionAgent[] {
     const stored = this.store.data.agents ?? [];
     const dismissed = new Set(this.store.data.preferences.dismissedBuiltinIds ?? []);
-    const builtins = isDemoMode() ? getDemoAgents() : getBuiltinAgents();
+    const builtins = getBuiltinAgents();
     return [
       ...stored,
       ...builtins.filter(
@@ -551,7 +550,7 @@ export class HubService {
   private getKbDocumentsList(): KbDocument[] {
     const stored = this.store.data.kbDocuments ?? [];
     const dismissed = new Set(this.store.data.preferences.dismissedBuiltinIds ?? []);
-    const builtins = isDemoMode() ? getDemoKbDocuments() : getBuiltinKbDocuments();
+    const builtins = getBuiltinKbDocuments();
     return [
       ...stored,
       ...builtins.filter(
@@ -560,7 +559,12 @@ export class HubService {
     ];
   }
 
-  private markBuiltinDismissed(id: string): void {
+  /**
+   * Remembers that the user deleted one of `builtins` (this mode's), so it stays hidden until
+   * restore-builtins. Any other id is the user's own item, which the delete already removed.
+   */
+  private markBuiltinDismissed(id: string, builtins: readonly { id: string }[]): void {
+    if (!builtins.some((b) => b.id === id)) return;
     const list = this.store.data.preferences.dismissedBuiltinIds ?? [];
     if (!list.includes(id)) {
       this.store.data.preferences.dismissedBuiltinIds = [...list, id];
@@ -1077,7 +1081,7 @@ export class HubService {
         this.store.data.memories = this.store.data.memories.filter(
           (m) => m.id !== request.id,
         );
-        this.markBuiltinDismissed(request.id);
+        this.markBuiltinDismissed(request.id, getBuiltinSkillsAndMemories());
         this.store.data.deletedMemoryIds ??= {};
         this.store.data.deletedMemoryIds[request.id] = Date.now();
         await this.host.deleteWorkspaceMemory?.(request.id).catch(() => {});
@@ -1409,10 +1413,17 @@ export class HubService {
         );
         break;
       case "demo-mode-toggle": {
-        const enabled = Boolean(request.enabled);
-        this.store.data.preferences.demoLabEnabled = enabled;
-        setDemoMode(enabled);
-        break;
+        // Demo mode never changes inside a running process (demo/demoMode.ts): switching it means a
+        // restart, which only the desktop host offers, and only after the user has confirmed it there.
+        const demoMode = Boolean(request.enabled);
+        if (demoMode !== isDemoMode()) {
+          if (!this.host.relaunchForDemoMode)
+            throw new Error(
+              "Demo mode is set when the sshs3 server starts (--demo or SSHS3_DEMO=1) and can't be changed here.",
+            );
+          await this.host.relaunchForDemoMode(demoMode);
+        }
+        return this.snapshot();
       }
       case "restore-builtins": {
         this.store.data.preferences.dismissedBuiltinIds = [];
@@ -1457,7 +1468,8 @@ export class HubService {
         this.store.data.agents = (this.store.data.agents ?? []).filter(
           (a) => a.id !== request.id,
         );
-        this.markBuiltinDismissed(request.id);
+        // Before deleteDemoAgent: in demo mode the built-ins are the demo store's agents.
+        this.markBuiltinDismissed(request.id, getBuiltinAgents());
         if (isDemoMode()) deleteDemoAgent(request.id);
         break;
       }
@@ -1614,12 +1626,13 @@ export class HubService {
       case "mcp-test": {
         const srv = this.getMcpServersList().find((s) => s.id === request.id);
         if (!srv) throw new Error("MCP server not found");
-        const result = await this.mcp.testAndDiscover(srv);
-        if (!result.ok && isDemoMode() && srv.id.startsWith("demo-mcp-")) {
+        if (isDemoTarget(srv.id)) {
+          // A demo MCP fixture is scripted (simulateDemoMcpTool): there is no server to start or reach.
           srv.status = "connected";
           srv.lastError = undefined;
           srv.lastTestedAt = Date.now();
         } else {
+          const result = await this.mcp.testAndDiscover(srv);
           srv.status = result.ok ? "connected" : "error";
           srv.lastError = result.error;
           srv.lastTestedAt = Date.now();
@@ -1657,7 +1670,8 @@ export class HubService {
         this.store.data.kbDocuments = (this.store.data.kbDocuments ?? []).filter(
           (d) => d.id !== request.id,
         );
-        this.markBuiltinDismissed(request.id);
+        // Before deleteDemoKbDocument: in demo mode the built-ins are the demo store's documents.
+        this.markBuiltinDismissed(request.id, getBuiltinKbDocuments());
         if (isDemoMode()) deleteDemoKbDocument(request.id);
         break;
       }
@@ -2558,6 +2572,25 @@ export class HubService {
     return saved;
   }
 
+  /**
+   * Merges with the shared workspace file (HubStore.syncSharedFile): the preference, else
+   * SSHS3_SHARED_WORKSPACE_FILE, resolved the same way HubStore does. A demo process only uses a file inside
+   * its own data directory (the web server's file its demo users share, see WebTenantManager): a team share
+   * anywhere else would hand the demo workspace to teammates (demo/outwardSync.ts).
+   */
+  private async syncSharedWorkspaceFile(
+    localServers: WorkspaceServerSummary[],
+  ): Promise<{ servers: WorkspaceServerSummary[]; changed: boolean }> {
+    const sharedFile = (
+      this.store.data.preferences.sharedWorkspacePath ||
+      process.env.SSHS3_SHARED_WORKSPACE_FILE ||
+      ""
+    ).trim();
+    if (!sharedFile || (isDemoMode() && !insideDataDirectory(sharedFile)))
+      return { servers: localServers, changed: false };
+    return this.store.syncSharedFile(sharedFile, localServers);
+  }
+
   private async collectExtraContext(): Promise<ExtraWorkspaceContext> {
     const [rawWorkspaceServers, teamData] = await Promise.all([
       this.host.workspaceServers?.().catch(() => []) ?? Promise.resolve([]),
@@ -2567,9 +2600,9 @@ export class HubService {
         Promise.resolve({ memories: [], activityLog: [] }),
     ]);
 
-    const sharedFileSync = await this.store
-      .syncSharedFile(undefined, rawWorkspaceServers)
-      .catch(() => ({ servers: rawWorkspaceServers, changed: false }));
+    const sharedFileSync = await this.syncSharedWorkspaceFile(
+      rawWorkspaceServers,
+    ).catch(() => ({ servers: rawWorkspaceServers, changed: false }));
 
     const deletedServerIds = this.store.data.deletedServerIds ?? {};
     const localOverrides = this.store.data.localOverrides ?? {};
@@ -2735,6 +2768,16 @@ export class HubService {
     );
   }
 
+  /**
+   * Whether a tool's target reference (an id, or the server name or host the model gave instead) is one
+   * of the demo workspace's fixtures. Identity decides (isDemoTarget): a name or host only counts through
+   * the server it resolves to.
+   */
+  private async isDemoTargetRef(ref: string | undefined): Promise<boolean> {
+    if (!ref || !isDemoMode()) return false;
+    return isDemoTarget(ref) || isDemoTarget((await this.resolveServerTarget(ref))?.id);
+  }
+
   private async handleAppAction(
     task: AgentTask,
     request: import("./ToolBroker").ToolRequest,
@@ -2770,16 +2813,8 @@ export class HubService {
       if (!resolved) {
         throw new Error(`Unknown or disabled MCP tool: ${request.action}`);
       }
-      const res = await this.mcp.callTool(
-        resolved.server,
-        resolved.toolName,
-        p,
-      );
-      if (
-        !res.ok &&
-        isDemoMode() &&
-        resolved.server.id.startsWith("demo-mcp-")
-      ) {
+      if (isDemoTarget(resolved.server.id)) {
+        // A demo MCP fixture answers from its script; its command/URL is never started or contacted.
         return {
           ok: true,
           mcpServer: resolved.server.name,
@@ -2787,6 +2822,11 @@ export class HubService {
           output: simulateDemoMcpTool(resolved.toolName, p),
         };
       }
+      const res = await this.mcp.callTool(
+        resolved.server,
+        resolved.toolName,
+        p,
+      );
       if (!res.ok) {
         throw new Error(res.error || "MCP tool invocation failed");
       }
@@ -3343,9 +3383,9 @@ export class HubService {
           op === "configure_ai" ||
           op === "update_shortcuts"
         ) {
-          if (bool("demoMode") !== undefined) {
-            setDemoMode(bool("demoMode")!);
-          }
+          // Demo mode is decided at launch and only the user can switch it (the Demo-Lab toggle restarts
+          // sshs3 after a confirmation): a `demoMode` value from the model is never applied.
+          const demoModeRequested = bool("demoMode");
           const aiConfigPatch: Record<string, unknown> = {};
           if (bool("aiEnabled") !== undefined) aiConfigPatch.enabled = bool("aiEnabled");
           if (str("aiProvider")) aiConfigPatch.provider = str("aiProvider");
@@ -3509,6 +3549,12 @@ export class HubService {
             ok: true,
             operation: op,
             demoMode: isDemoMode(),
+            ...(demoModeRequested !== undefined && demoModeRequested !== isDemoMode()
+              ? {
+                  demoModeNote:
+                    "Demo mode was not changed: it is set when sshs3 starts, and only the user can switch it with the Demo-Lab toggle (which restarts sshs3).",
+                }
+              : {}),
             actorName: aiConfigView.actorName,
             aiConfig: aiConfigView,
             aiPreferences: this.store.data.preferences,
@@ -3668,7 +3714,7 @@ export class HubService {
                 };
               }
             }
-            if (isDemoMode() && srv.id.startsWith("demo-")) {
+            if (isDemoTarget(srv.id)) {
               return {
                 node: srv.name,
                 host: srv.host,
@@ -3819,7 +3865,9 @@ export class HubService {
         const targetB = str("targetB");
         const pathB = str("pathB") || pathA;
 
-        if (isDemoMode()) {
+        // Scripted results only for the demo workspace's own fixtures (by identity, isDemoTargetRef):
+        // in demo mode a real target still takes the real path.
+        if ((await this.isDemoTargetRef(targetA)) || (await this.isDemoTargetRef(targetB))) {
           return simulateDemoStorageOps(op, targetA, pathA, targetB, pathB);
         }
 
@@ -4150,9 +4198,7 @@ export class HubService {
     ).filter((s) => s.id !== trimmed);
     const rawWorkspaceServers =
       (await this.host.workspaceServers?.().catch(() => [])) ?? [];
-    await this.store
-      .syncSharedFile(undefined, rawWorkspaceServers)
-      .catch(() => {});
+    await this.syncSharedWorkspaceFile(rawWorkspaceServers).catch(() => {});
     await this.store.save().catch(() => {});
     this.s3Workspace.schedulePush(400);
     this.changed();
@@ -4169,9 +4215,7 @@ export class HubService {
     }
     const rawWorkspaceServers =
       (await this.host.workspaceServers?.().catch(() => [])) ?? [];
-    await this.store
-      .syncSharedFile(undefined, rawWorkspaceServers)
-      .catch(() => {});
+    await this.syncSharedWorkspaceFile(rawWorkspaceServers).catch(() => {});
     await this.store.save().catch(() => {});
     this.s3Workspace.schedulePush(400);
     this.changed();
@@ -4192,6 +4236,19 @@ export class HubService {
     await this.broker.dispose();
     this.terminals.dispose();
     if (this.initialized) await this.store.save();
+  }
+}
+/** Whether `file` lies inside this process's data directory (userData: in demo mode, the demo workspace). */
+function insideDataDirectory(file: string): boolean {
+  try {
+    const relative = path.relative(app.getPath("userData"), path.resolve(file));
+    return (
+      relative !== "" &&
+      !path.isAbsolute(relative) &&
+      relative.split(path.sep)[0] !== ".."
+    );
+  } catch {
+    return false;
   }
 }
 function requiredText(value: unknown): string {

@@ -879,7 +879,10 @@ export const LandingView: React.FC<LandingViewProps> = ({
     }
   };
 
+  // Demo mode is decided at launch: on the desktop, main asks the user and then restarts sshs3 in the
+  // other mode; in web mode the server decides, so the toggle is disabled.
   const handleToggleDemoLab = async () => {
+    if (isWebBrowserMode()) return;
     try {
       await hubRequest({
         action: 'demo-mode-toggle',
@@ -1564,8 +1567,13 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     type="button"
                     data-testid="workspace-demo-lab-toggle"
                     onClick={handleToggleDemoLab}
-                    title="Slå på eller av det interaktiva 12-noders Enterprise Demo-Labbet (NetApp ONTAP, StorageGRID, Ceph/ZFS & K8s Trident) direkt i gränssnittet"
-                    className={`rounded-full px-2.5 py-0.5 text-[10.5px] font-semibold transition-all ${
+                    disabled={isWebBrowserMode()}
+                    title={
+                      isWebBrowserMode()
+                        ? "Demo mode is set when the sshs3 server starts and can't be changed here."
+                        : 'Slå på eller av det interaktiva 12-noders Enterprise Demo-Labbet (NetApp ONTAP, StorageGRID, Ceph/ZFS & K8s Trident) direkt i gränssnittet'
+                    }
+                    className={`rounded-full px-2.5 py-0.5 text-[10.5px] font-semibold transition-all disabled:cursor-not-allowed ${
                       hub?.demoMode
                         ? 'border border-amber-400/60 bg-amber-500/20 text-amber-200 shadow-sm'
                         : 'border border-border-subtle bg-app-card text-txt-muted hover:border-amber-500/40 hover:text-amber-200'

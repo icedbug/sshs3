@@ -93,4 +93,6 @@ export interface ProfileSyncStatus {
   smartcardLibPath?: string;
   /** Whether a smartcard library is detected and available on this system. */
   smartcardAvailable?: boolean;
+  /** Set when this process never contacts the sync target (demo mode): why. Push, pull, compare and unlock fail with the same text. */
+  syncDisabledReason?: string;
 }

@@ -42,7 +42,15 @@ import {
   useHub,
   useSelectedTerminal,
 } from "../../lib/aiHub";
+import { isWebBrowserMode } from "../../lib/webClientBridge";
 import "./aiHub.css";
+
+/**
+ * The Demo-Lab toggles: on the desktop, main asks for confirmation and then restarts sshs3 in the other
+ * mode; in web mode demo mode is fixed when the server starts, so they are shown disabled with this title.
+ */
+const DEMO_MODE_SET_BY_SERVER =
+  "Demo mode is set when the sshs3 server starts and can't be changed here.";
 
 type View =
   | "Work"
@@ -843,8 +851,17 @@ export function AiHubPanel({
               type="button"
               data-testid="ai-hub-demo-toggle"
               className={`ai-badge ${hub.demoMode ? "ai-badge-warn" : ""}`}
-              style={{ cursor: "pointer", fontSize: 10.5, padding: "3px 8px" }}
-              title="Växla det interaktiva 12-noders Enterprise Demo-Labbet PÅ eller AV direkt i UI:t"
+              style={{
+                cursor: isWebBrowserMode() ? "not-allowed" : "pointer",
+                fontSize: 10.5,
+                padding: "3px 8px",
+              }}
+              title={
+                isWebBrowserMode()
+                  ? DEMO_MODE_SET_BY_SERVER
+                  : "Växla det interaktiva 12-noders Enterprise Demo-Labbet PÅ eller AV direkt i UI:t"
+              }
+              disabled={isWebBrowserMode()}
               onClick={() =>
                 void act({
                   action: "demo-mode-toggle",
@@ -2894,6 +2911,8 @@ function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Element {
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
         <button
           type="button"
+          title={isWebBrowserMode() ? DEMO_MODE_SET_BY_SERVER : undefined}
+          disabled={isWebBrowserMode()}
           onClick={() =>
             void act({
               action: "demo-mode-toggle",

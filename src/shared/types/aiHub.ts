@@ -208,6 +208,8 @@ export interface S3WorkspaceSyncStatus {
   lastSyncAt?: number;
   syncing?: boolean;
   error?: string;
+  /** Set when this process never syncs with the bucket (demo mode): why. Also shown as `error` once a bucket is configured. */
+  syncDisabledReason?: string;
   inviteCode?: string;
 }
 export interface WorkspaceServerSummary {
@@ -298,7 +300,6 @@ export interface HubPreferences {
   inventory: boolean;
   retentionDays: number;
   sharedWorkspacePath?: string;
-  demoLabEnabled?: boolean;
   dismissedBuiltinIds?: string[];
 }
 export interface MissionAgent {
@@ -395,6 +396,7 @@ export interface HubSnapshot {
   preview?: ContextSource & { sessionId: string };
   config: AiConfigView;
   preferences: HubPreferences;
+  /** Read-only: whether this process was started in demo mode (decided at launch, see main/demo/demoMode.ts). */
   demoMode?: boolean;
   runtime: { bundled: boolean; version?: string };
   sessions: TerminalSession[];
@@ -631,6 +633,10 @@ export type HubRequest =
       };
     }
   | { action: "schedule-delete"; id: string }
+  /**
+   * Asks to run sshs3 with demo mode on/off. Demo mode never changes inside a running process: the
+   * desktop app confirms with the user and relaunches itself; the web server refuses (set at server start).
+   */
   | { action: "demo-mode-toggle"; enabled: boolean }
   | { action: "restore-builtins" }
   | { action: "inventory-refresh" }

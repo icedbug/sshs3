@@ -36,7 +36,8 @@ export interface CreateHubOptions {
 
 export function createHub(
   bridge: IpcBridge,
-  lifecycle: Pick<HubHost, "backgroundChanged" | "show">,
+  // relaunchForDemoMode is optional: only the desktop app can restart itself into/out of demo mode.
+  lifecycle: Pick<HubHost, "backgroundChanged" | "show" | "relaunchForDemoMode">,
   options?: CreateHubOptions,
 ): HubService {
   // Team Vault keeps one vault per team (every call takes a vaultId); the hooks below use each vault unlocked here.
@@ -604,6 +605,8 @@ export function createHub(
         const session = await bridge.sshPtyManager.createSession(config, {
           cols: 100,
           rows: 30,
+          // config.id is per session; the profile id identifies a demo target.
+          profileId: profile.id,
         });
         id = session.sessionId;
       }
@@ -641,6 +644,8 @@ export function createHub(
       const session = await bridge.sshPtyManager.createSession(config, {
         cols: 100,
         rows: 30,
+        // config.id is per session; the profile id identifies a demo target.
+        profileId: profile.id,
       });
       hub.terminals.register(
         {

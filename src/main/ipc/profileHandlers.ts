@@ -66,7 +66,8 @@ export function registerProfileHandlers(bridge: ProfileHost): void {
       // The file manager caches one live provider per profile id; drop it so the next connect uses the edited settings.
       await bridge.storageRegistry.disconnect?.(`sftp-${config.id}`);
       bridge.scheduleAutoSync();
-      void bridge.profileSyncService.autoSyncLocalSshConfig();
+      // A demo instance never rewrites the real ~/.ssh/config from its own demo profiles.
+      if (!isDemoMode()) void bridge.profileSyncService.autoSyncLocalSshConfig();
       await bridge.aiHub?.recordServerSaved(config.id);
       bridge.aiHub?.changed();
     }
@@ -78,7 +79,7 @@ export function registerProfileHandlers(bridge: ProfileHost): void {
       await bridge.profileStore.deleteSSH(id);
       await bridge.storageRegistry.disconnect?.(`sftp-${id}`);
       bridge.scheduleAutoSync();
-      void bridge.profileSyncService.autoSyncLocalSshConfig();
+      if (!isDemoMode()) void bridge.profileSyncService.autoSyncLocalSshConfig();
       await bridge.aiHub?.recordServerDeleted(id);
       bridge.aiHub?.changed();
     }
@@ -223,7 +224,7 @@ export function registerProfileHandlers(bridge: ProfileHost): void {
 
       bridge.scheduleAutoSync();
       if (sshList.length > 0) {
-        void bridge.profileSyncService.autoSyncLocalSshConfig();
+        if (!isDemoMode()) void bridge.profileSyncService.autoSyncLocalSshConfig();
       bridge.aiHub?.changed();
       }
       return { count };

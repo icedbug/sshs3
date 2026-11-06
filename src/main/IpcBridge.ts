@@ -86,6 +86,7 @@ import { registerTeamVaultHandlers } from './ipc/teamVaultHandlers';
 import { registerSshCaHandlers } from './ipc/sshCaHandlers';
 import { SshCaService } from './ca/SshCaService';
 import { handleHostKeyChanged } from './ssh/hostKeyChanged';
+import { assertOutwardSyncAllowed, outwardSyncDisabledReason } from './demo/outwardSync';
 import { createLogger } from './log';
 const ipcLog = createLogger('ipc');
 const sshLog = createLogger('ssh');
@@ -894,6 +895,9 @@ export class IpcBridge {
    * PIN prompt whose answer then fell through to a password prompt and failed.
    */
   public async getSyncProvider(target: StorageConnectConfig): ReturnType<StorageRegistry["getOrCreate"]> {
+    // Every profile-sync operation (push, pull, compare, wipe, unlock, auto-sync) gets its provider here: a
+    // demo process is refused before any connection or card prompt (see demo/outwardSync.ts).
+    assertOutwardSyncAllowed('Remote profile sync');
     // Every sync target has the same registry id, so a provider cached for a previous location would be reused.
     const connectionKey = syncTargetConnectionKey(target);
     if (this.syncProviderKey !== undefined && this.syncProviderKey !== connectionKey) {
@@ -1029,6 +1033,8 @@ export class IpcBridge {
 
 
   public scheduleAutoSync(delayMs = 2000): void {
+    // A demo process never pushes (demo/outwardSync.ts); buildSyncStatus reports why.
+    if (outwardSyncDisabledReason('Remote profile sync')) return;
     if (this.autoSyncTimer) {
       clearTimeout(this.autoSyncTimer);
     }
@@ -1068,6 +1074,8 @@ export class IpcBridge {
    * background auto-poll will pick up the other member's change regardless.
    */
   public scheduleTeamVaultAutoPush(vaultId: string, delayMs = 2000): void {
+    // A demo process never pushes a vault (demo/outwardSync.ts); buildTeamVaultStatus reports why.
+    if (outwardSyncDisabledReason('Team Vault sync')) return;
     const existing = this.teamVaultAutoPushTimers.get(vaultId);
     if (existing) {
       clearTimeout(existing);
@@ -1112,6 +1120,8 @@ export class IpcBridge {
    */
   public startAutoPullTimer(): void {
     this.stopAutoPullTimer();
+    // A demo process never pulls (demo/outwardSync.ts).
+    if (outwardSyncDisabledReason('Remote profile sync')) return;
     this.autoPullTimer = setInterval(() => {
       void this.runAutoPull();
     }, IpcBridge.AUTO_PULL_INTERVAL_MS);
@@ -1166,6 +1176,8 @@ export class IpcBridge {
    * don't need to check either condition themselves before calling this. */
   public startTeamVaultAutoPollTimer(vaultId: string): void {
     this.stopTeamVaultAutoPollTimer(vaultId);
+    // A demo process never polls a vault's remote (demo/outwardSync.ts).
+    if (outwardSyncDisabledReason('Team Vault sync')) return;
     const timer = setInterval(() => {
       void this.runTeamVaultAutoPoll(vaultId);
     }, IpcBridge.TEAM_VAULT_AUTO_POLL_INTERVAL_MS);
@@ -1308,6 +1320,7 @@ export class IpcBridge {
 
   public async buildSyncStatus(): Promise<ProfileSyncStatus> {
     const config = await this.syncConfigStore.getConfig();
+    const syncDisabledReason = outwardSyncDisabledReason('Remote profile sync');
     return {
       configured: !!config.target,
       target:
@@ -1332,6 +1345,7 @@ export class IpcBridge {
       smartcardLinked: Boolean(config.smartcardSync),
       smartcardLibPath: config.smartcardSync?.pkcs11LibPath,
       smartcardAvailable: (await SmartcardDetector.detectAvailableLibraries(undefined, { onlyExisting: true }).catch(() => [])).length > 0,
+      ...(syncDisabledReason ? { syncDisabledReason } : {}),
     };
   }
 
@@ -1344,6 +1358,7 @@ export class IpcBridge {
       this.teamVaultService.getStatus(vaultId),
       this.teamVaultConfigStore.getConfig(vaultId),
     ]);
+    const syncDisabledReason = outwardSyncDisabledReason('Team Vault sync');
     // A remembered identity path from before the single-team -> multi-team migration still
     // points at the old flat identities directory, which migrateLegacyIdentitiesDir has since
     // moved out from under it — self-heal it here (checked, not assumed, every time the status is
@@ -1382,6 +1397,7 @@ export class IpcBridge {
       selfRole: config.selfRecipientId
         ? status.members?.find((m) => m.recipientId === config.selfRecipientId)?.role
         : undefined,
+      ...(syncDisabledReason ? { syncDisabledReason } : {}),
     };
   }
 
@@ -1416,6 +1432,8 @@ export class IpcBridge {
     options?: { pkcs11LibPath?: string; pin?: string },
     unlockOptions?: { skipAutoSyncSchedule?: boolean }
   ): Promise<ProfileSyncStatus> {
+    // Unlocking pulls from the target: refused in demo mode before the card and its PIN are asked for.
+    assertOutwardSyncAllowed('Remote profile sync');
     const config = await this.syncConfigStore.getConfig();
     if (!config.target) {
       throw new Error('Configure a sync target first (profile-sync:setup)');

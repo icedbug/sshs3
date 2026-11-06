@@ -250,6 +250,9 @@ export interface TeamVaultStatus {
    * when `selfRecipientId` isn't a current member (e.g. just removed), or when the vault doesn't
    * exist locally yet. */
   selfRole?: TeamVaultRole;
+  /** Set when this process never contacts the vault's remote target (demo mode): why. Push, pull and
+   * the remote checks fail with the same text, and no background push or poll runs. */
+  syncDisabledReason?: string;
 }
 
 /**

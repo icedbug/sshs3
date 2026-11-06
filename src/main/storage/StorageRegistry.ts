@@ -2,8 +2,8 @@ import { LocalStorageProvider } from './LocalStorageProvider';
 import { SFTPStorageProvider } from './SFTPStorageProvider';
 import { S3StorageProvider } from './S3StorageProvider';
 import { K8sPodStorageProvider } from './K8sPodStorageProvider';
-import { DemoStorageProvider } from './DemoStorageProvider';
-import { isDemoMode } from '../ai/hub/demoWorkspace';
+import { DemoStorageProvider } from '../demo/DemoStorageProvider';
+import { isDemoTarget } from '../demo/demoMode';
 import type { IStorageProvider, SFTPConfig } from '../../shared/types/storage';
 import type { StorageConnectConfig } from '../../shared/types/ipc';
 import type { SshHostVerifier } from '../ssh/HostKeyVerifier';
@@ -27,10 +27,14 @@ export class StorageRegistry {
 
   /**
    * Returns an existing provider or instantiates and stores a new one.
+   *
+   * In demo mode a demo fixture (`isDemoTarget`: its provider or profile id) gets the in-memory demo
+   * storage instead of a real connection. `connection.profileId` names the saved profile when neither id
+   * carries it, e.g. the AI's file tools wrap a terminal's connection in a synthetic provider id.
    */
   public async getOrCreate(
     config: StorageConnectConfig,
-    connection: { controlPath?: string } = {}
+    connection: { controlPath?: string; profileId?: string } = {}
   ): Promise<IStorageProvider> {
     if (!config || !config.id) {
       throw new Error('Storage config must have an id');
@@ -56,10 +60,7 @@ export class StorageRegistry {
         if (!config.sftpConfig) {
           throw new Error(`SFTP config is required for provider "${config.id}"`);
         }
-        if (
-          isDemoMode() &&
-          (config.id.includes('demo-') || config.sftpConfig.host.startsWith('10.30.'))
-        ) {
+        if (isDemoTarget(config.id, config.sftpConfig.id, connection.profileId)) {
           provider = new DemoStorageProvider({
             id: config.id,
             name: config.name || config.sftpConfig.name || config.sftpConfig.host,
@@ -88,13 +89,7 @@ export class StorageRegistry {
         if (!config.s3Config) {
           throw new Error(`S3 config is required for provider "${config.id}"`);
         }
-        if (
-          isDemoMode() &&
-          (config.id.includes('demo-') ||
-            (config.s3Config.endpoint &&
-              (config.s3Config.endpoint.includes('acme.se') ||
-                config.s3Config.endpoint.includes('10.30.'))))
-        ) {
+        if (isDemoTarget(config.id, config.s3Config.id, connection.profileId)) {
           provider = new DemoStorageProvider({
             id: config.id,
             name: config.name || config.s3Config.name || 'Demo S3 Bucket',

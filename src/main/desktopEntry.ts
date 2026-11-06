@@ -4,6 +4,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { app } from 'electron';
 import './ai/desktop/nativeWindow';
 import { nativeTools } from './ai/desktop/nativeTools';
+import { demoWorkspaceDir, isDemoMode } from './demo/demoMode';
 
 // A detached GUI may outlive its launching shell. Closed stdio must not recurse through
 // exception loggers or freeze the main process.
@@ -22,9 +23,12 @@ if (process.env.SSHS3_FORCE_NATIVE_HERMES === '1') {
     : path.resolve(root, '../build-resources/hermes-desktop');
   const main = path.join(desktop, 'source/apps/desktop/dist/electron-main.mjs');
   if (!fs.existsSync(main)) throw new Error('Hermes Desktop has not been built. Run hermes:desktop:build first.');
-  const userData = process.env.SSHS3_USER_DATA_DIR || (process.env.PORTABLE_EXECUTABLE_DIR
+  const profileDir = process.env.SSHS3_USER_DATA_DIR || (process.env.PORTABLE_EXECUTABLE_DIR
     ? path.join(process.env.PORTABLE_EXECUTABLE_DIR, 'data')
     : path.join(app.getPath('appData'), 'sshs3'));
+  // Demo mode (decided at launch, see ./demo/demoMode) keeps its data, Hermes' included, out of the real
+  // profile; index.ts applies the same (idempotent) redirect for the regular window.
+  const userData = isDemoMode() ? demoWorkspaceDir(profileDir) : profileDir;
   fs.mkdirSync(userData, { recursive: true });
   app.setPath('userData', userData);
   process.env.SSHS3_NATIVE_HERMES = '1';

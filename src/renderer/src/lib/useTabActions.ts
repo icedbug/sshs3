@@ -595,31 +595,18 @@ export function useTabActions(ctx: TabActionsContext) {
     setActiveTabId(newId);
   }, [localHostname, setActiveTabId, setTabs]);
 
-  const handleConnectRecentSSH = useCallback((profile: SSHConnectionConfig) => {
-    if (profile.id.startsWith('demo-')) {
-      const newId = `term-${Date.now()}`;
-      const newTab: AppTab = {
-        id: newId,
-        type: 'terminal',
-        title: `${profile.name} (Demo)`,
-        paneTree: createLeaf(`${newId}-root`, { local: true, baseHost: profile.name }),
-      };
-      setTabs((prev) => [...prev, newTab]);
-      setActiveTabId(newId);
-      return;
-    }
+  /**
+   * The landing page's Connect, a server card's Terminal and quick connect's Enter: records when the
+   * profile was last used (without waiting for the save) and opens it exactly as Connection Manager's
+   * Connect does, as an SSH terminal for the profile. A demo profile is no exception. Its terminal sends
+   * the profile id to the main process, which alone decides whether that is a demo target and then runs
+   * the virtual demo terminal, so a demo server never opens a local shell titled as the server.
+   */
+  const handleConnectRecentSSH = (profile: SSHConnectionConfig) => {
     const updated = { ...profile, lastUsedAt: formatDateTime(new Date()) };
     void window.multissh?.profilesSaveSSH?.(updated).catch(() => {});
-    const newId = `term-${Date.now()}`;
-    const newTab: AppTab = {
-      id: newId,
-      type: 'terminal',
-      title: updated.name,
-      paneTree: createLeaf(`${newId}-root`, { config: updated }),
-    };
-    setTabs((prev) => [...prev, newTab]);
-    setActiveTabId(newId);
-  }, [setActiveTabId, setTabs]);
+    handleOpenSSHInTab(updated);
+  };
 
   const handleOpenEditorTab = useCallback((detail: OpenEditorTabDetail) => {
     const newId = `editor-${Date.now()}`;

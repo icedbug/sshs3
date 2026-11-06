@@ -77,16 +77,17 @@ export function registerClipboardHistoryHandlers(bridge: AppDataHost): void {
 }
 
 export function registerSnippetHandlers(bridge: AppDataHost): void {
+  // Built-in snippets (getBuiltinSnippets: the neutral defaults, or the demo workspace's in demo mode) are
+  // not stored: they are listed after the user's own. Editing one stores the user's copy under the
+  // built-in's id, which then replaces it; deleting one hides it for good, so it does not come back.
+  const isBuiltinSnippet = (id: unknown): boolean =>
+    typeof id === 'string' && getBuiltinSnippets().some((b) => b.id === id);
+
   bridge.registerHandler(IPC_CHANNELS.SNIPPETS_LIST, async (_event, hostKey?: unknown) => {
     if (hostKey !== undefined && (typeof hostKey !== 'string' || hostKey.length > 1024)) {
       throw new Error('Invalid host key');
     }
-    const list = await bridge.snippetStore.list(hostKey);
-    const merged = [...list];
-    for (const ds of getBuiltinSnippets()) {
-      if (!merged.some((s) => s.id === ds.id)) merged.push(ds);
-    }
-    return merged;
+    return await bridge.snippetStore.listWithBuiltins(getBuiltinSnippets(), hostKey);
   });
 
   bridge.registerHandler(IPC_CHANNELS.SNIPPETS_SAVE, async (_event, input: unknown) => {
@@ -104,18 +105,22 @@ export function registerSnippetHandlers(bridge: AppDataHost): void {
     ) {
       throw new Error('Invalid snippet');
     }
-    return await bridge.snippetStore.save({
-      id: s.id as string | undefined,
-      name: s.name,
-      command: s.command,
-      hostKey: s.hostKey as string | undefined,
-      hostLabel: s.hostLabel as string | undefined,
-    });
+    return await bridge.snippetStore.save(
+      {
+        id: s.id as string | undefined,
+        name: s.name,
+        command: s.command,
+        hostKey: s.hostKey as string | undefined,
+        hostLabel: s.hostLabel as string | undefined,
+      },
+      { replacesBuiltin: isBuiltinSnippet(s.id) }
+    );
   });
 
   bridge.registerHandler(IPC_CHANNELS.SNIPPETS_DELETE, async (_event, id: unknown): Promise<void> => {
     if (typeof id !== 'string' || id.length > 128) throw new Error('Invalid snippet id');
-    await bridge.snippetStore.delete(id);
+    if (isBuiltinSnippet(id)) await bridge.snippetStore.hideBuiltin(id);
+    else await bridge.snippetStore.delete(id);
   });
 }
 
@@ -129,9 +134,11 @@ export function registerSettingsHandlers(bridge: AppDataHost): void {
     async (_event, settings: Partial<AppSettings>): Promise<AppSettings> => {
       const saved = await bridge.settingsStore.saveSettings(settings);
       if ('logLevel' in settings) setLogLevel(resolveLogLevel(saved.logLevel));
-      // autoSync refreshes the agent block itself afterwards (and removes it when turned off).
-      if ('autoSyncLocalSshConfig' in settings) void bridge.profileSyncService.autoSyncLocalSshConfig();
-      else if ('smartcardAuthMode' in settings) bridge.smartcard.refreshAgentSshConfig();
+      // autoSync refreshes the agent block itself afterwards (and removes it when turned off). A demo
+      // instance never rewrites the real ~/.ssh/config from its own demo profiles.
+      if ('autoSyncLocalSshConfig' in settings) {
+        if (!isDemoMode()) void bridge.profileSyncService.autoSyncLocalSshConfig();
+      } else if ('smartcardAuthMode' in settings) bridge.smartcard.refreshAgentSshConfig();
       bridge.scheduleAutoSync();
       return saved;
     }

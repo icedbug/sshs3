@@ -11,8 +11,8 @@ import { AskpassServer } from '../smartcard/AskpassServer';
 import { AgentLifecycleManager } from './AgentLifecycleManager';
 import { registerEntry, unregisterEntry } from './AgentRegistry';
 import { K8sShimManager } from '../services/K8sShimManager';
-import { isDemoMode } from '../ai/hub/demoWorkspace';
-import { DemoVirtualPty, isDemoSshTarget } from './DemoVirtualPty';
+import { isDemoTarget } from '../demo/demoMode';
+import { DemoVirtualPty } from '../demo/DemoVirtualPty';
 import type { SettingsStore } from '../settings/SettingsStore';
 import type {
   SSHConnectionConfig,
@@ -473,9 +473,19 @@ export interface SSHPtyManagerOptions {
   hostKeyPromptHandler?: (info: HostKeyPromptInfo) => Promise<boolean>;
 }
 
+/** Options of an SSH session: those of its pty, and the saved profile it is for. */
+export interface SshSessionOptions extends PtyOptions {
+  /**
+   * The saved profile this session connects to. Terminals give every session its own `config.id`, so
+   * this is what identifies a demo target (`isDemoTarget`): in demo mode such a session runs on the
+   * virtual demo terminal and never gets an ssh process. Host names and addresses never decide that.
+   */
+  profileId?: string;
+}
+
 export class SSHPtyManager extends EventEmitter {
   private sessions: Map<string, SSHPtySession> = new Map();
-  private sessionOptions: Map<string, PtyOptions | undefined> = new Map();
+  private sessionOptions: Map<string, SshSessionOptions | undefined> = new Map();
   private settingsStore?: SettingsStore;
   private hostKeyPromptHandler?: (info: HostKeyPromptInfo) => Promise<boolean>;
   /**
@@ -566,6 +576,12 @@ export class SSHPtyManager extends EventEmitter {
     const rows = session.rows;
     const cwd = options?.cwd ?? (process.env.HOME || process.cwd());
 
+    if (isDemoTarget(config.id, options?.profileId)) {
+      // A demo target stays on the virtual terminal: reconnecting starts a fresh one, never ssh.
+      session.bindPty(new DemoVirtualPty(config, cols, rows));
+      return true;
+    }
+
     const askpassEnv = session.askpassServer ? session.askpassServer.getEnv() : {};
     const env: Record<string, string> = {
       ...(process.env as Record<string, string>),
@@ -616,11 +632,12 @@ export class SSHPtyManager extends EventEmitter {
   }
 
   /**
-   * Creates and spawns an OpenSSH PTY session with the given connection configuration.
+   * Creates and spawns an OpenSSH PTY session with the given connection configuration. A demo target
+   * (`options.profileId`, see SshSessionOptions) gets the virtual demo terminal instead.
    */
   public async createSession(
     config: SSHConnectionConfig,
-    options?: PtyOptions
+    options?: SshSessionOptions
   ): Promise<SSHPtySession> {
     const sessionId = config.id || `ssh-${crypto.randomUUID()}`;
     this.sessionOptions.set(sessionId, options);
@@ -628,7 +645,7 @@ export class SSHPtyManager extends EventEmitter {
     const rows = options?.rows ?? 24;
     const cwd = options?.cwd ?? (process.env.HOME || process.cwd());
 
-    if (isDemoSshTarget(config, isDemoMode())) {
+    if (isDemoTarget(config.id, options?.profileId)) {
       const demoPty = new DemoVirtualPty(config, cols, rows);
       const session = new InternalSSHPtySession({
         sessionId,

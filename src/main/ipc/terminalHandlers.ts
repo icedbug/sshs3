@@ -102,9 +102,10 @@ export function registerTerminalHandlers(bridge: TerminalHost): void {
         }
       }
 
+      // The renderer gives each terminal its own config.id; the profile id identifies a demo target.
       const session = options.local
         ? await bridge.sshPtyManager.createShellSession(ptyOptions)
-        : await bridge.sshPtyManager.createSession(config!, ptyOptions);
+        : await bridge.sshPtyManager.createSession(config!, { ...ptyOptions, profileId: options.profileId });
       const localShell = options.local ? resolveLocalShellKind(ptyOptions) : undefined;
       bridge.aiHub?.terminals.register(
         {

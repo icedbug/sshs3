@@ -29,6 +29,7 @@ import {
   type ManagedSshConfigBlock,
 } from './SshNativeFileMerger';
 import { writeFileAtomic } from '../storage/atomicFile';
+import { assertOutwardSyncAllowed, outwardSyncDisabledReason } from '../demo/outwardSync';
 
 const SYNC_DIR_NAME = '.sshs3';
 
@@ -687,8 +688,13 @@ export class ProfileSyncService {
    * push, the periodic auto pull, manual buttons), and overlapping ones trip over each other: a pull
    * or compare that starts mid-push sees the push's own in-progress marker, and two pushes delete each
    * other's marker and overwrite the remembered remote state.
+   *
+   * Being where all four start, it also refuses them in demo mode, which never touches the sync target
+   * (demo/outwardSync.ts; hasRemoteData checks the same itself).
    */
   private runExclusive<T>(task: () => Promise<T>): Promise<T> {
+    const demoDisabled = outwardSyncDisabledReason('Remote profile sync');
+    if (demoDisabled) return Promise.reject(new Error(demoDisabled));
     const result = this.syncOperationQueue.then(task);
     this.syncOperationQueue = result.then(
       () => {},
@@ -729,6 +735,7 @@ export class ProfileSyncService {
    * instead bootstrap via pullFromRemote().
    */
   public async hasRemoteData(provider: IStorageProvider, remoteBasePath = ''): Promise<boolean> {
+    assertOutwardSyncAllowed('Remote profile sync');
     const remoteFiles = buildRemoteFiles(resolveEffectiveBasePath(provider, remoteBasePath));
     return (await this.statOrNull(provider, remoteFiles.topology)) !== null;
   }

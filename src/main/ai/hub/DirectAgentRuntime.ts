@@ -1,4 +1,8 @@
-import { CodexAuthProvider, buildCodexHeaders } from "../CodexAuthProvider";
+import {
+  CodexAuthProvider,
+  buildCodexHeaders,
+  type CodexCredentials,
+} from "../CodexAuthProvider";
 import type { HermesModelConfig } from "../HermesManager";
 import type {
   AgentTask,
@@ -434,7 +438,6 @@ const AGENT_TOOLS: FunctionToolDef[] = [
           description:
             "Operation: 'get_state' (inspect full sshs3 state), 'update_settings' (update any AppSettings, AI parameter, or shortcut), 'configure_ai' (update AI model/provider/context window/reasoning), 'update_shortcuts' (update or reset keyboard shortcuts), 'list_dotfiles' / 'save_dotfile' / 'delete_dotfile' (manage Dotfile Pools and synced dotfiles), 'list_snippets' / 'save_snippet' / 'delete_snippet' (manage command snippets), or 'open_local_terminal'.",
         },
-        demoMode: { type: "boolean", description: "Enable or disable sshs3 Demo Mode." },
         actorName: { type: "string", description: "User's display name in the team workspace & activity log." },
         theme: { type: "string", enum: ["dark", "light", "breeze", "system"], description: "UI theme ('dark', 'light', 'breeze', or 'system')." },
         defaultNewTabType: { type: "string", enum: ["terminal", "filemanager"], description: "Default tab type when opening a new tab." },
@@ -1106,6 +1109,31 @@ interface ParsedToolCall {
   argumentsJson: string;
 }
 
+const NO_CODEX_SESSION =
+  "No ChatGPT/Codex OAuth session found. Sign in with ChatGPT or configure an API key in AI settings.";
+
+/**
+ * Why an API-key or endpoint provider cannot be contacted at all, or undefined
+ * when it is configured. These are HubService's own launch checks: Anthropic
+ * needs an API key, an OpenAI-compatible endpoint its base URL (a key is
+ * optional there, e.g. a local Ollama). The model name does not count: with
+ * credentials in place it is the user's real provider, and a wrong model must
+ * fail as that provider's error. ChatGPT/Codex counts as configured when
+ * start() resolves an OAuth session from its auth files.
+ */
+function missingProviderSetup(
+  model: Exclude<HermesModelConfig, { kind: "openai-codex" }>,
+): string | undefined {
+  if (model.kind === "anthropic")
+    return isBlank(model.apiKey) ? "Anthropic API key missing" : undefined;
+  return isBlank(model.baseUrl) ? "Model endpoint missing" : undefined;
+}
+
+/** Also true for a key or URL that is unset at runtime despite its type. */
+function isBlank(value: string | undefined): boolean {
+  return !value?.trim();
+}
+
 export class DirectAgentRuntime implements AgentRuntime {
   private abort = new AbortController();
   private cancelled = false;
@@ -1134,7 +1162,18 @@ export class DirectAgentRuntime implements AgentRuntime {
   ): Promise<void> {
     try {
       if (model.kind === "openai-codex") {
-        await this.runCodexResponsesLoop(task, model, onEvent);
+        const auth = new CodexAuthProvider(this.authBaseDir);
+        const creds = await auth.resolveCredentials(this.fetchImpl);
+        if (creds) {
+          await this.runCodexResponsesLoop(task, model, creds, onEvent);
+        } else {
+          await this.runWithoutProvider(task, NO_CODEX_SESSION, onEvent);
+        }
+        return;
+      }
+      const missingSetup = missingProviderSetup(model);
+      if (missingSetup) {
+        await this.runWithoutProvider(task, missingSetup, onEvent);
       } else if (model.kind === "anthropic") {
         await this.runAnthropicLoop(task, model, onEvent);
       } else {
@@ -1145,18 +1184,8 @@ export class DirectAgentRuntime implements AgentRuntime {
         onEvent({ type: "run.cancelled" });
         return;
       }
-      if (isDemoMode() && this.fetchImpl === fetch) {
-        try {
-          await this.runDemoInteractiveCopilot(task, onEvent);
-          return;
-        } catch (demoErr) {
-          onEvent({
-            type: "run.failed",
-            error: safeError(demoErr),
-          });
-          return;
-        }
-      }
+      // A configured provider's own failure (rejected key, network, HTTP status)
+      // is the result: the scripted demo copilot never stands in for it.
       onEvent({
         type: "run.failed",
         error: safeError(error),
@@ -1164,10 +1193,38 @@ export class DirectAgentRuntime implements AgentRuntime {
     }
   }
 
+  /**
+   * No AI provider is configured, so no model can run. Only demo mode answers
+   * anyway, with the scripted demo copilot; otherwise the run fails with the
+   * missing setup step.
+   */
+  private async runWithoutProvider(
+    task: AgentTask,
+    missingSetup: string,
+    onEvent: (event: RunEvent) => void,
+  ): Promise<void> {
+    if (!isDemoMode()) throw new Error(missingSetup);
+    await this.runDemoInteractiveCopilot(task, onEvent);
+  }
+
+  /**
+   * The scripted demo copilot. Its tool calls take a model run's path: only
+   * tools this run offers (mode, Mission Agent allow-list), through the broker
+   * and its approvals.
+   */
   private async runDemoInteractiveCopilot(
     task: AgentTask,
     onEvent: (event: RunEvent) => void,
   ): Promise<void> {
+    let initialContext: unknown;
+    try {
+      initialContext = await this.invokeBroker({ action: "context" });
+    } catch {
+      // Non-fatal, as for a model run
+    }
+    const offered = new Set(
+      toolsForTask(task, initialContext).map((t) => t.name),
+    );
     const lastUserMsg =
       [...task.messages].reverse().find((m) => m.role === "user")?.text || "";
     const lower = lastUserMsg.toLowerCase();
@@ -1192,19 +1249,20 @@ export class DirectAgentRuntime implements AgentRuntime {
         onEvent({ type: "message.delta", delta: chunk });
         await new Promise((r) => setTimeout(r, 18));
       }
+      // No usage: no model ran, so there are no tokens to report.
       onEvent({
         type: "run.completed",
         output: markdown,
-        usage: { input_tokens: 1840, output_tokens: 420 },
       });
     };
 
     // 1. 2x2 Cluster Split-View orchestration
     if (
-      lower.includes("split") ||
-      lower.includes("2x2") ||
-      lower.includes("2×2") ||
-      lower.includes("sida vid sida")
+      offered.has("sshs3_workspace_layout") &&
+      (lower.includes("split") ||
+        lower.includes("2x2") ||
+        lower.includes("2×2") ||
+        lower.includes("sida vid sida"))
     ) {
       const cluster = detectCluster();
       const layoutRes = await this.executeToolCall({
@@ -1234,10 +1292,11 @@ export class DirectAgentRuntime implements AgentRuntime {
 
     // 2. Cross-Server Config Diff
     if (
-      lower.includes("diff") ||
-      lower.includes("jämför") ||
-      lower.includes("multipath.conf") ||
-      lower.includes("ceph.conf")
+      offered.has("sshs3_storage_ops") &&
+      (lower.includes("diff") ||
+        lower.includes("jämför") ||
+        lower.includes("multipath.conf") ||
+        lower.includes("ceph.conf"))
     ) {
       const pathToDiff = lower.includes("ceph.conf")
         ? "/etc/ceph/ceph.conf"
@@ -1286,10 +1345,11 @@ export class DirectAgentRuntime implements AgentRuntime {
 
     // 3. Parallel Cluster Execution
     if (
-      lower.includes("parallell") ||
-      lower.includes("cluster_exec") ||
-      lower.includes("hälsokontroll") ||
-      lower.includes("alla noder")
+      offered.has("sshs3_cluster_exec") &&
+      (lower.includes("parallell") ||
+        lower.includes("cluster_exec") ||
+        lower.includes("hälsokontroll") ||
+        lower.includes("alla noder"))
     ) {
       const cluster = detectCluster();
       const cmd = cluster.includes("ONTAP")
@@ -1335,7 +1395,10 @@ export class DirectAgentRuntime implements AgentRuntime {
     }
 
     // 4. Multi-Agent Workforce Swarm
-    if (lower.includes("workforce") || lower.includes("swarm")) {
+    if (
+      offered.has("sshs3_agent_and_mcp_manage") &&
+      (lower.includes("workforce") || lower.includes("swarm"))
+    ) {
       const wfResRaw = await this.executeToolCall({
         id: `demo_wf_${Date.now()}`,
         name: "sshs3_agent_and_mcp_manage",
@@ -1357,10 +1420,11 @@ export class DirectAgentRuntime implements AgentRuntime {
 
     // 5. Knowledge Base Search & Runbooks
     if (
-      lower.includes("runbook") ||
-      lower.includes("@kb") ||
-      lower.includes("kunskapsbas") ||
-      lower.includes("kb")
+      offered.has("sshs3_kb_search") &&
+      (lower.includes("runbook") ||
+        lower.includes("@kb") ||
+        lower.includes("kunskapsbas") ||
+        lower.includes("kb"))
     ) {
       const kbResRaw = await this.executeToolCall({
         id: `demo_kb_${Date.now()}`,
@@ -1391,7 +1455,11 @@ export class DirectAgentRuntime implements AgentRuntime {
     }
 
     // 6. Terminal command execution & troubleshooting (when connected to a terminal or general prompt)
-    if (task.target?.sessionId && task.mode !== "advice") {
+    if (
+      task.target?.sessionId &&
+      task.mode !== "advice" &&
+      offered.has("terminal_command")
+    ) {
       const targetLabel = (task.target.label || "").toLowerCase();
       const isOntap =
         targetLabel.includes("netapp") ||
@@ -1460,15 +1528,9 @@ export class DirectAgentRuntime implements AgentRuntime {
   private async runCodexResponsesLoop(
     task: AgentTask,
     model: Extract<HermesModelConfig, { kind: "openai-codex" }>,
+    creds: CodexCredentials,
     onEvent: (event: RunEvent) => void,
   ): Promise<void> {
-    const auth = new CodexAuthProvider(this.authBaseDir);
-    const creds = await auth.resolveCredentials(this.fetchImpl);
-    if (!creds) {
-      throw new Error(
-        "No ChatGPT/Codex OAuth session found. Sign in with ChatGPT or configure an API key in AI settings.",
-      );
-    }
     const sanitizedBaseUrl =
       model.baseUrl && !model.baseUrl.includes("openrouter.ai")
         ? model.baseUrl

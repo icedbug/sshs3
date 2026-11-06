@@ -17,8 +17,13 @@ import {
 } from "../../crypto/SecretFieldCrypto";
 import { maskContext, safeError } from "./privacy";
 import { createLogger } from "../../log";
+import {
+  assertOutwardSyncAllowed,
+  outwardSyncDisabledReason,
+} from "../../demo/outwardSync";
 
 const log = createLogger("s3-workspace");
+const SYNC = "S3 team workspace sync";
 
 export const S3_INVITE_PREFIX = "sshs3-s3://";
 const WORKSPACE_FILENAME = "workspace.json";
@@ -446,12 +451,23 @@ export class S3WorkspaceSyncService {
     );
   }
 
+  /**
+   * Whether the bucket may be contacted: configured, and not a demo process (a demo workspace never
+   * reaches shared state, see demo/outwardSync.ts). Every network path (start, timers, pushes, polls,
+   * presence) is gated by this rather than by `isConfigured()` alone.
+   */
+  private canReachBucket(): boolean {
+    return this.isConfigured() && !outwardSyncDisabledReason(SYNC);
+  }
+
   getStatus(): S3WorkspaceSyncStatus {
     const configured = this.isConfigured();
+    const syncDisabledReason = outwardSyncDisabledReason(SYNC);
     return {
       configured,
       enabled: this.config.enabled,
-      connected: configured && this.connected && !this.lastError,
+      connected:
+        configured && !syncDisabledReason && this.connected && !this.lastError,
       endpoint: this.config.endpoint,
       region: this.config.region || "eu-north-1",
       bucket: this.config.bucket,
@@ -461,7 +477,10 @@ export class S3WorkspaceSyncService {
       forcePathStyle: this.config.forcePathStyle ?? true,
       lastSyncAt: this.lastSyncAt,
       syncing: this.syncing,
-      error: this.lastError,
+      // A configured bucket this (demo) process will not sync with shows why where sync errors show,
+      // instead of looking connected.
+      error: (configured ? syncDisabledReason : undefined) ?? this.lastError,
+      ...(syncDisabledReason ? { syncDisabledReason } : {}),
       inviteCode: configured ? encodeS3WorkspaceInvite(this.config) : undefined,
     };
   }
@@ -475,6 +494,8 @@ export class S3WorkspaceSyncService {
     update?: Partial<S3WorkspaceConfig>,
     inviteCode?: string,
   ): Promise<void> {
+    // Refused up front in demo mode (nothing is saved), so connecting a team bucket fails visibly.
+    assertOutwardSyncAllowed(SYNC);
     const decoded = inviteCode ? decodeS3WorkspaceInvite(inviteCode) : {};
     const merged = { ...this.config, ... update, ...decoded };
     const secret =
@@ -525,7 +546,7 @@ export class S3WorkspaceSyncService {
 
   async start(): Promise<void> {
     await this.load();
-    if (!this.isConfigured()) return;
+    if (!this.canReachBucket()) return;
     this.startTimers();
     void this.syncNow().catch((err) =>
       log.warn("Initial S3 workspace sync failed", safeError(err)),
@@ -559,7 +580,7 @@ export class S3WorkspaceSyncService {
       await this.resetProvider();
       this.lastKnownRemoteStat = undefined;
       this.lastError = undefined;
-      if (this.isConfigured()) {
+      if (this.canReachBucket()) {
         this.startTimers();
         await this.syncNow().catch((err) =>
           log.warn("Reloaded S3 workspace sync failed", safeError(err)),
@@ -570,7 +591,7 @@ export class S3WorkspaceSyncService {
         this.presenceList = [];
       }
       this.callbacks.onStateChanged();
-    } else if (this.isConfigured() && !this.connected) {
+    } else if (this.canReachBucket() && !this.connected) {
       this.startTimers();
       await this.syncNow().catch((err) =>
         log.warn("Reloaded S3 workspace sync failed", safeError(err)),
@@ -580,7 +601,7 @@ export class S3WorkspaceSyncService {
 
   startTimers(): void {
     this.stopTimers();
-    if (this.disposed || !this.isConfigured()) return;
+    if (this.disposed || !this.canReachBucket()) return;
     const pollMs = this.options.pollIntervalMs ?? 10_000;
     const presenceMs = this.options.presenceIntervalMs ?? 15_000;
 
@@ -615,7 +636,7 @@ export class S3WorkspaceSyncService {
   }
 
   schedulePush(delayMs = this.options.pushDebounceMs ?? 1_200): void {
-    if (this.disposed || !this.isConfigured()) return;
+    if (this.disposed || !this.canReachBucket()) return;
     if (this.pushDebounceTimer) {
       clearTimeout(this.pushDebounceTimer);
     }
@@ -629,11 +650,14 @@ export class S3WorkspaceSyncService {
   }
 
   schedulePresenceUpdate(): void {
-    if (this.disposed || !this.isConfigured()) return;
+    if (this.disposed || !this.canReachBucket()) return;
     void this.publishAndRefreshPresence().catch(() => {});
   }
 
   async syncNow(opts: { forcePush?: boolean } = {}): Promise<void> {
+    // An explicit "sync now" (button, AI tool) in demo mode fails with the reason instead of quietly
+    // succeeding; the background paths never get here in demo mode (canReachBucket).
+    assertOutwardSyncAllowed(SYNC);
     if (!this.isConfigured()) return;
     return this.enqueue(async () => {
       this.syncing = true;
@@ -703,7 +727,7 @@ export class S3WorkspaceSyncService {
   }
 
   async pollOnce(): Promise<void> {
-    if (this.disposed || !this.isConfigured() || this.syncing) return;
+    if (this.disposed || !this.canReachBucket() || this.syncing) return;
     try {
       const provider = await this.getOrCreateProvider();
       const remotePath = this.workspaceObjectPath();
@@ -735,7 +759,7 @@ export class S3WorkspaceSyncService {
   }
 
   async publishAndRefreshPresence(): Promise<void> {
-    if (this.disposed || !this.isConfigured()) return;
+    if (this.disposed || !this.canReachBucket()) return;
     const provider = await this.getOrCreateProvider();
     const local = await this.callbacks.getLocalState();
     await this.publishAndRefreshPresenceInternal(provider, local);
@@ -843,6 +867,8 @@ export class S3WorkspaceSyncService {
   }
 
   private async getOrCreateProvider(): Promise<IStorageProvider> {
+    // Every bucket connection is made here: never in demo mode, whichever path asked for it.
+    assertOutwardSyncAllowed(SYNC);
     if (this.provider) return this.provider;
     if (this.options.providerFactory) {
       this.provider = this.options.providerFactory(this.config);

@@ -3,6 +3,7 @@ import os from 'node:os';
 import fs from 'node:fs';
 import { setHeadlessUserDataPath } from './electronShim';
 import { Sshs3WebServer } from './WebServer';
+import { demoWorkspaceDir, isDemoMode } from '../demo/demoMode';
 
 // This is a CLI entry point: the startup banner is meant for the operator's terminal,
 // so it goes straight to stdout/stderr rather than through the levelled main-process logger.
@@ -16,9 +17,14 @@ const fail = (line: string, err: unknown): void => {
 async function main(): Promise<void> {
   const port = Number(process.env.SSHS3_WEB_PORT || process.env.PORT || 8080);
   const host = process.env.SSHS3_WEB_HOST || process.env.HOST || '0.0.0.0';
-  const dataDir = path.resolve(
+  const baseDataDir = path.resolve(
     process.env.SSHS3_DATA_DIR || path.join(os.homedir(), '.sshs3-web-server')
   );
+  // Demo mode is decided once, here at server start (--demo or SSHS3_DEMO=1, see ../demo/demoMode), for
+  // every user: no tenant can switch it. A demo server keeps its users, tenants and keys in its own
+  // directory, so it never reads or writes the real server data.
+  const demoMode = isDemoMode();
+  const dataDir = demoMode ? demoWorkspaceDir(baseDataDir) : baseDataDir;
 
   // Resolve static frontend directory (dist/)
   const candidates = [
@@ -47,6 +53,7 @@ async function main(): Promise<void> {
   out(`  Listen:     ${info.host}:${info.port}`);
   out(`  Data Dir:   ${dataDir}`);
   out(`  Static Dir: ${staticDir}`);
+  out(`  Demo Mode:  ${demoMode ? 'on (separate demo data dir)' : 'off'}`);
   out('============================================================');
 
   const shutdown = async (signal: string) => {

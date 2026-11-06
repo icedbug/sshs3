@@ -429,6 +429,8 @@ export class WebTenantManager {
 
     const hub = createHub(
       bridge,
+      // No relaunchForDemoMode: demo mode is fixed for the whole server when it starts (serverEntry.ts),
+      // so a tenant's Demo-Lab toggle request is refused.
       {
         backgroundChanged: async () => {},
         show: () => {},

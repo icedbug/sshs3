@@ -1479,16 +1479,17 @@ describe("Production multi-user workspace sync & auto-memory", () => {
     ).toBe(true);
   });
 
-  it("ships 100% batteries-included out-of-the-box with 6 Mission Agents, 8 @kb Runbooks, 6 Skills + Core Memory, 12 Snippets, and supports 1-click Demo-Lab toggle & Restore Builtins", async () => {
+  it("ships small neutral built-ins outside demo mode (one agent, generic snippets, no KB or memories), the demo workspace only in demo mode, and supports the Demo-Lab toggle & Restore Builtins", async () => {
     const { HubService } = await import("../../src/main/ai/hub/HubService");
-    const { getBuiltinSnippets, setDemoMode } = await import(
+    const { getBuiltinSnippets } = await import(
       "../../src/main/ai/hub/demoWorkspace"
     );
+    const { setDemoModeForTesting } = await import("../../src/main/demo/demoMode");
 
-    setDemoMode(false);
+    setDemoModeForTesting(false);
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "sshs3-hub-outofthebox-"));
     disposals.push(() => {
-      setDemoMode(false);
+      setDemoModeForTesting(undefined);
       return fs.rm(tmpDir, { recursive: true, force: true });
     });
 
@@ -1506,56 +1507,48 @@ describe("Production multi-user workspace sync & auto-memory", () => {
     await hub.initialize();
 
     const snap = await hub.snapshot();
-    // Even with Demo Mode OFF, all 6 built-in specialist agents and 8 KB runbooks are pre-loaded!
+    // Outside demo mode only the neutral defaults are built in: one general-purpose agent, a few
+    // generic snippets, and no knowledge-base documents or memories.
     expect(snap.demoMode).toBe(false);
-    expect((snap.agents ?? []).length).toBe(6);
-    expect(
-      snap.agents?.some((a) => a.id === "builtin-agent-linux-sre"),
-    ).toBe(true);
-    expect(
-      snap.agents?.some((a) => a.id === "builtin-agent-ssh-security"),
-    ).toBe(true);
-    expect((snap.kbDocuments ?? []).length).toBe(8);
-    expect(
-      snap.kbDocuments?.some((d) => d.id === "builtin-kb-linux-use-sre"),
-    ).toBe(true);
-    expect(
-      snap.memories.some((m) => m.id === "builtin-skill-linux-use-triage"),
-    ).toBe(true);
-    expect(
-      snap.memories.some((m) => m.id === "builtin-mem-sre-golden-rules"),
-    ).toBe(true);
-    expect(getBuiltinSnippets().length).toBe(12);
+    expect((snap.agents ?? []).map((a) => a.id)).toEqual(["builtin-agent-general"]);
+    expect(snap.kbDocuments ?? []).toEqual([]);
+    expect(snap.memories).toEqual([]);
+    const snippetIds = getBuiltinSnippets().map((s) => s.id);
+    expect(snippetIds).toContain("builtin-snip-disk-usage");
+    expect(snippetIds.some((id) => id.startsWith("demo-"))).toBe(false);
 
     // Dismissing a built-in agent hides it until restore-builtins is called
     const afterDelete = await hub.request({
       action: "agent-delete",
-      id: "builtin-agent-linux-sre",
+      id: "builtin-agent-general",
     });
     expect(
-      afterDelete.agents?.some((a) => a.id === "builtin-agent-linux-sre"),
+      afterDelete.agents?.some((a) => a.id === "builtin-agent-general"),
     ).toBe(false);
 
     const afterRestore = await hub.request({ action: "restore-builtins" });
     expect(
-      afterRestore.agents?.some((a) => a.id === "builtin-agent-linux-sre"),
+      afterRestore.agents?.some((a) => a.id === "builtin-agent-general"),
     ).toBe(true);
 
-    // Toggle Demo-Lab ON at runtime via HubRequest
-    const afterDemoOn = await hub.request({
-      action: "demo-mode-toggle",
-      enabled: true,
-    });
-    expect(afterDemoOn.demoMode).toBe(true);
-    expect(afterDemoOn.preferences.demoLabEnabled).toBe(true);
-    expect((afterDemoOn.tasks ?? []).length).toBeGreaterThanOrEqual(1);
+    // Demo mode is decided at launch: without a host that can restart the app (web, tests) the
+    // Demo-Lab toggle is refused, and nothing about it is stored.
+    await expect(
+      hub.request({ action: "demo-mode-toggle", enabled: true }),
+    ).rejects.toThrow(/Demo mode is set when the sshs3 server starts/);
+    const afterRefusedToggle = await hub.snapshot();
+    expect(afterRefusedToggle.demoMode).toBe(false);
+    expect("demoLabEnabled" in afterRefusedToggle.preferences).toBe(false);
 
-    // Toggle Demo-Lab OFF again
-    const afterDemoOff = await hub.request({
-      action: "demo-mode-toggle",
-      enabled: false,
-    });
-    expect(afterDemoOff.demoMode).toBe(false);
+    // A process started in demo mode shows the demo workspace, its tasks and built-ins included
+    setDemoModeForTesting(true);
+    const demoSnap = await hub.snapshot();
+    expect(demoSnap.demoMode).toBe(true);
+    expect((demoSnap.tasks ?? []).length).toBeGreaterThanOrEqual(1);
+    expect(demoSnap.agents?.some((a) => a.id === "demo-agent-ontap-architect")).toBe(true);
+    expect(demoSnap.kbDocuments?.some((d) => d.id === "demo-kb-ontap-cli-qos")).toBe(true);
+    expect(demoSnap.memories.some((m) => m.id === "demo-skill-ontap-latency")).toBe(true);
+    expect(getBuiltinSnippets().some((s) => s.id === "demo-snip-ontap-latency")).toBe(true);
   });
 });
 

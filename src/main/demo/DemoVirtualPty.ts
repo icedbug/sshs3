@@ -1,6 +1,15 @@
 import type { IPty, IDisposable } from 'node-pty';
 import type { SSHConnectionConfig } from '../../shared/types/ssh';
 
+/**
+ * The demo workspace's virtual terminal: a scripted shell that stands in for an SSH session to one of
+ * the demo fixtures, so a demo server never gets a real ssh process or network connection.
+ *
+ * Whether a target is a demo fixture is decided elsewhere, by identity only (`isDemoTarget` in
+ * ./demoMode, used by SSHPtyManager). Here the host name and address only choose which appliance
+ * personality (ONTAP, StorageGRID, Ceph/ZFS, Kubernetes node) the virtual terminal renders.
+ */
+
 interface DemoClusterMutableState {
   ontapQosFixed: boolean;
   snapmirrorResynced: boolean;
@@ -15,13 +24,7 @@ const demoClusterState: DemoClusterMutableState = {
   multipathFixed: false,
 };
 
-export function isDemoSshTarget(config: SSHConnectionConfig, demoModeActive: boolean): boolean {
-  if (!demoModeActive) return false;
-  if (config.id?.startsWith('demo-')) return true;
-  if (config.host?.startsWith('10.30.')) return true;
-  return false;
-}
-
+/** The scripted output of `rawCmd` on the demo appliance named or addressed by `hostOrName`. */
 export function executeDemoServerCommand(
   hostOrName: string,
   rawCmd: string

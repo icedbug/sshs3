@@ -13,22 +13,20 @@ import type {
 } from "../../../shared/types/aiHub";
 import type { S3Config } from "../../../shared/types/storage";
 import type { Snippet } from "../../../shared/types/snippets";
+import { isDemoMode } from "../../demo/demoMode";
+import {
+  getDefaultAgents,
+  getDefaultKbDocuments,
+  getDefaultSkillsAndMemories,
+  getDefaultSnippets,
+} from "./builtins";
 
-let demoOverride: boolean | undefined;
+// Demo mode is decided once at launch and never changes at runtime; the flag lives in
+// demo/demoMode.ts. Re-exported because many modules import it from here.
+export { isDemoMode };
 
-export function setDemoMode(enabled: boolean): void {
-  demoOverride = enabled;
-  process.env.SSHS3_DEMO = enabled ? "1" : "0";
-}
-
-export function isDemoMode(): boolean {
-  if (demoOverride !== undefined) return demoOverride;
-  return (
-    process.env.SSHS3_DEMO === "1" ||
-    process.env.SSHS3_DEMO_WORKSPACE === "1" ||
-    process.argv.includes("--demo")
-  );
-}
+// The getBuiltin* functions below decide what ships built in, per mode: these demo fixtures only in demo
+// mode, otherwise the neutral defaults of builtins.ts.
 
 const now = Date.now();
 const min = 60_000;
@@ -798,11 +796,14 @@ export function getDemoSnippets(): Snippet[] {
   return initialDemoSnippets.map((s) => ({ ...s }));
 }
 
+/** The built-in snippets: the demo workspace's in demo mode, otherwise the neutral defaults. */
 export function getBuiltinSnippets(): Snippet[] {
-  return initialDemoSnippets.map((s) => ({ ...s }));
+  return isDemoMode() ? getDemoSnippets() : getDefaultSnippets();
 }
 
+/** The built-in skills and memories: the demo workspace's in demo mode, otherwise none. */
 export function getBuiltinSkillsAndMemories(): MemoryEntry[] {
+  if (!isDemoMode()) return getDefaultSkillsAndMemories();
   return initialDemoMemories
     .filter((m) => m.kind === "skill" || m.id.startsWith("builtin-"))
     .map((m) => ({ ...m }));
@@ -1387,8 +1388,12 @@ export function getDemoAgents(): MissionAgent[] {
   return [...demoAgentsStore];
 }
 
+/**
+ * The built-in agents: in demo mode the demo workspace's (as saved and deleted in this process),
+ * otherwise the neutral defaults.
+ */
 export function getBuiltinAgents(): MissionAgent[] {
-  return initialDemoAgents.map((a) => ({ ...a }));
+  return isDemoMode() ? getDemoAgents() : getDefaultAgents();
 }
 
 export function saveDemoAgent(agent: MissionAgent): void {
@@ -1421,12 +1426,12 @@ export function getDemoKbDocuments(): KbDocument[] {
   return [...demoKbStore];
 }
 
+/**
+ * The built-in knowledge-base documents: in demo mode the demo workspace's (as saved and deleted in this
+ * process), otherwise none.
+ */
 export function getBuiltinKbDocuments(): KbDocument[] {
-  return initialDemoKbDocuments.map((d) => ({
-    ...d,
-    chunks: d.chunks.map((c) => ({ ...c })),
-    tags: d.tags ? [...d.tags] : undefined,
-  }));
+  return isDemoMode() ? getDemoKbDocuments() : getDefaultKbDocuments();
 }
 
 export function saveDemoKbDocument(doc: KbDocument): void {

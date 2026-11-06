@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
-import { app, BrowserWindow, Menu, nativeImage, safeStorage, screen, Tray } from 'electron';
+import { app, BrowserWindow, dialog, Menu, nativeImage, safeStorage, screen, Tray } from 'electron';
 import { createHub } from './ai/hub/createHub';
-import { isDemoMode } from './ai/hub/demoWorkspace';
+import { DEMO_ENV_VARS, demoModeRelaunchArgs, demoWorkspaceDir, isDemoMode } from './demo/demoMode';
 import { NativeDesktopShell } from './ai/desktop/NativeDesktopShell';
 import { getNativeWindow } from './ai/desktop/nativeWindow';
 import { nativeTools, setNativeHub } from './ai/desktop/nativeTools';
@@ -25,6 +25,7 @@ import type { SessionData } from '../shared/types/session';
 import { configureLogging, createLogger, flushLogs, resolveLogLevel, setLogLevel } from './log';
 import { resolvePasswordStore } from './crypto/passwordStore';
 import { loadPolicy } from './policy/loadPolicy';
+import { startLinuxRelaunch } from './update/linuxRelaunch';
 
 app.setName('sshs3');
 if (process.platform === 'linux') {
@@ -65,12 +66,23 @@ if (process.env.PORTABLE_EXECUTABLE_DIR) {
   }
 }
 
+// Demo mode (decided once at launch from --demo or SSHS3_DEMO=1, see ./demo/demoMode) keeps everything in
+// its own data directory inside the normal one. Set before anything reads userData (the single-instance
+// lock, the log file, every store, the renderer's Chromium profile), so a demo instance never reads or
+// writes the real profile, and has its own lock: a demo and a normal instance can run side by side.
+if (isDemoMode()) {
+  const demoUserData = demoWorkspaceDir(app.getPath('userData'));
+  fs.mkdirSync(demoUserData, { recursive: true });
+  app.setPath('userData', demoUserData);
+  // macOS keeps app logs outside userData (~/Library/Logs/sshs3); keep the demo's with its own data.
+  app.setAppLogsPath(path.join(demoUserData, 'logs'));
+}
+
 // Enforce single-instance lock: if an instance is already running with the same userData directory,
 // focus the existing window and immediately terminate the new instance.
 let hasSingleInstanceLock = true;
 const nativeHermes = process.env.SSHS3_NATIVE_HERMES === '1';
-const demoMode = process.env.SSHS3_DEMO === '1' || process.argv.includes('--demo');
-if (!nativeHermes && !demoMode && process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
+if (!nativeHermes && process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
   hasSingleInstanceLock = app.requestSingleInstanceLock();
   if (!hasSingleInstanceLock) {
     app.quit();
@@ -103,6 +115,7 @@ log.info('starting', {
   arch: process.arch,
   pid: process.pid,
   packaged: app.isPackaged,
+  demoMode: isDemoMode(),
   // Only whether it was inherited, never the surrounding environment: relaunch after an update inherits it.
   inheritedSshAuthSock: process.env.SSH_AUTH_SOCK ?? null,
 });
@@ -231,6 +244,63 @@ async function confirmQuit(): Promise<boolean> {
   return true;
 }
 
+/** How long a demo-mode restart waits for the graceful shutdown before it exits regardless. */
+const DEMO_RELAUNCH_EXIT_TIMEOUT_MS = 15_000;
+
+/**
+ * The Demo-Lab toggle (an AI Hub request, see HubHost.relaunchForDemoMode). Demo mode is decided at launch
+ * (./demo/demoMode), so switching it restarts the app with `--demo` added or removed, after the user has
+ * confirmed. Resolves false when nothing happens (same mode, declined, or already quitting).
+ */
+async function relaunchForDemoMode(demoMode: boolean): Promise<boolean> {
+  if (demoMode === isDemoMode() || isQuitting || !ipcBridge) return false;
+  if (!(await confirmDemoModeRelaunch(demoMode))) return false;
+  if (isQuitting || !(await confirmQuitIfActiveTransfers())) return false;
+  quitLog.info('relaunching to switch demo mode', { demoMode });
+  // The new instance takes its mode from its command line alone, never from an inherited environment.
+  for (const name of DEMO_ENV_VARS) delete process.env[name];
+  // Started on purpose by the user, so it shows its window even if this instance was autostarted hidden.
+  const args = demoModeRelaunchArgs(process.argv.slice(1).filter((arg) => arg !== '--background'), demoMode);
+  scheduleRelaunch(args);
+  // The restart is already confirmed: before-quit must not ask again, but still shuts down gracefully
+  // (sessions, tunnels, agents, logs). On the next turn, so the AI Hub request that asked is answered first.
+  quitConfirmed = true;
+  setImmediate(() => app.quit());
+  // Should that graceful shutdown stall, exit anyway: the relaunch scheduled above happens on exit.
+  setTimeout(() => app.exit(0), DEMO_RELAUNCH_EXIT_TIMEOUT_MS).unref();
+  return true;
+}
+
+/** Asks before a demo-mode restart; Cancel is the default, so a stray Enter never restarts the app. */
+async function confirmDemoModeRelaunch(demoMode: boolean): Promise<boolean> {
+  const options: Electron.MessageBoxOptions = {
+    type: 'question',
+    buttons: [demoMode ? 'Restart in Demo Mode' : 'Restart in Normal Mode', 'Cancel'],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+    title: 'sshs3',
+    message: demoMode ? 'Restart sshs3 in demo mode?' : 'Restart sshs3 in normal mode?',
+    detail: demoMode
+      ? 'sshs3 will restart in demo mode — your real profile is not touched. Open sessions and tunnels will be closed.'
+      : 'sshs3 will restart in normal mode. Open sessions and tunnels will be closed.',
+  };
+  const parent = windowManager.focused() ?? mainWindow;
+  const { response } =
+    parent && !parent.isDestroyed() ? await dialog.showMessageBox(parent, options) : await dialog.showMessageBox(options);
+  return response === 0;
+}
+
+/** Starts the app again with `args` once this process has exited. */
+function scheduleRelaunch(args: string[]): void {
+  // Packaged Linux builds come back through the desktop session like after an update (a fresh systemd scope,
+  // so sudo/PAM keep working in the integrated terminal; AppImage-aware). A direct re-exec is the fallback.
+  if (process.platform === 'linux' && app.isPackaged && startLinuxRelaunch({ args })) return;
+  // A portable Windows build runs from a temporary extraction that is removed on exit: relaunch the portable exe.
+  const portableExe = process.env.PORTABLE_EXECUTABLE_FILE;
+  app.relaunch(portableExe ? { args, execPath: portableExe } : { args });
+}
+
 /**
  * Native Hermes mode: Hermes owns the host window and sshs3 runs as a view inside it (see
  * ./ai/desktop/NativeDesktopShell), so no regular app window is created.
@@ -276,7 +346,7 @@ function createWindow(key: string | null = null, saved?: { bounds?: Rect; maximi
   const htmlPath = path.join(__dirname, '../dist/index.html');
   // Demo mode: the renderer detects it via ?demo=1, so the page is loaded with that query
   // (as a file:// URL in production, since createAppWindow's loadFile takes no query).
-  const loadUrl = demoMode
+  const loadUrl = isDemoMode()
     ? devServerUrl
       ? `${devServerUrl}${devServerUrl.includes('?') ? '&' : '?'}demo=1`
       : `${pathToFileURL(htmlPath).href}?demo=1`
@@ -296,7 +366,7 @@ function createWindow(key: string | null = null, saved?: { bounds?: Rect; maximi
     htmlPath,
   });
 
-  if (demoMode && isMain && !saved?.bounds) {
+  if (isDemoMode() && isMain && !saved?.bounds) {
     win.setSize(1480, 920);
     win.center();
   }
@@ -361,7 +431,7 @@ function createWindow(key: string | null = null, saved?: { bounds?: Rect; maximi
       if (!win.isDestroyed() && !process.argv.includes('--background')) {
         win.show();
         win.focus();
-        if (demoMode) {
+        if (isDemoMode()) {
           win.setAlwaysOnTop(true);
           win.focus();
           setTimeout(() => {
@@ -451,7 +521,7 @@ const windowActions: WindowActions = {
 async function restoreWindows(): Promise<void> {
   let session: SessionData | null = null;
   // Demo mode opens a clean Demo Workspace: no previous windows (or their tabs) are restored.
-  // isDemoMode() (CLI flag or Demo Lab preference, resolved by aiHub.initialize()) matches SESSION_GET.
+  // isDemoMode() (decided at launch, see ./demo/demoMode) matches SESSION_GET.
   if (!isDemoMode()) {
     try {
       session = (await ipcBridge?.sessionStore.getSession()) ?? null;
@@ -514,6 +584,9 @@ async function initializeApp(): Promise<void> {
         ]));
         backgroundTray.on('double-click', () => mainWindow?.show());
       } else if (!enabled && backgroundTray) { backgroundTray.destroy(); backgroundTray = null; }
+      // Login items are per machine and belong to the real installation: a demo instance (with its own,
+      // fresh preferences) must neither add nor remove them.
+      if (isDemoMode()) return;
       if (process.platform === 'win32') app.setLoginItemSettings({ openAtLogin: enabled && autoStart, args: ['--background'] });
       if (process.platform === 'linux') {
         const autoDir = path.join(process.env.XDG_CONFIG_HOME || path.join(app.getPath('home'), '.config'), 'autostart');
@@ -525,6 +598,7 @@ async function initializeApp(): Promise<void> {
         } else if (fs.existsSync(target)) fs.unlinkSync(target);
       }
     },
+    relaunchForDemoMode,
   });
   ipcBridge.register();
   if (nativeHermes) setNativeHub(ipcBridge.aiHub);
@@ -553,7 +627,8 @@ async function initializeApp(): Promise<void> {
       void SystemTrustStore.init();
     }),
     // Syncs the managed block, then (via onLocalSshConfigSynced) clears any agent block a crashed run left behind.
-    ipcBridge.profileSyncService.autoSyncLocalSshConfig(),
+    // Not in demo mode: the demo's own profile store must never rewrite the real ~/.ssh/config.
+    isDemoMode() ? undefined : ipcBridge.profileSyncService.autoSyncLocalSshConfig(),
   ]).catch((err) => {
     log.warn('background initialization error', err);
   });

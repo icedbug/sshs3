@@ -8,6 +8,13 @@ import type {
   WriteStreamOptions,
 } from '../../shared/types/storage';
 
+/**
+ * The demo workspace's in-memory file system: stands in for the SFTP server or S3 bucket of a demo
+ * fixture, so browsing or editing a demo target never opens a real connection. StorageRegistry uses
+ * it only for demo targets (`isDemoTarget` in ./demoMode, by identity); the host or bucket name only
+ * chooses which sample files are seeded.
+ */
+
 interface VirtualFileNode {
   path: string;
   name: string;

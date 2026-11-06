@@ -102,12 +102,16 @@ export class FileTools {
           config,
           providerId,
         );
-        await this.bridge.storageRegistry.getOrCreate({
-          id: providerId,
-          name: session.label,
-          type: "sftp",
-          sftpConfig: config,
-        });
+        await this.bridge.storageRegistry.getOrCreate(
+          {
+            id: providerId,
+            name: session.label,
+            type: "sftp",
+            sftpConfig: config,
+          },
+          // providerId is synthetic; the terminal's profile id identifies a demo target.
+          { profileId: session.profileId },
+        );
       } else {
         const live = this.bridge.k8sTerminalManager.getSession(session.id);
         if (!live) throw new Error("Container connection no longer exists");
