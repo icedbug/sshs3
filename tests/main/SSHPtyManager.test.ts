@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import type { IPty, IDisposable } from 'node-pty';
 import { SmartcardDetector } from '../../src/main/smartcard/SmartcardDetector';
@@ -258,7 +259,7 @@ describe('SSHPtyManager', () => {
         host: 'pwd.domain.com',
         username: 'pwduser',
         authType: 'password',
-        password: 'mysecretpassword',
+        password: 'mysecretpassword', // pragma: allowlist secret
       };
 
       const session = await manager.createSession(config);
@@ -540,6 +541,35 @@ describe('SSHPtyManager', () => {
         Object.defineProperty(process, 'platform', { value: originalPlatform });
       }
     });
+
+    // Electron always has fds above 9 open; dash (Debian/Ubuntu /bin/sh) cannot redirect those.
+    it.skipIf(process.platform !== 'linux')(
+      'the wrapper reaches the shell with fds above 9 open, under dash and bash',
+      async () => {
+        await manager.createShellSession({ cols: 80, rows: 24 });
+        const { args } = (mockPtyInstances[mockPtyInstances.length - 1] as any)._spawnArgs;
+        const script: string = args[1];
+
+        const shells = ['/bin/sh', '/usr/bin/dash', '/bin/dash', '/bin/bash'].filter((s) => fs.existsSync(s));
+        expect(shells.length).toBeGreaterThan(0);
+        const high = fs.openSync('/dev/null', 'r');
+        try {
+          for (const sh of shells) {
+            // stdio index 12 opens fd 12 in the child.
+            const stdio: ('pipe' | 'ignore' | number)[] = ['ignore', 'pipe', 'pipe', ...Array(9).fill('ignore'), high];
+            const result = spawnSync(sh, ['-c', script, '--', '/bin/sh', '-c', 'ls /proc/self/fd; echo reached'], {
+              stdio,
+              encoding: 'utf8',
+            });
+            expect({ sh, status: result.status }).toEqual({ sh, status: 0 });
+            expect(result.stdout).toContain('reached');
+            if (sh === '/bin/bash') expect(result.stdout.split('\n')).not.toContain('12');
+          }
+        } finally {
+          fs.closeSync(high);
+        }
+      }
+    );
   });
 
   describe('hasSshClient', () => {

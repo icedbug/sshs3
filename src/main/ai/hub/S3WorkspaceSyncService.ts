@@ -117,7 +117,7 @@ export function decodeS3WorkspaceInvite(
         : "sshs3-workspace",
     accessKeyId: parsed.accessKeyId.trim(),
     secretAccessKey:
-      typeof parsed.secretAccessKey === "string"
+      typeof parsed.secretAccessKey === "string" // pragma: allowlist secret
         ? parsed.secretAccessKey
         : undefined,
     forcePathStyle:
@@ -270,6 +270,7 @@ export function mergeS3WorkspacePayload(
       ...lm,
       title: maskContext(lm.title),
       text: maskContext(lm.text),
+      ...(lm.sourceCommand ? { sourceCommand: maskContext(lm.sourceCommand) } : {}),
     });
   }
   for (const rm of Array.isArray(remote.memories) ? remote.memories : []) {
@@ -279,12 +280,39 @@ export function mergeS3WorkspacePayload(
     const prev = memMap.get(rm.id);
     if (!prev || rTime > (prev.updatedAt ?? 0)) {
       memMap.set(rm.id, {
+        ...prev,
+        ...rm,
         id: rm.id,
         kind: rm.kind === "skill" ? "skill" : "memory",
+        tier:
+          rm.tier === "core" || rm.tier === "archival" || rm.tier === "episodic"
+            ? rm.tier
+            : prev?.tier,
+        cluster: rm.cluster ? String(rm.cluster) : prev?.cluster,
         scope: rm.scope || "workspace",
         title: maskContext(String(rm.title || "")),
         text: maskContext(String(rm.text || "")),
-        author: rm.author ? String(rm.author) : undefined,
+        author: rm.author ? String(rm.author) : prev?.author,
+        updatedCount:
+          typeof rm.updatedCount === "number" ? rm.updatedCount : prev?.updatedCount,
+        confidence:
+          typeof rm.confidence === "number" ? rm.confidence : prev?.confidence,
+        successCount:
+          typeof rm.successCount === "number" ? rm.successCount : prev?.successCount,
+        failureCount:
+          typeof rm.failureCount === "number" ? rm.failureCount : prev?.failureCount,
+        usageCount:
+          typeof rm.usageCount === "number" ? rm.usageCount : prev?.usageCount,
+        feedbackScore:
+          typeof rm.feedbackScore === "number" ? rm.feedbackScore : prev?.feedbackScore,
+        autoLearned:
+          typeof rm.autoLearned === "boolean" ? rm.autoLearned : prev?.autoLearned,
+        sourceCommand: rm.sourceCommand
+          ? maskContext(String(rm.sourceCommand))
+          : prev?.sourceCommand,
+        errorSignature: rm.errorSignature
+          ? String(rm.errorSignature)
+          : prev?.errorSignature,
         updatedAt: rTime,
       });
       changed = true;

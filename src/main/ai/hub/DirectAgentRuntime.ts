@@ -292,16 +292,26 @@ const AGENT_TOOLS: FunctionToolDef[] = [
   {
     name: "sshs3_manage_memory_and_activity",
     description:
-      "List, create, update, deduplicate, or delete shared/personal AI memories (Core Pinned, Archival, or Episodic) and reusable troubleshooting skills in sshs3, or log a team activity note.",
+      "List, create, update, deduplicate, upvote/downvote (feedback), trigger self-reflection on, or delete shared/personal AI memories (Core Pinned, Archival, or Episodic) and reusable troubleshooting skills in sshs3, or log a team activity note.",
     parameters: {
       type: "object",
       properties: {
         operation: {
           type: "string",
-          enum: ["list", "save", "core_replace", "core_append", "delete", "log_activity"],
-          description: "Operation: 'list', 'save' (create/update/deduplicate memory or skill), 'core_replace' / 'core_append' (Letta-style Core Pinned Memory update), 'delete', or 'log_activity'.",
+          enum: [
+            "list",
+            "save",
+            "core_replace",
+            "core_append",
+            "delete",
+            "feedback",
+            "self_reflect",
+            "log_activity",
+          ],
+          description:
+            "Operation: 'list', 'save' (create/update/deduplicate memory or skill), 'core_replace' / 'core_append' (Letta-style Core Pinned Memory update), 'delete', 'feedback' (apply +1/-1 reinforcement feedback), 'self_reflect' (run Voyager/Letta self-reflection & consolidation cycle), or 'log_activity'.",
         },
-        idOrTitle: { type: "string", description: "Memory/skill ID or title to update or delete." },
+        idOrTitle: { type: "string", description: "Memory/skill ID or title to update, give feedback on, or delete." },
         title: { type: "string", description: "Title for the memory/skill or target label for activity." },
         text: { type: "string", description: "Content for the memory/skill or summary for activity." },
         detail: { type: "string", description: "Optional command or config detail when logging activity." },
@@ -311,8 +321,14 @@ const AGENT_TOOLS: FunctionToolDef[] = [
           enum: ["core", "archival", "episodic"],
           description: "Memory tier: 'core' (always pinned in prompt), 'archival' (searched via Hybrid RAG), or 'episodic' (session fact).",
         },
-        cluster: { type: "string", description: "Optional cluster binding for the memory/skill." },
-        scope: { type: "string", description: "Scope: 'workspace' (shared with team) or 'personal'." },
+        cluster: { type: "string", description: "Optional cluster binding for the memory/skill or self_reflect target cluster." },
+        scope: { type: "string", description: "Scope: 'workspace' (shared with team), 'personal', 'server:<name>', or 'cluster:<name>'." },
+        sourceCommand: { type: "string", description: "Optional canonical shell command associated with a reusable skill." },
+        delta: {
+          type: "number",
+          enum: [1, -1],
+          description: "Reinforcement feedback delta (+1 upvote or -1 downvote) when operation is 'feedback'.",
+        },
         activityKind: {
           type: "string",
           enum: ["note", "config-edit", "service", "deploy", "package", "command"],
@@ -416,7 +432,7 @@ const AGENT_TOOLS: FunctionToolDef[] = [
   {
     name: "sshs3_manage_app_and_settings",
     description:
-      "Read or configure ALL sshs3 application settings, AI model & context window parameters, keyboard shortcuts, Dotfile Pools & synced dotfiles (~/.bashrc, ~/.vimrc, ~/.tmux.conf, etc.), and reusable command snippets, or open a local terminal session.",
+      "Read or configure ALL sshs3 application settings, AI model & context window parameters, AST Shell Safety & Policy Guard rules, keyboard shortcuts, Dotfile Pools & synced dotfiles (~/.bashrc, ~/.vimrc, ~/.tmux.conf, etc.), and reusable command snippets, or open a local terminal session.",
     parameters: {
       type: "object",
       properties: {
@@ -427,6 +443,7 @@ const AGENT_TOOLS: FunctionToolDef[] = [
             "update_settings",
             "configure_ai",
             "update_shortcuts",
+            "update_safety_policy",
             "list_dotfiles",
             "save_dotfile",
             "delete_dotfile",
@@ -436,7 +453,7 @@ const AGENT_TOOLS: FunctionToolDef[] = [
             "open_local_terminal",
           ],
           description:
-            "Operation: 'get_state' (inspect full sshs3 state), 'update_settings' (update any AppSettings, AI parameter, or shortcut), 'configure_ai' (update AI model/provider/context window/reasoning), 'update_shortcuts' (update or reset keyboard shortcuts), 'list_dotfiles' / 'save_dotfile' / 'delete_dotfile' (manage Dotfile Pools and synced dotfiles), 'list_snippets' / 'save_snippet' / 'delete_snippet' (manage command snippets), or 'open_local_terminal'.",
+            "Operation: 'get_state' (inspect full sshs3 state), 'update_settings' (update any AppSettings, AI parameter, safety policy, or shortcut), 'configure_ai' (update AI model/provider/context window/reasoning), 'update_shortcuts' (update or reset keyboard shortcuts), 'update_safety_policy' (update AST Shell Safety & Policy Guard rules), 'list_dotfiles' / 'save_dotfile' / 'delete_dotfile' (manage Dotfile Pools and synced dotfiles), 'list_snippets' / 'save_snippet' / 'delete_snippet' (manage command snippets), or 'open_local_terminal'.",
         },
         actorName: { type: "string", description: "User's display name in the team workspace & activity log." },
         theme: { type: "string", enum: ["dark", "light", "breeze", "system"], description: "UI theme ('dark', 'light', 'breeze', or 'system')." },
@@ -526,6 +543,37 @@ const AGENT_TOOLS: FunctionToolDef[] = [
         autoStart: { type: "boolean", description: "Start sshs3 automatically on login." },
         inventory: { type: "boolean", description: "Enable background TCP reachability checks." },
         retentionDays: { type: "number", description: "Number of days to retain AI task history." },
+        safetyPolicy: {
+          type: "object",
+          description: "AST Shell Safety & Policy Guard configuration.",
+          properties: {
+            autoApproveSafeReadOnly: {
+              type: "boolean",
+              description: "Auto-approve AST-verified read-only commands in 'assisted' mode.",
+            },
+            requireApprovalOnProdTags: {
+              type: "boolean",
+              description: "Require manual approval for modifying commands on 'prod'/'production'/'critical'-tagged servers even in 'autonomous' mode.",
+            },
+            blockDestructiveWithoutConfirm: {
+              type: "boolean",
+              description: "Always require manual confirmation for destructive commands.",
+            },
+          },
+          additionalProperties: false,
+        },
+        autoApproveSafeReadOnly: {
+          type: "boolean",
+          description: "Auto-approve AST-verified read-only commands in 'assisted' mode.",
+        },
+        requireApprovalOnProdTags: {
+          type: "boolean",
+          description: "Require manual approval on 'prod'/'production'/'critical'-tagged servers in 'autonomous' mode.",
+        },
+        blockDestructiveWithoutConfirm: {
+          type: "boolean",
+          description: "Always require manual confirmation for destructive commands.",
+        },
         poolId: { type: "string", description: "Dotfile Pool ID (e.g. 'default', 'storage-admins') for save_dotfile / delete_dotfile." },
         poolName: { type: "string", description: "Display name for the Dotfile Pool (e.g. 'Storage Admin Dotfiles')." },
         remotePath: { type: "string", description: "Remote dotfile path (e.g. '~/.bashrc', '~/.vimrc', '~/.tmux.conf')." },
@@ -1320,8 +1368,12 @@ export class DirectAgentRuntime implements AgentRuntime {
       });
       let diffText = diffResRaw;
       try {
-        const parsed = JSON.parse(diffResRaw) as { diff?: string };
-        if (parsed.diff) diffText = parsed.diff;
+        const parsed = JSON.parse(diffResRaw) as {
+          unifiedDiff?: string;
+          diff?: string;
+        };
+        const resolvedDiff = parsed.unifiedDiff ?? parsed.diff;
+        if (resolvedDiff) diffText = resolvedDiff;
       } catch {
         // keep raw
       }
@@ -1625,6 +1677,9 @@ export class DirectAgentRuntime implements AgentRuntime {
           instructions,
           input: inputItems,
           tools: wireTools,
+          max_output_tokens: tuning.maxOutputTokens,
+          reasoning: { effort: tuning.reasoningEffort },
+          temperature: tuning.temperature,
           store: false,
           stream: true,
         }),
@@ -1803,6 +1858,8 @@ export class DirectAgentRuntime implements AgentRuntime {
           model: model.model,
           messages,
           tools,
+          max_tokens: tuning.maxOutputTokens,
+          temperature: tuning.temperature,
           stream: true,
         }),
         signal: this.abort.signal,
@@ -1913,10 +1970,34 @@ export class DirectAgentRuntime implements AgentRuntime {
     const messages: Array<Record<string, unknown>> = task.messages
       .filter((m) => m.role !== "system")
       .slice(-30)
-      .map((m) => ({
-        role: m.role === "assistant" ? "assistant" : "user",
-        content: boundedContext(m.text),
-      }));
+      .map((m) => {
+        const role = m.role === "assistant" ? "assistant" : "user";
+        if (role === "user" && m.images?.length) {
+          const contentBlocks: Array<Record<string, unknown>> = [
+            { type: "text", text: boundedContext(m.text) },
+          ];
+          for (const img of m.images) {
+            const match = /^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/.exec(
+              img.dataUrl || "",
+            );
+            if (match) {
+              contentBlocks.push({
+                type: "image",
+                source: {
+                  type: "base64",
+                  media_type: img.mimeType || match[1],
+                  data: match[2],
+                },
+              });
+            }
+          }
+          return { role, content: contentBlocks };
+        }
+        return {
+          role,
+          content: boundedContext(m.text),
+        };
+      });
 
     const tools = toolsForTask(task, initialContext).map((t) => ({
       name: t.name,
@@ -1941,7 +2022,8 @@ export class DirectAgentRuntime implements AgentRuntime {
         },
         body: JSON.stringify({
           model: model.model,
-          max_tokens: 4096,
+          max_tokens: tuning.maxOutputTokens,
+          temperature: tuning.temperature,
           system: systemInstructions,
           messages,
           tools,

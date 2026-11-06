@@ -7,7 +7,7 @@ import security from 'eslint-plugin-security';
 
 export default tseslint.config(
   {
-    ignores: ['dist', 'dist-electron', 'build-resources/**', 'release/**', '.npm-cache/**', 'node_modules', 'coverage', '*.config.js', '*.config.ts', '.claude/**', '.superpowers/**', 'pieces/**'],
+    ignores: ['dist', 'dist-electron', 'dist-web', 'build-resources/**', 'release/**', '.npm-cache/**', 'node_modules', 'coverage', '*.config.js', '*.config.ts', '.claude/**', '.agents/**', '.superpowers/**', 'pieces/**'],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,

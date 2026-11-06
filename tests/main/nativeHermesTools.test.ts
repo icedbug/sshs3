@@ -195,7 +195,7 @@ describe("native Hermes terminal authority", () => {
     bridge.approve(task.id, task.changes[0].id, true);
     const output = await processResult;
     expect(output.stdout).toContain('"nativePlugin": "passed"');
-    expect(output.stdout).toContain('"secretScrub": "passed"');
+    expect(output.stdout).toContain('"secretScrub": "passed"'); // pragma: allowlist secret
     expect(writes[2].id).toBe("one");
     expect(terminals.get("one")!.owner).toBeUndefined();
     expect(task.status).toBe("interrupted");

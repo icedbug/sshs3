@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { createTwoFilesPatch } from "diff";
 import { nativeEvents } from '../desktop/nativeEvents';
 import { FileTools } from "./FileTools";
 import type { IpcBridge } from "../../IpcBridge";
@@ -8,12 +9,19 @@ import {
   type WorkspaceServerSummary,
 } from "../../../shared/types/aiHub";
 import { DEFAULT_SHORTCUTS } from "../../../shared/types/settings";
+import type {
+  IStorageProvider,
+  S3Config,
+  SFTPConfig,
+} from "../../../shared/types/storage";
 import type { TeamVaultPayload } from "../../../shared/types/teamVault";
 import type { InventoryTarget } from "./ContextService";
+import { boundedContext, maskContext } from "./privacy";
 import {
   appendDemoActivity,
   deleteDemoMemory,
   deleteDemoServer,
+  getBuiltinSnippets,
   getDemoActivityLog,
   getDemoMemories,
   getDemoS3Profiles,
@@ -59,6 +67,218 @@ export function createHub(
     }
     return undefined;
   };
+  const resolveTargetStorageProvider = async (
+    targetRef: string,
+  ): Promise<IStorageProvider> => {
+    const raw = (targetRef || "local").trim();
+    const q = raw.replace(/^@/, "").toLowerCase();
+    if (q === "local") {
+      return await bridge.storageRegistry.getOrCreate({
+        id: "ai-hub-local",
+        name: "Local Storage",
+        type: "local",
+      });
+    }
+    const existingProvider = bridge.storageRegistry.get(raw);
+    if (existingProvider) return existingProvider;
+
+    const termSession = hub.terminals
+      .list()
+      .find(
+        (t) =>
+          t.id.toLowerCase() === q ||
+          (t.profileId && t.profileId.toLowerCase() === q) ||
+          t.label.toLowerCase() === q,
+      );
+    if (termSession) {
+      if (termSession.kind === "local") {
+        return await bridge.storageRegistry.getOrCreate({
+          id: "ai-hub-local",
+          name: termSession.label || "Local Storage",
+          type: "local",
+        });
+      }
+      if (termSession.kind === "ssh") {
+        const live = bridge.sshPtyManager?.getSession?.(termSession.id);
+        if (live) {
+          const providerId = `ai-storage-ssh:${termSession.id}`;
+          let sftpConfig: SFTPConfig = {
+            ...live.config,
+            id: providerId,
+            port: live.config.port ?? 22,
+          };
+          if (bridge.smartcard) {
+            sftpConfig = await bridge.smartcard.prepareSftpSmartcardConfig(
+              sftpConfig,
+              providerId,
+            );
+            sftpConfig = await bridge.smartcard.prepareFido2SftpConfig(
+              sftpConfig,
+              providerId,
+            );
+          }
+          return await bridge.storageRegistry.getOrCreate(
+            {
+              id: providerId,
+              name: termSession.label,
+              type: "sftp",
+              sftpConfig,
+            },
+            { profileId: termSession.profileId },
+          );
+        }
+      }
+    }
+
+    const profiles = await bridge.profileStore
+      .getProfiles()
+      .catch(() => ({ ssh: [], s3: [], folders: [] }));
+    const s3Candidates: S3Config[] = [...(profiles.s3 ?? [])];
+    const sshCandidates = [...(profiles.ssh ?? [])];
+
+    for (const vaultId of await unlockedVaultIds()) {
+      try {
+        const payload = await bridge.teamVaultService.getPayload(vaultId);
+        for (const s3p of payload.s3 ?? []) {
+          if (!s3Candidates.some((x) => x.id === s3p.id)) {
+            s3Candidates.push(s3p);
+          }
+        }
+        for (const sshp of payload.ssh ?? []) {
+          if (!sshCandidates.some((x) => x.id === sshp.id)) {
+            sshCandidates.push(sshp);
+          }
+        }
+      } catch {
+        // Ignore locked/unreadable vault
+      }
+    }
+    for (const syncedSrv of hub.store.data.s3SyncedServers ?? []) {
+      if (!sshCandidates.some((x) => x.id === syncedSrv.id)) {
+        sshCandidates.push({
+          ...syncedSrv,
+          authType: syncedSrv.authType ?? "agent",
+        });
+      }
+    }
+    if (isDemoMode()) {
+      for (const ds3 of getDemoS3Profiles()) {
+        if (!s3Candidates.some((x) => x.id === ds3.id)) s3Candidates.push(ds3);
+      }
+      for (const dsrv of getDemoServers()) {
+        if (!sshCandidates.some((x) => x.id === dsrv.id)) {
+          sshCandidates.push({
+            ...dsrv,
+            authType: dsrv.authType ?? "agent",
+          });
+        }
+      }
+    }
+
+    const matchedS3 =
+      s3Candidates.find(
+        (s) =>
+          s.id.toLowerCase() === q ||
+          `s3-${s.id.toLowerCase()}` === q ||
+          s.name.toLowerCase() === q ||
+          (s.initialPath && s.initialPath.toLowerCase() === q),
+      ) ||
+      s3Candidates.find(
+        (s) =>
+          s.name.toLowerCase().includes(q) ||
+          (s.initialPath && s.initialPath.toLowerCase().includes(q)),
+      );
+    if (matchedS3) {
+      const providerId = `s3-${matchedS3.id}`;
+      return await bridge.storageRegistry.getOrCreate(
+        {
+          id: providerId,
+          name: matchedS3.name,
+          type: "s3",
+          s3Config: { ...matchedS3, id: matchedS3.id },
+        },
+        { profileId: matchedS3.id },
+      );
+    }
+
+    const matchedSsh =
+      sshCandidates.find(
+        (s) =>
+          s.id.toLowerCase() === q ||
+          `sftp-${s.id.toLowerCase()}` === q ||
+          s.name.toLowerCase() === q ||
+          s.host.toLowerCase() === q,
+      ) ||
+      sshCandidates.find(
+        (s) =>
+          s.name.toLowerCase().includes(q) || s.host.toLowerCase().includes(q),
+      );
+    if (matchedSsh) {
+      const providerId = `sftp-${matchedSsh.id}`;
+      let sftpConfig: SFTPConfig = {
+        ...matchedSsh,
+        id: providerId,
+        port: matchedSsh.port ?? 22,
+      };
+      if (bridge.resolveProxyJumpConfig) {
+        sftpConfig = await bridge.resolveProxyJumpConfig(sftpConfig);
+      }
+      if (bridge.smartcard) {
+        sftpConfig = await bridge.smartcard.prepareSftpSmartcardConfig(
+          sftpConfig,
+          providerId,
+        );
+        sftpConfig = await bridge.smartcard.prepareFido2SftpConfig(
+          sftpConfig,
+          providerId,
+        );
+        sftpConfig = await bridge.smartcard.prepareSftpSshCaConfig(sftpConfig);
+      }
+      return await bridge.storageRegistry.getOrCreate(
+        {
+          id: providerId,
+          name: matchedSsh.name || matchedSsh.host,
+          type: "sftp",
+          sftpConfig,
+        },
+        { profileId: matchedSsh.id },
+      );
+    }
+
+    throw new Error(`Storage target "${targetRef}" not found`);
+  };
+
+  const readProviderTextFile = async (
+    provider: IStorageProvider,
+    remotePath: string,
+  ): Promise<string> => {
+    if (bridge.fileEditorService?.readFile && bridge.storageRegistry.has(provider.id)) {
+      const res = await bridge.fileEditorService.readFile(
+        bridge.storageRegistry,
+        provider.id,
+        remotePath,
+        64_000,
+      );
+      if (res.isBinary || res.notUtf8) {
+        throw new Error(`File "${remotePath}" is binary or non-UTF8`);
+      }
+      return boundedContext(maskContext(res.content), 64_000);
+    }
+    if (typeof provider.readFile === "function") {
+      const buf = await provider.readFile(remotePath);
+      return boundedContext(maskContext(buf.toString("utf-8")), 64_000);
+    }
+    const stream = await provider.createReadStream(remotePath);
+    const chunks: Buffer[] = [];
+    for await (const chunk of stream as AsyncIterable<Buffer | string>) {
+      chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+    }
+    return boundedContext(
+      maskContext(Buffer.concat(chunks).toString("utf-8")),
+      64_000,
+    );
+  };
+
   const hub: HubService = new HubService({
     ...lifecycle,
     aiConfigFilePath: options?.aiConfigFilePath,
@@ -191,8 +411,9 @@ export function createHub(
           memories: [
             ...payloads.flatMap((payload) =>
               (payload.workspaceMemories ?? []).map((m) => ({
+                ...m,
                 id: m.id,
-                kind: m.kind,
+                kind: (m.kind === "skill" ? "skill" : "memory") as "memory" | "skill",
                 scope: m.scope,
                 title: m.title,
                 text: m.text,
@@ -622,21 +843,42 @@ export function createHub(
       return id;
     },
     openServerTerminal: async (profileId) => {
-      const profile = (await bridge.profileStore.getProfiles()).ssh.find(
-        (p) => p.id === profileId,
-      );
+      const profiles = await bridge.profileStore.getProfiles();
+      let profile = profiles.ssh.find((p) => p.id === profileId);
+      if (!profile) {
+        const team = await findTeamVaultProfile(profileId);
+        if (team) profile = team.profile;
+      }
+      if (!profile) {
+        const synced = (hub.store.data.s3SyncedServers ?? []).find(
+          (s) => s.id === profileId,
+        );
+        if (synced) {
+          profile = {
+            ...synced,
+            authType: synced.authType ?? "agent",
+          };
+        }
+      }
       if (!profile) throw new Error(`Saved SSH profile "${profileId}" not found`);
-      if (["password", "smartcard", "fido2"].includes(profile.authType)) {
+      const localOv = hub.store.data.localOverrides?.[profileId];
+      const effectiveProfile = {
+        ...profile,
+        ...(localOv?.username ? { username: localOv.username } : {}),
+        ...(localOv?.privateKeyPath ? { privateKeyPath: localOv.privateKeyPath } : {}),
+        ...(localOv?.authType ? { authType: localOv.authType } : {}),
+      };
+      if (["password", "smartcard", "fido2"].includes(effectiveProfile.authType)) {
         throw new Error(
-          `Node "${profile.name || profile.host}" requires interactive auth; open its terminal tab first.`,
+          `Node "${effectiveProfile.name || effectiveProfile.host}" requires interactive auth; open its terminal tab first.`,
         );
       }
       const config = await bridge.resolveProxyJumpConfig({
-        ...profile,
+        ...effectiveProfile,
         id: crypto.randomUUID(),
         autoReconnect: false,
         extraOptions: {
-          ...profile.extraOptions,
+          ...effectiveProfile.extraOptions,
           BatchMode: "yes",
           ConnectTimeout: "10",
         },
@@ -645,30 +887,49 @@ export function createHub(
         cols: 100,
         rows: 30,
         // config.id is per session; the profile id identifies a demo target.
-        profileId: profile.id,
+        profileId: effectiveProfile.id,
       });
       hub.terminals.register(
         {
           id: session.sessionId,
-          label: profile.name || profile.host,
+          label: effectiveProfile.name || effectiveProfile.host,
           kind: "ssh",
-          profileId: profile.id,
+          profileId: effectiveProfile.id,
         },
         (data) => bridge.sshPtyManager.write(session.sessionId, data),
       );
+      await hub.terminals.arm(session.sessionId, "bash").catch(() => {});
       return session.sessionId;
     },
     extraAppContext: async () => {
+      const usedListWithBuiltins =
+        typeof bridge.snippetStore?.listWithBuiltins === "function";
       const [profiles, settings, snippets, dotfilesPools, dirSyncProfiles] = await Promise.all([
         bridge.profileStore.getProfiles().catch(() => ({ ssh: [], s3: [], folders: [] })),
         bridge.settingsStore?.getSettings?.().catch(() => ({})) ?? Promise.resolve({}),
-        bridge.snippetStore?.list?.().catch(() => []) ?? Promise.resolve([]),
+        (usedListWithBuiltins
+          ? bridge.snippetStore.listWithBuiltins(getBuiltinSnippets())
+          : bridge.snippetStore?.list?.()
+        )?.catch(() => []) ?? Promise.resolve([]),
         bridge.dotfilePoolStore?.getPools?.().catch(() => []) ?? Promise.resolve([]),
         bridge.directorySyncProfileStore?.list?.().catch(() => []) ?? Promise.resolve([]),
       ]);
       const folderSet = new Set<string>(profiles.folders ?? []);
       const s3List = [...(profiles.s3 ?? [])];
       const snippetList = [...(snippets ?? [])];
+      if (!usedListWithBuiltins) {
+        const dismissed = new Set(
+          hub.store.data.preferences.dismissedBuiltinIds ?? [],
+        );
+        for (const bs of getBuiltinSnippets()) {
+          if (
+            !dismissed.has(bs.id) &&
+            !snippetList.some((s) => s.id === bs.id)
+          ) {
+            snippetList.push(bs);
+          }
+        }
+      }
       if (isDemoMode()) {
         for (const d of getDemoServers()) {
           if (d.folder) folderSet.add(d.folder);
@@ -677,8 +938,10 @@ export function createHub(
           if (ds3.group) folderSet.add(ds3.group);
           if (!s3List.some((s) => s.id === ds3.id)) s3List.push(ds3);
         }
-        for (const ds of getDemoSnippets()) {
-          if (!snippetList.some((s) => s.id === ds.id)) snippetList.push(ds);
+        if (!usedListWithBuiltins) {
+          for (const ds of getDemoSnippets()) {
+            if (!snippetList.some((s) => s.id === ds.id)) snippetList.push(ds);
+          }
         }
       }
       const activeTunnels = (bridge.sshTunnelManager?.listActive?.() ?? []).map((t) => ({
@@ -910,32 +1173,64 @@ export function createHub(
           deletedRemotePath: input.dotfile.remotePath,
         };
       }
+      const listAllSnippets = async () => {
+        if (typeof bridge.snippetStore?.listWithBuiltins === "function") {
+          return (
+            (await bridge.snippetStore
+              .listWithBuiltins(getBuiltinSnippets())
+              .catch(() => [])) ?? []
+          );
+        }
+        const raw = (await bridge.snippetStore?.list?.().catch(() => [])) ?? [];
+        const dismissed = new Set(
+          hub.store.data.preferences.dismissedBuiltinIds ?? [],
+        );
+        return [
+          ...raw,
+          ...getBuiltinSnippets().filter(
+            (bs) => !dismissed.has(bs.id) && !raw.some((r) => r.id === bs.id),
+          ),
+        ];
+      };
+      const isBuiltinSnippetId = (id: string | undefined): boolean =>
+        typeof id === "string" && getBuiltinSnippets().some((b) => b.id === id);
       if (input.operation === "list_snippets") {
-        const snippets = (await bridge.snippetStore?.list?.().catch(() => [])) ?? [];
+        const snippets = await listAllSnippets();
         return { snippets };
       }
       if (input.operation === "save_snippet" && input.snippet) {
-        const snippets = (await bridge.snippetStore?.list?.().catch(() => [])) ?? [];
+        const snippets = await listAllSnippets();
         const q = (input.snippet.id || input.snippet.name || "").trim().toLowerCase();
         const existing = snippets.find(
           (s) => s.id.toLowerCase() === q || s.name.toLowerCase() === q,
         );
-        const saved = await bridge.snippetStore.save({
-          id: existing?.id || input.snippet.id,
-          name: input.snippet.name || existing?.name || "Snippet",
-          command: input.snippet.command || existing?.command || "",
-        });
+        const targetId = existing?.id || input.snippet.id;
+        const saved = await bridge.snippetStore.save(
+          {
+            id: targetId,
+            name: input.snippet.name || existing?.name || "Snippet",
+            command: input.snippet.command || existing?.command || "",
+          },
+          { replacesBuiltin: isBuiltinSnippetId(targetId) },
+        );
         return saved;
       }
       if (input.operation === "delete_snippet" && input.snippet) {
-        const snippets = (await bridge.snippetStore?.list?.().catch(() => [])) ?? [];
+        const snippets = await listAllSnippets();
         const q = (input.snippet.id || input.snippet.name || "").trim().toLowerCase();
         const existing = snippets.find(
           (s) => s.id.toLowerCase() === q || s.name.toLowerCase() === q,
         );
         const targetId = existing?.id || input.snippet.id;
         if (!targetId) throw new Error("Snippet not found");
-        await bridge.snippetStore.delete(targetId);
+        if (
+          isBuiltinSnippetId(targetId) &&
+          typeof bridge.snippetStore?.hideBuiltin === "function"
+        ) {
+          await bridge.snippetStore.hideBuiltin(targetId);
+        } else {
+          await bridge.snippetStore.delete(targetId);
+        }
         return { deletedSnippetId: targetId };
       }
       if (input.operation === "open_local_terminal") {
@@ -959,6 +1254,71 @@ export function createHub(
       }
       return {};
     },
+    resolveStorageProvider: async (targetRef) => {
+      return await resolveTargetStorageProvider(targetRef);
+    },
+    storageOps: async ({ operation, targetA, pathA, targetB, pathB }) => {
+      const providerA = await resolveTargetStorageProvider(targetA);
+      if (operation === "list_files") {
+        const entries = await providerA.list(pathA || "/");
+        return {
+          ok: true,
+          operation: "list_files",
+          target: targetA,
+          path: pathA,
+          entries: entries.map((e) => ({
+            name: e.name,
+            path: e.path,
+            type: e.isDirectory ? "directory" : "file",
+            size: e.size,
+            modifiedAt: e.mtime
+              ? e.mtime
+              : e.mtimeMs
+                ? new Date(e.mtimeMs).toISOString()
+                : undefined,
+          })),
+        };
+      }
+      if (operation === "read_remote_file") {
+        const content = await readProviderTextFile(providerA, pathA);
+        return {
+          ok: true,
+          operation: "read_remote_file",
+          target: targetA,
+          path: pathA,
+          content,
+        };
+      }
+      const bTarget = targetB || targetA;
+      const bPath = pathB || pathA;
+      const providerB =
+        bTarget === targetA
+          ? providerA
+          : await resolveTargetStorageProvider(bTarget);
+      const [leftContent, rightContent] = await Promise.all([
+        readProviderTextFile(providerA, pathA),
+        readProviderTextFile(providerB, bPath),
+      ]);
+      const unifiedDiff = createTwoFilesPatch(
+        `${targetA}:${pathA}`,
+        `${bTarget}:${bPath}`,
+        leftContent,
+        rightContent,
+        "baseline",
+        leftContent === rightContent ? "identical" : "drift-detected",
+        { context: 3 },
+      );
+      return {
+        ok: true,
+        operation: "diff_paths",
+        engine: "diff/Myers-O(ND)",
+        left: { target: targetA, path: pathA },
+        right: { target: bTarget, path: bPath },
+        identical: leftContent === rightContent,
+        unifiedDiff,
+        diff: unifiedDiff,
+      };
+    },
   }, options?.hubDirectory);
   const files = new FileTools(bridge, hub.terminals, () => hub.changed());
   if (bridge.profileSyncService) {
@@ -979,7 +1339,7 @@ export function createHub(
         for (const rm of remote.workspaceMemories ?? []) {
           const prev = memMap.get(rm.id);
           if (!prev || rm.updatedAt > prev.updatedAt) {
-            memMap.set(rm.id, rm);
+            memMap.set(rm.id, prev ? { ...prev, ...rm } : rm);
             changed = true;
           }
         }

@@ -302,7 +302,7 @@ const initialDemoS3Profiles: S3Config[] = [
     endpoint: "https://s3-dc1.storage.acme.se:10443",
     region: "eu-north-1",
     accessKeyId: "SG_PROD_AKIA90210DEMO",
-    secretAccessKey: "demo-secret-not-shared",
+    secretAccessKey: "demo-secret-not-shared", // pragma: allowlist secret
     forcePathStyle: true,
     initialPath: "ontap-fabricpool-tier",
     group: "Object Storage / StorageGRID & S3",
@@ -314,7 +314,7 @@ const initialDemoS3Profiles: S3Config[] = [
     endpoint: "https://10.30.10.15",
     region: "eu-north-1",
     accessKeyId: "ONTAP_S3_AKIA4411DEMO",
-    secretAccessKey: "demo-secret-not-shared",
+    secretAccessKey: "demo-secret-not-shared", // pragma: allowlist secret
     forcePathStyle: true,
     initialPath: "ai-datasets-nvme",
     group: "NetApp ONTAP / Stockholm DC1",
@@ -326,7 +326,7 @@ const initialDemoS3Profiles: S3Config[] = [
     endpoint: "https://rgw.ceph.acme.se",
     region: "eu-north-1",
     accessKeyId: "CEPH_RGW_AKIA7788DEMO",
-    secretAccessKey: "demo-secret-not-shared",
+    secretAccessKey: "demo-secret-not-shared", // pragma: allowlist secret
     forcePathStyle: true,
     initialPath: "veeam-immutable-vault",
     group: "Ceph & ZFS / Block & Backup",
@@ -338,7 +338,7 @@ const initialDemoS3Profiles: S3Config[] = [
     endpoint: "https://10.30.30.40:9000",
     region: "us-east-1",
     accessKeyId: "MINIO_AISTOR_DEMO_KEY",
-    secretAccessKey: "demo-secret-not-shared",
+    secretAccessKey: "demo-secret-not-shared", // pragma: allowlist secret
     forcePathStyle: true,
     initialPath: "llm-checkpoints-prod",
     group: "Object Storage / StorageGRID & S3",
@@ -804,7 +804,7 @@ export function getBuiltinSnippets(): Snippet[] {
 /** The built-in skills and memories: the demo workspace's in demo mode, otherwise none. */
 export function getBuiltinSkillsAndMemories(): MemoryEntry[] {
   if (!isDemoMode()) return getDefaultSkillsAndMemories();
-  return initialDemoMemories
+  return demoMemoriesStore
     .filter((m) => m.kind === "skill" || m.id.startsWith("builtin-"))
     .map((m) => ({ ...m }));
 }
@@ -1568,6 +1568,67 @@ export const MCP_MARKETPLACE_CATALOG: McpCatalogPreset[] = [
       {
         name: "github_create_remediation_pr",
         description: "Create a branch and pull request with updated config or runbook.",
+      },
+    ],
+  },
+  {
+    id: "preset-mcp-trivy-falco",
+    name: "Trivy CVE Scanner & Falco Runtime Security MCP",
+    category: "security",
+    icon: "🛡️",
+    description:
+      "Skanna container-images, OS-paket och Kubernetes-kluster efter kritiska CVE:er med Aqua Trivy och läs Falco runtime-larm.",
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "mcp-server-trivy"],
+    defaultTools: [
+      {
+        name: "trivy_scan_filesystem_or_image",
+        description: "Run Aqua Trivy vulnerability & misconfiguration scan on host or image.",
+      },
+      {
+        name: "falco_list_runtime_alerts",
+        description: "Inspect recent eBPF/Falco kernel & container security events.",
+      },
+    ],
+  },
+  {
+    id: "preset-mcp-netbox-ipam",
+    name: "NetBox CMDB, IPAM & SAN Fabric Topology MCP",
+    category: "network",
+    icon: "🌐",
+    description:
+      "Slå upp VLAN, VRF, rack-placering, LIF-subnät och switch-portar direkt från open-source NetBox SSoT.",
+    transport: "http",
+    url: "http://10.30.10.30:8000/api/mcp",
+    defaultTools: [
+      {
+        name: "netbox_lookup_prefix_and_vlan",
+        description: "Query NetBox IPAM prefixes, VLAN IDs, and assigned server interfaces.",
+      },
+      {
+        name: "netbox_get_device_cables",
+        description: "Trace physical and SAN/NIC cable peers for a rack server or storage node.",
+      },
+    ],
+  },
+  {
+    id: "preset-mcp-opentelemetry-jaeger",
+    name: "OpenTelemetry & Jaeger Distributed Tracing MCP",
+    category: "observability",
+    icon: "🔭",
+    description:
+      "Följ distribuerade OTel-traces över mikrotjänster, S3-anrop och databaser för att isolera p99-flaskhalsar.",
+    transport: "http",
+    url: "http://10.30.10.25:16686/api/mcp",
+    defaultTools: [
+      {
+        name: "jaeger_find_slow_traces",
+        description: "Search OpenTelemetry traces exceeding latency threshold or with error tags.",
+      },
+      {
+        name: "otel_service_dependency_graph",
+        description: "Fetch live service-to-service call latency and error rates.",
       },
     ],
   },

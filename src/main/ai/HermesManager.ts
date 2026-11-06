@@ -80,7 +80,7 @@ export class HermesManager {
       const manifest = JSON.parse(
         await fs.readFile(path.join(this.runtimeDir, "manifest.json"), "utf-8"),
       ) as HermesManifest;
-      if (manifest.commit !== "f97608f178d1ffeca59860195ab7da295f7c8e5f")
+      if (manifest.commit !== "f97608f178d1ffeca59860195ab7da295f7c8e5f") // pragma: allowlist secret
         return null;
       if (
         typeof manifest.python !== "string" ||

@@ -748,6 +748,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     // so it's wired up explicitly here.
     // Also prevent xterm from intercepting/swallowing tab switching shortcuts (Ctrl+Tab, Ctrl+Shift+Tab).
     term.attachCustomKeyEventHandler((e) => {
+      if (e.defaultPrevented) {
+        return false;
+      }
       if (pathHoverRef.current.isEditorOpen()) {
         return false;
       }
@@ -767,17 +770,17 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           setTimeout(() => inlineAiInputRef.current?.focus(), 20);
           return false;
         }
-        // Ctrl+L (with selection) or Ctrl+Shift+L: Send selection or last command output to AI Chat
-        if (keyLower === 'l' && (e.shiftKey || Boolean(term.getSelection()))) {
+        // Ctrl+L (with selection): Send selection to AI Chat (Ctrl+Shift+L is reserved for Snippets)
+        if (!e.shiftKey && keyLower === 'l' && Boolean(term.getSelection())) {
           e.preventDefault();
-          const selectedText = term.getSelection() || outputTracker.lastOutput() || '';
+          const selectedText = term.getSelection();
           if (selectedText) {
             window.dispatchEvent(
               new CustomEvent('sshs3:ai-attach', {
                 detail: {
                   sessionId: sessionIdRef.current ?? undefined,
                   text: selectedText,
-                  label: term.getSelection() ? 'Terminal selection' : 'Last command output',
+                  label: 'Terminal selection',
                 },
               })
             );

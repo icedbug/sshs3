@@ -429,8 +429,8 @@ describe('LandingView Component', () => {
           (c) =>
             c.url.endsWith('/api/user/password') &&
             c.method === 'POST' &&
-            c.body?.currentPassword === 'old-pass-123' &&
-            c.body?.newPassword === 'new-pass-456'
+            c.body?.currentPassword === 'old-pass-123' && // pragma: allowlist secret
+            c.body?.newPassword === 'new-pass-456' // pragma: allowlist secret
         )
       ).toBe(true);
 
@@ -451,7 +451,8 @@ describe('LandingView Component', () => {
     }
   });
 
-  it('renders AI Workspace Command Center, KPI Ribbon, and 3-tab Right Column (Activity, Memory, Runbooks)', () => {
+  it('renders AI Workspace Command Center, KPI Ribbon, and 3-tab Right Column (Activity, Memory, Runbooks)', async () => {
+    const originalMultissh = (window as any).multissh;
     const aiOpenEvents: any[] = [];
     const listener = (e: Event) => {
       aiOpenEvents.push((e as CustomEvent).detail);
@@ -502,10 +503,28 @@ describe('LandingView Component', () => {
       expect(screen.getByTestId('right-panel-workforce')).toBeInTheDocument();
       expect(screen.getByTestId('dashboard-run-workforce-btn')).toBeInTheDocument();
 
+      // Self-learning reflection button & @orama/orama + Voyager badge are rendered in the command center
+      expect(screen.getByText('@orama/orama + Voyager')).toBeInTheDocument();
+      const reflectBtn = screen.getByTestId('workspace-self-reflect-btn');
+      expect(reflectBtn).toBeInTheDocument();
+      // hubRequest stores whatever aiHubRequest resolves as the shared hub snapshot, so resolve with
+      // this test's snapshot (none) instead of a partial object that would leak into later tests.
+      const aiHubRequestMock = vi.fn().mockResolvedValue(undefined);
+      (window as any).multissh = {
+        ...(originalMultissh ?? {}),
+        aiHubRequest: aiHubRequestMock,
+      };
+      await act(async () => {
+        fireEvent.click(reflectBtn);
+      });
+      expect(aiHubRequestMock).toHaveBeenCalledWith({ action: 'self-learn-reflect' });
+
       fireEvent.click(screen.getByTestId('right-tab-activity'));
       expect(screen.queryByTestId('right-panel-kb')).not.toBeInTheDocument();
     } finally {
       window.removeEventListener('sshs3:ai-open', listener);
+      if (originalMultissh === undefined) delete (window as any).multissh;
+      else (window as any).multissh = originalMultissh;
     }
   });
 

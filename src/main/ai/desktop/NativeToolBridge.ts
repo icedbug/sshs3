@@ -7,7 +7,8 @@ import type { HubService } from "../hub/HubService";
 import type { ToolRequest } from "../hub/ToolBroker";
 import { safeError } from "../hub/privacy";
 
-type Hub = Pick<HubService, "initialize" | "terminals" | "broker" | "store" | "changed">;
+type Hub = Pick<HubService, "initialize" | "terminals" | "broker" | "store" | "changed"> &
+  Partial<Pick<HubService, "reflectTaskCompletion" | "selfLearning">>;
 export interface NativeOwner { profileHome: string; sessionId: string }
 export interface NativeBinding { owner: NativeOwner; task: AgentTask }
 export interface NativeToolSnapshot { selected?: TerminalSession; bindings: NativeBinding[] }
@@ -234,6 +235,22 @@ export class NativeToolBridge {
         else {
           task.status = input.failed ? "failed" : "completed";
           task.updatedAt = Date.now();
+          if (typeof hub.reflectTaskCompletion === "function") {
+            hub.reflectTaskCompletion(task);
+          } else if (hub.selfLearning) {
+            try {
+              const reflected = hub.selfLearning.reflectOnCompletedTask({
+                task,
+                memories: hub.store.data.memories,
+                infraEdges: hub.store.data.infraEdges ?? [],
+                servers: hub.store.data.s3SyncedServers ?? [],
+              });
+              hub.store.data.memories = reflected.memories;
+              hub.store.data.infraEdges = reflected.infraEdges;
+            } catch {
+              // Never block task completion on self-reflection
+            }
+          }
           hub.terminals.release(task.id);
           this.notify();
         }

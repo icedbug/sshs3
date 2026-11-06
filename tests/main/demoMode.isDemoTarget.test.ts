@@ -38,7 +38,7 @@ const realStorageGrid: S3Config = {
   endpoint: 'https://s3-dc1.storage.acme.se:10443',
   region: 'eu-north-1',
   accessKeyId: 'AKIAREALPROFILE',
-  secretAccessKey: 'not-a-demo-secret',
+  secretAccessKey: 'not-a-demo-secret', // pragma: allowlist secret
   forcePathStyle: true,
 };
 

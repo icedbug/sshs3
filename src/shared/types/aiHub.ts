@@ -109,7 +109,63 @@ export interface MemoryEntry {
   text: string;
   author?: string;
   updatedCount?: number;
+  confidence?: number;
+  successCount?: number;
+  failureCount?: number;
+  usageCount?: number;
+  feedbackScore?: number;
+  autoLearned?: boolean;
+  sourceCommand?: string;
+  errorSignature?: string;
   updatedAt: number;
+}
+
+export interface OpenSourceEngineInfo {
+  id: string;
+  name: string;
+  packageName: string;
+  version: string;
+  category:
+    | "rag"
+    | "mcp"
+    | "safety"
+    | "learning"
+    | "diff"
+    | "memory"
+    | "runtime";
+  status: "active" | "ready";
+  description: string;
+  metricsLabel?: string;
+}
+
+export interface SelfLearningEvent {
+  id: string;
+  kind:
+    | "failure_to_fix"
+    | "task_reflexion"
+    | "memory_consolidation"
+    | "topology_discovery"
+    | "user_feedback";
+  title: string;
+  summary: string;
+  targetCluster?: string;
+  confidence: number;
+  memoryId?: string;
+  createdAt: number;
+}
+
+export interface SelfLearningStatus {
+  enabled: boolean;
+  totalLearnedSkills: number;
+  failureToFixPatterns: number;
+  consolidatedMemories: number;
+  autoDiscoveredEdges: number;
+  verifiedTaskRate: number;
+  averageConfidence: number;
+  oramaIndexedChunks: number;
+  lastReflectionAt?: number;
+  openSourceEngines: OpenSourceEngineInfo[];
+  recentEvents: SelfLearningEvent[];
 }
 
 export interface InfraGraphEdge {
@@ -157,7 +213,14 @@ export interface WorkforceRun {
 export interface McpCatalogPreset {
   id: string;
   name: string;
-  category: "observability" | "kubernetes" | "storage" | "database" | "gitops";
+  category:
+    | "observability"
+    | "kubernetes"
+    | "storage"
+    | "database"
+    | "gitops"
+    | "security"
+    | "network";
   icon: string;
   description: string;
   transport: "stdio" | "http";
@@ -419,6 +482,7 @@ export interface HubSnapshot {
   safetyPolicy?: SafetyPolicyConfig;
   lastTerminalFailures?: Record<string, TerminalCommandFailure>;
   pendingLayoutEvent?: WorkspaceLayoutEvent;
+  selfLearning?: SelfLearningStatus;
   contextBudget?: {
     contextWindowTokens: number;
     terminalContextChars: number;
@@ -466,6 +530,8 @@ export type HubRequest =
       entry: Omit<MemoryEntry, "id" | "updatedAt"> & { id?: string };
     }
   | { action: "memory-delete"; id: string }
+  | { action: "memory-feedback"; id: string; delta: 1 | -1 }
+  | { action: "self-learn-reflect"; targetCluster?: string }
   | {
       action: "agent-save";
       agent: Omit<MissionAgent, "id" | "updatedAt"> & { id?: string };

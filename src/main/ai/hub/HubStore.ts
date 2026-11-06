@@ -14,6 +14,7 @@ import type {
   MemoryEntry,
   MissionAgent,
   SafetyPolicyConfig,
+  SelfLearningEvent,
   WorkforceRun,
   WorkspaceActivityEvent,
   WorkspaceServerSummary,
@@ -33,6 +34,14 @@ export interface SharedWorkspaceFilePayload {
   deletedMemoryIds?: Record<string, number>;
 }
 
+export interface PersistedSelfLearningState {
+  recentEvents?: SelfLearningEvent[];
+  failureToFixCount?: number;
+  consolidatedCount?: number;
+  autoDiscoveredEdgeCount?: number;
+  lastReflectionAt?: number;
+}
+
 export interface HubData {
   version: 1;
   preferences: HubPreferences;
@@ -48,6 +57,7 @@ export interface HubData {
   infraEdges?: InfraGraphEdge[];
   workforceRuns?: WorkforceRun[];
   safetyPolicy?: SafetyPolicyConfig;
+  selfLearningState?: PersistedSelfLearningState;
   localOverrides?: Record<string, LocalServerAuthOverride>;
   deletedServerIds?: Record<string, string>;
   deletedMemoryIds?: Record<string, number>;
@@ -76,6 +86,12 @@ export const defaultHubData = (): HubData => ({
     autoApproveSafeReadOnly: true,
     requireApprovalOnProdTags: true,
     blockDestructiveWithoutConfirm: true,
+  },
+  selfLearningState: {
+    recentEvents: [],
+    failureToFixCount: 0,
+    consolidatedCount: 0,
+    autoDiscoveredEdgeCount: 0,
   },
   localOverrides: {},
   deletedServerIds: {},

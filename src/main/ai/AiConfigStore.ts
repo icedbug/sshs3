@@ -152,7 +152,7 @@ export class AiConfigStore {
       if (update.apiKey === null || update.apiKey === "") {
         delete next.apiKey;
         this.sessionKey = "";
-      } else if (typeof update.apiKey === "string") {
+      } else if (typeof update.apiKey === "string") { // pragma: allowlist secret
         const encrypted = isEncryptionAvailable()
           ? encryptSecretValue(update.apiKey.trim())
           : "";

@@ -13,6 +13,7 @@ import {
 } from '../../shared/types/aiHub';
 import type { SSHConnectionConfig } from '../../shared/types/ssh';
 import { ProfileStore, type ProfilesData } from '../profile/ProfileStore';
+import { K8sProfileStore } from '../profile/K8sProfileStore';
 import { SessionStore } from '../session/SessionStore';
 import { ClipboardHistoryStore } from '../clipboard/ClipboardHistoryStore';
 import { SnippetStore } from '../snippets/SnippetStore';
@@ -21,6 +22,7 @@ import { DotfilePoolStore } from '../dotfiles/DotfilePoolStore';
 import { DirectorySyncProfileStore } from '../dirsync/DirectorySyncProfileStore';
 import { SyncConfigStore } from '../services/SyncConfigStore';
 import { TeamVaultConfigStore } from '../services/TeamVaultConfigStore';
+import { TeamVaultService } from '../services/TeamVaultService';
 import type { WebUserPublic } from './WebAuthService';
 
 type RpcHandler = (event: unknown, ...args: unknown[]) => unknown;
@@ -403,14 +405,45 @@ export class WebTenantManager {
     const directorySyncProfileStore = new DirectorySyncProfileStore(
       path.join(userDir, 'dirsync-profiles.json'),
     );
+    const k8sProfileStore = new K8sProfileStore(
+      path.join(userDir, 'k8s-profiles.json'),
+    );
     const syncConfigStore = new SyncConfigStore(
       path.join(userDir, 'sync-config.json'),
     );
     const teamVaultConfigStore = new TeamVaultConfigStore(
       path.join(userDir, 'team-vault-config.json'),
     );
+    const teamVaultService: TeamVaultService = new TeamVaultService({
+      baseDir: userDir,
+      pinPrompter: {
+        promptForPinDirect: (prompt, kind, context, retry) =>
+          bridge.promptForPinDirect(prompt, kind, context, retry),
+        makePresenceNotifier: (sessionId, message) =>
+          bridge.makePresenceNotifier(sessionId, message),
+        ensurePivPresent: (context) =>
+          bridge.smartcard.ensureDefaultPivPresent(context),
+      },
+      configStore: {
+        getConfig: (vaultId) => teamVaultConfigStore.getConfig(vaultId),
+        setLastKnownRemoteEntry: (
+          vaultId,
+          entry,
+          lastSyncedRevision,
+          remoteFormatVersion,
+        ) =>
+          teamVaultConfigStore.setLastKnownRemoteEntry(
+            vaultId,
+            entry,
+            lastSyncedRevision,
+            remoteFormatVersion,
+          ),
+        clearSyncState: (vaultId) => teamVaultConfigStore.clearSyncState(vaultId),
+      },
+      onFormatUpgraded: (vaultId) => bridge.scheduleTeamVaultAutoPush(vaultId),
+    });
 
-    const bridge = new IpcBridge({
+    const bridge: IpcBridge = new IpcBridge({
       ipcMain: virtualIpcMain as unknown as IpcMain,
       profileStore,
       sessionStore,
@@ -419,7 +452,9 @@ export class WebTenantManager {
       settingsStore,
       dotfilePoolStore,
       directorySyncProfileStore,
+      k8sProfileStore,
       syncConfigStore,
+      teamVaultService,
       teamVaultConfigStore,
       getWebContents: () => virtualWebContents,
       confirmQuit: async () => true,

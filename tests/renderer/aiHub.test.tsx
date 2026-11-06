@@ -7,6 +7,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 import type { HubSnapshot } from "../../src/shared/types/aiHub";
@@ -306,6 +307,90 @@ describe("persistent AI chat", () => {
           }),
         }),
       ),
+    );
+  });
+
+  it("renders Self-Learning Engine metrics, triggers self-learn-reflect, and sends memory-feedback votes", async () => {
+    fixture.memories = [
+      {
+        id: "mem-learned-1",
+        kind: "skill",
+        scope: "workspace",
+        tier: "core",
+        title: "Auto-Learned Fix: multipathd reload",
+        text: "systemctl restart multipathd && multipath -r",
+        autoLearned: true,
+        confidence: 0.88,
+        feedbackScore: 2,
+        updatedAt: 100,
+      },
+    ];
+    fixture.selfLearning = {
+      enabled: true,
+      totalLearnedSkills: 4,
+      failureToFixPatterns: 2,
+      consolidatedMemories: 3,
+      autoDiscoveredEdges: 1,
+      verifiedTaskRate: 100,
+      oramaIndexedChunks: 42,
+      averageConfidence: 0.88,
+      openSourceEngines: [
+        {
+          id: "orama-hybrid-rag",
+          name: "Orama Hybrid Vector + BM25 Engine",
+          packageName: "@orama/orama",
+          version: "3.1.18",
+          category: "rag",
+          description: "In-memory hybrid BM25 + 16D concept vector search",
+          status: "active",
+          metricsLabel: "42 chunks",
+        },
+      ],
+      recentEvents: [
+        {
+          id: "ev-1",
+          createdAt: 100,
+          kind: "failure_to_fix",
+          title: "Learned multipathd recovery",
+          summary: "Captured exit 1 -> exit 0 resolution",
+          confidence: 0.88,
+        },
+      ],
+    };
+
+    render(<AiHubPanel mode="hub" setMode={() => {}} />);
+    // The nav label is "🧠 Memory & skills" followed by the memory count badge.
+    fireEvent.click(
+      within(screen.getByRole("navigation", { name: "Hub views" })).getByRole(
+        "button",
+        { name: /Memory & skills/ },
+      ),
+    );
+
+    expect(screen.getByTestId("self-learning-engine-card")).toBeVisible();
+    expect(screen.getByTestId("os-engine-badge-orama-hybrid-rag")).toBeVisible();
+
+    fireEvent.click(screen.getByTestId("run-self-reflection-btn"));
+    await waitFor(() =>
+      expect(request).toHaveBeenCalledWith({ action: "self-learn-reflect" }),
+    );
+
+    fireEvent.click(screen.getByTestId("memory-upvote-mem-learned-1"));
+    await waitFor(() =>
+      expect(request).toHaveBeenCalledWith({
+        action: "memory-feedback",
+        id: "mem-learned-1",
+        delta: 1,
+      }),
+    );
+
+    fireEvent.click(screen.getByTestId("memory-downvote-mem-learned-1"));
+    await waitFor(() =>
+      expect(request).toHaveBeenCalledWith({
+        action: "memory-feedback",
+        id: "mem-learned-1",
+        delta: -1,
+      }),
     );
   });
 });

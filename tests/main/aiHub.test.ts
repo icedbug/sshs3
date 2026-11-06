@@ -13,7 +13,7 @@ import { maskContext } from "../../src/main/ai/hub/privacy";
 import { scopedMemory } from "../../src/main/ai/hub/ContextService";
 import type { AgentTask } from "../../src/shared/types/aiHub";
 
-const nonce = "1234567890abcdef1234567890abcdef";
+const nonce = "1234567890abcdef1234567890abcdef"; // pragma: allowlist secret
 const frame = (value: string): string =>
   "\x1b]777;SSHS3;" + nonce + ";" + value + "\x07";
 const task = (id = "a"): AgentTask => ({
@@ -294,12 +294,12 @@ describe("durable evidence", () => {
   });
   it("masks private keys, bearer tokens and credentials before clipping", () => {
     const secret =
-      "-----BEGIN OPENSSH PRIVATE KEY-----\nsecretstuff\n-----END OPENSSH PRIVATE KEY-----";
+      "-----BEGIN OPENSSH PRIVATE KEY-----\nsecretstuff\n-----END OPENSSH PRIVATE KEY-----"; // pragma: allowlist secret
     expect(maskContext(secret)).not.toContain("secretstuff");
     expect(maskContext("Authorization: Bearer abcd.efgh")).not.toContain(
       "abcd.efgh",
     );
-    expect(maskContext("https://user:secret@example.com")).not.toContain(
+    expect(maskContext("https://user:secret@example.com")).not.toContain( // pragma: allowlist secret
       "secret@",
     );
   });

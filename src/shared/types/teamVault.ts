@@ -31,10 +31,21 @@ export interface WorkspaceActivityEvent {
 export interface WorkspaceMemoryEntry {
   id: string;
   kind: 'memory' | 'skill';
+  tier?: 'core' | 'archival' | 'episodic';
+  cluster?: string;
   scope: string;
   title: string;
   text: string;
   author?: string;
+  updatedCount?: number;
+  confidence?: number;
+  successCount?: number;
+  failureCount?: number;
+  usageCount?: number;
+  feedbackScore?: number;
+  autoLearned?: boolean;
+  sourceCommand?: string;
+  errorSignature?: string;
   updatedAt: number;
 }
 

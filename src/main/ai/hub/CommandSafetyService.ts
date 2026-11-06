@@ -16,12 +16,35 @@ export const DEFAULT_SAFETY_POLICY: SafetyPolicyConfig = {
   blockDestructiveWithoutConfirm: true,
 };
 
+function stripLeadingSudoAndEnv(segment: string): string {
+  let rest = segment.trim();
+  while (rest) {
+    if (/^sudo\s+/i.test(rest)) {
+      rest = rest.replace(/^sudo\s+/i, "");
+      while (/^-[a-zA-Z]+\s+/.test(rest)) {
+        rest = rest.replace(/^-[a-zA-Z]+\s+/, "");
+      }
+      continue;
+    }
+    if (/^env\s+/i.test(rest)) {
+      rest = rest.replace(/^env\s+/i, "");
+      while (/^\S+=\S+\s+/.test(rest)) {
+        rest = rest.replace(/^\S+=\S+\s+/, "");
+      }
+      continue;
+    }
+    break;
+  }
+  return rest;
+}
+
 /**
  * AST-style shell command splitter that breaks pipelines (`|`), logical chains (`&&`, `||`),
- * sequences (`;`, `\n`), and extracts nested subshells (`$(...)` and backticks) while
- * respecting single and double quotes.
+ * sequences (`;`, `\n`), extracts nested subshells (`$(...)`, `<(...)`, and backticks),
+ * and unwraps nested shell invocations (`bash -c "..."`, `sh -c '...'`, `eval "..."`)
+ * while respecting single and double quotes.
  */
-export function splitShellAstSegments(command: string): string[] {
+export function splitShellAstSegments(command: string, depth = 0): string[] {
   const segments: string[] = [];
   const subshells: string[] = [];
   let current = "";
@@ -30,7 +53,7 @@ export function splitShellAstSegments(command: string): string[] {
   let escaped = false;
 
   const trimmed = (command ?? "").trim();
-  if (!trimmed) return [];
+  if (!trimmed || depth > 4) return [];
 
   for (let i = 0; i < trimmed.length; i++) {
     const ch = trimmed[i];
@@ -60,15 +83,19 @@ export function splitShellAstSegments(command: string): string[] {
       continue;
     }
 
-    // Extract $(...) subshells even inside double quotes
-    if (!inSingle && ch === "$" && next === "(") {
-      let depth = 1;
+    // Extract $(...) and process substitution <(...) / >(...)
+    if (
+      !inSingle &&
+      (ch === "$" || (!inDouble && (ch === "<" || ch === ">"))) &&
+      next === "("
+    ) {
+      let parenDepth = 1;
       let j = i + 2;
       let inner = "";
-      while (j < trimmed.length && depth > 0) {
-        if (trimmed[j] === "(" && trimmed[j - 1] !== "\\") depth++;
-        else if (trimmed[j] === ")" && trimmed[j - 1] !== "\\") depth--;
-        if (depth > 0) inner += trimmed[j];
+      while (j < trimmed.length && parenDepth > 0) {
+        if (trimmed[j] === "(" && trimmed[j - 1] !== "\\") parenDepth++;
+        else if (trimmed[j] === ")" && trimmed[j - 1] !== "\\") parenDepth--;
+        if (parenDepth > 0) inner += trimmed[j];
         j++;
       }
       if (inner.trim()) {
@@ -116,8 +143,20 @@ export function splitShellAstSegments(command: string): string[] {
     segments.push(current.trim());
   }
 
+  // Unwrap nested `bash -c "..."`, `sh -c '...'`, `zsh -c`, or `eval "..."`
+  for (const seg of [...segments]) {
+    const strippedSeg = stripLeadingSudoAndEnv(seg);
+    const shellDashC =
+      /^(?:bash|sh|zsh|dash|ksh)\s+-[a-zA-Z]*c\s+(['"])([\s\S]+)\1$/i.exec(
+        strippedSeg,
+      ) ?? /^eval\s+(['"])([\s\S]+)\1$/i.exec(strippedSeg);
+    if (shellDashC?.[2]?.trim()) {
+      subshells.push(shellDashC[2].trim());
+    }
+  }
+
   for (const sub of subshells) {
-    for (const child of splitShellAstSegments(sub)) {
+    for (const child of splitShellAstSegments(sub, depth + 1)) {
       if (!segments.includes(child)) {
         segments.push(child);
       }
@@ -141,7 +180,7 @@ const DESTRUCTIVE_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
     reason: "Piped deletion via xargs rm",
   },
   {
-    pattern: /\b(mkfs(\.[a-z0-9]+)?|wipefs|fdisk|parted|sfdisk|gdisk)\b/i,
+    pattern: /\b(mkfs\.[a-z0-9]+|mkfs|wipefs|fdisk|parted|sfdisk|gdisk)\b/i,
     reason: "Disk formatting or partition table modification",
   },
   {
@@ -173,7 +212,7 @@ const DESTRUCTIVE_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
     reason: "Firewall ruleset flush",
   },
   {
-    pattern: /\bchmod\s+(-R\s+)?777\s+\/(etc|var|usr|boot|root)?\s*$/i,
+    pattern: /\b(chmod\s+-R|chmod)\s+777\s+\/(etc|var|usr|boot|root)?\s*$/i,
     reason: "Unsafe recursive permission change on system root",
   },
 ];
@@ -203,7 +242,8 @@ const MODIFY_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
     reason: "Helm release mutation",
   },
   {
-    pattern: /\b(docker|podman|nerdctl)\s+(rm|stop|kill|restart|run|exec|compose\s+up|compose\s+down)\b/i,
+    pattern:
+      /\b(docker|podman|nerdctl)\s+(rm|stop|kill|restart|run|exec|compose\s+up|compose\s+down)\b/i,
     reason: "Container lifecycle mutation",
   },
   {
@@ -212,11 +252,13 @@ const MODIFY_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
     reason: "NetApp ONTAP storage configuration change",
   },
   {
-    pattern: /\b(ceph\s+osd\s+(out|in|reweight|set|unset)|zpool\s+(scrub|add|attach|detach|replace|set)|zfs\s+set)\b/i,
+    pattern:
+      /\b(ceph\s+osd\s+(out|in|reweight|set|unset)|zpool\s+(scrub|add|attach|detach|replace|set)|zfs\s+set)\b/i,
     reason: "Ceph / ZFS storage pool state change",
   },
   {
-    pattern: /\b(sed\s+-i|tee\s+|cp\s+|mv\s+|rm\s+|mkdir\s+|touch\s+|chmod\s+|chown\s+|ln\s+|useradd\s+|usermod\s+|sysctl\s+-w)\b/i,
+    pattern:
+      /\b(sed\s+-i|tee\s+|cp\s+|mv\s+|rm\s+|mkdir\s+|touch\s+|chmod\s+|chown\s+|ln\s+|useradd\s+|usermod\s+|sysctl\s+-w)\b/i,
     reason: "Filesystem or OS configuration mutation",
   },
   {
@@ -226,15 +268,15 @@ const MODIFY_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
 ];
 
 const SAFE_READONLY_PATTERNS: RegExp[] = [
-  /^(sudo\s+)?(ls|df|du|free|uptime|uname|whoami|id|hostname|date|pwd|env|printenv|lscpu|lsblk|lspci|lsusb|lsof|stat|file|wc|head|tail|cat|less|more|grep|egrep|fgrep|awk|cut|sort|uniq|tr|jq|yq|md5sum|sha256sum)\b/i,
-  /^(sudo\s+)?(ps|top\s+-b|vmstat|iostat|mpstat|sar|pidstat|numastat)\b/i,
-  /^(sudo\s+)?systemctl\s+(status|is-active|is-enabled|list-units|list-unit-files|show)\b/i,
-  /^(sudo\s+)?(journalctl|dmesg)\b/i,
-  /^(sudo\s+)?(ip\s+(addr|a|route|r|link|neigh|rule)|ss|netstat|ping\s+-c|traceroute|tracepath|mtr\s+-r|dig|nslookup|host|ethtool|multipath\s+-ll)\b/i,
-  /^(sudo\s+)?kubectl\s+(get|describe|logs|top|events|explain|version|cluster-info|api-resources|auth\s+can-i)\b/i,
-  /^(sudo\s+)?(ceph\s+(status|-s|health|osd\s+(tree|df|stat|perf|pool\s+stats)|pg\s+stat|df|mon\s+stat|quorum_status)|zpool\s+(status|list|iostat|history)|zfs\s+(list|get))\b/i,
-  /^(snapmirror\s+show|volume\s+show|aggr\s+show|storage\s+failover\s+show|network\s+interface\s+show|qos\s+statistics\s+.*show|system\s+node\s+show|lun\s+show|vserver\s+show|version)\b/i,
-  /^(sudo\s+)?find\b(?![^;|]*\s(-delete|-exec\s+rm))\b/i,
+  /^(?:sudo\s+|)(ls|df|du|free|uptime|uname|whoami|id|hostname|date|pwd|env|printenv|lscpu|lsblk|lspci|lsusb|lsof|stat|file|wc|head|tail|cat|less|more|grep|egrep|fgrep|awk|cut|sort|uniq|tr|jq|yq|md5sum|sha256sum)\b/i,
+  /^(?:sudo\s+|)(ps|top\s+-b|vmstat|iostat|mpstat|sar|pidstat|numastat)\b/i,
+  /^(?:sudo\s+|)systemctl\s+(status|is-active|is-enabled|list-units|list-unit-files|show|--failed)\b/i,
+  /^(?:sudo\s+|)(journalctl|dmesg)\b/i,
+  /^(?:sudo\s+|)(ip\s+(?:-[a-zA-Z0-9]+\s+|)(?:-[a-zA-Z0-9]+\s+|)(addr|a|route|r|link|neigh|rule)|ss|netstat|ping\s+-c|traceroute|tracepath|mtr\s+-r|dig|nslookup|host|ethtool|multipath\s+-ll|iscsiadm\s+-m\s+session)\b/i,
+  /^(?:sudo\s+|)kubectl\s+(get|describe|logs|top|events|explain|version|cluster-info|api-resources|auth\s+can-i)\b/i,
+  /^(?:sudo\s+|)(ceph\s+(status|-s|health|osd\s+(tree|df|stat|perf|pool\s+stats)|pg\s+stat|df|mon\s+stat|quorum_status)|zpool\s+(status|list|iostat|history)|zfs\s+(list|get))\b/i,
+  /^(snapmirror\s+show|volume\s+show|aggr\s+show|storage\s+(failover|aggregate|disk)\s+show|network\s+interface\s+show|qos\s+statistics\s+.*show|system\s+node\s+show|lun\s+show|vserver\s+show|version)\b/i,
+  /^(?:sudo\s+|)find\b(?![^;|]*\s(-delete|-exec\s+rm))\b/i,
 ];
 
 export function analyzeCommandSafety(command: string): CommandRiskAnalysis {
@@ -327,6 +369,13 @@ export function shouldRequireCommandApproval(opts: {
     return false;
   }
 
-  // Assisted mode:
+  // Assisted mode: auto-approve verified read-only commands when autoApproveSafeReadOnly is enabled
+  if (
+    opts.analysis.riskLevel === "safe" &&
+    policy.autoApproveSafeReadOnly
+  ) {
+    return false;
+  }
+
   return true;
 }

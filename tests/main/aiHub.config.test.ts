@@ -31,7 +31,7 @@ describe("AI model credentials", () => {
   it("stores ciphertext but never returns the key to the renderer", async () => {
     const store = new AiConfigStore(file);
     const view = await store.update({
-      apiKey: "test-credential",
+      apiKey: "test-credential", // pragma: allowlist secret
       model: "test-model",
     });
     expect(view).toMatchObject({ hasApiKey: true, keyStorage: "encrypted" });
@@ -50,7 +50,7 @@ describe("AI model credentials", () => {
       crypto.fail = mode === "failure";
       const store = new AiConfigStore(file);
       expect(
-        await store.update({ apiKey: "session-credential" }),
+        await store.update({ apiKey: "session-credential" }), // pragma: allowlist secret
       ).toMatchObject({ keyStorage: "session" });
       expect((await store.getConfig()).apiKey).toBe("session-credential");
       expect(await fs.readFile(file, "utf8")).not.toContain(
@@ -69,7 +69,7 @@ describe("AI model credentials", () => {
   it("rejects endpoint credentials and preserves concurrent setting updates", async () => {
     const store = new AiConfigStore(file);
     await expect(
-      store.update({ baseUrl: "https://user:secret@example.test" }),
+      store.update({ baseUrl: "https://user:secret@example.test" }), // pragma: allowlist secret
     ).rejects.toThrow("API key field");
     await Promise.all([
       store.update({ model: "model" }),

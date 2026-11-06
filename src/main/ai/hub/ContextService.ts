@@ -9,6 +9,7 @@ import type {
   WorkspaceServerSummary,
 } from "../../../shared/types/aiHub";
 import type { HubStore } from "./HubStore";
+import type { KnowledgeBaseService } from "./KnowledgeBaseService";
 import type { TerminalRegistry } from "./TerminalRegistry";
 
 export interface InventoryTarget {
@@ -20,21 +21,75 @@ export interface InventoryTarget {
   blocked?: string;
 }
 
+export interface ScopedMemoryTargetContext {
+  targetLabel?: string;
+  serverName?: string;
+  serverHost?: string;
+  cluster?: string;
+}
+
 export function scopedMemory(
   entries: MemoryEntry[],
   scope: string,
   skills: boolean,
+  targetContext?: ScopedMemoryTargetContext,
 ): MemoryEntry[] {
-  return entries.filter(
-    (m) =>
-      (m.scope === "personal" ||
-        m.scope === "workspace" ||
-        m.scope === "workspace:all" ||
-        m.scope === scope ||
-        (m.scope.startsWith("target:k8s:") &&
-          scope.startsWith(m.scope + "/"))) &&
-      (m.kind === "skill") === skills,
+  const scopeLower = scope.toLowerCase();
+  const targetIdLower = scopeLower.startsWith("target:")
+    ? scopeLower.slice("target:".length).trim()
+    : "";
+  const isUnboundScope =
+    scopeLower === "personal" ||
+    scopeLower === "workspace" ||
+    scopeLower === "workspace:all";
+  const serverIdentifiers = new Set(
+    [
+      targetIdLower,
+      targetContext?.targetLabel,
+      targetContext?.serverName,
+      targetContext?.serverHost,
+    ]
+      .map((s) => (s ?? "").trim().toLowerCase())
+      .filter(Boolean),
   );
+  const clusterLower = (targetContext?.cluster ?? "").trim().toLowerCase();
+
+  return entries.filter((m) => {
+    if ((m.kind === "skill") !== skills) return false;
+    if (
+      m.scope === "personal" ||
+      m.scope === "workspace" ||
+      m.scope === "workspace:all" ||
+      m.scope === scope ||
+      (m.scope.startsWith("target:k8s:") && scope.startsWith(m.scope + "/"))
+    ) {
+      return true;
+    }
+    const mScopeLower = m.scope.toLowerCase();
+    if (mScopeLower.startsWith("server:")) {
+      if (isUnboundScope) return true;
+      const srvTarget = mScopeLower.slice("server:".length).trim();
+      if (!srvTarget) return true;
+      return Array.from(serverIdentifiers).some(
+        (id) => id === srvTarget || id.includes(srvTarget) || srvTarget.includes(id),
+      );
+    }
+    if (mScopeLower.startsWith("cluster:")) {
+      if (isUnboundScope) return true;
+      const clTarget = mScopeLower.slice("cluster:".length).trim();
+      if (!clTarget) return true;
+      if (
+        clusterLower &&
+        (clusterLower === clTarget ||
+          clusterLower.includes(clTarget) ||
+          clTarget.includes(clusterLower))
+      ) {
+        return true;
+      }
+      return serverIdentifiers.has(clTarget);
+    }
+    return false;
+  });
 }
 
 export interface ExtraWorkspaceContext {
@@ -71,6 +126,7 @@ export class ContextService {
     private readonly store: HubStore,
     private readonly terminals: TerminalRegistry,
     private readonly targets: () => Promise<InventoryTarget[]>,
+    private readonly kb?: KnowledgeBaseService,
   ) {}
 
   read(
@@ -143,13 +199,30 @@ export class ContextService {
               .includes(q),
         )
         .slice(-30),
-      workspaceMemories: memorySource
-        .filter(
+      workspaceMemories: (() => {
+        const filtered = memorySource.filter(
           (m) =>
             !q ||
-            `${m.title} ${m.text} ${m.scope}`.toLowerCase().includes(q),
-        )
-        .slice(-40),
+            `${m.title} ${m.text} ${m.scope} ${m.cluster ?? ""} ${m.sourceCommand ?? ""}`
+              .toLowerCase()
+              .includes(q),
+        );
+        const activeSession = id ? this.terminals.get(id) : undefined;
+        const activeSrv = servers.find(
+          (s) =>
+            (activeSession?.profileId && s.id === activeSession.profileId) ||
+            (activeSession?.label &&
+              s.name.toLowerCase() === activeSession.label.toLowerCase()),
+        );
+        return this.kb
+          ? this.kb.rankMemories(
+              filtered,
+              q || task.title || "",
+              activeSrv?.cluster,
+              40,
+            )
+          : filtered.slice(0, 40);
+      })(),
       inventory: this.store.data.inventory,
       target: id
         ? {

@@ -6,34 +6,43 @@ This document outlines the architecture, process boundaries, design patterns, an
 
 ## 1. System Overview & Process Boundaries
 
-The application is built on Electron, Vite, and React with a strictly separated architecture:
+The application is built on Electron, Vite, and React with a strictly separated architecture. The same
+renderer and main-process services also run without Electron in the multi-user **Web Server** mode:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                       Renderer Process                      │
 │  React 18 · Tailwind CSS · Lucide Icons · xterm.js · Vite   │
-│  UI: Dual-pane explorer, TabBar, Terminals, Modals          │
+│  UI: Dual-pane explorer, TabBar, Terminals, Modals, AI Hub  │
 └──────────────────────────────┬──────────────────────────────┘
-                               │ (ContextBridge: window.multissh)
+                               │ (window.multissh: MultiSSHApi)
 ┌──────────────────────────────▼──────────────────────────────┐
-│                        Preload Layer                        │
-│  src/preload/index.ts · contextBridge.exposeInMainWorld     │
-│  Strict typed API facade (MultiSSHApi)                      │
+│               Preload & Web Client Bridge                   │
+│  Desktop: src/preload/index.ts (contextBridge)              │
+│  Browser: src/renderer/src/lib/webClientBridge.ts           │
+│  Shared factory: src/shared/ipc/createMultiSSHApi.ts        │
 └──────────────────────────────┬──────────────────────────────┘
-                               │ (IPC Channels)
+                               │ (Electron IPC / WebSocket RPC)
 ┌──────────────────────────────▼──────────────────────────────┐
 │                         Main Process                        │
-│  src/main/index.ts · src/main/IpcBridge.ts                  │
+│  src/main/desktopEntry.ts -> src/main/index.ts · IpcBridge  │
+│  Web Server: src/main/web/serverEntry.ts · WebServer        │
 │  Node.js environment: node-pty, AWS S3 SDK, fs, net, ssh CLI │
 │  StorageRegistry · TransferQueue · ProfileStore (safeStorage)│
 │  SSHPtyManager · AskpassServer · AgentLifecycleManager       │
+│  AI Hub: src/main/ai/hub (HubService, createHub)            │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ### Process Sandboxing & Security
 - `sandbox: true`, `contextIsolation: true`, `nodeIntegration: false`.
 - The renderer has **zero** direct access to Node.js built-ins (`fs`, `child_process`, `net`).
-- All communication must go through `src/shared/types/ipc.ts` and `src/preload/index.ts`.
+- All communication must go through `src/shared/types/ipc.ts` and the shared `MultiSSHApi` factory in `src/shared/ipc/createMultiSSHApi.ts`. `src/preload/index.ts` passes it `ipcRenderer`; `webClientBridge.ts` passes a WebSocket transport, so both front ends expose the same API.
+
+### Runtime Modes
+- **Desktop** (`npm run dev`, `npm run build`): `src/main/desktopEntry.ts` loads `src/main/index.ts`. The pinned native Hermes Desktop host (`src/main/ai/desktop/`) is only started when `SSHS3_FORCE_NATIVE_HERMES=1` is set and its staged build exists; otherwise the regular sshs3 window with the built-in AI Hub runs.
+- **Web Server** (`npm run build:web` → `dist-web/server.mjs`, `npm run start:web`): `src/main/web/serverEntry.ts` starts `WebServer` (HTTP API + RFC 6455 WebSocket RPC). `WebAuthService` handles accounts, sessions and invite links; `WebTenantManager` gives each user an isolated set of stores (profiles, K8s profiles, Team Vaults, snippets, AI Hub). `electronShim.ts` replaces the Electron APIs the main-process services import.
+- **Demo mode** (`npm run demo`, `--demo` or `SSHS3_DEMO=1`): decided once at process start in `src/main/demo/demoMode.ts` and never persisted. A demo process keeps all state in its own `demo-workspace` data directory, uses `DemoVirtualPty`/`DemoStorageProvider` for the `demo-…` fixtures, and `outwardSync.ts` turns off S3 team workspace sync, Team Vault sync and remote profile sync so nothing from the demo workspace leaves the machine. Outside demo mode the AI Hub uses the neutral defaults in `src/main/ai/hub/builtins.ts`.
 
 ---
 
@@ -42,12 +51,18 @@ The application is built on Electron, Vite, and React with a strictly separated 
 ```
 ├── docs/                           # Architecture, comparison, and subsystem guides
 │   ├── COMPARISON.md               # Detailed comparison vs PuTTY, MobaXterm, WinSCP, S3 Browser
+│   ├── ai-hub.md                   # AI Hub: runtimes, knowledge base, self-learning, safety, MCP, web/demo modes
 │   └── user-guide/                 # End-user docs, published at docs.sshs3.com
-├── scripts/                        # Automated deploy and release scripts (deploy.sh)
+├── scripts/                        # Deploy/release scripts (deploy.sh, deploy-vm.sh), build-web.mjs, docs-lint.mjs, hermes/ (pinned native Hermes build)
 ├── src/
 │   ├── main/                       # Electron main process (Node.js)
+│   │   ├── desktopEntry.ts         # Electron entry: optional native Hermes host (SSHS3_FORCE_NATIVE_HERMES=1), then index.ts
 │   │   ├── index.ts                # Application lifecycle, window creation, quit hooks
 │   │   ├── IpcBridge.ts            # IPC bridge: constructor/wiring, prompt layer (pending prompts, presence), auto-sync, dispose
+│   │   ├── ai/                     # AI: AiConfigStore, CodexAuthProvider, HermesManager, desktop/ (native Hermes host + NativeToolBridge)
+│   │   │   └── hub/                # AI Hub: HubService (actions, agent tools), createHub (host wiring), HubStore, DirectAgentRuntime, KnowledgeBaseService (Orama), SelfLearningService, CommandSafetyService, ContextService, TerminalRegistry, ToolBroker, McpClientManager, S3WorkspaceSyncService, builtins/demoWorkspace, privacy
+│   │   ├── demo/                   # Launch-time demo mode: demoMode, outwardSync, DemoVirtualPty, DemoStorageProvider
+│   │   ├── web/                    # Multi-user Web Server: serverEntry, WebServer, WebAuthService, WebTenantManager, electronShim
 │   │   ├── ipc/                    # One registerXHandlers(bridge) per domain (terminal, smartcard, storage, transfer, profile, dotfile, sync, k8s, key install, git, …) + ipcHelpers.ts
 │   │   ├── aws/                    # AWS SSO OIDC device auth service (AwsSsoAuthService)
 │   │   ├── ca/                     # SSH Certificate Authority: SshCaService (session, cert install, timers), oidcFlow (OIDC discovery/browser login/refresh), operationQueue, providers/ (Step-CA, Vault), cert validation, agent protocol, sshWire (wire encoding)
@@ -75,31 +90,41 @@ The application is built on Electron, Vite, and React with a strictly separated 
 │   │   ├── terminal/               # K8s container exec PTY & live log streaming managers
 │   │   ├── transfer/               # Streaming TransferPipeline, ByteMeter & TransferQueue
 │   │   └── x11/                    # X11 server lifecycle manager (VcXsrv integration)
-│   ├── preload/                    # Electron preload script exposing window.multissh
+│   ├── preload/                    # Electron preload script exposing window.multissh (via shared createMultiSSHApi)
 │   ├── renderer/                   # React frontend
 │   │   └── src/
 │   │       ├── App.tsx             # Root component: layout, top-level modals, tab views
 │   │       ├── components/
+│   │       │   ├── AiHub/          # AI Hub panel (chat, agents, knowledge base, memory/self-learning, MCP, safety policy) + TerminalControl
 │   │       │   ├── ConnectionModal/# Profile management for SSH, S3, and Kubernetes (ConnectionManagerModal + team tabs, TeamProfileTree/List, folder/row/import components, connectionGrouping.ts)
 │   │       │   ├── FileManager/    # DualPaneExplorer, FileList, FilePane (+ FilePaneToolbar, FilePaneFilterBar, FilePaneModals, GitStatusMenu, filePaneContextMenu.ts), GitCloneModal
 │   │       │   ├── K8s/            # Pod inspector, port forward modal, debug container UI
+│   │       │   ├── LandingView.tsx # AI workspace start page: servers/clusters, quick actions, web account settings
 │   │       │   ├── SettingsModal/  # SettingsModal shell + useSettingsForm (draft state) + one *SettingsSection per category, GitSettingsPanel, SyncSettingsPanel, TeamVaultListPanel, TeamVaultDetailPanel
 │   │       │   ├── TabBar.tsx      # Draggable/closable tab bar
 │   │       │   ├── TerminalView.tsx# xterm.js terminal instance & FitAddon
-│   │       │   └── Tunnels/        # Independent SSH port-forwarding management dashboard
+│   │       │   ├── Tunnels/        # Independent SSH port-forwarding management dashboard
+│   │       │   └── WebAuthGate.tsx # Web Server mode login, first-user setup, invite registration & SSH key setup
 │   │       └── lib/
+│   │           ├── aiHub.ts        # AI Hub snapshot subscription & action dispatch helpers
 │   │           ├── format.ts       # Byte/speed formatting, date formatters, path utils
 │   │           ├── tabs.ts         # AppTab type and tab normalisation/sanitising helpers
 │   │           ├── useAppKeyboard.ts      # App-wide shortcuts, spatial Ctrl+Shift+Arrow navigation, Enter/Escape in modals
 │   │           ├── useTabActions.ts       # Create/close/split/connect tabs and panes
 │   │           ├── useSessionPersistence.ts # Restore and save the tab session
-│   │           └── spatialNavigation.ts # 2D keyboard navigation (Ctrl+Shift+Arrows) for panes, overlays and menus
-│   └── shared/                     # Types shared between main and renderer
+│   │           ├── spatialNavigation.ts # 2D keyboard navigation (Ctrl+Shift+Arrows) for panes, overlays and menus
+│   │           └── webClientBridge.ts # Browser transport (HTTP + WebSocket) that builds window.multissh in Web Server mode
+│   └── shared/                     # Code and types shared between main and renderer
+│       ├── ipc/
+│       │   └── createMultiSSHApi.ts # The one MultiSSHApi implementation, used by preload and webClientBridge
 │       └── types/
+│           ├── ai.ts               # AI provider/model config (DEFAULT_AI_MODELS)
+│           ├── aiHub.ts            # AI Hub snapshot, actions, memory, safety policy & self-learning types
 │           ├── dotfiles.ts         # Dotfiles sync pool contracts
 │           ├── git.ts              # Git status, commit signing, clone & key fetching types
 │           ├── ipc.ts              # IPC_CHANNELS and MultiSSHApi interface
 │           ├── kubernetes.ts       # Kubernetes cluster, pod, and container exec types
+│           ├── nativeHermes.ts     # Native Hermes host layout/control contracts
 │           ├── session.ts          # Tab, pane, and split layout types
 │           ├── settings.ts         # AppSettings and keyboard shortcut definitions
 │           ├── ssh.ts              # SSHConnectionConfig, PtyOptions, Smartcard
@@ -162,9 +187,9 @@ Transfers between different storage providers (e.g. SFTP -> S3, S3 -> Local, Loc
    - Open [`src/shared/types/ipc.ts`](src/shared/types/ipc.ts).
    - Add channel constant to `IPC_CHANNELS`.
    - Add method signature to `MultiSSHApi`.
-2. **Preload Exposure**:
-   - Open [`src/preload/index.ts`](src/preload/index.ts).
-   - Implement the method on `api` using `ipcRenderer.invoke` or `ipcRenderer.on`.
+2. **Preload & Web Client Exposure**:
+   - Open [`src/shared/ipc/createMultiSSHApi.ts`](src/shared/ipc/createMultiSSHApi.ts).
+   - Implement the method on the returned `MultiSSHApi` object using `ipcRenderer.invoke` or `ipcRenderer.on`. Both [`src/preload/index.ts`](src/preload/index.ts) (Electron `ipcRenderer`) and [`src/renderer/src/lib/webClientBridge.ts`](src/renderer/src/lib/webClientBridge.ts) (WebSocket transport in Web Server mode) build `window.multissh` from this factory, so do not add methods to either of them directly.
 3. **Main Process Implementation**:
    - Add the handler to the matching domain file in [`src/main/ipc/`](src/main/ipc/), inside its `registerXHandlers(bridge)` function, using `bridge.registerHandler(IPC_CHANNELS.MY_ACTION, async (_event, ...) => { ... })`. Services and shared state are reached through `bridge` (the [`IpcBridge`](src/main/IpcBridge.ts) instance), typed as that file's own `XHost = Pick<IpcBridge, ...>` so a group only sees the members it uses (add the member to the `Pick` when you need a new one; `tests/main/ipcHostAccess.test.ts` guards who may touch the PIN-prompt maps and agent state); `registerHandler` also runs the sender check (`assertTrustedSender`), so never call `ipcMain.handle` directly.
    - A new domain gets its own `ipc/<domain>Handlers.ts` and one call in `IpcBridge.register()` (order matters only for the existing groups).
@@ -191,6 +216,10 @@ Transfers between different storage providers (e.g. SFTP -> S3, S3 -> Local, Loc
    | Session, clipboard, snippets, settings | `ipc/appDataHandlers.ts` |
    | Machine policy (read-only) | `ipc/policyHandlers.ts` |
    | SSH Certificate Authorities (SSH CA) | `ipc/sshCaHandlers.ts` |
+   | Team Vaults | `ipc/teamVaultHandlers.ts` |
+   | Renderer log forwarding | `ipc/logHandlers.ts` |
+   | AI Hub (`HUB_CHANNEL`, one `HubRequest` union) | `IpcBridge.ts` → `bridge.aiHub` (built by `ai/hub/createHub.ts`) |
+   - AI Hub features are not new IPC channels: add a variant to `HubRequest` in `shared/types/aiHub.ts`, handle it in `HubService.request()`, and give `HubService` access to host services through the `HubHost` interface implemented in `createHub.ts` (the same code serves the desktop app and every Web Server tenant).
    - State-free helpers shared by handlers live in `ipc/ipcHelpers.ts`; askpass prompt classification in `ssh/askpassPrompt.ts`.
    - The smartcard/FIDO2 agent lifecycle lives in [`SmartcardCoordinator`](src/main/smartcard/SmartcardCoordinator.ts), reached through `bridge.smartcard`. Its state (`globalCards`, the app agent, per-session agents, cooldown and in-flight maps, certificate caches, the startup-unlock promise) is private; handlers only use its methods (`prepare*Config`, `awaitStartupUnlock`, `getUnlockedCardSocket`, `isInLoadCooldown`, `appAgentSocketIfUnlocked`, `listSessionAgents`, `dispose`, …), each handler group's host type lists exactly the coordinator methods it calls (`smartcard: Pick<SmartcardCoordinator, ...>`), and `tests/main/ipcHostAccess.test.ts` fails if a handler reads that state or its `Pick` drifts from what it calls. It gets its dependencies through `SmartcardDeps` (stores, `sshPtyManager`, the PIN prompt and presence notifier, the agent-block sync callback) and never imports `IpcBridge`. The prompt layer (`promptForPinDirect`, `pendingAskpass`, `makePresenceNotifier`) and the auto-sync methods stay on `IpcBridge`.
    - **Pushing events to the renderer (multi-window):** never call `getWebContents().send` directly. Use the `IpcBridge` helpers, backed by [`WindowManager`](src/main/windows/WindowManager.ts): `sendToSession(sessionId, …)` for output bound to a terminal/log session (the window that created it, recorded with `bridge.assignSession(event.sender, sessionId)` in the create handler), `sendToSender(event.sender, …)` for progress of a request (search, dir-sync, AWS SSO), `broadcast(…)` for app-wide state (settings, sync, transfers, updates), and `sendToFocused(…)` / `getWebContents()` only for prompts that need one answer (host key, PIN, quit). Prompts keep their fail-closed fallback when no window exists.

@@ -92,7 +92,7 @@ async function writeConfiguredS3Workspace(file: string): Promise<void> {
       prefix: 'team',
       accessKeyId: 'AKIATEAM',
       // No OS keyring under test, so secrets are stored (and read back) as plaintext.
-      secretAccessKeyEncrypted: 'team-secret',
+      secretAccessKeyEncrypted: 'team-secret', // pragma: allowlist secret
       forcePathStyle: true,
     })
   );
@@ -107,7 +107,7 @@ const S3_TARGET: StorageConnectConfig = {
     name: 'Team bucket',
     region: 'eu-north-1',
     accessKeyId: 'AKIATEAM',
-    secretAccessKey: 'team-secret',
+    secretAccessKey: 'team-secret', // pragma: allowlist secret
   },
 };
 
@@ -187,7 +187,7 @@ describe('S3 team workspace sync in demo mode', () => {
         region: 'eu-north-1',
         prefix: 'team',
         accessKeyId: 'AKIATEAM',
-        secretAccessKey: 'team-secret',
+        secretAccessKey: 'team-secret', // pragma: allowlist secret
       })
     ).rejects.toThrow(S3_DISABLED);
     await expect(fs.access(file)).rejects.toThrow();
@@ -278,7 +278,7 @@ describe('HubService in demo mode', () => {
     await expect(
       hub.request({
         action: 'workspace-s3-configure',
-        config: { enabled: true, bucket: 'other-bucket', accessKeyId: 'AKIAOTHER', secretAccessKey: 'other-secret' },
+        config: { enabled: true, bucket: 'other-bucket', accessKeyId: 'AKIAOTHER', secretAccessKey: 'other-secret' }, // pragma: allowlist secret
       })
     ).rejects.toThrow(S3_DISABLED);
     await settle();
@@ -469,7 +469,7 @@ describe('Team Vault and remote profile sync in demo mode', () => {
     await expect(ipc.invoke(IPC_CHANNELS.PROFILE_SYNC_PULL)).rejects.toThrow(PROFILE_SYNC_DISABLED);
     await expect(ipc.invoke(IPC_CHANNELS.PROFILE_SYNC_COMPARE)).rejects.toThrow(PROFILE_SYNC_DISABLED);
     await expect(
-      ipc.invoke(IPC_CHANNELS.PROFILE_SYNC_ENABLE, { topologyPassword: 'topology', credentialsPassword: 'credentials' })
+      ipc.invoke(IPC_CHANNELS.PROFILE_SYNC_ENABLE, { topologyPassword: 'topology', credentialsPassword: 'credentials' }) // pragma: allowlist secret
     ).rejects.toThrow(PROFILE_SYNC_DISABLED);
     await expect(ipc.invoke(IPC_CHANNELS.PROFILE_SYNC_UNLOCK_SMARTCARD)).rejects.toThrow(PROFILE_SYNC_DISABLED);
     expect(syncCryptoService.isUnlocked('topology')).toBe(false);

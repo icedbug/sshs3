@@ -33,8 +33,10 @@ import { CodexAuthProvider } from "../CodexAuthProvider";
 import { HermesManager, type HermesModelConfig } from "../HermesManager";
 import { HubStore } from "./HubStore";
 import { S3WorkspaceSyncService } from "./S3WorkspaceSyncService";
+import { createTwoFilesPatch } from "diff";
 import { McpClientManager } from "./McpClientManager";
 import { KnowledgeBaseService } from "./KnowledgeBaseService";
+import { SelfLearningService } from "./SelfLearningService";
 import {
   analyzeCommandSafety,
   DEFAULT_SAFETY_POLICY,
@@ -47,9 +49,12 @@ import {
   getBuiltinAgents,
   getBuiltinKbDocuments,
   getBuiltinSkillsAndMemories,
+  getBuiltinSnippets,
   getDemoInfraEdges,
   getDemoMcpServers,
+  getDemoMemories,
   getDemoSchedules,
+  getDemoServers,
   getDemoTasks,
   getDemoWorkforceRuns,
   isDemoMode,
@@ -58,6 +63,7 @@ import {
   saveDemoInfraEdge,
   saveDemoKbDocument,
   saveDemoMcpServer,
+  saveDemoMemory,
   saveDemoWorkforceRun,
 } from "./demoWorkspace";
 import { isDemoTarget } from "../../demo/demoMode";
@@ -236,6 +242,7 @@ export interface HubHost {
     };
   }): Promise<unknown>;
   openServerTerminal?(profileId: string): Promise<string>;
+  resolveStorageProvider?(targetRef: string): Promise<IStorageProvider | undefined>;
   storageOps?(input: {
     operation: "list_files" | "read_remote_file" | "diff_paths";
     targetA: string;
@@ -255,6 +262,7 @@ export class HubService {
   readonly s3Workspace: S3WorkspaceSyncService;
   readonly mcp = new McpClientManager();
   readonly kb = new KnowledgeBaseService();
+  readonly selfLearning = new SelfLearningService(this.kb);
   private runtimes = new Map<string, AgentRuntime>();
   private launches = new Map<string, symbol>();
   private initialized?: Promise<void>;
@@ -264,6 +272,7 @@ export class HubService {
   private previewId?: string;
   private inlineSuggestion?: InlineCommandSuggestion;
   private pendingLayoutEvent?: WorkspaceLayoutEvent;
+  private cachedWorkspaceServers: WorkspaceServerSummary[] = [];
   private ticking = false;
   private disposed = false;
   private resume = (): void => {
@@ -288,11 +297,13 @@ export class HubService {
     directory = path.join(app.getPath("userData"), "ai-hub"),
   ) {
     this.store = new HubStore(path.join(directory, "hub.json"));
+    this.selfLearning.bindStore(this.store);
     this.config = new AiConfigStore(host.aiConfigFilePath);
     this.context = new ContextService(
       this.store,
       this.terminals,
       host.inventoryTargets,
+      this.kb,
     );
     this.broker = new ToolBroker(this.terminals, {
       context: async (task, query, sessionId) => {
@@ -310,10 +321,26 @@ export class HubService {
           return { saved: true, entry };
         }
         const extra = await this.collectExtraContext();
+        const terminal =
+          task.target && this.terminals.get(task.target.sessionId);
+        const targetLabel = terminal?.label ?? task.target?.label;
+        const matchedSrv = (extra.workspaceServers ?? []).find(
+          (s) =>
+            (terminal?.profileId && s.id === terminal.profileId) ||
+            (targetLabel &&
+              (s.name.toLowerCase() === targetLabel.toLowerCase() ||
+                s.id.toLowerCase() === targetLabel.toLowerCase())),
+        );
         return scopedMemory(
           extra.memories ?? this.store.data.memories,
           this.scope(task),
           request.action === "skills",
+          {
+            targetLabel,
+            serverName: matchedSrv?.name,
+            serverHost: matchedSrv?.host,
+            cluster: matchedSrv?.cluster,
+          },
         );
       },
       file: (...args) => {
@@ -333,6 +360,55 @@ export class HubService {
       },
       activity: (task, change, sessionId) => {
         void this.recordAgentChangeActivity(task, change, sessionId);
+      },
+      safetyContext: (task, targetLabel) => {
+        const rawLabel = (targetLabel || task.target?.label || "").trim();
+        const label = rawLabel.toLowerCase();
+        const session = task.target
+          ? this.terminals.get(task.target.sessionId)
+          : undefined;
+        const knownServers = this.getKnownServers();
+        const clusterMatch = /^cluster\s+([^\s(]+)/i
+          .exec(rawLabel)?.[1]
+          ?.toLowerCase();
+        const matchedServers = knownServers.filter((s) => {
+          const sName = s.name.toLowerCase();
+          const sId = s.id.toLowerCase();
+          const sCluster = s.cluster?.toLowerCase();
+          if (session?.profileId && s.id === session.profileId) return true;
+          if (!label) return false;
+          if (
+            sName === label ||
+            sId === label ||
+            s.host.toLowerCase() === label
+          ) {
+            return true;
+          }
+          if (
+            sCluster &&
+            (sCluster === label ||
+              (clusterMatch &&
+                (sCluster === clusterMatch ||
+                  sCluster.includes(clusterMatch))))
+          ) {
+            return true;
+          }
+          if (
+            (rawLabel.includes(",") || rawLabel.includes("(")) &&
+            sName.length >= 2 &&
+            label.includes(sName)
+          ) {
+            return true;
+          }
+          return false;
+        });
+        const aggregatedTags = Array.from(
+          new Set(matchedServers.flatMap((s) => s.tags ?? [])),
+        );
+        return {
+          policy: this.store.data.safetyPolicy ?? DEFAULT_SAFETY_POLICY,
+          targetTags: aggregatedTags.length > 0 ? aggregatedTags : undefined,
+        };
       },
       changed: () => this.changed(),
     });
@@ -410,8 +486,12 @@ export class HubService {
             if ((state.deletedMemoryIds[m.id] ?? 0) >= (m.updatedAt ?? 0))
               continue;
             const prev = sharedMemMap.get(m.id);
-            if (!prev || (m.updatedAt ?? 0) >= (prev.updatedAt ?? 0)) {
+            if (!prev) {
               sharedMemMap.set(m.id, m);
+            } else if ((m.updatedAt ?? 0) > (prev.updatedAt ?? 0)) {
+              sharedMemMap.set(m.id, { ...prev, ...m });
+            } else {
+              sharedMemMap.set(m.id, { ...m, ...prev });
             }
           }
           this.store.data.memories = [
@@ -473,6 +553,11 @@ export class HubService {
       await this.store.load().catch((e) =>
         log.warn("HubStore load failed; using default store", safeError(e)),
       );
+      this.selfLearning.bindStore(this.store);
+      const initServers = await this.host.workspaceServers?.().catch(() => []);
+      if (Array.isArray(initServers) && initServers.length > 0) {
+        this.cachedWorkspaceServers = initServers;
+      }
       // Demo mode is decided once at launch (demo/demoMode.ts) and is never stored: drop the Demo-Lab
       // preference that older builds persisted, so it is neither read nor written back.
       Reflect.deleteProperty(this.store.data.preferences, "demoLabEnabled");
@@ -541,9 +626,12 @@ export class HubService {
   private getMcpServersList(): McpServerConfig[] {
     const stored = this.store.data.mcpServers ?? [];
     if (!isDemoMode()) return stored;
+    const dismissed = new Set(this.store.data.preferences.dismissedBuiltinIds ?? []);
     return [
       ...stored,
-      ...getDemoMcpServers().filter((dm) => !stored.some((m) => m.id === dm.id)),
+      ...getDemoMcpServers().filter(
+        (dm) => !dismissed.has(dm.id) && !stored.some((m) => m.id === dm.id),
+      ),
     ];
   }
 
@@ -574,18 +662,24 @@ export class HubService {
   private getInfraEdgesList(): InfraGraphEdge[] {
     const stored = this.store.data.infraEdges ?? [];
     if (!isDemoMode()) return stored;
+    const dismissed = new Set(this.store.data.preferences.dismissedBuiltinIds ?? []);
     return [
       ...stored,
-      ...getDemoInfraEdges().filter((de) => !stored.some((e) => e.id === de.id)),
+      ...getDemoInfraEdges().filter(
+        (de) => !dismissed.has(de.id) && !stored.some((e) => e.id === de.id),
+      ),
     ];
   }
 
   private getWorkforceRunsList(): WorkforceRun[] {
     const stored = this.store.data.workforceRuns ?? [];
     if (!isDemoMode()) return stored;
+    const dismissed = new Set(this.store.data.preferences.dismissedBuiltinIds ?? []);
     return [
       ...stored,
-      ...getDemoWorkforceRuns().filter((dw) => !stored.some((w) => w.id === dw.id)),
+      ...getDemoWorkforceRuns().filter(
+        (dw) => !dismissed.has(dw.id) && !stored.some((w) => w.id === dw.id),
+      ),
     ];
   }
 
@@ -640,6 +734,9 @@ export class HubService {
       ];
     }
 
+    const allMemories = extra.memories ?? this.store.data.memories;
+    const allEdges = this.getInfraEdgesList();
+
     const steps: WorkforceStep[] = selectedAgents.slice(0, 4).map((ag, idx) => {
       const cluster = ag.targetCluster || opts.targetCluster || "Workspace";
       const clusterNodes = allServers.filter(
@@ -652,27 +749,50 @@ export class HubService {
         cluster,
         limit: 2,
       });
+      const rankedSkills = this.kb
+        .rankMemories(allMemories, `${opts.prompt} ${ag.role}`, cluster, 2)
+        .filter((m) => m.kind === "skill");
+      const relatedEdges = allEdges.filter((e) =>
+        clusterNodes.some(
+          (n) =>
+            n.name.toLowerCase() === e.from.toLowerCase() ||
+            n.name.toLowerCase() === e.to.toLowerCase(),
+        ),
+      );
       const nodeNames =
         clusterNodes.slice(0, 3).map((n) => n.name).join(", ") || cluster;
       const kbHint =
         kbMatches.length > 0
-          ? `Enligt KB "${kbMatches[0].title}": ${kbMatches[0].snippet.slice(0, 180)}…`
+          ? `Enligt @orama KB "${kbMatches[0].title}": ${kbMatches[0].snippet.slice(0, 160)}…`
           : `Analyserade ${clusterNodes.length || 1} noder (${nodeNames}) mot uppdraget "${ag.mission.slice(0, 90)}".`;
+      const skillHint =
+        rankedSkills.length > 0
+          ? ` [Voyager Skill: ${rankedSkills[0].title} (${Math.round((rankedSkills[0].confidence ?? 0.85) * 100)}%)]`
+          : "";
+      const edgeHint =
+        relatedEdges.length > 0
+          ? ` [Topologi: ${relatedEdges[0].from} → ${relatedEdges[0].to} (${relatedEdges[0].relation})]`
+          : "";
 
-      const recCmds = cluster.toLowerCase().includes("ontap")
-        ? [
-            "qos statistics volume latency show -iterations 1",
-            "snapmirror show",
-          ]
-        : cluster.toLowerCase().includes("ceph")
-          ? ["ceph status && ceph osd df tree", "zpool status -v"]
-          : cluster.toLowerCase().includes("k8s") ||
-              cluster.toLowerCase().includes("trident")
-            ? [
-                "kubectl get pvc,volumeattachment -A -o wide",
-                "multipath -ll",
-              ]
-            : ["uptime && df -h && systemctl --failed"];
+      const recCmds = [
+        ...(rankedSkills
+          .map((s) => s.sourceCommand)
+          .filter((c): c is string => Boolean(c))),
+        ...(cluster.toLowerCase().includes("ontap")
+          ? [
+              "qos statistics volume latency show -iterations 1",
+              "snapmirror show",
+            ]
+          : cluster.toLowerCase().includes("ceph")
+            ? ["ceph status && ceph osd df tree", "zpool status -v"]
+            : cluster.toLowerCase().includes("k8s") ||
+                cluster.toLowerCase().includes("trident")
+              ? [
+                  "kubectl get pvc,volumeattachment -A -o wide",
+                  "multipath -ll",
+                ]
+              : ["uptime && df -h && systemctl --failed"]),
+      ].slice(0, 3);
 
       return {
         id: `wf-step-${Date.now()}-${idx}`,
@@ -683,7 +803,7 @@ export class HubService {
         targetCluster: cluster,
         subTask: `Deluppdrag för ${ag.name} (${cluster}): ${opts.prompt.slice(0, 140)}`,
         status: "completed",
-        findings: `Kontrollerade ${nodeNames}. ${kbHint}`,
+        findings: `Kontrollerade ${nodeNames}. ${kbHint}${skillHint}${edgeHint}`,
         recommendedCommands: recCmds,
         durationMs: 850 + idx * 240,
       };
@@ -767,7 +887,7 @@ export class HubService {
         return {
           enabled: false,
           provider: "openai-codex" as const,
-          model: "gpt-6.1-codex-max",
+          model: "gpt-6.1-sol",
           useHermes: false,
           hasApiKey: false,
           keyStorage: "encrypted" as const,
@@ -792,6 +912,23 @@ export class HubService {
       contextWindowTokens,
       Math.round((msgChars + kbChars + srvChars + memChars + terminalContextChars) / 4) + 1200,
     );
+    const dismissedIds = new Set(
+      this.store.data.preferences.dismissedBuiltinIds ?? [],
+    );
+    const allTasks = isDemoMode()
+      ? [
+          ...getDemoTasks().filter(
+            (dt) =>
+              !dismissedIds.has(dt.id) &&
+              !this.store.data.tasks.some((t) => t.id === dt.id),
+          ),
+          ...this.store.data.tasks,
+        ]
+      : this.store.data.tasks;
+    const allMemories = extra.memories ?? this.store.data.memories;
+    const allInfraEdges = this.getInfraEdgesList();
+    const allMcpServers = this.getMcpServersList();
+
     return {
       preview: preview
         ? {
@@ -810,20 +947,15 @@ export class HubService {
         version: manifest?.tag ?? "native-ts-1.0",
       },
       sessions: this.terminals.list(),
-      tasks: isDemoMode()
-        ? [
-            ...getDemoTasks().filter(
-              (dt) => !this.store.data.tasks.some((t) => t.id === dt.id),
-            ),
-            ...this.store.data.tasks,
-          ]
-        : this.store.data.tasks,
-      memories: extra.memories ?? this.store.data.memories,
+      tasks: allTasks,
+      memories: allMemories,
       schedules: isDemoMode()
         ? [
             ...this.store.data.schedules,
             ...getDemoSchedules().filter(
-              (ds) => !this.store.data.schedules.some((s) => s.id === ds.id),
+              (ds) =>
+                !dismissedIds.has(ds.id) &&
+                !this.store.data.schedules.some((s) => s.id === ds.id),
             ),
           ]
         : this.store.data.schedules,
@@ -838,14 +970,21 @@ export class HubService {
       ),
       localOverrides: { ...(this.store.data.localOverrides ?? {}) },
       agents: this.getAgentsList(),
-      mcpServers: this.getMcpServersList(),
+      mcpServers: allMcpServers,
       mcpCatalog: MCP_MARKETPLACE_CATALOG,
       kbDocuments: kbDocs,
       workforceRuns: this.getWorkforceRunsList(),
-      infraEdges: this.getInfraEdgesList(),
+      infraEdges: allInfraEdges,
       safetyPolicy: this.store.data.safetyPolicy ?? DEFAULT_SAFETY_POLICY,
       lastTerminalFailures: this.terminals.failures(),
       pendingLayoutEvent: this.pendingLayoutEvent,
+      selfLearning: this.selfLearning.getStatus({
+        memories: allMemories,
+        tasks: allTasks,
+        kbDocuments: kbDocs,
+        infraEdges: allInfraEdges,
+        mcpServerCount: allMcpServers.length,
+      }),
       contextBudget: {
         contextWindowTokens,
         terminalContextChars,
@@ -1062,7 +1201,9 @@ export class HubService {
           scope !== "personal" &&
           scope !== "workspace" &&
           !scope.startsWith("target:") &&
-          !scope.startsWith("workspace:")
+          !scope.startsWith("workspace:") &&
+          !scope.startsWith("server:") &&
+          !scope.startsWith("cluster:")
         )
           throw new Error("Invalid memory scope");
         await this.saveMemoryInternal({
@@ -1074,6 +1215,8 @@ export class HubService {
           title: requiredText(entry.title),
           text: requiredText(entry.text),
           author: entry.author,
+          sourceCommand: entry.sourceCommand,
+          confidence: entry.confidence,
         });
         break;
       }
@@ -1087,6 +1230,122 @@ export class HubService {
         await this.host.deleteWorkspaceMemory?.(request.id).catch(() => {});
         this.s3Workspace.schedulePush(400);
         break;
+      case "memory-feedback": {
+        const storedIds = new Set(this.store.data.memories.map((m) => m.id));
+        const builtinOrDemoIds = new Set([
+          ...getBuiltinSkillsAndMemories().map((m) => m.id),
+          ...(isDemoMode() ? getDemoMemories().map((m) => m.id) : []),
+        ]);
+        const extra = await this.collectExtraContext();
+        const combined = [...this.store.data.memories];
+        for (const m of extra.memories ?? []) {
+          if (!combined.some((x) => x.id === m.id)) combined.push(m);
+        }
+        const { memories, updated } = this.selfLearning.applyMemoryFeedback(
+          combined,
+          request.id,
+          request.delta,
+        );
+        if (
+          updated &&
+          isDemoMode() &&
+          (builtinOrDemoIds.has(updated.id) || isDemoTarget(updated.id))
+        ) {
+          saveDemoMemory(updated);
+        }
+        this.store.data.memories = memories.filter((m) => {
+          if (storedIds.has(m.id)) return true;
+          if (
+            m.id === request.id &&
+            !m.id.startsWith("auto-node:") &&
+            !m.id.startsWith("auto-cluster:") &&
+            !m.id.startsWith("builtin-") &&
+            !m.id.startsWith("demo-") &&
+            !builtinOrDemoIds.has(m.id) &&
+            !isDemoTarget(m.id)
+          ) {
+            return true;
+          }
+          return false;
+        });
+        if (
+          updated &&
+          updated.scope !== "personal" &&
+          !updated.id.startsWith("auto-node:") &&
+          !updated.id.startsWith("auto-cluster:") &&
+          !builtinOrDemoIds.has(updated.id) &&
+          !isDemoTarget(updated.id)
+        ) {
+          await this.host.saveWorkspaceMemory?.(updated).catch(() => {});
+          this.s3Workspace.schedulePush(400);
+        }
+        break;
+      }
+      case "self-learn-reflect": {
+        const storedMemoryIds = new Set(
+          this.store.data.memories.map((m) => m.id),
+        );
+        const builtinOrDemoMemoryIds = new Set([
+          ...getBuiltinSkillsAndMemories().map((m) => m.id),
+          ...(isDemoMode() ? getDemoMemories().map((m) => m.id) : []),
+        ]);
+        const storedEdgeIds = new Set(
+          (this.store.data.infraEdges ?? []).map((e) => e.id),
+        );
+        const demoEdgeIds = new Set(
+          isDemoMode() ? getDemoInfraEdges().map((e) => e.id) : [],
+        );
+        const extra = await this.collectExtraContext();
+        const dismissedReflect = new Set(
+          this.store.data.preferences.dismissedBuiltinIds ?? [],
+        );
+        const allTasks = isDemoMode()
+          ? [
+              ...getDemoTasks().filter(
+                (dt) =>
+                  !dismissedReflect.has(dt.id) &&
+                  !this.store.data.tasks.some((t) => t.id === dt.id),
+              ),
+              ...this.store.data.tasks,
+            ]
+          : this.store.data.tasks;
+        const combinedMemories = [...this.store.data.memories];
+        for (const m of extra.memories ?? []) {
+          if (
+            !m.id.startsWith("auto-node:") &&
+            !m.id.startsWith("auto-cluster:") &&
+            !combinedMemories.some((x) => x.id === m.id)
+          ) {
+            combinedMemories.push(m);
+          }
+        }
+        const reflected = this.selfLearning.runReflectionCycle({
+          memories: combinedMemories,
+          tasks: allTasks,
+          activityLog: extra.activityLog ?? this.store.data.activityLog ?? [],
+          infraEdges: this.getInfraEdgesList(),
+          servers: extra.workspaceServers ?? [],
+          lastFailures: this.terminals.failures(),
+          targetCluster: request.targetCluster,
+        });
+        this.store.data.memories = reflected.memories.filter(
+          (m) =>
+            storedMemoryIds.has(m.id) ||
+            (!m.id.startsWith("auto-node:") &&
+              !m.id.startsWith("auto-cluster:") &&
+              !m.id.startsWith("builtin-") &&
+              !m.id.startsWith("demo-") &&
+              !builtinOrDemoMemoryIds.has(m.id) &&
+              !isDemoTarget(m.id)),
+        );
+        this.store.data.infraEdges = reflected.infraEdges.filter(
+          (e) =>
+            storedEdgeIds.has(e.id) ||
+            (!demoEdgeIds.has(e.id) && !isDemoTarget(e.id)),
+        );
+        this.s3Workspace.schedulePush(400);
+        break;
+      }
       case "activity-record": {
         const actor =
           request.event.actor?.trim() || (await this.resolveActorName());
@@ -1411,6 +1670,9 @@ export class HubService {
         this.store.data.schedules = this.store.data.schedules.filter(
           (s) => s.id !== request.id,
         );
+        if (isDemoMode()) {
+          this.markBuiltinDismissed(request.id, getDemoSchedules());
+        }
         break;
       case "demo-mode-toggle": {
         // Demo mode never changes inside a running process (demo/demoMode.ts): switching it means a
@@ -1574,7 +1836,10 @@ export class HubService {
         this.store.data.infraEdges = (this.store.data.infraEdges ?? []).filter(
           (x) => x.id !== request.id,
         );
-        if (isDemoMode()) deleteDemoInfraEdge(request.id);
+        if (isDemoMode()) {
+          this.markBuiltinDismissed(request.id, getDemoInfraEdges());
+          deleteDemoInfraEdge(request.id);
+        }
         break;
       }
       case "safety-policy-save": {
@@ -1620,7 +1885,10 @@ export class HubService {
         this.store.data.mcpServers = (this.store.data.mcpServers ?? []).filter(
           (s) => s.id !== request.id,
         );
-        if (isDemoMode()) deleteDemoMcpServer(request.id);
+        if (isDemoMode()) {
+          this.markBuiltinDismissed(request.id, getDemoMcpServers());
+          deleteDemoMcpServer(request.id);
+        }
         break;
       }
       case "mcp-test": {
@@ -1695,11 +1963,44 @@ export class HubService {
       }
       case "kb-ingest-s3": {
         const prefix = request.prefix?.trim() || "runbooks/";
+        const targetCluster = request.cluster;
+        const isDemoS3Target =
+          (await this.isDemoTargetRef(request.s3ProfileId)) ||
+          (isDemoMode() && request.s3ProfileId === "sg-fabricpool-dc1");
+
+        if (this.host.resolveStorageProvider && !isDemoS3Target) {
+          const provider = await this.host.resolveStorageProvider(
+            request.s3ProfileId,
+          );
+          if (!provider) {
+            throw new Error(`S3 profile "${request.s3ProfileId}" not found`);
+          }
+          const docs = await this.kb.ingestFromStorageProvider(
+            provider,
+            prefix,
+            `S3:${request.s3ProfileId}`,
+            targetCluster,
+          );
+          const map = new Map(
+            (this.store.data.kbDocuments ?? []).map((x) => [x.id, x]),
+          );
+          for (const doc of docs) {
+            map.set(doc.id, doc);
+            if (isDemoMode()) saveDemoKbDocument(doc);
+          }
+          this.store.data.kbDocuments = Array.from(map.values());
+          break;
+        }
+
+        if (!isDemoMode()) {
+          throw new Error(`S3 profile "${request.s3ProfileId}" not found`);
+        }
+
         const doc = this.kb.createDocument({
           title: `S3 KB Sync: ${request.s3ProfileId} (${prefix})`,
           sourceType: "s3",
           sourceRef: `s3://${request.s3ProfileId}/${prefix}`,
-          cluster: request.cluster || "NetApp-StorageGRID-S3",
+          cluster: targetCluster || "NetApp-StorageGRID-S3",
           tags: ["s3-kb", "runbook", request.s3ProfileId],
           content: [
             `# S3 Synkad Kunskapsbas (${request.s3ProfileId}/${prefix})`,
@@ -1714,7 +2015,7 @@ export class HubService {
           ...(this.store.data.kbDocuments ?? []).filter((x) => x.id !== doc.id),
           doc,
         ];
-        if (isDemoMode()) saveDemoKbDocument(doc);
+        saveDemoKbDocument(doc);
         break;
       }
       case "terminal-failure-dismiss": {
@@ -1735,6 +2036,15 @@ export class HubService {
           throw new Error("Stop active tasks before deleting history");
         this.store.data.tasks = [];
         this.store.data.history = [];
+        this.store.data.workforceRuns = [];
+        if (isDemoMode()) {
+          for (const dt of getDemoTasks()) {
+            this.markBuiltinDismissed(dt.id, getDemoTasks());
+          }
+          for (const dw of getDemoWorkforceRuns()) {
+            this.markBuiltinDismissed(dw.id, getDemoWorkforceRuns());
+          }
+        }
         this.terminals.observe(false);
         this.terminals.observe((await this.config.getView()).enabled);
         break;
@@ -1845,11 +2155,11 @@ export class HubService {
       throw new Error(
         "Three tasks are already running; pause one before starting another",
       );
-    const token = Symbol(task.id);
-    this.launches.set(task.id, token);
+    const launchMarker = Symbol(task.id);
+    this.launches.set(task.id, launchMarker);
     task.status = "queued";
     try {
-      await this.launchReserved(task, token, schedule);
+      await this.launchReserved(task, launchMarker, schedule);
     } catch (error) {
       this.broker.revoke(task.id);
       this.terminals.release(task.id);
@@ -1860,19 +2170,19 @@ export class HubService {
       this.changed();
       throw error;
     } finally {
-      if (this.launches.get(task.id) === token) this.launches.delete(task.id);
+      if (this.launches.get(task.id) === launchMarker) this.launches.delete(task.id);
     }
   }
 
   private async launchReserved(
     task: AgentTask,
-    token: symbol,
+    launchMarker: symbol,
     schedule?: AgentSchedule,
   ): Promise<void> {
     const assertLaunching = (): void => {
       if (
         this.disposed ||
-        this.launches.get(task.id) !== token ||
+        this.launches.get(task.id) !== launchMarker ||
         !active(task)
       )
         throw new Error("Task was stopped during startup");
@@ -2066,9 +2376,38 @@ export class HubService {
           });
       }
       if (event.error) task.error = boundedContext(event.error);
+      if (task.status === "completed" || task.status === "failed") {
+        this.reflectTaskCompletion(task);
+      }
     }
     task.updatedAt = Date.now();
     this.changed();
+  }
+
+  reflectTaskCompletion(task: AgentTask): void {
+    if (task.status !== "completed" && task.status !== "failed") return;
+    try {
+      const knownServers = this.getKnownServers();
+      const session = task.target
+        ? this.terminals.get(task.target.sessionId)
+        : undefined;
+      const targetSrv = knownServers.find(
+        (s) =>
+          (session?.profileId && s.id === session.profileId) ||
+          s.name.toLowerCase() === (task.target?.label ?? "").toLowerCase(),
+      );
+      const reflected = this.selfLearning.reflectOnCompletedTask({
+        task,
+        memories: this.store.data.memories,
+        infraEdges: this.store.data.infraEdges ?? [],
+        servers: knownServers,
+        cluster: targetSrv?.cluster,
+      });
+      this.store.data.memories = reflected.memories;
+      this.store.data.infraEdges = reflected.infraEdges;
+    } catch {
+      // Never block task completion on self-reflection
+    }
   }
 
   private async stop(task: AgentTask, reason: string): Promise<void> {
@@ -2315,6 +2654,7 @@ export class HubService {
     classified: DetectedCommandActivity,
   ): Promise<void> {
     try {
+      const activeFailure = classified.resolvedFailure;
       const actor = await this.resolveActorName();
       const event: WorkspaceActivityEvent = {
         id: crypto.randomUUID(),
@@ -2327,6 +2667,22 @@ export class HubService {
         detail: boundedContext(commandLine, 1000),
       };
       this.appendActivityEvent(event);
+
+      // Voyager Failure->Fix Self-Learning: if this session resolved a prior failure with exitCode 0, capture the recovery command
+      if (activeFailure && activeFailure.command.trim() !== commandLine.trim()) {
+        const res = this.selfLearning.learnFromCommandResolution({
+          memories: this.store.data.memories,
+          failure: activeFailure,
+          fixCommand: commandLine,
+          scope: `server:${session.label}`,
+        });
+        this.store.data.memories = res.memories;
+        this.terminals.dismissFailure(session.id);
+        if (res.learnedSkill && res.learnedSkill.scope !== "personal") {
+          await this.host.saveWorkspaceMemory?.(res.learnedSkill).catch(() => {});
+        }
+      }
+
       await this.host.recordWorkspaceActivity?.(event).catch(() => {});
       await this.syncAutoMemoryForTarget(session.profileId, session.label);
       this.s3Workspace.schedulePush();
@@ -2342,12 +2698,18 @@ export class HubService {
     sessionId?: string,
   ): Promise<void> {
     try {
-      const actor = `${await this.resolveActorName()} (AI)`;
       const session = sessionId
         ? this.terminals.get(sessionId)
         : task.target
           ? this.terminals.get(task.target.sessionId)
           : undefined;
+      const activeFailure =
+        session && change.kind === "command" && change.exitCode === 0
+          ? this.terminals.consumeResolvedFailure(session.id)
+          : session
+            ? this.terminals.failures()[session.id]
+            : undefined;
+      const actor = `${await this.resolveActorName()} (AI)`;
       const targetLabel = change.target || session?.label || task.title;
       const event: WorkspaceActivityEvent = {
         id: crypto.randomUUID(),
@@ -2367,6 +2729,30 @@ export class HubService {
             : undefined,
       };
       this.appendActivityEvent(event);
+
+      // Voyager Failure->Fix Self-Learning: if an AI command succeeded on a session with a prior failure
+      if (
+        session &&
+        activeFailure &&
+        change.kind === "command" &&
+        change.exitCode === 0 &&
+        change.command &&
+        activeFailure.command.trim() !== change.command.trim()
+      ) {
+        const res = this.selfLearning.learnFromCommandResolution({
+          memories: this.store.data.memories,
+          failure: activeFailure,
+          fixCommand: change.command,
+          fixOutput: change.output,
+          scope: `server:${targetLabel}`,
+        });
+        this.store.data.memories = res.memories;
+        this.terminals.dismissFailure(session.id);
+        if (res.learnedSkill && res.learnedSkill.scope !== "personal") {
+          await this.host.saveWorkspaceMemory?.(res.learnedSkill).catch(() => {});
+        }
+      }
+
       await this.host.recordWorkspaceActivity?.(event).catch(() => {});
       await this.syncAutoMemoryForTarget(session?.profileId, targetLabel);
       this.s3Workspace.schedulePush();
@@ -2453,72 +2839,153 @@ export class HubService {
         ? "powershell"
         : "bash");
 
-    // Try fast heuristic command generation first for instant zero-latency response,
-    // and enrich with model if needed
-    const fallback = buildInstantCommandSuggestion(q, lower, targetShell);
+    const dismissed = new Set(
+      this.store.data.preferences.dismissedBuiltinIds ?? [],
+    );
+    const deletedMemoryIds = this.store.data.deletedMemoryIds ?? {};
+    const candidateSkills: MemoryEntry[] = [
+      ...this.store.data.memories.filter((m) => Boolean(m.sourceCommand)),
+      ...getBuiltinSkillsAndMemories().filter(
+        (m) =>
+          Boolean(m.sourceCommand) &&
+          !dismissed.has(m.id) &&
+          (deletedMemoryIds[m.id] ?? 0) < (m.updatedAt ?? 0) &&
+          !this.store.data.memories.some((x) => x.id === m.id),
+      ),
+    ];
+
+    // Check Voyager Self-Learning & built-in skills first for POSIX shells, then fast heuristic fallback
+    const learnedMatch =
+      targetShell !== "cmd" &&
+      targetShell !== "powershell" &&
+      targetShell !== "pwsh"
+        ? this.selfLearning.findBestLearnedCommand(candidateSkills, q)
+        : undefined;
+    const fallback =
+      learnedMatch ?? buildInstantCommandSuggestion(q, lower, targetShell);
+
+    const sysPrompt = `You are an inline terminal command generator for ${targetShell}. Return ONLY a JSON object {"command":"...","explanation":"..."} with a single safe shell command matching the user's request and a 1-sentence explanation in the user's language.`;
+    const userPrompt = `Request: ${q}\n${context ? `Terminal output context:\n${boundedContext(context, 1500)}` : ""}`;
 
     try {
       const config = await this.config.getConfig();
-      if (config.enabled && config.provider === "openai-codex") {
-        const { CodexAuthProvider, buildCodexHeaders } = await import(
-          "../CodexAuthProvider"
-        );
-        const configDir =
-          typeof this.config.getFilePath === "function"
-            ? path.dirname(this.config.getFilePath())
-            : undefined;
-        const auth = new CodexAuthProvider(configDir);
-        const creds = await auth.resolveCredentials();
-        if (creds) {
-          const baseUrl = (config.baseUrl || creds.baseUrl).replace(/\/$/, "");
-          const controller = new AbortController();
-          const timeout = setTimeout(() => controller.abort(), 5000);
-          try {
-            const resp = await fetch(`${baseUrl}/responses`, {
+      if (config.enabled) {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 5000);
+        try {
+          let outputText = "";
+          if (config.provider === "openai-codex") {
+            const { CodexAuthProvider, buildCodexHeaders } = await import(
+              "../CodexAuthProvider"
+            );
+            const configDir =
+              typeof this.config.getFilePath === "function"
+                ? path.dirname(this.config.getFilePath())
+                : undefined;
+            const auth = new CodexAuthProvider(configDir);
+            const creds = await auth.resolveCredentials();
+            if (creds) {
+              const baseUrl = (config.baseUrl || creds.baseUrl).replace(/\/$/, "");
+              const resp = await fetch(`${baseUrl}/responses`, {
+                method: "POST",
+                headers: buildCodexHeaders(creds.accessToken, baseUrl),
+                body: JSON.stringify({
+                  model: config.model || creds.defaultModel || "gpt-6.1-sol",
+                  instructions: sysPrompt,
+                  input: [
+                    {
+                      type: "message",
+                      role: "user",
+                      content: [{ type: "input_text", text: userPrompt }],
+                    },
+                  ],
+                  store: false,
+                  stream: true,
+                }),
+                signal: controller.signal,
+              });
+              if (resp.ok) {
+                if (typeof resp.text === "function") {
+                  outputText = extractResponseTextFromRaw(await resp.text());
+                } else if (typeof resp.json === "function") {
+                  outputText = extractResponseText(
+                    (await resp.json()) as Record<string, unknown>,
+                  );
+                }
+              }
+            }
+          } else if (config.provider === "openai-compatible" && config.baseUrl) {
+            const baseUrl = config.baseUrl.replace(/\/$/, "");
+            const headers: Record<string, string> = {
+              "Content-Type": "application/json",
+            };
+            if (config.apiKey) headers.Authorization = `Bearer ${config.apiKey}`;
+            const resp = await fetch(`${baseUrl}/chat/completions`, {
               method: "POST",
-              headers: buildCodexHeaders(creds.accessToken, baseUrl),
+              headers,
               body: JSON.stringify({
-                model: config.model || creds.defaultModel || "gpt-6.1-sol",
-                instructions: `You are an inline terminal command generator for ${targetShell}. Return ONLY a JSON object {"command":"...","explanation":"..."} with a single safe shell command matching the user's request and a 1-sentence explanation in the user's language.`,
-                input: [
-                  {
-                    type: "message",
-                    role: "user",
-                    content: [
-                      {
-                        type: "input_text",
-                        text: `Request: ${q}\n${context ? `Terminal output context:\n${boundedContext(context, 1500)}` : ""}`,
-                      },
-                    ],
-                  },
+                model: config.model || DEFAULT_AI_MODELS["openai-compatible"],
+                messages: [
+                  { role: "system", content: sysPrompt },
+                  { role: "user", content: userPrompt },
                 ],
-                store: false,
-                stream: true,
+                max_tokens: 400,
+                temperature: 0.1,
+                stream: false,
               }),
               signal: controller.signal,
             });
             if (resp.ok) {
-              let outputText = "";
-              if (typeof resp.text === "function") {
-                const rawBody = await resp.text();
-                outputText = extractResponseTextFromRaw(rawBody);
-              } else if (typeof resp.json === "function") {
-                const json = (await resp.json()) as Record<string, unknown>;
-                outputText = extractResponseText(json);
-              }
-              const parsed = parseInlineCommandJson(outputText);
-              if (parsed) {
-                return {
-                  command: parsed.command,
-                  explanation: parsed.explanation,
-                  sessionId,
-                  createdAt: Date.now(),
-                };
-              }
+              const json = (await resp.json()) as {
+                choices?: Array<{ message?: { content?: string } }>;
+              };
+              outputText = json.choices?.[0]?.message?.content ?? "";
             }
-          } finally {
-            clearTimeout(timeout);
+          } else if (config.provider === "anthropic" && config.apiKey) {
+            const base = (config.baseUrl || "https://api.anthropic.com").replace(
+              /\/$/,
+              "",
+            );
+            const endpoint = base.endsWith("/v1")
+              ? `${base}/messages`
+              : `${base}/v1/messages`;
+            const resp = await fetch(endpoint, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "x-api-key": config.apiKey,
+                "anthropic-version": "2023-06-01",
+              },
+              body: JSON.stringify({
+                model: config.model || DEFAULT_AI_MODELS.anthropic,
+                max_tokens: 400,
+                temperature: 0.1,
+                system: sysPrompt,
+                messages: [{ role: "user", content: userPrompt }],
+              }),
+              signal: controller.signal,
+            });
+            if (resp.ok) {
+              const json = (await resp.json()) as {
+                content?: Array<{ type?: string; text?: string }>;
+              };
+              outputText = (json.content ?? [])
+                .filter((b) => typeof b.text === "string")
+                .map((b) => b.text)
+                .join("\n");
+            }
           }
+          const parsed = parseInlineCommandJson(outputText);
+          if (parsed) {
+            return {
+              command: parsed.command,
+              explanation: parsed.explanation,
+              sessionId,
+              createdAt: Date.now(),
+            };
+          }
+        } finally {
+          clearTimeout(timeout);
         }
       }
     } catch {
@@ -2541,6 +3008,10 @@ export class HubService {
     title: string;
     text: string;
     author?: string;
+    confidence?: number;
+    autoLearned?: boolean;
+    sourceCommand?: string;
+    errorSignature?: string;
   }): Promise<MemoryEntry> {
     const author = input.author?.trim() || (await this.resolveActorName());
     const { memories, saved } = this.kb.deduplicateOrMergeMemory(
@@ -2554,17 +3025,21 @@ export class HubService {
         title: boundedContext(input.title, 200),
         text: boundedContext(input.text),
         author: boundedContext(author, 80),
+        confidence: input.confidence,
+        autoLearned: input.autoLearned,
+        sourceCommand: input.sourceCommand
+          ? boundedContext(input.sourceCommand, 500)
+          : undefined,
+        errorSignature: input.errorSignature
+          ? boundedContext(input.errorSignature, 160)
+          : undefined,
       },
     );
     this.store.data.memories = memories;
     if (this.store.data.deletedMemoryIds?.[saved.id]) {
       delete this.store.data.deletedMemoryIds[saved.id];
     }
-    if (
-      saved.scope === "workspace" ||
-      saved.scope.startsWith("workspace:") ||
-      saved.scope.startsWith("target:")
-    ) {
+    if (saved.scope !== "personal") {
       await this.host.saveWorkspaceMemory?.(saved).catch(() => {});
       this.s3Workspace.schedulePush();
     }
@@ -2649,6 +3124,7 @@ export class HubService {
         ...(ov?.authType ? { localAuthType: ov.authType } : {}),
       });
     }
+    this.cachedWorkspaceServers = workspaceServers;
 
     const deletedMemoryIds = this.store.data.deletedMemoryIds ?? {};
     const dismissed = new Set(this.store.data.preferences.dismissedBuiltinIds ?? []);
@@ -2661,8 +3137,12 @@ export class HubService {
     for (const m of teamData.memories) {
       if ((deletedMemoryIds[m.id] ?? 0) >= (m.updatedAt ?? 0)) continue;
       const existing = memoryMap.get(m.id);
-      if (!existing || m.updatedAt >= existing.updatedAt) {
+      if (!existing) {
         memoryMap.set(m.id, m);
+      } else if (m.updatedAt > existing.updatedAt) {
+        memoryMap.set(m.id, { ...existing, ...m });
+      } else {
+        memoryMap.set(m.id, { ...m, ...existing });
       }
     }
     for (const m of getBuiltinSkillsAndMemories()) {
@@ -2724,6 +3204,12 @@ export class HubService {
       this.config.getView().catch(() => undefined),
     ]);
 
+    const hostSnippets = appExtra?.snippets ?? [];
+    const snippets =
+      hostSnippets.length > 0
+        ? hostSnippets
+        : getBuiltinSnippets().filter((s) => !dismissed.has(s.id));
+
     return {
       workspaceServers,
       memories,
@@ -2732,7 +3218,7 @@ export class HubService {
       s3Profiles: appExtra?.s3Profiles ?? [],
       s3TeamWorkspace: this.s3Workspace.getStatus(),
       schedules: this.store.data.schedules ?? [],
-      snippets: appExtra?.snippets ?? [],
+      snippets,
       dotfilesPools: appExtra?.dotfilesPools ?? [],
       dirSyncProfiles: appExtra?.dirSyncProfiles ?? [],
       activeTunnels: appExtra?.activeTunnels ?? [],
@@ -2748,6 +3234,20 @@ export class HubService {
         aiConfig: aiCfg,
       },
     };
+  }
+
+  private getKnownServers(): WorkspaceServerSummary[] {
+    const map = new Map<string, WorkspaceServerSummary>();
+    for (const s of isDemoMode() ? getDemoServers() : []) {
+      if (s?.id) map.set(s.id, s);
+    }
+    for (const s of this.store.data.s3SyncedServers ?? []) {
+      if (s?.id) map.set(s.id, s);
+    }
+    for (const s of this.cachedWorkspaceServers) {
+      if (s?.id) map.set(s.id, s);
+    }
+    return Array.from(map.values());
   }
 
   private async resolveServerTarget(
@@ -3163,6 +3663,28 @@ export class HubService {
           await this.request({ action: "memory-delete", id: targetId });
           return { ok: true, operation: "delete", deletedMemoryId: targetId, title: match?.title };
         }
+        if (op === "feedback") {
+          const q = (str("idOrTitle") || str("id") || str("title") || "").toLowerCase();
+          if (!q) throw new Error("idOrTitle is required to give feedback on a memory or skill");
+          const match = (extra.memories ?? []).find(
+            (m) => m.id.toLowerCase() === q || m.title.toLowerCase() === q || m.title.toLowerCase().includes(q),
+          );
+          const targetId = match?.id || str("idOrTitle") || str("id")!;
+          const delta: 1 | -1 = num("delta") === -1 ? -1 : 1;
+          await this.request({ action: "memory-feedback", id: targetId, delta });
+          return { ok: true, operation: "feedback", id: targetId, delta };
+        }
+        if (op === "self_reflect") {
+          const snap = await this.request({
+            action: "self-learn-reflect",
+            targetCluster: str("cluster") || str("targetCluster"),
+          });
+          return {
+            ok: true,
+            operation: "self_reflect",
+            selfLearning: snap.selfLearning,
+          };
+        }
         if (op === "log_activity") {
           const targetLabel = str("targetLabel") || str("title") || "Workspace";
           const summary = str("summary") || str("text") || "Team note";
@@ -3204,6 +3726,7 @@ export class HubService {
           scope: str("scope") || "workspace",
           title,
           text,
+          sourceCommand: str("sourceCommand"),
         });
         await this.store.save();
         return { ok: true, operation: op, entry };
@@ -3361,6 +3884,7 @@ export class HubService {
           const aiConfig = await this.config.getView();
           return {
             aiConfig,
+            safetyPolicy: this.store.data.safetyPolicy ?? DEFAULT_SAFETY_POLICY,
             appSettings: extra.appSettings,
             folders: extra.folders,
             s3Profiles: extra.s3Profiles,
@@ -3381,11 +3905,51 @@ export class HubService {
         if (
           op === "update_settings" ||
           op === "configure_ai" ||
-          op === "update_shortcuts"
+          op === "update_shortcuts" ||
+          op === "update_safety_policy"
         ) {
           // Demo mode is decided at launch and only the user can switch it (the Demo-Lab toggle restarts
           // sshs3 after a confirmation): a `demoMode` value from the model is never applied.
           const demoModeRequested = bool("demoMode");
+          const rawPolicy =
+            p.safetyPolicy &&
+            typeof p.safetyPolicy === "object" &&
+            !Array.isArray(p.safetyPolicy)
+              ? (p.safetyPolicy as Record<string, unknown>)
+              : undefined;
+          const nextAutoApprove =
+            typeof rawPolicy?.autoApproveSafeReadOnly === "boolean"
+              ? rawPolicy.autoApproveSafeReadOnly
+              : bool("autoApproveSafeReadOnly");
+          const nextRequireProd =
+            typeof rawPolicy?.requireApprovalOnProdTags === "boolean"
+              ? rawPolicy.requireApprovalOnProdTags
+              : bool("requireApprovalOnProdTags");
+          const nextBlockDestructive =
+            typeof rawPolicy?.blockDestructiveWithoutConfirm === "boolean"
+              ? rawPolicy.blockDestructiveWithoutConfirm
+              : bool("blockDestructiveWithoutConfirm");
+          if (
+            nextAutoApprove !== undefined ||
+            nextRequireProd !== undefined ||
+            nextBlockDestructive !== undefined
+          ) {
+            const currentPolicy =
+              this.store.data.safetyPolicy ?? DEFAULT_SAFETY_POLICY;
+            await this.request({
+              action: "safety-policy-save",
+              policy: {
+                autoApproveSafeReadOnly:
+                  nextAutoApprove ?? currentPolicy.autoApproveSafeReadOnly,
+                requireApprovalOnProdTags:
+                  nextRequireProd ?? currentPolicy.requireApprovalOnProdTags,
+                blockDestructiveWithoutConfirm:
+                  nextBlockDestructive ??
+                  currentPolicy.blockDestructiveWithoutConfirm,
+              },
+            });
+          }
+
           const aiConfigPatch: Record<string, unknown> = {};
           if (bool("aiEnabled") !== undefined) aiConfigPatch.enabled = bool("aiEnabled");
           if (str("aiProvider")) aiConfigPatch.provider = str("aiProvider");
@@ -3557,6 +4121,7 @@ export class HubService {
               : {}),
             actorName: aiConfigView.actorName,
             aiConfig: aiConfigView,
+            safetyPolicy: this.store.data.safetyPolicy ?? DEFAULT_SAFETY_POLICY,
             aiPreferences: this.store.data.preferences,
             appSettings: updatedAppSettings,
           };
@@ -3872,18 +4437,13 @@ export class HubService {
         }
 
         if (this.host.storageOps) {
-          try {
-            const res = await this.host.storageOps({
-              operation: op,
-              targetA,
-              pathA,
-              targetB,
-              pathB,
-            });
-            return res;
-          } catch {
-            return simulateDemoStorageOps(op, targetA, pathA, targetB, pathB);
-          }
+          return await this.host.storageOps({
+            operation: op,
+            targetA,
+            pathA,
+            targetB,
+            pathB,
+          });
         }
         return simulateDemoStorageOps(op, targetA, pathA, targetB, pathB);
       }
@@ -4509,6 +5069,7 @@ function simulateDemoStorageOps(
     };
   }
   if (op === "read_remote_file") {
+    const isWorker = targetA.toLowerCase().includes("worker");
     return {
       ok: true,
       operation: "read_remote_file",
@@ -4524,7 +5085,7 @@ function simulateDemoStorageOps(
         `    device {`,
         `        vendor "NETAPP"`,
         `        product "LUN.*"`,
-        `        path_grouping_policy "group_by_prio"`,
+        `        path_grouping_policy ${isWorker ? "multibus" : "group_by_prio"}`,
         `        prio "ontap"`,
         `        path_checker "tur"`,
         `        features "2 pg_init_retries 50"`,
@@ -4535,27 +5096,60 @@ function simulateDemoStorageOps(
       ].join("\n"),
     };
   }
-  // diff_paths
+  // diff_paths — computed with real Myers O(ND) algorithm via open-source `diff`
   const b = targetB || "demo-k8s-storage-cp-01";
   const pb = pathB || pathA;
+  const leftIsWorker = targetA.toLowerCase().includes("worker");
+  const leftContent = [
+    `# Configuration on ${targetA}:${pathA}`,
+    `defaults {`,
+    `    user_friendly_names yes`,
+    `    find_multipaths yes`,
+    `}`,
+    `devices {`,
+    `    device {`,
+    `        vendor "NETAPP"`,
+    `        product "LUN.*"`,
+    `        path_grouping_policy ${leftIsWorker ? "multibus" : "group_by_prio"}`,
+    `        no_path_retry "queue"`,
+    `        rr_min_io_rq 1`,
+    `    }`,
+    `}`,
+  ].join("\n");
+  const rightContent = [
+    `# Configuration on ${b}:${pb}`,
+    `defaults {`,
+    `    user_friendly_names yes`,
+    `    find_multipaths yes`,
+    `}`,
+    `devices {`,
+    `    device {`,
+    `        vendor "NETAPP"`,
+    `        product "LUN.*"`,
+    `        path_grouping_policy ${leftIsWorker ? "group_by_prio" : "multibus"}`,
+    `        no_path_retry 30`,
+    `        rr_min_io_rq 4`,
+    `    }`,
+    `}`,
+  ].join("\n");
+  const unifiedDiff = createTwoFilesPatch(
+    `${targetA}:${pathA}`,
+    `${b}:${pb}`,
+    leftContent,
+    rightContent,
+    "baseline",
+    "drift-detected",
+    { context: 3 },
+  );
   return {
     ok: true,
     operation: "diff_paths",
+    engine: "diff/Myers-O(ND)",
     left: { target: targetA, path: pathA },
     right: { target: b, path: pb },
-    identical: false,
-    unifiedDiff: [
-      `--- ${targetA}:${pathA}`,
-      `+++ ${b}:${pb}`,
-      `@@ -9,6 +9,6 @@`,
-      `         vendor "NETAPP"`,
-      `         product "LUN.*"`,
-      `         path_grouping_policy "group_by_prio"`,
-      `-        no_path_retry "queue"`,
-      `-        rr_min_io_rq 1`,
-      `+        no_path_retry 30`,
-      `+        rr_min_io_rq 4`,
-    ].join("\n"),
+    identical: leftContent === rightContent,
+    unifiedDiff,
+    diff: unifiedDiff,
   };
 }
 

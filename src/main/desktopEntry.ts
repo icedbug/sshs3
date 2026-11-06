@@ -37,7 +37,7 @@ if (process.env.SSHS3_FORCE_NATIVE_HERMES === '1') {
   process.env.HERMES_HOME = path.join(userData, 'hermes-native');
   process.env.HERMES_DESKTOP_HERMES_ROOT = path.join(desktop, 'source');
   const manifest = JSON.parse(fs.readFileSync(path.join(desktop, 'source-pin.json'), 'utf8')) as { commit?: string };
-  if (manifest.commit !== 'f925b01791fe052e7d55dc975750c0bd985aff91') throw new Error('Hermes Desktop version does not match the host adapter.');
+  if (manifest.commit !== 'f925b01791fe052e7d55dc975750c0bd985aff91') throw new Error('Hermes Desktop version does not match the host adapter.'); // pragma: allowlist secret
   const runtime = app.isPackaged ? path.join(process.resourcesPath, 'hermes')
     : path.resolve(root, '../build-resources/hermes-native-runtime');
   const runtimeManifest = JSON.parse(fs.readFileSync(path.join(runtime, 'manifest.json'), 'utf8')) as { python?: string; commit?: string; repo?: string };

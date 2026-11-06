@@ -1550,7 +1550,646 @@ describe("Production multi-user workspace sync & auto-memory", () => {
     expect(demoSnap.memories.some((m) => m.id === "demo-skill-ontap-latency")).toBe(true);
     expect(getBuiltinSnippets().some((s) => s.id === "demo-snip-ontap-latency")).toBe(true);
   });
+
+  it("integrates @orama/orama hybrid vector+BM25 search, Myers diff, AST subshell safety guardrails, and Voyager/Reflexion continuous self-learning", async () => {
+    const { HubService } = await import("../../src/main/ai/hub/HubService");
+    const { analyzeCommandSafety } = await import(
+      "../../src/main/ai/hub/CommandSafetyService"
+    );
+    const { setDemoModeForTesting } = await import("../../src/main/demo/demoMode");
+    setDemoModeForTesting(true);
+    const tmpDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), "sshs3-hub-selflearn-"),
+    );
+    disposals.push(() => {
+      setDemoModeForTesting(undefined);
+      return fs.rm(tmpDir, { recursive: true, force: true });
+    });
+
+    const hub = new HubService(
+      {
+        changed: () => {},
+        inventoryTargets: async () => [],
+        backgroundChanged: async () => {},
+        openSchedule: async () => "s1",
+        show: () => {},
+        workspaceServers: async () => [
+          {
+            id: "srv-ontap-prod-01",
+            name: "ontap-prod-01",
+            host: "10.10.1.10",
+            port: 22,
+            username: "admin",
+            cluster: "NetApp-ONTAP-Prod-SE",
+            tags: ["prod", "ontap"],
+            shared: true,
+          },
+        ],
+      },
+      tmpDir,
+    );
+    disposals.push(() => hub.dispose());
+    await hub.initialize();
+
+    // 1. Verify @orama/orama index & bilingual 16D vector + BM25 search
+    const initialSnap = await hub.snapshot();
+    expect(initialSnap.selfLearning).toBeDefined();
+    expect(initialSnap.selfLearning?.oramaIndexedChunks).toBeGreaterThan(0);
+    expect(
+      initialSnap.selfLearning?.openSourceEngines.some(
+        (e) => e.id === "orama-hybrid-rag" && e.packageName === "@orama/orama",
+      ),
+    ).toBe(true);
+    expect((initialSnap.mcpCatalog ?? []).length).toBe(9);
+
+    // Search with Swedish semantic concept + slight typo
+    const hits = hub.kb.search(initialSnap.kbDocuments ?? [], {
+      query: "hög svarstid och dröjsmål i lagring",
+      limit: 4,
+    });
+    expect(hits.length).toBeGreaterThan(0);
+    expect(hub.kb.getIndexedChunkCount()).toBeGreaterThan(10);
+
+    // 2. Verify AST Subshell Unwrapping (`bash -c`, `eval`, `<(...)`)
+    const subshellDestructive = analyzeCommandSafety(
+      `bash -c "echo checking && rm -rf /var/lib/postgresql/data"`,
+    );
+    expect(subshellDestructive.riskLevel).toBe("destructive");
+    expect(subshellDestructive.parsedSubcommands.length).toBeGreaterThanOrEqual(2);
+
+    // 3. Verify ToolBroker enforces SafetyPolicy (`autoApproveSafeReadOnly` in assisted mode & `blockDestructiveWithoutConfirm` in autonomous mode)
+    const { shouldRequireCommandApproval } = await import(
+      "../../src/main/ai/hub/CommandSafetyService"
+    );
+    expect(
+      shouldRequireCommandApproval({
+        analysis: analyzeCommandSafety("mkfs.ext4 /dev/nvme0n1"),
+        mode: "autonomous",
+      }),
+    ).toBe(true);
+
+    hub.terminals.register(
+      {
+        id: "sess-learn-1",
+        label: "ontap-prod-01",
+        kind: "ssh",
+        profileId: "srv-ontap-prod-01",
+      },
+      (data) => {
+        const n = /SSHS3;([a-f0-9]{32});BEGIN/.exec(data)?.[1];
+        if (n) {
+          queueMicrotask(() =>
+            hub.terminals.feed(
+              "sess-learn-1",
+              `\x1b]777;SSHS3;${n};BEGIN\x07Filesystem Size Used Avail\n/dev/root 100G 40G 60G\n\x1b]777;SSHS3;${n};END;0;/etc\x07`,
+            ),
+          );
+        }
+      },
+    );
+    await hub.terminals.arm("sess-learn-1", "bash");
+
+    const assistedTask: AgentTask = {
+      id: "task-safety-assisted",
+      title: "Assisted Read-Only Check",
+      mode: "assisted",
+      status: "running",
+      target: {
+        sessionId: "sess-learn-1",
+        generation: hub.terminals.get("sess-learn-1")!.generation,
+        label: "ontap-prod-01",
+      },
+      messages: [],
+      changes: [],
+      sources: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      maxCommands: 20,
+      maxMinutes: 15,
+      verification: "not-verified",
+    };
+    const assistedCap = await hub.broker.issue(assistedTask);
+    // In assisted mode with autoApproveSafeReadOnly=true (default), safe read-only commands execute immediately without waiting for approval!
+    const safeExecRes = (await hub.broker.invoke(assistedCap.key, {
+      action: "command",
+      command: "df -h && free -m",
+      description: "Read-only disk and memory check",
+    })) as { exitCode: number; output: string };
+    expect(safeExecRes.exitCode).toBe(0);
+    expect(assistedTask.changes[0].riskLevel).toBe("safe");
+    expect(assistedTask.changes[0].status).toBe("completed");
+
+    // 4. Verify Voyager Failure -> Fix Automatic Skill Synthesis
+    // Simulate a failed command followed by a successful fix in the same terminal session
+    hub.terminals.feed(
+      "sess-learn-1",
+      `\x1b]777;SSHS3;0123456789abcdef0123456789abcdef;BEGIN\x07multipath -ll\nerror: multipathd daemon not running or Stale file handle\n\x1b]777;SSHS3;0123456789abcdef0123456789abcdef;END;1;/etc\x07`, // pragma: allowlist secret
+    );
+    await new Promise((r) => setTimeout(r, 30));
+    hub.terminals.feed(
+      "sess-learn-1",
+      `\x1b]777;SSHS3;fedcba9876543210fedcba9876543210;BEGIN\x07systemctl restart multipathd && multipath -r && multipath -ll\nmpathe (3600a098038314654) dm-2 NETAPP,LUN C-Mode\n\x1b]777;SSHS3;fedcba9876543210fedcba9876543210;END;0;/etc\x07`, // pragma: allowlist secret
+    );
+    await new Promise((r) => setTimeout(r, 40));
+
+    const afterFixSnap = await hub.snapshot();
+    const autoLearnedSkill = afterFixSnap.memories.find(
+      (m) => m.autoLearned && m.sourceCommand?.includes("multipath -r"),
+    );
+    expect(autoLearnedSkill).toBeDefined();
+    expect(autoLearnedSkill?.confidence).toBeGreaterThanOrEqual(0.8);
+    expect(
+      afterFixSnap.selfLearning?.failureToFixPatterns,
+    ).toBeGreaterThanOrEqual(1);
+
+    // 5. Verify Ctrl+K Inline Suggestion adapts to learned Voyager skills
+    const inlineLearnedSnap = await hub.request({
+      action: "inline-suggest",
+      prompt: "multipathd daemon stale file handle",
+      shell: "bash",
+    });
+    expect(inlineLearnedSnap.inlineSuggestion?.command).toContain(
+      "multipath -r",
+    );
+    expect(inlineLearnedSnap.inlineSuggestion?.explanation).toContain(
+      "Auto-Learned Skill",
+    );
+
+    // 6. Verify Memory Reinforcement Feedback (+1 / -1) and Self-Reflection cycle
+    const beforeConf = autoLearnedSkill!.confidence ?? 0.82;
+    const upvotedSnap = await hub.request({
+      action: "memory-feedback",
+      id: autoLearnedSkill!.id,
+      delta: 1,
+    });
+    const upvotedSkill = upvotedSnap.memories.find(
+      (m) => m.id === autoLearnedSkill!.id,
+    );
+    expect(upvotedSkill?.confidence).toBeGreaterThan(beforeConf);
+    expect(upvotedSkill?.feedbackScore).toBe(1);
+
+    const reflectedSnap = await hub.request({
+      action: "self-learn-reflect",
+      targetCluster: "NetApp-ONTAP-Prod-SE",
+    });
+    expect(reflectedSnap.selfLearning?.lastReflectionAt).toBeDefined();
+    expect(reflectedSnap.selfLearning?.recentEvents.length).toBeGreaterThan(0);
+  });
+
+  it("synchronizes real storageOps Myers diff, kb-ingest-s3 via ingestFromStorageProvider, DirectAgentRuntime tuning + Anthropic images, and built-in snippets", async () => {
+    const { HubService } = await import("../../src/main/ai/hub/HubService");
+    const { LocalStorageProvider } = await import(
+      "../../src/main/storage/LocalStorageProvider"
+    );
+    const { setDemoModeForTesting } = await import("../../src/main/demo/demoMode");
+    setDemoModeForTesting(false);
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "sshs3-hub-sync-fixes-"));
+    disposals.push(() => {
+      setDemoModeForTesting(undefined);
+      return fs.rm(tmpDir, { recursive: true, force: true });
+    });
+
+    const runbookDir = path.join(tmpDir, "s3-runbooks");
+    await fs.mkdir(runbookDir, { recursive: true });
+    await fs.writeFile(
+      path.join(runbookDir, "ceph-recovery.md"),
+      "# Ceph OSD Recovery Runbook\n\nCheck `ceph health detail` and `ceph osd tree` before reweighting.\n",
+      "utf-8",
+    );
+    const localProvider = new LocalStorageProvider({
+      id: "s3-real-runbooks",
+      name: "real-runbooks-bucket",
+      basePath: tmpDir,
+    });
+
+    const hub = new HubService(
+      {
+        changed: () => {},
+        inventoryTargets: async () => [],
+        backgroundChanged: async () => {},
+        openSchedule: async () => "s1",
+        show: () => {},
+        resolveStorageProvider: async (ref) =>
+          ref === "s3-real-runbooks" ? localProvider : undefined,
+        storageOps: async ({ operation, targetA, pathA }) => {
+          if (targetA === "unreachable-node") {
+            throw new Error("Connection refused to unreachable-node");
+          }
+          return { ok: true, operation, target: targetA, path: pathA };
+        },
+      },
+      tmpDir,
+    );
+    disposals.push(() => hub.dispose());
+    await hub.initialize();
+
+    // 1. kb-ingest-s3 uses ingestFromStorageProvider for real storage profiles and rejects unknown profiles outside demo mode
+    const afterIngest = await hub.request({
+      action: "kb-ingest-s3",
+      s3ProfileId: "s3-real-runbooks",
+      prefix: "s3-runbooks/",
+      cluster: "Ceph-NVMe-Block-Pool",
+    });
+    expect(
+      afterIngest.kbDocuments?.some((d) => d.title === "ceph-recovery.md"),
+    ).toBe(true);
+    await expect(
+      hub.request({
+        action: "kb-ingest-s3",
+        s3ProfileId: "missing-s3-profile",
+        prefix: "runbooks/",
+      }),
+    ).rejects.toThrow(/not found/);
+
+    // 2. sshs3_storage_ops propagates real host.storageOps errors instead of returning fake demo data
+    const task: AgentTask = {
+      id: "task-storage-real",
+      title: "Storage check",
+      mode: "autonomous",
+      status: "running",
+      messages: [],
+      changes: [],
+      sources: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      maxCommands: 10,
+      maxMinutes: 5,
+      verification: "not-verified",
+    };
+    const cap = await hub.broker.issue(task);
+    await expect(
+      hub.broker.invoke(cap.key, {
+        action: "sshs3_storage_ops",
+        payload: {
+          operation: "read_remote_file",
+          targetA: "unreachable-node",
+          pathA: "/etc/multipath.conf",
+        },
+      }),
+    ).rejects.toThrow(/Connection refused to unreachable-node/);
+
+    // 3. DirectAgentRuntime forwards maxOutputTokens, temperature, and user msg.images to Anthropic
+    let anthropicBody: Record<string, unknown> = {};
+    const mockAnthropicFetch = vi.fn().mockImplementation(async (_url, init) => {
+      anthropicBody = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      const sse = [
+        'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Image analyzed."}}',
+        'data: {"type":"message_delta","usage":{"input_tokens":50,"output_tokens":10}}',
+        "",
+      ].join("\n\n");
+      return new Response(
+        new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode(sse));
+            c.close();
+          },
+        }),
+        { status: 200 },
+      );
+    });
+    const rt = new DirectAgentRuntime(
+      async () => ({
+        appSettings: {
+          aiConfig: {
+            maxOutputTokens: 6144,
+            temperature: 0.35,
+            reasoningEffort: "high",
+          },
+        },
+      }),
+      tmpDir,
+      mockAnthropicFetch as unknown as typeof fetch,
+    );
+    await rt.start(
+      {
+        ...task,
+        id: "task-anthropic-img",
+        messages: [
+          {
+            id: "m-img",
+            role: "user",
+            text: "Inspect this topology screenshot",
+            images: [
+              {
+                label: "topo.png",
+                mimeType: "image/png",
+                dataUrl: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+              },
+            ],
+            at: Date.now(),
+          },
+        ],
+      },
+      {
+        kind: "anthropic",
+        model: "claude-3-7-sonnet-latest",
+        apiKey: "sk-ant-test", // pragma: allowlist secret
+      },
+      () => {},
+    );
+    expect(anthropicBody.max_tokens).toBe(6144);
+    expect(anthropicBody.temperature).toBe(0.35);
+    const sentMessages = anthropicBody.messages as Array<{
+      role: string;
+      content: Array<{ type: string }>;
+    }>;
+    expect(Array.isArray(sentMessages[0].content)).toBe(true);
+    expect(sentMessages[0].content.some((b) => b.type === "image")).toBe(true);
+  });
+
+  it("synchronizes Focus B backend fixes: F4 18-field MemoryEntry merge, F5 consumeResolvedFailure & OSC 133, F6 server:/cluster: scopedMemory, F7 ephemeral guard, F10 prod file-write safetyContext, F12 SelfLearningService privacy/persistence/v9.0.0, and F13 agent tool parity", async () => {
+    const { HubService } = await import("../../src/main/ai/hub/HubService");
+    const { mergeS3WorkspacePayload } = await import(
+      "../../src/main/ai/hub/S3WorkspaceSyncService"
+    );
+    const { scopedMemory } = await import(
+      "../../src/main/ai/hub/ContextService"
+    );
+    const { setDemoModeForTesting } = await import(
+      "../../src/main/demo/demoMode"
+    );
+    setDemoModeForTesting(false);
+    const tmpDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), "sshs3-hub-focusb-"),
+    );
+    disposals.push(() => {
+      setDemoModeForTesting(undefined);
+      return fs.rm(tmpDir, { recursive: true, force: true });
+    });
+
+    // F4: mergeS3WorkspacePayload preserves all 17+ Letta/Voyager MemoryEntry fields
+    const mergedResult = mergeS3WorkspacePayload(
+      {
+        version: 1,
+        updatedAt: 1000,
+        servers: [],
+        memories: [],
+        activityLog: [],
+      },
+      {
+        version: 1,
+        updatedAt: 2000,
+        servers: [],
+        memories: [
+          {
+            id: "mem-ext-1",
+            kind: "skill",
+            tier: "core",
+            cluster: "NetApp-ONTAP-Prod-SE",
+            scope: "server:ontap-prod-01",
+            title: "Multipath reload skill",
+            text: "Run multipath -r",
+            author: "alice",
+            updatedCount: 3,
+            confidence: 0.91,
+            successCount: 5,
+            failureCount: 1,
+            usageCount: 6,
+            feedbackScore: 2,
+            autoLearned: true,
+            sourceCommand: "multipath -r",
+            errorSignature: "err:stale_file_handle",
+            updatedAt: 500,
+          },
+        ],
+        activityLog: [],
+      },
+    );
+    expect(mergedResult.merged.memories).toHaveLength(1);
+    expect(mergedResult.merged.memories[0]).toMatchObject({
+      id: "mem-ext-1",
+      kind: "skill",
+      tier: "core",
+      cluster: "NetApp-ONTAP-Prod-SE",
+      scope: "server:ontap-prod-01",
+      updatedCount: 3,
+      confidence: 0.91,
+      successCount: 5,
+      failureCount: 1,
+      usageCount: 6,
+      feedbackScore: 2,
+      autoLearned: true,
+      sourceCommand: "multipath -r",
+      errorSignature: "err:stale_file_handle",
+    });
+
+    // F6: scopedMemory matches server:<name> and cluster:<cluster> for matching targetContext while isolating other servers
+    const scoped = scopedMemory(
+      [
+        mergedResult.merged.memories[0],
+        {
+          id: "mem-cluster-1",
+          kind: "skill",
+          scope: "cluster:NetApp-ONTAP-Prod-SE",
+          title: "Cluster skill",
+          text: "Cluster wide check",
+          updatedAt: 501,
+        },
+        {
+          id: "mem-other-srv",
+          kind: "skill",
+          scope: "server:unrelated-host",
+          title: "Other server skill",
+          text: "Do not leak",
+          updatedAt: 502,
+        },
+      ],
+      "target:srv-ontap-prod-01",
+      true,
+      {
+        targetLabel: "ontap-prod-01",
+        serverName: "ontap-prod-01",
+        cluster: "NetApp-ONTAP-Prod-SE",
+      },
+    );
+    expect(scoped.map((m) => m.id)).toEqual(["mem-ext-1", "mem-cluster-1"]);
+
+    let approvalCount = 0;
+    const hub = new HubService(
+      {
+        changed: () => {},
+        inventoryTargets: async () => [],
+        backgroundChanged: async () => {},
+        openSchedule: async () => "s1",
+        show: () => {},
+        workspaceServers: async () => [
+          {
+            id: "srv-ontap-prod-01",
+            name: "ontap-prod-01",
+            host: "10.10.1.10",
+            port: 22,
+            username: "admin",
+            cluster: "NetApp-ONTAP-Prod-SE",
+            tags: ["prod", "ontap"],
+            shared: true,
+          },
+        ],
+        file: async (taskArg, req, authorize) => {
+          const change: import("../../src/shared/types/aiHub").AgentChange = {
+            id: "chg-prod-file-1",
+            kind: "file",
+            target: "ontap-prod-01",
+            description: req.description || `Write ${req.path}`,
+            status: "pending",
+            at: Date.now(),
+          };
+          taskArg.changes.push(change);
+          await authorize(change);
+          approvalCount += 1;
+          change.status = "completed";
+          return { written: true, path: req.path };
+        },
+      },
+      tmpDir,
+    );
+    disposals.push(() => hub.dispose());
+    await hub.initialize();
+
+    // F12: Myers Unified Diff Engine reports version 9.0.0, masks secrets in learned skills, and persists selfLearningState in HubStore
+    const status = hub.selfLearning.getStatus({
+      memories: [],
+      kbDocuments: [],
+      infraEdges: [],
+      tasks: [],
+      mcpServerCount: 0,
+    });
+    expect(
+      status.openSourceEngines.find((e) => e.id === "myers-unified-diff")
+        ?.version,
+    ).toBe("9.0.0");
+    const maskedLearn = hub.selfLearning.learnFromCommandResolution({
+      memories: [],
+      failure: {
+        label: "ontap-prod-01",
+        command: "curl https://admin:topsecret@10.10.1.10/api", // pragma: allowlist secret
+        exitCode: 1,
+        snippet: "HTTP 401 Authorization: Bearer 1111222233334444",
+      },
+      fixCommand: "curl -k https://admin:topsecret@10.10.1.10/api/health", // pragma: allowlist secret
+      scope: "server:ontap-prod-01",
+    });
+    expect(maskedLearn.learnedSkill?.text).not.toContain("topsecret");
+    expect(maskedLearn.learnedSkill?.sourceCommand).not.toContain("topsecret");
+    expect(hub.store.data.selfLearningState?.failureToFixCount).toBeGreaterThanOrEqual(1);
+
+    // F7: Ephemeral auto-node:* (from collectExtraContext) and builtin-* memories are never persisted into hub.store.data.memories on memory-feedback or self-learn-reflect
+    await hub.request({
+      action: "memory-feedback",
+      id: "auto-node:srv-ontap-prod-01",
+      delta: 1,
+    });
+    await hub.request({
+      action: "self-learn-reflect",
+    });
+    expect(
+      hub.store.data.memories.some(
+        (m) => m.id.startsWith("auto-node:") || m.id.startsWith("builtin-"),
+      ),
+    ).toBe(false);
+
+    // F5: OSC 133 human failure -> fix resolution triggers learnFromCommandResolution
+    hub.terminals.register(
+      {
+        id: "sess-osc133",
+        label: "ontap-prod-01",
+        kind: "ssh",
+        profileId: "srv-ontap-prod-01",
+      },
+      () => {},
+    );
+    hub.terminals.observeHumanInput("sess-osc133", "systemctl status multipathd\r");
+    hub.terminals.feed("sess-osc133", "multipathd.service: Failed\r\n\x1b]133;D;3\x07");
+    expect(hub.terminals.failures()["sess-osc133"]?.exitCode).toBe(3);
+    hub.terminals.observeHumanInput("sess-osc133", "sudo systemctl restart multipathd\r");
+    hub.terminals.feed("sess-osc133", "Restarted ok\r\n\x1b]133;D;0\x07");
+    await new Promise((r) => setTimeout(r, 30));
+    expect(hub.terminals.failures()["sess-osc133"]).toBeUndefined();
+    expect(
+      hub.store.data.memories.some(
+        (m) =>
+          m.autoLearned &&
+          m.sourceCommand?.includes("sudo systemctl restart multipathd"),
+      ),
+    ).toBe(true);
+
+    // F10: ToolBroker enforces requireApprovalOnProdTags for file-write on prod-tagged workspaceServers even in autonomous mode
+    await hub.snapshot();
+    const prodFileTask: AgentTask = {
+      id: "task-prod-file",
+      title: "Prod file write check",
+      mode: "autonomous",
+      status: "running",
+      target: {
+        sessionId: "sess-osc133",
+        generation: hub.terminals.get("sess-osc133")!.generation,
+        label: "ontap-prod-01",
+      },
+      messages: [],
+      changes: [],
+      sources: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      maxCommands: 10,
+      maxMinutes: 5,
+      verification: "not-verified",
+    };
+    const prodCap = await hub.broker.issue(prodFileTask);
+    const writePromise = hub.broker.invoke(prodCap.key, {
+      action: "file-write",
+      path: "/etc/multipath.conf",
+      content: "new-content\n",
+      description: "Update multipath config on prod",
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(prodFileTask.changes[0]?.status).toBe("pending");
+    hub.broker.approve(prodFileTask.id, prodFileTask.changes[0].id, true);
+    await writePromise;
+    expect(approvalCount).toBe(1);
+
+    // F13: Agent tool parity for sshs3_manage_memory_and_activity (feedback & self_reflect) and sshs3_manage_app_and_settings (update_safety_policy)
+    const savedMem = await hub.broker.invoke(prodCap.key, {
+      action: "sshs3_manage_memory_and_activity",
+      payload: {
+        operation: "save",
+        kind: "skill",
+        title: "ONTAP LIF failover check",
+        text: "network interface show -is-home false",
+        sourceCommand: "network interface show -is-home false",
+      },
+    }) as { entry: { id: string } };
+    expect(savedMem.entry.id).toBeTruthy();
+
+    const fbRes = await hub.broker.invoke(prodCap.key, {
+      action: "sshs3_manage_memory_and_activity",
+      payload: {
+        operation: "feedback",
+        idOrTitle: savedMem.entry.id,
+        delta: 1,
+      },
+    }) as { ok: boolean; id?: string; delta?: number };
+    expect(fbRes.ok).toBe(true);
+    expect(fbRes.id).toBe(savedMem.entry.id);
+    expect(
+      hub.store.data.memories.find((m) => m.id === savedMem.entry.id)
+        ?.feedbackScore,
+    ).toBe(1);
+
+    const reflectRes = await hub.broker.invoke(prodCap.key, {
+      action: "sshs3_manage_memory_and_activity",
+      payload: {
+        operation: "self_reflect",
+        cluster: "NetApp-ONTAP-Prod-SE",
+      },
+    }) as { ok: boolean };
+    expect(reflectRes.ok).toBe(true);
+
+    const policyRes = await hub.broker.invoke(prodCap.key, {
+      action: "sshs3_manage_app_and_settings",
+      payload: {
+        operation: "update_safety_policy",
+        requireApprovalOnProdTags: false,
+      },
+    }) as { safetyPolicy?: { requireApprovalOnProdTags: boolean } };
+    expect(policyRes.safetyPolicy?.requireApprovalOnProdTags).toBe(false);
+  });
 });
-
-
-

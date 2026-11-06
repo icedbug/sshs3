@@ -177,7 +177,7 @@ describe.skipIf(process.env.SSHS3_HERMES_INTEGRATION !== "1")(
             kind: "custom",
             model: "contract-model",
             baseUrl: "http://127.0.0.1:" + port + "/v1",
-            apiKey: "contract-only",
+            apiKey: "contract-only", // pragma: allowlist secret
           },
           (event) => events.push(event),
         );

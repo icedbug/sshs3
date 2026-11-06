@@ -113,7 +113,7 @@ describe("storage of demo targets", () => {
     port: 22,
     username: "admin",
     authType: "password",
-    password: "demo",
+    password: "demo", // pragma: allowlist secret
   };
   const s3Config: S3Config = {
     id: "demo-s3-storagegrid-prod",
@@ -121,7 +121,7 @@ describe("storage of demo targets", () => {
     endpoint: "https://s3-dc1.storage.acme.se:10443",
     region: "us-east-1",
     accessKeyId: "demo",
-    secretAccessKey: "demo",
+    secretAccessKey: "demo", // pragma: allowlist secret
   };
 
   beforeEach(() => {

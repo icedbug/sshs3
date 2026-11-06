@@ -407,6 +407,9 @@ export class LocalStorageProvider extends BaseStorageProvider {
           seen.add(mount);
           candidates.push({ path: mount, label: mount });
         }
+        if (!seen.has('/')) {
+          candidates.unshift({ path: '/', label: '/' });
+        }
       } catch {
         candidates = [{ path: '/', label: '/' }];
       }

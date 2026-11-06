@@ -139,7 +139,7 @@ function generateOpenSshEd25519KeyPair(comment: string): {
   const b64 = fullBlob.toString('base64');
   const lines = b64.match(/.{1,70}/g) ?? [b64];
   const privateKeyPem = [
-    '-----BEGIN OPENSSH PRIVATE KEY-----',
+    '-----BEGIN OPENSSH PRIVATE KEY-----', // pragma: allowlist secret
     ...lines,
     '-----END OPENSSH PRIVATE KEY-----',
     '',
@@ -327,7 +327,7 @@ export class WebAuthService {
   }
 
   private validatePassword(password: string): void {
-    if (typeof password !== 'string' || password.length < 6) {
+    if (typeof password !== 'string' || password.length < 6) { // pragma: allowlist secret
       throw new Error('Lösenordet måste vara minst 6 tecken långt');
     }
   }

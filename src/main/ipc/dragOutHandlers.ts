@@ -64,7 +64,7 @@ export function registerDragOutHandlers(bridge: DragOutHost): void {
   // Starts a native OS drag of local files/folders so they can be dropped outside sshs3.
   bridge.registerHandler(IPC_CHANNELS.DRAG_OUT_START, async (event, paths: unknown): Promise<boolean> => {
     const files = await validateDragOutPaths(paths);
-    if (files.length === 0) return false;
+    if (files.length === 0 || typeof event.sender?.startDrag !== 'function') return false;
     event.sender.startDrag({ file: files[0], files, icon: dragIcon() });
     return true;
   });

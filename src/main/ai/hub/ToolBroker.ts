@@ -1,8 +1,15 @@
 import crypto from "node:crypto";
 import http from "node:http";
-import type { AgentChange, AgentTask } from "../../../shared/types/aiHub";
+import type {
+  AgentChange,
+  AgentTask,
+  SafetyPolicyConfig,
+} from "../../../shared/types/aiHub";
 import type { TerminalRegistry } from "./TerminalRegistry";
-import { analyzeCommandSafety } from "./CommandSafetyService";
+import {
+  analyzeCommandSafety,
+  shouldRequireCommandApproval,
+} from "./CommandSafetyService";
 import { boundedContext, safeError } from "./privacy";
 
 export interface ToolRequest {
@@ -35,6 +42,10 @@ export interface ToolDependencies {
   ): Promise<unknown>;
   openLocalTerminal?(): Promise<string>;
   activity?(task: AgentTask, change: AgentChange, sessionId?: string): void;
+  safetyContext?(
+    task: AgentTask,
+    targetLabel?: string,
+  ): { policy?: SafetyPolicyConfig; targetTags?: string[] };
   changed(): void;
 }
 
@@ -314,7 +325,28 @@ export class ToolBroker {
       this.deps.changed();
       throw new Error("Advice mode does not execute commands or change files");
     }
-    if (task.mode === "assisted") {
+
+    let requiresApproval = task.mode === "assisted";
+    if (
+      (change.kind === "command" || change.kind === "file") &&
+      this.deps.safetyContext
+    ) {
+      const ctx = this.deps.safetyContext(task, change.target);
+      requiresApproval = shouldRequireCommandApproval({
+        analysis: {
+          riskLevel: change.riskLevel ?? "modify",
+          riskReason:
+            change.riskReason ??
+            (change.kind === "file" ? "Remote file modification" : ""),
+          parsedSubcommands: change.parsedSubcommands ?? [],
+        },
+        mode: task.mode,
+        targetTags: ctx.targetTags,
+        policy: ctx.policy,
+      });
+    }
+
+    if (requiresApproval) {
       task.status = "waiting";
       this.deps.changed();
       const allowed = await new Promise<boolean>((resolve) => {

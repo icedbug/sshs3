@@ -32,6 +32,8 @@ interface LiveTerminal {
 export interface DetectedCommandActivity {
   kind: "command" | "config-edit" | "service" | "deploy";
   summary: string;
+  exitCode?: number;
+  resolvedFailure?: TerminalCommandFailure;
 }
 
 /**
@@ -45,13 +47,25 @@ export function classifyNotableCommand(
   const line = rawLine.trim();
   if (!line || line.startsWith("#") || line.length > 2000) return null;
   // Strip leading sudo / env vars for pattern matching
-  const normalized = line
-    .replace(/^(?:sudo\s+(?:-[A-Za-z]+\s+)*|env\s+\S+=\S+\s+)*/, "")
-    .trim();
+  let normalized = line;
+  while (/^(?:sudo|env)\s+/i.test(normalized)) {
+    if (/^sudo\s+/i.test(normalized)) {
+      normalized = normalized.replace(/^sudo\s+/i, "");
+      while (/^-[A-Za-z]+\s+/.test(normalized)) {
+        normalized = normalized.replace(/^-[A-Za-z]+\s+/, "");
+      }
+    } else {
+      normalized = normalized.replace(/^env\s+/i, "");
+      while (/^\S+=\S+\s+/.test(normalized)) {
+        normalized = normalized.replace(/^\S+=\S+\s+/, "");
+      }
+    }
+  }
+  normalized = normalized.trim();
 
   // Config / file edits
   const editorMatch =
-    /^(?:vim?|nvim|nano|emacs|micro|code|subl|sed\s+-i|tee(?:\s+-a)?)\s+(.+)$/i.exec(
+    /^(?:vim?|nvim|nano|emacs|micro|code|subl|sed\s+-i|tee\s+-a|tee)\s+(.+)$/i.exec(
       normalized,
     );
   if (editorMatch) {
@@ -102,7 +116,7 @@ export function classifyNotableCommand(
     };
   }
   if (
-    /^(?:docker(?:\s+compose)?|docker-compose|podman|nerdctl)\s+(?:up|down|restart|stop|start|rm|pull|build|run|exec)\b/i.test(
+    /^(?:docker\s+compose|docker|docker-compose|podman|nerdctl)\s+(?:up|down|restart|stop|start|rm|pull|build|run|exec)\b/i.test(
       normalized,
     )
   ) {
@@ -146,6 +160,7 @@ export function classifyNotableCommand(
 export class TerminalRegistry extends EventEmitter {
   private sessions = new Map<string, LiveTerminal>();
   private lastFailures = new Map<string, TerminalCommandFailure>();
+  private lastResolvedFailures = new Map<string, TerminalCommandFailure>();
   private observing = false;
 
   observe(enabled: boolean): void {
@@ -158,13 +173,26 @@ export class TerminalRegistry extends EventEmitter {
     return Object.fromEntries(this.lastFailures.entries());
   }
 
+  consumeResolvedFailure(sessionId: string): TerminalCommandFailure | undefined {
+    const resolved =
+      this.lastResolvedFailures.get(sessionId) ??
+      this.lastFailures.get(sessionId);
+    this.lastResolvedFailures.delete(sessionId);
+    if (this.lastFailures.delete(sessionId)) {
+      this.emit("changed");
+    }
+    return resolved;
+  }
+
   dismissFailure(sessionId: string): void {
+    this.lastResolvedFailures.delete(sessionId);
     if (this.lastFailures.delete(sessionId)) {
       this.emit("changed");
     }
   }
 
   recordFailure(failure: TerminalCommandFailure): void {
+    this.lastResolvedFailures.delete(failure.sessionId);
     this.lastFailures.set(failure.sessionId, failure);
     this.emit("changed");
   }
@@ -222,6 +250,7 @@ export class TerminalRegistry extends EventEmitter {
           s.view.cwd = result.cwd;
           s.view.updatedAt = Date.now();
           if (!pending.handshake && result.exitCode !== 0) {
+            this.lastResolvedFailures.delete(id);
             this.lastFailures.set(id, {
               sessionId: id,
               label: s.view.label,
@@ -231,7 +260,13 @@ export class TerminalRegistry extends EventEmitter {
               at: Date.now(),
             });
           } else if (!pending.handshake && result.exitCode === 0) {
-            this.lastFailures.delete(id);
+            const prevFailure = this.lastFailures.get(id);
+            if (prevFailure) {
+              this.lastResolvedFailures.set(id, prevFailure);
+              this.lastFailures.delete(id);
+            } else {
+              this.lastResolvedFailures.delete(id);
+            }
           }
           pending.resolve({ ...result, output: boundedContext(result.output) });
           this.emit("changed");
@@ -248,7 +283,7 @@ export class TerminalRegistry extends EventEmitter {
     let clean = data;
     if (s.trimPostHandshakeNewline) {
       s.trimPostHandshakeNewline = false;
-      clean = clean.replace(/^(?:\r?\n)+/, "");
+      clean = clean.replace(/^[\r\n]+/, "");
     }
     if (this.observing && clean) {
       s.output = (s.output + clean).slice(-128_000);
@@ -263,12 +298,62 @@ export class TerminalRegistry extends EventEmitter {
     chunk: string,
   ): void {
     if (!chunk) return;
+    // 0. Check passive OSC 777;SSHS3;<nonce>;BEGIN ... END;<exitCode>;<cwd> frame
+    const sshs3Match =
+      // eslint-disable-next-line no-control-regex
+      /\x1b\]777;SSHS3;[a-f0-9]{32};BEGIN\x07([\s\S]*?)\x1b\]777;SSHS3;[a-f0-9]{32};END;([0-9]+);([^\x07]*)\x07/i.exec(
+        chunk,
+      );
+    if (sshs3Match) {
+      const body = sshs3Match[1] ?? "";
+      const code = Number(sshs3Match[2]);
+      const lines = body
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter(Boolean);
+      const inferredCmd = lines[0] || s.lastSubmittedCommand || "";
+      const outSnippet = lines.slice(1).join("\n") || body;
+      if (code !== 0) {
+        this.lastResolvedFailures.delete(id);
+        this.lastFailures.set(id, {
+          sessionId: id,
+          label: s.view.label,
+          command: inferredCmd,
+          exitCode: code,
+          snippet: boundedContext(outSnippet, 1500),
+          at: Date.now(),
+        });
+        this.emit("changed");
+      } else {
+        const priorFailure = this.lastFailures.get(id);
+        const classified =
+          classifyNotableCommand(inferredCmd) ??
+          (priorFailure && inferredCmd
+            ? {
+                kind: "command" as const,
+                summary: `Resolved terminal failure with: ${inferredCmd}`,
+              }
+            : null);
+        if (this.lastFailures.delete(id)) {
+          this.emit("changed");
+        }
+        if (classified && inferredCmd) {
+          this.emit("commandLine", { ...s.view }, inferredCmd, {
+            ...classified,
+            exitCode: 0,
+            resolvedFailure: priorFailure,
+          });
+        }
+      }
+      return;
+    }
     // 1. Check OSC 133;D;<exitCode> shell integration marker
     // eslint-disable-next-line no-control-regex -- matching terminal escape sequences is the point
     const oscMatch = /\x1b\]133;D;([0-9]+)(?:\x07|\x1b\\)/.exec(chunk);
     if (oscMatch) {
       const code = Number(oscMatch[1]);
       if (code !== 0) {
+        this.lastResolvedFailures.delete(id);
         this.lastFailures.set(id, {
           sessionId: id,
           label: s.view.label,
@@ -278,8 +363,23 @@ export class TerminalRegistry extends EventEmitter {
           at: Date.now(),
         });
         this.emit("changed");
-      } else if (this.lastFailures.delete(id)) {
-        this.emit("changed");
+      } else {
+        const priorFailure = this.lastFailures.get(id);
+        const inferredCmd = (s.lastSubmittedCommand || "").trim();
+        if (this.lastFailures.delete(id)) {
+          this.emit("changed");
+        }
+        if (priorFailure && inferredCmd) {
+          const classified = classifyNotableCommand(inferredCmd) ?? {
+            kind: "command" as const,
+            summary: `Resolved terminal failure with: ${inferredCmd}`,
+          };
+          this.emit("commandLine", { ...s.view }, inferredCmd, {
+            ...classified,
+            exitCode: 0,
+            resolvedFailure: priorFailure,
+          });
+        }
       }
       return;
     }

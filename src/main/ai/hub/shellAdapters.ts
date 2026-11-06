@@ -129,7 +129,7 @@ export class CommandFrames {
         const trailing = cleanInternalTitleOsc(this.carry);
         this.carry = "";
         if (this.options.handshake) {
-          this.displayBuffer += `\x1b[?25h\r\x1b[2K${trailing.replace(/^(?:\r?\n)+/, "")}`;
+          this.displayBuffer += `\x1b[?25h\r\x1b[2K${trailing.replace(/^[\r\n]+/, "")}`;
         } else if (trailing) {
           this.displayBuffer += `\x1b[?25h${trailing}`;
         }

@@ -119,7 +119,7 @@ describe('Sshs3WebServer Multi-User Hybrid Mode', () => {
       body: JSON.stringify({
         username: 'jacob',
         displayName: 'Jacob Admin',
-        password: 'super-secret-password',
+        password: 'super-secret-password', // pragma: allowlist secret
       }),
     });
     expect(jacobSetup.token).toBeTruthy();
@@ -145,7 +145,7 @@ describe('Sshs3WebServer Multi-User Hybrid Mode', () => {
         inviteToken: inviteRes.invite.token,
         username: 'erik',
         displayName: 'Erik Kompis',
-        password: 'erik-password-123',
+        password: 'erik-password-123', // pragma: allowlist secret
       }),
     });
     expect(erikReg.token).toBeTruthy();
@@ -307,8 +307,8 @@ describe('Sshs3WebServer Multi-User Hybrid Mode', () => {
         {
           method: 'POST',
           body: JSON.stringify({
-            currentPassword: 'erik-password-123',
-            newPassword: 'erik-new-password-456',
+            currentPassword: 'erik-password-123', // pragma: allowlist secret
+            newPassword: 'erik-new-password-456', // pragma: allowlist secret
           }),
         },
         erikReg.token
@@ -338,7 +338,7 @@ describe('Sshs3WebServer Multi-User Hybrid Mode', () => {
           body: JSON.stringify({
             inviteToken: inviteToRevoke.invite.token,
             username: 'latecomer',
-            password: 'password123',
+            password: 'password123', // pragma: allowlist secret
           }),
         })
       ).rejects.toThrow();

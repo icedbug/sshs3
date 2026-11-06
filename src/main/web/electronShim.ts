@@ -249,12 +249,28 @@ export const Menu = {
   },
 };
 
+interface ShimNativeImage {
+  isEmpty: () => boolean;
+  resize: (_options?: { width?: number; height?: number }) => ShimNativeImage;
+}
+
+function makeShimNativeImage(empty: boolean): ShimNativeImage {
+  const img: ShimNativeImage = {
+    isEmpty: () => empty,
+    resize: () => img,
+  };
+  return img;
+}
+
 export const nativeImage = {
-  createFromPath(): { isEmpty: () => boolean } {
-    return { isEmpty: () => true };
+  createFromPath(): ShimNativeImage {
+    return makeShimNativeImage(true);
   },
-  createEmpty(): { isEmpty: () => boolean } {
-    return { isEmpty: () => true };
+  createFromBuffer(): ShimNativeImage {
+    return makeShimNativeImage(false);
+  },
+  createEmpty(): ShimNativeImage {
+    return makeShimNativeImage(true);
   },
 };
 

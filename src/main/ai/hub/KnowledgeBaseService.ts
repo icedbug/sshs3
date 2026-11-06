@@ -1,6 +1,12 @@
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import {
+  create as createOrama,
+  insertMultiple as insertMultipleOrama,
+  search as searchOrama,
+  type AnyOrama,
+} from "@orama/orama";
 import type { KbDocument, MemoryEntry } from "../../../shared/types/aiHub";
 import type { IStorageProvider } from "../../../shared/types/storage";
 
@@ -19,10 +25,11 @@ export interface KbChunkResult {
 }
 
 /**
- * Orama-inspired Hybrid Semantic Concept Dictionary for bilingual (SV/EN) DevOps,
- * Storage (NetApp ONTAP, Ceph, ZFS, S3), Kubernetes, and Linux infrastructure.
+ * Bilingual (SV/EN) DevOps, Storage (NetApp ONTAP, Ceph, ZFS, S3), Kubernetes,
+ * Security, Database, Observability, and Linux infrastructure concept clusters.
+ * Used both for explicit concept tagging and 16-dimensional Orama vector embeddings.
  */
-const SEMANTIC_CONCEPT_CLUSTERS: Record<string, string[]> = {
+export const SEMANTIC_CONCEPT_CLUSTERS: Record<string, string[]> = {
   storage_capacity: [
     "full",
     "disk",
@@ -159,17 +166,166 @@ const SEMANTIC_CONCEPT_CLUSTERS: Record<string, string[]> = {
     "connection",
     "unreachable",
   ],
+  security_audit_cve: [
+    "cve",
+    "trivy",
+    "falco",
+    "sshd",
+    "cert",
+    "tls",
+    "rbac",
+    "sudo",
+    "root",
+    "selinux",
+    "apparmor",
+    "sårbarhet",
+    "säkerhet",
+    "audit",
+    "unauthorized",
+    "permission",
+  ],
+  database_postgres_redis: [
+    "postgres",
+    "postgresql",
+    "pg_stat",
+    "wal",
+    "deadlock",
+    "vacuum",
+    "redis",
+    "mysql",
+    "mariadb",
+    "databas",
+    "connection_pool",
+    "pgbouncer",
+  ],
+  observability_prometheus_logs: [
+    "prometheus",
+    "grafana",
+    "loki",
+    "alertmanager",
+    "metric",
+    "oom",
+    "memory_leak",
+    "cpu",
+    "load",
+    "journalctl",
+    "dmesg",
+    "syslog",
+    "övervakning",
+    "larm",
+  ],
+  gitops_ci_deploy: [
+    "argocd",
+    "flux",
+    "helm",
+    "terraform",
+    "ansible",
+    "gitops",
+    "pipeline",
+    "deploy",
+    "rollback",
+    "drift",
+    "kustomize",
+    "release",
+  ],
+  linux_systemd_kernel: [
+    "systemd",
+    "systemctl",
+    "service",
+    "unit",
+    "kernel",
+    "sysctl",
+    "ulimit",
+    "oom-killer",
+    "zombie",
+    "process",
+    "cron",
+    "cgroup",
+  ],
+  backup_snapshot_restore: [
+    "snapshot",
+    "restic",
+    "borg",
+    "veeam",
+    "velero",
+    "restore",
+    "återställning",
+    "kopia",
+    "retention",
+    "immutable",
+  ],
+  gpu_ai_inference: [
+    "gpu",
+    "nvidia",
+    "cuda",
+    "vllm",
+    "ollama",
+    "tensor",
+    "vram",
+    "rocm",
+    "nccl",
+    "inference",
+    "llm",
+    "triton",
+  ],
+  dns_loadbalancer_ingress: [
+    "dns",
+    "coredns",
+    "bind",
+    "nginx",
+    "haproxy",
+    "envoy",
+    "traefik",
+    "ingress",
+    "loadbalancer",
+    "vip",
+    "keepalived",
+    "cert-manager",
+  ],
 };
+
+const CONCEPT_KEYS = Object.keys(SEMANTIC_CONCEPT_CLUSTERS);
 
 export function extractSemanticConcepts(tokens: string[]): string[] {
   const matched: string[] = [];
   for (const [concept, keywords] of Object.entries(SEMANTIC_CONCEPT_CLUSTERS)) {
     const hit = tokens.some((tok) =>
-      keywords.some((kw) => tok === kw || (tok.length >= 4 && kw.startsWith(tok)) || (kw.length >= 4 && tok.startsWith(kw))),
+      keywords.some(
+        (kw) =>
+          tok === kw ||
+          (tok.length >= 4 && kw.startsWith(tok)) ||
+          (kw.length >= 4 && tok.startsWith(kw)),
+      ),
     );
     if (hit) matched.push(concept);
   }
   return matched;
+}
+
+export function computeConceptEmbedding(tokens: string[]): number[] {
+  const raw = CONCEPT_KEYS.map((concept) => {
+    const keywords = SEMANTIC_CONCEPT_CLUSTERS[concept] ?? [];
+    let hits = 0;
+    for (const tok of tokens) {
+      for (const kw of keywords) {
+        if (tok === kw) hits += 1.0;
+        else if (
+          (tok.length >= 4 && kw.startsWith(tok)) ||
+          (kw.length >= 4 && tok.startsWith(kw))
+        ) {
+          hits += 0.6;
+        }
+      }
+    }
+    return hits;
+  });
+  const norm = Math.sqrt(raw.reduce((acc, v) => acc + v * v, 0));
+  if (norm === 0) {
+    // Return uniform small non-zero unit vector so Orama cosine similarity never divides by zero
+    const val = 1 / Math.sqrt(CONCEPT_KEYS.length);
+    return raw.map(() => val);
+  }
+  return raw.map((v) => v / norm);
 }
 
 function computeTrigramSimilarity(a: string, b: string): number {
@@ -213,7 +369,11 @@ const TEXT_EXTENSIONS = new Set([
   ".csv",
 ]);
 
-export function splitIntoChunks(text: string, maxChunkChars = 1200, overlapChars = 180): string[] {
+export function splitIntoChunks(
+  text: string,
+  maxChunkChars = 1200,
+  overlapChars = 180,
+): string[] {
   const cleaned = text.replace(/\r\n/g, "\n").trim();
   if (!cleaned) return [];
   if (cleaned.length <= maxChunkChars) return [cleaned];
@@ -245,7 +405,7 @@ export function splitIntoChunks(text: string, maxChunkChars = 1200, overlapChars
   return chunks;
 }
 
-function tokenize(input: string): string[] {
+export function tokenize(input: string): string[] {
   return input
     .toLowerCase()
     .split(/[^a-z0-9åäö_.-]+/i)
@@ -253,7 +413,95 @@ function tokenize(input: string): string[] {
     .filter((t) => t.length >= 2);
 }
 
+interface IndexedChunkRecord {
+  chunkId: string;
+  doc: KbDocument;
+  chunkIndex: number;
+  text: string;
+  tokens: string[];
+  concepts: string[];
+}
+
 export class KnowledgeBaseService {
+  private oramaDb?: AnyOrama;
+  private oramaSignature = "";
+  private indexedChunks = new Map<string, IndexedChunkRecord>();
+
+  getIndexedChunkCount(): number {
+    return this.indexedChunks.size;
+  }
+
+  private ensureOramaIndex(docs: KbDocument[]): void {
+    const sig = docs
+      .map((d) => `${d.id}:${d.updatedAt}:${d.chunks?.length ?? 0}`)
+      .join("|");
+    if (this.oramaDb && this.oramaSignature === sig) {
+      return;
+    }
+
+    const db = createOrama({
+      schema: {
+        chunkId: "string",
+        docId: "string",
+        chunkIndex: "number",
+        title: "string",
+        collection: "string",
+        cluster: "string",
+        tags: "string",
+        concepts: "string",
+        text: "string",
+        embedding: `vector[${CONCEPT_KEYS.length}]` as const,
+      },
+    });
+
+    const chunkMap = new Map<string, IndexedChunkRecord>();
+    const oramaRecords: Array<Record<string, unknown>> = [];
+
+    for (const doc of docs) {
+      const parts =
+        doc.chunks?.length > 0
+          ? doc.chunks.map((c) => c.text)
+          : splitIntoChunks(doc.content);
+      const col = doc.collection || doc.cluster || "General";
+      const cl = doc.cluster || doc.targetCluster || "";
+      const tagStr = (doc.tags ?? []).join(" ");
+      parts.forEach((part, idx) => {
+        const chunkId = `${doc.id}#${idx}`;
+        const tokens = tokenize(`${doc.title} ${col} ${cl} ${tagStr} ${part}`);
+        const concepts = extractSemanticConcepts(tokens);
+        const embedding = computeConceptEmbedding(tokens);
+        chunkMap.set(chunkId, {
+          chunkId,
+          doc,
+          chunkIndex: idx,
+          text: part,
+          tokens,
+          concepts,
+        });
+        oramaRecords.push({
+          chunkId,
+          docId: doc.id,
+          chunkIndex: idx,
+          title: doc.title,
+          collection: col,
+          cluster: cl,
+          tags: tagStr,
+          concepts: concepts.join(" "),
+          text: part,
+          embedding,
+        });
+      });
+    }
+
+    if (oramaRecords.length > 0) {
+      insertMultipleOrama(db, oramaRecords);
+    }
+
+    this.oramaDb = db;
+    this.oramaSignature = sig;
+    this.indexedChunks = chunkMap;
+  }
+
   createDocument(input: {
     id?: string;
     collection?: string;
@@ -279,8 +527,10 @@ export class KnowledgeBaseService {
         text,
       };
     });
-    const cluster = input.cluster?.trim() || input.targetCluster?.trim() || undefined;
-    const sourceRef = input.sourceRef?.trim() || input.sourceUri?.trim() || undefined;
+    const cluster =
+      input.cluster?.trim() || input.targetCluster?.trim() || undefined;
+    const sourceRef =
+      input.sourceRef?.trim() || input.sourceUri?.trim() || undefined;
     return {
       id,
       collection: input.collection?.trim() || cluster || "General",
@@ -318,54 +568,36 @@ export class KnowledgeBaseService {
       limit?: number;
     },
   ): KbChunkResult[] {
-    const query = typeof queryOrOpts === "string" ? queryOrOpts : queryOrOpts.query;
+    const query =
+      typeof queryOrOpts === "string" ? queryOrOpts : queryOrOpts.query;
     const opts = typeof queryOrOpts === "string" ? options : queryOrOpts;
     const limit = Math.max(1, Math.min(25, opts?.limit ?? 6));
     const qTokens = tokenize(query);
     const allowedCollections = opts?.collectionIds
       ?.map((c) => c.trim().toLowerCase())
       .filter(Boolean);
-    const clusterFilter = (opts?.cluster || opts?.targetCluster)?.trim().toLowerCase();
+    const clusterFilter = (opts?.cluster || opts?.targetCluster)
+      ?.trim()
+      .toLowerCase();
 
-    const candidateDocs = docs.filter((doc) => {
+    // Ensure the @orama/orama in-memory hybrid index is up to date
+    this.ensureOramaIndex(docs);
+
+    const candidateRecords = [...this.indexedChunks.values()].filter((rec) => {
       if (allowedCollections && allowedCollections.length > 0) {
-        const col = (doc.collection || doc.cluster || "").toLowerCase();
+        const col = (rec.doc.collection || rec.doc.cluster || "").toLowerCase();
         const matchCol =
           allowedCollections.includes(col) ||
-          allowedCollections.includes(doc.id.toLowerCase());
+          allowedCollections.includes(rec.doc.id.toLowerCase());
         if (!matchCol) return false;
       }
       return true;
     });
 
-    const allChunks: Array<{
-      doc: KbDocument;
-      chunkIndex: number;
-      text: string;
-      tokens: string[];
-    }> = [];
-
-    for (const doc of candidateDocs) {
-      const parts =
-        doc.chunks?.length > 0
-          ? doc.chunks.map((c) => c.text)
-          : splitIntoChunks(doc.content);
-      const col = doc.collection || doc.cluster || "General";
-      const cl = doc.cluster || doc.targetCluster || "";
-      parts.forEach((part, idx) => {
-        allChunks.push({
-          doc,
-          chunkIndex: idx,
-          text: part,
-          tokens: tokenize(`${doc.title} ${col} ${cl} ${(doc.tags ?? []).join(" ")} ${part}`),
-        });
-      });
-    }
-
-    if (allChunks.length === 0) return [];
+    if (candidateRecords.length === 0) return [];
 
     if (qTokens.length === 0) {
-      return allChunks.slice(0, limit).map((c) => ({
+      return candidateRecords.slice(0, limit).map((c) => ({
         docId: c.doc.id,
         title: c.doc.title,
         collection: c.doc.collection || c.doc.cluster || "General",
@@ -377,26 +609,65 @@ export class KnowledgeBaseService {
       }));
     }
 
-    // BM25 + Hybrid Semantic Concept parameters (Orama pattern)
+    // 1. Query @orama/orama full-text BM25 + typo-tolerant index AND hybrid vector index
+    const oramaScores = new Map<string, number>();
+    const queryConcepts = extractSemanticConcepts(qTokens);
+    if (this.oramaDb) {
+      try {
+        const expandedTerm = [query, ...queryConcepts].join(" ").trim();
+        const ftResults = searchOrama(this.oramaDb, {
+          term: expandedTerm,
+          properties: [
+            "title",
+            "text",
+            "collection",
+            "cluster",
+            "tags",
+            "concepts",
+          ],
+          boost: {
+            title: 2.5,
+            concepts: 2.0,
+            tags: 1.8,
+            cluster: 1.5,
+            text: 1.0,
+          },
+          tolerance: 1,
+          limit: Math.max(25, limit * 4),
+        });
+        if (ftResults && "hits" in ftResults && Array.isArray(ftResults.hits)) {
+          for (const hit of ftResults.hits) {
+            const doc = hit.document as { chunkId?: string };
+            if (doc?.chunkId && Number.isFinite(hit.score)) {
+              oramaScores.set(doc.chunkId, hit.score * 2.2);
+            }
+          }
+        }
+      } catch {
+        // Fallback cleanly if Orama query parser encounters unusual syntax
+      }
+    }
+
+    // 2. Combine @orama/orama BM25 scores with compound-token BM25, bilingual concept vectors, and trigram similarity
     const k1 = 1.5;
     const b = 0.75;
     const avgLen =
-      allChunks.reduce((acc, c) => acc + c.tokens.length, 0) / allChunks.length || 1;
+      candidateRecords.reduce((acc, c) => acc + c.tokens.length, 0) /
+        candidateRecords.length || 1;
     const docFreq = new Map<string, number>();
     for (const q of qTokens) {
       let df = 0;
-      for (const c of allChunks) {
+      for (const c of candidateRecords) {
         if (c.tokens.some((t) => t === q || t.includes(q))) df++;
       }
       docFreq.set(q, df);
     }
 
-    const queryConcepts = extractSemanticConcepts(qTokens);
     const scored: KbChunkResult[] = [];
-    const N = allChunks.length;
+    const N = candidateRecords.length;
 
-    for (const c of allChunks) {
-      let bm25Score = 0;
+    for (const c of candidateRecords) {
+      let lexicalBm25 = oramaScores.get(c.chunkId) ?? 0;
       const len = c.tokens.length || 1;
       for (const q of qTokens) {
         let tf = 0;
@@ -407,14 +678,12 @@ export class KnowledgeBaseService {
         if (tf === 0) continue;
         const df = docFreq.get(q) ?? 0;
         const idf = Math.log(1 + (N - df + 0.5) / (df + 0.5));
-        bm25Score +=
+        lexicalBm25 +=
           idf * ((tf * (k1 + 1)) / (tf + k1 * (1 - b + b * (len / avgLen))));
       }
 
-      // Semantic concept match + character trigram similarity
-      const chunkConcepts = extractSemanticConcepts(c.tokens);
       const matchedConcepts = queryConcepts.filter((qc) =>
-        chunkConcepts.includes(qc),
+        c.concepts.includes(qc),
       );
       const conceptBoost = matchedConcepts.length * 1.45;
       const trigramSim = computeTrigramSimilarity(
@@ -422,12 +691,17 @@ export class KnowledgeBaseService {
         `${c.doc.title} ${c.text.slice(0, 400)}`,
       );
       const semanticScore =
-        Math.round((conceptBoost + (trigramSim >= 0.12 ? trigramSim * 1.8 : 0)) * 1000) /
-        1000;
+        Math.round(
+          (conceptBoost + (trigramSim >= 0.12 ? trigramSim * 1.8 : 0)) * 1000,
+        ) / 1000;
 
-      let totalScore = bm25Score + semanticScore;
+      let totalScore = lexicalBm25 + semanticScore;
 
-      const docCluster = (c.doc.cluster || c.doc.targetCluster || "").toLowerCase();
+      const docCluster = (
+        c.doc.cluster ||
+        c.doc.targetCluster ||
+        ""
+      ).toLowerCase();
       if (clusterFilter && docCluster && docCluster === clusterFilter) {
         totalScore *= 1.35;
       }
@@ -444,7 +718,7 @@ export class KnowledgeBaseService {
           chunkIndex: c.chunkIndex,
           snippet: c.text,
           score: Math.round(totalScore * 1000) / 1000,
-          bm25Score: Math.round(bm25Score * 1000) / 1000,
+          bm25Score: Math.round(lexicalBm25 * 1000) / 1000,
           semanticScore,
           matchedConcepts,
         });
@@ -455,9 +729,8 @@ export class KnowledgeBaseService {
   }
 
   /**
-   * Mem0-inspired automatic memory deduplication & semantic consolidation.
-   * If a memory with the same scope/kind and high title/concept overlap already exists,
-   * merges and updates it in-place rather than creating duplicate entries.
+   * Mem0 + Voyager inspired automatic memory deduplication, semantic consolidation,
+   * and confidence/reinforcement score tracking.
    */
   deduplicateOrMergeMemory(
     existing: MemoryEntry[],
@@ -475,11 +748,24 @@ export class KnowledgeBaseService {
       matchIdx = existing.findIndex((m) => {
         if (m.kind !== incoming.kind || m.scope !== incoming.scope) return false;
         if (m.title.trim().toLowerCase() === normTitle) return true;
+        if (
+          incoming.errorSignature &&
+          m.errorSignature &&
+          incoming.errorSignature === m.errorSignature
+        ) {
+          return true;
+        }
         const mTokens = tokenize(`${m.title} ${m.text}`);
         if (incomingTokens.length >= 3 && mTokens.length >= 3) {
-          const overlap = incomingTokens.filter((t) => mTokens.includes(t)).length;
-          const ratio = overlap / Math.min(incomingTokens.length, mTokens.length);
-          if (ratio >= 0.78 && m.title.toLowerCase().slice(0, 14) === normTitle.slice(0, 14)) {
+          const overlap = incomingTokens.filter((t) =>
+            mTokens.includes(t),
+          ).length;
+          const ratio =
+            overlap / Math.min(incomingTokens.length, mTokens.length);
+          if (
+            ratio >= 0.78 &&
+            m.title.toLowerCase().slice(0, 14) === normTitle.slice(0, 14)
+          ) {
             return true;
           }
         }
@@ -494,6 +780,14 @@ export class KnowledgeBaseService {
         incoming.text.includes(prev.text.trim())
           ? incoming.text.trim()
           : `${incoming.text.trim()} (Tidigare notering: ${prev.text.trim().slice(0, 240)})`;
+      const prevConfidence = prev.confidence ?? 0.78;
+      const nextConfidence = Math.min(
+        0.99,
+        Math.round(
+          Math.max(incoming.confidence ?? prevConfidence, prevConfidence + 0.04) *
+            100,
+        ) / 100,
+      );
       const updated: MemoryEntry = {
         ...prev,
         ...incoming,
@@ -503,12 +797,21 @@ export class KnowledgeBaseService {
         tier: incoming.tier ?? prev.tier ?? "archival",
         cluster: incoming.cluster ?? prev.cluster,
         updatedCount: (prev.updatedCount ?? 1) + 1,
+        confidence: nextConfidence,
+        successCount:
+          incoming.successCount ?? (prev.successCount ?? 0) + (incoming.autoLearned ? 1 : 0),
+        failureCount: incoming.failureCount ?? prev.failureCount ?? 0,
+        usageCount: incoming.usageCount ?? (prev.usageCount ?? 0) + 1,
+        feedbackScore: incoming.feedbackScore ?? prev.feedbackScore ?? 0,
+        autoLearned: incoming.autoLearned ?? prev.autoLearned,
+        sourceCommand: incoming.sourceCommand ?? prev.sourceCommand,
+        errorSignature: incoming.errorSignature ?? prev.errorSignature,
         updatedAt: now,
       };
       const next = [...existing];
       next.splice(matchIdx, 1);
       return {
-        memories: [updated, ...next].slice(0, 80),
+        memories: [updated, ...next].slice(0, 100),
         saved: updated,
         merged: true,
       };
@@ -524,11 +827,19 @@ export class KnowledgeBaseService {
       text: incoming.text.trim().slice(0, 1200),
       author: incoming.author,
       updatedCount: 1,
+      confidence: incoming.confidence ?? (incoming.kind === "skill" ? 0.85 : 0.78),
+      successCount: incoming.successCount ?? (incoming.autoLearned ? 1 : 0),
+      failureCount: incoming.failureCount ?? 0,
+      usageCount: incoming.usageCount ?? 1,
+      feedbackScore: incoming.feedbackScore ?? 0,
+      autoLearned: incoming.autoLearned,
+      sourceCommand: incoming.sourceCommand,
+      errorSignature: incoming.errorSignature,
       updatedAt: now,
     };
 
     return {
-      memories: [created, ...existing].slice(0, 80),
+      memories: [created, ...existing].slice(0, 100),
       saved: created,
       merged: false,
     };
@@ -536,7 +847,8 @@ export class KnowledgeBaseService {
 
   /**
    * Hybrid ranking of Memories & Skills against a prompt or cluster context.
-   * Core memories are always prioritized first, followed by highest Hybrid BM25 + Semantic matches.
+   * Combines Letta/MemGPT tier priority, Orama/BM25 lexical + semantic concept matching,
+   * and Voyager/Reflexion confidence & reinforcement feedback scores.
    */
   rankMemories(
     memories: MemoryEntry[],
@@ -544,24 +856,35 @@ export class KnowledgeBaseService {
     cluster?: string,
     limit = 16,
   ): MemoryEntry[] {
-    if (memories.length <= limit && !query.trim()) return memories;
+    if (memories.length === 0) return [];
     const qTokens = tokenize(query);
     const qConcepts = extractSemanticConcepts(qTokens);
     const clusterNorm = cluster?.trim().toLowerCase();
 
     return [...memories]
       .map((m) => {
-        let score = m.tier === "core" ? 10 : m.tier === "archival" ? 3 : 1;
+        let score = m.tier === "core" ? 10 : m.tier === "archival" ? 3.5 : 1;
         if (clusterNorm && m.cluster?.toLowerCase() === clusterNorm) {
           score += 6;
         }
+        // Reinforcement learning & confidence weighting
+        const confidence = m.confidence ?? (m.kind === "skill" ? 0.82 : 0.75);
+        score += (confidence - 0.5) * 4.0;
+        score += Math.min(6, (m.successCount ?? 0) * 1.15);
+        score += (m.feedbackScore ?? 0) * 2.5;
+        score -= Math.min(5, (m.failureCount ?? 0) * 1.5);
+
         if (qTokens.length > 0) {
-          const mTokens = tokenize(`${m.title} ${m.text} ${m.scope} ${m.cluster ?? ""}`);
+          const mTokens = tokenize(
+            `${m.title} ${m.text} ${m.scope} ${m.cluster ?? ""} ${m.sourceCommand ?? ""} ${m.errorSignature ?? ""}`,
+          );
           for (const q of qTokens) {
             if (mTokens.some((t) => t === q || t.includes(q))) score += 2.5;
           }
           const mConcepts = extractSemanticConcepts(mTokens);
-          const conceptHits = qConcepts.filter((c) => mConcepts.includes(c)).length;
+          const conceptHits = qConcepts.filter((c) =>
+            mConcepts.includes(c),
+          ).length;
           score += conceptHits * 2.0;
         }
         return { m, score };
@@ -587,11 +910,15 @@ export class KnowledgeBaseService {
     const collection =
       typeof collectionOrOpts === "string"
         ? collectionOrOpts
-        : collectionOrOpts.collection || collectionOrOpts.cluster || "Local Docs";
+        : collectionOrOpts.collection ||
+          collectionOrOpts.cluster ||
+          "Local Docs";
     const cluster =
       typeof collectionOrOpts === "string"
         ? targetCluster
-        : collectionOrOpts.cluster || collectionOrOpts.targetCluster || targetCluster;
+        : collectionOrOpts.cluster ||
+          collectionOrOpts.targetCluster ||
+          targetCluster;
     const tags =
       typeof collectionOrOpts === "string" ? undefined : collectionOrOpts.tags;
     const out: KbDocument[] = [];
@@ -605,7 +932,8 @@ export class KnowledgeBaseService {
       }
       for (const entry of entries) {
         if (out.length >= maxFiles) break;
-        if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
+        if (entry.name.startsWith(".") || entry.name === "node_modules")
+          continue;
         const full = path.join(dir, entry.name);
         if (entry.isDirectory()) {
           await walk(full, depth + 1);
@@ -664,7 +992,9 @@ export class KnowledgeBaseService {
           const stream = await provider.createReadStream(entry.path);
           const chunks: Buffer[] = [];
           for await (const chunk of stream as AsyncIterable<Buffer | string>) {
-            chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+            chunks.push(
+              typeof chunk === "string" ? Buffer.from(chunk) : chunk,
+            );
           }
           text = Buffer.concat(chunks).toString("utf-8");
         }

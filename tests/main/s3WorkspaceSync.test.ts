@@ -146,7 +146,7 @@ describe('S3WorkspaceSyncService & CRDT Merge', () => {
       endpoint: 'https://s3.eu-north-1.amazonaws.com',
       prefix: 'sshs3-team',
       accessKeyId: 'AKIAEXAMPLE123',
-      secretAccessKey: 'super-secret-s3-key',
+      secretAccessKey: 'super-secret-s3-key', // pragma: allowlist secret
     });
 
     expect(invite.startsWith('sshs3-s3://')).toBe(true);
@@ -158,7 +158,7 @@ describe('S3WorkspaceSyncService & CRDT Merge', () => {
       endpoint: 'https://s3.eu-north-1.amazonaws.com',
       prefix: 'sshs3-team',
       accessKeyId: 'AKIAEXAMPLE123',
-      secretAccessKey: 'super-secret-s3-key',
+      secretAccessKey: 'super-secret-s3-key', // pragma: allowlist secret
       forcePathStyle: true,
     });
   });
@@ -179,8 +179,8 @@ describe('S3WorkspaceSyncService & CRDT Merge', () => {
       localUsername: 'jacob-local',
       localPrivateKeyPath: '~/.ssh/id_ed25519_jacob',
       localAuthType: 'privateKey' as const,
-      password: 'never-upload-password',
-      privateKey: 'never-upload-private-key',
+      password: 'never-upload-password', // pragma: allowlist secret
+      privateKey: 'never-upload-private-key', // pragma: allowlist secret
     } as WorkspaceServerSummary & { password?: string; privateKey?: string };
 
     const sanitized = sanitizeServerForS3(rawServer);
@@ -382,7 +382,7 @@ describe('S3WorkspaceSyncService & CRDT Merge', () => {
       region: 'eu-north-1',
       prefix: 'team-alpha',
       accessKeyId: 'AKIAJACOB',
-      secretAccessKey: 'SECRETJACOB',
+      secretAccessKey: 'SECRETJACOB', // pragma: allowlist secret
     });
 
     const jacobStatus = syncJacob.getStatus();
