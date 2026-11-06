@@ -27,10 +27,10 @@ export const SftpButton: React.FC<SftpButtonProps> = ({ authType, onOpen, disabl
         if (!unavailableReason) onOpen();
       }}
       className={
-        'flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium shadow-sm transition-colors ' +
+        'flex items-center gap-1 rounded border px-2 py-0.5 text-[10px] font-mono transition-colors ' +
         (unavailableReason
-          ? 'cursor-not-allowed bg-app-surface text-txt-muted opacity-50'
-          : 'bg-sky-700 text-white hover:bg-sky-600 disabled:opacity-40 disabled:hover:bg-sky-700')
+          ? 'cursor-not-allowed border-white/5 bg-white/[0.02] text-neutral-600 opacity-50'
+          : 'border-white/15 bg-white/[0.04] text-neutral-300 hover:border-white/30 hover:bg-white/[0.09] hover:text-white disabled:opacity-40')
       }
     >
       <Files className="h-3 w-3" />

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Terminal } from 'lucide-react';
+import { Sparkles, Terminal } from 'lucide-react';
 import { UnsplitButton } from './components/UnsplitButton';
 import { TabBar } from './components/TabBar';
 import { AiHubPanel } from './components/AiHub/AiHubPanel';
@@ -43,12 +43,7 @@ const log = createRendererLogger('App');
 
 const AppContent: React.FC = () => {
   const confirm = useConfirm();
-  const isDemoQuery =
-    typeof window !== "undefined" &&
-    new URLSearchParams(window.location.search).get("demo") === "1";
-  const [aiMode, setAiMode] = useState<"closed" | "panel" | "hub">(
-    isDemoQuery ? "panel" : "closed",
-  );
+  const [aiMode, setAiMode] = useState<"closed" | "panel" | "hub">("closed");
   const [aiPanelWidth, setAiPanelWidth] = useState<number>(() => {
     try {
       const saved = Number(localStorage.getItem("sshs3:ai-panel-width"));
@@ -683,10 +678,10 @@ const AppContent: React.FC = () => {
           />
         </div>
         <button
-          className={`h-full shrink-0 px-3 text-xs font-medium border-l border-divider/40 transition-colors flex items-center gap-1.5 ${
+          className={`h-full shrink-0 px-3.5 text-xs font-mono tracking-wider transition-colors flex items-center gap-1.5 ${
             (nativeHermes ? nativeMode !== "closed" : aiMode !== "closed")
-              ? "bg-sky-500/15 text-sky-300"
-              : "text-sky-400 hover:bg-app-surface-hover"
+              ? "bg-white text-black font-semibold"
+              : "text-neutral-300 hover:text-white hover:bg-white/[0.04]"
           }`}
           title="Öppna / stäng AI Hub (Chat, Mission Agents, MCP, Kunskapsbas)"
           onClick={() =>
@@ -697,13 +692,13 @@ const AppContent: React.FC = () => {
               : setAiMode(aiMode === "closed" ? "panel" : "closed")
           }
         >
-          <span>✨</span>
+          <Sparkles size={12} className={(nativeHermes ? nativeMode !== "closed" : aiMode !== "closed") ? "text-black" : "text-neutral-400"} />
           <span>Chat</span>
         </button>
         {nativeHermes ? (
           nativeMode !== 'closed' && (
             <button
-              className="h-full shrink-0 px-3 text-xs font-medium text-sky-400 hover:bg-app-surface-hover border-l border-divider/40"
+              className="h-full shrink-0 px-3 text-xs font-mono tracking-wider text-neutral-300 hover:text-white hover:bg-white/[0.04] border-l border-white/10"
               onClick={() => void nativeHermes.set({ mode: 'full' })}
             >
               Expand AI
@@ -718,14 +713,14 @@ const AppContent: React.FC = () => {
                   ? 'Växla tillbaka till sidopanel'
                   : 'Expandera AI Hub till helskärm (Mission Agents, MCP & KB)'
               }
-              className={`h-full shrink-0 px-3 text-xs font-medium border-l border-divider/40 transition-colors flex items-center gap-1 ${
+              className={`h-full shrink-0 px-3 text-xs font-mono tracking-wider border-l border-white/10 transition-colors flex items-center gap-1.5 ${
                 aiMode === 'hub'
-                  ? 'bg-indigo-500/20 text-indigo-300'
-                  : 'text-sky-400 hover:bg-app-surface-hover'
+                  ? 'bg-white/10 text-white'
+                  : 'text-neutral-400 hover:text-white hover:bg-white/[0.04]'
               }`}
               onClick={() => setAiMode(aiMode === 'hub' ? 'panel' : 'hub')}
             >
-              <span>{aiMode === 'hub' ? '◧ Sidebar AI' : '⛶ Expand AI'}</span>
+              <span>{aiMode === 'hub' ? 'Sidebar AI' : 'Expand AI'}</span>
             </button>
           )
         )}

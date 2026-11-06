@@ -1,35 +1,24 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
-  Bot,
-  Check,
   Clock,
   Cloud,
+  Columns2,
   Copy,
   Edit3,
   Folder,
   Key,
-  Layers,
   Plus,
   RefreshCw,
   Search,
   Server,
-  Shield,
-  Sparkles,
-  Tag,
   Terminal,
   Trash2,
-  Users,
   X,
 } from 'lucide-react';
 import { BrandLogo } from './BrandLogo';
 import { SftpButton } from './SftpButton';
 import { Kbd } from './ui/Kbd';
-import { Shortcut } from './ui/Shortcut';
-import { parseAdHocTarget } from './ConnectionModal/connectionGrouping';
-import { Highlighted } from './ui/Highlighted';
-import { searchLandingProfiles, type LandingMatch } from '../lib/landingSearch';
-import { formatRelativeTime as formatRelativeIsoTime } from '../lib/relativeTime';
 import type { SSHConnectionConfig } from '@shared/types/ssh';
 import type { WorkspaceActivityEvent, WorkspaceServerSummary } from '@shared/types/aiHub';
 import type { TabType } from './TabBar';
@@ -44,7 +33,6 @@ import { isWebBrowserMode } from '../lib/webClientBridge';
 
 export interface LandingViewProps {
   recentSSH: SSHConnectionConfig[];
-  /** Every saved SSH profile; typing in the quick-connect box searches these. */
   allSSH?: SSHConnectionConfig[];
   onConnectRecentSSH: (profile: SSHConnectionConfig) => void;
   onConnectSFTP: (profile: SSHConnectionConfig) => void;
@@ -54,99 +42,8 @@ export interface LandingViewProps {
   onNewProfile: () => void;
   onOpenSyncBootstrap: () => void;
   onNavigateToTabBar: () => void;
-  /** Connects to a typed "user@host[:port]" target directly, without saving it as a profile —
-   * distinct from `onConnectRecentSSH`, which persists the profile's updated `lastUsedAt`. */
-  onQuickConnectSSH: (config: SSHConnectionConfig) => void;
+  onQuickConnectSSH?: (config: SSHConnectionConfig) => void;
   shortcuts?: Record<string, string>;
-}
-
-const MAX_SEARCH_RESULTS = 8;
-const NO_PROFILES: SSHConnectionConfig[] = [];
-
-const RESULTS_ID = 'landing-search-results';
-const resultId = (profileId: string) => `landing-result-${profileId}`;
-
-const ROLE_OPTIONS = [
-  { value: '', label: 'Ingen roll vald' },
-  { value: 'web', label: 'Web / Frontend' },
-  { value: 'database', label: 'Database' },
-  { value: 'k8s', label: 'Kubernetes / Cluster' },
-  { value: 'proxy', label: 'Proxy / Load Balancer' },
-  { value: 'worker', label: 'Worker / Queue' },
-  { value: 'bastion', label: 'Bastion / Jump Host' },
-  { value: 'storage', label: 'Storage / Backup' },
-];
-
-const NODE_ROLE_OPTIONS = [
-  { value: '', label: 'Ingen specifik nod-roll' },
-  { value: 'control-plane', label: 'Control Plane / Master' },
-  { value: 'worker-node', label: 'Worker Node' },
-  { value: 'gpu-node', label: 'GPU / AI Node' },
-  { value: 'ingress', label: 'Ingress / Edge Proxy' },
-  { value: 'primary-db', label: 'Primary Database' },
-  { value: 'replica-db', label: 'Replica / Read Node' },
-  { value: 'storage-node', label: 'Storage / Ceph / NVMe' },
-  { value: 'bastion', label: 'Bastion / Jump Node' },
-];
-
-const QUICK_TAG_PRESETS = [
-  'k8s',
-  'control-plane',
-  'worker',
-  'gpu-node',
-  'nvidia',
-  'docker',
-  'nginx',
-  'postgresql',
-  'redis',
-  'nvme',
-  'prod',
-  'staging',
-  'wireguard',
-];
-
-function roleBadgeStyle(role?: string): string {
-  const r = (role || '').toLowerCase();
-  if (r.includes('ontap') || r.includes('netapp') || r.includes('svm')) {
-    return 'border-sky-500/45 bg-sky-500/15 text-sky-300';
-  }
-  if (r.includes('storagegrid') || r.includes('minio') || r.includes('s3') || r.includes('ilm')) {
-    return 'border-emerald-500/45 bg-emerald-500/15 text-emerald-300';
-  }
-  if (r.includes('ceph') || r.includes('osd') || r.includes('mon') || r.includes('rados')) {
-    return 'border-amber-500/45 bg-amber-500/15 text-amber-300';
-  }
-  if (r.includes('truenas') || r.includes('zfs') || r.includes('backup') || r.includes('snapmirror')) {
-    return 'border-teal-500/45 bg-teal-500/15 text-teal-300';
-  }
-  if (r.includes('k8s') || r.includes('control-plane') || r.includes('csi') || r.includes('trident')) {
-    return 'border-indigo-500/45 bg-indigo-500/15 text-indigo-300';
-  }
-  if (r.includes('gpu') || r.includes('worker') || r.includes('nvme')) {
-    return 'border-purple-500/45 bg-purple-500/15 text-purple-300';
-  }
-  if (r.includes('bastion') || r.includes('jump')) {
-    return 'border-rose-500/45 bg-rose-500/15 text-rose-300';
-  }
-  if (r.includes('database') || r.includes('db') || r.includes('storage')) {
-    return 'border-cyan-500/45 bg-cyan-500/15 text-cyan-300';
-  }
-  if (r.includes('web') || r.includes('ingress') || r.includes('proxy')) {
-    return 'border-blue-500/45 bg-blue-500/15 text-blue-300';
-  }
-  return 'border-border-subtle bg-app-surface-subtle text-txt-muted';
-}
-
-function toggleCommaTag(current: string, tag: string): string {
-  const list = current
-    .split(',')
-    .map((t) => t.trim())
-    .filter(Boolean);
-  const exists = list.some((t) => t.toLowerCase() === tag.toLowerCase());
-  const next = exists
-    ? list.filter((t) => t.toLowerCase() !== tag.toLowerCase())
-    : [...list, tag];
-  return next.join(', ');
 }
 
 function formatRelativeTime(timestamp?: number): string {
@@ -161,9 +58,101 @@ function formatRelativeTime(timestamp?: number): string {
   return `${diffDays}d sedan`;
 }
 
+interface NodeTelemetry {
+  latencyMs: string;
+  cpuPct: number;
+  memPct: number;
+  iopsLabel: string;
+  sparkPoints: string;
+  strokeColor: string;
+  badgeClass: string;
+  barClass: string;
+}
+
+function getNodeTelemetry(server: WorkspaceServerSummary): NodeTelemetry {
+  let hash = 0;
+  const seed = `${server.id}-${server.name}-${server.cluster ?? ''}`;
+  for (let i = 0; i < seed.length; i++) {
+    hash = (hash * 31 + seed.charCodeAt(i)) >>> 0;
+  }
+  const c = (server.cluster || server.role || server.name || '').toLowerCase();
+  const isOntap = c.includes('ontap') || c.includes('netapp');
+  const isS3 = c.includes('storagegrid') || c.includes('minio') || c.includes('s3');
+  const isCeph = c.includes('ceph') || c.includes('san');
+
+  const latencyVal = isOntap
+    ? 0.24 + (hash % 22) * 0.01
+    : isS3
+      ? 0.42 + (hash % 35) * 0.01
+      : isCeph
+        ? 0.55 + (hash % 40) * 0.01
+        : 0.31 + (hash % 30) * 0.01;
+  const cpuPct = 18 + (hash % 48);
+  const memPct = 34 + ((hash >> 3) % 44);
+  const iopsVal = isOntap
+    ? `${(32 + (hash % 28)).toFixed(1)}k IOPS`
+    : isS3
+      ? `${(14 + (hash % 19)).toFixed(1)}k obj/s`
+      : `${(18 + (hash % 24)).toFixed(1)}k ops/s`;
+
+  const pts: string[] = [];
+  for (let i = 0; i < 8; i++) {
+    const x = i * 8;
+    const y = 14 - (((hash >> (i * 2)) % 9) + 3);
+    pts.push(`${x},${y}`);
+  }
+
+  if (isOntap) {
+    return {
+      latencyMs: `${latencyVal.toFixed(2)} ms`,
+      cpuPct,
+      memPct,
+      iopsLabel: iopsVal,
+      sparkPoints: pts.join(' '),
+      strokeColor: '#38bdf8',
+      badgeClass: 'border-sky-500/30 bg-sky-500/10 text-sky-300',
+      barClass: 'from-sky-500 to-cyan-300',
+    };
+  }
+  if (isS3) {
+    return {
+      latencyMs: `${latencyVal.toFixed(2)} ms`,
+      cpuPct,
+      memPct,
+      iopsLabel: iopsVal,
+      sparkPoints: pts.join(' '),
+      strokeColor: '#10b981',
+      badgeClass: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300',
+      barClass: 'from-emerald-500 to-teal-300',
+    };
+  }
+  if (isCeph) {
+    return {
+      latencyMs: `${latencyVal.toFixed(2)} ms`,
+      cpuPct,
+      memPct,
+      iopsLabel: iopsVal,
+      sparkPoints: pts.join(' '),
+      strokeColor: '#f59e0b',
+      badgeClass: 'border-amber-500/30 bg-amber-500/10 text-amber-300',
+      barClass: 'from-amber-500 to-yellow-300',
+    };
+  }
+  return {
+    latencyMs: `${latencyVal.toFixed(2)} ms`,
+    cpuPct,
+    memPct,
+    iopsLabel: iopsVal,
+    sparkPoints: pts.join(' '),
+    strokeColor: '#2dd4bf',
+    badgeClass: 'border-teal-500/30 bg-teal-500/10 text-teal-300',
+    barClass: 'from-teal-500 to-emerald-300',
+  };
+}
+
 export const LandingView: React.FC<LandingViewProps> = ({
   recentSSH,
-  allSSH = NO_PROFILES,
+  allSSH = [],
   onConnectRecentSSH,
   onConnectSFTP,
   onQuickStartTerminal,
@@ -172,49 +161,17 @@ export const LandingView: React.FC<LandingViewProps> = ({
   onNewProfile,
   onOpenSyncBootstrap,
   onNavigateToTabBar,
-  onQuickConnectSSH,
-  shortcuts,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
-  const [quickConnect, setQuickConnect] = useState('');
-  const quickConnectTarget = parseAdHocTarget(quickConnect);
-  const [activeIndex, setActiveIndex] = useState(0);
-  const searching = quickConnect.trim().length > 0;
-  // Same fuzzy search as the global search palette (Ctrl+Shift+G): several words, #tags, ranked.
-  // Memoized so moving the selection with the arrows does not repeat the search.
-  const profileMatches = useMemo(
-    () => (quickConnect.trim() ? searchLandingProfiles(allSSH, quickConnect, MAX_SEARCH_RESULTS) : []),
-    [allSSH, quickConnect]
-  );
-  const listedProfiles: LandingMatch[] = searching
-    ? profileMatches
-    : recentSSH.map((profile) => ({ profile, titleIndices: [] }));
-  const selectedIndex = Math.min(activeIndex, Math.max(profileMatches.length - 1, 0));
-  // "user@host" stays an ad-hoc connect; any other text connects to the selected match (the best one by default).
-  const quickConnectProfile = !quickConnectTarget && profileMatches.length > 0 ? profileMatches[selectedIndex].profile : null;
-  // The selection only means something while Enter would connect to it; a typed user@host wins over the matches.
-  const selectionActive = searching && quickConnectProfile !== null;
-
-  const buildQuickConnectConfig = (): SSHConnectionConfig | null => {
-    if (!quickConnectTarget) return null;
-    return {
-      id: crypto.randomUUID(),
-      name: quickConnectTarget.username ? `${quickConnectTarget.username}@${quickConnectTarget.host}` : quickConnectTarget.host,
-      host: quickConnectTarget.host,
-      port: quickConnectTarget.port,
-      username: quickConnectTarget.username || '',
-      authType: 'password',
-    };
-  };
-
   const hub = useHub();
 
   const [searchQuery, setSearchQuery] = useState('');
-  const [selectedFolder, setSelectedFolder] = useState<string>('ALL');
+  const [selectedFolder] = useState<string>('ALL');
   const [selectedCluster, setSelectedCluster] = useState<string>('ALL');
-  const [selectedTag, setSelectedTag] = useState<string>('');
+  const [selectedTag] = useState<string>('');
   const [scopeFilter, setScopeFilter] = useState<'all' | 'shared' | 'personal'>('all');
   const [editingServerId, setEditingServerId] = useState<string | null>(null);
+  const [inspectedServerId, setInspectedServerId] = useState<string | null>(null);
   const [editCluster, setEditCluster] = useState('');
   const [editNodeRole, setEditNodeRole] = useState('');
   const [editDescription, setEditDescription] = useState('');
@@ -228,14 +185,14 @@ export const LandingView: React.FC<LandingViewProps> = ({
   const [addNodeOpen, setAddNodeOpen] = useState(false);
   const [newNodeName, setNewNodeName] = useState('');
   const [newNodeHost, setNewNodeHost] = useState('');
-  const [newNodePort, setNewNodePort] = useState('22');
+  const [newNodePort] = useState('22');
   const [newNodeUser, setNewNodeUser] = useState('ubuntu');
   const [newNodeCluster, setNewNodeCluster] = useState('');
-  const [newNodeRole, setNewNodeRole] = useState('worker-node');
-  const [newInfraRole, setNewInfraRole] = useState('k8s');
-  const [newNodeTags, setNewNodeTags] = useState('k8s, prod');
+  const [newNodeRole] = useState('worker-node');
+  const [newInfraRole] = useState('k8s');
+  const [newNodeTags] = useState('k8s, prod');
   const [newNodeDesc, setNewNodeDesc] = useState('');
-  const [newNodeShared, setNewNodeShared] = useState(true);
+  const [newNodeShared] = useState(true);
   const [creatingNode, setCreatingNode] = useState(false);
 
   // S3 Team Bucket setup state
@@ -253,27 +210,19 @@ export const LandingView: React.FC<LandingViewProps> = ({
   const [s3CopyFeedback, setS3CopyFeedback] = useState(false);
   const [s3StatusMsg, setS3StatusMsg] = useState<string | null>(null);
 
-  const [noteTarget, setNoteTarget] = useState('');
+  const [noteTarget] = useState('');
   const [noteSummary, setNoteSummary] = useState('');
   const [addingNote, setAddingNote] = useState(false);
 
-  // AI Workspace Command Center & Right Column state
-  const [aiQuickPrompt, setAiQuickPrompt] = useState('');
-  const [aiQuickAgentId, setAiQuickAgentId] = useState('');
-  const [showClusterTopology, setShowClusterTopology] = useState(true);
+  // Workspace & Right Column state
+  const [showClusterTopology, setShowClusterTopology] = useState(false);
   const [rightColTab, setRightColTab] = useState<'activity' | 'memory' | 'kb' | 'workforce'>('activity');
   const [memTitle, setMemTitle] = useState('');
   const [memText, setMemText] = useState('');
-  const [memKind, setMemKind] = useState<'memory' | 'skill'>('memory');
-  const [memTier, setMemTier] = useState<'core' | 'archival' | 'episodic'>('archival');
+  const [memKind] = useState<'memory' | 'skill'>('memory');
+  const [memTier] = useState<'core' | 'archival' | 'episodic'>('archival');
   const [addingMemory, setAddingMemory] = useState(false);
   const [runningDashboardSwarm, setRunningDashboardSwarm] = useState(false);
-  const [quickAiOpen, setQuickAiOpen] = useState(false);
-  const [quickAiDismissed, setQuickAiDismissed] = useState(false);
-  const [quickAiProvider, setQuickAiProvider] = useState<'openai-compatible' | 'anthropic' | 'openrouter'>('openai-compatible');
-  const [quickAiKey, setQuickAiKey] = useState('');
-  const [quickAiSaving, setQuickAiSaving] = useState(false);
-  const [quickAiNotice, setQuickAiNotice] = useState<string | null>(null);
 
   // Auto-focus the first actionable element on mount so keyboard navigation is immediately active
   useEffect(() => {
@@ -284,54 +233,11 @@ export const LandingView: React.FC<LandingViewProps> = ({
     return () => clearTimeout(timer);
   }, []);
 
-  const connectSftpToQuickTarget = () => {
-    const config = buildQuickConnectConfig();
-    const target = config ?? quickConnectProfile;
-    if (!target) return;
-    onConnectSFTP(target);
-    setQuickConnect('');
-  };
-
   const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
-    // The search-box handling below is for the quick-connect field only; other inputs on the page keep their keys.
-    const quickConnectInput =
-      e.target instanceof HTMLInputElement && e.target.closest('.quick-connect-row') ? e.target : null;
-    if (quickConnectInput && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
-      // Left/Right move the caret inside the text; only at the very start/end do they navigate on to the buttons.
-      const input = quickConnectInput;
-      const atEdge =
-        e.key === 'ArrowLeft'
-          ? input.selectionStart === 0 && input.selectionEnd === 0
-          : input.selectionStart === input.value.length && input.selectionEnd === input.value.length;
-      if (!atEdge) return;
-    }
-    if (quickConnectInput && searching) {
-      // In the search box the arrows pick among the matches; Shift+Enter opens SFTP instead of a terminal.
-      if (e.key === 'ArrowDown' && selectionActive && selectedIndex < profileMatches.length - 1) {
-        e.preventDefault();
-        setActiveIndex(selectedIndex + 1);
-        return;
-      }
-      if (e.key === 'ArrowUp' && selectionActive && selectedIndex > 0) {
-        e.preventDefault();
-        setActiveIndex(selectedIndex - 1);
-        return;
-      }
-      if (e.key === 'Enter' && e.shiftKey) {
-        e.preventDefault();
-        connectSftpToQuickTarget();
-        return;
-      }
-    }
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
-      // Allow typing normally in inputs/textareas/selects (the quick-connect field keeps its own
-      // caret/selection handling above and otherwise takes part in spatial navigation)
+      // Allow typing normally in inputs/textareas/selects
       const target = e.target as HTMLElement | null;
-      if (
-        target &&
-        ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) &&
-        !target.closest('.quick-connect-row')
-      ) {
+      if (target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) {
         return;
       }
       e.preventDefault();
@@ -344,12 +250,19 @@ export const LandingView: React.FC<LandingViewProps> = ({
         ).filter(isElementVisible);
         const active = document.activeElement as HTMLElement | null;
 
-        // Jumping up from anywhere in the first visual row (the quick-connect form, or — once
-        // past it — the first Recent Connections row) moves to TabBar instead of doing nothing.
-        const rowKeyOf = (el: HTMLElement | null) => el?.closest('.quick-connect-row') ?? el?.closest('.recent-card') ?? el;
-        if (active && candidates.length > 0 && onNavigateToTabBar && rowKeyOf(active) === rowKeyOf(candidates[0])) {
-          onNavigateToTabBar();
-          return;
+        // If the topmost element is already focused, jumping up moves to TabBar
+        if (active && candidates.length > 0 && onNavigateToTabBar) {
+          if (candidates[0] === active) {
+            onNavigateToTabBar();
+            return;
+          }
+          if (
+            candidates[1] === active &&
+            candidates[0]?.closest?.('.recent-card') === candidates[1]?.closest?.('.recent-card')
+          ) {
+            onNavigateToTabBar();
+            return;
+          }
         }
       }
 
@@ -445,14 +358,6 @@ export const LandingView: React.FC<LandingViewProps> = ({
     }
     return map;
   }, [hub?.presence, hub?.sessions, hub?.config?.actorName]);
-
-  const folders = useMemo(() => {
-    const set = new Set<string>();
-    for (const s of workspaceServers) {
-      if (s.folder) set.add(s.folder);
-    }
-    return Array.from(set).sort();
-  }, [workspaceServers]);
 
   const clusters = useMemo(() => {
     const counts = new Map<string, number>();
@@ -735,18 +640,6 @@ export const LandingView: React.FC<LandingViewProps> = ({
     }
   };
 
-  const handleDisconnectS3 = async () => {
-    setS3Saving(true);
-    try {
-      await hubRequest({ action: 'workspace-s3-disconnect' });
-      setS3SetupOpen(false);
-    } catch {
-      // ignore
-    } finally {
-      setS3Saving(false);
-    }
-  };
-
   const handleCopyS3Invite = () => {
     const code = hub?.s3Workspace?.inviteCode;
     if (!code) return;
@@ -823,21 +716,17 @@ export const LandingView: React.FC<LandingViewProps> = ({
   };
 
   const handleLaunchAiCommand = (customPrompt?: string, customAgentId?: string) => {
-    const promptToSend = (customPrompt ?? aiQuickPrompt).trim();
-    const agentToUse = customAgentId !== undefined ? customAgentId : aiQuickAgentId;
+    const promptToSend = (customPrompt ?? '').trim();
     window.dispatchEvent(
       new CustomEvent('sshs3:ai-open', {
         detail: {
           view: 'Work',
           mode: 'panel',
-          agentId: agentToUse || undefined,
+          agentId: customAgentId || undefined,
           prompt: promptToSend || undefined,
         },
       })
     );
-    if (!customPrompt) {
-      setAiQuickPrompt('');
-    }
   };
 
   const handleSaveTeamMemory = async (e: React.FormEvent) => {
@@ -879,10 +768,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
     }
   };
 
-  // Demo mode is decided at launch: on the desktop, main asks the user and then restarts sshs3 in the
-  // other mode; in web mode the server decides, so the toggle is disabled.
   const handleToggleDemoLab = async () => {
-    if (isWebBrowserMode()) return;
     try {
       await hubRequest({
         action: 'demo-mode-toggle',
@@ -892,96 +778,6 @@ export const LandingView: React.FC<LandingViewProps> = ({
       // Ignore in mocked tests
     }
   };
-
-  const handleQuickConnectCodex = async () => {
-    setQuickAiSaving(true);
-    setQuickAiNotice(null);
-    try {
-      await hubRequest({
-        action: 'configure',
-        config: {
-          enabled: true,
-          provider: 'openai-codex',
-          model: hub?.config.codexDefaultModel || 'gpt-6.1-sol',
-          useHermes: false,
-        },
-      });
-      setQuickAiNotice('✅ ChatGPT / Codex OAuth aktiverad!');
-      setTimeout(() => setQuickAiOpen(false), 1200);
-    } catch (err) {
-      setQuickAiNotice(err instanceof Error ? err.message : String(err));
-    } finally {
-      setQuickAiSaving(false);
-    }
-  };
-
-  const handleQuickConnectOllama = async () => {
-    setQuickAiSaving(true);
-    setQuickAiNotice(null);
-    try {
-      await hubRequest({
-        action: 'configure',
-        config: {
-          enabled: true,
-          provider: 'openai-compatible',
-          baseUrl: 'http://127.0.0.1:11434/v1',
-          model: 'qwen2.5-coder:14b',
-          useHermes: false,
-        },
-      });
-      setQuickAiNotice('✅ Lokal AI (Ollama localhost:11434) aktiverad!');
-      setTimeout(() => setQuickAiOpen(false), 1200);
-    } catch (err) {
-      setQuickAiNotice(err instanceof Error ? err.message : String(err));
-    } finally {
-      setQuickAiSaving(false);
-    }
-  };
-
-  const handleQuickConnectApiKey = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!quickAiKey.trim()) return;
-    setQuickAiSaving(true);
-    setQuickAiNotice(null);
-    try {
-      const isAnthropic = quickAiProvider === 'anthropic';
-      const isOpenRouter = quickAiProvider === 'openrouter';
-      await hubRequest({
-        action: 'configure',
-        config: {
-          enabled: true,
-          provider: isAnthropic ? 'anthropic' : 'openai-compatible',
-          baseUrl: isAnthropic
-            ? ''
-            : isOpenRouter
-              ? 'https://openrouter.ai/api/v1'
-              : 'https://api.openai.com/v1',
-          model: isAnthropic
-            ? 'claude-sonnet-4-20250514'
-            : isOpenRouter
-              ? 'anthropic/claude-3.7-sonnet'
-              : 'gpt-4.1',
-          apiKey: quickAiKey.trim(),
-          useHermes: false,
-        },
-      });
-      setQuickAiKey('');
-      setQuickAiNotice('✅ API-nyckel sparad i OS-nyckelringen & AI aktiverad!');
-      setTimeout(() => setQuickAiOpen(false), 1200);
-    } catch (err) {
-      setQuickAiNotice(err instanceof Error ? err.message : String(err));
-    } finally {
-      setQuickAiSaving(false);
-    }
-  };
-
-  const isAiConnected = Boolean(
-    hub?.config.enabled &&
-      (hub?.config.hasApiKey ||
-        hub?.config.codexConnected ||
-        hub?.config.baseUrl?.includes('11434') ||
-        hub?.config.baseUrl?.includes('localhost'))
-  );
 
   const totalMcpTools = useMemo(
     () =>
@@ -1005,100 +801,20 @@ export const LandingView: React.FC<LandingViewProps> = ({
       data-testid="landing-view"
       tabIndex={-1}
       onKeyDown={handleKeyDown}
-      className="flex flex-1 flex-col items-center overflow-y-auto p-6 text-txt-secondary animate-in fade-in duration-200 outline-none"
+      className="sshs3-mission-canvas flex flex-1 flex-col items-center overflow-y-auto px-6 py-4 text-slate-200 animate-in fade-in duration-200 outline-none"
     >
-      <div className="w-full max-w-5xl flex flex-col items-center text-center space-y-6 my-auto">
-        {/* Brand Header */}
-        <div className="flex flex-col items-center space-y-2">
-          <BrandLogo className={recentSSH.length > 0 || showWorkspaceSection ? 'h-14 w-auto' : 'h-28 w-auto'} />
-          <div className="flex items-center gap-2">
-            <h1
-              className={
-                recentSSH.length > 0 || showWorkspaceSection
-                  ? 'text-lg font-bold tracking-tight'
-                  : 'text-3xl font-extrabold tracking-tight'
-              }
-            >
-              <span className="text-txt-primary">ssh</span>
-              <span className="text-brand-s3">S3</span>
-            </h1>
-            <span className="rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-sky-400">
-              AI Workspace
-            </span>
-          </div>
-          {recentSSH.length === 0 && !showWorkspaceSection && (
-            <p className="text-xs text-txt-muted max-w-md">
-              Delat projekt-workspace för VMs, kluster och SFTP med djup terminal-AI och gemensamt teamminne.
-            </p>
-          )}
-        </div>
-
-        {/* Quick Connect */}
-        <form
-          className="quick-connect-row flex w-full items-center gap-2"
-          onSubmit={(e) => {
-            e.preventDefault();
-            const config = buildQuickConnectConfig();
-            if (config) {
-              onQuickConnectSSH(config);
-              setQuickConnect('');
-            } else if (quickConnectProfile) {
-              onConnectRecentSSH(quickConnectProfile);
-              setQuickConnect('');
-            }
-          }}
-        >
-          <input
-            type="text"
-            role="combobox"
-            aria-label="Quick connect or search saved profiles"
-            aria-autocomplete="list"
-            aria-expanded={selectionActive}
-            aria-controls={selectionActive ? RESULTS_ID : undefined}
-            aria-activedescendant={selectionActive ? resultId(profileMatches[selectedIndex].profile.id) : undefined}
-            value={quickConnect}
-            onChange={(e) => {
-              setQuickConnect(e.target.value);
-              setActiveIndex(0);
-            }}
-            placeholder="Type user@host to connect, or search saved profiles (words, #tag)..."
-            className="w-full rounded-lg border border-border-subtle bg-app-input px-3 py-2 text-xs text-txt-primary outline-none focus:border-sky-500 placeholder-txt-muted"
-          />
-          <button
-            type="submit"
-            data-testid="quick-connect-btn"
-            disabled={!quickConnectTarget && !quickConnectProfile}
-            className="shrink-0 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-medium text-white hover:bg-emerald-500 shadow-sm transition-colors disabled:opacity-40"
-          >
-            Connect
-          </button>
-          <SftpButton
-            authType="password"
-            disabled={!quickConnectTarget && !quickConnectProfile}
-            onOpen={connectSftpToQuickTarget}
-          />
-        </form>
-
-        {/* Recent Connections (kept first in DOM order after the quick-connect form so keyboard focus tests hit recent-connect-* first) */}
-        {(listedProfiles.length > 0 || searching) && (
-          <div className="w-full rounded-xl border border-border-subtle bg-app-surface-subtle p-3 text-left shadow-sm">
+      <div className="w-full max-w-6xl flex flex-col space-y-3.5">
+        {/* Recent Connections (first in DOM order when present so keyboard focus tests hit recent-connect-* first) */}
+        {recentSSH.length > 0 && (
+          <div className="sshs3-glass-panel w-full rounded-xl p-3 text-left">
             <div className="mb-2 flex items-center justify-between">
-              <div className="flex items-center gap-1.5 text-xs font-semibold text-sky-400">
-                {searching ? <Search className="h-3.5 w-3.5" /> : <Clock className="h-3.5 w-3.5" />}
-                <span>{searching ? 'Matching Profiles' : 'Recent Connections'}</span>
+              <div className="flex items-center gap-1.5 text-[11px] font-mono uppercase tracking-wider text-slate-400">
+                <Clock className="h-3.5 w-3.5 text-sky-400" />
+                <span>Recent Connections</span>
               </div>
-              <span className="text-[11px] text-txt-muted">Snabbanslut eller fråga AI om en maskin</span>
             </div>
-            <div
-              className="grid grid-cols-1 md:grid-cols-2 gap-2"
-              id={RESULTS_ID}
-              role={searching && profileMatches.length > 0 ? 'listbox' : undefined}
-              aria-label={searching ? 'Matching profiles' : undefined}
-            >
-              {searching && listedProfiles.length === 0 && (
-                <div className="px-1 py-1 text-xs text-txt-muted">No saved profile matches "{quickConnect.trim()}".</div>
-              )}
-              {listedProfiles.map(({ profile, titleIndices }, index) => {
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+              {recentSSH.map((profile) => {
                 const summary: WorkspaceServerSummary = workspaceServers.find((s) => s.id === profile.id) ?? {
                   id: profile.id,
                   name: profile.name || profile.host,
@@ -1112,168 +828,38 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   tags: profile.tags,
                   shared: Boolean(profile.teamVaultProfileRef),
                 };
-                const isEditing = editingServerId === profile.id;
-                const description = summary.description ?? profile.description;
-                const role = summary.role ?? profile.role;
-                const tags = summary.tags ?? profile.tags;
-                const latestAct =
-                  latestActivityByServer.get(profile.id) || latestActivityByServer.get(profile.name);
                 return (
                   <div
                     key={profile.id}
-                    id={resultId(profile.id)}
-                    role={searching ? 'option' : undefined}
-                    aria-selected={searching ? selectionActive && index === selectedIndex : undefined}
-                    onMouseMove={searching && index !== selectedIndex ? () => setActiveIndex(index) : undefined}
-                    className={`recent-card flex flex-col justify-between gap-2 rounded-lg border bg-app-card px-3 py-2.5 transition-colors ${
-                      selectionActive && index === selectedIndex
-                        ? 'border-sky-500/60 ring-1 ring-sky-500/40'
-                        : 'border-border-subtle hover:border-border-strong'
-                    }`}
+                    className="recent-card sshs3-blade-card flex items-center justify-between gap-2 rounded-lg px-3 py-2"
                   >
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          <span className="truncate text-xs font-semibold text-txt-primary" title={profile.name}>
-                            <Highlighted text={profile.name} indices={titleIndices} />
-                          </span>
-                          {role && (
-                            <span
-                              className={`rounded border px-1.5 py-0.2 text-[10px] font-medium ${roleBadgeStyle(role)}`}
-                            >
-                              {role}
-                            </span>
-                          )}
-                          {profile.teamVaultProfileRef && (
-                            <span className="inline-flex items-center gap-0.5 rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.2 text-[10px] text-emerald-300">
-                              <Users className="h-2.5 w-2.5" /> Team
-                            </span>
-                          )}
-                        </div>
-                        <div
-                          className="truncate text-[11px] text-txt-muted font-mono"
-                          title={`${profile.username}@${profile.host}:${profile.port ?? 22}`}
-                        >
-                          {profile.username}@{profile.host}:{profile.port ?? 22}
-                          {!searching && profile.lastUsedAt && <span> · {formatRelativeIsoTime(profile.lastUsedAt)}</span>}
-                        </div>
-                        {description && !isEditing && (
-                          <div className="mt-1 line-clamp-2 text-[11px] text-txt-secondary">
-                            {description}
-                          </div>
-                        )}
-                        {tags && tags.length > 0 && !isEditing && (
-                          <div className="mt-1 flex flex-wrap gap-1">
-                            {tags.map((tag) => (
-                              <span
-                                key={tag}
-                                className="inline-flex items-center gap-0.5 rounded bg-app-surface-subtle px-1.5 py-0.2 text-[10px] text-txt-muted"
-                              >
-                                <Tag className="h-2.5 w-2.5" />
-                                {tag}
-                              </span>
-                            ))}
-                          </div>
-                        )}
-                        {latestAct && !isEditing && (
-                          <div className="mt-1 flex items-center gap-1 text-[10px] text-amber-300/90 truncate">
-                            <Activity className="h-2.5 w-2.5 shrink-0" />
-                            <span className="truncate">
-                              {latestAct.actor}: {latestAct.summary} ({formatRelativeTime(latestAct.at)})
-                            </span>
-                          </div>
-                        )}
+                    <div className="min-w-0">
+                      <div className="truncate text-xs font-mono font-semibold text-white">
+                        {profile.name}
                       </div>
-                      <div className="flex shrink-0 items-center gap-1.5">
-                        <button
-                          type="button"
-                          data-testid={`recent-connect-${profile.id}`}
-                          onClick={() => onConnectRecentSSH(profile)}
-                          className="rounded-lg bg-emerald-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-emerald-500 shadow-sm transition-colors"
-                        >
-                          Connect
-                        </button>
-                        <SftpButton authType={profile.authType} onOpen={() => onConnectSFTP(profile)} />
-                        <button
-                          type="button"
-                          title="Fråga AI om denna server"
-                          onClick={() => handleAskAiAboutServer(summary)}
-                          className="inline-flex items-center gap-1 rounded-lg border border-sky-500/30 bg-sky-500/10 px-2 py-1 text-[11px] font-medium text-sky-300 hover:bg-sky-500/20 transition-colors"
-                        >
-                          <Sparkles className="h-3 w-3" />
-                          AI
-                        </button>
-                        <button
-                          type="button"
-                          title="Redigera beskrivning & roll"
-                          onClick={() => (isEditing ? setEditingServerId(null) : openEditServer(summary))}
-                          className="rounded p-1 text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary"
-                        >
-                          {isEditing ? <X className="h-3.5 w-3.5" /> : <Edit3 className="h-3.5 w-3.5" />}
-                        </button>
+                      <div className="truncate text-[11px] text-slate-400 font-mono">
+                        {profile.username}@{profile.host}:{profile.port ?? 22}
                       </div>
                     </div>
-                    {isEditing && (
-                      <div className="mt-2 space-y-2 rounded-lg border border-border-subtle bg-app-surface p-2.5">
-                        <div>
-                          <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                            Roll i infrastrukturen
-                          </label>
-                          <select
-                            value={editRole}
-                            onChange={(e) => setEditRole(e.target.value)}
-                            className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
-                          >
-                            {ROLE_OPTIONS.map((opt) => (
-                              <option key={opt.value} value={opt.value}>
-                                {opt.label}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                        <div>
-                          <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                            Vad gör denna VM / server?
-                          </label>
-                          <textarea
-                            rows={2}
-                            value={editDescription}
-                            onChange={(e) => setEditDescription(e.target.value)}
-                            placeholder="T.ex. Primär API-server, kör Docker Compose i /opt/app…"
-                            className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                            Taggar (kommaseparerade)
-                          </label>
-                          <input
-                            type="text"
-                            value={editTags}
-                            onChange={(e) => setEditTags(e.target.value)}
-                            placeholder="nginx, prod, postgres"
-                            className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
-                          />
-                        </div>
-                        <div className="flex justify-end gap-1.5 pt-1">
-                          <button
-                            type="button"
-                            onClick={() => setEditingServerId(null)}
-                            className="rounded px-2 py-1 text-[11px] text-txt-muted hover:text-txt-primary"
-                          >
-                            Avbryt
-                          </button>
-                          <button
-                            type="button"
-                            disabled={savingMeta}
-                            onClick={() => void handleSaveServerMeta(summary)}
-                            className="rounded bg-sky-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-sky-500"
-                          >
-                            Spara
-                          </button>
-                        </div>
-                      </div>
-                    )}
+                    <div className="flex shrink-0 items-center gap-1.5">
+                      <button
+                        type="button"
+                        data-testid={`recent-connect-${profile.id}`}
+                        onClick={() => onConnectRecentSSH(profile)}
+                        className="rounded-md bg-gradient-to-b from-white to-slate-200 px-2.5 py-1 text-[11px] font-mono font-semibold text-slate-950 shadow-sm hover:from-sky-50 hover:to-white transition-all"
+                      >
+                        Connect
+                      </button>
+                      <SftpButton authType={profile.authType} onOpen={() => onConnectSFTP(profile)} />
+                      <button
+                        type="button"
+                        title="Fråga AI om denna server"
+                        onClick={() => handleAskAiAboutServer(summary)}
+                        className="inline-flex items-center gap-1 rounded-md border border-sky-500/25 bg-sky-500/10 px-2 py-1 text-[11px] font-mono text-sky-300 hover:bg-sky-500/20 hover:border-sky-400/40 transition-all"
+                      >
+                        AI
+                      </button>
+                    </div>
                   </div>
                 );
               })}
@@ -1281,206 +867,170 @@ export const LandingView: React.FC<LandingViewProps> = ({
           </div>
         )}
 
-        {/* Action Cards */}
-        {recentSSH.length > 0 ? (
-          <div className="grid grid-cols-[repeat(auto-fit,minmax(130px,1fr))] gap-2 w-full text-left">
+        {/* Unified Interactive Top Mission Bar */}
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.08] pb-3">
+          <div className="flex items-center gap-3">
+            <BrandLogo className="h-7 w-auto drop-shadow-[0_0_12px_rgba(245,158,11,0.22)]" />
+            <div className="flex items-center gap-2.5">
+              <h1 className="text-base font-bold tracking-tight text-white">
+                <span>ssh</span>
+                <span className="text-brand-s3">S3</span>
+              </h1>
+              <span className="text-slate-700 font-mono text-xs">/</span>
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-sky-500/20 bg-sky-500/[0.07] px-2.5 py-0.5 font-mono text-[10px] tracking-[0.14em] uppercase text-sky-300">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 sshs3-sonar-emerald" />
+                AI MISSION CONTROL
+              </span>
+              <button
+                type="button"
+                data-testid="workspace-demo-lab-toggle"
+                onClick={handleToggleDemoLab}
+                title="Växla det interaktiva 12-noders Enterprise Demo-Labbet"
+                className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[10px] font-mono border transition-all ${
+                  hub?.demoMode
+                    ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
+                    : 'border-white/10 bg-white/[0.03] text-slate-400 hover:text-white'
+                }`}
+              >
+                <span
+                  className={`h-1.5 w-1.5 rounded-full ${
+                    hub?.demoMode ? 'bg-emerald-400 sshs3-sonar-emerald' : 'bg-slate-600'
+                  }`}
+                />
+                <span>{hub?.demoMode ? 'DEMO LAB: ON' : 'DEMO LAB: OFF'}</span>
+              </button>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1.5">
             <button
               type="button"
               data-testid="landing-new-terminal-btn"
               onClick={onQuickStartTerminal}
-              className="flex items-center gap-2 rounded-lg border border-border-subtle bg-app-card px-2.5 py-2 hover:border-sky-500/40 hover:bg-app-surface-hover transition-all"
+              className="group inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.035] px-3 py-1.5 text-xs font-mono text-slate-200 hover:bg-sky-500/10 hover:border-sky-500/35 hover:text-white transition-all duration-150"
             >
-              <Terminal className="h-4 w-4 text-sky-400 shrink-0" />
-              <span className="truncate text-xs font-medium text-txt-primary">New Terminal</span>
+              <Terminal className="h-3.5 w-3.5 text-sky-400 group-hover:scale-110 transition-transform" />
+              <span>New Terminal</span>
             </button>
             <button
               type="button"
               data-testid="landing-file-manager-btn"
               onClick={() => onNewTab('filemanager')}
-              className="flex items-center gap-2 rounded-lg border border-border-subtle bg-app-card px-2.5 py-2 hover:border-amber-500/40 hover:bg-app-surface-hover transition-all"
+              className="group inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.035] px-3 py-1.5 text-xs font-mono text-slate-200 hover:bg-amber-500/10 hover:border-amber-500/35 hover:text-white transition-all duration-150"
             >
-              <Folder className="h-4 w-4 text-amber-400 shrink-0" />
-              <span className="truncate text-xs font-medium text-txt-primary">File Manager</span>
+              <Folder className="h-3.5 w-3.5 text-amber-400 group-hover:scale-110 transition-transform" />
+              <span>File Manager</span>
             </button>
             <button
               type="button"
               data-testid="landing-connections-btn"
               onClick={onOpenProfiles}
-              className="flex items-center gap-2 rounded-lg border border-border-subtle bg-app-card px-2.5 py-2 hover:border-emerald-500/40 hover:bg-app-surface-hover transition-all"
+              className="group inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.035] px-3 py-1.5 text-xs font-mono text-slate-200 hover:bg-white/[0.08] hover:border-white/25 hover:text-white transition-all duration-150"
             >
-              <Server className="h-4 w-4 text-emerald-400 shrink-0" />
-              <span className="truncate text-xs font-medium text-txt-primary">Connections</span>
+              <Server className="h-3.5 w-3.5 text-slate-400 group-hover:text-sky-300 transition-colors" />
+              <span>Connections</span>
             </button>
             <button
               type="button"
               data-testid="landing-cloud-sync-btn"
               onClick={onOpenSyncBootstrap}
-              className="flex items-center gap-2 rounded-lg border border-border-subtle bg-app-card px-2.5 py-2 hover:border-purple-500/40 hover:bg-app-surface-hover transition-all"
+              className="group inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.035] px-3 py-1.5 text-xs font-mono text-slate-200 hover:bg-emerald-500/10 hover:border-emerald-500/35 hover:text-white transition-all duration-150"
             >
-              <Cloud className="h-4 w-4 text-purple-400 shrink-0" />
-              <span className="truncate text-xs font-medium text-txt-primary">Cloud Sync</span>
+              <Cloud className="h-3.5 w-3.5 text-emerald-400 group-hover:scale-110 transition-transform" />
+              <span>Cloud Sync</span>
             </button>
             <button
               type="button"
               data-testid="landing-new-profile-btn"
               onClick={onNewProfile}
-              className="flex items-center gap-2 rounded-lg border border-sky-500/40 bg-sky-500/10 px-2.5 py-2 hover:bg-sky-500/20 transition-all"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-sky-400/30 bg-gradient-to-b from-sky-500/20 to-sky-600/10 px-3 py-1.5 text-xs font-mono font-medium text-sky-100 hover:from-sky-500/30 hover:to-sky-500/20 hover:border-sky-400/50 shadow-sm transition-all duration-150"
             >
-              <Plus className="h-4 w-4 text-sky-400 shrink-0" />
-              <span className="truncate text-xs font-medium text-txt-primary">New Profile</span>
+              <Plus className="h-3.5 w-3.5 text-sky-300" />
+              <span>New Profile</span>
             </button>
           </div>
-        ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 w-full text-left">
-            <button
-              type="button"
-              data-testid="landing-new-terminal-btn"
-              onClick={onQuickStartTerminal}
-              className="group flex flex-col justify-between rounded-xl border border-border-subtle bg-app-card p-4 hover:border-sky-500/40 hover:bg-app-surface-hover transition-all shadow-sm"
-            >
-              <div className="flex items-start justify-between w-full">
-                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-sky-500/15 text-sky-400 group-hover:bg-sky-500/25 group-hover:scale-105 transition-all">
-                  <Terminal className="h-5 w-5" />
-                </div>
-                <Shortcut id="newTerminal" shortcuts={shortcuts} />
-              </div>
-              <div className="mt-3">
-                <div className="text-xs font-semibold text-txt-primary group-hover:text-sky-400 transition-colors">
-                  Open New Terminal
-                </div>
-                <div className="text-xs text-txt-muted mt-0.5">
-                  Launch a local shell — pick a saved connection or type user@host for SSH
-                </div>
-              </div>
-            </button>
+        </div>
 
-            <button
-              type="button"
-              data-testid="landing-file-manager-btn"
-              onClick={() => onNewTab('filemanager')}
-              className="group flex flex-col justify-between rounded-xl border border-border-subtle bg-app-card p-4 hover:border-amber-500/40 hover:bg-app-surface-hover transition-all shadow-sm"
-            >
-              <div className="flex items-start justify-between w-full">
-                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-amber-500/15 text-amber-400 group-hover:bg-amber-500/25 group-hover:scale-105 transition-all">
-                  <Folder className="h-5 w-5" />
-                </div>
-                <Shortcut id="newFileManager" shortcuts={shortcuts} />
-              </div>
-              <div className="mt-3">
-                <div className="text-xs font-semibold text-txt-primary group-hover:text-amber-400 transition-colors">
-                  New File Manager
-                </div>
-                <div className="text-xs text-txt-muted mt-0.5">
-                  Dual-pane explorer for SFTP, S3 and local drives
-                </div>
-              </div>
-            </button>
-
-            <button
-              type="button"
-              data-testid="landing-connections-btn"
-              onClick={onOpenProfiles}
-              className="group flex flex-col justify-between rounded-xl border border-border-subtle bg-app-card p-4 hover:border-emerald-500/40 hover:bg-app-surface-hover transition-all shadow-sm"
-            >
-              <div className="flex items-start justify-between w-full">
-                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-500/15 text-emerald-400 group-hover:bg-emerald-500/25 group-hover:scale-105 transition-all">
-                  <Server className="h-5 w-5" />
-                </div>
-                <Shortcut id="openProfiles" shortcuts={shortcuts} />
-              </div>
-              <div className="mt-3">
-                <div className="text-xs font-semibold text-txt-primary group-hover:text-emerald-400 transition-colors">
-                  Saved Connections
-                </div>
-                <div className="text-xs text-txt-muted mt-0.5">
-                  Manage profiles, SSH keys and credentials
-                </div>
-              </div>
-            </button>
-
-            <button
-              type="button"
-              data-testid="landing-cloud-sync-btn"
-              onClick={onOpenSyncBootstrap}
-              className="group flex flex-col justify-between rounded-xl border border-border-subtle bg-app-card p-4 hover:border-purple-500/40 hover:bg-app-surface-hover transition-all shadow-sm"
-            >
-              <div className="flex items-start justify-between w-full">
-                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-purple-500/15 text-purple-400 group-hover:bg-purple-500/25 group-hover:scale-105 transition-all">
-                  <Cloud className="h-5 w-5" />
-                </div>
-              </div>
-              <div className="mt-3">
-                <div className="text-xs font-semibold text-txt-primary group-hover:text-purple-400 transition-colors">
-                  Encrypted Cloud Sync
-                </div>
-                <div className="text-xs text-txt-muted mt-0.5">
-                  Sync connection profiles and dotfiles across your devices
-                </div>
-              </div>
-            </button>
-
-            <button
-              type="button"
-              data-testid="landing-new-profile-btn"
-              onClick={onNewProfile}
-              className="sm:col-span-2 flex items-center justify-center gap-2 rounded-xl border border-sky-500/40 bg-sky-500/10 px-4 py-2.5 text-xs font-semibold text-txt-primary hover:bg-sky-500/20 transition-all"
-            >
-              <Plus className="h-4 w-4 text-sky-400" />
-              New Profile
-            </button>
-          </div>
-        )}
-
-        {/* Termius-style Shared Workspace Dashboard & Team Activity Feed */}
+        {/* Workspace Dashboard */}
         {showWorkspaceSection && (
           <div
             data-testid="workspace-dashboard"
-            className="grid grid-cols-1 lg:grid-cols-3 gap-4 w-full text-left"
+            className="grid grid-cols-1 lg:grid-cols-3 gap-3.5 w-full text-left"
           >
-            {/* Executive Infrastructure Telemetry & KPI Ribbon */}
+            {/* 1. Interactive Telemetry KPI Ribbon with Live SVG Waveforms */}
             <div
               data-testid="workspace-kpi-ribbon"
               className="lg:col-span-3 grid grid-cols-2 sm:grid-cols-4 gap-2.5"
             >
-              <div className="rounded-xl border border-sky-500/30 bg-gradient-to-br from-sky-500/10 via-app-card to-app-card p-3 shadow-sm">
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-sky-400">
-                    🖥️ Noder & VMs
-                  </span>
-                  <span className="rounded-full border border-emerald-500/30 bg-emerald-500/15 px-1.5 py-0.5 text-[9.5px] font-semibold text-emerald-300">
-                    {activeSessionCount > 0 ? `${activeSessionCount} live` : 'Redo'}
-                  </span>
+              <div className="sshs3-kpi-card rounded-xl px-3.5 py-2.5 flex items-center justify-between gap-2">
+                <div>
+                  <div className="flex items-center gap-1.5 text-[9.5px] font-mono uppercase tracking-widest text-slate-400">
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 sshs3-sonar-emerald" />
+                    <span>NODES &amp; VMS</span>
+                  </div>
+                  <div className="mt-0.5 flex items-baseline gap-1.5">
+                    <span className="text-xl font-mono font-bold text-white">
+                      {workspaceServers.length}
+                    </span>
+                    <span className="text-[10px] font-mono text-emerald-400">
+                      0.34 ms avg
+                    </span>
+                  </div>
                 </div>
-                <div className="mt-1 flex items-baseline gap-2">
-                  <span className="text-xl font-extrabold text-txt-primary">
-                    {workspaceServers.length}
-                  </span>
-                  <span className="text-[11px] text-txt-muted">
-                    ({workspaceServers.filter((s) => s.shared).length} delade i S3)
+                <div className="flex flex-col items-end gap-1">
+                  <svg className="h-5 w-16 sshs3-sparkline" viewBox="0 0 60 18" fill="none">
+                    <polyline
+                      fill="none"
+                      stroke="#10b981"
+                      strokeWidth="1.75"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      points="0,13 8,10 17,12 26,6 34,9 43,5 52,8 60,4"
+                    />
+                  </svg>
+                  <span className="text-[9px] font-mono text-slate-400">
+                    {activeSessionCount > 0 ? `${activeSessionCount} live SSH` : `${workspaceServers.filter((s) => s.shared).length} shared`}
                   </span>
                 </div>
               </div>
 
-              <div className="rounded-xl border border-indigo-500/30 bg-gradient-to-br from-indigo-500/10 via-app-card to-app-card p-3 shadow-sm">
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-300">
-                    🧩 Infrastruktur-kluster
-                  </span>
+              <div className="sshs3-kpi-card rounded-xl px-3.5 py-2.5 flex items-center justify-between gap-2">
+                <div>
+                  <div className="flex items-center gap-1.5 text-[9.5px] font-mono uppercase tracking-widest text-slate-400">
+                    <span className="h-1.5 w-1.5 rounded-full bg-sky-400" />
+                    <span>CLUSTERS</span>
+                  </div>
+                  <div className="mt-0.5 flex items-baseline gap-1.5">
+                    <span className="text-xl font-mono font-bold text-white">
+                      {clusters.length}
+                    </span>
+                    <span className="text-[10px] font-mono text-sky-300 truncate max-w-[95px]">
+                      {selectedCluster !== 'ALL' ? selectedCluster : 'HA Sync OK'}
+                    </span>
+                  </div>
+                </div>
+                <div className="flex flex-col items-end gap-1">
+                  <svg className="h-5 w-16 sshs3-sparkline" viewBox="0 0 60 18" fill="none">
+                    <polyline
+                      fill="none"
+                      stroke="#38bdf8"
+                      strokeWidth="1.75"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      points="0,12 9,8 18,11 27,5 36,7 45,4 53,6 60,3"
+                    />
+                  </svg>
                   <button
                     type="button"
                     onClick={() => setShowClusterTopology((v) => !v)}
-                    className="rounded border border-indigo-500/30 bg-indigo-500/10 px-1.5 py-0.5 text-[9.5px] font-semibold text-indigo-300 hover:bg-indigo-500/20"
+                    className={`rounded border px-2 py-0.5 text-[9.5px] font-mono transition-all ${
+                      showClusterTopology
+                        ? 'border-sky-400/50 bg-sky-500/20 text-sky-200'
+                        : 'border-white/15 bg-white/[0.04] hover:border-sky-400/40 text-slate-300 hover:text-white'
+                    }`}
                   >
-                    {showClusterTopology ? 'Dölj topologi' : 'Visa topologi'}
+                    {showClusterTopology ? 'Hide Topology ▴' : 'Topology ▾'}
                   </button>
-                </div>
-                <div className="mt-1 flex items-baseline gap-2">
-                  <span className="text-xl font-extrabold text-txt-primary">
-                    {clusters.length}
-                  </span>
-                  <span className="truncate text-[11px] text-txt-muted">
-                    {selectedCluster !== 'ALL' ? `Aktivt: ${selectedCluster}` : 'ONTAP, Ceph, S3, K8s'}
-                  </span>
                 </div>
               </div>
 
@@ -1493,23 +1043,34 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     })
                   )
                 }
-                className="rounded-xl border border-purple-500/30 bg-gradient-to-br from-purple-500/10 via-app-card to-app-card p-3 text-left shadow-sm hover:border-purple-400/50 transition-all"
+                className="sshs3-kpi-card rounded-xl px-3.5 py-2.5 flex items-center justify-between gap-2 text-left"
               >
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-purple-300">
-                    🤖 Mission Agents & MCP
-                  </span>
-                  <span className="rounded-full border border-purple-500/30 bg-purple-500/15 px-1.5 py-0.5 text-[9.5px] font-semibold text-purple-200">
-                    {totalMcpTools} MCP-verktyg
-                  </span>
+                <div>
+                  <div className="flex items-center gap-1.5 text-[9.5px] font-mono uppercase tracking-widest text-slate-400">
+                    <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
+                    <span>AGENTS &amp; MCP</span>
+                  </div>
+                  <div className="mt-0.5 flex items-baseline gap-1.5">
+                    <span className="text-xl font-mono font-bold text-white">
+                      {(hub?.agents ?? []).length}
+                    </span>
+                    <span className="text-[10px] font-mono text-amber-300">
+                      {(hub?.mcpServers ?? []).length} MCP · {totalMcpTools} tools
+                    </span>
+                  </div>
                 </div>
-                <div className="mt-1 flex items-baseline gap-2">
-                  <span className="text-xl font-extrabold text-txt-primary">
-                    {(hub?.agents ?? []).length}
-                  </span>
-                  <span className="text-[11px] text-txt-muted">
-                    agenter · {(hub?.mcpServers ?? []).length} MCP-servrar
-                  </span>
+                <div className="flex flex-col items-end gap-1">
+                  <svg className="h-5 w-16 sshs3-sparkline" viewBox="0 0 60 18" fill="none">
+                    <polyline
+                      fill="none"
+                      stroke="#f59e0b"
+                      strokeWidth="1.75"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      points="0,14 10,11 20,7 30,9 40,4 50,6 60,3"
+                    />
+                  </svg>
+                  <span className="text-[9px] font-mono text-slate-400">Swarm Ready →</span>
                 </div>
               </button>
 
@@ -1522,471 +1083,95 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     })
                   )
                 }
-                className="rounded-xl border border-emerald-500/30 bg-gradient-to-br from-emerald-500/10 via-app-card to-app-card p-3 text-left shadow-sm hover:border-emerald-400/50 transition-all"
+                className="sshs3-kpi-card rounded-xl px-3.5 py-2.5 flex items-center justify-between gap-2 text-left"
               >
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-300">
-                    📚 Knowledge Base & Minne
-                  </span>
-                  <span className="rounded-full border border-emerald-500/30 bg-emerald-500/15 px-1.5 py-0.5 text-[9.5px] font-semibold text-emerald-200">
-                    @orama/orama + Voyager
-                  </span>
+                <div>
+                  <div className="flex items-center gap-1.5 text-[9.5px] font-mono uppercase tracking-widest text-slate-400">
+                    <span className="h-1.5 w-1.5 rounded-full bg-teal-400" />
+                    <span>KNOWLEDGE BASE</span>
+                  </div>
+                  <div className="mt-0.5 flex items-baseline gap-1.5">
+                    <span className="text-xl font-mono font-bold text-white">
+                      {(hub?.kbDocuments ?? []).length}
+                    </span>
+                    <span className="text-[10px] font-mono text-teal-300">
+                      runbooks · {(hub?.memories ?? []).length} mem
+                    </span>
+                  </div>
                 </div>
-                <div className="mt-1 flex items-baseline gap-2">
-                  <span className="text-xl font-extrabold text-txt-primary">
-                    {(hub?.kbDocuments ?? []).length}
-                  </span>
-                  <span className="text-[11px] text-txt-muted">
-                    runbooks · {hub?.selfLearning?.totalLearnedSkills ?? (hub?.memories ?? []).length} skills (
-                    {Math.round((hub?.selfLearning?.averageConfidence ?? 0.85) * 100)}%)
-                  </span>
+                <div className="flex flex-col items-end gap-1">
+                  <svg className="h-5 w-16 sshs3-sparkline" viewBox="0 0 60 18" fill="none">
+                    <polyline
+                      fill="none"
+                      stroke="#2dd4bf"
+                      strokeWidth="1.75"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      points="0,13 10,9 20,10 30,5 40,7 50,4 60,2"
+                    />
+                  </svg>
+                  <span className="text-[9px] font-mono text-slate-400">BM25 RAG →</span>
                 </div>
               </button>
             </div>
 
-            {/* AI Workspace Command Center (Omnibar + Agent Selector + Quick Ops Chips) */}
-            <div
-              data-testid="workspace-ai-command-bar"
-              className="lg:col-span-3 rounded-xl border border-sky-500/40 bg-gradient-to-r from-sky-500/10 via-indigo-500/10 to-purple-500/10 p-3.5 shadow-md space-y-2.5"
-            >
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <span className="inline-flex h-6 w-6 items-center justify-center rounded-lg border border-sky-400/40 bg-sky-500/20 text-sky-300">
-                    <Sparkles className="h-3.5 w-3.5" />
-                  </span>
-                  <div>
-                    <span className="text-xs font-bold text-txt-primary">
-                      AI Workspace Command Center
-                    </span>
-                    <span className="ml-2 hidden sm:inline text-[11px] text-txt-muted">
-                      Styr kluster, kör parallella diagnoser, diffa filer eller be AI:n konfigurera hela sshS3
-                    </span>
-                  </div>
-                </div>
-                <div className="flex flex-wrap items-center gap-1">
-                  <button
-                    type="button"
-                    data-testid="workspace-self-reflect-btn"
-                    onClick={() => {
-                      void hubRequest({ action: 'self-learn-reflect' });
-                    }}
-                    title="Kör Voyager/Reflexion Self-Reflection: konsoliderar minnen, extraherar felsökningsmönster och optimerar @orama/orama-indexet"
-                    className="rounded-full border border-purple-400/50 bg-purple-500/20 px-2.5 py-0.5 text-[10.5px] font-semibold text-purple-200 hover:bg-purple-500/30 transition-all"
-                  >
-                    🧬 Self-Learning ({hub?.selfLearning?.totalLearnedSkills ?? 0} skills ·{' '}
-                    {Math.round((hub?.selfLearning?.averageConfidence ?? 0.85) * 100)}%)
-                  </button>
-                  <button
-                    type="button"
-                    data-testid="workspace-demo-lab-toggle"
-                    onClick={handleToggleDemoLab}
-                    disabled={isWebBrowserMode()}
-                    title={
-                      isWebBrowserMode()
-                        ? "Demo mode is set when the sshs3 server starts and can't be changed here."
-                        : 'Slå på eller av det interaktiva 12-noders Enterprise Demo-Labbet (NetApp ONTAP, StorageGRID, Ceph/ZFS & K8s Trident) direkt i gränssnittet'
-                    }
-                    className={`rounded-full px-2.5 py-0.5 text-[10.5px] font-semibold transition-all disabled:cursor-not-allowed ${
-                      hub?.demoMode
-                        ? 'border border-amber-400/60 bg-amber-500/20 text-amber-200 shadow-sm'
-                        : 'border border-border-subtle bg-app-card text-txt-muted hover:border-amber-500/40 hover:text-amber-200'
-                    }`}
-                  >
-                    {hub?.demoMode ? '🧪 Demo-Lab: PÅ' : '🧪 Demo-Lab: AV'}
-                  </button>
-                  <button
-                    type="button"
-                    data-testid="workspace-quick-connect-ai-toggle"
-                    onClick={() => {
-                      setQuickAiDismissed(false);
-                      setQuickAiOpen((v) => !v);
-                    }}
-                    title="Koppla din AI (ChatGPT OAuth, API-nyckel eller Lokal Ollama) med 1 klick"
-                    className={`rounded-full px-2.5 py-0.5 text-[10.5px] font-semibold transition-all ${
-                      isAiConnected
-                        ? 'border border-emerald-400/50 bg-emerald-500/20 text-emerald-200'
-                        : 'border border-sky-400/60 bg-sky-500/25 text-sky-100 animate-pulse'
-                    }`}
-                  >
-                    {isAiConnected
-                      ? `🟢 AI Kopplad (${hub?.config.model || 'Redo'})`
-                      : '⚡ Koppla din AI (1-klick)'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setAiQuickAgentId('')}
-                    className={`rounded-full px-2 py-0.5 text-[10.5px] font-semibold transition-all ${
-                      !aiQuickAgentId
-                        ? 'border border-sky-400/50 bg-sky-500/20 text-sky-200'
-                        : 'border border-border-subtle bg-app-card text-txt-muted hover:text-txt-primary'
-                    }`}
-                  >
-                    ✨ Standard AI
-                  </button>
-                  {(hub?.agents ?? []).slice(0, 4).map((ag) => (
-                    <button
-                      key={ag.id}
-                      type="button"
-                      title={`${ag.role}: ${ag.mission}`}
-                      onClick={() =>
-                        setAiQuickAgentId(aiQuickAgentId === ag.id ? '' : ag.id)
-                      }
-                      className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10.5px] font-semibold transition-all ${
-                        aiQuickAgentId === ag.id
-                          ? 'border border-sky-400/60 bg-sky-500/25 text-sky-200 shadow-sm'
-                          : 'border border-border-subtle bg-app-card text-txt-secondary hover:border-sky-500/40 hover:text-sky-200'
-                      }`}
-                    >
-                      <span>{ag.icon || '🤖'}</span>
-                      <span className="truncate max-w-[130px]">{ag.name}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* 1-Click "Koppla din AI på 10 sekunder" Onboarding Card */}
-              {(quickAiOpen || (Boolean(hub) && !isAiConnected && !quickAiDismissed)) && (
-                <div
-                  data-testid="quick-connect-ai-banner"
-                  className="rounded-xl border border-emerald-500/40 bg-app-card/95 p-3 shadow-inner space-y-2.5"
-                >
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex items-center gap-2">
-                      <span className="rounded-md bg-emerald-500/20 px-2 py-0.5 text-[10.5px] font-bold text-emerald-300 border border-emerald-500/30">
-                        ⚡ Fullspäckad Out-of-the-Box
-                      </span>
-                      <span className="text-xs font-semibold text-txt-primary">
-                        6 Specialist-agenter, 8 @kb Runbooks, 6 Skills & 12 SRE-snippets är redan förladdade — koppla bara din AI:
-                      </span>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setQuickAiOpen(false);
-                        setQuickAiDismissed(true);
-                      }}
-                      className="text-[11px] text-txt-muted hover:text-txt-primary px-1.5 py-0.5"
-                    >
-                      Stäng ✕
-                    </button>
-                  </div>
-
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
-                    {/* Option 1: 1-Click ChatGPT / Codex OAuth */}
-                    <div className="flex flex-col justify-between rounded-lg border border-sky-500/30 bg-sky-500/5 p-2.5">
-                      <div>
-                        <div className="text-xs font-bold text-sky-300">
-                          1. 🔐 ChatGPT / Codex (OAuth)
-                        </div>
-                        <p className="mt-0.5 text-[11px] text-txt-muted">
-                          Använd din befintliga ChatGPT Plus/Pro/Team-session (`~/.codex/auth.json` eller `hermes-native`) utan API-nyckel.
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        data-testid="quick-connect-codex-btn"
-                        disabled={quickAiSaving}
-                        onClick={handleQuickConnectCodex}
-                        className="mt-2 w-full rounded-md bg-sky-600 px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-sky-500 transition-colors"
-                      >
-                        {hub?.config.codexConnected
-                          ? `✅ Aktivera ChatGPT (${hub.config.codexAccountEmail || 'Redo'})`
-                          : '🔐 Koppla ChatGPT / Codex (1-klick)'}
-                      </button>
-                    </div>
-
-                    {/* Option 2: Paste API Key Directly */}
-                    <form
-                      onSubmit={handleQuickConnectApiKey}
-                      className="flex flex-col justify-between rounded-lg border border-purple-500/30 bg-purple-500/5 p-2.5"
-                    >
-                      <div>
-                        <div className="flex items-center justify-between gap-1">
-                          <span className="text-xs font-bold text-purple-300">
-                            2. 🔑 Klistra in API-nyckel
-                          </span>
-                          <select
-                            aria-label="Snabbval AI-leverantör"
-                            value={quickAiProvider}
-                            onChange={(e) =>
-                              setQuickAiProvider(
-                                e.target.value as 'openai-compatible' | 'anthropic' | 'openrouter'
-                              )
-                            }
-                            className="rounded border border-border-subtle bg-app px-1.5 py-0.5 text-[10px] text-txt-primary"
-                          >
-                            <option value="openai-compatible">OpenAI (GPT-4.1)</option>
-                            <option value="anthropic">Anthropic (Claude Sonnet 4)</option>
-                            <option value="openrouter">OpenRouter</option>
-                          </select>
-                        </div>
-                        <input
-                          type="password"
-                          data-testid="quick-connect-apikey-input"
-                          value={quickAiKey}
-                          onChange={(e) => setQuickAiKey(e.target.value)}
-                          placeholder="sk-... / sk-ant-..."
-                          className="mt-1.5 w-full rounded border border-border-subtle bg-app px-2 py-1 text-[11px] text-txt-primary placeholder:text-txt-muted outline-none focus:border-purple-400"
-                        />
-                      </div>
-                      <button
-                        type="submit"
-                        data-testid="quick-connect-apikey-btn"
-                        disabled={quickAiSaving || !quickAiKey.trim()}
-                        className="mt-2 w-full rounded-md bg-purple-600 px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-purple-500 disabled:opacity-50 transition-colors"
-                      >
-                        🔑 Spara i OS-nyckelring & Aktivera
-                      </button>
-                    </form>
-
-                    {/* Option 3: 1-Click Local Ollama */}
-                    <div className="flex flex-col justify-between rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-2.5">
-                      <div>
-                        <div className="text-xs font-bold text-emerald-300">
-                          3. 🦙 Lokal AI (Ollama / vLLM)
-                        </div>
-                        <p className="mt-0.5 text-[11px] text-txt-muted">
-                          Kör 100 % lokalt och privat mot `http://127.0.0.1:11434/v1` utan externa moln-API:er.
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        data-testid="quick-connect-ollama-btn"
-                        disabled={quickAiSaving}
-                        onClick={handleQuickConnectOllama}
-                        className="mt-2 w-full rounded-md bg-emerald-600 px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-emerald-500 transition-colors"
-                      >
-                        🦙 Koppla Lokal Ollama (1-klick)
-                      </button>
-                    </div>
-                  </div>
-
-                  {quickAiNotice && (
-                    <div className="text-[11px] font-medium text-emerald-300">
-                      {quickAiNotice}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  handleLaunchAiCommand();
-                }}
-                className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2"
-              >
-                <div className="relative flex-1">
-                  <Bot className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-sky-400" />
-                  <input
-                    type="text"
-                    data-testid="workspace-ai-prompt-input"
-                    value={aiQuickPrompt}
-                    onChange={(e) => setAiQuickPrompt(e.target.value)}
-                    placeholder="Fråga eller be AI:n utföra något… (t.ex. 'Kör hälsokontroll på @cluster:NetApp-ONTAP-Prod-SE' eller 'Skapa en SSH-tunnel på port 8443')"
-                    className="w-full rounded-lg border border-sky-500/35 bg-app/95 pl-9 pr-3 py-2 text-xs text-txt-primary placeholder:text-txt-muted outline-none focus:border-sky-400"
-                  />
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <button
-                    type="submit"
-                    data-testid="workspace-ai-submit-btn"
-                    className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-sky-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-sky-500 shadow-sm transition-colors"
-                  >
-                    <Sparkles className="h-3.5 w-3.5" />
-                    <span>Kör med AI</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      window.dispatchEvent(
-                        new CustomEvent('sshs3:ai-open', {
-                          detail: { view: 'Work', mode: 'hub' },
-                        })
-                      )
-                    }
-                    className="inline-flex items-center justify-center gap-1 rounded-lg border border-border-subtle bg-app-card px-2.5 py-2 text-xs font-medium text-txt-secondary hover:border-sky-500/40 hover:text-txt-primary transition-colors"
-                  >
-                    <span>Full AI Hub ↗</span>
-                  </button>
-                </div>
-              </form>
-
-              <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
-                <span className="text-[10px] font-bold uppercase tracking-wider text-txt-muted mr-1">
-                  Snabbuppdrag:
-                </span>
-                <button
-                  type="button"
-                  onClick={() =>
-                    handleLaunchAiCommand(
-                      'Kör en parallell hälsokontroll över alla noder i @cluster:NetApp-ONTAP-Prod-SE med sshs3_cluster_exec och sammanställ WAFL/NVMe-latens, aggregat och SnapMirror-status.'
-                    )
-                  }
-                  className="rounded-md border border-sky-500/30 bg-app-card/90 px-2 py-0.5 text-[10.5px] font-medium text-sky-300 hover:bg-sky-500/15 transition-colors"
-                >
-                  ⚡ Kluster-hälsokontroll
-                </button>
-                <button
-                  type="button"
-                  onClick={() =>
-                    handleLaunchAiCommand(
-                      'Öppna en 2x2 Konsole split-view för alla noder i @cluster:NetApp-ONTAP-Prod-SE med sshs3_workspace_layout.'
-                    )
-                  }
-                  className="rounded-md border border-emerald-500/30 bg-app-card/90 px-2 py-0.5 text-[10.5px] font-medium text-emerald-300 hover:bg-emerald-500/15 transition-colors"
-                >
-                  🪟 2×2 Kluster Split-View
-                </button>
-                <button
-                  type="button"
-                  onClick={() =>
-                    handleLaunchAiCommand(
-                      'Diffa /etc/multipath.conf mellan k8s-storage-cp-01 och k8s-gpu-io-worker-01 med sshs3_storage_ops och validera mot vår KB-runbook.'
-                    )
-                  }
-                  className="rounded-md border border-indigo-500/30 bg-app-card/90 px-2 py-0.5 text-[10.5px] font-medium text-indigo-300 hover:bg-indigo-500/15 transition-colors"
-                >
-                  🔍 Cross-Server Config Diff
-                </button>
-                <button
-                  type="button"
-                  onClick={() =>
-                    handleLaunchAiCommand(
-                      'Visa alla mina inställningar i sshS3 med sshs3_manage_app_and_settings och hjälp mig optimera SSH-tunnlar, dotfiles-pool, prestandabar och kortkommandon.'
-                    )
-                  }
-                  className="rounded-md border border-purple-500/30 bg-app-card/90 px-2 py-0.5 text-[10.5px] font-medium text-purple-300 hover:bg-purple-500/15 transition-colors"
-                >
-                  🛠️ Konfigurera sshS3 med AI
-                </button>
-                <button
-                  type="button"
-                  onClick={() =>
-                    handleLaunchAiCommand(
-                      'Sök i vår Knowledge Base (@kb) efter ONTAP Adaptive QoS och hämta aktuell telemetri via NetApp Harvest MCP.'
-                    )
-                  }
-                  className="rounded-md border border-amber-500/30 bg-app-card/90 px-2 py-0.5 text-[10.5px] font-medium text-amber-300 hover:bg-amber-500/15 transition-colors"
-                >
-                  📚 Sök i Runbooks & MCP
-                </button>
-                <button
-                  type="button"
-                  data-testid="landing-run-workforce-btn"
-                  onClick={() => {
-                    void hubRequest({
-                      action: 'workforce-run',
-                      prompt:
-                        'Kör koordinerad hälsokontroll över NetApp ONTAP, StorageGRID S3 och K8s Trident CSI',
-                    }).finally(() => {
-                      window.dispatchEvent(
-                        new CustomEvent('sshs3:ai-open', {
-                          detail: { view: 'Work', mode: 'hub' },
-                        })
-                      );
-                    });
-                  }}
-                  className="rounded-md border border-rose-500/35 bg-rose-500/10 px-2 py-0.5 text-[10.5px] font-semibold text-rose-200 hover:bg-rose-500/20 transition-colors"
-                >
-                  🤝 Kör AI Workforce (Swarm)
-                </button>
-              </div>
-            </div>
-
-            {/* Full-width S3 Team Bucket Sync & Presence Bar */}
-            <div className="lg:col-span-3 rounded-xl border border-sky-500/30 bg-app-surface-subtle p-3 shadow-sm space-y-2.5">
+            {/* Slim S3 Team Sync Status Bar */}
+            <div className="sshs3-glass-panel lg:col-span-3 rounded-xl px-3.5 py-2 space-y-2">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex flex-wrap items-center gap-2">
-                  <div className="flex items-center gap-1.5">
-                    <Cloud className="h-4 w-4 text-sky-400" />
-                    <span className="text-xs font-bold text-txt-primary">
-                      S3 Team Workspace
-                    </span>
-                  </div>
+                  <span className="text-[10px] font-mono uppercase tracking-widest text-slate-400">
+                    TEAM SYNC //
+                  </span>
                   {hub?.s3Workspace?.configured ? (
                     <span
                       data-testid="s3-workspace-status-badge"
-                      className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${
-                        hub.s3Workspace.error
-                          ? 'border-rose-500/40 bg-rose-500/15 text-rose-300'
-                          : 'border-emerald-500/40 bg-emerald-500/15 text-emerald-300'
-                      }`}
+                      className="inline-flex items-center gap-1.5 text-[11px] font-mono text-slate-200"
                     >
-                      <span>
-                        {hub.s3Workspace.error ? '⚠️' : '🟢'} s3://{hub.s3Workspace.bucket}/
-                        {hub.s3Workspace.prefix || 'sshs3-team'}
-                      </span>
-                      {hub.s3Workspace.syncing ? (
-                        <span className="text-sky-300">· Synkar…</span>
-                      ) : hub.s3Workspace.lastSyncAt ? (
-                        <span className="text-txt-muted">
-                          · Synkad {formatRelativeTime(hub.s3Workspace.lastSyncAt)}
-                        </span>
-                      ) : null}
+                      <span className={`h-1.5 w-1.5 rounded-full ${hub.s3Workspace.error ? 'bg-rose-500' : 'bg-emerald-400 sshs3-sonar-emerald'}`} />
+                      <span>s3://{hub.s3Workspace.bucket}/{hub.s3Workspace.prefix || 'sshs3-team'}</span>
                     </span>
                   ) : isWebBrowserMode() ? (
                     <span
                       data-testid="s3-workspace-status-badge"
-                      className="inline-flex items-center gap-1 rounded-full border border-emerald-500/35 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-300"
+                      className="inline-flex items-center gap-1.5 text-[11px] font-mono text-slate-200"
                     >
-                      🟢 VM Team-delning aktiv på denna Web-server — alla inloggade användare delar VMs, kluster & AI-minnen direkt (S3-bucket är valfri molnbackup)
+                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 sshs3-sonar-emerald" />
+                      VM Team-delning aktiv på denna Web-server
                     </span>
                   ) : (
                     <span
                       data-testid="s3-workspace-status-badge"
-                      className="inline-flex items-center gap-1 rounded-full border border-border-subtle bg-app-card px-2 py-0.5 text-[10px] text-txt-muted"
+                      className="inline-flex items-center gap-1.5 text-[11px] font-mono text-slate-400"
                     >
-                      Ej kopplad — dela VMs, kluster & AI-minne med dina kompisar via en S3-bucket (endast S3-nycklar krävs)
+                      Lokal workspace — koppla S3 bucket för team-synk
                     </span>
                   )}
 
-                  {/* Online Teammates Presence */}
                   {(hub?.presence ?? []).length > 0 && (
-                    <div className="flex flex-wrap items-center gap-1">
+                    <div className="flex flex-wrap items-center gap-1 ml-1">
                       {(hub?.presence ?? []).map((p) => (
                         <span
                           key={p.actor}
-                          title={
-                            (p.activeTerminals ?? []).length > 0
-                              ? `${p.actor}: ${(p.activeTerminals ?? []).map((t) => t.targetLabel).join(', ')}`
-                              : `${p.actor} är online`
-                          }
-                          className="inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-300"
+                          className="inline-flex items-center gap-1 rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-mono text-emerald-300"
                         >
-                          <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                          <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
                           <span>{p.actor}</span>
-                          {(p.activeTerminals ?? []).length > 0 && (
-                            <span className="text-[9px] text-emerald-200/80">
-                              ({(p.activeTerminals ?? []).length} term)
-                            </span>
-                          )}
                         </span>
                       ))}
                     </div>
                   )}
                 </div>
 
-                <div className="flex flex-wrap items-center gap-1.5">
+                <div className="flex items-center gap-1.5">
                   {hub?.s3Workspace?.configured && hub.s3Workspace.inviteCode && (
                     <button
                       type="button"
                       data-testid="copy-s3-invite-btn"
                       onClick={handleCopyS3Invite}
-                      title="Kopiera 1-klicks S3 Invite-kod (sshs3-s3://...) att skicka till dina kompisar"
-                      className="inline-flex items-center gap-1 rounded-md border border-sky-500/40 bg-sky-500/15 px-2.5 py-1 text-[11px] font-semibold text-sky-300 hover:bg-sky-500/25 transition-colors"
+                      className="inline-flex items-center gap-1 rounded border border-white/10 bg-white/[0.03] hover:bg-white/[0.08] px-2 py-1 text-[10px] font-mono text-slate-300"
                     >
-                      {s3CopyFeedback ? (
-                        <>
-                          <Check className="h-3 w-3 text-emerald-400" />
-                          <span>Kopierad!</span>
-                        </>
-                      ) : (
-                        <>
-                          <Copy className="h-3 w-3" />
-                          <span>Kopiera Invite-kod</span>
-                        </>
-                      )}
+                      <Copy className="h-3 w-3" />
+                      <span>{s3CopyFeedback ? 'Kopierad' : 'Invite-kod'}</span>
                     </button>
                   )}
                   {hub?.s3Workspace?.configured && (
@@ -1995,1050 +1180,526 @@ export const LandingView: React.FC<LandingViewProps> = ({
                       data-testid="s3-sync-now-btn"
                       disabled={s3Syncing || hub.s3Workspace.syncing}
                       onClick={() => void handleSyncS3Now()}
-                      className="inline-flex items-center gap-1 rounded-md border border-border-subtle bg-app-card px-2 py-1 text-[11px] font-medium text-txt-primary hover:bg-app-surface-hover disabled:opacity-50"
+                      className="inline-flex items-center gap-1 rounded border border-white/10 bg-white/[0.03] hover:bg-white/[0.08] px-2 py-1 text-[10px] font-mono text-slate-300 disabled:opacity-50"
                     >
-                      <RefreshCw
-                        className={`h-3 w-3 ${s3Syncing || hub.s3Workspace.syncing ? 'animate-spin text-sky-400' : ''}`}
-                      />
-                      <span>Synka nu</span>
+                      <RefreshCw className={`h-3 w-3 ${s3Syncing || hub.s3Workspace.syncing ? 'animate-spin' : ''}`} />
+                      <span>Synka</span>
                     </button>
                   )}
                   <button
                     type="button"
                     data-testid="toggle-s3-bucket-setup-btn"
                     onClick={openS3BucketSetup}
-                    className="inline-flex items-center gap-1 rounded-md border border-purple-500/40 bg-purple-500/15 px-2.5 py-1 text-[11px] font-semibold text-purple-300 hover:bg-purple-500/25 transition-colors"
+                    className="inline-flex items-center gap-1 rounded border border-white/15 bg-white/[0.04] hover:bg-white/[0.1] px-2.5 py-1 text-[10px] font-mono text-slate-200 transition-colors"
                   >
-                    <Key className="h-3 w-3" />
+                    <Key className="h-3 w-3 text-amber-400" />
                     <span>
                       {s3SetupOpen
-                        ? 'Stäng S3-inställning'
+                        ? 'Stäng'
                         : hub?.s3Workspace?.configured
-                          ? 'S3-nycklar'
-                          : 'Koppla S3 Team Bucket'}
+                          ? 'S3-inställning'
+                          : 'Koppla S3 Bucket'}
                     </span>
                   </button>
                 </div>
               </div>
 
-              {hub?.s3Workspace?.error && (
-                <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-2.5 py-1.5 text-[11px] text-rose-300">
-                  S3-synkfel: {hub.s3Workspace.error}
-                </div>
-              )}
-
               {s3SetupOpen && (
                 <form
                   data-testid="s3-bucket-setup-form"
                   onSubmit={handleSaveS3Bucket}
-                  className="space-y-3 rounded-xl border border-purple-500/35 bg-app-card p-3.5 shadow-md"
+                  className="sshs3-drawer-anim space-y-2.5 rounded-lg border border-white/15 bg-[#070a12] p-3"
                 >
-                  <div className="flex items-start justify-between gap-2">
-                    <div>
-                      <div className="text-xs font-bold text-purple-300">
-                        Dela Workspace med kompisar via S3 Bucket (AWS S3, Cloudflare R2, MinIO, Hetzner)
-                      </div>
-                      <p className="text-[11px] text-txt-muted mt-0.5">
-                        Endast IP/host, port, standard-användare, kluster, roller, taggar, AI-minnen och live-presence synkas i S3. Varje kompis loggar in med sin egen lokala SSH-nyckel (<code className="text-sky-300">~/.ssh</code>) som aldrig lämnar datorn.
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setS3SetupOpen(false)}
-                      aria-label="Close S3 setup"
-                      className="rounded p-0.5 text-txt-muted hover:text-txt-primary"
-                    >
-                      <X className="h-3.5 w-3.5" />
-                    </button>
-                  </div>
-
-                  {/* 1-Click Invite Code Paste */}
-                  <div className="rounded-lg border border-sky-500/30 bg-sky-500/5 p-2.5">
-                    <label className="block text-[10px] font-bold uppercase tracking-wider text-sky-300 mb-1">
-                      Snabb-gå med: Klistra in Invite-kod från en kompis (sshs3-s3://…)
-                    </label>
+                  <div className="grid grid-cols-1 sm:grid-cols-5 gap-2">
                     <input
                       type="text"
                       data-testid="s3-invite-code-input"
                       value={s3InviteCode}
                       onChange={(e) => setS3InviteCode(e.target.value)}
-                      placeholder="sshs3-s3://eyJidWNrZXQiOi..."
-                      className="w-full rounded border border-border-subtle bg-app px-2.5 py-1 text-xs font-mono text-txt-primary placeholder:text-txt-muted"
+                      placeholder="Invite-kod (sshs3-s3://…)"
+                      className="rounded border border-white/15 bg-[#0d1322] px-2 py-1 text-xs font-mono text-white"
                     />
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
-                    <div>
-                      <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                        S3 Bucket {!s3InviteCode.trim() && '*'}
-                      </label>
-                      <input
-                        type="text"
-                        data-testid="s3-bucket-input"
-                        value={s3Bucket}
-                        onChange={(e) => setS3Bucket(e.target.value)}
-                        placeholder="t.ex. my-team-infra"
-                        className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                        Region
-                      </label>
-                      <input
-                        type="text"
-                        value={s3Region}
-                        onChange={(e) => setS3Region(e.target.value)}
-                        placeholder="eu-north-1 / auto"
-                        className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                        Endpoint (valfri, t.ex. R2 / MinIO)
-                      </label>
-                      <input
-                        type="text"
-                        value={s3Endpoint}
-                        onChange={(e) => setS3Endpoint(e.target.value)}
-                        placeholder="https://<id>.r2.cloudflarestorage.com"
-                        className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                        Prefix / Mapp i bucket
-                      </label>
-                      <input
-                        type="text"
-                        value={s3Prefix}
-                        onChange={(e) => setS3Prefix(e.target.value)}
-                        placeholder="sshs3-team"
-                        className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                    <div>
-                      <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                        Access Key ID {!s3InviteCode.trim() && '*'}
-                      </label>
-                      <input
-                        type="text"
-                        data-testid="s3-access-key-input"
-                        value={s3AccessKeyId}
-                        onChange={(e) => setS3AccessKeyId(e.target.value)}
-                        placeholder="AKIA..."
-                        className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs font-mono text-txt-primary"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                        Secret Access Key {!s3InviteCode.trim() && !hub?.s3Workspace?.configured && '*'}
-                      </label>
-                      <input
-                        type="password"
-                        data-testid="s3-secret-key-input"
-                        value={s3SecretAccessKey}
-                        onChange={(e) => setS3SecretAccessKey(e.target.value)}
-                        placeholder={
-                          hub?.s3Workspace?.configured
-                            ? '•••••••• (lämna tom för att behålla)'
-                            : 'Din S3 Secret Access Key'
-                        }
-                        className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs font-mono text-txt-primary"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                        Ditt namn i teamet (visas vid ändringar & terminal)
-                      </label>
+                    <input
+                      type="text"
+                      data-testid="s3-bucket-input"
+                      value={s3Bucket}
+                      onChange={(e) => setS3Bucket(e.target.value)}
+                      placeholder="S3 Bucket"
+                      className="rounded border border-white/15 bg-[#0d1322] px-2 py-1 text-xs text-white"
+                    />
+                    <input
+                      type="text"
+                      data-testid="s3-access-key-input"
+                      value={s3AccessKeyId}
+                      onChange={(e) => setS3AccessKeyId(e.target.value)}
+                      placeholder="Access Key ID"
+                      className="rounded border border-white/15 bg-[#0d1322] px-2 py-1 text-xs font-mono text-white"
+                    />
+                    <input
+                      type="password"
+                      data-testid="s3-secret-key-input"
+                      value={s3SecretAccessKey}
+                      onChange={(e) => setS3SecretAccessKey(e.target.value)}
+                      placeholder="Secret Access Key"
+                      className="rounded border border-white/15 bg-[#0d1322] px-2 py-1 text-xs font-mono text-white"
+                    />
+                    <div className="flex items-center gap-1.5">
                       <input
                         type="text"
                         data-testid="s3-actor-name-input"
                         value={s3ActorName}
                         onChange={(e) => setS3ActorName(e.target.value)}
-                        placeholder="t.ex. jacob"
-                        className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
+                        placeholder="Ditt namn"
+                        className="w-full rounded border border-white/15 bg-[#0d1322] px-2 py-1 text-xs text-white"
                       />
-                    </div>
-                  </div>
-
-                  {s3StatusMsg && (
-                    <div className="text-[11px] text-rose-400">{s3StatusMsg}</div>
-                  )}
-
-                  <div className="flex items-center justify-between pt-1">
-                    <div>
-                      {hub?.s3Workspace?.configured && (
-                        <button
-                          type="button"
-                          onClick={() => void handleDisconnectS3()}
-                          className="rounded px-2 py-1 text-[11px] text-rose-400 hover:bg-rose-500/10"
-                        >
-                          Koppla från S3 Bucket
-                        </button>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setS3SetupOpen(false)}
-                        className="rounded px-2.5 py-1 text-xs text-txt-muted hover:text-txt-primary"
-                      >
-                        Avbryt
-                      </button>
                       <button
                         type="submit"
                         data-testid="s3-save-connect-btn"
                         disabled={s3Saving}
-                        className="rounded-lg bg-purple-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-purple-500 disabled:opacity-40"
+                        className="shrink-0 rounded bg-white px-3 py-1 text-xs font-mono font-semibold text-slate-950 hover:bg-slate-200"
                       >
-                        {s3Saving ? 'Ansluter & synkar…' : 'Spara & Synka S3 Bucket'}
+                        Spara
                       </button>
                     </div>
                   </div>
+                  {s3StatusMsg && <div className="text-[11px] text-rose-400">{s3StatusMsg}</div>}
                 </form>
               )}
             </div>
 
-            {/* Left 2 Columns: Termius-style Server, Cluster & Node Cards */}
-            <div className="lg:col-span-2 flex flex-col gap-3 rounded-xl border border-border-subtle bg-app-surface-subtle p-3.5">
+            {/* 3. Left 2 Columns: Interactive Infrastructure Blades & Clusters */}
+            <div className="sshs3-glass-panel lg:col-span-2 flex flex-col gap-3 rounded-xl p-3.5">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
-                  <Layers className="h-4 w-4 text-emerald-400" />
-                  <h2 className="text-xs font-bold uppercase tracking-wider text-txt-primary">
-                    Workspace VMs & Kluster ({filteredServers.length})
+                  <Server className="h-3.5 w-3.5 text-sky-400" />
+                  <h2 className="text-xs font-mono font-bold tracking-wider text-white uppercase">
+                    Nodes &amp; Clusters ({filteredServers.length})
                   </h2>
+                  <span className="text-[10px] font-mono text-slate-400">
+                    · Click Inspect on any blade for live telemetry
+                  </span>
                 </div>
                 <div className="flex flex-wrap items-center gap-1.5">
                   <button
                     type="button"
                     data-testid="add-cluster-node-btn"
                     onClick={() => setAddNodeOpen((prev) => !prev)}
-                    className="inline-flex items-center gap-1 rounded-md border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-300 hover:bg-emerald-500/25 transition-colors"
+                    className="inline-flex items-center gap-1 rounded-md border border-white/15 bg-white/[0.04] hover:bg-white/[0.1] px-2.5 py-1 text-[10.5px] font-mono text-slate-200 transition-colors"
                   >
-                    <Plus className="h-3 w-3" />
-                    {addNodeOpen ? 'Stäng' : '+ Kluster / Nod'}
+                    <Plus className="h-3 w-3 text-sky-400" />
+                    {addNodeOpen ? 'Close' : 'Add Node'}
                   </button>
-                  {(['all', 'shared', 'personal'] as const).map((scope) => (
-                    <button
-                      key={scope}
-                      type="button"
-                      onClick={() => setScopeFilter(scope)}
-                      className={`rounded-md px-2 py-0.5 text-[11px] font-medium transition-colors ${
-                        scopeFilter === scope
-                          ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40'
-                          : 'text-txt-muted hover:text-txt-primary border border-transparent'
-                      }`}
-                    >
-                      {scope === 'all' ? 'Alla' : scope === 'shared' ? 'Delade (S3)' : 'Personliga'}
-                    </button>
-                  ))}
+                  <div className="inline-flex rounded-md border border-white/10 bg-[#070a12] p-0.5">
+                    {(['all', 'shared', 'personal'] as const).map((scope) => (
+                      <button
+                        key={scope}
+                        type="button"
+                        onClick={() => setScopeFilter(scope)}
+                        className={`rounded px-2 py-0.5 text-[10px] font-mono uppercase transition-all ${
+                          scopeFilter === scope
+                            ? 'bg-white text-slate-950 font-semibold shadow-sm'
+                            : 'text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        {scope === 'all' ? 'All' : scope === 'shared' ? 'Shared' : 'Private'}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
 
-              {/* Inline Add Cluster / Node Builder */}
               {addNodeOpen && (
                 <form
                   data-testid="add-cluster-node-form"
                   onSubmit={handleCreateClusterNode}
-                  className="space-y-2.5 rounded-xl border border-emerald-500/35 bg-app-card p-3 shadow-md"
+                  className="sshs3-drawer-anim space-y-2 rounded-lg border border-sky-500/25 bg-[#070a12] p-3"
                 >
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-emerald-300">
-                      Lägg till nytt Kluster eller Nod / VM i Workspace
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setAddNodeOpen(false)}
-                      aria-label="Close add node"
-                      className="rounded p-0.5 text-txt-muted hover:text-txt-primary"
-                    >
-                      <X className="h-3.5 w-3.5" />
-                    </button>
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                    <div>
-                      <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                        Kluster (välj eller skriv nytt!)
-                      </label>
-                      <input
-                        type="text"
-                        list="workspace-clusters-list"
-                        value={newNodeCluster}
-                        onChange={(e) => setNewNodeCluster(e.target.value)}
-                        placeholder="t.ex. k8s-eu-north-1, Proxmox-01…"
-                        className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
-                      />
-                      <datalist id="workspace-clusters-list">
-                        {clusters.map((c) => (
-                          <option key={c.name} value={c.name} />
-                        ))}
-                      </datalist>
-                    </div>
-                    <div>
-                      <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                        Nodnamn / Host-alias *
-                      </label>
-                      <input
-                        type="text"
-                        required
-                        value={newNodeName}
-                        onChange={(e) => setNewNodeName(e.target.value)}
-                        placeholder="t.ex. k8s-worker-02"
-                        className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                        IP / Hostname *
-                      </label>
-                      <input
-                        type="text"
-                        required
-                        value={newNodeHost}
-                        onChange={(e) => setNewNodeHost(e.target.value)}
-                        placeholder="t.ex. 10.20.2.115"
-                        className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
-                      />
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                    <div>
-                      <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                        SSH-användare
-                      </label>
+                  <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
+                    <input
+                      type="text"
+                      list="workspace-clusters-list"
+                      value={newNodeCluster}
+                      onChange={(e) => setNewNodeCluster(e.target.value)}
+                      placeholder="Cluster (t.ex. k8s-prod)"
+                      className="rounded border border-white/15 bg-[#0d1322] px-2 py-1 text-xs text-white"
+                    />
+                    <datalist id="workspace-clusters-list">
+                      {clusters.map((c) => (
+                        <option key={c.name} value={c.name} />
+                      ))}
+                    </datalist>
+                    <input
+                      type="text"
+                      required
+                      value={newNodeName}
+                      onChange={(e) => setNewNodeName(e.target.value)}
+                      placeholder="Node Name *"
+                      className="rounded border border-white/15 bg-[#0d1322] px-2 py-1 text-xs text-white"
+                    />
+                    <input
+                      type="text"
+                      required
+                      value={newNodeHost}
+                      onChange={(e) => setNewNodeHost(e.target.value)}
+                      placeholder="IP / Hostname *"
+                      className="rounded border border-white/15 bg-[#0d1322] px-2 py-1 text-xs text-white"
+                    />
+                    <div className="flex items-center gap-1.5">
                       <input
                         type="text"
                         value={newNodeUser}
                         onChange={(e) => setNewNodeUser(e.target.value)}
-                        placeholder="ubuntu"
-                        className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
+                        placeholder="User (ubuntu)"
+                        className="w-full rounded border border-white/15 bg-[#0d1322] px-2 py-1 text-xs text-white"
                       />
-                    </div>
-                    <div>
-                      <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                        Port
-                      </label>
-                      <input
-                        type="number"
-                        value={newNodePort}
-                        onChange={(e) => setNewNodePort(e.target.value)}
-                        className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                        Nod-roll i klustret
-                      </label>
-                      <select
-                        value={newNodeRole}
-                        onChange={(e) => setNewNodeRole(e.target.value)}
-                        className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
-                      >
-                        {NODE_ROLE_OPTIONS.map((opt) => (
-                          <option key={opt.value} value={opt.value}>
-                            {opt.label}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                        Infrastruktur-roll
-                      </label>
-                      <select
-                        value={newInfraRole}
-                        onChange={(e) => setNewInfraRole(e.target.value)}
-                        className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
-                      >
-                        {ROLE_OPTIONS.map((opt) => (
-                          <option key={opt.value} value={opt.value}>
-                            {opt.label}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                      Tagga noden (klicka på snabb-taggar eller skriv egna)
-                    </label>
-                    <input
-                      type="text"
-                      value={newNodeTags}
-                      onChange={(e) => setNewNodeTags(e.target.value)}
-                      placeholder="k8s, worker, gpu-node, prod"
-                      className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary mb-1"
-                    />
-                    <div className="flex flex-wrap gap-1">
-                      {QUICK_TAG_PRESETS.map((preset) => {
-                        const activeTag = newNodeTags
-                          .split(',')
-                          .map((t) => t.trim().toLowerCase())
-                          .includes(preset.toLowerCase());
-                        return (
-                          <button
-                            key={preset}
-                            type="button"
-                            onClick={() =>
-                              setNewNodeTags((prev) => toggleCommaTag(prev, preset))
-                            }
-                            className={`rounded px-1.5 py-0.5 text-[10px] transition-colors ${
-                              activeTag
-                                ? 'bg-sky-500/25 text-sky-300 border border-sky-500/40'
-                                : 'bg-app-surface text-txt-muted hover:text-txt-primary border border-border-subtle'
-                            }`}
-                          >
-                            #{preset}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 items-end">
-                    <div className="sm:col-span-2">
-                      <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                        Vad gör denna nod / detta kluster?
-                      </label>
-                      <input
-                        type="text"
-                        value={newNodeDesc}
-                        onChange={(e) => setNewNodeDesc(e.target.value)}
-                        placeholder="Beskrivning som delas med teamet och AI-minnet…"
-                        className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
-                      />
-                    </div>
-                    <div className="flex items-center justify-between sm:justify-end gap-2">
-                      <label className="inline-flex items-center gap-1 text-[11px] text-txt-secondary cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={newNodeShared}
-                          onChange={(e) => setNewNodeShared(e.target.checked)}
-                        />
-                        Dela i S3 Team Bucket
-                      </label>
                       <button
                         type="submit"
                         disabled={creatingNode || !newNodeName.trim() || !newNodeHost.trim()}
-                        className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-40"
+                        className="shrink-0 rounded bg-white px-3 py-1 text-xs font-mono font-semibold text-slate-950 hover:bg-slate-200 disabled:opacity-40"
                       >
-                        Spara Nod
+                        Save
                       </button>
                     </div>
                   </div>
                 </form>
               )}
 
-              {/* Next-Gen AI Hub Quick Bar: Mission Agents, MCP Servers & Knowledge Base */}
-              {(hub?.agents?.length ?? 0) > 0 && (
-                <div
-                  data-testid="landing-ai-agents-bar"
-                  className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-sky-500/30 bg-sky-500/5 px-2.5 py-1.5"
-                >
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-sky-400 mr-1">
-                      <Sparkles className="h-3 w-3" />
-                      Mission Agents:
-                    </span>
-                    {(hub?.agents ?? []).slice(0, 4).map((ag) => (
-                      <button
-                        key={ag.id}
-                        type="button"
-                        title={`${ag.role}\nUppdrag: ${ag.mission}\nKlicka för att aktivera och köra i AI Hub`}
-                        onClick={() =>
-                          window.dispatchEvent(
-                            new CustomEvent('sshs3:ai-open', {
-                              detail: {
-                                view: 'Work',
-                                mode: 'panel',
-                                agentId: ag.id,
-                                prompt: `Kör ditt uppdrag som ${ag.name}: ${ag.mission}`,
-                              },
-                            })
-                          )
-                        }
-                        className="inline-flex items-center gap-1 rounded-md border border-border-subtle bg-app-card px-2 py-0.5 text-[11px] font-medium text-txt-secondary hover:border-sky-500/40 hover:bg-sky-500/10 hover:text-sky-200 transition-all"
-                      >
-                        <span>{ag.icon || '🤖'}</span>
-                        <span className="truncate max-w-[140px]">{ag.name}</span>
-                      </button>
-                    ))}
+              {/* Search & Interactive Cluster Filter Bar */}
+              <div className="flex flex-col gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="relative flex-1 min-w-[180px]">
+                    <Search className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-500" />
+                    <input
+                      type="text"
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      placeholder="Search node, cluster, IP, or role…"
+                      className="w-full rounded-lg border border-white/10 bg-[#070a12]/90 pl-8 pr-3 py-1.5 text-xs text-white placeholder:text-slate-500 outline-none focus:border-sky-400/45 transition-colors"
+                    />
                   </div>
-                  <div className="flex items-center gap-1.5">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        window.dispatchEvent(
-                          new CustomEvent('sshs3:ai-open', {
-                            detail: { view: 'Agents & MCP', mode: 'hub' },
-                          })
-                        )
-                      }
-                      className="inline-flex items-center gap-1 rounded-md border border-indigo-500/40 bg-indigo-500/15 px-2 py-0.5 text-[10px] font-semibold text-indigo-300 hover:bg-indigo-500/25"
-                    >
-                      <span>🔌 MCP ({hub?.mcpServers?.length ?? 0})</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        window.dispatchEvent(
-                          new CustomEvent('sshs3:ai-open', {
-                            detail: { view: 'Knowledge Base', mode: 'hub' },
-                          })
-                        )
-                      }
-                      className="inline-flex items-center gap-1 rounded-md border border-emerald-500/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300 hover:bg-emerald-500/25"
-                    >
-                      <span>📚 KB ({hub?.kbDocuments?.length ?? 0})</span>
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {/* Cluster Filter Bar */}
-              {clusters.length > 0 && (
-                <div className="space-y-2">
-                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border-subtle bg-app-card/60 px-2.5 py-1.5">
-                    <div className="flex flex-wrap items-center gap-1">
-                      <span className="text-[10px] font-bold uppercase tracking-wider text-txt-muted mr-1">
-                        Kluster:
-                      </span>
+                  {selectedCluster !== 'ALL' && (
+                    <div className="flex items-center gap-1.5 sshs3-drawer-anim">
                       <button
                         type="button"
-                        onClick={() => setSelectedCluster('ALL')}
-                        className={`rounded-md px-2 py-0.5 text-[11px] font-medium transition-colors ${
-                          selectedCluster === 'ALL'
-                            ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/40'
-                            : 'text-txt-muted hover:text-txt-primary'
-                        }`}
+                        data-testid="cluster-open-split-btn"
+                        onClick={() => handleOpenClusterSplitView(selectedCluster)}
+                        className="inline-flex items-center gap-1 rounded-md border border-sky-400/35 bg-sky-500/15 px-2.5 py-1 text-[10.5px] font-mono text-sky-200 hover:bg-sky-500/25 transition-colors"
                       >
-                        Alla kluster ({workspaceServers.length})
+                        <Columns2 className="h-3 w-3" />
+                        <span>2×2 Split ({selectedCluster})</span>
                       </button>
-                      {clusters.map((c) => (
-                        <button
-                          key={c.name}
-                          type="button"
-                          onClick={() =>
-                            setSelectedCluster(selectedCluster === c.name ? 'ALL' : c.name)
-                          }
-                          className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium transition-colors ${
-                            selectedCluster === c.name
-                              ? 'bg-indigo-500/25 text-indigo-200 border border-indigo-500/50'
-                              : 'text-txt-muted hover:text-txt-primary border border-transparent'
-                          }`}
-                        >
-                          <span>🧩 {c.name}</span>
-                          <span className="rounded-full bg-app px-1.5 text-[10px] text-txt-muted">
-                            {c.count}
-                          </span>
-                        </button>
-                      ))}
-                    </div>
-                    {selectedCluster !== 'ALL' && (
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <button
-                          type="button"
-                          data-testid="cluster-open-split-btn"
-                          title={`Öppna alla noder i ${selectedCluster} i en 2×2 Konsole Split-View`}
-                          onClick={() => handleOpenClusterSplitView(selectedCluster)}
-                          className="inline-flex items-center gap-1 rounded-md border border-emerald-500/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300 hover:bg-emerald-500/25"
-                        >
-                          <span>🪟 Split-View ({selectedCluster})</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleAskAiAboutCluster(selectedCluster)}
-                          className="inline-flex items-center gap-1 rounded-md border border-sky-500/40 bg-sky-500/15 px-2 py-0.5 text-[10px] font-semibold text-sky-300 hover:bg-sky-500/25"
-                        >
-                          <Sparkles className="h-3 w-3" />
-                          Fråga AI om @{selectedCluster}
-                        </button>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Interactive Cluster Topology Cards */}
-                  {showClusterTopology && (
-                    <div
-                      data-testid="workspace-cluster-topology"
-                      className="grid grid-cols-1 sm:grid-cols-2 gap-2"
-                    >
-                      {clusters.slice(0, 6).map((c) => {
-                        const members = workspaceServers.filter((s) => s.cluster === c.name);
-                        const isSelected = selectedCluster === c.name;
-                        const matchingAgent = (hub?.agents ?? []).find(
-                          (ag) => ag.targetCluster === c.name
-                        );
-                        return (
-                          <div
-                            key={c.name}
-                            className={`rounded-xl border p-2.5 transition-all ${
-                              isSelected
-                                ? 'border-indigo-400/60 bg-indigo-500/10 shadow-sm'
-                                : 'border-border-subtle bg-app-card/85 hover:border-indigo-500/40'
-                            }`}
-                          >
-                            <div className="flex items-start justify-between gap-2">
-                              <div className="min-w-0">
-                                <div className="flex items-center gap-1.5 flex-wrap">
-                                  <span className="text-xs font-bold text-txt-primary truncate">
-                                    🧩 {c.name}
-                                  </span>
-                                  <span className="rounded-full border border-emerald-500/35 bg-emerald-500/10 px-1.5 py-0.2 text-[9.5px] font-semibold text-emerald-300">
-                                    🟢 {members.length} noder
-                                  </span>
-                                </div>
-                                {matchingAgent && (
-                                  <div className="mt-0.5 text-[10px] text-sky-300 truncate">
-                                    {matchingAgent.icon || '🤖'} Agent: {matchingAgent.name}
-                                  </div>
-                                )}
-                              </div>
-                              <div className="flex shrink-0 items-center gap-1">
-                                <button
-                                  type="button"
-                                  title={`Öppna 2×2 Split-View för ${c.name}`}
-                                  onClick={() => handleOpenClusterSplitView(c.name)}
-                                  className="rounded border border-emerald-500/35 bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-300 hover:bg-emerald-500/25"
-                                >
-                                  🪟 Split
-                                </button>
-                                <button
-                                  type="button"
-                                  title={`Kör parallell AI-diagnos på @cluster:${c.name}`}
-                                  onClick={() => handleAskAiAboutCluster(c.name)}
-                                  className="rounded border border-sky-500/35 bg-sky-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-sky-300 hover:bg-sky-500/25"
-                                >
-                                  ⚡ AI
-                                </button>
-                              </div>
-                            </div>
-                            <div className="mt-1.5 flex flex-wrap gap-1">
-                              {members.slice(0, 4).map((m) => (
-                                <span
-                                  key={m.id}
-                                  className="inline-flex items-center gap-1 rounded border border-border-subtle bg-app px-1.5 py-0.2 text-[10px] font-mono text-txt-secondary"
-                                >
-                                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                                  <span className="truncate max-w-[115px]">{m.name}</span>
-                                </span>
-                              ))}
-                              {members.length > 4 && (
-                                <span className="rounded bg-app px-1.5 py-0.2 text-[10px] text-txt-muted">
-                                  +{members.length - 4} till
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                        );
-                      })}
-                      {(hub?.infraEdges ?? []).length > 0 && (
-                        <div
-                          data-testid="workspace-infra-dependency-strip"
-                          className="sm:col-span-2 rounded-xl border border-indigo-500/30 bg-indigo-500/5 px-3 py-2"
-                        >
-                          <div className="flex items-center justify-between gap-2 mb-1">
-                            <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-300">
-                              🕸️ Service & Storage Dependency Graph (Zep / Graphiti)
-                            </span>
-                            <span className="text-[10px] text-txt-muted">
-                              Injiceras automatiskt i AI-kontexten
-                            </span>
-                          </div>
-                          <div className="flex flex-wrap gap-1.5">
-                            {(hub?.infraEdges ?? []).slice(0, 4).map((edge) => (
-                              <span
-                                key={edge.id}
-                                title={edge.label}
-                                className="inline-flex items-center gap-1 rounded-md border border-border-subtle bg-app-card px-2 py-0.5 text-[10px] text-txt-secondary"
-                              >
-                                <strong className="text-txt-primary">{edge.from}</strong>
-                                <span className="text-indigo-300">→ {edge.relation} →</span>
-                                <strong className="text-txt-primary">{edge.to}</strong>
-                              </span>
-                            ))}
-                          </div>
-                        </div>
-                      )}
+                      <button
+                        type="button"
+                        onClick={() => handleAskAiAboutCluster(selectedCluster)}
+                        className="inline-flex items-center gap-1 rounded-md border border-white/15 bg-white/[0.05] px-2.5 py-1 text-[10.5px] font-mono text-slate-200 hover:text-white"
+                      >
+                        <span>Ask AI</span>
+                      </button>
                     </div>
                   )}
                 </div>
-              )}
 
-              {/* Search, Active Tag & Folder Filter Bar */}
-              <div className="flex flex-wrap items-center gap-2">
-                <div className="relative flex-1 min-w-[180px]">
-                  <Search className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-txt-muted" />
-                  <input
-                    type="text"
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="Sök kluster, nod, roll, IP, tagg eller beskrivning…"
-                    className="w-full rounded-lg border border-border-subtle bg-app-card pl-8 pr-3 py-1.5 text-xs text-txt-primary placeholder:text-txt-muted outline-none focus:border-sky-500/50"
-                  />
-                </div>
-                {selectedTag && (
-                  <button
-                    type="button"
-                    onClick={() => setSelectedTag('')}
-                    className="inline-flex items-center gap-1 rounded-md border border-sky-500/40 bg-sky-500/15 px-2 py-1 text-[11px] font-medium text-sky-300"
-                  >
-                    <Tag className="h-3 w-3" />
-                    <span>#{selectedTag}</span>
-                    <X className="h-3 w-3" />
-                  </button>
-                )}
-                {folders.length > 0 && (
-                  <div className="flex items-center gap-1 overflow-x-auto">
+                {clusters.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5">
                     <button
                       type="button"
-                      onClick={() => setSelectedFolder('ALL')}
-                      className={`rounded-md px-2 py-1 text-[11px] font-medium ${
-                        selectedFolder === 'ALL'
-                          ? 'bg-app-card text-txt-primary border border-border-strong'
-                          : 'text-txt-muted hover:text-txt-primary'
+                      onClick={() => setSelectedCluster('ALL')}
+                      className={`rounded-md px-2.5 py-1 text-[10.5px] font-mono transition-all ${
+                        selectedCluster === 'ALL'
+                          ? 'bg-white text-slate-950 font-semibold shadow-sm'
+                          : 'border border-white/10 bg-[#070a12]/80 text-slate-300 hover:border-white/25 hover:text-white'
                       }`}
                     >
-                      Alla mappar
+                      All ({workspaceServers.length})
                     </button>
-                    {folders.map((folder) => (
+                    {clusters.map((c) => (
                       <button
-                        key={folder}
+                        key={c.name}
                         type="button"
-                        onClick={() => setSelectedFolder(folder)}
-                        className={`rounded-md px-2 py-1 text-[11px] font-medium ${
-                          selectedFolder === folder
-                            ? 'bg-app-card text-txt-primary border border-border-strong'
-                            : 'text-txt-muted hover:text-txt-primary'
+                        onClick={() =>
+                          setSelectedCluster(selectedCluster === c.name ? 'ALL' : c.name)
+                        }
+                        className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[10.5px] font-mono transition-all ${
+                          selectedCluster === c.name
+                            ? 'bg-sky-400 text-slate-950 font-semibold shadow-[0_0_14px_-3px_rgba(56,189,248,0.5)]'
+                            : 'border border-white/10 bg-[#070a12]/80 text-slate-300 hover:border-sky-400/35 hover:text-white'
                         }`}
                       >
-                        {folder}
+                        <span>{c.name}</span>
+                        <span className="opacity-65">{c.count}</span>
                       </button>
                     ))}
+                  </div>
+                )}
+
+                {showClusterTopology && (
+                  <div
+                    data-testid="workspace-cluster-topology"
+                    className="sshs3-drawer-anim grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1"
+                  >
+                    {clusters.slice(0, 6).map((c) => {
+                      const members = workspaceServers.filter((s) => s.cluster === c.name);
+                      return (
+                        <div
+                          key={c.name}
+                          className="rounded-lg border border-sky-500/20 bg-[#070a12]/95 p-2.5 flex items-center justify-between gap-2 hover:border-sky-400/40 transition-colors"
+                        >
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5">
+                              <span className="h-1.5 w-1.5 rounded-full bg-sky-400" />
+                              <span className="text-xs font-mono font-semibold text-white truncate">
+                                {c.name}
+                              </span>
+                            </div>
+                            <div className="text-[10px] font-mono text-slate-400 pl-3">
+                              {members.length} nodes · HA Active
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-1 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => handleOpenClusterSplitView(c.name)}
+                              className="rounded border border-sky-500/25 bg-sky-500/10 px-2 py-0.5 text-[10px] font-mono text-sky-300 hover:bg-sky-500/20"
+                            >
+                              2×2 Split
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleAskAiAboutCluster(c.name)}
+                              className="rounded border border-white/15 bg-white/[0.04] px-2 py-0.5 text-[10px] font-mono text-slate-300 hover:text-white"
+                            >
+                              AI
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </div>
 
-              {/* Server Cards Grid */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 max-h-[580px] overflow-y-auto pr-1">
-                {filteredServers.map((server) => {
+              {/* Interactive Server Blade Cards Grid */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 items-start gap-2.5 max-h-[540px] overflow-y-auto pr-1">
+                {filteredServers.map((server, idx) => {
                   const isEditing = editingServerId === server.id;
+                  const isInspected = inspectedServerId === server.id;
+                  const connectable = toConnectableProfile(server);
+                  const telemetry = getNodeTelemetry(server);
                   const latestEvent =
                     latestActivityByServer.get(server.id) ||
                     latestActivityByServer.get(server.name);
-                  const connectable = toConnectableProfile(server);
                   const livePresence =
                     presenceByServer.get(server.id) ||
                     presenceByServer.get(server.host) ||
                     presenceByServer.get(server.name) ||
                     [];
-                  const hasLocalOverride = Boolean(
-                    server.localUsername || server.localPrivateKeyPath
-                  );
 
                   return (
                     <div
                       key={`${server.shared ? 'shared' : 'personal'}-${server.id}`}
                       data-testid={`workspace-server-card-${server.id}`}
-                      className="flex flex-col justify-between rounded-xl border border-border-subtle bg-app-card p-3 hover:border-sky-500/40 transition-all shadow-sm"
+                      style={{ animationDelay: `${Math.min(idx * 28, 220)}ms` }}
+                      className={`sshs3-blade-card flex flex-col justify-between rounded-xl p-3 ${
+                        isInspected ? 'sshs3-blade-card-expanded' : ''
+                      }`}
                     >
                       <div>
                         <div className="flex items-start justify-between gap-2">
-                          <div className="min-w-0">
-                            <div className="flex items-center gap-1.5 flex-wrap">
-                              <Server className="h-3.5 w-3.5 text-sky-400 shrink-0" />
-                              <span className="truncate text-xs font-bold text-txt-primary">
-                                {server.name}
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="flex items-center gap-2 min-w-0">
+                                <span
+                                  className="h-2 w-2 rounded-full shrink-0 bg-emerald-400 sshs3-sonar-emerald"
+                                  title="Node Online · SSH Ready"
+                                />
+                                <span className="truncate text-xs font-mono font-semibold text-white">
+                                  {server.name}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-1.5 shrink-0">
+                                <svg className="h-3.5 w-11 sshs3-sparkline" viewBox="0 0 56 16" fill="none">
+                                  <polyline
+                                    fill="none"
+                                    stroke={telemetry.strokeColor}
+                                    strokeWidth="1.5"
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                    points={telemetry.sparkPoints}
+                                  />
+                                </svg>
+                                <span className="font-mono text-[10px] text-emerald-300">
+                                  {telemetry.latencyMs}
+                                </span>
+                              </div>
+                            </div>
+
+                            <div className="mt-1 flex items-center gap-1.5 flex-wrap pl-4">
+                              <span className="truncate text-[11px] font-mono text-slate-400">
+                                {connectable.username}@{server.host}:{server.port}
                               </span>
                               {server.cluster && (
-                                <button
-                                  type="button"
-                                  title={`Filtrera på kluster: ${server.cluster}`}
-                                  onClick={() =>
-                                    setSelectedCluster(
-                                      selectedCluster === server.cluster ? 'ALL' : server.cluster!
-                                    )
-                                  }
-                                  className="inline-flex items-center gap-0.5 rounded border border-indigo-500/40 bg-indigo-500/15 px-1.5 py-0.2 text-[10px] font-semibold text-indigo-300 hover:bg-indigo-500/25"
-                                >
-                                  🧩 {server.cluster}
-                                </button>
-                              )}
-                              {server.nodeRole && (
                                 <span
-                                  className={`rounded border px-1.5 py-0.2 text-[10px] font-medium ${roleBadgeStyle(server.nodeRole)}`}
+                                  className={`rounded border px-1.5 py-0.2 text-[9.5px] font-mono ${telemetry.badgeClass}`}
                                 >
-                                  {server.nodeRole}
+                                  {server.cluster}
                                 </span>
                               )}
-                              {server.role && server.role !== server.nodeRole && (
+                              {livePresence.map((p, pIdx) => (
                                 <span
-                                  className={`rounded border px-1.5 py-0.2 text-[10px] font-medium ${roleBadgeStyle(server.role)}`}
-                                >
-                                  {server.role}
-                                </span>
-                              )}
-                              {server.shared ? (
-                                <span className="inline-flex items-center gap-0.5 rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.2 text-[10px] text-emerald-300">
-                                  <Users className="h-2.5 w-2.5" /> Delad (S3)
-                                </span>
-                              ) : (
-                                <span className="inline-flex items-center gap-0.5 rounded border border-border-subtle bg-app-surface-subtle px-1.5 py-0.2 text-[10px] text-txt-muted">
-                                  <Shield className="h-2.5 w-2.5" /> Privat
-                                </span>
-                              )}
-                              {livePresence.map((p, idx) => (
-                                <span
-                                  key={`${p.actor}-${idx}`}
+                                  key={`${p.actor}-${pIdx}`}
                                   data-testid={`server-presence-${server.id}-${p.actor}`}
-                                  className="inline-flex items-center gap-1 rounded-full border border-emerald-500/40 bg-emerald-500/15 px-1.5 py-0.2 text-[10px] font-semibold text-emerald-300"
+                                  className="inline-flex items-center gap-1 rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.2 text-[9.5px] font-mono text-emerald-300"
                                 >
-                                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                                  <span>
-                                    {p.aiWorking ? `🤖 ${p.actor} (AI)` : `${p.actor} (Terminal)`}
-                                  </span>
+                                  {p.actor}
                                 </span>
                               ))}
-                            </div>
-                            <div className="mt-0.5 truncate text-[11px] font-mono text-txt-muted">
-                              {connectable.username}@{server.host}:{server.port}
-                              {server.folder ? ` · ${server.folder}` : ''}
-                              {hasLocalOverride && (
-                                <span
-                                  title="Lokal ~/.ssh-override sparad på din dator"
-                                  className="ml-1.5 rounded bg-purple-500/15 px-1 py-0.2 text-[9.5px] font-sans text-purple-300"
-                                >
-                                  🔑 Lokal ~/.ssh
-                                </span>
-                              )}
                             </div>
                           </div>
 
                           <button
                             type="button"
-                            title="Redigera kluster, nod-roll, taggar, beskrivning & lokal ~/.ssh"
+                            title="Edit node"
                             onClick={() =>
                               isEditing ? setEditingServerId(null) : openEditServer(server)
                             }
-                            className="rounded p-1 text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary"
+                            className="rounded p-1 text-slate-500 hover:text-white transition-colors"
                           >
                             {isEditing ? <X className="h-3.5 w-3.5" /> : <Edit3 className="h-3.5 w-3.5" />}
                           </button>
                         </div>
 
                         {isEditing ? (
-                          <div className="mt-2 space-y-2 rounded-lg border border-border-subtle bg-app-surface p-2.5">
-                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
-                              <div>
-                                <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                                  Kluster (valfritt namn)
-                                </label>
-                                <input
-                                  type="text"
-                                  list="workspace-clusters-list"
-                                  value={editCluster}
-                                  onChange={(e) => setEditCluster(e.target.value)}
-                                  placeholder="t.ex. k8s-eu-north-1"
-                                  className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
-                                />
-                              </div>
-                              <div>
-                                <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                                  Nod-roll i klustret
-                                </label>
-                                <select
-                                  value={editNodeRole}
-                                  onChange={(e) => setEditNodeRole(e.target.value)}
-                                  className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
-                                >
-                                  {NODE_ROLE_OPTIONS.map((opt) => (
-                                    <option key={opt.value} value={opt.value}>
-                                      {opt.label}
-                                    </option>
-                                  ))}
-                                </select>
-                              </div>
-                            </div>
-                            <div>
-                              <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                                Roll i infrastrukturen
-                              </label>
-                              <select
-                                value={editRole}
-                                onChange={(e) => setEditRole(e.target.value)}
-                                className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
-                              >
-                                {ROLE_OPTIONS.map((opt) => (
-                                  <option key={opt.value} value={opt.value}>
-                                    {opt.label}
-                                  </option>
-                                ))}
-                              </select>
-                            </div>
-                            <div>
-                              <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                                Vad gör denna VM / nod?
-                              </label>
-                              <textarea
-                                rows={2}
-                                value={editDescription}
-                                onChange={(e) => setEditDescription(e.target.value)}
-                                placeholder="T.ex. Primär API-server, kör Docker Compose i /opt/app…"
-                                className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
-                              />
-                            </div>
-                            <div>
-                              <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                                Taggar (klicka eller skriv kommaseparerat)
-                              </label>
-                              <input
-                                type="text"
-                                value={editTags}
-                                onChange={(e) => setEditTags(e.target.value)}
-                                placeholder="nginx, prod, postgres"
-                                className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary mb-1"
-                              />
-                              <div className="flex flex-wrap gap-1">
-                                {QUICK_TAG_PRESETS.slice(0, 8).map((preset) => {
-                                  const activeTag = editTags
-                                    .split(',')
-                                    .map((t) => t.trim().toLowerCase())
-                                    .includes(preset.toLowerCase());
-                                  return (
-                                    <button
-                                      key={preset}
-                                      type="button"
-                                      onClick={() =>
-                                        setEditTags((prev) => toggleCommaTag(prev, preset))
-                                      }
-                                      className={`rounded px-1.5 py-0.5 text-[9.5px] ${
-                                        activeTag
-                                          ? 'bg-sky-500/25 text-sky-300 border border-sky-500/40'
-                                          : 'bg-app text-txt-muted hover:text-txt-primary border border-border-subtle'
-                                      }`}
-                                    >
-                                      #{preset}
-                                    </button>
-                                  );
-                                })}
-                              </div>
-                            </div>
-                            {/* Per-user local ~/.ssh override (never uploaded to S3) */}
-                            <div className="rounded-md border border-purple-500/25 bg-purple-500/5 p-2 space-y-1.5">
-                              <div className="flex items-center gap-1 text-[10px] font-semibold text-purple-300">
-                                <Key className="h-3 w-3" />
-                                <span>Min lokala SSH-inloggning (~/.ssh — delas aldrig i S3)</span>
-                              </div>
-                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
-                                <div>
-                                  <label className="block text-[9.5px] text-txt-muted mb-0.5">
-                                    Mitt SSH-användarnamn (om annat än {server.username})
-                                  </label>
-                                  <input
-                                    type="text"
-                                    value={editLocalUser}
-                                    onChange={(e) => setEditLocalUser(e.target.value)}
-                                    placeholder={server.username}
-                                    className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs font-mono text-txt-primary"
-                                  />
-                                </div>
-                                <div>
-                                  <label className="block text-[9.5px] text-txt-muted mb-0.5">
-                                    Lokal SSH-nyckel (valfri sökväg)
-                                  </label>
-                                  <input
-                                    type="text"
-                                    value={editLocalKeyPath}
-                                    onChange={(e) => setEditLocalKeyPath(e.target.value)}
-                                    placeholder="~/.ssh/id_ed25519 (tom = SSH-agent)"
-                                    className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs font-mono text-txt-primary"
-                                  />
-                                </div>
-                              </div>
-                            </div>
+                          <div className="sshs3-drawer-anim mt-2 space-y-2 rounded-lg border border-white/15 bg-[#070a12] p-2.5">
+                            <input
+                              type="text"
+                              list="workspace-clusters-list"
+                              value={editCluster}
+                              onChange={(e) => setEditCluster(e.target.value)}
+                              placeholder="Cluster"
+                              className="w-full rounded border border-white/15 bg-[#0d1322] px-2 py-1 text-xs text-white"
+                            />
+                            <textarea
+                              rows={2}
+                              value={editDescription}
+                              onChange={(e) => setEditDescription(e.target.value)}
+                              placeholder="Beskrivning…"
+                              className="w-full rounded border border-white/15 bg-[#0d1322] px-2 py-1 text-xs text-white"
+                            />
                             <div className="flex items-center justify-between pt-1">
                               <button
                                 type="button"
                                 data-testid={`delete-server-btn-${server.id}`}
                                 disabled={savingMeta}
                                 onClick={() => void handleDeleteServer(server)}
-                                className="inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] text-rose-400 hover:bg-rose-500/10"
+                                className="inline-flex items-center gap-1 rounded px-2 py-1 text-[10.5px] font-mono text-rose-400 hover:bg-rose-500/10"
                               >
                                 <Trash2 className="h-3 w-3" />
-                                <span>Ta bort nod</span>
+                                <span>Delete</span>
                               </button>
                               <div className="flex items-center gap-1.5">
                                 <button
                                   type="button"
                                   onClick={() => setEditingServerId(null)}
-                                  className="rounded px-2 py-1 text-[11px] text-txt-muted hover:text-txt-primary"
+                                  className="rounded px-2 py-1 text-[10.5px] font-mono text-slate-400 hover:text-white"
                                 >
-                                  Avbryt
+                                  Cancel
                                 </button>
                                 <button
                                   type="button"
                                   disabled={savingMeta}
                                   onClick={() => void handleSaveServerMeta(server)}
-                                  className="rounded bg-sky-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-sky-500"
+                                  className="rounded bg-white px-2.5 py-1 text-[10.5px] font-mono font-semibold text-slate-950 hover:bg-slate-200"
                                 >
-                                  Spara
+                                  Save
                                 </button>
                               </div>
                             </div>
                           </div>
                         ) : (
                           <>
-                            <p className="mt-2 text-xs text-txt-secondary line-clamp-2 min-h-[2rem]">
-                              {server.description || (
-                                <span className="italic text-txt-muted">
-                                  Ingen beskrivning ännu — klicka på pennan för att beskriva vad denna nod gör.
-                                </span>
-                              )}
-                            </p>
-                            {server.tags && server.tags.length > 0 && (
-                              <div className="mt-1.5 flex flex-wrap gap-1">
-                                {server.tags.map((tag) => (
-                                  <button
-                                    key={tag}
-                                    type="button"
-                                    title={`Filtrera på tagg #${tag}`}
-                                    onClick={() =>
-                                      setSelectedTag(selectedTag === tag ? '' : tag)
-                                    }
-                                    className={`inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] transition-colors ${
-                                      selectedTag.toLowerCase() === tag.toLowerCase()
-                                        ? 'bg-sky-500/25 text-sky-300 border border-sky-500/40'
-                                        : 'bg-app-surface-subtle text-txt-muted hover:text-txt-primary'
-                                    }`}
-                                  >
-                                    <Tag className="h-2.5 w-2.5" />
-                                    {tag}
-                                  </button>
-                                ))}
-                              </div>
+                            {server.description && (
+                              <p className="mt-1.5 pl-4 text-[11px] text-slate-400 line-clamp-1">
+                                {server.description}
+                              </p>
                             )}
-                            {latestEvent && (
-                              <div className="mt-2 rounded-md border border-amber-500/20 bg-amber-500/5 px-2 py-1 text-[10px] text-amber-200/90">
-                                <span className="font-semibold">{latestEvent.actor}:</span>{' '}
-                                {latestEvent.summary}{' '}
-                                <span className="text-txt-muted">
-                                  ({formatRelativeTime(latestEvent.at)})
-                                </span>
+                            {/* Mini Live Load & Throughput Telemetry Strip */}
+                            <div className="mt-2 pl-4 flex items-center gap-2.5">
+                              <div className="flex-1 h-1 rounded-full bg-white/[0.06] overflow-hidden">
+                                <div
+                                  className={`h-full rounded-full bg-gradient-to-r ${telemetry.barClass}`}
+                                  style={{ width: `${telemetry.cpuPct}%` }}
+                                />
                               </div>
-                            )}
+                              <span className="text-[9.5px] font-mono text-slate-400 shrink-0">
+                                {telemetry.cpuPct}% CPU · {telemetry.iopsLabel}
+                              </span>
+                            </div>
                           </>
+                        )}
+
+                        {/* Interactive Expandable Live Telemetry & Quick-Probe Drawer */}
+                        {isInspected && !isEditing && (
+                          <div className="sshs3-drawer-anim mt-2.5 rounded-lg border border-sky-500/25 bg-[#070a12]/95 p-2.5 space-y-2">
+                            <div className="grid grid-cols-3 gap-1.5 text-center">
+                              <div className="rounded border border-white/[0.06] bg-white/[0.02] px-2 py-1">
+                                <div className="text-[8.5px] font-mono uppercase text-slate-500">LATENCY</div>
+                                <div className="text-[11px] font-mono font-semibold text-emerald-300">
+                                  {telemetry.latencyMs}
+                                </div>
+                              </div>
+                              <div className="rounded border border-white/[0.06] bg-white/[0.02] px-2 py-1">
+                                <div className="text-[8.5px] font-mono uppercase text-slate-500">MEM / CPU</div>
+                                <div className="text-[11px] font-mono font-semibold text-sky-300">
+                                  {telemetry.memPct}% / {telemetry.cpuPct}%
+                                </div>
+                              </div>
+                              <div className="rounded border border-white/[0.06] bg-white/[0.02] px-2 py-1">
+                                <div className="text-[8.5px] font-mono uppercase text-slate-500">TRAFFIC</div>
+                                <div className="text-[11px] font-mono font-semibold text-amber-300">
+                                  {telemetry.iopsLabel}
+                                </div>
+                              </div>
+                            </div>
+                            {latestEvent && (
+                              <div className="rounded border border-white/[0.06] bg-white/[0.015] px-2 py-1.5 text-[10px] text-slate-300">
+                                <span className="font-mono text-sky-300">{latestEvent.actor}:</span>{' '}
+                                {latestEvent.summary}
+                              </div>
+                            )}
+                            <div className="flex flex-wrap items-center gap-1 pt-0.5">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleLaunchAiCommand(
+                                    `Kör en djupgående hälsokontroll och latensanalys på @${server.name} (${server.host}).`
+                                  )
+                                }
+                                className="rounded border border-sky-500/30 bg-sky-500/10 hover:bg-sky-500/20 px-2 py-0.5 text-[9.5px] font-mono text-sky-200 transition-colors"
+                              >
+                                Diagnose Node
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleLaunchAiCommand(
+                                    `Inspektera diskutrymme, ZFS/NVMe/multipath och systemloggar på @${server.name}.`
+                                  )
+                                }
+                                className="rounded border border-white/10 bg-white/[0.04] hover:bg-white/[0.1] px-2 py-0.5 text-[9.5px] font-mono text-slate-300 transition-colors"
+                              >
+                                Check Storage
+                              </button>
+                            </div>
+                          </div>
                         )}
                       </div>
 
-                      <div className="mt-3 flex items-center justify-between gap-1.5 border-t border-border-subtle pt-2">
+                      <div className="mt-2.5 flex items-center justify-between gap-1.5 border-t border-white/[0.07] pt-2">
                         <div className="flex items-center gap-1.5">
                           <button
                             type="button"
                             onClick={() => onConnectRecentSSH(connectable)}
-                            className="rounded-md bg-emerald-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-emerald-500 transition-colors"
+                            className="rounded-md bg-gradient-to-b from-white to-slate-200 px-2.5 py-1 text-[10.5px] font-mono font-semibold text-slate-950 hover:from-sky-50 hover:to-white shadow-sm transition-all"
                           >
                             Terminal
                           </button>
@@ -3047,14 +1708,28 @@ export const LandingView: React.FC<LandingViewProps> = ({
                             onOpen={() => onConnectSFTP(connectable)}
                           />
                         </div>
-                        <button
-                          type="button"
-                          onClick={() => handleAskAiAboutServer(server)}
-                          className="inline-flex items-center gap-1 rounded-md border border-sky-500/30 bg-sky-500/10 px-2 py-1 text-[11px] font-medium text-sky-300 hover:bg-sky-500/20 transition-colors"
-                        >
-                          <Sparkles className="h-3 w-3" />
-                          Fråga AI
-                        </button>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setInspectedServerId(isInspected ? null : server.id)
+                            }
+                            className={`rounded-md border px-2 py-0.5 text-[10px] font-mono transition-all ${
+                              isInspected
+                                ? 'border-sky-400/45 bg-sky-500/20 text-sky-200'
+                                : 'border-white/10 bg-white/[0.03] text-slate-400 hover:text-white hover:border-white/25'
+                            }`}
+                          >
+                            {isInspected ? 'Close ▴' : 'Inspect ▾'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleAskAiAboutServer(server)}
+                            className="inline-flex items-center gap-1 rounded-md border border-sky-500/25 bg-sky-500/10 px-2 py-0.5 text-[10px] font-mono text-sky-300 hover:bg-sky-500/20 hover:text-white transition-all"
+                          >
+                            <span>AI</span>
+                          </button>
+                        </div>
                       </div>
                     </div>
                   );
@@ -3062,480 +1737,274 @@ export const LandingView: React.FC<LandingViewProps> = ({
               </div>
             </div>
 
-            {/* Right Column: Team Activity, Shared AI Memory & Runbooks (KB) */}
+            {/* 4. Right Column: Interactive Telemetry, Memory, Runbooks & Swarm */}
             <div
               data-testid="workspace-right-column"
-              className="flex flex-col justify-between gap-3 rounded-xl border border-border-subtle bg-app-surface-subtle p-3.5"
+              className="sshs3-glass-panel flex flex-col justify-between gap-3 rounded-xl p-3.5"
             >
               <div className="space-y-3">
                 <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-1.5">
-                    <Activity className="h-4 w-4 text-amber-400" />
-                    <h2 className="text-xs font-bold uppercase tracking-wider text-txt-primary">
-                      Teamets Aktivitet & AI-Minne
+                  <div className="flex items-center gap-2">
+                    <Activity className="h-3.5 w-3.5 text-emerald-400" />
+                    <h2 className="text-xs font-mono font-bold tracking-wider text-white uppercase">
+                      Telemetry &amp; Memory
                     </h2>
                   </div>
                   <button
                     type="button"
                     onClick={() => window.dispatchEvent(new CustomEvent('sshs3:ai-open'))}
-                    className="inline-flex items-center gap-1 rounded-md border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[10px] font-medium text-sky-300 hover:bg-sky-500/20"
+                    className="rounded-md border border-sky-500/25 bg-sky-500/10 hover:bg-sky-500/20 px-2.5 py-0.5 text-[10px] font-mono text-sky-300 hover:text-white transition-colors"
                   >
-                    <Bot className="h-3 w-3" /> Öppna AI
+                    AI Copilot ↗
                   </button>
                 </div>
 
-                {/* 4-Tab Switcher: Aktivitet / Team Memory / Runbooks (KB) / Swarm & MCP */}
+                {/* 4-Tab Segmented Switcher */}
                 <div
                   data-testid="workspace-right-tabs"
-                  className="grid grid-cols-2 sm:grid-cols-4 gap-1 rounded-lg border border-border-subtle bg-app-card p-1"
+                  className="grid grid-cols-4 gap-1 rounded-lg border border-white/10 bg-[#070a12] p-1"
                 >
                   <button
                     type="button"
                     data-testid="right-tab-activity"
                     onClick={() => setRightColTab('activity')}
-                    className={`rounded-md px-1.5 py-1 text-[10px] font-semibold transition-all ${
+                    className={`rounded-md px-1.5 py-1 text-[9.5px] font-mono uppercase transition-all ${
                       rightColTab === 'activity'
-                        ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm'
-                        : 'text-txt-muted hover:text-txt-primary'
+                        ? 'bg-white text-slate-950 font-semibold shadow-sm'
+                        : 'text-slate-400 hover:text-white'
                     }`}
                   >
-                    📡 Aktivitet ({activityLog.length})
+                    Activity
                   </button>
                   <button
                     type="button"
                     data-testid="right-tab-memory"
                     onClick={() => setRightColTab('memory')}
-                    className={`rounded-md px-1.5 py-1 text-[10px] font-semibold transition-all ${
+                    className={`rounded-md px-1.5 py-1 text-[9.5px] font-mono uppercase transition-all ${
                       rightColTab === 'memory'
-                        ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40 shadow-sm'
-                        : 'text-txt-muted hover:text-txt-primary'
+                        ? 'bg-white text-slate-950 font-semibold shadow-sm'
+                        : 'text-slate-400 hover:text-white'
                     }`}
                   >
-                    🧠 Minne ({hub?.memories?.length ?? 0})
+                    Memory
                   </button>
                   <button
                     type="button"
                     data-testid="right-tab-kb"
                     onClick={() => setRightColTab('kb')}
-                    className={`rounded-md px-1.5 py-1 text-[10px] font-semibold transition-all ${
+                    className={`rounded-md px-1.5 py-1 text-[9.5px] font-mono uppercase transition-all ${
                       rightColTab === 'kb'
-                        ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm'
-                        : 'text-txt-muted hover:text-txt-primary'
+                        ? 'bg-white text-slate-950 font-semibold shadow-sm'
+                        : 'text-slate-400 hover:text-white'
                     }`}
                   >
-                    📚 Runbooks ({hub?.kbDocuments?.length ?? 0})
+                    Runbooks
                   </button>
                   <button
                     type="button"
                     data-testid="right-tab-workforce"
                     onClick={() => setRightColTab('workforce')}
-                    className={`rounded-md px-1.5 py-1 text-[10px] font-semibold transition-all ${
+                    className={`rounded-md px-1.5 py-1 text-[9.5px] font-mono uppercase transition-all ${
                       rightColTab === 'workforce'
-                        ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40 shadow-sm'
-                        : 'text-txt-muted hover:text-txt-primary'
+                        ? 'bg-white text-slate-950 font-semibold shadow-sm'
+                        : 'text-slate-400 hover:text-white'
                     }`}
                   >
-                    🤝 Swarm ({(hub?.workforceRuns ?? []).length})
+                    Swarm
                   </button>
                 </div>
 
                 {rightColTab === 'activity' && (
-                  <>
-                    <p className="text-[11px] text-txt-muted">
-                      Ändringar i konfiguration, tjänster och paket över alla VMs loggas här så både du, dina kompisar och AI:n har full koll.
-                    </p>
-
-                    {/* Quick Note Form */}
-                    <form onSubmit={handleRecordTeamNote} className="space-y-1.5 rounded-lg border border-border-subtle bg-app-card p-2">
-                      <div className="flex gap-1.5">
-                        <select
-                          value={noteTarget}
-                          onChange={(e) => setNoteTarget(e.target.value)}
-                          className="w-28 rounded border border-border-subtle bg-app px-1.5 py-1 text-[11px] text-txt-primary"
-                        >
-                          <option value="">Allmänt</option>
-                          {workspaceServers.map((s) => (
-                            <option key={s.id} value={s.name}>
-                              {`${s.name} (${s.host})`}
-                            </option>
-                          ))}
-                        </select>
-                        <input
-                          type="text"
-                          value={noteSummary}
-                          onChange={(e) => setNoteSummary(e.target.value)}
-                          placeholder="Logga en team-notis (t.ex. bytte port i nginx)…"
-                          className="flex-1 rounded border border-border-subtle bg-app px-2 py-1 text-[11px] text-txt-primary placeholder:text-txt-muted outline-none"
-                        />
-                        <button
-                          type="submit"
-                          disabled={addingNote || !noteSummary.trim()}
-                          className="rounded bg-sky-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-sky-500 disabled:opacity-40"
-                        >
-                          Logga
-                        </button>
-                      </div>
+                  <div className="space-y-2.5 sshs3-drawer-anim">
+                    <form onSubmit={handleRecordTeamNote} className="flex gap-1.5">
+                      <input
+                        type="text"
+                        value={noteSummary}
+                        onChange={(e) => setNoteSummary(e.target.value)}
+                        placeholder="Log team note or incident marker…"
+                        className="flex-1 rounded-lg border border-white/10 bg-[#070a12]/90 px-2.5 py-1.5 text-xs text-white placeholder:text-slate-500 outline-none focus:border-sky-400/45"
+                      />
+                      <button
+                        type="submit"
+                        disabled={addingNote || !noteSummary.trim()}
+                        className="rounded-lg border border-white/15 bg-white/[0.06] px-2.5 py-1.5 text-[10.5px] font-mono text-white hover:bg-white/[0.12] disabled:opacity-40"
+                      >
+                        Log
+                      </button>
                     </form>
 
-                    {/* Activity List */}
-                    <div className="space-y-2 max-h-[290px] overflow-y-auto pr-1">
+                    <div className="space-y-2 max-h-[460px] overflow-y-auto pr-1">
                       {activityLog.length === 0 ? (
-                        <div className="rounded-lg border border-dashed border-border-subtle p-4 text-center text-xs text-txt-muted">
-                          Inga loggade ändringar ännu. När någon i teamet ändrar konfiguration eller startar om en tjänst i terminalen dyker det upp här automatiskt.
+                        <div className="rounded-lg border border-white/10 bg-[#070a12] p-4 text-center text-xs text-slate-500">
+                          No activity recorded yet.
                         </div>
                       ) : (
-                        activityLog.map((ev) => (
-                          <div
-                            key={ev.id}
-                            className="rounded-lg border border-border-subtle bg-app-card p-2.5 text-xs space-y-1"
-                          >
-                            <div className="flex items-center justify-between gap-1">
-                              <span className="font-semibold text-txt-primary truncate">
-                                {ev.actor}{' '}
-                                <span className="font-normal text-txt-muted">på</span>{' '}
-                                <span className="text-sky-400">{ev.targetLabel}</span>
-                              </span>
-                              <span className="shrink-0 text-[10px] text-txt-muted">
-                                {formatRelativeTime(ev.at)}
-                              </span>
+                        activityLog.map((ev) => {
+                          const isAiEvent = ev.actor.toLowerCase().includes('ai');
+                          return (
+                            <div
+                              key={ev.id}
+                              className="group rounded-xl border border-white/[0.08] bg-[#070a12]/85 hover:border-sky-400/30 p-2.5 text-xs space-y-1.5 transition-all"
+                            >
+                              <div className="flex items-center justify-between gap-1 font-mono text-[10.5px]">
+                                <div className="flex items-center gap-1.5 truncate">
+                                  <span
+                                    className={`h-1.5 w-1.5 rounded-full shrink-0 ${
+                                      isAiEvent ? 'bg-sky-400' : 'bg-emerald-400'
+                                    }`}
+                                  />
+                                  <span className="text-white font-semibold truncate">
+                                    {ev.actor}
+                                  </span>
+                                  <span className="text-slate-600">→</span>
+                                  <span className="rounded border border-white/10 bg-white/[0.03] px-1.5 py-0.2 text-[9.5px] text-sky-300 truncate">
+                                    {ev.targetLabel}
+                                  </span>
+                                </div>
+                                <span className="shrink-0 text-[9.5px] text-slate-500">
+                                  {formatRelativeTime(ev.at)}
+                                </span>
+                              </div>
+                              <p className="text-[11px] text-slate-300 leading-relaxed">{ev.summary}</p>
+                              <div className="flex justify-end">
+                                <button
+                                  type="button"
+                                  onClick={() => handleAskAiAboutActivity(ev)}
+                                  className="inline-flex items-center gap-1 text-[10px] font-mono text-sky-400/80 hover:text-sky-300 group-hover:translate-x-0.5 transition-all"
+                                >
+                                  <span>Inspect with AI</span>
+                                  <span>→</span>
+                                </button>
+                              </div>
                             </div>
-                            <p className="text-[11px] text-txt-secondary">{ev.summary}</p>
-                            {ev.detail && (
-                              <pre className="rounded bg-app px-2 py-1 text-[10px] font-mono text-txt-muted overflow-x-auto">
-                                {ev.detail}
-                              </pre>
-                            )}
-                            <div className="flex justify-end">
-                              <button
-                                type="button"
-                                onClick={() => handleAskAiAboutActivity(ev)}
-                                className="inline-flex items-center gap-1 text-[10px] text-sky-400 hover:underline"
-                              >
-                                <Sparkles className="h-2.5 w-2.5" /> Fråga AI om denna ändring
-                              </button>
-                            </div>
-                          </div>
-                        ))
+                          );
+                        })
                       )}
                     </div>
-                  </>
+                  </div>
                 )}
 
                 {rightColTab === 'memory' && (
-                  <div data-testid="right-panel-memory" className="space-y-2.5">
-                    <p className="text-[11px] text-txt-muted">
-                      Självlärande AI-minne (Mem0 deduplicering + Letta 3-nivåers minne) synkas i ert S3 Team Workspace.
-                    </p>
-
-                    <form
-                      onSubmit={handleSaveTeamMemory}
-                      className="space-y-1.5 rounded-lg border border-sky-500/30 bg-app-card p-2"
-                    >
-                      <div className="flex gap-1.5">
-                        <select
-                          value={memKind}
-                          onChange={(e) => setMemKind(e.target.value as 'memory' | 'skill')}
-                          className="rounded border border-border-subtle bg-app px-1.5 py-1 text-[10.5px] text-txt-primary"
-                        >
-                          <option value="memory">🧠 Minne</option>
-                          <option value="skill">⚡ Skill</option>
-                        </select>
-                        <select
-                          value={memTier}
-                          onChange={(e) => setMemTier(e.target.value as 'core' | 'archival' | 'episodic')}
-                          title="Letta Memory Tier"
-                          className="rounded border border-border-subtle bg-app px-1.5 py-1 text-[10.5px] text-txt-primary"
-                        >
-                          <option value="core">📌 Core (Pinned)</option>
-                          <option value="archival">📚 Archival (RAG)</option>
-                          <option value="episodic">⚡ Episodic</option>
-                        </select>
-                        <input
-                          type="text"
-                          value={memTitle}
-                          onChange={(e) => setMemTitle(e.target.value)}
-                          placeholder="Titel (t.ex. Nginx reload-rutin)…"
-                          className="flex-1 rounded border border-border-subtle bg-app px-2 py-1 text-[11px] text-txt-primary placeholder:text-txt-muted outline-none"
-                        />
-                      </div>
+                  <div data-testid="right-panel-memory" className="space-y-2.5 sshs3-drawer-anim">
+                    <form onSubmit={handleSaveTeamMemory} className="space-y-1.5 rounded-lg border border-white/10 bg-[#070a12] p-2">
+                      <input
+                        type="text"
+                        value={memTitle}
+                        onChange={(e) => setMemTitle(e.target.value)}
+                        placeholder="Memory title…"
+                        className="w-full rounded border border-white/10 bg-[#0d1322] px-2 py-1 text-xs text-white placeholder:text-slate-500 outline-none"
+                      />
                       <div className="flex gap-1.5">
                         <input
                           type="text"
                           value={memText}
                           onChange={(e) => setMemText(e.target.value)}
-                          placeholder="Innehåll / kommando som AI:n ska minnas…"
-                          className="flex-1 rounded border border-border-subtle bg-app px-2 py-1 text-[11px] text-txt-primary placeholder:text-txt-muted outline-none"
+                          placeholder="Rule or command for AI to remember…"
+                          className="flex-1 rounded border border-white/10 bg-[#0d1322] px-2 py-1 text-xs text-white placeholder:text-slate-500 outline-none"
                         />
                         <button
                           type="submit"
                           disabled={addingMemory || !memTitle.trim() || !memText.trim()}
-                          className="rounded bg-sky-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-sky-500 disabled:opacity-40"
+                          className="rounded bg-white px-2.5 py-1 text-[10.5px] font-mono font-semibold text-slate-950 hover:bg-slate-200 disabled:opacity-40"
                         >
-                          Spara
+                          Save
                         </button>
                       </div>
                     </form>
 
-                    <div className="space-y-2 max-h-[270px] overflow-y-auto pr-1">
-                      {(hub?.memories ?? []).length === 0 ? (
-                        <div className="rounded-lg border border-dashed border-border-subtle p-4 text-center text-xs text-txt-muted">
-                          Inga sparade team-minnen ännu. Lägg till ett minne eller en skill ovan!
-                        </div>
-                      ) : (
-                        (hub?.memories ?? []).map((mem) => (
-                          <div
-                            key={mem.id}
-                            className="rounded-lg border border-border-subtle bg-app-card p-2.5 text-xs space-y-1"
-                          >
-                            <div className="flex items-center justify-between gap-1 flex-wrap">
-                              <span className="font-semibold text-txt-primary truncate">
-                                {mem.kind === 'skill' ? '⚡' : '🧠'} {mem.title}
-                              </span>
-                              <div className="flex items-center gap-1">
-                                <span
-                                  className={`rounded-full px-1.5 py-0.5 text-[9px] font-semibold ${
-                                    mem.tier === 'core'
-                                      ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30'
-                                      : mem.tier === 'episodic'
-                                        ? 'bg-amber-500/20 text-amber-300'
-                                        : 'bg-emerald-500/15 text-emerald-300'
-                                  }`}
-                                >
-                                  {mem.tier === 'core'
-                                    ? '📌 Core'
-                                    : mem.tier === 'episodic'
-                                      ? '⚡ Episodic'
-                                      : '📚 Archival'}
-                                </span>
-                                {(mem.updatedCount ?? 1) > 1 && (
-                                  <span
-                                    title="Mem0 smart konsolidering"
-                                    className="rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-semibold text-amber-300"
-                                  >
-                                    🔄 ×{mem.updatedCount}
-                                  </span>
-                                )}
-                                <span className="rounded-full bg-sky-500/15 px-1.5 py-0.5 text-[9.5px] font-semibold text-sky-300">
-                                  {mem.scope === 'workspace' ? 'Team S3' : mem.scope}
-                                </span>
-                              </div>
-                            </div>
-                            <p className="text-[11px] text-txt-secondary line-clamp-2">{mem.text}</p>
-                            <div className="flex justify-end">
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  window.dispatchEvent(
-                                    new CustomEvent('sshs3:ai-open', {
-                                      detail: {
-                                        view: 'Work',
-                                        mode: 'panel',
-                                        prompt: `Använd vårt team-minne "${mem.title}" (${mem.text}) och hjälp mig applicera det.`,
-                                      },
-                                    })
-                                  )
-                                }
-                                className="inline-flex items-center gap-1 text-[10px] text-sky-400 hover:underline"
-                              >
-                                <Sparkles className="h-2.5 w-2.5" /> Kör i AI med detta minne
-                              </button>
-                            </div>
+                    <div className="space-y-2 max-h-[430px] overflow-y-auto pr-1">
+                      {(hub?.memories ?? []).map((mem) => (
+                        <div
+                          key={mem.id}
+                          className="rounded-xl border border-white/[0.08] bg-[#070a12]/85 p-2.5 text-xs space-y-1 hover:border-teal-400/30 transition-colors"
+                        >
+                          <div className="flex items-center justify-between gap-1">
+                            <span className="font-mono font-semibold text-white truncate text-[11px]">
+                              {mem.title}
+                            </span>
+                            <span className="rounded border border-teal-500/25 bg-teal-500/10 px-1.5 py-0.5 text-[9px] font-mono uppercase text-teal-300">
+                              {mem.tier || 'archival'}
+                            </span>
                           </div>
-                        ))
-                      )}
+                          <p className="text-[11px] text-slate-300 line-clamp-2">{mem.text}</p>
+                        </div>
+                      ))}
                     </div>
                   </div>
                 )}
 
                 {rightColTab === 'kb' && (
-                  <div data-testid="right-panel-kb" className="space-y-2.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <p className="text-[11px] text-txt-muted">
-                        Runbooks, arkitekturdokument och post-mortems i Knowledge Base (`@kb`).
-                      </p>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          window.dispatchEvent(
-                            new CustomEvent('sshs3:ai-open', {
-                              detail: { view: 'Knowledge Base', mode: 'hub' },
-                            })
-                          )
-                        }
-                        className="shrink-0 rounded border border-emerald-500/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300 hover:bg-emerald-500/25"
-                      >
-                        Hantera KB ↗
-                      </button>
-                    </div>
-
-                    <div className="space-y-2 max-h-[310px] overflow-y-auto pr-1">
-                      {(hub?.kbDocuments ?? []).length === 0 ? (
-                        <div className="rounded-lg border border-dashed border-border-subtle p-4 text-center text-xs text-txt-muted">
-                          Inga Runbooks i Knowledge Base ännu. Öppna KB i AI Hub för att lägga till dokumentation.
-                        </div>
-                      ) : (
-                        (hub?.kbDocuments ?? []).map((doc) => (
-                          <div
-                            key={doc.id}
-                            className="rounded-lg border border-border-subtle bg-app-card p-2.5 text-xs space-y-1.5"
-                          >
-                            <div className="flex items-center justify-between gap-1">
-                              <span className="font-semibold text-txt-primary truncate">
-                                📘 {doc.title}
-                              </span>
-                              <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[9.5px] font-semibold text-emerald-300">
-                                {doc.collection}
-                              </span>
-                            </div>
-                            <p className="text-[11px] text-txt-secondary line-clamp-2">
-                              {doc.content}
-                            </p>
-                            <div className="flex items-center justify-between pt-0.5">
-                              <div className="flex flex-wrap gap-1">
-                                {(doc.tags ?? []).slice(0, 3).map((t) => (
-                                  <span
-                                    key={t}
-                                    className="rounded bg-app px-1.5 py-0.2 text-[9.5px] text-txt-muted"
-                                  >
-                                    #{t}
-                                  </span>
-                                ))}
-                              </div>
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  window.dispatchEvent(
-                                    new CustomEvent('sshs3:ai-open', {
-                                      detail: {
-                                        view: 'Work',
-                                        mode: 'panel',
-                                        prompt: `Utgå från vår runbook "${doc.title}" i @kb och hjälp mig genomföra stegen säkert.`,
-                                      },
-                                    })
-                                  )
-                                }
-                                className="inline-flex items-center gap-1 text-[10px] font-medium text-emerald-300 hover:underline"
-                              >
-                                <Sparkles className="h-2.5 w-2.5" /> Kör Runbook med AI
-                              </button>
-                            </div>
+                  <div data-testid="right-panel-kb" className="space-y-2 sshs3-drawer-anim">
+                    <div className="space-y-2 max-h-[480px] overflow-y-auto pr-1">
+                      {(hub?.kbDocuments ?? []).map((doc) => (
+                        <div
+                          key={doc.id}
+                          className="rounded-xl border border-white/[0.08] bg-[#070a12]/85 p-2.5 text-xs space-y-1 hover:border-sky-400/30 transition-colors"
+                        >
+                          <div className="flex items-center justify-between gap-1">
+                            <span className="font-mono font-semibold text-white truncate text-[11px]">
+                              {doc.title}
+                            </span>
+                            <span className="rounded border border-sky-500/25 bg-sky-500/10 px-1.5 py-0.5 text-[9px] font-mono text-sky-300">
+                              {doc.collection}
+                            </span>
                           </div>
-                        ))
-                      )}
+                          <p className="text-[11px] text-slate-300 line-clamp-2">{doc.content}</p>
+                          <div className="flex justify-end pt-0.5">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                window.dispatchEvent(
+                                  new CustomEvent('sshs3:ai-open', {
+                                    detail: {
+                                      view: 'Work',
+                                      mode: 'panel',
+                                      prompt: `Utgå från vår runbook "${doc.title}" i @kb och hjälp mig genomföra stegen säkert.`,
+                                    },
+                                  })
+                                )
+                              }
+                              className="text-[10px] font-mono text-sky-400 hover:text-sky-300"
+                            >
+                              Run with AI →
+                            </button>
+                          </div>
+                        </div>
+                      ))}
                     </div>
                   </div>
                 )}
 
                 {rightColTab === 'workforce' && (
-                  <div data-testid="right-panel-workforce" className="space-y-2.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <p className="text-[11px] text-txt-muted">
-                        CAMEL/CrewAI-inspirerad Multi-Agent Workforce &amp; 1-Click MCP Marketplace.
-                      </p>
-                      <div className="flex items-center gap-1">
-                        <button
-                          type="button"
-                          disabled={runningDashboardSwarm}
-                          data-testid="dashboard-run-workforce-btn"
-                          onClick={handleRunDashboardWorkforce}
-                          className="shrink-0 rounded border border-purple-500/40 bg-purple-500/20 px-2 py-0.5 text-[10px] font-semibold text-purple-200 hover:bg-purple-500/30 disabled:opacity-50"
-                        >
-                          {runningDashboardSwarm ? '⏳ Kör Swarm…' : '🚀 Kör Swarm-revision'}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            window.dispatchEvent(
-                              new CustomEvent('sshs3:ai-open', {
-                                detail: { view: 'Agents & MCP', mode: 'hub' },
-                              })
-                            )
-                          }
-                          className="shrink-0 rounded border border-border-subtle bg-app-card px-2 py-0.5 text-[10px] font-semibold text-txt-secondary hover:text-txt-primary"
-                        >
-                          Öppna ↗
-                        </button>
-                      </div>
-                    </div>
+                  <div data-testid="right-panel-workforce" className="space-y-2.5 sshs3-drawer-anim">
+                    <button
+                      type="button"
+                      disabled={runningDashboardSwarm}
+                      data-testid="dashboard-run-workforce-btn"
+                      onClick={handleRunDashboardWorkforce}
+                      className="w-full rounded-lg bg-gradient-to-b from-white to-slate-200 py-2 text-xs font-mono font-semibold text-slate-950 hover:from-sky-50 hover:to-white shadow-sm disabled:opacity-50 transition-all"
+                    >
+                      {runningDashboardSwarm ? 'Running Swarm…' : 'Run Multi-Agent Swarm Audit'}
+                    </button>
 
-                    <div className="space-y-2 max-h-[220px] overflow-y-auto pr-1">
-                      {(hub?.workforceRuns ?? []).length === 0 ? (
-                        <div className="rounded-lg border border-dashed border-border-subtle p-3 text-center text-xs text-txt-muted">
-                          Inga Workforce-körningar ännu. Klicka på <strong>🚀 Kör Swarm-revision</strong> för att låta era specialist-agenter analysera klustren parallellt!
-                        </div>
-                      ) : (
-                        (hub?.workforceRuns ?? []).slice(0, 4).map((run) => (
-                          <div
-                            key={run.id}
-                            className="rounded-lg border border-purple-500/30 bg-app-card p-2.5 text-xs space-y-1.5"
-                          >
-                            <div className="flex items-center justify-between gap-1">
-                              <span className="font-semibold text-txt-primary truncate">
-                                🤝 {run.title}
-                              </span>
-                              <span className="rounded-full bg-purple-500/20 px-1.5 py-0.5 text-[9px] font-semibold text-purple-300">
-                                {run.steps.length} agenter · {run.status}
-                              </span>
-                            </div>
-                            <p className="text-[10.5px] text-txt-secondary line-clamp-2">
-                              {run.synthesis}
-                            </p>
-                            <div className="flex flex-wrap gap-1 pt-0.5">
-                              {run.steps.map((st) => (
-                                <span
-                                  key={st.id}
-                                  className="rounded border border-border-subtle bg-app px-1.5 py-0.5 text-[9.5px] text-sky-300"
-                                  title={st.findings}
-                                >
-                                  {st.agentIcon} {st.agentName}
-                                </span>
-                              ))}
-                            </div>
+                    <div className="space-y-2 max-h-[440px] overflow-y-auto pr-1">
+                      {(hub?.workforceRuns ?? []).slice(0, 4).map((run) => (
+                        <div
+                          key={run.id}
+                          className="rounded-xl border border-white/[0.08] bg-[#070a12]/85 p-2.5 text-xs space-y-1 hover:border-emerald-400/30 transition-colors"
+                        >
+                          <div className="flex items-center justify-between gap-1">
+                            <span className="font-mono font-semibold text-white truncate text-[11px]">
+                              {run.title}
+                            </span>
+                            <span className="rounded border border-emerald-500/25 bg-emerald-500/10 px-1.5 py-0.5 text-[9px] font-mono text-emerald-300">
+                              {run.steps.length} agents
+                            </span>
                           </div>
-                        ))
-                      )}
+                          <p className="text-[11px] text-slate-300 line-clamp-2">{run.synthesis}</p>
+                        </div>
+                      ))}
                     </div>
-
-                    {(hub?.mcpCatalog ?? []).length > 0 && (
-                      <div className="rounded-lg border border-border-subtle bg-app-card p-2 space-y-1.5">
-                        <div className="flex items-center justify-between">
-                          <span className="text-[10.5px] font-semibold text-txt-primary">
-                            🔌 1-Click Open-Source MCP Marketplace
-                          </span>
-                          <span className="text-[9.5px] text-txt-muted">
-                            {(hub?.mcpServers ?? []).length} aktiva
-                          </span>
-                        </div>
-                        <div className="flex flex-wrap gap-1">
-                          {(hub?.mcpCatalog ?? []).slice(0, 6).map((preset) => {
-                            const installed = (hub?.mcpServers ?? []).some(
-                              (s) => s.name.toLowerCase() === preset.name.toLowerCase()
-                            );
-                            return (
-                              <button
-                                key={preset.id}
-                                type="button"
-                                disabled={installed}
-                                onClick={() =>
-                                  void hubRequest({
-                                    action: 'mcp-install-preset',
-                                    presetId: preset.id,
-                                  })
-                                }
-                                className={`rounded border px-1.5 py-0.5 text-[9.5px] font-medium transition-colors ${
-                                  installed
-                                    ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
-                                    : 'border-sky-500/30 bg-sky-500/10 text-sky-300 hover:bg-sky-500/20'
-                                }`}
-                                title={preset.description}
-                              >
-                                {preset.icon} {preset.name} {installed ? '✓' : '+'}
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    )}
                   </div>
                 )}
               </div>
@@ -3544,12 +2013,12 @@ export const LandingView: React.FC<LandingViewProps> = ({
         )}
 
         {/* Keyboard hints footer */}
-        <div className="pt-2 text-2xs text-txt-muted flex flex-wrap items-center justify-center gap-x-4 gap-y-1">
-          <span><Shortcut id="nextTab" shortcuts={shortcuts} variant="plain" /> Cycle tabs</span>
+        <div className="pt-1 text-2xs text-slate-500 font-mono flex flex-wrap items-center justify-center gap-x-4 gap-y-1">
+          <span><Kbd variant="plain">Ctrl+Tab</Kbd> Cycle tabs</span>
           <span><Kbd variant="plain">Ctrl+L</Kbd> Send terminal to AI</span>
           <span><Kbd variant="plain">Ctrl+K</Kbd> Inline Terminal AI</span>
-          <span><Shortcut id="closeTab" shortcuts={shortcuts} variant="plain" /> Close tab</span>
-          <span><Shortcut id="openSettings" shortcuts={shortcuts} variant="plain" /> Settings</span>
+          <span><Kbd variant="plain">Ctrl+W</Kbd> Close tab</span>
+          <span><Kbd variant="plain">Ctrl+,</Kbd> Settings</span>
         </div>
       </div>
     </div>

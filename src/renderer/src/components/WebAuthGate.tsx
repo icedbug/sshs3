@@ -448,7 +448,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
           )}
 
           {authError && (
-            <div role="alert" className="rounded-lg bg-rose-500/10 border border-rose-500/30 px-3.5 py-2.5 text-xs text-rose-300">
+            <div className="rounded-lg bg-rose-500/10 border border-rose-500/30 px-3.5 py-2.5 text-xs text-rose-300">
               {authError}
             </div>
           )}
@@ -654,7 +654,6 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
             <button
               type="button"
               onClick={() => setJustOnboarded(false)}
-              aria-label="Dismiss"
               className="text-slate-400 hover:text-white px-1.5 py-0.5"
             >
               ✕
@@ -686,19 +685,19 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
       )}
 
       {/* Floating Web User & Team Admin Pill */}
-      <div className="fixed bottom-3 right-3 z-[9990] flex items-center gap-1.5 rounded-full bg-slate-900/95 border border-slate-700/90 p-1 pl-3 shadow-xl backdrop-blur">
+      <div className="fixed bottom-3 left-3 z-[9990] flex items-center gap-1.5 rounded-md bg-[#0a0a0d]/95 border border-white/15 p-1 pl-2.5 shadow-xl backdrop-blur">
         <span
-          className={`w-2 h-2 rounded-full ${wsConnected ? 'bg-emerald-400' : 'bg-amber-400 animate-pulse'}`}
+          className={`w-1.5 h-1.5 rounded-full ${wsConnected ? 'bg-emerald-400' : 'bg-amber-400 animate-pulse'}`}
           title={wsConnected ? 'Realtids-WebSocket ansluten' : 'Återansluter...'}
         />
-        <span className="text-xs font-medium text-slate-200 mr-1">{user?.displayName || user?.username}</span>
+        <span className="text-[11px] font-mono text-zinc-300 mr-1">{user?.displayName || user?.username}</span>
         <button
           type="button"
           onClick={() => {
             setModalTab('ssh');
             setShowModal(true);
           }}
-          className="px-2.5 py-1 rounded-full bg-slate-800 hover:bg-slate-700 text-[11px] text-cyan-300 font-medium transition"
+          className="px-2 py-0.5 rounded bg-white/[0.05] hover:bg-white/[0.1] border border-white/10 text-[10px] font-mono text-zinc-200 transition"
         >
           🔑 SSH-nyckel
         </button>
@@ -709,7 +708,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
               setModalTab('team');
               setShowModal(true);
             }}
-            className="px-2.5 py-1 rounded-full bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/30 text-[11px] text-cyan-200 font-medium transition"
+            className="px-2 py-0.5 rounded bg-white/[0.08] hover:bg-white/[0.14] border border-white/15 text-[10px] font-mono text-white transition"
           >
             👥 Bjud in / Team
           </button>

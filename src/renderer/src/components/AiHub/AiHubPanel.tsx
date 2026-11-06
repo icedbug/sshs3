@@ -67,49 +67,6 @@ const modes: Record<AgentMode, string> = {
   autonomous: "Auto",
 };
 
-const DEMO_SHOWCASE_RESPONSE = [
-  "## 🗄️ Klusterdiagnos: `NetApp-ONTAP-Prod-SE` & `K8s-Trident-CSI-Prod`",
-  "",
-  "Jag körde en parallell hälsokontroll över samtliga 4 noder i `@cluster:NetApp-ONTAP-Prod-SE` samt diffade `/etc/multipath.conf` mot vår KB-standard (`@kb:trident-csi-multipath-standard`).",
-  "",
-  "### 1. Sammanställning av Nodstatus & Latens (ONTAP 9.15.1P2)",
-  "",
-  "| Nod | Roll | Aggregat / Kapacitet | Snittlatens | SnapMirror Lag | Status |",
-  "| :--- | :--- | :--- | :--- | :--- | :--- |",
-  "| `netapp-aff-a800-01a` | HA Node A (DC1) | `aggr1_nvme_prod` (64% av 220 TB) | `0.31 ms` | `00:02:44` | **ONLINE · HEALTH_OK** |",
-  "| `netapp-aff-a800-01b` | HA Node B (DC1) | `aggr2_nvme_db` (58% av 180 TB) | `0.48 ms` | `00:03:18` | **ONLINE · HEALTH_OK** |",
-  "| `netapp-fas9000-dr-01` | SnapVault DR (DC2) | `aggr_dr_nlsas` (71% av 1.6 PB) | `1.12 ms` | Synkad (XDP) | **ONLINE · SNAPMIRRORED** |",
-  "| `ontap-aiq-um-01` | Active IQ & Harvest | Prometheus / Grafana | `0.19 ms` | — | **TELEMETRY OK** |",
-  "",
-  "> **Rotorsak & Rekommendation:** Volymen `vol_analytics_sc` slår i QoS-taket `pg-batch-ceiling` (`15 000 IOPS` / `600 MB/s`) under batch-körningar, medan produktionsdatabasen `vol_pg_prod_01` ligger stabilt på `0.31 ms`. På `k8s-gpu-io-worker-01` saknas dessutom `no_path_retry queue` i `/etc/multipath.conf`.",
-  "",
-  "### 2. Cross-Server Config Diff (`/etc/multipath.conf`)",
-  "",
-  "```diff",
-  "--- k8s-storage-cp-01:/etc/multipath.conf",
-  "+++ k8s-gpu-io-worker-01:/etc/multipath.conf",
-  "@@ -8,7 +8,7 @@",
-  "     device {",
-  "         vendor \"NETAPP\"",
-  "         product \"LUN.*\"",
-  "         path_grouping_policy \"group_by_prio\"",
-  "-        features \"2 pg_init_retries 50\"",
-  "-        no_path_retry \"queue\"",
-  "+        features \"0\"",
-  "+        no_path_retry \"fail\"",
-  "     }",
-  "```",
-  "",
-  "### 3. Föreslagna åtgärdskommandon",
-  "",
-  "Höj Adaptive QoS-taket tillfälligt för AI-träningsvolymen på `netapp-aff-a800-01a`:",
-  "",
-  "```bash",
-  "volume modify -vserver svm-prod-nfs -volume vol_analytics_sc -qos-policy-group pg-prod-db-extreme",
-  "qos statistics volume latency show -vserver svm-prod-nfs -volume vol_analytics_sc -iterations 5",
-  "```",
-].join("\n");
-
 function RichMarkdownContent({
   text,
   onUseCommand,
@@ -242,7 +199,6 @@ export function AiHubPanel({
   const [atIndex, setAtIndex] = useState(0);
   const [atDismissedFor, setAtDismissedFor] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [showDemoPreview, setShowDemoPreview] = useState(false);
   const [copiedMsgId, setCopiedMsgId] = useState<string | null>(null);
   const [connection, setConnection] = useState<{
     id: string;
@@ -853,8 +809,13 @@ export function AiHubPanel({
               className={`ai-badge ${hub.demoMode ? "ai-badge-warn" : ""}`}
               style={{
                 cursor: isWebBrowserMode() ? "not-allowed" : "pointer",
-                fontSize: 10.5,
+                fontSize: 10,
+                letterSpacing: "0.06em",
+                textTransform: "uppercase",
                 padding: "3px 8px",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 5,
               }}
               title={
                 isWebBrowserMode()
@@ -869,7 +830,16 @@ export function AiHubPanel({
                 })
               }
             >
-              {hub.demoMode ? "🧪 Demo-Lab: PÅ" : "🧪 Demo-Lab: AV"}
+              <span
+                style={{
+                  width: 5,
+                  height: 5,
+                  borderRadius: "50%",
+                  backgroundColor: hub.demoMode ? "#10b981" : "rgba(255,255,255,0.4)",
+                  display: "inline-block",
+                }}
+              />
+              {hub.demoMode ? "DEMO LAB: ON" : "DEMO LAB: OFF"}
             </button>
           )}
           <button
@@ -995,17 +965,17 @@ export function AiHubPanel({
             >
               <span>
                 {name === "Work"
-                  ? "💬 Chat"
+                  ? "Chat"
                   : name === "Agents & MCP"
-                    ? "🤖 Agents & MCP"
+                    ? "Agents & MCP"
                     : name === "Knowledge Base"
                       ? mode === "panel"
-                        ? "📚 KB"
-                        : "📚 Knowledge Base"
+                        ? "KB"
+                        : "Knowledge Base"
                       : name === "Memory & skills"
                         ? mode === "panel"
-                          ? "🧠 Memory"
-                          : "🧠 Memory & skills"
+                          ? "Memory"
+                          : "Memory & skills"
                         : name}
               </span>
               {badgeCount > 0 && (
@@ -1135,7 +1105,19 @@ export function AiHubPanel({
                             setAutonomy(ag.defaultMode);
                           }}
                         >
-                          <span>{ag.icon || "🤖"}</span>
+                          <span
+                            style={{
+                              width: 6,
+                              height: 6,
+                              borderRadius: "50%",
+                              background:
+                                selectedAgentId === ag.id
+                                  ? "#ffffff"
+                                  : "rgba(255,255,255,0.28)",
+                              marginTop: 5,
+                              flexShrink: 0,
+                            }}
+                          />
                           <div>
                             <span>{ag.name}</span>
                             <small>
@@ -1147,7 +1129,7 @@ export function AiHubPanel({
                       <button
                         type="button"
                         className="ai-btn-emerald"
-                        style={{ marginTop: 4, fontSize: 11.5, textAlign: "center" }}
+                        style={{ marginTop: 4, fontSize: 11, textAlign: "center" }}
                         onClick={() => {
                           const prevIds = new Set(hub.tasks.map((t) => t.id));
                           void act({
@@ -1162,25 +1144,8 @@ export function AiHubPanel({
                           });
                         }}
                       >
-                        🤝 Kör AI Workforce Swarm
+                        Run Workforce Swarm
                       </button>
-                    </div>
-                  </div>
-
-                  <div className="ai-sidebar-section">
-                    <div className="ai-sidebar-header">
-                      <strong>Recent Team Activity</strong>
-                    </div>
-                    <div className="ai-sidebar-list">
-                      {(hub.activityLog ?? []).slice(0, 4).map((evt) => (
-                        <div key={evt.id} className="ai-sidebar-activity">
-                          <div className="ai-sidebar-activity-top">
-                            <strong>{evt.actor}</strong>
-                            <small>{evt.targetLabel}</small>
-                          </div>
-                          <p>{evt.summary}</p>
-                        </div>
-                      ))}
                     </div>
                   </div>
                 </aside>
@@ -1197,31 +1162,59 @@ export function AiHubPanel({
               >
                 {!task && !connection && (
                   <div className="ai-welcome">
-                    <h2>Vad kan jag hjälpa dig med i sshS3?</h2>
+                    <div
+                      style={{
+                        fontSize: 10,
+                        fontFamily: "var(--font-mono, monospace)",
+                        letterSpacing: "0.14em",
+                        textTransform: "uppercase",
+                        color: "rgba(255,255,255,0.4)",
+                        marginBottom: 6,
+                      }}
+                    >
+                      SSHS3 // AI COMMAND CONSOLE
+                    </div>
+                    <h2>Hur vill du arbeta med din infrastruktur?</h2>
                     <p>
-                      Välj en specialiserad <strong>Mission Agent</strong> eller fråga fritt om dina kluster, VMs, S3-buckets, KB-runbooks och MCP-verktyg.
+                      Ställ en fråga, använd <code>@cluster</code> / <code>@kb</code> för kontext eller skriv <code>/</code> för kommandon.
                     </p>
                     {!hub.config.hasApiKey &&
                       !hub.config.codexConnected &&
                       !hub.config.baseUrl?.includes("11434") && (
                         <article
-                          className="ai-card ai-card-active"
+                          className="ai-card"
                           data-testid="ai-hub-quick-connect-card"
-                          style={{ marginBottom: 14, textAlign: "left" }}
+                          style={{
+                            marginBottom: 14,
+                            padding: "10px 12px",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            gap: 10,
+                            flexWrap: "wrap",
+                          }}
                         >
-                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                            <strong>⚡ Koppla din AI på 10 sekunder (Allt annat är förladdat!)</strong>
-                            <span className="ai-badge ai-badge-green">
-                              {(hub.agents ?? []).length} Agenter · {(hub.kbDocuments ?? []).length} Runbooks
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <span
+                              style={{
+                                fontSize: 10,
+                                fontFamily: "monospace",
+                                letterSpacing: "0.08em",
+                                textTransform: "uppercase",
+                                color: "rgba(255,255,255,0.5)",
+                              }}
+                            >
+                              MODEL ENGINE
+                            </span>
+                            <span style={{ fontSize: 12, color: "rgba(255,255,255,0.85)" }}>
+                              Anslut modell för live-exekvering
                             </span>
                           </div>
-                          <p style={{ fontSize: 11.5, margin: "6px 0 10px" }}>
-                            Alla 6 specialist-agenter, 8 @kb-runbooks och 12 SRE-snippets är redan redo. Välj hur du vill ansluta din modell:
-                          </p>
                           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                             <button
                               type="button"
                               className="ai-btn-emerald"
+                              style={{ padding: "4px 10px", fontSize: 11 }}
                               onClick={() =>
                                 void act({
                                   action: "configure",
@@ -1234,10 +1227,11 @@ export function AiHubPanel({
                                 })
                               }
                             >
-                              🔐 ChatGPT / Codex OAuth (1-klick)
+                              Codex OAuth
                             </button>
                             <button
                               type="button"
+                              style={{ padding: "4px 10px", fontSize: 11 }}
                               onClick={() =>
                                 void act({
                                   action: "configure",
@@ -1251,56 +1245,30 @@ export function AiHubPanel({
                                 })
                               }
                             >
-                              🦙 Lokal Ollama (localhost:11434)
+                              Local Ollama
                             </button>
                             <button
                               type="button"
+                              style={{ padding: "4px 10px", fontSize: 11 }}
                               onClick={() => setSettingsOpen(true)}
                             >
-                              🔑 Klistra in API-nyckel (OpenAI / Claude)…
+                              API Key…
                             </button>
                           </div>
                         </article>
                       )}
-                    {(hub.agents ?? []).length > 0 && (
-                      <div className="ai-agent-quick-bar" aria-label="Quick select Mission Agent">
-                        <button
-                          type="button"
-                          className={`ai-agent-pill ${!selectedAgentId ? "active" : ""}`}
-                          onClick={() => setSelectedAgentId("")}
-                        >
-                          ✨ Standard AI
-                        </button>
-                        {(hub.agents ?? []).map((ag) => (
-                          <button
-                            key={ag.id}
-                            type="button"
-                            className={`ai-agent-pill ${selectedAgentId === ag.id ? "active" : ""}`}
-                            onClick={() => {
-                              setSelectedAgentId(ag.id);
-                              setAutonomy(ag.defaultMode);
-                            }}
-                          >
-                            <span>{ag.icon || "🤖"}</span>
-                            <span>{ag.name}</span>
-                          </button>
-                        ))}
-                      </div>
-                    )}
                     {activeAgent && (
                       <article className="ai-card ai-card-active" style={{ marginBottom: 14 }}>
                         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
                           <div>
-                            <strong>
-                              {activeAgent.icon || "🤖"} {activeAgent.name}
-                            </strong>
+                            <strong>{activeAgent.name}</strong>
                             <div>
                               <small>{activeAgent.role}</small>
                             </div>
                           </div>
                           {activeAgent.targetCluster && (
                             <span className="ai-badge ai-badge-cluster">
-                              🧩 {activeAgent.targetCluster}
+                              {activeAgent.targetCluster}
                             </span>
                           )}
                         </div>
@@ -1324,7 +1292,7 @@ export function AiHubPanel({
                               });
                             }}
                           >
-                            🚀 Kör uppdrag nu
+                            Kör uppdrag nu
                           </button>
                           <button
                             type="button"
@@ -1334,7 +1302,7 @@ export function AiHubPanel({
                               )
                             }
                           >
-                            ✏️ Anpassa uppdrag i chatten
+                            Anpassa i chatten
                           </button>
                         </div>
                       </article>
@@ -1349,8 +1317,12 @@ export function AiHubPanel({
                           )
                         }
                       >
-                        <strong>⚡ Parallell klusterkörning (@cluster)</strong>
-                        <small>Kör kommandon parallellt över hela kluster och få en samlad rapport</small>
+                        <div style={{ display: "flex", width: "100%", justifyContent: "space-between", alignItems: "center" }}>
+                          <span className="ai-badge">/cluster-exec</span>
+                          <span style={{ fontSize: 10, fontFamily: "monospace", color: "#38bdf8" }}>MULTI-NODE</span>
+                        </div>
+                        <strong>Parallell klusterkörning (@cluster)</strong>
+                        <small>Exekvera kommandon parallellt över klusternoder och syntetisera rapport</small>
                       </button>
                       <button
                         type="button"
@@ -1361,32 +1333,12 @@ export function AiHubPanel({
                           )
                         }
                       >
-                        <strong>🪟 Öppna 2×2 Kluster Split-View</strong>
-                        <small>Be AI:n öppna Konsole split-grid eller Dual-Pane Explorer direkt i UI:t</small>
-                      </button>
-                      <button
-                        type="button"
-                        className="ai-starter-card"
-                        onClick={() =>
-                          setPrompt(
-                            "Jämför (diffa) /etc/multipath.conf mellan k8s-gpu-io-worker-01 och k8s-storage-cp-01 med sshs3_storage_ops och kontrollera mot vår KB-standard.",
-                          )
-                        }
-                      >
-                        <strong>🔍 Cross-Server Config Diff &amp; SFTP/S3</strong>
-                        <small>Diffa konfigurationsfiler mellan två noder eller inspektera S3-buckets</small>
-                      </button>
-                      <button
-                        type="button"
-                        className="ai-starter-card"
-                        onClick={() =>
-                          setPrompt(
-                            "Sök i vår Knowledge Base (@kb) efter ONTAP Adaptive QoS och hämta aktuella volym-IOPS och latens via NetApp Harvest MCP.",
-                          )
-                        }
-                      >
-                        <strong>📚 Sök i Kunskapsbasen (KB) &amp; MCP</strong>
-                        <small>Kombinera BM25-runbooks med live-telemetri från anslutna MCP-servrar</small>
+                        <div style={{ display: "flex", width: "100%", justifyContent: "space-between", alignItems: "center" }}>
+                          <span className="ai-badge ai-badge-cluster">/split-cluster</span>
+                          <span style={{ fontSize: 10, fontFamily: "monospace", color: "#a5b4fc" }}>2×2 MATRIX</span>
+                        </div>
+                        <strong>2×2 Kluster Split-View</strong>
+                        <small>Öppna en 2×2 terminal-grid eller SFTP/S3 Dual-Pane direkt i arbetsytan</small>
                       </button>
                       <button
                         type="button"
@@ -1398,8 +1350,12 @@ export function AiHubPanel({
                           )
                         }
                       >
-                        <strong>🛠️ Konfigurera hela sshS3 med AI</strong>
-                        <small>Tunnlar, S3-profiler, kortkommandon, dotfiles, Cloud Sync &amp; UI-teman</small>
+                        <div style={{ display: "flex", width: "100%", justifyContent: "space-between", alignItems: "center" }}>
+                          <span className="ai-badge ai-badge-mode">/configure</span>
+                          <span style={{ fontSize: 10, fontFamily: "monospace", color: "#fcd34d" }}>AUTOMATION</span>
+                        </div>
+                        <strong>Konfigurera sshS3 &amp; Tunnlar</strong>
+                        <small>SSH-tunnlar, S3-profiler, kortkommandon, dotfiles &amp; Cloud Sync</small>
                       </button>
                       <button
                         type="button"
@@ -1419,90 +1375,14 @@ export function AiHubPanel({
                           });
                         }}
                       >
-                        <strong>🤝 Kör AI Workforce (Multi-Agent Swarm)</strong>
-                        <small>Lead SRE Supervisor kör alla dina Mission Agents parallellt och syntetiserar en rapport</small>
-                      </button>
-                      <button
-                        type="button"
-                        className="ai-starter-card"
-                        onClick={() =>
-                          setPrompt(
-                            "/plan Skapa en säker åtgärdsplan med riskanalys, verifieringssteg och rollback för en rolling uppgradering av @cluster:K8s-Prod-AI-Cluster.",
-                          )
-                        }
-                      >
-                        <strong>🗺️ /plan &amp; /grill-me Arkitekturgranskning</strong>
-                        <small>Skriv / i chatten för slash-kommandon, exekveringsplaner &amp; designgranskning</small>
+                        <div style={{ display: "flex", width: "100%", justifyContent: "space-between", alignItems: "center" }}>
+                          <span className="ai-badge ai-badge-success">/workforce</span>
+                          <span style={{ fontSize: 10, fontFamily: "monospace", color: "#34d399" }}>SWARM READY</span>
+                        </div>
+                        <strong>Kör AI Workforce Swarm</strong>
+                        <small>Koordinerad analys över alla aktiva Mission Agents parallellt</small>
                       </button>
                     </div>
-                    <div style={{ marginTop: "14px", display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
-                      <button
-                        type="button"
-                        className="ai-btn-accent"
-                        onClick={() => setShowDemoPreview((prev) => !prev)}
-                      >
-                        {showDemoPreview
-                          ? "✕ Dölj exempel-konversation"
-                          : "👁️ Visa exempel på AI-svar (Tabeller, Diff & Kluster-körning)"}
-                      </button>
-                    </div>
-                    {showDemoPreview && (
-                      <div style={{ marginTop: "14px" }}>
-                        <article className="ai-message ai-message-user">
-                          <div className="ai-message-header">
-                            <span className="ai-message-author">
-                              <span className="ai-avatar-badge">👤</span>
-                              <span>You</span>
-                            </span>
-                            <span className="ai-message-meta">Exempel · @cluster:NetApp-ONTAP-Prod-SE</span>
-                          </div>
-                          <p>
-                            Kör en parallell hälsokontroll över @cluster:NetApp-ONTAP-Prod-SE och diffa /etc/multipath.conf mellan k8s-storage-cp-01 och k8s-gpu-io-worker-01.
-                          </p>
-                        </article>
-                        <details className="ai-change ai-change-completed" open>
-                          <summary>
-                            <Terminal size={13} />
-                            <span>Parallell klusterkörning (sshs3_cluster_exec) på 4 noder i NetApp-ONTAP-Prod-SE</span>
-                            <span className="ai-badge ai-badge-success">✓ Utförd (4/4 noder · exit 0)</span>
-                          </summary>
-                          <pre>qos statistics volume latency show -iterations 1; snapmirror show</pre>
-                          <div className="ai-change-meta">
-                            <span className="ai-badge ai-badge-cluster">🧩 NetApp-ONTAP-Prod-SE</span>
-                            <span className="ai-tool-tag">netapp-aff-a800-01a</span>
-                            <span className="ai-tool-tag">netapp-aff-a800-01b</span>
-                            <span className="ai-tool-tag">netapp-fas9000-dr-01</span>
-                            <span className="ai-tool-tag">ontap-aiq-um-01</span>
-                          </div>
-                        </details>
-                        <article className="ai-message ai-message-assistant">
-                          <div className="ai-message-header">
-                            <span className="ai-message-author">
-                              <span className="ai-avatar-badge">🗄️</span>
-                              <span>Assistant</span>
-                              <span className="ai-pill">NetApp ONTAP Storage Architect</span>
-                            </span>
-                            <span className="ai-message-meta">
-                              <button
-                                type="button"
-                                className="ai-code-btn"
-                                onClick={() => {
-                                  void navigator.clipboard?.writeText(DEMO_SHOWCASE_RESPONSE);
-                                  setCopiedMsgId("demo-showcase");
-                                  setTimeout(() => setCopiedMsgId(null), 1800);
-                                }}
-                              >
-                                {copiedMsgId === "demo-showcase" ? "✓ Kopierad" : "📋 Kopiera svar"}
-                              </button>
-                            </span>
-                          </div>
-                          <RichMarkdownContent
-                            text={DEMO_SHOWCASE_RESPONSE}
-                            onUseCommand={(cmd) => setPrompt(cmd)}
-                          />
-                        </article>
-                      </div>
-                    )}
                   </div>
                 )}
                 {task && (
@@ -2075,9 +1955,7 @@ export function AiHubPanel({
                       }
                     >
                       <span>
-                        {activeAgent
-                          ? `${activeAgent.icon || "🤖"} ${activeAgent.name}`
-                          : "🤖 Default Agent"}
+                        {activeAgent ? activeAgent.name : "Default Agent"}
                       </span>
                       <ChevronDown size={11} />
                     </button>
@@ -2108,7 +1986,7 @@ export function AiHubPanel({
                               setMenu(null);
                             }}
                           >
-                            🤖 {ag.name}
+                            {ag.name}
                             <small>
                               {ag.role}
                               {ag.targetCluster ? ` · ${ag.targetCluster}` : ""}
@@ -2121,7 +1999,7 @@ export function AiHubPanel({
                             setView("Agents & MCP");
                           }}
                         >
-                          ⚙️ Manage Agents & MCP…
+                          Manage Agents & MCP…
                           <small>Create custom mission agents & MCP servers</small>
                         </button>
                       </div>
@@ -2501,7 +2379,7 @@ export function AiHubPanel({
                       return (
                         <>
                           <span>
-                            📊 {Math.max(1, Math.round(usedTokens / 1000))}k /{" "}
+                            {Math.max(1, Math.round(usedTokens / 1000))}k /{" "}
                             {Math.round(maxTokens / 1000)}k ctx
                           </span>
                           <span className="ai-context-meter-bar" aria-hidden="true">
