@@ -756,12 +756,21 @@ export const ConnectionManagerModal: React.FC<ConnectionManagerModalProps> = ({
   return (
     <>
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 animate-in fade-in duration-150"
+      data-testid="drawer-connections"
+      data-drawer-side="left"
+      className="fixed inset-0 z-50 flex items-stretch justify-start bg-black/55 backdrop-blur-[2px] animate-in fade-in duration-150"
       onClick={handleBackdropClick}
     >
-      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Connection Manager" className="flex h-[85vh] max-h-[720px] w-full max-w-4xl flex-col rounded-xl border border-border-subtle bg-app-card shadow-2xl overflow-hidden relative">
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Connection Manager"
+        data-testid="slide-over-drawer"
+        className="sshs3-slide-drawer sshs3-slide-drawer-left flex h-full w-full max-w-4xl flex-col border-r border-border-subtle bg-app-card shadow-2xl overflow-hidden relative"
+      >
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-divider bg-app-surface px-4 py-3">
+        <div className="flex items-center justify-between border-b border-divider bg-app-surface/90 px-4 py-3 backdrop-blur-md">
           <div className="flex items-center gap-2">
             <Server className="h-4 w-4 text-sky-400" />
             <h2 className="text-sm font-semibold text-txt-primary">Connection Manager</h2>

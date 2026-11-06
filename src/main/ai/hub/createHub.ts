@@ -1,6 +1,5 @@
 import crypto from "node:crypto";
 import { createTwoFilesPatch } from "diff";
-import { nativeEvents } from '../desktop/nativeEvents';
 import { FileTools } from "./FileTools";
 import type { IpcBridge } from "../../IpcBridge";
 import { HubService, type HubHost } from "./HubService";
@@ -289,7 +288,6 @@ export function createHub(
     file: (...args) => files.invoke(...args),
     changed: () => {
       bridge.broadcast(HUB_CHANGED);
-      if (process.env.SSHS3_NATIVE_HERMES === '1') nativeEvents.emit('toolsChanged');
       options?.onSharedWorkspaceChanged?.();
     },
     workspaceServers: async (): Promise<WorkspaceServerSummary[]> => {

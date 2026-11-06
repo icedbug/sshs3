@@ -10,8 +10,6 @@ export interface AiConfig {
   model: string;
   /** Optional endpoint override. Required for 'openai-compatible' (e.g. http://localhost:11434/v1). */
   baseUrl?: string;
-  /** Reserved for config compatibility. */
-  useHermes: boolean;
   /** Display name / handle used when recording team workspace changes (e.g. 'jacob'). */
   actorName?: string;
   /** Context window budget in tokens (e.g. 16000, 32000, 64000, 128000, 256000, 900000). Default: 128000. */
@@ -41,14 +39,6 @@ export interface AiConfigView extends AiConfig {
 /** `apiKey`: a string replaces the stored key, null removes it, undefined keeps it. */
 export interface AiConfigUpdate extends Partial<AiConfig> {
   apiKey?: string | null;
-}
-
-/** The bundled Hermes agent: whether this build includes it, and whether it is running now. */
-export interface AiHermesStatus {
-  bundled: boolean;
-  /** Hermes release tag, when bundled. */
-  version?: string;
-  running: boolean;
 }
 
 export const DEFAULT_AI_MODELS: Record<AiProvider, string> = {
@@ -87,5 +77,4 @@ export const DEFAULT_AI_CONFIG: AiConfig = {
   enabled: false,
   provider: "anthropic",
   model: DEFAULT_AI_MODELS.anthropic,
-  useHermes: true,
 };

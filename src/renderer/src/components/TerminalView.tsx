@@ -1155,22 +1155,35 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       {perfSessionId && (
         <div className="absolute bottom-1 right-3 z-10 flex items-center gap-1.5">
           {terminalErrorHint && (
-            <div className="flex items-center gap-1 rounded-md border border-rose-500/40 bg-rose-500/15 px-2 py-0.5 text-[10px] font-medium text-rose-200 shadow-lg animate-fade-in">
+            <div
+              data-testid="terminal-copilot-pill"
+              className="sshs3-copilot-pill flex items-center gap-1.5 border-rose-500/50 bg-rose-500/15 px-2.5 py-1 text-2xs font-medium text-rose-300 shadow-lg animate-fade-in"
+            >
               <button
                 type="button"
                 data-testid="terminal-fix-error-btn"
-                className="inline-flex items-center gap-1 hover:text-white"
+                className="inline-flex items-center gap-1 hover:text-txt-primary"
                 onClick={() => {
                   const latest = outputTrackerRef.current?.lastOutput() || terminalErrorHint;
-                  window.dispatchEvent(new CustomEvent('sshs3:ai-open'));
+                  const fixPrompt =
+                    'Förklara varför detta fel uppstod i terminalen och föreslå rätt kommando för att lösa det.';
+                  window.dispatchEvent(
+                    new CustomEvent('sshs3:ai-open', {
+                      detail: {
+                        mode: 'panel',
+                        view: 'Work',
+                        prompt: fixPrompt,
+                        context: latest,
+                      },
+                    })
+                  );
                   window.dispatchEvent(
                     new CustomEvent('sshs3:ai-attach', {
                       detail: {
                         sessionId: perfSessionId,
                         text: latest,
                         label: `${hostLabel || 'Terminal'} error output`,
-                        prompt:
-                          'Förklara varför detta fel uppstod i terminalen och föreslå rätt kommando för att lösa det.',
+                        prompt: fixPrompt,
                       },
                     })
                   );
@@ -1184,7 +1197,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 type="button"
                 aria-label="Dismiss error hint"
                 onClick={() => setTerminalErrorHint(null)}
-                className="ml-0.5 text-rose-300/70 hover:text-white"
+                className="ml-0.5 text-rose-300/70 hover:text-txt-primary"
               >
                 <X className="h-2.5 w-2.5" />
               </button>

@@ -1,6 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
+  Columns,
+  HardDrive,
+  ShieldCheck,
+  Sparkles,
 } from 'lucide-react';
 import type { FileEntry } from '@shared/types/storage';
 import type { TransferConflictResolution } from '@shared/types/ipc';
@@ -22,6 +26,7 @@ import { GitStatusMenu } from './GitStatusMenu';
 import { FilePaneToolbar } from './FilePaneToolbar';
 import type { BreadcrumbsHandle } from './Breadcrumbs';
 import { FilePaneFilterBar } from './FilePaneFilterBar';
+import { S3CloudExplorer } from './S3CloudExplorer';
 import { useNavHistory } from '../../lib/useNavHistory';
 import { SOURCE_ICONS, isNoopOsDrop } from './filePaneHelpers';
 import { recursiveFilterFiles, RECURSIVE_MAX_RESULTS } from '../../lib/recursiveFilter';
@@ -30,6 +35,7 @@ import { offersAwsSsoSignIn } from '@shared/types/aws';
 import { isListingStale } from '../../lib/staleListing';
 import { comboFromKeyboardEvent } from '../../lib/shortcuts';
 import { DEFAULT_SHORTCUTS } from '@shared/types/settings';
+import { hubRequest } from '../../lib/aiHub';
 import { createRendererLogger } from '../../lib/log';
 const log = createRendererLogger('FilePane');
 
@@ -56,6 +62,8 @@ interface FilePaneProps {
   gitIntegrationEnabled?: boolean;
   /** Optional file or folder path to highlight upon loading. */
   initialSelectedPath?: string;
+  /** Whether the dedicated 3-column S3 Cloud Explorer & Inspector starts open when sourceType === 's3'. Default true. */
+  s3ExplorerInitialOpen?: boolean;
 }
 
 export const FilePane: React.FC<FilePaneProps> = ({
@@ -75,6 +83,7 @@ export const FilePane: React.FC<FilePaneProps> = ({
   onToggleHiddenFiles,
   gitIntegrationEnabled = true,
   initialSelectedPath,
+  s3ExplorerInitialOpen = true,
 }) => {
   const onPathChangeRef = useRef(onPathChange);
   onPathChangeRef.current = onPathChange;
@@ -722,6 +731,115 @@ export const FilePane: React.FC<FilePaneProps> = ({
   const stopOutsideWatchRef = useRef<(() => void) | null>(null);
   useEffect(() => () => stopOutsideWatchRef.current?.(), []);
   const canDragOut = source.sourceType !== 'local' && Boolean(window.multissh?.dragOutPrepare);
+  const [s3ExplorerOpen, setS3ExplorerOpen] = useState(s3ExplorerInitialOpen);
+
+  const handleAiExplainDiff = useCallback(() => {
+    const targetList = selectedEntries.length > 0 ? selectedEntries.map((e) => e.path) : [currentPath];
+    const joined = targetList.join(', ');
+    const prompt = `Förklara konfigurationsdiff och granska ändringar för ${joined} på ${source.label} (${source.sourceType}).`;
+    const contextText = [
+      `Storage Source: ${source.label} [provider=${source.providerId}, type=${source.sourceType}]`,
+      `Current Path: ${currentPath}`,
+      `Selected Files: ${joined}`,
+      otherPane ? `Comparison Pane: ${otherPane.label} (${otherPane.path})` : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    window.dispatchEvent(
+      new CustomEvent('sshs3:ai-open', {
+        detail: {
+          mode: 'panel',
+          view: 'Work',
+          prompt,
+          context: contextText,
+        },
+      })
+    );
+    window.dispatchEvent(
+      new CustomEvent('sshs3:ai-attach', {
+        detail: {
+          label: `@diff:${selectedEntries[0]?.name || source.label}`,
+          text: contextText,
+          prompt,
+        },
+      })
+    );
+  }, [selectedEntries, currentPath, source, otherPane]);
+
+  const handleAiGenerateS3Policy = useCallback(() => {
+    const rawPath = (selectedEntries[0]?.path || currentPath || '/').replace(/^\/+/, '');
+    const parts = rawPath.split('/').filter(Boolean);
+    const bucket = parts[0] || source.label || 'my-bucket';
+    const prefix = parts.slice(1).join('/');
+    const arn = `arn:aws:s3:::${bucket}/${prefix ? prefix + '/*' : '*'}`;
+    const prompt = `Generera en least-privilege S3-policy (IAM & Bucket Policy) för bucket "${bucket}" (ARN: ${arn}, prefix: "${prefix || '/'}").`;
+    const contextText = `S3 Policy Context:\nProvider: ${source.providerId}\nBucket: ${bucket}\nPrefix: ${prefix || '/'}\nARN: ${arn}`;
+
+    window.dispatchEvent(
+      new CustomEvent('sshs3:ai-open', {
+        detail: {
+          mode: 'panel',
+          view: 'Work',
+          prompt,
+          context: contextText,
+        },
+      })
+    );
+    window.dispatchEvent(
+      new CustomEvent('sshs3:ai-attach', {
+        detail: {
+          label: `@s3-policy:${bucket}`,
+          text: contextText,
+          prompt,
+        },
+      })
+    );
+  }, [selectedEntries, currentPath, source]);
+
+  const kbFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (kbFeedbackTimerRef.current) clearTimeout(kbFeedbackTimerRef.current);
+    },
+    []
+  );
+
+  const handleAiIndexKb = useCallback(async () => {
+    const targetPath = selectedEntries[0]?.path || currentPath || '/';
+    try {
+      if (source.sourceType === 's3') {
+        const s3ProfileId = source.providerId.replace(/^s3-/, '');
+        const cleanPrefix = targetPath.replace(/^\/+/, '');
+        await hubRequest({
+          action: 'kb-ingest-s3',
+          s3ProfileId,
+          prefix: cleanPrefix || undefined,
+          collection: source.label,
+        });
+      } else {
+        await hubRequest({
+          action: 'kb-ingest-folder',
+          folderPath: targetPath,
+          collection: source.label,
+        });
+      }
+      setDotfilesFeedback('Indexerad i Kunskapsbas (@orama)');
+      if (kbFeedbackTimerRef.current) clearTimeout(kbFeedbackTimerRef.current);
+      kbFeedbackTimerRef.current = setTimeout(() => setDotfilesFeedback(null), 2500);
+    } catch {
+      window.dispatchEvent(
+        new CustomEvent('sshs3:ai-open', {
+          detail: {
+            mode: 'panel',
+            view: 'Knowledge Base',
+            prompt: `Indexera ${targetPath} från ${source.label} (${source.sourceType}) i vår Kunskapsbas (@orama).`,
+            context: `KB Ingest: ${source.providerId} ${targetPath}`,
+          },
+        })
+      );
+    }
+  }, [selectedEntries, currentPath, source]);
 
   const contextMenuItems: ContextMenuItem[] = buildContextMenuItems({
     contextMenuOpen: contextMenu !== null,
@@ -766,6 +884,9 @@ export const FilePane: React.FC<FilePaneProps> = ({
     setPropertiesOpen,
     setCertificateOpen,
     setSearchOpen,
+    handleAiExplainDiff,
+    handleAiGenerateS3Policy,
+    handleAiIndexKb: () => void handleAiIndexKb(),
   });
 
   const SourceIcon = SOURCE_ICONS[source.sourceType];
@@ -893,8 +1014,8 @@ export const FilePane: React.FC<FilePaneProps> = ({
         handlePaneDrop(e);
       }}
     >
-      {/* Pane Top Bar with Source Switcher */}
-      <div className="flex items-center justify-between border-b border-divider bg-app-surface px-2.5 py-1">
+      {/* Pane Top Bar with Source Switcher & Contextual AI Actions */}
+      <div className="flex items-center justify-between gap-2 border-b border-divider bg-app-surface px-2.5 py-1">
         <div className="flex items-center gap-2 min-w-0">
           <div className="flex shrink-0 items-center gap-1 rounded-lg border border-border-subtle bg-app-card p-0.5 text-xs">
             {(['local', 'sftp', 's3', 'k8s'] as SourceType[]).map((type) => {
@@ -929,11 +1050,68 @@ export const FilePane: React.FC<FilePaneProps> = ({
             {source.label}
           </span>
         </div>
-        {isActive && (
-          <span className="rounded bg-sky-500/15 border border-sky-500/30 px-2 py-0.5 text-2xs font-semibold text-sky-400 select-none">
-            Active
-          </span>
-        )}
+
+        <div className="flex items-center gap-1.5 shrink-0">
+          <button
+            type="button"
+            data-testid="ai-action-explain-diff"
+            title="Förklara konfigurationsdiff med AI"
+            onClick={handleAiExplainDiff}
+            className="inline-flex items-center gap-1 rounded border border-sky-500/35 bg-sky-500/10 px-1.5 py-0.5 text-2xs font-medium text-sky-400 hover:bg-sky-500/20 transition-colors"
+          >
+            <Sparkles className="h-3 w-3 shrink-0" />
+            <span className="hidden sm:inline">Förklara konfigurationsdiff</span>
+          </button>
+
+          {source.sourceType === 's3' && (
+            <button
+              type="button"
+              data-testid="ai-action-generate-s3-policy"
+              title="Generera S3-policy med AI"
+              onClick={handleAiGenerateS3Policy}
+              className="inline-flex items-center gap-1 rounded border border-amber-500/35 bg-amber-500/10 px-1.5 py-0.5 text-2xs font-medium text-amber-400 hover:bg-amber-500/20 transition-colors"
+            >
+              <ShieldCheck className="h-3 w-3 shrink-0" />
+              <span className="hidden sm:inline">Generera S3-policy</span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            data-testid="ai-action-index-kb"
+            title="Indexera i Kunskapsbas (@orama)"
+            onClick={() => void handleAiIndexKb()}
+            className="inline-flex items-center gap-1 rounded border border-purple-500/35 bg-purple-500/10 px-1.5 py-0.5 text-2xs font-medium text-purple-400 hover:bg-purple-500/20 transition-colors"
+          >
+            <HardDrive className="h-3 w-3 shrink-0" />
+            <span className="hidden sm:inline">Indexera i Kunskapsbas</span>
+          </button>
+
+          {source.sourceType === 's3' && (
+            <button
+              type="button"
+              data-testid="toggle-s3-inspector"
+              title={s3ExplorerOpen ? 'Dölj S3 Cloud Explorer & Inspector' : 'Visa S3 Cloud Explorer & Inspector'}
+              aria-pressed={s3ExplorerOpen}
+              onClick={() => setS3ExplorerOpen((prev) => !prev)}
+              className={
+                'inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-2xs font-semibold transition-colors ' +
+                (s3ExplorerOpen
+                  ? 'border-amber-500/50 bg-amber-500/20 text-amber-400'
+                  : 'border-border-subtle bg-app-card text-txt-muted hover:text-txt-primary')
+              }
+            >
+              <Columns className="h-3 w-3 shrink-0" />
+              <span>S3 Inspector</span>
+            </button>
+          )}
+
+          {isActive && (
+            <span className="rounded bg-sky-500/15 border border-sky-500/30 px-2 py-0.5 text-2xs font-semibold text-sky-400 select-none">
+              Active
+            </span>
+          )}
+        </div>
       </div>
 
       {/* Pane Action Toolbar */}
@@ -1026,69 +1204,145 @@ export const FilePane: React.FC<FilePaneProps> = ({
         </div>
       )}
 
-      {/* File List Content */}
-      <div
-        className={
-          'min-h-0 flex-1 ' + (isReceivingForeignDrag ? 'ring-2 ring-inset ring-sky-500/60' : '')
-        }
-      >
-        <FileList
+      {/* File List Content (wrapped in 3-Column S3CloudExplorer when source.sourceType === 's3' and s3ExplorerOpen is true) */}
+      {source.sourceType === 's3' && s3ExplorerOpen ? (
+        <S3CloudExplorer
+          providerId={source.providerId}
+          providerLabel={source.label}
+          currentPath={currentPath}
           entries={visibleEntries}
-          loading={loading}
-          selectedPaths={selectedPaths}
-          onSelectionChange={setSelectedPaths}
-          focusRequest={focusRequest}
-          onOpen={handleOpen}
-          filterText={filterText}
-          onDraggableStart={(entry, e) => {
-            const items = selectedPaths.has(entry.path)
-              ? activeEntries.filter((it) => selectedPaths.has(it.path))
-              : [entry];
-            // Local files become a native OS drag so they can also be dropped outside sshs3
-            // (in-app drops then arrive as OS file drops, see readOsFilePaths).
-            if (source.sourceType === 'local' && window.multissh?.dragOutStart) {
-              e.preventDefault();
-              void window.multissh.dragOutStart(items.map((it) => it.path)).catch(() => {});
-              return true;
-            }
-            // A remote item released outside the window can not be handed to another app directly:
-            // offer the "Drag out of sshs3" copy instead.
-            if (canDragOut) {
-              stopOutsideWatchRef.current?.();
-              stopOutsideWatchRef.current = watchDragReleasedOutsideWindow(() =>
-                setDragOutPaths(items.map((it) => it.path))
-              );
-            }
-            beginDrag(buildDragPayload(side, source.providerId, currentPath, items), e.dataTransfer);
-          }}
-          onDraggableEnd={endDrag}
-          isDropTarget={isDropTarget}
-          onEntryDrop={handleEntryDrop}
-          onEntryDragOver={(entry) => setDragOverPath(entry.path)}
-          onEntryDragLeave={() => setDragOverPath(null)}
-          onPaneDrop={handlePaneDrop}
-          dragOverPath={dragOverPath}
-          renamingPath={renamingPath}
-          onRenameCommit={handleRenameCommit}
-          onRenameCancel={() => setRenamingPath(null)}
-          onEntryContextMenu={(_entry, e) => setContextMenu({ x: e.clientX, y: e.clientY })}
-          onPaneContextMenu={(e) => setContextMenu({ x: e.clientX, y: e.clientY })}
-          onRenameStart={handleRenameStart}
+          selectedEntries={selectedEntries}
+          onNavigate={onPathChange}
           onRefresh={() => void load(true)}
-          onNavigateParent={() => onPathChange(parentPath(currentPath))}
-          onNavigateBack={handleGoBack}
-          onNavigateForward={handleGoForward}
-          onCopySelected={handleCopy}
-          onCutSelected={handleCut}
-          onPaste={handlePaste}
-          cutPaths={
-            clipboard?.mode === 'cut' && clipboard.providerId === source.providerId
-              ? new Set(clipboard.sourcePaths)
-              : undefined
+          onCreateBucketOrFolder={handleCreateFolderCommit}
+          onUploadDrop={(paths, targetPath) =>
+            onTransferRequested({
+              sourceProviderId: 'local',
+              sourcePaths: paths,
+              targetPath,
+            })
           }
-          onDeleteSelected={() => void handleDelete()}
-        />
-      </div>
+          inspectorOpen={s3ExplorerOpen}
+          onToggleInspector={() => setS3ExplorerOpen((prev) => !prev)}
+        >
+          <div
+            className={
+              'min-h-0 flex-1 ' + (isReceivingForeignDrag ? 'ring-2 ring-inset ring-sky-500/60' : '')
+            }
+          >
+            <FileList
+              entries={visibleEntries}
+              loading={loading}
+              selectedPaths={selectedPaths}
+              onSelectionChange={setSelectedPaths}
+              focusRequest={focusRequest}
+              onOpen={handleOpen}
+              filterText={filterText}
+              onDraggableStart={(entry, e) => {
+                const items = selectedPaths.has(entry.path)
+                  ? activeEntries.filter((it) => selectedPaths.has(it.path))
+                  : [entry];
+                if (canDragOut) {
+                  stopOutsideWatchRef.current?.();
+                  stopOutsideWatchRef.current = watchDragReleasedOutsideWindow(() =>
+                    setDragOutPaths(items.map((it) => it.path))
+                  );
+                }
+                beginDrag(buildDragPayload(side, source.providerId, currentPath, items), e.dataTransfer);
+              }}
+              onDraggableEnd={endDrag}
+              isDropTarget={isDropTarget}
+              onEntryDrop={handleEntryDrop}
+              onEntryDragOver={(entry) => setDragOverPath(entry.path)}
+              onEntryDragLeave={() => setDragOverPath(null)}
+              onPaneDrop={handlePaneDrop}
+              dragOverPath={dragOverPath}
+              renamingPath={renamingPath}
+              onRenameCommit={handleRenameCommit}
+              onRenameCancel={() => setRenamingPath(null)}
+              onEntryContextMenu={(_entry, e) => setContextMenu({ x: e.clientX, y: e.clientY })}
+              onPaneContextMenu={(e) => setContextMenu({ x: e.clientX, y: e.clientY })}
+              onRenameStart={handleRenameStart}
+              onRefresh={() => void load(true)}
+              onNavigateParent={() => onPathChange(parentPath(currentPath))}
+              onNavigateBack={handleGoBack}
+              onNavigateForward={handleGoForward}
+              onCopySelected={handleCopy}
+              onCutSelected={handleCut}
+              onPaste={handlePaste}
+              cutPaths={
+                clipboard?.mode === 'cut' && clipboard.providerId === source.providerId
+                  ? new Set(clipboard.sourcePaths)
+                  : undefined
+              }
+              onDeleteSelected={() => void handleDelete()}
+            />
+          </div>
+        </S3CloudExplorer>
+      ) : (
+        <div
+          className={
+            'min-h-0 flex-1 ' + (isReceivingForeignDrag ? 'ring-2 ring-inset ring-sky-500/60' : '')
+          }
+        >
+          <FileList
+            entries={visibleEntries}
+            loading={loading}
+            selectedPaths={selectedPaths}
+            onSelectionChange={setSelectedPaths}
+            focusRequest={focusRequest}
+            onOpen={handleOpen}
+            filterText={filterText}
+            onDraggableStart={(entry, e) => {
+              const items = selectedPaths.has(entry.path)
+                ? activeEntries.filter((it) => selectedPaths.has(it.path))
+                : [entry];
+              // Local files become a native OS drag so they can also be dropped outside sshs3
+              // (in-app drops then arrive as OS file drops, see readOsFilePaths).
+              if (source.sourceType === 'local' && window.multissh?.dragOutStart) {
+                e.preventDefault();
+                void window.multissh.dragOutStart(items.map((it) => it.path)).catch(() => {});
+                return true;
+              }
+              // A remote item released outside the window can not be handed to another app directly:
+              // offer the "Drag out of sshs3" copy instead.
+              if (canDragOut) {
+                stopOutsideWatchRef.current?.();
+                stopOutsideWatchRef.current = watchDragReleasedOutsideWindow(() =>
+                  setDragOutPaths(items.map((it) => it.path))
+                );
+              }
+              beginDrag(buildDragPayload(side, source.providerId, currentPath, items), e.dataTransfer);
+            }}
+            onDraggableEnd={endDrag}
+            isDropTarget={isDropTarget}
+            onEntryDrop={handleEntryDrop}
+            onEntryDragOver={(entry) => setDragOverPath(entry.path)}
+            onEntryDragLeave={() => setDragOverPath(null)}
+            onPaneDrop={handlePaneDrop}
+            dragOverPath={dragOverPath}
+            renamingPath={renamingPath}
+            onRenameCommit={handleRenameCommit}
+            onRenameCancel={() => setRenamingPath(null)}
+            onEntryContextMenu={(_entry, e) => setContextMenu({ x: e.clientX, y: e.clientY })}
+            onPaneContextMenu={(e) => setContextMenu({ x: e.clientX, y: e.clientY })}
+            onRenameStart={handleRenameStart}
+            onRefresh={() => void load(true)}
+            onNavigateParent={() => onPathChange(parentPath(currentPath))}
+            onNavigateBack={handleGoBack}
+            onNavigateForward={handleGoForward}
+            onCopySelected={handleCopy}
+            onCutSelected={handleCut}
+            onPaste={handlePaste}
+            cutPaths={
+              clipboard?.mode === 'cut' && clipboard.providerId === source.providerId
+                ? new Set(clipboard.sourcePaths)
+                : undefined
+            }
+            onDeleteSelected={() => void handleDelete()}
+          />
+        </div>
+      )}
 
       {/* Status Bar (§24): item count, selection count, and total size of the selection. */}
       <div className="flex items-center justify-between gap-2 border-t border-divider bg-app-surface-subtle px-2.5 py-1 text-2xs text-txt-muted">

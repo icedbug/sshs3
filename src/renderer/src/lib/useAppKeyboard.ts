@@ -155,7 +155,9 @@ export function useAppKeyboard(ctx: AppKeyboardContext): void {
       }
 
       // Inline Terminal AI shortcut Ctrl+K (not Ctrl+Shift+K, which is a separate,
-      // user-rebindable shortcut — see 'searchInFiles' below).
+      // user-rebindable shortcut — see 'searchInFiles' below). When no visible inline
+      // terminal AI trigger is mounted (e.g. on Mission Control or File Manager),
+      // Ctrl+K / Cmd+K opens the Global Command Palette / Omnibar if enabled.
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'k') {
         const inlineAiBtn = Array.from(
           document.querySelectorAll<HTMLButtonElement>('[data-testid="terminal-inline-ai-btn"]')

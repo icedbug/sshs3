@@ -1222,7 +1222,6 @@ export function AiHubPanel({
                                     enabled: true,
                                     provider: "openai-codex",
                                     model: hub.config.codexDefaultModel || "gpt-6.1-sol",
-                                    useHermes: false,
                                   },
                                 })
                               }
@@ -1240,7 +1239,6 @@ export function AiHubPanel({
                                     provider: "openai-compatible",
                                     baseUrl: "http://127.0.0.1:11434/v1",
                                     model: "qwen2.5-coder:14b",
-                                    useHermes: false,
                                   },
                                 })
                               }
@@ -2767,7 +2765,6 @@ function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Element {
             model: model.trim(),
             baseUrl: provider === "openai-codex" ? "" : url.trim(),
             actorName,
-            useHermes: false,
             contextWindowTokens,
             terminalContextChars,
             maxOutputTokens,

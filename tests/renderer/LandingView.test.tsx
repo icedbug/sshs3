@@ -319,4 +319,37 @@ describe('LandingView Component', () => {
     fireEvent.click(screen.getByTestId('right-tab-activity'));
     expect(screen.queryByTestId('right-panel-kb')).not.toBeInTheDocument();
   });
+
+  it('triggers Host Workspace (SSH + SFTP) split connection when blade-connect-workspace button is clicked (F7/F8)', () => {
+    const onConnectRecentSSH = vi.fn();
+    const events: CustomEvent[] = [];
+    const onHostWorkspace = (e: Event) => events.push(e as CustomEvent);
+    window.addEventListener('sshs3:open-host-workspace', onHostWorkspace);
+
+    try {
+      render(
+        <LandingView
+          recentSSH={mockRecentSSH}
+          onConnectRecentSSH={onConnectRecentSSH}
+          onConnectSFTP={vi.fn()}
+          onQuickStartTerminal={vi.fn()}
+          onNewTab={vi.fn()}
+          onOpenProfiles={vi.fn()}
+          onNewProfile={vi.fn()}
+          onOpenSyncBootstrap={vi.fn()}
+          onNavigateToTabBar={vi.fn()}
+        />
+      );
+
+      const workspaceBtn = screen.getByTestId('blade-connect-workspace-conn-1');
+      expect(workspaceBtn).toBeInTheDocument();
+      fireEvent.click(workspaceBtn);
+
+      expect(onConnectRecentSSH).toHaveBeenCalledWith(mockRecentSSH[0]);
+      expect(events.length).toBe(1);
+      expect(events[0].detail.serverId).toBe('conn-1');
+    } finally {
+      window.removeEventListener('sshs3:open-host-workspace', onHostWorkspace);
+    }
+  });
 });

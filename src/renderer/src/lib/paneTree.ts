@@ -1,6 +1,29 @@
-import type { PaneLeaf, PaneNode, PaneOrientation, PaneSplit } from '@shared/types/session';
+import type { PaneLeaf, PaneNode, PaneOrientation, PaneSplit, PaneSurfaceType } from '@shared/types/session';
+import type { SSHConnectionConfig } from '@shared/types/ssh';
 
 let paneCounter = 0;
+const pendingHostWorkspaceSplits = new Set<string>();
+
+export function requestHostWorkspaceSplit(config: SSHConnectionConfig): void {
+  if (config.id) pendingHostWorkspaceSplits.add(`id:${config.id}`);
+  if (config.host) pendingHostWorkspaceSplits.add(`host:${config.host}`);
+}
+
+export function consumePendingHostWorkspaceSplit(config?: SSHConnectionConfig): boolean {
+  if (!config) return false;
+  const idKey = config.id ? `id:${config.id}` : '';
+  const hostKey = config.host ? `host:${config.host}` : '';
+  let matched = false;
+  if (idKey && pendingHostWorkspaceSplits.has(idKey)) {
+    pendingHostWorkspaceSplits.delete(idKey);
+    matched = true;
+  }
+  if (hostKey && pendingHostWorkspaceSplits.has(hostKey)) {
+    pendingHostWorkspaceSplits.delete(hostKey);
+    matched = true;
+  }
+  return matched;
+}
 
 export function genPaneId(prefix: string): string {
   paneCounter += 1;
@@ -8,7 +31,25 @@ export function genPaneId(prefix: string): string {
 }
 
 export function createLeaf(id: string, over?: Partial<Omit<PaneLeaf, 'type' | 'id'>>): PaneLeaf {
-  return { type: 'leaf', id, ...over };
+  const surfaceType = over?.surfaceType ?? over?.leafType;
+  return {
+    type: 'leaf',
+    id,
+    ...over,
+    ...(surfaceType ? { surfaceType, leafType: surfaceType } : {}),
+  };
+}
+
+export function getLeafSurfaceType(leaf: PaneLeaf): PaneSurfaceType {
+  return leaf.surfaceType ?? leaf.leafType ?? 'terminal';
+}
+
+export function isSftpLeaf(leaf: PaneLeaf): boolean {
+  return getLeafSurfaceType(leaf) === 'sftp';
+}
+
+export function getLeafSshConfig(leaf: PaneLeaf): SSHConnectionConfig | undefined {
+  return leaf.config ?? leaf.sshConfig;
 }
 
 export function countLeaves(node: PaneNode): number {
@@ -27,13 +68,22 @@ export function findLeaf(node: PaneNode, id: string): PaneLeaf | null {
 /** Panes other than `exceptId` that hold a live or connectable session (not an empty placeholder). */
 export function countOtherSessionPanes(node: PaneNode, exceptId: string): number {
   return collectLeaves(node).filter(
-    (leaf) => leaf.id !== exceptId && Boolean(leaf.config || leaf.local || leaf.k8sTarget || leaf.k8sLogTarget)
+    (leaf) =>
+      leaf.id !== exceptId &&
+      Boolean(leaf.config || leaf.sshConfig || leaf.local || leaf.k8sTarget || leaf.k8sLogTarget)
   ).length;
 }
 
 /** True for a plain local-shell pane (the same precedence PaneLeafContent uses to pick the view). */
 export function isLocalShellLeaf(leaf: PaneLeaf): boolean {
-  return Boolean(leaf.local && !leaf.config && !leaf.k8sTarget && !leaf.k8sLogTarget);
+  return Boolean(
+    !isSftpLeaf(leaf) &&
+      leaf.local &&
+      !leaf.config &&
+      !leaf.sshConfig &&
+      !leaf.k8sTarget &&
+      !leaf.k8sLogTarget
+  );
 }
 
 /**
@@ -99,9 +149,10 @@ export function splitPane(
   tree: PaneNode,
   paneId: string,
   orientation: PaneOrientation,
-  idPrefix: string
+  idPrefix: string,
+  newLeafOverrides?: Partial<Omit<PaneLeaf, 'type' | 'id'>>
 ): { tree: PaneNode; newPaneId: string } {
-  const newLeaf = createLeaf(genPaneId(idPrefix));
+  const newLeaf = createLeaf(genPaneId(idPrefix), newLeafOverrides);
 
   function recurse(node: PaneNode): PaneNode {
     if (node.type === 'leaf') {
@@ -142,6 +193,28 @@ export function splitPane(
   }
 
   return { tree: recurse(tree), newPaneId: newLeaf.id };
+}
+
+/**
+ * Splits `paneId` side-by-side (`orientation: 'row'`) with an SFTP surface leaf bound to the same
+ * `SSHConnectionConfig` (Host Workspace split view).
+ */
+export function splitPaneWithSftp(
+  tree: PaneNode,
+  paneId: string,
+  idPrefix: string,
+  sftpInitialPath?: string
+): { tree: PaneNode; newPaneId: string } {
+  const sourceLeaf = findLeaf(tree, paneId);
+  const sshConfig = sourceLeaf ? getLeafSshConfig(sourceLeaf) : undefined;
+  return splitPane(tree, paneId, 'row', idPrefix, {
+    surfaceType: 'sftp',
+    leafType: 'sftp',
+    config: sshConfig,
+    sshConfig,
+    sftpInitialPath: sftpInitialPath ?? sourceLeaf?.sftpInitialPath,
+    local: sourceLeaf?.local,
+  });
 }
 
 /**

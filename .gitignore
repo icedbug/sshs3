@@ -1,10 +1,5 @@
 node_modules/
 .npm-cache/
-build-resources/hermes/
-build-resources/hermes-native-runtime/
-build-resources/.hermes-runtime-*/
-build-resources/.hermes-previous-*/
-build-resources/hermes-desktop/
 dist/
 dist-electron/
 dist-web/

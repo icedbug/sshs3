@@ -21,16 +21,13 @@ vi.mock("../../src/main/ai/AiConfigStore", () => ({
     getConfig = mocks.config;
   },
 }));
-vi.mock("../../src/main/ai/HermesManager", () => ({
-  HermesManager: class {
-    getManifest = async () => null;
-  },
-}));
 vi.mock("../../src/main/ai/hub/AgentRuntime", () => ({
-  HermesRuntime: class {
-    start = mocks.runtime;
-    stop = async () => {};
-  },
+  createAgentRuntime: () => ({
+    start: mocks.runtime,
+    steer: async () => {},
+    stop: async () => {},
+  }),
+  newMessageId: () => "test-msg-id",
 }));
 import { HubService } from "../../src/main/ai/hub/HubService";
 const cleanups: Array<() => Promise<void>> = [];
@@ -60,7 +57,7 @@ async function create() {
   return hub;
 }
 describe("Hub startup cancellation", () => {
-  it("cannot start Hermes or issue a capability after stop while credentials load", async () => {
+  it("cannot start runtime or issue a capability after stop while credentials load", async () => {
     let finish!: (value: unknown) => void;
     mocks.config.mockImplementation(
       () =>

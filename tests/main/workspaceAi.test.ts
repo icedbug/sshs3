@@ -714,7 +714,6 @@ describe("Production multi-user workspace sync & auto-memory", () => {
         enabled: false,
         provider: "openai-codex" as const,
         model: "gpt-6.1-sol",
-        useHermes: false,
         hasApiKey: false,
         keyStorage: "encrypted" as const,
       };
@@ -723,7 +722,6 @@ describe("Production multi-user workspace sync & auto-memory", () => {
       enabled: false,
       provider: "openai-codex" as const,
       model: "gpt-6.1-sol",
-      useHermes: false,
       apiKey: "",
     });
 

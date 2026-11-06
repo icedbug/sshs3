@@ -126,33 +126,10 @@ export interface IpcRendererTransport {
   on(channel: string, listener: (_event: any, ...args: any[]) => void): void;
   removeListener(channel: string, listener: (_event: any, ...args: any[]) => void): void;
   getPathForFile?: (file: File) => string;
-  enableNativeHermes?: boolean;
 }
 
 export function createMultiSSHApi(ipcRenderer: IpcRendererTransport): MultiSSHApi {
   return {
-    nativeHermes: ipcRenderer.enableNativeHermes
-      ? {
-          get: () => ipcRenderer.invoke('sshs3:hermes:state'),
-          set: (update) => ipcRenderer.invoke('sshs3:hermes:layout', update),
-          tools: () => ipcRenderer.invoke('sshs3:hermes:tools:state'),
-          selectTerminal: (id) => ipcRenderer.invoke('sshs3:hermes:tools:select', id),
-          arm: (shell) => ipcRenderer.invoke('sshs3:hermes:tools:arm', shell),
-          approve: (task, change, allowed) => ipcRenderer.invoke('sshs3:hermes:tools:approve', task, change, allowed),
-          takeover: (task) => ipcRenderer.invoke('sshs3:hermes:tools:takeover', task),
-          resume: (task) => ipcRenderer.invoke('sshs3:hermes:tools:resume', task),
-          onToolsChanged: (callback) => {
-            const handler = (_event: any, state: import('../types/nativeHermes').NativeToolState): void => callback(state);
-            ipcRenderer.on('sshs3:hermes:tools:changed', handler);
-            return () => ipcRenderer.removeListener('sshs3:hermes:tools:changed', handler);
-          },
-          onChange: (callback) => {
-            const handler = (_event: any, state: import('../types/nativeHermes').NativeHermesState): void => callback(state);
-            ipcRenderer.on('sshs3:hermes:changed', handler);
-            return () => ipcRenderer.removeListener('sshs3:hermes:changed', handler);
-          },
-        }
-      : undefined,
     aiHubRequest: (request) => ipcRenderer.invoke('ai-hub:request', request),
     onAiHubChanged: (callback) => {
       const listener = (): void => callback();

@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Sparkles, Terminal } from 'lucide-react';
+import { Cable, FolderSync, Search, Server, Settings, Sparkles, Terminal } from 'lucide-react';
 import { UnsplitButton } from './components/UnsplitButton';
 import { TabBar } from './components/TabBar';
 import { AiHubPanel } from './components/AiHub/AiHubPanel';
+import { BottomStatusBar } from './components/BottomStatusBar';
 import type { AppTab } from './lib/tabs';
 import { useAppKeyboard } from './lib/useAppKeyboard';
 import { useTabActions } from './lib/useTabActions';
@@ -56,14 +57,6 @@ const AppContent: React.FC = () => {
     }
     return 420;
   });
-  const nativeHermes = window.multissh?.nativeHermes;
-  const [nativeMode, setNativeMode] = useState<"closed" | "panel" | "full">("panel");
-  useEffect(() => {
-    if (!nativeHermes) return;
-    const unsubscribe = nativeHermes.onChange(state => setNativeMode(state.mode));
-    void nativeHermes.get().then(state => setNativeMode(state.mode));
-    return unsubscribe;
-  }, [nativeHermes]);
   // Starts empty rather than seeded with a default terminal tab so that a
   // genuinely fresh install (no saved session) falls straight into the same
   // "all tabs closed" hero view as an existing user who closes their last
@@ -434,6 +427,14 @@ const AppContent: React.FC = () => {
     return () => window.removeEventListener(OPEN_EDITOR_TAB_EVENT, handleOpenEditor);
   }, [handleOpenEditorTab]);
 
+  useEffect(() => {
+    const handleOpenFleetOverview = () => {
+      setActiveTabId('');
+    };
+    window.addEventListener('sshs3:open-fleet-overview', handleOpenFleetOverview);
+    return () => window.removeEventListener('sshs3:open-fleet-overview', handleOpenFleetOverview);
+  }, []);
+
   // UX audit finding #14: the landing page shown whenever no tabs are open
   // was a static onboarding screen — four cards explaining what the app can
   // do — that stayed exactly the same whether you had zero saved profiles or
@@ -477,6 +478,15 @@ const AppContent: React.FC = () => {
     openTopLevelModal(() => setProfilesModalOpen(true));
   };
 
+  const handleToggleConnectionsDrawer = () => {
+    if (profilesModalOpen) {
+      setProfilesModalOpen(false);
+      setProfilesModalNew(false);
+    } else {
+      handleOpenProfiles();
+    }
+  };
+
   const globalSearchEnabled = settings.enableGlobalSearch !== false;
   const handleOpenGlobalSearch = () => openTopLevelModal(() => setGlobalSearchOpen(true));
 
@@ -495,6 +505,14 @@ const AppContent: React.FC = () => {
     openTopLevelModal(() => setSettingsModalOpen(true));
   };
 
+  const handleToggleSettingsDrawer = () => {
+    if (settingsModalOpen) {
+      setSettingsModalOpen(false);
+    } else {
+      handleOpenSettings();
+    }
+  };
+
   const handleRunGlobalAction = (id: GlobalActionId) =>
     runGlobalAction(id, {
       newTab: handleNewTab,
@@ -506,6 +524,31 @@ const AppContent: React.FC = () => {
 
   const handleOpenTunnels = () => {
     openTopLevelModal(() => setTunnelsModalOpen(true));
+  };
+
+  const handleToggleTunnelsDrawer = () => {
+    if (tunnelsModalOpen) {
+      setTunnelsModalOpen(false);
+    } else {
+      handleOpenTunnels();
+    }
+  };
+
+  const handleOpenDirSync = () => {
+    openTopLevelModal(() => setDirSyncProfilesOpen(true));
+  };
+
+  const handleToggleDirSyncDrawer = () => {
+    if (dirSyncProfilesOpen) {
+      setDirSyncProfilesOpen(false);
+    } else {
+      handleOpenDirSync();
+    }
+  };
+
+  const handleChangeTheme = (nextTheme: 'dark' | 'light' | 'breeze') => {
+    setSettings((prev) => ({ ...prev, theme: nextTheme }));
+    void saveSettingsPatch({ theme: nextTheme });
   };
 
   const handleSyncBootstrapComplete = () => {
@@ -629,18 +672,17 @@ const AppContent: React.FC = () => {
 
   return (
     <div className="relative flex h-screen w-screen flex-col overflow-hidden bg-app text-txt-primary">
-      {/* Top Bar with Brand, TabBar, and Quick Connect. select-none here only
-          (not on the whole app, see UX review #5) so tab titles, toolbar
-          icons etc. don't show a text cursor/selection highlight, while
-          file names, hostnames and other content below stays selectable. */}
+      {/* Airy Tab-Centered Topbar (F4 — Option 1B + Omnibar, h-11 / 44px) */}
       <header
         ref={headerRef}
-        className="relative flex h-10 shrink-0 items-center bg-app-surface select-none after:pointer-events-none after:absolute after:inset-x-0 after:bottom-0 after:z-0 after:h-px after:bg-divider"
+        data-testid="app-topbar"
+        className="relative flex h-11 shrink-0 items-center bg-app-surface select-none after:pointer-events-none after:absolute after:inset-x-0 after:bottom-0 after:z-0 after:h-px after:bg-divider"
       >
-        {/* Clicking the brand shows the landing page again; tabs stay open and mounted (no tab is active). */}
+        {/* Clicking the brand shows the Mission Control / Fleet landing page; tabs stay open and mounted. */}
         <button
           type="button"
-          title="Home"
+          data-testid="topbar-brand-home"
+          title="Home · Mission Control"
           onClick={() => setActiveTabId('')}
           className="flex items-center gap-2.5 self-stretch border-r border-divider px-3.5 font-semibold text-sm hover:bg-app-surface-hover transition-colors"
         >
@@ -651,13 +693,25 @@ const AppContent: React.FC = () => {
           </span>
         </button>
 
-        {/* TabBar */}
+        {/* Left Drawer Trigger: Connections & Inventory */}
+        <button
+          type="button"
+          data-testid="drawer-toggle-connections"
+          aria-pressed={profilesModalOpen}
+          title="Connections & Inventory Slide-Over Drawer (Ctrl+Shift+O)"
+          onClick={handleToggleConnectionsDrawer}
+          className={`flex h-7 items-center gap-1.5 rounded-lg border px-2.5 ml-2 text-xs font-medium transition-colors shrink-0 ${
+            profilesModalOpen
+              ? 'border-sky-500/50 bg-sky-500/15 text-sky-400'
+              : 'border-border-subtle bg-app-surface-subtle text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary'
+          }`}
+        >
+          <Server className="h-3.5 w-3.5 text-sky-400 shrink-0" />
+          <span className="hidden sm:inline">Inventory</span>
+        </button>
+
+        {/* TabBar (centered scrollable workspace tabs) */}
         <div className="min-w-0 flex-1 self-stretch">
-          {/* LOW finding (code review): window.multissh! throws if the preload
-              bridge is somehow missing, unlike the otherwise-consistent
-              window.multissh?.x pattern used everywhere else in this file —
-              the two callbacks below degrade gracefully instead (no cached
-              agents / nothing locked) rather than crashing the tab bar. */}
           <TabBar
             tabs={tabs}
             activeTabId={activeTabId}
@@ -672,7 +726,7 @@ const AppContent: React.FC = () => {
             onOpenGlobalSearch={globalSearchEnabled ? handleOpenGlobalSearch : undefined}
             onOpenSettings={handleOpenSettings}
             onOpenTunnels={handleOpenTunnels}
-            onOpenDirSyncProfiles={() => openTopLevelModal(() => setDirSyncProfilesOpen(true))}
+            onOpenDirSyncProfiles={handleOpenDirSync}
             showLockSmartcardButton={settings.smartcardAuthMode === 'agent-global'}
             onLockSmartcard={() => window.multissh?.smartcardLockAll() ?? Promise.resolve({ locked: 0 })}
             onUnlockSmartcard={() => window.multissh?.smartcardUnlockNow?.() ?? Promise.resolve({ started: false })}
@@ -680,53 +734,107 @@ const AppContent: React.FC = () => {
             shortcuts={settings.shortcuts}
           />
         </div>
-        <button
-          className={`h-full shrink-0 px-3.5 text-xs font-mono tracking-wider transition-colors flex items-center gap-1.5 ${
-            (nativeHermes ? nativeMode !== "closed" : aiMode !== "closed")
-              ? "bg-white text-black font-semibold"
-              : "text-neutral-300 hover:text-white hover:bg-white/[0.04]"
-          }`}
-          title="Öppna / stäng AI Hub (Chat, Mission Agents, MCP, Kunskapsbas)"
-          onClick={() =>
-            nativeHermes
-              ? void nativeHermes.set({
-                  mode: nativeMode === "closed" ? "panel" : "closed",
-                })
-              : setAiMode(aiMode === "closed" ? "panel" : "closed")
-          }
-        >
-          <Sparkles size={12} className={(nativeHermes ? nativeMode !== "closed" : aiMode !== "closed") ? "text-black" : "text-neutral-400"} />
-          <span>Chat</span>
-        </button>
-        {nativeHermes ? (
-          nativeMode !== 'closed' && (
+
+        {/* Central / Prominent Global Command Palette / Omnibar Trigger (F4) */}
+        {globalSearchEnabled && (
+          <button
+            type="button"
+            data-testid="omnibar-trigger"
+            onClick={handleOpenGlobalSearch}
+            title="Open Global Command Palette & Omnibar (Ctrl+Shift+G / ⌘K)"
+            className="mx-2 flex h-7 shrink-0 items-center gap-2 rounded-lg border border-border-subtle bg-app-input px-2.5 text-xs text-txt-muted hover:border-sky-500/50 hover:text-txt-primary transition-all shadow-inner"
+          >
+            <Search className="h-3.5 w-3.5 text-sky-400 shrink-0" />
+            <span className="hidden md:inline text-2xs">Omnibar · Search &amp; Commands…</span>
+            <kbd className="rounded border border-border-subtle bg-app-surface px-1.5 py-0.2 font-mono text-[10px] text-txt-muted">
+              ⌘K
+            </kbd>
+          </button>
+        )}
+
+        {/* Clean Right Slide-Over Drawer Triggers (Tunnels, DirSync, Settings, AI Hub) */}
+        <div className="flex shrink-0 items-center gap-1 border-l border-divider px-2 self-stretch">
+          <button
+            type="button"
+            data-testid="drawer-toggle-tunnels"
+            aria-pressed={tunnelsModalOpen}
+            title="SSH Tunnels Drawer"
+            onClick={handleToggleTunnelsDrawer}
+            className={`flex h-7 w-7 items-center justify-center rounded-lg transition-colors ${
+              tunnelsModalOpen
+                ? 'bg-indigo-500/20 text-indigo-400 border border-indigo-500/40'
+                : 'text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary'
+            }`}
+          >
+            <Cable className="h-3.5 w-3.5" />
+          </button>
+
+          <button
+            type="button"
+            data-testid="drawer-toggle-dirsync"
+            aria-pressed={dirSyncProfilesOpen}
+            title="Directory Sync Profiles Drawer"
+            onClick={handleToggleDirSyncDrawer}
+            className={`flex h-7 w-7 items-center justify-center rounded-lg transition-colors ${
+              dirSyncProfilesOpen
+                ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40'
+                : 'text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary'
+            }`}
+          >
+            <FolderSync className="h-3.5 w-3.5" />
+          </button>
+
+          <button
+            type="button"
+            data-testid="drawer-toggle-settings"
+            aria-pressed={settingsModalOpen}
+            title="Settings Slide-Over Drawer"
+            onClick={handleToggleSettingsDrawer}
+            className={`flex h-7 w-7 items-center justify-center rounded-lg transition-colors ${
+              settingsModalOpen
+                ? 'bg-sky-500/20 text-sky-400 border border-sky-500/40'
+                : 'text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary'
+            }`}
+          >
+            <Settings className="h-3.5 w-3.5" />
+          </button>
+
+          <button
+            type="button"
+            data-testid="drawer-toggle-ai"
+            aria-pressed={aiMode !== 'closed'}
+            className={`h-7 shrink-0 rounded-lg px-2.5 text-xs font-mono tracking-wider transition-colors flex items-center gap-1.5 ${
+              aiMode !== 'closed'
+                ? 'bg-sky-600 text-white font-semibold shadow-sm'
+                : 'border border-border-subtle bg-app-surface-subtle text-txt-secondary hover:text-txt-primary hover:bg-app-surface-hover'
+            }`}
+            title="Öppna / stäng AI Hub (Chat, Mission Agents, MCP, Kunskapsbas)"
+            onClick={() => setAiMode(aiMode === 'closed' ? 'panel' : 'closed')}
+          >
+            <Sparkles size={12} className={aiMode !== 'closed' ? 'text-white' : 'text-sky-400'} />
+            <span>Chat</span>
+          </button>
+
+          {aiMode !== 'closed' && (
             <button
-              className="h-full shrink-0 px-3 text-xs font-mono tracking-wider text-neutral-300 hover:text-white hover:bg-white/[0.04] border-l border-white/10"
-              onClick={() => void nativeHermes.set({ mode: 'full' })}
-            >
-              Expand AI
-            </button>
-          )
-        ) : (
-          aiMode !== 'closed' && (
-            <button
+              type="button"
               data-testid="topbar-expand-ai-btn"
               title={
                 aiMode === 'hub'
                   ? 'Växla tillbaka till sidopanel'
                   : 'Expandera AI Hub till helskärm (Mission Agents, MCP & KB)'
               }
-              className={`h-full shrink-0 px-3 text-xs font-mono tracking-wider border-l border-white/10 transition-colors flex items-center gap-1.5 ${
+              className={`h-7 shrink-0 rounded-lg px-2.5 text-xs font-mono tracking-wider border transition-colors flex items-center gap-1.5 ${
                 aiMode === 'hub'
-                  ? 'bg-white/10 text-white'
-                  : 'text-neutral-400 hover:text-white hover:bg-white/[0.04]'
+                  ? 'border-sky-500/50 bg-sky-500/15 text-sky-300'
+                  : 'border-border-subtle text-txt-muted hover:text-txt-primary hover:bg-app-surface-hover'
               }`}
               onClick={() => setAiMode(aiMode === 'hub' ? 'panel' : 'hub')}
             >
               <span>{aiMode === 'hub' ? 'Sidebar AI' : 'Expand AI'}</span>
             </button>
-          )
-        )}
+          )}
+        </div>
       </header>
 
       {/* Main Content Area: non-active tabs stay mounted with display: none */}
@@ -734,8 +842,7 @@ const AppContent: React.FC = () => {
         onMouseDownCapture={() => setTabBarFocused(false)}
         className="relative flex flex-1 w-full overflow-hidden bg-app"
         style={{
-          paddingRight:
-            !nativeHermes && aiMode === "panel" ? `${aiPanelWidth}px` : undefined,
+          paddingRight: aiMode === "panel" ? `${aiPanelWidth}px` : undefined,
         }}
       >
         {!sessionLoaded ? null : (
@@ -933,6 +1040,21 @@ const AppContent: React.FC = () => {
         )}
       </main>
 
+      {/* Persistent Bottom Status Bar & Global Transfer HUD (F6 — Option 1B + 3A) */}
+      <BottomStatusBar
+        tabs={tabs}
+        activeTabId={activeTabId}
+        theme={settings.theme}
+        onChangeTheme={handleChangeTheme}
+        smartcardAuthMode={settings.smartcardAuthMode}
+        onOpenTunnels={handleOpenTunnels}
+        onOpenDirSync={handleOpenDirSync}
+        onOpenSettings={handleOpenSettings}
+        onOpenConnections={handleOpenProfiles}
+        onToggleAi={() => setAiMode((prev) => (prev === 'closed' ? 'panel' : 'closed'))}
+        aiOpen={aiMode !== 'closed'}
+      />
+
       <GlobalOverlays />
       <AppNotice message={notice} onDismiss={dismissNotice} />
 
@@ -954,7 +1076,7 @@ const AppContent: React.FC = () => {
         onViewK8sLogs={handleViewK8sLogs}
       />
 
-      {/* Quick-link / Top Bar / Ctrl+Shift+O: manage or connect to saved SSH/S3 profiles */}
+      {/* Left Slide-Over Drawer: Connections & Inventory */}
       <ConnectionManagerModal
         open={profilesModalOpen}
         initialTab={profilesModalTab}
@@ -975,7 +1097,7 @@ const AppContent: React.FC = () => {
         onBrowseK8sFiles={handleBrowseK8sFiles}
       />
 
-      {/* Ctrl+Shift+G / top bar: find a profile, tab or user@host and go to it */}
+      {/* Global Command Palette / Omnibar (Ctrl+Shift+G / Top Bar) */}
       {globalSearchOpen && globalSearchEnabled && (
         <GlobalSearchPalette
           tabs={tabs}
@@ -988,10 +1110,16 @@ const AppContent: React.FC = () => {
           shortcuts={settings.shortcuts}
           onRunAction={handleRunGlobalAction}
           onConnectSystem={(members, source) => void handleConnectSystem(members, source)}
+          onOpenTunnels={handleOpenTunnels}
+          onOpenDirSync={handleOpenDirSync}
+          onOpenSettings={handleOpenSettings}
+          onOpenAiHub={() => setAiMode('panel')}
+          onChangeTheme={handleChangeTheme}
+          onGoHome={() => setActiveTabId('')}
         />
       )}
 
-      {/* Settings Modal */}
+      {/* Right Slide-Over Drawer: Settings */}
       <SettingsModal
         open={settingsModalOpen}
         initialCategory={settingsCategory}
@@ -1000,7 +1128,7 @@ const AppContent: React.FC = () => {
         onClose={() => setSettingsModalOpen(false)}
       />
 
-      {/* SSH Tunnels Modal (global, across all connections) */}
+      {/* Right Slide-Over Drawer: SSH Tunnels */}
       <SSHGlobalTunnelsModal open={tunnelsModalOpen} onClose={() => setTunnelsModalOpen(false)} />
 
       <SyncBootstrapModal
@@ -1009,7 +1137,7 @@ const AppContent: React.FC = () => {
         onComplete={handleSyncBootstrapComplete}
       />
 
-      {/* Saved directory-sync profiles: "Run" always jumps to a fresh diff review, never straight to applying */}
+      {/* Right Slide-Over Drawer: Saved Directory-Sync Profiles */}
       <DirSyncSavedProfilesModal
         open={dirSyncProfilesOpen}
         onClose={() => setDirSyncProfilesOpen(false)}
@@ -1023,7 +1151,13 @@ const AppContent: React.FC = () => {
         onClose={() => setDirSyncRunProfile(null)}
         runProfile={dirSyncRunProfile}
       />
-      {!nativeHermes && (
+
+      {/* Right Slide-Over Drawer: AI Hub */}
+      <div
+        data-testid="drawer-ai"
+        data-drawer-open={aiMode !== 'closed' ? 'true' : 'false'}
+        className={aiMode !== 'closed' ? 'sshs3-slide-drawer-right contents' : 'contents'}
+      >
         <AiHubPanel
           mode={aiMode}
           setMode={setAiMode}
@@ -1037,7 +1171,7 @@ const AppContent: React.FC = () => {
             }
           }}
         />
-      )}
+      </div>
     </div>
   );
 };

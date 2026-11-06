@@ -127,15 +127,23 @@ export const SSHGlobalTunnelsModal: React.FC<SSHGlobalTunnelsModalProps> = ({ op
 
   return (
     <div
-      ref={dialogRef}
-      role="dialog"
-      aria-modal="true"
-      aria-label="All SSH tunnels"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 animate-in fade-in duration-150"
+      data-testid="drawer-tunnels"
+      data-drawer-side="right"
+      className="fixed inset-0 z-50 flex items-stretch justify-end bg-black/55 backdrop-blur-[2px] animate-in fade-in duration-150"
+      onClick={(e) => {
+        if (!wizardTarget && e.target === e.currentTarget) onClose();
+      }}
     >
-      <div className="flex max-h-[90vh] w-full max-w-2xl flex-col rounded-xl border border-border-subtle bg-app-card shadow-2xl overflow-hidden">
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="All SSH tunnels"
+        data-testid="slide-over-drawer"
+        className="sshs3-slide-drawer sshs3-slide-drawer-right flex h-full w-full max-w-2xl flex-col border-l border-border-subtle bg-app-card shadow-2xl overflow-hidden"
+      >
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-divider bg-app-surface px-5 py-3.5">
+        <div className="flex items-center justify-between border-b border-divider bg-app-surface/90 px-5 py-3.5 backdrop-blur-md">
           <div className="flex items-center gap-3">
             <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-500/15 border border-indigo-500/30 text-indigo-400">
               <Cable className="h-5 w-5" />

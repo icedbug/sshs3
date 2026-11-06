@@ -5,10 +5,21 @@ import type { K8sTerminalTarget } from './kubernetes';
 /** 'row' places children side by side (a vertical divider); 'column' stacks them (a horizontal divider). */
 export type PaneOrientation = 'row' | 'column';
 
+/** Surface type rendered inside a PaneLeaf ('terminal' by default, or 'sftp' for Host Workspace split view). */
+export type PaneSurfaceType = 'terminal' | 'sftp';
+
 export interface PaneLeaf {
   type: 'leaf';
   id: string;
   config?: SSHConnectionConfig;
+  /** Optional alias for `config` when binding an SFTP split leaf to an SSH host. */
+  sshConfig?: SSHConnectionConfig;
+  /** Surface rendered inside this pane leaf (defaults to 'terminal'). */
+  surfaceType?: PaneSurfaceType;
+  /** Alias for `surfaceType` ('terminal' | 'sftp'). */
+  leafType?: PaneSurfaceType;
+  /** Optional initial remote directory path for SFTP surface leaves. */
+  sftpInitialPath?: string;
   /** True when this pane runs a local shell instead of an SSH connection. */
   local?: boolean;
   /** Set when this pane is an interactive exec session into a Kubernetes/OpenShift container. */

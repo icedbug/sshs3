@@ -3,7 +3,6 @@ import {
   buildCodexHeaders,
   type CodexCredentials,
 } from "../CodexAuthProvider";
-import type { HermesModelConfig } from "../HermesManager";
 import type {
   AgentTask,
   KbDocument,
@@ -11,7 +10,7 @@ import type {
   MissionAgent,
 } from "../../../shared/types/aiHub";
 import type { ToolRequest } from "./ToolBroker";
-import type { AgentRuntime, RunEvent } from "./AgentRuntime";
+import type { AgentModelConfig, AgentRuntime, RunEvent } from "./AgentRuntime";
 import { isDemoMode } from "./demoWorkspace";
 import { boundedContext, safeError } from "./privacy";
 
@@ -1170,7 +1169,7 @@ const NO_CODEX_SESSION =
  * start() resolves an OAuth session from its auth files.
  */
 function missingProviderSetup(
-  model: Exclude<HermesModelConfig, { kind: "openai-codex" }>,
+  model: Exclude<AgentModelConfig, { kind: "openai-codex" }>,
 ): string | undefined {
   if (model.kind === "anthropic")
     return isBlank(model.apiKey) ? "Anthropic API key missing" : undefined;
@@ -1205,7 +1204,7 @@ export class DirectAgentRuntime implements AgentRuntime {
 
   async start(
     task: AgentTask,
-    model: HermesModelConfig,
+    model: AgentModelConfig,
     onEvent: (event: RunEvent) => void,
   ): Promise<void> {
     try {
@@ -1579,7 +1578,7 @@ export class DirectAgentRuntime implements AgentRuntime {
 
   private async runCodexResponsesLoop(
     task: AgentTask,
-    model: Extract<HermesModelConfig, { kind: "openai-codex" }>,
+    model: Extract<AgentModelConfig, { kind: "openai-codex" }>,
     creds: CodexCredentials,
     onEvent: (event: RunEvent) => void,
   ): Promise<void> {
@@ -1788,7 +1787,7 @@ export class DirectAgentRuntime implements AgentRuntime {
 
   private async runOpenAiCompatibleLoop(
     task: AgentTask,
-    model: Extract<HermesModelConfig, { kind: "custom" }>,
+    model: Extract<AgentModelConfig, { kind: "custom" }>,
     onEvent: (event: RunEvent) => void,
   ): Promise<void> {
     const baseUrl = model.baseUrl.replace(/\/$/, "");
@@ -1950,7 +1949,7 @@ export class DirectAgentRuntime implements AgentRuntime {
 
   private async runAnthropicLoop(
     task: AgentTask,
-    model: Extract<HermesModelConfig, { kind: "anthropic" }>,
+    model: Extract<AgentModelConfig, { kind: "anthropic" }>,
     onEvent: (event: RunEvent) => void,
   ): Promise<void> {
     const base = (model.baseUrl || "https://api.anthropic.com").replace(/\/$/, "");

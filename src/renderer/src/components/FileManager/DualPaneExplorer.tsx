@@ -715,21 +715,33 @@ export const DualPaneExplorer: React.FC<DualPaneExplorerProps> = ({
               onClick={() => {
                 const leftTarget = panes.left.source.providerId.replace(/^(sftp-|s3-)/, '');
                 const rightTarget = panes.right.source.providerId.replace(/^(sftp-|s3-)/, '');
+                const contextText = [
+                  `Dual-Pane Explorer Context:`,
+                  `- Left Pane: ${panes.left.source.label} [provider=${panes.left.source.providerId}, type=${panes.left.source.sourceType}] path=${panes.left.path}`,
+                  `- Right Pane: ${panes.right.source.label} [provider=${panes.right.source.providerId}, type=${panes.right.source.sourceType}] path=${panes.right.path}`,
+                ].join('\n');
+                const promptText = `Jämför innehållet och konfigurationsfilerna mellan vänster panel (${leftTarget}:${panes.left.path}) och höger panel (${rightTarget}:${panes.right.path}) med sshs3_storage_ops.`;
+                window.dispatchEvent(
+                  new CustomEvent('sshs3:ai-open', {
+                    detail: {
+                      mode: 'panel',
+                      view: 'Work',
+                      prompt: promptText,
+                      context: contextText,
+                    },
+                  })
+                );
                 window.dispatchEvent(
                   new CustomEvent('sshs3:ai-attach', {
                     detail: {
                       label: `@storage:${panes.left.source.label}↔${panes.right.source.label}`,
-                      text: [
-                        `Dual-Pane Explorer Context:`,
-                        `- Left Pane: ${panes.left.source.label} [provider=${panes.left.source.providerId}, type=${panes.left.source.sourceType}] path=${panes.left.path}`,
-                        `- Right Pane: ${panes.right.source.label} [provider=${panes.right.source.providerId}, type=${panes.right.source.sourceType}] path=${panes.right.path}`,
-                      ].join('\n'),
-                      prompt: `Jämför innehållet och konfigurationsfilerna mellan vänster panel (${leftTarget}:${panes.left.path}) och höger panel (${rightTarget}:${panes.right.path}) med sshs3_storage_ops.`,
+                      text: contextText,
+                      prompt: promptText,
                     },
                   })
                 );
               }}
-              className="inline-flex items-center gap-1 rounded border border-sky-500/40 bg-sky-500/15 px-2 py-0.5 text-2xs font-semibold text-sky-300 hover:bg-sky-500/25 transition-colors"
+              className="inline-flex items-center gap-1 rounded border border-sky-500/40 bg-sky-500/15 px-2 py-0.5 text-2xs font-semibold text-sky-400 hover:bg-sky-500/25 transition-colors"
             >
               <span>🔍 AI Diff Vänster ↔ Höger</span>
             </button>
@@ -739,17 +751,29 @@ export const DualPaneExplorer: React.FC<DualPaneExplorerProps> = ({
               title="Indexera aktiv mapp eller S3-prefix direkt i Knowledge Base (@kb)"
               onClick={() => {
                 const activePane = panes[activeSide];
+                const contextText = `KB Ingest Request:\nSource: ${activePane.source.label} (${activePane.source.sourceType})\nProvider ID: ${activePane.source.providerId}\nPath: ${activePane.path}`;
+                const promptText = `Indexera och spara viktig dokumentation/runbooks eller konfigurationsfiler från ${activePane.source.label} (${activePane.path}) in i vår Knowledge Base (@kb).`;
+                window.dispatchEvent(
+                  new CustomEvent('sshs3:ai-open', {
+                    detail: {
+                      mode: 'panel',
+                      view: 'Knowledge Base',
+                      prompt: promptText,
+                      context: contextText,
+                    },
+                  })
+                );
                 window.dispatchEvent(
                   new CustomEvent('sshs3:ai-attach', {
                     detail: {
                       label: `@kb-ingest:${activePane.source.label}`,
-                      text: `KB Ingest Request:\nSource: ${activePane.source.label} (${activePane.source.sourceType})\nProvider ID: ${activePane.source.providerId}\nPath: ${activePane.path}`,
-                      prompt: `Indexera och spara viktig dokumentation/runbooks eller konfigurationsfiler från ${activePane.source.label} (${activePane.path}) in i vår Knowledge Base (@kb).`,
+                      text: contextText,
+                      prompt: promptText,
                     },
                   })
                 );
               }}
-              className="inline-flex items-center gap-1 rounded border border-purple-500/40 bg-purple-500/15 px-2 py-0.5 text-2xs font-semibold text-purple-300 hover:bg-purple-500/25 transition-colors"
+              className="inline-flex items-center gap-1 rounded border border-purple-500/40 bg-purple-500/15 px-2 py-0.5 text-2xs font-semibold text-purple-400 hover:bg-purple-500/25 transition-colors"
             >
               <span>📥 Indexera i KB</span>
             </button>
@@ -764,7 +788,7 @@ export const DualPaneExplorer: React.FC<DualPaneExplorerProps> = ({
                   })
                 );
               }}
-              className="inline-flex items-center gap-1 rounded border border-emerald-500/40 bg-emerald-500/15 px-2 py-0.5 text-2xs font-semibold text-emerald-300 hover:bg-emerald-500/25 transition-colors"
+              className="inline-flex items-center gap-1 rounded border border-emerald-500/40 bg-emerald-500/15 px-2 py-0.5 text-2xs font-semibold text-emerald-400 hover:bg-emerald-500/25 transition-colors"
             >
               <span>📚 Kunskapsbas (KB)</span>
             </button>

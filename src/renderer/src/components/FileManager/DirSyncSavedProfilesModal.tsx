@@ -165,12 +165,21 @@ export const DirSyncSavedProfilesModal: React.FC<DirSyncSavedProfilesModalProps>
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 animate-in fade-in duration-150"
+      data-testid="drawer-dirsync"
+      data-drawer-side="right"
+      className="fixed inset-0 z-50 flex items-stretch justify-end bg-black/55 backdrop-blur-[2px] animate-in fade-in duration-150"
       onClick={handleBackdropClick}
     >
-      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Saved sync profiles" className="w-full max-w-2xl max-h-[85vh] flex flex-col rounded-xl border border-border-subtle bg-app-card shadow-2xl overflow-hidden">
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Saved sync profiles"
+        data-testid="slide-over-drawer"
+        className="sshs3-slide-drawer sshs3-slide-drawer-right w-full max-w-2xl h-full flex flex-col border-l border-border-subtle bg-app-card shadow-2xl overflow-hidden"
+      >
         {/* Modal Header */}
-        <div className="flex items-center justify-between border-b border-divider bg-app-surface px-4 py-3 shrink-0">
+        <div className="flex items-center justify-between border-b border-divider bg-app-surface/90 px-4 py-3 shrink-0 backdrop-blur-md">
           <div className="flex items-center gap-2">
             <FolderSync className="h-4 w-4 text-sky-400" />
             <h2 className="text-sm font-semibold text-txt-primary">Saved Sync Profiles</h2>

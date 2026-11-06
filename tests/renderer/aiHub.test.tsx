@@ -31,7 +31,6 @@ beforeEach(() => {
       enabled: true,
       provider: "openai-compatible",
       model: "local",
-      useHermes: true,
       hasApiKey: false,
     },
     preferences: {
@@ -269,7 +268,6 @@ describe("persistent AI chat", () => {
       provider: "openai-compatible",
       model: "gpt-sol-latest",
       baseUrl: "https://openrouter.ai/api/v1",
-      useHermes: true,
       hasApiKey: false,
       codexConnected: true,
       codexAccountEmail: "jacob@example.com",
@@ -303,7 +301,6 @@ describe("persistent AI chat", () => {
             provider: "openai-codex",
             model: "gpt-6.1-sol-900k",
             baseUrl: "",
-            useHermes: false,
           }),
         }),
       ),

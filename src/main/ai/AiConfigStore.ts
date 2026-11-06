@@ -133,8 +133,6 @@ export class AiConfigStore {
           next.temperature = Math.max(0, Math.min(1.5, Math.round(t * 100) / 100));
         }
       }
-      if (update.useHermes !== undefined)
-        next.useHermes = Boolean(update.useHermes);
       if (update.baseUrl !== undefined) {
         const baseUrl = update.baseUrl.trim();
         if (baseUrl) assertHttpUrl(baseUrl);
@@ -211,7 +209,6 @@ export class AiConfigStore {
             provider: "openai-codex",
             model: codex.defaultModel || DEFAULT_AI_MODELS["openai-codex"],
             baseUrl: undefined,
-            useHermes: false,
           };
         }
       }
@@ -239,7 +236,6 @@ export class AiConfigStore {
           enabled: true,
           provider: "openai-codex",
           model: codex.defaultModel || DEFAULT_AI_MODELS["openai-codex"],
-          useHermes: false,
         };
       }
       return { ...DEFAULT_AI_CONFIG };
@@ -301,7 +297,6 @@ export class AiConfigStore {
         typeof stored.temperature === "number" && Number.isFinite(stored.temperature)
           ? stored.temperature
           : 0.2,
-      useHermes: stored.useHermes === true,
     };
   }
 

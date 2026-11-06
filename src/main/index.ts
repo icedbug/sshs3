@@ -2,9 +2,6 @@ import crypto from 'node:crypto';
 import { app, BrowserWindow, dialog, Menu, nativeImage, safeStorage, screen, Tray } from 'electron';
 import { createHub } from './ai/hub/createHub';
 import { DEMO_ENV_VARS, demoModeRelaunchArgs, demoWorkspaceDir, isDemoMode } from './demo/demoMode';
-import { NativeDesktopShell } from './ai/desktop/NativeDesktopShell';
-import { getNativeWindow } from './ai/desktop/nativeWindow';
-import { nativeTools, setNativeHub } from './ai/desktop/nativeTools';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -81,8 +78,7 @@ if (isDemoMode()) {
 // Enforce single-instance lock: if an instance is already running with the same userData directory,
 // focus the existing window and immediately terminate the new instance.
 let hasSingleInstanceLock = true;
-const nativeHermes = process.env.SSHS3_NATIVE_HERMES === '1';
-if (!nativeHermes && process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
+if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
   hasSingleInstanceLock = app.requestSingleInstanceLock();
   if (!hasSingleInstanceLock) {
     app.quit();
@@ -104,7 +100,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Only the instance that owns the single-instance lock writes the log file.
 if (hasSingleInstanceLock && process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
-  configureLogging({ dir: app.getPath('logs'), mirrorToConsole: !app.isPackaged && !nativeHermes });
+  configureLogging({ dir: app.getPath('logs'), mirrorToConsole: !app.isPackaged });
 }
 const log = createLogger('app');
 const quitLog = createLogger('quit');
@@ -185,9 +181,8 @@ process.on('unhandledRejection', (reason) => {
 const windowManager = new WindowManager<BrowserWindow>();
 // Secondary windows whose close was confirmed (or needs no confirmation) and may now go through.
 const closeConfirmed = new Set<number>();
-// The main window (key null), or the native Hermes host window; used by the AI Hub and its tray.
+// The main window (key null); used by the AI Hub and its tray.
 let mainWindow: BrowserWindow | null = null;
-let nativeShell: NativeDesktopShell | null = null;
 let backgroundTray: Tray | null = null;
 // Windows-only startup progress window (null elsewhere); see ./splash/SplashWindow.
 let splash: SplashController | null = null;
@@ -299,17 +294,6 @@ function scheduleRelaunch(args: string[]): void {
   // A portable Windows build runs from a temporary extraction that is removed on exit: relaunch the portable exe.
   const portableExe = process.env.PORTABLE_EXECUTABLE_FILE;
   app.relaunch(portableExe ? { args, execPath: portableExe } : { args });
-}
-
-/**
- * Native Hermes mode: Hermes owns the host window and sshs3 runs as a view inside it (see
- * ./ai/desktop/NativeDesktopShell), so no regular app window is created.
- */
-async function createNativeHermesWindow(): Promise<BrowserWindow> {
-  mainWindow = await getNativeWindow();
-  if (!nativeShell) nativeShell = new NativeDesktopShell(mainWindow, path.join(__dirname, 'index.cjs'), path.join(__dirname, '../dist/index.html'));
-  mainWindow.once('closed', () => { nativeShell = null; mainWindow = null; });
-  return mainWindow;
 }
 
 /** Bounds changes are saved after the window has been still for this long. */
@@ -552,21 +536,15 @@ async function initializeApp(): Promise<void> {
   configureRegistryDir(path.join(app.getPath('userData'), 'runtime-agents'));
 
   // Remove default dead application menu
-  if (!nativeHermes) Menu.setApplicationMenu(null);
+  Menu.setApplicationMenu(null);
 
   // Initialize and register IPC bridge
   ipcBridge = new IpcBridge({
     policy,
-    // Native Hermes mode has a single sshs3 view inside Hermes' window, not WindowManager windows,
-    // so IPC there targets (and trusts) only that view, as before multi-window support.
-    ...(nativeHermes
-      ? { getWebContents: () => nativeShell?.getWebContents() }
-      : {
-          getWebContents: () => windowManager.focusedWebContents() as Electron.WebContents | undefined,
-          isTrustedFrame: (frame: Electron.WebFrameMain | null) => windowManager.isTrustedFrame(frame),
-          windows: windowManager,
-          windowActions,
-        }),
+    getWebContents: () => windowManager.focusedWebContents() as Electron.WebContents | undefined,
+    isTrustedFrame: (frame: Electron.WebFrameMain | null) => windowManager.isTrustedFrame(frame),
+    windows: windowManager,
+    windowActions,
     confirmQuit,
   });
   ipcBridge.aiHub = createHub(ipcBridge, {
@@ -601,7 +579,6 @@ async function initializeApp(): Promise<void> {
     relaunchForDemoMode,
   });
   ipcBridge.register();
-  if (nativeHermes) setNativeHub(ipcBridge.aiHub);
   await ipcBridge.aiHub.initialize().catch((error) => log.warn('AI Hub initialization failed', error));
   void ipcBridge.settingsStore
     .getSettings()
@@ -612,12 +589,8 @@ async function initializeApp(): Promise<void> {
   void ipcBridge.clearClipboardHistoryIfConfigured().catch(() => {});
 
   // Create the main window immediately so the UI starts loading without waiting for subshells
-  if (nativeHermes) {
-    await createNativeHermesWindow();
-  } else {
-    await restoreWindows();
-    ipcBridge.startUpdateChecks();
-  }
+  await restoreWindows();
+  ipcBridge.startUpdateChecks();
 
   // Run background tasks (orphan cleanup, login shell environment, trust store, ~/.ssh/config sync)
   // in parallel with window loading so startup time is not penalized
@@ -658,7 +631,7 @@ async function initializeApp(): Promise<void> {
 
 app.whenReady().then(() => {
   if (!hasSingleInstanceLock) return;
-  if (!nativeHermes) splash = showSplash();
+  splash = showSplash();
   return initializeApp();
 });
 
@@ -675,7 +648,6 @@ app.on('before-quit', (event) => {
       isQuitting = true;
       if (ipcBridge) {
         try {
-          if (nativeHermes) await nativeTools.dispose();
           await ipcBridge.dispose();
         } catch {
           // ignore
@@ -725,7 +697,7 @@ app.on('window-all-closed', () => {
 });
 
 app.on('activate', () => {
-  if (!nativeHermes && BrowserWindow.getAllWindows().length === 0) {
+  if (BrowserWindow.getAllWindows().length === 0) {
     createWindow();
   }
 });

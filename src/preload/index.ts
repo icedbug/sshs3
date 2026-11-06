@@ -17,7 +17,6 @@ export const api: MultiSSHApi = createMultiSSHApi({
       return (file as any)?.path || '';
     }
   },
-  enableNativeHermes: typeof process !== 'undefined' && Array.isArray(process.argv) && process.argv.includes('--sshs3-native-hermes'),
 });
 
 export function exposePreloadApi(): void {

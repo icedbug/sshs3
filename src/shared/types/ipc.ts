@@ -1,5 +1,4 @@
 import type { AiHubApi } from './aiHub';
-import type { NativeHermesApi } from './nativeHermes';
 import type { UpdateState } from './update';
 import type {
   SshCaConfig,
@@ -609,7 +608,6 @@ export interface StorageConnectConfig {
 }
 
 export interface MultiSSHApi extends AiHubApi {
-  nativeHermes?: NativeHermesApi;
   // Terminal
   terminalCreate(options: {
     profileId?: string;

@@ -102,17 +102,6 @@ describe('the desktop app (index.ts)', () => {
     // Nothing between the redirect and the lock looks at demo mode, so a demo instance is not exempt.
     expect(index.slice(redirectEnd, lock)).not.toMatch(/isDemoMode|demoMode|SSHS3_DEMO|--demo/);
   });
-
-  it('applies the same redirect in the native Hermes entry before Hermes gets its directories', () => {
-    const entry = mainSource('desktopEntry.ts');
-    const derived = entry.indexOf('demoWorkspaceDir(');
-    expect(derived, 'desktopEntry.ts derives the demo data dir').toBeGreaterThan(-1);
-    for (const use of ["app.setPath('userData'", 'HERMES_DESKTOP_USER_DATA_DIR', 'HERMES_HOME']) {
-      const at = entry.indexOf(use);
-      expect(at, `${use} is in desktopEntry.ts`).toBeGreaterThan(-1);
-      expect(at, `${use} comes after the demo redirect`).toBeGreaterThan(derived);
-    }
-  });
 });
 
 describe('the web server (serverEntry.ts)', () => {

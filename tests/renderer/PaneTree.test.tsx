@@ -261,4 +261,102 @@ describe('PaneTree Component', () => {
 
     expect(screen.queryByRole('separator')).not.toBeInTheDocument();
   });
+
+  it('renders SessionTelemetryPill in pane header with live CPU, latency, 8-point SVG sparkline, and 1-click detail popover (F7)', () => {
+    const sshLeaf: PaneLeaf = {
+      id: 'pane-ssh-1',
+      type: 'leaf',
+      local: true,
+    };
+
+    render(
+      <PaneTreeView
+        node={sshLeaf}
+        isActive={true}
+        activePaneId="pane-ssh-1"
+        totalPanes={1}
+        settings={dummySettings}
+        platform="linux"
+        onSelectPane={vi.fn()}
+        onSplitPane={vi.fn()}
+        onClosePane={vi.fn()}
+        onChangeConnection={vi.fn()}
+        onOpenLocalTerminal={vi.fn()}
+        onCloseTab={vi.fn()}
+      />
+    );
+
+    const pill = screen.getByTestId('session-telemetry-pill');
+    expect(pill).toBeInTheDocument();
+    expect(pill.className).toContain('sshs3-telemetry-pill');
+
+    const sparkline = screen.getByTestId('session-telemetry-sparkline');
+    expect(sparkline).toBeInTheDocument();
+    const points = (sparkline.getAttribute('points') || '').trim().split(/\s+/);
+    expect(points.length).toBe(8);
+
+    // 1-click expand opens detail popover
+    expect(screen.queryByTestId('session-telemetry-detail')).not.toBeInTheDocument();
+    fireEvent.click(pill);
+    expect(screen.getByTestId('session-telemetry-detail')).toBeInTheDocument();
+    expect(screen.getByTestId('telemetry-action-split-sftp')).toBeInTheDocument();
+    expect(screen.getByTestId('telemetry-action-diagnose-ai')).toBeInTheDocument();
+    expect(screen.getByTestId('telemetry-action-open-fleet')).toBeInTheDocument();
+
+    // Clicking Diagnose with AI dispatches sshs3:ai-open with telemetry context
+    const aiEvents: CustomEvent[] = [];
+    const onAiOpen = (e: Event) => aiEvents.push(e as CustomEvent);
+    window.addEventListener('sshs3:ai-open', onAiOpen);
+    try {
+      fireEvent.click(screen.getByTestId('telemetry-action-diagnose-ai'));
+      expect(aiEvents.length).toBe(1);
+      expect(aiEvents[0].detail.telemetry).toBeDefined();
+    } finally {
+      window.removeEventListener('sshs3:ai-open', onAiOpen);
+    }
+  });
+
+  it('splits a pane side-by-side with SFTP browser when clicking SFTP Split, supports resizing, and closes SFTP split cleanly (F8)', async () => {
+    const localLeaf: PaneLeaf = {
+      id: 'pane-host-1',
+      type: 'leaf',
+    };
+    const onResizeSplit = vi.fn();
+
+    render(
+      <PaneTreeView
+        node={localLeaf}
+        isActive={true}
+        activePaneId="pane-host-1"
+        totalPanes={1}
+        settings={dummySettings}
+        platform="linux"
+        onSelectPane={vi.fn()}
+        onSplitPane={vi.fn()}
+        onResizeSplit={onResizeSplit}
+        onClosePane={vi.fn()}
+        onChangeConnection={vi.fn()}
+        onOpenLocalTerminal={vi.fn()}
+        onCloseTab={vi.fn()}
+      />
+    );
+
+    expect(screen.queryByTestId('host-workspace-sftp-pane')).not.toBeInTheDocument();
+
+    // Click the 1-click Split SFTP button in the header
+    fireEvent.click(screen.getByTestId('pane-split-sftp-pane-host-1'));
+
+    expect(screen.getByTestId('host-workspace-sftp-pane')).toBeInTheDocument();
+    const divider = screen.getByRole('separator', { name: 'Resize terminal panes' });
+    expect(divider).toBeInTheDocument();
+
+    // Resize the split divider between terminal and SFTP browser
+    fireEvent.keyDown(divider, { key: 'ArrowRight', ctrlKey: true, altKey: true });
+    expect(onResizeSplit).toHaveBeenCalledTimes(1);
+
+    // Close the SFTP split pane and verify the original pane remains mounted
+    fireEvent.click(screen.getByTestId('close-pane-pane-host-1-sftp'));
+    expect(screen.queryByTestId('host-workspace-sftp-pane')).not.toBeInTheDocument();
+    expect(screen.getByTestId('terminal-pane-pane-host-1')).toBeInTheDocument();
+  });
 });

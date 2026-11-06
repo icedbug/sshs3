@@ -67,9 +67,6 @@ export function useSelectedTerminal(): string {
 }
 export function selectAiTerminal(id: string): void {
   selected = id;
-  if (window.multissh?.nativeHermes) {
-    void window.multissh.nativeHermes.selectTerminal(id || undefined).catch(() => {});
-  }
   publish();
 }
 export async function hubRequest(request: HubRequest): Promise<HubSnapshot> {

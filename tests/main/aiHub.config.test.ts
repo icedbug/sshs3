@@ -122,7 +122,6 @@ describe("AI model credentials", () => {
         enabled: true,
         provider: "openai-compatible",
         model: "gpt-sol-latest",
-        useHermes: true,
         baseUrl: "https://openrouter.ai/api/v1",
       }),
     );
@@ -167,7 +166,6 @@ describe("AI model credentials", () => {
           enabled: true,
           provider: "openai-codex",
           model: "gpt-6.1-sol",
-          useHermes: false,
         }),
     );
     const bomStore = new AiConfigStore(file);

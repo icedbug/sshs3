@@ -30,7 +30,6 @@ import { SHELL_KINDS } from "../../../shared/types/aiHub";
 import { DEFAULT_AI_MODELS } from "../../../shared/types/ai";
 import { AiConfigStore } from "../AiConfigStore";
 import { CodexAuthProvider } from "../CodexAuthProvider";
-import { HermesManager, type HermesModelConfig } from "../HermesManager";
 import { HubStore } from "./HubStore";
 import { S3WorkspaceSyncService } from "./S3WorkspaceSyncService";
 import { createTwoFilesPatch } from "diff";
@@ -73,7 +72,8 @@ import {
 } from "./TerminalRegistry";
 import { ToolBroker, type ToolDependencies } from "./ToolBroker";
 import {
-  HermesRuntime,
+  createAgentRuntime,
+  type AgentModelConfig,
   type AgentRuntime,
   type RunEvent,
 } from "./AgentRuntime";
@@ -565,12 +565,6 @@ export class HubService {
         log.warn("S3 workspace start failed", safeError(e)),
       );
       this.resume();
-      if (process.env.SSHS3_NATIVE_HERMES === '1') {
-        // Native Hermes owns conversations, profiles, schedules and persistent memory.
-        // Keep only sshs3's terminal/tool authority; do not revive legacy agent jobs.
-        this.terminals.observe(true);
-        return;
-      }
       const config = await this.config.getView().catch((e) => {
         log.warn("AiConfigStore getView failed during init", safeError(e));
         return { enabled: true } as Awaited<ReturnType<typeof this.config.getView>>;
@@ -878,7 +872,6 @@ export class HubService {
 
   async snapshot(): Promise<HubSnapshot> {
     await this.initialize();
-    const manifest = await new HermesManager().getManifest();
     const preview = this.previewId && this.terminals.get(this.previewId);
     const extra = await this.collectExtraContext();
     const configView: import("../../../shared/types/ai").AiConfigView =
@@ -888,7 +881,6 @@ export class HubService {
           enabled: false,
           provider: "openai-codex" as const,
           model: "gpt-6.1-sol",
-          useHermes: false,
           hasApiKey: false,
           keyStorage: "encrypted" as const,
         };
@@ -944,7 +936,7 @@ export class HubService {
       demoMode: isDemoMode(),
       runtime: {
         bundled: true,
-        version: manifest?.tag ?? "native-ts-1.0",
+        version: "native-ts-1.0",
       },
       sessions: this.terminals.list(),
       tasks: allTasks,
@@ -1025,8 +1017,6 @@ export class HubService {
     if (this.disposed) throw new Error("Application is shutting down");
     if (!request || typeof request.action !== "string")
       throw new Error("Invalid AI request");
-    if (process.env.SSHS3_NATIVE_HERMES === '1' && ['start', 'reply', 'resume', 'schedule-save'].includes(request.action))
-      throw new Error('This installation uses native Hermes. Open the Hermes chat to start or schedule work.');
     switch (request.action) {
       case "snapshot":
         return this.snapshot();
@@ -2243,7 +2233,7 @@ export class HubService {
       throw new Error("Anthropic API key missing");
     if (provider === "openai-compatible" && !baseUrl)
       throw new Error("Model endpoint missing");
-    const modelConfig: HermesModelConfig =
+    const modelConfig: AgentModelConfig =
       provider === "openai-codex"
         ? { kind: "openai-codex", model, baseUrl }
         : provider === "anthropic"
@@ -2264,17 +2254,8 @@ export class HubService {
     task.error = undefined;
     const capability = await this.broker.issue(task);
     assertLaunching();
-    const runtime = new HermesRuntime(
-      new HermesManager({
-        homeDir: path.join(
-          app.getPath("userData"),
-          "ai-hub",
-          "runtime",
-          crypto.createHash("sha256").update(task.id).digest("hex"),
-        ),
-        toolEndpoint: capability,
-      }),
-      (req) => this.broker.invoke(capability.key, req),
+    const runtime = createAgentRuntime((req) =>
+      this.broker.invoke(capability.key, req),
     );
     this.runtimes.set(task.id, runtime);
     const timer = setTimeout(() => {
@@ -2299,19 +2280,6 @@ export class HubService {
           task.error = "Model connection ended without a final result.";
         }
         await runtime.stop();
-        // Hermes files are task-local. Erase runtime history: the redacted Hub store is authoritative.
-        const fs = await import("node:fs/promises");
-        await fs
-          .rm(
-            path.join(
-              app.getPath("userData"),
-              "ai-hub",
-              "runtime",
-              crypto.createHash("sha256").update(task.id).digest("hex"),
-            ),
-            { recursive: true, force: true },
-          )
-          .catch(() => {});
         if (this.runtimes.get(task.id) === runtime)
           this.runtimes.delete(task.id);
         this.changed();

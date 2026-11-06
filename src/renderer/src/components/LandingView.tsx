@@ -29,6 +29,7 @@ import {
   type NavigationDirection,
 } from '../lib/spatialNavigation';
 import { hubRequest, useHub } from '../lib/aiHub';
+import { requestHostWorkspaceSplit } from '../lib/paneTree';
 import { isWebBrowserMode } from '../lib/webClientBridge';
 
 export interface LandingViewProps {
@@ -36,6 +37,7 @@ export interface LandingViewProps {
   allSSH?: SSHConnectionConfig[];
   onConnectRecentSSH: (profile: SSHConnectionConfig) => void;
   onConnectSFTP: (profile: SSHConnectionConfig) => void;
+  onOpenHostWorkspace?: (profile: SSHConnectionConfig) => void;
   onQuickStartTerminal: () => void;
   onNewTab: (type: TabType) => void;
   onOpenProfiles: () => void;
@@ -155,6 +157,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
   allSSH = [],
   onConnectRecentSSH,
   onConnectSFTP,
+  onOpenHostWorkspace,
   onQuickStartTerminal,
   onNewTab,
   onOpenProfiles,
@@ -520,6 +523,27 @@ export const LandingView: React.FC<LandingViewProps> = ({
     );
   };
 
+  const handleOpenHostWorkspace = (
+    server: WorkspaceServerSummary,
+    connectable: SSHConnectionConfig
+  ) => {
+    requestHostWorkspaceSplit(connectable);
+    window.dispatchEvent(
+      new CustomEvent('sshs3:open-host-workspace', {
+        detail: {
+          serverId: server.id,
+          config: connectable,
+          server,
+        },
+      })
+    );
+    if (onOpenHostWorkspace) {
+      onOpenHostWorkspace(connectable);
+    } else {
+      onConnectRecentSSH(connectable);
+    }
+  };
+
   const handleAskAiAboutActivity = (event: WorkspaceActivityEvent) => {
     window.dispatchEvent(
       new CustomEvent('sshs3:ai-attach', {
@@ -801,14 +825,14 @@ export const LandingView: React.FC<LandingViewProps> = ({
       data-testid="landing-view"
       tabIndex={-1}
       onKeyDown={handleKeyDown}
-      className="sshs3-mission-canvas flex flex-1 flex-col items-center overflow-y-auto px-6 py-4 text-slate-200 animate-in fade-in duration-200 outline-none"
+      className="sshs3-mission-canvas flex flex-1 flex-col items-center overflow-y-auto px-6 py-4 text-txt-primary animate-in fade-in duration-200 outline-none"
     >
       <div className="w-full max-w-6xl flex flex-col space-y-3.5">
         {/* Recent Connections (first in DOM order when present so keyboard focus tests hit recent-connect-* first) */}
         {recentSSH.length > 0 && (
           <div className="sshs3-glass-panel w-full rounded-xl p-3 text-left">
             <div className="mb-2 flex items-center justify-between">
-              <div className="flex items-center gap-1.5 text-[11px] font-mono uppercase tracking-wider text-slate-400">
+              <div className="flex items-center gap-1.5 text-[11px] font-mono uppercase tracking-wider text-txt-muted">
                 <Clock className="h-3.5 w-3.5 text-sky-400" />
                 <span>Recent Connections</span>
               </div>
@@ -834,10 +858,10 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     className="recent-card sshs3-blade-card flex items-center justify-between gap-2 rounded-lg px-3 py-2"
                   >
                     <div className="min-w-0">
-                      <div className="truncate text-xs font-mono font-semibold text-white">
+                      <div className="truncate text-xs font-mono font-semibold text-txt-primary">
                         {profile.name}
                       </div>
-                      <div className="truncate text-[11px] text-slate-400 font-mono">
+                      <div className="truncate text-[11px] text-txt-muted font-mono">
                         {profile.username}@{profile.host}:{profile.port ?? 22}
                       </div>
                     </div>
@@ -846,11 +870,25 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         type="button"
                         data-testid={`recent-connect-${profile.id}`}
                         onClick={() => onConnectRecentSSH(profile)}
-                        className="rounded-md bg-gradient-to-b from-white to-slate-200 px-2.5 py-1 text-[11px] font-mono font-semibold text-slate-950 shadow-sm hover:from-sky-50 hover:to-white transition-all"
+                        className="rounded-md bg-accent px-2.5 py-1 text-[11px] font-mono font-semibold text-white shadow-sm hover:bg-accent-hover transition-all"
                       >
                         Connect
                       </button>
                       <SftpButton authType={profile.authType} onOpen={() => onConnectSFTP(profile)} />
+                      <button
+                        type="button"
+                        data-testid={
+                          filteredServers.some((s) => s.id === profile.id)
+                            ? `recent-connect-workspace-${profile.id}`
+                            : `blade-connect-workspace-${profile.id}`
+                        }
+                        title="Open Host Workspace (SSH + SFTP)"
+                        onClick={() => handleOpenHostWorkspace(summary, profile)}
+                        className="inline-flex items-center gap-1 rounded-md border border-sky-500/30 bg-sky-500/10 px-2 py-1 text-[10.5px] font-mono text-sky-300 hover:bg-sky-500/20 hover:border-sky-400/45 transition-all"
+                      >
+                        <Columns2 className="h-3 w-3 text-amber-400" />
+                        <span>Host Workspace (SSH + SFTP)</span>
+                      </button>
                       <button
                         type="button"
                         title="Fråga AI om denna server"
@@ -868,15 +906,15 @@ export const LandingView: React.FC<LandingViewProps> = ({
         )}
 
         {/* Unified Interactive Top Mission Bar */}
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.08] pb-3">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-divider pb-3">
           <div className="flex items-center gap-3">
             <BrandLogo className="h-7 w-auto drop-shadow-[0_0_12px_rgba(245,158,11,0.22)]" />
             <div className="flex items-center gap-2.5">
-              <h1 className="text-base font-bold tracking-tight text-white">
+              <h1 className="text-base font-bold tracking-tight text-txt-primary">
                 <span>ssh</span>
                 <span className="text-brand-s3">S3</span>
               </h1>
-              <span className="text-slate-700 font-mono text-xs">/</span>
+              <span className="text-txt-muted font-mono text-xs">/</span>
               <span className="inline-flex items-center gap-1.5 rounded-full border border-sky-500/20 bg-sky-500/[0.07] px-2.5 py-0.5 font-mono text-[10px] tracking-[0.14em] uppercase text-sky-300">
                 <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 sshs3-sonar-emerald" />
                 AI MISSION CONTROL
@@ -888,13 +926,13 @@ export const LandingView: React.FC<LandingViewProps> = ({
                 title="Växla det interaktiva 12-noders Enterprise Demo-Labbet"
                 className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[10px] font-mono border transition-all ${
                   hub?.demoMode
-                    ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
-                    : 'border-white/10 bg-white/[0.03] text-slate-400 hover:text-white'
+                    ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+                    : 'border-border-subtle bg-app-surface-subtle text-txt-muted hover:text-txt-primary'
                 }`}
               >
                 <span
                   className={`h-1.5 w-1.5 rounded-full ${
-                    hub?.demoMode ? 'bg-emerald-400 sshs3-sonar-emerald' : 'bg-slate-600'
+                    hub?.demoMode ? 'bg-emerald-400 sshs3-sonar-emerald' : 'bg-txt-muted'
                   }`}
                 />
                 <span>{hub?.demoMode ? 'DEMO LAB: ON' : 'DEMO LAB: OFF'}</span>
@@ -907,7 +945,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
               type="button"
               data-testid="landing-new-terminal-btn"
               onClick={onQuickStartTerminal}
-              className="group inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.035] px-3 py-1.5 text-xs font-mono text-slate-200 hover:bg-sky-500/10 hover:border-sky-500/35 hover:text-white transition-all duration-150"
+              className="group inline-flex items-center gap-1.5 rounded-lg border border-border-subtle bg-app-surface-subtle px-3 py-1.5 text-xs font-mono text-txt-secondary hover:bg-sky-500/10 hover:border-sky-500/35 hover:text-txt-primary transition-all duration-150"
             >
               <Terminal className="h-3.5 w-3.5 text-sky-400 group-hover:scale-110 transition-transform" />
               <span>New Terminal</span>
@@ -916,7 +954,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
               type="button"
               data-testid="landing-file-manager-btn"
               onClick={() => onNewTab('filemanager')}
-              className="group inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.035] px-3 py-1.5 text-xs font-mono text-slate-200 hover:bg-amber-500/10 hover:border-amber-500/35 hover:text-white transition-all duration-150"
+              className="group inline-flex items-center gap-1.5 rounded-lg border border-border-subtle bg-app-surface-subtle px-3 py-1.5 text-xs font-mono text-txt-secondary hover:bg-amber-500/10 hover:border-amber-500/35 hover:text-txt-primary transition-all duration-150"
             >
               <Folder className="h-3.5 w-3.5 text-amber-400 group-hover:scale-110 transition-transform" />
               <span>File Manager</span>
@@ -925,16 +963,16 @@ export const LandingView: React.FC<LandingViewProps> = ({
               type="button"
               data-testid="landing-connections-btn"
               onClick={onOpenProfiles}
-              className="group inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.035] px-3 py-1.5 text-xs font-mono text-slate-200 hover:bg-white/[0.08] hover:border-white/25 hover:text-white transition-all duration-150"
+              className="group inline-flex items-center gap-1.5 rounded-lg border border-border-subtle bg-app-surface-subtle px-3 py-1.5 text-xs font-mono text-txt-secondary hover:bg-app-surface-hover hover:border-border-strong hover:text-txt-primary transition-all duration-150"
             >
-              <Server className="h-3.5 w-3.5 text-slate-400 group-hover:text-sky-300 transition-colors" />
+              <Server className="h-3.5 w-3.5 text-txt-muted group-hover:text-sky-300 transition-colors" />
               <span>Connections</span>
             </button>
             <button
               type="button"
               data-testid="landing-cloud-sync-btn"
               onClick={onOpenSyncBootstrap}
-              className="group inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.035] px-3 py-1.5 text-xs font-mono text-slate-200 hover:bg-emerald-500/10 hover:border-emerald-500/35 hover:text-white transition-all duration-150"
+              className="group inline-flex items-center gap-1.5 rounded-lg border border-border-subtle bg-app-surface-subtle px-3 py-1.5 text-xs font-mono text-txt-secondary hover:bg-emerald-500/10 hover:border-emerald-500/35 hover:text-txt-primary transition-all duration-150"
             >
               <Cloud className="h-3.5 w-3.5 text-emerald-400 group-hover:scale-110 transition-transform" />
               <span>Cloud Sync</span>
@@ -943,7 +981,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
               type="button"
               data-testid="landing-new-profile-btn"
               onClick={onNewProfile}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-sky-400/30 bg-gradient-to-b from-sky-500/20 to-sky-600/10 px-3 py-1.5 text-xs font-mono font-medium text-sky-100 hover:from-sky-500/30 hover:to-sky-500/20 hover:border-sky-400/50 shadow-sm transition-all duration-150"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-sky-400/30 bg-sky-500/15 px-3 py-1.5 text-xs font-mono font-medium text-sky-200 hover:bg-sky-500/25 hover:border-sky-400/50 shadow-sm transition-all duration-150"
             >
               <Plus className="h-3.5 w-3.5 text-sky-300" />
               <span>New Profile</span>
@@ -964,12 +1002,12 @@ export const LandingView: React.FC<LandingViewProps> = ({
             >
               <div className="sshs3-kpi-card rounded-xl px-3.5 py-2.5 flex items-center justify-between gap-2">
                 <div>
-                  <div className="flex items-center gap-1.5 text-[9.5px] font-mono uppercase tracking-widest text-slate-400">
+                  <div className="flex items-center gap-1.5 text-[9.5px] font-mono uppercase tracking-widest text-txt-muted">
                     <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 sshs3-sonar-emerald" />
                     <span>NODES &amp; VMS</span>
                   </div>
                   <div className="mt-0.5 flex items-baseline gap-1.5">
-                    <span className="text-xl font-mono font-bold text-white">
+                    <span className="text-xl font-mono font-bold text-txt-primary">
                       {workspaceServers.length}
                     </span>
                     <span className="text-[10px] font-mono text-emerald-400">
@@ -988,7 +1026,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                       points="0,13 8,10 17,12 26,6 34,9 43,5 52,8 60,4"
                     />
                   </svg>
-                  <span className="text-[9px] font-mono text-slate-400">
+                  <span className="text-[9px] font-mono text-txt-muted">
                     {activeSessionCount > 0 ? `${activeSessionCount} live SSH` : `${workspaceServers.filter((s) => s.shared).length} shared`}
                   </span>
                 </div>
@@ -996,12 +1034,12 @@ export const LandingView: React.FC<LandingViewProps> = ({
 
               <div className="sshs3-kpi-card rounded-xl px-3.5 py-2.5 flex items-center justify-between gap-2">
                 <div>
-                  <div className="flex items-center gap-1.5 text-[9.5px] font-mono uppercase tracking-widest text-slate-400">
+                  <div className="flex items-center gap-1.5 text-[9.5px] font-mono uppercase tracking-widest text-txt-muted">
                     <span className="h-1.5 w-1.5 rounded-full bg-sky-400" />
                     <span>CLUSTERS</span>
                   </div>
                   <div className="mt-0.5 flex items-baseline gap-1.5">
-                    <span className="text-xl font-mono font-bold text-white">
+                    <span className="text-xl font-mono font-bold text-txt-primary">
                       {clusters.length}
                     </span>
                     <span className="text-[10px] font-mono text-sky-300 truncate max-w-[95px]">
@@ -1026,7 +1064,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     className={`rounded border px-2 py-0.5 text-[9.5px] font-mono transition-all ${
                       showClusterTopology
                         ? 'border-sky-400/50 bg-sky-500/20 text-sky-200'
-                        : 'border-white/15 bg-white/[0.04] hover:border-sky-400/40 text-slate-300 hover:text-white'
+                        : 'border-border-subtle bg-app-surface-subtle hover:border-sky-400/40 text-txt-secondary hover:text-txt-primary'
                     }`}
                   >
                     {showClusterTopology ? 'Hide Topology ▴' : 'Topology ▾'}
@@ -1046,12 +1084,12 @@ export const LandingView: React.FC<LandingViewProps> = ({
                 className="sshs3-kpi-card rounded-xl px-3.5 py-2.5 flex items-center justify-between gap-2 text-left"
               >
                 <div>
-                  <div className="flex items-center gap-1.5 text-[9.5px] font-mono uppercase tracking-widest text-slate-400">
+                  <div className="flex items-center gap-1.5 text-[9.5px] font-mono uppercase tracking-widest text-txt-muted">
                     <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
                     <span>AGENTS &amp; MCP</span>
                   </div>
                   <div className="mt-0.5 flex items-baseline gap-1.5">
-                    <span className="text-xl font-mono font-bold text-white">
+                    <span className="text-xl font-mono font-bold text-txt-primary">
                       {(hub?.agents ?? []).length}
                     </span>
                     <span className="text-[10px] font-mono text-amber-300">
@@ -1070,7 +1108,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                       points="0,14 10,11 20,7 30,9 40,4 50,6 60,3"
                     />
                   </svg>
-                  <span className="text-[9px] font-mono text-slate-400">Swarm Ready →</span>
+                  <span className="text-[9px] font-mono text-txt-muted">Swarm Ready →</span>
                 </div>
               </button>
 
@@ -1086,12 +1124,12 @@ export const LandingView: React.FC<LandingViewProps> = ({
                 className="sshs3-kpi-card rounded-xl px-3.5 py-2.5 flex items-center justify-between gap-2 text-left"
               >
                 <div>
-                  <div className="flex items-center gap-1.5 text-[9.5px] font-mono uppercase tracking-widest text-slate-400">
+                  <div className="flex items-center gap-1.5 text-[9.5px] font-mono uppercase tracking-widest text-txt-muted">
                     <span className="h-1.5 w-1.5 rounded-full bg-teal-400" />
                     <span>KNOWLEDGE BASE</span>
                   </div>
                   <div className="mt-0.5 flex items-baseline gap-1.5">
-                    <span className="text-xl font-mono font-bold text-white">
+                    <span className="text-xl font-mono font-bold text-txt-primary">
                       {(hub?.kbDocuments ?? []).length}
                     </span>
                     <span className="text-[10px] font-mono text-teal-300">
@@ -1110,7 +1148,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                       points="0,13 10,9 20,10 30,5 40,7 50,4 60,2"
                     />
                   </svg>
-                  <span className="text-[9px] font-mono text-slate-400">BM25 RAG →</span>
+                  <span className="text-[9px] font-mono text-txt-muted">BM25 RAG →</span>
                 </div>
               </button>
             </div>
@@ -1119,13 +1157,13 @@ export const LandingView: React.FC<LandingViewProps> = ({
             <div className="sshs3-glass-panel lg:col-span-3 rounded-xl px-3.5 py-2 space-y-2">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-[10px] font-mono uppercase tracking-widest text-slate-400">
+                  <span className="text-[10px] font-mono uppercase tracking-widest text-txt-muted">
                     TEAM SYNC //
                   </span>
                   {hub?.s3Workspace?.configured ? (
                     <span
                       data-testid="s3-workspace-status-badge"
-                      className="inline-flex items-center gap-1.5 text-[11px] font-mono text-slate-200"
+                      className="inline-flex items-center gap-1.5 text-[11px] font-mono text-txt-primary"
                     >
                       <span className={`h-1.5 w-1.5 rounded-full ${hub.s3Workspace.error ? 'bg-rose-500' : 'bg-emerald-400 sshs3-sonar-emerald'}`} />
                       <span>s3://{hub.s3Workspace.bucket}/{hub.s3Workspace.prefix || 'sshs3-team'}</span>
@@ -1133,7 +1171,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   ) : isWebBrowserMode() ? (
                     <span
                       data-testid="s3-workspace-status-badge"
-                      className="inline-flex items-center gap-1.5 text-[11px] font-mono text-slate-200"
+                      className="inline-flex items-center gap-1.5 text-[11px] font-mono text-txt-primary"
                     >
                       <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 sshs3-sonar-emerald" />
                       VM Team-delning aktiv på denna Web-server
@@ -1141,7 +1179,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   ) : (
                     <span
                       data-testid="s3-workspace-status-badge"
-                      className="inline-flex items-center gap-1.5 text-[11px] font-mono text-slate-400"
+                      className="inline-flex items-center gap-1.5 text-[11px] font-mono text-txt-muted"
                     >
                       Lokal workspace — koppla S3 bucket för team-synk
                     </span>
@@ -1168,7 +1206,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                       type="button"
                       data-testid="copy-s3-invite-btn"
                       onClick={handleCopyS3Invite}
-                      className="inline-flex items-center gap-1 rounded border border-white/10 bg-white/[0.03] hover:bg-white/[0.08] px-2 py-1 text-[10px] font-mono text-slate-300"
+                      className="inline-flex items-center gap-1 rounded border border-border-subtle bg-app-surface-subtle hover:bg-app-surface-hover px-2 py-1 text-[10px] font-mono text-txt-secondary"
                     >
                       <Copy className="h-3 w-3" />
                       <span>{s3CopyFeedback ? 'Kopierad' : 'Invite-kod'}</span>
@@ -1180,7 +1218,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                       data-testid="s3-sync-now-btn"
                       disabled={s3Syncing || hub.s3Workspace.syncing}
                       onClick={() => void handleSyncS3Now()}
-                      className="inline-flex items-center gap-1 rounded border border-white/10 bg-white/[0.03] hover:bg-white/[0.08] px-2 py-1 text-[10px] font-mono text-slate-300 disabled:opacity-50"
+                      className="inline-flex items-center gap-1 rounded border border-border-subtle bg-app-surface-subtle hover:bg-app-surface-hover px-2 py-1 text-[10px] font-mono text-txt-secondary disabled:opacity-50"
                     >
                       <RefreshCw className={`h-3 w-3 ${s3Syncing || hub.s3Workspace.syncing ? 'animate-spin' : ''}`} />
                       <span>Synka</span>
@@ -1190,7 +1228,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     type="button"
                     data-testid="toggle-s3-bucket-setup-btn"
                     onClick={openS3BucketSetup}
-                    className="inline-flex items-center gap-1 rounded border border-white/15 bg-white/[0.04] hover:bg-white/[0.1] px-2.5 py-1 text-[10px] font-mono text-slate-200 transition-colors"
+                    className="inline-flex items-center gap-1 rounded border border-border-subtle bg-app-surface-subtle hover:bg-app-surface-hover px-2.5 py-1 text-[10px] font-mono text-txt-primary transition-colors"
                   >
                     <Key className="h-3 w-3 text-amber-400" />
                     <span>
@@ -1208,7 +1246,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                 <form
                   data-testid="s3-bucket-setup-form"
                   onSubmit={handleSaveS3Bucket}
-                  className="sshs3-drawer-anim space-y-2.5 rounded-lg border border-white/15 bg-[#070a12] p-3"
+                  className="sshs3-drawer-anim space-y-2.5 rounded-lg border border-border-subtle bg-app-surface-subtle p-3"
                 >
                   <div className="grid grid-cols-1 sm:grid-cols-5 gap-2">
                     <input
@@ -1217,7 +1255,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                       value={s3InviteCode}
                       onChange={(e) => setS3InviteCode(e.target.value)}
                       placeholder="Invite-kod (sshs3-s3://…)"
-                      className="rounded border border-white/15 bg-[#0d1322] px-2 py-1 text-xs font-mono text-white"
+                      className="rounded border border-border-subtle bg-app-input px-2 py-1 text-xs font-mono text-txt-primary"
                     />
                     <input
                       type="text"
@@ -1225,7 +1263,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                       value={s3Bucket}
                       onChange={(e) => setS3Bucket(e.target.value)}
                       placeholder="S3 Bucket"
-                      className="rounded border border-white/15 bg-[#0d1322] px-2 py-1 text-xs text-white"
+                      className="rounded border border-border-subtle bg-app-input px-2 py-1 text-xs text-txt-primary"
                     />
                     <input
                       type="text"
@@ -1233,7 +1271,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                       value={s3AccessKeyId}
                       onChange={(e) => setS3AccessKeyId(e.target.value)}
                       placeholder="Access Key ID"
-                      className="rounded border border-white/15 bg-[#0d1322] px-2 py-1 text-xs font-mono text-white"
+                      className="rounded border border-border-subtle bg-app-input px-2 py-1 text-xs font-mono text-txt-primary"
                     />
                     <input
                       type="password"
@@ -1241,7 +1279,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                       value={s3SecretAccessKey}
                       onChange={(e) => setS3SecretAccessKey(e.target.value)}
                       placeholder="Secret Access Key"
-                      className="rounded border border-white/15 bg-[#0d1322] px-2 py-1 text-xs font-mono text-white"
+                      className="rounded border border-border-subtle bg-app-input px-2 py-1 text-xs font-mono text-txt-primary"
                     />
                     <div className="flex items-center gap-1.5">
                       <input
@@ -1250,13 +1288,13 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         value={s3ActorName}
                         onChange={(e) => setS3ActorName(e.target.value)}
                         placeholder="Ditt namn"
-                        className="w-full rounded border border-white/15 bg-[#0d1322] px-2 py-1 text-xs text-white"
+                        className="w-full rounded border border-border-subtle bg-app-input px-2 py-1 text-xs text-txt-primary"
                       />
                       <button
                         type="submit"
                         data-testid="s3-save-connect-btn"
                         disabled={s3Saving}
-                        className="shrink-0 rounded bg-white px-3 py-1 text-xs font-mono font-semibold text-slate-950 hover:bg-slate-200"
+                        className="shrink-0 rounded bg-accent px-3 py-1 text-xs font-mono font-semibold text-white hover:bg-accent-hover"
                       >
                         Spara
                       </button>
@@ -1272,10 +1310,10 @@ export const LandingView: React.FC<LandingViewProps> = ({
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
                   <Server className="h-3.5 w-3.5 text-sky-400" />
-                  <h2 className="text-xs font-mono font-bold tracking-wider text-white uppercase">
+                  <h2 className="text-xs font-mono font-bold tracking-wider text-txt-primary uppercase">
                     Nodes &amp; Clusters ({filteredServers.length})
                   </h2>
-                  <span className="text-[10px] font-mono text-slate-400">
+                  <span className="text-[10px] font-mono text-txt-muted">
                     · Click Inspect on any blade for live telemetry
                   </span>
                 </div>
@@ -1284,12 +1322,12 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     type="button"
                     data-testid="add-cluster-node-btn"
                     onClick={() => setAddNodeOpen((prev) => !prev)}
-                    className="inline-flex items-center gap-1 rounded-md border border-white/15 bg-white/[0.04] hover:bg-white/[0.1] px-2.5 py-1 text-[10.5px] font-mono text-slate-200 transition-colors"
+                    className="inline-flex items-center gap-1 rounded-md border border-border-subtle bg-app-surface-subtle hover:bg-app-surface-hover px-2.5 py-1 text-[10.5px] font-mono text-txt-primary transition-colors"
                   >
                     <Plus className="h-3 w-3 text-sky-400" />
                     {addNodeOpen ? 'Close' : 'Add Node'}
                   </button>
-                  <div className="inline-flex rounded-md border border-white/10 bg-[#070a12] p-0.5">
+                  <div className="inline-flex rounded-md border border-border-subtle bg-app-surface-subtle p-0.5">
                     {(['all', 'shared', 'personal'] as const).map((scope) => (
                       <button
                         key={scope}
@@ -1297,8 +1335,8 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         onClick={() => setScopeFilter(scope)}
                         className={`rounded px-2 py-0.5 text-[10px] font-mono uppercase transition-all ${
                           scopeFilter === scope
-                            ? 'bg-white text-slate-950 font-semibold shadow-sm'
-                            : 'text-slate-400 hover:text-white'
+                            ? 'bg-accent text-white font-semibold shadow-sm'
+                            : 'text-txt-muted hover:text-txt-primary'
                         }`}
                       >
                         {scope === 'all' ? 'All' : scope === 'shared' ? 'Shared' : 'Private'}
@@ -1312,7 +1350,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                 <form
                   data-testid="add-cluster-node-form"
                   onSubmit={handleCreateClusterNode}
-                  className="sshs3-drawer-anim space-y-2 rounded-lg border border-sky-500/25 bg-[#070a12] p-3"
+                  className="sshs3-drawer-anim space-y-2 rounded-lg border border-sky-500/25 bg-app-surface-subtle p-3"
                 >
                   <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
                     <input
@@ -1321,7 +1359,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                       value={newNodeCluster}
                       onChange={(e) => setNewNodeCluster(e.target.value)}
                       placeholder="Cluster (t.ex. k8s-prod)"
-                      className="rounded border border-white/15 bg-[#0d1322] px-2 py-1 text-xs text-white"
+                      className="rounded border border-border-subtle bg-app-input px-2 py-1 text-xs text-txt-primary"
                     />
                     <datalist id="workspace-clusters-list">
                       {clusters.map((c) => (
@@ -1334,7 +1372,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                       value={newNodeName}
                       onChange={(e) => setNewNodeName(e.target.value)}
                       placeholder="Node Name *"
-                      className="rounded border border-white/15 bg-[#0d1322] px-2 py-1 text-xs text-white"
+                      className="rounded border border-border-subtle bg-app-input px-2 py-1 text-xs text-txt-primary"
                     />
                     <input
                       type="text"
@@ -1342,7 +1380,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                       value={newNodeHost}
                       onChange={(e) => setNewNodeHost(e.target.value)}
                       placeholder="IP / Hostname *"
-                      className="rounded border border-white/15 bg-[#0d1322] px-2 py-1 text-xs text-white"
+                      className="rounded border border-border-subtle bg-app-input px-2 py-1 text-xs text-txt-primary"
                     />
                     <div className="flex items-center gap-1.5">
                       <input
@@ -1350,12 +1388,12 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         value={newNodeUser}
                         onChange={(e) => setNewNodeUser(e.target.value)}
                         placeholder="User (ubuntu)"
-                        className="w-full rounded border border-white/15 bg-[#0d1322] px-2 py-1 text-xs text-white"
+                        className="w-full rounded border border-border-subtle bg-app-input px-2 py-1 text-xs text-txt-primary"
                       />
                       <button
                         type="submit"
                         disabled={creatingNode || !newNodeName.trim() || !newNodeHost.trim()}
-                        className="shrink-0 rounded bg-white px-3 py-1 text-xs font-mono font-semibold text-slate-950 hover:bg-slate-200 disabled:opacity-40"
+                        className="shrink-0 rounded bg-accent px-3 py-1 text-xs font-mono font-semibold text-white hover:bg-accent-hover disabled:opacity-40"
                       >
                         Save
                       </button>
@@ -1368,13 +1406,13 @@ export const LandingView: React.FC<LandingViewProps> = ({
               <div className="flex flex-col gap-2">
                 <div className="flex flex-wrap items-center gap-2">
                   <div className="relative flex-1 min-w-[180px]">
-                    <Search className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-500" />
+                    <Search className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-txt-muted" />
                     <input
                       type="text"
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
                       placeholder="Search node, cluster, IP, or role…"
-                      className="w-full rounded-lg border border-white/10 bg-[#070a12]/90 pl-8 pr-3 py-1.5 text-xs text-white placeholder:text-slate-500 outline-none focus:border-sky-400/45 transition-colors"
+                      className="w-full rounded-lg border border-border-subtle bg-app-input pl-8 pr-3 py-1.5 text-xs text-txt-primary placeholder:text-txt-muted outline-none focus:border-sky-400/45 transition-colors"
                     />
                   </div>
                   {selectedCluster !== 'ALL' && (
@@ -1391,7 +1429,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                       <button
                         type="button"
                         onClick={() => handleAskAiAboutCluster(selectedCluster)}
-                        className="inline-flex items-center gap-1 rounded-md border border-white/15 bg-white/[0.05] px-2.5 py-1 text-[10.5px] font-mono text-slate-200 hover:text-white"
+                        className="inline-flex items-center gap-1 rounded-md border border-border-subtle bg-app-surface-subtle px-2.5 py-1 text-[10.5px] font-mono text-txt-secondary hover:text-txt-primary"
                       >
                         <span>Ask AI</span>
                       </button>
@@ -1406,8 +1444,8 @@ export const LandingView: React.FC<LandingViewProps> = ({
                       onClick={() => setSelectedCluster('ALL')}
                       className={`rounded-md px-2.5 py-1 text-[10.5px] font-mono transition-all ${
                         selectedCluster === 'ALL'
-                          ? 'bg-white text-slate-950 font-semibold shadow-sm'
-                          : 'border border-white/10 bg-[#070a12]/80 text-slate-300 hover:border-white/25 hover:text-white'
+                          ? 'bg-accent text-white font-semibold shadow-sm'
+                          : 'border border-border-subtle bg-app-surface-subtle text-txt-secondary hover:border-border-strong hover:text-txt-primary'
                       }`}
                     >
                       All ({workspaceServers.length})
@@ -1421,8 +1459,8 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         }
                         className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[10.5px] font-mono transition-all ${
                           selectedCluster === c.name
-                            ? 'bg-sky-400 text-slate-950 font-semibold shadow-[0_0_14px_-3px_rgba(56,189,248,0.5)]'
-                            : 'border border-white/10 bg-[#070a12]/80 text-slate-300 hover:border-sky-400/35 hover:text-white'
+                            ? 'bg-accent text-white font-semibold shadow-sm'
+                            : 'border border-border-subtle bg-app-surface-subtle text-txt-secondary hover:border-sky-400/35 hover:text-txt-primary'
                         }`}
                       >
                         <span>{c.name}</span>
@@ -1442,16 +1480,16 @@ export const LandingView: React.FC<LandingViewProps> = ({
                       return (
                         <div
                           key={c.name}
-                          className="rounded-lg border border-sky-500/20 bg-[#070a12]/95 p-2.5 flex items-center justify-between gap-2 hover:border-sky-400/40 transition-colors"
+                          className="rounded-lg border border-sky-500/20 bg-app-surface-subtle p-2.5 flex items-center justify-between gap-2 hover:border-sky-400/40 transition-colors"
                         >
                           <div className="min-w-0">
                             <div className="flex items-center gap-1.5">
                               <span className="h-1.5 w-1.5 rounded-full bg-sky-400" />
-                              <span className="text-xs font-mono font-semibold text-white truncate">
+                              <span className="text-xs font-mono font-semibold text-txt-primary truncate">
                                 {c.name}
                               </span>
                             </div>
-                            <div className="text-[10px] font-mono text-slate-400 pl-3">
+                            <div className="text-[10px] font-mono text-txt-muted pl-3">
                               {members.length} nodes · HA Active
                             </div>
                           </div>
@@ -1466,7 +1504,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                             <button
                               type="button"
                               onClick={() => handleAskAiAboutCluster(c.name)}
-                              className="rounded border border-white/15 bg-white/[0.04] px-2 py-0.5 text-[10px] font-mono text-slate-300 hover:text-white"
+                              className="rounded border border-border-subtle bg-app-surface px-2 py-0.5 text-[10px] font-mono text-txt-secondary hover:text-txt-primary"
                             >
                               AI
                             </button>
@@ -1512,7 +1550,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                                   className="h-2 w-2 rounded-full shrink-0 bg-emerald-400 sshs3-sonar-emerald"
                                   title="Node Online · SSH Ready"
                                 />
-                                <span className="truncate text-xs font-mono font-semibold text-white">
+                                <span className="truncate text-xs font-mono font-semibold text-txt-primary">
                                   {server.name}
                                 </span>
                               </div>
@@ -1534,7 +1572,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                             </div>
 
                             <div className="mt-1 flex items-center gap-1.5 flex-wrap pl-4">
-                              <span className="truncate text-[11px] font-mono text-slate-400">
+                              <span className="truncate text-[11px] font-mono text-txt-muted">
                                 {connectable.username}@{server.host}:{server.port}
                               </span>
                               {server.cluster && (
@@ -1562,28 +1600,28 @@ export const LandingView: React.FC<LandingViewProps> = ({
                             onClick={() =>
                               isEditing ? setEditingServerId(null) : openEditServer(server)
                             }
-                            className="rounded p-1 text-slate-500 hover:text-white transition-colors"
+                            className="rounded p-1 text-txt-muted hover:text-txt-primary transition-colors"
                           >
                             {isEditing ? <X className="h-3.5 w-3.5" /> : <Edit3 className="h-3.5 w-3.5" />}
                           </button>
                         </div>
 
                         {isEditing ? (
-                          <div className="sshs3-drawer-anim mt-2 space-y-2 rounded-lg border border-white/15 bg-[#070a12] p-2.5">
+                          <div className="sshs3-drawer-anim mt-2 space-y-2 rounded-lg border border-border-subtle bg-app-surface-subtle p-2.5">
                             <input
                               type="text"
                               list="workspace-clusters-list"
                               value={editCluster}
                               onChange={(e) => setEditCluster(e.target.value)}
                               placeholder="Cluster"
-                              className="w-full rounded border border-white/15 bg-[#0d1322] px-2 py-1 text-xs text-white"
+                              className="w-full rounded border border-border-subtle bg-app-input px-2 py-1 text-xs text-txt-primary"
                             />
                             <textarea
                               rows={2}
                               value={editDescription}
                               onChange={(e) => setEditDescription(e.target.value)}
                               placeholder="Beskrivning…"
-                              className="w-full rounded border border-white/15 bg-[#0d1322] px-2 py-1 text-xs text-white"
+                              className="w-full rounded border border-border-subtle bg-app-input px-2 py-1 text-xs text-txt-primary"
                             />
                             <div className="flex items-center justify-between pt-1">
                               <button
@@ -1600,7 +1638,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                                 <button
                                   type="button"
                                   onClick={() => setEditingServerId(null)}
-                                  className="rounded px-2 py-1 text-[10.5px] font-mono text-slate-400 hover:text-white"
+                                  className="rounded px-2 py-1 text-[10.5px] font-mono text-txt-muted hover:text-txt-primary"
                                 >
                                   Cancel
                                 </button>
@@ -1608,7 +1646,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                                   type="button"
                                   disabled={savingMeta}
                                   onClick={() => void handleSaveServerMeta(server)}
-                                  className="rounded bg-white px-2.5 py-1 text-[10.5px] font-mono font-semibold text-slate-950 hover:bg-slate-200"
+                                  className="rounded bg-accent px-2.5 py-1 text-[10.5px] font-mono font-semibold text-white hover:bg-accent-hover"
                                 >
                                   Save
                                 </button>
@@ -1618,19 +1656,19 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         ) : (
                           <>
                             {server.description && (
-                              <p className="mt-1.5 pl-4 text-[11px] text-slate-400 line-clamp-1">
+                              <p className="mt-1.5 pl-4 text-[11px] text-txt-muted line-clamp-1">
                                 {server.description}
                               </p>
                             )}
                             {/* Mini Live Load & Throughput Telemetry Strip */}
                             <div className="mt-2 pl-4 flex items-center gap-2.5">
-                              <div className="flex-1 h-1 rounded-full bg-white/[0.06] overflow-hidden">
+                              <div className="flex-1 h-1 rounded-full bg-app-surface-subtle overflow-hidden">
                                 <div
                                   className={`h-full rounded-full bg-gradient-to-r ${telemetry.barClass}`}
                                   style={{ width: `${telemetry.cpuPct}%` }}
                                 />
                               </div>
-                              <span className="text-[9.5px] font-mono text-slate-400 shrink-0">
+                              <span className="text-[9.5px] font-mono text-txt-muted shrink-0">
                                 {telemetry.cpuPct}% CPU · {telemetry.iopsLabel}
                               </span>
                             </div>
@@ -1639,29 +1677,29 @@ export const LandingView: React.FC<LandingViewProps> = ({
 
                         {/* Interactive Expandable Live Telemetry & Quick-Probe Drawer */}
                         {isInspected && !isEditing && (
-                          <div className="sshs3-drawer-anim mt-2.5 rounded-lg border border-sky-500/25 bg-[#070a12]/95 p-2.5 space-y-2">
+                          <div className="sshs3-drawer-anim mt-2.5 rounded-lg border border-sky-500/25 bg-app-surface-subtle p-2.5 space-y-2">
                             <div className="grid grid-cols-3 gap-1.5 text-center">
-                              <div className="rounded border border-white/[0.06] bg-white/[0.02] px-2 py-1">
-                                <div className="text-[8.5px] font-mono uppercase text-slate-500">LATENCY</div>
+                              <div className="rounded border border-border-subtle bg-app-card px-2 py-1">
+                                <div className="text-[8.5px] font-mono uppercase text-txt-muted">LATENCY</div>
                                 <div className="text-[11px] font-mono font-semibold text-emerald-300">
                                   {telemetry.latencyMs}
                                 </div>
                               </div>
-                              <div className="rounded border border-white/[0.06] bg-white/[0.02] px-2 py-1">
-                                <div className="text-[8.5px] font-mono uppercase text-slate-500">MEM / CPU</div>
+                              <div className="rounded border border-border-subtle bg-app-card px-2 py-1">
+                                <div className="text-[8.5px] font-mono uppercase text-txt-muted">MEM / CPU</div>
                                 <div className="text-[11px] font-mono font-semibold text-sky-300">
                                   {telemetry.memPct}% / {telemetry.cpuPct}%
                                 </div>
                               </div>
-                              <div className="rounded border border-white/[0.06] bg-white/[0.02] px-2 py-1">
-                                <div className="text-[8.5px] font-mono uppercase text-slate-500">TRAFFIC</div>
+                              <div className="rounded border border-border-subtle bg-app-card px-2 py-1">
+                                <div className="text-[8.5px] font-mono uppercase text-txt-muted">TRAFFIC</div>
                                 <div className="text-[11px] font-mono font-semibold text-amber-300">
                                   {telemetry.iopsLabel}
                                 </div>
                               </div>
                             </div>
                             {latestEvent && (
-                              <div className="rounded border border-white/[0.06] bg-white/[0.015] px-2 py-1.5 text-[10px] text-slate-300">
+                              <div className="rounded border border-border-subtle bg-app-card px-2 py-1.5 text-[10px] text-txt-secondary">
                                 <span className="font-mono text-sky-300">{latestEvent.actor}:</span>{' '}
                                 {latestEvent.summary}
                               </div>
@@ -1685,7 +1723,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                                     `Inspektera diskutrymme, ZFS/NVMe/multipath och systemloggar på @${server.name}.`
                                   )
                                 }
-                                className="rounded border border-white/10 bg-white/[0.04] hover:bg-white/[0.1] px-2 py-0.5 text-[9.5px] font-mono text-slate-300 transition-colors"
+                                className="rounded border border-border-subtle bg-app-card hover:bg-app-surface-hover px-2 py-0.5 text-[9.5px] font-mono text-txt-secondary transition-colors"
                               >
                                 Check Storage
                               </button>
@@ -1694,12 +1732,12 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         )}
                       </div>
 
-                      <div className="mt-2.5 flex items-center justify-between gap-1.5 border-t border-white/[0.07] pt-2">
-                        <div className="flex items-center gap-1.5">
+                      <div className="mt-2.5 flex flex-wrap items-center justify-between gap-1.5 border-t border-divider pt-2">
+                        <div className="flex flex-wrap items-center gap-1.5">
                           <button
                             type="button"
                             onClick={() => onConnectRecentSSH(connectable)}
-                            className="rounded-md bg-gradient-to-b from-white to-slate-200 px-2.5 py-1 text-[10.5px] font-mono font-semibold text-slate-950 hover:from-sky-50 hover:to-white shadow-sm transition-all"
+                            className="rounded-md bg-accent px-2.5 py-1 text-[10.5px] font-mono font-semibold text-white hover:bg-accent-hover shadow-sm transition-all"
                           >
                             Terminal
                           </button>
@@ -1707,6 +1745,16 @@ export const LandingView: React.FC<LandingViewProps> = ({
                             authType={connectable.authType}
                             onOpen={() => onConnectSFTP(connectable)}
                           />
+                          <button
+                            type="button"
+                            data-testid={`blade-connect-workspace-${server.id}`}
+                            title="Open Host Workspace (SSH + SFTP)"
+                            onClick={() => handleOpenHostWorkspace(server, connectable)}
+                            className="inline-flex items-center gap-1 rounded-md border border-sky-500/30 bg-sky-500/10 px-2 py-1 text-[10px] font-mono font-medium text-sky-300 hover:bg-sky-500/20 hover:border-sky-400/45 hover:text-txt-primary transition-all"
+                          >
+                            <Columns2 className="h-3 w-3 text-amber-400" />
+                            <span>Host Workspace (SSH + SFTP)</span>
+                          </button>
                         </div>
                         <div className="flex items-center gap-1">
                           <button
@@ -1717,7 +1765,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                             className={`rounded-md border px-2 py-0.5 text-[10px] font-mono transition-all ${
                               isInspected
                                 ? 'border-sky-400/45 bg-sky-500/20 text-sky-200'
-                                : 'border-white/10 bg-white/[0.03] text-slate-400 hover:text-white hover:border-white/25'
+                                : 'border-border-subtle bg-app-surface-subtle text-txt-muted hover:text-txt-primary hover:border-border-strong'
                             }`}
                           >
                             {isInspected ? 'Close ▴' : 'Inspect ▾'}
@@ -1725,7 +1773,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                           <button
                             type="button"
                             onClick={() => handleAskAiAboutServer(server)}
-                            className="inline-flex items-center gap-1 rounded-md border border-sky-500/25 bg-sky-500/10 px-2 py-0.5 text-[10px] font-mono text-sky-300 hover:bg-sky-500/20 hover:text-white transition-all"
+                            className="inline-flex items-center gap-1 rounded-md border border-sky-500/25 bg-sky-500/10 px-2 py-0.5 text-[10px] font-mono text-sky-300 hover:bg-sky-500/20 hover:text-txt-primary transition-all"
                           >
                             <span>AI</span>
                           </button>
@@ -1746,14 +1794,14 @@ export const LandingView: React.FC<LandingViewProps> = ({
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
                     <Activity className="h-3.5 w-3.5 text-emerald-400" />
-                    <h2 className="text-xs font-mono font-bold tracking-wider text-white uppercase">
+                    <h2 className="text-xs font-mono font-bold tracking-wider text-txt-primary uppercase">
                       Telemetry &amp; Memory
                     </h2>
                   </div>
                   <button
                     type="button"
                     onClick={() => window.dispatchEvent(new CustomEvent('sshs3:ai-open'))}
-                    className="rounded-md border border-sky-500/25 bg-sky-500/10 hover:bg-sky-500/20 px-2.5 py-0.5 text-[10px] font-mono text-sky-300 hover:text-white transition-colors"
+                    className="rounded-md border border-sky-500/25 bg-sky-500/10 hover:bg-sky-500/20 px-2.5 py-0.5 text-[10px] font-mono text-sky-300 hover:text-txt-primary transition-colors"
                   >
                     AI Copilot ↗
                   </button>
@@ -1762,7 +1810,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                 {/* 4-Tab Segmented Switcher */}
                 <div
                   data-testid="workspace-right-tabs"
-                  className="grid grid-cols-4 gap-1 rounded-lg border border-white/10 bg-[#070a12] p-1"
+                  className="grid grid-cols-4 gap-1 rounded-lg border border-border-subtle bg-app-surface-subtle p-1"
                 >
                   <button
                     type="button"
@@ -1770,8 +1818,8 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     onClick={() => setRightColTab('activity')}
                     className={`rounded-md px-1.5 py-1 text-[9.5px] font-mono uppercase transition-all ${
                       rightColTab === 'activity'
-                        ? 'bg-white text-slate-950 font-semibold shadow-sm'
-                        : 'text-slate-400 hover:text-white'
+                        ? 'bg-accent text-white font-semibold shadow-sm'
+                        : 'text-txt-muted hover:text-txt-primary'
                     }`}
                   >
                     Activity
@@ -1782,8 +1830,8 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     onClick={() => setRightColTab('memory')}
                     className={`rounded-md px-1.5 py-1 text-[9.5px] font-mono uppercase transition-all ${
                       rightColTab === 'memory'
-                        ? 'bg-white text-slate-950 font-semibold shadow-sm'
-                        : 'text-slate-400 hover:text-white'
+                        ? 'bg-accent text-white font-semibold shadow-sm'
+                        : 'text-txt-muted hover:text-txt-primary'
                     }`}
                   >
                     Memory
@@ -1794,8 +1842,8 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     onClick={() => setRightColTab('kb')}
                     className={`rounded-md px-1.5 py-1 text-[9.5px] font-mono uppercase transition-all ${
                       rightColTab === 'kb'
-                        ? 'bg-white text-slate-950 font-semibold shadow-sm'
-                        : 'text-slate-400 hover:text-white'
+                        ? 'bg-accent text-white font-semibold shadow-sm'
+                        : 'text-txt-muted hover:text-txt-primary'
                     }`}
                   >
                     Runbooks
@@ -1806,8 +1854,8 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     onClick={() => setRightColTab('workforce')}
                     className={`rounded-md px-1.5 py-1 text-[9.5px] font-mono uppercase transition-all ${
                       rightColTab === 'workforce'
-                        ? 'bg-white text-slate-950 font-semibold shadow-sm'
-                        : 'text-slate-400 hover:text-white'
+                        ? 'bg-accent text-white font-semibold shadow-sm'
+                        : 'text-txt-muted hover:text-txt-primary'
                     }`}
                   >
                     Swarm
@@ -1822,12 +1870,12 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         value={noteSummary}
                         onChange={(e) => setNoteSummary(e.target.value)}
                         placeholder="Log team note or incident marker…"
-                        className="flex-1 rounded-lg border border-white/10 bg-[#070a12]/90 px-2.5 py-1.5 text-xs text-white placeholder:text-slate-500 outline-none focus:border-sky-400/45"
+                        className="flex-1 rounded-lg border border-border-subtle bg-app-input px-2.5 py-1.5 text-xs text-txt-primary placeholder:text-txt-muted outline-none focus:border-sky-400/45"
                       />
                       <button
                         type="submit"
                         disabled={addingNote || !noteSummary.trim()}
-                        className="rounded-lg border border-white/15 bg-white/[0.06] px-2.5 py-1.5 text-[10.5px] font-mono text-white hover:bg-white/[0.12] disabled:opacity-40"
+                        className="rounded-lg border border-border-subtle bg-app-surface-subtle px-2.5 py-1.5 text-[10.5px] font-mono text-txt-primary hover:bg-app-surface-hover disabled:opacity-40"
                       >
                         Log
                       </button>
@@ -1835,7 +1883,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
 
                     <div className="space-y-2 max-h-[460px] overflow-y-auto pr-1">
                       {activityLog.length === 0 ? (
-                        <div className="rounded-lg border border-white/10 bg-[#070a12] p-4 text-center text-xs text-slate-500">
+                        <div className="rounded-lg border border-border-subtle bg-app-surface-subtle p-4 text-center text-xs text-txt-muted">
                           No activity recorded yet.
                         </div>
                       ) : (
@@ -1844,7 +1892,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                           return (
                             <div
                               key={ev.id}
-                              className="group rounded-xl border border-white/[0.08] bg-[#070a12]/85 hover:border-sky-400/30 p-2.5 text-xs space-y-1.5 transition-all"
+                              className="group rounded-xl border border-border-subtle bg-app-card hover:border-sky-400/30 p-2.5 text-xs space-y-1.5 transition-all"
                             >
                               <div className="flex items-center justify-between gap-1 font-mono text-[10.5px]">
                                 <div className="flex items-center gap-1.5 truncate">
@@ -1853,19 +1901,19 @@ export const LandingView: React.FC<LandingViewProps> = ({
                                       isAiEvent ? 'bg-sky-400' : 'bg-emerald-400'
                                     }`}
                                   />
-                                  <span className="text-white font-semibold truncate">
+                                  <span className="text-txt-primary font-semibold truncate">
                                     {ev.actor}
                                   </span>
-                                  <span className="text-slate-600">→</span>
-                                  <span className="rounded border border-white/10 bg-white/[0.03] px-1.5 py-0.2 text-[9.5px] text-sky-300 truncate">
+                                  <span className="text-txt-muted">→</span>
+                                  <span className="rounded border border-border-subtle bg-app-surface-subtle px-1.5 py-0.2 text-[9.5px] text-sky-300 truncate">
                                     {ev.targetLabel}
                                   </span>
                                 </div>
-                                <span className="shrink-0 text-[9.5px] text-slate-500">
+                                <span className="shrink-0 text-[9.5px] text-txt-muted">
                                   {formatRelativeTime(ev.at)}
                                 </span>
                               </div>
-                              <p className="text-[11px] text-slate-300 leading-relaxed">{ev.summary}</p>
+                              <p className="text-[11px] text-txt-secondary leading-relaxed">{ev.summary}</p>
                               <div className="flex justify-end">
                                 <button
                                   type="button"
@@ -1886,13 +1934,13 @@ export const LandingView: React.FC<LandingViewProps> = ({
 
                 {rightColTab === 'memory' && (
                   <div data-testid="right-panel-memory" className="space-y-2.5 sshs3-drawer-anim">
-                    <form onSubmit={handleSaveTeamMemory} className="space-y-1.5 rounded-lg border border-white/10 bg-[#070a12] p-2">
+                    <form onSubmit={handleSaveTeamMemory} className="space-y-1.5 rounded-lg border border-border-subtle bg-app-surface-subtle p-2">
                       <input
                         type="text"
                         value={memTitle}
                         onChange={(e) => setMemTitle(e.target.value)}
                         placeholder="Memory title…"
-                        className="w-full rounded border border-white/10 bg-[#0d1322] px-2 py-1 text-xs text-white placeholder:text-slate-500 outline-none"
+                        className="w-full rounded border border-border-subtle bg-app-input px-2 py-1 text-xs text-txt-primary placeholder:text-txt-muted outline-none"
                       />
                       <div className="flex gap-1.5">
                         <input
@@ -1900,12 +1948,12 @@ export const LandingView: React.FC<LandingViewProps> = ({
                           value={memText}
                           onChange={(e) => setMemText(e.target.value)}
                           placeholder="Rule or command for AI to remember…"
-                          className="flex-1 rounded border border-white/10 bg-[#0d1322] px-2 py-1 text-xs text-white placeholder:text-slate-500 outline-none"
+                          className="flex-1 rounded border border-border-subtle bg-app-input px-2 py-1 text-xs text-txt-primary placeholder:text-txt-muted outline-none"
                         />
                         <button
                           type="submit"
                           disabled={addingMemory || !memTitle.trim() || !memText.trim()}
-                          className="rounded bg-white px-2.5 py-1 text-[10.5px] font-mono font-semibold text-slate-950 hover:bg-slate-200 disabled:opacity-40"
+                          className="rounded bg-accent px-2.5 py-1 text-[10.5px] font-mono font-semibold text-white hover:bg-accent-hover disabled:opacity-40"
                         >
                           Save
                         </button>
@@ -1916,17 +1964,17 @@ export const LandingView: React.FC<LandingViewProps> = ({
                       {(hub?.memories ?? []).map((mem) => (
                         <div
                           key={mem.id}
-                          className="rounded-xl border border-white/[0.08] bg-[#070a12]/85 p-2.5 text-xs space-y-1 hover:border-teal-400/30 transition-colors"
+                          className="rounded-xl border border-border-subtle bg-app-card p-2.5 text-xs space-y-1 hover:border-teal-400/30 transition-colors"
                         >
                           <div className="flex items-center justify-between gap-1">
-                            <span className="font-mono font-semibold text-white truncate text-[11px]">
+                            <span className="font-mono font-semibold text-txt-primary truncate text-[11px]">
                               {mem.title}
                             </span>
                             <span className="rounded border border-teal-500/25 bg-teal-500/10 px-1.5 py-0.5 text-[9px] font-mono uppercase text-teal-300">
                               {mem.tier || 'archival'}
                             </span>
                           </div>
-                          <p className="text-[11px] text-slate-300 line-clamp-2">{mem.text}</p>
+                          <p className="text-[11px] text-txt-secondary line-clamp-2">{mem.text}</p>
                         </div>
                       ))}
                     </div>
@@ -1939,17 +1987,17 @@ export const LandingView: React.FC<LandingViewProps> = ({
                       {(hub?.kbDocuments ?? []).map((doc) => (
                         <div
                           key={doc.id}
-                          className="rounded-xl border border-white/[0.08] bg-[#070a12]/85 p-2.5 text-xs space-y-1 hover:border-sky-400/30 transition-colors"
+                          className="rounded-xl border border-border-subtle bg-app-card p-2.5 text-xs space-y-1 hover:border-sky-400/30 transition-colors"
                         >
                           <div className="flex items-center justify-between gap-1">
-                            <span className="font-mono font-semibold text-white truncate text-[11px]">
+                            <span className="font-mono font-semibold text-txt-primary truncate text-[11px]">
                               {doc.title}
                             </span>
                             <span className="rounded border border-sky-500/25 bg-sky-500/10 px-1.5 py-0.5 text-[9px] font-mono text-sky-300">
                               {doc.collection}
                             </span>
                           </div>
-                          <p className="text-[11px] text-slate-300 line-clamp-2">{doc.content}</p>
+                          <p className="text-[11px] text-txt-secondary line-clamp-2">{doc.content}</p>
                           <div className="flex justify-end pt-0.5">
                             <button
                               type="button"
@@ -1982,7 +2030,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                       disabled={runningDashboardSwarm}
                       data-testid="dashboard-run-workforce-btn"
                       onClick={handleRunDashboardWorkforce}
-                      className="w-full rounded-lg bg-gradient-to-b from-white to-slate-200 py-2 text-xs font-mono font-semibold text-slate-950 hover:from-sky-50 hover:to-white shadow-sm disabled:opacity-50 transition-all"
+                      className="w-full rounded-lg bg-accent py-2 text-xs font-mono font-semibold text-white hover:bg-accent-hover shadow-sm disabled:opacity-50 transition-all"
                     >
                       {runningDashboardSwarm ? 'Running Swarm…' : 'Run Multi-Agent Swarm Audit'}
                     </button>
@@ -1991,17 +2039,17 @@ export const LandingView: React.FC<LandingViewProps> = ({
                       {(hub?.workforceRuns ?? []).slice(0, 4).map((run) => (
                         <div
                           key={run.id}
-                          className="rounded-xl border border-white/[0.08] bg-[#070a12]/85 p-2.5 text-xs space-y-1 hover:border-emerald-400/30 transition-colors"
+                          className="rounded-xl border border-border-subtle bg-app-card p-2.5 text-xs space-y-1 hover:border-emerald-400/30 transition-colors"
                         >
                           <div className="flex items-center justify-between gap-1">
-                            <span className="font-mono font-semibold text-white truncate text-[11px]">
+                            <span className="font-mono font-semibold text-txt-primary truncate text-[11px]">
                               {run.title}
                             </span>
                             <span className="rounded border border-emerald-500/25 bg-emerald-500/10 px-1.5 py-0.5 text-[9px] font-mono text-emerald-300">
                               {run.steps.length} agents
                             </span>
                           </div>
-                          <p className="text-[11px] text-slate-300 line-clamp-2">{run.synthesis}</p>
+                          <p className="text-[11px] text-txt-secondary line-clamp-2">{run.synthesis}</p>
                         </div>
                       ))}
                     </div>
@@ -2013,7 +2061,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
         )}
 
         {/* Keyboard hints footer */}
-        <div className="pt-1 text-2xs text-slate-500 font-mono flex flex-wrap items-center justify-center gap-x-4 gap-y-1">
+        <div className="pt-1 text-2xs text-txt-muted font-mono flex flex-wrap items-center justify-center gap-x-4 gap-y-1">
           <span><Kbd variant="plain">Ctrl+Tab</Kbd> Cycle tabs</span>
           <span><Kbd variant="plain">Ctrl+L</Kbd> Send terminal to AI</span>
           <span><Kbd variant="plain">Ctrl+K</Kbd> Inline Terminal AI</span>

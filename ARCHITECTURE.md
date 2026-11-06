@@ -40,7 +40,7 @@ renderer and main-process services also run without Electron in the multi-user *
 - All communication must go through `src/shared/types/ipc.ts` and the shared `MultiSSHApi` factory in `src/shared/ipc/createMultiSSHApi.ts`. `src/preload/index.ts` passes it `ipcRenderer`; `webClientBridge.ts` passes a WebSocket transport, so both front ends expose the same API.
 
 ### Runtime Modes
-- **Desktop** (`npm run dev`, `npm run build`): `src/main/desktopEntry.ts` loads `src/main/index.ts`. The pinned native Hermes Desktop host (`src/main/ai/desktop/`) is only started when `SSHS3_FORCE_NATIVE_HERMES=1` is set and its staged build exists; otherwise the regular sshs3 window with the built-in AI Hub runs.
+- **Desktop** (`npm run dev`, `npm run build`): `src/main/desktopEntry.ts` loads `src/main/index.ts`, launching the unified sshs3 window with the built-in AI Hub.
 - **Web Server** (`npm run build:web` → `dist-web/server.mjs`, `npm run start:web`): `src/main/web/serverEntry.ts` starts `WebServer` (HTTP API + RFC 6455 WebSocket RPC). `WebAuthService` handles accounts, sessions and invite links; `WebTenantManager` gives each user an isolated set of stores (profiles, K8s profiles, Team Vaults, snippets, AI Hub). `electronShim.ts` replaces the Electron APIs the main-process services import.
 - **Demo mode** (`npm run demo`, `--demo` or `SSHS3_DEMO=1`): decided once at process start in `src/main/demo/demoMode.ts` and never persisted. A demo process keeps all state in its own `demo-workspace` data directory, uses `DemoVirtualPty`/`DemoStorageProvider` for the `demo-…` fixtures, and `outwardSync.ts` turns off S3 team workspace sync, Team Vault sync and remote profile sync so nothing from the demo workspace leaves the machine. Outside demo mode the AI Hub uses the neutral defaults in `src/main/ai/hub/builtins.ts`.
 
@@ -53,13 +53,13 @@ renderer and main-process services also run without Electron in the multi-user *
 │   ├── COMPARISON.md               # Detailed comparison vs PuTTY, MobaXterm, WinSCP, S3 Browser
 │   ├── ai-hub.md                   # AI Hub: runtimes, knowledge base, self-learning, safety, MCP, web/demo modes
 │   └── user-guide/                 # End-user docs, published at docs.sshs3.com
-├── scripts/                        # Deploy/release scripts (deploy.sh, deploy-vm.sh), build-web.mjs, docs-lint.mjs, hermes/ (pinned native Hermes build)
+├── scripts/                        # Deploy/release scripts (deploy.sh, deploy-vm.sh), build-web.mjs, docs-lint.mjs
 ├── src/
 │   ├── main/                       # Electron main process (Node.js)
-│   │   ├── desktopEntry.ts         # Electron entry: optional native Hermes host (SSHS3_FORCE_NATIVE_HERMES=1), then index.ts
+│   │   ├── desktopEntry.ts         # Electron entry: stdio guard, then index.ts
 │   │   ├── index.ts                # Application lifecycle, window creation, quit hooks
 │   │   ├── IpcBridge.ts            # IPC bridge: constructor/wiring, prompt layer (pending prompts, presence), auto-sync, dispose
-│   │   ├── ai/                     # AI: AiConfigStore, CodexAuthProvider, HermesManager, desktop/ (native Hermes host + NativeToolBridge)
+│   │   ├── ai/                     # AI: AiConfigStore, CodexAuthProvider
 │   │   │   └── hub/                # AI Hub: HubService (actions, agent tools), createHub (host wiring), HubStore, DirectAgentRuntime, KnowledgeBaseService (Orama), SelfLearningService, CommandSafetyService, ContextService, TerminalRegistry, ToolBroker, McpClientManager, S3WorkspaceSyncService, builtins/demoWorkspace, privacy
 │   │   ├── demo/                   # Launch-time demo mode: demoMode, outwardSync, DemoVirtualPty, DemoStorageProvider
 │   │   ├── web/                    # Multi-user Web Server: serverEntry, WebServer, WebAuthService, WebTenantManager, electronShim
@@ -124,7 +124,6 @@ renderer and main-process services also run without Electron in the multi-user *
 │           ├── git.ts              # Git status, commit signing, clone & key fetching types
 │           ├── ipc.ts              # IPC_CHANNELS and MultiSSHApi interface
 │           ├── kubernetes.ts       # Kubernetes cluster, pod, and container exec types
-│           ├── nativeHermes.ts     # Native Hermes host layout/control contracts
 │           ├── session.ts          # Tab, pane, and split layout types
 │           ├── settings.ts         # AppSettings and keyboard shortcut definitions
 │           ├── ssh.ts              # SSHConnectionConfig, PtyOptions, Smartcard

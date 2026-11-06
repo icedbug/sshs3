@@ -24,6 +24,7 @@ import {
   Search,
   Shield,
   ShieldCheck,
+  Sparkles,
   Tag,
   Terminal,
   Trash2,
@@ -85,6 +86,9 @@ export interface FilePaneContextMenuInput {
   setPropertiesOpen: (open: boolean) => void;
   setCertificateOpen: (open: boolean) => void;
   setSearchOpen: (open: boolean) => void;
+  handleAiExplainDiff?: () => void;
+  handleAiGenerateS3Policy?: () => void;
+  handleAiIndexKb?: () => void;
 }
 
 /** The right-click menu: one set of actions for the selection, another for empty space. */
@@ -132,7 +136,82 @@ export function buildContextMenuItems(input: FilePaneContextMenuInput): ContextM
     setPropertiesOpen,
     setCertificateOpen,
     setSearchOpen,
+    handleAiExplainDiff,
+    handleAiGenerateS3Policy,
+    handleAiIndexKb,
   } = input;
+
+  const defaultExplainDiff = () => {
+    const names = selectedEntries.map((e) => e.path).join(', ') || currentPath;
+    const prompt = `Förklara konfigurationsdiff och granska säkerhets-/driftinställningar för ${names} (${sourceType}).`;
+    window.dispatchEvent(
+      new CustomEvent('sshs3:ai-open', {
+        detail: {
+          mode: 'panel',
+          view: 'Work',
+          prompt,
+          context: `Source: ${sourceType}, Path: ${currentPath}, Selected: ${names}`,
+        },
+      })
+    );
+  };
+
+  const defaultGenerateS3Policy = () => {
+    const targetPath = selectedEntries[0]?.path || currentPath || '/';
+    const bucket = targetPath.replace(/^\/+/, '').split('/')[0] || 'bucket';
+    const prompt = `Generera en least-privilege S3-policy (IAM & Bucket Policy) för bucket "${bucket}" och sökväg "${targetPath}".`;
+    window.dispatchEvent(
+      new CustomEvent('sshs3:ai-open', {
+        detail: {
+          mode: 'panel',
+          view: 'Work',
+          prompt,
+          context: `S3 Bucket: ${bucket}, Path: ${targetPath}`,
+        },
+      })
+    );
+  };
+
+  const defaultIndexKb = () => {
+    const targetPath = selectedEntries[0]?.path || currentPath || '/';
+    const prompt = `Indexera ${targetPath} (${sourceType}) i vår Orama RAG-kunskapsbas (@kb).`;
+    window.dispatchEvent(
+      new CustomEvent('sshs3:ai-open', {
+        detail: {
+          mode: 'panel',
+          view: 'Knowledge Base',
+          prompt,
+          context: `KB Ingest: ${sourceType} ${targetPath}`,
+        },
+      })
+    );
+  };
+
+  const aiMenuItems: ContextMenuItem[] = [
+    {
+      key: 'ai-action-explain-diff',
+      label: 'Förklara konfigurationsdiff',
+      icon: Sparkles,
+      separatorBefore: true,
+      onSelect: () => (handleAiExplainDiff ? handleAiExplainDiff() : defaultExplainDiff()),
+    },
+    ...(sourceType === 's3'
+      ? [
+          {
+            key: 'ai-action-generate-s3-policy',
+            label: 'Generera S3-policy',
+            icon: ShieldCheck,
+            onSelect: () => (handleAiGenerateS3Policy ? handleAiGenerateS3Policy() : defaultGenerateS3Policy()),
+          },
+        ]
+      : []),
+    {
+      key: 'ai-action-index-kb',
+      label: 'Indexera i Kunskapsbas',
+      icon: Sparkles,
+      onSelect: () => (handleAiIndexKb ? handleAiIndexKb() : defaultIndexKb()),
+    },
+  ];
 
   return !contextMenuOpen
     ? []
@@ -332,6 +411,7 @@ export function buildContextMenuItems(input: FilePaneContextMenuInput): ContextM
                 },
               ]
             : []),
+          ...aiMenuItems,
           ...(gitIntegrationEnabled && sourceType !== 's3' && sourceType !== 'k8s'
             ? [
                 ...(selectedEntries.length === 1 && selectedEntries[0].isDirectory
@@ -411,6 +491,7 @@ export function buildContextMenuItems(input: FilePaneContextMenuInput): ContextM
             icon: Search,
             onSelect: () => setSearchOpen(true),
           },
+          ...aiMenuItems,
           ...(gitIntegrationEnabled && sourceType !== 's3' && sourceType !== 'k8s'
             ? [
                 {

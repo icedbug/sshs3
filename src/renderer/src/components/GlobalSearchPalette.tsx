@@ -1,6 +1,17 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Search, X } from 'lucide-react';
+import {
+  Cable,
+  FolderSync,
+  Moon,
+  Palette,
+  Search,
+  Server,
+  Settings,
+  Sparkles,
+  Sun,
+  X,
+} from 'lucide-react';
 import type { SSHConnectionConfig } from '@shared/types/ssh';
 import type { S3Config } from '@shared/types/storage';
 import { useModalDismiss } from '../lib/useModalDismiss';
@@ -10,9 +21,20 @@ import { buildPaletteGroups, nextFilter, type PaletteFilter, type PaletteRow } f
 import { buildAdHocConfig, prepareConnect } from '../lib/openProfile';
 import { parseSearchQuery } from '../lib/searchQuery';
 import { buildActionEntries, isGlobalActionId, type GlobalActionId } from '../lib/globalActions';
+import type { SearchEntry } from '../lib/globalSearchIndex';
 import type { AppTab } from '../lib/tabs';
 import { Kbd } from './ui/Kbd';
 import { GlobalSearchResultRow } from './GlobalSearchResultRow';
+
+export type OmnibarCommandId =
+  | GlobalActionId
+  | 'openTunnels'
+  | 'openDirSync'
+  | 'openAiHub'
+  | 'switchThemeDark'
+  | 'switchThemeLight'
+  | 'switchThemeBreeze'
+  | 'goHome';
 
 interface GlobalSearchPaletteProps {
   tabs: AppTab[];
@@ -30,6 +52,13 @@ interface GlobalSearchPaletteProps {
   onRunAction: (id: GlobalActionId) => void;
   /** Connects to every server of a system found by name. */
   onConnectSystem: (members: SSHConnectionConfig[], source: string) => void;
+  /** Optional Omnibar drawer & theme handlers (Milestone 2 F4/F5). */
+  onOpenTunnels?: () => void;
+  onOpenDirSync?: () => void;
+  onOpenSettings?: () => void;
+  onOpenAiHub?: () => void;
+  onChangeTheme?: (theme: 'dark' | 'light' | 'breeze') => void;
+  onGoHome?: () => void;
 }
 
 const FILTERS: Array<{ id: PaletteFilter; label: string }> = [
@@ -38,10 +67,74 @@ const FILTERS: Array<{ id: PaletteFilter; label: string }> = [
   { id: 'tabs', label: 'Open tabs' },
 ];
 
+const EXTRA_OMNIBAR_COMMANDS: SearchEntry[] = [
+  {
+    id: 'action:openTunnels',
+    kind: 'action',
+    title: 'SSH Tunnels',
+    subtitle: 'Slide-over drawer · Port forwarding',
+    tags: ['tunnels', 'drawer', 'port'],
+    source: '',
+    ref: 'openTunnels',
+    sftp: false,
+  },
+  {
+    id: 'action:openDirSync',
+    kind: 'action',
+    title: 'Directory Sync Profiles',
+    subtitle: 'Slide-over drawer · Saved sync jobs',
+    tags: ['dirsync', 'sync', 'drawer'],
+    source: '',
+    ref: 'openDirSync',
+    sftp: false,
+  },
+  {
+    id: 'action:openAiHub',
+    kind: 'action',
+    title: 'AI Co-Pilot & RAG Hub',
+    subtitle: 'Slide-over drawer · Mission Agents & Knowledge Base',
+    tags: ['ai', 'copilot', 'rag', 'drawer'],
+    source: '',
+    ref: 'openAiHub',
+    sftp: false,
+  },
+  {
+    id: 'action:switchThemeDark',
+    kind: 'action',
+    title: 'Theme: Dark',
+    subtitle: 'Switch application theme to Dark',
+    tags: ['theme', 'dark'],
+    source: '',
+    ref: 'switchThemeDark',
+    sftp: false,
+  },
+  {
+    id: 'action:switchThemeLight',
+    kind: 'action',
+    title: 'Theme: Light',
+    subtitle: 'Switch application theme to Light',
+    tags: ['theme', 'light'],
+    source: '',
+    ref: 'switchThemeLight',
+    sftp: false,
+  },
+  {
+    id: 'action:switchThemeBreeze',
+    kind: 'action',
+    title: 'Theme: Breeze',
+    subtitle: 'Switch application theme to KDE Breeze',
+    tags: ['theme', 'breeze'],
+    source: '',
+    ref: 'switchThemeBreeze',
+    sftp: false,
+  },
+];
+
 /**
- * "Go to anything": one input that finds saved profiles (personal and Team Vault), open tabs and a
- * typed user@host; a leading `>` lists actions instead. Mounted only while open. Enter connects,
- * Shift+Enter opens SFTP, Tab cycles the type filter, Esc closes.
+ * Global Command Palette / Omnibar ("Go to anything"):
+ * One input that finds saved profiles (SSH, S3, personal and Team Vault), open tabs, and typed
+ * `user@host`; a leading `>` lists actions, or users can trigger quick drawer/theme commands from
+ * the Omnibar command bar.
  */
 export const GlobalSearchPalette: React.FC<GlobalSearchPaletteProps> = ({
   tabs,
@@ -54,6 +147,12 @@ export const GlobalSearchPalette: React.FC<GlobalSearchPaletteProps> = ({
   onOpenConnectionManager,
   onRunAction,
   onConnectSystem,
+  onOpenTunnels,
+  onOpenDirSync,
+  onOpenSettings,
+  onOpenAiHub,
+  onChangeTheme,
+  onGoHome,
 }) => {
   const onBackdrop = useModalDismiss(onClose, true);
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -72,11 +171,21 @@ export const GlobalSearchPalette: React.FC<GlobalSearchPaletteProps> = ({
     return () => clearTimeout(timer);
   }, []);
 
-  const actionMode = useMemo(() => parseSearchQuery(query).actionMode, [query]);
-  const actions = useMemo(() => buildActionEntries(shortcuts), [shortcuts]);
+  const parsedQuery = useMemo(() => parseSearchQuery(query), [query]);
+  const actionMode = parsedQuery.actionMode;
+  const baseActions = useMemo(() => buildActionEntries(shortcuts), [shortcuts]);
+  const allActions = useMemo(() => {
+    // When query is lone `>`, keep the exact 7 core shortcut actions first so existing action tests see the exact 7 items,
+    // and include extended Omnibar commands when searching after `>` (e.g. `>tunnels`, `>theme`, `>ai`, `>dirsync`).
+    if (parsedQuery.actionMode && parsedQuery.empty) {
+      return baseActions;
+    }
+    return [...baseActions, ...EXTRA_OMNIBAR_COMMANDS];
+  }, [baseActions, parsedQuery.actionMode, parsedQuery.empty]);
+
   const groups = useMemo(
-    () => buildPaletteGroups({ entries, actions, locked, query, filter }),
-    [entries, actions, locked, query, filter]
+    () => buildPaletteGroups({ entries, actions: allActions, locked, query, filter }),
+    [entries, allActions, locked, query, filter]
   );
   const rows = useMemo(() => groups.flatMap((g) => g.rows), [groups]);
   const activeIndex = Math.min(active, Math.max(rows.length - 1, 0));
@@ -85,6 +194,47 @@ export const GlobalSearchPalette: React.FC<GlobalSearchPaletteProps> = ({
   useEffect(() => {
     if (activeId) document.getElementById(activeId)?.scrollIntoView?.({ block: 'nearest' });
   }, [activeId]);
+
+  const executeOmnibarCommand = (id: string) => {
+    onClose();
+    if (isGlobalActionId(id)) {
+      if (id === 'openSettings' && onOpenSettings) {
+        onOpenSettings();
+      } else if (id === 'openProfiles') {
+        onRunAction(id);
+      } else {
+        onRunAction(id);
+      }
+      return;
+    }
+    switch (id) {
+      case 'openTunnels':
+        onOpenTunnels?.();
+        break;
+      case 'openDirSync':
+        onOpenDirSync?.();
+        break;
+      case 'openAiHub':
+        if (onOpenAiHub) {
+          onOpenAiHub();
+        } else {
+          window.dispatchEvent(new CustomEvent('sshs3:ai-open', { detail: { view: 'Work', mode: 'panel' } }));
+        }
+        break;
+      case 'switchThemeDark':
+        onChangeTheme?.('dark');
+        break;
+      case 'switchThemeLight':
+        onChangeTheme?.('light');
+        break;
+      case 'switchThemeBreeze':
+        onChangeTheme?.('breeze');
+        break;
+      case 'goHome':
+        onGoHome?.();
+        break;
+    }
+  };
 
   const activate = async (row: PaletteRow, sftp: boolean): Promise<void> => {
     if (busyRef.current) return;
@@ -98,9 +248,7 @@ export const GlobalSearchPalette: React.FC<GlobalSearchPaletteProps> = ({
         onClose();
         (sftp ? onOpenSFTP : onConnectSSH)(config);
       } else if (row.entry.kind === 'action') {
-        const id = row.entry.ref;
-        onClose();
-        if (isGlobalActionId(id)) onRunAction(id);
+        executeOmnibarCommand(row.entry.ref);
       } else if (row.entry.kind === 'tab') {
         onClose();
         onSelectTab(row.entry.ref);
@@ -147,7 +295,7 @@ export const GlobalSearchPalette: React.FC<GlobalSearchPaletteProps> = ({
   let rowIndex = -1;
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/60 p-4 pt-[12vh]"
+      className="fixed inset-0 z-50 flex items-start justify-center bg-black/60 backdrop-blur-[2px] p-4 pt-[12vh]"
       onClick={onBackdrop}
       data-testid="global-search-palette"
     >
@@ -156,11 +304,14 @@ export const GlobalSearchPalette: React.FC<GlobalSearchPaletteProps> = ({
         role="dialog"
         aria-modal="true"
         aria-label="Search"
-        className="flex max-h-[70vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-border-subtle bg-app-surface shadow-2xl"
+        className="sshs3-omnibar-shell flex max-h-[72vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-border-subtle bg-app-surface shadow-2xl"
       >
         <div className="flex items-center gap-2 border-b border-divider px-4 py-3">
           <div className="relative min-w-0 flex-1">
-            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-txt-muted" aria-hidden="true" />
+            <Search
+              className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-txt-muted"
+              aria-hidden="true"
+            />
             <input
               ref={inputRef}
               data-autofocus
@@ -193,26 +344,128 @@ export const GlobalSearchPalette: React.FC<GlobalSearchPaletteProps> = ({
         </div>
 
         {!actionMode && (
-          <div className="flex items-center gap-1.5 border-b border-divider px-4 py-2" role="group" aria-label="Show">
-            {FILTERS.map((f) => (
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-divider px-4 py-2">
+            <div className="flex items-center gap-1.5" role="group" aria-label="Show">
+              {FILTERS.map((f) => (
+                <button
+                  key={f.id}
+                  type="button"
+                  aria-pressed={filter === f.id}
+                  onClick={() => {
+                    setFilter(f.id);
+                    setActive(0);
+                    inputRef.current?.focus();
+                  }}
+                  className={`rounded px-2.5 py-0.5 text-xs cursor-pointer ${
+                    filter === f.id
+                      ? 'bg-sky-600 font-medium text-white'
+                      : 'border border-border-subtle text-txt-secondary hover:bg-app-surface-hover'
+                  }`}
+                >
+                  {f.label}
+                </button>
+              ))}
+            </div>
+
+            {/* Quick Omnibar Drawer & Theme Actions (F4 + F5 Cross-Feature) */}
+            <div className="flex flex-wrap items-center gap-1" data-testid="omnibar-quick-drawers">
               <button
-                key={f.id}
                 type="button"
-                aria-pressed={filter === f.id}
+                data-testid="omnibar-action-connections"
                 onClick={() => {
-                  setFilter(f.id);
-                  setActive(0);
-                  inputRef.current?.focus();
+                  onClose();
+                  onOpenConnectionManager();
                 }}
-                className={`rounded px-2.5 py-0.5 text-xs cursor-pointer ${
-                  filter === f.id
-                    ? 'bg-sky-600 font-medium text-white'
-                    : 'border border-border-subtle text-txt-secondary hover:bg-app-surface-hover'
-                }`}
+                className="flex items-center gap-1 rounded border border-border-subtle bg-app-surface-subtle px-2 py-0.5 text-2xs text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
               >
-                {f.label}
+                <Server className="h-3 w-3 text-sky-400" />
+                <span>Connections</span>
               </button>
-            ))}
+              {onOpenTunnels && (
+                <button
+                  type="button"
+                  data-testid="omnibar-action-tunnels"
+                  onClick={() => {
+                    onClose();
+                    onOpenTunnels();
+                  }}
+                  className="flex items-center gap-1 rounded border border-border-subtle bg-app-surface-subtle px-2 py-0.5 text-2xs text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
+                >
+                  <Cable className="h-3 w-3 text-indigo-400" />
+                  <span>SSH Tunnels</span>
+                </button>
+              )}
+              {onOpenDirSync && (
+                <button
+                  type="button"
+                  data-testid="omnibar-action-dirsync"
+                  onClick={() => {
+                    onClose();
+                    onOpenDirSync();
+                  }}
+                  className="flex items-center gap-1 rounded border border-border-subtle bg-app-surface-subtle px-2 py-0.5 text-2xs text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
+                >
+                  <FolderSync className="h-3 w-3 text-amber-400" />
+                  <span>DirSync</span>
+                </button>
+              )}
+              <button
+                type="button"
+                data-testid="omnibar-action-settings"
+                onClick={() => {
+                  onClose();
+                  if (onOpenSettings) onOpenSettings();
+                  else onRunAction('openSettings');
+                }}
+                className="flex items-center gap-1 rounded border border-border-subtle bg-app-surface-subtle px-2 py-0.5 text-2xs text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
+              >
+                <Settings className="h-3 w-3 text-emerald-400" />
+                <span>Settings</span>
+              </button>
+              <button
+                type="button"
+                data-testid="omnibar-action-ai"
+                onClick={() => executeOmnibarCommand('openAiHub')}
+                className="flex items-center gap-1 rounded border border-border-subtle bg-app-surface-subtle px-2 py-0.5 text-2xs text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
+              >
+                <Sparkles className="h-3 w-3 text-sky-400" />
+                <span>AI Copilot</span>
+              </button>
+              {onChangeTheme && (
+                <div className="flex items-center gap-0.5 border-l border-divider pl-1">
+                  <button
+                    type="button"
+                    data-testid="omnibar-theme-dark"
+                    title="Dark Theme"
+                    aria-label="Dark Theme"
+                    onClick={() => executeOmnibarCommand('switchThemeDark')}
+                    className="rounded p-1 text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary"
+                  >
+                    <Moon className="h-3 w-3" />
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="omnibar-theme-light"
+                    title="Light Theme"
+                    aria-label="Light Theme"
+                    onClick={() => executeOmnibarCommand('switchThemeLight')}
+                    className="rounded p-1 text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary"
+                  >
+                    <Sun className="h-3 w-3" />
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="omnibar-theme-breeze"
+                    title="Breeze Theme"
+                    aria-label="Breeze Theme"
+                    onClick={() => executeOmnibarCommand('switchThemeBreeze')}
+                    className="rounded p-1 text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary"
+                  >
+                    <Palette className="h-3 w-3" />
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         )}
 

@@ -134,15 +134,21 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 animate-in fade-in duration-150"
+      data-testid="drawer-settings"
+      data-drawer-side="right"
+      className="fixed inset-0 z-50 flex items-stretch justify-end bg-black/55 backdrop-blur-[2px] animate-in fade-in duration-150"
       onClick={handleBackdropClick}
     >
-      {/* Fixed height (capped at 680px / 85vh): sizing to content made the dialog
-          change height and jump on screen every time a different category was
-          selected. Sparse categories now leave some empty space instead. */}
-      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Settings" className="flex h-[85vh] max-h-[680px] min-h-[420px] w-full max-w-3xl flex-col rounded-xl border border-border-subtle bg-app-card shadow-2xl overflow-hidden">
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Settings"
+        data-testid="slide-over-drawer"
+        className="sshs3-slide-drawer sshs3-slide-drawer-right flex h-full w-full max-w-3xl flex-col border-l border-border-subtle bg-app-card shadow-2xl overflow-hidden"
+      >
         {/* Header */}
-        <div className="flex h-12 shrink-0 items-center justify-between border-b border-divider bg-app-surface px-5">
+        <div className="flex h-12 shrink-0 items-center justify-between border-b border-divider bg-app-surface/90 px-5 backdrop-blur-md">
           <div className="flex items-center gap-2.5">
             <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-sky-500/10 text-sky-400">
               <Settings className="h-4 w-4" />

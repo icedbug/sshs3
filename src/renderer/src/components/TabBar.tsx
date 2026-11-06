@@ -67,6 +67,8 @@ export interface TabBarProps {
   onUnlockSmartcard?: () => Promise<{ started: boolean }>;
   onListCachedSmartcards?: () => Promise<CachedSmartcardAgent[]>;
   shortcuts?: Record<string, string>;
+  /** Optional inline telemetry or accessory slot rendered inside or alongside the active tab header (M3). */
+  activeTabTelemetrySlot?: React.ReactNode;
 }
 
 export const TabBar: React.FC<TabBarProps> = ({
@@ -89,6 +91,7 @@ export const TabBar: React.FC<TabBarProps> = ({
   onUnlockSmartcard,
   onListCachedSmartcards,
   shortcuts,
+  activeTabTelemetrySlot,
 }) => {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [tabMenu, setTabMenu] = useState<{ tabId: string; x: number; y: number; windows: WindowInfo[] } | null>(null);
@@ -287,10 +290,10 @@ export const TabBar: React.FC<TabBarProps> = ({
               }}
               className={`group relative flex max-w-[220px] min-w-[120px] cursor-pointer items-center justify-between rounded-t-lg px-3 text-xs transition-colors ${
                 isActive
-                  ? `z-10 h-[34px] bg-app-card text-txt-primary font-medium border-t-2 border-sky-500 shadow-sm ${
+                  ? `z-10 h-[36px] bg-app-card text-txt-primary font-medium border-t-2 border-sky-500 shadow-sm ${
                       tabBarFocused ? 'ring-2 ring-sky-400 ring-inset shadow-md font-semibold' : ''
                     }`
-                  : 'h-[30px] bg-app-surface text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary'
+                  : 'h-[32px] bg-app-surface text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary'
               }`}
             >
               <div className="flex items-center gap-2 truncate">
@@ -343,6 +346,10 @@ export const TabBar: React.FC<TabBarProps> = ({
           );
         })}
       </div>
+
+      {activeTabTelemetrySlot && (
+        <div className="flex shrink-0 items-center self-center px-1.5">{activeTabTelemetrySlot}</div>
+      )}
 
       {/* New Tab Button & Dropdown */}
       <div className="relative flex shrink-0 items-center self-center" ref={menuRef}>
@@ -429,8 +436,8 @@ export const TabBar: React.FC<TabBarProps> = ({
         )}
       </div>
 
-      {/* Quick links: Search, Smartcard lock, Connections & Settings */}
-      <div className="flex items-center gap-1 self-center border-l border-divider pl-2">
+      {/* Quick links: Omnibar Search, Smartcard lock, Slide-Over Drawer Toggles */}
+      <div className="flex shrink-0 items-center gap-1 self-center border-l border-divider pl-2">
         {onOpenGlobalSearch && <GlobalSearchButton onOpen={onOpenGlobalSearch} shortcuts={shortcuts} />}
         {showLockSmartcardButton && (
           <div className="relative flex items-center" ref={smartcardMenuRef}>
@@ -473,10 +480,6 @@ export const TabBar: React.FC<TabBarProps> = ({
                   <ul className="space-y-2">
                     {cachedAgents.map((agent) => (
                       <li key={agent.pkcs11LibPath}>
-                        {/* UX audit finding #13: this used to show the raw PKCS#11 library
-                            path (e.g. "/usr/lib64/p11-kit-proxy.so") as the primary label —
-                            meaningful to someone debugging a smartcard driver, opaque to
-                            everyone else. The friendly name leads; the path is one hover away. */}
                         <div
                           className="truncate text-xs font-medium text-txt-primary"
                           title={agent.pkcs11LibPath || undefined}
@@ -562,7 +565,6 @@ export const TabBar: React.FC<TabBarProps> = ({
                   </ul>
                 )}
 
-                {/* One toggle: Lock while something is unlocked, Unlock when nothing is. Hidden while the list loads. */}
                 {!loadingCachedAgents && cachedAgents && cachedAgents.length === 0 && onUnlockSmartcard && (
                   <button
                     type="button"
@@ -632,38 +634,42 @@ export const TabBar: React.FC<TabBarProps> = ({
         >
           <Server className="h-4 w-4" />
         </button>
-        <button
-          type="button"
-          data-testid="quick-tunnels-btn"
-          title={
-            liveTunnelCount > 0
-              ? `SSH Tunnels (${liveTunnelCount} active)`
-              : erroredTunnelCount > 0
-                ? `SSH Tunnels (${erroredTunnelCount} failed)`
-                : 'SSH Tunnels'
-          }
-          aria-label="SSH Tunnels"
-          onClick={onOpenTunnels}
-          className={`flex h-6 w-6 items-center justify-center rounded-md transition-colors hover:bg-app-surface-hover ${
-            erroredTunnelCount > 0
-              ? 'text-rose-400 hover:text-rose-300'
-              : liveTunnelCount > 0
-                ? 'text-emerald-400 hover:text-emerald-300'
-                : 'text-txt-muted hover:text-txt-primary'
-          }`}
-        >
-          <Cable className="h-4 w-4" />
-        </button>
-        <button
-          type="button"
-          data-testid="quick-dirsync-profiles-btn"
-          title="Directory Sync: Saved Profiles"
-          aria-label="Directory Sync: Saved Profiles"
-          onClick={onOpenDirSyncProfiles}
-          className="flex h-6 w-6 items-center justify-center rounded-md text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
-        >
-          <FolderSync className="h-4 w-4" />
-        </button>
+        {onOpenTunnels && (
+          <button
+            type="button"
+            data-testid="quick-tunnels-btn"
+            title={
+              liveTunnelCount > 0
+                ? `SSH Tunnels (${liveTunnelCount} active)`
+                : erroredTunnelCount > 0
+                  ? `SSH Tunnels (${erroredTunnelCount} failed)`
+                  : 'SSH Tunnels'
+            }
+            aria-label="SSH Tunnels"
+            onClick={onOpenTunnels}
+            className={`flex h-6 w-6 items-center justify-center rounded-md transition-colors hover:bg-app-surface-hover ${
+              erroredTunnelCount > 0
+                ? 'text-rose-400 hover:text-rose-300'
+                : liveTunnelCount > 0
+                  ? 'text-emerald-400 hover:text-emerald-300'
+                  : 'text-txt-muted hover:text-txt-primary'
+            }`}
+          >
+            <Cable className="h-4 w-4" />
+          </button>
+        )}
+        {onOpenDirSyncProfiles && (
+          <button
+            type="button"
+            data-testid="quick-dirsync-profiles-btn"
+            title="Directory Sync: Saved Profiles"
+            aria-label="Directory Sync: Saved Profiles"
+            onClick={onOpenDirSyncProfiles}
+            className="flex h-6 w-6 items-center justify-center rounded-md text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
+          >
+            <FolderSync className="h-4 w-4" />
+          </button>
+        )}
         <button
           type="button"
           data-testid="quick-settings-btn"
