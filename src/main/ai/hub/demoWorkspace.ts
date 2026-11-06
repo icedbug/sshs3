@@ -1566,6 +1566,67 @@ export const MCP_MARKETPLACE_CATALOG: McpCatalogPreset[] = [
       },
     ],
   },
+  {
+    id: "preset-mcp-trivy-falco",
+    name: "Trivy CVE Scanner & Falco Runtime Security MCP",
+    category: "security",
+    icon: "🛡️",
+    description:
+      "Skanna container-images, OS-paket och Kubernetes-kluster efter kritiska CVE:er med Aqua Trivy och läs Falco runtime-larm.",
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "mcp-server-trivy"],
+    defaultTools: [
+      {
+        name: "trivy_scan_filesystem_or_image",
+        description: "Run Aqua Trivy vulnerability & misconfiguration scan on host or image.",
+      },
+      {
+        name: "falco_list_runtime_alerts",
+        description: "Inspect recent eBPF/Falco kernel & container security events.",
+      },
+    ],
+  },
+  {
+    id: "preset-mcp-netbox-ipam",
+    name: "NetBox CMDB, IPAM & SAN Fabric Topology MCP",
+    category: "network",
+    icon: "🌐",
+    description:
+      "Slå upp VLAN, VRF, rack-placering, LIF-subnät och switch-portar direkt från open-source NetBox SSoT.",
+    transport: "http",
+    url: "http://10.30.10.30:8000/api/mcp",
+    defaultTools: [
+      {
+        name: "netbox_lookup_prefix_and_vlan",
+        description: "Query NetBox IPAM prefixes, VLAN IDs, and assigned server interfaces.",
+      },
+      {
+        name: "netbox_get_device_cables",
+        description: "Trace physical and SAN/NIC cable peers for a rack server or storage node.",
+      },
+    ],
+  },
+  {
+    id: "preset-mcp-opentelemetry-jaeger",
+    name: "OpenTelemetry & Jaeger Distributed Tracing MCP",
+    category: "observability",
+    icon: "🔭",
+    description:
+      "Följ distribuerade OTel-traces över mikrotjänster, S3-anrop och databaser för att isolera p99-flaskhalsar.",
+    transport: "http",
+    url: "http://10.30.10.25:16686/api/mcp",
+    defaultTools: [
+      {
+        name: "jaeger_find_slow_traces",
+        description: "Search OpenTelemetry traces exceeding latency threshold or with error tags.",
+      },
+      {
+        name: "otel_service_dependency_graph",
+        description: "Fetch live service-to-service call latency and error rates.",
+      },
+    ],
+  },
 ];
 
 const initialDemoInfraEdges: InfraGraphEdge[] = [

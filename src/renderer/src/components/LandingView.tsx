@@ -1375,7 +1375,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     📚 Knowledge Base & Minne
                   </span>
                   <span className="rounded-full border border-emerald-500/30 bg-emerald-500/15 px-1.5 py-0.5 text-[9.5px] font-semibold text-emerald-200">
-                    BM25 + S3
+                    @orama/orama + Voyager
                   </span>
                 </div>
                 <div className="mt-1 flex items-baseline gap-2">
@@ -1383,7 +1383,8 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     {(hub?.kbDocuments ?? []).length}
                   </span>
                   <span className="text-[11px] text-txt-muted">
-                    runbooks · {(hub?.memories ?? []).length} team-minnen
+                    runbooks · {hub?.selfLearning?.totalLearnedSkills ?? (hub?.memories ?? []).length} skills (
+                    {Math.round((hub?.selfLearning?.averageConfidence ?? 0.85) * 100)}%)
                   </span>
                 </div>
               </button>
@@ -1409,6 +1410,18 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   </div>
                 </div>
                 <div className="flex flex-wrap items-center gap-1">
+                  <button
+                    type="button"
+                    data-testid="workspace-self-reflect-btn"
+                    onClick={() => {
+                      void hubRequest({ action: 'self-learn-reflect' });
+                    }}
+                    title="Kör Voyager/Reflexion Self-Reflection: konsoliderar minnen, extraherar felsökningsmönster och optimerar @orama/orama-indexet"
+                    className="rounded-full border border-purple-400/50 bg-purple-500/20 px-2.5 py-0.5 text-[10.5px] font-semibold text-purple-200 hover:bg-purple-500/30 transition-all"
+                  >
+                    🧬 Self-Learning ({hub?.selfLearning?.totalLearnedSkills ?? 0} skills ·{' '}
+                    {Math.round((hub?.selfLearning?.averageConfidence ?? 0.85) * 100)}%)
+                  </button>
                   <button
                     type="button"
                     data-testid="workspace-demo-lab-toggle"

@@ -1557,7 +1557,188 @@ describe("Production multi-user workspace sync & auto-memory", () => {
     });
     expect(afterDemoOff.demoMode).toBe(false);
   });
+
+  it("integrates @orama/orama hybrid vector+BM25 search, Myers diff, AST subshell safety guardrails, and Voyager/Reflexion continuous self-learning", async () => {
+    const { HubService } = await import("../../src/main/ai/hub/HubService");
+    const { analyzeCommandSafety } = await import(
+      "../../src/main/ai/hub/CommandSafetyService"
+    );
+    const tmpDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), "sshs3-hub-selflearn-"),
+    );
+    disposals.push(() => fs.rm(tmpDir, { recursive: true, force: true }));
+
+    const hub = new HubService(
+      {
+        changed: () => {},
+        inventoryTargets: async () => [],
+        backgroundChanged: async () => {},
+        openSchedule: async () => "s1",
+        show: () => {},
+        workspaceServers: async () => [
+          {
+            id: "srv-ontap-prod-01",
+            name: "ontap-prod-01",
+            host: "10.10.1.10",
+            port: 22,
+            username: "admin",
+            cluster: "NetApp-ONTAP-Prod-SE",
+            tags: ["prod", "ontap"],
+            shared: true,
+          },
+        ],
+      },
+      tmpDir,
+    );
+    disposals.push(() => hub.dispose());
+    await hub.initialize();
+
+    // 1. Verify @orama/orama index & bilingual 16D vector + BM25 search
+    const initialSnap = await hub.snapshot();
+    expect(initialSnap.selfLearning).toBeDefined();
+    expect(initialSnap.selfLearning?.oramaIndexedChunks).toBeGreaterThan(0);
+    expect(
+      initialSnap.selfLearning?.openSourceEngines.some(
+        (e) => e.id === "orama-hybrid-rag" && e.packageName === "@orama/orama",
+      ),
+    ).toBe(true);
+    expect((initialSnap.mcpCatalog ?? []).length).toBe(9);
+
+    // Search with Swedish semantic concept + slight typo
+    const hits = hub.kb.search(initialSnap.kbDocuments ?? [], {
+      query: "hög svarstid och dröjsmål i lagring",
+      limit: 4,
+    });
+    expect(hits.length).toBeGreaterThan(0);
+    expect(hub.kb.getIndexedChunkCount()).toBeGreaterThan(10);
+
+    // 2. Verify AST Subshell Unwrapping (`bash -c`, `eval`, `<(...)`)
+    const subshellDestructive = analyzeCommandSafety(
+      `bash -c "echo checking && rm -rf /var/lib/postgresql/data"`,
+    );
+    expect(subshellDestructive.riskLevel).toBe("destructive");
+    expect(subshellDestructive.parsedSubcommands.length).toBeGreaterThanOrEqual(2);
+
+    // 3. Verify ToolBroker enforces SafetyPolicy (`autoApproveSafeReadOnly` in assisted mode & `blockDestructiveWithoutConfirm` in autonomous mode)
+    const { shouldRequireCommandApproval } = await import(
+      "../../src/main/ai/hub/CommandSafetyService"
+    );
+    expect(
+      shouldRequireCommandApproval({
+        analysis: analyzeCommandSafety("mkfs.ext4 /dev/nvme0n1"),
+        mode: "autonomous",
+      }),
+    ).toBe(true);
+
+    hub.terminals.register(
+      {
+        id: "sess-learn-1",
+        label: "ontap-prod-01",
+        kind: "ssh",
+        profileId: "srv-ontap-prod-01",
+      },
+      (data) => {
+        const n = /SSHS3;([a-f0-9]{32});BEGIN/.exec(data)?.[1];
+        if (n) {
+          queueMicrotask(() =>
+            hub.terminals.feed(
+              "sess-learn-1",
+              `\x1b]777;SSHS3;${n};BEGIN\x07Filesystem Size Used Avail\n/dev/root 100G 40G 60G\n\x1b]777;SSHS3;${n};END;0;/etc\x07`,
+            ),
+          );
+        }
+      },
+    );
+    await hub.terminals.arm("sess-learn-1", "bash");
+
+    const assistedTask: AgentTask = {
+      id: "task-safety-assisted",
+      title: "Assisted Read-Only Check",
+      mode: "assisted",
+      status: "running",
+      target: {
+        sessionId: "sess-learn-1",
+        generation: hub.terminals.get("sess-learn-1")!.generation,
+        label: "ontap-prod-01",
+      },
+      messages: [],
+      changes: [],
+      sources: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      maxCommands: 20,
+      maxMinutes: 15,
+      verification: "not-verified",
+    };
+    const assistedCap = await hub.broker.issue(assistedTask);
+    // In assisted mode with autoApproveSafeReadOnly=true (default), safe read-only commands execute immediately without waiting for approval!
+    const safeExecRes = (await hub.broker.invoke(assistedCap.key, {
+      action: "command",
+      command: "df -h && free -m",
+      description: "Read-only disk and memory check",
+    })) as { exitCode: number; output: string };
+    expect(safeExecRes.exitCode).toBe(0);
+    expect(assistedTask.changes[0].riskLevel).toBe("safe");
+    expect(assistedTask.changes[0].status).toBe("completed");
+
+    // 4. Verify Voyager Failure -> Fix Automatic Skill Synthesis
+    // Simulate a failed command followed by a successful fix in the same terminal session
+    hub.terminals.feed(
+      "sess-learn-1",
+      `\x1b]777;SSHS3;0123456789abcdef0123456789abcdef;BEGIN\x07multipath -ll\nerror: multipathd daemon not running or Stale file handle\n\x1b]777;SSHS3;0123456789abcdef0123456789abcdef;END;1;/etc\x07`,
+    );
+    await new Promise((r) => setTimeout(r, 30));
+    hub.terminals.feed(
+      "sess-learn-1",
+      `\x1b]777;SSHS3;fedcba9876543210fedcba9876543210;BEGIN\x07systemctl restart multipathd && multipath -r && multipath -ll\nmpathe (3600a098038314654) dm-2 NETAPP,LUN C-Mode\n\x1b]777;SSHS3;fedcba9876543210fedcba9876543210;END;0;/etc\x07`,
+    );
+    await new Promise((r) => setTimeout(r, 40));
+
+    const afterFixSnap = await hub.snapshot();
+    const autoLearnedSkill = afterFixSnap.memories.find(
+      (m) => m.autoLearned && m.sourceCommand?.includes("multipath -r"),
+    );
+    expect(autoLearnedSkill).toBeDefined();
+    expect(autoLearnedSkill?.confidence).toBeGreaterThanOrEqual(0.8);
+    expect(
+      afterFixSnap.selfLearning?.failureToFixPatterns,
+    ).toBeGreaterThanOrEqual(1);
+
+    // 5. Verify Ctrl+K Inline Suggestion adapts to learned Voyager skills
+    const inlineLearnedSnap = await hub.request({
+      action: "inline-suggest",
+      prompt: "multipathd daemon stale file handle",
+      shell: "bash",
+    });
+    expect(inlineLearnedSnap.inlineSuggestion?.command).toContain(
+      "multipath -r",
+    );
+    expect(inlineLearnedSnap.inlineSuggestion?.explanation).toContain(
+      "Auto-Learned Skill",
+    );
+
+    // 6. Verify Memory Reinforcement Feedback (+1 / -1) and Self-Reflection cycle
+    const beforeConf = autoLearnedSkill!.confidence ?? 0.82;
+    const upvotedSnap = await hub.request({
+      action: "memory-feedback",
+      id: autoLearnedSkill!.id,
+      delta: 1,
+    });
+    const upvotedSkill = upvotedSnap.memories.find(
+      (m) => m.id === autoLearnedSkill!.id,
+    );
+    expect(upvotedSkill?.confidence).toBeGreaterThan(beforeConf);
+    expect(upvotedSkill?.feedbackScore).toBe(1);
+
+    const reflectedSnap = await hub.request({
+      action: "self-learn-reflect",
+      targetCluster: "NetApp-ONTAP-Prod-SE",
+    });
+    expect(reflectedSnap.selfLearning?.lastReflectionAt).toBeDefined();
+    expect(reflectedSnap.selfLearning?.recentEvents.length).toBeGreaterThan(0);
+  });
 });
+
 
 
 

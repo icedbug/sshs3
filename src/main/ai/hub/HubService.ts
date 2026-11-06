@@ -33,8 +33,10 @@ import { CodexAuthProvider } from "../CodexAuthProvider";
 import { HermesManager, type HermesModelConfig } from "../HermesManager";
 import { HubStore } from "./HubStore";
 import { S3WorkspaceSyncService } from "./S3WorkspaceSyncService";
+import { createTwoFilesPatch } from "diff";
 import { McpClientManager } from "./McpClientManager";
 import { KnowledgeBaseService } from "./KnowledgeBaseService";
+import { SelfLearningService } from "./SelfLearningService";
 import {
   analyzeCommandSafety,
   DEFAULT_SAFETY_POLICY,
@@ -52,6 +54,7 @@ import {
   getDemoKbDocuments,
   getDemoMcpServers,
   getDemoSchedules,
+  getDemoServers,
   getDemoTasks,
   getDemoWorkforceRuns,
   isDemoMode,
@@ -251,6 +254,7 @@ export class HubService {
   readonly s3Workspace: S3WorkspaceSyncService;
   readonly mcp = new McpClientManager();
   readonly kb = new KnowledgeBaseService();
+  readonly selfLearning = new SelfLearningService(this.kb);
   private runtimes = new Map<string, AgentRuntime>();
   private launches = new Map<string, symbol>();
   private initialized?: Promise<void>;
@@ -329,6 +333,26 @@ export class HubService {
       },
       activity: (task, change, sessionId) => {
         void this.recordAgentChangeActivity(task, change, sessionId);
+      },
+      safetyContext: (task, targetLabel) => {
+        const label = (targetLabel || task.target?.label || "").toLowerCase();
+        const session = task.target
+          ? this.terminals.get(task.target.sessionId)
+          : undefined;
+        const knownServers = [
+          ...(this.store.data.s3SyncedServers ?? []),
+          ...(isDemoMode() ? getDemoServers() : []),
+        ];
+        const matchedSrv = knownServers.find(
+          (s) =>
+            (session?.profileId && s.id === session.profileId) ||
+            s.name.toLowerCase() === label ||
+            s.id.toLowerCase() === label,
+        );
+        return {
+          policy: this.store.data.safetyPolicy ?? DEFAULT_SAFETY_POLICY,
+          targetTags: matchedSrv?.tags,
+        };
       },
       changed: () => this.changed(),
     });
@@ -636,6 +660,9 @@ export class HubService {
       ];
     }
 
+    const allMemories = extra.memories ?? this.store.data.memories;
+    const allEdges = this.getInfraEdgesList();
+
     const steps: WorkforceStep[] = selectedAgents.slice(0, 4).map((ag, idx) => {
       const cluster = ag.targetCluster || opts.targetCluster || "Workspace";
       const clusterNodes = allServers.filter(
@@ -648,27 +675,50 @@ export class HubService {
         cluster,
         limit: 2,
       });
+      const rankedSkills = this.kb
+        .rankMemories(allMemories, `${opts.prompt} ${ag.role}`, cluster, 2)
+        .filter((m) => m.kind === "skill");
+      const relatedEdges = allEdges.filter((e) =>
+        clusterNodes.some(
+          (n) =>
+            n.name.toLowerCase() === e.from.toLowerCase() ||
+            n.name.toLowerCase() === e.to.toLowerCase(),
+        ),
+      );
       const nodeNames =
         clusterNodes.slice(0, 3).map((n) => n.name).join(", ") || cluster;
       const kbHint =
         kbMatches.length > 0
-          ? `Enligt KB "${kbMatches[0].title}": ${kbMatches[0].snippet.slice(0, 180)}…`
+          ? `Enligt @orama KB "${kbMatches[0].title}": ${kbMatches[0].snippet.slice(0, 160)}…`
           : `Analyserade ${clusterNodes.length || 1} noder (${nodeNames}) mot uppdraget "${ag.mission.slice(0, 90)}".`;
+      const skillHint =
+        rankedSkills.length > 0
+          ? ` [Voyager Skill: ${rankedSkills[0].title} (${Math.round((rankedSkills[0].confidence ?? 0.85) * 100)}%)]`
+          : "";
+      const edgeHint =
+        relatedEdges.length > 0
+          ? ` [Topologi: ${relatedEdges[0].from} → ${relatedEdges[0].to} (${relatedEdges[0].relation})]`
+          : "";
 
-      const recCmds = cluster.toLowerCase().includes("ontap")
-        ? [
-            "qos statistics volume latency show -iterations 1",
-            "snapmirror show",
-          ]
-        : cluster.toLowerCase().includes("ceph")
-          ? ["ceph status && ceph osd df tree", "zpool status -v"]
-          : cluster.toLowerCase().includes("k8s") ||
-              cluster.toLowerCase().includes("trident")
-            ? [
-                "kubectl get pvc,volumeattachment -A -o wide",
-                "multipath -ll",
-              ]
-            : ["uptime && df -h && systemctl --failed"];
+      const recCmds = [
+        ...(rankedSkills
+          .map((s) => s.sourceCommand)
+          .filter((c): c is string => Boolean(c))),
+        ...(cluster.toLowerCase().includes("ontap")
+          ? [
+              "qos statistics volume latency show -iterations 1",
+              "snapmirror show",
+            ]
+          : cluster.toLowerCase().includes("ceph")
+            ? ["ceph status && ceph osd df tree", "zpool status -v"]
+            : cluster.toLowerCase().includes("k8s") ||
+                cluster.toLowerCase().includes("trident")
+              ? [
+                  "kubectl get pvc,volumeattachment -A -o wide",
+                  "multipath -ll",
+                ]
+              : ["uptime && df -h && systemctl --failed"]),
+      ].slice(0, 3);
 
       return {
         id: `wf-step-${Date.now()}-${idx}`,
@@ -679,7 +729,7 @@ export class HubService {
         targetCluster: cluster,
         subTask: `Deluppdrag för ${ag.name} (${cluster}): ${opts.prompt.slice(0, 140)}`,
         status: "completed",
-        findings: `Kontrollerade ${nodeNames}. ${kbHint}`,
+        findings: `Kontrollerade ${nodeNames}. ${kbHint}${skillHint}${edgeHint}`,
         recommendedCommands: recCmds,
         durationMs: 850 + idx * 240,
       };
@@ -788,6 +838,18 @@ export class HubService {
       contextWindowTokens,
       Math.round((msgChars + kbChars + srvChars + memChars + terminalContextChars) / 4) + 1200,
     );
+    const allTasks = isDemoMode()
+      ? [
+          ...getDemoTasks().filter(
+            (dt) => !this.store.data.tasks.some((t) => t.id === dt.id),
+          ),
+          ...this.store.data.tasks,
+        ]
+      : this.store.data.tasks;
+    const allMemories = extra.memories ?? this.store.data.memories;
+    const allInfraEdges = this.getInfraEdgesList();
+    const allMcpServers = this.getMcpServersList();
+
     return {
       preview: preview
         ? {
@@ -806,15 +868,8 @@ export class HubService {
         version: manifest?.tag ?? "native-ts-1.0",
       },
       sessions: this.terminals.list(),
-      tasks: isDemoMode()
-        ? [
-            ...getDemoTasks().filter(
-              (dt) => !this.store.data.tasks.some((t) => t.id === dt.id),
-            ),
-            ...this.store.data.tasks,
-          ]
-        : this.store.data.tasks,
-      memories: extra.memories ?? this.store.data.memories,
+      tasks: allTasks,
+      memories: allMemories,
       schedules: isDemoMode()
         ? [
             ...this.store.data.schedules,
@@ -834,14 +889,21 @@ export class HubService {
       ),
       localOverrides: { ...(this.store.data.localOverrides ?? {}) },
       agents: this.getAgentsList(),
-      mcpServers: this.getMcpServersList(),
+      mcpServers: allMcpServers,
       mcpCatalog: MCP_MARKETPLACE_CATALOG,
       kbDocuments: kbDocs,
       workforceRuns: this.getWorkforceRunsList(),
-      infraEdges: this.getInfraEdgesList(),
+      infraEdges: allInfraEdges,
       safetyPolicy: this.store.data.safetyPolicy ?? DEFAULT_SAFETY_POLICY,
       lastTerminalFailures: this.terminals.failures(),
       pendingLayoutEvent: this.pendingLayoutEvent,
+      selfLearning: this.selfLearning.getStatus({
+        memories: allMemories,
+        tasks: allTasks,
+        kbDocuments: kbDocs,
+        infraEdges: allInfraEdges,
+        mcpServerCount: allMcpServers.length,
+      }),
       contextBudget: {
         contextWindowTokens,
         terminalContextChars,
@@ -1058,7 +1120,9 @@ export class HubService {
           scope !== "personal" &&
           scope !== "workspace" &&
           !scope.startsWith("target:") &&
-          !scope.startsWith("workspace:")
+          !scope.startsWith("workspace:") &&
+          !scope.startsWith("server:") &&
+          !scope.startsWith("cluster:")
         )
           throw new Error("Invalid memory scope");
         await this.saveMemoryInternal({
@@ -1083,6 +1147,54 @@ export class HubService {
         await this.host.deleteWorkspaceMemory?.(request.id).catch(() => {});
         this.s3Workspace.schedulePush(400);
         break;
+      case "memory-feedback": {
+        const extra = await this.collectExtraContext();
+        const combined = [...this.store.data.memories];
+        for (const m of extra.memories ?? []) {
+          if (!combined.some((x) => x.id === m.id)) combined.push(m);
+        }
+        const { memories, updated } = this.selfLearning.applyMemoryFeedback(
+          combined,
+          request.id,
+          request.delta,
+        );
+        this.store.data.memories = memories;
+        if (updated && updated.scope !== "personal") {
+          await this.host.saveWorkspaceMemory?.(updated).catch(() => {});
+          this.s3Workspace.schedulePush(400);
+        }
+        break;
+      }
+      case "self-learn-reflect": {
+        const extra = await this.collectExtraContext();
+        const allTasks = isDemoMode()
+          ? [
+              ...getDemoTasks().filter(
+                (dt) => !this.store.data.tasks.some((t) => t.id === dt.id),
+              ),
+              ...this.store.data.tasks,
+            ]
+          : this.store.data.tasks;
+        const combinedMemories = [...this.store.data.memories];
+        for (const m of extra.memories ?? []) {
+          if (!combinedMemories.some((x) => x.id === m.id)) {
+            combinedMemories.push(m);
+          }
+        }
+        const reflected = this.selfLearning.runReflectionCycle({
+          memories: combinedMemories,
+          tasks: allTasks,
+          activityLog: extra.activityLog ?? this.store.data.activityLog ?? [],
+          infraEdges: this.getInfraEdgesList(),
+          servers: extra.workspaceServers ?? [],
+          lastFailures: this.terminals.failures(),
+          targetCluster: request.targetCluster,
+        });
+        this.store.data.memories = reflected.memories;
+        this.store.data.infraEdges = reflected.infraEdges;
+        this.s3Workspace.schedulePush(400);
+        break;
+      }
       case "activity-record": {
         const actor =
           request.event.actor?.trim() || (await this.resolveActorName());
@@ -2052,6 +2164,20 @@ export class HubService {
           });
       }
       if (event.error) task.error = boundedContext(event.error);
+      if (task.status === "completed" || task.status === "failed") {
+        try {
+          const reflected = this.selfLearning.reflectOnCompletedTask({
+            task,
+            memories: this.store.data.memories,
+            infraEdges: this.store.data.infraEdges ?? [],
+            servers: this.store.data.s3SyncedServers ?? [],
+          });
+          this.store.data.memories = reflected.memories;
+          this.store.data.infraEdges = reflected.infraEdges;
+        } catch {
+          // Never block task completion on self-reflection
+        }
+      }
     }
     task.updatedAt = Date.now();
     this.changed();
@@ -2301,6 +2427,7 @@ export class HubService {
     classified: DetectedCommandActivity,
   ): Promise<void> {
     try {
+      const activeFailure = this.terminals.failures()[session.id];
       const actor = await this.resolveActorName();
       const event: WorkspaceActivityEvent = {
         id: crypto.randomUUID(),
@@ -2313,6 +2440,19 @@ export class HubService {
         detail: boundedContext(commandLine, 1000),
       };
       this.appendActivityEvent(event);
+
+      // Voyager Failure->Fix Self-Learning: if this session had a prior failure, capture the recovery command
+      if (activeFailure && activeFailure.command.trim() !== commandLine.trim()) {
+        const res = this.selfLearning.learnFromCommandResolution({
+          memories: this.store.data.memories,
+          failure: activeFailure,
+          fixCommand: commandLine,
+          scope: `server:${session.label}`,
+        });
+        this.store.data.memories = res.memories;
+        this.terminals.dismissFailure(session.id);
+      }
+
       await this.host.recordWorkspaceActivity?.(event).catch(() => {});
       await this.syncAutoMemoryForTarget(session.profileId, session.label);
       this.s3Workspace.schedulePush();
@@ -2328,12 +2468,15 @@ export class HubService {
     sessionId?: string,
   ): Promise<void> {
     try {
-      const actor = `${await this.resolveActorName()} (AI)`;
       const session = sessionId
         ? this.terminals.get(sessionId)
         : task.target
           ? this.terminals.get(task.target.sessionId)
           : undefined;
+      const activeFailure = session
+        ? this.terminals.failures()[session.id]
+        : undefined;
+      const actor = `${await this.resolveActorName()} (AI)`;
       const targetLabel = change.target || session?.label || task.title;
       const event: WorkspaceActivityEvent = {
         id: crypto.randomUUID(),
@@ -2353,6 +2496,27 @@ export class HubService {
             : undefined,
       };
       this.appendActivityEvent(event);
+
+      // Voyager Failure->Fix Self-Learning: if an AI command succeeded on a session with a prior failure
+      if (
+        session &&
+        activeFailure &&
+        change.kind === "command" &&
+        change.exitCode === 0 &&
+        change.command &&
+        activeFailure.command.trim() !== change.command.trim()
+      ) {
+        const res = this.selfLearning.learnFromCommandResolution({
+          memories: this.store.data.memories,
+          failure: activeFailure,
+          fixCommand: change.command,
+          fixOutput: change.output,
+          scope: `server:${targetLabel}`,
+        });
+        this.store.data.memories = res.memories;
+        this.terminals.dismissFailure(session.id);
+      }
+
       await this.host.recordWorkspaceActivity?.(event).catch(() => {});
       await this.syncAutoMemoryForTarget(session?.profileId, targetLabel);
       this.s3Workspace.schedulePush();
@@ -2439,9 +2603,18 @@ export class HubService {
         ? "powershell"
         : "bash");
 
-    // Try fast heuristic command generation first for instant zero-latency response,
-    // and enrich with model if needed
-    const fallback = buildInstantCommandSuggestion(q, lower, targetShell);
+    // Check Voyager Self-Learning skills first for POSIX shells, then fast heuristic fallback
+    const learnedMatch =
+      targetShell !== "cmd" &&
+      targetShell !== "powershell" &&
+      targetShell !== "pwsh"
+        ? this.selfLearning.findBestLearnedCommand(
+            this.store.data.memories.filter((m) => Boolean(m.autoLearned && m.sourceCommand)),
+            q,
+          )
+        : undefined;
+    const fallback =
+      learnedMatch ?? buildInstantCommandSuggestion(q, lower, targetShell);
 
     try {
       const config = await this.config.getConfig();
@@ -4478,27 +4651,58 @@ function simulateDemoStorageOps(
       ].join("\n"),
     };
   }
-  // diff_paths
+  // diff_paths — computed with real Myers O(ND) algorithm via open-source `diff`
   const b = targetB || "demo-k8s-storage-cp-01";
   const pb = pathB || pathA;
+  const leftContent = [
+    `# Configuration on ${targetA}:${pathA}`,
+    `defaults {`,
+    `    user_friendly_names yes`,
+    `    find_multipaths yes`,
+    `}`,
+    `devices {`,
+    `    device {`,
+    `        vendor "NETAPP"`,
+    `        product "LUN.*"`,
+    `        path_grouping_policy "group_by_prio"`,
+    `        no_path_retry "queue"`,
+    `        rr_min_io_rq 1`,
+    `    }`,
+    `}`,
+  ].join("\n");
+  const rightContent = [
+    `# Configuration on ${b}:${pb}`,
+    `defaults {`,
+    `    user_friendly_names yes`,
+    `    find_multipaths yes`,
+    `}`,
+    `devices {`,
+    `    device {`,
+    `        vendor "NETAPP"`,
+    `        product "LUN.*"`,
+    `        path_grouping_policy "group_by_prio"`,
+    `        no_path_retry 30`,
+    `        rr_min_io_rq 4`,
+    `    }`,
+    `}`,
+  ].join("\n");
+  const unifiedDiff = createTwoFilesPatch(
+    `${targetA}:${pathA}`,
+    `${b}:${pb}`,
+    leftContent,
+    rightContent,
+    "baseline",
+    "drift-detected",
+    { context: 3 },
+  );
   return {
     ok: true,
     operation: "diff_paths",
+    engine: "diff/Myers-O(ND)",
     left: { target: targetA, path: pathA },
     right: { target: b, path: pb },
-    identical: false,
-    unifiedDiff: [
-      `--- ${targetA}:${pathA}`,
-      `+++ ${b}:${pb}`,
-      `@@ -9,6 +9,6 @@`,
-      `         vendor "NETAPP"`,
-      `         product "LUN.*"`,
-      `         path_grouping_policy "group_by_prio"`,
-      `-        no_path_retry "queue"`,
-      `-        rr_min_io_rq 1`,
-      `+        no_path_retry 30`,
-      `+        rr_min_io_rq 4`,
-    ].join("\n"),
+    identical: leftContent === rightContent,
+    unifiedDiff,
   };
 }
 

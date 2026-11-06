@@ -3237,12 +3237,104 @@ function Memory({
     suggestion ? "skill" : "memory",
   );
   const [tier, setTier] = useState<"core" | "archival" | "episodic">("core");
+  const [reflecting, setReflecting] = useState(false);
+  const sl = hub.selfLearning;
+
   return (
     <div className="ai-scroll">
-      <h2>🧠 Smart Memory & Skills (Mem0 + Letta Tiers)</h2>
+      <h2>🧠 Smart Memory, Voyager Skills & Continuous Self-Learning</h2>
       <p className="ai-hint">
-        Overlapping memories are automatically deduplicated & consolidated (Mem0 pattern). Pin critical facts to <code>Core Memory</code> so they are always injected into the system prompt.
+        Overlapping memories are automatically deduplicated & consolidated (Mem0 pattern). Every terminal failure→fix resolution and completed mission automatically synthesizes reusable skills and reinforces confidence scores (Voyager + Reflexion).
       </p>
+
+      {sl && (
+        <article className="ai-card" data-testid="self-learning-engine-card">
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <div>
+              <strong>🧬 Open-Source Self-Learning Engine (Voyager + Reflexion + @orama/orama)</strong>
+              <div style={{ marginTop: 2 }}>
+                <small>
+                  AI Workspacet lär sig kontinuerligt av körda terminalkommandon, felkoder, Playbook-exekveringar och din feedback.
+                </small>
+              </div>
+            </div>
+            <button
+              type="button"
+              className="ai-btn-emerald"
+              disabled={reflecting}
+              data-testid="run-self-reflection-btn"
+              onClick={() => {
+                setReflecting(true);
+                void act({ action: "self-learn-reflect" }).finally(() =>
+                  setReflecting(false),
+                );
+              }}
+            >
+              {reflecting
+                ? "⏳ Reflekterar…"
+                : "🧬 Kör Self-Reflection & Optimera Minne"}
+            </button>
+          </div>
+
+          <div className="ai-stat-grid" style={{ marginTop: 10 }}>
+            <div className="ai-stat-box">
+              <strong>{sl.totalLearnedSkills}</strong>
+              <small>🛠️ Voyager Skills ({sl.failureToFixPatterns} Auto-Learned)</small>
+            </div>
+            <div className="ai-stat-box">
+              <strong>{Math.round(sl.averageConfidence * 100)}%</strong>
+              <small>🎯 Snitt-Confidence (Reinforced)</small>
+            </div>
+            <div className="ai-stat-box">
+              <strong>{sl.oramaIndexedChunks}</strong>
+              <small>⚡ @orama/orama Vector+BM25 Chunks</small>
+            </div>
+          </div>
+
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+            {sl.openSourceEngines.map((eng) => (
+              <span
+                key={eng.id}
+                className="ai-tool-tag"
+                title={eng.description}
+                data-testid={`os-engine-badge-${eng.id}`}
+              >
+                🟢 <strong>{eng.name}</strong> <small>v{eng.version}</small> · {eng.metricsLabel}
+              </span>
+            ))}
+          </div>
+
+          {sl.recentEvents.length > 0 && (
+            <details style={{ marginTop: 10 }} open>
+              <summary style={{ cursor: "pointer", fontSize: 12, fontWeight: 600 }}>
+                📈 Senaste självlärande händelser ({sl.recentEvents.length})
+              </summary>
+              <div style={{ display: "grid", gap: 6, marginTop: 6 }}>
+                {sl.recentEvents.slice(0, 5).map((ev) => (
+                  <div
+                    key={ev.id}
+                    style={{
+                      padding: "6px 8px",
+                      borderRadius: 6,
+                      background: "rgba(15, 23, 42, 0.55)",
+                      fontSize: 12,
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 6 }}>
+                      <strong>{ev.title}</strong>
+                      <span className="ai-badge ai-badge-success">
+                        🎯 {Math.round(ev.confidence * 100)}%
+                      </span>
+                    </div>
+                    <small style={{ display: "block", opacity: 0.85 }}>{ev.summary}</small>
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
+        </article>
+      )}
+
       <form
         className="ai-form"
         onSubmit={(e) => {
@@ -3322,7 +3414,18 @@ function Memory({
                 · {m.kind} · {m.scope}
               </small>
             </div>
-            <div style={{ display: "flex", gap: 4 }}>
+            <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+              {m.autoLearned && (
+                <span className="ai-badge ai-badge-purple" title="Syntetiserad automatiskt av SelfLearningService">
+                  🧬 Auto-Learned
+                </span>
+              )}
+              <span
+                className="ai-badge ai-badge-success"
+                title={`Reinforcement Confidence · Successes: ${m.successCount ?? 0} · Feedback: ${m.feedbackScore ?? 0}`}
+              >
+                🎯 {Math.round((m.confidence ?? 0.78) * 100)}%
+              </span>
               <span className="ai-badge ai-badge-mode">
                 {m.tier === "archival"
                   ? "📚 Archival"
@@ -3338,23 +3441,45 @@ function Memory({
             </div>
           </div>
           <p>{m.text}</p>
-          <button
-            onClick={() => {
-              setId(m.id);
-              setTitle(m.title);
-              setText(m.text);
-              setScope(m.scope);
-              setKind(m.kind);
-              setTier(m.tier ?? "core");
-            }}
-          >
-            Edit
-          </button>
-          <button
-            onClick={() => void act({ action: "memory-delete", id: m.id })}
-          >
-            Delete
-          </button>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+            <button
+              type="button"
+              title="Förstärk detta minne/skill (+Confidence & högre prioritet i RAG/Ctrl+K)"
+              data-testid={`memory-upvote-${m.id}`}
+              onClick={() =>
+                void act({ action: "memory-feedback", id: m.id, delta: 1 })
+              }
+            >
+              👍 Bra ({m.feedbackScore ?? 0})
+            </button>
+            <button
+              type="button"
+              title="Nedprioritera detta minne/skill (-Confidence)"
+              data-testid={`memory-downvote-${m.id}`}
+              onClick={() =>
+                void act({ action: "memory-feedback", id: m.id, delta: -1 })
+              }
+            >
+              👎 Mindre relevant
+            </button>
+            <button
+              onClick={() => {
+                setId(m.id);
+                setTitle(m.title);
+                setText(m.text);
+                setScope(m.scope);
+                setKind(m.kind);
+                setTier(m.tier ?? "core");
+              }}
+            >
+              Edit
+            </button>
+            <button
+              onClick={() => void act({ action: "memory-delete", id: m.id })}
+            >
+              Delete
+            </button>
+          </div>
         </article>
       ))}
     </div>

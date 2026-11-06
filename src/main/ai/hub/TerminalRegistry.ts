@@ -263,6 +263,49 @@ export class TerminalRegistry extends EventEmitter {
     chunk: string,
   ): void {
     if (!chunk) return;
+    // 0. Check passive OSC 777;SSHS3;<nonce>;BEGIN ... END;<exitCode>;<cwd> frame
+    const sshs3Match =
+      // eslint-disable-next-line no-control-regex
+      /\x1b\]777;SSHS3;[a-f0-9]{32};BEGIN\x07([\s\S]*?)\x1b\]777;SSHS3;[a-f0-9]{32};END;([0-9]+);([^\x07]*)\x07/i.exec(
+        chunk,
+      );
+    if (sshs3Match) {
+      const body = sshs3Match[1] ?? "";
+      const code = Number(sshs3Match[2]);
+      const lines = body
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter(Boolean);
+      const inferredCmd = lines[0] || s.lastSubmittedCommand || "";
+      const outSnippet = lines.slice(1).join("\n") || body;
+      if (code !== 0) {
+        this.lastFailures.set(id, {
+          sessionId: id,
+          label: s.view.label,
+          command: inferredCmd,
+          exitCode: code,
+          snippet: boundedContext(outSnippet, 1500),
+          at: Date.now(),
+        });
+        this.emit("changed");
+      } else {
+        const classified =
+          classifyNotableCommand(inferredCmd) ??
+          (this.lastFailures.has(id) && inferredCmd
+            ? {
+                kind: "command" as const,
+                summary: `Resolved terminal failure with: ${inferredCmd}`,
+              }
+            : null);
+        if (classified && inferredCmd) {
+          this.emit("commandLine", { ...s.view }, inferredCmd, classified);
+        }
+        if (this.lastFailures.delete(id)) {
+          this.emit("changed");
+        }
+      }
+      return;
+    }
     // 1. Check OSC 133;D;<exitCode> shell integration marker
     const oscMatch = /\x1b\]133;D;([0-9]+)(?:\x07|\x1b\\)/.exec(chunk);
     if (oscMatch) {
