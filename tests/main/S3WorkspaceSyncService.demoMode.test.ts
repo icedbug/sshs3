@@ -453,4 +453,131 @@ describe('HubService and the S3 team workspace: outside demo mode against demo m
     expect(bucket.log).toEqual([]);
     expect(hub.s3Workspace.getStatus().syncDisabledReason).toMatch(S3_DISABLED);
   });
+
+  it('demo mode: multiple configured S3 workspaces in s3-workspace.json stay blocked while 3 built-in demo workspaces are active', async () => {
+    setDemoModeForTesting(true);
+    const dir = await tempDir('sshs3-s3-multi-demo-');
+    electronPaths.userData = dir;
+    const s3ConfigFilePath = path.join(dir, 'ai-hub', 's3-workspace.json');
+    await fs.mkdir(path.dirname(s3ConfigFilePath), { recursive: true });
+    await fs.writeFile(
+      s3ConfigFilePath,
+      JSON.stringify({
+        id: 'ws-team-1',
+        name: 'Team 1',
+        enabled: true,
+        region: 'eu-north-1',
+        bucket: 'team-bucket-1',
+        prefix: 'team-1',
+        accessKeyId: 'AKIATEAM1',
+        secretAccessKeyEncrypted: 'secret-1', // pragma: allowlist secret
+        forcePathStyle: true,
+        activeWorkspaceId: 'ws-team-1',
+        workspaces: [
+          {
+            id: 'ws-team-1',
+            name: 'Team 1',
+            enabled: true,
+            region: 'eu-north-1',
+            bucket: 'team-bucket-1',
+            prefix: 'team-1',
+            accessKeyId: 'AKIATEAM1',
+            secretAccessKeyEncrypted: 'secret-1', // pragma: allowlist secret
+            forcePathStyle: true,
+          },
+          {
+            id: 'ws-team-2',
+            name: 'Team 2',
+            enabled: true,
+            region: 'eu-central-1',
+            bucket: 'team-bucket-2',
+            prefix: 'team-2',
+            accessKeyId: 'AKIATEAM2',
+            secretAccessKeyEncrypted: 'secret-2', // pragma: allowlist secret
+            forcePathStyle: true,
+          },
+        ],
+      })
+    );
+    const bucket = recordingBucket();
+    const s3ProviderFactory = vi.fn((_config: S3WorkspaceConfig) => bucket.provider);
+    const hub = new HubService(
+      {
+        changed: () => {},
+        inventoryTargets: async () => [],
+        backgroundChanged: async () => {},
+        openSchedule: async () => 's1',
+        show: () => {},
+        aiConfigFilePath: path.join(dir, 'ai-config.json'),
+        workspaceServers: async () => [],
+        defaultActorName: 'tester',
+        s3ConfigFilePath,
+        s3ProviderFactory,
+      },
+      path.join(dir, 'ai-hub')
+    );
+    disposals.push(() => hub.dispose());
+    await hub.initialize();
+
+    const snap = await hub.snapshot();
+    expect(s3ProviderFactory).not.toHaveBeenCalled();
+    expect(bucket.log).toEqual([]);
+    expect(snap.s3Workspaces).toHaveLength(2);
+    expect(snap.s3Workspaces?.every((w) => !w.connected && Boolean(w.syncDisabledReason))).toBe(true);
+    // Built-in demo mode workspaces are also surfaced in snap.workspaces
+    expect(snap.workspaces?.some((w) => w.id === 'ws-demo-ontap')).toBe(true);
+    expect(snap.workspaces?.some((w) => w.id === 'ws-demo-s3-grid')).toBe(true);
+    expect(snap.workspaces?.some((w) => w.id === 'ws-demo-k8s-ceph')).toBe(true);
+  });
+
+  it('normal mode: HubService supports workspace-select, workspace-connect-demo, and multi-workspace server/memory provenance', async () => {
+    setDemoModeForTesting(false);
+    const { hub } = await createHub();
+    await waitUntilSynced(hub.s3Workspace);
+
+    // Connect a simulated demo workspace in normal mode via workspace-connect-demo
+    const afterDemoConnect = await hub.request({
+      action: 'workspace-connect-demo',
+      name: 'Customer Staging Lab',
+      cluster: 'Staging-K8s-SE',
+    });
+    expect(afterDemoConnect.activeWorkspaceId).toBe('ws-demo-customer-staging-lab');
+    expect(
+      afterDemoConnect.workspaces?.some(
+        (w) => w.id === 'ws-demo-customer-staging-lab' && w.kind === 'demo'
+      )
+    ).toBe(true);
+    expect(
+      afterDemoConnect.workspaceServers?.some(
+        (s) =>
+          s.workspaceId === 'ws-demo-customer-staging-lab' &&
+          s.workspaceName === 'Customer Staging Lab'
+      )
+    ).toBe(true);
+
+    // Upsert a server while activeWorkspaceId is ws-demo-customer-staging-lab -> inherits workspaceId
+    const afterUpsert = await hub.request({
+      action: 'server-upsert',
+      server: {
+        id: 'staging-extra-node',
+        name: 'staging-extra-01',
+        host: '10.88.10.99',
+        port: 22,
+        username: 'ubuntu',
+        cluster: 'Staging-K8s-SE',
+      },
+    });
+    const addedSrv = afterUpsert.workspaceServers?.find(
+      (s) => s.id === 'staging-extra-node'
+    );
+    expect(addedSrv?.workspaceId).toBe('ws-demo-customer-staging-lab');
+    expect(addedSrv?.workspaceName).toBe('Customer Staging Lab');
+
+    // Switch active workspace back to ALL
+    const afterSelectAll = await hub.request({
+      action: 'workspace-select',
+      workspaceId: 'ALL',
+    });
+    expect(afterSelectAll.activeWorkspaceId).toBe('ALL');
+  });
 });

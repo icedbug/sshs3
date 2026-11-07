@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type {
@@ -41,7 +42,9 @@ export interface S3WorkspaceRemotePayload {
   deletedMemoryIds?: Record<string, number>;
 }
 
-interface StoredS3WorkspaceConfig {
+export interface StoredWorkspaceSlot {
+  id: string;
+  name?: string;
   enabled: boolean;
   endpoint?: string;
   region: string;
@@ -51,11 +54,78 @@ interface StoredS3WorkspaceConfig {
   secretAccessKeyEncrypted?: string;
   forcePathStyle?: boolean;
   lastSyncAt?: number;
+  actorName?: string;
+}
+
+interface StoredS3WorkspaceConfig {
+  id?: string;
+  name?: string;
+  enabled: boolean;
+  endpoint?: string;
+  region: string;
+  bucket: string;
+  prefix: string;
+  accessKeyId: string;
+  secretAccessKeyEncrypted?: string;
+  forcePathStyle?: boolean;
+  lastSyncAt?: number;
+  actorName?: string;
+  activeWorkspaceId?: string;
+  workspaces?: StoredWorkspaceSlot[];
+}
+
+interface WorkspaceRuntimeSlot {
+  id: string;
+  config: S3WorkspaceConfig;
+  lastSyncAt?: number;
+  syncing: boolean;
+  connected: boolean;
+  lastError?: string;
+  lastKnownRemoteStat?: { size: number; mtime?: string } | null;
+  presenceList: WorkspacePresenceEntry[];
+  provider?: IStorageProvider;
+  serverCount: number;
+  memoryCount: number;
+}
+
+function slugifySegment(value: string): string {
+  return (
+    value
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "default"
+  );
+}
+
+export function deriveS3WorkspaceId(bucket: string, prefix?: string): string {
+  const b = slugifySegment(bucket || "workspace");
+  const p = slugifySegment(
+    (prefix || "sshs3-workspace").trim().replace(/^\/+|\/+$/g, ""),
+  );
+  return `ws-${b}-${p}`;
+}
+
+export function deriveS3WorkspaceName(
+  bucket: string,
+  prefix?: string,
+  explicitName?: string,
+): string {
+  if (explicitName && explicitName.trim()) return explicitName.trim();
+  const cleanBucket = (bucket || "").trim();
+  const cleanPrefix = (prefix || "sshs3-workspace")
+    .trim()
+    .replace(/^\/+|\/+$/g, "");
+  if (!cleanBucket) return "S3 Workspace";
+  return cleanPrefix && cleanPrefix !== "sshs3-workspace"
+    ? `${cleanBucket}/${cleanPrefix}`
+    : cleanBucket;
 }
 
 export function encodeS3WorkspaceInvite(config: S3WorkspaceConfig): string {
-  const payload = {
+  const payload: Record<string, unknown> = {
     v: 1,
+    ...(config.name?.trim() ? { name: config.name.trim() } : {}),
     endpoint: config.endpoint?.trim() || undefined,
     region: config.region.trim() || "eu-north-1",
     bucket: config.bucket.trim(),
@@ -101,6 +171,9 @@ export function decodeS3WorkspaceInvite(
     throw new Error("S3 invite-koden saknar bucket eller accessKeyId");
   }
   return {
+    ...(typeof parsed.name === "string" && parsed.name.trim()
+      ? { name: parsed.name.trim() }
+      : {}),
     enabled: true,
     endpoint:
       typeof parsed.endpoint === "string" && parsed.endpoint.trim()
@@ -362,7 +435,10 @@ export function mergeS3WorkspacePayload(
 }
 
 export interface S3WorkspaceSyncCallbacks {
-  getLocalState(): Promise<{
+  getLocalState(
+    workspaceId?: string,
+    slotConfig?: S3WorkspaceConfig,
+  ): Promise<{
     actor: string;
     servers: WorkspaceServerSummary[];
     memories: MemoryEntry[];
@@ -371,19 +447,23 @@ export interface S3WorkspaceSyncCallbacks {
     deletedMemoryIds: Record<string, number>;
     activeTerminals: WorkspacePresenceTerminal[];
   }>;
-  applyMergedState(state: {
-    activeServers: WorkspaceServerSummary[];
-    memories: MemoryEntry[];
-    activityLog: WorkspaceActivityEvent[];
-    deletedServerIds: Record<string, string>;
-    deletedMemoryIds: Record<string, number>;
-    changed: boolean;
-  }): Promise<void>;
+  applyMergedState(
+    state: {
+      activeServers: WorkspaceServerSummary[];
+      memories: MemoryEntry[];
+      activityLog: WorkspaceActivityEvent[];
+      deletedServerIds: Record<string, string>;
+      deletedMemoryIds: Record<string, number>;
+      changed: boolean;
+    },
+    workspaceId?: string,
+    slotConfig?: S3WorkspaceConfig,
+  ): Promise<void>;
   onStateChanged(): void;
 }
 
-export class S3WorkspaceSyncService {
-  private config: S3WorkspaceConfig = {
+function createEmptyConfig(): S3WorkspaceConfig {
+  return {
     enabled: false,
     region: "eu-north-1",
     bucket: "",
@@ -392,16 +472,14 @@ export class S3WorkspaceSyncService {
     secretAccessKey: "",
     forcePathStyle: true,
   };
-  private lastSyncAt?: number;
-  private syncing = false;
-  private connected = false;
-  private lastError?: string;
-  private lastKnownRemoteStat?: { size: number; mtime?: string } | null;
-  private presenceList: WorkspacePresenceEntry[] = [];
+}
+
+export class S3WorkspaceSyncService {
+  private slots = new Map<string, WorkspaceRuntimeSlot>();
+  private activeWorkspaceId?: string;
   private pollTimer?: NodeJS.Timeout;
   private presenceTimer?: NodeJS.Timeout;
   private pushDebounceTimer?: NodeJS.Timeout;
-  private provider?: IStorageProvider;
   private syncQueue: Promise<void> = Promise.resolve();
   private disposed = false;
 
@@ -416,6 +494,81 @@ export class S3WorkspaceSyncService {
     } = {},
   ) {}
 
+  private isSlotConfigured(slot: WorkspaceRuntimeSlot | undefined): boolean {
+    if (!slot) return false;
+    return Boolean(
+      slot.config.enabled &&
+        slot.config.bucket.trim() &&
+        slot.config.accessKeyId.trim() &&
+        slot.config.secretAccessKey,
+    );
+  }
+
+  private getPrimarySlot(): WorkspaceRuntimeSlot | undefined {
+    if (this.activeWorkspaceId && this.slots.has(this.activeWorkspaceId)) {
+      const active = this.slots.get(this.activeWorkspaceId)!;
+      if (this.isSlotConfigured(active)) return active;
+    }
+    for (const slot of this.slots.values()) {
+      if (this.isSlotConfigured(slot)) return slot;
+    }
+    if (this.activeWorkspaceId && this.slots.has(this.activeWorkspaceId)) {
+      return this.slots.get(this.activeWorkspaceId);
+    }
+    return this.slots.values().next().value;
+  }
+
+  private hydrateSlotFromStored(
+    item: StoredWorkspaceSlot,
+    existing?: WorkspaceRuntimeSlot,
+  ): WorkspaceRuntimeSlot {
+    const bucket = item.bucket?.trim() || "";
+    const prefix = (item.prefix || "sshs3-workspace")
+      .trim()
+      .replace(/^\/+|\/+$/g, "");
+    const id = item.id?.trim() || deriveS3WorkspaceId(bucket, prefix);
+    const secret = item.secretAccessKeyEncrypted
+      ? decryptSecretValue(item.secretAccessKeyEncrypted)
+      : "";
+    const config: S3WorkspaceConfig = {
+      id,
+      ...(item.name?.trim() ? { name: item.name.trim() } : {}),
+      enabled: Boolean(item.enabled),
+      endpoint: item.endpoint?.trim() || undefined,
+      region: item.region?.trim() || "eu-north-1",
+      bucket,
+      prefix,
+      accessKeyId: item.accessKeyId?.trim() || "",
+      secretAccessKey: secret,
+      forcePathStyle: item.forcePathStyle ?? true,
+      ...(item.actorName?.trim() ? { actorName: item.actorName.trim() } : {}),
+    };
+    const sameTarget =
+      existing &&
+      existing.config.enabled === config.enabled &&
+      existing.config.endpoint === config.endpoint &&
+      existing.config.region === config.region &&
+      existing.config.bucket === config.bucket &&
+      existing.config.prefix === config.prefix &&
+      existing.config.accessKeyId === config.accessKeyId &&
+      existing.config.secretAccessKey === config.secretAccessKey &&
+      existing.config.forcePathStyle === config.forcePathStyle;
+
+    return {
+      id,
+      config,
+      lastSyncAt: item.lastSyncAt ?? existing?.lastSyncAt,
+      syncing: sameTarget ? existing.syncing : false,
+      connected: sameTarget ? existing.connected : false,
+      lastError: sameTarget ? existing.lastError : undefined,
+      lastKnownRemoteStat: sameTarget ? existing.lastKnownRemoteStat : undefined,
+      presenceList: sameTarget ? existing.presenceList : [],
+      provider: sameTarget ? existing.provider : undefined,
+      serverCount: existing?.serverCount ?? 0,
+      memoryCount: existing?.memoryCount ?? 0,
+    };
+  }
+
   async load(): Promise<void> {
     try {
       const raw = (await fs.readFile(this.configFilePath, "utf8"))
@@ -423,21 +576,92 @@ export class S3WorkspaceSyncService {
         .trim();
       if (!raw) return;
       const stored = JSON.parse(raw) as StoredS3WorkspaceConfig;
-      this.config = {
-        enabled: Boolean(stored.enabled),
-        endpoint: stored.endpoint?.trim() || undefined,
-        region: stored.region?.trim() || "eu-north-1",
-        bucket: stored.bucket?.trim() || "",
-        prefix: (stored.prefix || "sshs3-workspace")
+      const nextSlots = new Map<string, WorkspaceRuntimeSlot>();
+
+      if (Array.isArray(stored.workspaces) && stored.workspaces.length > 0) {
+        for (const ws of stored.workspaces) {
+          if (!ws || typeof ws !== "object") continue;
+          const bucket = ws.bucket?.trim() || "";
+          const prefix = (ws.prefix || "sshs3-workspace")
+            .trim()
+            .replace(/^\/+|\/+$/g, "");
+          const id = ws.id?.trim() || deriveS3WorkspaceId(bucket, prefix);
+          const hydrated = this.hydrateSlotFromStored(
+            { ...ws, id },
+            this.slots.get(id),
+          );
+          nextSlots.set(hydrated.id, hydrated);
+        }
+        // If top-level bucket was modified externally and doesn't match any slot, reconcile it
+        if (stored.bucket?.trim()) {
+          const topPrefix = (stored.prefix || "sshs3-workspace")
+            .trim()
+            .replace(/^\/+|\/+$/g, "");
+          const topId =
+            stored.id?.trim() ||
+            deriveS3WorkspaceId(stored.bucket.trim(), topPrefix);
+          if (!nextSlots.has(topId)) {
+            const hydratedTop = this.hydrateSlotFromStored(
+              {
+                id: topId,
+                name: stored.name,
+                enabled: Boolean(stored.enabled),
+                endpoint: stored.endpoint,
+                region: stored.region || "eu-north-1",
+                bucket: stored.bucket,
+                prefix: topPrefix,
+                accessKeyId: stored.accessKeyId || "",
+                secretAccessKeyEncrypted: stored.secretAccessKeyEncrypted,
+                forcePathStyle: stored.forcePathStyle,
+                lastSyncAt: stored.lastSyncAt,
+                actorName: stored.actorName,
+              },
+              this.slots.get(topId),
+            );
+            nextSlots.set(hydratedTop.id, hydratedTop);
+          }
+        }
+      } else if (stored.bucket?.trim() || stored.enabled) {
+        const prefix = (stored.prefix || "sshs3-workspace")
           .trim()
-          .replace(/^\/+|\/+$/g, ""),
-        accessKeyId: stored.accessKeyId?.trim() || "",
-        secretAccessKey: stored.secretAccessKeyEncrypted
-          ? decryptSecretValue(stored.secretAccessKeyEncrypted)
-          : "",
-        forcePathStyle: stored.forcePathStyle ?? true,
-      };
-      this.lastSyncAt = stored.lastSyncAt;
+          .replace(/^\/+|\/+$/g, "");
+        const id =
+          stored.id?.trim() ||
+          deriveS3WorkspaceId(stored.bucket?.trim() || "", prefix);
+        const hydrated = this.hydrateSlotFromStored(
+          {
+            id,
+            name: stored.name,
+            enabled: Boolean(stored.enabled),
+            endpoint: stored.endpoint,
+            region: stored.region || "eu-north-1",
+            bucket: stored.bucket || "",
+            prefix,
+            accessKeyId: stored.accessKeyId || "",
+            secretAccessKeyEncrypted: stored.secretAccessKeyEncrypted,
+            forcePathStyle: stored.forcePathStyle,
+            lastSyncAt: stored.lastSyncAt,
+            actorName: stored.actorName,
+          },
+          this.slots.get(id),
+        );
+        nextSlots.set(hydrated.id, hydrated);
+      }
+
+      // Close any providers from old slots not reused
+      for (const oldSlot of this.slots.values()) {
+        const nextSlot = nextSlots.get(oldSlot.id);
+        if (oldSlot.provider && (!nextSlot || nextSlot.provider !== oldSlot.provider)) {
+          await oldSlot.provider.disconnect?.().catch(() => {});
+        }
+      }
+
+      this.slots = nextSlots;
+      if (stored.activeWorkspaceId && this.slots.has(stored.activeWorkspaceId)) {
+        this.activeWorkspaceId = stored.activeWorkspaceId;
+      } else {
+        this.activeWorkspaceId = this.getPrimarySlot()?.id;
+      }
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
         log.warn("Failed to load S3 workspace config", safeError(err));
@@ -446,21 +670,52 @@ export class S3WorkspaceSyncService {
   }
 
   async save(): Promise<void> {
+    const primary = this.getPrimarySlot();
+    const pCfg = primary?.config ?? createEmptyConfig();
+    const workspaces: StoredWorkspaceSlot[] = Array.from(this.slots.values())
+      .filter((s) => s.config.bucket.trim() || s.config.enabled)
+      .map((s) => ({
+        id: s.id,
+        ...(s.config.name?.trim() ? { name: s.config.name.trim() } : {}),
+        enabled: s.config.enabled,
+        endpoint: s.config.endpoint?.trim() || undefined,
+        region: s.config.region.trim() || "eu-north-1",
+        bucket: s.config.bucket.trim(),
+        prefix: (s.config.prefix || "sshs3-workspace")
+          .trim()
+          .replace(/^\/+|\/+$/g, ""),
+        accessKeyId: s.config.accessKeyId.trim(),
+        secretAccessKeyEncrypted: s.config.secretAccessKey
+          ? encryptSecretValue(s.config.secretAccessKey)
+          : undefined,
+        forcePathStyle: s.config.forcePathStyle ?? true,
+        lastSyncAt: s.lastSyncAt,
+        ...(s.config.actorName?.trim()
+          ? { actorName: s.config.actorName.trim() }
+          : {}),
+      }));
+
     const stored: StoredS3WorkspaceConfig = {
-      enabled: this.config.enabled,
-      endpoint: this.config.endpoint?.trim() || undefined,
-      region: this.config.region.trim() || "eu-north-1",
-      bucket: this.config.bucket.trim(),
-      prefix: (this.config.prefix || "sshs3-workspace")
+      ...(primary?.id ? { id: primary.id } : {}),
+      ...(pCfg.name?.trim() ? { name: pCfg.name.trim() } : {}),
+      enabled: pCfg.enabled,
+      endpoint: pCfg.endpoint?.trim() || undefined,
+      region: pCfg.region.trim() || "eu-north-1",
+      bucket: pCfg.bucket.trim(),
+      prefix: (pCfg.prefix || "sshs3-workspace")
         .trim()
         .replace(/^\/+|\/+$/g, ""),
-      accessKeyId: this.config.accessKeyId.trim(),
-      secretAccessKeyEncrypted: this.config.secretAccessKey
-        ? encryptSecretValue(this.config.secretAccessKey)
+      accessKeyId: pCfg.accessKeyId.trim(),
+      secretAccessKeyEncrypted: pCfg.secretAccessKey
+        ? encryptSecretValue(pCfg.secretAccessKey)
         : undefined,
-      forcePathStyle: this.config.forcePathStyle ?? true,
-      lastSyncAt: this.lastSyncAt,
+      forcePathStyle: pCfg.forcePathStyle ?? true,
+      lastSyncAt: primary?.lastSyncAt,
+      ...(pCfg.actorName?.trim() ? { actorName: pCfg.actorName.trim() } : {}),
+      activeWorkspaceId: this.activeWorkspaceId ?? primary?.id,
+      workspaces,
     };
+
     await fs.mkdir(path.dirname(this.configFilePath), {
       recursive: true,
       mode: 0o700,
@@ -470,13 +725,14 @@ export class S3WorkspaceSyncService {
     await fs.rename(tmp, this.configFilePath);
   }
 
-  isConfigured(): boolean {
-    return Boolean(
-      this.config.enabled &&
-        this.config.bucket.trim() &&
-        this.config.accessKeyId.trim() &&
-        this.config.secretAccessKey,
-    );
+  isConfigured(workspaceId?: string): boolean {
+    if (workspaceId) {
+      return this.isSlotConfigured(this.slots.get(workspaceId));
+    }
+    for (const slot of this.slots.values()) {
+      if (this.isSlotConfigured(slot)) return true;
+    }
+    return false;
   }
 
   /**
@@ -484,90 +740,283 @@ export class S3WorkspaceSyncService {
    * reaches shared state, see demo/outwardSync.ts). Every network path (start, timers, pushes, polls,
    * presence) is gated by this rather than by `isConfigured()` alone.
    */
-  private canReachBucket(): boolean {
-    return this.isConfigured() && !outwardSyncDisabledReason(SYNC);
+  private canReachBucket(workspaceId?: string): boolean {
+    return this.isConfigured(workspaceId) && !outwardSyncDisabledReason(SYNC);
   }
 
-  getStatus(): S3WorkspaceSyncStatus {
-    const configured = this.isConfigured();
+  private buildSlotStatus(slot: WorkspaceRuntimeSlot | undefined): S3WorkspaceSyncStatus {
+    const cfg = slot?.config ?? createEmptyConfig();
+    const configured = this.isSlotConfigured(slot);
     const syncDisabledReason = outwardSyncDisabledReason(SYNC);
+    const anySyncing = slot
+      ? slot.syncing
+      : Array.from(this.slots.values()).some((s) => s.syncing);
+    const presenceCount = slot ? this.getPresence(slot.id).length : 0;
+    const derivedName = slot
+      ? deriveS3WorkspaceName(cfg.bucket, cfg.prefix, cfg.name)
+      : undefined;
+
     return {
+      ...(slot?.id ? { id: slot.id } : {}),
+      ...(derivedName ? { name: derivedName } : {}),
       configured,
-      enabled: this.config.enabled,
+      enabled: cfg.enabled,
       connected:
-        configured && !syncDisabledReason && this.connected && !this.lastError,
-      endpoint: this.config.endpoint,
-      region: this.config.region || "eu-north-1",
-      bucket: this.config.bucket,
-      prefix: this.config.prefix || "sshs3-workspace",
-      accessKeyId: this.config.accessKeyId,
-      hasSecretAccessKey: Boolean(this.config.secretAccessKey),
-      forcePathStyle: this.config.forcePathStyle ?? true,
-      lastSyncAt: this.lastSyncAt,
-      syncing: this.syncing,
+        configured &&
+        !syncDisabledReason &&
+        Boolean(slot?.connected) &&
+        !slot?.lastError,
+      endpoint: cfg.endpoint,
+      region: cfg.region || "eu-north-1",
+      bucket: cfg.bucket,
+      prefix: cfg.prefix || "sshs3-workspace",
+      accessKeyId: cfg.accessKeyId,
+      hasSecretAccessKey: Boolean(cfg.secretAccessKey),
+      forcePathStyle: cfg.forcePathStyle ?? true,
+      lastSyncAt: slot?.lastSyncAt,
+      syncing: anySyncing,
       // A configured bucket this (demo) process will not sync with shows why where sync errors show,
       // instead of looking connected.
-      error: (configured ? syncDisabledReason : undefined) ?? this.lastError,
+      error: (configured ? syncDisabledReason : undefined) ?? slot?.lastError,
       ...(syncDisabledReason ? { syncDisabledReason } : {}),
-      inviteCode: configured ? encodeS3WorkspaceInvite(this.config) : undefined,
+      inviteCode: configured ? encodeS3WorkspaceInvite(cfg) : undefined,
+      ...(slot
+        ? {
+            serverCount: slot.serverCount,
+            memoryCount: slot.memoryCount,
+            presenceCount,
+          }
+        : {}),
     };
   }
 
-  getPresence(): WorkspacePresenceEntry[] {
+  getStatus(workspaceId?: string): S3WorkspaceSyncStatus {
+    const slot = workspaceId
+      ? this.slots.get(workspaceId)
+      : this.getPrimarySlot();
+    return this.buildSlotStatus(slot);
+  }
+
+  getWorkspacesStatus(): S3WorkspaceSyncStatus[] {
+    return Array.from(this.slots.values())
+      .filter((slot) => this.isSlotConfigured(slot) || slot.config.bucket.trim().length > 0)
+      .map((slot) => this.buildSlotStatus(slot));
+  }
+
+  getActiveWorkspaceId(): string | undefined {
+    return this.activeWorkspaceId ?? this.getPrimarySlot()?.id;
+  }
+
+  setActiveWorkspaceId(workspaceId?: string): void {
+    this.activeWorkspaceId = workspaceId;
+  }
+
+  updateSlotCounts(
+    workspaceId: string,
+    counts: { serverCount?: number; memoryCount?: number },
+  ): void {
+    const slot = this.slots.get(workspaceId);
+    if (!slot) return;
+    if (counts.serverCount !== undefined) slot.serverCount = counts.serverCount;
+    if (counts.memoryCount !== undefined) slot.memoryCount = counts.memoryCount;
+  }
+
+  getPresence(workspaceId?: string): WorkspacePresenceEntry[] {
     const cutoff = Date.now() - PRESENCE_TTL_MS;
-    return this.presenceList.filter((p) => p.updatedAt >= cutoff);
+    if (workspaceId && workspaceId !== "ALL") {
+      const slot = this.slots.get(workspaceId);
+      if (!slot) return [];
+      return slot.presenceList.filter((p) => p.updatedAt >= cutoff);
+    }
+    const merged = new Map<string, WorkspacePresenceEntry>();
+    for (const slot of this.slots.values()) {
+      for (const p of slot.presenceList) {
+        if (p.updatedAt < cutoff) continue;
+        const prev = merged.get(p.actor);
+        if (!prev || p.updatedAt >= prev.updatedAt) {
+          merged.set(p.actor, p);
+        }
+      }
+    }
+    return Array.from(merged.values()).sort((a, b) =>
+      a.actor.localeCompare(b.actor),
+    );
   }
 
   async configure(
     update?: Partial<S3WorkspaceConfig>,
     inviteCode?: string,
-  ): Promise<void> {
+    options?: {
+      workspaceId?: string;
+      mode?: "add" | "update" | "replace";
+    },
+  ): Promise<S3WorkspaceSyncStatus> {
     // Refused up front in demo mode (nothing is saved), so connecting a team bucket fails visibly.
     assertOutwardSyncAllowed(SYNC);
     const decoded = inviteCode ? decodeS3WorkspaceInvite(inviteCode) : {};
-    const merged = { ...this.config, ... update, ...decoded };
+
+    const incomingBucket = (decoded.bucket ?? update?.bucket ?? "").trim();
+    const incomingPrefix = ((decoded.prefix ?? update?.prefix) || "")
+      .trim()
+      .replace(/^\/+|\/+$/g, "");
+    const explicitId = (
+      options?.workspaceId ??
+      update?.id ??
+      decoded.id ??
+      ""
+    ).trim();
+    const mode = options?.mode;
+
+    // Resolve which existing slot (if any) to update vs creating a new slot
+    let targetSlot: WorkspaceRuntimeSlot | undefined;
+    if (explicitId && this.slots.has(explicitId)) {
+      targetSlot = this.slots.get(explicitId);
+    } else if (mode === "replace" && !explicitId) {
+      targetSlot = this.getPrimarySlot();
+    } else if (mode !== "add") {
+      if (incomingBucket) {
+        const effectivePrefix = incomingPrefix || "sshs3-workspace";
+        for (const slot of this.slots.values()) {
+          if (
+            slot.config.bucket.trim().toLowerCase() ===
+              incomingBucket.toLowerCase() &&
+            (slot.config.prefix || "sshs3-workspace").trim().toLowerCase() ===
+              effectivePrefix.toLowerCase()
+          ) {
+            targetSlot = slot;
+            break;
+          }
+        }
+        // If only one unconfigured empty slot exists, reuse it
+        if (!targetSlot && this.slots.size === 1) {
+          const single = this.slots.values().next().value!;
+          if (!single.config.bucket.trim()) {
+            targetSlot = single;
+          }
+        }
+      } else {
+        targetSlot = this.getPrimarySlot();
+      }
+    }
+
+    const baseConfig = targetSlot?.config ?? createEmptyConfig();
+    const merged = { ...baseConfig, ...update, ...decoded };
     const secret =
       decoded.secretAccessKey !== undefined
         ? decoded.secretAccessKey
         : update?.secretAccessKey !== undefined && update.secretAccessKey !== ""
           ? update.secretAccessKey
-          : this.config.secretAccessKey;
+          : baseConfig.secretAccessKey;
 
-    this.config = {
+    const bucket = (merged.bucket || "").trim();
+    const prefix = (merged.prefix || "sshs3-workspace")
+      .trim()
+      .replace(/^\/+|\/+$/g, "");
+
+    let slotId =
+      explicitId ||
+      targetSlot?.id ||
+      deriveS3WorkspaceId(bucket, prefix);
+    if (!targetSlot && this.slots.has(slotId)) {
+      let suffix = 2;
+      while (this.slots.has(`${slotId}-${suffix}`)) {
+        suffix += 1;
+      }
+      slotId = `${slotId}-${suffix}`;
+    }
+
+    const explicitName = (update?.name ?? decoded.name ?? targetSlot?.config.name)?.trim();
+    const nextConfig: S3WorkspaceConfig = {
+      id: slotId,
+      ...(explicitName ? { name: explicitName } : {}),
       enabled: merged.enabled ?? true,
       endpoint: merged.endpoint?.trim() || undefined,
       region: (merged.region || "eu-north-1").trim(),
-      bucket: (merged.bucket || "").trim(),
-      prefix: (merged.prefix || "sshs3-workspace")
-        .trim()
-        .replace(/^\/+|\/+$/g, ""),
+      bucket,
+      prefix,
       accessKeyId: (merged.accessKeyId || "").trim(),
       secretAccessKey: secret || "",
       forcePathStyle: merged.forcePathStyle ?? true,
+      ...(merged.actorName?.trim()
+        ? { actorName: merged.actorName.trim() }
+        : {}),
     };
 
-    await this.resetProvider();
-    this.lastKnownRemoteStat = undefined;
-    this.lastError = undefined;
+    if (targetSlot) {
+      await this.resetSlotProvider(targetSlot);
+      if (targetSlot.id !== slotId) {
+        this.slots.delete(targetSlot.id);
+        targetSlot.id = slotId;
+      }
+      targetSlot.config = nextConfig;
+      targetSlot.lastKnownRemoteStat = undefined;
+      targetSlot.lastError = undefined;
+      this.slots.set(slotId, targetSlot);
+    } else {
+      targetSlot = {
+        id: slotId,
+        config: nextConfig,
+        syncing: false,
+        connected: false,
+        presenceList: [],
+        serverCount: 0,
+        memoryCount: 0,
+      };
+      this.slots.set(slotId, targetSlot);
+    }
+
+    this.activeWorkspaceId = targetSlot.id;
     await this.save();
 
-    if (this.isConfigured()) {
-      await this.syncNow();
+    if (this.isSlotConfigured(targetSlot)) {
+      await this.syncNow({ workspaceId: targetSlot.id });
       this.startTimers();
     } else {
-      this.stopTimers();
-      this.connected = false;
+      targetSlot.connected = false;
+      if (!this.canReachBucket()) {
+        this.stopTimers();
+      }
     }
     this.callbacks.onStateChanged();
+    return this.buildSlotStatus(targetSlot);
   }
 
-  async disconnect(): Promise<void> {
-    this.stopTimers();
-    await this.resetProvider();
-    this.config.enabled = false;
-    this.connected = false;
-    this.lastError = undefined;
-    this.presenceList = [];
+  async disconnect(
+    workspaceId?: string,
+    opts?: { remove?: boolean },
+  ): Promise<void> {
+    if (workspaceId && workspaceId !== "ALL") {
+      const slot = this.slots.get(workspaceId);
+      if (slot) {
+        await this.resetSlotProvider(slot);
+        slot.config.enabled = false;
+        slot.connected = false;
+        slot.lastError = undefined;
+        slot.presenceList = [];
+        if (opts?.remove !== false && (opts?.remove === true || this.slots.size > 1)) {
+          this.slots.delete(workspaceId);
+        }
+      }
+      if (this.activeWorkspaceId === workspaceId) {
+        this.activeWorkspaceId = this.getPrimarySlot()?.id;
+      }
+    } else {
+      for (const slot of this.slots.values()) {
+        await this.resetSlotProvider(slot);
+        slot.config.enabled = false;
+        slot.connected = false;
+        slot.lastError = undefined;
+        slot.presenceList = [];
+      }
+      if (opts?.remove) {
+        this.slots.clear();
+        this.activeWorkspaceId = undefined;
+      }
+    }
+
+    if (!this.canReachBucket()) {
+      this.stopTimers();
+    }
     await this.save();
     this.callbacks.onStateChanged();
   }
@@ -581,33 +1030,28 @@ export class S3WorkspaceSyncService {
     );
   }
 
+  private serializeSlotsKey(): string {
+    return JSON.stringify(
+      Array.from(this.slots.values()).map((s) => ({
+        id: s.id,
+        enabled: s.config.enabled,
+        endpoint: s.config.endpoint,
+        region: s.config.region,
+        bucket: s.config.bucket,
+        prefix: s.config.prefix,
+        accessKeyId: s.config.accessKeyId,
+        secretAccessKey: s.config.secretAccessKey,
+        forcePathStyle: s.config.forcePathStyle,
+      })),
+    );
+  }
+
   async reloadFromDisk(): Promise<void> {
     if (this.disposed) return;
-    const prevKey = JSON.stringify({
-      enabled: this.config.enabled,
-      endpoint: this.config.endpoint,
-      region: this.config.region,
-      bucket: this.config.bucket,
-      prefix: this.config.prefix,
-      accessKeyId: this.config.accessKeyId,
-      secretAccessKey: this.config.secretAccessKey,
-      forcePathStyle: this.config.forcePathStyle,
-    });
+    const prevKey = this.serializeSlotsKey();
     await this.load();
-    const nextKey = JSON.stringify({
-      enabled: this.config.enabled,
-      endpoint: this.config.endpoint,
-      region: this.config.region,
-      bucket: this.config.bucket,
-      prefix: this.config.prefix,
-      accessKeyId: this.config.accessKeyId,
-      secretAccessKey: this.config.secretAccessKey,
-      forcePathStyle: this.config.forcePathStyle,
-    });
+    const nextKey = this.serializeSlotsKey();
     if (prevKey !== nextKey) {
-      await this.resetProvider();
-      this.lastKnownRemoteStat = undefined;
-      this.lastError = undefined;
       if (this.canReachBucket()) {
         this.startTimers();
         await this.syncNow().catch((err) =>
@@ -615,11 +1059,19 @@ export class S3WorkspaceSyncService {
         );
       } else {
         this.stopTimers();
-        this.connected = false;
-        this.presenceList = [];
+        for (const slot of this.slots.values()) {
+          await this.resetSlotProvider(slot);
+          slot.connected = false;
+          slot.presenceList = [];
+        }
       }
       this.callbacks.onStateChanged();
-    } else if (this.canReachBucket() && !this.connected) {
+    } else if (
+      this.canReachBucket() &&
+      Array.from(this.slots.values()).some(
+        (s) => this.isSlotConfigured(s) && !s.connected,
+      )
+    ) {
       this.startTimers();
       await this.syncNow().catch((err) =>
         log.warn("Reloaded S3 workspace sync failed", safeError(err)),
@@ -682,134 +1134,188 @@ export class S3WorkspaceSyncService {
     void this.publishAndRefreshPresence().catch(() => {});
   }
 
-  async syncNow(opts: { forcePush?: boolean } = {}): Promise<void> {
+  async syncNow(
+    opts: { forcePush?: boolean; workspaceId?: string } = {},
+  ): Promise<void> {
     // An explicit "sync now" (button, AI tool) in demo mode fails with the reason instead of quietly
     // succeeding; the background paths never get here in demo mode (canReachBucket).
     assertOutwardSyncAllowed(SYNC);
-    if (!this.isConfigured()) return;
+    const targetSlots =
+      opts.workspaceId && opts.workspaceId !== "ALL"
+        ? [this.slots.get(opts.workspaceId)].filter(
+            (s): s is WorkspaceRuntimeSlot => this.isSlotConfigured(s),
+          )
+        : Array.from(this.slots.values()).filter((s) =>
+            this.isSlotConfigured(s),
+          );
+    if (targetSlots.length === 0) return;
+
     return this.enqueue(async () => {
-      this.syncing = true;
-      this.callbacks.onStateChanged();
-      try {
-        const provider = await this.getOrCreateProvider();
-        const remotePath = this.workspaceObjectPath();
-        const remotePayload = await this.readRemoteWorkspace(provider, remotePath);
-        const local = await this.callbacks.getLocalState();
-
-        const localPayload: S3WorkspaceRemotePayload = {
-          version: 1,
-          updatedAt: Date.now(),
-          servers: local.servers.map(sanitizeServerForS3),
-          memories: local.memories.filter((m) => m.scope !== "personal"),
-          activityLog: local.activityLog,
-          deletedServerIds: local.deletedServerIds,
-          deletedMemoryIds: local.deletedMemoryIds,
-        };
-
-        const { merged, activeServers, changed } = mergeS3WorkspacePayload(
-          localPayload,
-          remotePayload ?? {},
-        );
-
-        await this.callbacks.applyMergedState({
-          activeServers,
-          memories: merged.memories,
-          activityLog: merged.activityLog,
-          deletedServerIds: merged.deletedServerIds ?? {},
-          deletedMemoryIds: merged.deletedMemoryIds ?? {},
-          changed,
-        });
-
-        // Write merged state back to S3 if remote didn't exist, if merge produced changes, or if forcePush
-        const shouldWriteRemote =
-          !remotePayload ||
-          opts.forcePush ||
-          changed ||
-          (localPayload.servers.length > 0 &&
-            (remotePayload.servers?.length ?? 0) !== merged.servers.length);
-
-        if (shouldWriteRemote) {
-          const buf = Buffer.from(JSON.stringify(merged, null, 2), "utf8");
-          await this.writeProviderFile(provider, remotePath, buf);
-          const stat = await this.statOrNull(provider, remotePath);
-          this.lastKnownRemoteStat = stat
-            ? { size: stat.size, mtime: stat.mtime }
-            : null;
-        }
-
-        await this.publishAndRefreshPresenceInternal(provider, local);
-
-        this.connected = true;
-        this.lastError = undefined;
-        this.lastSyncAt = Date.now();
-        await this.save().catch(() => {});
-      } catch (err) {
-        this.connected = false;
-        this.lastError = safeError(err);
-        throw err;
-      } finally {
-        this.syncing = false;
+      let firstError: unknown;
+      for (const slot of targetSlots) {
+        slot.syncing = true;
         this.callbacks.onStateChanged();
+        try {
+          const provider = await this.getOrCreateProvider(slot);
+          const remotePath = this.workspaceObjectPath(slot);
+          const remotePayload = await this.readRemoteWorkspace(
+            slot,
+            provider,
+            remotePath,
+          );
+          const local = await this.callbacks.getLocalState(
+            slot.id,
+            slot.config,
+          );
+
+          const localPayload: S3WorkspaceRemotePayload = {
+            version: 1,
+            updatedAt: Date.now(),
+            servers: local.servers.map(sanitizeServerForS3),
+            memories: local.memories.filter((m) => m.scope !== "personal"),
+            activityLog: local.activityLog,
+            deletedServerIds: local.deletedServerIds,
+            deletedMemoryIds: local.deletedMemoryIds,
+          };
+
+          const { merged, activeServers, changed } = mergeS3WorkspacePayload(
+            localPayload,
+            remotePayload ?? {},
+          );
+
+          slot.serverCount = activeServers.length;
+          slot.memoryCount = merged.memories.length;
+
+          await this.callbacks.applyMergedState(
+            {
+              activeServers,
+              memories: merged.memories,
+              activityLog: merged.activityLog,
+              deletedServerIds: merged.deletedServerIds ?? {},
+              deletedMemoryIds: merged.deletedMemoryIds ?? {},
+              changed,
+            },
+            slot.id,
+            slot.config,
+          );
+
+          // Write merged state back to S3 if remote didn't exist, if merge produced changes, or if forcePush
+          const shouldWriteRemote =
+            !remotePayload ||
+            opts.forcePush ||
+            changed ||
+            (localPayload.servers.length > 0 &&
+              (remotePayload.servers?.length ?? 0) !== merged.servers.length);
+
+          if (shouldWriteRemote) {
+            const buf = Buffer.from(JSON.stringify(merged, null, 2), "utf8");
+            await this.writeProviderFile(provider, remotePath, buf);
+            const stat = await this.statOrNull(provider, remotePath);
+            slot.lastKnownRemoteStat = stat
+              ? { size: stat.size, mtime: stat.mtime }
+              : null;
+          }
+
+          await this.publishAndRefreshPresenceInternal(slot, provider, local);
+
+          slot.connected = true;
+          slot.lastError = undefined;
+          slot.lastSyncAt = Date.now();
+          await this.save().catch(() => {});
+        } catch (err) {
+          slot.connected = false;
+          slot.lastError = safeError(err);
+          firstError ??= err;
+        } finally {
+          slot.syncing = false;
+          this.callbacks.onStateChanged();
+        }
+      }
+      if (firstError) {
+        throw firstError;
       }
     });
   }
 
   async pollOnce(): Promise<void> {
-    if (this.disposed || !this.canReachBucket() || this.syncing) return;
-    try {
-      const provider = await this.getOrCreateProvider();
-      const remotePath = this.workspaceObjectPath();
-      const stat = await this.statOrNull(provider, remotePath);
-      const changedOnS3 =
-        (this.lastKnownRemoteStat === undefined && stat !== null) ||
-        (this.lastKnownRemoteStat === null && stat !== null) ||
-        (this.lastKnownRemoteStat !== null &&
-          this.lastKnownRemoteStat !== undefined &&
-          stat !== null &&
-          (stat.size !== this.lastKnownRemoteStat.size ||
-            stat.mtime !== this.lastKnownRemoteStat.mtime));
+    if (this.disposed || !this.canReachBucket()) return;
+    const configuredSlots = Array.from(this.slots.values()).filter(
+      (s) => this.isSlotConfigured(s) && !s.syncing,
+    );
+    for (const slot of configuredSlots) {
+      try {
+        const provider = await this.getOrCreateProvider(slot);
+        const remotePath = this.workspaceObjectPath(slot);
+        const stat = await this.statOrNull(provider, remotePath);
+        const changedOnS3 =
+          (slot.lastKnownRemoteStat === undefined && stat !== null) ||
+          (slot.lastKnownRemoteStat === null && stat !== null) ||
+          (slot.lastKnownRemoteStat !== null &&
+            slot.lastKnownRemoteStat !== undefined &&
+            stat !== null &&
+            (stat.size !== slot.lastKnownRemoteStat.size ||
+              stat.mtime !== slot.lastKnownRemoteStat.mtime));
 
-      if (changedOnS3) {
-        await this.syncNow();
-      } else {
-        await this.publishAndRefreshPresence();
-        if (!this.connected || this.lastError) {
-          this.connected = true;
-          this.lastError = undefined;
-          this.callbacks.onStateChanged();
+        if (changedOnS3) {
+          await this.syncNow({ workspaceId: slot.id });
+        } else {
+          const local = await this.callbacks.getLocalState(
+            slot.id,
+            slot.config,
+          );
+          await this.publishAndRefreshPresenceInternal(slot, provider, local);
+          if (!slot.connected || slot.lastError) {
+            slot.connected = true;
+            slot.lastError = undefined;
+            this.callbacks.onStateChanged();
+          }
         }
+      } catch (err) {
+        slot.connected = false;
+        slot.lastError = safeError(err);
+        this.callbacks.onStateChanged();
       }
-    } catch (err) {
-      this.connected = false;
-      this.lastError = safeError(err);
-      this.callbacks.onStateChanged();
     }
   }
 
   async publishAndRefreshPresence(): Promise<void> {
     if (this.disposed || !this.canReachBucket()) return;
-    const provider = await this.getOrCreateProvider();
-    const local = await this.callbacks.getLocalState();
-    await this.publishAndRefreshPresenceInternal(provider, local);
+    const configuredSlots = Array.from(this.slots.values()).filter((s) =>
+      this.isSlotConfigured(s),
+    );
+    for (const slot of configuredSlots) {
+      const provider = await this.getOrCreateProvider(slot);
+      const local = await this.callbacks.getLocalState(slot.id, slot.config);
+      await this.publishAndRefreshPresenceInternal(slot, provider, local);
+    }
   }
 
   private async publishAndRefreshPresenceInternal(
+    slot: WorkspaceRuntimeSlot,
     provider: IStorageProvider,
     local: {
       actor: string;
       activeTerminals: WorkspacePresenceTerminal[];
     },
   ): Promise<void> {
-    const actor = (local.actor || "teammate").trim();
+    const actor = (slot.config.actorName || local.actor || "teammate").trim();
     const safeActor = actor.replace(/[^a-zA-Z0-9_.-]/g, "_") || "teammate";
     const now = Date.now();
+    const wsName = deriveS3WorkspaceName(
+      slot.config.bucket,
+      slot.config.prefix,
+      slot.config.name,
+    );
     const selfEntry: WorkspacePresenceEntry = {
       actor,
       updatedAt: now,
       activeTerminals: local.activeTerminals,
+      workspaceId: slot.id,
+      workspaceName: wsName,
     };
 
-    const selfPath = `${this.presenceDirPath()}/${safeActor}.json`;
+    const dirPath = this.presenceDirPath(slot);
+    const selfPath = `${dirPath}/${safeActor}.json`;
     try {
       await this.writeProviderFile(
         provider,
@@ -823,12 +1329,12 @@ export class S3WorkspaceSyncService {
     // List all presence files in S3
     const entries: WorkspacePresenceEntry[] = [selfEntry];
     try {
-      const files = await provider.list(this.presenceDirPath());
+      const files = await provider.list(dirPath);
       const cutoff = now - PRESENCE_TTL_MS;
       for (const file of files) {
         if (file.isDirectory || !file.name.endsWith(".json")) continue;
         if (file.name === `${safeActor}.json`) continue;
-        const filePath = `${this.presenceDirPath()}/${file.name}`;
+        const filePath = `${dirPath}/${file.name}`;
         try {
           const buf = await this.readProviderFile(provider, filePath, 64_000);
           const parsed = JSON.parse(
@@ -846,6 +1352,8 @@ export class S3WorkspaceSyncService {
               activeTerminals: Array.isArray(parsed.activeTerminals)
                 ? parsed.activeTerminals
                 : [],
+              workspaceId: slot.id,
+              workspaceName: wsName,
             });
           }
         } catch {
@@ -857,14 +1365,14 @@ export class S3WorkspaceSyncService {
     }
 
     const prevJson = JSON.stringify(
-      this.presenceList.map((p) => ({
+      slot.presenceList.map((p) => ({
         actor: p.actor,
         terminals: p.activeTerminals.map((t) => `${t.targetLabel}:${t.state}`),
       })),
     );
-    this.presenceList = entries.sort((a, b) => a.actor.localeCompare(b.actor));
+    slot.presenceList = entries.sort((a, b) => a.actor.localeCompare(b.actor));
     const nextJson = JSON.stringify(
-      this.presenceList.map((p) => ({
+      slot.presenceList.map((p) => ({
         actor: p.actor,
         terminals: p.activeTerminals.map((t) => `${t.targetLabel}:${t.state}`),
       })),
@@ -874,9 +1382,9 @@ export class S3WorkspaceSyncService {
     }
   }
 
-  private workspaceObjectPath(): string {
-    const bucket = this.config.bucket.trim();
-    const prefix = (this.config.prefix || "sshs3-workspace")
+  private workspaceObjectPath(slot: WorkspaceRuntimeSlot): string {
+    const bucket = slot.config.bucket.trim();
+    const prefix = (slot.config.prefix || "sshs3-workspace")
       .trim()
       .replace(/^\/+|\/+$/g, "");
     return prefix
@@ -884,9 +1392,9 @@ export class S3WorkspaceSyncService {
       : `${bucket}/${WORKSPACE_FILENAME}`;
   }
 
-  private presenceDirPath(): string {
-    const bucket = this.config.bucket.trim();
-    const prefix = (this.config.prefix || "sshs3-workspace")
+  private presenceDirPath(slot: WorkspaceRuntimeSlot): string {
+    const bucket = slot.config.bucket.trim();
+    const prefix = (slot.config.prefix || "sshs3-workspace")
       .trim()
       .replace(/^\/+|\/+$/g, "");
     return prefix
@@ -894,46 +1402,49 @@ export class S3WorkspaceSyncService {
       : `${bucket}/${PRESENCE_DIRNAME}`;
   }
 
-  private async getOrCreateProvider(): Promise<IStorageProvider> {
+  private async getOrCreateProvider(
+    slot: WorkspaceRuntimeSlot,
+  ): Promise<IStorageProvider> {
     // Every bucket connection is made here: never in demo mode, whichever path asked for it.
     assertOutwardSyncAllowed(SYNC);
-    if (this.provider) return this.provider;
+    if (slot.provider) return slot.provider;
     if (this.options.providerFactory) {
-      this.provider = this.options.providerFactory(this.config);
+      slot.provider = this.options.providerFactory(slot.config);
       await (
-        this.provider as { connect?: () => Promise<void> }
+        slot.provider as { connect?: () => Promise<void> }
       ).connect?.();
-      return this.provider;
+      return slot.provider;
     }
     const s3Provider = new S3StorageProvider({
-      id: "s3-workspace-sync",
-      name: `S3 Workspace (${this.config.bucket})`,
-      endpoint: this.config.endpoint?.trim() || undefined,
-      region: this.config.region || "eu-north-1",
-      accessKeyId: this.config.accessKeyId,
-      secretAccessKey: this.config.secretAccessKey || "",
-      forcePathStyle: this.config.forcePathStyle ?? true,
+      id: `s3-workspace-sync-${slot.id}`,
+      name: `S3 Workspace (${slot.config.bucket})`,
+      endpoint: slot.config.endpoint?.trim() || undefined,
+      region: slot.config.region || "eu-north-1",
+      accessKeyId: slot.config.accessKeyId,
+      secretAccessKey: slot.config.secretAccessKey || "",
+      forcePathStyle: slot.config.forcePathStyle ?? true,
     });
     await (s3Provider as { connect?: () => Promise<void> }).connect?.();
-    this.provider = s3Provider;
-    return this.provider;
+    slot.provider = s3Provider;
+    return slot.provider;
   }
 
-  private async resetProvider(): Promise<void> {
-    const old = this.provider;
-    this.provider = undefined;
+  private async resetSlotProvider(slot: WorkspaceRuntimeSlot): Promise<void> {
+    const old = slot.provider;
+    slot.provider = undefined;
     if (old) {
       await old.disconnect?.().catch(() => {});
     }
   }
 
   private async readRemoteWorkspace(
+    slot: WorkspaceRuntimeSlot,
     provider: IStorageProvider,
     remotePath: string,
   ): Promise<Partial<S3WorkspaceRemotePayload> | null> {
     const stat = await this.statOrNull(provider, remotePath);
     if (!stat) {
-      this.lastKnownRemoteStat = null;
+      slot.lastKnownRemoteStat = null;
       return null;
     }
     if (stat.size > MAX_WORKSPACE_BYTES) {
@@ -944,7 +1455,7 @@ export class S3WorkspaceSyncService {
       remotePath,
       MAX_WORKSPACE_BYTES,
     );
-    this.lastKnownRemoteStat = { size: stat.size, mtime: stat.mtime };
+    slot.lastKnownRemoteStat = { size: stat.size, mtime: stat.mtime };
     const text = raw.toString("utf8").replace(/^\uFEFF/, "").trim();
     if (!text) return null;
     return JSON.parse(text) as Partial<S3WorkspaceRemotePayload>;
@@ -1068,6 +1579,8 @@ export class S3WorkspaceSyncService {
   async dispose(): Promise<void> {
     this.disposed = true;
     this.stopTimers();
-    await this.resetProvider();
+    for (const slot of this.slots.values()) {
+      await this.resetSlotProvider(slot);
+    }
   }
 }

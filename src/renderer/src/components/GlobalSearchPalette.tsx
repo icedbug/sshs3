@@ -3,8 +3,10 @@ import { createPortal } from 'react-dom';
 import {
   Cable,
   FolderSync,
+  Layers,
   Moon,
   Palette,
+  RefreshCw,
   Search,
   Server,
   Settings,
@@ -25,6 +27,7 @@ import type { SearchEntry } from '../lib/globalSearchIndex';
 import type { AppTab } from '../lib/tabs';
 import { Kbd } from './ui/Kbd';
 import { GlobalSearchResultRow } from './GlobalSearchResultRow';
+import { hubRequest, useHub } from '../lib/aiHub';
 
 export type OmnibarCommandId =
   | GlobalActionId
@@ -160,6 +163,8 @@ export const GlobalSearchPalette: React.FC<GlobalSearchPaletteProps> = ({
   const busyRef = useRef(false);
   useDialogFocus(dialogRef, true);
   const { entries, locked, loading, getProfile } = useGlobalSearchIndex(tabs);
+  const hub = useHub();
+  const connectedWorkspaces = useMemo(() => hub?.workspaces ?? [], [hub?.workspaces]);
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<PaletteFilter>('all');
   const [active, setActive] = useState(0);
@@ -174,14 +179,53 @@ export const GlobalSearchPalette: React.FC<GlobalSearchPaletteProps> = ({
   const parsedQuery = useMemo(() => parseSearchQuery(query), [query]);
   const actionMode = parsedQuery.actionMode;
   const baseActions = useMemo(() => buildActionEntries(shortcuts), [shortcuts]);
+
+  const workspaceActionEntries = useMemo((): SearchEntry[] => {
+    const list: SearchEntry[] = [
+      {
+        id: 'action:workspace-select:ALL',
+        kind: 'action',
+        title: 'Workspace: All Connected Workspaces (Unified View)',
+        subtitle: 'Show nodes, clusters, and telemetry across all connected workspaces',
+        tags: ['workspace', 'all', 'unified', 'fleet'],
+        source: '',
+        ref: 'workspace-select:ALL',
+        sftp: false,
+      },
+      ...connectedWorkspaces.map(
+        (ws): SearchEntry => ({
+          id: `action:workspace-select:${ws.id}`,
+          kind: 'action',
+          title: `Switch Workspace: ${ws.name} (${ws.serverCount} nodes)`,
+          subtitle: `Filter fleet to ${ws.name} (${ws.kind.toUpperCase()})`,
+          tags: ['workspace', 'switch', ws.name.toLowerCase(), ws.kind],
+          source: '',
+          ref: `workspace-select:${ws.id}`,
+          sftp: false,
+        })
+      ),
+      {
+        id: 'action:workspace-sync-all',
+        kind: 'action',
+        title: 'Sync All Connected Workspaces',
+        subtitle: 'Pull & push state across all connected S3 and team workspaces',
+        tags: ['workspace', 'sync', 's3', 'team'],
+        source: '',
+        ref: 'workspace-sync-all',
+        sftp: false,
+      },
+    ];
+    return list;
+  }, [connectedWorkspaces]);
+
   const allActions = useMemo(() => {
     // When query is lone `>`, keep the exact 7 core shortcut actions first so existing action tests see the exact 7 items,
-    // and include extended Omnibar commands when searching after `>` (e.g. `>tunnels`, `>theme`, `>ai`, `>dirsync`).
+    // and include extended Omnibar commands when searching after `>` (e.g. `>tunnels`, `>theme`, `>ai`, `>dirsync`, `>workspace`).
     if (parsedQuery.actionMode && parsedQuery.empty) {
       return baseActions;
     }
-    return [...baseActions, ...EXTRA_OMNIBAR_COMMANDS];
-  }, [baseActions, parsedQuery.actionMode, parsedQuery.empty]);
+    return [...baseActions, ...EXTRA_OMNIBAR_COMMANDS, ...workspaceActionEntries];
+  }, [baseActions, parsedQuery.actionMode, parsedQuery.empty, workspaceActionEntries]);
 
   const groups = useMemo(
     () => buildPaletteGroups({ entries, actions: allActions, locked, query, filter }),
@@ -197,6 +241,19 @@ export const GlobalSearchPalette: React.FC<GlobalSearchPaletteProps> = ({
 
   const executeOmnibarCommand = (id: string) => {
     onClose();
+    if (id.startsWith('workspace-select:')) {
+      const wsId = id.slice('workspace-select:'.length) || 'ALL';
+      window.dispatchEvent(new CustomEvent('sshs3:workspace-select', { detail: { workspaceId: wsId } }));
+      void hubRequest({ action: 'workspace-select', workspaceId: wsId }).catch(() => {});
+      if (wsId === 'ALL') {
+        onGoHome?.();
+      }
+      return;
+    }
+    if (id === 'workspace-sync-all') {
+      void hubRequest({ action: 'workspace-s3-sync-now' }).catch(() => {});
+      return;
+    }
     if (isGlobalActionId(id)) {
       if (id === 'openSettings' && onOpenSettings) {
         onOpenSettings();
@@ -466,6 +523,50 @@ export const GlobalSearchPalette: React.FC<GlobalSearchPaletteProps> = ({
                 </div>
               )}
             </div>
+          </div>
+        )}
+
+        {!actionMode && connectedWorkspaces.length > 0 && (
+          <div
+            data-testid="omnibar-workspaces-bar"
+            className="flex flex-wrap items-center gap-1.5 border-b border-divider bg-app-surface-subtle/50 px-4 py-1.5"
+          >
+            <button
+              type="button"
+              data-testid="omnibar-workspace-ALL"
+              onClick={() => executeOmnibarCommand('workspace-select:ALL')}
+              className="inline-flex items-center gap-1 rounded border border-sky-400/35 bg-sky-500/15 px-2 py-0.5 text-[10px] font-mono text-sky-200 hover:bg-sky-500/25 transition-colors"
+            >
+              <Layers className="h-3 w-3 text-sky-400" />
+              <span>Workspace: All Connected Workspaces (Unified View)</span>
+            </button>
+            {connectedWorkspaces.map((ws) => (
+              <button
+                key={ws.id}
+                type="button"
+                data-testid={`omnibar-workspace-${ws.id}`}
+                onClick={() => executeOmnibarCommand(`workspace-select:${ws.id}`)}
+                className="inline-flex items-center gap-1 rounded border border-border-subtle bg-app-surface px-2 py-0.5 text-[10px] font-mono text-txt-secondary hover:border-sky-400/35 hover:text-txt-primary transition-colors"
+              >
+                <span
+                  className={`h-1.5 w-1.5 rounded-full ${
+                    ws.connected ? 'bg-emerald-400' : 'bg-txt-muted'
+                  }`}
+                />
+                <span>
+                  Switch Workspace: {ws.name} ({ws.serverCount} nodes)
+                </span>
+              </button>
+            ))}
+            <button
+              type="button"
+              data-testid="omnibar-workspace-sync-all"
+              onClick={() => executeOmnibarCommand('workspace-sync-all')}
+              className="inline-flex items-center gap-1 rounded border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-mono text-emerald-300 hover:bg-emerald-500/20 transition-colors"
+            >
+              <RefreshCw className="h-2.5 w-2.5 text-emerald-400" />
+              <span>Sync All Connected Workspaces</span>
+            </button>
           </div>
         )}
 

@@ -4,6 +4,7 @@ import path from "node:path";
 import type {
   AgentSchedule,
   AgentTask,
+  ConnectedWorkspaceSummary,
   ContextSource,
   HubPreferences,
   InfraGraphEdge,
@@ -62,6 +63,9 @@ export interface HubData {
   deletedServerIds?: Record<string, string>;
   deletedMemoryIds?: Record<string, number>;
   s3SyncedServers?: WorkspaceServerSummary[];
+  s3SyncedServersByWorkspace?: Record<string, WorkspaceServerSummary[]>;
+  activeWorkspaceId?: string;
+  demoWorkspaces?: ConnectedWorkspaceSummary[];
 }
 export const defaultHubData = (): HubData => ({
   version: 1,
@@ -97,6 +101,9 @@ export const defaultHubData = (): HubData => ({
   deletedServerIds: {},
   deletedMemoryIds: {},
   s3SyncedServers: [],
+  s3SyncedServersByWorkspace: {},
+  activeWorkspaceId: "ALL",
+  demoWorkspaces: [],
 });
 
 /** One process owns the store. Serial atomic replacements preserve the last valid snapshot. */
@@ -272,6 +279,9 @@ export class HubStore {
     }
     this.data.deletedMemoryIds = deletedMemoryIds;
 
+    const fileWorkspaceId = "ws-file-shared";
+    const fileWorkspaceName = path.basename(targetPath) || "Shared File Workspace";
+
     // 1. Merge memories by id (latest updatedAt wins, respecting tombstones)
     const memMap = new Map<string, MemoryEntry>();
     for (const m of this.data.memories) {
@@ -283,7 +293,11 @@ export class HubStore {
       if ((deletedMemoryIds[rm.id] ?? 0) >= (rm.updatedAt ?? 0)) continue;
       const prev = memMap.get(rm.id);
       if (!prev || (rm.updatedAt ?? 0) > (prev.updatedAt ?? 0)) {
-        memMap.set(rm.id, rm);
+        memMap.set(rm.id, {
+          ...rm,
+          workspaceId: rm.workspaceId || fileWorkspaceId,
+          workspaceName: rm.workspaceName || fileWorkspaceName,
+        });
         changed = true;
       }
     }
@@ -295,7 +309,11 @@ export class HubStore {
     for (const ra of Array.isArray(remote.activityLog) ? remote.activityLog : []) {
       if (!ra || typeof ra.id !== "string") continue;
       if (!actMap.has(ra.id)) {
-        actMap.set(ra.id, ra);
+        actMap.set(ra.id, {
+          ...ra,
+          workspaceId: ra.workspaceId || fileWorkspaceId,
+          workspaceName: ra.workspaceName || fileWorkspaceName,
+        });
         changed = true;
       }
     }
@@ -316,7 +334,12 @@ export class HubStore {
         if (delMs > 0 && updMs > delMs) {
           delete deletedServerIds[rs.id];
         }
-        srvMap.set(rs.id, { ...rs, shared: true });
+        srvMap.set(rs.id, {
+          ...rs,
+          shared: true,
+          workspaceId: rs.workspaceId || fileWorkspaceId,
+          workspaceName: rs.workspaceName || fileWorkspaceName,
+        });
       }
     }
     for (const ls of localServers) {
@@ -330,12 +353,19 @@ export class HubStore {
         delete deletedServerIds[ls.id];
       }
       const prev = srvMap.get(ls.id);
+      const taggedLocal: WorkspaceServerSummary = ls.shared !== false
+        ? {
+            ...ls,
+            workspaceId: ls.workspaceId || fileWorkspaceId,
+            workspaceName: ls.workspaceName || fileWorkspaceName,
+          }
+        : ls;
       if (!prev) {
-        srvMap.set(ls.id, ls);
+        srvMap.set(ls.id, taggedLocal);
       } else {
         const tPrev = parseTimeMs(prev.updatedAt);
         if (updMs >= tPrev) {
-          srvMap.set(ls.id, ls);
+          srvMap.set(ls.id, taggedLocal);
         }
       }
     }

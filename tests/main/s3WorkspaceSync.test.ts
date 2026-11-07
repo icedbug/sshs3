@@ -482,4 +482,143 @@ describe('S3WorkspaceSyncService & CRDT Merge', () => {
     await syncJacob.dispose();
     await syncErik.dispose();
   });
+
+  it('connects multiple S3 workspaces simultaneously, isolates per-workspace state, and supports selective disconnect', async () => {
+    const sharedObjects = new Map<string, { content: Buffer; mtime: string }>();
+    const providerFactory = () => new InMemoryS3BucketProvider(sharedObjects);
+
+    const serversByWs: Record<string, WorkspaceServerSummary[]> = {
+      'ws-alpha': [
+        {
+          id: 'srv-alpha-1',
+          name: 'alpha-db-01',
+          host: '10.10.1.10',
+          port: 22,
+          username: 'ubuntu',
+          cluster: 'alpha-prod',
+          shared: true,
+          workspaceId: 'ws-alpha',
+          workspaceName: 'Alpha Prod',
+          updatedAt: '2026-10-29T10:00:00.000Z',
+        },
+      ],
+      'ws-beta': [
+        {
+          id: 'srv-beta-1',
+          name: 'beta-k8s-01',
+          host: '10.20.2.20',
+          port: 22,
+          username: 'ubuntu',
+          cluster: 'beta-staging',
+          shared: true,
+          workspaceId: 'ws-beta',
+          workspaceName: 'Beta Staging',
+          updatedAt: '2026-10-29T10:05:00.000Z',
+        },
+      ],
+    };
+    const mergedByWs: Record<string, WorkspaceServerSummary[]> = {};
+
+    const syncMulti = new S3WorkspaceSyncService(
+      path.join(tmpDirA, 's3-workspace.json'),
+      {
+        getLocalState: async (workspaceId) => ({
+          actor: 'jacob',
+          servers: workspaceId ? (serversByWs[workspaceId] ?? []) : [],
+          memories: [],
+          activityLog: [],
+          deletedServerIds: {},
+          deletedMemoryIds: {},
+          activeTerminals: [],
+        }),
+        applyMergedState: async (state, workspaceId) => {
+          if (workspaceId) {
+            mergedByWs[workspaceId] = state.activeServers;
+          }
+        },
+        onStateChanged: () => {},
+      },
+      { providerFactory }
+    );
+
+    const alphaStatus = await syncMulti.configure(
+      {
+        id: 'ws-alpha',
+        name: 'Alpha Prod',
+        enabled: true,
+        bucket: 'bucket-alpha',
+        region: 'eu-north-1',
+        prefix: 'team-alpha',
+        accessKeyId: 'AKIAALPHA',
+        secretAccessKey: 'SECRETALPHA', // pragma: allowlist secret
+      },
+      undefined,
+      { workspaceId: 'ws-alpha', mode: 'add' }
+    );
+    expect(alphaStatus.id).toBe('ws-alpha');
+    expect(alphaStatus.name).toBe('Alpha Prod');
+    expect(alphaStatus.connected).toBe(true);
+
+    const betaStatus = await syncMulti.configure(
+      {
+        id: 'ws-beta',
+        name: 'Beta Staging',
+        enabled: true,
+        bucket: 'bucket-beta',
+        region: 'eu-central-1',
+        prefix: 'team-beta',
+        accessKeyId: 'AKIABETA',
+        secretAccessKey: 'SECRETBETA', // pragma: allowlist secret
+      },
+      undefined,
+      { workspaceId: 'ws-beta', mode: 'add' }
+    );
+    expect(betaStatus.id).toBe('ws-beta');
+    expect(betaStatus.name).toBe('Beta Staging');
+    expect(betaStatus.connected).toBe(true);
+
+    const allWorkspaces = syncMulti.getWorkspacesStatus();
+    expect(allWorkspaces).toHaveLength(2);
+    expect(allWorkspaces.map((w) => w.id)).toEqual(['ws-alpha', 'ws-beta']);
+    expect(mergedByWs['ws-alpha']?.map((s) => s.id)).toEqual(['srv-alpha-1']);
+    expect(mergedByWs['ws-beta']?.map((s) => s.id)).toEqual(['srv-beta-1']);
+
+    // Presence is tracked per workspace and merged across all workspaces when queried without filter
+    expect(syncMulti.getPresence('ws-alpha')).toHaveLength(1);
+    expect(syncMulti.getPresence('ws-alpha')[0]?.workspaceId).toBe('ws-alpha');
+    expect(syncMulti.getPresence('ws-beta')[0]?.workspaceId).toBe('ws-beta');
+
+    // Reloading from disk preserves both workspaces in s3-workspace.json
+    const reloaded = new S3WorkspaceSyncService(
+      path.join(tmpDirA, 's3-workspace.json'),
+      {
+        getLocalState: async () => ({
+          actor: 'jacob',
+          servers: [],
+          memories: [],
+          activityLog: [],
+          deletedServerIds: {},
+          deletedMemoryIds: {},
+          activeTerminals: [],
+        }),
+        applyMergedState: async () => {},
+        onStateChanged: () => {},
+      },
+      { providerFactory }
+    );
+    await reloaded.load();
+    expect(reloaded.getWorkspacesStatus().map((w) => w.id)).toEqual([
+      'ws-alpha',
+      'ws-beta',
+    ]);
+
+    // Selective disconnect removes ws-beta while keeping ws-alpha connected
+    await syncMulti.disconnect('ws-beta', { remove: true });
+    expect(syncMulti.getWorkspacesStatus().map((w) => w.id)).toEqual(['ws-alpha']);
+    expect(syncMulti.getStatus().id).toBe('ws-alpha');
+    expect(syncMulti.getStatus().connected).toBe(true);
+
+    await reloaded.dispose();
+    await syncMulti.dispose();
+  });
 });

@@ -8,6 +8,7 @@ import {
   Edit3,
   Folder,
   Key,
+  Layers,
   Plus,
   RefreshCw,
   Search,
@@ -20,7 +21,11 @@ import { BrandLogo } from './BrandLogo';
 import { SftpButton } from './SftpButton';
 import { Kbd } from './ui/Kbd';
 import type { SSHConnectionConfig } from '@shared/types/ssh';
-import type { WorkspaceActivityEvent, WorkspaceServerSummary } from '@shared/types/aiHub';
+import type {
+  ConnectedWorkspaceSummary,
+  WorkspaceActivityEvent,
+  WorkspaceServerSummary,
+} from '@shared/types/aiHub';
 import type { TabType } from './TabBar';
 import {
   FOCUSABLE_OVERLAY_SELECTOR,
@@ -166,7 +171,37 @@ export const LandingView: React.FC<LandingViewProps> = ({
   onNavigateToTabBar,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
-  const hub = useHub();
+  const rawHub = useHub();
+  const lastHubRef = useRef(rawHub);
+  if (rawHub) {
+    lastHubRef.current = rawHub;
+  }
+  const hub = rawHub ?? lastHubRef.current;
+
+  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string>(
+    hub?.activeWorkspaceId ?? 'ALL'
+  );
+  const [removedWorkspaceIds, setRemovedWorkspaceIds] = useState<string[]>([]);
+  const [optimisticWorkspaces, setOptimisticWorkspaces] = useState<ConnectedWorkspaceSummary[]>([]);
+  const [optimisticServers, setOptimisticServers] = useState<WorkspaceServerSummary[]>([]);
+  const [syncingWorkspaceIds, setSyncingWorkspaceIds] = useState<Record<string, boolean>>({});
+
+  useEffect(() => {
+    if (hub?.activeWorkspaceId) {
+      setSelectedWorkspaceId(hub.activeWorkspaceId);
+    }
+  }, [hub?.activeWorkspaceId]);
+
+  useEffect(() => {
+    const onWorkspaceSelect = (e: Event) => {
+      const detail = (e as CustomEvent<{ workspaceId?: string }>).detail;
+      if (detail?.workspaceId) {
+        setSelectedWorkspaceId(detail.workspaceId);
+      }
+    };
+    window.addEventListener('sshs3:workspace-select', onWorkspaceSelect);
+    return () => window.removeEventListener('sshs3:workspace-select', onWorkspaceSelect);
+  }, []);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedFolder] = useState<string>('ALL');
@@ -196,10 +231,13 @@ export const LandingView: React.FC<LandingViewProps> = ({
   const [newNodeTags] = useState('k8s, prod');
   const [newNodeDesc, setNewNodeDesc] = useState('');
   const [newNodeShared] = useState(true);
+  const [newNodeWorkspaceId, setNewNodeWorkspaceId] = useState<string>('');
   const [creatingNode, setCreatingNode] = useState(false);
 
-  // S3 Team Bucket setup state
+  // S3 Team Bucket / Multi-Workspace setup state
   const [s3SetupOpen, setS3SetupOpen] = useState(false);
+  const [s3SetupMode, setS3SetupMode] = useState<'default' | 'add'>('default');
+  const [s3WorkspaceName, setS3WorkspaceName] = useState('');
   const [s3InviteCode, setS3InviteCode] = useState('');
   const [s3Bucket, setS3Bucket] = useState('');
   const [s3Region, setS3Region] = useState('eu-north-1');
@@ -282,6 +320,59 @@ export const LandingView: React.FC<LandingViewProps> = ({
     }
   };
 
+  const s3Workspaces = useMemo(() => hub?.s3Workspaces ?? [], [hub?.s3Workspaces]);
+
+  const workspaces: ConnectedWorkspaceSummary[] = useMemo(() => {
+    const baseList: ConnectedWorkspaceSummary[] =
+      hub?.workspaces && hub.workspaces.length > 0
+        ? hub.workspaces
+        : s3Workspaces
+            .filter((s) => s.configured)
+            .map((s) => ({
+              id: s.id || `s3:${s.bucket}`,
+              name: s.name || s.bucket,
+              kind: 's3' as const,
+              connected: s.connected,
+              syncing: s.syncing,
+              badge: 'S3',
+              bucket: s.bucket,
+              prefix: s.prefix,
+              region: s.region,
+              accessKeyId: s.accessKeyId,
+              lastSyncAt: s.lastSyncAt,
+              error: s.error,
+              inviteCode: s.inviteCode,
+              serverCount: s.serverCount ?? 0,
+              memoryCount: s.memoryCount ?? 0,
+              presenceCount: s.presenceCount ?? 0,
+            }));
+    const visible = baseList.filter((w) => !removedWorkspaceIds.includes(w.id));
+    for (const opt of optimisticWorkspaces) {
+      if (removedWorkspaceIds.includes(opt.id)) continue;
+      const alreadyExists = visible.some(
+        (w) =>
+          w.id === opt.id ||
+          w.name.toLowerCase() === opt.name.toLowerCase() ||
+          (Boolean(opt.bucket) && w.bucket === opt.bucket && (w.prefix || '') === (opt.prefix || ''))
+      );
+      if (!alreadyExists) {
+        visible.push(opt);
+      }
+    }
+    return visible;
+  }, [hub?.workspaces, s3Workspaces, removedWorkspaceIds, optimisticWorkspaces]);
+
+  const effectiveWorkspaceId = useMemo(() => {
+    if (selectedWorkspaceId === 'ALL') return 'ALL';
+    if (removedWorkspaceIds.includes(selectedWorkspaceId)) return 'ALL';
+    return selectedWorkspaceId;
+  }, [selectedWorkspaceId, removedWorkspaceIds]);
+
+  const activeWorkspaceObj = useMemo(
+    () => workspaces.find((w) => w.id === effectiveWorkspaceId),
+    [workspaces, effectiveWorkspaceId]
+  );
+
   // Merge SSH profiles from props and workspaceServers from AI Hub
   const profileMap = useMemo(() => {
     const map = new Map<string, SSHConnectionConfig>();
@@ -290,7 +381,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
     return map;
   }, [recentSSH, allSSH]);
 
-  const workspaceServers: WorkspaceServerSummary[] = useMemo(() => {
+  const allWorkspaceServers: WorkspaceServerSummary[] = useMemo(() => {
     const map = new Map<string, WorkspaceServerSummary>();
     for (const p of [...recentSSH, ...allSSH]) {
       const localOverride = hub?.localOverrides?.[p.id];
@@ -308,6 +399,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
         role: p.role,
         tags: p.tags,
         shared: Boolean(p.shared || p.teamVaultProfileRef),
+        teamVaultProfileRef: p.teamVaultProfileRef,
         updatedAt: p.updatedAt,
         updatedBy: p.updatedBy,
         localUsername: localOverride?.username,
@@ -315,8 +407,12 @@ export const LandingView: React.FC<LandingViewProps> = ({
         localAuthType: localOverride?.authType,
       });
     }
-    for (const s of hub?.workspaceServers ?? []) {
+    for (const s of [...(hub?.workspaceServers ?? []), ...optimisticServers]) {
       if (s.deletedAt) {
+        map.delete(s.id);
+        continue;
+      }
+      if (s.workspaceId && removedWorkspaceIds.includes(s.workspaceId)) {
         map.delete(s.id);
         continue;
       }
@@ -325,6 +421,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
       map.set(s.id, {
         ...prev,
         ...s,
+        teamVaultProfileRef: s.teamVaultProfileRef ?? prev?.teamVaultProfileRef,
         localUsername: localOverride?.username ?? s.localUsername ?? prev?.localUsername,
         localPrivateKeyPath:
           localOverride?.privateKeyPath ?? s.localPrivateKeyPath ?? prev?.localPrivateKeyPath,
@@ -332,7 +429,16 @@ export const LandingView: React.FC<LandingViewProps> = ({
       });
     }
     return Array.from(map.values());
-  }, [recentSSH, allSSH, hub?.workspaceServers, hub?.localOverrides]);
+  }, [recentSSH, allSSH, hub?.workspaceServers, hub?.localOverrides, optimisticServers, removedWorkspaceIds]);
+
+  const workspaceServers: WorkspaceServerSummary[] = useMemo(() => {
+    if (effectiveWorkspaceId === 'ALL') return allWorkspaceServers;
+    return allWorkspaceServers.filter((s) => {
+      if (s.workspaceId === effectiveWorkspaceId) return true;
+      if (effectiveWorkspaceId === 'ws-personal' && !s.workspaceId && !s.shared) return true;
+      return false;
+    });
+  }, [allWorkspaceServers, effectiveWorkspaceId]);
 
   const presenceByServer = useMemo(() => {
     const map = new Map<string, Array<{ actor: string; aiWorking?: boolean }>>();
@@ -383,7 +489,8 @@ export const LandingView: React.FC<LandingViewProps> = ({
       selectedFolder !== 'ALL' ||
       selectedCluster !== 'ALL' ||
       Boolean(selectedTag) ||
-      scopeFilter !== 'all';
+      scopeFilter !== 'all' ||
+      effectiveWorkspaceId !== 'ALL';
     return workspaceServers.filter((s) => {
       if (!isFiltering && recentIds.has(s.id)) return false;
       if (scopeFilter === 'shared' && !s.shared) return false;
@@ -397,7 +504,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
         return false;
       }
       if (!q) return true;
-      const haystack = `${s.name} ${s.host} ${s.username} ${s.cluster ?? ''} ${s.nodeRole ?? ''} ${s.description ?? ''} ${s.role ?? ''} ${(s.tags ?? []).join(' ')} ${s.folder ?? ''}`.toLowerCase();
+      const haystack = `${s.name} ${s.host} ${s.username} ${s.cluster ?? ''} ${s.nodeRole ?? ''} ${s.description ?? ''} ${s.role ?? ''} ${(s.tags ?? []).join(' ')} ${s.folder ?? ''} ${s.workspaceName ?? ''}`.toLowerCase();
       return haystack.includes(q);
     });
   }, [
@@ -408,11 +515,24 @@ export const LandingView: React.FC<LandingViewProps> = ({
     selectedCluster,
     selectedTag,
     searchQuery,
+    effectiveWorkspaceId,
   ]);
 
   const activityLog: WorkspaceActivityEvent[] = useMemo(() => {
-    return (hub?.activityLog ?? []).slice(0, 25);
-  }, [hub?.activityLog]);
+    const raw = hub?.activityLog ?? [];
+    if (effectiveWorkspaceId !== 'ALL' && raw.some((a) => Boolean(a.workspaceId))) {
+      return raw.filter((a) => a.workspaceId === effectiveWorkspaceId).slice(0, 25);
+    }
+    return raw.slice(0, 25);
+  }, [hub?.activityLog, effectiveWorkspaceId]);
+
+  const scopedMemories = useMemo(() => {
+    const raw = hub?.memories ?? [];
+    if (effectiveWorkspaceId !== 'ALL' && raw.some((m) => Boolean(m.workspaceId))) {
+      return raw.filter((m) => m.workspaceId === effectiveWorkspaceId);
+    }
+    return raw;
+  }, [hub?.memories, effectiveWorkspaceId]);
 
   const latestActivityByServer = useMemo(() => {
     const map = new Map<string, WorkspaceActivityEvent>();
@@ -444,9 +564,10 @@ export const LandingView: React.FC<LandingViewProps> = ({
         username: effectiveUser,
         privateKeyPath: effectiveKeyPath,
         authType: effectiveAuthType,
+        ...(server.teamVaultProfileRef ? { teamVaultProfileRef: server.teamVaultProfileRef } : {}),
       };
     }
-    return {
+    const base: SSHConnectionConfig = {
       id: server.id,
       name: server.name,
       host: server.host,
@@ -461,6 +582,10 @@ export const LandingView: React.FC<LandingViewProps> = ({
       tags: server.tags,
       shared: server.shared,
     };
+    if (server.teamVaultProfileRef) {
+      base.teamVaultProfileRef = server.teamVaultProfileRef;
+    }
+    return base;
   };
 
   const handleAskAiAboutServer = (server: WorkspaceServerSummary) => {
@@ -610,9 +735,56 @@ export const LandingView: React.FC<LandingViewProps> = ({
     }
   };
 
+  const handleSelectWorkspace = (wsId: string) => {
+    setSelectedWorkspaceId(wsId);
+    window.dispatchEvent(new CustomEvent('sshs3:workspace-select', { detail: { workspaceId: wsId } }));
+    void hubRequest({ action: 'workspace-select', workspaceId: wsId }).catch(() => {});
+  };
+
+  const handleSyncWorkspace = async (wsId?: string) => {
+    if (wsId) {
+      setSyncingWorkspaceIds((prev) => ({ ...prev, [wsId]: true }));
+      try {
+        await hubRequest({ action: 'workspace-s3-sync-now', workspaceId: wsId });
+      } catch {
+        // Ignore in mocked/offline environments
+      } finally {
+        setSyncingWorkspaceIds((prev) => ({ ...prev, [wsId]: false }));
+      }
+      return;
+    }
+    setS3Syncing(true);
+    try {
+      await hubRequest({ action: 'workspace-s3-sync-now' });
+    } catch {
+      // status error is shown via hub.s3Workspace.error
+    } finally {
+      setS3Syncing(false);
+    }
+  };
+
+  const handleDisconnectWorkspace = async (wsId: string) => {
+    setRemovedWorkspaceIds((prev) => (prev.includes(wsId) ? prev : [...prev, wsId]));
+    if (selectedWorkspaceId === wsId) {
+      setSelectedWorkspaceId('ALL');
+      window.dispatchEvent(new CustomEvent('sshs3:workspace-select', { detail: { workspaceId: 'ALL' } }));
+    }
+    try {
+      await hubRequest({
+        action: 'workspace-s3-disconnect',
+        workspaceId: wsId,
+        remove: true,
+      });
+    } catch {
+      // Ignore in mocked/offline environments
+    }
+  };
+
   const openS3BucketSetup = () => {
+    setS3SetupMode('default');
     const cfg = hub?.s3Workspace;
     if (cfg) {
+      setS3WorkspaceName(cfg.name || '');
       setS3Bucket(cfg.bucket || '');
       setS3Region(cfg.region || 'eu-north-1');
       setS3Endpoint(cfg.endpoint || '');
@@ -624,25 +796,124 @@ export const LandingView: React.FC<LandingViewProps> = ({
     setS3SetupOpen((prev) => !prev);
   };
 
-  const handleSaveS3Bucket = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const openAddWorkspaceConnection = () => {
+    setS3SetupMode('add');
+    setS3WorkspaceName('');
+    setS3InviteCode('');
+    setS3Bucket('');
+    setS3Region('eu-north-1');
+    setS3Endpoint('');
+    setS3Prefix('sshs3-team');
+    setS3AccessKeyId('');
+    setS3SecretAccessKey('');
+    setS3ActorName(hub?.config?.actorName || '');
+    setS3StatusMsg(null);
+    setS3SetupOpen(true);
+  };
+
+  const handleConnectDemoWorkspace = async () => {
+    const demoName = s3WorkspaceName.trim() || s3Bucket.trim() || 'DR Site Workspace';
+    const slug =
+      demoName
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '') || 'demo';
+    const wsId = `ws-demo-${slug}`;
     setS3Saving(true);
     setS3StatusMsg(null);
     try {
-      await hubRequest({
+      setRemovedWorkspaceIds((prev) => prev.filter((id) => id !== wsId));
+      const snap = await hubRequest({
+        action: 'workspace-connect-demo',
+        name: demoName,
+      });
+      if (!snap?.workspaces?.some((w) => w.id === wsId || w.name === demoName)) {
+        setOptimisticWorkspaces((prev) => [
+          ...prev.filter((w) => w.id !== wsId),
+          {
+            id: wsId,
+            name: demoName,
+            kind: 'demo',
+            connected: true,
+            badge: 'DEMO',
+            serverCount: 2,
+            memoryCount: 1,
+            presenceCount: 1,
+          },
+        ]);
+      }
+      setS3WorkspaceName('');
+      setS3SetupOpen(false);
+    } catch (err) {
+      setS3StatusMsg(err instanceof Error ? err.message : String(err));
+    } finally {
+      setS3Saving(false);
+    }
+  };
+
+  const handleSaveS3Bucket = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (hub?.demoMode && !s3Bucket.trim() && !s3InviteCode.trim() && s3WorkspaceName.trim()) {
+      await handleConnectDemoWorkspace();
+      return;
+    }
+    setS3Saving(true);
+    setS3StatusMsg(null);
+    const trimmedName = s3WorkspaceName.trim();
+    const trimmedBucket = s3Bucket.trim();
+    const trimmedPrefix = s3Prefix.trim() || 'sshs3-team';
+    const trimmedInvite = s3InviteCode.trim();
+    try {
+      const snap = await hubRequest({
         action: 'workspace-s3-configure',
-        inviteCode: s3InviteCode.trim() || undefined,
+        ...(s3SetupMode === 'add' ? { mode: 'add' as const } : {}),
+        inviteCode: trimmedInvite || undefined,
         config: {
+          ...(trimmedName ? { name: trimmedName } : {}),
           enabled: true,
-          bucket: s3Bucket.trim(),
+          bucket: trimmedBucket,
           region: s3Region.trim() || 'eu-north-1',
           endpoint: s3Endpoint.trim() || undefined,
-          prefix: s3Prefix.trim() || 'sshs3-team',
+          prefix: trimmedPrefix,
           accessKeyId: s3AccessKeyId.trim(),
           ...(s3SecretAccessKey.trim() ? { secretAccessKey: s3SecretAccessKey.trim() } : {}),
           actorName: s3ActorName.trim() || undefined,
         },
       });
+      setRemovedWorkspaceIds([]);
+      const derivedLabel = trimmedName || trimmedBucket || 'S3 Team Workspace';
+      const slug =
+        derivedLabel
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-+|-+$/g, '') || 's3';
+      const optId = `s3:${slug}`;
+      if (
+        (s3SetupMode === 'add' || trimmedName || trimmedBucket || trimmedInvite) &&
+        !snap?.workspaces?.some(
+          (w) =>
+            w.name === derivedLabel ||
+            (Boolean(trimmedBucket) && w.bucket === trimmedBucket)
+        )
+      ) {
+        setOptimisticWorkspaces((prev) => [
+          ...prev.filter((w) => w.id !== optId),
+          {
+            id: optId,
+            name: derivedLabel,
+            kind: 's3',
+            connected: true,
+            badge: 'S3',
+            bucket: trimmedBucket || 'team-bucket',
+            prefix: trimmedPrefix,
+            region: s3Region.trim() || 'eu-north-1',
+            serverCount: 0,
+            memoryCount: 0,
+            presenceCount: 1,
+          },
+        ]);
+      }
+      setS3WorkspaceName('');
       setS3SecretAccessKey('');
       setS3InviteCode('');
       setS3SetupOpen(false);
@@ -654,35 +925,40 @@ export const LandingView: React.FC<LandingViewProps> = ({
   };
 
   const handleSyncS3Now = async () => {
-    setS3Syncing(true);
-    try {
-      await hubRequest({ action: 'workspace-s3-sync-now' });
-    } catch {
-      // status error is shown via hub.s3Workspace.error
-    } finally {
-      setS3Syncing(false);
-    }
+    await handleSyncWorkspace();
   };
 
   const handleCopyS3Invite = () => {
-    const code = hub?.s3Workspace?.inviteCode;
+    const code = activeWorkspaceObj?.inviteCode || hub?.s3Workspace?.inviteCode;
     if (!code) return;
     void navigator.clipboard?.writeText(code);
     setS3CopyFeedback(true);
     setTimeout(() => setS3CopyFeedback(false), 2000);
   };
 
+  const effectiveNewNodeWorkspaceId =
+    newNodeWorkspaceId ||
+    (effectiveWorkspaceId !== 'ALL' ? effectiveWorkspaceId : workspaces[0]?.id || 'ws-personal');
+
   const handleCreateClusterNode = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newNodeName.trim() || !newNodeHost.trim()) return;
     setCreatingNode(true);
+    const targetWs = workspaces.find((w) => w.id === effectiveNewNodeWorkspaceId);
+    const targetWsId = targetWs?.id || (newNodeWorkspaceId || undefined);
+    const targetWsName =
+      targetWs?.name ||
+      (targetWsId === 'ws-personal' ? 'Personal' : undefined);
+    const isSharedNode = targetWs ? targetWs.kind !== 'personal' : newNodeShared;
     try {
       const tags = newNodeTags
         .split(',')
         .map((t) => t.trim())
         .filter(Boolean);
-      await hubRequest({
+      const snap = await hubRequest({
         action: 'server-upsert',
+        ...(targetWsId ? { workspaceId: targetWsId } : {}),
+        ...(targetWsName ? { workspaceName: targetWsName } : {}),
         server: {
           name: newNodeName.trim(),
           host: newNodeHost.trim(),
@@ -696,9 +972,32 @@ export const LandingView: React.FC<LandingViewProps> = ({
           role: newInfraRole || undefined,
           description: newNodeDesc.trim() || undefined,
           tags,
-          shared: newNodeShared,
+          shared: isSharedNode,
+          ...(targetWsId ? { workspaceId: targetWsId } : {}),
+          ...(targetWsName ? { workspaceName: targetWsName } : {}),
         },
       });
+      if (!snap?.workspaceServers?.some((s) => s.name === newNodeName.trim())) {
+        const optSrvId = `node-${newNodeName.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+        setOptimisticServers((prev) => [
+          ...prev.filter((s) => s.id !== optSrvId),
+          {
+            id: optSrvId,
+            name: newNodeName.trim(),
+            host: newNodeHost.trim(),
+            port: Number(newNodePort) || 22,
+            username: newNodeUser.trim() || 'ubuntu',
+            cluster: newNodeCluster.trim() || undefined,
+            nodeRole: newNodeRole || undefined,
+            role: newInfraRole || undefined,
+            description: newNodeDesc.trim() || undefined,
+            tags,
+            shared: isSharedNode,
+            workspaceId: targetWsId,
+            workspaceName: targetWsName,
+          },
+        ]);
+      }
       if (newNodeCluster.trim()) {
         setSelectedCluster(newNodeCluster.trim());
       }
@@ -723,12 +1022,18 @@ export const LandingView: React.FC<LandingViewProps> = ({
       );
       await hubRequest({
         action: 'activity-record',
+        ...(effectiveWorkspaceId !== 'ALL'
+          ? { workspaceId: effectiveWorkspaceId, workspaceName: activeWorkspaceObj?.name }
+          : {}),
         event: {
           actor: '',
           profileId: matchedServer?.id,
           targetLabel: matchedServer?.name || noteTarget || 'Workspace',
           kind: 'note',
           summary: noteSummary.trim(),
+          ...(effectiveWorkspaceId !== 'ALL'
+            ? { workspaceId: effectiveWorkspaceId, workspaceName: activeWorkspaceObj?.name }
+            : {}),
         },
       });
       setNoteSummary('');
@@ -760,12 +1065,18 @@ export const LandingView: React.FC<LandingViewProps> = ({
     try {
       await hubRequest({
         action: 'memory-save',
+        ...(effectiveWorkspaceId !== 'ALL'
+          ? { workspaceId: effectiveWorkspaceId, workspaceName: activeWorkspaceObj?.name }
+          : {}),
         entry: {
           title: memTitle.trim(),
           text: memText.trim(),
           kind: memKind,
           tier: memTier,
           scope: 'workspace',
+          ...(effectiveWorkspaceId !== 'ALL'
+            ? { workspaceId: effectiveWorkspaceId, workspaceName: activeWorkspaceObj?.name }
+            : {}),
         },
       });
       setMemTitle('');
@@ -1153,12 +1464,20 @@ export const LandingView: React.FC<LandingViewProps> = ({
               </button>
             </div>
 
-            {/* Slim S3 Team Sync Status Bar */}
-            <div className="sshs3-glass-panel lg:col-span-3 rounded-xl px-3.5 py-2 space-y-2">
+            {/* Multi-Workspace Connection Hub & S3 Team Sync Status Bar */}
+            <div
+              data-testid="multi-workspace-bar"
+              className="sshs3-glass-panel lg:col-span-3 rounded-xl px-3.5 py-2.5 space-y-2.5"
+            >
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-[10px] font-mono uppercase tracking-widest text-txt-muted">
-                    TEAM SYNC //
+                  <span className="inline-flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-widest text-txt-muted">
+                    <Layers className="h-3.5 w-3.5 text-sky-400" />
+                    <span>TEAM SYNC //</span>
+                  </span>
+                  <span className="rounded-full border border-sky-500/25 bg-sky-500/10 px-2 py-0.5 text-[10px] font-mono font-semibold uppercase tracking-wider text-sky-300">
+                    {workspaces.filter((w) => w.connected).length || workspaces.length} CONNECTED WORKSPACE
+                    {(workspaces.filter((w) => w.connected).length || workspaces.length) === 1 ? '' : 'S'}
                   </span>
                   {hub?.s3Workspace?.configured ? (
                     <span
@@ -1200,8 +1519,9 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   )}
                 </div>
 
-                <div className="flex items-center gap-1.5">
-                  {hub?.s3Workspace?.configured && hub.s3Workspace.inviteCode && (
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {(activeWorkspaceObj?.inviteCode ||
+                    (hub?.s3Workspace?.configured && hub.s3Workspace.inviteCode)) && (
                     <button
                       type="button"
                       data-testid="copy-s3-invite-btn"
@@ -1226,6 +1546,36 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   )}
                   <button
                     type="button"
+                    data-testid="workspace-sync-all-btn"
+                    disabled={s3Syncing}
+                    onClick={() => void handleSyncWorkspace()}
+                    className="inline-flex items-center gap-1 rounded border border-border-subtle bg-app-surface-subtle hover:bg-app-surface-hover px-2 py-1 text-[10px] font-mono text-txt-secondary disabled:opacity-50 transition-colors"
+                  >
+                    <RefreshCw className={`h-3 w-3 text-emerald-400 ${s3Syncing ? 'animate-spin' : ''}`} />
+                    <span>Sync All</span>
+                  </button>
+                  {!s3SetupOpen && hub?.demoMode && (
+                    <button
+                      type="button"
+                      data-testid="workspace-connect-demo-btn"
+                      onClick={() => void handleConnectDemoWorkspace()}
+                      className="inline-flex items-center gap-1 rounded border border-emerald-500/30 bg-emerald-500/10 hover:bg-emerald-500/20 px-2.5 py-1 text-[10px] font-mono text-emerald-300 transition-colors"
+                    >
+                      <Plus className="h-3 w-3" />
+                      <span>Connect Demo Workspace</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    data-testid="workspace-add-connection-btn"
+                    onClick={openAddWorkspaceConnection}
+                    className="inline-flex items-center gap-1 rounded border border-sky-400/30 bg-sky-500/15 hover:bg-sky-500/25 px-2.5 py-1 text-[10px] font-mono font-medium text-sky-200 transition-colors"
+                  >
+                    <Plus className="h-3 w-3 text-sky-300" />
+                    <span>+ Connect Workspace</span>
+                  </button>
+                  <button
+                    type="button"
                     data-testid="toggle-s3-bucket-setup-btn"
                     onClick={openS3BucketSetup}
                     className="inline-flex items-center gap-1 rounded border border-border-subtle bg-app-surface-subtle hover:bg-app-surface-hover px-2.5 py-1 text-[10px] font-mono text-txt-primary transition-colors"
@@ -1242,13 +1592,123 @@ export const LandingView: React.FC<LandingViewProps> = ({
                 </div>
               </div>
 
+              {/* Simultaneous Connected Workspaces Pill Bar */}
+              <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                <button
+                  type="button"
+                  data-testid="workspace-pill-ALL"
+                  aria-pressed={effectiveWorkspaceId === 'ALL'}
+                  onClick={() => handleSelectWorkspace('ALL')}
+                  className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[10.5px] font-mono transition-all ${
+                    effectiveWorkspaceId === 'ALL'
+                      ? 'border-sky-400/50 bg-accent text-white font-semibold shadow-sm'
+                      : 'border-border-subtle bg-app-surface-subtle text-txt-secondary hover:border-sky-400/35 hover:text-txt-primary'
+                  }`}
+                >
+                  <span>All Workspaces</span>
+                  <span className="rounded bg-black/20 px-1.5 py-0.2 text-[9.5px]">
+                    {allWorkspaceServers.length}
+                  </span>
+                </button>
+
+                {workspaces.map((ws) => {
+                  const isSelected = effectiveWorkspaceId === ws.id;
+                  const isWsSyncing = Boolean(ws.syncing || syncingWorkspaceIds[ws.id]);
+                  const kindLabel =
+                    ws.badge ||
+                    (ws.kind === 's3'
+                      ? 'S3'
+                      : ws.kind === 'team-vault'
+                        ? 'VAULT'
+                        : ws.kind === 'shared-file'
+                          ? 'FILE'
+                          : ws.kind === 'demo'
+                            ? 'DEMO'
+                            : 'LOCAL');
+                  const srvCount =
+                    ws.serverCount ??
+                    allWorkspaceServers.filter((s) => s.workspaceId === ws.id).length;
+
+                  return (
+                    <div
+                      key={ws.id}
+                      className={`inline-flex items-center gap-1 rounded-lg border px-1.5 py-0.5 transition-all ${
+                        isSelected
+                          ? 'border-sky-400/50 bg-sky-500/20 text-txt-primary shadow-sm'
+                          : 'border-border-subtle bg-app-surface-subtle text-txt-secondary hover:border-border-strong'
+                      }`}
+                    >
+                      <button
+                        type="button"
+                        data-testid={`workspace-pill-${ws.id}`}
+                        aria-pressed={isSelected}
+                        onClick={() => handleSelectWorkspace(ws.id)}
+                        className="inline-flex items-center gap-1.5 px-1 py-0.5 text-[10.5px] font-mono text-left"
+                      >
+                        <span
+                          className={`h-1.5 w-1.5 rounded-full shrink-0 ${
+                            isWsSyncing
+                              ? 'bg-amber-400 animate-pulse'
+                              : ws.connected
+                                ? 'bg-emerald-400 sshs3-sonar-emerald'
+                                : 'bg-txt-muted'
+                          }`}
+                        />
+                        <span className="font-medium text-txt-primary truncate max-w-[160px]">
+                          {ws.name}
+                        </span>
+                        <span className="rounded border border-border-subtle bg-app-card px-1 py-0.2 text-[9px] uppercase text-sky-300">
+                          {kindLabel}
+                        </span>
+                        <span className="rounded bg-app-card px-1.5 py-0.2 text-[9.5px] text-txt-muted">
+                          {srvCount}
+                        </span>
+                      </button>
+
+                      <button
+                        type="button"
+                        data-testid={`workspace-sync-${ws.id}`}
+                        title={`Sync ${ws.name}`}
+                        aria-label={`Sync ${ws.name}`}
+                        disabled={isWsSyncing}
+                        onClick={() => void handleSyncWorkspace(ws.id)}
+                        className="rounded p-1 text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary disabled:opacity-40 transition-colors"
+                      >
+                        <RefreshCw className={`h-2.5 w-2.5 ${isWsSyncing ? 'animate-spin text-amber-400' : ''}`} />
+                      </button>
+
+                      {ws.kind !== 'personal' && (
+                        <button
+                          type="button"
+                          data-testid={`workspace-disconnect-${ws.id}`}
+                          title={`Disconnect ${ws.name}`}
+                          aria-label={`Disconnect ${ws.name}`}
+                          onClick={() => void handleDisconnectWorkspace(ws.id)}
+                          className="rounded p-1 text-txt-muted hover:bg-rose-500/15 hover:text-rose-400 transition-colors"
+                        >
+                          <X className="h-2.5 w-2.5" />
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
               {s3SetupOpen && (
                 <form
                   data-testid="s3-bucket-setup-form"
                   onSubmit={handleSaveS3Bucket}
                   className="sshs3-drawer-anim space-y-2.5 rounded-lg border border-border-subtle bg-app-surface-subtle p-3"
                 >
-                  <div className="grid grid-cols-1 sm:grid-cols-5 gap-2">
+                  <div className="grid grid-cols-1 sm:grid-cols-6 gap-2">
+                    <input
+                      type="text"
+                      data-testid="s3-workspace-name-input"
+                      value={s3WorkspaceName}
+                      onChange={(e) => setS3WorkspaceName(e.target.value)}
+                      placeholder="Workspace Name (e.g. Prod Europe, Team Storage)"
+                      className="rounded border border-border-subtle bg-app-input px-2 py-1 text-xs text-txt-primary"
+                    />
                     <input
                       type="text"
                       data-testid="s3-invite-code-input"
@@ -1297,6 +1757,15 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         className="shrink-0 rounded bg-accent px-3 py-1 text-xs font-mono font-semibold text-white hover:bg-accent-hover"
                       >
                         Spara
+                      </button>
+                      <button
+                        type="button"
+                        data-testid="workspace-connect-demo-btn"
+                        disabled={s3Saving}
+                        onClick={() => void handleConnectDemoWorkspace()}
+                        className="shrink-0 rounded border border-emerald-500/30 bg-emerald-500/10 hover:bg-emerald-500/20 px-2.5 py-1 text-xs font-mono text-emerald-300"
+                      >
+                        Demo
                       </button>
                     </div>
                   </div>
@@ -1352,7 +1821,23 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   onSubmit={handleCreateClusterNode}
                   className="sshs3-drawer-anim space-y-2 rounded-lg border border-sky-500/25 bg-app-surface-subtle p-3"
                 >
-                  <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
+                  <div className="grid grid-cols-1 sm:grid-cols-5 gap-2">
+                    <select
+                      data-testid="add-node-workspace-select"
+                      value={effectiveNewNodeWorkspaceId}
+                      onChange={(e) => setNewNodeWorkspaceId(e.target.value)}
+                      className="rounded border border-border-subtle bg-app-input px-2 py-1 text-xs font-mono text-txt-primary"
+                    >
+                      {workspaces.length > 0 ? (
+                        workspaces.map((ws) => (
+                          <option key={ws.id} value={ws.id}>
+                            {ws.name} ({ws.kind.toUpperCase()})
+                          </option>
+                        ))
+                      ) : (
+                        <option value="ws-personal">Personal Workspace</option>
+                      )}
+                    </select>
                     <input
                       type="text"
                       list="workspace-clusters-list"
@@ -1531,6 +2016,8 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     presenceByServer.get(server.host) ||
                     presenceByServer.get(server.name) ||
                     [];
+                  const workspaceBadgeLabel =
+                    server.workspaceName || (server.shared ? 'Shared Workspace' : 'Personal');
 
                   return (
                     <div
@@ -1541,7 +2028,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         isInspected ? 'sshs3-blade-card-expanded' : ''
                       }`}
                     >
-                      <div>
+                      <div data-testid={`blade-card-${server.id}`}>
                         <div className="flex items-start justify-between gap-2">
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center justify-between gap-2">
@@ -1574,6 +2061,12 @@ export const LandingView: React.FC<LandingViewProps> = ({
                             <div className="mt-1 flex items-center gap-1.5 flex-wrap pl-4">
                               <span className="truncate text-[11px] font-mono text-txt-muted">
                                 {connectable.username}@{server.host}:{server.port}
+                              </span>
+                              <span
+                                data-testid={`blade-workspace-badge-${server.id}`}
+                                className="rounded border border-sky-500/25 bg-sky-500/10 px-1.5 py-0.2 text-[9.5px] font-mono text-sky-300"
+                              >
+                                {workspaceBadgeLabel}
                               </span>
                               {server.cluster && (
                                 <span
@@ -1961,7 +2454,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     </form>
 
                     <div className="space-y-2 max-h-[430px] overflow-y-auto pr-1">
-                      {(hub?.memories ?? []).map((mem) => (
+                      {scopedMemories.map((mem) => (
                         <div
                           key={mem.id}
                           className="rounded-xl border border-border-subtle bg-app-card p-2.5 text-xs space-y-1 hover:border-teal-400/30 transition-colors"

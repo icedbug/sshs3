@@ -186,6 +186,24 @@ export function AiHubPanel({
 }): JSX.Element {
   const hub = useHub();
   const selectedTerminal = useSelectedTerminal();
+  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string>(
+    hub?.activeWorkspaceId ?? "ALL",
+  );
+  useEffect(() => {
+    if (hub?.activeWorkspaceId) {
+      setSelectedWorkspaceId(hub.activeWorkspaceId);
+    }
+  }, [hub?.activeWorkspaceId]);
+  useEffect(() => {
+    const onWsSelect = (e: Event) => {
+      const detail = (e as CustomEvent<{ workspaceId?: string }>).detail;
+      if (detail?.workspaceId) {
+        setSelectedWorkspaceId(detail.workspaceId);
+      }
+    };
+    window.addEventListener("sshs3:workspace-select", onWsSelect);
+    return () => window.removeEventListener("sshs3:workspace-select", onWsSelect);
+  }, []);
   const [view, setView] = useState<View>("Work");
   const [taskId, setTaskId] = useState("");
   const [prompt, setPrompt] = useState("");
@@ -985,6 +1003,100 @@ export function AiHubPanel({
           );
         })}
       </nav>
+      {hub?.workspaces && hub.workspaces.length > 0 && (
+        <div
+          data-testid="ai-hub-workspaces-bar"
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            alignItems: "center",
+            gap: 6,
+            padding: "6px 12px",
+            borderBottom: "1px solid var(--border-subtle, #2a3140)",
+            fontSize: 11,
+            fontFamily: "var(--font-mono, monospace)",
+          }}
+        >
+          <button
+            type="button"
+            data-testid="ai-hub-workspace-pill-ALL"
+            aria-pressed={selectedWorkspaceId === "ALL"}
+            onClick={() => {
+              setSelectedWorkspaceId("ALL");
+              window.dispatchEvent(
+                new CustomEvent("sshs3:workspace-select", {
+                  detail: { workspaceId: "ALL" },
+                }),
+              );
+              void act({ action: "workspace-select", workspaceId: "ALL" });
+            }}
+            style={{
+              padding: "2px 8px",
+              borderRadius: 6,
+              fontSize: 10,
+              background:
+                selectedWorkspaceId === "ALL"
+                  ? "rgba(56, 189, 248, 0.2)"
+                  : "rgba(30, 41, 59, 0.55)",
+              border:
+                selectedWorkspaceId === "ALL"
+                  ? "1px solid rgba(56, 189, 248, 0.45)"
+                  : "1px solid rgba(148, 163, 184, 0.2)",
+              color: "#e2e8f0",
+              cursor: "pointer",
+            }}
+          >
+            All Workspaces ({(hub.workspaceServers ?? []).length})
+          </button>
+          {hub.workspaces.map((ws) => {
+            const isSelected = selectedWorkspaceId === ws.id;
+            return (
+              <button
+                key={ws.id}
+                type="button"
+                data-testid={`ai-hub-workspace-pill-${ws.id}`}
+                aria-pressed={isSelected}
+                onClick={() => {
+                  setSelectedWorkspaceId(ws.id);
+                  window.dispatchEvent(
+                    new CustomEvent("sshs3:workspace-select", {
+                      detail: { workspaceId: ws.id },
+                    }),
+                  );
+                  void act({ action: "workspace-select", workspaceId: ws.id });
+                }}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 5,
+                  padding: "2px 8px",
+                  borderRadius: 6,
+                  fontSize: 10,
+                  background: isSelected
+                    ? "rgba(56, 189, 248, 0.2)"
+                    : "rgba(30, 41, 59, 0.55)",
+                  border: isSelected
+                    ? "1px solid rgba(56, 189, 248, 0.45)"
+                    : "1px solid rgba(148, 163, 184, 0.2)",
+                  color: "#e2e8f0",
+                  cursor: "pointer",
+                }}
+              >
+                <span
+                  style={{
+                    width: 6,
+                    height: 6,
+                    borderRadius: "50%",
+                    background: ws.connected ? "#10b981" : "#64748b",
+                  }}
+                />
+                <span>{ws.name}</span>
+                <small style={{ opacity: 0.75 }}>{ws.serverCount}</small>
+              </button>
+            );
+          })}
+        </div>
+      )}
       {error && (
         <div className="ai-error" role="alert">
           {error}

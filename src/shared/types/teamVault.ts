@@ -24,6 +24,8 @@ export interface WorkspaceActivityEvent {
   commandOrPath?: string;
   detail?: string;
   details?: string;
+  workspaceId?: string;
+  workspaceName?: string;
   at: number;
 }
 
@@ -46,6 +48,8 @@ export interface WorkspaceMemoryEntry {
   autoLearned?: boolean;
   sourceCommand?: string;
   errorSignature?: string;
+  workspaceId?: string;
+  workspaceName?: string;
   updatedAt: number;
 }
 

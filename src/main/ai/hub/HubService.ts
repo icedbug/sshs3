@@ -6,6 +6,7 @@ import type {
   AgentChange,
   AgentSchedule,
   AgentTask,
+  ConnectedWorkspaceSummary,
   HubRequest,
   HubSnapshot,
   InfraGraphEdge,
@@ -31,7 +32,11 @@ import { DEFAULT_AI_MODELS } from "../../../shared/types/ai";
 import { AiConfigStore } from "../AiConfigStore";
 import { CodexAuthProvider } from "../CodexAuthProvider";
 import { HubStore } from "./HubStore";
-import { S3WorkspaceSyncService } from "./S3WorkspaceSyncService";
+import {
+  deriveS3WorkspaceId,
+  deriveS3WorkspaceName,
+  S3WorkspaceSyncService,
+} from "./S3WorkspaceSyncService";
 import { createTwoFilesPatch } from "diff";
 import { McpClientManager } from "./McpClientManager";
 import { KnowledgeBaseService } from "./KnowledgeBaseService";
@@ -56,14 +61,17 @@ import {
   getDemoServers,
   getDemoTasks,
   getDemoWorkforceRuns,
+  getDemoWorkspaces,
   isDemoMode,
   MCP_MARKETPLACE_CATALOG,
+  removeDemoWorkspace,
   saveDemoAgent,
   saveDemoInfraEdge,
   saveDemoKbDocument,
   saveDemoMcpServer,
   saveDemoMemory,
   saveDemoWorkforceRun,
+  upsertDemoServer,
 } from "./demoWorkspace";
 import { isDemoTarget } from "../../demo/demoMode";
 import {
@@ -103,6 +111,7 @@ export interface HubHost {
   relaunchForDemoMode?(demoMode: boolean): Promise<boolean>;
   file?: ToolDependencies["file"];
   workspaceServers?(): Promise<WorkspaceServerSummary[]>;
+  teamVaultWorkspaces?(): Promise<ConnectedWorkspaceSummary[]>;
   getTeamWorkspaceData?(): Promise<{
     memories: MemoryEntry[];
     activityLog: WorkspaceActivityEvent[];
@@ -119,6 +128,8 @@ export interface HubHost {
     description?: string;
     role?: string;
     tags?: string[];
+    workspaceId?: string;
+    workspaceName?: string;
   }): Promise<void>;
   upsertServer?(input: {
     id?: string;
@@ -152,6 +163,8 @@ export interface HubHost {
     description?: string;
     tags?: string[];
     shared?: boolean;
+    workspaceId?: string;
+    workspaceName?: string;
   }): Promise<WorkspaceServerSummary>;
   deleteServer?(profileId: string): Promise<void>;
   syncSharedServersFromS3?(
@@ -273,6 +286,7 @@ export class HubService {
   private inlineSuggestion?: InlineCommandSuggestion;
   private pendingLayoutEvent?: WorkspaceLayoutEvent;
   private cachedWorkspaceServers: WorkspaceServerSummary[] = [];
+  private removedWorkspaceIds = new Set<string>();
   private ticking = false;
   private disposed = false;
   private resume = (): void => {
@@ -415,21 +429,42 @@ export class HubService {
     this.s3Workspace = new S3WorkspaceSyncService(
       host.s3ConfigFilePath ?? path.join(directory, "s3-workspace.json"),
       {
-        getLocalState: async () => {
+        getLocalState: async (workspaceId) => {
           const actor = await this.resolveActorName();
           const hostServers =
             (await this.host.workspaceServers?.().catch(() => [])) ?? [];
           const deletedServerIds = {
             ...(this.store.data.deletedServerIds ?? {}),
           };
+          const multiS3 = this.s3Workspace.getWorkspacesStatus().length > 1;
+          const activeSlotId = this.s3Workspace.getActiveWorkspaceId();
+          const matchesSlot = (itemWsId?: string): boolean => {
+            if (!workspaceId) return true;
+            if (itemWsId === workspaceId) return true;
+            if (!itemWsId) {
+              return !multiS3 || activeSlotId === workspaceId;
+            }
+            return false;
+          };
+
           const srvMap = new Map<string, WorkspaceServerSummary>();
-          for (const s of this.store.data.s3SyncedServers ?? []) {
+          const slotCached = workspaceId
+            ? (this.store.data.s3SyncedServersByWorkspace?.[workspaceId] ?? [])
+            : [];
+          for (const s of slotCached) {
             if (s?.id && s.shared !== false) {
               srvMap.set(s.id, { ...s, shared: true });
             }
           }
+          for (const s of this.store.data.s3SyncedServers ?? []) {
+            if (s?.id && s.shared !== false && matchesSlot(s.workspaceId)) {
+              if (!srvMap.has(s.id)) {
+                srvMap.set(s.id, { ...s, shared: true });
+              }
+            }
+          }
           for (const s of hostServers) {
-            if (s?.id && s.shared !== false) {
+            if (s?.id && s.shared !== false && matchesSlot(s.workspaceId)) {
               const delVal = deletedServerIds[s.id];
               const delMs =
                 typeof delVal === "number"
@@ -458,33 +493,73 @@ export class HubService {
             actor,
             servers: Array.from(srvMap.values()),
             memories: this.store.data.memories.filter(
-              (m) => m.scope !== "personal",
+              (m) => m.scope !== "personal" && matchesSlot(m.workspaceId),
             ),
-            activityLog: this.store.data.activityLog ?? [],
+            activityLog: (this.store.data.activityLog ?? []).filter((a) =>
+              matchesSlot(a.workspaceId),
+            ),
             deletedServerIds,
             deletedMemoryIds: { ...(this.store.data.deletedMemoryIds ?? {}) },
             activeTerminals,
           };
         },
-        applyMergedState: async (state) => {
+        applyMergedState: async (state, workspaceId, slotConfig) => {
           this.store.data.deletedServerIds = state.deletedServerIds;
           this.store.data.deletedMemoryIds = state.deletedMemoryIds;
-          this.store.data.s3SyncedServers = state.activeServers;
+          const wsName = slotConfig
+            ? deriveS3WorkspaceName(
+                slotConfig.bucket,
+                slotConfig.prefix,
+                slotConfig.name,
+              )
+            : undefined;
+          const taggedServers = state.activeServers.map((s) => ({
+            ...s,
+            ...(workspaceId ? { workspaceId } : {}),
+            ...(wsName ? { workspaceName: wsName } : {}),
+          }));
+          if (workspaceId) {
+            this.store.data.s3SyncedServersByWorkspace ??= {};
+            this.store.data.s3SyncedServersByWorkspace[workspaceId] =
+              taggedServers;
+            this.rebuildCombinedS3ServersCache();
+          } else {
+            this.store.data.s3SyncedServers = taggedServers;
+          }
 
-          const personalMemories = this.store.data.memories.filter(
-            (m) => m.scope === "personal",
+          const preservedMemories = this.store.data.memories.filter(
+            (m) =>
+              m.scope === "personal" ||
+              Boolean(
+                workspaceId && m.workspaceId && m.workspaceId !== workspaceId,
+              ),
           );
           const sharedMemMap = new Map<string, MemoryEntry>();
           for (const m of this.store.data.memories) {
-            if (m.scope !== "personal") {
+            if (
+              m.scope !== "personal" &&
+              (!workspaceId || !m.workspaceId || m.workspaceId === workspaceId)
+            ) {
               if ((state.deletedMemoryIds[m.id] ?? 0) < (m.updatedAt ?? 0)) {
                 sharedMemMap.set(m.id, m);
               }
             }
           }
-          for (const m of state.memories) {
-            if ((state.deletedMemoryIds[m.id] ?? 0) >= (m.updatedAt ?? 0))
+          for (const rawMem of state.memories) {
+            if (
+              (state.deletedMemoryIds[rawMem.id] ?? 0) >=
+              (rawMem.updatedAt ?? 0)
+            )
               continue;
+            const m: MemoryEntry = {
+              ...rawMem,
+              ...(workspaceId
+                ? { workspaceId: rawMem.workspaceId || workspaceId }
+                : {}),
+              ...(wsName
+                ? { workspaceName: rawMem.workspaceName || wsName }
+                : {}),
+            };
             const prev = sharedMemMap.get(m.id);
             if (!prev) {
               sharedMemMap.set(m.id, m);
@@ -495,21 +570,29 @@ export class HubService {
             }
           }
           this.store.data.memories = [
-            ...personalMemories,
+            ...preservedMemories,
             ...Array.from(sharedMemMap.values()),
           ];
 
           const actMap = new Map<string, WorkspaceActivityEvent>();
           for (const a of this.store.data.activityLog ?? [])
             actMap.set(a.id, a);
-          for (const a of state.activityLog) actMap.set(a.id, a);
+          for (const a of state.activityLog) {
+            actMap.set(a.id, {
+              ...a,
+              ...(workspaceId
+                ? { workspaceId: a.workspaceId || workspaceId }
+                : {}),
+              ...(wsName ? { workspaceName: a.workspaceName || wsName } : {}),
+            });
+          }
           this.store.data.activityLog = Array.from(actMap.values())
             .sort((a, b) => a.at - b.at)
             .slice(-500);
 
           await this.host
             .syncSharedServersFromS3?.(
-              state.activeServers,
+              taggedServers,
               state.deletedServerIds,
             )
             .catch((e) =>
@@ -920,6 +1003,19 @@ export class HubService {
     const allMemories = extra.memories ?? this.store.data.memories;
     const allInfraEdges = this.getInfraEdgesList();
     const allMcpServers = this.getMcpServersList();
+    const allWorkspaceServers = extra.workspaceServers ?? [];
+    const s3Workspaces = this.s3Workspace.getWorkspacesStatus();
+    const workspaces = await this.buildConnectedWorkspaces(
+      allWorkspaceServers,
+      allMemories,
+      s3Workspaces,
+    );
+    const activeWorkspaceId = this.store.data.activeWorkspaceId || "ALL";
+    const primaryS3Status =
+      activeWorkspaceId !== "ALL" &&
+      s3Workspaces.some((w) => w.id === activeWorkspaceId)
+        ? this.s3Workspace.getStatus(activeWorkspaceId)
+        : this.s3Workspace.getStatus();
 
     return {
       preview: preview
@@ -953,9 +1049,12 @@ export class HubService {
         : this.store.data.schedules,
       inventory: this.store.data.inventory,
       activityLog: extra.activityLog ?? this.store.data.activityLog ?? [],
-      workspaceServers: extra.workspaceServers ?? [],
+      workspaceServers: allWorkspaceServers,
       inlineSuggestion: this.inlineSuggestion,
-      s3Workspace: this.s3Workspace.getStatus(),
+      s3Workspace: primaryS3Status,
+      s3Workspaces,
+      workspaces,
+      activeWorkspaceId,
       presence: this.mergePresence(
         this.s3Workspace.getPresence(),
         this.host.peerPresenceProvider?.() ?? [],
@@ -987,6 +1086,120 @@ export class HubService {
         estimatedUsedTokens,
       },
     };
+  }
+
+  private async buildConnectedWorkspaces(
+    allWorkspaceServers: WorkspaceServerSummary[],
+    allMemories: MemoryEntry[],
+    s3Workspaces: import("../../../shared/types/aiHub").S3WorkspaceSyncStatus[],
+  ): Promise<ConnectedWorkspaceSummary[]> {
+    const result = new Map<string, ConnectedWorkspaceSummary>();
+
+    // 1. S3 workspaces
+    for (const s3 of s3Workspaces) {
+      const id = s3.id || deriveS3WorkspaceId(s3.bucket, s3.prefix);
+      const name = s3.name || deriveS3WorkspaceName(s3.bucket, s3.prefix);
+      const srvCount = allWorkspaceServers.filter(
+        (srv) => srv.workspaceId === id,
+      ).length;
+      const memCount = allMemories.filter(
+        (m) => m.workspaceId === id && !m.id.startsWith("auto-node:"),
+      ).length;
+      result.set(id, {
+        id,
+        name,
+        kind: "s3",
+        connected: s3.connected,
+        syncing: s3.syncing,
+        badge: s3.region ? `S3 · ${s3.region}` : "S3 Bucket",
+        endpointOrPath: s3.endpoint || `s3://${s3.bucket}/${s3.prefix}`,
+        bucket: s3.bucket,
+        prefix: s3.prefix,
+        region: s3.region,
+        accessKeyId: s3.accessKeyId,
+        lastSyncAt: s3.lastSyncAt,
+        error: s3.error,
+        inviteCode: s3.inviteCode,
+        serverCount: srvCount || (s3.serverCount ?? 0),
+        memoryCount: memCount || (s3.memoryCount ?? 0),
+        presenceCount: s3.presenceCount ?? 0,
+      });
+    }
+
+    // 2. Unlocked Team Vault workspaces
+    const vaultWorkspaces =
+      (await this.host.teamVaultWorkspaces?.().catch(() => [])) ?? [];
+    for (const vw of vaultWorkspaces) {
+      if (!result.has(vw.id)) {
+        result.set(vw.id, vw);
+      }
+    }
+
+    // 3. Shared File Workspace
+    const sharedFile = (
+      this.store.data.preferences.sharedWorkspacePath ||
+      process.env.SSHS3_SHARED_WORKSPACE_FILE ||
+      ""
+    ).trim();
+    if (sharedFile && (!isDemoMode() || insideDataDirectory(sharedFile))) {
+      const id = "ws-file-shared";
+      result.set(id, {
+        id,
+        name: path.basename(sharedFile) || "Shared File Workspace",
+        kind: "shared-file",
+        connected: true,
+        badge: "Shared File · Git/NAS",
+        endpointOrPath: sharedFile,
+        serverCount: allWorkspaceServers.filter((s) => s.workspaceId === id)
+          .length,
+        memoryCount: allMemories.filter(
+          (m) => m.workspaceId === id && !m.id.startsWith("auto-node:"),
+        ).length,
+        presenceCount: 1,
+      });
+    }
+
+    // 4. Built-in Demo Mode workspaces + user-connected simulated workspaces
+    const demoCandidates: ConnectedWorkspaceSummary[] = [
+      ...(isDemoMode() ? getDemoWorkspaces() : []),
+      ...(this.store.data.demoWorkspaces ?? []),
+    ];
+    for (const dw of demoCandidates) {
+      if (this.removedWorkspaceIds.has(dw.id)) continue;
+      const srvCount = allWorkspaceServers.filter(
+        (s) => s.workspaceId === dw.id,
+      ).length;
+      const memCount = allMemories.filter(
+        (m) => m.workspaceId === dw.id && !m.id.startsWith("auto-node:"),
+      ).length;
+      result.set(dw.id, {
+        ...dw,
+        serverCount: srvCount || dw.serverCount,
+        memoryCount: memCount || dw.memoryCount,
+      });
+    }
+
+    // 5. Personal (Local) workspace when personal items exist
+    const personalSrvCount = allWorkspaceServers.filter(
+      (s) => s.shared === false || s.workspaceId === "ws-personal",
+    ).length;
+    const personalMemCount = allMemories.filter(
+      (m) => m.scope === "personal" || m.workspaceId === "ws-personal",
+    ).length;
+    if (personalSrvCount > 0 || personalMemCount > 0) {
+      result.set("ws-personal", {
+        id: "ws-personal",
+        name: "Personal (Local)",
+        kind: "personal",
+        connected: true,
+        badge: "Local Only",
+        serverCount: personalSrvCount,
+        memoryCount: personalMemCount,
+        presenceCount: 1,
+      });
+    }
+
+    return Array.from(result.values());
   }
 
   private mergePresence(
@@ -1196,6 +1409,16 @@ export class HubService {
           !scope.startsWith("cluster:")
         )
           throw new Error("Invalid memory scope");
+        const resolvedWs =
+          scope === "personal"
+            ? {
+                workspaceId: "ws-personal",
+                workspaceName: "Personal (Local)",
+              }
+            : this.resolveTargetWorkspace(
+                request.workspaceId ?? entry.workspaceId,
+                request.workspaceName ?? entry.workspaceName,
+              );
         await this.saveMemoryInternal({
           id: entry.id,
           kind: entry.kind,
@@ -1207,6 +1430,8 @@ export class HubService {
           author: entry.author,
           sourceCommand: entry.sourceCommand,
           confidence: entry.confidence,
+          workspaceId: resolvedWs.workspaceId,
+          workspaceName: resolvedWs.workspaceName,
         });
         break;
       }
@@ -1339,6 +1564,17 @@ export class HubService {
       case "activity-record": {
         const actor =
           request.event.actor?.trim() || (await this.resolveActorName());
+        const matchedSrv = request.event.profileId
+          ? this.getKnownServers().find((s) => s.id === request.event.profileId)
+          : undefined;
+        const resolvedWs = this.resolveTargetWorkspace(
+          request.workspaceId ??
+            request.event.workspaceId ??
+            matchedSrv?.workspaceId,
+          request.workspaceName ??
+            request.event.workspaceName ??
+            matchedSrv?.workspaceName,
+        );
         const event: WorkspaceActivityEvent = {
           id: crypto.randomUUID(),
           at: Date.now(),
@@ -1353,6 +1589,12 @@ export class HubService {
           detail: request.event.detail
             ? boundedContext(request.event.detail, 2000)
             : undefined,
+          ...(resolvedWs.workspaceId
+            ? { workspaceId: resolvedWs.workspaceId }
+            : {}),
+          ...(resolvedWs.workspaceName
+            ? { workspaceName: resolvedWs.workspaceName }
+            : {}),
         };
         this.appendActivityEvent(event);
         await this.host.recordWorkspaceActivity?.(event).catch(() => {});
@@ -1373,6 +1615,10 @@ export class HubService {
             authType: request.localAuthType,
           });
         }
+        const resolvedWs = this.resolveTargetWorkspace(
+          request.workspaceId,
+          request.workspaceName,
+        );
         await this.host.describeServer?.({
           profileId: pid,
           shared: request.shared,
@@ -1381,6 +1627,8 @@ export class HubService {
           description: request.description,
           role: request.role,
           tags: request.tags,
+          workspaceId: resolvedWs.workspaceId,
+          workspaceName: resolvedWs.workspaceName,
         });
         const actor = await this.resolveActorName();
         const nowIso = new Date().toISOString();
@@ -1390,6 +1638,10 @@ export class HubService {
           allServers.find((s) => s.id === pid) ||
           (this.store.data.s3SyncedServers ?? []).find((s) => s.id === pid);
         if (matchedServer) {
+          const effectiveWs = this.resolveTargetWorkspace(
+            request.workspaceId ?? matchedServer.workspaceId,
+            request.workspaceName ?? matchedServer.workspaceName,
+          );
           const updatedSrv: WorkspaceServerSummary = {
             ...matchedServer,
             shared: request.shared ?? matchedServer.shared,
@@ -1410,15 +1662,22 @@ export class HubService {
                 ? request.role.trim() || undefined
                 : matchedServer.role,
             tags: request.tags ?? matchedServer.tags,
+            ...(effectiveWs.workspaceId
+              ? { workspaceId: effectiveWs.workspaceId }
+              : {}),
+            ...(effectiveWs.workspaceName
+              ? { workspaceName: effectiveWs.workspaceName }
+              : {}),
             updatedAt: nowIso,
             updatedBy: actor,
           };
           if (updatedSrv.shared !== false) {
-            this.upsertLocalS3ServerCache(updatedSrv);
+            this.upsertLocalS3ServerCache(
+              updatedSrv,
+              updatedSrv.workspaceId,
+            );
           } else {
-            this.store.data.s3SyncedServers = (
-              this.store.data.s3SyncedServers ?? []
-            ).filter((s) => s.id !== pid);
+            this.removeServerFromLocalS3Cache(pid);
           }
         }
         const humanLabel = matchedServer?.name || pid;
@@ -1436,6 +1695,12 @@ export class HubService {
           detail: request.description
             ? boundedContext(request.description, 400)
             : undefined,
+          ...(resolvedWs.workspaceId
+            ? { workspaceId: resolvedWs.workspaceId }
+            : {}),
+          ...(resolvedWs.workspaceName
+            ? { workspaceName: resolvedWs.workspaceName }
+            : {}),
         };
         this.appendActivityEvent(event);
         await this.host.recordWorkspaceActivity?.(event).catch(() => {});
@@ -1449,6 +1714,16 @@ export class HubService {
         const host = requiredText(s.host);
         const actor = await this.resolveActorName();
         const nowIso = new Date().toISOString();
+        const isShared = s.shared ?? true;
+        const resolvedWs = !isShared
+          ? {
+              workspaceId: "ws-personal",
+              workspaceName: "Personal (Local)",
+            }
+          : this.resolveTargetWorkspace(
+              request.workspaceId ?? s.workspaceId,
+              request.workspaceName ?? s.workspaceName,
+            );
         const saved = await this.host.upsertServer?.({
           id: s.id,
           name,
@@ -1480,7 +1755,9 @@ export class HubService {
           role: s.role,
           description: s.description,
           tags: s.tags,
-          shared: s.shared ?? true,
+          shared: isShared,
+          workspaceId: resolvedWs.workspaceId,
+          workspaceName: resolvedWs.workspaceName,
         });
         const targetId = saved?.id ?? s.id ?? crypto.randomUUID();
         if (this.store.data.deletedServerIds?.[targetId]) {
@@ -1500,6 +1777,10 @@ export class HubService {
             authType: s.localAuthType,
           });
         }
+        const effectiveWorkspaceId =
+          resolvedWs.workspaceId ?? saved?.workspaceId;
+        const effectiveWorkspaceName =
+          resolvedWs.workspaceName ?? saved?.workspaceName;
         const summary: WorkspaceServerSummary = {
           id: targetId,
           name: name.trim(),
@@ -1532,16 +1813,23 @@ export class HubService {
           role: s.role?.trim() || undefined,
           description: s.description?.trim() || undefined,
           tags: s.tags?.map((t) => t.trim()).filter(Boolean),
-          shared: s.shared ?? true,
+          shared: isShared,
+          ...(effectiveWorkspaceId
+            ? { workspaceId: effectiveWorkspaceId }
+            : {}),
+          ...(effectiveWorkspaceName
+            ? { workspaceName: effectiveWorkspaceName }
+            : {}),
+          ...(saved?.teamVaultProfileRef
+            ? { teamVaultProfileRef: saved.teamVaultProfileRef }
+            : {}),
           updatedAt: nowIso,
           updatedBy: actor,
         };
         if (summary.shared) {
-          this.upsertLocalS3ServerCache(summary);
+          this.upsertLocalS3ServerCache(summary, effectiveWorkspaceId);
         } else {
-          this.store.data.s3SyncedServers = (
-            this.store.data.s3SyncedServers ?? []
-          ).filter((srv) => srv.id !== targetId);
+          this.removeServerFromLocalS3Cache(targetId);
         }
         const clusterBadge = s.cluster?.trim()
           ? ` in cluster ${s.cluster.trim()}`
@@ -1557,6 +1845,12 @@ export class HubService {
           detail: s.description
             ? boundedContext(s.description, 400)
             : undefined,
+          ...(effectiveWorkspaceId
+            ? { workspaceId: effectiveWorkspaceId }
+            : {}),
+          ...(effectiveWorkspaceName
+            ? { workspaceName: effectiveWorkspaceName }
+            : {}),
         };
         this.appendActivityEvent(event);
         await this.host.recordWorkspaceActivity?.(event).catch(() => {});
@@ -1583,9 +1877,7 @@ export class HubService {
         const delIso = new Date().toISOString();
         this.store.data.deletedServerIds ??= {};
         this.store.data.deletedServerIds[pid] = delIso;
-        this.store.data.s3SyncedServers = (
-          this.store.data.s3SyncedServers ?? []
-        ).filter((s) => s.id !== pid);
+        this.removeServerFromLocalS3Cache(pid);
         await this.host.deleteServer?.(pid).catch(() => {});
         const event: WorkspaceActivityEvent = {
           id: crypto.randomUUID(),
@@ -1595,6 +1887,12 @@ export class HubService {
           targetLabel: existing?.name || pid,
           kind: "profile-update",
           summary: `Removed node ${existing?.name || pid} from workspace`,
+          ...(existing?.workspaceId
+            ? { workspaceId: existing.workspaceId }
+            : {}),
+          ...(existing?.workspaceName
+            ? { workspaceName: existing.workspaceName }
+            : {}),
         };
         this.appendActivityEvent(event);
         await this.host.recordWorkspaceActivity?.(event).catch(() => {});
@@ -1605,15 +1903,184 @@ export class HubService {
         if (request.config?.actorName !== undefined) {
           await this.config.update({ actorName: request.config.actorName.trim() });
         }
-        await this.s3Workspace.configure(request.config, request.inviteCode);
+        const status = await this.s3Workspace.configure(
+          request.config,
+          request.inviteCode,
+          {
+            workspaceId: request.workspaceId,
+            mode: request.mode,
+          },
+        );
+        if (status.id && status.configured) {
+          this.removedWorkspaceIds.delete(status.id);
+          this.store.data.activeWorkspaceId = status.id;
+        }
         break;
       }
       case "workspace-s3-sync-now": {
-        await this.s3Workspace.syncNow({ forcePush: true });
+        await this.s3Workspace.syncNow({
+          forcePush: true,
+          workspaceId: request.workspaceId,
+        });
         break;
       }
       case "workspace-s3-disconnect": {
-        await this.s3Workspace.disconnect();
+        const targetId = request.workspaceId;
+        await this.s3Workspace.disconnect(targetId, {
+          remove: request.remove,
+        });
+        if (targetId && request.remove) {
+          this.removedWorkspaceIds.add(targetId);
+          this.store.data.s3SyncedServers = (
+            this.store.data.s3SyncedServers ?? []
+          ).filter((s) => s.workspaceId !== targetId);
+          if (this.store.data.s3SyncedServersByWorkspace?.[targetId]) {
+            delete this.store.data.s3SyncedServersByWorkspace[targetId];
+          }
+          this.rebuildCombinedS3ServersCache();
+          this.store.data.demoWorkspaces = (
+            this.store.data.demoWorkspaces ?? []
+          ).filter((w) => w.id !== targetId);
+          this.store.data.memories = (this.store.data.memories ?? []).filter(
+            (m) => m.workspaceId !== targetId,
+          );
+          if (isDemoMode()) {
+            removeDemoWorkspace(targetId);
+          }
+        }
+        if (
+          targetId &&
+          this.store.data.activeWorkspaceId === targetId
+        ) {
+          this.store.data.activeWorkspaceId =
+            this.s3Workspace.getActiveWorkspaceId() || "ALL";
+        }
+        break;
+      }
+      case "workspace-select": {
+        const wsId = (request.workspaceId || "ALL").trim() || "ALL";
+        this.store.data.activeWorkspaceId = wsId;
+        if (wsId !== "ALL") {
+          this.s3Workspace.setActiveWorkspaceId(wsId);
+        }
+        break;
+      }
+      case "workspace-connect-demo": {
+        const name = requiredText(request.name).trim();
+        const slug =
+          name
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, "-")
+            .replace(/^-+|-+$/g, "") || "demo";
+        const wsId = request.id?.trim() || `ws-demo-${slug}`;
+        this.removedWorkspaceIds.delete(wsId);
+        const clusterName =
+          request.cluster?.trim() || `${name.replace(/\s+/g, "-")}-Cluster`;
+        const nowMs = Date.now();
+        const nowIso = new Date(nowMs).toISOString();
+
+        const demoNodes: WorkspaceServerSummary[] = [
+          {
+            id: `demo-node-${slug}-01`,
+            name: `${slug}-node-01`,
+            host: "10.88.10.11",
+            port: 22,
+            username: "ubuntu",
+            folder: name,
+            group: name,
+            cluster: clusterName,
+            nodeRole: "primary-controller",
+            role: "compute",
+            description: `Primary controller node in simulated workspace ${name} (${clusterName}).`,
+            tags: ["demo-workspace", slug, "ha-primary"],
+            shared: true,
+            workspaceId: wsId,
+            workspaceName: name,
+            updatedAt: nowIso,
+            updatedBy: "demo-provisioner",
+          },
+          {
+            id: `demo-node-${slug}-02`,
+            name: `${slug}-node-02`,
+            host: "10.88.10.12",
+            port: 22,
+            username: "ubuntu",
+            folder: name,
+            group: name,
+            cluster: clusterName,
+            nodeRole: "worker-replica",
+            role: "storage",
+            description: `Secondary replica & storage worker in simulated workspace ${name} (${clusterName}).`,
+            tags: ["demo-workspace", slug, "replica"],
+            shared: true,
+            workspaceId: wsId,
+            workspaceName: name,
+            updatedAt: nowIso,
+            updatedBy: "demo-provisioner",
+          },
+        ];
+
+        for (const srv of demoNodes) {
+          this.upsertLocalS3ServerCache(srv, wsId);
+          if (isDemoMode()) {
+            upsertDemoServer({ ...srv, id: srv.id });
+          }
+        }
+
+        const demoMem: MemoryEntry = {
+          id: `demo-mem-${slug}-topology`,
+          kind: "memory",
+          tier: "core",
+          cluster: clusterName,
+          scope: "workspace",
+          title: `${name} (${clusterName}) — Topology & Runbook`,
+          text: `Workspace ${name} contains ${demoNodes.map((n) => `${n.name} (${n.host})`).join(" and ")} in cluster ${clusterName}.`,
+          author: "demo-provisioner",
+          workspaceId: wsId,
+          workspaceName: name,
+          updatedAt: nowMs,
+        };
+        this.store.data.memories = [
+          demoMem,
+          ...this.store.data.memories.filter((m) => m.id !== demoMem.id),
+        ];
+        if (isDemoMode()) {
+          saveDemoMemory(demoMem);
+        }
+
+        const demoAct: WorkspaceActivityEvent = {
+          id: `demo-act-${slug}-init`,
+          at: nowMs,
+          actor: "demo-provisioner",
+          profileId: demoNodes[0].id,
+          targetLabel: demoNodes[0].name,
+          kind: "deploy",
+          summary: `Connected simulated workspace "${name}" with cluster ${clusterName} (${demoNodes.length} nodes)`,
+          workspaceId: wsId,
+          workspaceName: name,
+        };
+        this.appendActivityEvent(demoAct);
+
+        const summary: ConnectedWorkspaceSummary = {
+          id: wsId,
+          name,
+          kind: "demo",
+          connected: true,
+          badge: `Demo · ${clusterName}`,
+          endpointOrPath: `demo://${slug}/${clusterName}`,
+          bucket: `${slug}-bucket`,
+          prefix: clusterName.toLowerCase(),
+          region: "eu-north-1",
+          lastSyncAt: nowMs,
+          serverCount: demoNodes.length,
+          memoryCount: 1,
+          presenceCount: 1,
+        };
+        this.store.data.demoWorkspaces = [
+          ...(this.store.data.demoWorkspaces ?? []).filter((w) => w.id !== wsId),
+          summary,
+        ];
+        this.store.data.activeWorkspaceId = wsId;
         break;
       }
       case "inline-suggest": {
@@ -2562,10 +3029,134 @@ export class HubService {
     }
   }
 
-  private upsertLocalS3ServerCache(server: WorkspaceServerSummary): void {
+  private resolveTargetWorkspace(
+    explicitId?: string,
+    explicitName?: string,
+  ): { workspaceId?: string; workspaceName?: string } {
+    const cleanExplicitId = explicitId?.trim();
+    const cleanExplicitName = explicitName?.trim();
+    const candidateId =
+      cleanExplicitId && cleanExplicitId !== "ALL"
+        ? cleanExplicitId
+        : this.store.data.activeWorkspaceId &&
+            this.store.data.activeWorkspaceId !== "ALL"
+          ? this.store.data.activeWorkspaceId
+          : this.s3Workspace.getActiveWorkspaceId();
+
+    if (!candidateId || candidateId === "ALL") {
+      return {
+        workspaceId: undefined,
+        workspaceName: cleanExplicitName,
+      };
+    }
+
+    if (cleanExplicitName) {
+      return { workspaceId: candidateId, workspaceName: cleanExplicitName };
+    }
+
+    const s3Slot = this.s3Workspace
+      .getWorkspacesStatus()
+      .find((w) => w.id === candidateId);
+    if (s3Slot) {
+      return {
+        workspaceId: candidateId,
+        workspaceName:
+          s3Slot.name || deriveS3WorkspaceName(s3Slot.bucket, s3Slot.prefix),
+      };
+    }
+
+    const demoWs = [
+      ...(isDemoMode() ? getDemoWorkspaces() : []),
+      ...(this.store.data.demoWorkspaces ?? []),
+    ].find((w) => w.id === candidateId);
+    if (demoWs) {
+      return { workspaceId: candidateId, workspaceName: demoWs.name };
+    }
+
+    if (candidateId === "ws-file-shared") {
+      const sharedFile = (
+        this.store.data.preferences.sharedWorkspacePath ||
+        process.env.SSHS3_SHARED_WORKSPACE_FILE ||
+        ""
+      ).trim();
+      return {
+        workspaceId: candidateId,
+        workspaceName: path.basename(sharedFile) || "Shared File Workspace",
+      };
+    }
+
+    if (candidateId === "ws-personal") {
+      return {
+        workspaceId: "ws-personal",
+        workspaceName: "Personal (Local)",
+      };
+    }
+
+    const matchingSrv = this.getKnownServers().find(
+      (s) => s.workspaceId === candidateId && s.workspaceName,
+    );
+    return {
+      workspaceId: candidateId,
+      workspaceName: matchingSrv?.workspaceName || candidateId,
+    };
+  }
+
+  private rebuildCombinedS3ServersCache(): void {
+    const combined = new Map<string, WorkspaceServerSummary>();
+    const activeSlots = this.store.data.s3SyncedServersByWorkspace ?? {};
+    for (const s of this.store.data.s3SyncedServers ?? []) {
+      if (!s?.id) continue;
+      if (s.workspaceId && !(s.workspaceId in activeSlots)) continue;
+      if (s.workspaceId && this.removedWorkspaceIds.has(s.workspaceId)) continue;
+      combined.set(s.id, s);
+    }
+    for (const [wsId, list] of Object.entries(activeSlots)) {
+      if (this.removedWorkspaceIds.has(wsId)) continue;
+      for (const s of list ?? []) {
+        if (!s?.id) continue;
+        const nextSrv: WorkspaceServerSummary = {
+          ...s,
+          workspaceId: s.workspaceId || wsId,
+        };
+        const prev = combined.get(s.id);
+        if (!prev) {
+          combined.set(s.id, nextSrv);
+        } else {
+          const tPrev = Date.parse(prev.updatedAt || "") || 0;
+          const tNext = Date.parse(nextSrv.updatedAt || "") || 0;
+          if (tNext >= tPrev) {
+            combined.set(s.id, nextSrv);
+          }
+        }
+      }
+    }
+    this.store.data.s3SyncedServers = Array.from(combined.values());
+  }
+
+  private removeServerFromLocalS3Cache(serverId: string): void {
+    this.store.data.s3SyncedServers = (
+      this.store.data.s3SyncedServers ?? []
+    ).filter((s) => s.id !== serverId);
+    if (this.store.data.s3SyncedServersByWorkspace) {
+      for (const wsId of Object.keys(
+        this.store.data.s3SyncedServersByWorkspace,
+      )) {
+        this.store.data.s3SyncedServersByWorkspace[wsId] = (
+          this.store.data.s3SyncedServersByWorkspace[wsId] ?? []
+        ).filter((s) => s.id !== serverId);
+      }
+    }
+  }
+
+  private upsertLocalS3ServerCache(
+    server: WorkspaceServerSummary,
+    workspaceId?: string,
+  ): void {
     this.store.data.s3SyncedServers ??= [];
+    this.store.data.s3SyncedServersByWorkspace ??= {};
     this.store.data.deletedServerIds ??= {};
     delete this.store.data.deletedServerIds[server.id];
+    const effectiveWsId = workspaceId || server.workspaceId;
     const clean: WorkspaceServerSummary = {
       id: server.id,
       name: server.name,
@@ -2599,9 +3190,22 @@ export class HubService {
       role: server.role,
       tags: server.tags,
       shared: true,
+      ...(effectiveWsId ? { workspaceId: effectiveWsId } : {}),
+      ...(server.workspaceName ? { workspaceName: server.workspaceName } : {}),
+      ...(server.teamVaultProfileRef
+        ? { teamVaultProfileRef: server.teamVaultProfileRef }
+        : {}),
       updatedAt: server.updatedAt || new Date().toISOString(),
       updatedBy: server.updatedBy,
     };
+    if (effectiveWsId) {
+      const existingSlotList =
+        this.store.data.s3SyncedServersByWorkspace[effectiveWsId] ?? [];
+      this.store.data.s3SyncedServersByWorkspace[effectiveWsId] = [
+        ...existingSlotList.filter((s) => s.id !== server.id),
+        clean,
+      ];
+    }
     this.store.data.s3SyncedServers = [
       ...this.store.data.s3SyncedServers.filter((s) => s.id !== server.id),
       clean,
@@ -2785,6 +3389,8 @@ export class HubService {
         title: `Live-status & historik: ${displayName}${server?.cluster ? ` (${server.cluster})` : ""}`,
         text: lines.join("\n"),
         author: "Auto-Memory",
+        workspaceId: server?.workspaceId,
+        workspaceName: server?.workspaceName,
       });
     } catch {
       // Never block main flow on auto-memory
@@ -2980,6 +3586,8 @@ export class HubService {
     autoLearned?: boolean;
     sourceCommand?: string;
     errorSignature?: string;
+    workspaceId?: string;
+    workspaceName?: string;
   }): Promise<MemoryEntry> {
     const author = input.author?.trim() || (await this.resolveActorName());
     const { memories, saved } = this.kb.deduplicateOrMergeMemory(
@@ -3003,7 +3611,11 @@ export class HubService {
           : undefined,
       },
     );
-    this.store.data.memories = memories;
+    if (input.workspaceId) saved.workspaceId = input.workspaceId;
+    if (input.workspaceName) saved.workspaceName = input.workspaceName;
+    this.store.data.memories = memories.map((m) =>
+      m.id === saved.id ? saved : m,
+    );
     if (this.store.data.deletedMemoryIds?.[saved.id]) {
       delete this.store.data.deletedMemoryIds[saved.id];
     }
@@ -3043,18 +3655,58 @@ export class HubService {
         Promise.resolve({ memories: [], activityLog: [] }),
     ]);
 
-    const sharedFileSync = await this.syncSharedWorkspaceFile(
-      rawWorkspaceServers,
-    ).catch(() => ({ servers: rawWorkspaceServers, changed: false }));
-
     const deletedServerIds = this.store.data.deletedServerIds ?? {};
     const localOverrides = this.store.data.localOverrides ?? {};
     const srvMap = new Map<string, WorkspaceServerSummary>();
     for (const s of this.store.data.s3SyncedServers ?? []) {
-      if (s?.id && s.host) srvMap.set(s.id, { ...s, shared: true });
+      if (!s?.id || !s.host) continue;
+      if (s.workspaceId && this.removedWorkspaceIds.has(s.workspaceId)) continue;
+      srvMap.set(s.id, { ...s, shared: true });
     }
+    for (const [wsId, list] of Object.entries(
+      this.store.data.s3SyncedServersByWorkspace ?? {},
+    )) {
+      if (this.removedWorkspaceIds.has(wsId)) continue;
+      const slotInfo = this.s3Workspace
+        .getWorkspacesStatus()
+        .find((w) => w.id === wsId);
+      const wsName = slotInfo
+        ? slotInfo.name || deriveS3WorkspaceName(slotInfo.bucket, slotInfo.prefix)
+        : undefined;
+      for (const s of list ?? []) {
+        if (!s?.id || !s.host) continue;
+        srvMap.set(s.id, {
+          ...s,
+          shared: true,
+          workspaceId: s.workspaceId || wsId,
+          ...(s.workspaceName || wsName
+            ? { workspaceName: s.workspaceName || wsName }
+            : {}),
+        });
+      }
+    }
+
+    const enrichedRawServers = rawWorkspaceServers
+      .filter(
+        (s) => !s?.workspaceId || !this.removedWorkspaceIds.has(s.workspaceId),
+      )
+      .map((s) => {
+        const known = srvMap.get(s.id);
+        if (!known) return s;
+        return {
+          ...s,
+          workspaceId: s.workspaceId ?? known.workspaceId,
+          workspaceName: s.workspaceName ?? known.workspaceName,
+        };
+      });
+
+    const sharedFileSync = await this.syncSharedWorkspaceFile(
+      enrichedRawServers,
+    ).catch(() => ({ servers: enrichedRawServers, changed: false }));
+
     for (const s of sharedFileSync.servers) {
       if (!s?.id || !s.host) continue;
+      if (s.workspaceId && this.removedWorkspaceIds.has(s.workspaceId)) continue;
       const prev = srvMap.get(s.id);
       if (!prev) {
         srvMap.set(s.id, s);
@@ -3062,13 +3714,33 @@ export class HubService {
         const tPrev = Date.parse(prev.updatedAt || "") || 0;
         const tNext = Date.parse(s.updatedAt || "") || 0;
         if (tNext >= tPrev) {
-          srvMap.set(s.id, { ...prev, ...s, shared: prev.shared || s.shared });
+          const keepPrevWs = Boolean(
+            prev.workspaceId &&
+              prev.workspaceId !== "ws-file-shared" &&
+              s.workspaceId === "ws-file-shared",
+          );
+          srvMap.set(s.id, {
+            ...prev,
+            ...s,
+            shared: prev.shared || s.shared,
+            workspaceId: keepPrevWs
+              ? prev.workspaceId
+              : (s.workspaceId ?? prev.workspaceId),
+            workspaceName: keepPrevWs
+              ? prev.workspaceName
+              : (s.workspaceName ?? prev.workspaceName),
+            teamVaultProfileRef:
+              s.teamVaultProfileRef ?? prev.teamVaultProfileRef,
+          });
         }
       }
     }
 
     const workspaceServers: WorkspaceServerSummary[] = [];
     for (const srv of srvMap.values()) {
+      if (srv.workspaceId && this.removedWorkspaceIds.has(srv.workspaceId)) {
+        continue;
+      }
       const delIso = deletedServerIds[srv.id] || srv.deletedAt;
       const delMs =
         typeof delIso === "number"
@@ -3098,11 +3770,13 @@ export class HubService {
     const dismissed = new Set(this.store.data.preferences.dismissedBuiltinIds ?? []);
     const memoryMap = new Map<string, MemoryEntry>();
     for (const m of this.store.data.memories) {
+      if (m.workspaceId && this.removedWorkspaceIds.has(m.workspaceId)) continue;
       if ((deletedMemoryIds[m.id] ?? 0) < (m.updatedAt ?? 0)) {
         memoryMap.set(m.id, m);
       }
     }
     for (const m of teamData.memories) {
+      if (m.workspaceId && this.removedWorkspaceIds.has(m.workspaceId)) continue;
       if ((deletedMemoryIds[m.id] ?? 0) >= (m.updatedAt ?? 0)) continue;
       const existing = memoryMap.get(m.id);
       if (!existing) {
@@ -3115,6 +3789,7 @@ export class HubService {
     }
     for (const m of getBuiltinSkillsAndMemories()) {
       if (dismissed.has(m.id)) continue;
+      if (m.workspaceId && this.removedWorkspaceIds.has(m.workspaceId)) continue;
       if ((deletedMemoryIds[m.id] ?? 0) >= (m.updatedAt ?? 0)) continue;
       if (!memoryMap.has(m.id)) {
         memoryMap.set(m.id, m);
@@ -3158,6 +3833,8 @@ export class HubService {
           title: `Auto-Minne: ${srv.name}${srv.cluster ? ` (${srv.cluster})` : ""}`,
           text: lines.join("\n"),
           author: "Auto-Memory",
+          ...(srv.workspaceId ? { workspaceId: srv.workspaceId } : {}),
+          ...(srv.workspaceName ? { workspaceName: srv.workspaceName } : {}),
           updatedAt: srv.updatedAt ? Date.parse(srv.updatedAt) || Date.now() : Date.now(),
         });
       }
@@ -3761,6 +4438,7 @@ export class HubService {
         if (op === "status") {
           return {
             s3TeamWorkspace: this.s3Workspace.getStatus(),
+            s3TeamWorkspaces: this.s3Workspace.getWorkspacesStatus(),
             s3Profiles: extra.s3Profiles ?? [],
             dirSyncProfiles: extra.dirSyncProfiles ?? [],
           };
@@ -3773,17 +4451,30 @@ export class HubService {
           };
         }
         if (op === "sync_now") {
-          await this.request({ action: "workspace-s3-sync-now" });
+          await this.request({
+            action: "workspace-s3-sync-now",
+            workspaceId: str("workspaceId"),
+          });
           return {
             ok: true,
             operation: "sync_now",
             s3TeamWorkspace: this.s3Workspace.getStatus(),
+            s3TeamWorkspaces: this.s3Workspace.getWorkspacesStatus(),
           };
         }
         if (op === "configure_s3_workspace") {
+          const rawMode = str("mode");
+          const mode: "add" | "update" | "replace" | undefined =
+            rawMode === "add" || rawMode === "update" || rawMode === "replace"
+              ? rawMode
+              : undefined;
           await this.request({
             action: "workspace-s3-configure",
+            workspaceId: str("workspaceId"),
+            mode,
             config: {
+              id: str("workspaceId") || str("id"),
+              name: str("name"),
               enabled: bool("enabled") ?? true,
               endpoint: str("endpoint"),
               region: str("region") || "eu-north-1",
@@ -3800,14 +4491,20 @@ export class HubService {
             ok: true,
             operation: "configure_s3_workspace",
             s3TeamWorkspace: this.s3Workspace.getStatus(),
+            s3TeamWorkspaces: this.s3Workspace.getWorkspacesStatus(),
           };
         }
         if (op === "disconnect_s3_workspace") {
-          await this.request({ action: "workspace-s3-disconnect" });
+          await this.request({
+            action: "workspace-s3-disconnect",
+            workspaceId: str("workspaceId"),
+            remove: bool("remove"),
+          });
           return {
             ok: true,
             operation: "disconnect_s3_workspace",
             s3TeamWorkspace: this.s3Workspace.getStatus(),
+            s3TeamWorkspaces: this.s3Workspace.getWorkspacesStatus(),
           };
         }
         const rawAuthMethod = str("authMethod");
@@ -4721,9 +5418,7 @@ export class HubService {
       ...(this.store.data.deletedServerIds ?? {}),
       [trimmed]: nowIso,
     };
-    this.store.data.s3SyncedServers = (
-      this.store.data.s3SyncedServers ?? []
-    ).filter((s) => s.id !== trimmed);
+    this.removeServerFromLocalS3Cache(trimmed);
     const rawWorkspaceServers =
       (await this.host.workspaceServers?.().catch(() => [])) ?? [];
     await this.syncSharedWorkspaceFile(rawWorkspaceServers).catch(() => {});

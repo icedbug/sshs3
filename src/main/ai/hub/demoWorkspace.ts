@@ -1,6 +1,7 @@
 import type {
   AgentSchedule,
   AgentTask,
+  ConnectedWorkspaceSummary,
   InfraGraphEdge,
   KbDocument,
   McpCatalogPreset,
@@ -774,11 +775,139 @@ const initialDemoSnippets: Snippet[] = [
   },
 ];
 
+export function resolveDemoWorkspaceTag(
+  cluster?: string,
+  itemIdOrProfileId?: string,
+): { workspaceId: string; workspaceName: string } {
+  const c = (cluster || "").toLowerCase();
+  const pid = (itemIdOrProfileId || "").toLowerCase();
+  if (
+    c.includes("storagegrid") ||
+    c.includes("s3") ||
+    pid.includes("sg-") ||
+    pid.includes("storagegrid") ||
+    pid.includes("minio")
+  ) {
+    return {
+      workspaceId: "ws-demo-s3-grid",
+      workspaceName: "StorageGRID & Cloud S3",
+    };
+  }
+  if (
+    c.includes("k8s") ||
+    c.includes("trident") ||
+    c.includes("ceph") ||
+    pid.includes("k8s") ||
+    pid.includes("trident") ||
+    pid.includes("ceph") ||
+    pid.includes("truenas") ||
+    pid.includes("zfs") ||
+    pid.includes("multipath")
+  ) {
+    return {
+      workspaceId: "ws-demo-k8s-ceph",
+      workspaceName: "K8s & Ceph Platform",
+    };
+  }
+  return {
+    workspaceId: "ws-demo-ontap",
+    workspaceName: "Stockholm Core Storage",
+  };
+}
+
+for (const srv of initialDemoServers) {
+  const tag = resolveDemoWorkspaceTag(srv.cluster, srv.id);
+  srv.workspaceId ??= tag.workspaceId;
+  srv.workspaceName ??= tag.workspaceName;
+}
+
+for (const act of initialDemoActivity) {
+  const tag = resolveDemoWorkspaceTag(undefined, act.profileId || act.id);
+  act.workspaceId ??= tag.workspaceId;
+  act.workspaceName ??= tag.workspaceName;
+}
+
+for (const mem of initialDemoMemories) {
+  const tag = resolveDemoWorkspaceTag(mem.cluster, mem.id);
+  mem.workspaceId ??= tag.workspaceId;
+  mem.workspaceName ??= tag.workspaceName;
+}
+
+export const initialDemoWorkspaces: ConnectedWorkspaceSummary[] = [
+  {
+    id: "ws-demo-ontap",
+    name: "Stockholm Core Storage",
+    kind: "demo",
+    connected: true,
+    badge: "ONTAP 9.15 · DC1/DC2",
+    endpointOrPath: "https://10.30.10.15/ontap-core",
+    bucket: "ontap-core-workspace",
+    prefix: "stockholm-dc1",
+    region: "eu-north-1",
+    lastSyncAt: now - 2 * min,
+    serverCount: initialDemoServers.filter(
+      (s) => s.workspaceId === "ws-demo-ontap",
+    ).length,
+    memoryCount: initialDemoMemories.filter(
+      (m) => m.workspaceId === "ws-demo-ontap",
+    ).length,
+    presenceCount: 2,
+  },
+  {
+    id: "ws-demo-s3-grid",
+    name: "StorageGRID & Cloud S3",
+    kind: "demo",
+    connected: true,
+    badge: "S3 11.8 · AIStor",
+    endpointOrPath: "https://s3-dc1.storage.acme.se:10443",
+    bucket: "storagegrid-ops",
+    prefix: "s3-fleet",
+    region: "eu-north-1",
+    lastSyncAt: now - 5 * min,
+    serverCount: initialDemoServers.filter(
+      (s) => s.workspaceId === "ws-demo-s3-grid",
+    ).length,
+    memoryCount: initialDemoMemories.filter(
+      (m) => m.workspaceId === "ws-demo-s3-grid",
+    ).length,
+    presenceCount: 1,
+  },
+  {
+    id: "ws-demo-k8s-ceph",
+    name: "K8s & Ceph Platform",
+    kind: "demo",
+    connected: true,
+    badge: "Trident CSI · Ceph Reef",
+    endpointOrPath: "https://rgw.ceph.acme.se",
+    bucket: "k8s-ceph-platform",
+    prefix: "trident-prod",
+    region: "eu-north-1",
+    lastSyncAt: now - 4 * min,
+    serverCount: initialDemoServers.filter(
+      (s) => s.workspaceId === "ws-demo-k8s-ceph",
+    ).length,
+    memoryCount: initialDemoMemories.filter(
+      (m) => m.workspaceId === "ws-demo-k8s-ceph",
+    ).length,
+    presenceCount: 2,
+  },
+];
+
 const demoServersStore = new Map<string, WorkspaceServerSummary>(
   initialDemoServers.map((s) => [s.id, { ...s }]),
 );
 const demoActivityStore: WorkspaceActivityEvent[] = [...initialDemoActivity];
 const demoMemoriesStore: MemoryEntry[] = [...initialDemoMemories];
+
+export function getDemoWorkspaces(): ConnectedWorkspaceSummary[] {
+  const servers = Array.from(demoServersStore.values());
+  return initialDemoWorkspaces.map((ws) => ({
+    ...ws,
+    serverCount: servers.filter((s) => s.workspaceId === ws.id).length,
+    memoryCount: demoMemoriesStore.filter((m) => m.workspaceId === ws.id)
+      .length,
+  }));
+}
 
 export function getDemoServers(): WorkspaceServerSummary[] {
   return Array.from(demoServersStore.values());
@@ -816,6 +945,8 @@ export function updateDemoServer(input: {
   description?: string;
   role?: string;
   tags?: string[];
+  workspaceId?: string;
+  workspaceName?: string;
 }): boolean {
   const existing = demoServersStore.get(input.profileId);
   if (!existing) return false;
@@ -832,6 +963,8 @@ export function updateDemoServer(input: {
     description: input.description?.trim() || undefined,
     role: input.role?.trim() || undefined,
     tags: input.tags?.length ? input.tags : undefined,
+    ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
+    ...(input.workspaceName ? { workspaceName: input.workspaceName } : {}),
     updatedAt: new Date().toISOString(),
     updatedBy: "jacob (demo)",
   });
@@ -870,8 +1003,14 @@ export function upsertDemoServer(input: {
   description?: string;
   tags?: string[];
   shared?: boolean;
+  workspaceId?: string;
+  workspaceName?: string;
 }): WorkspaceServerSummary {
   const existing = demoServersStore.get(input.id);
+  const fallbackTag = resolveDemoWorkspaceTag(
+    input.cluster ?? existing?.cluster,
+    input.id,
+  );
   const next: WorkspaceServerSummary = {
     ...existing,
     id: input.id,
@@ -906,6 +1045,12 @@ export function upsertDemoServer(input: {
     description: input.description?.trim() || undefined,
     tags: input.tags?.length ? input.tags : undefined,
     shared: input.shared ?? true,
+    workspaceId:
+      input.workspaceId ?? existing?.workspaceId ?? fallbackTag.workspaceId,
+    workspaceName:
+      input.workspaceName ??
+      existing?.workspaceName ??
+      fallbackTag.workspaceName,
     updatedAt: new Date().toISOString(),
     updatedBy: "jacob",
   };
@@ -917,14 +1062,48 @@ export function deleteDemoServer(id: string): void {
   demoServersStore.delete(id);
 }
 
+const initialDemoServerIds = new Set(initialDemoServers.map((s) => s.id));
+const initialDemoMemoryIds = new Set(initialDemoMemories.map((m) => m.id));
+const initialDemoActivityIds = new Set(initialDemoActivity.map((a) => a.id));
+
+export function removeDemoWorkspace(workspaceId: string): void {
+  if (!workspaceId) return;
+  for (const [id, srv] of demoServersStore.entries()) {
+    if (srv.workspaceId === workspaceId && !initialDemoServerIds.has(id)) {
+      demoServersStore.delete(id);
+    }
+  }
+  for (let i = demoMemoriesStore.length - 1; i >= 0; i--) {
+    const m = demoMemoriesStore[i];
+    if (m.workspaceId === workspaceId && !initialDemoMemoryIds.has(m.id)) {
+      demoMemoriesStore.splice(i, 1);
+    }
+  }
+  for (let i = demoActivityStore.length - 1; i >= 0; i--) {
+    const a = demoActivityStore[i];
+    if (a.workspaceId === workspaceId && !initialDemoActivityIds.has(a.id)) {
+      demoActivityStore.splice(i, 1);
+    }
+  }
+}
+
 export function getDemoActivityLog(): WorkspaceActivityEvent[] {
   return [...demoActivityStore];
 }
 
 export function appendDemoActivity(event: WorkspaceActivityEvent): void {
-  const idx = demoActivityStore.findIndex((e) => e.id === event.id);
-  if (idx >= 0) demoActivityStore[idx] = event;
-  else demoActivityStore.unshift(event);
+  const tag = resolveDemoWorkspaceTag(
+    undefined,
+    event.profileId || event.targetLabel,
+  );
+  const enriched: WorkspaceActivityEvent = {
+    ...event,
+    workspaceId: event.workspaceId || tag.workspaceId,
+    workspaceName: event.workspaceName || tag.workspaceName,
+  };
+  const idx = demoActivityStore.findIndex((e) => e.id === enriched.id);
+  if (idx >= 0) demoActivityStore[idx] = enriched;
+  else demoActivityStore.unshift(enriched);
 }
 
 export function getDemoMemories(): MemoryEntry[] {
@@ -932,9 +1111,15 @@ export function getDemoMemories(): MemoryEntry[] {
 }
 
 export function saveDemoMemory(entry: MemoryEntry): void {
-  const idx = demoMemoriesStore.findIndex((m) => m.id === entry.id);
-  if (idx >= 0) demoMemoriesStore[idx] = entry;
-  else demoMemoriesStore.unshift(entry);
+  const tag = resolveDemoWorkspaceTag(entry.cluster, entry.id);
+  const enriched: MemoryEntry = {
+    ...entry,
+    workspaceId: entry.workspaceId || tag.workspaceId,
+    workspaceName: entry.workspaceName || tag.workspaceName,
+  };
+  const idx = demoMemoriesStore.findIndex((m) => m.id === enriched.id);
+  if (idx >= 0) demoMemoriesStore[idx] = enriched;
+  else demoMemoriesStore.unshift(enriched);
 }
 
 export function deleteDemoMemory(id: string): void {

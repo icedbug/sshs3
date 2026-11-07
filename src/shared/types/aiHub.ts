@@ -117,6 +117,8 @@ export interface MemoryEntry {
   autoLearned?: boolean;
   sourceCommand?: string;
   errorSignature?: string;
+  workspaceId?: string;
+  workspaceName?: string;
   updatedAt: number;
 }
 
@@ -245,8 +247,12 @@ export interface WorkspacePresenceEntry {
   actor: string;
   updatedAt: number;
   activeTerminals: WorkspacePresenceTerminal[];
+  workspaceId?: string;
+  workspaceName?: string;
 }
 export interface S3WorkspaceConfig {
+  id?: string;
+  name?: string;
   enabled: boolean;
   endpoint?: string;
   region: string;
@@ -258,6 +264,8 @@ export interface S3WorkspaceConfig {
   actorName?: string;
 }
 export interface S3WorkspaceSyncStatus {
+  id?: string;
+  name?: string;
   configured: boolean;
   enabled: boolean;
   connected: boolean;
@@ -274,6 +282,28 @@ export interface S3WorkspaceSyncStatus {
   /** Set when this process never syncs with the bucket (demo mode): why. Also shown as `error` once a bucket is configured. */
   syncDisabledReason?: string;
   inviteCode?: string;
+  serverCount?: number;
+  memoryCount?: number;
+  presenceCount?: number;
+}
+export interface ConnectedWorkspaceSummary {
+  id: string;
+  name: string;
+  kind: "s3" | "team-vault" | "shared-file" | "demo" | "personal";
+  connected: boolean;
+  syncing?: boolean;
+  badge?: string;
+  endpointOrPath?: string;
+  bucket?: string;
+  prefix?: string;
+  region?: string;
+  accessKeyId?: string;
+  lastSyncAt?: number;
+  error?: string;
+  inviteCode?: string;
+  serverCount: number;
+  memoryCount: number;
+  presenceCount: number;
 }
 export interface WorkspaceServerSummary {
   id: string;
@@ -317,6 +347,9 @@ export interface WorkspaceServerSummary {
   role?: string;
   tags?: string[];
   shared: boolean;
+  workspaceId?: string;
+  workspaceName?: string;
+  teamVaultProfileRef?: { vaultId: string; profileId: string };
   updatedAt?: string;
   updatedBy?: string;
   deletedAt?: string;
@@ -471,6 +504,9 @@ export interface HubSnapshot {
   workspaceServers?: WorkspaceServerSummary[];
   inlineSuggestion?: InlineCommandSuggestion;
   s3Workspace?: S3WorkspaceSyncStatus;
+  s3Workspaces?: S3WorkspaceSyncStatus[];
+  workspaces?: ConnectedWorkspaceSummary[];
+  activeWorkspaceId?: string;
   presence?: WorkspacePresenceEntry[];
   localOverrides?: Record<string, LocalServerAuthOverride>;
   agents?: MissionAgent[];
@@ -528,6 +564,8 @@ export type HubRequest =
   | {
       action: "memory-save";
       entry: Omit<MemoryEntry, "id" | "updatedAt"> & { id?: string };
+      workspaceId?: string;
+      workspaceName?: string;
     }
   | { action: "memory-delete"; id: string }
   | { action: "memory-feedback"; id: string; delta: 1 | -1 }
@@ -608,6 +646,8 @@ export type HubRequest =
   | {
       action: "activity-record";
       event: Omit<WorkspaceActivityEvent, "id" | "at"> & { id?: string; at?: number };
+      workspaceId?: string;
+      workspaceName?: string;
     }
   | {
       action: "server-describe";
@@ -618,12 +658,16 @@ export type HubRequest =
       description?: string;
       role?: string;
       tags?: string[];
+      workspaceId?: string;
+      workspaceName?: string;
       localUsername?: string;
       localPrivateKeyPath?: string;
       localAuthType?: "agent" | "privateKey";
     }
   | {
       action: "server-upsert";
+      workspaceId?: string;
+      workspaceName?: string;
       server: {
         id?: string;
         name: string;
@@ -665,6 +709,8 @@ export type HubRequest =
         description?: string;
         tags?: string[];
         shared?: boolean;
+        workspaceId?: string;
+        workspaceName?: string;
         localUsername?: string;
         localPrivateKeyPath?: string;
         localAuthType?: "agent" | "privateKey";
@@ -680,11 +726,15 @@ export type HubRequest =
     }
   | {
       action: "workspace-s3-configure";
+      workspaceId?: string;
+      mode?: "add" | "update" | "replace";
       config?: Partial<S3WorkspaceConfig>;
       inviteCode?: string;
     }
-  | { action: "workspace-s3-sync-now" }
-  | { action: "workspace-s3-disconnect" }
+  | { action: "workspace-s3-sync-now"; workspaceId?: string }
+  | { action: "workspace-s3-disconnect"; workspaceId?: string; remove?: boolean }
+  | { action: "workspace-select"; workspaceId: string }
+  | { action: "workspace-connect-demo"; name: string; cluster?: string; id?: string }
   | {
       action: "inline-suggest";
       prompt: string;

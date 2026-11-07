@@ -29,6 +29,10 @@ Every feature from the Phase 0 Survey and locked `/grill-me` alignment is assign
 | F10 | Ambient Terminal Co-Pilot Pill | On terminal error (non-zero exit code) or shortcut, show floating pill `[ ⌘K Förklara & Åtgärda ]` expanding AI Hub side panel with terminal context & Orama RAG | M4 | survey + `/grill-me` #5 |
 | F11 | Contextual SFTP/S3 AI Actions | Contextual AI actions in SFTP/S3 ("Förklara konfigurationsdiff", "Generera S3-policy", "Indexera i Kunskapsbas") wired to AI Hub & Orama | M4 | survey + `/grill-me` #5 |
 | F12 | Full Verification, Demo Visual Check & Git Push | `vitest`, `tsc --noEmit`, `npm run build:web`, `SSHS3_DEMO=1` visual verification, and git push to `origin/codex/ai-hub` | M5 | `/grill-me` #7 |
+| F13 | Multi-Workspace Backend Registry & Simultaneous S3/Vault/File Sync | Upgrade `S3WorkspaceSyncService`, `HubStore`, `HubService`, `createHub`, and `demoWorkspace` from single-workspace to multi-workspace slot registry (`workspaces`, `s3Workspaces`, `activeWorkspaceId`), keeping multiple workspaces connected and syncing simultaneously while tagging servers, memories, activity, and presence with `workspaceId` & `workspaceName` | M6 | user follow-up 2026-11-07 |
+| F14 | Mission Control Multi-Workspace Hub, Filter Pills & Simultaneous Connection UI | Enhance `LandingView.tsx` with a Multi-Workspace Connection Hub showing all simultaneously connected workspaces (S3 buckets, Team Vaults, Shared Files, Demo Workspaces), workspace filter pills (`ALL` + per-workspace pills with live status, server counts, per-workspace sync & disconnect, and `"Sync All"`), `"Connect Additional Workspace"` mode in S3/Team setup, and target workspace selector in `+ Add Node` | M6 | user follow-up 2026-11-07 |
+| F15 | Cross-App Multi-Workspace Switcher & Omnibar / StatusBar / AI Hub Integration | Add `data-testid="status-workspaces-badge"` interactive workspace switcher/status pill in `BottomStatusBar.tsx`, workspace filter/scope badges in `AiHubPanel.tsx`, and multi-workspace switch/sync/connect commands in `GlobalSearchPalette.tsx` (Omnibar `⌘K`) | M6 | user follow-up 2026-11-07 |
+| F16 | Multi-Workspace Tiers 1–4 Unit & E2E Test Suite + Demo Verification | Comprehensive backend unit tests (`tests/main/multiWorkspace.test.ts`) and renderer E2E tests (`tests/renderer/redesign/m5_multi_workspace.test.tsx`) across Tiers 1–4 with 100% backward compatibility across all 214 existing test files | M6 | user follow-up 2026-11-07 |
 
 ## Milestones
 | # | Name | Scope | Dependencies | Status |
@@ -39,6 +43,7 @@ Every feature from the Phase 0 Survey and locked `/grill-me` alignment is assign
 | M4 | Dedicated S3 Cloud Explorer & Inspector + Ambient AI Co-Pilot & Storage AI | F9, F10, F11 | M1, M2 | DONE |
 | E2E | E2E Testing Track | Requirement-driven test suite across Tiers 1-4 (`TEST_INFRA.md`, `TEST_READY.md`) | M1 | DONE |
 | M5 | Final E2E Pass, Visual Verification (`SSHS3_DEMO=1`) & Git Push | F12 + Tier 5 Adversarial Coverage Hardening | M1, M2, M3, M4, E2E | DONE |
+| M6 | Multi-Workspace Simultaneous Connections, Management & Switching | F13, F14, F15, F16 | M1–M5 | DONE |
 
 ## Interface Contracts
 
@@ -72,8 +77,31 @@ Every feature from the Phase 0 Survey and locked `/grill-me` alignment is assign
 - Non-zero exit code detection in `TerminalView.tsx` surfaces floating pill `[ ⌘K Förklara & Åtgärda ]` (`data-testid="terminal-copilot-pill"`). Clicking dispatches `sshs3:ai-open` with terminal buffer context and triggers Orama RAG lookup.
 - SFTP/S3 context menu & toolbar provide AI actions: `"Förklara konfigurationsdiff"`, `"Generera S3-policy"`, and `"Indexera i Kunskapsbas"`.
 
+### 7. Multi-Workspace Simultaneous Connectivity (`src/shared/types/aiHub.ts`, `S3WorkspaceSyncService.ts`, `HubService.ts`, `LandingView.tsx`, `AiHubPanel.tsx`, `BottomStatusBar.tsx`, `GlobalSearchPalette.tsx`)
+- **Shared Types (`src/shared/types/aiHub.ts` & `src/shared/types/teamVault.ts`)**:
+  - `WorkspaceServerSummary`, `MemoryEntry`, `WorkspaceMemoryEntry`, `WorkspaceActivityEvent`, and `WorkspacePresenceEntry` include optional `workspaceId?: string`, `workspaceName?: string`, and (on `WorkspaceServerSummary`) `teamVaultProfileRef?: { vaultId: string; profileId: string }`.
+  - `S3WorkspaceConfig` & `S3WorkspaceSyncStatus` include optional `id?: string`, `name?: string`, `serverCount?: number`, `memoryCount?: number`, `presenceCount?: number`.
+  - `ConnectedWorkspaceSummary`: `{ id: string; name: string; kind: 's3' | 'team-vault' | 'shared-file' | 'demo' | 'personal'; connected: boolean; syncing?: boolean; badge?: string; endpointOrPath?: string; bucket?: string; prefix?: string; region?: string; accessKeyId?: string; lastSyncAt?: number; error?: string; inviteCode?: string; serverCount: number; memoryCount: number; presenceCount: number }`.
+  - `HubSnapshot` keeps `s3Workspace?: S3WorkspaceSyncStatus` (primary/active S3 workspace for 100% backward compatibility) and adds `s3Workspaces?: S3WorkspaceSyncStatus[]`, `workspaces?: ConnectedWorkspaceSummary[]`, and `activeWorkspaceId?: string` (default `'ALL'`).
+  - `HubRequest` extends `workspace-s3-configure` (`workspaceId?: string`, `mode?: 'add' | 'update' | 'replace'`), `workspace-s3-sync-now` (`workspaceId?: string`), `workspace-s3-disconnect` (`workspaceId?: string`, `remove?: boolean`), and adds `{ action: 'workspace-select'; workspaceId: string }` and `{ action: 'workspace-connect-demo'; name: string; cluster?: string }`.
+- **Backend Invariants (`S3WorkspaceSyncService.ts`, `HubStore.ts`, `HubService.ts`)**:
+  - `S3WorkspaceSyncService` manages multiple simultaneous workspace slots (`Map<string, WorkspaceRuntimeSlot>`) while keeping **exactly 2 timers** (`pollTimer` and `presenceTimer`) in `startTimers()` (`vi.getTimerCount() === 2`) and persisting both top-level primary slot fields and `workspaces: StoredWorkspaceSlot[]` in `s3-workspace.json`.
+  - `HubStore` isolates synced servers per workspace in `s3SyncedServersByWorkspace: Record<string, WorkspaceServerSummary[]>` and computes `s3SyncedServers` as their union so connecting/syncing Workspace B never overwrites Workspace A, and disconnecting Workspace A removes only Workspace A's transient servers.
+  - `demoWorkspace.ts` seeds 3 simultaneously connected demo workspaces (`ws-demo-ontap` "Stockholm Core Storage", `ws-demo-s3-grid` "StorageGRID & Cloud S3", `ws-demo-k8s-ceph` "K8s & Ceph Platform") in `snap.workspaces` when `isDemoMode()` is active while keeping `S3WorkspaceSyncService` outward-sync guards (`demoOutwardSync.test.ts`) 100% intact.
+- **Renderer `data-testid` Contracts**:
+  - `LandingView.tsx`:
+    - Preserves focus order (`recent-connect-r1` first when `recentSSH` non-empty; `workspace-demo-lab-toggle` first when `recentSSH` empty) and all legacy `s3-*` test IDs.
+    - Adds `data-testid="multi-workspace-bar"`, `data-testid="workspace-pill-ALL"`, `data-testid="workspace-pill-${ws.id}"`, `data-testid="workspace-sync-${ws.id}"`, `data-testid="workspace-disconnect-${ws.id}"`, `data-testid="workspace-sync-all-btn"`, `data-testid="workspace-add-connection-btn"`, `data-testid="s3-workspace-name-input"`, and per-blade `data-testid="blade-workspace-badge-${s.id}"`.
+  - `BottomStatusBar.tsx`:
+    - Preserves `data-testid="status-connection-indicator"` text and adds `data-testid="status-workspaces-badge"` with a popover/switcher (`data-testid="status-workspaces-popover"`) to view/switch/sync connected workspaces from any tab.
+  - `AiHubPanel.tsx`:
+    - Displays active/connected workspaces bar (`data-testid="ai-hub-workspaces-bar"`) allowing switching workspace scope or viewing unified multi-workspace context.
+  - `GlobalSearchPalette.tsx`:
+    - Surfaces connected workspaces (`omnibar-workspace-${ws.id}` and `omnibar-workspace-ALL`) for instant keyboard switching and syncing.
+
 ## Code Layout
 - `src/main/` — Electron main process & backend services (`DirectAgentRuntime.ts`, `HubService.ts`, `KnowledgeBaseService.ts`, `S3StorageProvider.ts`, `SFTPStorageProvider.ts`)
 - `src/shared/` — Shared TypeScript interfaces (`ai.ts`, `aiHub.ts`, `ipc.ts`, `session.ts`, `storage.ts`)
 - `src/renderer/src/` — React frontend (`App.tsx`, `index.css`, `components/`, `lib/`)
 - `tests/` — Vitest unit and integration tests (`tests/main/`, `tests/renderer/`)
+
