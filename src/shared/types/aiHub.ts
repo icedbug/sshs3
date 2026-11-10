@@ -48,6 +48,13 @@ export interface AgentMessage {
   images?: Array<{ label: string; dataUrl: string; mimeType?: string }>;
   at: number;
 }
+/** One tool call an agent made, with what it got back (both masked and shortened). */
+export interface AgentToolRecord {
+  name: string;
+  input: string;
+  output: string;
+  at: number;
+}
 export type CommandRiskLevel = "safe" | "modify" | "destructive";
 
 export interface SafetyPolicyConfig {
@@ -90,6 +97,12 @@ export interface AgentTask {
   messages: AgentMessage[];
   changes: AgentChange[];
   sources: ContextSource[];
+  /**
+   * The tool calls of earlier runs of this conversation, newest last. Given
+   * back to the model on the next reply, so it still knows what it looked up
+   * and ran instead of only what it said.
+   */
+  toolLog?: AgentToolRecord[];
   createdAt: number;
   updatedAt: number;
   error?: string;

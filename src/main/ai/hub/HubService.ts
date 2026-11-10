@@ -1121,7 +1121,8 @@ export class HubService {
         version: manifest?.tag ?? "native-ts-1.0",
       },
       sessions: this.terminals.list(),
-      tasks: allTasks,
+      // The tool log is for the model's next run; the UI shows changes and messages.
+      tasks: allTasks.map(({ toolLog: _toolLog, ...task }) => task),
       memories: allMemories,
       memoryProposals: this.store.data.memoryProposals ?? [],
       memoryDistillRunning: this.distilling.size > 0,
@@ -2624,6 +2625,12 @@ export class HubService {
         task.messages.push(message);
       }
       message.text = boundedContext(message.text + event.delta, 128_000);
+    }
+    if (event.type === "tool.result" && event.tool) {
+      task.toolLog = [
+        ...(task.toolLog ?? []),
+        { ...event.tool, at: Date.now() },
+      ].slice(-60);
     }
     if (
       event.type === "message.interim" &&

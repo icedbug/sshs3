@@ -5,7 +5,9 @@ import {
 } from "../CodexAuthProvider";
 import type { HermesModelConfig } from "../HermesManager";
 import type {
+  AgentMessage,
   AgentTask,
+  AgentToolRecord,
   KbDocument,
   McpServerConfig,
   MissionAgent,
@@ -975,6 +977,60 @@ function resolveActiveAgent(
   return undefined;
 }
 
+const TOOL_LOG_CHARS = 24_000;
+
+/**
+ * The conversation as the model gets it on a new run: the stored messages,
+ * with each earlier turn's tool calls and results written under the answer
+ * they led to. Stored messages hold only what was said; without this a reply
+ * in the same conversation would not know what the agent had already looked
+ * up or run. The newest records are kept when the log exceeds its budget.
+ */
+export function conversationWithToolLog(task: AgentTask): AgentMessage[] {
+  const messages = task.messages.filter((m) => m.role !== "system");
+  const log = task.toolLog ?? [];
+  if (log.length === 0) return messages;
+  const render = (r: AgentToolRecord): string =>
+    `- ${r.name}(${r.input}) → ${r.output}`;
+  // Newest first until the budget is used.
+  const kept = new Set<AgentToolRecord>();
+  let used = 0;
+  for (const record of [...log].reverse()) {
+    used += render(record).length;
+    if (used > TOOL_LOG_CHARS && kept.size > 0) break;
+    kept.add(record);
+  }
+  const userTimes = messages.filter((m) => m.role === "user").map((m) => m.at);
+  const out = messages.map((m) => ({ ...m }));
+  for (let turn = 0; turn < userTimes.length; turn++) {
+    const from = userTimes[turn];
+    const until = userTimes[turn + 1] ?? Infinity;
+    const records = log.filter(
+      (r) => kept.has(r) && r.at >= from && r.at < until,
+    );
+    if (records.length === 0) continue;
+    const text = `[Tool calls made for this answer, with their results]\n${records.map(render).join("\n")}`;
+    // The last thing the assistant said in that turn, else a note of its own.
+    let last = -1;
+    out.forEach((m, i) => {
+      if (m.role === "assistant" && m.at >= from && m.at < until) last = i;
+    });
+    if (last >= 0) out[last].text = `${out[last].text}\n\n${text}`;
+    else {
+      const next = out.findIndex((m) => m.role === "user" && m.at >= until);
+      const note: AgentMessage = {
+        id: `toollog-${turn}`,
+        role: "assistant",
+        text,
+        at: from,
+      };
+      if (next >= 0) out.splice(next, 0, note);
+      else out.push(note);
+    }
+  }
+  return out;
+}
+
 /**
  * What a read-only run (a workforce specialist, a workspace chat answer) may
  * call. The broker runs `workspace_context`, `sshs3_kb_search` and
@@ -1236,6 +1292,7 @@ export class DirectAgentRuntime implements AgentRuntime {
   private steeringQueue: string[] = [];
   /** Names of the tools this run offered the model; anything else is refused. */
   private offered?: Set<string>;
+  private onEvent?: (event: RunEvent) => void;
 
   constructor(
     private readonly invokeBroker: DirectToolInvoker,
@@ -1258,6 +1315,7 @@ export class DirectAgentRuntime implements AgentRuntime {
     model: HermesModelConfig,
     onEvent: (event: RunEvent) => void,
   ): Promise<void> {
+    this.onEvent = onEvent;
     try {
       if (model.kind === "openai-codex") {
         const auth = new CodexAuthProvider(this.authBaseDir);
@@ -1629,13 +1687,23 @@ export class DirectAgentRuntime implements AgentRuntime {
     } catch {
       return JSON.stringify({ error: "Invalid JSON arguments for tool " + call.name });
     }
+    let output: string;
     try {
       const req = mapToolCallToBrokerRequest(call.name, parsedArgs);
       const result = await this.invokeBroker(req);
-      return JSON.stringify(result ?? { ok: true });
+      output = JSON.stringify(result ?? { ok: true });
     } catch (error) {
-      return JSON.stringify({ error: safeError(error) });
+      output = JSON.stringify({ error: safeError(error) });
     }
+    this.onEvent?.({
+      type: "tool.result",
+      tool: {
+        name: call.name,
+        input: boundedContext(call.argumentsJson || "{}", 800),
+        output: boundedContext(output, 3000),
+      },
+    });
+    return output;
   }
 
   private async runCodexResponsesLoop(
@@ -1671,7 +1739,7 @@ export class DirectAgentRuntime implements AgentRuntime {
     const instructions = buildSystemInstructions(task, initialContext);
 
     const inputItems: Array<Record<string, unknown>> = [];
-    for (const msg of task.messages.slice(-30)) {
+    for (const msg of conversationWithToolLog(task).slice(-30)) {
       if (msg.role === "system") continue;
       const role = msg.role === "assistant" ? "assistant" : "user";
       const contentParts: Array<Record<string, unknown>> = [
@@ -1870,7 +1938,7 @@ export class DirectAgentRuntime implements AgentRuntime {
       });
     }
 
-    for (const msg of task.messages.slice(-30)) {
+    for (const msg of conversationWithToolLog(task).slice(-30)) {
       if (msg.role === "system") continue;
       if (msg.role === "user" && msg.images?.length) {
         messages.push({
@@ -2043,8 +2111,9 @@ export class DirectAgentRuntime implements AgentRuntime {
       });
     }
 
-    const messages: Array<Record<string, unknown>> = task.messages
-      .filter((m) => m.role !== "system")
+    const messages: Array<Record<string, unknown>> = conversationWithToolLog(
+      task,
+    )
       .slice(-30)
       .map((m) => {
         const role = m.role === "assistant" ? "assistant" : "user";

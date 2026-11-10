@@ -18,6 +18,8 @@ export interface RunEvent {
   output?: string;
   error?: string;
   usage?: Record<string, number>;
+  /** With `tool.result`: the call that was made and what it returned. */
+  tool?: { name: string; input: string; output: string };
 }
 export interface AgentRuntime {
   start(
