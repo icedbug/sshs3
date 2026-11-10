@@ -1576,7 +1576,7 @@ export function AiHubPanel({
                     )}
                   </div>
                 )}
-                {timeline.map((item, idx) =>
+                {timeline.map((item) =>
                   item.message ? (
                     <article
                       className={"ai-message ai-message-" + item.message.role}
@@ -1665,58 +1665,6 @@ export function AiHubPanel({
                           setTimeout(() => composer.current?.focus(), 20);
                         }}
                       />
-                      {item.message.role === "assistant" &&
-                        idx === timeline.length - 1 &&
-                        !running && (
-                          <div className="ai-message-footer">
-                            <button
-                              type="button"
-                              className="ai-msg-action-btn"
-                              onClick={() => {
-                                void navigator.clipboard?.writeText(
-                                  item.message!.text,
-                                );
-                                setCopiedMsgId(item.message!.id);
-                                setTimeout(() => setCopiedMsgId(null), 1800);
-                              }}
-                            >
-                              {copiedMsgId === item.message.id
-                                ? "✓ Svar kopierat"
-                                : "📋 Kopiera svar"}
-                            </button>
-                            <button
-                              type="button"
-                              className="ai-msg-action-btn"
-                              onClick={() => {
-                                void act({
-                                  action: "memory-save",
-                                  entry: {
-                                    kind: "memory",
-                                    scope: "workspace",
-                                    title:
-                                      task?.title?.slice(0, 60) ||
-                                      "AI-insikt från chatt",
-                                    text: item.message!.text.slice(0, 1200),
-                                  },
-                                });
-                              }}
-                            >
-                              🧠 Spara i Team Memory
-                            </button>
-                            <button
-                              type="button"
-                              className="ai-msg-action-btn"
-                              onClick={() => {
-                                setPrompt(
-                                  "Fortsätt utreda och föreslå nästa konkreta verifieringssteg.",
-                                );
-                                setTimeout(() => composer.current?.focus(), 20);
-                              }}
-                            >
-                              🔄 Följ upp
-                            </button>
-                          </div>
-                        )}
                     </article>
                   ) : item.change && task ? (
                     <details
@@ -1884,14 +1832,6 @@ export function AiHubPanel({
                       <Check size={13} /> Verification check passed
                     </p>
                   )}
-                {mode === "hub" && task && !running && (
-                  <button
-                    className="ai-text-button"
-                    onClick={() => setView("Memory & skills")}
-                  >
-                    Save findings as a skill
-                  </button>
-                )}
                 {connection && (
                   <div className="ai-connect-question">
                     <span className="ai-message-author">

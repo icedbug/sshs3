@@ -7,28 +7,23 @@ import {
   FolderSymlink,
   X,
   Plus,
-  Server,
-  Settings,
   Unlock,
   Lock,
   KeyRound,
   Loader2,
   CreditCard,
-  FolderSync,
   ChevronRight,
   ChevronDown,
   Boxes,
-  Cable,
   FileText,
 } from 'lucide-react';
-import type { CachedSmartcardAgent, SSHActiveTunnel } from '@shared/types/ssh';
+import type { CachedSmartcardAgent } from '@shared/types/ssh';
 import type { MoveTabTarget, WindowInfo } from '@shared/types/ipc';
 import { Shortcut } from './ui/Shortcut';
 import { GlobalSearchButton } from './GlobalSearchButton';
 import { TabContextMenu } from './TabContextMenu';
 import { watchDragReleasedOutsideWindow } from '../lib/dragLeaveWindow';
 import { OPEN_TAB_MENU_EVENT } from '../lib/tabMenuEvents';
-import { getShortcutKeys } from '../lib/shortcuts';
 import { formatDate } from '../lib/dateFormat';
 import { SshCaStatusBadge } from './ca/SshCaStatusBadge';
 
@@ -81,11 +76,8 @@ export const TabBar: React.FC<TabBarProps> = ({
   onListWindows,
   onNewTab,
   onNewK8sSession,
-  onOpenProfiles,
   onOpenGlobalSearch,
   onOpenSettings,
-  onOpenDirSyncProfiles,
-  onOpenTunnels,
   showLockSmartcardButton,
   onLockSmartcard,
   onUnlockSmartcard,
@@ -167,23 +159,6 @@ export const TabBar: React.FC<TabBarProps> = ({
   const [cachedAgents, setCachedAgents] = useState<CachedSmartcardAgent[] | null>(null);
   const [loadingCachedAgents, setLoadingCachedAgents] = useState(false);
   const [expandedFingerprints, setExpandedFingerprints] = useState<Set<string>>(new Set());
-  const [activeTunnels, setActiveTunnels] = useState<SSHActiveTunnel[]>([]);
-
-  useEffect(() => {
-    // Optional chaining (LOW finding pattern already used elsewhere in this file, see the
-    // comment above <TabBar> in App.tsx): degrade to "no tunnel indicator" instead of
-    // crashing the whole tab bar if the preload bridge is somehow missing or incomplete
-    // (e.g. an older/mocked window.multissh in tests).
-    window.multissh
-      ?.sshTunnelList?.()
-      ?.then(setActiveTunnels)
-      ?.catch(() => {});
-    const unsubscribe = window.multissh?.onSshTunnelEvent?.(setActiveTunnels);
-    return () => unsubscribe?.();
-  }, []);
-
-  const liveTunnelCount = activeTunnels.filter((t) => t.status === 'active').length;
-  const erroredTunnelCount = activeTunnels.filter((t) => t.status === 'error').length;
 
   const certSubjectCN = (subject: string): string => {
     const line = subject.split('\n').find((l) => l.startsWith('CN='));
@@ -624,62 +599,6 @@ export const TabBar: React.FC<TabBarProps> = ({
           </div>
         )}
         <SshCaStatusBadge onOpenSettings={onOpenSettings} />
-        <button
-          type="button"
-          data-testid="quick-profiles-btn"
-          title={`Connections & Profiles (${getShortcutKeys('openProfiles', shortcuts)})`}
-          aria-label="Connections & Profiles"
-          onClick={onOpenProfiles}
-          className="flex h-6 w-6 items-center justify-center rounded-md text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
-        >
-          <Server className="h-4 w-4" />
-        </button>
-        {onOpenTunnels && (
-          <button
-            type="button"
-            data-testid="quick-tunnels-btn"
-            title={
-              liveTunnelCount > 0
-                ? `SSH Tunnels (${liveTunnelCount} active)`
-                : erroredTunnelCount > 0
-                  ? `SSH Tunnels (${erroredTunnelCount} failed)`
-                  : 'SSH Tunnels'
-            }
-            aria-label="SSH Tunnels"
-            onClick={onOpenTunnels}
-            className={`flex h-6 w-6 items-center justify-center rounded-md transition-colors hover:bg-app-surface-hover ${
-              erroredTunnelCount > 0
-                ? 'text-rose-400 hover:text-rose-300'
-                : liveTunnelCount > 0
-                  ? 'text-emerald-400 hover:text-emerald-300'
-                  : 'text-txt-muted hover:text-txt-primary'
-            }`}
-          >
-            <Cable className="h-4 w-4" />
-          </button>
-        )}
-        {onOpenDirSyncProfiles && (
-          <button
-            type="button"
-            data-testid="quick-dirsync-profiles-btn"
-            title="Directory Sync: Saved Profiles"
-            aria-label="Directory Sync: Saved Profiles"
-            onClick={onOpenDirSyncProfiles}
-            className="flex h-6 w-6 items-center justify-center rounded-md text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
-          >
-            <FolderSync className="h-4 w-4" />
-          </button>
-        )}
-        <button
-          type="button"
-          data-testid="quick-settings-btn"
-          title={`Settings (${getShortcutKeys('openSettings', shortcuts)})`}
-          aria-label="Settings"
-          onClick={onOpenSettings}
-          className="flex h-6 w-6 items-center justify-center rounded-md text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
-        >
-          <Settings className="h-4 w-4" />
-        </button>
       </div>
     </div>
 

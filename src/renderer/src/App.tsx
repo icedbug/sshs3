@@ -722,11 +722,8 @@ const AppContent: React.FC = () => {
             onListWindows={() => window.multissh?.windowList?.() ?? Promise.resolve([])}
             onNewTab={handleNewTab}
             onNewK8sSession={handleNewK8sSession}
-            onOpenProfiles={handleOpenProfiles}
             onOpenGlobalSearch={globalSearchEnabled ? handleOpenGlobalSearch : undefined}
             onOpenSettings={handleOpenSettings}
-            onOpenTunnels={handleOpenTunnels}
-            onOpenDirSyncProfiles={handleOpenDirSync}
             showLockSmartcardButton={settings.smartcardAuthMode === 'agent-global'}
             onLockSmartcard={() => window.multissh?.smartcardLockAll() ?? Promise.resolve({ locked: 0 })}
             onUnlockSmartcard={() => window.multissh?.smartcardUnlockNow?.() ?? Promise.resolve({ started: false })}

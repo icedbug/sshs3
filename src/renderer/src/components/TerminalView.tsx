@@ -1215,27 +1215,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           >
             Inline AI (Ctrl+K)
           </button>
-          <button
-            type="button"
-            className="rounded bg-app-surface px-2 py-0.5 text-[10px] text-txt-muted hover:text-txt-primary"
-            onClick={() => {
-              const text = termRef.current?.getSelection() || outputTrackerRef.current?.lastOutput();
-              window.dispatchEvent(new CustomEvent('sshs3:ai-open'));
-              if (text) {
-                window.dispatchEvent(
-                  new CustomEvent('sshs3:ai-attach', {
-                    detail: {
-                      sessionId: perfSessionId,
-                      text,
-                      label: termRef.current?.getSelection() ? 'Terminal selection' : 'Last command output',
-                    },
-                  })
-                );
-              }
-            }}
-          >
-            Attach selection to AI
-          </button>
         </div>
       )}
       {inlineAiOpen && (

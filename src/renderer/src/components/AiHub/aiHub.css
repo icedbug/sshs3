@@ -662,31 +662,6 @@
 .ai-md-table tbody tr:hover {
   background: var(--bg-surface-hover);
 }
-.ai-message-footer {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  margin-top: 10px;
-  padding-top: 8px;
-  border-top: 1px solid var(--border-divider);
-}
-.ai-hub .ai-msg-action-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 3px 8px;
-  font-size: 10.5px;
-  border-radius: 6px;
-  border: 1px solid var(--border-subtle);
-  background: var(--bg-surface-subtle);
-  color: var(--text-muted);
-}
-.ai-hub .ai-msg-action-btn:hover {
-  border-color: var(--accent-primary);
-  background: var(--accent-subtle);
-  color: var(--text-primary);
-}
 .ai-hub pre {
   max-height: 320px;
   overflow: auto;

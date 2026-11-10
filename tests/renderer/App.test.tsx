@@ -199,7 +199,7 @@ describe('App Component', () => {
   it('opens settings modal when settings gear button is clicked', async () => {
     render(<App />);
 
-    fireEvent.click(screen.getByTestId('quick-settings-btn'));
+    fireEvent.click(screen.getByTestId('drawer-toggle-settings'));
     expect(await screen.findByText('Settings')).toBeInTheDocument();
   });
 

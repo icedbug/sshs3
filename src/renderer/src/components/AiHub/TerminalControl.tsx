@@ -7,20 +7,14 @@ export function TerminalControl({
 }): JSX.Element | null {
   const hub = useHub();
   const session = hub?.sessions.find((s) => s.id === sessionId);
-  if (!hub?.config.enabled || !session) return null;
+  if (!hub?.config.enabled || !session || !session.owner) return null;
   const task = hub.tasks.find((t) => t.id === session.owner);
   return (
     <div className="flex shrink-0 items-center justify-between border-b border-divider bg-app-surface px-2 py-1 text-xs">
       <span aria-live="polite">
-        {session.owner
-          ? task?.status === "waiting"
-            ? "Waiting for you"
-            : "AI working"
-          : "You control"}{" "}
-        · {session.label}
+        {task?.status === "waiting" ? "Waiting for you" : "AI working"} · {session.label}
       </span>
-      {session.owner && (
-        <button
+      <button
           className="rounded px-2 hover:bg-app-surface-hover"
           onClick={() => {
             void hubRequest({
@@ -31,7 +25,6 @@ export function TerminalControl({
         >
           Take control
         </button>
-      )}
     </div>
   );
 }

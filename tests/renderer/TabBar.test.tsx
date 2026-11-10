@@ -169,7 +169,6 @@ describe('TabBar Component', () => {
     );
     const search = screen.getByTestId('global-search-btn');
     expect(search.parentElement).toHaveClass('border-l', 'border-divider');
-    expect(search.parentElement).toContainElement(screen.getByTestId('quick-profiles-btn'));
     expect(search.parentElement?.firstElementChild).toBe(search);
     unmount();
     render(<TabBar tabs={sampleTabs} activeTabId="tab-1" onSelectTab={vi.fn()} onCloseTab={vi.fn()} onNewTab={vi.fn()} />);
@@ -259,12 +258,10 @@ describe('TabBar Component', () => {
     expect(onNewTab).toHaveBeenCalledWith('filemanager', { remote: true });
   });
 
-  it('triggers quick links for profiles and settings', () => {
+  it('does not render duplicate quick action buttons (profiles, settings, tunnels, dirsync handled by App drawers)', () => {
     const onSelectTab = vi.fn();
     const onCloseTab = vi.fn();
     const onNewTab = vi.fn();
-    const onOpenProfiles = vi.fn();
-    const onOpenSettings = vi.fn();
 
     render(
       <TabBar
@@ -273,19 +270,13 @@ describe('TabBar Component', () => {
         onSelectTab={onSelectTab}
         onCloseTab={onCloseTab}
         onNewTab={onNewTab}
-        onOpenProfiles={onOpenProfiles}
-        onOpenSettings={onOpenSettings}
       />
     );
 
-    const profilesBtn = screen.getByTestId('quick-profiles-btn');
-    const settingsBtn = screen.getByTestId('quick-settings-btn');
-
-    fireEvent.click(profilesBtn);
-    expect(onOpenProfiles).toHaveBeenCalledTimes(1);
-
-    fireEvent.click(settingsBtn);
-    expect(onOpenSettings).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId('quick-profiles-btn')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('quick-settings-btn')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('quick-tunnels-btn')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('quick-dirsync-profiles-btn')).not.toBeInTheDocument();
   });
 
   it('closes new tab menu on Escape and restores focus to the add-tab button', () => {
