@@ -263,8 +263,8 @@ describe("HubService chat-post", () => {
     expect(sent).toContain("I raised proxy_read_timeout on prod-api-01");
     expect(sent).toContain("what changed on prod-api-01 today?");
     // The read-only run is not told it can configure the app.
-    expect(String(bodies[0].system)).toContain("This run is read-only");
-    expect(String(bodies[0].system)).not.toContain("CONFIGURE & ORCHESTRATE");
+    expect(JSON.stringify(bodies[0].system)).toContain("This run is read-only");
+    expect(JSON.stringify(bodies[0].system)).not.toContain("CONFIGURE & ORCHESTRATE");
 
     const run = hub.store.data.tasks.find((t) => t.chatMessageId === question.id)!;
     expect(run.mode).toBe("advice");

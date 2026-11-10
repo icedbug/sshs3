@@ -2023,9 +2023,24 @@ export class DirectAgentRuntime implements AgentRuntime {
       // ignore
     }
     const tuning = extractAiRuntimeTuning(task, initialContext);
-    let systemInstructions = buildSystemInstructions(task, initialContext);
+    // Two system blocks, so the prompt cache can be reused: the instructions
+    // are the same for every run of this kind and carry a cache breakpoint;
+    // the workspace snapshot differs per run and comes after it. Within a run
+    // the top-level cache_control below moves the breakpoint to the end of the
+    // conversation each turn, so a tool turn re-reads the earlier turns from
+    // the cache instead of paying for them again.
+    const system: Array<Record<string, unknown>> = [
+      {
+        type: "text",
+        text: buildSystemInstructions(task, initialContext),
+        cache_control: { type: "ephemeral" },
+      },
+    ];
     if (initialContext && !isDistillRun(task)) {
-      systemInstructions += `\n\nCurrent Workspace & Terminal Snapshot:\n${boundedContext(JSON.stringify(initialContext), tuning.snapshotMaxChars)}`;
+      system.push({
+        type: "text",
+        text: `Current Workspace & Terminal Snapshot:\n${boundedContext(JSON.stringify(initialContext), tuning.snapshotMaxChars)}`,
+      });
     }
 
     const messages: Array<Record<string, unknown>> = task.messages
@@ -2068,6 +2083,10 @@ export class DirectAgentRuntime implements AgentRuntime {
 
     const maxTurns = tuning.maxTurns;
     let finalOutput = "";
+    // Token use of the whole run, summed over its turns. Input counts every
+    // token the model read, whether billed in full, written to the cache or
+    // read from it.
+    const total = { input_tokens: 0, output_tokens: 0 };
 
     for (let turn = 0; turn < maxTurns && !this.cancelled; turn++) {
       while (this.steeringQueue.length > 0) {
@@ -2084,8 +2103,9 @@ export class DirectAgentRuntime implements AgentRuntime {
         body: JSON.stringify({
           model: model.model,
           max_tokens: tuning.maxOutputTokens,
-          temperature: tuning.temperature,
-          system: systemInstructions,
+          // No `temperature`: current Claude models reject sampling parameters.
+          cache_control: { type: "ephemeral" },
+          system,
           messages,
           ...(tools.length > 0 ? { tools } : {}),
           stream: true,
@@ -2101,7 +2121,9 @@ export class DirectAgentRuntime implements AgentRuntime {
 
       let turnText = "";
       const toolCalls = new Map<number, ParsedToolCall>();
-      let usage: Record<string, number> | undefined;
+      let turnOutputTokens = 0;
+      let turnInputTokens = 0;
+      let sawMessageStart = false;
 
       await consumeSseStream(response.body, (data) => {
         let evt: Record<string, unknown>;
@@ -2111,7 +2133,16 @@ export class DirectAgentRuntime implements AgentRuntime {
           return;
         }
         const type = String(evt.type || "");
-        if (type === "content_block_start" && evt.content_block && typeof evt.content_block === "object") {
+        if (type === "message_start" && evt.message && typeof evt.message === "object") {
+          sawMessageStart = true;
+          // The input side of the turn is reported once, when the message starts.
+          const u = (evt.message as { usage?: Record<string, number> }).usage;
+          if (u)
+            total.input_tokens +=
+              (u.input_tokens ?? 0) +
+              (u.cache_creation_input_tokens ?? 0) +
+              (u.cache_read_input_tokens ?? 0);
+        } else if (type === "content_block_start" && evt.content_block && typeof evt.content_block === "object") {
           const block = evt.content_block as Record<string, unknown>;
           const idx = typeof evt.index === "number" ? evt.index : 0;
           if (block.type === "tool_use") {
@@ -2132,13 +2163,16 @@ export class DirectAgentRuntime implements AgentRuntime {
             if (call) call.argumentsJson += delta.partial_json;
           }
         } else if (type === "message_delta" && evt.usage && typeof evt.usage === "object") {
+          // Cumulative for the message; the last one of a turn is its total.
           const u = evt.usage as Record<string, number>;
-          usage = {
-            input_tokens: u.input_tokens ?? 0,
-            output_tokens: u.output_tokens ?? 0,
-          };
+          turnOutputTokens = u.output_tokens ?? turnOutputTokens;
+          // Some Anthropic-compatible endpoints report input only here.
+          if (!sawMessageStart) turnInputTokens = u.input_tokens ?? turnInputTokens;
         }
       });
+      total.output_tokens += turnOutputTokens;
+      total.input_tokens += turnInputTokens;
+      const usage = { ...total };
 
       const calls = [...toolCalls.values()].filter((c) => c.name);
       if (turnText) finalOutput = turnText;
@@ -2181,7 +2215,11 @@ export class DirectAgentRuntime implements AgentRuntime {
       messages.push({ role: "user", content: toolResults });
     }
 
-    onEvent({ type: "run.completed", output: finalOutput || "Completed actions." });
+    onEvent({
+      type: "run.completed",
+      output: finalOutput || "Completed actions.",
+      usage: { ...total },
+    });
   }
 }
 

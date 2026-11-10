@@ -48,6 +48,13 @@ explicitly enabled presentation on top of the same terminal authority.
   configuration are forwarded to every provider, and attached images are sent to
   all three. Fallback models come from `DEFAULT_AI_MODELS` in
   `src/shared/types/ai.ts`.
+  The Anthropic loop uses prompt caching: the instructions are a system block
+  of their own with a cache breakpoint, the per-run workspace snapshot follows
+  it, and a top-level `cache_control` moves the conversation breakpoint each
+  tool turn. It sends no `temperature` (current Claude models reject sampling
+  parameters) and reports the run's tokens summed over all turns, input read
+  from `message_start` including cache writes and reads. A run may only call
+  the tools it was offered.
 - **`KnowledgeBaseService`** — hybrid search with `@orama/orama` (BM25 plus
   bilingual Swedish/English concept vectors), memory ranking and ingestion of
   runbooks from a real S3 storage profile (`kb-ingest-s3` →

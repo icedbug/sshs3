@@ -254,7 +254,7 @@ describe("HubService memory proposals", () => {
     // One call for the session, one for the proposal run; the second carries no tools and no snapshot.
     expect(bodies).toHaveLength(2);
     expect(bodies[1].tools).toBeUndefined();
-    expect(String(bodies[1].system)).not.toContain("Workspace & Terminal Snapshot");
+    expect(JSON.stringify(bodies[1].system)).not.toContain("Workspace & Terminal Snapshot");
     expect(JSON.stringify(bodies[1].messages)).toContain("Why do SSE streams drop?");
 
     const proposal = hub.store.data.memoryProposals![0];

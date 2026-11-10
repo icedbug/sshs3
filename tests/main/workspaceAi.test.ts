@@ -1902,7 +1902,8 @@ describe("Production multi-user workspace sync & auto-memory", () => {
       () => {},
     );
     expect(anthropicBody.max_tokens).toBe(6144);
-    expect(anthropicBody.temperature).toBe(0.35);
+    // Sampling parameters are not sent to Anthropic: current Claude models reject them.
+    expect(anthropicBody.temperature).toBeUndefined();
     const sentMessages = anthropicBody.messages as Array<{
       role: string;
       content: Array<{ type: string }>;
