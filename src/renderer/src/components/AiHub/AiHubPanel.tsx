@@ -290,7 +290,7 @@ export function AiHubPanel({
   const allMentionOptions = (() => {
     if (!hub) return [];
     const items: Array<{ label: string; subtitle: string; text: string }> = [];
-    const recent = (hub.activityLog ?? []).slice(0, 20);
+    const recent = (hub.activityLog ?? []).filter((e) => e.kind !== "chat").slice(0, 20);
     items.push({
       label: "@team-changes",
       subtitle: "Recent config & command changes by your team",
@@ -1047,11 +1047,11 @@ export function AiHubPanel({
                       </button>
                     </div>
                     <div className="ai-sidebar-list">
-                      {!hub.tasks.some((t) => !t.workforceRunId) && (
+                      {!hub.tasks.some((t) => !t.workforceRunId && !t.chatMessageId) && (
                         <small className="ai-hint">No conversations yet.</small>
                       )}
-                      {/* A workforce specialist's run is shown inside its workforce conversation. */}
-                      {[...hub.tasks].filter((t) => !t.workforceRunId).reverse().map((t) => (
+                      {/* A workforce specialist's run is shown in its workforce conversation, a chat answer in the workspace chat. */}
+                      {[...hub.tasks].filter((t) => !t.workforceRunId && !t.chatMessageId).reverse().map((t) => (
                         <button
                           key={t.id}
                           className="ai-sidebar-item"
@@ -1173,7 +1173,7 @@ export function AiHubPanel({
                       <strong>Recent Team Activity</strong>
                     </div>
                     <div className="ai-sidebar-list">
-                      {(hub.activityLog ?? []).slice(0, 4).map((evt) => (
+                      {(hub.activityLog ?? []).filter((e) => e.kind !== "chat").slice(0, 4).map((evt) => (
                         <div key={evt.id} className="ai-sidebar-activity">
                           <div className="ai-sidebar-activity-top">
                             <strong>{evt.actor}</strong>
@@ -2681,7 +2681,7 @@ export function AiHubPanel({
                   Config edits, service restarts and infrastructure changes across VMs appear here automatically.
                 </p>
               )}
-              {(hub.activityLog ?? []).map((ev) => (
+              {(hub.activityLog ?? []).filter((e) => e.kind !== "chat").map((ev) => (
                 <article className="ai-card" key={ev.id}>
                   <strong>
                     {ev.actor} · {ev.targetLabel}

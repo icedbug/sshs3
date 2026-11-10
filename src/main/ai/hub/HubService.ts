@@ -86,10 +86,20 @@ import {
 import { boundedContext, safeError } from "./privacy";
 import { createLogger } from "../../log";
 import { runWorkforce } from "./WorkforceRunner";
+import {
+  AI_CHAT_ACTOR,
+  MAX_CHAT_TEXT,
+  buildChatAnswerPrompt,
+  mentionsAi,
+  normalizeChannel,
+} from "./WorkspaceChat";
 
 const log = createLogger("ai-hub");
 const active = (t: AgentTask): boolean =>
   ["queued", "running", "waiting"].includes(t.status);
+/** A read-only run the hub started itself (workforce specialist, chat answer). */
+const isBackgroundRun = (t: AgentTask | undefined): boolean =>
+  Boolean(t?.workforceRunId || t?.chatMessageId);
 export interface HubHost {
   changed(): void;
   inventoryTargets(): Promise<InventoryTarget[]>;
@@ -1521,6 +1531,23 @@ export class HubService {
         this.s3Workspace.schedulePush(400);
         break;
       }
+      case "chat-post": {
+        const text = requiredText(request.text);
+        if (text.length > MAX_CHAT_TEXT)
+          throw new Error(
+            `A chat message can be at most ${MAX_CHAT_TEXT} characters`,
+          );
+        const channel = normalizeChannel(request.channel);
+        const message = await this.postChatMessage({
+          actor: await this.resolveActorName(),
+          actorKind: "human",
+          text,
+          channel,
+          replyTo: request.replyTo,
+        });
+        if (mentionsAi(text)) this.answerChatMention(message);
+        break;
+      }
       case "server-describe": {
         const pid = requiredText(request.profileId);
         if (
@@ -2218,7 +2245,7 @@ export class HubService {
   private async start(
     input: StartAgentTask,
     schedule?: AgentSchedule,
-    workforce?: { workforceRunId: string; title: string },
+    readOnly?: { workforceRunId?: string; chatMessageId?: string; title: string },
   ): Promise<AgentTask> {
     if (!["advice", "assisted", "autonomous"].includes(input.mode))
       throw new Error("Invalid autonomy mode");
@@ -2249,8 +2276,13 @@ export class HubService {
       : undefined;
     const task: AgentTask = {
       id: crypto.randomUUID(),
-      title: workforce?.title ?? prompt.slice(0, 100),
-      ...(workforce ? { workforceRunId: workforce.workforceRunId } : {}),
+      title: readOnly?.title ?? prompt.slice(0, 100),
+      ...(readOnly?.workforceRunId
+        ? { workforceRunId: readOnly.workforceRunId }
+        : {}),
+      ...(readOnly?.chatMessageId
+        ? { chatMessageId: readOnly.chatMessageId }
+        : {}),
       mode: input.mode,
       agentId: matchedAgent?.id ?? input.agentId,
       agentName: matchedAgent?.name ?? input.agentName,
@@ -2312,9 +2344,9 @@ export class HubService {
     // not take one of the user's three slots.
     const ownRuns = [...this.runtimes.keys(), ...this.launches.keys()].filter(
       (id) =>
-        !this.store.data.tasks.find((t) => t.id === id)?.workforceRunId,
+        !isBackgroundRun(this.store.data.tasks.find((t) => t.id === id)),
     ).length;
-    if (!task.workforceRunId && ownRuns >= 3)
+    if (!isBackgroundRun(task) && ownRuns >= 3)
       throw new Error(
         "Three tasks are already running; pause one before starting another",
       );
@@ -2477,8 +2509,8 @@ export class HubService {
           this.runtimes.delete(task.id);
         this.settled(task.id);
         this.changed();
-        // A specialist is one part of a workforce run, not a task of its own.
-        if (!task.workforceRunId)
+        // A specialist or a chat answer is not a task of the user's own.
+        if (!isBackgroundRun(task))
           this.notify(
             task.status === "completed"
               ? "Task finished"
@@ -2810,6 +2842,86 @@ export class HubService {
       ...this.store.data.s3SyncedServers.filter((s) => s.id !== server.id),
       clean,
     ];
+  }
+
+  /** Adds a chat message to the shared activity log and sends it to the team. */
+  private async postChatMessage(input: {
+    actor: string;
+    actorKind: "human" | "ai";
+    text: string;
+    channel: string;
+    replyTo?: string;
+    detail?: string;
+  }): Promise<WorkspaceActivityEvent> {
+    const event: WorkspaceActivityEvent = {
+      id: crypto.randomUUID(),
+      at: Date.now(),
+      actor: boundedContext(input.actor, 80),
+      actorKind: input.actorKind,
+      targetLabel: `#${input.channel}`,
+      kind: "chat",
+      channel: input.channel,
+      summary: boundedContext(input.text, 16_000),
+      ...(input.replyTo ? { replyTo: input.replyTo } : {}),
+      ...(input.detail ? { detail: boundedContext(input.detail, 2000) } : {}),
+    };
+    this.appendActivityEvent(event);
+    await this.host.recordWorkspaceActivity?.(event).catch(() => {});
+    this.s3Workspace.schedulePush(400);
+    this.changed();
+    return event;
+  }
+
+  /**
+   * Answers an `@ai` mention with a read-only model run and posts the answer
+   * to the same channel. Only the machine of the person who wrote the mention
+   * runs it, so a message synced to the team is answered once. A run that
+   * cannot produce an answer posts the reason instead of staying silent.
+   */
+  private answerChatMention(question: WorkspaceActivityEvent): void {
+    const channel = normalizeChannel(question.channel);
+    const answer = async (): Promise<void> => {
+      let text: string;
+      try {
+        const task = await this.start(
+          {
+            prompt: buildChatAnswerPrompt(
+              question,
+              this.store.data.activityLog ?? [],
+            ),
+            mode: "advice",
+            agentName: "Workspace assistant",
+            maxCommands: 1,
+            maxMinutes: 5,
+          },
+          undefined,
+          {
+            chatMessageId: question.id,
+            title: `Chat · ${boundedContext(question.summary, 80)}`,
+          },
+        );
+        await this.whenSettled(task);
+        const reply =
+          task.messages.filter((m) => m.role === "assistant").at(-1)?.text ??
+          "";
+        text =
+          task.status === "completed" && reply.trim()
+            ? reply
+            : `I could not answer: ${task.error ?? `the run ended as ${task.status}`}`;
+      } catch (error) {
+        text = `I could not answer: ${safeError(error)}`;
+      }
+      if (this.disposed) return;
+      await this.postChatMessage({
+        actor: AI_CHAT_ACTOR,
+        actorKind: "ai",
+        text,
+        channel,
+        replyTo: question.id,
+        detail: `Asked by ${question.actor}`,
+      });
+    };
+    void answer().catch((e) => log.warn("Chat answer failed", safeError(e)));
   }
 
   private appendActivityEvent(event: WorkspaceActivityEvent): void {

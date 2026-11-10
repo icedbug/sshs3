@@ -86,6 +86,17 @@ explicitly enabled presentation on top of the same terminal authority.
   Specialist runs are stored as tasks tagged `workforceRunId` and shown inside
   the workforce conversation. Only demo mode plays a scripted run, marked
   `simulated`.
+- **Workspace chat (`WorkspaceChat.ts`, `components/AiHub/WorkspaceChat.tsx`)** —
+  a chat message is a `chat` event on the team activity log (`channel`,
+  `replyTo`, `actorKind`), so it reaches teammates through the transports the
+  log already has: the S3 team workspace, Team Vault, the shared workspace file
+  and, on the Web Server, directly between signed-in users. `chat-post` stores
+  the message (secrets masked); a message that mentions `@ai` is answered in the
+  channel by one read-only model run on the poster's own machine, which reads
+  the earlier conversation and the workspace through `workspace_context` /
+  `sshs3_kb_search`. A run that cannot answer posts the reason. Chat is given
+  to agents as `recentTeamChat`, apart from `recentTeamActivity`. Messages share
+  the activity log's 500-event cap and retention.
 - **`McpClientManager`** — MCP over stdio and HTTP with a catalog of nine
   presets (`MCP_MARKETPLACE_CATALOG`).
 - **`S3WorkspaceSyncService`** — team workspace sync over an S3 bucket. Memory

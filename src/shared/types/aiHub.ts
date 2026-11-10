@@ -103,6 +103,11 @@ export interface AgentTask {
    * is offered only read-only tools and is not listed as a conversation.
    */
   workforceRunId?: string;
+  /**
+   * Set on the read-only run that answers an `@ai` mention in the workspace
+   * chat: the id of the chat message it answers. Not listed as a conversation.
+   */
+  chatMessageId?: string;
 }
 export interface MemoryEntry {
   id: string;
@@ -616,6 +621,12 @@ export type HubRequest =
       cluster?: string;
       targetCluster?: string;
     }
+  /**
+   * Posts a message to the workspace chat (shared with the team through the
+   * activity log's sync). A message that mentions `@ai` is answered in the
+   * channel by a read-only model run on the poster's own machine.
+   */
+  | { action: "chat-post"; text: string; channel?: string; replyTo?: string }
   | { action: "terminal-failure-dismiss"; sessionId: string }
   | { action: "layout-event-ack"; id: string }
   | {

@@ -40,6 +40,7 @@ import {
   type NavigationDirection,
 } from '../lib/spatialNavigation';
 import { hubRequest, useHub } from '../lib/aiHub';
+import { WorkspaceChat } from './AiHub/WorkspaceChat';
 import { isWebBrowserMode } from '../lib/webClientBridge';
 
 export interface LandingViewProps {
@@ -261,7 +262,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
   const [aiQuickPrompt, setAiQuickPrompt] = useState('');
   const [aiQuickAgentId, setAiQuickAgentId] = useState('');
   const [showClusterTopology, setShowClusterTopology] = useState(true);
-  const [rightColTab, setRightColTab] = useState<'activity' | 'memory' | 'kb' | 'workforce'>('activity');
+  const [rightColTab, setRightColTab] = useState<'chat' | 'activity' | 'memory' | 'kb' | 'workforce'>('chat');
   const [memTitle, setMemTitle] = useState('');
   const [memText, setMemText] = useState('');
   const [memKind, setMemKind] = useState<'memory' | 'skill'>('memory');
@@ -503,7 +504,8 @@ export const LandingView: React.FC<LandingViewProps> = ({
   ]);
 
   const activityLog: WorkspaceActivityEvent[] = useMemo(() => {
-    return (hub?.activityLog ?? []).slice(0, 25);
+    // Chat messages travel on the same log and are shown in the chat tab.
+    return (hub?.activityLog ?? []).filter((e) => e.kind !== 'chat').slice(0, 25);
   }, [hub?.activityLog]);
 
   const latestActivityByServer = useMemo(() => {
@@ -1653,10 +1655,11 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="flex items-center gap-2">
                       <span className="rounded-md bg-emerald-500/20 px-2 py-0.5 text-[10.5px] font-bold text-emerald-300 border border-emerald-500/30">
-                        ⚡ Fullspäckad Out-of-the-Box
+                        ⚡ Koppla din AI
                       </span>
                       <span className="text-xs font-semibold text-txt-primary">
-                        6 Specialist-agenter, 8 @kb Runbooks, 6 Skills & 12 SRE-snippets är redan förladdade — koppla bara din AI:
+                        {/* Counts are this workspace's own content, not a promise of preloaded material. */}
+                        {`Workspacet har ${(hub?.agents ?? []).length} agent(er), ${(hub?.kbDocuments ?? []).length} runbooks och ${(hub?.memories ?? []).filter((m) => m.kind === 'skill').length} skills. Välj hur AI:n ska köras:`}
                       </span>
                     </div>
                     <button
@@ -3084,11 +3087,23 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   </button>
                 </div>
 
-                {/* 4-Tab Switcher: Aktivitet / Team Memory / Runbooks (KB) / Swarm & MCP */}
+                {/* Tab switcher: Chatt / Aktivitet / Team Memory / Runbooks (KB) / Swarm & MCP */}
                 <div
                   data-testid="workspace-right-tabs"
-                  className="grid grid-cols-2 sm:grid-cols-4 gap-1 rounded-lg border border-border-subtle bg-app-card p-1"
+                  className="grid grid-cols-2 sm:grid-cols-5 gap-1 rounded-lg border border-border-subtle bg-app-card p-1"
                 >
+                  <button
+                    type="button"
+                    data-testid="right-tab-chat"
+                    onClick={() => setRightColTab('chat')}
+                    className={`rounded-md px-1.5 py-1 text-[10px] font-semibold transition-all ${
+                      rightColTab === 'chat'
+                        ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40 shadow-sm'
+                        : 'text-txt-muted hover:text-txt-primary'
+                    }`}
+                  >
+                    💬 Chatt
+                  </button>
                   <button
                     type="button"
                     data-testid="right-tab-activity"
@@ -3138,6 +3153,17 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     🤝 Swarm ({(hub?.workforceRuns ?? []).length})
                   </button>
                 </div>
+
+                {rightColTab === 'chat' && (
+                  <div data-testid="right-panel-chat">
+                    <WorkspaceChat
+                      hub={hub}
+                      request={hubRequest}
+                      // The Web Server shares the workspace between its signed-in users without a bucket.
+                      teamShared={isWebBrowserMode() ? true : undefined}
+                    />
+                  </div>
+                )}
 
                 {rightColTab === 'activity' && (
                   <>
