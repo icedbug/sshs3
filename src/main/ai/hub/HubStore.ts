@@ -20,6 +20,48 @@ import type {
   WorkspaceServerSummary,
 } from "../../../shared/types/aiHub";
 import { maskContext } from "./privacy";
+import {
+  decryptSecretValue,
+  encryptSecretValue,
+} from "../../crypto/SecretFieldCrypto";
+
+/**
+ * Parts of the store that the user wrote as configuration or documents. They
+ * are saved as written: masking them would rewrite a runbook that mentions
+ * `password=…` and replace an MCP server's `Bearer` token with `[redacted]`,
+ * so it no longer authenticates after a restart. Everything else in the store
+ * is captured context (terminal output, messages, command results) and is
+ * masked on its way to disk. All of it is masked again before it reaches a
+ * model or a teammate (boundedContext, the sync payloads).
+ */
+const SAVED_AS_WRITTEN = new Set<keyof HubData>([
+  "kbDocuments",
+  "mcpServers",
+  "agents",
+]);
+
+/** An MCP server's credentials: its header and environment values, and a URL that may carry a password. */
+function mapMcpSecrets(
+  servers: McpServerConfig[] | undefined,
+  transform: (value: string) => string,
+): McpServerConfig[] | undefined {
+  const values = (
+    record: Record<string, string> | undefined,
+  ): Record<string, string> | undefined =>
+    record &&
+    Object.fromEntries(
+      Object.entries(record).map(([k, v]) => [
+        k,
+        typeof v === "string" ? transform(v) : v,
+      ]),
+    );
+  return servers?.map((server) => ({
+    ...server,
+    ...(server.headers ? { headers: values(server.headers) } : {}),
+    ...(server.env ? { env: values(server.env) } : {}),
+    ...(server.url ? { url: transform(server.url) } : {}),
+  }));
+}
 
 export interface SharedWorkspaceFilePayload {
   version: 1;
@@ -128,6 +170,10 @@ export class HubStore {
         ...value,
         preferences: { ...defaultHubData().preferences, ...value.preferences },
       };
+      this.data.mcpServers = mapMcpSecrets(
+        this.data.mcpServers,
+        decryptSecretValue,
+      );
       for (const task of this.data.tasks) {
         if (["running", "queued", "waiting"].includes(task.status)) {
           task.status = "interrupted";
@@ -201,7 +247,16 @@ export class HubStore {
                 Object.entries(value).map(([k, v]) => [k, clean(v)]),
               )
             : value;
-    const content = JSON.stringify(clean(this.data));
+    const content = JSON.stringify({
+      ...Object.fromEntries(
+        Object.entries(this.data).map(([key, value]) => [
+          key,
+          SAVED_AS_WRITTEN.has(key as keyof HubData) ? value : clean(value),
+        ]),
+      ),
+      // Encrypted with the OS keyring where one exists (plain otherwise, as for saved profiles).
+      mcpServers: mapMcpSecrets(this.data.mcpServers, encryptSecretValue),
+    });
     const write = async (): Promise<void> => {
       await fs.mkdir(path.dirname(this.file), { recursive: true, mode: 0o700 });
       const temporary = `${this.file}.tmp-${process.pid}-${crypto.randomUUID()}`;
