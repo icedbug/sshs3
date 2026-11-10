@@ -10,6 +10,8 @@ import type {
   InventoryEntry,
   KbDocument,
   LocalServerAuthOverride,
+  MemoryDistillStatus,
+  MemoryProposal,
   McpServerConfig,
   MemoryEntry,
   MissionAgent,
@@ -89,6 +91,11 @@ export interface HubData {
   preferences: HubPreferences;
   tasks: AgentTask[];
   memories: MemoryEntry[];
+  /** Suggested memories awaiting a person's decision; local, never synced. */
+  memoryProposals?: MemoryProposal[];
+  /** Ids of records already read for proposals, newest last, so none is read twice. */
+  distilledSourceIds?: string[];
+  lastMemoryDistill?: MemoryDistillStatus;
   schedules: AgentSchedule[];
   inventory: InventoryEntry[];
   history: ContextSource[];

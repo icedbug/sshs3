@@ -13,6 +13,7 @@ import type {
   KbDocument,
   LocalServerAuthOverride,
   McpServerConfig,
+  MemoryDistillStatus,
   MemoryEntry,
   MissionAgent,
   S3WorkspaceConfig,
@@ -87,6 +88,15 @@ import { boundedContext, safeError } from "./privacy";
 import { createLogger } from "../../log";
 import { runWorkforce } from "./WorkforceRunner";
 import {
+  MAX_STORED_PROPOSALS,
+  activityTranscript,
+  buildDistillPrompt,
+  parseDistillAnswer,
+  taskTranscript,
+  worthDistilling,
+  type DistillSource,
+} from "./MemoryDistiller";
+import {
   AI_CHAT_ACTOR,
   MAX_CHAT_TEXT,
   buildChatAnswerPrompt,
@@ -99,7 +109,7 @@ const active = (t: AgentTask): boolean =>
   ["queued", "running", "waiting"].includes(t.status);
 /** A read-only run the hub started itself (workforce specialist, chat answer). */
 const isBackgroundRun = (t: AgentTask | undefined): boolean =>
-  Boolean(t?.workforceRunId || t?.chatMessageId);
+  Boolean(t?.workforceRunId || t?.chatMessageId || t?.distillSourceId);
 export interface HubHost {
   changed(): void;
   inventoryTargets(): Promise<InventoryTarget[]>;
@@ -280,6 +290,8 @@ export class HubService {
   private settleWaiters = new Map<string, Array<() => void>>();
   /** Workforce run id → the conversation task that shows it. */
   private workforceLeads = new Map<string, string>();
+  /** Records being read for memory proposals right now. */
+  private distilling = new Set<string>();
   private initialized?: Promise<void>;
   private tickTimer?: NodeJS.Timeout;
   private saveTimer?: NodeJS.Timeout;
@@ -1111,6 +1123,9 @@ export class HubService {
       sessions: this.terminals.list(),
       tasks: allTasks,
       memories: allMemories,
+      memoryProposals: this.store.data.memoryProposals ?? [],
+      memoryDistillRunning: this.distilling.size > 0,
+      lastMemoryDistill: this.store.data.lastMemoryDistill,
       schedules: isDemoMode()
         ? [
             ...this.store.data.schedules,
@@ -1238,6 +1253,9 @@ export class HubService {
           for (const key of ["background", "autoStart", "inventory"] as const)
             if (p[key] !== undefined)
               this.store.data.preferences[key] = p[key] === true;
+          if (p.proposeMemories !== undefined)
+            this.store.data.preferences.proposeMemories =
+              p.proposeMemories === true;
           if (p.sharedWorkspacePath !== undefined) {
             const cleanedPath = p.sharedWorkspacePath.trim();
             if (cleanedPath) {
@@ -1529,6 +1547,70 @@ export class HubService {
         this.appendActivityEvent(event);
         await this.host.recordWorkspaceActivity?.(event).catch(() => {});
         this.s3Workspace.schedulePush(400);
+        break;
+      }
+      case "memory-proposal-accept": {
+        const proposal = (this.store.data.memoryProposals ?? []).find(
+          (p) => p.id === request.id,
+        );
+        if (!proposal) throw new Error("Proposal not found");
+        const title = request.title?.trim() || proposal.title;
+        const text = request.text?.trim() || proposal.text;
+        if (proposal.op === "update") {
+          const target = this.store.data.memories.find(
+            (m) => m.id === proposal.targetId,
+          );
+          if (!target)
+            throw new Error(
+              "The memory this proposal updates no longer exists; reject the proposal or save it as a new memory",
+            );
+          await this.saveMemoryInternal({
+            id: target.id,
+            kind: target.kind,
+            tier: target.tier,
+            cluster: target.cluster,
+            scope: target.scope,
+            title,
+            text,
+          });
+        } else {
+          await this.saveMemoryInternal({
+            kind: proposal.kind,
+            tier: "archival",
+            scope: proposal.scope,
+            title,
+            text,
+            autoLearned: true,
+          });
+        }
+        this.store.data.memoryProposals = (
+          this.store.data.memoryProposals ?? []
+        ).filter((p) => p.id !== proposal.id);
+        break;
+      }
+      case "memory-proposal-reject": {
+        this.store.data.memoryProposals = (
+          this.store.data.memoryProposals ?? []
+        ).filter((p) => p.id !== request.id);
+        break;
+      }
+      case "memory-distill-activity": {
+        const events = (this.store.data.activityLog ?? []).slice(-80);
+        const last = events.at(-1);
+        if (!last) throw new Error("There is no team activity to read yet");
+        const status = await this.proposeMemoriesFrom(
+          {
+            id: `activity:${last.id}`,
+            title: "Recent team activity and chat",
+            transcript: activityTranscript(events),
+          },
+          events
+            .slice(-20)
+            .map((e) => `${e.targetLabel} ${e.summary}`)
+            .join(" "),
+          { again: true },
+        );
+        if (status?.error) throw new Error(status.error);
         break;
       }
       case "chat-post": {
@@ -2245,7 +2327,12 @@ export class HubService {
   private async start(
     input: StartAgentTask,
     schedule?: AgentSchedule,
-    readOnly?: { workforceRunId?: string; chatMessageId?: string; title: string },
+    readOnly?: {
+      workforceRunId?: string;
+      chatMessageId?: string;
+      distillSourceId?: string;
+      title: string;
+    },
   ): Promise<AgentTask> {
     if (!["advice", "assisted", "autonomous"].includes(input.mode))
       throw new Error("Invalid autonomy mode");
@@ -2282,6 +2369,9 @@ export class HubService {
         : {}),
       ...(readOnly?.chatMessageId
         ? { chatMessageId: readOnly.chatMessageId }
+        : {}),
+      ...(readOnly?.distillSourceId
+        ? { distillSourceId: readOnly.distillSourceId }
         : {}),
       mode: input.mode,
       agentId: matchedAgent?.id ?? input.agentId,
@@ -2575,6 +2665,19 @@ export class HubService {
       if (task.status === "completed" || task.status === "failed") {
         this.reflectTaskCompletion(task);
       }
+      if (
+        !isBackgroundRun(task) &&
+        this.store.data.preferences.proposeMemories !== false &&
+        worthDistilling(task)
+      )
+        void this.proposeMemoriesFrom(
+          {
+            id: `task:${task.id}`,
+            title: `Session: ${task.title}`,
+            transcript: taskTranscript(task),
+          },
+          `${task.title} ${task.target?.label ?? ""}`,
+        ).catch((e) => log.warn("Memory proposal run failed", safeError(e)));
     }
     task.updatedAt = Date.now();
     this.changed();
@@ -2648,7 +2751,8 @@ export class HubService {
     }, 2000);
   }
   private notify(title: string, body: string): void {
-    if (Notification.isSupported()) {
+    // Absent where there is no desktop to notify (the web server's Electron stand-in).
+    if (Notification?.isSupported?.()) {
       const notification = new Notification({
         title: `sshs3 · ${title}`,
         body: boundedContext(body, 160),
@@ -2842,6 +2946,91 @@ export class HubService {
       ...this.store.data.s3SyncedServers.filter((s) => s.id !== server.id),
       clean,
     ];
+  }
+
+  /**
+   * Has the model read one record and stores what it proposes to remember
+   * (MemoryDistiller). A record is read once unless `again` is set. Proposals
+   * stay local and unused until a person accepts them. The outcome, including
+   * a failed or unusable model answer, is kept as `lastMemoryDistill`.
+   */
+  private async proposeMemoriesFrom(
+    source: DistillSource,
+    query: string,
+    opts: { again?: boolean } = {},
+  ): Promise<MemoryDistillStatus | undefined> {
+    const seen = this.store.data.distilledSourceIds ?? [];
+    if (this.distilling.has(source.id)) return undefined;
+    if (!opts.again && seen.includes(source.id)) return undefined;
+    if (isDemoMode()) return undefined; // the demo copilot is scripted, it reads nothing
+    this.distilling.add(source.id);
+    this.changed();
+    const finish = (
+      proposed: number,
+      error?: string,
+    ): MemoryDistillStatus => {
+      const status: MemoryDistillStatus = {
+        at: Date.now(),
+        sourceTitle: boundedContext(source.title, 160),
+        proposed,
+        ...(error ? { error } : {}),
+      };
+      this.store.data.lastMemoryDistill = status;
+      this.store.data.distilledSourceIds = [
+        ...(this.store.data.distilledSourceIds ?? []).filter(
+          (id) => id !== source.id,
+        ),
+        source.id,
+      ].slice(-300);
+      return status;
+    };
+    try {
+      // Only team memory is compared and proposed: a personal note stays private.
+      const shared = this.store.data.memories.filter(
+        (m) => m.scope !== "personal",
+      );
+      const existing = this.kb.rankMemories(shared, query, undefined, 10);
+      const task = await this.start(
+        {
+          prompt: buildDistillPrompt(source, existing),
+          mode: "advice",
+          agentName: "Memory",
+          maxCommands: 1,
+          maxMinutes: 5,
+        },
+        undefined,
+        {
+          distillSourceId: source.id,
+          title: `Memory · ${boundedContext(source.title, 80)}`,
+        },
+      );
+      await this.whenSettled(task);
+      const answer =
+        task.messages.filter((m) => m.role === "assistant").at(-1)?.text ?? "";
+      if (task.status !== "completed")
+        return finish(0, task.error ?? `The run ended as ${task.status}.`);
+      const proposals = parseDistillAnswer(answer, source, existing);
+      if (!proposals)
+        return finish(0, "The model did not answer in the requested format.");
+      const pending = this.store.data.memoryProposals ?? [];
+      const fresh = proposals.filter(
+        (p) =>
+          !pending.some(
+            (q) =>
+              q.text === p.text ||
+              (p.op === "update" && q.op === "update" && q.targetId === p.targetId),
+          ),
+      );
+      this.store.data.memoryProposals = [...pending, ...fresh].slice(
+        -MAX_STORED_PROPOSALS,
+      );
+      return finish(fresh.length);
+    } catch (error) {
+      return finish(0, safeError(error));
+    } finally {
+      this.distilling.delete(source.id);
+      this.changed();
+    }
   }
 
   /** Adds a chat message to the shared activity log and sends it to the team. */

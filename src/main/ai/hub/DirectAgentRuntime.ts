@@ -992,10 +992,19 @@ export function isReadOnlyRun(task: AgentTask): boolean {
   return Boolean(task.workforceRunId || task.chatMessageId);
 }
 
+/**
+ * A run that proposes memories from one record (MemoryDistiller). It answers
+ * from its prompt alone: no tools, and no workspace snapshot beside the record.
+ */
+export function isDistillRun(task: AgentTask): boolean {
+  return Boolean(task.distillSourceId);
+}
+
 export function toolsForTask(
   task: AgentTask,
   initialContext?: unknown,
 ): FunctionToolDef[] {
+  if (isDistillRun(task)) return [];
   if (isReadOnlyRun(task))
     return AGENT_TOOLS.filter((t) => READ_ONLY_RUN_TOOLS.has(t.name));
   const activeAgent = resolveActiveAgent(task, initialContext);
@@ -1105,6 +1114,8 @@ function buildSystemInstructions(
   task: AgentTask,
   initialContext?: unknown,
 ): string {
+  if (isDistillRun(task))
+    return "You maintain a team's long-term memory about its infrastructure. Follow the instructions in the message and answer with the requested JSON only.";
   const activeAgent = resolveActiveAgent(task, initialContext);
   if (isReadOnlyRun(task)) {
     // The general instructions describe tools this run does not have.
@@ -1686,7 +1697,7 @@ export class DirectAgentRuntime implements AgentRuntime {
       });
     }
 
-    if (initialContext) {
+    if (initialContext && !isDistillRun(task)) {
       inputItems.unshift({
         type: "message",
         role: "user",
@@ -1726,7 +1737,7 @@ export class DirectAgentRuntime implements AgentRuntime {
           model: resolvedModel,
           instructions,
           input: inputItems,
-          tools: wireTools,
+          ...(wireTools.length > 0 ? { tools: wireTools } : {}),
           max_output_tokens: tuning.maxOutputTokens,
           reasoning: { effort: tuning.reasoningEffort },
           temperature: tuning.temperature,
@@ -1852,7 +1863,7 @@ export class DirectAgentRuntime implements AgentRuntime {
     const instructions = buildSystemInstructions(task, initialContext);
     const messages: Array<Record<string, unknown>> = [{ role: "system", content: instructions }];
 
-    if (initialContext) {
+    if (initialContext && !isDistillRun(task)) {
       messages.push({
         role: "system",
         content: `Current Workspace & Terminal Snapshot:\n${boundedContext(JSON.stringify(initialContext), tuning.snapshotMaxChars)}`,
@@ -1907,7 +1918,7 @@ export class DirectAgentRuntime implements AgentRuntime {
         body: JSON.stringify({
           model: model.model,
           messages,
-          tools,
+          ...(tools.length > 0 ? { tools } : {}),
           max_tokens: tuning.maxOutputTokens,
           temperature: tuning.temperature,
           stream: true,
@@ -2013,7 +2024,7 @@ export class DirectAgentRuntime implements AgentRuntime {
     }
     const tuning = extractAiRuntimeTuning(task, initialContext);
     let systemInstructions = buildSystemInstructions(task, initialContext);
-    if (initialContext) {
+    if (initialContext && !isDistillRun(task)) {
       systemInstructions += `\n\nCurrent Workspace & Terminal Snapshot:\n${boundedContext(JSON.stringify(initialContext), tuning.snapshotMaxChars)}`;
     }
 
@@ -2076,7 +2087,7 @@ export class DirectAgentRuntime implements AgentRuntime {
           temperature: tuning.temperature,
           system: systemInstructions,
           messages,
-          tools,
+          ...(tools.length > 0 ? { tools } : {}),
           stream: true,
         }),
         signal: this.abort.signal,

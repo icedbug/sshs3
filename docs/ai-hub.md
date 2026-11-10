@@ -97,6 +97,20 @@ explicitly enabled presentation on top of the same terminal authority.
   `sshs3_kb_search`. A run that cannot answer posts the reason. Chat is given
   to agents as `recentTeamChat`, apart from `recentTeamActivity`. Messages share
   the activity log's 500-event cap and retention.
+- **`MemoryDistiller` (memory proposals)** — after a finished agent task (and
+  on request for the team's recent activity and chat) one tool-less model run
+  reads the record together with the team memories that already cover the
+  subject and answers with JSON proposals: add a memory/skill or update one it
+  was shown. The answer is validated (team scopes only, an update only of a
+  shown memory, evidence required, at most four) and stored as
+  `memoryProposals`: local, not given to agents and not synced until a person
+  accepts one (`memory-proposal-accept`, optionally with corrected text) or
+  rejects it. An accepted proposal is an ordinary `MemoryEntry` and syncs like
+  one. Personal notes are never shown to that run. `proposeMemories: false`
+  turns the per-task run off; the outcome of the latest run, including an
+  unusable answer, is `lastMemoryDistill`. This is the extract-and-compare
+  method of mem0, done with the configured provider so that it also works with
+  ChatGPT/Codex sign-in and keeps the team's existing memory sync.
 - **`McpClientManager`** — MCP over stdio and HTTP with a catalog of nine
   presets (`MCP_MARKETPLACE_CATALOG`).
 - **`S3WorkspaceSyncService`** — team workspace sync over an S3 bucket. Memory

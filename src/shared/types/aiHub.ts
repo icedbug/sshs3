@@ -108,6 +108,12 @@ export interface AgentTask {
    * chat: the id of the chat message it answers. Not listed as a conversation.
    */
   chatMessageId?: string;
+  /**
+   * Set on the tool-less run that proposes memories from one record
+   * (a finished task, a stretch of team activity): that record's id. Not
+   * listed as a conversation.
+   */
+  distillSourceId?: string;
 }
 export interface MemoryEntry {
   id: string;
@@ -128,6 +134,37 @@ export interface MemoryEntry {
   sourceCommand?: string;
   errorSignature?: string;
   updatedAt: number;
+}
+
+/**
+ * A memory the assistant suggests after reading a finished task or the team's
+ * recent activity. It is not a memory yet: it is not given to agents and not
+ * shared with the team until somebody accepts it.
+ */
+export interface MemoryProposal {
+  id: string;
+  /** `add` a new memory, or `update` the text of the existing memory `targetId`. */
+  op: "add" | "update";
+  targetId?: string;
+  kind: "memory" | "skill";
+  scope: string;
+  title: string;
+  text: string;
+  /** For an update: the text it would replace. */
+  previousText?: string;
+  /** The part of the record the proposal rests on, as the model cited it. */
+  evidence: string;
+  sourceId: string;
+  sourceTitle: string;
+  createdAt: number;
+}
+
+/** The outcome of the latest memory proposal run. */
+export interface MemoryDistillStatus {
+  at: number;
+  sourceTitle: string;
+  proposed: number;
+  error?: string;
 }
 
 export interface OpenSourceEngineInfo {
@@ -382,6 +419,11 @@ export interface HubPreferences {
   retentionDays: number;
   sharedWorkspacePath?: string;
   dismissedBuiltinIds?: string[];
+  /**
+   * Whether a finished agent task is read once more by the model to propose
+   * team memories (one extra model call per task). On unless set to false.
+   */
+  proposeMemories?: boolean;
 }
 export interface MissionAgent {
   id: string;
@@ -483,6 +525,11 @@ export interface HubSnapshot {
   sessions: TerminalSession[];
   tasks: AgentTask[];
   memories: MemoryEntry[];
+  /** Memories the assistant suggests; nothing here is in use until accepted. */
+  memoryProposals?: MemoryProposal[];
+  /** True while a proposal run is reading a record. */
+  memoryDistillRunning?: boolean;
+  lastMemoryDistill?: MemoryDistillStatus;
   schedules: AgentSchedule[];
   inventory: InventoryEntry[];
   activityLog?: WorkspaceActivityEvent[];
@@ -549,6 +596,11 @@ export type HubRequest =
     }
   | { action: "memory-delete"; id: string }
   | { action: "memory-feedback"; id: string; delta: 1 | -1 }
+  /** Saves a proposal as a memory (or applies its update), optionally with edited text. */
+  | { action: "memory-proposal-accept"; id: string; title?: string; text?: string }
+  | { action: "memory-proposal-reject"; id: string }
+  /** Reads the team's recent activity and chat once and proposes memories from it. */
+  | { action: "memory-distill-activity" }
   | { action: "self-learn-reflect"; targetCluster?: string }
   | {
       action: "agent-save";

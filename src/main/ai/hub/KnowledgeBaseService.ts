@@ -775,7 +775,12 @@ export class KnowledgeBaseService {
 
     if (matchIdx >= 0) {
       const prev = existing[matchIdx];
+      // Saving a memory by its id is an edit: the new text replaces the old.
+      // Only a new note that merely resembles an existing one keeps a trace
+      // of what it was merged into.
+      const editedById = Boolean(incoming.id) && incoming.id === prev.id;
       const mergedText =
+        editedById ||
         incoming.text.trim() === prev.text.trim() ||
         incoming.text.includes(prev.text.trim())
           ? incoming.text.trim()

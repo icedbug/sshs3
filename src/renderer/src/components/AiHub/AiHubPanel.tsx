@@ -1,3 +1,4 @@
+import { MemoryProposals } from "./MemoryProposals";
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -3262,10 +3263,12 @@ function Memory({
 
   return (
     <div className="ai-scroll">
-      <h2>🧠 Smart Memory, Voyager Skills & Continuous Self-Learning</h2>
+      <h2>🧠 Memory & skills</h2>
       <p className="ai-hint">
-        Overlapping memories are automatically deduplicated & consolidated (Mem0 pattern). Every terminal failure→fix resolution and completed mission automatically synthesizes reusable skills and reinforces confidence scores (Voyager + Reflexion).
+        What the team has chosen to remember about its infrastructure. Agents read these when they work; team-scoped entries are shared through the workspace sync. A note that closely resembles an existing one is merged into it.
       </p>
+
+      <MemoryProposals hub={hub} act={act} />
 
       {sl && (
         <article className="ai-card" data-testid="self-learning-engine-card">
