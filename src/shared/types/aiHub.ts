@@ -98,6 +98,11 @@ export interface AgentTask {
   maxMinutes: number;
   usage?: { inputTokens: number; outputTokens: number; costUsd?: number };
   verification: "not-verified" | "verified" | "incomplete";
+  /**
+   * Set on a read-only specialist run started by a workforce run. Such a task
+   * is offered only read-only tools and is not listed as a conversation.
+   */
+  workforceRunId?: string;
 }
 export interface MemoryEntry {
   id: string;
@@ -192,9 +197,14 @@ export interface WorkforceStep {
   targetCluster?: string;
   subTask: string;
   status: "queued" | "running" | "completed" | "failed";
+  /** The specialist's own final answer; empty until its model run has finished. */
   findings: string;
   recommendedCommands?: string[];
+  /** Measured wall-clock time of the specialist's run. */
   durationMs?: number;
+  /** The agent task that produced `findings` (absent for scripted demo runs). */
+  taskId?: string;
+  error?: string;
 }
 
 export interface WorkforceRun {
@@ -206,6 +216,9 @@ export interface WorkforceRun {
   status: "running" | "completed" | "failed";
   steps: WorkforceStep[];
   synthesis: string;
+  error?: string;
+  /** True for the scripted demo-mode run: no model was called. */
+  simulated?: boolean;
   createdAt: number;
   updatedAt: number;
 }

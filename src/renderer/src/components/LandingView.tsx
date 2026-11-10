@@ -870,7 +870,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
       await hubRequest({
         action: 'workforce-run',
         prompt:
-          'Genomför en koordinerad Multi-Agent Workforce-revision av våra NetApp ONTAP-, StorageGRID S3- och Kubernetes-kluster. Kontrollera replikeringshälsa, S3 ILM-status och öppna rekommenderade read-only diagnossteg.',
+          'Gå igenom våra delade servrar och kluster: senaste teamändringar, kända problem i kunskapsbasen och vad som bör kontrolleras härnäst.',
       });
     } catch {
       // Non-fatal in offline/mocked tests
@@ -1878,7 +1878,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     void hubRequest({
                       action: 'workforce-run',
                       prompt:
-                        'Kör koordinerad hälsokontroll över NetApp ONTAP, StorageGRID S3 och K8s Trident CSI',
+                        'Gå igenom våra delade servrar och kluster: senaste teamändringar, kända problem i kunskapsbasen och vad som bör kontrolleras härnäst.',
                     }).finally(() => {
                       window.dispatchEvent(
                         new CustomEvent('sshs3:ai-open', {
@@ -3430,7 +3430,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   <div data-testid="right-panel-workforce" className="space-y-2.5">
                     <div className="flex items-center justify-between gap-2">
                       <p className="text-[11px] text-txt-muted">
-                        CAMEL/CrewAI-inspirerad Multi-Agent Workforce &amp; 1-Click MCP Marketplace.
+                        Era Mission Agents undersöker uppdraget var för sig (skrivskyddat) och en sammanställning skrivs.
                       </p>
                       <div className="flex items-center gap-1">
                         <button
@@ -3475,19 +3475,20 @@ export const LandingView: React.FC<LandingViewProps> = ({
                               </span>
                               <span className="rounded-full bg-purple-500/20 px-1.5 py-0.5 text-[9px] font-semibold text-purple-300">
                                 {run.steps.length} agenter · {run.status}
+                                {run.simulated ? ' · demo' : ''}
                               </span>
                             </div>
                             <p className="text-[10.5px] text-txt-secondary line-clamp-2">
-                              {run.synthesis}
+                              {run.error ?? run.synthesis}
                             </p>
                             <div className="flex flex-wrap gap-1 pt-0.5">
                               {run.steps.map((st) => (
                                 <span
                                   key={st.id}
                                   className="rounded border border-border-subtle bg-app px-1.5 py-0.5 text-[9.5px] text-sky-300"
-                                  title={st.findings}
+                                  title={st.error ?? st.findings}
                                 >
-                                  {st.agentIcon} {st.agentName}
+                                  {st.status === 'failed' ? '❌' : st.agentIcon} {st.agentName}
                                 </span>
                               ))}
                             </div>

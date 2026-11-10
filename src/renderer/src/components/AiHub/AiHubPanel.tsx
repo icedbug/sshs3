@@ -1047,10 +1047,11 @@ export function AiHubPanel({
                       </button>
                     </div>
                     <div className="ai-sidebar-list">
-                      {!hub.tasks.length && (
+                      {!hub.tasks.some((t) => !t.workforceRunId) && (
                         <small className="ai-hint">No conversations yet.</small>
                       )}
-                      {[...hub.tasks].reverse().map((t) => (
+                      {/* A workforce specialist's run is shown inside its workforce conversation. */}
+                      {[...hub.tasks].filter((t) => !t.workforceRunId).reverse().map((t) => (
                         <button
                           key={t.id}
                           className="ai-sidebar-item"
@@ -1153,7 +1154,7 @@ export function AiHubPanel({
                           void act({
                             action: "workforce-run",
                             prompt:
-                              "Kör koordinerad AI Workforce-hälsokontroll över alla aktiva kluster (NetApp ONTAP, StorageGRID S3, Ceph & K8s Trident CSI)",
+                              "Gå igenom våra delade servrar och kluster: senaste teamändringar, kända problem i kunskapsbasen och vad som bör kontrolleras härnäst.",
                           }).then((nextSnap) => {
                             const created = nextSnap?.tasks.find(
                               (t) => !prevIds.has(t.id),
@@ -1410,7 +1411,7 @@ export function AiHubPanel({
                           void act({
                             action: "workforce-run",
                             prompt:
-                              "Kör koordinerad AI Workforce-revision över NetApp ONTAP, StorageGRID S3, Ceph och K8s Trident CSI",
+                              "Gå igenom våra delade servrar och kluster: senaste teamändringar, kända problem i kunskapsbasen och vad som bör kontrolleras härnäst.",
                           }).then((nextSnap) => {
                             const created = nextSnap?.tasks.find(
                               (t) => !prevIds.has(t.id),
@@ -3777,7 +3778,13 @@ function AgentsAndMcpView({
           >
             <summary style={{ cursor: "pointer", fontWeight: 600, fontSize: 12 }}>
               ⚡ {run.title} · {run.steps.length} agenter ({run.status})
+              {run.simulated ? " · demo, ingen modell anropad" : ""}
             </summary>
+            {run.error && (
+              <p className="ai-error" style={{ margin: "6px 0 0", fontSize: 12 }}>
+                {run.error}
+              </p>
+            )}
             <div style={{ display: "grid", gap: 6, marginTop: 8 }}>
               {run.steps.map((step) => (
                 <div
@@ -3797,7 +3804,15 @@ function AgentsAndMcpView({
                       </span>
                     )}
                   </div>
-                  <p style={{ margin: "4px 0" }}>{step.findings}</p>
+                  <p style={{ margin: "4px 0", whiteSpace: "pre-wrap" }}>
+                    {step.status === "queued"
+                      ? "Väntar…"
+                      : step.status === "running"
+                        ? "Undersöker…"
+                        : step.status === "failed"
+                          ? `Misslyckades: ${step.error ?? "okänt fel"}`
+                          : step.findings}
+                  </p>
                   {step.recommendedCommands?.[0] && (
                     <code style={{ display: "block", fontSize: 11, opacity: 0.9 }}>
                       $ {step.recommendedCommands[0]}

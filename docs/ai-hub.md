@@ -77,6 +77,15 @@ explicitly enabled presentation on top of the same terminal authority.
   `read_remote_file`, `diff_paths`) runs against real storage providers through
   `HubHost.storageOps`; `diff_paths` produces a Myers unified diff with
   `createTwoFilesPatch` from the `diff` package.
+- **`WorkforceRunner`** — a workforce run starts one read-only model run per
+  selected Mission Agent (`workspace_context`, `sshs3_kb_search` and
+  `sshs3_storage_ops` only; bounded concurrency, at most four specialists) and
+  then one run that combines their reports. Every finding in the result is a
+  model's own answer; a specialist that cannot run is recorded as failed with
+  the provider's error, and without an enabled provider the run is refused.
+  Specialist runs are stored as tasks tagged `workforceRunId` and shown inside
+  the workforce conversation. Only demo mode plays a scripted run, marked
+  `simulated`.
 - **`McpClientManager`** — MCP over stdio and HTTP with a catalog of nine
   presets (`MCP_MARKETPLACE_CATALOG`).
 - **`S3WorkspaceSyncService`** — team workspace sync over an S3 bucket. Memory

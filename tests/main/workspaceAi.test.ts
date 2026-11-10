@@ -1452,20 +1452,34 @@ describe("Production multi-user workspace sync & auto-memory", () => {
       },
     });
 
-    const snapWorkforce = await hub.request({
-      action: "workforce-run",
-      prompt: "Verify ONTAP aggregates and K8s Trident PVCs simultaneously",
-      agentIds: ["ag-ontap-test", "ag-k8s-test"],
-    });
-    expect((snapWorkforce.workforceRuns ?? []).length).toBeGreaterThanOrEqual(1);
-    const latestRun = snapWorkforce.workforceRuns![0];
-    expect(latestRun.status).toBe("completed");
-    expect(latestRun.steps).toHaveLength(2);
-    expect(latestRun.synthesis).toContain("AI Workforce Sammanställning");
+    // Without an enabled AI provider a workforce run is refused: no model can
+    // run, so there is nothing to report (tests/main/aiHubWorkforce.test.ts
+    // covers the real run).
+    await expect(
+      hub.request({
+        action: "workforce-run",
+        prompt: "Verify ONTAP aggregates and K8s Trident PVCs simultaneously",
+        agentIds: ["ag-ontap-test", "ag-k8s-test"],
+      }),
+    ).rejects.toThrow(/Enable AI/);
+    expect(hub.store.data.workforceRuns ?? []).toHaveLength(0);
 
-    // Verify Swarm Handoff on the newly created task
-    const createdTask = snapWorkforce.tasks[0];
-    expect(createdTask).toBeDefined();
+    // Verify Swarm Handoff on an existing task
+    const createdTask: AgentTask = {
+      id: "task-handoff",
+      title: "Storage triage",
+      mode: "advice",
+      status: "completed",
+      messages: [{ id: "m1", role: "user", text: "Check PVCs", at: Date.now() }],
+      changes: [],
+      sources: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      maxCommands: 20,
+      maxMinutes: 15,
+      verification: "not-verified",
+    };
+    hub.store.data.tasks.push(createdTask);
     const snapHandoff = await hub.request({
       action: "agent-handoff",
       taskId: createdTask.id,

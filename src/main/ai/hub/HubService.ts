@@ -85,6 +85,7 @@ import {
 } from "./ContextService";
 import { boundedContext, safeError } from "./privacy";
 import { createLogger } from "../../log";
+import { runWorkforce } from "./WorkforceRunner";
 
 const log = createLogger("ai-hub");
 const active = (t: AgentTask): boolean =>
@@ -265,6 +266,10 @@ export class HubService {
   readonly selfLearning = new SelfLearningService(this.kb);
   private runtimes = new Map<string, AgentRuntime>();
   private launches = new Map<string, symbol>();
+  /** Resolvers for callers waiting on a task's run to end (see whenSettled). */
+  private settleWaiters = new Map<string, Array<() => void>>();
+  /** Workforce run id → the conversation task that shows it. */
+  private workforceLeads = new Map<string, string>();
   private initialized?: Promise<void>;
   private tickTimer?: NodeJS.Timeout;
   private saveTimer?: NodeJS.Timeout;
@@ -294,7 +299,7 @@ export class HubService {
 
   constructor(
     private readonly host: HubHost,
-    directory = path.join(app.getPath("userData"), "ai-hub"),
+    private readonly directory = path.join(app.getPath("userData"), "ai-hub"),
   ) {
     this.store = new HubStore(path.join(directory, "hub.json"));
     this.selfLearning.bindStore(this.store);
@@ -683,18 +688,12 @@ export class HubService {
     ];
   }
 
-  private async executeWorkforceRun(opts: {
-    prompt: string;
+  /** The Mission Agents a workforce request addresses (ids/names, else the cluster's, else all enabled). */
+  private selectWorkforceAgents(opts: {
     agentIds?: string[];
     targetCluster?: string;
-    createTask?: boolean;
-  }): Promise<WorkforceRun> {
-    const allAgents = this.getAgentsList();
-    const extra = await this.collectExtraContext();
-    const allServers = extra.workspaceServers ?? [];
-    const kbDocs = this.getKbDocumentsList();
-
-    let selectedAgents = allAgents;
+  }): MissionAgent[] {
+    const allAgents = this.getAgentsList().filter((a) => a.enabled !== false);
     if (opts.agentIds && opts.agentIds.length > 0) {
       const qList = opts.agentIds.map((x) => x.toLowerCase());
       const filtered = allAgents.filter((a) =>
@@ -705,19 +704,174 @@ export class HubService {
             (a.targetCluster && a.targetCluster.toLowerCase().includes(q)),
         ),
       );
-      if (filtered.length > 0) selectedAgents = filtered;
+      if (filtered.length > 0) return filtered;
     } else if (opts.targetCluster && opts.targetCluster !== "ALL") {
       const cl = opts.targetCluster.toLowerCase();
       const clusterMatched = allAgents.filter(
         (a) => a.targetCluster && a.targetCluster.toLowerCase().includes(cl),
       );
       if (clusterMatched.length > 0) {
-        selectedAgents = [
+        return [
           ...clusterMatched,
           ...allAgents.filter((a) => !clusterMatched.includes(a)).slice(0, 2),
         ];
       }
     }
+    return allAgents;
+  }
+
+  private storeWorkforceRun(run: WorkforceRun): void {
+    this.store.data.workforceRuns = [
+      run,
+      ...(this.store.data.workforceRuns ?? []).filter((r) => r.id !== run.id),
+    ].slice(0, 25);
+  }
+
+  /** Resolves when the task's model run has ended and its runtime is released. */
+  private whenSettled(task: AgentTask): Promise<void> {
+    if (
+      !active(task) &&
+      !this.runtimes.has(task.id) &&
+      !this.launches.has(task.id)
+    )
+      return Promise.resolve();
+    return new Promise((resolve) => {
+      const list = this.settleWaiters.get(task.id) ?? [];
+      list.push(resolve);
+      this.settleWaiters.set(task.id, list);
+    });
+  }
+
+  private settled(taskId: string): void {
+    const list = this.settleWaiters.get(taskId);
+    if (!list) return;
+    this.settleWaiters.delete(taskId);
+    for (const resolve of list) resolve();
+  }
+
+  /**
+   * Starts a workforce run: every selected Mission Agent investigates the
+   * objective in its own read-only model run, then one more run combines the
+   * reports. `run` is the live record (already stored); `done` settles when the
+   * whole run has ended. Without a reachable model the specialists fail with the
+   * provider's error — nothing is written on their behalf.
+   *
+   * Demo mode alone plays the scripted demo run instead (marked `simulated`).
+   */
+  private async beginWorkforceRun(opts: {
+    prompt: string;
+    agentIds?: string[];
+    targetCluster?: string;
+    createTask?: boolean;
+  }): Promise<{ run: WorkforceRun; done: Promise<WorkforceRun> }> {
+    if (isDemoMode()) {
+      const run = await this.simulateDemoWorkforceRun(opts);
+      return { run, done: Promise.resolve(run) };
+    }
+    if (!(await this.config.getConfig()).enabled)
+      throw new Error("Enable AI and configure a model in Hub settings first");
+
+    let lead: AgentTask | undefined;
+    if (opts.createTask) {
+      const now = Date.now();
+      lead = {
+        id: crypto.randomUUID(),
+        title: `Workforce: ${boundedContext(opts.prompt, 90)}`,
+        agentName: "Workforce lead",
+        mode: "advice",
+        status: "running",
+        messages: [
+          {
+            id: crypto.randomUUID(),
+            role: "user",
+            text: boundedContext(opts.prompt, 16_000),
+            at: now,
+          },
+          { id: crypto.randomUUID(), role: "assistant", text: "", at: now },
+        ],
+        changes: [],
+        sources: [],
+        createdAt: now,
+        updatedAt: now,
+        maxCommands: 1,
+        maxMinutes: 30,
+        verification: "not-verified",
+      };
+      this.store.data.tasks.push(lead);
+    }
+
+    let current: WorkforceRun | undefined;
+    const done = runWorkforce(
+      {
+        prompt: opts.prompt,
+        agents: this.selectWorkforceAgents(opts),
+        targetCluster: opts.targetCluster,
+      },
+      {
+        cancelled: () => this.disposed || (lead ? !active(lead) : false),
+        runSpecialist: async ({ runId, prompt, agent, agentName }) => {
+          const task = await this.start(
+            {
+              prompt,
+              mode: "advice",
+              agentId: agent?.id,
+              agentName,
+              maxCommands: 1,
+              maxMinutes: 10,
+            },
+            undefined,
+            { workforceRunId: runId, title: `${agentName} · workforce` },
+          );
+          await this.whenSettled(task);
+          const text =
+            task.messages.filter((m) => m.role === "assistant").at(-1)?.text ??
+            "";
+          return task.status === "completed"
+            ? { taskId: task.id, status: "completed", text }
+            : {
+                taskId: task.id,
+                status: "failed",
+                text,
+                error: task.error ?? `The run ended as ${task.status}.`,
+              };
+        },
+        onProgress: (run) => {
+          current = run;
+          this.storeWorkforceRun(run);
+          if (lead) {
+            this.workforceLeads.set(run.id, lead.id);
+            // A lead the user stopped keeps its "interrupted" state.
+            if (active(lead)) {
+              lead.messages[1].text = renderWorkforceProgress(run);
+              lead.updatedAt = Date.now();
+              if (run.status !== "running") {
+                lead.status = run.status;
+                lead.error = run.error;
+                if (run.status === "failed") lead.verification = "incomplete";
+              }
+            }
+          }
+          if (run.status !== "running") this.workforceLeads.delete(run.id);
+          this.changed();
+        },
+      },
+    );
+    // runWorkforce reports its initial state before its first await.
+    return { run: current!, done };
+  }
+
+  /** The scripted demo-mode workforce run. No model is called; the run says so. */
+  private async simulateDemoWorkforceRun(opts: {
+    prompt: string;
+    agentIds?: string[];
+    targetCluster?: string;
+    createTask?: boolean;
+  }): Promise<WorkforceRun> {
+    const extra = await this.collectExtraContext();
+    const allServers = extra.workspaceServers ?? [];
+    const kbDocs = this.getKbDocumentsList();
+
+    let selectedAgents = this.selectWorkforceAgents(opts);
 
     if (selectedAgents.length === 0) {
       selectedAgents = [
@@ -805,12 +959,12 @@ export class HubService {
         status: "completed",
         findings: `Kontrollerade ${nodeNames}. ${kbHint}${skillHint}${edgeHint}`,
         recommendedCommands: recCmds,
-        durationMs: 850 + idx * 240,
       };
     });
 
     const synthesis = [
       `### 🤝 AI Workforce Sammanställning (${steps.length} specialistagenter körda parallellt)`,
+      "> **Demoläge:** det här är en förinspelad demokörning. Ingen modell anropades och ingenting kontrollerades.",
       `Uppdrag: **${opts.prompt}**`,
       "",
       ...steps.map(
@@ -830,15 +984,13 @@ export class HubService {
       status: "completed",
       steps,
       synthesis,
+      simulated: true,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
 
-    this.store.data.workforceRuns = [
-      run,
-      ...(this.store.data.workforceRuns ?? []).filter((r) => r.id !== run.id),
-    ].slice(0, 25);
-    if (isDemoMode()) saveDemoWorkforceRun(run);
+    this.storeWorkforceRun(run);
+    saveDemoWorkforceRun(run);
 
     if (opts.createTask) {
       const now = Date.now();
@@ -868,7 +1020,7 @@ export class HubService {
         updatedAt: now,
         maxCommands: 20,
         maxMinutes: 15,
-        verification: "verified",
+        verification: "not-verified",
       };
       this.store.data.tasks.push(wfTask);
     }
@@ -1755,12 +1907,15 @@ export class HubService {
         break;
       }
       case "workforce-run": {
-        await this.executeWorkforceRun({
+        // The snapshot returns with the run in progress; its steps fill in as
+        // the specialists finish (each change is announced through changed()).
+        const { done } = await this.beginWorkforceRun({
           prompt: requiredText(request.prompt),
           agentIds: request.agentIds,
           targetCluster: request.targetCluster,
           createTask: request.createTask ?? true,
         });
+        void done.catch((e) => log.warn("Workforce run failed", safeError(e)));
         break;
       }
       case "agent-handoff": {
@@ -2063,6 +2218,7 @@ export class HubService {
   private async start(
     input: StartAgentTask,
     schedule?: AgentSchedule,
+    workforce?: { workforceRunId: string; title: string },
   ): Promise<AgentTask> {
     if (!["advice", "assisted", "autonomous"].includes(input.mode))
       throw new Error("Invalid autonomy mode");
@@ -2093,7 +2249,8 @@ export class HubService {
       : undefined;
     const task: AgentTask = {
       id: crypto.randomUUID(),
-      title: prompt.slice(0, 100),
+      title: workforce?.title ?? prompt.slice(0, 100),
+      ...(workforce ? { workforceRunId: workforce.workforceRunId } : {}),
       mode: input.mode,
       agentId: matchedAgent?.id ?? input.agentId,
       agentName: matchedAgent?.name ?? input.agentName,
@@ -2151,7 +2308,13 @@ export class HubService {
   ): Promise<void> {
     if (this.runtimes.has(task.id) || this.launches.has(task.id))
       throw new Error("Task already running");
-    if (this.runtimes.size + this.launches.size >= 3)
+    // Workforce specialists are bounded by their run's own concurrency and do
+    // not take one of the user's three slots.
+    const ownRuns = [...this.runtimes.keys(), ...this.launches.keys()].filter(
+      (id) =>
+        !this.store.data.tasks.find((t) => t.id === id)?.workforceRunId,
+    ).length;
+    if (!task.workforceRunId && ownRuns >= 3)
       throw new Error(
         "Three tasks are already running; pause one before starting another",
       );
@@ -2267,8 +2430,7 @@ export class HubService {
     const runtime = new HermesRuntime(
       new HermesManager({
         homeDir: path.join(
-          app.getPath("userData"),
-          "ai-hub",
+          this.directory,
           "runtime",
           crypto.createHash("sha256").update(task.id).digest("hex"),
         ),
@@ -2304,8 +2466,7 @@ export class HubService {
         await fs
           .rm(
             path.join(
-              app.getPath("userData"),
-              "ai-hub",
+              this.directory,
               "runtime",
               crypto.createHash("sha256").update(task.id).digest("hex"),
             ),
@@ -2314,13 +2475,16 @@ export class HubService {
           .catch(() => {});
         if (this.runtimes.get(task.id) === runtime)
           this.runtimes.delete(task.id);
+        this.settled(task.id);
         this.changed();
-        this.notify(
-          task.status === "completed"
-            ? "Task finished"
-            : "Task needs attention",
-          task.title,
-        );
+        // A specialist is one part of a workforce run, not a task of its own.
+        if (!task.workforceRunId)
+          this.notify(
+            task.status === "completed"
+              ? "Task finished"
+              : "Task needs attention",
+            task.title,
+          );
       });
   }
 
@@ -2420,6 +2584,14 @@ export class HubService {
     this.terminals.release(task.id);
     this.changed();
     await this.runtimes.get(task.id)?.stop();
+    // Stopping a workforce conversation stops its specialists too.
+    for (const [runId, leadId] of this.workforceLeads) {
+      if (leadId !== task.id) continue;
+      for (const child of this.store.data.tasks.filter(
+        (t) => t.workforceRunId === runId && active(t),
+      ))
+        await this.stop(child, reason);
+    }
   }
   private scope(task: AgentTask): string {
     const terminal = task.target && this.terminals.get(task.target.sessionId);
@@ -4570,12 +4742,15 @@ export class HubService {
             : str("idOrName")
               ? [str("idOrName")!]
               : undefined;
-          const run = await this.executeWorkforceRun({
-            prompt: wfPrompt,
-            agentIds: rawIds,
-            targetCluster: str("targetCluster") || str("cluster"),
-            createTask: false,
-          });
+          // The calling agent waits for the specialists' reports.
+          const run = await (
+            await this.beginWorkforceRun({
+              prompt: wfPrompt,
+              agentIds: rawIds,
+              targetCluster: str("targetCluster") || str("cluster"),
+              createTask: false,
+            })
+          ).done;
           this.changed();
           return {
             ok: true,
@@ -4799,6 +4974,36 @@ export class HubService {
   }
 }
 /** Whether `file` lies inside this process's data directory (userData: in demo mode, the demo workspace). */
+/** The workforce conversation's message: per-specialist status, then the combined result. */
+function renderWorkforceProgress(run: WorkforceRun): string {
+  const done = run.steps.filter(
+    (s) => s.status === "completed" || s.status === "failed",
+  ).length;
+  const lines = run.steps.map((s) => {
+    const mark =
+      s.status === "completed"
+        ? "✅"
+        : s.status === "failed"
+          ? "❌"
+          : s.status === "running"
+            ? "⏳"
+            : "•";
+    const where = s.targetCluster ? ` (${s.targetCluster})` : "";
+    const time =
+      s.durationMs === undefined ? "" : ` — ${Math.round(s.durationMs / 1000)} s`;
+    const problem = s.error ? ` — ${s.error}` : "";
+    return `- ${mark} **${s.agentName}**${where}${time}${problem}`;
+  });
+  const status = [
+    `**Workforce** — ${done}/${run.steps.length} specialists finished`,
+    ...lines,
+  ].join("\n");
+  if (run.status === "running") return status;
+  if (run.status === "failed")
+    return `${status}\n\nThe run failed: ${run.error ?? "unknown error"}`;
+  return `${run.synthesis}\n\n---\n${status}`;
+}
+
 function insideDataDirectory(file: string): boolean {
   try {
     const relative = path.relative(app.getPath("userData"), path.resolve(file));

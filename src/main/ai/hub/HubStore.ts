@@ -141,6 +141,17 @@ export class HubStore {
           }
         }
       }
+      // A workforce run cannot outlive the process that was running its specialists.
+      for (const run of this.data.workforceRuns ?? []) {
+        if (run.status !== "running") continue;
+        run.status = "failed";
+        run.error = "The application stopped before this run finished.";
+        for (const step of run.steps)
+          if (step.status === "queued" || step.status === "running") {
+            step.status = "failed";
+            step.error = run.error;
+          }
+      }
       this.prune();
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return;

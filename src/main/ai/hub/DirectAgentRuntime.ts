@@ -975,10 +975,23 @@ function resolveActiveAgent(
   return undefined;
 }
 
-function toolsForTask(
+/**
+ * What a workforce specialist may call. The broker runs `workspace_context`,
+ * `sshs3_kb_search` and `sshs3_storage_ops` (list/read/diff) without changing
+ * anything; a specialist gets no terminal, no management tool and no MCP tool.
+ */
+const WORKFORCE_SPECIALIST_TOOLS = new Set([
+  "workspace_context",
+  "sshs3_kb_search",
+  "sshs3_storage_ops",
+]);
+
+export function toolsForTask(
   task: AgentTask,
   initialContext?: unknown,
 ): FunctionToolDef[] {
+  if (task.workforceRunId)
+    return AGENT_TOOLS.filter((t) => WORKFORCE_SPECIALIST_TOOLS.has(t.name));
   const activeAgent = resolveActiveAgent(task, initialContext);
   let baseTools =
     task.mode === "advice" || !task.target
@@ -1186,6 +1199,8 @@ export class DirectAgentRuntime implements AgentRuntime {
   private abort = new AbortController();
   private cancelled = false;
   private steeringQueue: string[] = [];
+  /** Names of the tools this run offered the model; anything else is refused. */
+  private offered?: Set<string>;
 
   constructor(
     private readonly invokeBroker: DirectToolInvoker,
@@ -1561,7 +1576,18 @@ export class DirectAgentRuntime implements AgentRuntime {
     );
   }
 
+  /** The run's tool list, remembered so that only these can be called. */
+  private offer(task: AgentTask, initialContext?: unknown): FunctionToolDef[] {
+    const tools = toolsForTask(task, initialContext);
+    this.offered = new Set(tools.map((t) => t.name));
+    return tools;
+  }
+
   private async executeToolCall(call: ParsedToolCall): Promise<string> {
+    if (this.offered && !this.offered.has(call.name))
+      return JSON.stringify({
+        error: `Tool ${call.name} is not available in this run`,
+      });
     let parsedArgs: Record<string, unknown>;
     try {
       parsedArgs = call.argumentsJson ? (JSON.parse(call.argumentsJson) as Record<string, unknown>) : {};
@@ -1649,7 +1675,7 @@ export class DirectAgentRuntime implements AgentRuntime {
       });
     }
 
-    const wireTools = toolsForTask(task, initialContext).map((t) => ({
+    const wireTools = this.offer(task, initialContext).map((t) => ({
       type: "function",
       name: t.name,
       description: t.description,
@@ -1829,7 +1855,7 @@ export class DirectAgentRuntime implements AgentRuntime {
       }
     }
 
-    const tools = toolsForTask(task, initialContext).map((t) => ({
+    const tools = this.offer(task, initialContext).map((t) => ({
       type: "function",
       function: {
         name: t.name,
@@ -1999,7 +2025,7 @@ export class DirectAgentRuntime implements AgentRuntime {
         };
       });
 
-    const tools = toolsForTask(task, initialContext).map((t) => ({
+    const tools = this.offer(task, initialContext).map((t) => ({
       name: t.name,
       description: t.description,
       input_schema: t.parameters,
