@@ -2814,6 +2814,9 @@ function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Element {
   const [model, setModel] = useState(hub.config.model);
   const [customModelMode, setCustomModelMode] = useState(false);
   const [url, setUrl] = useState(hub.config.baseUrl ?? "");
+  const [embeddingModel, setEmbeddingModel] = useState(
+    hub.config.embeddingModel ?? "",
+  );
   const [key, setKey] = useState("");
   const [actorName, setActorName] = useState(hub.config.actorName ?? "");
   const [enabled, setEnabled] = useState(hub.config.enabled);
@@ -2844,6 +2847,7 @@ function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Element {
     setModel(hub.config.model);
     setCustomModelMode(false);
     setUrl(hub.config.baseUrl ?? "");
+    setEmbeddingModel(hub.config.embeddingModel ?? "");
     setActorName(hub.config.actorName ?? "");
     setEnabled(hub.config.enabled);
     setContextWindowTokens(hub.config.contextWindowTokens ?? 128000);
@@ -2856,6 +2860,7 @@ function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Element {
     hub.config.provider,
     hub.config.model,
     hub.config.baseUrl,
+    hub.config.embeddingModel,
     hub.config.actorName,
     hub.config.enabled,
     hub.config.contextWindowTokens,
@@ -2890,6 +2895,8 @@ function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Element {
             provider,
             model: model.trim(),
             baseUrl: provider === "openai-codex" ? "" : url.trim(),
+            embeddingModel:
+              provider === "openai-compatible" ? embeddingModel.trim() : "",
             actorName,
             useHermes: false,
             contextWindowTokens,
@@ -3078,6 +3085,23 @@ function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Element {
               placeholder="http://localhost:11434/v1"
             />
           </label>
+          {provider === "openai-compatible" && (
+            <label>
+              Embedding model (optional)
+              <input
+                data-testid="ai-embedding-model-input"
+                value={embeddingModel}
+                onChange={(e) => setEmbeddingModel(e.target.value)}
+                placeholder="nomic-embed-text / text-embedding-3-small"
+              />
+              <small>
+                With a model that this endpoint serves on <code>/embeddings</code>,
+                knowledge base search also ranks by meaning. Without one it
+                matches terms only. Runbook text is sent to this endpoint to
+                be embedded.
+              </small>
+            </label>
+          )}
           <label>
             API key
             <input
@@ -4525,7 +4549,7 @@ function KnowledgeBaseView({
           <small>🧩 Indexed BM25 Chunks</small>
         </div>
         <div className="ai-stat-box">
-          <strong>Hybrid BM25 + Concept RAG</strong>
+          <strong>BM25 + synonyms{hub.config.provider === "openai-compatible" && hub.config.embeddingModel ? ` + embeddings (${hub.config.embeddingModel})` : ""}</strong>
           <small>⚡ Orama Retrieval Engine</small>
         </div>
       </div>

@@ -88,6 +88,11 @@ import { boundedContext, safeError } from "./privacy";
 import { createLogger } from "../../log";
 import { runWorkforce } from "./WorkforceRunner";
 import {
+  EmbeddingIndex,
+  openAiCompatibleEmbedder,
+  type Embedder,
+} from "./EmbeddingIndex";
+import {
   MAX_STORED_PROPOSALS,
   activityTranscript,
   buildDistillPrompt,
@@ -292,6 +297,7 @@ export class HubService {
   private workforceLeads = new Map<string, string>();
   /** Records being read for memory proposals right now. */
   private distilling = new Set<string>();
+  private readonly embeddings: EmbeddingIndex;
   private initialized?: Promise<void>;
   private tickTimer?: NodeJS.Timeout;
   private saveTimer?: NodeJS.Timeout;
@@ -324,6 +330,9 @@ export class HubService {
     private readonly directory = path.join(app.getPath("userData"), "ai-hub"),
   ) {
     this.store = new HubStore(path.join(directory, "hub.json"));
+    this.embeddings = new EmbeddingIndex(
+      path.join(directory, "kb-embeddings.json"),
+    );
     this.selfLearning.bindStore(this.store);
     this.config = new AiConfigStore(host.aiConfigFilePath);
     this.context = new ContextService(
@@ -3040,6 +3049,29 @@ export class HubService {
     }
   }
 
+  /**
+   * The embedder for knowledge base search: the configured OpenAI-compatible
+   * endpoint with an embedding model set. Other providers have no embeddings
+   * endpoint, and demo documents are never sent anywhere; search is then
+   * lexical.
+   */
+  private async kbEmbedder(): Promise<Embedder | undefined> {
+    if (isDemoMode()) return undefined;
+    const config = await this.config.getConfig().catch(() => undefined);
+    if (
+      !config?.enabled ||
+      config.provider !== "openai-compatible" ||
+      !config.baseUrl ||
+      !config.embeddingModel
+    )
+      return undefined;
+    return openAiCompatibleEmbedder({
+      baseUrl: config.baseUrl,
+      apiKey: config.apiKey || undefined,
+      model: config.embeddingModel,
+    });
+  }
+
   /** Adds a chat message to the shared activity log and sends it to the team. */
   private async postChatMessage(input: {
     actor: string;
@@ -4933,16 +4965,22 @@ export class HubService {
         const cluster = str("cluster");
         const limit = num("limit") ?? 6;
         const docs = this.getKbDocumentsList();
-        const matches = this.kb.search(docs, {
-          query,
-          cluster,
-          limit,
-        });
+        const found = await this.kb.searchHybrid(
+          docs,
+          { query, cluster, limit },
+          await this.kbEmbedder(),
+          this.embeddings,
+        );
         return {
           query,
           cluster,
           totalDocuments: docs.length,
-          matches,
+          // "hybrid": ranked by terms and by meaning; "lexical": by terms only.
+          retrieval: found.retrieval,
+          ...(found.embeddingError
+            ? { embeddingError: found.embeddingError }
+            : {}),
+          matches: found.matches,
         };
       }
 

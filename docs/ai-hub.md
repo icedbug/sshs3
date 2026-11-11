@@ -55,8 +55,16 @@ explicitly enabled presentation on top of the same terminal authority.
   parameters) and reports the run's tokens summed over all turns, input read
   from `message_start` including cache writes and reads. A run may only call
   the tools it was offered.
-- **`KnowledgeBaseService`** — hybrid search with `@orama/orama` (BM25 plus
-  bilingual Swedish/English concept vectors), memory ranking and ingestion of
+- **`KnowledgeBaseService`** — lexical search with `@orama/orama` (BM25, typo
+  tolerance and a hand-written Swedish/English synonym table) and, when the
+  provider is an OpenAI-compatible endpoint with `embeddingModel` set, ranking
+  by meaning as well: `searchHybrid` embeds the query and the chunks through
+  that endpoint's `/embeddings` (`EmbeddingIndex` caches vectors by content
+  hash in `kb-embeddings.json`, vectors only) and fuses both rankings by
+  reciprocal rank fusion. `sshs3_kb_search` reports which was used
+  (`retrieval: "hybrid" | "lexical"`) and why embeddings were not, if they
+  failed. ChatGPT/Codex sign-in and Anthropic have no embeddings endpoint, so
+  search is lexical there. Also memory ranking and ingestion of
   runbooks from a real S3 storage profile (`kb-ingest-s3` →
   `ingestFromStorageProvider`). The demo StorageGRID documents are used only for
   demo targets.

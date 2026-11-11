@@ -9,6 +9,13 @@ import {
 } from "@orama/orama";
 import type { KbDocument, MemoryEntry } from "../../../shared/types/aiHub";
 import type { IStorageProvider } from "../../../shared/types/storage";
+import {
+  cosine,
+  fuseRanks,
+  type Embedder,
+  type EmbeddingIndex,
+} from "./EmbeddingIndex";
+import { safeError } from "./privacy";
 
 export interface KbChunkResult {
   docId: string;
@@ -27,7 +34,9 @@ export interface KbChunkResult {
 /**
  * Bilingual (SV/EN) DevOps, Storage (NetApp ONTAP, Ceph, ZFS, S3), Kubernetes,
  * Security, Database, Observability, and Linux infrastructure concept clusters.
- * Used both for explicit concept tagging and 16-dimensional Orama vector embeddings.
+ * Used to tag chunks and to expand a query with related terms in both
+ * languages. This is a hand-written synonym table, not an embedding: ranking
+ * by meaning comes from real embeddings (see searchHybrid / EmbeddingIndex).
  */
 export const SEMANTIC_CONCEPT_CLUSTERS: Record<string, string[]> = {
   storage_capacity: [
@@ -284,7 +293,6 @@ export const SEMANTIC_CONCEPT_CLUSTERS: Record<string, string[]> = {
   ],
 };
 
-const CONCEPT_KEYS = Object.keys(SEMANTIC_CONCEPT_CLUSTERS);
 
 export function extractSemanticConcepts(tokens: string[]): string[] {
   const matched: string[] = [];
@@ -300,32 +308,6 @@ export function extractSemanticConcepts(tokens: string[]): string[] {
     if (hit) matched.push(concept);
   }
   return matched;
-}
-
-export function computeConceptEmbedding(tokens: string[]): number[] {
-  const raw = CONCEPT_KEYS.map((concept) => {
-    const keywords = SEMANTIC_CONCEPT_CLUSTERS[concept] ?? [];
-    let hits = 0;
-    for (const tok of tokens) {
-      for (const kw of keywords) {
-        if (tok === kw) hits += 1.0;
-        else if (
-          (tok.length >= 4 && kw.startsWith(tok)) ||
-          (kw.length >= 4 && tok.startsWith(kw))
-        ) {
-          hits += 0.6;
-        }
-      }
-    }
-    return hits;
-  });
-  const norm = Math.sqrt(raw.reduce((acc, v) => acc + v * v, 0));
-  if (norm === 0) {
-    // Return uniform small non-zero unit vector so Orama cosine similarity never divides by zero
-    const val = 1 / Math.sqrt(CONCEPT_KEYS.length);
-    return raw.map(() => val);
-  }
-  return raw.map((v) => v / norm);
 }
 
 function computeTrigramSimilarity(a: string, b: string): number {
@@ -450,7 +432,6 @@ export class KnowledgeBaseService {
         tags: "string",
         concepts: "string",
         text: "string",
-        embedding: `vector[${CONCEPT_KEYS.length}]` as const,
       },
     });
 
@@ -469,7 +450,6 @@ export class KnowledgeBaseService {
         const chunkId = `${doc.id}#${idx}`;
         const tokens = tokenize(`${doc.title} ${col} ${cl} ${tagStr} ${part}`);
         const concepts = extractSemanticConcepts(tokens);
-        const embedding = computeConceptEmbedding(tokens);
         chunkMap.set(chunkId, {
           chunkId,
           doc,
@@ -488,7 +468,6 @@ export class KnowledgeBaseService {
           tags: tagStr,
           concepts: concepts.join(" "),
           text: part,
-          embedding,
         });
       });
     }
@@ -648,7 +627,7 @@ export class KnowledgeBaseService {
       }
     }
 
-    // 2. Combine @orama/orama BM25 scores with compound-token BM25, bilingual concept vectors, and trigram similarity
+    // 2. Combine @orama/orama BM25 scores with compound-token BM25, matched synonym concepts, and trigram similarity
     const k1 = 1.5;
     const b = 0.75;
     const avgLen =
@@ -726,6 +705,100 @@ export class KnowledgeBaseService {
     }
 
     return scored.sort((a, b) => b.score - a.score).slice(0, limit);
+  }
+
+  /**
+   * Lexical search fused with ranking by meaning. Every chunk of the allowed
+   * collections is compared with the query by the cosine of real embeddings;
+   * that ranking and the lexical one are combined by reciprocal rank fusion,
+   * so a chunk that says the same thing in other words is found although it
+   * shares no term with the query. `retrieval` says what was actually used:
+   * when the embeddings cannot be had, the lexical result is returned with
+   * the reason.
+   */
+  async searchHybrid(
+    docs: KbDocument[],
+    opts: {
+      query: string;
+      collectionIds?: string[];
+      cluster?: string;
+      limit?: number;
+    },
+    embedder: Embedder | undefined,
+    index: EmbeddingIndex,
+  ): Promise<{
+    matches: KbChunkResult[];
+    retrieval: "hybrid" | "lexical";
+    embeddingModel?: string;
+    embeddingError?: string;
+  }> {
+    const limit = Math.max(1, Math.min(25, opts.limit ?? 6));
+    const lexical = this.search(docs, { ...opts, limit: 25 });
+    if (!embedder || !opts.query.trim())
+      return { matches: lexical.slice(0, limit), retrieval: "lexical" };
+
+    const allowed = opts.collectionIds
+      ?.map((c) => c.trim().toLowerCase())
+      .filter(Boolean);
+    const chunks = [...this.indexedChunks.values()].filter((rec) => {
+      if (!allowed || allowed.length === 0) return true;
+      const col = (rec.doc.collection || rec.doc.cluster || "").toLowerCase();
+      return allowed.includes(col) || allowed.includes(rec.doc.id.toLowerCase());
+    });
+    if (chunks.length === 0) return { matches: [], retrieval: "lexical" };
+
+    let similarities: Array<{ rec: IndexedChunkRecord; similarity: number }>;
+    try {
+      const [queryVector] = await embedder.embed([opts.query]);
+      const vectors = await index.vectorsFor(
+        chunks.map((c) => `${c.doc.title}\n${c.text}`),
+        embedder,
+      );
+      similarities = chunks
+        .map((rec, i) => ({ rec, similarity: cosine(queryVector, vectors[i]) }))
+        .sort((a, b) => b.similarity - a.similarity);
+    } catch (error) {
+      return {
+        matches: lexical.slice(0, limit),
+        retrieval: "lexical",
+        embeddingModel: embedder.model,
+        embeddingError: safeError(error),
+      };
+    }
+
+    const semanticTop = similarities.slice(0, 25);
+    const fused = fuseRanks([
+      lexical.map((m) => `${m.docId}#${m.chunkIndex}`),
+      semanticTop.map((s) => s.rec.chunkId),
+    ]);
+    const lexicalById = new Map(
+      lexical.map((m) => [`${m.docId}#${m.chunkIndex}`, m]),
+    );
+    const similarityById = new Map(
+      similarities.map((s) => [s.rec.chunkId, s.similarity]),
+    );
+    const matches = [...fused.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, limit)
+      .map(([chunkId, score]): KbChunkResult => {
+        const rec = this.indexedChunks.get(chunkId)!;
+        const lex = lexicalById.get(chunkId);
+        return {
+          docId: rec.doc.id,
+          title: rec.doc.title,
+          collection: rec.doc.collection || rec.doc.cluster || "General",
+          targetCluster: rec.doc.cluster || rec.doc.targetCluster,
+          sourceUri: rec.doc.sourceRef || rec.doc.sourceUri,
+          chunkIndex: rec.chunkIndex,
+          snippet: rec.text,
+          score: Math.round(score * 100_000) / 100_000,
+          bm25Score: lex?.bm25Score ?? 0,
+          semanticScore:
+            Math.round((similarityById.get(chunkId) ?? 0) * 1000) / 1000,
+          matchedConcepts: lex?.matchedConcepts ?? [],
+        };
+      });
+    return { matches, retrieval: "hybrid", embeddingModel: embedder.model };
   }
 
   /**

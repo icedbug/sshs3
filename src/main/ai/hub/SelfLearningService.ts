@@ -757,7 +757,7 @@ export class SelfLearningService {
         category: "rag",
         status: "active",
         description:
-          "In-memory BM25 + 16-dim konceptvektor + trigram/typo-tolerant hybrid RAG-index för flerspråkig (SV/EN) infrastrukturdokumentation.",
+          "In-memory BM25 + synonymtabell (SV/EN) + trigram/typo-tolerant sökindex för flerspråkig (SV/EN) infrastrukturdokumentation.",
         metricsLabel: `${indexedChunks} indexerade chunks • ${params.kbDocuments.length} dokument`,
       },
       {

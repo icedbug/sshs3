@@ -26,6 +26,13 @@ export interface AiConfig {
   reasoningEffort?: AiReasoningEffort;
   /** Sampling temperature (0.0 - 1.0) for custom/compatible models. Default: 0.2. */
   temperature?: number;
+  /**
+   * Embedding model served by the OpenAI-compatible endpoint (`baseUrl` +
+   * `/embeddings`), e.g. `text-embedding-3-small` or `nomic-embed-text`.
+   * When set with that provider, knowledge base search also ranks by meaning;
+   * otherwise it is lexical only.
+   */
+  embeddingModel?: string;
 }
 
 /** What the renderer sees: the API key itself never leaves the main process. */

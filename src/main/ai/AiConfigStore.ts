@@ -104,6 +104,11 @@ export class AiConfigStore {
           Math.min(1_000_000, Math.round(Number(update.contextWindowTokens) || 128000)),
         );
       }
+      if (update.embeddingModel !== undefined) {
+        const name = String(update.embeddingModel).trim().slice(0, 200);
+        if (name) next.embeddingModel = name;
+        else delete next.embeddingModel;
+      }
       if (update.terminalContextChars !== undefined) {
         next.terminalContextChars = Math.max(
           1000,
@@ -276,6 +281,9 @@ export class AiConfigStore {
         : {}),
       ...(typeof stored.actorName === "string" && stored.actorName
         ? { actorName: stored.actorName }
+        : {}),
+      ...(typeof stored.embeddingModel === "string" && stored.embeddingModel
+        ? { embeddingModel: stored.embeddingModel }
         : {}),
       contextWindowTokens:
         typeof stored.contextWindowTokens === "number" && stored.contextWindowTokens >= 4000
