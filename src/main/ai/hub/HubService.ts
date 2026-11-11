@@ -15,6 +15,7 @@ import type {
   McpServerConfig,
   MemoryDistillStatus,
   MemoryEntry,
+  MemoryProposal,
   MissionAgent,
   S3WorkspaceConfig,
   StartAgentTask,
@@ -1271,6 +1272,9 @@ export class HubService {
           if (p.proposeMemories !== undefined)
             this.store.data.preferences.proposeMemories =
               p.proposeMemories === true;
+          if (p.autoSaveMemories !== undefined)
+            this.store.data.preferences.autoSaveMemories =
+              p.autoSaveMemories === true;
           if (p.sharedWorkspacePath !== undefined) {
             const cleanedPath = p.sharedWorkspacePath.trim();
             if (cleanedPath) {
@@ -1569,34 +1573,42 @@ export class HubService {
           (p) => p.id === request.id,
         );
         if (!proposal) throw new Error("Proposal not found");
-        const title = request.title?.trim() || proposal.title;
-        const text = request.text?.trim() || proposal.text;
+        if (!proposal.appliedMemoryId)
+          await this.applyMemoryProposal(proposal, {
+            title: request.title,
+            text: request.text,
+          });
+        this.store.data.memoryProposals = (
+          this.store.data.memoryProposals ?? []
+        ).filter((p) => p.id !== proposal.id);
+        break;
+      }
+      case "memory-proposal-undo": {
+        const proposal = (this.store.data.memoryProposals ?? []).find(
+          (p) => p.id === request.id,
+        );
+        if (!proposal?.appliedMemoryId)
+          throw new Error("There is nothing to undo for this entry");
+        const memoryId = proposal.appliedMemoryId;
+        const current = this.store.data.memories.find((m) => m.id === memoryId);
         if (proposal.op === "update") {
-          const target = this.store.data.memories.find(
-            (m) => m.id === proposal.targetId,
-          );
-          if (!target)
+          // Put the earlier text back, unless somebody has edited it since.
+          if (current && current.text === proposal.text && proposal.previousText)
+            await this.saveMemoryInternal({
+              id: current.id,
+              kind: current.kind,
+              tier: current.tier,
+              cluster: current.cluster,
+              scope: current.scope,
+              title: current.title,
+              text: proposal.previousText,
+            });
+          else if (current)
             throw new Error(
-              "The memory this proposal updates no longer exists; reject the proposal or save it as a new memory",
+              "This memory has been changed since; edit it in the list instead",
             );
-          await this.saveMemoryInternal({
-            id: target.id,
-            kind: target.kind,
-            tier: target.tier,
-            cluster: target.cluster,
-            scope: target.scope,
-            title,
-            text,
-          });
-        } else {
-          await this.saveMemoryInternal({
-            kind: proposal.kind,
-            tier: "archival",
-            scope: proposal.scope,
-            title,
-            text,
-            autoLearned: true,
-          });
+        } else if (current) {
+          await this.request({ action: "memory-delete", id: memoryId });
         }
         this.store.data.memoryProposals = (
           this.store.data.memoryProposals ?? []
@@ -2767,6 +2779,9 @@ export class HubService {
     try {
       if (!(await this.config.getView()).enabled) return;
       const now = Date.now();
+      void this.maybeLearnFromOwnActivity(now).catch((e) =>
+        log.warn("Learning from activity failed", safeError(e)),
+      );
       let historyChanged = false;
       for (const session of this.terminals.list()) {
         const text = this.terminals.context(session.id);
@@ -2948,6 +2963,70 @@ export class HubService {
     ];
   }
 
+  /** Saves a proposal as a team memory, or applies its update to the memory it names. */
+  private async applyMemoryProposal(
+    proposal: MemoryProposal,
+    edited: { title?: string; text?: string } = {},
+  ): Promise<MemoryEntry> {
+    const title = edited.title?.trim() || proposal.title;
+    const text = edited.text?.trim() || proposal.text;
+    if (proposal.op === "update") {
+      const target = this.store.data.memories.find(
+        (m) => m.id === proposal.targetId,
+      );
+      if (!target)
+        throw new Error(
+          "The memory this proposal updates no longer exists; reject the proposal or save it as a new memory",
+        );
+      return this.saveMemoryInternal({
+        id: target.id,
+        kind: target.kind,
+        tier: target.tier,
+        cluster: target.cluster,
+        scope: target.scope,
+        title,
+        text,
+      });
+    }
+    return this.saveMemoryInternal({
+      kind: proposal.kind,
+      tier: "archival",
+      scope: proposal.scope,
+      title,
+      text,
+      autoLearned: true,
+    });
+  }
+
+  /**
+   * Reads this user's own recent activity for memories, at most every six
+   * hours and only when enough has happened. Each teammate's app reads its own
+   * user's activity, so a change is read once, not once per teammate.
+   */
+  private async maybeLearnFromOwnActivity(now = Date.now()): Promise<void> {
+    if (this.store.data.preferences.proposeMemories === false) return;
+    const last = this.store.data.lastActivityDistillAt ?? 0;
+    if (now - last < 6 * 3_600_000) return;
+    const actor = (await this.resolveActorName()).trim().toLowerCase();
+    const own = (this.store.data.activityLog ?? []).filter(
+      (e) => e.at > last && e.actor.trim().toLowerCase() === actor,
+    );
+    if (own.length < 8) return;
+    this.store.data.lastActivityDistillAt = now;
+    const events = own.slice(-80);
+    await this.proposeMemoriesFrom(
+      {
+        id: `activity:${events.at(-1)!.id}`,
+        title: "My recent activity",
+        transcript: activityTranscript(events),
+      },
+      events
+        .slice(-20)
+        .map((e) => `${e.targetLabel} ${e.summary}`)
+        .join(" "),
+    );
+  }
+
   /**
    * Has the model read one record and stores what it proposes to remember
    * (MemoryDistiller). A record is read once unless `again` is set. Proposals
@@ -3018,9 +3097,25 @@ export class HubService {
           !pending.some(
             (q) =>
               q.text === p.text ||
-              (p.op === "update" && q.op === "update" && q.targetId === p.targetId),
+              (p.op === "update" &&
+                q.op === "update" &&
+                !q.appliedMemoryId &&
+                q.targetId === p.targetId),
           ),
       );
+      // The default: what the assistant learned is saved and shared at once,
+      // so the team's memory grows without anyone tending it. Each entry stays
+      // in the list as a record that can be undone.
+      if (this.store.data.preferences.autoSaveMemories !== false)
+        for (const proposal of fresh) {
+          const saved = await this.applyMemoryProposal(proposal).catch(
+            (e) => {
+              log.warn("Could not save a learned memory", safeError(e));
+              return undefined;
+            },
+          );
+          if (saved) proposal.appliedMemoryId = saved.id;
+        }
       this.store.data.memoryProposals = [...pending, ...fresh].slice(
         -MAX_STORED_PROPOSALS,
       );

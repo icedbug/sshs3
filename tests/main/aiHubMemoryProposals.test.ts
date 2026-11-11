@@ -184,7 +184,7 @@ function sseResponse(text: string): Response {
   );
 }
 
-async function makeHub(saved: MemoryEntry[] = []) {
+async function makeHub(saved: MemoryEntry[] = [], autoSave = false) {
   const { HubService } = await import("../../src/main/ai/hub/HubService");
   const { setDemoModeForTesting } = await import("../../src/main/demo/demoMode");
   setDemoModeForTesting(false);
@@ -212,6 +212,7 @@ async function makeHub(saved: MemoryEntry[] = []) {
   await hub.request({
     action: "configure",
     config: { enabled: true, provider: "anthropic", model: "claude-test", apiKey: "sk-ant-test" }, // pragma: allowlist secret
+    preferences: { autoSaveMemories: autoSave },
   });
   return hub;
 }
@@ -224,7 +225,7 @@ async function waitFor(check: () => boolean, ms = 5000): Promise<void> {
   }
 }
 
-describe("HubService memory proposals", () => {
+describe("HubService memory proposals (a person accepts each one: autoSaveMemories off)", () => {
   it("reads a finished session once, with no tools, and keeps its proposal out of memory until accepted", async () => {
     const saved: MemoryEntry[] = [];
     const hub = await makeHub(saved);
@@ -356,5 +357,141 @@ describe("HubService memory proposals", () => {
     await waitFor(() => hub.store.data.tasks.some((t) => t.status === "completed"));
     await new Promise((r) => setTimeout(r, 60));
     expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+const proposalAnswer = (proposals: unknown[]) => sseResponse(JSON.stringify({ proposals }));
+
+describe("HubService learned memories (saved automatically, the default)", () => {
+  it("saves and shares what the assistant learned from a session at once, and keeps a record that can be undone", async () => {
+    const saved: MemoryEntry[] = [];
+    const hub = await makeHub(saved, true);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: unknown, init?: RequestInit) => {
+        const first = JSON.stringify((JSON.parse(String(init?.body)) as { messages: unknown[] }).messages[0]);
+        return first.includes("long-term memory")
+          ? proposalAnswer([
+              { op: "add", kind: "skill", scope: "cluster:prod", title: "Drain before reboot", text: "Drain a prod node before rebooting it.", evidence: "kubectl drain → exit 0" },
+            ])
+          : sseResponse(`Drained and rebooted. ${"Details. ".repeat(80)}`);
+      }),
+    );
+    await hub.request({ action: "start", task: { prompt: "Reboot node 3 safely", mode: "advice" } });
+    await waitFor(() => hub.store.data.memories.length === 1);
+
+    const memory = hub.store.data.memories[0];
+    expect(memory).toMatchObject({ kind: "skill", scope: "cluster:prod", title: "Drain before reboot", autoLearned: true });
+    // Shared with the team without anyone accepting it.
+    expect(saved.map((m) => m.id)).toEqual([memory.id]);
+    const record = hub.store.data.memoryProposals![0];
+    expect(record).toMatchObject({ op: "add", appliedMemoryId: memory.id, sourceTitle: "Session: Reboot node 3 safely" });
+
+    // Undo deletes the memory (with a tombstone, so teammates lose it too) and clears the record.
+    const after = await hub.request({ action: "memory-proposal-undo", id: record.id });
+    expect(after.memories).toHaveLength(0);
+    expect(after.memoryProposals).toHaveLength(0);
+    expect(hub.store.data.deletedMemoryIds?.[memory.id]).toBeTypeOf("number");
+  });
+
+  it("applies an update at once, undo restores the earlier text, and does not overwrite a later edit", async () => {
+    const hub = await makeHub([], true);
+    const team = (await hub.request({
+      action: "memory-save",
+      entry: { kind: "memory", scope: "workspace", title: "Postgres connections", text: "max_connections is 150" },
+    })).memories[0];
+    await hub.request({
+      action: "activity-record",
+      event: { actor: "sara", targetLabel: "prod-db", kind: "config-edit", summary: "raised max_connections to 300" },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => proposalAnswer([{ op: "update", id: team.id, text: "max_connections is 300", evidence: "raised max_connections to 300" }])),
+    );
+    const learned = await hub.request({ action: "memory-distill-activity" });
+    expect(learned.memories.find((m) => m.id === team.id)!.text).toBe("max_connections is 300");
+    const record = learned.memoryProposals![0];
+    expect(record).toMatchObject({ op: "update", appliedMemoryId: team.id, previousText: "max_connections is 150" });
+
+    const undone = await hub.request({ action: "memory-proposal-undo", id: record.id });
+    expect(undone.memories.find((m) => m.id === team.id)!.text).toBe("max_connections is 150");
+    expect(undone.memoryProposals).toHaveLength(0);
+
+    // Learn it again, then a person edits the memory: undo must not throw that edit away.
+    await hub.request({
+      action: "activity-record",
+      event: { actor: "sara", targetLabel: "prod-db", kind: "config-edit", summary: "confirmed 300 after reload" },
+    });
+    const again = await hub.request({ action: "memory-distill-activity" });
+    const second = again.memoryProposals![0];
+    await hub.request({
+      action: "memory-save",
+      entry: { id: team.id, kind: "memory", scope: "workspace", title: "Postgres connections", text: "max_connections is 300; PgBouncer on 6432" },
+    });
+    await expect(hub.request({ action: "memory-proposal-undo", id: second.id })).rejects.toThrow(/changed since/);
+    expect(hub.store.data.memories.find((m) => m.id === team.id)!.text).toBe("max_connections is 300; PgBouncer on 6432");
+  });
+
+  it("keeps a learned memory when its record is dismissed, and has nothing to undo for a pending proposal", async () => {
+    const hub = await makeHub([], true);
+    await hub.request({
+      action: "activity-record",
+      event: { actor: "erik", targetLabel: "prod-api", kind: "config-edit", summary: "set proxy_read_timeout 120s for SSE" },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => proposalAnswer([{ op: "add", scope: "server:prod-api", title: "SSE timeout", text: "Keep proxy_read_timeout at 120s.", evidence: "set proxy_read_timeout 120s" }])),
+    );
+    const learned = await hub.request({ action: "memory-distill-activity" });
+    const kept = await hub.request({ action: "memory-proposal-reject", id: learned.memoryProposals![0].id });
+    expect(kept.memoryProposals).toHaveLength(0);
+    expect(kept.memories.map((m) => m.title)).toEqual(["SSE timeout"]);
+
+    hub.store.data.memoryProposals = [
+      { id: "p1", op: "add", kind: "memory", scope: "workspace", title: "t", text: "x", evidence: "e", sourceId: "s", sourceTitle: "s", createdAt: 1 },
+    ];
+    await expect(hub.request({ action: "memory-proposal-undo", id: "p1" })).rejects.toThrow(/nothing to undo/);
+  });
+
+  it("reads this user's own activity on its own once enough has happened, and not again within six hours", async () => {
+    const hub = await makeHub([], true);
+    const me = (await hub.request({
+      action: "activity-record",
+      event: { actor: "", targetLabel: "prod-db", kind: "command", summary: "own change 0" },
+    })).activityLog!.at(-1)!.actor;
+    for (let i = 1; i < 8; i++)
+      await hub.request({ action: "activity-record", event: { actor: "", targetLabel: "prod-db", kind: "command", summary: `own change ${i}` } });
+    for (let i = 0; i < 20; i++)
+      await hub.request({ action: "activity-record", event: { actor: "somebody-else", targetLabel: "prod-db", kind: "command", summary: `their change ${i}` } });
+    let prompt = "";
+    const fetchSpy = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      prompt = JSON.stringify((JSON.parse(String(init?.body)) as { messages: unknown }).messages);
+      return proposalAnswer([]);
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    const learn = (now: number): Promise<void> =>
+      (hub as unknown as { maybeLearnFromOwnActivity(now: number): Promise<void> }).maybeLearnFromOwnActivity(now);
+
+    const t0 = Date.now() + 1000;
+    await learn(t0);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(prompt).toContain(`${me} on prod-db (command): own change 7`);
+    // A teammate's activity is read by that teammate's own app.
+    expect(prompt).not.toContain("their change");
+
+    for (let i = 8; i < 20; i++)
+      await hub.request({ action: "activity-record", event: { actor: "", targetLabel: "prod-db", kind: "command", summary: `own change ${i}` } });
+    await learn(t0 + 3_600_000);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not read activity on its own while fewer than eight own changes are new", async () => {
+    const hub = await makeHub([], true);
+    for (let i = 0; i < 7; i++)
+      await hub.request({ action: "activity-record", event: { actor: "", targetLabel: "prod-db", kind: "command", summary: `own change ${i}` } });
+    const fetchSpy = vi.fn(async () => proposalAnswer([]));
+    vi.stubGlobal("fetch", fetchSpy);
+    await (hub as unknown as { maybeLearnFromOwnActivity(now: number): Promise<void> }).maybeLearnFromOwnActivity(Date.now() + 1000);
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });

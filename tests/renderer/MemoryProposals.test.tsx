@@ -20,7 +20,8 @@ const proposal = (extra: Partial<MemoryProposal> = {}): MemoryProposal => ({
   createdAt: 1,
   ...extra,
 });
-const hub = (extra: Partial<HubSnapshot>): HubSnapshot => ({ memories: [], ...extra }) as unknown as HubSnapshot;
+const hub = (extra: Partial<HubSnapshot>): HubSnapshot =>
+  ({ memories: [], preferences: { autoSaveMemories: false }, ...extra }) as unknown as HubSnapshot;
 
 describe('MemoryProposals', () => {
   it('shows what a proposal says, where it applies, what it rests on, and what an update replaces', () => {
@@ -88,5 +89,41 @@ describe('MemoryProposals', () => {
     rerender(<MemoryProposals act={act} hub={hub({})} />);
     fireEvent.click(screen.getByTestId('memory-distill-activity-btn'));
     expect(act).toHaveBeenCalledWith({ action: 'memory-distill-activity' });
+  });
+
+  it('shows a memory the assistant already saved as learned: read-only, with Undo and Keep', async () => {
+    const act = vi.fn().mockResolvedValue(undefined);
+    render(
+      <MemoryProposals
+        act={act}
+        hub={hub({
+          preferences: {} as HubSnapshot['preferences'],
+          memoryProposals: [proposal({ appliedMemoryId: 'm9' }), proposal({ id: 'p2', op: 'update', appliedMemoryId: 'm1', previousText: 'old text' })],
+        })}
+      />
+    );
+    expect(screen.getByText(/Learned by the assistant/)).toBeInTheDocument();
+    const first = within(screen.getByTestId('memory-proposal-p1'));
+    expect(first.getByText('Learned a memory')).toBeInTheDocument();
+    expect(first.getByLabelText('Text')).toBeDisabled();
+    expect(first.queryByText('Accept and share with the team')).not.toBeInTheDocument();
+    expect(within(screen.getByTestId('memory-proposal-p2')).getByTestId('memory-proposal-previous')).toHaveTextContent('Replaced: old text');
+    fireEvent.click(first.getByText('Undo'));
+    expect(act).toHaveBeenLastCalledWith({ action: 'memory-proposal-undo', id: 'p1' });
+    await waitFor(() => expect(first.getByText('Keep')).not.toBeDisabled());
+    fireEvent.click(first.getByText('Keep'));
+    expect(act).toHaveBeenLastCalledWith({ action: 'memory-proposal-reject', id: 'p1' });
+  });
+
+  it('automatic saving is on unless turned off, and the switch changes the preference', () => {
+    const act = vi.fn().mockResolvedValue(undefined);
+    const { rerender } = render(<MemoryProposals act={act} hub={hub({ preferences: {} as HubSnapshot['preferences'] })} />);
+    const toggle = screen.getByTestId('memory-autosave-toggle') as HTMLInputElement;
+    expect(toggle.checked).toBe(true);
+    fireEvent.click(toggle);
+    expect(act).toHaveBeenCalledWith({ action: 'configure', config: {}, preferences: { autoSaveMemories: false } });
+    rerender(<MemoryProposals act={act} hub={hub({})} />);
+    expect((screen.getByTestId('memory-autosave-toggle') as HTMLInputElement).checked).toBe(false);
+    expect(screen.getByText(/Suggested by the assistant/)).toBeInTheDocument();
   });
 });

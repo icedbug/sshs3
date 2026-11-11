@@ -30,6 +30,7 @@ export function MemoryProposals({
   act: Act;
 }): JSX.Element {
   const proposals = hub.memoryProposals ?? [];
+  const autoSave = hub.preferences?.autoSaveMemories !== false;
   const last = hub.lastMemoryDistill;
   const [reading, setReading] = useState(false);
   const busy = reading || hub.memoryDistillRunning === true;
@@ -53,14 +54,34 @@ export function MemoryProposals({
         }}
       >
         <div>
-          <strong>Suggested by the assistant ({proposals.length})</strong>
+          <strong>
+            {autoSave ? "Learned by the assistant" : "Suggested by the assistant"} (
+            {proposals.length})
+          </strong>
           <div style={{ marginTop: 2 }}>
             <small>
-              After a finished session the assistant reads it once more and
-              suggests what the team should remember. A suggestion is not used
-              and not shared until somebody accepts it.
+              {autoSave
+                ? "After a finished session, and from your own activity, the assistant saves what the team should remember and shares it at once. Undo anything that is wrong."
+                : "After a finished session the assistant suggests what the team should remember. A suggestion is not used and not shared until somebody accepts it."}
             </small>
           </div>
+          <label
+            style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 4 }}
+          >
+            <input
+              type="checkbox"
+              data-testid="memory-autosave-toggle"
+              checked={autoSave}
+              onChange={(e) =>
+                void act({
+                  action: "configure",
+                  config: {},
+                  preferences: { autoSaveMemories: e.target.checked },
+                })
+              }
+            />
+            <small>Save and share what the assistant learns automatically</small>
+          </label>
         </div>
         <button
           type="button"
@@ -98,6 +119,8 @@ function ProposalRow({
   const [text, setText] = useState(proposal.text);
   const [title, setTitle] = useState(proposal.title);
   const [busy, setBusy] = useState(false);
+  // Already saved by the assistant: a record of what was learned, which can be undone.
+  const applied = Boolean(proposal.appliedMemoryId);
 
   const decide = (request: HubRequest): void => {
     setBusy(true);
@@ -119,11 +142,17 @@ function ProposalRow({
     >
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
         <span className="ai-badge">
-          {proposal.op === "update"
-            ? "Update an existing memory"
-            : proposal.kind === "skill"
-              ? "New skill"
-              : "New memory"}
+          {applied
+            ? proposal.op === "update"
+              ? "Updated a memory"
+              : proposal.kind === "skill"
+                ? "Learned a skill"
+                : "Learned a memory"
+            : proposal.op === "update"
+              ? "Update an existing memory"
+              : proposal.kind === "skill"
+                ? "New skill"
+                : "New memory"}
         </span>
         <small>Applies to {scopeLabel(proposal.scope)}</small>
         <small style={{ opacity: 0.75 }}>· from {proposal.sourceTitle}</small>
@@ -132,49 +161,73 @@ function ProposalRow({
         aria-label="Title"
         value={title}
         onChange={(e) => setTitle(e.target.value)}
-        disabled={busy}
+        disabled={busy || applied}
       />
       <textarea
         aria-label="Text"
         value={text}
         onChange={(e) => setText(e.target.value)}
         rows={3}
-        disabled={busy}
+        disabled={busy || applied}
       />
       {proposal.previousText && (
         <small data-testid="memory-proposal-previous">
-          Replaces: <span style={{ opacity: 0.8 }}>{proposal.previousText}</span>
+          {applied ? "Replaced" : "Replaces"}: <span style={{ opacity: 0.8 }}>{proposal.previousText}</span>
         </small>
       )}
       <small>
         Evidence: <span style={{ opacity: 0.8 }}>{proposal.evidence}</span>
       </small>
-      <div style={{ display: "flex", gap: 6 }}>
-        <button
-          type="button"
-          className="ai-btn-emerald"
-          disabled={busy || !text.trim() || !title.trim()}
-          onClick={() =>
-            decide({
-              action: "memory-proposal-accept",
-              id: proposal.id,
-              title: title.trim(),
-              text: text.trim(),
-            })
-          }
-        >
-          Accept and share with the team
-        </button>
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() =>
-            decide({ action: "memory-proposal-reject", id: proposal.id })
-          }
-        >
-          Reject
-        </button>
-      </div>
+      {applied ? (
+        <div style={{ display: "flex", gap: 6 }}>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() =>
+              decide({ action: "memory-proposal-undo", id: proposal.id })
+            }
+          >
+            Undo
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            title="Keep the memory and remove this entry from the list"
+            onClick={() =>
+              decide({ action: "memory-proposal-reject", id: proposal.id })
+            }
+          >
+            Keep
+          </button>
+        </div>
+      ) : (
+        <div style={{ display: "flex", gap: 6 }}>
+          <button
+            type="button"
+            className="ai-btn-emerald"
+            disabled={busy || !text.trim() || !title.trim()}
+            onClick={() =>
+              decide({
+                action: "memory-proposal-accept",
+                id: proposal.id,
+                title: title.trim(),
+                text: text.trim(),
+              })
+            }
+          >
+            Accept and share with the team
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() =>
+              decide({ action: "memory-proposal-reject", id: proposal.id })
+            }
+          >
+            Reject
+          </button>
+        </div>
+      )}
     </section>
   );
 }

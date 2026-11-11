@@ -165,6 +165,12 @@ export interface MemoryProposal {
   sourceId: string;
   sourceTitle: string;
   createdAt: number;
+  /**
+   * Set once the suggestion has been saved (by the assistant itself when
+   * memories are saved automatically, the default): the memory it became.
+   * Such an entry is a record of what was learned, kept so it can be undone.
+   */
+  appliedMemoryId?: string;
 }
 
 /** The outcome of the latest memory proposal run. */
@@ -432,6 +438,12 @@ export interface HubPreferences {
    * team memories (one extra model call per task). On unless set to false.
    */
   proposeMemories?: boolean;
+  /**
+   * Whether what the assistant proposes to remember is saved and shared with
+   * the team at once (on unless set to false), so the team's memory grows on
+   * its own; each such memory can be undone. Off: a person accepts each one.
+   */
+  autoSaveMemories?: boolean;
 }
 export interface MissionAgent {
   id: string;
@@ -607,6 +619,8 @@ export type HubRequest =
   /** Saves a proposal as a memory (or applies its update), optionally with edited text. */
   | { action: "memory-proposal-accept"; id: string; title?: string; text?: string }
   | { action: "memory-proposal-reject"; id: string }
+  /** Takes back a memory the assistant saved by itself: a new one is deleted, an updated one gets its earlier text. */
+  | { action: "memory-proposal-undo"; id: string }
   /** Reads the team's recent activity and chat once and proposes memories from it. */
   | { action: "memory-distill-activity" }
   | { action: "self-learn-reflect"; targetCluster?: string }

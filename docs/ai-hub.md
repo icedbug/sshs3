@@ -115,7 +115,14 @@ explicitly enabled presentation on top of the same terminal authority.
   accepts one (`memory-proposal-accept`, optionally with corrected text) or
   rejects it. An accepted proposal is an ordinary `MemoryEntry` and syncs like
   one. Personal notes are never shown to that run. `proposeMemories: false`
-  turns the per-task run off; the outcome of the latest run, including an
+  turns the per-task run off. By default (`autoSaveMemories`, on unless set to
+  false) the validated proposals are saved and shared at once, so the team's
+  memory grows on its own: each stays in `memoryProposals` with
+  `appliedMemoryId` as a record that can be undone (`memory-proposal-undo`
+  deletes a new memory, or restores an updated one's earlier text unless it
+  was edited since). With it off a person accepts each one. Each user's app
+  also reads that user's own activity on its own (at most every six hours,
+  from eight new changes). The outcome of the latest run, including an
   unusable answer, is `lastMemoryDistill`. This is the extract-and-compare
   method of mem0, done with the configured provider so that it also works with
   ChatGPT/Codex sign-in and keeps the team's existing memory sync.

@@ -96,6 +96,8 @@ export interface HubData {
   /** Ids of records already read for proposals, newest last, so none is read twice. */
   distilledSourceIds?: string[];
   lastMemoryDistill?: MemoryDistillStatus;
+  /** When this user's own activity was last read for memories. */
+  lastActivityDistillAt?: number;
   schedules: AgentSchedule[];
   inventory: InventoryEntry[];
   history: ContextSource[];
