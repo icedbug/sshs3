@@ -40,7 +40,6 @@ import {
   type NavigationDirection,
 } from '../lib/spatialNavigation';
 import { hubRequest, useHub } from '../lib/aiHub';
-import { WorkspaceChat } from './AiHub/WorkspaceChat';
 import { isWebBrowserMode } from '../lib/webClientBridge';
 
 export interface LandingViewProps {
@@ -254,21 +253,11 @@ export const LandingView: React.FC<LandingViewProps> = ({
   const [s3CopyFeedback, setS3CopyFeedback] = useState(false);
   const [s3StatusMsg, setS3StatusMsg] = useState<string | null>(null);
 
-  const [noteTarget, setNoteTarget] = useState('');
-  const [noteSummary, setNoteSummary] = useState('');
-  const [addingNote, setAddingNote] = useState(false);
 
   // AI Workspace Command Center & Right Column state
   const [aiQuickPrompt, setAiQuickPrompt] = useState('');
   const [aiQuickAgentId, setAiQuickAgentId] = useState('');
   const [showClusterTopology, setShowClusterTopology] = useState(true);
-  const [rightColTab, setRightColTab] = useState<'chat' | 'activity' | 'memory' | 'kb' | 'workforce'>('chat');
-  const [memTitle, setMemTitle] = useState('');
-  const [memText, setMemText] = useState('');
-  const [memKind, setMemKind] = useState<'memory' | 'skill'>('memory');
-  const [memTier, setMemTier] = useState<'core' | 'archival' | 'episodic'>('archival');
-  const [addingMemory, setAddingMemory] = useState(false);
-  const [runningDashboardSwarm, setRunningDashboardSwarm] = useState(false);
   const [quickAiOpen, setQuickAiOpen] = useState(false);
   const [quickAiDismissed, setQuickAiDismissed] = useState(false);
   const [quickAiProvider, setQuickAiProvider] = useState<'openai-compatible' | 'anthropic' | 'openrouter'>('openai-compatible');
@@ -617,17 +606,6 @@ export const LandingView: React.FC<LandingViewProps> = ({
     );
   };
 
-  const handleAskAiAboutActivity = (event: WorkspaceActivityEvent) => {
-    window.dispatchEvent(
-      new CustomEvent('sshs3:ai-attach', {
-        detail: {
-          label: `@change:${event.targetLabel}`,
-          text: `Team activity on ${event.targetLabel} by ${event.actor} at ${new Date(event.at).toLocaleString()}:\nSummary: ${event.summary}\n${event.detail ? `Detail: ${event.detail}` : ''}`,
-        },
-      })
-    );
-  };
-
   const openEditServer = (server: WorkspaceServerSummary) => {
     const localOverride = hub?.localOverrides?.[server.id];
     setEditingServerId(server.id);
@@ -798,32 +776,6 @@ export const LandingView: React.FC<LandingViewProps> = ({
     }
   };
 
-  const handleRecordTeamNote = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!noteSummary.trim()) return;
-    setAddingNote(true);
-    try {
-      const matchedServer = workspaceServers.find(
-        (s) => s.id === noteTarget || s.name === noteTarget
-      );
-      await hubRequest({
-        action: 'activity-record',
-        event: {
-          actor: '',
-          profileId: matchedServer?.id,
-          targetLabel: matchedServer?.name || noteTarget || 'Workspace',
-          kind: 'note',
-          summary: noteSummary.trim(),
-        },
-      });
-      setNoteSummary('');
-    } catch {
-      // Non-fatal
-    } finally {
-      setAddingNote(false);
-    }
-  };
-
   const handleLaunchAiCommand = (customPrompt?: string, customAgentId?: string) => {
     const promptToSend = (customPrompt ?? aiQuickPrompt).trim();
     const agentToUse = customAgentId !== undefined ? customAgentId : aiQuickAgentId;
@@ -839,45 +791,6 @@ export const LandingView: React.FC<LandingViewProps> = ({
     );
     if (!customPrompt) {
       setAiQuickPrompt('');
-    }
-  };
-
-  const handleSaveTeamMemory = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!memTitle.trim() || !memText.trim()) return;
-    setAddingMemory(true);
-    try {
-      await hubRequest({
-        action: 'memory-save',
-        entry: {
-          title: memTitle.trim(),
-          text: memText.trim(),
-          kind: memKind,
-          tier: memTier,
-          scope: 'workspace',
-        },
-      });
-      setMemTitle('');
-      setMemText('');
-    } catch {
-      // Non-fatal
-    } finally {
-      setAddingMemory(false);
-    }
-  };
-
-  const handleRunDashboardWorkforce = async () => {
-    setRunningDashboardSwarm(true);
-    try {
-      await hubRequest({
-        action: 'workforce-run',
-        prompt:
-          'Review our shared servers and clusters: recent team changes, known problems in the knowledge base, and what should be checked next.',
-      });
-    } catch {
-      // Non-fatal in offline/mocked tests
-    } finally {
-      setRunningDashboardSwarm(false);
     }
   };
 
@@ -1308,10 +1221,10 @@ export const LandingView: React.FC<LandingViewProps> = ({
             data-testid="workspace-dashboard"
             className="grid grid-cols-1 lg:grid-cols-3 gap-4 w-full text-left"
           >
-            {/* The servers and the team (chat, activity, memory) come first: that is the workspace.
-                Sync status, the AI command bar and the KPI ribbon follow below. */}
+            {/* The servers come first: that is the workspace. Sync status, the AI command bar and the
+                KPI ribbon follow below. The team's chat, activity, memory and runbooks are in the AI panel. */}
             {/* Left 2 Columns: Termius-style Server, Cluster & Node Cards */}
-            <div className="lg:col-span-2 flex flex-col gap-3 rounded-xl border border-border-subtle bg-app-surface-subtle p-3.5">
+            <div className="lg:col-span-3 flex flex-col gap-3 rounded-xl border border-border-subtle bg-app-surface-subtle p-3.5">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
                   <Layers className="h-4 w-4 text-emerald-400" />
@@ -1320,6 +1233,20 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   </h2>
                 </div>
                 <div className="flex flex-wrap items-center gap-1.5">
+                  {/* The team's chat, activity, memory and runbooks live in the AI panel. */}
+                  <button
+                    type="button"
+                    data-testid="open-team-chat-btn"
+                    onClick={() =>
+                      window.dispatchEvent(
+                        new CustomEvent('sshs3:ai-open', { detail: { view: 'Team', mode: 'hub' } })
+                      )
+                    }
+                    className="inline-flex items-center gap-1 rounded-md border border-sky-500/40 bg-sky-500/10 px-2.5 py-0.5 text-[11px] font-semibold text-sky-300 hover:bg-sky-500/20"
+                  >
+                    <Users className="h-3 w-3" />
+                    Team chat
+                  </button>
                   <button
                     type="button"
                     data-testid="add-cluster-node-btn"
@@ -1765,7 +1692,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
               )}
 
               {/* Server Cards Grid */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2.5">
                 {filteredServers.map((server) => {
                   const isEditing = editingServerId === server.id;
                   const latestEvent =
@@ -2168,510 +2095,6 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   </div>
                 </div>
               )}
-            </div>
-
-            {/* Right Column: Team Activity, Shared AI Memory & Runbooks (KB) */}
-            <div
-              data-testid="workspace-right-column"
-              // Stays in view beside the (long) server list, so the chat is always at hand.
-              className="flex flex-col justify-between gap-3 rounded-xl border border-border-subtle bg-app-surface-subtle p-3.5 lg:sticky lg:top-0 lg:self-start"
-            >
-              <div className="space-y-3">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-1.5">
-                    <Activity className="h-4 w-4 text-amber-400" />
-                    <h2 className="text-xs font-bold uppercase tracking-wider text-txt-primary">
-                      Team
-                    </h2>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => window.dispatchEvent(new CustomEvent('sshs3:ai-open'))}
-                    className="inline-flex items-center gap-1 rounded-md border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[10px] font-medium text-sky-300 hover:bg-sky-500/20"
-                  >
-                    <Bot className="h-3 w-3" /> Open AI
-                  </button>
-                </div>
-
-                {/* Tab switcher: Chatt / Aktivitet / Team Memory / Runbooks (KB) / Swarm & MCP */}
-                <div
-                  data-testid="workspace-right-tabs"
-                  className="flex flex-wrap gap-1 rounded-lg border border-border-subtle bg-app-card p-1 [&>button]:flex-1 [&>button]:whitespace-nowrap"
-                >
-                  <button
-                    type="button"
-                    data-testid="right-tab-chat"
-                    onClick={() => setRightColTab('chat')}
-                    className={`rounded-md px-1.5 py-1 text-[10px] font-semibold transition-all ${
-                      rightColTab === 'chat'
-                        ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40 shadow-sm'
-                        : 'text-txt-muted hover:text-txt-primary'
-                    }`}
-                  >
-                    Chat
-                  </button>
-                  <button
-                    type="button"
-                    data-testid="right-tab-activity"
-                    onClick={() => setRightColTab('activity')}
-                    className={`rounded-md px-1.5 py-1 text-[10px] font-semibold transition-all ${
-                      rightColTab === 'activity'
-                        ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm'
-                        : 'text-txt-muted hover:text-txt-primary'
-                    }`}
-                  >
-                    Activity ({activityLog.length})
-                  </button>
-                  <button
-                    type="button"
-                    data-testid="right-tab-memory"
-                    onClick={() => setRightColTab('memory')}
-                    className={`rounded-md px-1.5 py-1 text-[10px] font-semibold transition-all ${
-                      rightColTab === 'memory'
-                        ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40 shadow-sm'
-                        : 'text-txt-muted hover:text-txt-primary'
-                    }`}
-                  >
-                    Memory ({hub?.memories?.length ?? 0})
-                  </button>
-                  <button
-                    type="button"
-                    data-testid="right-tab-kb"
-                    onClick={() => setRightColTab('kb')}
-                    className={`rounded-md px-1.5 py-1 text-[10px] font-semibold transition-all ${
-                      rightColTab === 'kb'
-                        ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm'
-                        : 'text-txt-muted hover:text-txt-primary'
-                    }`}
-                  >
-                    Runbooks ({hub?.kbDocuments?.length ?? 0})
-                  </button>
-                  <button
-                    type="button"
-                    data-testid="right-tab-workforce"
-                    onClick={() => setRightColTab('workforce')}
-                    className={`rounded-md px-1.5 py-1 text-[10px] font-semibold transition-all ${
-                      rightColTab === 'workforce'
-                        ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40 shadow-sm'
-                        : 'text-txt-muted hover:text-txt-primary'
-                    }`}
-                  >
-                    Reviews ({(hub?.workforceRuns ?? []).length})
-                  </button>
-                </div>
-
-                {rightColTab === 'chat' && (
-                  <div data-testid="right-panel-chat">
-                    <WorkspaceChat
-                      hub={hub}
-                      request={hubRequest}
-                      // The Web Server shares the workspace between its signed-in users without a bucket.
-                      teamShared={isWebBrowserMode() ? true : undefined}
-                    />
-                  </div>
-                )}
-
-                {rightColTab === 'activity' && (
-                  <>
-                    <p className="text-[11px] text-txt-muted">
-                      Changes to configuration, services and packages on any VM are logged here, for you, your teammates and the assistant.
-                    </p>
-
-                    {/* Quick Note Form */}
-                    <form onSubmit={handleRecordTeamNote} className="space-y-1.5 rounded-lg border border-border-subtle bg-app-card p-2">
-                      <div className="flex gap-1.5">
-                        <select
-                          value={noteTarget}
-                          onChange={(e) => setNoteTarget(e.target.value)}
-                          className="w-28 rounded border border-border-subtle bg-app px-1.5 py-1 text-[11px] text-txt-primary"
-                        >
-                          <option value="">General</option>
-                          {workspaceServers.map((s) => (
-                            <option key={s.id} value={s.name}>
-                              {`${s.name} (${s.host})`}
-                            </option>
-                          ))}
-                        </select>
-                        <input
-                          type="text"
-                          value={noteSummary}
-                          onChange={(e) => setNoteSummary(e.target.value)}
-                          placeholder="Log a note for the team (e.g. changed the nginx port)…"
-                          className="flex-1 rounded border border-border-subtle bg-app px-2 py-1 text-[11px] text-txt-primary placeholder:text-txt-muted outline-none"
-                        />
-                        <button
-                          type="submit"
-                          disabled={addingNote || !noteSummary.trim()}
-                          className="rounded bg-sky-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-sky-500 disabled:opacity-40"
-                        >
-                          Log
-                        </button>
-                      </div>
-                    </form>
-
-                    {/* Activity List */}
-                    <div className="space-y-2 max-h-[290px] overflow-y-auto pr-1">
-                      {activityLog.length === 0 ? (
-                        <div className="rounded-lg border border-dashed border-border-subtle p-4 text-center text-xs text-txt-muted">
-                          No changes logged yet. When someone on the team edits configuration or restarts a service in a terminal, it shows up here.
-                        </div>
-                      ) : (
-                        activityLog.map((ev) => (
-                          <div
-                            key={ev.id}
-                            className="rounded-lg border border-border-subtle bg-app-card p-2.5 text-xs space-y-1"
-                          >
-                            <div className="flex items-center justify-between gap-1">
-                              <span className="font-semibold text-txt-primary truncate">
-                                {ev.actor}{' '}
-                                <span className="font-normal text-txt-muted">on</span>{' '}
-                                <span className="text-sky-400">{ev.targetLabel}</span>
-                              </span>
-                              <span className="shrink-0 text-[10px] text-txt-muted">
-                                {formatRelativeTime(ev.at)}
-                              </span>
-                            </div>
-                            <p className="text-[11px] text-txt-secondary">{ev.summary}</p>
-                            {ev.detail && (
-                              <pre className="rounded bg-app px-2 py-1 text-[10px] font-mono text-txt-muted overflow-x-auto">
-                                {ev.detail}
-                              </pre>
-                            )}
-                            <div className="flex justify-end">
-                              <button
-                                type="button"
-                                onClick={() => handleAskAiAboutActivity(ev)}
-                                className="inline-flex items-center gap-1 text-[10px] text-sky-400 hover:underline"
-                              >
-                                <Sparkles className="h-2.5 w-2.5" /> Ask AI about this change
-                              </button>
-                            </div>
-                          </div>
-                        ))
-                      )}
-                    </div>
-                  </>
-                )}
-
-                {rightColTab === 'memory' && (
-                  <div data-testid="right-panel-memory" className="space-y-2.5">
-                    <p className="text-[11px] text-txt-muted">
-                      What the team has chosen to remember. Team memories are shared through the workspace sync.
-                    </p>
-
-                    <form
-                      onSubmit={handleSaveTeamMemory}
-                      className="space-y-1.5 rounded-lg border border-sky-500/30 bg-app-card p-2"
-                    >
-                      <div className="flex gap-1.5">
-                        <select
-                          value={memKind}
-                          onChange={(e) => setMemKind(e.target.value as 'memory' | 'skill')}
-                          className="rounded border border-border-subtle bg-app px-1.5 py-1 text-[10.5px] text-txt-primary"
-                        >
-                          <option value="memory">🧠 Memory</option>
-                          <option value="skill">⚡ Skill</option>
-                        </select>
-                        <select
-                          value={memTier}
-                          onChange={(e) => setMemTier(e.target.value as 'core' | 'archival' | 'episodic')}
-                          title="Letta Memory Tier"
-                          className="rounded border border-border-subtle bg-app px-1.5 py-1 text-[10.5px] text-txt-primary"
-                        >
-                          <option value="core">📌 Core (Pinned)</option>
-                          <option value="archival">📚 Archival (RAG)</option>
-                          <option value="episodic">⚡ Episodic</option>
-                        </select>
-                        <input
-                          type="text"
-                          value={memTitle}
-                          onChange={(e) => setMemTitle(e.target.value)}
-                          placeholder="Titel (t.ex. Nginx reload-rutin)…"
-                          className="flex-1 rounded border border-border-subtle bg-app px-2 py-1 text-[11px] text-txt-primary placeholder:text-txt-muted outline-none"
-                        />
-                      </div>
-                      <div className="flex gap-1.5">
-                        <input
-                          type="text"
-                          value={memText}
-                          onChange={(e) => setMemText(e.target.value)}
-                          placeholder="What the assistant should remember…"
-                          className="flex-1 rounded border border-border-subtle bg-app px-2 py-1 text-[11px] text-txt-primary placeholder:text-txt-muted outline-none"
-                        />
-                        <button
-                          type="submit"
-                          disabled={addingMemory || !memTitle.trim() || !memText.trim()}
-                          className="rounded bg-sky-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-sky-500 disabled:opacity-40"
-                        >
-                          Save
-                        </button>
-                      </div>
-                    </form>
-
-                    <div className="space-y-2 max-h-[270px] overflow-y-auto pr-1">
-                      {(hub?.memories ?? []).length === 0 ? (
-                        <div className="rounded-lg border border-dashed border-border-subtle p-4 text-center text-xs text-txt-muted">
-                          No team memories yet. Add a memory or a skill above.
-                        </div>
-                      ) : (
-                        (hub?.memories ?? []).map((mem) => (
-                          <div
-                            key={mem.id}
-                            className="rounded-lg border border-border-subtle bg-app-card p-2.5 text-xs space-y-1"
-                          >
-                            <div className="flex items-center justify-between gap-1 flex-wrap">
-                              <span className="font-semibold text-txt-primary truncate">
-                                {mem.kind === 'skill' ? '⚡' : '🧠'} {mem.title}
-                              </span>
-                              <div className="flex items-center gap-1">
-                                <span
-                                  className={`rounded-full px-1.5 py-0.5 text-[9px] font-semibold ${
-                                    mem.tier === 'core'
-                                      ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30'
-                                      : mem.tier === 'episodic'
-                                        ? 'bg-amber-500/20 text-amber-300'
-                                        : 'bg-emerald-500/15 text-emerald-300'
-                                  }`}
-                                >
-                                  {mem.tier === 'core'
-                                    ? '📌 Core'
-                                    : mem.tier === 'episodic'
-                                      ? '⚡ Episodic'
-                                      : '📚 Archival'}
-                                </span>
-                                {(mem.updatedCount ?? 1) > 1 && (
-                                  <span
-                                    title="Mem0 smart konsolidering"
-                                    className="rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-semibold text-amber-300"
-                                  >
-                                    🔄 ×{mem.updatedCount}
-                                  </span>
-                                )}
-                                <span className="rounded-full bg-sky-500/15 px-1.5 py-0.5 text-[9.5px] font-semibold text-sky-300">
-                                  {mem.scope === 'workspace' ? 'Team S3' : mem.scope}
-                                </span>
-                              </div>
-                            </div>
-                            <p className="text-[11px] text-txt-secondary line-clamp-2">{mem.text}</p>
-                            <div className="flex justify-end">
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  window.dispatchEvent(
-                                    new CustomEvent('sshs3:ai-open', {
-                                      detail: {
-                                        view: 'Work',
-                                        mode: 'panel',
-                                        prompt: `Use our team memory "${mem.title}" (${mem.text}) and help me apply it.`,
-                                      },
-                                    })
-                                  )
-                                }
-                                className="inline-flex items-center gap-1 text-[10px] text-sky-400 hover:underline"
-                              >
-                                <Sparkles className="h-2.5 w-2.5" /> Use this memory with AI
-                              </button>
-                            </div>
-                          </div>
-                        ))
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                {rightColTab === 'kb' && (
-                  <div data-testid="right-panel-kb" className="space-y-2.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <p className="text-[11px] text-txt-muted">
-                        Runbooks, architecture notes and post-mortems in the knowledge base (`@kb`).
-                      </p>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          window.dispatchEvent(
-                            new CustomEvent('sshs3:ai-open', {
-                              detail: { view: 'Knowledge Base', mode: 'hub' },
-                            })
-                          )
-                        }
-                        className="shrink-0 rounded border border-emerald-500/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300 hover:bg-emerald-500/25"
-                      >
-                        Hantera KB ↗
-                      </button>
-                    </div>
-
-                    <div className="space-y-2 max-h-[310px] overflow-y-auto pr-1">
-                      {(hub?.kbDocuments ?? []).length === 0 ? (
-                        <div className="rounded-lg border border-dashed border-border-subtle p-4 text-center text-xs text-txt-muted">
-                          No runbooks yet. Open the knowledge base in the AI hub to add documentation.
-                        </div>
-                      ) : (
-                        (hub?.kbDocuments ?? []).map((doc) => (
-                          <div
-                            key={doc.id}
-                            className="rounded-lg border border-border-subtle bg-app-card p-2.5 text-xs space-y-1.5"
-                          >
-                            <div className="flex items-center justify-between gap-1">
-                              <span className="font-semibold text-txt-primary truncate">
-                                📘 {doc.title}
-                              </span>
-                              <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[9.5px] font-semibold text-emerald-300">
-                                {doc.collection}
-                              </span>
-                            </div>
-                            <p className="text-[11px] text-txt-secondary line-clamp-2">
-                              {doc.content}
-                            </p>
-                            <div className="flex items-center justify-between pt-0.5">
-                              <div className="flex flex-wrap gap-1">
-                                {(doc.tags ?? []).slice(0, 3).map((t) => (
-                                  <span
-                                    key={t}
-                                    className="rounded bg-app px-1.5 py-0.2 text-[9.5px] text-txt-muted"
-                                  >
-                                    #{t}
-                                  </span>
-                                ))}
-                              </div>
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  window.dispatchEvent(
-                                    new CustomEvent('sshs3:ai-open', {
-                                      detail: {
-                                        view: 'Work',
-                                        mode: 'panel',
-                                        prompt: `Follow our runbook "${doc.title}" in @kb and help me carry out the steps safely.`,
-                                      },
-                                    })
-                                  )
-                                }
-                                className="inline-flex items-center gap-1 text-[10px] font-medium text-emerald-300 hover:underline"
-                              >
-                                <Sparkles className="h-2.5 w-2.5" /> Run this runbook with AI
-                              </button>
-                            </div>
-                          </div>
-                        ))
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                {rightColTab === 'workforce' && (
-                  <div data-testid="right-panel-workforce" className="space-y-2.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <p className="text-[11px] text-txt-muted">
-                        Your Mission Agents each investigate the objective (read-only) and a combined result is written.
-                      </p>
-                      <div className="flex items-center gap-1">
-                        <button
-                          type="button"
-                          disabled={runningDashboardSwarm}
-                          data-testid="dashboard-run-workforce-btn"
-                          onClick={handleRunDashboardWorkforce}
-                          className="shrink-0 rounded border border-purple-500/40 bg-purple-500/20 px-2 py-0.5 text-[10px] font-semibold text-purple-200 hover:bg-purple-500/30 disabled:opacity-50"
-                        >
-                          {runningDashboardSwarm ? '⏳ Running…' : '🚀 Run a review'}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            window.dispatchEvent(
-                              new CustomEvent('sshs3:ai-open', {
-                                detail: { view: 'Agents & MCP', mode: 'hub' },
-                              })
-                            )
-                          }
-                          className="shrink-0 rounded border border-border-subtle bg-app-card px-2 py-0.5 text-[10px] font-semibold text-txt-secondary hover:text-txt-primary"
-                        >
-                          Open ↗
-                        </button>
-                      </div>
-                    </div>
-
-                    <div className="space-y-2 max-h-[220px] overflow-y-auto pr-1">
-                      {(hub?.workforceRuns ?? []).length === 0 ? (
-                        <div className="rounded-lg border border-dashed border-border-subtle p-3 text-center text-xs text-txt-muted">
-                          No workforce runs yet. Click <strong>🚀 Run a review</strong> to have your Mission Agents look at the clusters in parallel.
-                        </div>
-                      ) : (
-                        (hub?.workforceRuns ?? []).slice(0, 4).map((run) => (
-                          <div
-                            key={run.id}
-                            className="rounded-lg border border-purple-500/30 bg-app-card p-2.5 text-xs space-y-1.5"
-                          >
-                            <div className="flex items-center justify-between gap-1">
-                              <span className="font-semibold text-txt-primary truncate">
-                                🤝 {run.title}
-                              </span>
-                              <span className="rounded-full bg-purple-500/20 px-1.5 py-0.5 text-[9px] font-semibold text-purple-300">
-                                {run.steps.length} agenter · {run.status}
-                                {run.simulated ? ' · demo' : ''}
-                              </span>
-                            </div>
-                            <p className="text-[10.5px] text-txt-secondary line-clamp-2">
-                              {run.error ?? run.synthesis}
-                            </p>
-                            <div className="flex flex-wrap gap-1 pt-0.5">
-                              {run.steps.map((st) => (
-                                <span
-                                  key={st.id}
-                                  className="rounded border border-border-subtle bg-app px-1.5 py-0.5 text-[9.5px] text-sky-300"
-                                  title={st.error ?? st.findings}
-                                >
-                                  {st.status === 'failed' ? '❌' : st.agentIcon} {st.agentName}
-                                </span>
-                              ))}
-                            </div>
-                          </div>
-                        ))
-                      )}
-                    </div>
-
-                    {(hub?.mcpCatalog ?? []).length > 0 && (
-                      <div className="rounded-lg border border-border-subtle bg-app-card p-2 space-y-1.5">
-                        <div className="flex items-center justify-between">
-                          <span className="text-[10.5px] font-semibold text-txt-primary">
-                            🔌 1-Click Open-Source MCP Marketplace
-                          </span>
-                          <span className="text-[9.5px] text-txt-muted">
-                            {(hub?.mcpServers ?? []).length} aktiva
-                          </span>
-                        </div>
-                        <div className="flex flex-wrap gap-1">
-                          {(hub?.mcpCatalog ?? []).slice(0, 6).map((preset) => {
-                            const installed = (hub?.mcpServers ?? []).some(
-                              (s) => s.name.toLowerCase() === preset.name.toLowerCase()
-                            );
-                            return (
-                              <button
-                                key={preset.id}
-                                type="button"
-                                disabled={installed}
-                                onClick={() =>
-                                  void hubRequest({
-                                    action: 'mcp-install-preset',
-                                    presetId: preset.id,
-                                  })
-                                }
-                                className={`rounded border px-1.5 py-0.5 text-[9.5px] font-medium transition-colors ${
-                                  installed
-                                    ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
-                                    : 'border-sky-500/30 bg-sky-500/10 text-sky-300 hover:bg-sky-500/20'
-                                }`}
-                                title={preset.description}
-                              >
-                                {preset.icon} {preset.name} {installed ? '✓' : '+'}
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
             </div>
 
             {/* Full-width S3 Team Bucket Sync & Presence Bar */}

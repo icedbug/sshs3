@@ -32,6 +32,7 @@ import {
 } from "../../lib/aiHub";
 import { isWebBrowserMode } from "../../lib/webClientBridge";
 import "./aiHub.css";
+import { WorkspaceChat } from "./WorkspaceChat";
 import { DEMO_MODE_SET_BY_SERVER, modes, } from "./panelShared";
 import { RichMarkdownContent } from "./RichMarkdownContent";
 import { Settings } from "./SettingsView";
@@ -43,6 +44,7 @@ import { KnowledgeBaseView } from "./KnowledgeBaseView";
 
 type View =
   | "Work"
+  | "Team"
   | "Agents & MCP"
   | "Knowledge Base"
   | "Infrastructure"
@@ -838,6 +840,7 @@ export function AiHubPanel({
           mode === "hub"
             ? ([
                 "Work",
+                "Team",
                 "Agents & MCP",
                 "Knowledge Base",
                 "Infrastructure",
@@ -847,6 +850,7 @@ export function AiHubPanel({
               ] as View[])
             : ([
                 "Work",
+                "Team",
                 "Agents & MCP",
                 "Knowledge Base",
                 "Memory & skills",
@@ -874,7 +878,9 @@ export function AiHubPanel({
               <span>
                 {name === "Work"
                   ? "💬 Chat"
-                  : name === "Agents & MCP"
+                  : name === "Team"
+                    ? "👥 Team"
+                    : name === "Agents & MCP"
                     ? "🤖 Agents & MCP"
                     : name === "Knowledge Base"
                       ? mode === "panel"
@@ -2646,6 +2652,21 @@ export function AiHubPanel({
             />
           )}
           {activeView === "Schedules" && <Schedules hub={hub} act={act} />}
+          {activeView === "Team" && (
+            <div className="ai-scroll" data-testid="ai-team-view">
+              <h2>👥 Team chat</h2>
+              <p className="ai-hint">
+                The workspace&apos;s shared conversation. Mention @ai and the
+                assistant answers here, where the whole team sees it.
+              </p>
+              <WorkspaceChat
+                hub={hub}
+                request={hubRequest}
+                // The Web Server shares the workspace between its signed-in users without a bucket.
+                teamShared={isWebBrowserMode() ? true : undefined}
+              />
+            </div>
+          )}
         </>
       )}
       {settingsOpen && hub && (

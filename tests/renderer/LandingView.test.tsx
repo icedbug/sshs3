@@ -492,16 +492,10 @@ describe('LandingView Component', () => {
         prompt: 'Konfigurera en SSH-tunnel för port 5432',
       });
 
-      // Switch right column tabs between Activity, Team Memory, and Runbooks (KB)
-      expect(screen.getByTestId('workspace-right-tabs')).toBeInTheDocument();
-      fireEvent.click(screen.getByTestId('right-tab-memory'));
-      expect(screen.getByTestId('right-panel-memory')).toBeInTheDocument();
-
-      fireEvent.click(screen.getByTestId('right-tab-kb'));
-      expect(screen.getByTestId('right-panel-kb')).toBeInTheDocument();
-      fireEvent.click(screen.getByTestId('right-tab-workforce'));
-      expect(screen.getByTestId('right-panel-workforce')).toBeInTheDocument();
-      expect(screen.getByTestId('dashboard-run-workforce-btn')).toBeInTheDocument();
+      // The team's chat, activity, memory and runbooks are in the AI panel; the page opens it there.
+      expect(screen.queryByTestId('workspace-right-column')).not.toBeInTheDocument();
+      fireEvent.click(screen.getByTestId('open-team-chat-btn'));
+      expect(aiOpenEvents.at(-1)).toMatchObject({ view: 'Team', mode: 'hub' });
 
       // Self-learning reflection button & @orama/orama + Voyager badge are rendered in the command center
       expect(screen.getByText('@orama/orama + Voyager')).toBeInTheDocument();
@@ -519,8 +513,6 @@ describe('LandingView Component', () => {
       });
       expect(aiHubRequestMock).toHaveBeenCalledWith({ action: 'self-learn-reflect' });
 
-      fireEvent.click(screen.getByTestId('right-tab-activity'));
-      expect(screen.queryByTestId('right-panel-kb')).not.toBeInTheDocument();
     } finally {
       window.removeEventListener('sshs3:ai-open', listener);
       if (originalMultissh === undefined) delete (window as any).multissh;

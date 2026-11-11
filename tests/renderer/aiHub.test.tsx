@@ -394,3 +394,25 @@ describe("persistent AI chat", () => {
     );
   });
 });
+
+describe("AI panel team view", () => {
+  it("opens the workspace chat from the Team tab and posts through the hub", async () => {
+    fixture = {
+      ...fixture,
+      activityLog: [
+        { id: "c1", kind: "chat", actor: "sara", summary: "restarting pgbouncer", targetLabel: "#general", at: 1 },
+      ],
+    } as HubSnapshot;
+    request.mockResolvedValue(fixture);
+    render(<AiHubPanel mode="hub" setMode={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: /Team/ }));
+    const view = screen.getByTestId("ai-team-view");
+    expect(within(view).getByText("restarting pgbouncer")).toBeInTheDocument();
+    const input = within(view).getByTestId("workspace-chat-input");
+    fireEvent.change(input, { target: { value: "ok" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() =>
+      expect(request).toHaveBeenCalledWith({ action: "chat-post", text: "ok", channel: "general" }),
+    );
+  });
+});

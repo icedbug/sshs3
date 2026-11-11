@@ -106,6 +106,8 @@ explicitly enabled presentation on top of the same terminal authority.
   the workforce conversation. Only demo mode plays a scripted run, marked
   `simulated`.
 - **Workspace chat (`WorkspaceChat.ts`, `components/AiHub/WorkspaceChat.tsx`)** —
+  shown in the AI panel's **Team** view (the landing page has a "Team chat"
+  button that opens it);
   a chat message is a `chat` event on the team activity log (`channel`,
   `replyTo`, `actorKind`), so it reaches teammates through the transports the
   log already has: the S3 team workspace, Team Vault, the shared workspace file
