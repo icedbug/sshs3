@@ -1539,71 +1539,60 @@ export const LandingView: React.FC<LandingViewProps> = ({
                 </form>
               )}
 
-              {/* Next-Gen AI Hub Quick Bar: Mission Agents, MCP Servers & Knowledge Base */}
-              {(hub?.agents?.length ?? 0) > 0 && (
-                <div
-                  data-testid="landing-ai-agents-bar"
-                  className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-sky-500/30 bg-sky-500/5 px-2.5 py-1.5"
-                >
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-sky-400 mr-1">
-                      <Sparkles className="h-3 w-3" />
-                      Mission Agents:
-                    </span>
-                    {(hub?.agents ?? []).slice(0, 4).map((ag) => (
+              {/* Find first, then narrow by cluster, then the servers themselves; agents and tools last. */}
+              {/* Search, Active Tag & Folder Filter Bar */}
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="relative flex-1 min-w-[180px]">
+                  <Search className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-txt-muted" />
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="Search cluster, node, role, IP, tag or description…"
+                    className="w-full rounded-lg border border-border-subtle bg-app-card pl-8 pr-3 py-1.5 text-xs text-txt-primary placeholder:text-txt-muted outline-none focus:border-sky-500/50"
+                  />
+                </div>
+                {selectedTag && (
+                  <button
+                    type="button"
+                    onClick={() => setSelectedTag('')}
+                    className="inline-flex items-center gap-1 rounded-md border border-sky-500/40 bg-sky-500/15 px-2 py-1 text-[11px] font-medium text-sky-300"
+                  >
+                    <Tag className="h-3 w-3" />
+                    <span>#{selectedTag}</span>
+                    <X className="h-3 w-3" />
+                  </button>
+                )}
+                {folders.length > 0 && (
+                  <div className="flex items-center gap-1 overflow-x-auto">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedFolder('ALL')}
+                      className={`rounded-md px-2 py-1 text-[11px] font-medium ${
+                        selectedFolder === 'ALL'
+                          ? 'bg-app-card text-txt-primary border border-border-strong'
+                          : 'text-txt-muted hover:text-txt-primary'
+                      }`}
+                    >
+                      All folders
+                    </button>
+                    {folders.map((folder) => (
                       <button
-                        key={ag.id}
+                        key={folder}
                         type="button"
-                        title={`${ag.role}\nMission: ${ag.mission}\nClick to run it in the AI hub`}
-                        onClick={() =>
-                          window.dispatchEvent(
-                            new CustomEvent('sshs3:ai-open', {
-                              detail: {
-                                view: 'Work',
-                                mode: 'panel',
-                                agentId: ag.id,
-                                prompt: `Carry out your mission as ${ag.name}: ${ag.mission}`,
-                              },
-                            })
-                          )
-                        }
-                        className="inline-flex items-center gap-1 rounded-md border border-border-subtle bg-app-card px-2 py-0.5 text-[11px] font-medium text-txt-secondary hover:border-sky-500/40 hover:bg-sky-500/10 hover:text-sky-200 transition-all"
+                        onClick={() => setSelectedFolder(folder)}
+                        className={`rounded-md px-2 py-1 text-[11px] font-medium ${
+                          selectedFolder === folder
+                            ? 'bg-app-card text-txt-primary border border-border-strong'
+                            : 'text-txt-muted hover:text-txt-primary'
+                        }`}
                       >
-                        <span>{ag.icon || '🤖'}</span>
-                        <span className="truncate max-w-[140px]">{ag.name}</span>
+                        {folder}
                       </button>
                     ))}
                   </div>
-                  <div className="flex items-center gap-1.5">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        window.dispatchEvent(
-                          new CustomEvent('sshs3:ai-open', {
-                            detail: { view: 'Agents & MCP', mode: 'hub' },
-                          })
-                        )
-                      }
-                      className="inline-flex items-center gap-1 rounded-md border border-indigo-500/40 bg-indigo-500/15 px-2 py-0.5 text-[10px] font-semibold text-indigo-300 hover:bg-indigo-500/25"
-                    >
-                      <span>🔌 MCP ({hub?.mcpServers?.length ?? 0})</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        window.dispatchEvent(
-                          new CustomEvent('sshs3:ai-open', {
-                            detail: { view: 'Knowledge Base', mode: 'hub' },
-                          })
-                        )
-                      }
-                      className="inline-flex items-center gap-1 rounded-md border border-emerald-500/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300 hover:bg-emerald-500/25"
-                    >
-                      <span>📚 KB ({hub?.kbDocuments?.length ?? 0})</span>
-                    </button>
-                  </div>
-                </div>
-              )}
+                )}
+              </div>
 
               {/* Cluster Filter Bar */}
               {clusters.length > 0 && (
@@ -1695,7 +1684,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                                     🧩 {c.name}
                                   </span>
                                   <span className="rounded-full border border-emerald-500/35 bg-emerald-500/10 px-1.5 py-0.2 text-[9.5px] font-semibold text-emerald-300">
-                                    🟢 {members.length} nodes
+                                    🟢 {members.length} {members.length === 1 ? 'node' : 'nodes'}
                                   </span>
                                 </div>
                                 {matchingAgent && (
@@ -1775,62 +1764,8 @@ export const LandingView: React.FC<LandingViewProps> = ({
                 </div>
               )}
 
-              {/* Search, Active Tag & Folder Filter Bar */}
-              <div className="flex flex-wrap items-center gap-2">
-                <div className="relative flex-1 min-w-[180px]">
-                  <Search className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-txt-muted" />
-                  <input
-                    type="text"
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="Search cluster, node, role, IP, tag or description…"
-                    className="w-full rounded-lg border border-border-subtle bg-app-card pl-8 pr-3 py-1.5 text-xs text-txt-primary placeholder:text-txt-muted outline-none focus:border-sky-500/50"
-                  />
-                </div>
-                {selectedTag && (
-                  <button
-                    type="button"
-                    onClick={() => setSelectedTag('')}
-                    className="inline-flex items-center gap-1 rounded-md border border-sky-500/40 bg-sky-500/15 px-2 py-1 text-[11px] font-medium text-sky-300"
-                  >
-                    <Tag className="h-3 w-3" />
-                    <span>#{selectedTag}</span>
-                    <X className="h-3 w-3" />
-                  </button>
-                )}
-                {folders.length > 0 && (
-                  <div className="flex items-center gap-1 overflow-x-auto">
-                    <button
-                      type="button"
-                      onClick={() => setSelectedFolder('ALL')}
-                      className={`rounded-md px-2 py-1 text-[11px] font-medium ${
-                        selectedFolder === 'ALL'
-                          ? 'bg-app-card text-txt-primary border border-border-strong'
-                          : 'text-txt-muted hover:text-txt-primary'
-                      }`}
-                    >
-                      All folders
-                    </button>
-                    {folders.map((folder) => (
-                      <button
-                        key={folder}
-                        type="button"
-                        onClick={() => setSelectedFolder(folder)}
-                        className={`rounded-md px-2 py-1 text-[11px] font-medium ${
-                          selectedFolder === folder
-                            ? 'bg-app-card text-txt-primary border border-border-strong'
-                            : 'text-txt-muted hover:text-txt-primary'
-                        }`}
-                      >
-                        {folder}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-
               {/* Server Cards Grid */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 max-h-[580px] overflow-y-auto pr-1">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                 {filteredServers.map((server) => {
                   const isEditing = editingServerId === server.id;
                   const latestEvent =
@@ -2167,6 +2102,72 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   );
                 })}
               </div>
+
+              {/* Next-Gen AI Hub Quick Bar: Mission Agents, MCP Servers & Knowledge Base */}
+              {(hub?.agents?.length ?? 0) > 0 && (
+                <div
+                  data-testid="landing-ai-agents-bar"
+                  className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-sky-500/30 bg-sky-500/5 px-2.5 py-1.5"
+                >
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-sky-400 mr-1">
+                      <Sparkles className="h-3 w-3" />
+                      Mission Agents:
+                    </span>
+                    {(hub?.agents ?? []).slice(0, 4).map((ag) => (
+                      <button
+                        key={ag.id}
+                        type="button"
+                        title={`${ag.role}\nMission: ${ag.mission}\nClick to run it in the AI hub`}
+                        onClick={() =>
+                          window.dispatchEvent(
+                            new CustomEvent('sshs3:ai-open', {
+                              detail: {
+                                view: 'Work',
+                                mode: 'panel',
+                                agentId: ag.id,
+                                prompt: `Carry out your mission as ${ag.name}: ${ag.mission}`,
+                              },
+                            })
+                          )
+                        }
+                        className="inline-flex items-center gap-1 rounded-md border border-border-subtle bg-app-card px-2 py-0.5 text-[11px] font-medium text-txt-secondary hover:border-sky-500/40 hover:bg-sky-500/10 hover:text-sky-200 transition-all"
+                      >
+                        <span>{ag.icon || '🤖'}</span>
+                        <span className="truncate max-w-[140px]">{ag.name}</span>
+                      </button>
+                    ))}
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        window.dispatchEvent(
+                          new CustomEvent('sshs3:ai-open', {
+                            detail: { view: 'Agents & MCP', mode: 'hub' },
+                          })
+                        )
+                      }
+                      className="inline-flex items-center gap-1 rounded-md border border-indigo-500/40 bg-indigo-500/15 px-2 py-0.5 text-[10px] font-semibold text-indigo-300 hover:bg-indigo-500/25"
+                    >
+                      <span>🔌 MCP ({hub?.mcpServers?.length ?? 0})</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        window.dispatchEvent(
+                          new CustomEvent('sshs3:ai-open', {
+                            detail: { view: 'Knowledge Base', mode: 'hub' },
+                          })
+                        )
+                      }
+                      className="inline-flex items-center gap-1 rounded-md border border-emerald-500/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300 hover:bg-emerald-500/25"
+                    >
+                      <span>📚 KB ({hub?.kbDocuments?.length ?? 0})</span>
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Right Column: Team Activity, Shared AI Memory & Runbooks (KB) */}
@@ -2207,7 +2208,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         : 'text-txt-muted hover:text-txt-primary'
                     }`}
                   >
-                    💬 Chat
+                    Chat
                   </button>
                   <button
                     type="button"
@@ -2219,7 +2220,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         : 'text-txt-muted hover:text-txt-primary'
                     }`}
                   >
-                    📡 Activity ({activityLog.length})
+                    Activity ({activityLog.length})
                   </button>
                   <button
                     type="button"
@@ -2231,7 +2232,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         : 'text-txt-muted hover:text-txt-primary'
                     }`}
                   >
-                    🧠 Memory ({hub?.memories?.length ?? 0})
+                    Memory ({hub?.memories?.length ?? 0})
                   </button>
                   <button
                     type="button"
@@ -2243,7 +2244,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         : 'text-txt-muted hover:text-txt-primary'
                     }`}
                   >
-                    📚 Runbooks ({hub?.kbDocuments?.length ?? 0})
+                    Runbooks ({hub?.kbDocuments?.length ?? 0})
                   </button>
                   <button
                     type="button"
@@ -2255,7 +2256,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         : 'text-txt-muted hover:text-txt-primary'
                     }`}
                   >
-                    🤝 Workforce ({(hub?.workforceRuns ?? []).length})
+                    Reviews ({(hub?.workforceRuns ?? []).length})
                   </button>
                 </div>
 

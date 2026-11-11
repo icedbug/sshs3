@@ -101,7 +101,8 @@ export function WorkspaceChat({ hub, request, channel = GENERAL, teamShared }: W
         role="log"
         aria-label="Workspace chat"
         aria-live="polite"
-        className="max-h-[340px] min-h-[160px] space-y-2 overflow-y-auto pr-1"
+        // Fills the height the page has left, so the conversation is the main thing in the team column.
+        className="h-[calc(100vh-430px)] max-h-[640px] min-h-[200px] space-y-2 overflow-y-auto pr-1"
       >
         {messages.length === 0 ? (
           <div className="rounded-lg border border-dashed border-border-subtle p-3 text-xs text-txt-muted">
