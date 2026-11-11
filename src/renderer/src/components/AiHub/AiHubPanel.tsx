@@ -286,87 +286,87 @@ export function AiHubPanel({
   const slashCommands = [
     {
       cmd: "/workforce",
-      title: "🤝 Kör AI Workforce (Multi-Agent Swarm)",
-      subtitle: "Delegera ett tvärfunktionellt mål parallellt över dina Mission Agents och syntetisera en rapport",
+      title: "🤝 Run a workforce review",
+      subtitle: "Have your Mission Agents investigate an objective in parallel and combine their reports",
       template:
-        "Kör vår AI Workforce med sshs3_agent_and_mcp_manage (operation=run_workforce) över NetApp ONTAP, StorageGRID S3 och K8s Trident CSI för att utreda: ",
+        "Run a workforce review with sshs3_agent_and_mcp_manage (operation=run_workforce) to investigate: ",
     },
     {
       cmd: "/handoff",
-      title: "🔄 Swarm Agent Handoff",
-      subtitle: "Överlämna den aktiva konversationen till en annan specialiserad Mission Agent",
+      title: "🔄 Hand over to another agent",
+      subtitle: "Hand the active conversation over to another Mission Agent",
       template:
-        "Gör en Swarm Agent Handoff med sshs3_agent_and_mcp_manage (operation=handoff_agent) till vår specialistagent för: ",
+        "Hand over with sshs3_agent_and_mcp_manage (operation=handoff_agent) to our specialist agent for: ",
     },
     {
       cmd: "/mcp",
       title: "🛒 1-Click Open-Source MCP Marketplace",
-      subtitle: "Installera Prometheus, Grafana/Loki, Kubernetes/Helm, PostgreSQL eller Terraform MCP",
+      subtitle: "Install the Prometheus, Grafana/Loki, Kubernetes/Helm, PostgreSQL or Terraform MCP server",
       template:
-        "Installera en MCP-server från vår katalog med sshs3_agent_and_mcp_manage (operation=install_mcp_preset, presetId=preset-mcp-prometheus) och lista dess verktyg.",
+        "Install an MCP server from the catalog with sshs3_agent_and_mcp_manage (operation=install_mcp_preset, presetId=preset-mcp-prometheus) and list its tools.",
     },
     {
       cmd: "/cluster-exec",
-      title: "⚡ Parallell klusterkörning",
-      subtitle: "Kör kommandon parallellt över alla noder i ett kluster med sshs3_cluster_exec",
+      title: "⚡ Run across a cluster",
+      subtitle: "Run a command on every node of a cluster in parallel with sshs3_cluster_exec",
       template:
-        "Kör en parallell hälsokontroll över alla noder i @cluster:NetApp-ONTAP-Prod-SE med sshs3_cluster_exec: ",
+        "Run a parallel health check across the nodes of a cluster with sshs3_cluster_exec: ",
     },
     {
       cmd: "/split-cluster",
-      title: "🪟 2×2 Kluster Split-View",
-      subtitle: "Öppna ett helt kluster i en 2×2 Konsole terminal-grid med sshs3_workspace_layout",
+      title: "🪟 2×2 cluster split view",
+      subtitle: "Open a whole cluster in a 2×2 terminal grid with sshs3_workspace_layout",
       template:
-        "Öppna en 2x2 split-view terminal-grid för alla noder i @cluster:NetApp-ONTAP-Prod-SE med sshs3_workspace_layout så att jag kan övervaka dem sida vid sida.",
+        "Open a 2x2 split-view terminal grid for the nodes of one of my clusters with sshs3_workspace_layout; ask me which cluster if there are several.",
     },
     {
       cmd: "/diff",
       title: "🔍 Cross-Server Config Diff",
-      subtitle: "Diffa konfigurationsfiler mellan två noder med sshs3_storage_ops",
+      subtitle: "Diff a configuration file between two nodes with sshs3_storage_ops",
       template:
-        "Jämför (diffa) /etc/multipath.conf mellan k8s-gpu-io-worker-01 och k8s-storage-cp-01 med sshs3_storage_ops och kontrollera mot vår KB-standard.",
+        "Diff a configuration file between two of my servers with sshs3_storage_ops; ask me which file and which servers.",
     },
     {
       cmd: "/configure",
-      title: "🛠️ Konfigurera sshS3 med AI",
+      title: "🛠️ Configure sshS3 with AI",
       subtitle: "Konfigurera SSH-tunnlar, S3-profiler, kortkommandon, teman, dotfiles & Cloud Sync",
       template:
-        "Konfigurera sshS3 åt mig (SSH-tunnlar, S3-profil, kortkommandon, tema eller dotfiles): ",
+        "Configure sshS3 for me (SSH tunnels, S3 profile, shortcuts, theme or dotfiles): ",
     },
     {
       cmd: "/tunnel",
       title: "🚇 Skapa SSH Port-Forwarding Tunnel",
-      subtitle: "Lägg till lokal, remote eller dynamisk SOCKS5-tunnel på en serverprofil",
+      subtitle: "Add a local, remote or dynamic SOCKS5 tunnel to a server profile",
       template:
-        "Skapa en SSH port-forwarding tunnel (local 5432 -> 127.0.0.1:5432) på vår primära nod med sshs3_manage_server (operation=save_tunnel).",
+        "Create an SSH port-forwarding tunnel (local 5432 -> 127.0.0.1:5432) on a server I name, with sshs3_manage_server (operation=save_tunnel).",
     },
     {
       cmd: "/kb",
-      title: "📚 Sök i Runbooks & Kunskapsbas",
-      subtitle: "Sök med Orama Hybrid RAG (BM25 + semantiska koncept) och kombinera med MCP-telemetri",
+      title: "📚 Search runbooks",
+      subtitle: "Search the knowledge base",
       template:
-        "Sök i vår Knowledge Base (@kb) efter relevanta runbooks och standarder för: ",
+        "Search our knowledge base (@kb) for runbooks and standards about: ",
     },
     {
       cmd: "/memory",
-      title: "🧠 Spara i Smart Memory (Mem0 / Letta Core)",
-      subtitle: "Spara eller konsolidera fakta i Core/Archival Memory i det delade S3-teamminnet",
+      title: "🧠 Save to team memory",
+      subtitle: "Save a fact or a procedure to the shared team memory",
       template:
-        "Spara följande rutin som en delad Core Memory / Team Skill med sshs3_manage_memory_and_activity: ",
+        "Save the following as a shared team memory or skill with sshs3_manage_memory_and_activity: ",
     },
     {
       cmd: "/plan",
-      title: "🗺️ Arkitektur- & Åtgärdsplan",
-      subtitle: "Skapa en strukturerad steg-för-steg-plan med riskanalys och rollback",
+      title: "🗺️ Plan",
+      subtitle: "Write a step-by-step plan with risks and rollback",
       template:
-        "/plan Skapa en strukturerad steg-för-steg åtgärdsplan med riskanalys, verifiering och rollback för: ",
+        "/plan Write a step-by-step plan with risks, verification and rollback for: ",
     },
     {
       cmd: "/grill-me",
-      title: "🔥 Grill-Me Design & Säkerhetsgranskning",
-      subtitle: "Låt AI:n intervjua och utmana din arkitektur eller ändring innan produktion",
+      title: "🔥 Challenge my plan",
+      subtitle: "Have the assistant question your design or change before production",
       template:
-        "/grill-me Utmana och granska min planerade infrastrukturändring kritiskt innan vi kör i produktion: ",
+        "/grill-me Question and review my planned infrastructure change critically before production: ",
     },
   ];
 
@@ -737,7 +737,7 @@ export function AiHubPanel({
               title={
                 isWebBrowserMode()
                   ? DEMO_MODE_SET_BY_SERVER
-                  : "Växla det interaktiva 12-noders Enterprise Demo-Labbet PÅ eller AV direkt i UI:t"
+                  : "Turn the interactive demo lab (a scripted 12-node environment) on or off"
               }
               disabled={isWebBrowserMode()}
               onClick={() =>
@@ -747,7 +747,7 @@ export function AiHubPanel({
                 })
               }
             >
-              {hub.demoMode ? "🧪 Demo-Lab: PÅ" : "🧪 Demo-Lab: AV"}
+              {hub.demoMode ? "🧪 Demo lab: on" : "🧪 Demo lab: off"}
             </button>
           )}
           <button
@@ -1032,7 +1032,7 @@ export function AiHubPanel({
                           void act({
                             action: "workforce-run",
                             prompt:
-                              "Gå igenom våra delade servrar och kluster: senaste teamändringar, kända problem i kunskapsbasen och vad som bör kontrolleras härnäst.",
+                              "Review our shared servers and clusters: recent team changes, known problems in the knowledge base, and what should be checked next.",
                           }).then((nextSnap) => {
                             const created = nextSnap?.tasks.find(
                               (t) => !prevIds.has(t.id),
@@ -1041,7 +1041,7 @@ export function AiHubPanel({
                           });
                         }}
                       >
-                        🤝 Kör AI Workforce Swarm
+                        🤝 Run a workforce review
                       </button>
                     </div>
                   </div>
@@ -1076,9 +1076,9 @@ export function AiHubPanel({
               >
                 {!task && !connection && (
                   <div className="ai-welcome">
-                    <h2>Vad kan jag hjälpa dig med i sshS3?</h2>
+                    <h2>What can I help with?</h2>
                     <p>
-                      Välj en specialiserad <strong>Mission Agent</strong> eller fråga fritt om dina kluster, VMs, S3-buckets, KB-runbooks och MCP-verktyg.
+                      Pick a <strong>Mission Agent</strong>, or ask about your clusters, VMs, S3 buckets, runbooks and MCP tools.
                     </p>
                     {!hub.config.hasApiKey &&
                       !hub.config.codexConnected &&
@@ -1089,13 +1089,13 @@ export function AiHubPanel({
                           style={{ marginBottom: 14, textAlign: "left" }}
                         >
                           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                            <strong>⚡ Koppla din AI på 10 sekunder (Allt annat är förladdat!)</strong>
+                            <strong>⚡ Connect your AI</strong>
                             <span className="ai-badge ai-badge-green">
                               {(hub.agents ?? []).length} Agenter · {(hub.kbDocuments ?? []).length} Runbooks
                             </span>
                           </div>
                           <p style={{ fontSize: 11.5, margin: "6px 0 10px" }}>
-                            Alla 6 specialist-agenter, 8 @kb-runbooks och 12 SRE-snippets är redan redo. Välj hur du vill ansluta din modell:
+                            Choose how to connect a model:
                           </p>
                           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                             <button
@@ -1203,13 +1203,13 @@ export function AiHubPanel({
                               });
                             }}
                           >
-                            🚀 Kör uppdrag nu
+                            🚀 Run the mission now
                           </button>
                           <button
                             type="button"
                             onClick={() =>
                               setPrompt(
-                                `Utför ditt uppdrag för ${activeAgent.targetCluster ? `@cluster:${activeAgent.targetCluster}` : "vår infrastruktur"}: ${activeAgent.mission}`,
+                                `Carry out your mission for ${activeAgent.targetCluster ? `@cluster:${activeAgent.targetCluster}` : "our infrastructure"}: ${activeAgent.mission}`,
                               )
                             }
                           >
@@ -1224,48 +1224,48 @@ export function AiHubPanel({
                         className="ai-starter-card"
                         onClick={() =>
                           setPrompt(
-                            "Kör en parallell hälsokontroll över alla noder i @cluster:NetApp-ONTAP-Prod-SE med sshs3_cluster_exec och jämför WAFL/NVMe-latens, aggregat och SnapMirror-status.",
+                            "Run a parallel health check across the nodes of my clusters with sshs3_cluster_exec and summarise load, disk, failed services and anything unusual.",
                           )
                         }
                       >
-                        <strong>⚡ Parallell klusterkörning (@cluster)</strong>
-                        <small>Kör kommandon parallellt över hela kluster och få en samlad rapport</small>
+                        <strong>⚡ Run across a cluster (@cluster)</strong>
+                        <small>Run a command on every node of a cluster and get one report</small>
                       </button>
                       <button
                         type="button"
                         className="ai-starter-card"
                         onClick={() =>
                           setPrompt(
-                            "Öppna en 2x2 split-view terminal-grid för alla noder i @cluster:NetApp-ONTAP-Prod-SE så att jag kan övervaka dem sida vid sida.",
+                            "Open a 2x2 split-view terminal grid for the nodes of one of my clusters; ask me which cluster if there are several.",
                           )
                         }
                       >
-                        <strong>🪟 Öppna 2×2 Kluster Split-View</strong>
-                        <small>Be AI:n öppna Konsole split-grid eller Dual-Pane Explorer direkt i UI:t</small>
+                        <strong>🪟 Open a 2×2 cluster split view</strong>
+                        <small>Have the assistant open a split terminal grid or the dual-pane explorer</small>
                       </button>
                       <button
                         type="button"
                         className="ai-starter-card"
                         onClick={() =>
                           setPrompt(
-                            "Jämför (diffa) /etc/multipath.conf mellan k8s-gpu-io-worker-01 och k8s-storage-cp-01 med sshs3_storage_ops och kontrollera mot vår KB-standard.",
+                            "Diff a configuration file between two of my servers with sshs3_storage_ops; ask me which file and which servers.",
                           )
                         }
                       >
                         <strong>🔍 Cross-Server Config Diff &amp; SFTP/S3</strong>
-                        <small>Diffa konfigurationsfiler mellan två noder eller inspektera S3-buckets</small>
+                        <small>Diff configuration files between two nodes, or inspect S3 buckets</small>
                       </button>
                       <button
                         type="button"
                         className="ai-starter-card"
                         onClick={() =>
                           setPrompt(
-                            "Sök i vår Knowledge Base (@kb) efter ONTAP Adaptive QoS och hämta aktuella volym-IOPS och latens via NetApp Harvest MCP.",
+                            "Search our knowledge base (@kb) for what I describe next, and tell me which runbook applies.",
                           )
                         }
                       >
-                        <strong>📚 Sök i Kunskapsbasen (KB) &amp; MCP</strong>
-                        <small>Kombinera BM25-runbooks med live-telemetri från anslutna MCP-servrar</small>
+                        <strong>📚 Search the knowledge base</strong>
+                        <small>Find the runbook that applies; combine it with data from connected MCP servers</small>
                       </button>
                       <button
                         type="button"
@@ -1277,7 +1277,7 @@ export function AiHubPanel({
                           )
                         }
                       >
-                        <strong>🛠️ Konfigurera hela sshS3 med AI</strong>
+                        <strong>🛠️ Configure sshS3 with AI</strong>
                         <small>Tunnlar, S3-profiler, kortkommandon, dotfiles, Cloud Sync &amp; UI-teman</small>
                       </button>
                       <button
@@ -1289,7 +1289,7 @@ export function AiHubPanel({
                           void act({
                             action: "workforce-run",
                             prompt:
-                              "Gå igenom våra delade servrar och kluster: senaste teamändringar, kända problem i kunskapsbasen och vad som bör kontrolleras härnäst.",
+                              "Review our shared servers and clusters: recent team changes, known problems in the knowledge base, and what should be checked next.",
                           }).then((nextSnap) => {
                             const created = nextSnap?.tasks.find(
                               (t) => !prevIds.has(t.id),
@@ -1298,20 +1298,20 @@ export function AiHubPanel({
                           });
                         }}
                       >
-                        <strong>🤝 Kör AI Workforce (Multi-Agent Swarm)</strong>
-                        <small>Lead SRE Supervisor kör alla dina Mission Agents parallellt och syntetiserar en rapport</small>
+                        <strong>🤝 Run a workforce review</strong>
+                        <small>Your Mission Agents investigate in parallel (read-only) and one report combines their findings</small>
                       </button>
                       <button
                         type="button"
                         className="ai-starter-card"
                         onClick={() =>
                           setPrompt(
-                            "/plan Skapa en säker åtgärdsplan med riskanalys, verifieringssteg och rollback för en rolling uppgradering av @cluster:K8s-Prod-AI-Cluster.",
+                            "/plan Write a safe plan with risks, verification steps and rollback for a rolling upgrade of one of my clusters.",
                           )
                         }
                       >
                         <strong>🗺️ /plan &amp; /grill-me Arkitekturgranskning</strong>
-                        <small>Skriv / i chatten för slash-kommandon, exekveringsplaner &amp; designgranskning</small>
+                        <small>Type / in the chat for commands, plans and design reviews</small>
                       </button>
                     </div>
                     <div style={{ marginTop: "14px", display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
@@ -1321,8 +1321,8 @@ export function AiHubPanel({
                         onClick={() => setShowDemoPreview((prev) => !prev)}
                       >
                         {showDemoPreview
-                          ? "✕ Dölj exempel-konversation"
-                          : "👁️ Visa exempel på AI-svar (Tabeller, Diff & Kluster-körning)"}
+                          ? "✕ Hide the example conversation"
+                          : "👁️ Show an example answer (invented data)"}
                       </button>
                     </div>
                     {showDemoPreview && (
@@ -1396,7 +1396,7 @@ export function AiHubPanel({
                       </span>
                       <span
                         className="ai-badge ai-badge-success"
-                        title="AST Shell Command Safety Guardrails är aktiva för alla kommandon i denna konversation"
+                        title="Command safety checks apply to every command in this conversation"
                       >
                         🛡️ AST Safety Guard
                       </span>
@@ -1423,7 +1423,7 @@ export function AiHubPanel({
                             }
                           }}
                         >
-                          🟢 Godkänn alla säkra (
+                          🟢 Approve all safe (
                           {
                             task.changes.filter(
                               (c) =>
@@ -1436,7 +1436,7 @@ export function AiHubPanel({
                     </div>
                     {(hub.agents ?? []).length > 0 && (
                       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                        <small>🤝 Swarm Handoff:</small>
+                        <small>🤝 Hand over:</small>
                         <select
                           aria-label="Swarm Handoff to specialist agent"
                           data-testid="chat-swarm-handoff-select"
@@ -1450,11 +1450,11 @@ export function AiHubPanel({
                               action: "agent-handoff",
                               taskId: task.id,
                               toAgentId: nextAgentId,
-                              reason: "Swarm handoff direkt från konversationsvyn",
+                              reason: "Handed over from the conversation",
                             });
                           }}
                         >
-                          <option value="">Välj specialistagent…</option>
+                          <option value="">Choose an agent…</option>
                           {(hub.agents ?? []).map((ag) => (
                             <option key={ag.id} value={ag.id}>
                               {ag.icon || "🤖"} {ag.name}
@@ -1570,7 +1570,7 @@ export function AiHubPanel({
                               }}
                             >
                               {copiedMsgId === item.message.id
-                                ? "✓ Svar kopierat"
+                                ? "✓ Copied"
                                 : "📋 Kopiera svar"}
                             </button>
                             <button
@@ -1584,25 +1584,25 @@ export function AiHubPanel({
                                     scope: "workspace",
                                     title:
                                       task?.title?.slice(0, 60) ||
-                                      "AI-insikt från chatt",
+                                      "From an AI conversation",
                                     text: item.message!.text.slice(0, 1200),
                                   },
                                 });
                               }}
                             >
-                              🧠 Spara i Team Memory
+                              🧠 Save to team memory
                             </button>
                             <button
                               type="button"
                               className="ai-msg-action-btn"
                               onClick={() => {
                                 setPrompt(
-                                  "Fortsätt utreda och föreslå nästa konkreta verifieringssteg.",
+                                  "Keep investigating and propose the next concrete verification step.",
                                 );
                                 setTimeout(() => composer.current?.focus(), 20);
                               }}
                             >
-                              🔄 Följ upp
+                              🔄 Follow up
                             </button>
                           </div>
                         )}
@@ -2462,7 +2462,7 @@ export function AiHubPanel({
                 ]);
                 setTaskId("");
                 setPrompt(
-                  `Följ och kör vår KB-runbook "${doc.title}" (${doc.collection || "general"}) steg för steg. Börja med read-only verifieringskommandon och sammanfatta status.`,
+                  `Follow our runbook "${doc.title}" (${doc.collection || "general"}) step by step. Start with read-only checks and summarise the state.`,
                 );
                 setView("Work");
               }}

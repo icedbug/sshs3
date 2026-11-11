@@ -36,13 +36,13 @@ describe('MemoryProposals', () => {
       />
     );
     const first = within(screen.getByTestId('memory-proposal-p1'));
-    expect(first.getByText('Nytt minne')).toBeInTheDocument();
-    expect(first.getByText('Gäller servern prod-api-01')).toBeInTheDocument();
+    expect(first.getByText('New memory')).toBeInTheDocument();
+    expect(first.getByText('Applies to server prod-api-01')).toBeInTheDocument();
     expect(first.getByText('nginx -t → exit 0')).toBeInTheDocument();
-    expect(first.getByText(/från Session: SSE drops/)).toBeInTheDocument();
+    expect(first.getByText(/from Session: SSE drops/)).toBeInTheDocument();
     expect(first.queryByTestId('memory-proposal-previous')).not.toBeInTheDocument();
     const second = within(screen.getByTestId('memory-proposal-p2'));
-    expect(second.getByText('Uppdatera befintligt minne')).toBeInTheDocument();
+    expect(second.getByText('Update an existing memory')).toBeInTheDocument();
     expect(second.getByTestId('memory-proposal-previous')).toHaveTextContent('max_connections is 150');
   });
 
@@ -50,7 +50,7 @@ describe('MemoryProposals', () => {
     const act = vi.fn().mockResolvedValue(undefined);
     render(<MemoryProposals act={act} hub={hub({ memoryProposals: [proposal()] })} />);
     fireEvent.change(screen.getByLabelText('Text'), { target: { value: '  Keep it at 180s.  ' } });
-    fireEvent.click(screen.getByText('Godkänn och dela med teamet'));
+    fireEvent.click(screen.getByText('Accept and share with the team'));
     expect(act).toHaveBeenLastCalledWith({
       action: 'memory-proposal-accept',
       id: 'p1',
@@ -58,16 +58,16 @@ describe('MemoryProposals', () => {
       text: 'Keep it at 180s.',
     });
     // Both buttons wait for the request in flight.
-    expect(screen.getByText('Avvisa')).toBeDisabled();
-    await waitFor(() => expect(screen.getByText('Avvisa')).not.toBeDisabled());
-    fireEvent.click(screen.getByText('Avvisa'));
+    expect(screen.getByText('Reject')).toBeDisabled();
+    await waitFor(() => expect(screen.getByText('Reject')).not.toBeDisabled());
+    fireEvent.click(screen.getByText('Reject'));
     expect(act).toHaveBeenLastCalledWith({ action: 'memory-proposal-reject', id: 'p1' });
   });
 
   it('cannot accept an emptied proposal', () => {
     render(<MemoryProposals act={vi.fn()} hub={hub({ memoryProposals: [proposal()] })} />);
     fireEvent.change(screen.getByLabelText('Text'), { target: { value: '   ' } });
-    expect(screen.getByText('Godkänn och dela med teamet')).toBeDisabled();
+    expect(screen.getByText('Accept and share with the team')).toBeDisabled();
   });
 
   it('reports the latest reading: nothing new, a count, or why it failed; and is busy while one runs', () => {
@@ -75,14 +75,14 @@ describe('MemoryProposals', () => {
     const { rerender } = render(
       <MemoryProposals act={act} hub={hub({ lastMemoryDistill: { at: 1, sourceTitle: 'Session: x', proposed: 0 } })} />
     );
-    expect(screen.getByTestId('memory-distill-status')).toHaveTextContent('gav inget nytt att minnas');
+    expect(screen.getByTestId('memory-distill-status')).toHaveTextContent('found nothing new to remember');
     rerender(
       <MemoryProposals
         act={act}
         hub={hub({ lastMemoryDistill: { at: 1, sourceTitle: 'Session: x', proposed: 0, error: 'Anthropic API (401)' } })}
       />
     );
-    expect(screen.getByTestId('memory-distill-status')).toHaveTextContent('misslyckades: Anthropic API (401)');
+    expect(screen.getByTestId('memory-distill-status')).toHaveTextContent('failed: Anthropic API (401)');
     rerender(<MemoryProposals act={act} hub={hub({ memoryDistillRunning: true })} />);
     expect(screen.getByTestId('memory-distill-activity-btn')).toBeDisabled();
     rerender(<MemoryProposals act={act} hub={hub({})} />);

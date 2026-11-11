@@ -60,7 +60,7 @@ export function RichMarkdownContent({
                         title="Infoga kommando i chatten / terminalen"
                         onClick={() => onUseCommand(raw)}
                       >
-                        ▶️ Använd
+                        ▶️ Use
                       </button>
                     )}
                     <button

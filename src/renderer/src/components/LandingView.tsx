@@ -68,7 +68,7 @@ const RESULTS_ID = 'landing-search-results';
 const resultId = (profileId: string) => `landing-result-${profileId}`;
 
 const ROLE_OPTIONS = [
-  { value: '', label: 'Ingen roll vald' },
+  { value: '', label: 'No role' },
   { value: 'web', label: 'Web / Frontend' },
   { value: 'database', label: 'Database' },
   { value: 'k8s', label: 'Kubernetes / Cluster' },
@@ -79,7 +79,7 @@ const ROLE_OPTIONS = [
 ];
 
 const NODE_ROLE_OPTIONS = [
-  { value: '', label: 'Ingen specifik nod-roll' },
+  { value: '', label: 'No node role' },
   { value: 'control-plane', label: 'Control Plane / Master' },
   { value: 'worker-node', label: 'Worker Node' },
   { value: 'gpu-node', label: 'GPU / AI Node' },
@@ -155,11 +155,11 @@ function formatRelativeTime(timestamp?: number): string {
   const diffSec = Math.max(1, Math.floor((Date.now() - timestamp) / 1000));
   if (diffSec < 60) return 'nyss';
   const diffMin = Math.floor(diffSec / 60);
-  if (diffMin < 60) return `${diffMin}m sedan`;
+  if (diffMin < 60) return `${diffMin}m ago`;
   const diffHours = Math.floor(diffMin / 60);
-  if (diffHours < 24) return `${diffHours}h sedan`;
+  if (diffHours < 24) return `${diffHours}h ago`;
   const diffDays = Math.floor(diffHours / 24);
-  return `${diffDays}d sedan`;
+  return `${diffDays}d ago`;
 }
 
 export const LandingView: React.FC<LandingViewProps> = ({
@@ -872,7 +872,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
       await hubRequest({
         action: 'workforce-run',
         prompt:
-          'Gå igenom våra delade servrar och kluster: senaste teamändringar, kända problem i kunskapsbasen och vad som bör kontrolleras härnäst.',
+          'Review our shared servers and clusters: recent team changes, known problems in the knowledge base, and what should be checked next.',
       });
     } catch {
       // Non-fatal in offline/mocked tests
@@ -908,7 +908,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
           useHermes: false,
         },
       });
-      setQuickAiNotice('✅ ChatGPT / Codex OAuth aktiverad!');
+      setQuickAiNotice('✅ ChatGPT / Codex sign-in enabled');
       setTimeout(() => setQuickAiOpen(false), 1200);
     } catch (err) {
       setQuickAiNotice(err instanceof Error ? err.message : String(err));
@@ -931,7 +931,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
           useHermes: false,
         },
       });
-      setQuickAiNotice('✅ Lokal AI (Ollama localhost:11434) aktiverad!');
+      setQuickAiNotice('✅ Local AI (Ollama localhost:11434) enabled');
       setTimeout(() => setQuickAiOpen(false), 1200);
     } catch (err) {
       setQuickAiNotice(err instanceof Error ? err.message : String(err));
@@ -968,7 +968,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
         },
       });
       setQuickAiKey('');
-      setQuickAiNotice('✅ API-nyckel sparad i OS-nyckelringen & AI aktiverad!');
+      setQuickAiNotice('✅ API key saved to the OS keyring; AI enabled');
       setTimeout(() => setQuickAiOpen(false), 1200);
     } catch (err) {
       setQuickAiNotice(err instanceof Error ? err.message : String(err));
@@ -1049,7 +1049,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
           </div>
           {recentSSH.length === 0 && !showWorkspaceSection && (
             <p className="text-xs text-txt-muted max-w-md">
-              Delat projekt-workspace för VMs, kluster och SFTP med djup terminal-AI och gemensamt teamminne.
+              A shared workspace for VMs, clusters and SFTP, with an assistant in the terminal and a team memory.
             </p>
           )}
         </div>
@@ -1108,7 +1108,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                 {searching ? <Search className="h-3.5 w-3.5" /> : <Clock className="h-3.5 w-3.5" />}
                 <span>{searching ? 'Matching Profiles' : 'Recent Connections'}</span>
               </div>
-              <span className="text-[11px] text-txt-muted">Snabbanslut eller fråga AI om en maskin</span>
+              <span className="text-[11px] text-txt-muted">Connect, or ask the assistant about a machine</span>
             </div>
             <div
               className="grid grid-cols-1 md:grid-cols-2 gap-2"
@@ -1217,7 +1217,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         <SftpButton authType={profile.authType} onOpen={() => onConnectSFTP(profile)} />
                         <button
                           type="button"
-                          title="Fråga AI om denna server"
+                          title="Ask the assistant about this server"
                           onClick={() => handleAskAiAboutServer(summary)}
                           className="inline-flex items-center gap-1 rounded-lg border border-sky-500/30 bg-sky-500/10 px-2 py-1 text-[11px] font-medium text-sky-300 hover:bg-sky-500/20 transition-colors"
                         >
@@ -1226,7 +1226,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         </button>
                         <button
                           type="button"
-                          title="Redigera beskrivning & roll"
+                          title="Edit description and role"
                           onClick={() => (isEditing ? setEditingServerId(null) : openEditServer(summary))}
                           className="rounded p-1 text-txt-muted hover:bg-app-surface-hover hover:text-txt-primary"
                         >
@@ -1238,7 +1238,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                       <div className="mt-2 space-y-2 rounded-lg border border-border-subtle bg-app-surface p-2.5">
                         <div>
                           <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                            Roll i infrastrukturen
+                            Role in the infrastructure
                           </label>
                           <select
                             value={editRole}
@@ -1254,13 +1254,13 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         </div>
                         <div>
                           <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                            Vad gör denna VM / server?
+                            What does this VM / server do?
                           </label>
                           <textarea
                             rows={2}
                             value={editDescription}
                             onChange={(e) => setEditDescription(e.target.value)}
-                            placeholder="T.ex. Primär API-server, kör Docker Compose i /opt/app…"
+                            placeholder="e.g. Primary API server, runs Docker Compose in /opt/app…"
                             className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
                           />
                         </div>
@@ -1282,7 +1282,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                             onClick={() => setEditingServerId(null)}
                             className="rounded px-2 py-1 text-[11px] text-txt-muted hover:text-txt-primary"
                           >
-                            Avbryt
+                            Cancel
                           </button>
                           <button
                             type="button"
@@ -1290,7 +1290,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                             onClick={() => void handleSaveServerMeta(summary)}
                             className="rounded bg-sky-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-sky-500"
                           >
-                            Spara
+                            Save
                           </button>
                         </div>
                       </div>
@@ -1316,7 +1316,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                 <div className="flex items-center gap-2">
                   <Layers className="h-4 w-4 text-emerald-400" />
                   <h2 className="text-xs font-bold uppercase tracking-wider text-txt-primary">
-                    Workspace VMs & Kluster ({filteredServers.length})
+                    Servers & clusters ({filteredServers.length})
                   </h2>
                 </div>
                 <div className="flex flex-wrap items-center gap-1.5">
@@ -1327,7 +1327,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     className="inline-flex items-center gap-1 rounded-md border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-300 hover:bg-emerald-500/25 transition-colors"
                   >
                     <Plus className="h-3 w-3" />
-                    {addNodeOpen ? 'Stäng' : '+ Kluster / Nod'}
+                    {addNodeOpen ? 'Close' : '+ Cluster / node'}
                   </button>
                   {(['all', 'shared', 'personal'] as const).map((scope) => (
                     <button
@@ -1340,7 +1340,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                           : 'text-txt-muted hover:text-txt-primary border border-transparent'
                       }`}
                     >
-                      {scope === 'all' ? 'Alla' : scope === 'shared' ? 'Delade (S3)' : 'Personliga'}
+                      {scope === 'all' ? 'All' : scope === 'shared' ? 'Shared' : 'Personal'}
                     </button>
                   ))}
                 </div>
@@ -1355,7 +1355,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                 >
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-bold text-emerald-300">
-                      Lägg till nytt Kluster eller Nod / VM i Workspace
+                      Add a cluster or a node / VM to the workspace
                     </span>
                     <button
                       type="button"
@@ -1369,7 +1369,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                     <div>
                       <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                        Kluster (välj eller skriv nytt!)
+                        Cluster (pick one or type a new name)
                       </label>
                       <input
                         type="text"
@@ -1415,7 +1415,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                     <div>
                       <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                        SSH-användare
+                        SSH user
                       </label>
                       <input
                         type="text"
@@ -1438,7 +1438,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     </div>
                     <div>
                       <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                        Nod-roll i klustret
+                        Node role in the cluster
                       </label>
                       <select
                         value={newNodeRole}
@@ -1454,7 +1454,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     </div>
                     <div>
                       <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                        Infrastruktur-roll
+                        Infrastructure role
                       </label>
                       <select
                         value={newInfraRole}
@@ -1471,7 +1471,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   </div>
                   <div>
                     <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                      Tagga noden (klicka på snabb-taggar eller skriv egna)
+                      Tags (click a suggestion or type your own)
                     </label>
                     <input
                       type="text"
@@ -1508,13 +1508,13 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 items-end">
                     <div className="sm:col-span-2">
                       <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                        Vad gör denna nod / detta kluster?
+                        What does this node / cluster do?
                       </label>
                       <input
                         type="text"
                         value={newNodeDesc}
                         onChange={(e) => setNewNodeDesc(e.target.value)}
-                        placeholder="Beskrivning som delas med teamet och AI-minnet…"
+                        placeholder="A description shared with the team and the assistant…"
                         className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
                       />
                     </div>
@@ -1532,7 +1532,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         disabled={creatingNode || !newNodeName.trim() || !newNodeHost.trim()}
                         className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-40"
                       >
-                        Spara Nod
+                        Save node
                       </button>
                     </div>
                   </div>
@@ -1554,7 +1554,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                       <button
                         key={ag.id}
                         type="button"
-                        title={`${ag.role}\nUppdrag: ${ag.mission}\nKlicka för att aktivera och köra i AI Hub`}
+                        title={`${ag.role}\nMission: ${ag.mission}\nClick to run it in the AI hub`}
                         onClick={() =>
                           window.dispatchEvent(
                             new CustomEvent('sshs3:ai-open', {
@@ -1562,7 +1562,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                                 view: 'Work',
                                 mode: 'panel',
                                 agentId: ag.id,
-                                prompt: `Kör ditt uppdrag som ${ag.name}: ${ag.mission}`,
+                                prompt: `Carry out your mission as ${ag.name}: ${ag.mission}`,
                               },
                             })
                           )
@@ -1611,7 +1611,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border-subtle bg-app-card/60 px-2.5 py-1.5">
                     <div className="flex flex-wrap items-center gap-1">
                       <span className="text-[10px] font-bold uppercase tracking-wider text-txt-muted mr-1">
-                        Kluster:
+                        Clusters:
                       </span>
                       <button
                         type="button"
@@ -1622,7 +1622,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                             : 'text-txt-muted hover:text-txt-primary'
                         }`}
                       >
-                        Alla kluster ({workspaceServers.length})
+                        All clusters ({workspaceServers.length})
                       </button>
                       {clusters.map((c) => (
                         <button
@@ -1649,7 +1649,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         <button
                           type="button"
                           data-testid="cluster-open-split-btn"
-                          title={`Öppna alla noder i ${selectedCluster} i en 2×2 Konsole Split-View`}
+                          title={`Open all nodes of ${selectedCluster} in a 2×2 split view`}
                           onClick={() => handleOpenClusterSplitView(selectedCluster)}
                           className="inline-flex items-center gap-1 rounded-md border border-emerald-500/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300 hover:bg-emerald-500/25"
                         >
@@ -1661,7 +1661,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                           className="inline-flex items-center gap-1 rounded-md border border-sky-500/40 bg-sky-500/15 px-2 py-0.5 text-[10px] font-semibold text-sky-300 hover:bg-sky-500/25"
                         >
                           <Sparkles className="h-3 w-3" />
-                          Fråga AI om @{selectedCluster}
+                          Ask AI about @{selectedCluster}
                         </button>
                       </div>
                     )}
@@ -1695,7 +1695,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                                     🧩 {c.name}
                                   </span>
                                   <span className="rounded-full border border-emerald-500/35 bg-emerald-500/10 px-1.5 py-0.2 text-[9.5px] font-semibold text-emerald-300">
-                                    🟢 {members.length} noder
+                                    🟢 {members.length} nodes
                                   </span>
                                 </div>
                                 {matchingAgent && (
@@ -1707,7 +1707,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                               <div className="flex shrink-0 items-center gap-1">
                                 <button
                                   type="button"
-                                  title={`Öppna 2×2 Split-View för ${c.name}`}
+                                  title={`Open a 2×2 split view for ${c.name}`}
                                   onClick={() => handleOpenClusterSplitView(c.name)}
                                   className="rounded border border-emerald-500/35 bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-300 hover:bg-emerald-500/25"
                                 >
@@ -1715,7 +1715,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                                 </button>
                                 <button
                                   type="button"
-                                  title={`Kör parallell AI-diagnos på @cluster:${c.name}`}
+                                  title={`Run a parallel AI diagnosis on @cluster:${c.name}`}
                                   onClick={() => handleAskAiAboutCluster(c.name)}
                                   className="rounded border border-sky-500/35 bg-sky-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-sky-300 hover:bg-sky-500/25"
                                 >
@@ -1735,7 +1735,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                               ))}
                               {members.length > 4 && (
                                 <span className="rounded bg-app px-1.5 py-0.2 text-[10px] text-txt-muted">
-                                  +{members.length - 4} till
+                                  +{members.length - 4} more
                                 </span>
                               )}
                             </div>
@@ -1749,10 +1749,10 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         >
                           <div className="flex items-center justify-between gap-2 mb-1">
                             <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-300">
-                              🕸️ Service & Storage Dependency Graph (Zep / Graphiti)
+                              🕸️ Service & storage dependencies
                             </span>
                             <span className="text-[10px] text-txt-muted">
-                              Injiceras automatiskt i AI-kontexten
+                              Given to the assistant as context
                             </span>
                           </div>
                           <div className="flex flex-wrap gap-1.5">
@@ -1783,7 +1783,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     type="text"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="Sök kluster, nod, roll, IP, tagg eller beskrivning…"
+                    placeholder="Search cluster, node, role, IP, tag or description…"
                     className="w-full rounded-lg border border-border-subtle bg-app-card pl-8 pr-3 py-1.5 text-xs text-txt-primary placeholder:text-txt-muted outline-none focus:border-sky-500/50"
                   />
                 </div>
@@ -1809,7 +1809,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                           : 'text-txt-muted hover:text-txt-primary'
                       }`}
                     >
-                      Alla mappar
+                      All folders
                     </button>
                     {folders.map((folder) => (
                       <button
@@ -1863,7 +1863,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                               {server.cluster && (
                                 <button
                                   type="button"
-                                  title={`Filtrera på kluster: ${server.cluster}`}
+                                  title={`Filter by cluster: ${server.cluster}`}
                                   onClick={() =>
                                     setSelectedCluster(
                                       selectedCluster === server.cluster ? 'ALL' : server.cluster!
@@ -1890,7 +1890,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                               )}
                               {server.shared ? (
                                 <span className="inline-flex items-center gap-0.5 rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.2 text-[10px] text-emerald-300">
-                                  <Users className="h-2.5 w-2.5" /> Delad (S3)
+                                  <Users className="h-2.5 w-2.5" /> Shared
                                 </span>
                               ) : (
                                 <span className="inline-flex items-center gap-0.5 rounded border border-border-subtle bg-app-surface-subtle px-1.5 py-0.2 text-[10px] text-txt-muted">
@@ -1915,10 +1915,10 @@ export const LandingView: React.FC<LandingViewProps> = ({
                               {server.folder ? ` · ${server.folder}` : ''}
                               {hasLocalOverride && (
                                 <span
-                                  title="Lokal ~/.ssh-override sparad på din dator"
+                                  title="A local ~/.ssh override is saved on this computer"
                                   className="ml-1.5 rounded bg-purple-500/15 px-1 py-0.2 text-[9.5px] font-sans text-purple-300"
                                 >
-                                  🔑 Lokal ~/.ssh
+                                  🔑 Local ~/.ssh
                                 </span>
                               )}
                             </div>
@@ -1926,7 +1926,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
 
                           <button
                             type="button"
-                            title="Redigera kluster, nod-roll, taggar, beskrivning & lokal ~/.ssh"
+                            title="Edit cluster, node role, tags, description and local ~/.ssh"
                             onClick={() =>
                               isEditing ? setEditingServerId(null) : openEditServer(server)
                             }
@@ -1941,7 +1941,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
                               <div>
                                 <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                                  Kluster (valfritt namn)
+                                  Cluster (any name)
                                 </label>
                                 <input
                                   type="text"
@@ -1954,7 +1954,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                               </div>
                               <div>
                                 <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                                  Nod-roll i klustret
+                                  Node role in the cluster
                                 </label>
                                 <select
                                   value={editNodeRole}
@@ -1971,7 +1971,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                             </div>
                             <div>
                               <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                                Roll i infrastrukturen
+                                Role in the infrastructure
                               </label>
                               <select
                                 value={editRole}
@@ -1987,19 +1987,19 @@ export const LandingView: React.FC<LandingViewProps> = ({
                             </div>
                             <div>
                               <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                                Vad gör denna VM / nod?
+                                What does this VM / node do?
                               </label>
                               <textarea
                                 rows={2}
                                 value={editDescription}
                                 onChange={(e) => setEditDescription(e.target.value)}
-                                placeholder="T.ex. Primär API-server, kör Docker Compose i /opt/app…"
+                                placeholder="e.g. Primary API server, runs Docker Compose in /opt/app…"
                                 className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
                               />
                             </div>
                             <div>
                               <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                                Taggar (klicka eller skriv kommaseparerat)
+                                Tags (click, or type comma-separated)
                               </label>
                               <input
                                 type="text"
@@ -2042,7 +2042,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                               <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
                                 <div>
                                   <label className="block text-[9.5px] text-txt-muted mb-0.5">
-                                    Mitt SSH-användarnamn (om annat än {server.username})
+                                    My SSH user name (if not {server.username})
                                   </label>
                                   <input
                                     type="text"
@@ -2054,7 +2054,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                                 </div>
                                 <div>
                                   <label className="block text-[9.5px] text-txt-muted mb-0.5">
-                                    Lokal SSH-nyckel (valfri sökväg)
+                                    Local SSH key (optional path)
                                   </label>
                                   <input
                                     type="text"
@@ -2075,7 +2075,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                                 className="inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] text-rose-400 hover:bg-rose-500/10"
                               >
                                 <Trash2 className="h-3 w-3" />
-                                <span>Ta bort nod</span>
+                                <span>Remove node</span>
                               </button>
                               <div className="flex items-center gap-1.5">
                                 <button
@@ -2083,7 +2083,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                                   onClick={() => setEditingServerId(null)}
                                   className="rounded px-2 py-1 text-[11px] text-txt-muted hover:text-txt-primary"
                                 >
-                                  Avbryt
+                                  Cancel
                                 </button>
                                 <button
                                   type="button"
@@ -2091,7 +2091,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                                   onClick={() => void handleSaveServerMeta(server)}
                                   className="rounded bg-sky-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-sky-500"
                                 >
-                                  Spara
+                                  Save
                                 </button>
                               </div>
                             </div>
@@ -2101,7 +2101,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                             <p className="mt-2 text-xs text-txt-secondary line-clamp-2 min-h-[2rem]">
                               {server.description || (
                                 <span className="italic text-txt-muted">
-                                  Ingen beskrivning ännu — klicka på pennan för att beskriva vad denna nod gör.
+                                  No description yet. Click the pencil to describe what this node does.
                                 </span>
                               )}
                             </p>
@@ -2111,7 +2111,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                                   <button
                                     key={tag}
                                     type="button"
-                                    title={`Filtrera på tagg #${tag}`}
+                                    title={`Filter by tag #${tag}`}
                                     onClick={() =>
                                       setSelectedTag(selectedTag === tag ? '' : tag)
                                     }
@@ -2160,7 +2160,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                           className="inline-flex items-center gap-1 rounded-md border border-sky-500/30 bg-sky-500/10 px-2 py-1 text-[11px] font-medium text-sky-300 hover:bg-sky-500/20 transition-colors"
                         >
                           <Sparkles className="h-3 w-3" />
-                          Fråga AI
+                          Ask AI
                         </button>
                       </div>
                     </div>
@@ -2180,7 +2180,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   <div className="flex items-center gap-1.5">
                     <Activity className="h-4 w-4 text-amber-400" />
                     <h2 className="text-xs font-bold uppercase tracking-wider text-txt-primary">
-                      Teamets Aktivitet & AI-Minne
+                      Team
                     </h2>
                   </div>
                   <button
@@ -2188,7 +2188,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     onClick={() => window.dispatchEvent(new CustomEvent('sshs3:ai-open'))}
                     className="inline-flex items-center gap-1 rounded-md border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[10px] font-medium text-sky-300 hover:bg-sky-500/20"
                   >
-                    <Bot className="h-3 w-3" /> Öppna AI
+                    <Bot className="h-3 w-3" /> Open AI
                   </button>
                 </div>
 
@@ -2207,7 +2207,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         : 'text-txt-muted hover:text-txt-primary'
                     }`}
                   >
-                    💬 Chatt
+                    💬 Chat
                   </button>
                   <button
                     type="button"
@@ -2219,7 +2219,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         : 'text-txt-muted hover:text-txt-primary'
                     }`}
                   >
-                    📡 Aktivitet ({activityLog.length})
+                    📡 Activity ({activityLog.length})
                   </button>
                   <button
                     type="button"
@@ -2231,7 +2231,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         : 'text-txt-muted hover:text-txt-primary'
                     }`}
                   >
-                    🧠 Minne ({hub?.memories?.length ?? 0})
+                    🧠 Memory ({hub?.memories?.length ?? 0})
                   </button>
                   <button
                     type="button"
@@ -2255,7 +2255,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         : 'text-txt-muted hover:text-txt-primary'
                     }`}
                   >
-                    🤝 Swarm ({(hub?.workforceRuns ?? []).length})
+                    🤝 Workforce ({(hub?.workforceRuns ?? []).length})
                   </button>
                 </div>
 
@@ -2273,7 +2273,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                 {rightColTab === 'activity' && (
                   <>
                     <p className="text-[11px] text-txt-muted">
-                      Ändringar i konfiguration, tjänster och paket över alla VMs loggas här så både du, dina kompisar och AI:n har full koll.
+                      Changes to configuration, services and packages on any VM are logged here, for you, your teammates and the assistant.
                     </p>
 
                     {/* Quick Note Form */}
@@ -2284,7 +2284,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                           onChange={(e) => setNoteTarget(e.target.value)}
                           className="w-28 rounded border border-border-subtle bg-app px-1.5 py-1 text-[11px] text-txt-primary"
                         >
-                          <option value="">Allmänt</option>
+                          <option value="">General</option>
                           {workspaceServers.map((s) => (
                             <option key={s.id} value={s.name}>
                               {`${s.name} (${s.host})`}
@@ -2295,7 +2295,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                           type="text"
                           value={noteSummary}
                           onChange={(e) => setNoteSummary(e.target.value)}
-                          placeholder="Logga en team-notis (t.ex. bytte port i nginx)…"
+                          placeholder="Log a note for the team (e.g. changed the nginx port)…"
                           className="flex-1 rounded border border-border-subtle bg-app px-2 py-1 text-[11px] text-txt-primary placeholder:text-txt-muted outline-none"
                         />
                         <button
@@ -2303,7 +2303,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                           disabled={addingNote || !noteSummary.trim()}
                           className="rounded bg-sky-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-sky-500 disabled:opacity-40"
                         >
-                          Logga
+                          Log
                         </button>
                       </div>
                     </form>
@@ -2312,7 +2312,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     <div className="space-y-2 max-h-[290px] overflow-y-auto pr-1">
                       {activityLog.length === 0 ? (
                         <div className="rounded-lg border border-dashed border-border-subtle p-4 text-center text-xs text-txt-muted">
-                          Inga loggade ändringar ännu. När någon i teamet ändrar konfiguration eller startar om en tjänst i terminalen dyker det upp här automatiskt.
+                          No changes logged yet. When someone on the team edits configuration or restarts a service in a terminal, it shows up here.
                         </div>
                       ) : (
                         activityLog.map((ev) => (
@@ -2323,7 +2323,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                             <div className="flex items-center justify-between gap-1">
                               <span className="font-semibold text-txt-primary truncate">
                                 {ev.actor}{' '}
-                                <span className="font-normal text-txt-muted">på</span>{' '}
+                                <span className="font-normal text-txt-muted">on</span>{' '}
                                 <span className="text-sky-400">{ev.targetLabel}</span>
                               </span>
                               <span className="shrink-0 text-[10px] text-txt-muted">
@@ -2342,7 +2342,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                                 onClick={() => handleAskAiAboutActivity(ev)}
                                 className="inline-flex items-center gap-1 text-[10px] text-sky-400 hover:underline"
                               >
-                                <Sparkles className="h-2.5 w-2.5" /> Fråga AI om denna ändring
+                                <Sparkles className="h-2.5 w-2.5" /> Ask AI about this change
                               </button>
                             </div>
                           </div>
@@ -2355,7 +2355,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                 {rightColTab === 'memory' && (
                   <div data-testid="right-panel-memory" className="space-y-2.5">
                     <p className="text-[11px] text-txt-muted">
-                      Självlärande AI-minne (Mem0 deduplicering + Letta 3-nivåers minne) synkas i ert S3 Team Workspace.
+                      What the team has chosen to remember. Team memories are shared through the workspace sync.
                     </p>
 
                     <form
@@ -2368,7 +2368,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                           onChange={(e) => setMemKind(e.target.value as 'memory' | 'skill')}
                           className="rounded border border-border-subtle bg-app px-1.5 py-1 text-[10.5px] text-txt-primary"
                         >
-                          <option value="memory">🧠 Minne</option>
+                          <option value="memory">🧠 Memory</option>
                           <option value="skill">⚡ Skill</option>
                         </select>
                         <select
@@ -2394,7 +2394,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                           type="text"
                           value={memText}
                           onChange={(e) => setMemText(e.target.value)}
-                          placeholder="Innehåll / kommando som AI:n ska minnas…"
+                          placeholder="What the assistant should remember…"
                           className="flex-1 rounded border border-border-subtle bg-app px-2 py-1 text-[11px] text-txt-primary placeholder:text-txt-muted outline-none"
                         />
                         <button
@@ -2402,7 +2402,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                           disabled={addingMemory || !memTitle.trim() || !memText.trim()}
                           className="rounded bg-sky-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-sky-500 disabled:opacity-40"
                         >
-                          Spara
+                          Save
                         </button>
                       </div>
                     </form>
@@ -2410,7 +2410,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     <div className="space-y-2 max-h-[270px] overflow-y-auto pr-1">
                       {(hub?.memories ?? []).length === 0 ? (
                         <div className="rounded-lg border border-dashed border-border-subtle p-4 text-center text-xs text-txt-muted">
-                          Inga sparade team-minnen ännu. Lägg till ett minne eller en skill ovan!
+                          No team memories yet. Add a memory or a skill above.
                         </div>
                       ) : (
                         (hub?.memories ?? []).map((mem) => (
@@ -2461,14 +2461,14 @@ export const LandingView: React.FC<LandingViewProps> = ({
                                       detail: {
                                         view: 'Work',
                                         mode: 'panel',
-                                        prompt: `Använd vårt team-minne "${mem.title}" (${mem.text}) och hjälp mig applicera det.`,
+                                        prompt: `Use our team memory "${mem.title}" (${mem.text}) and help me apply it.`,
                                       },
                                     })
                                   )
                                 }
                                 className="inline-flex items-center gap-1 text-[10px] text-sky-400 hover:underline"
                               >
-                                <Sparkles className="h-2.5 w-2.5" /> Kör i AI med detta minne
+                                <Sparkles className="h-2.5 w-2.5" /> Use this memory with AI
                               </button>
                             </div>
                           </div>
@@ -2482,7 +2482,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   <div data-testid="right-panel-kb" className="space-y-2.5">
                     <div className="flex items-center justify-between gap-2">
                       <p className="text-[11px] text-txt-muted">
-                        Runbooks, arkitekturdokument och post-mortems i Knowledge Base (`@kb`).
+                        Runbooks, architecture notes and post-mortems in the knowledge base (`@kb`).
                       </p>
                       <button
                         type="button"
@@ -2502,7 +2502,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     <div className="space-y-2 max-h-[310px] overflow-y-auto pr-1">
                       {(hub?.kbDocuments ?? []).length === 0 ? (
                         <div className="rounded-lg border border-dashed border-border-subtle p-4 text-center text-xs text-txt-muted">
-                          Inga Runbooks i Knowledge Base ännu. Öppna KB i AI Hub för att lägga till dokumentation.
+                          No runbooks yet. Open the knowledge base in the AI hub to add documentation.
                         </div>
                       ) : (
                         (hub?.kbDocuments ?? []).map((doc) => (
@@ -2540,14 +2540,14 @@ export const LandingView: React.FC<LandingViewProps> = ({
                                       detail: {
                                         view: 'Work',
                                         mode: 'panel',
-                                        prompt: `Utgå från vår runbook "${doc.title}" i @kb och hjälp mig genomföra stegen säkert.`,
+                                        prompt: `Follow our runbook "${doc.title}" in @kb and help me carry out the steps safely.`,
                                       },
                                     })
                                   )
                                 }
                                 className="inline-flex items-center gap-1 text-[10px] font-medium text-emerald-300 hover:underline"
                               >
-                                <Sparkles className="h-2.5 w-2.5" /> Kör Runbook med AI
+                                <Sparkles className="h-2.5 w-2.5" /> Run this runbook with AI
                               </button>
                             </div>
                           </div>
@@ -2561,7 +2561,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   <div data-testid="right-panel-workforce" className="space-y-2.5">
                     <div className="flex items-center justify-between gap-2">
                       <p className="text-[11px] text-txt-muted">
-                        Era Mission Agents undersöker uppdraget var för sig (skrivskyddat) och en sammanställning skrivs.
+                        Your Mission Agents each investigate the objective (read-only) and a combined result is written.
                       </p>
                       <div className="flex items-center gap-1">
                         <button
@@ -2571,7 +2571,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                           onClick={handleRunDashboardWorkforce}
                           className="shrink-0 rounded border border-purple-500/40 bg-purple-500/20 px-2 py-0.5 text-[10px] font-semibold text-purple-200 hover:bg-purple-500/30 disabled:opacity-50"
                         >
-                          {runningDashboardSwarm ? '⏳ Kör Swarm…' : '🚀 Kör Swarm-revision'}
+                          {runningDashboardSwarm ? '⏳ Running…' : '🚀 Run a review'}
                         </button>
                         <button
                           type="button"
@@ -2584,7 +2584,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                           }
                           className="shrink-0 rounded border border-border-subtle bg-app-card px-2 py-0.5 text-[10px] font-semibold text-txt-secondary hover:text-txt-primary"
                         >
-                          Öppna ↗
+                          Open ↗
                         </button>
                       </div>
                     </div>
@@ -2592,7 +2592,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     <div className="space-y-2 max-h-[220px] overflow-y-auto pr-1">
                       {(hub?.workforceRuns ?? []).length === 0 ? (
                         <div className="rounded-lg border border-dashed border-border-subtle p-3 text-center text-xs text-txt-muted">
-                          Inga Workforce-körningar ännu. Klicka på <strong>🚀 Kör Swarm-revision</strong> för att låta era specialist-agenter analysera klustren parallellt!
+                          No workforce runs yet. Click <strong>🚀 Run a review</strong> to have your Mission Agents look at the clusters in parallel.
                         </div>
                       ) : (
                         (hub?.workforceRuns ?? []).slice(0, 4).map((run) => (
@@ -2697,10 +2697,10 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         {hub.s3Workspace.prefix || 'sshs3-team'}
                       </span>
                       {hub.s3Workspace.syncing ? (
-                        <span className="text-sky-300">· Synkar…</span>
+                        <span className="text-sky-300">· Syncing…</span>
                       ) : hub.s3Workspace.lastSyncAt ? (
                         <span className="text-txt-muted">
-                          · Synkad {formatRelativeTime(hub.s3Workspace.lastSyncAt)}
+                          · Synced {formatRelativeTime(hub.s3Workspace.lastSyncAt)}
                         </span>
                       ) : null}
                     </span>
@@ -2709,14 +2709,14 @@ export const LandingView: React.FC<LandingViewProps> = ({
                       data-testid="s3-workspace-status-badge"
                       className="inline-flex items-center gap-1 rounded-full border border-emerald-500/35 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-300"
                     >
-                      🟢 VM Team-delning aktiv på denna Web-server — alla inloggade användare delar VMs, kluster & AI-minnen direkt (S3-bucket är valfri molnbackup)
+                      🟢 Shared on this web server: signed-in users share VMs, clusters and team memory directly (an S3 bucket is an optional cloud copy)
                     </span>
                   ) : (
                     <span
                       data-testid="s3-workspace-status-badge"
                       className="inline-flex items-center gap-1 rounded-full border border-border-subtle bg-app-card px-2 py-0.5 text-[10px] text-txt-muted"
                     >
-                      Ej kopplad — dela VMs, kluster & AI-minne med dina kompisar via en S3-bucket (endast S3-nycklar krävs)
+                      Not connected. Share VMs, clusters and team memory with your team through an S3 bucket (only S3 keys are needed)
                     </span>
                   )}
 
@@ -2729,7 +2729,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                           title={
                             (p.activeTerminals ?? []).length > 0
                               ? `${p.actor}: ${(p.activeTerminals ?? []).map((t) => t.targetLabel).join(', ')}`
-                              : `${p.actor} är online`
+                              : `${p.actor} is online`
                           }
                           className="inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-300"
                         >
@@ -2752,7 +2752,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                       type="button"
                       data-testid="copy-s3-invite-btn"
                       onClick={handleCopyS3Invite}
-                      title="Kopiera 1-klicks S3 Invite-kod (sshs3-s3://...) att skicka till dina kompisar"
+                      title="Copy the S3 invite code (sshs3-s3://...) to send to your teammates"
                       className="inline-flex items-center gap-1 rounded-md border border-sky-500/40 bg-sky-500/15 px-2.5 py-1 text-[11px] font-semibold text-sky-300 hover:bg-sky-500/25 transition-colors"
                     >
                       {s3CopyFeedback ? (
@@ -2763,7 +2763,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                       ) : (
                         <>
                           <Copy className="h-3 w-3" />
-                          <span>Kopiera Invite-kod</span>
+                          <span>Copy invite code</span>
                         </>
                       )}
                     </button>
@@ -2791,10 +2791,10 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     <Key className="h-3 w-3" />
                     <span>
                       {s3SetupOpen
-                        ? 'Stäng S3-inställning'
+                        ? 'Close S3 settings'
                         : hub?.s3Workspace?.configured
                           ? 'S3-nycklar'
-                          : 'Koppla S3 Team Bucket'}
+                          : 'Connect S3 team bucket'}
                     </span>
                   </button>
                 </div>
@@ -2815,10 +2815,10 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   <div className="flex items-start justify-between gap-2">
                     <div>
                       <div className="text-xs font-bold text-purple-300">
-                        Dela Workspace med kompisar via S3 Bucket (AWS S3, Cloudflare R2, MinIO, Hetzner)
+                        Share the workspace with your team through an S3 bucket (AWS S3, Cloudflare R2, MinIO, Hetzner)
                       </div>
                       <p className="text-[11px] text-txt-muted mt-0.5">
-                        Endast IP/host, port, standard-användare, kluster, roller, taggar, AI-minnen och live-presence synkas i S3. Varje kompis loggar in med sin egen lokala SSH-nyckel (<code className="text-sky-300">~/.ssh</code>) som aldrig lämnar datorn.
+                        Only IP/host, port, default user, clusters, roles, tags, team memories and presence are synced to S3. Each teammate signs in with their own local SSH key (<code className="text-sky-300">~/.ssh</code>), which never leaves their computer.
                       </p>
                     </div>
                     <button
@@ -2834,7 +2834,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   {/* 1-Click Invite Code Paste */}
                   <div className="rounded-lg border border-sky-500/30 bg-sky-500/5 p-2.5">
                     <label className="block text-[10px] font-bold uppercase tracking-wider text-sky-300 mb-1">
-                      Snabb-gå med: Klistra in Invite-kod från en kompis (sshs3-s3://…)
+                      Join: paste an invite code from a teammate (sshs3-s3://…)
                     </label>
                     <input
                       type="text"
@@ -2874,7 +2874,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     </div>
                     <div>
                       <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                        Endpoint (valfri, t.ex. R2 / MinIO)
+                        Endpoint (optional, e.g. R2 / MinIO)
                       </label>
                       <input
                         type="text"
@@ -2923,7 +2923,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         onChange={(e) => setS3SecretAccessKey(e.target.value)}
                         placeholder={
                           hub?.s3Workspace?.configured
-                            ? '•••••••• (lämna tom för att behålla)'
+                            ? '•••••••• (leave empty to keep)'
                             : 'Din S3 Secret Access Key'
                         }
                         className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs font-mono text-txt-primary"
@@ -2931,7 +2931,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     </div>
                     <div>
                       <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                        Ditt namn i teamet (visas vid ändringar & terminal)
+                        Your name in the team (shown on changes and terminals)
                       </label>
                       <input
                         type="text"
@@ -2956,7 +2956,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                           onClick={() => void handleDisconnectS3()}
                           className="rounded px-2 py-1 text-[11px] text-rose-400 hover:bg-rose-500/10"
                         >
-                          Koppla från S3 Bucket
+                          Disconnect S3 bucket
                         </button>
                       )}
                     </div>
@@ -2966,7 +2966,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         onClick={() => setS3SetupOpen(false)}
                         className="rounded px-2.5 py-1 text-xs text-txt-muted hover:text-txt-primary"
                       >
-                        Avbryt
+                        Cancel
                       </button>
                       <button
                         type="submit"
@@ -2974,7 +2974,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         disabled={s3Saving}
                         className="rounded-lg bg-purple-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-purple-500 disabled:opacity-40"
                       >
-                        {s3Saving ? 'Ansluter & synkar…' : 'Spara & Synka S3 Bucket'}
+                        {s3Saving ? 'Connecting and syncing…' : 'Save and sync S3 bucket'}
                       </button>
                     </div>
                   </div>
@@ -2997,7 +2997,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                       AI Workspace Command Center
                     </span>
                     <span className="ml-2 hidden sm:inline text-[11px] text-txt-muted">
-                      Styr kluster, kör parallella diagnoser, diffa filer eller be AI:n konfigurera hela sshS3
+                      Operate clusters, run parallel diagnostics, diff files or have the assistant configure sshS3
                     </span>
                   </div>
                 </div>
@@ -3008,7 +3008,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     onClick={() => {
                       void hubRequest({ action: 'self-learn-reflect' });
                     }}
-                    title="Kör Voyager/Reflexion Self-Reflection: konsoliderar minnen, extraherar felsökningsmönster och optimerar @orama/orama-indexet"
+                    title="Consolidate overlapping memories and refresh the search index"
                     className="rounded-full border border-purple-400/50 bg-purple-500/20 px-2.5 py-0.5 text-[10.5px] font-semibold text-purple-200 hover:bg-purple-500/30 transition-all"
                   >
                     🧬 Self-Learning ({hub?.selfLearning?.totalLearnedSkills ?? 0} skills ·{' '}
@@ -3022,7 +3022,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     title={
                       isWebBrowserMode()
                         ? "Demo mode is set when the sshs3 server starts and can't be changed here."
-                        : 'Slå på eller av det interaktiva 12-noders Enterprise Demo-Labbet (NetApp ONTAP, StorageGRID, Ceph/ZFS & K8s Trident) direkt i gränssnittet'
+                        : 'Turn the interactive demo lab (a scripted 12-node environment) on or off'
                     }
                     className={`rounded-full px-2.5 py-0.5 text-[10.5px] font-semibold transition-all disabled:cursor-not-allowed ${
                       hub?.demoMode
@@ -3030,7 +3030,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         : 'border border-border-subtle bg-app-card text-txt-muted hover:border-amber-500/40 hover:text-amber-200'
                     }`}
                   >
-                    {hub?.demoMode ? '🧪 Demo-Lab: PÅ' : '🧪 Demo-Lab: AV'}
+                    {hub?.demoMode ? '🧪 Demo lab: on' : '🧪 Demo lab: off'}
                   </button>
                   <button
                     type="button"
@@ -3039,7 +3039,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                       setQuickAiDismissed(false);
                       setQuickAiOpen((v) => !v);
                     }}
-                    title="Koppla din AI (ChatGPT OAuth, API-nyckel eller Lokal Ollama) med 1 klick"
+                    title="Connect your AI (ChatGPT sign-in, an API key or local Ollama)"
                     className={`rounded-full px-2.5 py-0.5 text-[10.5px] font-semibold transition-all ${
                       isAiConnected
                         ? 'border border-emerald-400/50 bg-emerald-500/20 text-emerald-200'
@@ -3048,7 +3048,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   >
                     {isAiConnected
                       ? `🟢 AI Kopplad (${hub?.config.model || 'Redo'})`
-                      : '⚡ Koppla din AI (1-klick)'}
+                      : '⚡ Connect your AI'}
                   </button>
                   <button
                     type="button"
@@ -3082,7 +3082,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                 </div>
               </div>
 
-              {/* 1-Click "Koppla din AI på 10 sekunder" Onboarding Card */}
+              {/* AI onboarding card */}
               {(quickAiOpen || (Boolean(hub) && !isAiConnected && !quickAiDismissed)) && (
                 <div
                   data-testid="quick-connect-ai-banner"
@@ -3091,11 +3091,11 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="flex items-center gap-2">
                       <span className="rounded-md bg-emerald-500/20 px-2 py-0.5 text-[10.5px] font-bold text-emerald-300 border border-emerald-500/30">
-                        ⚡ Koppla din AI
+                        ⚡ Connect your AI
                       </span>
                       <span className="text-xs font-semibold text-txt-primary">
                         {/* Counts are this workspace's own content, not a promise of preloaded material. */}
-                        {`Workspacet har ${(hub?.agents ?? []).length} agent(er), ${(hub?.kbDocuments ?? []).length} runbooks och ${(hub?.memories ?? []).filter((m) => m.kind === 'skill').length} skills. Välj hur AI:n ska köras:`}
+                        {`This workspace has ${(hub?.agents ?? []).length} agent(s), ${(hub?.kbDocuments ?? []).length} runbooks and ${(hub?.memories ?? []).filter((m) => m.kind === 'skill').length} skills. Choose how the AI runs:`}
                       </span>
                     </div>
                     <button
@@ -3106,7 +3106,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                       }}
                       className="text-[11px] text-txt-muted hover:text-txt-primary px-1.5 py-0.5"
                     >
-                      Stäng ✕
+                      Close ✕
                     </button>
                   </div>
 
@@ -3118,7 +3118,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                           1. 🔐 ChatGPT / Codex (OAuth)
                         </div>
                         <p className="mt-0.5 text-[11px] text-txt-muted">
-                          Använd din befintliga ChatGPT Plus/Pro/Team-session (`~/.codex/auth.json` eller `hermes-native`) utan API-nyckel.
+                          Use your existing ChatGPT Plus/Pro/Team session (`~/.codex/auth.json` or `hermes-native`), no API key needed.
                         </p>
                       </div>
                       <button
@@ -3129,8 +3129,8 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         className="mt-2 w-full rounded-md bg-sky-600 px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-sky-500 transition-colors"
                       >
                         {hub?.config.codexConnected
-                          ? `✅ Aktivera ChatGPT (${hub.config.codexAccountEmail || 'Redo'})`
-                          : '🔐 Koppla ChatGPT / Codex (1-klick)'}
+                          ? `✅ Enable ChatGPT (${hub.config.codexAccountEmail || 'ready'})`
+                          : '🔐 Connect ChatGPT / Codex'}
                       </button>
                     </div>
 
@@ -3142,10 +3142,10 @@ export const LandingView: React.FC<LandingViewProps> = ({
                       <div>
                         <div className="flex items-center justify-between gap-1">
                           <span className="text-xs font-bold text-purple-300">
-                            2. 🔑 Klistra in API-nyckel
+                            2. 🔑 Paste an API key
                           </span>
                           <select
-                            aria-label="Snabbval AI-leverantör"
+                            aria-label="AI provider"
                             value={quickAiProvider}
                             onChange={(e) =>
                               setQuickAiProvider(
@@ -3174,7 +3174,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         disabled={quickAiSaving || !quickAiKey.trim()}
                         className="mt-2 w-full rounded-md bg-purple-600 px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-purple-500 disabled:opacity-50 transition-colors"
                       >
-                        🔑 Spara i OS-nyckelring & Aktivera
+                        🔑 Save to the OS keyring and enable
                       </button>
                     </form>
 
@@ -3182,10 +3182,10 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     <div className="flex flex-col justify-between rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-2.5">
                       <div>
                         <div className="text-xs font-bold text-emerald-300">
-                          3. 🦙 Lokal AI (Ollama / vLLM)
+                          3. 🦙 Local AI (Ollama / vLLM)
                         </div>
                         <p className="mt-0.5 text-[11px] text-txt-muted">
-                          Kör 100 % lokalt och privat mot `http://127.0.0.1:11434/v1` utan externa moln-API:er.
+                          Runs locally and privately against `http://127.0.0.1:11434/v1`, with no external API.
                         </p>
                       </div>
                       <button
@@ -3195,7 +3195,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         onClick={handleQuickConnectOllama}
                         className="mt-2 w-full rounded-md bg-emerald-600 px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-emerald-500 transition-colors"
                       >
-                        🦙 Koppla Lokal Ollama (1-klick)
+                        🦙 Connect local Ollama
                       </button>
                     </div>
                   </div>
@@ -3222,7 +3222,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     data-testid="workspace-ai-prompt-input"
                     value={aiQuickPrompt}
                     onChange={(e) => setAiQuickPrompt(e.target.value)}
-                    placeholder="Fråga eller be AI:n utföra något… (t.ex. 'Kör hälsokontroll på @cluster:NetApp-ONTAP-Prod-SE' eller 'Skapa en SSH-tunnel på port 8443')"
+                    placeholder="Ask, or have the assistant do something… (e.g. 'Run a health check on @cluster:prod' or 'Create an SSH tunnel on port 8443')"
                     className="w-full rounded-lg border border-sky-500/35 bg-app/95 pl-9 pr-3 py-2 text-xs text-txt-primary placeholder:text-txt-muted outline-none focus:border-sky-400"
                   />
                 </div>
@@ -3233,7 +3233,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-sky-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-sky-500 shadow-sm transition-colors"
                   >
                     <Sparkles className="h-3.5 w-3.5" />
-                    <span>Kör med AI</span>
+                    <span>Run with AI</span>
                   </button>
                   <button
                     type="button"
@@ -3259,29 +3259,29 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   type="button"
                   onClick={() =>
                     handleLaunchAiCommand(
-                      'Kör en parallell hälsokontroll över alla noder i @cluster:NetApp-ONTAP-Prod-SE med sshs3_cluster_exec och sammanställ WAFL/NVMe-latens, aggregat och SnapMirror-status.'
+                      'Run a parallel health check across the nodes of my clusters with sshs3_cluster_exec and summarise load, disk, failed services and anything unusualus.'
                     )
                   }
                   className="rounded-md border border-sky-500/30 bg-app-card/90 px-2 py-0.5 text-[10.5px] font-medium text-sky-300 hover:bg-sky-500/15 transition-colors"
                 >
-                  ⚡ Kluster-hälsokontroll
+                  ⚡ Cluster health check
                 </button>
                 <button
                   type="button"
                   onClick={() =>
                     handleLaunchAiCommand(
-                      'Öppna en 2x2 Konsole split-view för alla noder i @cluster:NetApp-ONTAP-Prod-SE med sshs3_workspace_layout.'
+                      'Open a 2x2 split view for the nodes of one of my clusters with sshs3_workspace_layout; ask me which cluster if there are several.'
                     )
                   }
                   className="rounded-md border border-emerald-500/30 bg-app-card/90 px-2 py-0.5 text-[10.5px] font-medium text-emerald-300 hover:bg-emerald-500/15 transition-colors"
                 >
-                  🪟 2×2 Kluster Split-View
+                  🪟 2×2 cluster split view
                 </button>
                 <button
                   type="button"
                   onClick={() =>
                     handleLaunchAiCommand(
-                      'Diffa /etc/multipath.conf mellan k8s-storage-cp-01 och k8s-gpu-io-worker-01 med sshs3_storage_ops och validera mot vår KB-runbook.'
+                      'Diff a configuration file between two of my servers with sshs3_storage_ops; ask me which file and which servers.'
                     )
                   }
                   className="rounded-md border border-indigo-500/30 bg-app-card/90 px-2 py-0.5 text-[10.5px] font-medium text-indigo-300 hover:bg-indigo-500/15 transition-colors"
@@ -3292,23 +3292,23 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   type="button"
                   onClick={() =>
                     handleLaunchAiCommand(
-                      'Visa alla mina inställningar i sshS3 med sshs3_manage_app_and_settings och hjälp mig optimera SSH-tunnlar, dotfiles-pool, prestandabar och kortkommandon.'
+                      'Show my sshS3 settings with sshs3_manage_app_and_settings and help me tune SSH tunnels, the dotfiles pool, the performance bar and shortcuts.'
                     )
                   }
                   className="rounded-md border border-purple-500/30 bg-app-card/90 px-2 py-0.5 text-[10.5px] font-medium text-purple-300 hover:bg-purple-500/15 transition-colors"
                 >
-                  🛠️ Konfigurera sshS3 med AI
+                  🛠️ Configure sshS3 with AI
                 </button>
                 <button
                   type="button"
                   onClick={() =>
                     handleLaunchAiCommand(
-                      'Sök i vår Knowledge Base (@kb) efter ONTAP Adaptive QoS och hämta aktuell telemetri via NetApp Harvest MCP.'
+                      'Search our knowledge base (@kb) for what I describe next, and tell me which runbook applies.'
                     )
                   }
                   className="rounded-md border border-amber-500/30 bg-app-card/90 px-2 py-0.5 text-[10.5px] font-medium text-amber-300 hover:bg-amber-500/15 transition-colors"
                 >
-                  📚 Sök i Runbooks & MCP
+                  📚 Search runbooks
                 </button>
                 <button
                   type="button"
@@ -3317,7 +3317,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     void hubRequest({
                       action: 'workforce-run',
                       prompt:
-                        'Gå igenom våra delade servrar och kluster: senaste teamändringar, kända problem i kunskapsbasen och vad som bör kontrolleras härnäst.',
+                        'Review our shared servers and clusters: recent team changes, known problems in the knowledge base, and what should be checked next.',
                     }).finally(() => {
                       window.dispatchEvent(
                         new CustomEvent('sshs3:ai-open', {
@@ -3328,7 +3328,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   }}
                   className="rounded-md border border-rose-500/35 bg-rose-500/10 px-2 py-0.5 text-[10.5px] font-semibold text-rose-200 hover:bg-rose-500/20 transition-colors"
                 >
-                  🤝 Kör AI Workforce (Swarm)
+                  🤝 Run a workforce review
                 </button>
               </div>
             </div>
@@ -3341,7 +3341,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
               <div className="rounded-xl border border-sky-500/30 bg-gradient-to-br from-sky-500/10 via-app-card to-app-card p-3 shadow-sm">
                 <div className="flex items-center justify-between">
                   <span className="text-[10px] font-bold uppercase tracking-wider text-sky-400">
-                    🖥️ Noder & VMs
+                    🖥️ Nodes & VMs
                   </span>
                   <span className="rounded-full border border-emerald-500/30 bg-emerald-500/15 px-1.5 py-0.5 text-[9.5px] font-semibold text-emerald-300">
                     {activeSessionCount > 0 ? `${activeSessionCount} live` : 'Redo'}
@@ -3360,14 +3360,14 @@ export const LandingView: React.FC<LandingViewProps> = ({
               <div className="rounded-xl border border-indigo-500/30 bg-gradient-to-br from-indigo-500/10 via-app-card to-app-card p-3 shadow-sm">
                 <div className="flex items-center justify-between">
                   <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-300">
-                    🧩 Infrastruktur-kluster
+                    🧩 Clusters
                   </span>
                   <button
                     type="button"
                     onClick={() => setShowClusterTopology((v) => !v)}
                     className="rounded border border-indigo-500/30 bg-indigo-500/10 px-1.5 py-0.5 text-[9.5px] font-semibold text-indigo-300 hover:bg-indigo-500/20"
                   >
-                    {showClusterTopology ? 'Dölj topologi' : 'Visa topologi'}
+                    {showClusterTopology ? 'Hide topology' : 'Show topology'}
                   </button>
                 </div>
                 <div className="mt-1 flex items-baseline gap-2">
@@ -3422,7 +3422,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
               >
                 <div className="flex items-center justify-between">
                   <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-300">
-                    📚 Knowledge Base & Minne
+                    📚 Knowledge base & memory
                   </span>
                   <span className="rounded-full border border-emerald-500/30 bg-emerald-500/15 px-1.5 py-0.5 text-[9.5px] font-semibold text-emerald-200">
                     @orama/orama + Voyager

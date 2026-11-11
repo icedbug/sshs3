@@ -112,7 +112,7 @@ export function KnowledgeBaseView({
         <input
           style={{ flex: 1 }}
           data-testid="kb-hybrid-search-input"
-          placeholder="Sök med Hybrid BM25 + Semantiska koncept (t.ex. 'hög svarstid', 'snapmirror', 'pvc multipath')…"
+          placeholder="Search runbooks (e.g. 'high latency', 'replication lag', 'pvc multipath')…"
           value={searchFilter}
           onChange={(e) => setSearchFilter(e.target.value)}
         />
@@ -124,8 +124,8 @@ export function KnowledgeBaseView({
       <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 10, alignItems: "center" }}>
         <small style={{ opacity: 0.75 }}>🧠 Orama Concept Clusters:</small>
         {[
-          { label: "⚡ Latens / QoS", q: "hög svarstid" },
-          { label: "🔄 SnapMirror / DR", q: "replikering" },
+          { label: "⚡ Latency / QoS", q: "high latency" },
+          { label: "🔄 SnapMirror / DR", q: "replication" },
           { label: "☁️ StorageGRID S3", q: "storagegrid ilm" },
           { label: "☸️ Trident CSI / PVC", q: "trident pvc" },
           { label: "🔌 SAN Multipath", q: "multipath alua" },
@@ -296,7 +296,7 @@ export function KnowledgeBaseView({
                   className="ai-btn-accent"
                   onClick={() => onRunRunbook(doc)}
                 >
-                  🚀 Kör Runbook i Chatten
+                  🚀 Run this runbook in chat
                 </button>
               )}
               <button onClick={() => onAttachDoc(doc)}>

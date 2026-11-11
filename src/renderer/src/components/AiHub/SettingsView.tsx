@@ -130,13 +130,13 @@ export function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Elem
             })
           }
         >
-          {hub.demoMode ? "🧪 Stäng av Demo-Lab" : "🧪 Aktivera 12-noders Demo-Lab"}
+          {hub.demoMode ? "🧪 Turn the demo lab off" : "🧪 Turn the demo lab on"}
         </button>
         <button
           type="button"
           onClick={() => void act({ action: "restore-builtins" })}
         >
-          🔄 Återställ inbyggda Agenter, Runbooks & Skills
+          🔄 Restore built-in agents, runbooks and skills
         </button>
       </div>
       <label>

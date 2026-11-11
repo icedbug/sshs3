@@ -326,7 +326,7 @@ describe('LandingView Component', () => {
         />
       );
       const badge = screen.getByTestId('s3-workspace-status-badge');
-      expect(badge.textContent).toContain('VM Team-delning aktiv på denna Web-server');
+      expect(badge.textContent).toContain('Shared on this web server');
     } finally {
       delete (window as any).__SSHS3_WEB_MODE__;
     }

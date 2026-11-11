@@ -52,8 +52,8 @@ describe('WorkspaceChat', () => {
     const articles = screen.getAllByRole('article');
     expect(articles).toHaveLength(2);
     expect(articles[0]).toHaveTextContent('sara');
-    expect(articles[1]).toHaveTextContent('Assistenten');
-    expect(articles[1]).toHaveTextContent('Svar till sara: @ai what changed?');
+    expect(articles[1]).toHaveTextContent('Assistant');
+    expect(articles[1]).toHaveTextContent('Reply to sara: @ai what changed?');
     // The assistant's markdown is rendered, not shown as source.
     expect(articles[1].querySelector('strong')).toHaveTextContent('13:48');
   });
@@ -95,22 +95,22 @@ describe('WorkspaceChat', () => {
     fireEvent.click(screen.getByTestId('workspace-chat-mention-ai'));
     fireEvent.click(screen.getByTestId('workspace-chat-mention-ai'));
     expect(input.value).toBe('@ai who restarted nginx?');
-    expect(screen.getByText(/AI är inte påslagen/)).toBeInTheDocument();
+    expect(screen.getByText(/AI is not enabled/)).toBeInTheDocument();
   });
 
   it('says where messages go: shared when the team sync is on, this computer only otherwise', () => {
     const { rerender } = render(<WorkspaceChat request={vi.fn()} hub={hub()} />);
-    expect(screen.getByText(/sparas bara här/)).toBeInTheDocument();
+    expect(screen.getByText(/kept here only/)).toBeInTheDocument();
     rerender(
       <WorkspaceChat
         request={vi.fn()}
         hub={hub({ s3Workspace: { enabled: true, configured: true } as HubSnapshot['s3Workspace'] })}
       />
     );
-    expect(screen.getByText(/Delas med teamet/)).toBeInTheDocument();
+    expect(screen.getByText(/Shared with the team/)).toBeInTheDocument();
     // The caller's knowledge of another transport wins over the bucket status.
     rerender(<WorkspaceChat request={vi.fn()} hub={hub()} teamShared />);
-    expect(screen.getByText(/Delas med teamet/)).toBeInTheDocument();
+    expect(screen.getByText(/Shared with the team/)).toBeInTheDocument();
   });
 
   it('shows that the assistant is answering only while its run for a message of this channel is active', () => {

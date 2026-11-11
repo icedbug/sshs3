@@ -105,11 +105,11 @@ export function WorkspaceChat({ hub, request, channel = GENERAL, teamShared }: W
       >
         {messages.length === 0 ? (
           <div className="rounded-lg border border-dashed border-border-subtle p-3 text-xs text-txt-muted">
-            <p className="font-semibold text-txt-secondary">Inga meddelanden än.</p>
+            <p className="font-semibold text-txt-secondary">No messages yet.</p>
             <p className="mt-1">
-              Skriv till teamet här. Nämn <code className="text-sky-300">@ai</code> för att fråga
-              assistenten – den läser teamets aktivitetslogg, servrar, minnen och kunskapsbas och
-              svarar i kanalen så att alla ser svaret.
+              Write to the team here. Mention <code className="text-sky-300">@ai</code> to ask the
+              assistant: it reads the team's activity log, servers, memories and knowledge base, and
+              answers in the channel where everyone sees it.
             </p>
           </div>
         ) : (
@@ -124,14 +124,14 @@ export function WorkspaceChat({ hub, request, channel = GENERAL, teamShared }: W
         )}
         {answering && (
           <p data-testid="workspace-chat-answering" className="px-1 text-[11px] text-sky-300">
-            Assistenten läser workspacet och skriver ett svar…
+            The assistant is reading the workspace and writing an answer…
           </p>
         )}
       </div>
 
       {error && (
         <p role="alert" className="rounded border border-red-500/40 bg-red-500/10 px-2 py-1 text-[11px] text-red-300">
-          Meddelandet skickades inte: {error}
+          The message was not sent: {error}
         </p>
       )}
 
@@ -154,8 +154,8 @@ export function WorkspaceChat({ hub, request, channel = GENERAL, teamShared }: W
             }
           }}
           rows={2}
-          aria-label="Meddelande till teamet"
-          placeholder="Skriv till teamet… (@ai för att fråga assistenten)"
+          aria-label="Message to the team"
+          placeholder="Write to the team… (@ai to ask the assistant)"
           className="w-full resize-none rounded border border-border-subtle bg-app px-2 py-1.5 text-xs text-txt-primary outline-none placeholder:text-txt-muted focus:border-sky-500/60"
         />
         <div className="mt-1.5 flex items-center justify-between gap-2">
@@ -169,12 +169,12 @@ export function WorkspaceChat({ hub, request, channel = GENERAL, teamShared }: W
           </button>
           <span className="min-w-0 flex-1 truncate text-[10.5px] text-txt-muted">
             {tooLong
-              ? `För långt: ${draft.length}/${MAX_CHAT_TEXT} tecken`
+              ? `Too long: ${draft.length}/${MAX_CHAT_TEXT} characters`
               : mentionsAi && !aiEnabled
-                ? 'AI är inte påslagen – slå på den i AI-inställningarna för att få svar.'
+                ? 'AI is not enabled. Turn it on in the AI settings to get an answer.'
                 : shared
-                  ? 'Delas med teamet.'
-                  : 'Ingen team-synk är påslagen: meddelanden sparas bara här.'}
+                  ? 'Shared with the team.'
+                  : 'No team sync is on: messages are kept here only.'}
           </span>
           <button
             type="submit"
@@ -182,7 +182,7 @@ export function WorkspaceChat({ hub, request, channel = GENERAL, teamShared }: W
             disabled={sending || !draft.trim() || tooLong}
             className="rounded bg-sky-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-sky-500 disabled:opacity-40"
           >
-            {sending ? 'Skickar…' : 'Skicka'}
+            {sending ? 'Sending…' : 'Send'}
           </button>
         </div>
       </form>
@@ -209,7 +209,7 @@ function ChatMessage({
     >
       <header className="flex items-baseline justify-between gap-2">
         <span className={`font-semibold ${ai ? 'text-sky-300' : 'text-txt-primary'}`}>
-          {ai ? 'Assistenten' : message.actor}
+          {ai ? 'Assistant' : message.actor}
         </span>
         <time dateTime={new Date(message.at).toISOString()} className="shrink-0 text-[10px] text-txt-muted">
           {timeLabel(message.at, now)}
@@ -217,7 +217,7 @@ function ChatMessage({
       </header>
       {question && (
         <p className="mt-0.5 truncate border-l-2 border-border-subtle pl-1.5 text-[10.5px] text-txt-muted">
-          Svar till {question.actor}: {question.summary}
+          Reply to {question.actor}: {question.summary}
         </p>
       )}
       {ai ? (

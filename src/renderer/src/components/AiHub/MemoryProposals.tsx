@@ -10,11 +10,11 @@ type Act = (request: HubRequest) => Promise<HubSnapshot | undefined>;
 
 const scopeLabel = (scope: string): string =>
   scope === "workspace"
-    ? "hela workspacet"
+    ? "the whole workspace"
     : scope.startsWith("server:")
-      ? `servern ${scope.slice("server:".length)}`
+      ? `server ${scope.slice("server:".length)}`
       : scope.startsWith("cluster:")
-        ? `klustret ${scope.slice("cluster:".length)}`
+        ? `cluster ${scope.slice("cluster:".length)}`
         : scope;
 
 /**
@@ -53,12 +53,12 @@ export function MemoryProposals({
         }}
       >
         <div>
-          <strong>Förslag från assistenten ({proposals.length})</strong>
+          <strong>Suggested by the assistant ({proposals.length})</strong>
           <div style={{ marginTop: 2 }}>
             <small>
-              Efter en avslutad session läser assistenten den en gång till och
-              föreslår vad teamet bör minnas. Ett förslag används inte och
-              delas inte förrän någon godkänner det.
+              After a finished session the assistant reads it once more and
+              suggests what the team should remember. A suggestion is not used
+              and not shared until somebody accepts it.
             </small>
           </div>
         </div>
@@ -69,15 +69,15 @@ export function MemoryProposals({
           disabled={busy}
           onClick={readActivity}
         >
-          {busy ? "Läser…" : "Läs teamets senaste aktivitet"}
+          {busy ? "Reading…" : "Read the team's recent activity"}
         </button>
       </div>
 
       {last && proposals.length === 0 && (
         <p className="ai-hint" data-testid="memory-distill-status">
           {last.error
-            ? `Senaste läsningen (${last.sourceTitle}) misslyckades: ${last.error}`
-            : `Senaste läsningen (${last.sourceTitle}) gav ${last.proposed === 0 ? "inget nytt att minnas" : `${last.proposed} förslag`}.`}
+            ? `The latest reading (${last.sourceTitle}) failed: ${last.error}`
+            : `The latest reading (${last.sourceTitle}) found ${last.proposed === 0 ? "nothing new to remember" : `${last.proposed} suggestion(s)`}.`}
         </p>
       )}
 
@@ -120,16 +120,16 @@ function ProposalRow({
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
         <span className="ai-badge">
           {proposal.op === "update"
-            ? "Uppdatera befintligt minne"
+            ? "Update an existing memory"
             : proposal.kind === "skill"
-              ? "Ny skill"
-              : "Nytt minne"}
+              ? "New skill"
+              : "New memory"}
         </span>
-        <small>Gäller {scopeLabel(proposal.scope)}</small>
-        <small style={{ opacity: 0.75 }}>· från {proposal.sourceTitle}</small>
+        <small>Applies to {scopeLabel(proposal.scope)}</small>
+        <small style={{ opacity: 0.75 }}>· from {proposal.sourceTitle}</small>
       </div>
       <input
-        aria-label="Titel"
+        aria-label="Title"
         value={title}
         onChange={(e) => setTitle(e.target.value)}
         disabled={busy}
@@ -143,11 +143,11 @@ function ProposalRow({
       />
       {proposal.previousText && (
         <small data-testid="memory-proposal-previous">
-          Ersätter: <span style={{ opacity: 0.8 }}>{proposal.previousText}</span>
+          Replaces: <span style={{ opacity: 0.8 }}>{proposal.previousText}</span>
         </small>
       )}
       <small>
-        Underlag: <span style={{ opacity: 0.8 }}>{proposal.evidence}</span>
+        Evidence: <span style={{ opacity: 0.8 }}>{proposal.evidence}</span>
       </small>
       <div style={{ display: "flex", gap: 6 }}>
         <button
@@ -163,7 +163,7 @@ function ProposalRow({
             })
           }
         >
-          Godkänn och dela med teamet
+          Accept and share with the team
         </button>
         <button
           type="button"
@@ -172,7 +172,7 @@ function ProposalRow({
             decide({ action: "memory-proposal-reject", id: proposal.id })
           }
         >
-          Avvisa
+          Reject
         </button>
       </div>
     </section>

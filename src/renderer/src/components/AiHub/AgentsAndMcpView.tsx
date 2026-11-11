@@ -41,7 +41,7 @@ export function AgentsAndMcpView({
   const [testingMcpId, setTestingMcpId] = useState("");
 
   const [workforceObjective, setWorkforceObjective] = useState(
-    "Kör koordinerad hälsokontroll över NetApp ONTAP, StorageGRID S3 och K8s Trident CSI",
+    "Review our shared servers and clusters: recent team changes, known problems in the knowledge base, and what should be checked next.",
   );
   const [runningWorkforce, setRunningWorkforce] = useState(false);
 
@@ -90,15 +90,15 @@ export function AgentsAndMcpView({
       <article className="ai-card" data-testid="workforce-orchestrator-card">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           <div>
-            <strong>🤝 AI Workforce Orchestrator (Multi-Agent Swarm)</strong>
+            <strong>🤝 Workforce review</strong>
             <div style={{ marginTop: 2 }}>
               <small>
-                Lead SRE Supervisor delegerar parallella deluppdrag till dina specialiserade Mission Agents och syntetiserar en gemensam åtgärdsplan.
+                Each Mission Agent investigates the objective in its own read-only run; one more run combines their reports.
               </small>
             </div>
           </div>
           <span className="ai-badge ai-badge-success">
-            {(hub.workforceRuns ?? []).length} körning(ar)
+            {(hub.workforceRuns ?? []).length} run(s)
           </span>
         </div>
         <div style={{ display: "flex", gap: 6, marginTop: 10, flexWrap: "wrap" }}>
@@ -106,7 +106,7 @@ export function AgentsAndMcpView({
             style={{ flex: 1, minWidth: 220 }}
             value={workforceObjective}
             onChange={(e) => setWorkforceObjective(e.target.value)}
-            placeholder="Beskriv tvärfunktionellt uppdrag för AI Workforce…"
+            placeholder="Describe the objective for the review…"
             data-testid="workforce-objective-input"
           />
           <button
@@ -131,8 +131,8 @@ export function AgentsAndMcpView({
             }}
           >
             {runningWorkforce
-              ? "⏳ Orkestrerar agenter…"
-              : "🚀 Kör AI Workforce (Parallella Agenter)"}
+              ? "⏳ Running…"
+              : "🚀 Run the review"}
           </button>
         </div>
 
@@ -148,8 +148,8 @@ export function AgentsAndMcpView({
             }}
           >
             <summary style={{ cursor: "pointer", fontWeight: 600, fontSize: 12 }}>
-              ⚡ {run.title} · {run.steps.length} agenter ({run.status})
-              {run.simulated ? " · demo, ingen modell anropad" : ""}
+              ⚡ {run.title} · {run.steps.length} agents ({run.status})
+              {run.simulated ? " · demo, no model was called" : ""}
             </summary>
             {run.error && (
               <p className="ai-error" style={{ margin: "6px 0 0", fontSize: 12 }}>
@@ -177,11 +177,11 @@ export function AgentsAndMcpView({
                   </div>
                   <p style={{ margin: "4px 0", whiteSpace: "pre-wrap" }}>
                     {step.status === "queued"
-                      ? "Väntar…"
+                      ? "Waiting…"
                       : step.status === "running"
-                        ? "Undersöker…"
+                        ? "Investigating…"
                         : step.status === "failed"
-                          ? `Misslyckades: ${step.error ?? "okänt fel"}`
+                          ? `Failed: ${step.error ?? "unknown error"}`
                           : step.findings}
                   </p>
                   {step.recommendedCommands?.[0] && (
@@ -376,13 +376,13 @@ export function AgentsAndMcpView({
                     action: "agent-handoff",
                     taskId: activeTaskId,
                     toAgentId: ag.id,
-                    reason: `Swarm handoff till ${ag.name}`,
+                    reason: `Handed over to ${ag.name}`,
                   });
                 }
                 onSelectAgentForChat(ag.id);
               }}
             >
-              🤝 Swarm Handoff
+              🤝 Hand over
             </button>
             <button
               className="ai-btn-emerald"
@@ -416,7 +416,7 @@ export function AgentsAndMcpView({
       {/* PILLAR 5: 1-Click Open-Source MCP Marketplace */}
       <h2>🛒 1-Click Open-Source MCP Marketplace ({(hub.mcpCatalog ?? []).length})</h2>
       <p className="ai-hint">
-        Installera färdigkonfigurerade Open-Source MCP-servrar (Prometheus, Grafana/Loki, Kubernetes/Helm, PostgreSQL, Terraform, GitHub) med ett klick.
+        Install a preconfigured open-source MCP server (Prometheus, Grafana/Loki, Kubernetes/Helm, PostgreSQL, Terraform, GitHub).
       </p>
       <div
         data-testid="mcp-marketplace-grid"
@@ -465,7 +465,7 @@ export function AgentsAndMcpView({
                   })
                 }
               >
-                {isInstalled ? "✅ Installerad" : "⚡ 1-Klick Installera"}
+                {isInstalled ? "✅ Installed" : "⚡ Install"}
               </button>
             </article>
           );
@@ -650,7 +650,7 @@ export function AgentsAndMcpView({
           </button>
         </div>
         <small style={{ display: "block", marginTop: 4 }}>
-          Temporala beroendelänkar mellan kluster, noder och lagring som injiceras automatiskt i AI-kontexten vid rotorsaksanalys.
+          Dependencies between clusters, nodes and storage. They are given to the assistant as context.
         </small>
         {showEdgeForm && (
           <form
@@ -750,9 +750,9 @@ export function AgentsAndMcpView({
       <article className="ai-card" data-testid="safety-policy-card">
         <strong>🛡️ AST Shell Command Safety Guardrails</strong>
         <small style={{ display: "block", marginTop: 4, marginBottom: 8 }}>
-          Klassificerar automatiskt pipelines (<code>|</code>), kedjor (<code>&amp;&amp;</code>) och subshells i{" "}
+          Classifies every part of a command line, across pipelines (<code>|</code>), chains (<code>&amp;&amp;</code>) and subshells, as{" "}
           <span className="ai-badge ai-badge-success">🟢 Safe Read-Only</span>,{" "}
-          <span className="ai-badge ai-badge-mode">🟡 State-Modifying</span> och{" "}
+          <span className="ai-badge ai-badge-mode">🟡 State-Modifying</span> or{" "}
           <span className="ai-badge ai-badge-danger">🔴 Destructive</span>.
         </small>
         <div style={{ display: "grid", gap: 6, fontSize: 12 }}>
@@ -773,7 +773,7 @@ export function AgentsAndMcpView({
                 })
               }
             />
-            <span>Auto-godkänn 🟢 Safe Read-Only diagnostikkommandon</span>
+            <span>Run 🟢 safe read-only diagnostic commands without asking</span>
           </label>
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <input
@@ -792,7 +792,7 @@ export function AgentsAndMcpView({
                 })
               }
             />
-            <span>Kräv manuellt godkännande vid förändringar på produktionsnoder (🟡 Modify)</span>
+            <span>Require approval for changes on production nodes (🟡 Modify)</span>
           </label>
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <input
@@ -811,7 +811,7 @@ export function AgentsAndMcpView({
                 })
               }
             />
-            <span>Spärra 🔴 Destructive kommandon utan explicit granskning</span>
+            <span>Block 🔴 destructive commands unless explicitly reviewed</span>
           </label>
         </div>
       </article>

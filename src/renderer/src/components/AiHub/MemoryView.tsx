@@ -41,7 +41,7 @@ export function Memory({
               <strong>🧬 Open-Source Self-Learning Engine (Voyager + Reflexion + @orama/orama)</strong>
               <div style={{ marginTop: 2 }}>
                 <small>
-                  AI Workspacet lär sig kontinuerligt av körda terminalkommandon, felkoder, Playbook-exekveringar och din feedback.
+                  Fixes are noted when a failed command is followed by one that works, and your feedback adjusts how memories are ranked.
                 </small>
               </div>
             </div>
@@ -59,7 +59,7 @@ export function Memory({
             >
               {reflecting
                 ? "⏳ Reflekterar…"
-                : "🧬 Kör Self-Reflection & Optimera Minne"}
+                : "🧬 Consolidate memories"}
             </button>
           </div>
 
@@ -94,7 +94,7 @@ export function Memory({
           {sl.recentEvents.length > 0 && (
             <details style={{ marginTop: 10 }} open>
               <summary style={{ cursor: "pointer", fontSize: 12, fontWeight: 600 }}>
-                📈 Senaste självlärande händelser ({sl.recentEvents.length})
+                📈 Recent learning events ({sl.recentEvents.length})
               </summary>
               <div style={{ display: "grid", gap: 6, marginTop: 6 }}>
                 {sl.recentEvents.slice(0, 5).map((ev) => (
@@ -221,8 +221,8 @@ export function Memory({
                     : "📌 Core"}
               </span>
               {(m.updatedCount ?? 1) > 1 && (
-                <span className="ai-badge ai-badge-success" title="Antal gånger minnet har konsoliderats automatiskt (Mem0)">
-                  🔄 ×{m.updatedCount} konsoliderad
+                <span className="ai-badge ai-badge-success" title="How many times this memory was merged with a similar note">
+                  🔄 merged ×{m.updatedCount}
                 </span>
               )}
             </div>
@@ -231,7 +231,7 @@ export function Memory({
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
             <button
               type="button"
-              title="Förstärk detta minne/skill (+Confidence & högre prioritet i RAG/Ctrl+K)"
+              title="Mark as useful: ranks this memory higher"
               data-testid={`memory-upvote-${m.id}`}
               onClick={() =>
                 void act({ action: "memory-feedback", id: m.id, delta: 1 })
