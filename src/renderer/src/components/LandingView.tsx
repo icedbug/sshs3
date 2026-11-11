@@ -1009,10 +1009,29 @@ export const LandingView: React.FC<LandingViewProps> = ({
       onKeyDown={handleKeyDown}
       className="flex flex-1 flex-col items-center overflow-y-auto p-6 text-txt-secondary animate-in fade-in duration-200 outline-none"
     >
-      <div className="w-full max-w-5xl flex flex-col items-center text-center space-y-6 my-auto">
+      {/* With a workspace the page is a dashboard: wide and from the top. Without one it is a centred start screen. */}
+      <div
+        className={`w-full flex flex-col items-center text-center ${
+          showWorkspaceSection ? 'max-w-7xl space-y-4' : 'max-w-5xl space-y-6 my-auto'
+        }`}
+      >
         {/* Brand Header */}
-        <div className="flex flex-col items-center space-y-2">
-          <BrandLogo className={recentSSH.length > 0 || showWorkspaceSection ? 'h-14 w-auto' : 'h-28 w-auto'} />
+        <div
+          className={
+            showWorkspaceSection
+              ? 'flex w-full flex-row items-center gap-2'
+              : 'flex flex-col items-center space-y-2'
+          }
+        >
+          <BrandLogo
+            className={
+              showWorkspaceSection
+                ? 'h-7 w-auto'
+                : recentSSH.length > 0
+                  ? 'h-14 w-auto'
+                  : 'h-28 w-auto'
+            }
+          />
           <div className="flex items-center gap-2">
             <h1
               className={
@@ -1283,929 +1302,14 @@ export const LandingView: React.FC<LandingViewProps> = ({
           </div>
         )}
 
-        {/* Action Cards */}
-        {recentSSH.length > 0 ? (
-          <div className="grid grid-cols-[repeat(auto-fit,minmax(130px,1fr))] gap-2 w-full text-left">
-            <button
-              type="button"
-              data-testid="landing-new-terminal-btn"
-              onClick={onQuickStartTerminal}
-              className="flex items-center gap-2 rounded-lg border border-border-subtle bg-app-card px-2.5 py-2 hover:border-sky-500/40 hover:bg-app-surface-hover transition-all"
-            >
-              <Terminal className="h-4 w-4 text-sky-400 shrink-0" />
-              <span className="truncate text-xs font-medium text-txt-primary">New Terminal</span>
-            </button>
-            <button
-              type="button"
-              data-testid="landing-file-manager-btn"
-              onClick={() => onNewTab('filemanager')}
-              className="flex items-center gap-2 rounded-lg border border-border-subtle bg-app-card px-2.5 py-2 hover:border-amber-500/40 hover:bg-app-surface-hover transition-all"
-            >
-              <Folder className="h-4 w-4 text-amber-400 shrink-0" />
-              <span className="truncate text-xs font-medium text-txt-primary">File Manager</span>
-            </button>
-            <button
-              type="button"
-              data-testid="landing-connections-btn"
-              onClick={onOpenProfiles}
-              className="flex items-center gap-2 rounded-lg border border-border-subtle bg-app-card px-2.5 py-2 hover:border-emerald-500/40 hover:bg-app-surface-hover transition-all"
-            >
-              <Server className="h-4 w-4 text-emerald-400 shrink-0" />
-              <span className="truncate text-xs font-medium text-txt-primary">Connections</span>
-            </button>
-            <button
-              type="button"
-              data-testid="landing-cloud-sync-btn"
-              onClick={onOpenSyncBootstrap}
-              className="flex items-center gap-2 rounded-lg border border-border-subtle bg-app-card px-2.5 py-2 hover:border-purple-500/40 hover:bg-app-surface-hover transition-all"
-            >
-              <Cloud className="h-4 w-4 text-purple-400 shrink-0" />
-              <span className="truncate text-xs font-medium text-txt-primary">Cloud Sync</span>
-            </button>
-            <button
-              type="button"
-              data-testid="landing-new-profile-btn"
-              onClick={onNewProfile}
-              className="flex items-center gap-2 rounded-lg border border-sky-500/40 bg-sky-500/10 px-2.5 py-2 hover:bg-sky-500/20 transition-all"
-            >
-              <Plus className="h-4 w-4 text-sky-400 shrink-0" />
-              <span className="truncate text-xs font-medium text-txt-primary">New Profile</span>
-            </button>
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 w-full text-left">
-            <button
-              type="button"
-              data-testid="landing-new-terminal-btn"
-              onClick={onQuickStartTerminal}
-              className="group flex flex-col justify-between rounded-xl border border-border-subtle bg-app-card p-4 hover:border-sky-500/40 hover:bg-app-surface-hover transition-all shadow-sm"
-            >
-              <div className="flex items-start justify-between w-full">
-                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-sky-500/15 text-sky-400 group-hover:bg-sky-500/25 group-hover:scale-105 transition-all">
-                  <Terminal className="h-5 w-5" />
-                </div>
-                <Shortcut id="newTerminal" shortcuts={shortcuts} />
-              </div>
-              <div className="mt-3">
-                <div className="text-xs font-semibold text-txt-primary group-hover:text-sky-400 transition-colors">
-                  Open New Terminal
-                </div>
-                <div className="text-xs text-txt-muted mt-0.5">
-                  Launch a local shell — pick a saved connection or type user@host for SSH
-                </div>
-              </div>
-            </button>
-
-            <button
-              type="button"
-              data-testid="landing-file-manager-btn"
-              onClick={() => onNewTab('filemanager')}
-              className="group flex flex-col justify-between rounded-xl border border-border-subtle bg-app-card p-4 hover:border-amber-500/40 hover:bg-app-surface-hover transition-all shadow-sm"
-            >
-              <div className="flex items-start justify-between w-full">
-                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-amber-500/15 text-amber-400 group-hover:bg-amber-500/25 group-hover:scale-105 transition-all">
-                  <Folder className="h-5 w-5" />
-                </div>
-                <Shortcut id="newFileManager" shortcuts={shortcuts} />
-              </div>
-              <div className="mt-3">
-                <div className="text-xs font-semibold text-txt-primary group-hover:text-amber-400 transition-colors">
-                  New File Manager
-                </div>
-                <div className="text-xs text-txt-muted mt-0.5">
-                  Dual-pane explorer for SFTP, S3 and local drives
-                </div>
-              </div>
-            </button>
-
-            <button
-              type="button"
-              data-testid="landing-connections-btn"
-              onClick={onOpenProfiles}
-              className="group flex flex-col justify-between rounded-xl border border-border-subtle bg-app-card p-4 hover:border-emerald-500/40 hover:bg-app-surface-hover transition-all shadow-sm"
-            >
-              <div className="flex items-start justify-between w-full">
-                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-500/15 text-emerald-400 group-hover:bg-emerald-500/25 group-hover:scale-105 transition-all">
-                  <Server className="h-5 w-5" />
-                </div>
-                <Shortcut id="openProfiles" shortcuts={shortcuts} />
-              </div>
-              <div className="mt-3">
-                <div className="text-xs font-semibold text-txt-primary group-hover:text-emerald-400 transition-colors">
-                  Saved Connections
-                </div>
-                <div className="text-xs text-txt-muted mt-0.5">
-                  Manage profiles, SSH keys and credentials
-                </div>
-              </div>
-            </button>
-
-            <button
-              type="button"
-              data-testid="landing-cloud-sync-btn"
-              onClick={onOpenSyncBootstrap}
-              className="group flex flex-col justify-between rounded-xl border border-border-subtle bg-app-card p-4 hover:border-purple-500/40 hover:bg-app-surface-hover transition-all shadow-sm"
-            >
-              <div className="flex items-start justify-between w-full">
-                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-purple-500/15 text-purple-400 group-hover:bg-purple-500/25 group-hover:scale-105 transition-all">
-                  <Cloud className="h-5 w-5" />
-                </div>
-              </div>
-              <div className="mt-3">
-                <div className="text-xs font-semibold text-txt-primary group-hover:text-purple-400 transition-colors">
-                  Encrypted Cloud Sync
-                </div>
-                <div className="text-xs text-txt-muted mt-0.5">
-                  Sync connection profiles and dotfiles across your devices
-                </div>
-              </div>
-            </button>
-
-            <button
-              type="button"
-              data-testid="landing-new-profile-btn"
-              onClick={onNewProfile}
-              className="sm:col-span-2 flex items-center justify-center gap-2 rounded-xl border border-sky-500/40 bg-sky-500/10 px-4 py-2.5 text-xs font-semibold text-txt-primary hover:bg-sky-500/20 transition-all"
-            >
-              <Plus className="h-4 w-4 text-sky-400" />
-              New Profile
-            </button>
-          </div>
-        )}
-
         {/* Termius-style Shared Workspace Dashboard & Team Activity Feed */}
         {showWorkspaceSection && (
           <div
             data-testid="workspace-dashboard"
             className="grid grid-cols-1 lg:grid-cols-3 gap-4 w-full text-left"
           >
-            {/* Executive Infrastructure Telemetry & KPI Ribbon */}
-            <div
-              data-testid="workspace-kpi-ribbon"
-              className="lg:col-span-3 grid grid-cols-2 sm:grid-cols-4 gap-2.5"
-            >
-              <div className="rounded-xl border border-sky-500/30 bg-gradient-to-br from-sky-500/10 via-app-card to-app-card p-3 shadow-sm">
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-sky-400">
-                    🖥️ Noder & VMs
-                  </span>
-                  <span className="rounded-full border border-emerald-500/30 bg-emerald-500/15 px-1.5 py-0.5 text-[9.5px] font-semibold text-emerald-300">
-                    {activeSessionCount > 0 ? `${activeSessionCount} live` : 'Redo'}
-                  </span>
-                </div>
-                <div className="mt-1 flex items-baseline gap-2">
-                  <span className="text-xl font-extrabold text-txt-primary">
-                    {workspaceServers.length}
-                  </span>
-                  <span className="text-[11px] text-txt-muted">
-                    ({workspaceServers.filter((s) => s.shared).length} delade i S3)
-                  </span>
-                </div>
-              </div>
-
-              <div className="rounded-xl border border-indigo-500/30 bg-gradient-to-br from-indigo-500/10 via-app-card to-app-card p-3 shadow-sm">
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-300">
-                    🧩 Infrastruktur-kluster
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setShowClusterTopology((v) => !v)}
-                    className="rounded border border-indigo-500/30 bg-indigo-500/10 px-1.5 py-0.5 text-[9.5px] font-semibold text-indigo-300 hover:bg-indigo-500/20"
-                  >
-                    {showClusterTopology ? 'Dölj topologi' : 'Visa topologi'}
-                  </button>
-                </div>
-                <div className="mt-1 flex items-baseline gap-2">
-                  <span className="text-xl font-extrabold text-txt-primary">
-                    {clusters.length}
-                  </span>
-                  <span className="truncate text-[11px] text-txt-muted">
-                    {selectedCluster !== 'ALL' ? `Aktivt: ${selectedCluster}` : 'ONTAP, Ceph, S3, K8s'}
-                  </span>
-                </div>
-              </div>
-
-              <button
-                type="button"
-                onClick={() =>
-                  window.dispatchEvent(
-                    new CustomEvent('sshs3:ai-open', {
-                      detail: { view: 'Agents & MCP', mode: 'hub' },
-                    })
-                  )
-                }
-                className="rounded-xl border border-purple-500/30 bg-gradient-to-br from-purple-500/10 via-app-card to-app-card p-3 text-left shadow-sm hover:border-purple-400/50 transition-all"
-              >
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-purple-300">
-                    🤖 Mission Agents & MCP
-                  </span>
-                  <span className="rounded-full border border-purple-500/30 bg-purple-500/15 px-1.5 py-0.5 text-[9.5px] font-semibold text-purple-200">
-                    {totalMcpTools} MCP-verktyg
-                  </span>
-                </div>
-                <div className="mt-1 flex items-baseline gap-2">
-                  <span className="text-xl font-extrabold text-txt-primary">
-                    {(hub?.agents ?? []).length}
-                  </span>
-                  <span className="text-[11px] text-txt-muted">
-                    agenter · {(hub?.mcpServers ?? []).length} MCP-servrar
-                  </span>
-                </div>
-              </button>
-
-              <button
-                type="button"
-                onClick={() =>
-                  window.dispatchEvent(
-                    new CustomEvent('sshs3:ai-open', {
-                      detail: { view: 'Knowledge Base', mode: 'hub' },
-                    })
-                  )
-                }
-                className="rounded-xl border border-emerald-500/30 bg-gradient-to-br from-emerald-500/10 via-app-card to-app-card p-3 text-left shadow-sm hover:border-emerald-400/50 transition-all"
-              >
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-300">
-                    📚 Knowledge Base & Minne
-                  </span>
-                  <span className="rounded-full border border-emerald-500/30 bg-emerald-500/15 px-1.5 py-0.5 text-[9.5px] font-semibold text-emerald-200">
-                    @orama/orama + Voyager
-                  </span>
-                </div>
-                <div className="mt-1 flex items-baseline gap-2">
-                  <span className="text-xl font-extrabold text-txt-primary">
-                    {(hub?.kbDocuments ?? []).length}
-                  </span>
-                  <span className="text-[11px] text-txt-muted">
-                    runbooks · {hub?.selfLearning?.totalLearnedSkills ?? (hub?.memories ?? []).length} skills (
-                    {Math.round((hub?.selfLearning?.averageConfidence ?? 0.85) * 100)}%)
-                  </span>
-                </div>
-              </button>
-            </div>
-
-            {/* AI Workspace Command Center (Omnibar + Agent Selector + Quick Ops Chips) */}
-            <div
-              data-testid="workspace-ai-command-bar"
-              className="lg:col-span-3 rounded-xl border border-sky-500/40 bg-gradient-to-r from-sky-500/10 via-indigo-500/10 to-purple-500/10 p-3.5 shadow-md space-y-2.5"
-            >
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <span className="inline-flex h-6 w-6 items-center justify-center rounded-lg border border-sky-400/40 bg-sky-500/20 text-sky-300">
-                    <Sparkles className="h-3.5 w-3.5" />
-                  </span>
-                  <div>
-                    <span className="text-xs font-bold text-txt-primary">
-                      AI Workspace Command Center
-                    </span>
-                    <span className="ml-2 hidden sm:inline text-[11px] text-txt-muted">
-                      Styr kluster, kör parallella diagnoser, diffa filer eller be AI:n konfigurera hela sshS3
-                    </span>
-                  </div>
-                </div>
-                <div className="flex flex-wrap items-center gap-1">
-                  <button
-                    type="button"
-                    data-testid="workspace-self-reflect-btn"
-                    onClick={() => {
-                      void hubRequest({ action: 'self-learn-reflect' });
-                    }}
-                    title="Kör Voyager/Reflexion Self-Reflection: konsoliderar minnen, extraherar felsökningsmönster och optimerar @orama/orama-indexet"
-                    className="rounded-full border border-purple-400/50 bg-purple-500/20 px-2.5 py-0.5 text-[10.5px] font-semibold text-purple-200 hover:bg-purple-500/30 transition-all"
-                  >
-                    🧬 Self-Learning ({hub?.selfLearning?.totalLearnedSkills ?? 0} skills ·{' '}
-                    {Math.round((hub?.selfLearning?.averageConfidence ?? 0.85) * 100)}%)
-                  </button>
-                  <button
-                    type="button"
-                    data-testid="workspace-demo-lab-toggle"
-                    onClick={handleToggleDemoLab}
-                    disabled={isWebBrowserMode()}
-                    title={
-                      isWebBrowserMode()
-                        ? "Demo mode is set when the sshs3 server starts and can't be changed here."
-                        : 'Slå på eller av det interaktiva 12-noders Enterprise Demo-Labbet (NetApp ONTAP, StorageGRID, Ceph/ZFS & K8s Trident) direkt i gränssnittet'
-                    }
-                    className={`rounded-full px-2.5 py-0.5 text-[10.5px] font-semibold transition-all disabled:cursor-not-allowed ${
-                      hub?.demoMode
-                        ? 'border border-amber-400/60 bg-amber-500/20 text-amber-200 shadow-sm'
-                        : 'border border-border-subtle bg-app-card text-txt-muted hover:border-amber-500/40 hover:text-amber-200'
-                    }`}
-                  >
-                    {hub?.demoMode ? '🧪 Demo-Lab: PÅ' : '🧪 Demo-Lab: AV'}
-                  </button>
-                  <button
-                    type="button"
-                    data-testid="workspace-quick-connect-ai-toggle"
-                    onClick={() => {
-                      setQuickAiDismissed(false);
-                      setQuickAiOpen((v) => !v);
-                    }}
-                    title="Koppla din AI (ChatGPT OAuth, API-nyckel eller Lokal Ollama) med 1 klick"
-                    className={`rounded-full px-2.5 py-0.5 text-[10.5px] font-semibold transition-all ${
-                      isAiConnected
-                        ? 'border border-emerald-400/50 bg-emerald-500/20 text-emerald-200'
-                        : 'border border-sky-400/60 bg-sky-500/25 text-sky-100 animate-pulse'
-                    }`}
-                  >
-                    {isAiConnected
-                      ? `🟢 AI Kopplad (${hub?.config.model || 'Redo'})`
-                      : '⚡ Koppla din AI (1-klick)'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setAiQuickAgentId('')}
-                    className={`rounded-full px-2 py-0.5 text-[10.5px] font-semibold transition-all ${
-                      !aiQuickAgentId
-                        ? 'border border-sky-400/50 bg-sky-500/20 text-sky-200'
-                        : 'border border-border-subtle bg-app-card text-txt-muted hover:text-txt-primary'
-                    }`}
-                  >
-                    ✨ Standard AI
-                  </button>
-                  {(hub?.agents ?? []).slice(0, 4).map((ag) => (
-                    <button
-                      key={ag.id}
-                      type="button"
-                      title={`${ag.role}: ${ag.mission}`}
-                      onClick={() =>
-                        setAiQuickAgentId(aiQuickAgentId === ag.id ? '' : ag.id)
-                      }
-                      className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10.5px] font-semibold transition-all ${
-                        aiQuickAgentId === ag.id
-                          ? 'border border-sky-400/60 bg-sky-500/25 text-sky-200 shadow-sm'
-                          : 'border border-border-subtle bg-app-card text-txt-secondary hover:border-sky-500/40 hover:text-sky-200'
-                      }`}
-                    >
-                      <span>{ag.icon || '🤖'}</span>
-                      <span className="truncate max-w-[130px]">{ag.name}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* 1-Click "Koppla din AI på 10 sekunder" Onboarding Card */}
-              {(quickAiOpen || (Boolean(hub) && !isAiConnected && !quickAiDismissed)) && (
-                <div
-                  data-testid="quick-connect-ai-banner"
-                  className="rounded-xl border border-emerald-500/40 bg-app-card/95 p-3 shadow-inner space-y-2.5"
-                >
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex items-center gap-2">
-                      <span className="rounded-md bg-emerald-500/20 px-2 py-0.5 text-[10.5px] font-bold text-emerald-300 border border-emerald-500/30">
-                        ⚡ Koppla din AI
-                      </span>
-                      <span className="text-xs font-semibold text-txt-primary">
-                        {/* Counts are this workspace's own content, not a promise of preloaded material. */}
-                        {`Workspacet har ${(hub?.agents ?? []).length} agent(er), ${(hub?.kbDocuments ?? []).length} runbooks och ${(hub?.memories ?? []).filter((m) => m.kind === 'skill').length} skills. Välj hur AI:n ska köras:`}
-                      </span>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setQuickAiOpen(false);
-                        setQuickAiDismissed(true);
-                      }}
-                      className="text-[11px] text-txt-muted hover:text-txt-primary px-1.5 py-0.5"
-                    >
-                      Stäng ✕
-                    </button>
-                  </div>
-
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
-                    {/* Option 1: 1-Click ChatGPT / Codex OAuth */}
-                    <div className="flex flex-col justify-between rounded-lg border border-sky-500/30 bg-sky-500/5 p-2.5">
-                      <div>
-                        <div className="text-xs font-bold text-sky-300">
-                          1. 🔐 ChatGPT / Codex (OAuth)
-                        </div>
-                        <p className="mt-0.5 text-[11px] text-txt-muted">
-                          Använd din befintliga ChatGPT Plus/Pro/Team-session (`~/.codex/auth.json` eller `hermes-native`) utan API-nyckel.
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        data-testid="quick-connect-codex-btn"
-                        disabled={quickAiSaving}
-                        onClick={handleQuickConnectCodex}
-                        className="mt-2 w-full rounded-md bg-sky-600 px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-sky-500 transition-colors"
-                      >
-                        {hub?.config.codexConnected
-                          ? `✅ Aktivera ChatGPT (${hub.config.codexAccountEmail || 'Redo'})`
-                          : '🔐 Koppla ChatGPT / Codex (1-klick)'}
-                      </button>
-                    </div>
-
-                    {/* Option 2: Paste API Key Directly */}
-                    <form
-                      onSubmit={handleQuickConnectApiKey}
-                      className="flex flex-col justify-between rounded-lg border border-purple-500/30 bg-purple-500/5 p-2.5"
-                    >
-                      <div>
-                        <div className="flex items-center justify-between gap-1">
-                          <span className="text-xs font-bold text-purple-300">
-                            2. 🔑 Klistra in API-nyckel
-                          </span>
-                          <select
-                            aria-label="Snabbval AI-leverantör"
-                            value={quickAiProvider}
-                            onChange={(e) =>
-                              setQuickAiProvider(
-                                e.target.value as 'openai-compatible' | 'anthropic' | 'openrouter'
-                              )
-                            }
-                            className="rounded border border-border-subtle bg-app px-1.5 py-0.5 text-[10px] text-txt-primary"
-                          >
-                            <option value="openai-compatible">OpenAI (GPT-4.1)</option>
-                            <option value="anthropic">Anthropic (Claude Sonnet 4)</option>
-                            <option value="openrouter">OpenRouter</option>
-                          </select>
-                        </div>
-                        <input
-                          type="password"
-                          data-testid="quick-connect-apikey-input"
-                          value={quickAiKey}
-                          onChange={(e) => setQuickAiKey(e.target.value)}
-                          placeholder="sk-... / sk-ant-..."
-                          className="mt-1.5 w-full rounded border border-border-subtle bg-app px-2 py-1 text-[11px] text-txt-primary placeholder:text-txt-muted outline-none focus:border-purple-400"
-                        />
-                      </div>
-                      <button
-                        type="submit"
-                        data-testid="quick-connect-apikey-btn"
-                        disabled={quickAiSaving || !quickAiKey.trim()}
-                        className="mt-2 w-full rounded-md bg-purple-600 px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-purple-500 disabled:opacity-50 transition-colors"
-                      >
-                        🔑 Spara i OS-nyckelring & Aktivera
-                      </button>
-                    </form>
-
-                    {/* Option 3: 1-Click Local Ollama */}
-                    <div className="flex flex-col justify-between rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-2.5">
-                      <div>
-                        <div className="text-xs font-bold text-emerald-300">
-                          3. 🦙 Lokal AI (Ollama / vLLM)
-                        </div>
-                        <p className="mt-0.5 text-[11px] text-txt-muted">
-                          Kör 100 % lokalt och privat mot `http://127.0.0.1:11434/v1` utan externa moln-API:er.
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        data-testid="quick-connect-ollama-btn"
-                        disabled={quickAiSaving}
-                        onClick={handleQuickConnectOllama}
-                        className="mt-2 w-full rounded-md bg-emerald-600 px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-emerald-500 transition-colors"
-                      >
-                        🦙 Koppla Lokal Ollama (1-klick)
-                      </button>
-                    </div>
-                  </div>
-
-                  {quickAiNotice && (
-                    <div className="text-[11px] font-medium text-emerald-300">
-                      {quickAiNotice}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  handleLaunchAiCommand();
-                }}
-                className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2"
-              >
-                <div className="relative flex-1">
-                  <Bot className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-sky-400" />
-                  <input
-                    type="text"
-                    data-testid="workspace-ai-prompt-input"
-                    value={aiQuickPrompt}
-                    onChange={(e) => setAiQuickPrompt(e.target.value)}
-                    placeholder="Fråga eller be AI:n utföra något… (t.ex. 'Kör hälsokontroll på @cluster:NetApp-ONTAP-Prod-SE' eller 'Skapa en SSH-tunnel på port 8443')"
-                    className="w-full rounded-lg border border-sky-500/35 bg-app/95 pl-9 pr-3 py-2 text-xs text-txt-primary placeholder:text-txt-muted outline-none focus:border-sky-400"
-                  />
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <button
-                    type="submit"
-                    data-testid="workspace-ai-submit-btn"
-                    className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-sky-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-sky-500 shadow-sm transition-colors"
-                  >
-                    <Sparkles className="h-3.5 w-3.5" />
-                    <span>Kör med AI</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      window.dispatchEvent(
-                        new CustomEvent('sshs3:ai-open', {
-                          detail: { view: 'Work', mode: 'hub' },
-                        })
-                      )
-                    }
-                    className="inline-flex items-center justify-center gap-1 rounded-lg border border-border-subtle bg-app-card px-2.5 py-2 text-xs font-medium text-txt-secondary hover:border-sky-500/40 hover:text-txt-primary transition-colors"
-                  >
-                    <span>Full AI Hub ↗</span>
-                  </button>
-                </div>
-              </form>
-
-              <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
-                <span className="text-[10px] font-bold uppercase tracking-wider text-txt-muted mr-1">
-                  Snabbuppdrag:
-                </span>
-                <button
-                  type="button"
-                  onClick={() =>
-                    handleLaunchAiCommand(
-                      'Kör en parallell hälsokontroll över alla noder i @cluster:NetApp-ONTAP-Prod-SE med sshs3_cluster_exec och sammanställ WAFL/NVMe-latens, aggregat och SnapMirror-status.'
-                    )
-                  }
-                  className="rounded-md border border-sky-500/30 bg-app-card/90 px-2 py-0.5 text-[10.5px] font-medium text-sky-300 hover:bg-sky-500/15 transition-colors"
-                >
-                  ⚡ Kluster-hälsokontroll
-                </button>
-                <button
-                  type="button"
-                  onClick={() =>
-                    handleLaunchAiCommand(
-                      'Öppna en 2x2 Konsole split-view för alla noder i @cluster:NetApp-ONTAP-Prod-SE med sshs3_workspace_layout.'
-                    )
-                  }
-                  className="rounded-md border border-emerald-500/30 bg-app-card/90 px-2 py-0.5 text-[10.5px] font-medium text-emerald-300 hover:bg-emerald-500/15 transition-colors"
-                >
-                  🪟 2×2 Kluster Split-View
-                </button>
-                <button
-                  type="button"
-                  onClick={() =>
-                    handleLaunchAiCommand(
-                      'Diffa /etc/multipath.conf mellan k8s-storage-cp-01 och k8s-gpu-io-worker-01 med sshs3_storage_ops och validera mot vår KB-runbook.'
-                    )
-                  }
-                  className="rounded-md border border-indigo-500/30 bg-app-card/90 px-2 py-0.5 text-[10.5px] font-medium text-indigo-300 hover:bg-indigo-500/15 transition-colors"
-                >
-                  🔍 Cross-Server Config Diff
-                </button>
-                <button
-                  type="button"
-                  onClick={() =>
-                    handleLaunchAiCommand(
-                      'Visa alla mina inställningar i sshS3 med sshs3_manage_app_and_settings och hjälp mig optimera SSH-tunnlar, dotfiles-pool, prestandabar och kortkommandon.'
-                    )
-                  }
-                  className="rounded-md border border-purple-500/30 bg-app-card/90 px-2 py-0.5 text-[10.5px] font-medium text-purple-300 hover:bg-purple-500/15 transition-colors"
-                >
-                  🛠️ Konfigurera sshS3 med AI
-                </button>
-                <button
-                  type="button"
-                  onClick={() =>
-                    handleLaunchAiCommand(
-                      'Sök i vår Knowledge Base (@kb) efter ONTAP Adaptive QoS och hämta aktuell telemetri via NetApp Harvest MCP.'
-                    )
-                  }
-                  className="rounded-md border border-amber-500/30 bg-app-card/90 px-2 py-0.5 text-[10.5px] font-medium text-amber-300 hover:bg-amber-500/15 transition-colors"
-                >
-                  📚 Sök i Runbooks & MCP
-                </button>
-                <button
-                  type="button"
-                  data-testid="landing-run-workforce-btn"
-                  onClick={() => {
-                    void hubRequest({
-                      action: 'workforce-run',
-                      prompt:
-                        'Gå igenom våra delade servrar och kluster: senaste teamändringar, kända problem i kunskapsbasen och vad som bör kontrolleras härnäst.',
-                    }).finally(() => {
-                      window.dispatchEvent(
-                        new CustomEvent('sshs3:ai-open', {
-                          detail: { view: 'Work', mode: 'hub' },
-                        })
-                      );
-                    });
-                  }}
-                  className="rounded-md border border-rose-500/35 bg-rose-500/10 px-2 py-0.5 text-[10.5px] font-semibold text-rose-200 hover:bg-rose-500/20 transition-colors"
-                >
-                  🤝 Kör AI Workforce (Swarm)
-                </button>
-              </div>
-            </div>
-
-            {/* Full-width S3 Team Bucket Sync & Presence Bar */}
-            <div className="lg:col-span-3 rounded-xl border border-sky-500/30 bg-app-surface-subtle p-3 shadow-sm space-y-2.5">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="flex flex-wrap items-center gap-2">
-                  <div className="flex items-center gap-1.5">
-                    <Cloud className="h-4 w-4 text-sky-400" />
-                    <span className="text-xs font-bold text-txt-primary">
-                      S3 Team Workspace
-                    </span>
-                  </div>
-                  {hub?.s3Workspace?.configured ? (
-                    <span
-                      data-testid="s3-workspace-status-badge"
-                      className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${
-                        hub.s3Workspace.error
-                          ? 'border-rose-500/40 bg-rose-500/15 text-rose-300'
-                          : 'border-emerald-500/40 bg-emerald-500/15 text-emerald-300'
-                      }`}
-                    >
-                      <span>
-                        {hub.s3Workspace.error ? '⚠️' : '🟢'} s3://{hub.s3Workspace.bucket}/
-                        {hub.s3Workspace.prefix || 'sshs3-team'}
-                      </span>
-                      {hub.s3Workspace.syncing ? (
-                        <span className="text-sky-300">· Synkar…</span>
-                      ) : hub.s3Workspace.lastSyncAt ? (
-                        <span className="text-txt-muted">
-                          · Synkad {formatRelativeTime(hub.s3Workspace.lastSyncAt)}
-                        </span>
-                      ) : null}
-                    </span>
-                  ) : isWebBrowserMode() ? (
-                    <span
-                      data-testid="s3-workspace-status-badge"
-                      className="inline-flex items-center gap-1 rounded-full border border-emerald-500/35 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-300"
-                    >
-                      🟢 VM Team-delning aktiv på denna Web-server — alla inloggade användare delar VMs, kluster & AI-minnen direkt (S3-bucket är valfri molnbackup)
-                    </span>
-                  ) : (
-                    <span
-                      data-testid="s3-workspace-status-badge"
-                      className="inline-flex items-center gap-1 rounded-full border border-border-subtle bg-app-card px-2 py-0.5 text-[10px] text-txt-muted"
-                    >
-                      Ej kopplad — dela VMs, kluster & AI-minne med dina kompisar via en S3-bucket (endast S3-nycklar krävs)
-                    </span>
-                  )}
-
-                  {/* Online Teammates Presence */}
-                  {(hub?.presence ?? []).length > 0 && (
-                    <div className="flex flex-wrap items-center gap-1">
-                      {(hub?.presence ?? []).map((p) => (
-                        <span
-                          key={p.actor}
-                          title={
-                            (p.activeTerminals ?? []).length > 0
-                              ? `${p.actor}: ${(p.activeTerminals ?? []).map((t) => t.targetLabel).join(', ')}`
-                              : `${p.actor} är online`
-                          }
-                          className="inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-300"
-                        >
-                          <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                          <span>{p.actor}</span>
-                          {(p.activeTerminals ?? []).length > 0 && (
-                            <span className="text-[9px] text-emerald-200/80">
-                              ({(p.activeTerminals ?? []).length} term)
-                            </span>
-                          )}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                <div className="flex flex-wrap items-center gap-1.5">
-                  {hub?.s3Workspace?.configured && hub.s3Workspace.inviteCode && (
-                    <button
-                      type="button"
-                      data-testid="copy-s3-invite-btn"
-                      onClick={handleCopyS3Invite}
-                      title="Kopiera 1-klicks S3 Invite-kod (sshs3-s3://...) att skicka till dina kompisar"
-                      className="inline-flex items-center gap-1 rounded-md border border-sky-500/40 bg-sky-500/15 px-2.5 py-1 text-[11px] font-semibold text-sky-300 hover:bg-sky-500/25 transition-colors"
-                    >
-                      {s3CopyFeedback ? (
-                        <>
-                          <Check className="h-3 w-3 text-emerald-400" />
-                          <span>Kopierad!</span>
-                        </>
-                      ) : (
-                        <>
-                          <Copy className="h-3 w-3" />
-                          <span>Kopiera Invite-kod</span>
-                        </>
-                      )}
-                    </button>
-                  )}
-                  {hub?.s3Workspace?.configured && (
-                    <button
-                      type="button"
-                      data-testid="s3-sync-now-btn"
-                      disabled={s3Syncing || hub.s3Workspace.syncing}
-                      onClick={() => void handleSyncS3Now()}
-                      className="inline-flex items-center gap-1 rounded-md border border-border-subtle bg-app-card px-2 py-1 text-[11px] font-medium text-txt-primary hover:bg-app-surface-hover disabled:opacity-50"
-                    >
-                      <RefreshCw
-                        className={`h-3 w-3 ${s3Syncing || hub.s3Workspace.syncing ? 'animate-spin text-sky-400' : ''}`}
-                      />
-                      <span>Synka nu</span>
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    data-testid="toggle-s3-bucket-setup-btn"
-                    onClick={openS3BucketSetup}
-                    className="inline-flex items-center gap-1 rounded-md border border-purple-500/40 bg-purple-500/15 px-2.5 py-1 text-[11px] font-semibold text-purple-300 hover:bg-purple-500/25 transition-colors"
-                  >
-                    <Key className="h-3 w-3" />
-                    <span>
-                      {s3SetupOpen
-                        ? 'Stäng S3-inställning'
-                        : hub?.s3Workspace?.configured
-                          ? 'S3-nycklar'
-                          : 'Koppla S3 Team Bucket'}
-                    </span>
-                  </button>
-                </div>
-              </div>
-
-              {hub?.s3Workspace?.error && (
-                <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-2.5 py-1.5 text-[11px] text-rose-300">
-                  S3-synkfel: {hub.s3Workspace.error}
-                </div>
-              )}
-
-              {s3SetupOpen && (
-                <form
-                  data-testid="s3-bucket-setup-form"
-                  onSubmit={handleSaveS3Bucket}
-                  className="space-y-3 rounded-xl border border-purple-500/35 bg-app-card p-3.5 shadow-md"
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <div>
-                      <div className="text-xs font-bold text-purple-300">
-                        Dela Workspace med kompisar via S3 Bucket (AWS S3, Cloudflare R2, MinIO, Hetzner)
-                      </div>
-                      <p className="text-[11px] text-txt-muted mt-0.5">
-                        Endast IP/host, port, standard-användare, kluster, roller, taggar, AI-minnen och live-presence synkas i S3. Varje kompis loggar in med sin egen lokala SSH-nyckel (<code className="text-sky-300">~/.ssh</code>) som aldrig lämnar datorn.
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setS3SetupOpen(false)}
-                      aria-label="Close S3 setup"
-                      className="rounded p-0.5 text-txt-muted hover:text-txt-primary"
-                    >
-                      <X className="h-3.5 w-3.5" />
-                    </button>
-                  </div>
-
-                  {/* 1-Click Invite Code Paste */}
-                  <div className="rounded-lg border border-sky-500/30 bg-sky-500/5 p-2.5">
-                    <label className="block text-[10px] font-bold uppercase tracking-wider text-sky-300 mb-1">
-                      Snabb-gå med: Klistra in Invite-kod från en kompis (sshs3-s3://…)
-                    </label>
-                    <input
-                      type="text"
-                      data-testid="s3-invite-code-input"
-                      value={s3InviteCode}
-                      onChange={(e) => setS3InviteCode(e.target.value)}
-                      placeholder="sshs3-s3://eyJidWNrZXQiOi..."
-                      className="w-full rounded border border-border-subtle bg-app px-2.5 py-1 text-xs font-mono text-txt-primary placeholder:text-txt-muted"
-                    />
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
-                    <div>
-                      <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                        S3 Bucket {!s3InviteCode.trim() && '*'}
-                      </label>
-                      <input
-                        type="text"
-                        data-testid="s3-bucket-input"
-                        value={s3Bucket}
-                        onChange={(e) => setS3Bucket(e.target.value)}
-                        placeholder="t.ex. my-team-infra"
-                        className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                        Region
-                      </label>
-                      <input
-                        type="text"
-                        value={s3Region}
-                        onChange={(e) => setS3Region(e.target.value)}
-                        placeholder="eu-north-1 / auto"
-                        className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                        Endpoint (valfri, t.ex. R2 / MinIO)
-                      </label>
-                      <input
-                        type="text"
-                        value={s3Endpoint}
-                        onChange={(e) => setS3Endpoint(e.target.value)}
-                        placeholder="https://<id>.r2.cloudflarestorage.com"
-                        className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                        Prefix / Mapp i bucket
-                      </label>
-                      <input
-                        type="text"
-                        value={s3Prefix}
-                        onChange={(e) => setS3Prefix(e.target.value)}
-                        placeholder="sshs3-team"
-                        className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                    <div>
-                      <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                        Access Key ID {!s3InviteCode.trim() && '*'}
-                      </label>
-                      <input
-                        type="text"
-                        data-testid="s3-access-key-input"
-                        value={s3AccessKeyId}
-                        onChange={(e) => setS3AccessKeyId(e.target.value)}
-                        placeholder="AKIA..."
-                        className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs font-mono text-txt-primary"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                        Secret Access Key {!s3InviteCode.trim() && !hub?.s3Workspace?.configured && '*'}
-                      </label>
-                      <input
-                        type="password"
-                        data-testid="s3-secret-key-input"
-                        value={s3SecretAccessKey}
-                        onChange={(e) => setS3SecretAccessKey(e.target.value)}
-                        placeholder={
-                          hub?.s3Workspace?.configured
-                            ? '•••••••• (lämna tom för att behålla)'
-                            : 'Din S3 Secret Access Key'
-                        }
-                        className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs font-mono text-txt-primary"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                        Ditt namn i teamet (visas vid ändringar & terminal)
-                      </label>
-                      <input
-                        type="text"
-                        data-testid="s3-actor-name-input"
-                        value={s3ActorName}
-                        onChange={(e) => setS3ActorName(e.target.value)}
-                        placeholder="t.ex. jacob"
-                        className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
-                      />
-                    </div>
-                  </div>
-
-                  {s3StatusMsg && (
-                    <div className="text-[11px] text-rose-400">{s3StatusMsg}</div>
-                  )}
-
-                  <div className="flex items-center justify-between pt-1">
-                    <div>
-                      {hub?.s3Workspace?.configured && (
-                        <button
-                          type="button"
-                          onClick={() => void handleDisconnectS3()}
-                          className="rounded px-2 py-1 text-[11px] text-rose-400 hover:bg-rose-500/10"
-                        >
-                          Koppla från S3 Bucket
-                        </button>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setS3SetupOpen(false)}
-                        className="rounded px-2.5 py-1 text-xs text-txt-muted hover:text-txt-primary"
-                      >
-                        Avbryt
-                      </button>
-                      <button
-                        type="submit"
-                        data-testid="s3-save-connect-btn"
-                        disabled={s3Saving}
-                        className="rounded-lg bg-purple-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-purple-500 disabled:opacity-40"
-                      >
-                        {s3Saving ? 'Ansluter & synkar…' : 'Spara & Synka S3 Bucket'}
-                      </button>
-                    </div>
-                  </div>
-                </form>
-              )}
-            </div>
-
+            {/* The servers and the team (chat, activity, memory) come first: that is the workspace.
+                Sync status, the AI command bar and the KPI ribbon follow below. */}
             {/* Left 2 Columns: Termius-style Server, Cluster & Node Cards */}
             <div className="lg:col-span-2 flex flex-col gap-3 rounded-xl border border-border-subtle bg-app-surface-subtle p-3.5">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -3068,7 +2172,8 @@ export const LandingView: React.FC<LandingViewProps> = ({
             {/* Right Column: Team Activity, Shared AI Memory & Runbooks (KB) */}
             <div
               data-testid="workspace-right-column"
-              className="flex flex-col justify-between gap-3 rounded-xl border border-border-subtle bg-app-surface-subtle p-3.5"
+              // Stays in view beside the (long) server list, so the chat is always at hand.
+              className="flex flex-col justify-between gap-3 rounded-xl border border-border-subtle bg-app-surface-subtle p-3.5 lg:sticky lg:top-0 lg:self-start"
             >
               <div className="space-y-3">
                 <div className="flex items-center justify-between gap-2">
@@ -3090,7 +2195,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                 {/* Tab switcher: Chatt / Aktivitet / Team Memory / Runbooks (KB) / Swarm & MCP */}
                 <div
                   data-testid="workspace-right-tabs"
-                  className="grid grid-cols-2 sm:grid-cols-5 gap-1 rounded-lg border border-border-subtle bg-app-card p-1"
+                  className="flex flex-wrap gap-1 rounded-lg border border-border-subtle bg-app-card p-1 [&>button]:flex-1 [&>button]:whitespace-nowrap"
                 >
                   <button
                     type="button"
@@ -3567,6 +2672,923 @@ export const LandingView: React.FC<LandingViewProps> = ({
                 )}
               </div>
             </div>
+
+            {/* Full-width S3 Team Bucket Sync & Presence Bar */}
+            <div className="lg:col-span-3 rounded-xl border border-sky-500/30 bg-app-surface-subtle p-3 shadow-sm space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex items-center gap-1.5">
+                    <Cloud className="h-4 w-4 text-sky-400" />
+                    <span className="text-xs font-bold text-txt-primary">
+                      S3 Team Workspace
+                    </span>
+                  </div>
+                  {hub?.s3Workspace?.configured ? (
+                    <span
+                      data-testid="s3-workspace-status-badge"
+                      className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${
+                        hub.s3Workspace.error
+                          ? 'border-rose-500/40 bg-rose-500/15 text-rose-300'
+                          : 'border-emerald-500/40 bg-emerald-500/15 text-emerald-300'
+                      }`}
+                    >
+                      <span>
+                        {hub.s3Workspace.error ? '⚠️' : '🟢'} s3://{hub.s3Workspace.bucket}/
+                        {hub.s3Workspace.prefix || 'sshs3-team'}
+                      </span>
+                      {hub.s3Workspace.syncing ? (
+                        <span className="text-sky-300">· Synkar…</span>
+                      ) : hub.s3Workspace.lastSyncAt ? (
+                        <span className="text-txt-muted">
+                          · Synkad {formatRelativeTime(hub.s3Workspace.lastSyncAt)}
+                        </span>
+                      ) : null}
+                    </span>
+                  ) : isWebBrowserMode() ? (
+                    <span
+                      data-testid="s3-workspace-status-badge"
+                      className="inline-flex items-center gap-1 rounded-full border border-emerald-500/35 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-300"
+                    >
+                      🟢 VM Team-delning aktiv på denna Web-server — alla inloggade användare delar VMs, kluster & AI-minnen direkt (S3-bucket är valfri molnbackup)
+                    </span>
+                  ) : (
+                    <span
+                      data-testid="s3-workspace-status-badge"
+                      className="inline-flex items-center gap-1 rounded-full border border-border-subtle bg-app-card px-2 py-0.5 text-[10px] text-txt-muted"
+                    >
+                      Ej kopplad — dela VMs, kluster & AI-minne med dina kompisar via en S3-bucket (endast S3-nycklar krävs)
+                    </span>
+                  )}
+
+                  {/* Online Teammates Presence */}
+                  {(hub?.presence ?? []).length > 0 && (
+                    <div className="flex flex-wrap items-center gap-1">
+                      {(hub?.presence ?? []).map((p) => (
+                        <span
+                          key={p.actor}
+                          title={
+                            (p.activeTerminals ?? []).length > 0
+                              ? `${p.actor}: ${(p.activeTerminals ?? []).map((t) => t.targetLabel).join(', ')}`
+                              : `${p.actor} är online`
+                          }
+                          className="inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-300"
+                        >
+                          <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                          <span>{p.actor}</span>
+                          {(p.activeTerminals ?? []).length > 0 && (
+                            <span className="text-[9px] text-emerald-200/80">
+                              ({(p.activeTerminals ?? []).length} term)
+                            </span>
+                          )}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {hub?.s3Workspace?.configured && hub.s3Workspace.inviteCode && (
+                    <button
+                      type="button"
+                      data-testid="copy-s3-invite-btn"
+                      onClick={handleCopyS3Invite}
+                      title="Kopiera 1-klicks S3 Invite-kod (sshs3-s3://...) att skicka till dina kompisar"
+                      className="inline-flex items-center gap-1 rounded-md border border-sky-500/40 bg-sky-500/15 px-2.5 py-1 text-[11px] font-semibold text-sky-300 hover:bg-sky-500/25 transition-colors"
+                    >
+                      {s3CopyFeedback ? (
+                        <>
+                          <Check className="h-3 w-3 text-emerald-400" />
+                          <span>Kopierad!</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="h-3 w-3" />
+                          <span>Kopiera Invite-kod</span>
+                        </>
+                      )}
+                    </button>
+                  )}
+                  {hub?.s3Workspace?.configured && (
+                    <button
+                      type="button"
+                      data-testid="s3-sync-now-btn"
+                      disabled={s3Syncing || hub.s3Workspace.syncing}
+                      onClick={() => void handleSyncS3Now()}
+                      className="inline-flex items-center gap-1 rounded-md border border-border-subtle bg-app-card px-2 py-1 text-[11px] font-medium text-txt-primary hover:bg-app-surface-hover disabled:opacity-50"
+                    >
+                      <RefreshCw
+                        className={`h-3 w-3 ${s3Syncing || hub.s3Workspace.syncing ? 'animate-spin text-sky-400' : ''}`}
+                      />
+                      <span>Synka nu</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    data-testid="toggle-s3-bucket-setup-btn"
+                    onClick={openS3BucketSetup}
+                    className="inline-flex items-center gap-1 rounded-md border border-purple-500/40 bg-purple-500/15 px-2.5 py-1 text-[11px] font-semibold text-purple-300 hover:bg-purple-500/25 transition-colors"
+                  >
+                    <Key className="h-3 w-3" />
+                    <span>
+                      {s3SetupOpen
+                        ? 'Stäng S3-inställning'
+                        : hub?.s3Workspace?.configured
+                          ? 'S3-nycklar'
+                          : 'Koppla S3 Team Bucket'}
+                    </span>
+                  </button>
+                </div>
+              </div>
+
+              {hub?.s3Workspace?.error && (
+                <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-2.5 py-1.5 text-[11px] text-rose-300">
+                  S3-synkfel: {hub.s3Workspace.error}
+                </div>
+              )}
+
+              {s3SetupOpen && (
+                <form
+                  data-testid="s3-bucket-setup-form"
+                  onSubmit={handleSaveS3Bucket}
+                  className="space-y-3 rounded-xl border border-purple-500/35 bg-app-card p-3.5 shadow-md"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <div className="text-xs font-bold text-purple-300">
+                        Dela Workspace med kompisar via S3 Bucket (AWS S3, Cloudflare R2, MinIO, Hetzner)
+                      </div>
+                      <p className="text-[11px] text-txt-muted mt-0.5">
+                        Endast IP/host, port, standard-användare, kluster, roller, taggar, AI-minnen och live-presence synkas i S3. Varje kompis loggar in med sin egen lokala SSH-nyckel (<code className="text-sky-300">~/.ssh</code>) som aldrig lämnar datorn.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setS3SetupOpen(false)}
+                      aria-label="Close S3 setup"
+                      className="rounded p-0.5 text-txt-muted hover:text-txt-primary"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+
+                  {/* 1-Click Invite Code Paste */}
+                  <div className="rounded-lg border border-sky-500/30 bg-sky-500/5 p-2.5">
+                    <label className="block text-[10px] font-bold uppercase tracking-wider text-sky-300 mb-1">
+                      Snabb-gå med: Klistra in Invite-kod från en kompis (sshs3-s3://…)
+                    </label>
+                    <input
+                      type="text"
+                      data-testid="s3-invite-code-input"
+                      value={s3InviteCode}
+                      onChange={(e) => setS3InviteCode(e.target.value)}
+                      placeholder="sshs3-s3://eyJidWNrZXQiOi..."
+                      className="w-full rounded border border-border-subtle bg-app px-2.5 py-1 text-xs font-mono text-txt-primary placeholder:text-txt-muted"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
+                    <div>
+                      <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
+                        S3 Bucket {!s3InviteCode.trim() && '*'}
+                      </label>
+                      <input
+                        type="text"
+                        data-testid="s3-bucket-input"
+                        value={s3Bucket}
+                        onChange={(e) => setS3Bucket(e.target.value)}
+                        placeholder="t.ex. my-team-infra"
+                        className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
+                        Region
+                      </label>
+                      <input
+                        type="text"
+                        value={s3Region}
+                        onChange={(e) => setS3Region(e.target.value)}
+                        placeholder="eu-north-1 / auto"
+                        className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
+                        Endpoint (valfri, t.ex. R2 / MinIO)
+                      </label>
+                      <input
+                        type="text"
+                        value={s3Endpoint}
+                        onChange={(e) => setS3Endpoint(e.target.value)}
+                        placeholder="https://<id>.r2.cloudflarestorage.com"
+                        className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
+                        Prefix / Mapp i bucket
+                      </label>
+                      <input
+                        type="text"
+                        value={s3Prefix}
+                        onChange={(e) => setS3Prefix(e.target.value)}
+                        placeholder="sshs3-team"
+                        className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    <div>
+                      <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
+                        Access Key ID {!s3InviteCode.trim() && '*'}
+                      </label>
+                      <input
+                        type="text"
+                        data-testid="s3-access-key-input"
+                        value={s3AccessKeyId}
+                        onChange={(e) => setS3AccessKeyId(e.target.value)}
+                        placeholder="AKIA..."
+                        className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs font-mono text-txt-primary"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
+                        Secret Access Key {!s3InviteCode.trim() && !hub?.s3Workspace?.configured && '*'}
+                      </label>
+                      <input
+                        type="password"
+                        data-testid="s3-secret-key-input"
+                        value={s3SecretAccessKey}
+                        onChange={(e) => setS3SecretAccessKey(e.target.value)}
+                        placeholder={
+                          hub?.s3Workspace?.configured
+                            ? '•••••••• (lämna tom för att behålla)'
+                            : 'Din S3 Secret Access Key'
+                        }
+                        className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs font-mono text-txt-primary"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
+                        Ditt namn i teamet (visas vid ändringar & terminal)
+                      </label>
+                      <input
+                        type="text"
+                        data-testid="s3-actor-name-input"
+                        value={s3ActorName}
+                        onChange={(e) => setS3ActorName(e.target.value)}
+                        placeholder="t.ex. jacob"
+                        className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
+                      />
+                    </div>
+                  </div>
+
+                  {s3StatusMsg && (
+                    <div className="text-[11px] text-rose-400">{s3StatusMsg}</div>
+                  )}
+
+                  <div className="flex items-center justify-between pt-1">
+                    <div>
+                      {hub?.s3Workspace?.configured && (
+                        <button
+                          type="button"
+                          onClick={() => void handleDisconnectS3()}
+                          className="rounded px-2 py-1 text-[11px] text-rose-400 hover:bg-rose-500/10"
+                        >
+                          Koppla från S3 Bucket
+                        </button>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setS3SetupOpen(false)}
+                        className="rounded px-2.5 py-1 text-xs text-txt-muted hover:text-txt-primary"
+                      >
+                        Avbryt
+                      </button>
+                      <button
+                        type="submit"
+                        data-testid="s3-save-connect-btn"
+                        disabled={s3Saving}
+                        className="rounded-lg bg-purple-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-purple-500 disabled:opacity-40"
+                      >
+                        {s3Saving ? 'Ansluter & synkar…' : 'Spara & Synka S3 Bucket'}
+                      </button>
+                    </div>
+                  </div>
+                </form>
+              )}
+            </div>
+
+            {/* AI Workspace Command Center (Omnibar + Agent Selector + Quick Ops Chips) */}
+            <div
+              data-testid="workspace-ai-command-bar"
+              className="lg:col-span-3 rounded-xl border border-sky-500/40 bg-gradient-to-r from-sky-500/10 via-indigo-500/10 to-purple-500/10 p-3.5 shadow-md space-y-2.5"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <span className="inline-flex h-6 w-6 items-center justify-center rounded-lg border border-sky-400/40 bg-sky-500/20 text-sky-300">
+                    <Sparkles className="h-3.5 w-3.5" />
+                  </span>
+                  <div>
+                    <span className="text-xs font-bold text-txt-primary">
+                      AI Workspace Command Center
+                    </span>
+                    <span className="ml-2 hidden sm:inline text-[11px] text-txt-muted">
+                      Styr kluster, kör parallella diagnoser, diffa filer eller be AI:n konfigurera hela sshS3
+                    </span>
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-1">
+                  <button
+                    type="button"
+                    data-testid="workspace-self-reflect-btn"
+                    onClick={() => {
+                      void hubRequest({ action: 'self-learn-reflect' });
+                    }}
+                    title="Kör Voyager/Reflexion Self-Reflection: konsoliderar minnen, extraherar felsökningsmönster och optimerar @orama/orama-indexet"
+                    className="rounded-full border border-purple-400/50 bg-purple-500/20 px-2.5 py-0.5 text-[10.5px] font-semibold text-purple-200 hover:bg-purple-500/30 transition-all"
+                  >
+                    🧬 Self-Learning ({hub?.selfLearning?.totalLearnedSkills ?? 0} skills ·{' '}
+                    {Math.round((hub?.selfLearning?.averageConfidence ?? 0.85) * 100)}%)
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="workspace-demo-lab-toggle"
+                    onClick={handleToggleDemoLab}
+                    disabled={isWebBrowserMode()}
+                    title={
+                      isWebBrowserMode()
+                        ? "Demo mode is set when the sshs3 server starts and can't be changed here."
+                        : 'Slå på eller av det interaktiva 12-noders Enterprise Demo-Labbet (NetApp ONTAP, StorageGRID, Ceph/ZFS & K8s Trident) direkt i gränssnittet'
+                    }
+                    className={`rounded-full px-2.5 py-0.5 text-[10.5px] font-semibold transition-all disabled:cursor-not-allowed ${
+                      hub?.demoMode
+                        ? 'border border-amber-400/60 bg-amber-500/20 text-amber-200 shadow-sm'
+                        : 'border border-border-subtle bg-app-card text-txt-muted hover:border-amber-500/40 hover:text-amber-200'
+                    }`}
+                  >
+                    {hub?.demoMode ? '🧪 Demo-Lab: PÅ' : '🧪 Demo-Lab: AV'}
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="workspace-quick-connect-ai-toggle"
+                    onClick={() => {
+                      setQuickAiDismissed(false);
+                      setQuickAiOpen((v) => !v);
+                    }}
+                    title="Koppla din AI (ChatGPT OAuth, API-nyckel eller Lokal Ollama) med 1 klick"
+                    className={`rounded-full px-2.5 py-0.5 text-[10.5px] font-semibold transition-all ${
+                      isAiConnected
+                        ? 'border border-emerald-400/50 bg-emerald-500/20 text-emerald-200'
+                        : 'border border-sky-400/60 bg-sky-500/25 text-sky-100 animate-pulse'
+                    }`}
+                  >
+                    {isAiConnected
+                      ? `🟢 AI Kopplad (${hub?.config.model || 'Redo'})`
+                      : '⚡ Koppla din AI (1-klick)'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAiQuickAgentId('')}
+                    className={`rounded-full px-2 py-0.5 text-[10.5px] font-semibold transition-all ${
+                      !aiQuickAgentId
+                        ? 'border border-sky-400/50 bg-sky-500/20 text-sky-200'
+                        : 'border border-border-subtle bg-app-card text-txt-muted hover:text-txt-primary'
+                    }`}
+                  >
+                    ✨ Standard AI
+                  </button>
+                  {(hub?.agents ?? []).slice(0, 4).map((ag) => (
+                    <button
+                      key={ag.id}
+                      type="button"
+                      title={`${ag.role}: ${ag.mission}`}
+                      onClick={() =>
+                        setAiQuickAgentId(aiQuickAgentId === ag.id ? '' : ag.id)
+                      }
+                      className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10.5px] font-semibold transition-all ${
+                        aiQuickAgentId === ag.id
+                          ? 'border border-sky-400/60 bg-sky-500/25 text-sky-200 shadow-sm'
+                          : 'border border-border-subtle bg-app-card text-txt-secondary hover:border-sky-500/40 hover:text-sky-200'
+                      }`}
+                    >
+                      <span>{ag.icon || '🤖'}</span>
+                      <span className="truncate max-w-[130px]">{ag.name}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* 1-Click "Koppla din AI på 10 sekunder" Onboarding Card */}
+              {(quickAiOpen || (Boolean(hub) && !isAiConnected && !quickAiDismissed)) && (
+                <div
+                  data-testid="quick-connect-ai-banner"
+                  className="rounded-xl border border-emerald-500/40 bg-app-card/95 p-3 shadow-inner space-y-2.5"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="rounded-md bg-emerald-500/20 px-2 py-0.5 text-[10.5px] font-bold text-emerald-300 border border-emerald-500/30">
+                        ⚡ Koppla din AI
+                      </span>
+                      <span className="text-xs font-semibold text-txt-primary">
+                        {/* Counts are this workspace's own content, not a promise of preloaded material. */}
+                        {`Workspacet har ${(hub?.agents ?? []).length} agent(er), ${(hub?.kbDocuments ?? []).length} runbooks och ${(hub?.memories ?? []).filter((m) => m.kind === 'skill').length} skills. Välj hur AI:n ska köras:`}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setQuickAiOpen(false);
+                        setQuickAiDismissed(true);
+                      }}
+                      className="text-[11px] text-txt-muted hover:text-txt-primary px-1.5 py-0.5"
+                    >
+                      Stäng ✕
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
+                    {/* Option 1: 1-Click ChatGPT / Codex OAuth */}
+                    <div className="flex flex-col justify-between rounded-lg border border-sky-500/30 bg-sky-500/5 p-2.5">
+                      <div>
+                        <div className="text-xs font-bold text-sky-300">
+                          1. 🔐 ChatGPT / Codex (OAuth)
+                        </div>
+                        <p className="mt-0.5 text-[11px] text-txt-muted">
+                          Använd din befintliga ChatGPT Plus/Pro/Team-session (`~/.codex/auth.json` eller `hermes-native`) utan API-nyckel.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        data-testid="quick-connect-codex-btn"
+                        disabled={quickAiSaving}
+                        onClick={handleQuickConnectCodex}
+                        className="mt-2 w-full rounded-md bg-sky-600 px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-sky-500 transition-colors"
+                      >
+                        {hub?.config.codexConnected
+                          ? `✅ Aktivera ChatGPT (${hub.config.codexAccountEmail || 'Redo'})`
+                          : '🔐 Koppla ChatGPT / Codex (1-klick)'}
+                      </button>
+                    </div>
+
+                    {/* Option 2: Paste API Key Directly */}
+                    <form
+                      onSubmit={handleQuickConnectApiKey}
+                      className="flex flex-col justify-between rounded-lg border border-purple-500/30 bg-purple-500/5 p-2.5"
+                    >
+                      <div>
+                        <div className="flex items-center justify-between gap-1">
+                          <span className="text-xs font-bold text-purple-300">
+                            2. 🔑 Klistra in API-nyckel
+                          </span>
+                          <select
+                            aria-label="Snabbval AI-leverantör"
+                            value={quickAiProvider}
+                            onChange={(e) =>
+                              setQuickAiProvider(
+                                e.target.value as 'openai-compatible' | 'anthropic' | 'openrouter'
+                              )
+                            }
+                            className="rounded border border-border-subtle bg-app px-1.5 py-0.5 text-[10px] text-txt-primary"
+                          >
+                            <option value="openai-compatible">OpenAI (GPT-4.1)</option>
+                            <option value="anthropic">Anthropic (Claude Sonnet 4)</option>
+                            <option value="openrouter">OpenRouter</option>
+                          </select>
+                        </div>
+                        <input
+                          type="password"
+                          data-testid="quick-connect-apikey-input"
+                          value={quickAiKey}
+                          onChange={(e) => setQuickAiKey(e.target.value)}
+                          placeholder="sk-... / sk-ant-..."
+                          className="mt-1.5 w-full rounded border border-border-subtle bg-app px-2 py-1 text-[11px] text-txt-primary placeholder:text-txt-muted outline-none focus:border-purple-400"
+                        />
+                      </div>
+                      <button
+                        type="submit"
+                        data-testid="quick-connect-apikey-btn"
+                        disabled={quickAiSaving || !quickAiKey.trim()}
+                        className="mt-2 w-full rounded-md bg-purple-600 px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-purple-500 disabled:opacity-50 transition-colors"
+                      >
+                        🔑 Spara i OS-nyckelring & Aktivera
+                      </button>
+                    </form>
+
+                    {/* Option 3: 1-Click Local Ollama */}
+                    <div className="flex flex-col justify-between rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-2.5">
+                      <div>
+                        <div className="text-xs font-bold text-emerald-300">
+                          3. 🦙 Lokal AI (Ollama / vLLM)
+                        </div>
+                        <p className="mt-0.5 text-[11px] text-txt-muted">
+                          Kör 100 % lokalt och privat mot `http://127.0.0.1:11434/v1` utan externa moln-API:er.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        data-testid="quick-connect-ollama-btn"
+                        disabled={quickAiSaving}
+                        onClick={handleQuickConnectOllama}
+                        className="mt-2 w-full rounded-md bg-emerald-600 px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-emerald-500 transition-colors"
+                      >
+                        🦙 Koppla Lokal Ollama (1-klick)
+                      </button>
+                    </div>
+                  </div>
+
+                  {quickAiNotice && (
+                    <div className="text-[11px] font-medium text-emerald-300">
+                      {quickAiNotice}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  handleLaunchAiCommand();
+                }}
+                className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2"
+              >
+                <div className="relative flex-1">
+                  <Bot className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-sky-400" />
+                  <input
+                    type="text"
+                    data-testid="workspace-ai-prompt-input"
+                    value={aiQuickPrompt}
+                    onChange={(e) => setAiQuickPrompt(e.target.value)}
+                    placeholder="Fråga eller be AI:n utföra något… (t.ex. 'Kör hälsokontroll på @cluster:NetApp-ONTAP-Prod-SE' eller 'Skapa en SSH-tunnel på port 8443')"
+                    className="w-full rounded-lg border border-sky-500/35 bg-app/95 pl-9 pr-3 py-2 text-xs text-txt-primary placeholder:text-txt-muted outline-none focus:border-sky-400"
+                  />
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="submit"
+                    data-testid="workspace-ai-submit-btn"
+                    className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-sky-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-sky-500 shadow-sm transition-colors"
+                  >
+                    <Sparkles className="h-3.5 w-3.5" />
+                    <span>Kör med AI</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      window.dispatchEvent(
+                        new CustomEvent('sshs3:ai-open', {
+                          detail: { view: 'Work', mode: 'hub' },
+                        })
+                      )
+                    }
+                    className="inline-flex items-center justify-center gap-1 rounded-lg border border-border-subtle bg-app-card px-2.5 py-2 text-xs font-medium text-txt-secondary hover:border-sky-500/40 hover:text-txt-primary transition-colors"
+                  >
+                    <span>Full AI Hub ↗</span>
+                  </button>
+                </div>
+              </form>
+
+              <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-txt-muted mr-1">
+                  Snabbuppdrag:
+                </span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    handleLaunchAiCommand(
+                      'Kör en parallell hälsokontroll över alla noder i @cluster:NetApp-ONTAP-Prod-SE med sshs3_cluster_exec och sammanställ WAFL/NVMe-latens, aggregat och SnapMirror-status.'
+                    )
+                  }
+                  className="rounded-md border border-sky-500/30 bg-app-card/90 px-2 py-0.5 text-[10.5px] font-medium text-sky-300 hover:bg-sky-500/15 transition-colors"
+                >
+                  ⚡ Kluster-hälsokontroll
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    handleLaunchAiCommand(
+                      'Öppna en 2x2 Konsole split-view för alla noder i @cluster:NetApp-ONTAP-Prod-SE med sshs3_workspace_layout.'
+                    )
+                  }
+                  className="rounded-md border border-emerald-500/30 bg-app-card/90 px-2 py-0.5 text-[10.5px] font-medium text-emerald-300 hover:bg-emerald-500/15 transition-colors"
+                >
+                  🪟 2×2 Kluster Split-View
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    handleLaunchAiCommand(
+                      'Diffa /etc/multipath.conf mellan k8s-storage-cp-01 och k8s-gpu-io-worker-01 med sshs3_storage_ops och validera mot vår KB-runbook.'
+                    )
+                  }
+                  className="rounded-md border border-indigo-500/30 bg-app-card/90 px-2 py-0.5 text-[10.5px] font-medium text-indigo-300 hover:bg-indigo-500/15 transition-colors"
+                >
+                  🔍 Cross-Server Config Diff
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    handleLaunchAiCommand(
+                      'Visa alla mina inställningar i sshS3 med sshs3_manage_app_and_settings och hjälp mig optimera SSH-tunnlar, dotfiles-pool, prestandabar och kortkommandon.'
+                    )
+                  }
+                  className="rounded-md border border-purple-500/30 bg-app-card/90 px-2 py-0.5 text-[10.5px] font-medium text-purple-300 hover:bg-purple-500/15 transition-colors"
+                >
+                  🛠️ Konfigurera sshS3 med AI
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    handleLaunchAiCommand(
+                      'Sök i vår Knowledge Base (@kb) efter ONTAP Adaptive QoS och hämta aktuell telemetri via NetApp Harvest MCP.'
+                    )
+                  }
+                  className="rounded-md border border-amber-500/30 bg-app-card/90 px-2 py-0.5 text-[10.5px] font-medium text-amber-300 hover:bg-amber-500/15 transition-colors"
+                >
+                  📚 Sök i Runbooks & MCP
+                </button>
+                <button
+                  type="button"
+                  data-testid="landing-run-workforce-btn"
+                  onClick={() => {
+                    void hubRequest({
+                      action: 'workforce-run',
+                      prompt:
+                        'Gå igenom våra delade servrar och kluster: senaste teamändringar, kända problem i kunskapsbasen och vad som bör kontrolleras härnäst.',
+                    }).finally(() => {
+                      window.dispatchEvent(
+                        new CustomEvent('sshs3:ai-open', {
+                          detail: { view: 'Work', mode: 'hub' },
+                        })
+                      );
+                    });
+                  }}
+                  className="rounded-md border border-rose-500/35 bg-rose-500/10 px-2 py-0.5 text-[10.5px] font-semibold text-rose-200 hover:bg-rose-500/20 transition-colors"
+                >
+                  🤝 Kör AI Workforce (Swarm)
+                </button>
+              </div>
+            </div>
+
+            {/* Executive Infrastructure Telemetry & KPI Ribbon */}
+            <div
+              data-testid="workspace-kpi-ribbon"
+              className="lg:col-span-3 grid grid-cols-2 sm:grid-cols-4 gap-2.5"
+            >
+              <div className="rounded-xl border border-sky-500/30 bg-gradient-to-br from-sky-500/10 via-app-card to-app-card p-3 shadow-sm">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-sky-400">
+                    🖥️ Noder & VMs
+                  </span>
+                  <span className="rounded-full border border-emerald-500/30 bg-emerald-500/15 px-1.5 py-0.5 text-[9.5px] font-semibold text-emerald-300">
+                    {activeSessionCount > 0 ? `${activeSessionCount} live` : 'Redo'}
+                  </span>
+                </div>
+                <div className="mt-1 flex items-baseline gap-2">
+                  <span className="text-xl font-extrabold text-txt-primary">
+                    {workspaceServers.length}
+                  </span>
+                  <span className="text-[11px] text-txt-muted">
+                    ({workspaceServers.filter((s) => s.shared).length} delade i S3)
+                  </span>
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-indigo-500/30 bg-gradient-to-br from-indigo-500/10 via-app-card to-app-card p-3 shadow-sm">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-300">
+                    🧩 Infrastruktur-kluster
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setShowClusterTopology((v) => !v)}
+                    className="rounded border border-indigo-500/30 bg-indigo-500/10 px-1.5 py-0.5 text-[9.5px] font-semibold text-indigo-300 hover:bg-indigo-500/20"
+                  >
+                    {showClusterTopology ? 'Dölj topologi' : 'Visa topologi'}
+                  </button>
+                </div>
+                <div className="mt-1 flex items-baseline gap-2">
+                  <span className="text-xl font-extrabold text-txt-primary">
+                    {clusters.length}
+                  </span>
+                  <span className="truncate text-[11px] text-txt-muted">
+                    {selectedCluster !== 'ALL' ? `Aktivt: ${selectedCluster}` : 'ONTAP, Ceph, S3, K8s'}
+                  </span>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() =>
+                  window.dispatchEvent(
+                    new CustomEvent('sshs3:ai-open', {
+                      detail: { view: 'Agents & MCP', mode: 'hub' },
+                    })
+                  )
+                }
+                className="rounded-xl border border-purple-500/30 bg-gradient-to-br from-purple-500/10 via-app-card to-app-card p-3 text-left shadow-sm hover:border-purple-400/50 transition-all"
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-purple-300">
+                    🤖 Mission Agents & MCP
+                  </span>
+                  <span className="rounded-full border border-purple-500/30 bg-purple-500/15 px-1.5 py-0.5 text-[9.5px] font-semibold text-purple-200">
+                    {totalMcpTools} MCP-verktyg
+                  </span>
+                </div>
+                <div className="mt-1 flex items-baseline gap-2">
+                  <span className="text-xl font-extrabold text-txt-primary">
+                    {(hub?.agents ?? []).length}
+                  </span>
+                  <span className="text-[11px] text-txt-muted">
+                    agenter · {(hub?.mcpServers ?? []).length} MCP-servrar
+                  </span>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() =>
+                  window.dispatchEvent(
+                    new CustomEvent('sshs3:ai-open', {
+                      detail: { view: 'Knowledge Base', mode: 'hub' },
+                    })
+                  )
+                }
+                className="rounded-xl border border-emerald-500/30 bg-gradient-to-br from-emerald-500/10 via-app-card to-app-card p-3 text-left shadow-sm hover:border-emerald-400/50 transition-all"
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-300">
+                    📚 Knowledge Base & Minne
+                  </span>
+                  <span className="rounded-full border border-emerald-500/30 bg-emerald-500/15 px-1.5 py-0.5 text-[9.5px] font-semibold text-emerald-200">
+                    @orama/orama + Voyager
+                  </span>
+                </div>
+                <div className="mt-1 flex items-baseline gap-2">
+                  <span className="text-xl font-extrabold text-txt-primary">
+                    {(hub?.kbDocuments ?? []).length}
+                  </span>
+                  <span className="text-[11px] text-txt-muted">
+                    runbooks · {hub?.selfLearning?.totalLearnedSkills ?? (hub?.memories ?? []).length} skills (
+                    {Math.round((hub?.selfLearning?.averageConfidence ?? 0.85) * 100)}%)
+                  </span>
+                </div>
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Action Cards */}
+        {recentSSH.length > 0 ? (
+          <div className="grid grid-cols-[repeat(auto-fit,minmax(130px,1fr))] gap-2 w-full text-left">
+            <button
+              type="button"
+              data-testid="landing-new-terminal-btn"
+              onClick={onQuickStartTerminal}
+              className="flex items-center gap-2 rounded-lg border border-border-subtle bg-app-card px-2.5 py-2 hover:border-sky-500/40 hover:bg-app-surface-hover transition-all"
+            >
+              <Terminal className="h-4 w-4 text-sky-400 shrink-0" />
+              <span className="truncate text-xs font-medium text-txt-primary">New Terminal</span>
+            </button>
+            <button
+              type="button"
+              data-testid="landing-file-manager-btn"
+              onClick={() => onNewTab('filemanager')}
+              className="flex items-center gap-2 rounded-lg border border-border-subtle bg-app-card px-2.5 py-2 hover:border-amber-500/40 hover:bg-app-surface-hover transition-all"
+            >
+              <Folder className="h-4 w-4 text-amber-400 shrink-0" />
+              <span className="truncate text-xs font-medium text-txt-primary">File Manager</span>
+            </button>
+            <button
+              type="button"
+              data-testid="landing-connections-btn"
+              onClick={onOpenProfiles}
+              className="flex items-center gap-2 rounded-lg border border-border-subtle bg-app-card px-2.5 py-2 hover:border-emerald-500/40 hover:bg-app-surface-hover transition-all"
+            >
+              <Server className="h-4 w-4 text-emerald-400 shrink-0" />
+              <span className="truncate text-xs font-medium text-txt-primary">Connections</span>
+            </button>
+            <button
+              type="button"
+              data-testid="landing-cloud-sync-btn"
+              onClick={onOpenSyncBootstrap}
+              className="flex items-center gap-2 rounded-lg border border-border-subtle bg-app-card px-2.5 py-2 hover:border-purple-500/40 hover:bg-app-surface-hover transition-all"
+            >
+              <Cloud className="h-4 w-4 text-purple-400 shrink-0" />
+              <span className="truncate text-xs font-medium text-txt-primary">Cloud Sync</span>
+            </button>
+            <button
+              type="button"
+              data-testid="landing-new-profile-btn"
+              onClick={onNewProfile}
+              className="flex items-center gap-2 rounded-lg border border-sky-500/40 bg-sky-500/10 px-2.5 py-2 hover:bg-sky-500/20 transition-all"
+            >
+              <Plus className="h-4 w-4 text-sky-400 shrink-0" />
+              <span className="truncate text-xs font-medium text-txt-primary">New Profile</span>
+            </button>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 w-full text-left">
+            <button
+              type="button"
+              data-testid="landing-new-terminal-btn"
+              onClick={onQuickStartTerminal}
+              className="group flex flex-col justify-between rounded-xl border border-border-subtle bg-app-card p-4 hover:border-sky-500/40 hover:bg-app-surface-hover transition-all shadow-sm"
+            >
+              <div className="flex items-start justify-between w-full">
+                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-sky-500/15 text-sky-400 group-hover:bg-sky-500/25 group-hover:scale-105 transition-all">
+                  <Terminal className="h-5 w-5" />
+                </div>
+                <Shortcut id="newTerminal" shortcuts={shortcuts} />
+              </div>
+              <div className="mt-3">
+                <div className="text-xs font-semibold text-txt-primary group-hover:text-sky-400 transition-colors">
+                  Open New Terminal
+                </div>
+                <div className="text-xs text-txt-muted mt-0.5">
+                  Launch a local shell — pick a saved connection or type user@host for SSH
+                </div>
+              </div>
+            </button>
+
+            <button
+              type="button"
+              data-testid="landing-file-manager-btn"
+              onClick={() => onNewTab('filemanager')}
+              className="group flex flex-col justify-between rounded-xl border border-border-subtle bg-app-card p-4 hover:border-amber-500/40 hover:bg-app-surface-hover transition-all shadow-sm"
+            >
+              <div className="flex items-start justify-between w-full">
+                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-amber-500/15 text-amber-400 group-hover:bg-amber-500/25 group-hover:scale-105 transition-all">
+                  <Folder className="h-5 w-5" />
+                </div>
+                <Shortcut id="newFileManager" shortcuts={shortcuts} />
+              </div>
+              <div className="mt-3">
+                <div className="text-xs font-semibold text-txt-primary group-hover:text-amber-400 transition-colors">
+                  New File Manager
+                </div>
+                <div className="text-xs text-txt-muted mt-0.5">
+                  Dual-pane explorer for SFTP, S3 and local drives
+                </div>
+              </div>
+            </button>
+
+            <button
+              type="button"
+              data-testid="landing-connections-btn"
+              onClick={onOpenProfiles}
+              className="group flex flex-col justify-between rounded-xl border border-border-subtle bg-app-card p-4 hover:border-emerald-500/40 hover:bg-app-surface-hover transition-all shadow-sm"
+            >
+              <div className="flex items-start justify-between w-full">
+                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-500/15 text-emerald-400 group-hover:bg-emerald-500/25 group-hover:scale-105 transition-all">
+                  <Server className="h-5 w-5" />
+                </div>
+                <Shortcut id="openProfiles" shortcuts={shortcuts} />
+              </div>
+              <div className="mt-3">
+                <div className="text-xs font-semibold text-txt-primary group-hover:text-emerald-400 transition-colors">
+                  Saved Connections
+                </div>
+                <div className="text-xs text-txt-muted mt-0.5">
+                  Manage profiles, SSH keys and credentials
+                </div>
+              </div>
+            </button>
+
+            <button
+              type="button"
+              data-testid="landing-cloud-sync-btn"
+              onClick={onOpenSyncBootstrap}
+              className="group flex flex-col justify-between rounded-xl border border-border-subtle bg-app-card p-4 hover:border-purple-500/40 hover:bg-app-surface-hover transition-all shadow-sm"
+            >
+              <div className="flex items-start justify-between w-full">
+                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-purple-500/15 text-purple-400 group-hover:bg-purple-500/25 group-hover:scale-105 transition-all">
+                  <Cloud className="h-5 w-5" />
+                </div>
+              </div>
+              <div className="mt-3">
+                <div className="text-xs font-semibold text-txt-primary group-hover:text-purple-400 transition-colors">
+                  Encrypted Cloud Sync
+                </div>
+                <div className="text-xs text-txt-muted mt-0.5">
+                  Sync connection profiles and dotfiles across your devices
+                </div>
+              </div>
+            </button>
+
+            <button
+              type="button"
+              data-testid="landing-new-profile-btn"
+              onClick={onNewProfile}
+              className="sm:col-span-2 flex items-center justify-center gap-2 rounded-xl border border-sky-500/40 bg-sky-500/10 px-4 py-2.5 text-xs font-semibold text-txt-primary hover:bg-sky-500/20 transition-all"
+            >
+              <Plus className="h-4 w-4 text-sky-400" />
+              New Profile
+            </button>
           </div>
         )}
 
