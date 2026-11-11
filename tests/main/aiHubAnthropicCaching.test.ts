@@ -170,7 +170,8 @@ describe("Anthropic agent loop: thinking blocks and stop reasons", () => {
     );
     expect(events.find((e) => e.type === "run.failed")!.error).toMatch(/output limit/);
     // Only the context read at the start of the run; the cut-off call was not executed.
-    expect(broker.mock.calls.every(([req]) => (req as { action: string }).action === "context")).toBe(true);
+    const requests = broker.mock.calls as unknown as Array<[{ action: string }]>;
+    expect(requests.every(([req]) => req.action === "context")).toBe(true);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });
