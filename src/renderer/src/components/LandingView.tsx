@@ -920,7 +920,10 @@ export const LandingView: React.FC<LandingViewProps> = ({
       data-testid="landing-view"
       tabIndex={-1}
       onKeyDown={handleKeyDown}
-      className="flex flex-1 flex-col items-center overflow-y-auto p-6 text-txt-secondary animate-in fade-in duration-200 outline-none"
+      // In the browser a floating account bar sits at the bottom right: leave room under the last row.
+      className={`flex flex-1 flex-col items-center overflow-y-auto p-6 text-txt-secondary animate-in fade-in duration-200 outline-none ${
+        isWebBrowserMode() ? 'pb-20' : ''
+      }`}
     >
       {/* With a workspace the page is a dashboard: wide and from the top. Without one it is a centred start screen. */}
       <div
@@ -928,7 +931,8 @@ export const LandingView: React.FC<LandingViewProps> = ({
           showWorkspaceSection ? 'max-w-7xl space-y-4' : 'max-w-5xl space-y-6 my-auto'
         }`}
       >
-        {/* Brand Header */}
+        {/* Brand header: only on the start screen. With a workspace the app bar already carries the logo. */}
+        {!showWorkspaceSection && (
         <div
           className={
             showWorkspaceSection
@@ -966,6 +970,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
             </p>
           )}
         </div>
+        )}
 
         {/* Quick Connect */}
         <form
