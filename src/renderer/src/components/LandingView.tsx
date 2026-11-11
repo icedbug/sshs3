@@ -257,7 +257,8 @@ export const LandingView: React.FC<LandingViewProps> = ({
   // AI Workspace Command Center & Right Column state
   const [aiQuickPrompt, setAiQuickPrompt] = useState('');
   const [aiQuickAgentId, setAiQuickAgentId] = useState('');
-  const [showClusterTopology, setShowClusterTopology] = useState(true);
+  // null: follow the default (cards shown while there are few clusters); true/false: the user's choice.
+  const [clusterCardsChoice, setClusterCardsChoice] = useState<boolean | null>(null);
   const [quickAiOpen, setQuickAiOpen] = useState(false);
   const [quickAiDismissed, setQuickAiDismissed] = useState(false);
   const [quickAiProvider, setQuickAiProvider] = useState<'openai-compatible' | 'anthropic' | 'openrouter'>('openai-compatible');
@@ -455,6 +456,20 @@ export const LandingView: React.FC<LandingViewProps> = ({
       .map(([name, count]) => ({ name, count }))
       .sort((a, b) => a.name.localeCompare(b.name));
   }, [workspaceServers]);
+  // With many clusters their cards push the servers far down the page, so they start folded.
+  const showClusterTopology = clusterCardsChoice ?? clusters.length <= 4;
+  // Who is in which terminal right now, across the team.
+  const onlineNow = useMemo(
+    () =>
+      (hub?.presence ?? []).flatMap((p) =>
+        p.activeTerminals.map((t) => ({
+          actor: p.actor,
+          target: t.targetLabel,
+          ai: t.state === 'ai-working',
+        }))
+      ),
+    [hub?.presence]
+  );
 
   const recentIds = useMemo(() => new Set(recentSSH.map((p) => p.id)), [recentSSH]);
 
@@ -1235,6 +1250,20 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   <h2 className="text-xs font-bold uppercase tracking-wider text-txt-primary">
                     Servers & clusters ({filteredServers.length})
                   </h2>
+                  {onlineNow.length > 0 && (
+                    <span
+                      data-testid="workspace-online-now"
+                      className="inline-flex flex-wrap items-center gap-x-2 gap-y-0.5 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-[10.5px] font-medium text-emerald-300"
+                    >
+                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                      {onlineNow.slice(0, 3).map((o, i) => (
+                        <span key={`${o.actor}-${o.target}-${i}`}>
+                          {o.ai ? `AI for ${o.actor}` : o.actor} on {o.target}
+                        </span>
+                      ))}
+                      {onlineNow.length > 3 && <span>+{onlineNow.length - 3} more</span>}
+                    </span>
+                  )}
                 </div>
                 <div className="flex flex-wrap items-center gap-1.5">
                   <button
@@ -1521,6 +1550,15 @@ export const LandingView: React.FC<LandingViewProps> = ({
                       </span>
                       <button
                         type="button"
+                        data-testid="toggle-cluster-cards-btn"
+                        aria-expanded={showClusterTopology}
+                        onClick={() => setClusterCardsChoice(!showClusterTopology)}
+                        className="mr-1 rounded border border-border-subtle bg-app px-1.5 py-0.5 text-[10px] font-semibold text-txt-secondary hover:text-txt-primary"
+                      >
+                        {showClusterTopology ? 'Hide cards' : 'Show cards'}
+                      </button>
+                      <button
+                        type="button"
                         onClick={() => setSelectedCluster('ALL')}
                         className={`rounded-md px-2 py-0.5 text-[11px] font-medium transition-colors ${
                           selectedCluster === 'ALL'
@@ -1746,7 +1784,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                                 </span>
                               ) : (
                                 <span className="inline-flex items-center gap-0.5 rounded border border-border-subtle bg-app-surface-subtle px-1.5 py-0.2 text-[10px] text-txt-muted">
-                                  <Shield className="h-2.5 w-2.5" /> Privat
+                                  <Shield className="h-2.5 w-2.5" /> Private
                                 </span>
                               )}
                               {livePresence.map((p, idx) => (
@@ -1757,7 +1795,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                                 >
                                   <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
                                   <span>
-                                    {p.aiWorking ? `🤖 ${p.actor} (AI)` : `${p.actor} (Terminal)`}
+                                    {p.aiWorking ? `🤖 AI working for ${p.actor}` : `${p.actor} is connected`}
                                   </span>
                                 </span>
                               ))}
@@ -2778,7 +2816,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   </span>
                   <button
                     type="button"
-                    onClick={() => setShowClusterTopology((v) => !v)}
+                    onClick={() => setClusterCardsChoice(!showClusterTopology)}
                     className="rounded border border-indigo-500/30 bg-indigo-500/10 px-1.5 py-0.5 text-[9.5px] font-semibold text-indigo-300 hover:bg-indigo-500/20"
                   >
                     {showClusterTopology ? 'Hide topology' : 'Show topology'}
