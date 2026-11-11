@@ -37,8 +37,12 @@ explicitly enabled presentation on top of the same terminal authority.
 
 ## AI Hub services (`src/main/ai/hub/`)
 
-- **`HubService`** — the request/action handler (`request(HubRequest)`), agent
-  tool implementations (`sshs3_*` tools), scheduler and snapshot. It reaches the
+- **`HubService`** — the request/action handler (`request(HubRequest)`),
+  agent runs, scheduler and snapshot. The agent tool implementations (`sshs3_*`
+  tools and MCP calls) are in `AppActions.ts`; they reach the hub only through
+  `HubService.appActionHost()`, which lists the hub members a tool call may
+  use. Response parsing, the instant inline suggestions and the scripted demo
+  tool answers are in `hubHelpers.ts`. It reaches the
   host app only through the `HubHost` interface that `createHub.ts` implements
   (profiles, Team Vault workspace data, snippets including built-ins, storage
   providers, settings).
@@ -363,7 +367,7 @@ remaining platform/product work.
 - `src/main/web/`: multi-user Web Server, authentication, per-user tenants and Electron shim.
 - `src/shared/types/aiHub.ts`, `src/shared/types/ai.ts`: hub requests, snapshot, memory, safety policy and provider/model types.
 - `src/shared/ipc/createMultiSSHApi.ts`: the `MultiSSHApi` used by both the preload and the web client.
-- `src/renderer/src/components/AiHub/`, `src/renderer/src/components/LandingView.tsx`, `src/renderer/src/lib/aiHub.ts`: AI Hub UI.
+- `src/renderer/src/components/AiHub/`, `src/renderer/src/components/LandingView.tsx`, `src/renderer/src/lib/aiHub.ts`: AI Hub UI. `AiHubPanel.tsx` holds the chat and navigation; each view is its own file (`SettingsView`, `MemoryView` + `MemoryProposals`, `SchedulesView`, `AgentsAndMcpView`, `KnowledgeBaseView`, `WorkspaceChat`).
 - `integrations/hermes-desktop/`: narrow original desktop adaptations and backend plugin.
 - `src/shared/types/nativeHermes.ts`: host layout/control contracts.
 - `scripts/hermes/`: pinned source, original desktop build and PM-based runtime packaging.
