@@ -2190,6 +2190,12 @@ export class DirectAgentRuntime implements AgentRuntime {
 
       let turnText = "";
       const toolCalls = new Map<number, ParsedToolCall>();
+      // Every content block of the turn, by index, as the API sent it. The
+      // assistant turn is sent back from these, so thinking blocks (with their
+      // signatures) return unchanged: models that think reject a tool turn
+      // whose thinking was dropped or altered.
+      const blocks = new Map<number, Record<string, unknown>>();
+      let stopReason = "";
       let turnOutputTokens = 0;
       let turnInputTokens = 0;
       let sawMessageStart = false;
@@ -2214,6 +2220,7 @@ export class DirectAgentRuntime implements AgentRuntime {
         } else if (type === "content_block_start" && evt.content_block && typeof evt.content_block === "object") {
           const block = evt.content_block as Record<string, unknown>;
           const idx = typeof evt.index === "number" ? evt.index : 0;
+          blocks.set(idx, { ...block });
           if (block.type === "tool_use") {
             toolCalls.set(idx, {
               id: String(block.id || `tool_${idx}`),
@@ -2226,12 +2233,25 @@ export class DirectAgentRuntime implements AgentRuntime {
           const idx = typeof evt.index === "number" ? evt.index : 0;
           if (delta.type === "text_delta" && typeof delta.text === "string") {
             turnText += delta.text;
+            const block = blocks.get(idx) ?? { type: "text", text: "" };
+            block.text = `${typeof block.text === "string" ? block.text : ""}${delta.text}`;
+            blocks.set(idx, block);
             onEvent({ type: "message.delta", delta: delta.text });
           } else if (delta.type === "input_json_delta" && typeof delta.partial_json === "string") {
             const call = toolCalls.get(idx);
             if (call) call.argumentsJson += delta.partial_json;
+          } else if (delta.type === "thinking_delta" && typeof delta.thinking === "string") {
+            const block = blocks.get(idx);
+            if (block)
+              block.thinking = `${typeof block.thinking === "string" ? block.thinking : ""}${delta.thinking}`;
+          } else if (delta.type === "signature_delta" && typeof delta.signature === "string") {
+            const block = blocks.get(idx);
+            if (block)
+              block.signature = `${typeof block.signature === "string" ? block.signature : ""}${delta.signature}`;
           }
         } else if (type === "message_delta" && evt.usage && typeof evt.usage === "object") {
+          const reason = (evt.delta as { stop_reason?: unknown } | undefined)?.stop_reason;
+          if (typeof reason === "string") stopReason = reason;
           // Cumulative for the message; the last one of a turn is its total.
           const u = evt.usage as Record<string, number>;
           turnOutputTokens = u.output_tokens ?? turnOutputTokens;
@@ -2246,26 +2266,42 @@ export class DirectAgentRuntime implements AgentRuntime {
       const calls = [...toolCalls.values()].filter((c) => c.name);
       if (turnText) finalOutput = turnText;
 
+      // A declined request is a result of its own, not an empty answer.
+      if (stopReason === "refusal")
+        throw new Error(
+          "The model declined this request (stop reason: refusal).",
+        );
+      // A tool call cut off at the output limit has incomplete arguments.
+      if (stopReason === "max_tokens" && calls.length > 0)
+        throw new Error(
+          "The model reached its output limit in the middle of a tool call; raise the max output tokens setting.",
+        );
+
       if (calls.length === 0) {
         onEvent({ type: "run.completed", output: finalOutput, usage });
         return;
       }
 
+      // The assistant turn exactly as it was produced, in block order.
       const assistantContent: Array<Record<string, unknown>> = [];
-      if (turnText) assistantContent.push({ type: "text", text: turnText });
-      for (const c of calls) {
-        let inputObj: Record<string, unknown>;
-        try {
-          inputObj = c.argumentsJson ? (JSON.parse(c.argumentsJson) as Record<string, unknown>) : {};
-        } catch {
-          inputObj = {};
+      for (const [idx, block] of [...blocks.entries()].sort((a, b) => a[0] - b[0])) {
+        if (block.type === "tool_use") {
+          const c = toolCalls.get(idx);
+          if (!c?.name) continue;
+          let inputObj: Record<string, unknown>;
+          try {
+            inputObj = c.argumentsJson ? (JSON.parse(c.argumentsJson) as Record<string, unknown>) : {};
+          } catch {
+            inputObj = {};
+          }
+          assistantContent.push({ type: "tool_use", id: c.id, name: c.name, input: inputObj });
+        } else if (block.type === "text") {
+          if (typeof block.text === "string" && block.text)
+            assistantContent.push({ type: "text", text: block.text });
+        } else {
+          // thinking, redacted_thinking and any other block go back unchanged.
+          assistantContent.push(block);
         }
-        assistantContent.push({
-          type: "tool_use",
-          id: c.id,
-          name: c.name,
-          input: inputObj,
-        });
       }
       messages.push({ role: "assistant", content: assistantContent });
 

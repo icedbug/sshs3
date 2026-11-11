@@ -92,3 +92,85 @@ describe("Anthropic agent loop: prompt caching and token accounting", () => {
     expect(events.find((e) => e.type === "run.completed")!.usage).toEqual({ input_tokens: 50, output_tokens: 10 });
   });
 });
+
+describe("Anthropic agent loop: thinking blocks and stop reasons", () => {
+  const model = { kind: "anthropic" as const, model: "claude-opus-5-5", apiKey: "sk-ant-test" }; // pragma: allowlist secret
+
+  it("sends a tool turn back with its thinking blocks unchanged and in order", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const fetchImpl = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return bodies.length === 1
+        ? sse([
+            { type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "", signature: "" } },
+            { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "Check the " } },
+            { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "activity log." } },
+            { type: "content_block_delta", index: 0, delta: { type: "signature_delta", signature: "sig-abc" } },
+            { type: "content_block_start", index: 1, content_block: { type: "redacted_thinking", data: "opaque==" } },
+            { type: "content_block_start", index: 2, content_block: { type: "text", text: "" } },
+            { type: "content_block_delta", index: 2, delta: { type: "text_delta", text: "Looking it up." } },
+            { type: "content_block_start", index: 3, content_block: { type: "tool_use", id: "tu_1", name: "workspace_context", input: {} } },
+            { type: "content_block_delta", index: 3, delta: { type: "input_json_delta", partial_json: '{"query":"prod"}' } },
+            { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 9 } },
+          ])
+        : sse([
+            { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+            { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Done." } },
+            { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 2 } },
+          ]);
+    });
+    const events: RunEvent[] = [];
+    await new DirectAgentRuntime((async () => ({})) as never, undefined, fetchImpl as unknown as typeof fetch).start(
+      task,
+      model,
+      (e) => events.push(e),
+    );
+    const sent = bodies[1].messages as Array<{ role: string; content: unknown }>;
+    expect(sent[1]).toEqual({
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "Check the activity log.", signature: "sig-abc" },
+        { type: "redacted_thinking", data: "opaque==" },
+        { type: "text", text: "Looking it up." },
+        { type: "tool_use", id: "tu_1", name: "workspace_context", input: { query: "prod" } },
+      ],
+    });
+    // Thinking is never shown as part of the answer.
+    const shown = events.filter((e) => e.type === "message.delta").map((e) => e.delta).join("");
+    expect(shown).not.toContain("activity log");
+    expect(events.find((e) => e.type === "run.completed")!.output).toBe("Done.");
+  });
+
+  it("fails the run when the model declines, instead of completing with nothing", async () => {
+    const fetchImpl = vi.fn(async () =>
+      sse([{ type: "message_delta", delta: { stop_reason: "refusal" }, usage: { output_tokens: 0 } }]),
+    );
+    const events: RunEvent[] = [];
+    await new DirectAgentRuntime((async () => ({})) as never, undefined, fetchImpl as unknown as typeof fetch).start(
+      task,
+      model,
+      (e) => events.push(e),
+    );
+    expect(events.some((e) => e.type === "run.completed")).toBe(false);
+    expect(events.find((e) => e.type === "run.failed")!.error).toMatch(/declined/);
+  });
+
+  it("does not run a tool call that was cut off at the output limit", async () => {
+    const broker = vi.fn(async () => ({}));
+    const fetchImpl = vi.fn(async () =>
+      sse([
+        { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "tu_1", name: "workspace_context", input: {} } },
+        { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '{"query":"pr' } },
+        { type: "message_delta", delta: { stop_reason: "max_tokens" }, usage: { output_tokens: 8192 } },
+      ]),
+    );
+    const events: RunEvent[] = [];
+    await new DirectAgentRuntime(broker as never, undefined, fetchImpl as unknown as typeof fetch).start(task, model, (e) =>
+      events.push(e),
+    );
+    expect(events.find((e) => e.type === "run.failed")!.error).toMatch(/output limit/);
+    // Only the context read at the start of the run; the cut-off call was not executed.
+    expect(broker.mock.calls.every(([req]) => (req as { action: string }).action === "context")).toBe(true);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+});

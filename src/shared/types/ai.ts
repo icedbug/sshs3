@@ -60,7 +60,7 @@ export interface AiHermesStatus {
 
 export const DEFAULT_AI_MODELS: Record<AiProvider, string> = {
   "openai-codex": "gpt-6.1-sol",
-  anthropic: "claude-sonnet-4-5",
+  anthropic: "claude-opus-5-5",
   "openai-compatible": "",
 };
 
@@ -82,10 +82,10 @@ export const DEFAULT_PROVIDER_MODELS: Record<AiProvider, string[]> = {
     "gpt-5.6-luna-900k",
   ],
   anthropic: [
-    "claude-sonnet-4-5",
-    "claude-opus-4-1",
-    "claude-3-7-sonnet-latest",
-    "claude-3-5-haiku-latest",
+    "claude-opus-5-5",
+    "claude-sonnet-5-5",
+    "claude-haiku-5-5",
+    "claude-fable-5-2",
   ],
   "openai-compatible": [],
 };
