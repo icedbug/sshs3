@@ -133,14 +133,14 @@ describe("distill inputs", () => {
     expect(text).toContain("systemctl reload nginx → exit 1");
   });
 
-  it("reads team activity and chat oldest first, marking the assistant", () => {
+  it("reads team activity oldest first", () => {
     const text = activityTranscript([
-      { id: "b", actor: "AI", actorKind: "ai", kind: "chat", targetLabel: "#general", summary: "Erik did", at: 2000 },
+      { id: "b", actor: "sara", kind: "service-action", targetLabel: "prod-db", summary: "reloaded postgres", at: 2000 },
       { id: "a", actor: "erik", kind: "config-edit", targetLabel: "prod-api-01", summary: "raised timeout", commandOrPath: "/etc/nginx/x.conf", at: 1000 },
     ]);
     const [first, second] = text.split("\n");
     expect(first).toContain("erik on prod-api-01 (config-edit): raised timeout — /etc/nginx/x.conf");
-    expect(second).toContain("chat, AI (assistant): Erik did");
+    expect(second).toContain("sara on prod-db (service-action): reloaded postgres");
   });
 
   it("skips tasks with nothing to learn from", () => {
@@ -297,7 +297,7 @@ describe("HubService memory proposals", () => {
     });
     await expect(hub.request({ action: "memory-distill-activity" })).rejects.toThrow(/requested format/);
     expect(hub.store.data.memoryProposals ?? []).toHaveLength(0);
-    expect(hub.store.data.lastMemoryDistill).toMatchObject({ proposed: 0, sourceTitle: "Recent team activity and chat" });
+    expect(hub.store.data.lastMemoryDistill).toMatchObject({ proposed: 0, sourceTitle: "Recent team activity" });
     expect(hub.store.data.lastMemoryDistill!.error).toMatch(/requested format/);
   });
 

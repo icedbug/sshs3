@@ -19,20 +19,12 @@ export interface WorkspaceActivityEvent {
     | 'command'
     | 'ai-action'
     | 'profile-update'
-    | 'note'
-    /** A workspace chat message: `summary` is the message text. */
-    | 'chat';
+    | 'note';
   summary: string;
   commandOrPath?: string;
   detail?: string;
   details?: string;
   at: number;
-  /** Chat only: the channel the message belongs to (absent = the workspace's general channel). */
-  channel?: string;
-  /** Chat only: the id of the message this one answers. */
-  replyTo?: string;
-  /** Chat only: `ai` for an answer written by the workspace assistant. */
-  actorKind?: 'human' | 'ai';
 }
 
 /** Shared team AI memory / runbook / server knowledge entry synced inside TeamVaultPayload. */

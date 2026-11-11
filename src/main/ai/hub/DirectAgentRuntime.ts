@@ -1032,8 +1032,7 @@ export function conversationWithToolLog(task: AgentTask): AgentMessage[] {
 }
 
 /**
- * What a read-only run (a workforce specialist, a workspace chat answer) may
- * call. The broker runs `workspace_context`, `sshs3_kb_search` and
+ * What a read-only run (a workforce specialist) may call. The broker runs `workspace_context`, `sshs3_kb_search` and
  * `sshs3_storage_ops` (list/read/diff) without changing anything; such a run
  * gets no terminal, no management tool and no MCP tool.
  */
@@ -1043,9 +1042,9 @@ const READ_ONLY_RUN_TOOLS = new Set([
   "sshs3_storage_ops",
 ]);
 
-/** A run that only reads: started by a workforce run or by an `@ai` chat mention. */
+/** A run that only reads: a workforce specialist. */
 export function isReadOnlyRun(task: AgentTask): boolean {
-  return Boolean(task.workforceRunId || task.chatMessageId);
+  return Boolean(task.workforceRunId);
 }
 
 /**

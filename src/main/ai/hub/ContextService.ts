@@ -190,22 +190,7 @@ export class ContextService {
             .toLowerCase()
             .includes(q),
       ),
-      recentTeamChat: activitySource
-        .filter(
-          (a) =>
-            a.kind === "chat" &&
-            (!q || `${a.actor} ${a.summary}`.toLowerCase().includes(q)),
-        )
-        .slice(-30)
-        .map((a) => ({
-          at: a.at,
-          channel: a.channel ?? "general",
-          author: a.actor,
-          assistant: a.actorKind === "ai" || undefined,
-          text: a.summary,
-        })),
       recentTeamActivity: activitySource
-        .filter((a) => a.kind !== "chat")
         .filter(
           (a) =>
             !q ||

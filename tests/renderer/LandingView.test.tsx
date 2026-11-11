@@ -492,10 +492,8 @@ describe('LandingView Component', () => {
         prompt: 'Konfigurera en SSH-tunnel för port 5432',
       });
 
-      // The team's chat, activity, memory and runbooks are in the AI panel; the page opens it there.
+      // The team's activity, memory and runbooks are views of the AI panel, not a column of this page.
       expect(screen.queryByTestId('workspace-right-column')).not.toBeInTheDocument();
-      fireEvent.click(screen.getByTestId('open-team-chat-btn'));
-      expect(aiOpenEvents.at(-1)).toMatchObject({ view: 'Team', mode: 'hub' });
 
       // Self-learning reflection button & @orama/orama + Voyager badge are rendered in the command center
       expect(screen.getByText('@orama/orama + Voyager')).toBeInTheDocument();

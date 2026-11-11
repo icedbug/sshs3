@@ -105,21 +105,8 @@ explicitly enabled presentation on top of the same terminal authority.
   Specialist runs are stored as tasks tagged `workforceRunId` and shown inside
   the workforce conversation. Only demo mode plays a scripted run, marked
   `simulated`.
-- **Workspace chat (`WorkspaceChat.ts`, `components/AiHub/WorkspaceChat.tsx`)** —
-  shown in the AI panel's **Team** view (the landing page has a "Team chat"
-  button that opens it);
-  a chat message is a `chat` event on the team activity log (`channel`,
-  `replyTo`, `actorKind`), so it reaches teammates through the transports the
-  log already has: the S3 team workspace, Team Vault, the shared workspace file
-  and, on the Web Server, directly between signed-in users. `chat-post` stores
-  the message (secrets masked); a message that mentions `@ai` is answered in the
-  channel by one read-only model run on the poster's own machine, which reads
-  the earlier conversation and the workspace through `workspace_context` /
-  `sshs3_kb_search`. A run that cannot answer posts the reason. Chat is given
-  to agents as `recentTeamChat`, apart from `recentTeamActivity`. Messages share
-  the activity log's 500-event cap and retention.
 - **`MemoryDistiller` (memory proposals)** — after a finished agent task (and
-  on request for the team's recent activity and chat) one tool-less model run
+  on request for the team's recent activity) one tool-less model run
   reads the record together with the team memories that already cover the
   subject and answers with JSON proposals: add a memory/skill or update one it
   was shown. The answer is validated (team scopes only, an update only of a
@@ -369,7 +356,7 @@ remaining platform/product work.
 - `src/main/web/`: multi-user Web Server, authentication, per-user tenants and Electron shim.
 - `src/shared/types/aiHub.ts`, `src/shared/types/ai.ts`: hub requests, snapshot, memory, safety policy and provider/model types.
 - `src/shared/ipc/createMultiSSHApi.ts`: the `MultiSSHApi` used by both the preload and the web client.
-- `src/renderer/src/components/AiHub/`, `src/renderer/src/components/LandingView.tsx`, `src/renderer/src/lib/aiHub.ts`: AI Hub UI. `AiHubPanel.tsx` holds the chat and navigation; each view is its own file (`SettingsView`, `MemoryView` + `MemoryProposals`, `SchedulesView`, `AgentsAndMcpView`, `KnowledgeBaseView`, `WorkspaceChat`).
+- `src/renderer/src/components/AiHub/`, `src/renderer/src/components/LandingView.tsx`, `src/renderer/src/lib/aiHub.ts`: AI Hub UI. `AiHubPanel.tsx` holds the chat and navigation; each view is its own file (`SettingsView`, `MemoryView` + `MemoryProposals`, `SchedulesView`, `AgentsAndMcpView`, `KnowledgeBaseView`).
 - `integrations/hermes-desktop/`: narrow original desktop adaptations and backend plugin.
 - `src/shared/types/nativeHermes.ts`: host layout/control contracts.
 - `scripts/hermes/`: pinned source, original desktop build and PM-based runtime packaging.

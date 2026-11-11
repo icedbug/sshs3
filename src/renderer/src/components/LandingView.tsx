@@ -493,8 +493,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
   ]);
 
   const activityLog: WorkspaceActivityEvent[] = useMemo(() => {
-    // Chat messages travel on the same log and are shown in the chat tab.
-    return (hub?.activityLog ?? []).filter((e) => e.kind !== 'chat').slice(0, 25);
+    return (hub?.activityLog ?? []).slice(0, 25);
   }, [hub?.activityLog]);
 
   const latestActivityByServer = useMemo(() => {
@@ -1227,7 +1226,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
             className="grid grid-cols-1 lg:grid-cols-3 gap-4 w-full text-left"
           >
             {/* The servers come first: that is the workspace. Sync status, the AI command bar and the
-                KPI ribbon follow below. The team's chat, activity, memory and runbooks are in the AI panel. */}
+                KPI ribbon follow below. The team's activity, memory and runbooks are in the AI panel. */}
             {/* Left 2 Columns: Termius-style Server, Cluster & Node Cards */}
             <div className="lg:col-span-3 flex flex-col gap-3 rounded-xl border border-border-subtle bg-app-surface-subtle p-3.5">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1238,20 +1237,6 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   </h2>
                 </div>
                 <div className="flex flex-wrap items-center gap-1.5">
-                  {/* The team's chat, activity, memory and runbooks live in the AI panel. */}
-                  <button
-                    type="button"
-                    data-testid="open-team-chat-btn"
-                    onClick={() =>
-                      window.dispatchEvent(
-                        new CustomEvent('sshs3:ai-open', { detail: { view: 'Team', mode: 'hub' } })
-                      )
-                    }
-                    className="inline-flex items-center gap-1 rounded-md border border-sky-500/40 bg-sky-500/10 px-2.5 py-0.5 text-[11px] font-semibold text-sky-300 hover:bg-sky-500/20"
-                  >
-                    <Users className="h-3 w-3" />
-                    Team chat
-                  </button>
                   <button
                     type="button"
                     data-testid="add-cluster-node-btn"

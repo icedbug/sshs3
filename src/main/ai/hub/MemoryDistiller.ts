@@ -59,15 +59,13 @@ export function taskTranscript(task: AgentTask): string {
   return boundedContext(lines.join("\n"), 24_000);
 }
 
-/** A stretch of the team's activity log and chat, oldest first. */
+/** A stretch of the team's activity log, oldest first. */
 export function activityTranscript(events: WorkspaceActivityEvent[]): string {
   return boundedContext(
     [...events]
       .sort((a, b) => a.at - b.at)
       .map((e) =>
-        e.kind === "chat"
-          ? `[${clock(e.at)}] chat, ${e.actor}${e.actorKind === "ai" ? " (assistant)" : ""}: ${boundedContext(e.summary, 800)}`
-          : `[${clock(e.at)}] ${e.actor} on ${e.targetLabel} (${e.kind}): ${boundedContext(e.summary, 400)}${e.commandOrPath ? ` — ${boundedContext(e.commandOrPath, 300)}` : ""}`,
+        `[${clock(e.at)}] ${e.actor} on ${e.targetLabel} (${e.kind}): ${boundedContext(e.summary, 400)}${e.commandOrPath ? ` — ${boundedContext(e.commandOrPath, 300)}` : ""}`,
       )
       .join("\n"),
     24_000,
