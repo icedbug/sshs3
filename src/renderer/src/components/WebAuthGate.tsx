@@ -147,7 +147,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
       setUsersList(uRes.users || []);
       setInvitesList(iRes.invites || []);
     } catch (err: any) {
-      setAdminMsg(err?.message || 'Kunde inte ladda admin-data');
+      setAdminMsg(err?.message || 'Could not load the admin data');
     }
   }, [user]);
 
@@ -198,7 +198,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
       });
       handleAuthSuccess(res.token || res.sessionToken || '', res.user, true);
     } catch (err: any) {
-      setAuthError(err?.message || 'Kunde inte skapa admin-konto');
+      setAuthError(err?.message || 'Could not create the admin account');
     } finally {
       setSubmitting(false);
     }
@@ -218,7 +218,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
       });
       handleAuthSuccess(res.token || res.sessionToken || '', res.user, false);
     } catch (err: any) {
-      setAuthError(err?.message || 'Felaktigt användarnamn eller lösenord');
+      setAuthError(err?.message || 'Wrong user name or password');
     } finally {
       setSubmitting(false);
     }
@@ -243,7 +243,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
       );
       handleAuthSuccess(res.token || res.sessionToken || '', res.user, true);
     } catch (err: any) {
-      setAuthError(err?.message || 'Kunde inte lösa in invite-kod');
+      setAuthError(err?.message || 'The invite code could not be used');
     } finally {
       setSubmitting(false);
     }
@@ -273,9 +273,9 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
       if (user) {
         setUser({ ...user, sshPublicKey: res.sshPublicKey || res.publicKey || '' });
       }
-      setKeyStatusMsg('Ny Ed25519 SSH-nyckel har genererats på servern!');
+      setKeyStatusMsg('A new Ed25519 SSH key was generated on the server');
     } catch (err: any) {
-      setKeyStatusMsg(`Fel: ${err?.message || 'Kunde inte rotera SSH-nyckel'}`);
+      setKeyStatusMsg(`Error: ${err?.message || 'Could not rotate the SSH key'}`);
     }
   };
 
@@ -292,9 +292,9 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
       }
       setCustomPrivateKey('');
       setShowImportKey(false);
-      setKeyStatusMsg('Din privata SSH-nyckel har importerats och sparats säkert!');
+      setKeyStatusMsg('Your private SSH key was imported and stored');
     } catch (err: any) {
-      setKeyStatusMsg(`Fel: ${err?.message || 'Kunde inte importera SSH-nyckel'}`);
+      setKeyStatusMsg(`Error: ${err?.message || 'Could not import the SSH key'}`);
     }
   };
 
@@ -314,10 +314,10 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
       setNewUsername('');
       setNewDisplayName('');
       setNewPassword('');
-      setAdminMsg('Användarkonto skapat!');
+      setAdminMsg('User account created');
       await loadAdminData();
     } catch (err: any) {
-      setAdminMsg(`Fel: ${err?.message || 'Kunde inte skapa användare'}`);
+      setAdminMsg(`Error: ${err?.message || 'Could not create the user'}`);
     }
   };
 
@@ -329,7 +329,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
       });
       await loadAdminData();
     } catch (err: any) {
-      setAdminMsg(`Fel: ${err?.message || 'Kunde inte ta bort användare'}`);
+      setAdminMsg(`Error: ${err?.message || 'Could not remove the user'}`);
     }
   };
 
@@ -351,7 +351,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
       setInviteNote('');
       await loadAdminData();
     } catch (err: any) {
-      setAdminMsg(`Fel: ${err?.message || 'Kunde inte skapa invite-länk'}`);
+      setAdminMsg(`Error: ${err?.message || 'Could not create the invite link'}`);
     }
   };
 
@@ -361,10 +361,10 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
       await webApiFetch(`/api/admin/invites/${encodeURIComponent(token)}`, {
         method: 'DELETE',
       });
-      setAdminMsg('Invite-kod återkallad.');
+      setAdminMsg('Invite code revoked.');
       await loadAdminData();
     } catch (err: any) {
-      setAdminMsg(`Fel: ${err?.message || 'Kunde inte återkalla invite-kod'}`);
+      setAdminMsg(`Error: ${err?.message || 'Could not revoke the invite code'}`);
     }
   };
 
@@ -381,9 +381,9 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
       });
       setCurrentPasswordInput('');
       setNewPasswordInput('');
-      setPasswordStatusMsg('Lösenordet har uppdaterats!');
+      setPasswordStatusMsg('The password was updated');
     } catch (err: any) {
-      setPasswordStatusMsg(`Fel: ${err?.message || 'Kunde inte byta lösenord'}`);
+      setPasswordStatusMsg(`Error: ${err?.message || 'Could not change the password'}`);
     }
   };
 
@@ -392,7 +392,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
       <div className="min-h-screen w-full bg-[#090d16] text-slate-100 flex items-center justify-center">
         <div className="flex flex-col items-center gap-3">
           <div className="w-9 h-9 rounded-full border-2 border-cyan-400 border-t-transparent animate-spin" />
-          <div className="text-sm text-slate-400 font-mono">Ansluter till sshs3 Web Workspace...</div>
+          <div className="text-sm text-slate-400 font-mono">Connecting to the sshs3 web workspace…</div>
         </div>
       </div>
     );
@@ -416,33 +416,33 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
 
             <h1 className="text-xl font-bold text-white tracking-tight pt-1">
               {!initialized
-                ? 'Skapa Admin-konto (Första uppstart)'
+                ? 'Create the admin account (first start)'
                 : authMode === 'invite'
-                  ? 'Gå med i Teamets Workspace'
-                  : 'Logga in på sshs3'}
+                  ? 'Join the team workspace'
+                  : 'Sign in to sshs3'}
             </h1>
             <p className="text-xs text-slate-400 leading-relaxed">
               {!initialized
-                ? 'Välkommen! Skapa administratörskontot för den här VM:en. Du får direkt en personlig SSH-nyckel och kan bjuda in dina kompisar med en 1-klickslänk.'
+                ? 'Welcome. Create the administrator account for this server. You get a personal SSH key and can invite your team with a link.'
                 : authMode === 'invite'
-                  ? 'Skapa ditt personliga konto. Du får en egen SSH-nyckel på servern och direkt tillgång till teamets delade VM:ar, kluster, S3-bucket och AI-minnen.'
-                  : 'Logga in för att öppna dina egna terminal-flikar och samarbeta i teamets delade arbetsyta.'}
+                  ? 'Create your personal account. You get your own SSH key on the server and access to the team\'s shared VMs, clusters, S3 bucket and team memory.'
+                  : 'Sign in to open your own terminal tabs and work in the team\'s shared workspace.'}
             </p>
           </div>
 
           {!initialized && (
             <div className="grid grid-cols-3 gap-2 text-[11px]">
               <div className="rounded-lg bg-slate-900/90 border border-slate-800 p-2.5">
-                <div className="font-semibold text-cyan-300">1. Admin-konto</div>
-                <div className="text-slate-400 mt-0.5">Skapa ditt konto nedan</div>
+                <div className="font-semibold text-cyan-300">1. Admin account</div>
+                <div className="text-slate-400 mt-0.5">Create your account below</div>
               </div>
               <div className="rounded-lg bg-slate-900/90 border border-slate-800 p-2.5">
-                <div className="font-semibold text-emerald-300">2. Egen SSH-nyckel</div>
-                <div className="text-slate-400 mt-0.5">Genereras automatiskt</div>
+                <div className="font-semibold text-emerald-300">2. Your own SSH key</div>
+                <div className="text-slate-400 mt-0.5">Generated for you</div>
               </div>
               <div className="rounded-lg bg-slate-900/90 border border-slate-800 p-2.5">
                 <div className="font-semibold text-indigo-300">3. Bjud in teamet</div>
-                <div className="text-slate-400 mt-0.5">Dela 1-klicks invite-länk</div>
+                <div className="text-slate-400 mt-0.5">Share an invite link</div>
               </div>
             </div>
           )}
@@ -456,7 +456,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
           {!initialized ? (
             <form onSubmit={handleInitialSetup} className="space-y-4">
               <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">Användarnamn (för inloggning)</label>
+                <label className="block text-xs font-medium text-slate-300 mb-1">User name (for signing in)</label>
                 <input
                   type="text"
                   required
@@ -468,7 +468,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                 />
               </div>
               <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">Visningsnamn i teamet</label>
+                <label className="block text-xs font-medium text-slate-300 mb-1">Display name in the team</label>
                 <input
                   type="text"
                   value={displayName}
@@ -478,7 +478,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                 />
               </div>
               <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">Lösenord (minst 6 tecken)</label>
+                <label className="block text-xs font-medium text-slate-300 mb-1">Password (at least 6 characters)</label>
                 <input
                   type="password"
                   required
@@ -494,7 +494,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                 disabled={submitting}
                 className="w-full rounded-lg bg-cyan-500 hover:bg-cyan-400 disabled:opacity-50 text-slate-950 font-semibold py-2.5 text-sm transition shadow-lg shadow-cyan-500/15"
               >
-                {submitting ? 'Skapar Admin & SSH-nyckel...' : 'Skapa Admin-konto & Starta sshs3'}
+                {submitting ? 'Creating admin and SSH key…' : 'Create the admin account and start sshs3'}
               </button>
             </form>
           ) : authMode === 'invite' ? (
@@ -502,15 +502,15 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
               {inviteFromUrl && inviteToken && !showRawInviteInput ? (
                 <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/30 p-3 flex items-center justify-between gap-2">
                   <div className="text-xs text-emerald-200">
-                    <span className="font-semibold text-emerald-300">✓ Inbjudningslänk aktiverad!</span> Välj ditt
-                    användarnamn och lösenord nedan.
+                    <span className="font-semibold text-emerald-300">✓ Invite link accepted.</span> Choose your
+                    user name and password below.
                   </div>
                   <button
                     type="button"
                     onClick={() => setShowRawInviteInput(true)}
                     className="text-[11px] text-emerald-300 hover:underline shrink-0"
                   >
-                    Ändra kod
+                    Change code
                   </button>
                 </div>
               ) : (
@@ -521,13 +521,13 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                     required
                     value={inviteToken}
                     onChange={(e) => setInviteToken(e.target.value)}
-                    placeholder="Klistra in invite-kod..."
+                    placeholder="Paste the invite code…"
                     className="w-full rounded-lg bg-slate-900/90 border border-slate-700 px-3 py-2 text-sm text-white font-mono focus:outline-none focus:border-cyan-400"
                   />
                 </div>
               )}
               <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">Välj användarnamn</label>
+                <label className="block text-xs font-medium text-slate-300 mb-1">Choose a user name</label>
                 <input
                   type="text"
                   required
@@ -549,7 +549,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                 />
               </div>
               <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">Välj lösenord (minst 6 tecken)</label>
+                <label className="block text-xs font-medium text-slate-300 mb-1">Choose a password (at least 6 characters)</label>
                 <input
                   type="password"
                   required
@@ -565,7 +565,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                 disabled={submitting}
                 className="w-full rounded-lg bg-cyan-500 hover:bg-cyan-400 disabled:opacity-50 text-slate-950 font-semibold py-2.5 text-sm transition shadow-lg shadow-cyan-500/15"
               >
-                {submitting ? 'Skapar konto & SSH-nyckel...' : 'Gå med i Teamet & Öppna Workspace'}
+                {submitting ? 'Creating account and SSH key…' : 'Join the team and open the workspace'}
               </button>
               <div className="text-center pt-1">
                 <button
@@ -576,26 +576,26 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                   }}
                   className="text-xs text-cyan-400 hover:underline"
                 >
-                  Har du redan ett konto? Logga in här
+                  Already have an account? Sign in here
                 </button>
               </div>
             </form>
           ) : (
             <form onSubmit={handleLogin} className="space-y-4">
               <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">Användarnamn</label>
+                <label className="block text-xs font-medium text-slate-300 mb-1">User name</label>
                 <input
                   type="text"
                   required
                   autoFocus
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
-                  placeholder="Användarnamn"
+                  placeholder="User name"
                   className="w-full rounded-lg bg-slate-900/90 border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-400"
                 />
               </div>
               <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">Lösenord</label>
+                <label className="block text-xs font-medium text-slate-300 mb-1">Password</label>
                 <input
                   type="password"
                   required
@@ -610,7 +610,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                 disabled={submitting}
                 className="w-full rounded-lg bg-cyan-500 hover:bg-cyan-400 disabled:opacity-50 text-slate-950 font-semibold py-2.5 text-sm transition shadow-lg shadow-cyan-500/15"
               >
-                {submitting ? 'Loggar in...' : 'Logga in på Workspace'}
+                {submitting ? 'Signing in…' : 'Sign in'}
               </button>
               <div className="text-center pt-1">
                 <button
@@ -621,7 +621,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                   }}
                   className="text-xs text-cyan-400 hover:underline"
                 >
-                  Har du fått en Invite-kod från en kompis? Gå med här
+                  Got an invite code from a teammate? Join here
                 </button>
               </div>
             </form>
@@ -645,10 +645,10 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
           <div className="flex items-start justify-between gap-2">
             <div>
               <div className="font-semibold text-white flex items-center gap-1.5">
-                <span>🎉 Välkommen in, {user.displayName}!</span>
+                <span>🎉 Welcome, {user.displayName}</span>
               </div>
               <p className="text-slate-400 mt-0.5 leading-relaxed">
-                Din personliga <code className="text-cyan-300">ssh-ed25519</code>-nyckel är nu skapad på servern.
+                Your personal <code className="text-cyan-300">ssh-ed25519</code> key has been created on the server.
               </p>
             </div>
             <button
@@ -666,7 +666,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
               onClick={() => copyToClipboard(user.sshPublicKey, 'onboard-key')}
               className="px-3 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-semibold transition"
             >
-              {copiedText === 'onboard-key' ? '✓ SSH-nyckel kopierad!' : '🔑 Kopiera min publika SSH-nyckel'}
+              {copiedText === 'onboard-key' ? '✓ SSH key copied' : '🔑 Copy my public SSH key'}
             </button>
             {user.role === 'admin' && (
               <button
@@ -678,7 +678,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                 }}
                 className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-cyan-300 font-medium transition"
               >
-                👥 Bjud in kompisar (Invite-länk)
+                👥 Invite teammates
               </button>
             )}
           </div>
@@ -689,7 +689,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
       <div className="fixed bottom-3 right-3 z-[9990] flex items-center gap-1.5 rounded-full bg-slate-900/95 border border-slate-700/90 p-1 pl-3 shadow-xl backdrop-blur">
         <span
           className={`w-2 h-2 rounded-full ${wsConnected ? 'bg-emerald-400' : 'bg-amber-400 animate-pulse'}`}
-          title={wsConnected ? 'Realtids-WebSocket ansluten' : 'Återansluter...'}
+          title={wsConnected ? 'Live connection is up' : 'Reconnecting…'}
         />
         <span className="text-xs font-medium text-slate-200 mr-1">{user?.displayName || user?.username}</span>
         <button
@@ -700,7 +700,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
           }}
           className="px-2.5 py-1 rounded-full bg-slate-800 hover:bg-slate-700 text-[11px] text-cyan-300 font-medium transition"
         >
-          🔑 SSH-nyckel
+          🔑 SSH key
         </button>
         {user?.role === 'admin' && (
           <button
@@ -711,7 +711,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
             }}
             className="px-2.5 py-1 rounded-full bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/30 text-[11px] text-cyan-200 font-medium transition"
           >
-            👥 Bjud in / Team
+            👥 Invite / team
           </button>
         )}
       </div>
@@ -731,7 +731,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                     <span className="text-[11px] font-mono text-slate-400">(@{user.username})</span>
                   </div>
                   <div className="text-[11px] text-slate-400">
-                    Inloggad på sshs3 Web Server · Hybritt Team-läge aktivt
+                    Signed in to the sshs3 web server
                   </div>
                 </div>
               </div>
@@ -748,7 +748,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                   onClick={() => setShowModal(false)}
                   className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs"
                 >
-                  Stäng
+                  Close
                 </button>
               </div>
             </div>
@@ -764,7 +764,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                     : 'border-transparent text-slate-400 hover:text-slate-200'
                 }`}
               >
-                🔑 Min SSH-nyckel på servern
+                🔑 My SSH key on the server
               </button>
               {user.role === 'admin' && (
                 <button
@@ -776,7 +776,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                       : 'border-transparent text-slate-400 hover:text-slate-200'
                   }`}
                 >
-                  👥 Bjud in kompisar & Användarkonton
+                  👥 Invites and user accounts
                 </button>
               )}
             </div>
@@ -787,16 +787,16 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                   <div className="rounded-xl bg-slate-900/80 border border-slate-800 p-4 space-y-3">
                     <div className="flex items-center justify-between">
                       <div>
-                        <h3 className="text-sm font-semibold text-white">Din personliga Server-SSH-nyckel (Ed25519)</h3>
+                        <h3 className="text-sm font-semibold text-white">Your personal SSH key on the server (Ed25519)</h3>
                         <p className="text-slate-400 mt-0.5 leading-relaxed">
-                          När du ansluter till teamets delade VM:ar i webbläsaren använder sshs3 automatiskt din egen
-                          privata SSH-nyckel på servern. Lägg in den publika nyckeln nedan på mål-VM:arna.
+                          When you connect to the team's shared VMs in the browser, sshs3 uses your own
+                          private SSH key on the server. Add the public key below to the target VMs.
                         </p>
                       </div>
                     </div>
 
                     <div className="rounded-lg bg-slate-950 border border-slate-800 p-3 font-mono text-[11px] text-cyan-200 break-all select-all">
-                      {user.sshPublicKey || 'Ingen publik nyckel hittades'}
+                      {user.sshPublicKey || 'No public key found'}
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2">
@@ -805,7 +805,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                         onClick={() => copyToClipboard(user.sshPublicKey, 'pubkey')}
                         className="px-3 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-semibold transition"
                       >
-                        {copiedText === 'pubkey' ? '✓ Kopierad!' : 'Kopiera publik SSH-nyckel'}
+                        {copiedText === 'pubkey' ? '✓ Copied' : 'Copy public SSH key'}
                       </button>
                       <button
                         type="button"
@@ -814,21 +814,21 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                       >
                         {copiedText === 'authcmd'
                           ? '✓ Kommando kopierat!'
-                          : 'Kopiera 1-klickskommando för ~/.ssh/authorized_keys'}
+                          : 'Copy the command for ~/.ssh/authorized_keys'}
                       </button>
                       <button
                         type="button"
                         onClick={() => setShowImportKey((v) => !v)}
                         className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 transition"
                       >
-                        Importera egen privat nyckel
+                        Import your own private key
                       </button>
                       <button
                         type="button"
                         onClick={handleRotateSshKey}
                         className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-amber-300 transition"
                       >
-                        Rotera / Generera ny
+                        Rotate / generate a new one
                       </button>
                     </div>
 
@@ -841,7 +841,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                     {showImportKey && (
                       <form onSubmit={handleImportSshKey} className="space-y-2 pt-2 border-t border-slate-800">
                         <label className="block text-slate-300 font-medium">
-                          Klistra in din privata OpenSSH-nyckel (-----BEGIN OPENSSH PRIVATE KEY-----)
+                          Paste your private OpenSSH key (-----BEGIN OPENSSH PRIVATE KEY-----)
                         </label>
                         <textarea
                           rows={5}
@@ -855,7 +855,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                           type="submit"
                           className="px-3 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-semibold"
                         >
-                          Spara privat SSH-nyckel
+                          Save private SSH key
                         </button>
                       </form>
                     )}
@@ -866,14 +866,14 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                     onSubmit={handleChangePassword}
                     className="rounded-xl bg-slate-900/80 border border-slate-800 p-4 space-y-3"
                   >
-                    <h3 className="text-sm font-semibold text-white">Byt lösenord</h3>
+                    <h3 className="text-sm font-semibold text-white">Change password</h3>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                       <input
                         type="password"
                         required
                         value={currentPasswordInput}
                         onChange={(e) => setCurrentPasswordInput(e.target.value)}
-                        placeholder="Nuvarande lösenord"
+                        placeholder="Current password"
                         className="rounded-lg bg-slate-950 border border-slate-700 px-2.5 py-1.5 text-white"
                       />
                       <input
@@ -882,7 +882,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                         minLength={6}
                         value={newPasswordInput}
                         onChange={(e) => setNewPasswordInput(e.target.value)}
-                        placeholder="Nytt lösenord (minst 6 tecken)"
+                        placeholder="New password (at least 6 characters)"
                         className="rounded-lg bg-slate-950 border border-slate-700 px-2.5 py-1.5 text-white"
                       />
                     </div>
@@ -890,7 +890,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                       type="submit"
                       className="px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white font-medium"
                     >
-                      Uppdatera lösenord
+                      Update password
                     </button>
                     {passwordStatusMsg && (
                       <div className="rounded-lg bg-cyan-500/10 border border-cyan-500/30 px-3 py-2 text-cyan-200">
@@ -911,10 +911,10 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
 
                   {/* 1-Click Invite Generator */}
                   <div className="rounded-xl bg-slate-900/80 border border-slate-800 p-4 space-y-3">
-                    <h3 className="text-sm font-semibold text-white">Skapa 1-klicks Invite-länk till kompisar</h3>
+                    <h3 className="text-sm font-semibold text-white">Create an invite link</h3>
                     <p className="text-slate-400">
-                      Skicka länken till en kompis så kan de välja sitt eget lösenord och direkt komma åt teamets delade
-                      VM:ar, kluster, S3-arbetsyta och AI-minnen.
+                      Send the link to a teammate: they choose their own password and get access to the team's shared
+                      VMs, clusters, S3 workspace and team memory.
                     </p>
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                       <div>
@@ -955,13 +955,13 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                       onClick={handleCreateInvite}
                       className="px-3.5 py-2 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-semibold transition"
                     >
-                      Skapa & Kopiera Invite-länk
+                      Create and copy invite link
                     </button>
 
                     {latestInviteUrl && (
                       <div className="rounded-lg bg-emerald-500/10 border border-emerald-500/30 p-3 space-y-1.5">
                         <div className="text-emerald-300 font-semibold">
-                          ✓ Invite-länk skapad och kopierad till urklipp!
+                          ✓ Invite link created and copied to the clipboard
                         </div>
                         <div className="font-mono text-[11px] text-slate-200 break-all select-all">
                           {latestInviteUrl}
@@ -972,7 +972,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                     {invitesList.length > 0 && (
                       <div className="pt-3 border-t border-slate-800 space-y-2">
                         <div className="text-xs font-semibold text-slate-300">
-                          Aktiva Invite-länkar ({invitesList.length})
+                          Active invite links ({invitesList.length})
                         </div>
                         <div className="divide-y divide-slate-800">
                           {invitesList.map((inv) => {
@@ -985,7 +985,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                                     {inv.note ? ` · ${inv.note}` : ''}
                                   </div>
                                   <div className="text-[10px] text-slate-400">
-                                    Roll: {inv.role} · Använd: {inv.usedCount}/{inv.maxUses}
+                                    Role: {inv.role} · Used: {inv.usedCount}/{inv.maxUses}
                                   </div>
                                 </div>
                                 <div className="flex items-center gap-1.5 shrink-0">
@@ -994,14 +994,14 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                                     onClick={() => copyToClipboard(invUrl, `inv-${inv.token}`)}
                                     className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 text-[11px]"
                                   >
-                                    {copiedText === `inv-${inv.token}` ? '✓ Kopierad' : 'Kopiera länk'}
+                                    {copiedText === `inv-${inv.token}` ? '✓ Copied' : 'Copy link'}
                                   </button>
                                   <button
                                     type="button"
                                     onClick={() => handleRevokeInvite(inv.token)}
                                     className="px-2 py-1 rounded bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 text-[11px]"
                                   >
-                                    Återkalla
+                                    Revoke
                                   </button>
                                 </div>
                               </div>
@@ -1017,21 +1017,21 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                     onSubmit={handleCreateUser}
                     className="rounded-xl bg-slate-900/80 border border-slate-800 p-4 space-y-3"
                   >
-                    <h3 className="text-sm font-semibold text-white">Skapa användarkonto direkt</h3>
+                    <h3 className="text-sm font-semibold text-white">Create a user account</h3>
                     <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
                       <input
                         type="text"
                         required
                         value={newUsername}
                         onChange={(e) => setNewUsername(e.target.value)}
-                        placeholder="Användarnamn"
+                        placeholder="User name"
                         className="rounded-lg bg-slate-950 border border-slate-700 px-2.5 py-1.5 text-white"
                       />
                       <input
                         type="text"
                         value={newDisplayName}
                         onChange={(e) => setNewDisplayName(e.target.value)}
-                        placeholder="Visningsnamn"
+                        placeholder="Display name"
                         className="rounded-lg bg-slate-950 border border-slate-700 px-2.5 py-1.5 text-white"
                       />
                       <input
@@ -1040,7 +1040,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                         minLength={6}
                         value={newPassword}
                         onChange={(e) => setNewPassword(e.target.value)}
-                        placeholder="Lösenord (min 6)"
+                        placeholder="Password (min 6)"
                         className="rounded-lg bg-slate-950 border border-slate-700 px-2.5 py-1.5 text-white"
                       />
                       <select
@@ -1056,14 +1056,14 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                       type="submit"
                       className="px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white font-medium"
                     >
-                      + Lägg till användare
+                      + Add user
                     </button>
                   </form>
 
                   {/* Active users list */}
                   <div className="rounded-xl bg-slate-900/80 border border-slate-800 p-4 space-y-2.5">
                     <h3 className="text-sm font-semibold text-white">
-                      Registrerade användare på VM:en ({usersList.length})
+                      Users on this server ({usersList.length})
                     </h3>
                     <div className="divide-y divide-slate-800">
                       {usersList.map((u) => (
@@ -1086,7 +1086,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                               onClick={() => handleDeleteUser(u.id)}
                               className="px-2.5 py-1 rounded bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 text-[11px]"
                             >
-                              Ta bort
+                              Remove
                             </button>
                           )}
                         </div>

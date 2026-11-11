@@ -414,16 +414,16 @@ describe('LandingView Component', () => {
       await screen.findByTestId('app-inside-gate');
 
       // Open SSH / Account modal and submit password change
-      fireEvent.click(screen.getByText('🔑 SSH-nyckel'));
-      fireEvent.change(screen.getByPlaceholderText('Nuvarande lösenord'), {
+      fireEvent.click(screen.getByText('🔑 SSH key'));
+      fireEvent.change(screen.getByPlaceholderText('Current password'), {
         target: { value: 'old-pass-123' },
       });
-      fireEvent.change(screen.getByPlaceholderText('Nytt lösenord (minst 6 tecken)'), {
+      fireEvent.change(screen.getByPlaceholderText('New password (at least 6 characters)'), {
         target: { value: 'new-pass-456' },
       });
-      fireEvent.click(screen.getByText('Uppdatera lösenord'));
+      fireEvent.click(screen.getByText('Update password'));
 
-      await screen.findByText('Lösenordet har uppdaterats!');
+      await screen.findByText('The password was updated');
       expect(
         calls.some(
           (c) =>
@@ -435,11 +435,11 @@ describe('LandingView Component', () => {
       ).toBe(true);
 
       // Switch to Team tab and revoke active invite
-      fireEvent.click(screen.getByText('👥 Bjud in kompisar & Användarkonton'));
+      fireEvent.click(screen.getByText('👥 Invites and user accounts'));
       await screen.findByText(/inv_test_123/);
-      fireEvent.click(screen.getByText('Återkalla'));
+      fireEvent.click(screen.getByText('Revoke'));
 
-      await screen.findByText('Invite-kod återkallad.');
+      await screen.findByText('Invite code revoked.');
       expect(
         calls.some(
           (c) => c.url.includes('/api/admin/invites/inv_test_123') && c.method === 'DELETE'
