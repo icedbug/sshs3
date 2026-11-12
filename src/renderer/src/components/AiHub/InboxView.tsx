@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { HubSnapshot } from "@shared/types/aiHub";
+import { ChangeProof } from "./ChangeProof";
 import { type Act } from "./panelShared";
 import { RichMarkdownContent } from "./RichMarkdownContent";
 import { inboxItems, type InboxItem, type InboxKind } from "./workforceModel";
@@ -180,7 +181,13 @@ export function InboxView({
               )}
             </div>
             {item.kind === "approval" && item.detail ? (
-              <pre className="ai-terminal-peek">{item.detail}</pre>
+              <>
+                <pre className="ai-terminal-peek">{item.detail}</pre>
+                {(() => {
+                  const change = hub.tasks.find((t) => t.id === item.taskId)?.changes.find((c) => c.id === item.changeId);
+                  return change ? <ChangeProof change={change} /> : null;
+                })()}
+              </>
             ) : item.kind === "report" && hub.dailyReport ? (
               <div className="ai-doc-body">
                 <RichMarkdownContent text={hub.dailyReport.text} />

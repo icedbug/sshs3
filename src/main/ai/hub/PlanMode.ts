@@ -232,6 +232,8 @@ export function planGate(
   const command = typeof args.command === "string" ? args.command : "";
   const changes =
     tool === "file_write" ||
+    // A change is a change whatever its check says.
+    tool === "sshs3_change" ||
     ((tool === "terminal_command" || tool === "sshs3_cluster_exec") &&
       command !== "" &&
       analyzeCommandSafety(command).riskLevel !== "safe");

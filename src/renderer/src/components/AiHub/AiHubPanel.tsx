@@ -42,6 +42,7 @@ import { Schedules } from "./SchedulesView";
 import { ChangesView } from "./ChangesView";
 import { WorkforceView } from "./WorkforceView";
 import { HypothesisTree } from "./HypothesisTree";
+import { ChangeProof } from "./ChangeProof";
 import { InboxView } from "./InboxView";
 import { inboxItems } from "./workforceModel";
 import { InfrastructureView } from "./InfrastructureView";
@@ -1692,6 +1693,7 @@ export function AiHubPanel({
                             : item.change.status}
                         </small>
                       </summary>
+                      <ChangeProof change={item.change} />
                       {item.change.riskReason && (
                         <small
                           style={{

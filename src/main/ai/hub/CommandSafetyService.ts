@@ -277,7 +277,56 @@ const SAFE_READONLY_PATTERNS: RegExp[] = [
   /^(?:sudo\s+|)(ceph\s+(status|-s|health|osd\s+(tree|df|stat|perf|pool\s+stats)|pg\s+stat|df|mon\s+stat|quorum_status)|zpool\s+(status|list|iostat|history)|zfs\s+(list|get))\b/i,
   /^(snapmirror\s+show|volume\s+show|aggr\s+show|storage\s+(failover|aggregate|disk)\s+show|network\s+interface\s+show|qos\s+statistics\s+.*show|system\s+node\s+show|lun\s+show|vserver\s+show|version)\b/i,
   /^(?:sudo\s+|)find\b(?![^;|]*\s(-delete|-exec\s+rm))\b/i,
+  // Things that print or test and nothing else (writing somewhere is caught as a redirection before this).
+  /^(echo|printf|true|test|\[)(\s|$)/,
+  // Health and configuration checks of common services.
+  /^(?:sudo\s+|)(pg_isready|mysqladmin\s+(ping|status|version)|redis-cli\s+(?:-\S+\s+\S+\s+)*(ping|info|dbsize))\b/i,
+  /^(?:sudo\s+|)(nginx\s+-[tTvV]|apachectl\s+(-t|configtest)|apache2ctl\s+(-t|configtest)|sshd\s+-[tT]|haproxy\s+-c\b|named-checkconf|visudo\s+-c)\b/i,
+  /^(?:sudo\s+|)(docker|podman)\s+(ps|images|inspect|logs|version|info|top|port|diff|history|stats\s+--no-stream|network\s+(ls|inspect)|volume\s+(ls|inspect)|compose\s+(ps|logs|config|images|top))\b/i,
+  /^(?:sudo\s+|)openssl\s+(x509|verify|version|s_client)\b(?!.*\s-out\b)/i,
 ];
+
+/** Words of a command segment, quotes removed. Good enough to read flags; not a shell parser. */
+function words(seg: string): string[] {
+  return (seg.match(/"[^"]*"|'[^']*'|\S+/g) ?? []).map((w) => w.replace(/^(['"])(.*)\1$/, "$2"));
+}
+
+const CURL_SENDS = /^(-d|--data.*|--json|-F|--form.*|-T|--upload-file|-K|--config|-O|--remote-name.*|-c|--cookie-jar|--create-dirs|-J|--remote-header-name)$/;
+
+/**
+ * A curl that only asks: no body, no upload, no file written (output to
+ * /dev/null or to the terminal), and GET or HEAD. This is what a health check
+ * looks like, and it is the commonest thing an investigation needs.
+ */
+function isReadOnlyCurl(seg: string): boolean {
+  const w = words(seg.replace(/^sudo\s+/, ""));
+  if (w[0] !== "curl") return false;
+  for (let i = 1; i < w.length; i++) {
+    const flag = w[i];
+    if (CURL_SENDS.test(flag)) return false;
+    // Combined short flags: -sSfo, -XPOST.
+    if (/^-[a-zA-Z]{2,}$/.test(flag) && /[dFTKOcJ]/.test(flag.slice(1).replace(/[oX].*$/, ""))) return false;
+    const method = flag === "-X" || flag === "--request" ? w[i + 1] : /^-X(.+)$/.exec(flag)?.[1] ?? /^--request=(.+)$/.exec(flag)?.[1];
+    if (method && !/^(GET|HEAD)$/i.test(method)) return false;
+    const out =
+      flag === "-o" || flag === "--output"
+        ? w[i + 1]
+        : /^--output=(.+)$/.exec(flag)?.[1] ?? (/^-[a-zA-Z]*o$/.test(flag) ? w[i + 1] : undefined);
+    if (out !== undefined && out !== "/dev/null" && out !== "-") return false;
+  }
+  return true;
+}
+
+/** A wget that fetches to the terminal or to nowhere. */
+function isReadOnlyWget(seg: string): boolean {
+  const w = words(seg.replace(/^sudo\s+/, ""));
+  if (w[0] !== "wget") return false;
+  if (w.some((x) => /^--(post-|method=(?!GET|HEAD)|body-|input-file|mirror|recursive)/i.test(x))) return false;
+  return w.includes("--spider") || /(^|\s)-[a-zA-Z]*O\s*(-|\/dev\/null)(\s|$)/.test(seg);
+}
+
+/** Read-only forms that need more than a pattern on the first word. */
+const SAFE_READONLY_CHECKS: Array<(seg: string) => boolean> = [isReadOnlyCurl, isReadOnlyWget];
 
 export function analyzeCommandSafety(command: string): CommandRiskAnalysis {
   const segments = splitShellAstSegments(command);
@@ -313,7 +362,8 @@ export function analyzeCommandSafety(command: string): CommandRiskAnalysis {
     }
     if (segMatchedModify) continue;
 
-    const isExplicitlySafe = SAFE_READONLY_PATTERNS.some((re) => re.test(seg));
+    const isExplicitlySafe =
+      SAFE_READONLY_PATTERNS.some((re) => re.test(seg)) || SAFE_READONLY_CHECKS.some((check) => check(seg));
     if (!isExplicitlySafe) {
       if (highestLevel === "safe") {
         highestLevel = "modify";

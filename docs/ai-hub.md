@@ -234,6 +234,30 @@ explicitly enabled presentation on top of the same terminal authority.
   `errorSignature`) through S3 and Team Vault sync (`WorkspaceMemoryEntry` in
   `src/shared/types/teamVault.ts`); credentials are never uploaded.
 
+## Changes that prove themselves and take themselves back (`sshs3_change`)
+
+- A change is made with `sshs3_change`: the command, a read-only `check` whose
+  output must contain `expected`, the `rollback` command, and how long to
+  observe. The broker (`ToolBroker.runChange`) looks at the check before, runs
+  the change after the usual approval, and then the check must pass and keep
+  passing for the observation time (looked at every ten seconds, at most three
+  minutes). When it fails, the rollback runs at once, once, the check is
+  looked at again, and the agent is told what happened and not to repeat the
+  change. When the rollback fails too, the agent is told to stop.
+- The check must be classified read-only. The change is approved as one
+  thing: the worse of the command and its rollback decides how it is treated,
+  and the approval shows both (`ChangeProof`).
+- On a production target, an agent running on its own cannot change anything
+  with a bare command: it is refused and pointed to `sshs3_change`.
+- While a plan is pending, `sshs3_change` is held back like any change.
+- The classifier (`CommandSafetyService`) now knows the usual health checks
+  as read-only: a curl that only asks (GET or HEAD, no body, no upload, output
+  to the terminal or /dev/null), `wget --spider` / `-O -`, `pg_isready`,
+  configuration tests (`nginx -t`, `sshd -t`, `haproxy -c` …), `docker ps`,
+  `logs`, `inspect`, `echo`, `test`. Their mutating forms are still changes.
+  It remains a set of rules: something it does not know is treated as a
+  change, and a rule that is wrong would let a command through.
+
 ## Investigations: hypotheses and investigators that can look
 
 - **Hypotheses.** `sshs3_hypotheses` is the agent's working list of what might

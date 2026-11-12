@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { AgentChange, HubSnapshot } from "@shared/types/aiHub";
+import { ChangeProof } from "./ChangeProof";
 
 type Source = "all" | "team" | "assistant";
 
@@ -157,7 +158,7 @@ export function ChangesView({
         {page.map((e) => {
           const heading = day(e.at) !== lastDay ? (lastDay = day(e.at)) : "";
           const c = e.change;
-          const hasMore = Boolean(e.command || e.detail || c?.output || c?.before || c?.after);
+          const hasMore = Boolean(e.command || e.detail || c?.output || c?.before || c?.after || c?.check);
           const head = (
             <>
               <time>{time(e.at)}</time>
@@ -173,7 +174,7 @@ export function ChangesView({
                 )}
                 {c ? (
                   <span className={`ai-badge ${STATUS_TONE[c.status]}`}>
-                    {c.status}
+                    {c.rollback?.ran ? (c.rollback.exitCode === 0 ? "rolled back" : "rollback failed") : c.status}
                     {c.exitCode !== undefined && c.exitCode !== 0 ? ` · exit ${c.exitCode}` : ""}
                   </span>
                 ) : (
@@ -205,6 +206,7 @@ export function ChangesView({
                         <pre>{c.output}</pre>
                       </>
                     )}
+                    {c && <ChangeProof change={c} />}
                     {c?.riskReason && <small>Safety check: {c.riskReason}</small>}
                     {e.taskId && (
                       <button type="button" onClick={() => onOpenTask(e.taskId!)}>

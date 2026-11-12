@@ -104,6 +104,31 @@ const AGENT_TOOLS: FunctionToolDef[] = [
     },
   },
   {
+    name: "sshs3_change",
+    description:
+      "Make a change that carries its own proof and its own way back. Use this instead of terminal_command for anything that changes a system: restarting or reconfiguring a service, changing a setting, deploying. You give the command, a read-only `check` whose output must contain `expected` when the change worked, and the `rollback` command that takes it back. The check is looked at before; the change runs (after approval where that applies); the check must pass afterwards and keep passing for `observeSeconds`. If it does not, the rollback runs at once and you are told. Choose a check that would actually fail if the change went wrong (the service answering, the value in effect), not one that passes regardless.",
+    parameters: {
+      type: "object",
+      properties: {
+        command: { type: "string", description: "The change: one non-interactive command." },
+        description: { type: "string", description: "What this changes and why, for the person approving." },
+        check: {
+          type: "object",
+          properties: {
+            command: { type: "string", description: "Read-only command that shows whether the change worked." },
+            expected: { type: "string", description: "Text the check's output must contain when it worked." },
+          },
+          required: ["command", "expected"],
+        },
+        rollback: { type: "string", description: "The command that takes the change back." },
+        observeSeconds: { type: "number", description: "How long the check must keep passing (0 to 180). Use more for things that fail late, like a service that starts and then crashes." },
+        sessionId: { type: "string", description: "Optional terminal sessionId." },
+      },
+      required: ["command", "description", "check", "rollback"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "terminal_verify",
     description:
       "Run a verification command in an sshs3 terminal and check that the output contains an expected string and exits with code 0.",
@@ -1027,6 +1052,16 @@ function mapToolCallToBrokerRequest(name: string, args: Record<string, unknown>)
         description: typeof args.description === "string" ? args.description : "Run terminal command",
         id: typeof args.sessionId === "string" ? args.sessionId : undefined,
       };
+    case "sshs3_change":
+      return {
+        action: "change",
+        command: typeof args.command === "string" ? args.command : "",
+        description: typeof args.description === "string" ? args.description : "Make a change",
+        check: (args.check && typeof args.check === "object" ? args.check : {}) as { command?: string; expected?: string },
+        rollback: typeof args.rollback === "string" ? args.rollback : "",
+        observeSeconds: typeof args.observeSeconds === "number" ? args.observeSeconds : 0,
+        id: typeof args.sessionId === "string" ? args.sessionId : undefined,
+      };
     case "terminal_verify":
       return {
         action: "verify",
@@ -1240,7 +1275,8 @@ export function toolsForTask(
           (t) =>
             t.name === "workspace_context" ||
             t.name === "workspace_remember" ||
-            t.name.startsWith("sshs3_"),
+            // The management tools, but not the one that runs a change in a terminal.
+            (t.name.startsWith("sshs3_") && t.name !== "sshs3_change"),
         )
       : [...AGENT_TOOLS];
   baseTools.push({
@@ -1883,7 +1919,7 @@ export class DirectAgentRuntime implements AgentRuntime {
     args: Record<string, unknown>,
     result: unknown,
   ): Promise<unknown> {
-    if (tool !== "terminal_command" && tool !== "terminal_verify") return result;
+    if (tool !== "terminal_command" && tool !== "terminal_verify" && tool !== "sshs3_change") return result;
     const r = (result ?? {}) as Record<string, unknown>;
     if (typeof r.exitCode !== "number" || r.exitCode === 0) return result;
     try {

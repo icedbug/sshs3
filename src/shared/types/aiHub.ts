@@ -140,6 +140,13 @@ export interface AgentChange {
   riskLevel?: CommandRiskLevel;
   riskReason?: string;
   parsedSubcommands?: string[];
+  /**
+   * On a change that carries its own proof: the read-only check that shows it
+   * worked, and whether it passed before and after.
+   */
+  check?: { command: string; expected: string; before?: boolean; after?: boolean; output?: string };
+  /** The command that takes the change back, and what happened if it had to run. */
+  rollback?: { command: string; ran?: boolean; exitCode?: number; output?: string; checkAfter?: boolean };
   at: number;
 }
 export interface AgentTask {

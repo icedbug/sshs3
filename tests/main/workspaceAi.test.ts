@@ -546,6 +546,7 @@ describe("Production multi-user workspace sync & auto-memory", () => {
     expect(attachedTools).toEqual([
       "workspace_context",
       "terminal_command",
+      "sshs3_change",
       "terminal_verify",
       "file_read",
       "file_write",

@@ -195,6 +195,92 @@ describe("tool authority", () => {
     expect(writes).toHaveLength(2);
     expect(t.changes[0].status).toBe("completed");
   });
+  it("runs a change with its check, and rolls it back by itself when the check fails", async () => {
+    const { broker, t, capability, terminals } = await setup("autonomous");
+    t.maxCommands = 20;
+    broker.wait = async () => undefined;
+    // What the terminal answers, in the order the broker asks.
+    const run = vi.spyOn(terminals, "execute");
+    const answer = (output: string, exitCode = 0) => run.mockResolvedValueOnce({ exitCode, output } as never);
+
+    // 1. A change that works: check before (failing), the change, check after (passing).
+    answer("inactive", 3);
+    answer("");
+    answer("active");
+    const good = (await broker.invoke(capability.key, {
+      action: "change",
+      command: "systemctl start nginx",
+      description: "Start nginx",
+      check: { command: "systemctl is-active nginx", expected: "active" },
+      rollback: "systemctl stop nginx",
+    })) as Record<string, unknown>;
+    expect(good).toMatchObject({ checkPassed: true, checkPassedBefore: false });
+    expect(t.changes[0]).toMatchObject({ status: "completed", check: { before: false, after: true }, rollback: { command: "systemctl stop nginx" } });
+    expect(t.changes[0].rollback!.ran).toBeUndefined();
+    expect(t.verification).toBe("verified");
+    expect(run.mock.calls.map((c) => c[3])).toEqual(["systemctl is-active nginx", "systemctl start nginx", "systemctl is-active nginx"]);
+
+    // 2. A change whose check fails afterwards: the rollback runs, once, and the agent is told.
+    run.mockClear();
+    answer("worker_processes 4;");
+    answer("");
+    answer("502 Bad Gateway", 22);
+    answer("restored");
+    answer("200 OK");
+    const bad = (await broker.invoke(capability.key, {
+      action: "change",
+      command: "cp nginx.new /etc/nginx/nginx.conf && systemctl reload nginx",
+      description: "New nginx config",
+      check: { command: "curl -fsS -o /dev/null -w '%{http_code}' http://localhost/", expected: "200" },
+      rollback: "cp /etc/nginx/nginx.conf.bak /etc/nginx/nginx.conf && systemctl reload nginx",
+    })) as Record<string, unknown>;
+    expect(bad).toMatchObject({ checkPassed: false, rolledBack: true, checkPassesAfterRollback: true });
+    expect(String(bad.next)).toContain("Do not make the same change again");
+    expect(t.changes[1]).toMatchObject({ status: "failed", check: { after: false }, rollback: { ran: true, exitCode: 0, checkAfter: true } });
+    expect(run.mock.calls.map((c) => c[3]).slice(-2)).toEqual([
+      "cp /etc/nginx/nginx.conf.bak /etc/nginx/nginx.conf && systemctl reload nginx",
+      "curl -fsS -o /dev/null -w '%{http_code}' http://localhost/",
+    ]);
+
+    // 3. A rollback that fails too: the agent is told to stop, not to try again.
+    run.mockClear();
+    answer("ok");
+    answer("");
+    answer("down", 1);
+    answer("cannot restore", 1);
+    answer("down", 1);
+    const worse = (await broker.invoke(capability.key, { action: "change", command: "systemctl restart db", description: "Restart", check: { command: "systemctl is-active db", expected: "active" }, rollback: "systemctl start db" })) as Record<string, unknown>;
+    expect(worse).toMatchObject({ checkPassed: false, rolledBack: false, checkPassesAfterRollback: false });
+    expect(String(worse.next)).toContain("Stop making changes");
+
+    // A change without a check or a way back is not a change this tool makes, and the check may only look.
+    await expect(broker.invoke(capability.key, { action: "change", command: "systemctl restart x", rollback: "true" })).rejects.toThrow(/needs a check/);
+    await expect(broker.invoke(capability.key, { action: "change", command: "systemctl restart x", check: { command: "systemctl is-active x", expected: "active" } })).rejects.toThrow(/needs a rollback/);
+    await expect(broker.invoke(capability.key, { action: "change", command: "true", check: { command: "systemctl restart x", expected: "x" }, rollback: "true" })).rejects.toThrow(/must only look/);
+    run.mockRestore();
+  });
+
+  it("keeps the check passing for the observation time, and rolls back when it stops", async () => {
+    const { broker, t, capability, terminals } = await setup("autonomous");
+    t.maxCommands = 20;
+    const waits: number[] = [];
+    let now = 1_000_000;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    broker.wait = async (ms) => {
+      waits.push(ms);
+      now += ms;
+    };
+    const run = vi.spyOn(terminals, "execute");
+    for (const [output, exitCode] of [["inactive", 3], ["", 0], ["active", 0], ["active", 0], ["failed", 3], ["stopped", 0], ["inactive", 3]] as const)
+      run.mockResolvedValueOnce({ exitCode, output } as never);
+    const result = (await broker.invoke(capability.key, { action: "change", command: "systemctl start app", description: "Start", check: { command: "systemctl is-active app", expected: "active" }, rollback: "systemctl stop app", observeSeconds: 30 })) as Record<string, unknown>;
+    // It started, then crashed twenty seconds in: caught, and taken back.
+    expect(waits).toEqual([10_000, 10_000]);
+    expect(result).toMatchObject({ checkPassed: false, rolledBack: true });
+    clock.mockRestore();
+    run.mockRestore();
+  });
+
   it("lets an investigator run read-only commands without asking, and refuses everything else without asking", async () => {
     const { broker, t, capability, writes } = await setup("advice");
     t.investigator = true;

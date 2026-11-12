@@ -3362,3 +3362,38 @@
 .ai-hyp .ai-hyp-for {
   color: var(--ai-ink-soft);
 }
+
+/* ---- a change's check and way back --------------------------------------- */
+.ai-proof {
+  display: grid;
+  gap: 8px;
+  margin: 8px 0;
+  padding: 9px 11px;
+  border: 1px solid var(--ai-line);
+  border-radius: 8px;
+  background: var(--ai-surface);
+  font-size: 12px;
+}
+.ai-proof > div {
+  display: grid;
+  gap: 3px;
+}
+.ai-proof small {
+  color: var(--ai-ink-faint);
+}
+.ai-proof code {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11.5px;
+  color: var(--ai-ink);
+  word-break: break-all;
+}
+.ai-proof [data-ran="yes"] small {
+  color: #fbbf24;
+}
+.ai-proof pre {
+  margin: 2px 0 0;
+  max-height: 120px;
+  overflow: auto;
+  font-size: 11px;
+  white-space: pre-wrap;
+}

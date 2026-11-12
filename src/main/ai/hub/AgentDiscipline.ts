@@ -301,7 +301,11 @@ export function noteToolResult(
   const command = typeof args.command === "string" ? args.command : "";
   const changes = (): boolean =>
     command !== "" && analyzeCommandSafety(command).riskLevel !== "safe";
-  if (tool === "file_write") {
+  if (tool === "sshs3_change") {
+    // It carries its own check: passed means verified; failed means it was taken back.
+    state.madeChanges = true;
+    state.verifiedSinceChange = r.checkPassed === true || r.rolledBack === true;
+  } else if (tool === "file_write") {
     state.madeChanges = true;
     state.verifiedSinceChange = false;
   } else if (tool === "terminal_command") {
@@ -492,6 +496,7 @@ export function operatingInstructions(options: {
     "State a cause only when the evidence shows it. Name what you assume and what you could not check.",
     "",
     "## Making a change",
+    "Make a change to a system with `sshs3_change`, not with a bare command: it takes the check that shows the change worked and the rollback that takes it back, and it rolls back by itself when the check fails. Pick the check before you pick the command. If a change was rolled back, do not repeat it; find out why its check failed.",
     "For any job of three or more steps, or any change, write a task list with `todo_write` first and keep it current. One step at a time: the smallest change that addresses the cause, on the target it concerns, then its check.",
     "After a change, verify against the original symptom with `terminal_verify` (a command and the output you expect), not merely that the command exited 0. A change without a passed check is unverified, and you say so.",
     "If a step fails, read the error, and check whether the team's memory has this failure, before trying something else. Do not repeat a failing command unchanged. After two failed attempts at the same step, stop and report what you tried and what you saw.",
