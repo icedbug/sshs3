@@ -1592,6 +1592,19 @@ export function AiHubPanel({
                       )}
                       <RichMarkdownContent
                         text={item.message.text}
+                        refs={
+                          item.message.role === "assistant" && task
+                            ? new Set(task.changes.flatMap((c) => (c.ref ? [c.ref] : [])))
+                            : undefined
+                        }
+                        onOpenRef={(ref) => {
+                          const el = document.querySelector<HTMLDetailsElement>(`[data-ref="${ref}"]`);
+                          if (!el) return;
+                          el.open = true;
+                          el.scrollIntoView({ block: "center", behavior: "smooth" });
+                          el.classList.add("ai-change-flash");
+                          setTimeout(() => el.classList.remove("ai-change-flash"), 1600);
+                        }}
                         onUseCommand={(cmd) => {
                           setPrompt(cmd);
                           setTimeout(() => composer.current?.focus(), 20);
@@ -1654,10 +1667,12 @@ export function AiHubPanel({
                     <details
                       className={"ai-change ai-change-" + item.change.status}
                       key={item.change.id}
+                      data-ref={item.change.ref}
                       open={item.change.status === "pending"}
                     >
                       <summary>
                         <Terminal size={13} />
+                        {item.change.ref && <small className="ai-ref-name">{item.change.ref}</small>}
                         <span>{item.change.description}</span>
                         {item.change.riskLevel && (
                           <small

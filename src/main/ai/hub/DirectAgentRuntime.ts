@@ -977,6 +977,11 @@ const AGENT_TOOLS: FunctionToolDef[] = [
           type: "string",
           description: "Optional description label for the infrastructure dependency edge.",
         },
+        evidence: {
+          type: "string",
+          description:
+            "For 'save_infra_edge': what you observed that shows the link (the command and what it printed). The link is saved as a suggestion for a person to confirm.",
+        },
         name: {
           type: "string",
           description: "Name of the Mission Agent or MCP server.",

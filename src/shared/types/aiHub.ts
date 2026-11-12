@@ -186,6 +186,8 @@ export interface AgentChange {
   riskLevel?: CommandRiskLevel;
   riskReason?: string;
   parsedSubcommands?: string[];
+  /** A short name for this command within its conversation (c1, c2 …), so a report can point at it. */
+  ref?: string;
   /**
    * On a change that carries its own proof: the read-only check that shows it
    * worked, and whether it passed before and after.
@@ -375,6 +377,11 @@ export interface InfraGraphEdge {
     | "ssh_tunnel"
     | "monitors";
   label?: string;
+  /** Suggested by an agent from what it observed; not given to agents as fact until a person confirms it. */
+  proposed?: boolean;
+  /** What the agent saw that made it suggest the link. */
+  evidence?: string;
+  proposedBy?: string;
   updatedAt: number;
 }
 
@@ -1130,6 +1137,7 @@ export type HubRequest =
   | { action: "eval-case-delete"; id: string }
   /** Replays one case, or all of them when no id is given. Nothing is executed. */
   | { action: "eval-run"; id?: string }
+  | { action: "infra-edge-confirm"; id: string }
   /** An alert pasted by hand: JSON as a monitoring system posts it, or text. */
   | { action: "alert-paste"; text: string }
   | { action: "runner-save"; runner: { id: string; name: string; command: string; args: string[]; cwd?: string } }

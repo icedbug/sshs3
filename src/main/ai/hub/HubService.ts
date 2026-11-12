@@ -78,6 +78,7 @@ import {
   undoPageChange,
   PAGE_KINDS,
 } from "./KbCompile";
+import { buildDailyReport } from "./DailyReport";
 import {
   Replay,
   caseFromTask,
@@ -2663,13 +2664,33 @@ export class HubService {
           to: boundedContext(requiredText(e.to), 120),
           relation: e.relation || "depends_on",
           label: e.label ? boundedContext(e.label, 240) : undefined,
+          ...(e.proposed
+            ? {
+                proposed: true,
+                evidence: e.evidence ? boundedContext(e.evidence, 300) : undefined,
+                proposedBy: e.proposedBy ? boundedContext(e.proposedBy, 80) : undefined,
+              }
+            : {}),
           updatedAt: Date.now(),
         };
+        // A link a person already has is not turned back into a suggestion.
+        const known = (this.store.data.infraEdges ?? []).find(
+          (x) => !x.proposed && x.from === savedEdge.from && x.to === savedEdge.to && x.relation === savedEdge.relation,
+        );
+        if (known && savedEdge.proposed) break;
         this.store.data.infraEdges = [
           savedEdge,
           ...(this.store.data.infraEdges ?? []).filter((x) => x.id !== savedEdge.id),
         ];
         if (isDemoMode()) saveDemoInfraEdge(savedEdge);
+        break;
+      }
+      case "infra-edge-confirm": {
+        const edge = (this.store.data.infraEdges ?? []).find((x) => x.id === request.id);
+        if (!edge) throw new Error("Link not found");
+        edge.proposed = undefined;
+        edge.updatedAt = Date.now();
+        this.lastWorkSync = 0;
         break;
       }
       case "infra-edge-delete": {
@@ -4027,6 +4048,54 @@ export class HubService {
     if (!this.disposed) void this.readNextKb();
   }
 
+  // ---- nightly upkeep --------------------------------------------------------
+
+  private nightlyRunning = false;
+  /**
+   * Once a day, after three in the morning and while nothing of the user's is
+   * running: memory is tidied, pages are compared for contradictions, and the
+   * day's report is written. With a team bucket one installation does it for
+   * the team.
+   */
+  private async nightly(now = Date.now()): Promise<void> {
+    const at = new Date(now);
+    const day = `${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, "0")}-${String(at.getDate()).padStart(2, "0")}`;
+    if (this.nightlyRunning || this.store.data.lastNightlyDay === day || at.getHours() < 3 || isDemoMode()) return;
+    if (this.store.data.tasks.some((t) => active(t) && !isBackgroundRun(t))) return;
+    this.nightlyRunning = true;
+    try {
+      this.store.data.lastNightlyDay = day;
+      const sync = this.work();
+      const client = this.clientId();
+      if (sync) {
+        const held = await sync.claim(`nightly-${day}`, { by: await this.resolveActorName(), client }, now);
+        if (held.client !== client) return; // Another installation has today's upkeep.
+      }
+      await this.request({ action: "self-learn-reflect" }).catch((e) => log.warn("Nightly tidy failed", safeError(e)));
+      await this.checkContradictions().catch((e) => log.warn("Nightly contradiction check failed", safeError(e)));
+      const extra = await this.collectExtraContext();
+      const snap = await this.snapshot();
+      this.store.data.dailyReport = {
+        day,
+        at: Date.now(),
+        text: buildDailyReport({
+          since: now - 24 * 60 * 60_000,
+          now,
+          activity: extra.activityLog ?? this.store.data.activityLog ?? [],
+          tickets: live(this.store.data.workTickets),
+          tasks: this.store.data.tasks,
+          pages: this.store.data.kbPages ?? [],
+          memories: extra.memories ?? this.store.data.memories,
+          findings: snap.kbFindings ?? [],
+        }),
+      };
+      await this.store.save().catch(() => undefined);
+      this.changed();
+    } finally {
+      this.nightlyRunning = false;
+    }
+  }
+
   // ---- tests for the agents --------------------------------------------------
 
   /**
@@ -4574,6 +4643,7 @@ export class HubService {
       })().catch((e) => log.warn("Learning failed", safeError(e)));
       void this.workTick(now).catch((e) => log.warn("Board tick failed", safeError(e)));
       void this.readNextKb(now).catch((e) => log.warn("Knowledge base reading failed", safeError(e)));
+      void this.nightly(now).catch((e) => log.warn("Nightly upkeep failed", safeError(e)));
       let historyChanged = false;
       for (const session of this.terminals.list()) {
         const text = this.terminals.context(session.id);

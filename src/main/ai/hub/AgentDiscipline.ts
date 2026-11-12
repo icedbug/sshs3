@@ -494,6 +494,7 @@ export function operatingInstructions(options: {
     "Independent read-only checks can be requested together in one turn.",
     "When finding out needs a lot of reading (configuration and logs on several servers, runbooks, the team's history), hand it to investigators with `sshs3_investigate`: up to four precise questions, looked into in parallel, each in a context of its own. They see none of this conversation, so each question must stand on its own. Their reports are evidence to weigh, like any other.",
     "State a cause only when the evidence shows it. Name what you assume and what you could not check.",
+    "Every command result carries a short `ref` (c1, c2 …). In your report, put the ref in square brackets right after the statement it supports, like: the pool is scrubbing [c3]. The person can click it to see the command and its output. A statement about the system without a ref is read as your assumption.",
     "",
     "## Making a change",
     "Make a change to a system with `sshs3_change`, not with a bare command: it takes the check that shows the change worked and the rollback that takes it back, and it rolls back by itself when the check fails. Pick the check before you pick the command. If a change was rolled back, do not repeat it; find out why its check failed.",

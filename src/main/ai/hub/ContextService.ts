@@ -125,6 +125,40 @@ export interface ExtraWorkspaceContext {
   terminalContextChars?: number;
 }
 
+const RELATION_TEXT: Record<InfraGraphEdge["relation"], string> = {
+  depends_on: "depends on",
+  mounts_storage: "mounts storage from",
+  replicates_to: "replicates to",
+  routes_to: "routes to",
+  monitors: "monitors",
+  ssh_tunnel: "tunnels through",
+};
+
+/**
+ * The links that touch the thing being worked on, as sentences: what it leans
+ * on (look there when it misbehaves) and what leans on it (what a change here
+ * can reach).
+ */
+export function neighbours(edges: InfraGraphEdge[], names: string[]): string[] {
+  const mine = new Set(names.map((n) => n.trim().toLowerCase()).filter(Boolean));
+  if (mine.size === 0) return [];
+  const out: string[] = [];
+  for (const e of edges) {
+    if (e.proposed) continue;
+    const from = mine.has(e.from.trim().toLowerCase());
+    const to = mine.has(e.to.trim().toLowerCase());
+    if (!from && !to) continue;
+    const note = e.label ? ` (${e.label})` : "";
+    const text = RELATION_TEXT[e.relation] ?? e.relation;
+    out.push(
+      from
+        ? `Upstream: ${e.from} ${text} ${e.to}${note}. A fault here may start there.`
+        : `Downstream: ${e.from} ${text} ${e.to}${note}. A change here can reach it.`,
+    );
+  }
+  return out.slice(0, 12);
+}
+
 export class ContextService {
   private refreshing = false;
   constructor(
@@ -170,6 +204,10 @@ export class ContextService {
       nodeCount: nodes.length,
       nodes,
     }));
+    const confirmedEdges = (extra?.infraEdges ?? this.store.data.infraEdges ?? []).filter((e) => !e.proposed);
+    const label = task.target?.label ?? "";
+    const here = servers.find((s) => label && (s.name === label || s.host === label || label.includes(s.name)));
+    const around = neighbours(confirmedEdges, [label, here?.name ?? "", here?.cluster ?? ""]);
     return {
       observedAt: Date.now(),
       terminals: allTerminals,
@@ -186,7 +224,9 @@ export class ContextService {
       agents: extra?.agents ?? this.store.data.agents ?? [],
       mcpServers: extra?.mcpServers ?? this.store.data.mcpServers ?? [],
       ...this.knowledge(task, id, servers, extra),
-      infraDependencyGraph: extra?.infraEdges ?? this.store.data.infraEdges ?? [],
+      // Only links a person has confirmed are given as fact.
+      infraDependencyGraph: confirmedEdges,
+      ...(around.length ? { aroundThisTarget: around } : {}),
       recentWorkforceRuns: (extra?.workforceRuns ?? this.store.data.workforceRuns ?? []).slice(0, 5),
       workspaceServers: servers.filter(
         (s) =>

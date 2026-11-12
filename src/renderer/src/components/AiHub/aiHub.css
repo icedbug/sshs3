@@ -3434,3 +3434,33 @@
 .ai-eval-checks small {
   color: var(--ai-ink-faint);
 }
+
+/* A reference from a report to the command it rests on. */
+.ai-ref {
+  display: inline;
+  padding: 0 5px;
+  margin: 0 1px;
+  border: 1px solid rgba(52, 211, 153, 0.35);
+  border-radius: 5px;
+  background: rgba(52, 211, 153, 0.1);
+  color: #6ee7b7;
+  font: inherit;
+  font-size: 0.82em;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  cursor: pointer;
+}
+.ai-ref:hover {
+  background: rgba(52, 211, 153, 0.22);
+}
+.ai-ref-name {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  opacity: 0.6;
+}
+.ai-change-flash {
+  outline: 2px solid rgba(52, 211, 153, 0.7);
+  outline-offset: 2px;
+  transition: outline-color 0.3s;
+}
+.ai-link-proposed {
+  border-style: dashed;
+}

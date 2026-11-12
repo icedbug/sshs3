@@ -34,6 +34,10 @@ export interface ToolRequest {
   scope?: string;
   payload?: Record<string, unknown>;
 }
+/** The next short name for a command in this conversation: c1, c2, … */
+export const nextRef = (task: AgentTask): string =>
+  `c${task.changes.reduce((max, c) => Math.max(max, Number(/^c(\d+)$/.exec(c.ref ?? "")?.[1] ?? 0)), 0) + 1}`;
+
 export interface ToolDependencies {
   context(task: AgentTask, query?: string, sessionId?: string): Promise<unknown>;
   memory(task: AgentTask, request: ToolRequest): Promise<unknown>;
@@ -308,6 +312,7 @@ export class ToolBroker {
         riskLevel: safety.riskLevel,
         riskReason: safety.riskReason,
         parsedSubcommands: safety.parsedSubcommands,
+        ref: nextRef(task),
         at: Date.now(),
       };
       task.changes.push(change);
@@ -334,6 +339,8 @@ export class ToolBroker {
         this.deps.changed();
         return {
           ...result,
+          // Cite this in the report, in brackets, after what it shows.
+          ref: change.ref,
           commandId: change.id,
           source: `terminal:${target.sessionId}`,
           observedAt: Date.now(),
@@ -397,6 +404,7 @@ export class ToolBroker {
       parsedSubcommands: safety.parsedSubcommands,
       check: { command: boundedContext(checkCommand, 2000), expected: boundedContext(expected, 400), before: passes(before) },
       rollback: { command: boundedContext(rollback, 4000) },
+      ref: nextRef(task),
       at: Date.now(),
     };
     task.changes.push(change);
@@ -426,6 +434,7 @@ export class ToolBroker {
         this.deps.changed();
         return {
           id: change.id,
+          ref: change.ref,
           exitCode: result.exitCode,
           output: result.output,
           checkPassed: true,

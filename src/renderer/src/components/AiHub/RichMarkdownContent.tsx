@@ -1,13 +1,19 @@
 import { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { linkRefs } from "./reportRefs";
 
 export function RichMarkdownContent({
   text,
   onUseCommand,
+  refs,
+  onOpenRef,
 }: {
   text: string;
   onUseCommand?: (cmd: string) => void;
+  /** The short names of this conversation's commands; `[c3]` in the text becomes a link to that command. */
+  refs?: ReadonlySet<string>;
+  onOpenRef?: (ref: string) => void;
 }) {
   const [copiedBlock, setCopiedBlock] = useState<string | null>(null);
 
@@ -22,6 +28,25 @@ export function RichMarkdownContent({
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
+          a({ href, children }) {
+            const ref = /^#ref-(c\d+)$/.exec(href ?? "")?.[1];
+            if (ref)
+              return (
+                <button
+                  type="button"
+                  className="ai-ref"
+                  title="Show the command and its output"
+                  onClick={() => onOpenRef?.(ref)}
+                >
+                  {children}
+                </button>
+              );
+            return (
+              <a href={href} target="_blank" rel="noreferrer">
+                {children}
+              </a>
+            );
+          },
           table({ children }) {
             return (
               <div className="ai-table-wrap">
@@ -102,7 +127,7 @@ export function RichMarkdownContent({
           },
         }}
       >
-        {text}
+        {refs ? linkRefs(text, refs) : text}
       </ReactMarkdown>
     </div>
   );

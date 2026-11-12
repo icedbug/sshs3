@@ -234,6 +234,36 @@ explicitly enabled presentation on top of the same terminal authority.
   `errorSignature`) through S3 and Team Vault sync (`WorkspaceMemoryEntry` in
   `src/shared/types/teamVault.ts`); credentials are never uploaded.
 
+## Nightly upkeep, the dependency map, and evidence beside conclusions
+
+**Nightly upkeep** (`HubService.nightly`, `DailyReport.ts`). Once a day, after
+03:00 local time and only while none of the user's own runs is going, the hub
+tidies memory (`self-learn-reflect`), compares knowledge base pages for
+contradictions, and writes a daily report. With a team bucket one installation
+takes the claim `nightly-<day>` and does it for the team. The report is put
+together from records (alert tickets, commands with their checks and
+rollbacks, team activity, finished tickets, pages and memories the assistant
+wrote, what waits in the inbox); no model writes it, so it cannot say more than
+the data does. It shows in the Inbox until marked read. The report itself is
+local to the installation that wrote it; it is not synced.
+
+**Dependency map.** An agent that sees a link (a connection, a mount, a
+replication target) saves it with `save_infra_edge` and an `evidence` text. Such
+a link is stored with `proposed: true` and is shown under Infrastructure →
+Dependencies as a suggestion with Confirm / Dismiss. Only confirmed links are
+given to agents (`infraDependencyGraph`), and the links that touch the target
+of the run are also given as sentences in `aroundThisTarget` ("Upstream: …",
+"Downstream: …"), matched on the target's name and cluster. A suggestion never
+overwrites a link a person already has.
+
+**Evidence.** Every command gets a short name within its conversation (`c1`,
+`c2` …, `AgentChange.ref`) which is returned in the tool result. Agents are
+told to put it in brackets after the statement it supports. In the chat,
+`[c3]` becomes a button that opens and scrolls to that command and its output
+(`reportRefs.ts`); a name that matches no command stays plain text. This is an
+instruction and a display, not a gate: a report without references is not
+stopped.
+
 ## Tests for the agents (`EvalSuite`, `AgentTestsView`)
 
 - **A case** is made from a finished conversation (`caseFromTask`): its first

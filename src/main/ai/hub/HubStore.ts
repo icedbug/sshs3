@@ -127,6 +127,8 @@ export interface HubData {
   alertHook?: { hash: string; createdAt: number; lastAt?: number; received: number };
   alertRules?: { match: string; agentId: string }[];
   dailyReport?: { day: string; at: number; text: string; readAt?: number };
+  /** The day (local, YYYY-MM-DD) the nightly upkeep last ran. */
+  lastNightlyDay?: string;
   /** Test cases for the agents, with their recordings and latest runs. */
   evalCases?: EvalCase[];
   /** The pages agents read, written from the sources and from finished work. */

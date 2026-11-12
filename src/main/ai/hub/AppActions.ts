@@ -1687,6 +1687,10 @@ export async function handleAppAction(
               to: toNode,
               relation,
               label: str("edgeLabel") || str("label"),
+              // An agent's link is a suggestion from what it saw; a person confirms it.
+              proposed: true,
+              evidence: str("evidence") || str("edgeLabel") || str("label"),
+              proposedBy: task.agentName || "Assistant",
             },
           });
           return {

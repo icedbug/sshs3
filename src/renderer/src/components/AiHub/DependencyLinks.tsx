@@ -19,7 +19,9 @@ export function DependencyLinks({ hub, act }: { hub: HubSnapshot; act: Act }): J
   const [to, setTo] = useState("");
   const [relation, setRelation] = useState<InfraGraphEdge["relation"]>("depends_on");
   const [label, setLabel] = useState("");
-  const edges = hub.infraEdges ?? [];
+  const all = hub.infraEdges ?? [];
+  const edges = all.filter((e) => !e.proposed);
+  const proposed = all.filter((e) => e.proposed);
   const names = Array.from(
     new Set(
       (hub.workspaceServers ?? []).flatMap((s) => [s.cluster, s.name]).filter((x): x is string => Boolean(x)),
@@ -112,6 +114,37 @@ export function DependencyLinks({ hub, act }: { hub: HubSnapshot; act: Act }): J
           No links yet. Add the ones that matter when something breaks: which cluster stores another&apos;s volumes,
           what replicates where.
         </p>
+      )}
+      {proposed.length > 0 && (
+        <div className="ai-link-list" data-testid="proposed-links">
+          <small className="ai-muted">
+            Suggested by agents from what they saw. They are not given to agents as fact until you confirm them.
+          </small>
+          {proposed.map((edge) => (
+            <div key={edge.id} className="ai-link ai-link-proposed">
+              <div>
+                <strong>{edge.from}</strong> <span>{RELATIONS[edge.relation] ?? edge.relation}</span>{" "}
+                <strong>{edge.to}</strong>
+                <small>
+                  {edge.proposedBy ? `${edge.proposedBy}: ` : ""}
+                  {edge.evidence || edge.label || "no evidence given"}
+                </small>
+              </div>
+              <div className="ai-card-actions">
+                <button
+                  type="button"
+                  className="ai-btn-emerald"
+                  onClick={() => void act({ action: "infra-edge-confirm", id: edge.id })}
+                >
+                  Confirm
+                </button>
+                <button type="button" onClick={() => void act({ action: "infra-edge-delete", id: edge.id })}>
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
       )}
       <div className="ai-link-list">
         {edges.map((edge) => (
