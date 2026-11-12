@@ -3397,3 +3397,40 @@
   font-size: 11px;
   white-space: pre-wrap;
 }
+
+/* ---- agent tests --------------------------------------------------------- */
+.ai-eval-checks {
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 3px;
+  font-size: 12.5px;
+}
+.ai-eval-checks li {
+  padding-left: 18px;
+  position: relative;
+  color: var(--ai-ink-soft);
+}
+.ai-eval-checks li::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 6px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ai-ink-faint);
+}
+.ai-eval-checks li[data-passed="yes"]::before {
+  background: var(--ai-accent);
+}
+.ai-eval-checks li[data-passed="no"] {
+  color: #fca5a5;
+}
+.ai-eval-checks li[data-passed="no"]::before {
+  background: #f87171;
+}
+.ai-eval-checks small {
+  color: var(--ai-ink-faint);
+}

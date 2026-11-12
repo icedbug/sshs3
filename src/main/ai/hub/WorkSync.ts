@@ -15,7 +15,7 @@ import { TICKET_CLAIM_TTL_MS, mergeItems, type Mergeable } from "./WorkBoard";
  * removal is a copy marked deleted, so it reaches everyone.
  */
 
-export type WorkCollection = "goals" | "tickets" | "agents" | "kb" | "edges" | "pages";
+export type WorkCollection = "goals" | "tickets" | "agents" | "kb" | "edges" | "pages" | "evals";
 
 /** A runbook may be long; everything else is small. */
 const MAX_ITEM_BYTES = 1_500_000;

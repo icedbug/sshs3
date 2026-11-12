@@ -6,6 +6,8 @@ import type {
   AgentChange,
   AgentPlan,
   AgentUsage,
+  EvalCase,
+  EvalRun,
   ExternalRunner,
   HubReply,
   KbPage,
@@ -76,6 +78,15 @@ import {
   undoPageChange,
   PAGE_KINDS,
 } from "./KbCompile";
+import {
+  Replay,
+  caseFromTask,
+  evalRun,
+  judgePrompt,
+  normalizeExpectation,
+  parseJudgement,
+  ruleChecks,
+} from "./EvalSuite";
 import {
   alertTarget,
   alertTicketText,
@@ -197,7 +208,7 @@ const active = (t: AgentTask): boolean =>
   ["queued", "running", "waiting"].includes(t.status);
 /** A run the hub started itself (workforce specialist, memory proposals). */
 const isBackgroundRun = (t: AgentTask | undefined): boolean =>
-  Boolean(t?.workforceRunId || t?.distillSourceId);
+  Boolean(t?.workforceRunId || t?.distillSourceId || t?.evalCaseId);
 export interface HubHost {
   changed(): void;
   inventoryTargets(): Promise<InventoryTarget[]>;
@@ -397,6 +408,9 @@ export class HubService {
   /** What other installations' runs have spent, as last read from the bucket. */
   private othersUsage: Record<string, AgentUsage>[] = [];
   private uploadedUsage = "";
+  /** Recordings that answer the tool calls of test-case runs, by task id. */
+  private evalReplays = new Map<string, Replay>();
+  private evalRunningId?: string;
   private kbReadingId?: string;
   private kbRetryAt = 0;
   private kbNeedsModel = false;
@@ -1465,6 +1479,8 @@ export class HubService {
         chunks: [],
         chunkCount: Math.max(1, d.chunks?.length ?? d.chunkCount ?? 1),
       })),
+      evalCases: (this.store.data.evalCases ?? []).map(({ recorded, ...rest }) => ({ ...rest, recordedCalls: recorded.length })),
+      evalRunning: this.evalRunningId,
       dailyReport: this.store.data.dailyReport,
       alertIntake: {
         canReceive: Boolean(this.host.alertHookOwner),
@@ -2406,6 +2422,36 @@ export class HubService {
         };
         break;
       }
+      case "eval-case-save": {
+        const cases = this.store.data.evalCases ?? [];
+        const existing = cases.find((c) => c.id === request.id);
+        if (existing) {
+          existing.title = boundedContext(request.title?.trim() || existing.title, 160);
+          if (request.expect) existing.expect = normalizeExpectation(request.expect);
+          existing.updatedAt = Date.now();
+        } else {
+          const from = this.store.data.tasks.find((t) => t.id === request.fromTaskId);
+          if (!from) throw new Error("That conversation is not on this computer any more.");
+          if (active(from)) throw new Error("Wait until the conversation has ended.");
+          this.store.data.evalCases = [
+            ...cases,
+            caseFromTask(from, { title: request.title, expect: request.expect }, await this.resolveActorName()),
+          ];
+        }
+        this.lastWorkSync = 0;
+        break;
+      }
+      case "eval-case-delete":
+        this.store.data.evalCases = (this.store.data.evalCases ?? []).filter((c) => c.id !== request.id);
+        this.markSharedRemoved("evals", request.id);
+        break;
+      case "eval-run": {
+        const ids = (this.store.data.evalCases ?? []).filter((c) => !request.id || c.id === request.id).map((c) => c.id);
+        if (ids.length === 0) throw new Error("There is no such test case.");
+        if (this.evalRunningId) throw new Error("Test cases are already running.");
+        void this.runEvalCases(ids).catch((e) => log.warn("Running test cases failed", safeError(e)));
+        break;
+      }
       case "daily-report-read":
         if (this.store.data.dailyReport) this.store.data.dailyReport.readAt = Date.now();
         break;
@@ -3069,7 +3115,10 @@ export class HubService {
       title: string;
       mainModel?: boolean;
       investigator?: boolean;
+      evalCaseId?: string;
     },
+    /** For a test-case run: what answers its tool calls. */
+    replay?: Replay,
   ): Promise<AgentTask> {
     if (!["advice", "assisted", "autonomous"].includes(input.mode))
       throw new Error("Invalid autonomy mode");
@@ -3109,6 +3158,7 @@ export class HubService {
         : {}),
       ...(readOnly?.mainModel ? { mainModelOnly: true } : {}),
       ...(readOnly?.investigator ? { investigator: true } : {}),
+      ...(readOnly?.evalCaseId ? { evalCaseId: readOnly.evalCaseId } : {}),
       mode: input.mode,
       agentId: matchedAgent?.id ?? input.agentId,
       agentName: matchedAgent?.name ?? input.agentName,
@@ -3145,6 +3195,11 @@ export class HubService {
       verification: "not-verified",
     };
     this.store.data.tasks.push(task);
+    if (replay) {
+      this.evalReplays.set(task.id, replay);
+      // The recording is only needed while the run lasts.
+      void this.whenSettled(task).then(() => this.evalReplays.delete(task.id));
+    }
     try {
       await this.launch(task, schedule);
     } catch (error) {
@@ -3311,6 +3366,7 @@ export class HubService {
         toolEndpoint: capability,
       }),
       (req) => this.broker.invoke(capability.key, req),
+      this.evalReplays.get(task.id)?.answer.bind(this.evalReplays.get(task.id)),
     );
     this.runtimes.set(task.id, runtime);
     const timer = setTimeout(() => {
@@ -3971,6 +4027,67 @@ export class HubService {
     if (!this.disposed) void this.readNextKb();
   }
 
+  // ---- tests for the agents --------------------------------------------------
+
+  /**
+   * Replays test cases one after the other. Each is the recorded question put
+   * to the agent as it is now, with the tools answering from the recording;
+   * the answer is checked against what a person said should happen.
+   */
+  private async runEvalCases(ids: string[]): Promise<void> {
+    try {
+      for (const id of ids) {
+        const found = (this.store.data.evalCases ?? []).find((c) => c.id === id);
+        if (!found || this.disposed) continue;
+        this.evalRunningId = id;
+        this.changed();
+        const replay = new Replay(found.recorded);
+        let run: EvalRun;
+        try {
+          const task = await this.start(
+            { prompt: found.prompt, mode: found.mode, agentId: found.agentId, maxCommands: 40, maxMinutes: 10 },
+            undefined,
+            { evalCaseId: id, title: `Test · ${boundedContext(found.title, 80)}`, mainModel: true },
+            replay,
+          );
+          await this.whenSettled(task);
+          const answer = [...task.messages].reverse().find((m) => m.role === "assistant" && m.text.trim())?.text ?? "";
+          const checks = ruleChecks(found.expect, answer, task.toolLog ?? []);
+          if (found.expect.conclusion && task.status === "completed" && answer) {
+            const judge = await this.runBackground(
+              { prompt: judgePrompt(found, answer), mode: "advice", agentName: "Tests", maxCommands: 1, maxMinutes: 5 },
+              { distillSourceId: `eval:${id}:${Date.now()}`, title: `Judging · ${boundedContext(found.title, 80)}`, mainModel: true },
+            );
+            const verdict = parseJudgement(judge.messages.filter((m) => m.role === "assistant").at(-1)?.text ?? "");
+            checks.push(verdict ?? { name: "reaches the expected conclusion", passed: false, detail: "The judgement could not be read." });
+          }
+          run = evalRun({ task, checks, unrecorded: replay.unrecorded });
+        } catch (error) {
+          run = {
+            at: Date.now(),
+            passed: false,
+            checks: [{ name: "ran to an answer", passed: false, detail: safeError(error) }],
+            answer: "",
+            calls: [],
+            unrecorded: replay.unrecorded,
+            tokens: 0,
+          };
+        }
+        const current = (this.store.data.evalCases ?? []).find((c) => c.id === id);
+        if (current) {
+          current.runs = [run, ...current.runs].slice(0, 5);
+          current.updatedAt = Date.now();
+          this.lastWorkSync = 0;
+        }
+        await this.store.save().catch(() => undefined);
+        this.changed();
+      }
+    } finally {
+      this.evalRunningId = undefined;
+      this.changed();
+    }
+  }
+
   // ---- alerts in -----------------------------------------------------------
 
   /**
@@ -4076,7 +4193,7 @@ export class HubService {
   }
 
   /** Notes that a shared agent, runbook or dependency was removed here, and syncs soon. */
-  private markSharedRemoved(collection: "agents" | "kb" | "edges" | "pages", id: string): void {
+  private markSharedRemoved(collection: "agents" | "kb" | "edges" | "pages" | "evals", id: string): void {
     const all = (this.store.data.sharedRemoved ??= {});
     all[collection] = { ...(all[collection] ?? {}), [id]: Date.now() };
     this.lastWorkSync = 0;
@@ -4132,6 +4249,14 @@ export class HubService {
     removed.pages = pg.removed;
     if (pages.changed) {
       this.store.data.kbPages = pg.alive as KbPage[];
+      changed = true;
+    }
+
+    const evals = await sync.reconcile("evals", withRemovals(this.store.data.evalCases ?? [], removed.evals));
+    const ev = splitRemovals(evals.items);
+    removed.evals = ev.removed;
+    if (evals.changed) {
+      this.store.data.evalCases = ev.alive as EvalCase[];
       changed = true;
     }
 

@@ -164,6 +164,10 @@ export function layoutOrg(
 export const tokens = (n: number): string =>
   n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(n);
 
+/** A conversation of the user's own, not one of the hub's runs (specialists, readings for memory and pages, test cases). */
+export const isConversation = (t: Pick<AgentTask, "workforceRunId" | "distillSourceId" | "evalCaseId">): boolean =>
+  !t.workforceRunId && !t.distillSourceId && !t.evalCaseId;
+
 export type InboxKind = "approval" | "plan" | "question" | "review" | "blocked" | "alert" | "knowledge" | "report";
 
 /** One thing that is waiting for a person. */
@@ -193,7 +197,7 @@ const KB_WORTH_A_LOOK = new Set(["gap", "contradiction", "dead-target", "lost-so
 export function inboxItems(hub: HubSnapshot): InboxItem[] {
   const out: InboxItem[] = [];
   for (const task of hub.tasks) {
-    if (task.workforceRunId || task.distillSourceId) continue;
+    if (!isConversation(task)) continue;
     const live = ["running", "waiting", "queued"].includes(task.status);
     if (!live) continue;
     const who = task.agentName || "Assistant";

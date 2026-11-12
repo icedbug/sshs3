@@ -44,7 +44,7 @@ import { WorkforceView } from "./WorkforceView";
 import { HypothesisTree } from "./HypothesisTree";
 import { ChangeProof } from "./ChangeProof";
 import { InboxView } from "./InboxView";
-import { inboxItems } from "./workforceModel";
+import { inboxItems, isConversation } from "./workforceModel";
 import { InfrastructureView } from "./InfrastructureView";
 import { AgentsAndMcpView } from "./AgentsAndMcpView";
 import { KnowledgeBaseView } from "./KnowledgeBaseView";
@@ -955,11 +955,11 @@ export function AiHubPanel({
                       </button>
                     </div>
                     <div className="ai-sidebar-list">
-                      {!hub.tasks.some((t) => !t.workforceRunId) && (
+                      {!hub.tasks.some(isConversation) && (
                         <small className="ai-hint">No conversations yet.</small>
                       )}
                       {/* A workforce specialist's run is shown in its workforce conversation. */}
-                      {[...hub.tasks].filter((t) => !t.workforceRunId).reverse().map((t) => (
+                      {[...hub.tasks].filter(isConversation).reverse().map((t) => (
                         <button
                           key={t.id}
                           className="ai-sidebar-item"

@@ -7,6 +7,7 @@ import {
   type MissionAgent,
   type WorkforceRun,
 } from "@shared/types/aiHub";
+import { AgentTestsView } from "./AgentTestsView";
 import { ConfirmButton } from "./ConfirmButton";
 import { type Act, modes } from "./panelShared";
 
@@ -472,6 +473,8 @@ export function AgentsAndMcpView({
           </details>
         ))}
       </article>
+
+      <AgentTestsView hub={hub} act={act} />
 
       <div className="ai-section-head">
         <h3>

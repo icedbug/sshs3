@@ -280,7 +280,7 @@ const SAFE_READONLY_PATTERNS: RegExp[] = [
   // Things that print or test and nothing else (writing somewhere is caught as a redirection before this).
   /^(echo|printf|true|test|\[)(\s|$)/,
   // Health and configuration checks of common services.
-  /^(?:sudo\s+|)(pg_isready|mysqladmin\s+(ping|status|version)|redis-cli\s+(?:-\S+\s+\S+\s+)*(ping|info|dbsize))\b/i,
+  /^(?:sudo\s+|)(pg_isready|mysqladmin\s+(ping|status|version))\b/i,
   /^(?:sudo\s+|)(nginx\s+-[tTvV]|apachectl\s+(-t|configtest)|apache2ctl\s+(-t|configtest)|sshd\s+-[tT]|haproxy\s+-c\b|named-checkconf|visudo\s+-c)\b/i,
   /^(?:sudo\s+|)(docker|podman)\s+(ps|images|inspect|logs|version|info|top|port|diff|history|stats\s+--no-stream|network\s+(ls|inspect)|volume\s+(ls|inspect)|compose\s+(ps|logs|config|images|top))\b/i,
   /^(?:sudo\s+|)openssl\s+(x509|verify|version|s_client)\b(?!.*\s-out\b)/i,
@@ -325,8 +325,18 @@ function isReadOnlyWget(seg: string): boolean {
   return w.includes("--spider") || /(^|\s)-[a-zA-Z]*O\s*(-|\/dev\/null)(\s|$)/.test(seg);
 }
 
+/** redis-cli asking how the server is: ping, info or dbsize after connection options, and nothing else. */
+function isReadOnlyRedis(seg: string): boolean {
+  const w = words(seg.replace(/^sudo\s+/, ""));
+  if (w[0] !== "redis-cli") return false;
+  let i = 1;
+  while (i < w.length && /^-[hpna]$/.test(w[i])) i += 2;
+  const rest = w.slice(i).map((x) => x.toLowerCase());
+  return (rest.length === 1 && ["ping", "dbsize", "info"].includes(rest[0])) || (rest.length === 2 && rest[0] === "info");
+}
+
 /** Read-only forms that need more than a pattern on the first word. */
-const SAFE_READONLY_CHECKS: Array<(seg: string) => boolean> = [isReadOnlyCurl, isReadOnlyWget];
+const SAFE_READONLY_CHECKS: Array<(seg: string) => boolean> = [isReadOnlyCurl, isReadOnlyWget, isReadOnlyRedis];
 
 export function analyzeCommandSafety(command: string): CommandRiskAnalysis {
   const segments = splitShellAstSegments(command);

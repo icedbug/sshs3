@@ -1270,7 +1270,8 @@ export function toolsForTask(
     );
   const activeAgent = resolveActiveAgent(task, initialContext);
   let baseTools: FunctionToolDef[] =
-    task.mode === "advice" || !task.target
+    // A replayed test case has no terminal, but the conversation it was made from had: it gets the same tools.
+    task.mode === "advice" || (!task.target && !task.evalCaseId)
       ? AGENT_TOOLS.filter(
           (t) =>
             t.name === "workspace_context" ||
@@ -1519,6 +1520,12 @@ export class DirectAgentRuntime implements AgentRuntime {
   private compaction: "idle" | "asked" = "idle";
   /** This run's tool calls, newest last, for the digest a compaction keeps. */
   private runCalls: ToolDigestEntry[] = [];
+
+  /**
+   * Set on a run that replays a test case: every tool call that would go to
+   * the workspace is answered from the case's recording instead. Nothing runs.
+   */
+  replay?: (tool: string, argumentsJson: string) => string;
 
   constructor(
     private readonly invokeBroker: DirectToolInvoker,
@@ -2053,6 +2060,8 @@ export class DirectAgentRuntime implements AgentRuntime {
         ).length;
         output = JSON.stringify({ ok: true, items: parsed.todos.length, open });
       }
+    } else if (this.replay) {
+      output = this.replay(call.name, call.argumentsJson || "{}");
     } else if (this.task && planGate(this.task, call.name, parsedArgs)) {
       // A plan is pending: nothing that changes a system runs before the user has decided.
       output = JSON.stringify({ error: planGate(this.task, call.name, parsedArgs) });

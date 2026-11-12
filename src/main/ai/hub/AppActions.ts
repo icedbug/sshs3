@@ -1073,7 +1073,8 @@ export async function handleAppAction(
           (t) =>
             t.id !== task.id &&
             !t.workforceRunId &&
-            !t.distillSourceId,
+            !t.distillSourceId &&
+            !t.evalCaseId,
         );
         const wantedId = str("id");
         if (wantedId) {

@@ -111,6 +111,52 @@ export interface AgentToolRecord {
   output: string;
   at: number;
 }
+/** What a person says should happen when a test case is run. */
+export interface EvalExpectation {
+  /** Words the answer must contain. */
+  mention: string[];
+  notMention: string[];
+  /** A tool, or part of a command, the run must use (e.g. `sshs3_kb_search`, `zpool status`). */
+  mustCall: string[];
+  /** Part of a command the run must never try (e.g. `systemctl restart`). */
+  mustNotRun: string[];
+  /** The conclusion the answer should reach, in words; judged by a model. */
+  conclusion?: string;
+}
+export interface EvalCheck {
+  name: string;
+  passed: boolean;
+  detail?: string;
+}
+export interface EvalRun {
+  at: number;
+  model?: string;
+  passed: boolean;
+  checks: EvalCheck[];
+  answer: string;
+  calls: { name: string; input: string }[];
+  /** Tool calls the case had no recording for. */
+  unrecorded: number;
+  tokens: number;
+}
+/** A test for the agents, made from a real conversation and replayed without running anything. */
+export interface EvalCase {
+  id: string;
+  title: string;
+  prompt: string;
+  mode: AgentMode;
+  agentId?: string;
+  fromTaskId?: string;
+  /** What each tool answered when the conversation took place. */
+  recorded: { name: string; input: string; output: string }[];
+  expect: EvalExpectation;
+  /** Newest first. */
+  runs: EvalRun[];
+  createdBy: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export type CommandRiskLevel = "safe" | "modify" | "destructive";
 
 export interface SafetyPolicyConfig {
@@ -199,6 +245,11 @@ export interface AgentTask {
    * only ones classified as read-only, in a terminal of its own.
    */
   investigator?: boolean;
+  /**
+   * Set on a run that replays a test case: its tools answer from the case's
+   * recording and nothing is executed. Not listed as a conversation.
+   */
+  evalCaseId?: string;
   /** Set on a run that works a ticket from the board: that ticket's id. */
   ticketId?: string;
   /** The model the task's latest run was started on. */
@@ -905,6 +956,10 @@ export interface HubSnapshot {
     received: number;
     rules: { match: string; agentId: string }[];
   };
+  /** Test cases for the agents. Recordings are left out here; `recordedCalls` says how many there are. */
+  evalCases?: Array<Omit<EvalCase, "recorded"> & { recordedCalls: number }>;
+  /** The id of the case being run right now. */
+  evalRunning?: string;
   /** The latest nightly summary of what happened, until it has been read. */
   dailyReport?: { day: string; at: number; text: string; readAt?: number };
   /** The pages agents read. Bodies are shortened here; `kb-page-read` returns one in full. */
@@ -1070,6 +1125,11 @@ export type HubRequest =
   | { action: "alert-hook-disable" }
   | { action: "alert-rules-save"; rules: { match: string; agentId: string }[] }
   | { action: "daily-report-read" }
+  /** Makes a test case from a finished conversation, or changes a case's title and expectations. */
+  | { action: "eval-case-save"; id?: string; fromTaskId?: string; title?: string; expect?: Partial<EvalExpectation> }
+  | { action: "eval-case-delete"; id: string }
+  /** Replays one case, or all of them when no id is given. Nothing is executed. */
+  | { action: "eval-run"; id?: string }
   /** An alert pasted by hand: JSON as a monitoring system posts it, or text. */
   | { action: "alert-paste"; text: string }
   | { action: "runner-save"; runner: { id: string; name: string; command: string; args: string[]; cwd?: string } }

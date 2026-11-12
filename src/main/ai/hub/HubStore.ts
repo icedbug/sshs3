@@ -21,6 +21,7 @@ import type {
   WorkGoal,
   WorkTicket,
   AgentUsage,
+  EvalCase,
   ExternalRunner,
   KbFinding,
   KbGap,
@@ -121,11 +122,13 @@ export interface HubData {
   workTickets?: WorkTicket[];
   agentUsage?: Record<string, AgentUsage>;
   /** Removals of shared agents, runbooks and dependencies (id → when), so they reach teammates. */
-  sharedRemoved?: Partial<Record<"agents" | "kb" | "edges" | "pages", Record<string, number>>>;
+  sharedRemoved?: Partial<Record<"agents" | "kb" | "edges" | "pages" | "evals", Record<string, number>>>;
   /** The secret alerts are posted with (only its hash), and what came in. */
   alertHook?: { hash: string; createdAt: number; lastAt?: number; received: number };
   alertRules?: { match: string; agentId: string }[];
   dailyReport?: { day: string; at: number; text: string; readAt?: number };
+  /** Test cases for the agents, with their recordings and latest runs. */
+  evalCases?: EvalCase[];
   /** The pages agents read, written from the sources and from finished work. */
   kbPages?: KbPage[];
   /** Questions agents asked the knowledge base that found nothing. */

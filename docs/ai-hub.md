@@ -234,6 +234,29 @@ explicitly enabled presentation on top of the same terminal authority.
   `errorSignature`) through S3 and Team Vault sync (`WorkspaceMemoryEntry` in
   `src/shared/types/teamVault.ts`); credentials are never uploaded.
 
+## Tests for the agents (`EvalSuite`, `AgentTestsView`)
+
+- **A case** is made from a finished conversation (`caseFromTask`): its first
+  question, its mode and agent, and what every workspace tool answered at the
+  time (the run's own lists are left out). A person adds what should happen:
+  words the answer must or must not contain, a tool or part of a command the
+  run must use, part of a command it must never try, and the conclusion it
+  should reach.
+- **A run** (`eval-run`) asks the same question of the agent as it is now, on
+  the main model, with the normal tools. Every tool call that would reach the
+  workspace is answered from the recording by `Replay` (the closest recorded
+  call of the same tool); a call with no recording gets a plain "not
+  recorded" and is counted. Nothing is executed. The checks are rules
+  (`ruleChecks`) plus, when a conclusion is given, a model's judgement of
+  whether the answer reaches it. A case passes when every check does; there is
+  no blended score.
+- The newest five runs are kept per case, so the view can say which cases got
+  better or worse since the run before (`compareRuns`). Cases are shared with
+  the team like the rest of the setup.
+- A replay is only as good as its recording: when the agent, changed, asks for
+  something the original conversation never looked at, it gets "not recorded"
+  and may conclude differently for that reason alone. The count is shown.
+
 ## Changes that prove themselves and take themselves back (`sshs3_change`)
 
 - A change is made with `sshs3_change`: the command, a read-only `check` whose
