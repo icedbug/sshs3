@@ -210,3 +210,44 @@ describe("HubService tool log", () => {
     }
   });
 });
+
+describe("snapshotText", () => {
+  it("keeps the team's memories when the rest of the snapshot is too large and gets cut", async () => {
+    const { snapshotText } = await import("../../src/main/ai/hub/DirectAgentRuntime");
+    const context = {
+      terminals: [{ id: "t", recentOutput: "x".repeat(50_000) }],
+      workspaceMemories: [
+        { kind: "skill", scope: "cluster:prod", title: "Drain before reboot", text: "Drain a prod node before rebooting it." },
+        { kind: "memory", scope: "workspace", title: "Postgres", text: "max_connections is 300" },
+      ],
+      history: ["tail-marker"],
+    };
+    const text = snapshotText(context, 8000);
+    expect(text).toContain("- [skill, cluster:prod] Drain before reboot: Drain a prod node before rebooting it.");
+    expect(text).toContain("- [memory, workspace] Postgres: max_connections is 300");
+    // The snapshot itself is still bounded, and the memories are not repeated inside it.
+    expect(text.length).toBeLessThan(8000 + 1200);
+    expect(text).toContain("tail-marker");
+    expect(text.match(/Drain before reboot/g)).toHaveLength(1);
+  });
+
+  it("leaves out whole memories that do not fit their budget and says how many, best ranked first", async () => {
+    const { snapshotText } = await import("../../src/main/ai/hub/DirectAgentRuntime");
+    const workspaceMemories = Array.from({ length: 30 }, (_, i) => ({
+      kind: "memory", scope: "workspace", title: `m${String(i).padStart(2, "0")}`, text: "y".repeat(1000),
+    }));
+    const text = snapshotText({ workspaceMemories }, 8000);
+    expect(text).toContain("] m00: ");
+    expect(text).not.toContain("] m29: ");
+    const shown = (text.match(/^- \[memory/gm) ?? []).length;
+    expect(shown).toBeGreaterThan(8);
+    expect(text).toContain(`(${30 - shown} more not shown`);
+  });
+
+  it("is the plain snapshot when there are no memories, and masks a secret in one", async () => {
+    const { snapshotText } = await import("../../src/main/ai/hub/DirectAgentRuntime");
+    expect(snapshotText({ a: 1 }, 8000)).toBe('{"a":1}');
+    const text = snapshotText({ workspaceMemories: [{ kind: "memory", scope: "workspace", title: "db", text: "password=hunter2secret" }] }, 8000); // pragma: allowlist secret
+    expect(text).not.toContain("hunter2secret");
+  });
+});

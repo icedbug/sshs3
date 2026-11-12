@@ -87,6 +87,7 @@ import { boundedContext, safeError } from "./privacy";
 import { createLogger } from "../../log";
 import { runWorkforce } from "./WorkforceRunner";
 import { LearningQueue } from "./LearningQueue";
+import { firstActivityCursor, nextActivityBatch } from "./ActivityBatcher";
 import {
   EmbeddingIndex,
   openAiCompatibleEmbedder,
@@ -308,6 +309,7 @@ export class HubService {
   private learningQueue?: LearningQueue;
   private readingQueue = false;
   private lastQueueCheck = 0;
+  private lastActivityCheck = 0;
   private recoveredSessions = false;
   private initialized?: Promise<void>;
   private tickTimer?: NodeJS.Timeout;
@@ -2787,6 +2789,7 @@ export class HubService {
       void (async () => {
         await this.recoverUnreadSessions(now);
         await this.maybeLearnFromOwnActivity(now);
+        await this.queueTeamActivity(now);
         await this.readLearningQueue(now);
       })().catch((e) => log.warn("Learning failed", safeError(e)));
       let historyChanged = false;
@@ -3085,6 +3088,69 @@ export class HubService {
   }
 
   /**
+   * Hands the team's activity over for learning: everyone's changes since the
+   * shared cursor, as one record in the queue (ActivityBatcher). Any running
+   * app does this, so a colleague's changes are handed over although their
+   * computer is closed. Checked at most every five minutes.
+   */
+  private async queueTeamActivity(now = Date.now()): Promise<void> {
+    if (now - this.lastActivityCheck < 5 * 60_000) return;
+    if (this.store.data.preferences.proposeMemories === false) return;
+    const queue = this.queue();
+    if (!queue) return;
+    this.lastActivityCheck = now;
+    const cursorPath = "learn/activity-cursor.json";
+    const objects = this.s3Workspace.objects;
+    let cursor = firstActivityCursor(now);
+    try {
+      const raw = await objects.read(cursorPath);
+      const stored = raw
+        ? (JSON.parse(raw.toString("utf8")) as { through?: unknown }).through
+        : undefined;
+      if (typeof stored === "number" && Number.isFinite(stored)) cursor = stored;
+    } catch {
+      // An unreadable cursor is treated as none: the first one is written below.
+    }
+    const batch = nextActivityBatch(this.store.data.activityLog ?? [], cursor, now);
+    if (!batch) return;
+    if (batch.events.length > 0) {
+      const clock = (at: number): string =>
+        new Date(at).toISOString().slice(0, 16).replace("T", " ");
+      await queue.enqueue({
+        v: 1,
+        id: batch.id,
+        title: `Team activity ${clock(batch.from)} – ${clock(batch.through)} UTC`,
+        transcript: activityTranscript(batch.events),
+        query: boundedContext(
+          batch.events
+            .slice(-20)
+            .map((e) => `${e.targetLabel} ${e.summary}`)
+            .join(" "),
+          600,
+        ),
+        actor: "team",
+        // The same for every app that cuts this batch, so the record's name is too.
+        createdAt: batch.through,
+        attempts: 0,
+      });
+    }
+    // Never move the cursor back: another app may have handed over further meanwhile.
+    try {
+      const raw = await objects.read(cursorPath);
+      const latest = raw
+        ? (JSON.parse(raw.toString("utf8")) as { through?: unknown }).through
+        : undefined;
+      if (typeof latest === "number" && latest >= batch.through) return;
+    } catch {
+      // Unreadable: write ours.
+    }
+    await objects.write(
+      cursorPath,
+      Buffer.from(JSON.stringify({ through: batch.through }), "utf8"),
+    );
+  }
+
+  /**
    * Finished sessions that were never handed over for learning, because the
    * app was closed before it got to them, are handed over now. Once per start.
    */
@@ -3117,6 +3183,8 @@ export class HubService {
    */
   private async maybeLearnFromOwnActivity(now = Date.now()): Promise<void> {
     if (this.store.data.preferences.proposeMemories === false) return;
+    // With a team bucket the whole team's activity is handed over together (queueTeamActivity).
+    if (this.queue()) return;
     const last = this.store.data.lastActivityDistillAt ?? 0;
     if (now - last < 6 * 3_600_000) return;
     const actor = (await this.resolveActorName()).trim().toLowerCase();

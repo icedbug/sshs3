@@ -10,7 +10,13 @@ import {
   type QueueStore,
 } from "../../src/main/ai/hub/LearningQueue";
 import type { FileEntry, IStorageProvider } from "../../src/shared/types/storage";
-import type { MemoryEntry } from "../../src/shared/types/aiHub";
+import type { MemoryEntry, WorkspaceActivityEvent } from "../../src/shared/types/aiHub";
+import {
+  ACTIVITY_GRACE_MS,
+  ACTIVITY_SLOT_MS,
+  firstActivityCursor,
+  nextActivityBatch,
+} from "../../src/main/ai/hub/ActivityBatcher";
 
 const disposals: Array<() => Promise<unknown> | unknown> = [];
 afterEach(async () => {
@@ -201,7 +207,11 @@ async function makeHub(name: string, bucket: Map<string, Buffer>, saved: MemoryE
   return hub;
 }
 
-type Internals = { readLearningQueue(now?: number): Promise<void>; recoverUnreadSessions(now?: number): Promise<void> };
+type Internals = {
+  readLearningQueue(now?: number): Promise<void>;
+  recoverUnreadSessions(now?: number): Promise<void>;
+  queueTeamActivity(now?: number): Promise<void>;
+};
 const internals = (hub: unknown): Internals => hub as Internals;
 const pending = (bucket: Map<string, Buffer>): string[] => [...bucket.keys()].filter((k) => k.startsWith("team/ws/learn/pending/"));
 
@@ -304,5 +314,130 @@ describe("learning through the team bucket", () => {
     (erik as unknown as { recoveredSessions: boolean }).recoveredSessions = false;
     await internals(erik).recoverUnreadSessions(now);
     expect(pending(bucket)).toHaveLength(0);
+  });
+});
+
+const HOUR = ACTIVITY_SLOT_MS;
+const T0 = 500_000 * HOUR; // an hour boundary
+const change = (id: string, at: number, actor = "erik"): WorkspaceActivityEvent => ({
+  id,
+  actor,
+  kind: "config-edit",
+  targetLabel: "prod-db",
+  summary: `change ${id}`,
+  at,
+});
+const changes = (n: number, from: number, actor = "erik"): WorkspaceActivityEvent[] =>
+  Array.from({ length: n }, (_, i) => change(`${actor}-${from}-${String(i).padStart(3, "0")}`, from + i * 1000, actor));
+
+describe("nextActivityBatch", () => {
+  it("cuts everything since the cursor up to the last hour boundary that is past the grace time", () => {
+    const log = [...changes(8, T0 + 60_000), change("late", T0 + HOUR + 5 * 60_000)];
+    // 20 minutes past the boundary: teammates' changes may still be syncing in.
+    expect(nextActivityBatch(log, T0, T0 + HOUR + 20 * 60_000)).toBeUndefined();
+    const batch = nextActivityBatch(log, T0, T0 + HOUR + ACTIVITY_GRACE_MS + 1)!;
+    expect(batch).toMatchObject({ id: `activity:${T0}-${T0 + HOUR}`, from: T0, through: T0 + HOUR });
+    expect(batch.events).toHaveLength(8);
+    expect(batch.events.map((e) => e.id)).not.toContain("late");
+  });
+
+  it("gives every app the same batch, whenever in the hour and in whatever order it holds the log", () => {
+    const log = [...changes(5, T0 + 1000, "erik"), ...changes(5, T0 + 1500, "sara")];
+    const a = nextActivityBatch(log, T0, T0 + HOUR + ACTIVITY_GRACE_MS + 1)!;
+    const b = nextActivityBatch([...log].reverse(), T0, T0 + 2 * HOUR + ACTIVITY_GRACE_MS - 1)!;
+    expect(b.id).toBe(a.id);
+    expect(b.events.map((e) => e.id)).toEqual(a.events.map((e) => e.id));
+  });
+
+  it("waits while few changes are new, and hands them over anyway once the oldest is six hours old", () => {
+    const log = changes(3, T0 + 1000);
+    expect(nextActivityBatch(log, T0, T0 + 2 * HOUR)).toBeUndefined();
+    expect(nextActivityBatch(log, T0, T0 + 5 * HOUR)).toBeUndefined();
+    const batch = nextActivityBatch(log, T0, T0 + 6 * HOUR + 2000)!;
+    expect(batch.events).toHaveLength(3);
+    expect(batch.through).toBe(T0 + 5 * HOUR);
+  });
+
+  it("moves the cursor past a quiet stretch without a record, and does nothing before a new boundary", () => {
+    expect(nextActivityBatch([], T0, T0 + HOUR + ACTIVITY_GRACE_MS + 1)).toMatchObject({ through: T0 + HOUR, events: [] });
+    expect(nextActivityBatch(changes(20, T0 + 1000), T0 + HOUR, T0 + HOUR + ACTIVITY_GRACE_MS + 1)).toBeUndefined();
+  });
+
+  it("splits a large backlog at a change, keeps changes of one instant together, and continues from there", () => {
+    const log = [...changes(80, T0 + 1000), change("same-instant", T0 + 1000 + 79 * 1000), ...changes(30, T0 + 200_000)];
+    const now = T0 + HOUR + ACTIVITY_GRACE_MS + 1;
+    const first = nextActivityBatch(log, T0, now)!;
+    expect(first.events).toHaveLength(81);
+    expect(first.through).toBe(T0 + 1000 + 79 * 1000);
+    const second = nextActivityBatch(log, first.through, now)!;
+    expect(second.events).toHaveLength(30);
+    expect(second.through).toBe(T0 + HOUR);
+    expect(new Set([...first.events, ...second.events].map((e) => e.id)).size).toBe(111);
+  });
+
+  it("starts a new workspace a day back, on an hour boundary", () => {
+    const start = firstActivityCursor(T0 + 12_345);
+    expect(start % HOUR).toBe(0);
+    expect(T0 - start).toBe(24 * HOUR);
+  });
+});
+
+describe("team activity through the bucket", () => {
+  it("lets a running app hand over and read a closed colleague's changes, once, whoever looks", async () => {
+    const bucket = new Map<string, Buffer>();
+    const sara = await makeHub("sara", bucket);
+    const jacob = await makeHub("jacob", bucket);
+    const now = Date.now();
+    const slot = Math.floor((now - ACTIVITY_GRACE_MS) / HOUR) * HOUR;
+    // Erik made ten changes two hours ago and closed his computer; they are in everyone's synced log.
+    const eriks = changes(10, slot - 2 * HOUR + 1000, "erik");
+    for (const hub of [sara, jacob]) hub.store.data.activityLog = [...eriks];
+
+    let prompt = "";
+    const fetchSpy = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      prompt = JSON.stringify((JSON.parse(String(init?.body)) as { messages: unknown }).messages);
+      return sseResponse(
+        JSON.stringify({ proposals: [{ op: "add", scope: "server:prod-db", title: "Config lives in conf.d", text: "prod-db keeps its settings in conf.d.", evidence: "change erik" }] }),
+      );
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    // Both apps look in the same hour: one record, not two.
+    await internals(sara).queueTeamActivity(now);
+    await internals(jacob).queueTeamActivity(now);
+    expect(pending(bucket)).toHaveLength(1);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    const cursor = JSON.parse(bucket.get("team/ws/learn/activity-cursor.json")!.toString()) as { through: number };
+    expect(cursor.through).toBe(slot);
+
+    await internals(jacob).readLearningQueue(now + 60_000);
+    expect(prompt).toContain("erik on prod-db (config-edit): change erik-");
+    expect(jacob.store.data.memories.map((m) => m.title)).toEqual(["Config lives in conf.d"]);
+    expect(pending(bucket)).toHaveLength(0);
+
+    // Later looks find nothing new: the cursor is past Erik's changes.
+    (sara as unknown as { lastActivityCheck: number }).lastActivityCheck = 0;
+    await internals(sara).queueTeamActivity(now + 10 * 60_000);
+    expect(pending(bucket)).toHaveLength(0);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not move the shared cursor back when a slower app writes later", async () => {
+    const bucket = new Map<string, Buffer>();
+    const sara = await makeHub("sara", bucket);
+    const now = Date.now();
+    const slot = Math.floor((now - ACTIVITY_GRACE_MS) / HOUR) * HOUR;
+    sara.store.data.activityLog = changes(10, slot - 3 * HOUR + 1000);
+    const cursorKey = "team/ws/learn/activity-cursor.json";
+    bucket.set(cursorKey, Buffer.from(JSON.stringify({ through: slot - 4 * HOUR })));
+    // While Sara's app is uploading, a faster app moves the cursor further.
+    const objects = sara.s3Workspace.objects;
+    const write = objects.write;
+    objects.write = async (p, content) => {
+      await write(p, content);
+      if (p.startsWith("learn/pending/")) bucket.set(cursorKey, Buffer.from(JSON.stringify({ through: slot + HOUR })));
+    };
+    await internals(sara).queueTeamActivity(now);
+    expect(JSON.parse(bucket.get(cursorKey)!.toString()).through).toBe(slot + HOUR);
   });
 });

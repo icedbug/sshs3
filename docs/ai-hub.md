@@ -89,6 +89,10 @@ explicitly enabled presentation on top of the same terminal authority.
   (`autoApproveSafeReadOnly`, `requireApprovalOnProdTags`,
   `blockDestructiveWithoutConfirm`), including file writes on `prod`-tagged
   servers.
+- **Team memory in the prompt** — `snapshotText` puts the ranked memories
+  first as text with a budget of their own (12,000 characters, whole memories
+  only, with a count of those left out), apart from the JSON snapshot, which is
+  cut from its start when large.
 - **`ContextService`** — builds the agent context; memories scoped to
   `server:<name>` or `cluster:<name>` are included for matching targets and the
   40 highest-ranked memories are kept.
@@ -137,7 +141,15 @@ explicitly enabled presentation on top of the same terminal authority.
   own model through `MemoryDistiller`, and deletes it. A record whose reading
   fails goes back for another app, and is dropped after three failures. At
   start an app uploads finished sessions of the last week it never handed
-  over. Without a bucket (or when the upload fails) the app reads the record
+  over. The team's activity goes the same way (`ActivityBatcher`): a
+  shared cursor in the bucket (`learn/activity-cursor.json`) says up to when
+  activity has been handed over, and any running app cuts the next batch:
+  everyone's changes since the cursor up to the last hour boundary that is 30
+  minutes old, once eight are waiting or the oldest is six hours old. The
+  batch and its record name depend only on the log, the cursor and that
+  boundary, so two apps cut the same record. Changes that reach the shared log
+  only after their hour was handed over (made offline) are not read for memory;
+  they are still in the activity log the assistant sees. Without a bucket (or when the upload fails) the app reads the record
   itself, as before. Records are masked like everything else, but note that a
   teammate's app sends the session's transcript to that teammate's model
   provider.

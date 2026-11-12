@@ -8,6 +8,7 @@ import type {
   AgentMessage,
   AgentTask,
   AgentToolRecord,
+  MemoryEntry,
   KbDocument,
   McpServerConfig,
   MissionAgent,
@@ -15,7 +16,7 @@ import type {
 import type { ToolRequest } from "./ToolBroker";
 import type { AgentRuntime, RunEvent } from "./AgentRuntime";
 import { isDemoMode } from "./demoWorkspace";
-import { boundedContext, safeError } from "./privacy";
+import { boundedContext, maskContext, safeError } from "./privacy";
 
 export type DirectToolInvoker = (request: ToolRequest) => Promise<unknown>;
 
@@ -978,6 +979,51 @@ function resolveActiveAgent(
 }
 
 const TOOL_LOG_CHARS = 24_000;
+const TEAM_MEMORY_CHARS = 12_000;
+
+/**
+ * The workspace snapshot as the model reads it. The team's memories come
+ * first, as text with a budget of their own, best ranked first: the rest of
+ * the snapshot is cut from its start when it is too large, and what the team
+ * has learned must not be what gets cut. A memory that does not fit whole is
+ * left out rather than shortened, and the text says how many were.
+ */
+export function snapshotText(context: unknown, maxChars: number): string {
+  if (!context || typeof context !== "object")
+    return boundedContext(JSON.stringify(context ?? null), maxChars);
+  const { workspaceMemories, ...rest } = context as {
+    workspaceMemories?: unknown;
+  } & Record<string, unknown>;
+  const memories = Array.isArray(workspaceMemories)
+    ? (workspaceMemories as Array<Partial<MemoryEntry>>).filter(
+        (m) => m && typeof m.text === "string" && m.text.trim(),
+      )
+    : [];
+  const snapshot = boundedContext(JSON.stringify(rest), maxChars);
+  if (memories.length === 0) return snapshot;
+  const lines: string[] = [];
+  let used = 0;
+  let left = 0;
+  for (const m of memories) {
+    const line = `- [${m.kind === "skill" ? "skill" : "memory"}, ${m.scope ?? "workspace"}] ${maskContext(m.title ?? "")}: ${maskContext(m.text ?? "")}`;
+    if (used + line.length > TEAM_MEMORY_CHARS) {
+      left++;
+      continue;
+    }
+    lines.push(line);
+    used += line.length;
+  }
+  return [
+    "Team memory (what the team has learned and chosen to remember; best match first):",
+    ...lines,
+    ...(left > 0
+      ? [`(${left} more not shown; search with workspace_context.)`]
+      : []),
+    "",
+    "Workspace snapshot (JSON; when large, its beginning is cut):",
+    snapshot,
+  ].join("\n");
+}
 
 /**
  * The conversation as the model gets it on a new run: the stored messages,
@@ -1771,7 +1817,7 @@ export class DirectAgentRuntime implements AgentRuntime {
         content: [
           {
             type: "input_text",
-            text: `[Automatic Workspace & Terminal Snapshot]\n${boundedContext(JSON.stringify(initialContext), tuning.snapshotMaxChars)}`,
+            text: `[Automatic Workspace & Terminal Snapshot]\n${snapshotText(initialContext, tuning.snapshotMaxChars)}`,
           },
         ],
       });
@@ -1933,7 +1979,7 @@ export class DirectAgentRuntime implements AgentRuntime {
     if (initialContext && !isDistillRun(task)) {
       messages.push({
         role: "system",
-        content: `Current Workspace & Terminal Snapshot:\n${boundedContext(JSON.stringify(initialContext), tuning.snapshotMaxChars)}`,
+        content: `Current Workspace & Terminal Snapshot:\n${snapshotText(initialContext, tuning.snapshotMaxChars)}`,
       });
     }
 
@@ -2106,7 +2152,7 @@ export class DirectAgentRuntime implements AgentRuntime {
     if (initialContext && !isDistillRun(task)) {
       system.push({
         type: "text",
-        text: `Current Workspace & Terminal Snapshot:\n${boundedContext(JSON.stringify(initialContext), tuning.snapshotMaxChars)}`,
+        text: `Current Workspace & Terminal Snapshot:\n${snapshotText(initialContext, tuning.snapshotMaxChars)}`,
       });
     }
 
