@@ -3707,20 +3707,20 @@ export class HubService {
       const lines: string[] = [];
       if (server) {
         lines.push(
-          `Nod/VM: ${server.name} (${server.username}@${server.host}:${server.port})`,
+          `Server: ${server.name} (${server.username}@${server.host}:${server.port})`,
         );
-        if (server.cluster) lines.push(`Kluster: ${server.cluster}`);
-        if (server.nodeRole) lines.push(`Nod-roll: ${server.nodeRole}`);
-        if (server.role) lines.push(`Infrastruktur-roll: ${server.role}`);
+        if (server.cluster) lines.push(`Cluster: ${server.cluster}`);
+        if (server.nodeRole) lines.push(`Node role: ${server.nodeRole}`);
+        if (server.role) lines.push(`Role: ${server.role}`);
         if (server.tags?.length)
-          lines.push(`Taggar: ${server.tags.join(", ")}`);
+          lines.push(`Tags: ${server.tags.join(", ")}`);
         if (server.description)
-          lines.push(`Beskrivning: ${server.description}`);
+          lines.push(`Description: ${server.description}`);
       } else {
         lines.push(`Target: ${displayName}`);
       }
       if (recentEvents.length > 0) {
-        lines.push("Senaste automatiska händelser & ändringar:");
+        lines.push("Latest recorded changes:");
         for (const evt of recentEvents) {
           lines.push(
             `- [${new Date(evt.at).toISOString()}] ${evt.actor} (${evt.kind}): ${evt.summary}${evt.detail ? ` — ${evt.detail}` : ""}`,
@@ -3731,7 +3731,7 @@ export class HubService {
         id: `auto-node:${server?.id || key}`,
         kind: "memory",
         scope: "workspace",
-        title: `Live-status & historik: ${displayName}${server?.cluster ? ` (${server.cluster})` : ""}`,
+        title: `Server card: ${displayName}${server?.cluster ? ` (${server.cluster})` : ""}`,
         text: lines.join("\n"),
         author: "Auto-Memory",
       });
@@ -4084,15 +4084,15 @@ export class HubService {
           .filter((a) => a.profileId === srv.id || a.targetLabel === srv.name)
           .slice(0, 4);
         const lines: string[] = [
-          `Nod/VM: ${srv.name} (${srv.username}@${srv.host}:${srv.port})`,
-          ...(srv.cluster ? [`Kluster: ${srv.cluster}`] : []),
-          ...(srv.nodeRole ? [`Nod-roll: ${srv.nodeRole}`] : []),
-          ...(srv.role ? [`Infrastruktur-roll: ${srv.role}`] : []),
-          ...(srv.tags?.length ? [`Taggar: ${srv.tags.join(", ")}`] : []),
-          ...(srv.description ? [`Beskrivning: ${srv.description}`] : []),
+          `Server: ${srv.name} (${srv.username}@${srv.host}:${srv.port})`,
+          ...(srv.cluster ? [`Cluster: ${srv.cluster}`] : []),
+          ...(srv.nodeRole ? [`Node role: ${srv.nodeRole}`] : []),
+          ...(srv.role ? [`Role: ${srv.role}`] : []),
+          ...(srv.tags?.length ? [`Tags: ${srv.tags.join(", ")}`] : []),
+          ...(srv.description ? [`Description: ${srv.description}`] : []),
           ...(srvEvents.length
             ? [
-                "Senaste aktivitet:",
+                "Latest activity:",
                 ...srvEvents.map(
                   (e) =>
                     `- [${new Date(e.at).toISOString()}] ${e.actor}: ${e.summary}`,
@@ -4104,7 +4104,7 @@ export class HubService {
           id: autoId,
           kind: "memory",
           scope: "workspace",
-          title: `Auto-Minne: ${srv.name}${srv.cluster ? ` (${srv.cluster})` : ""}`,
+          title: `Server card: ${srv.name}${srv.cluster ? ` (${srv.cluster})` : ""}`,
           text: lines.join("\n"),
           author: "Auto-Memory",
           updatedAt: srv.updatedAt ? Date.parse(srv.updatedAt) || Date.now() : Date.now(),

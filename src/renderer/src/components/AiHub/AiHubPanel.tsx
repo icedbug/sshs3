@@ -863,7 +863,7 @@ export function AiHubPanel({
               : name === "Knowledge Base"
                 ? (hub?.kbDocuments?.length ?? 0)
                 : name === "Memory & skills"
-                  ? (hub?.memories?.length ?? 0)
+                  ? (hub?.memories ?? []).filter((m) => !m.id.startsWith("auto-node:") && !m.id.startsWith("auto-cluster:")).length
                   : name === "Schedules"
                     ? (hub?.schedules?.length ?? 0)
                     : 0;
@@ -2545,7 +2545,16 @@ export function AiHubPanel({
               }
             />
           )}
-          {activeView === "Schedules" && <Schedules hub={hub} act={act} />}
+          {activeView === "Schedules" && (
+            <Schedules
+              hub={hub}
+              act={act}
+              onOpenTask={(id) => {
+                setTaskId(id);
+                setView("Work");
+              }}
+            />
+          )}
         </>
       )}
       {settingsOpen && hub && (

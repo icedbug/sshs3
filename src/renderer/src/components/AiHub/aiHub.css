@@ -2534,3 +2534,35 @@
 .ai-timeline-item time {
   white-space: nowrap;
 }
+.ai-form-row-3up {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.ai-memory-text {
+  margin: 10px 0 0;
+  white-space: pre-wrap;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--ai-ink-soft);
+}
+.ai-clamped {
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.ai-footnote {
+  margin-top: 20px;
+}
+@media (max-width: 560px) {
+  .ai-form-row-3up {
+    grid-template-columns: 1fr;
+  }
+}
+.ai-card-off {
+  opacity: 0.62;
+}
+.ai-last-run {
+  display: block;
+  margin-top: 8px;
+  color: var(--ai-ink-faint);
+}
