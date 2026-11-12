@@ -2219,7 +2219,7 @@ export class HubService {
           id,
           name: boundedContext(requiredText(a.name), 120),
           role: boundedContext(a.role?.trim() || "Infrastructure Specialist", 160),
-          icon: boundedContext(a.icon?.trim() || "🤖", 16),
+          icon: boundedContext(a.icon?.trim() || "", 16),
           mission: boundedContext(requiredText(a.mission), 2000),
           systemPrompt: boundedContext(a.systemPrompt?.trim() || a.mission, 8000),
           targetCluster: a.targetCluster?.trim() || undefined,

@@ -54,6 +54,13 @@ async function main(): Promise<void> {
   out(`  Data Dir:   ${dataDir}`);
   out(`  Static Dir: ${staticDir}`);
   out(`  Demo Mode:  ${demoMode ? 'on (separate demo data dir)' : 'off'}`);
+  out(
+    `  Workforce:  ${
+      process.env.SSHS3_WORKFORCE === '1'
+        ? `on (${server.tenants.runningUserIds().length} user(s) running in the background)`
+        : 'off (a user\'s background work starts when they log in; set SSHS3_WORKFORCE=1)'
+    }`,
+  );
   out('============================================================');
 
   const shutdown = async (signal: string) => {

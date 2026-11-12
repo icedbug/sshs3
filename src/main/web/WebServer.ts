@@ -239,6 +239,12 @@ export interface Sshs3WebServerOptions {
   host?: string;
   dataDir: string;
   staticDir?: string;
+  /**
+   * Start every user's background work when the server starts instead of
+   * when they first log in (also SSHS3_WORKFORCE=1). A server that runs the
+   * team's workforce needs this: after a restart nobody may log in for days.
+   */
+  wakeUsersAtStart?: boolean;
 }
 
 export class Sshs3WebServer {
@@ -295,7 +301,27 @@ export class Sshs3WebServer {
     });
 
     this.httpServer = server;
+    if (this.options.wakeUsersAtStart ?? process.env.SSHS3_WORKFORCE === '1')
+      await this.wakeUsers();
     return { port: this.boundPort, host };
+  }
+
+  /**
+   * Starts each user's hub, whose timer runs their schedules, takes tickets
+   * when their heartbeat is on, and reads the team's learning queue. A user
+   * whose hub cannot start is logged and skipped.
+   */
+  async wakeUsers(): Promise<number> {
+    let awake = 0;
+    for (const user of await this.auth.listUsers()) {
+      try {
+        await this.tenants.getOrCreateTenant(user);
+        awake++;
+      } catch (err) {
+        log.error(`Could not start background work for ${user.username}`, err);
+      }
+    }
+    return awake;
   }
 
   async stop(): Promise<void> {

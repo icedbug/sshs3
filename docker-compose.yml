@@ -14,5 +14,11 @@ services:
       - SSHS3_DATA_DIR=/data
       - SSHS3_ADMIN_USER=${SSHS3_ADMIN_USER:-}
       - SSHS3_ADMIN_PASSWORD=${SSHS3_ADMIN_PASSWORD:-}
+      # Run every user's schedules and workforce heartbeat from server start,
+      # not only after they log in. See docs/workforce-server.md.
+      - SSHS3_WORKFORCE=${SSHS3_WORKFORCE:-1}
+      # Encrypts stored credentials. Unset, a key is generated and kept in the
+      # data volume; set it to keep the key out of the volume.
+      - SSHS3_MASTER_KEY=${SSHS3_MASTER_KEY:-}
     volumes:
       - ./sshs3-data:/data

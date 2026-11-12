@@ -331,6 +331,11 @@ export class WebTenantManager {
     this.notifyTimer.unref?.();
   }
 
+  /** Users whose hub is running in this process. */
+  runningUserIds(): string[] {
+    return [...this.resolvedTenants.keys()];
+  }
+
   async getOrCreateTenant(user: WebUserPublic): Promise<UserTenant> {
     const existing = this.tenants.get(user.id);
     if (existing) {

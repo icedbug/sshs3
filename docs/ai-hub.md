@@ -264,11 +264,26 @@ because there is no server to run one on.
   timer tick the app takes the oldest runnable ticket in To do and starts it,
   one at a time. It runs in the agent's own mode, so an agent set to run
   commands on its own does so unattended, within the safety policy.
-- **Sharing.** `WorkSync` keeps one object per goal and per ticket under
-  `work/` in the team bucket; per item the newer copy wins and a removal is a
-  copy marked deleted. It is read every 40 seconds. Agents themselves are not
-  shared yet: a ticket carries its assignee's name, but a teammate needs the
-  same agent locally to run it.
+- **Sharing.** `WorkSync` keeps one object per item under `work/` in the team
+  bucket: goals, tickets, agents, shared runbooks and dependencies. Per item
+  the newer copy wins; a removal is carried as a marker (`sharedRemoved`,
+  `withRemovals`) so it reaches everyone instead of the item coming back. It
+  is read every 40 seconds, and at once after a change. Spending is one
+  object per installation (`work/usage/<client>.json`) and added up
+  (`sumUsage`), so a budget holds for the team. Not shared, on purpose: MCP
+  servers and external runners (commands that run with the user's rights) and
+  schedules (they belong to the installation that runs them).
+- **External agents** (`AcpRuntime`). An agent with `runnerId` runs on an
+  external coding agent over the Agent Client Protocol: a program started on
+  this computer that speaks JSON-RPC on stdio. sshS3 sends the prompt, shows
+  the agent's text, plan and tool calls, and answers its permission requests
+  through the same approval and safety rules as its own commands, once per
+  action. It offers the agent no file access and no terminal: the agent uses
+  its own, in the runner's folder. Token use is not reported over ACP, so
+  such runs do not count against a budget.
+- **Server.** `docs/workforce-server.md`: the web build with
+  `SSHS3_WORKFORCE=1` starts every user's hub at server start, so tickets,
+  schedules and the learning queue are worked without anybody's app open.
 - **Templates** (`WORKFORCE_TEMPLATES`): "Operate a system" and "Develop a
   product" add five agents with reporting lines, a goal and first tickets.
 - **View** (`WorkforceView`, `TeamGraph`, `workforceModel`): the board with
@@ -276,9 +291,11 @@ because there is no server to run one on.
   a live tree on React Flow (MIT) showing what each agent is doing.
 
 Checked with stubbed model responses (`aiHubWorkBoard.test.ts`,
-`workforceView.test.tsx`) and in a browser against a stand-in
-OpenAI-compatible endpoint. Not checked: a real model, two computers sharing
-a real bucket, and a long unattended heartbeat.
+`workforceView.test.tsx`), against a stand-in ACP agent process
+(`aiHubAcpRuntime.test.ts`) and in a browser against a stand-in
+OpenAI-compatible endpoint. Not checked: a real model, the real Claude Code
+and Codex adapters, two computers sharing a real bucket, and a long
+unattended heartbeat.
 
 ## The panel (`src/renderer/src/components/AiHub/`)
 

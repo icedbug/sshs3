@@ -107,6 +107,24 @@ describe('Sshs3WebServer Multi-User Hybrid Mode', () => {
     });
   }
 
+  it('starts every user\'s background work at server start when it runs the workforce', async () => {
+    await apiJson('/api/auth/setup', {
+      method: 'POST',
+      body: JSON.stringify({ username: 'jacob', password: 'test-pass-123', displayName: 'Jacob' }),
+    });
+    await server.stop();
+    const staticDir = path.join(tmpDir, 'static');
+    // An ordinary restart: nobody has logged in, so nothing runs for anybody.
+    server = new Sshs3WebServer({ port: 0, host: '127.0.0.1', dataDir: tmpDir, staticDir });
+    await server.start();
+    expect(server.tenants.runningUserIds()).toHaveLength(0);
+    await server.stop();
+    // As a workforce server the user's hub, and with it the timer, is up before anyone logs in.
+    server = new Sshs3WebServer({ port: 0, host: '127.0.0.1', dataDir: tmpDir, staticDir, wakeUsersAtStart: true });
+    await server.start();
+    expect(server.tenants.runningUserIds()).toHaveLength(1);
+  });
+
   it('supports First-Run Admin setup, Invite redemption, per-user SSH keys, and Hybrid Multi-User WebSocket sharing', async () => {
     // 1. Check initial status -> uninitialized
     const initStatus = await apiJson('/api/auth/status');
