@@ -15,6 +15,7 @@ import {
   type Embedder,
   type EmbeddingIndex,
 } from "./EmbeddingIndex";
+import { MAX_DOC_CHARS, MAX_UPLOAD_BYTES, extractText, splitSections } from "./KbExtract";
 import { safeError } from "./privacy";
 
 export interface KbChunkResult {
@@ -404,6 +405,15 @@ interface IndexedChunkRecord {
   concepts: string[];
 }
 
+/** A document's text as the pieces search returns, each knowing the headings it sits under. */
+export function sectionsOf(docId: string, content: string): KbDocument["chunks"] {
+  return splitSections(content).map((section, idx) => ({
+    id: `${docId}#${idx}`,
+    heading: section.heading,
+    text: section.text,
+  }));
+}
+
 export class KnowledgeBaseService {
   private oramaDb?: AnyOrama;
   private oramaSignature = "";
@@ -448,7 +458,9 @@ export class KnowledgeBaseService {
       const tagStr = (doc.tags ?? []).join(" ");
       parts.forEach((part, idx) => {
         const chunkId = `${doc.id}#${idx}`;
-        const tokens = tokenize(`${doc.title} ${col} ${cl} ${tagStr} ${part}`);
+        // A piece is found by the headings it sits under too, not only by its own words.
+        const heading = doc.chunks?.[idx]?.heading ?? "";
+        const tokens = tokenize(`${doc.title} ${col} ${cl} ${tagStr} ${heading} ${part}`);
         const concepts = extractSemanticConcepts(tokens);
         chunkMap.set(chunkId, {
           chunkId,
@@ -465,7 +477,7 @@ export class KnowledgeBaseService {
           title: doc.title,
           collection: col,
           cluster: cl,
-          tags: tagStr,
+          tags: `${tagStr} ${heading}`.trim(),
           concepts: concepts.join(" "),
           text: part,
         });
@@ -495,17 +507,9 @@ export class KnowledgeBaseService {
     content: string;
     author?: string;
   }): KbDocument {
-    const content = input.content.slice(0, 250_000);
+    const content = input.content.slice(0, MAX_DOC_CHARS);
     const id = input.id || crypto.randomUUID();
-    const rawChunks = splitIntoChunks(content);
-    const chunks = rawChunks.map((text, idx) => {
-      const headingMatch = /^#{1,3}\s+(.+)$/m.exec(text);
-      return {
-        id: `${id}#${idx}`,
-        heading: headingMatch ? headingMatch[1].trim() : undefined,
-        text,
-      };
-    });
+    const chunks = sectionsOf(id, content);
     const cluster =
       input.cluster?.trim() || input.targetCluster?.trim() || undefined;
     const sourceRef =
@@ -983,7 +987,7 @@ export class KnowledgeBaseService {
           tags?: string[];
         } = "Local Docs",
     targetCluster?: string,
-    maxFiles = 25,
+    maxFiles = 300,
   ): Promise<KbDocument[]> {
     const collection =
       typeof collectionOrOpts === "string"
@@ -1017,11 +1021,12 @@ export class KnowledgeBaseService {
           await walk(full, depth + 1);
         } else if (entry.isFile()) {
           const ext = path.extname(entry.name).toLowerCase();
-          if (!TEXT_EXTENSIONS.has(ext)) continue;
+          if (!TEXT_EXTENSIONS.has(ext) && ![".pdf", ".docx", ".html", ".htm", ".log", ".csv"].includes(ext))
+            continue;
           try {
             const stat = await fs.stat(full);
-            if (stat.size === 0 || stat.size > 200_000) continue;
-            const content = await fs.readFile(full, "utf-8");
+            if (stat.size === 0 || stat.size > MAX_UPLOAD_BYTES) continue;
+            const content = (await extractText({ name: entry.name, data: await fs.readFile(full) })).text;
             out.push(
               this.createDocument({
                 id: `kb-folder-${crypto.createHash("sha1").update(full).digest("hex").slice(0, 14)}`,

@@ -234,6 +234,54 @@ explicitly enabled presentation on top of the same terminal authority.
   `errorSignature`) through S3 and Team Vault sync (`WorkspaceMemoryEntry` in
   `src/shared/types/teamVault.ts`); credentials are never uploaded.
 
+## Knowledge base: an inbox (`KbExtract`, `KbEnrich`)
+
+The knowledge base takes material as it is and makes it usable; nobody has to
+give a document a title, a collection or tags first.
+
+- **In.** Files and folders dropped on the view, chosen files, pasted text, a
+  pasted link (`kb-ingest-file`, `kb-ingest-text`, `kb-ingest-url`), and a
+  folder by its path on the desktop. `extractText` reads PDF (unpdf), Word
+  .docx (mammoth), web pages (Readability, then Turndown, without escaping so
+  commands stay intact) and any text file; it says why it cannot read the rest
+  (scanned PDFs, pictures, old .doc, binaries). 10 MB per file. A text longer
+  than 800 000 characters becomes several documents.
+- **Not twice.** A document carries a hash of its text; the same material
+  under another name is refused with the name of the one that is there.
+- **Pieces.** `splitSections` follows the document: a piece starts at a
+  heading, a fenced code block or a table is never cut, and each piece knows
+  the headings it sits under (`Storage handbook › Latency › Diagnose`). Search
+  matches on those headings too.
+- **Reading.** Every dropped-in document is queued (`reading.state`) and read
+  once by a tool-less background run (the fast model when one is set): a
+  title a person would search for, a summary, tags, a collection, a cluster
+  from the team's own list, a kind. A title found in the material itself is
+  kept; only a file name is replaced. The text is never rewritten. With a team
+  bucket the document is claimed first, so whichever installation has a
+  model, a server included, reads it. Without a model documents wait and are
+  searchable meanwhile; an answer that cannot be used fails after two tries
+  and can be asked for again.
+- **Originals.** The uploaded file is kept under `kb-originals/` and, with a
+  team bucket, under `kb/originals/<docId>/`, so the source can be opened and
+  read again later. It is removed with its document. Everything dropped in is
+  readable by the whole team.
+- **Out.** The snapshot's document list carries the beginning of each text and
+  no pieces; `kb-read` returns one whole document, `kb-search` the ranked
+  search the assistant uses, `kb-original` the file. These answers come in
+  `reply` on that request's snapshot only. For the assistant,
+  `sshs3_kb_search` returns each hit with its document's summary and the
+  headings it sits under, and with `id` reads a document section by section,
+  and it is told to say which document and heading it used.
+
+Checked with small real PDF and Word files, stubbed model responses
+(`aiHubKbExtract.test.ts`, `aiHubKbInbox.test.ts`,
+`knowledgeBaseView.test.tsx`) and in a browser against the web build with a
+stand-in model. Not checked: large real manuals, the packaged desktop app, and
+the quality of a real model's titles and summaries. Not built yet: pictures
+and scanned PDFs, watched sources that re-read themselves, search by meaning
+without an OpenAI-compatible embedding endpoint, and detecting documents that
+contradict each other.
+
 ## Workforce: goals, tickets and a team (`WorkBoard`, `WorkSync`)
 
 A team of mission agents works towards goals through a board of tickets. The

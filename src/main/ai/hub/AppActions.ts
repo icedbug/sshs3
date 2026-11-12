@@ -1430,6 +1430,31 @@ export async function handleAppAction(
         const cluster = str("cluster");
         const limit = num("limit") ?? 6;
         const docs = hub.getKbDocumentsList();
+        const readId = str("id");
+        if (readId) {
+          const doc = docs.find((d) => d.id === readId) ?? docs.find((d) => d.title.toLowerCase() === readId.toLowerCase());
+          if (!doc) throw new Error(`No knowledge base document with id ${readId}`);
+          const from = Math.max(0, Math.floor(num("from") ?? 0));
+          const sections: Array<{ section: number; heading?: string; text: string }> = [];
+          let size = 0;
+          let i = from;
+          // As many sections as fit in one answer; the rest with `from`.
+          for (; i < doc.chunks.length && (size < 14_000 || sections.length === 0); i++) {
+            sections.push({ section: i, heading: doc.chunks[i].heading, text: doc.chunks[i].text });
+            size += doc.chunks[i].text.length;
+          }
+          return {
+            docId: doc.id,
+            title: doc.title,
+            summary: doc.summary,
+            source: doc.sourceRef,
+            updated: new Date(doc.updatedAt).toISOString().slice(0, 10),
+            totalSections: doc.chunks.length,
+            sections,
+            ...(i < doc.chunks.length ? { next: i } : {}),
+          };
+        }
+        if (!query.trim()) throw new Error("sshs3_kb_search needs a query, or an id to read a document");
         const found = await hub.kb.searchHybrid(
           docs,
           { query, cluster, limit },
@@ -1445,7 +1470,16 @@ export async function handleAppAction(
           ...(found.embeddingError
             ? { embeddingError: found.embeddingError }
             : {}),
-          matches: found.matches,
+          matches: found.matches.map((m) => {
+            const doc = docs.find((d) => d.id === m.docId);
+            return {
+              ...m,
+              section: m.chunkIndex,
+              heading: doc?.chunks?.[m.chunkIndex]?.heading,
+              summary: doc?.summary,
+              totalSections: doc?.chunks?.length,
+            };
+          }),
         };
       }
 

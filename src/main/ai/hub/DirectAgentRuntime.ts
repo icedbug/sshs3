@@ -796,13 +796,21 @@ const AGENT_TOOLS: FunctionToolDef[] = [
   {
     name: "sshs3_kb_search",
     description:
-      "Search the built-in sshs3 Knowledge Base (KB) for runbooks, architecture docs, NetApp ONTAP / StorageGRID / Ceph / Kubernetes Trident guides, and configuration standards.",
+      "The team's knowledge base: runbooks, references, architecture notes and whatever else the team has put in. With `query`: the pieces that match best, each with its document (`docId`, `title`, `summary`) and where in it the piece sits (`heading`, `section`). A piece is an extract: before you act on a procedure, read the document around it with `id` (and `from` to continue). When you use something from here, say which document and heading it came from.",
     parameters: {
       type: "object",
       properties: {
         query: {
           type: "string",
           description: "Keywords or question to search in the Knowledge Base.",
+        },
+        id: {
+          type: "string",
+          description: "Read a document instead of searching: its docId from a search result. Returns its sections in order.",
+        },
+        from: {
+          type: "number",
+          description: "With id: the section to start at (default 0). Use the `next` of the previous answer to continue.",
         },
         cluster: {
           type: "string",
@@ -813,7 +821,6 @@ const AGENT_TOOLS: FunctionToolDef[] = [
           description: "Maximum number of KB chunks to return (default 6).",
         },
       },
-      required: ["query"],
       additionalProperties: false,
     },
   },

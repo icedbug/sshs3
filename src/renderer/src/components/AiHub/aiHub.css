@@ -2820,7 +2820,7 @@
     transparent 70%
   );
   background-size: 220% 100%;
-  animation: ai-rise 260ms var(--ai-ease) both, ai-sheen 2.6s linear infinite;
+  animation: ai-rise 260ms var(--ai-ease) both, ai-glide 2.6s linear infinite;
 }
 .ai-ticket-detail {
   margin-top: 14px;
@@ -3038,4 +3038,165 @@
   color: var(--ai-ink-faint);
   font-weight: 400;
   line-height: 1.5;
+}
+/* ---- knowledge base: the inbox ------------------------------------------ */
+.ai-dropzone {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+  gap: 16px;
+  padding: 18px;
+  border: 1.5px dashed var(--ai-line-strong);
+  border-radius: 14px;
+  background: var(--ai-surface);
+  transition: border-color 200ms var(--ai-ease), background 200ms var(--ai-ease), transform 200ms var(--ai-ease);
+}
+.ai-kb-dragging .ai-dropzone {
+  border-color: var(--ai-accent);
+  background: color-mix(in srgb, var(--ai-accent) 9%, transparent);
+  transform: scale(1.005);
+}
+.ai-dropzone-main {
+  display: grid;
+  align-content: center;
+  gap: 4px;
+}
+.ai-dropzone-main strong {
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--ai-ink);
+}
+.ai-dropzone-main small {
+  color: var(--ai-ink-faint);
+  line-height: 1.5;
+}
+.ai-dropzone-paste {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+}
+.ai-dropzone-paste textarea {
+  width: 100%;
+  min-height: 74px;
+  resize: vertical;
+}
+.ai-hub .ai-dropzone-paste button {
+  margin: 0;
+  justify-self: end;
+}
+.ai-reading {
+  margin: 12px 0 0;
+  padding: 9px 13px;
+  border-radius: 9px;
+  border: 1px solid var(--ai-line);
+  font-size: 12.5px;
+  color: var(--ai-ink-soft);
+}
+.ai-reading-on {
+  background-image: linear-gradient(
+    100deg,
+    transparent 30%,
+    color-mix(in srgb, var(--ai-accent) 10%, transparent) 50%,
+    transparent 70%
+  );
+  background-size: 220% 100%;
+  animation: ai-glide 2.4s linear infinite;
+}
+.ai-inbox ul {
+  margin: 0;
+  padding: 0 14px 10px;
+  list-style: none;
+  max-height: 240px;
+  overflow: auto;
+}
+.ai-inbox li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+  gap: 12px;
+  padding: 4px 0;
+  font-size: 12px;
+  border-top: 1px solid var(--ai-line);
+}
+.ai-inbox li span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ai-ink);
+}
+.ai-inbox li small {
+  color: var(--ai-ink-faint);
+}
+.ai-inbox-added small {
+  color: var(--ai-accent);
+}
+.ai-inbox-failed small {
+  color: #fca5a5;
+}
+.ai-hub .ai-inbox > .ai-chip {
+  margin: 0 14px 12px;
+}
+.ai-hits {
+  display: grid;
+  gap: 6px;
+  margin: 4px 0 14px;
+  animation: ai-rise 220ms var(--ai-ease) both;
+}
+.ai-hits > small {
+  color: var(--ai-ink-faint);
+}
+.ai-hub .ai-hit {
+  display: grid;
+  gap: 3px;
+  margin: 0;
+  padding: 9px 12px;
+  text-align: left;
+  border: 1px solid var(--ai-line);
+  border-radius: 9px;
+  background: var(--ai-surface);
+  font-size: 12.5px;
+  transition: border-color 160ms var(--ai-ease), background 160ms var(--ai-ease);
+}
+.ai-hub .ai-hit:hover {
+  border-color: var(--ai-accent);
+  background: var(--ai-surface-raised);
+}
+.ai-hit strong {
+  color: var(--ai-ink);
+  font-weight: 600;
+}
+.ai-hit strong span {
+  color: var(--ai-ink-faint);
+  font-weight: 500;
+}
+.ai-hit > span {
+  color: var(--ai-ink-soft);
+  line-height: 1.5;
+}
+.ai-doc-summary {
+  margin: 0 0 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--ai-line);
+  color: var(--ai-ink-soft);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+@media (max-width: 720px) {
+  .ai-dropzone,
+  .ai-inbox li {
+    grid-template-columns: 1fr;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ai-reading-on {
+    animation: none !important;
+  }
+}
+
+/* A light passing over a surface: the background moves, the element stays put. */
+@keyframes ai-glide {
+  from {
+    background-position: 120% 0;
+  }
+  to {
+    background-position: -120% 0;
+  }
 }

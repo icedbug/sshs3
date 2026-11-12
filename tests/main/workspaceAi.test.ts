@@ -1640,7 +1640,8 @@ describe("Production multi-user workspace sync & auto-memory", () => {
     expect((initialSnap.mcpCatalog ?? []).length).toBe(9);
 
     // Search with Swedish semantic concept + slight typo
-    const hits = hub.kb.search(initialSnap.kbDocuments ?? [], {
+    // The snapshot's list carries only the beginning of each text: search runs on the hub's own documents.
+    const hits = hub.kb.search(hub.appActionHost().getKbDocumentsList(), {
       query: "hög svarstid och dröjsmål i lagring",
       limit: 4,
     });

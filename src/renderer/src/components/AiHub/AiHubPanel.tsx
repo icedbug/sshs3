@@ -270,7 +270,17 @@ export function AiHubPanel({
       items.push({
         label: `@kb:${slug}`,
         subtitle: `Runbook (${doc.collection}): ${doc.title}`,
-        text: `# KB Document: ${doc.title} (${doc.collection})\n\n${doc.content.slice(0, 6000)}`,
+        // The list holds only the start of each text: the assistant reads the rest itself.
+        text: [
+          `Knowledge base document: ${doc.title} (docId ${doc.id}, ${doc.collection ?? "General"})`,
+          doc.summary ? `Summary: ${doc.summary}` : "",
+          `Beginning:\n${doc.content}`,
+          (doc.contentLength ?? 0) > doc.content.length
+            ? `This is only the beginning. Read the document with sshs3_kb_search (id="${doc.id}") before relying on it.`
+            : "",
+        ]
+          .filter(Boolean)
+          .join("\n\n"),
       });
     }
     return items;

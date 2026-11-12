@@ -672,18 +672,58 @@ export interface KbDocument {
   id: string;
   collection?: string;
   title: string;
-  sourceType: "upload" | "folder" | "s3" | "manual" | "note";
+  sourceType: "upload" | "folder" | "s3" | "manual" | "note" | "url" | "paste";
   sourceUri?: string;
   sourceRef?: string;
   targetCluster?: string;
   cluster?: string;
   tags?: string[];
+  /**
+   * The text. In a snapshot sent to the interface this is only the beginning
+   * (see `contentLength`); the whole text comes with a `kb-read` request.
+   */
   content: string;
+  /** Empty in a snapshot; see `chunkCount`. */
   chunks: KbChunk[];
   chunkCount?: number;
+  /** Length of the whole text, set on a snapshot's shortened copy. */
+  contentLength?: number;
   shared?: boolean;
   updatedAt: number;
   author?: string;
+  /** What the document is and when to open it, written when it was read. */
+  summary?: string;
+  kind?: "runbook" | "reference" | "architecture" | "incident" | "config" | "notes";
+  /**
+   * Where the reading that gives a dropped-in document its title, summary and
+   * tags stands. Absent on a document a person wrote.
+   */
+  reading?: { state: "queued" | "reading" | "done" | "failed"; attempts?: number; error?: string; at: number };
+  /** The title is only the file's name or the link: the reading may replace it. */
+  titleFromSource?: boolean;
+  /** The file this text was taken from, kept beside it. */
+  original?: { name: string; mime?: string; size: number };
+  /** Hash of the text, so the same material is not added twice. */
+  contentHash?: string;
+  pages?: number;
+}
+
+/** One piece of a document that matched a search. */
+export interface KbSearchHit {
+  docId: string;
+  title: string;
+  collection: string;
+  heading?: string;
+  snippet: string;
+  score: number;
+}
+
+/** What one request asked for, beside the snapshot. Present only on that request's answer. */
+export interface HubReply {
+  kbDocument?: KbDocument;
+  kbSearch?: { query: string; hits: KbSearchHit[]; byMeaning: boolean };
+  download?: { name: string; mime: string; dataBase64: string };
+  ingest?: { added: string[]; duplicates: string[]; failed: { name: string; error: string }[] };
 }
 export interface TerminalCommandFailure {
   sessionId: string;
@@ -738,6 +778,9 @@ export interface HubSnapshot {
   agents?: MissionAgent[];
   mcpServers?: McpServerConfig[];
   mcpCatalog?: McpCatalogPreset[];
+  reply?: HubReply;
+  /** The queue of documents waiting to be read for title, summary and tags. */
+  kbReading?: { waiting: number; reading?: string; failed: number; needsModel?: boolean };
   externalRunners?: ExternalRunner[];
   externalRunnerPresets?: ExternalRunnerPreset[];
   workGoals?: WorkGoal[];
@@ -902,6 +945,18 @@ export type HubRequest =
       };
     }
   | { action: "kb-delete"; id: string }
+  /** One file as it was dropped in. */
+  | { action: "kb-ingest-file"; name: string; mime?: string; dataBase64: string }
+  | { action: "kb-ingest-text"; text: string; title?: string }
+  | { action: "kb-ingest-url"; url: string }
+  /** The whole document comes back in `reply.kbDocument`. */
+  | { action: "kb-read"; id: string }
+  /** The ranked search the assistant uses; hits come back in `reply.kbSearch`. */
+  | { action: "kb-search"; query: string; limit?: number }
+  /** The original file comes back in `reply.download`. */
+  | { action: "kb-original"; id: string }
+  /** Read the document again for title, summary and tags. */
+  | { action: "kb-reread"; id: string }
   | {
       action: "kb-ingest-folder";
       folderPath: string;

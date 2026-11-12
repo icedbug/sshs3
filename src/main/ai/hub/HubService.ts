@@ -7,6 +7,7 @@ import type {
   AgentPlan,
   AgentUsage,
   ExternalRunner,
+  HubReply,
   AgentSchedule,
   AgentTask,
   HubRequest,
@@ -50,6 +51,18 @@ import {
   shouldRequireCommandApproval,
 } from "./CommandSafetyService";
 import { AcpRuntime, EXTERNAL_RUNNER_PRESETS } from "./AcpRuntime";
+import {
+  MAX_UPLOAD_BYTES,
+  contentHash,
+  extractText,
+  fetchUrl,
+  firstHeading,
+  splitLongText,
+  titleFromName,
+  type Extracted,
+} from "./KbExtract";
+import { buildReadingPrompt, parseReading } from "./KbEnrich";
+import { sectionsOf } from "./KnowledgeBaseService";
 import {
   deleteDemoAgent,
   deleteDemoInfraEdge,
@@ -349,6 +362,11 @@ export class HubService {
   /** What other installations' runs have spent, as last read from the bucket. */
   private othersUsage: Record<string, AgentUsage>[] = [];
   private uploadedUsage = "";
+  private kbReadingId?: string;
+  private kbRetryAt = 0;
+  private kbNeedsModel = false;
+  /** Documents another installation is reading: left alone until this time. */
+  private kbSkipUntil = new Map<string, number>();
   private readingQueue = false;
   private lastQueueCheck = 0;
   private lastActivityCheck = 0;
@@ -1371,7 +1389,20 @@ export class HubService {
         lastSyncAt: this.workSyncAt,
         error: this.workSyncError,
       },
-      kbDocuments: kbDocs,
+      // The list carries the beginning of each text; the whole comes with kb-read.
+      kbDocuments: kbDocs.map((d) => ({
+        ...d,
+        content: d.content.slice(0, 700),
+        contentLength: d.content.length,
+        chunks: [],
+        chunkCount: Math.max(1, d.chunks?.length ?? d.chunkCount ?? 1),
+      })),
+      kbReading: {
+        waiting: kbDocs.filter((d) => d.reading?.state === "queued" || d.reading?.state === "reading").length,
+        reading: kbDocs.find((d) => d.id === this.kbReadingId)?.title,
+        failed: kbDocs.filter((d) => d.reading?.state === "failed").length,
+        needsModel: this.kbNeedsModel || undefined,
+      },
       workforceRuns: this.getWorkforceRunsList(),
       infraEdges: allInfraEdges,
       safetyPolicy: this.store.data.safetyPolicy ?? DEFAULT_SAFETY_POLICY,
@@ -1421,6 +1452,8 @@ export class HubService {
 
   async request(request: HubRequest): Promise<HubSnapshot> {
     await this.initialize();
+    // What this request returns beside the snapshot. Local to the call: requests overlap.
+    let reply: HubReply | undefined;
     if (this.disposed) throw new Error("Application is shutting down");
     if (!request || typeof request.action !== "string")
       throw new Error("Invalid AI request");
@@ -2582,6 +2615,18 @@ export class HubService {
           content: requiredText(d.content),
           shared: d.shared ?? true,
         });
+        const before = this.getKbDocumentsList().find((x) => x.id === doc.id);
+        if (before) {
+          // An edit keeps what the reading and the upload gave the document.
+          doc.summary = before.summary;
+          doc.kind = before.kind;
+          doc.original = before.original;
+          doc.pages = before.pages;
+          doc.reading = before.reading;
+          // A person set the title: the reading does not replace it any more.
+          doc.titleFromSource = before.title === doc.title ? before.titleFromSource : false;
+        }
+        doc.contentHash = contentHash(doc.content);
         this.store.data.kbDocuments = [
           ...(this.store.data.kbDocuments ?? []).filter((x) => x.id !== doc.id),
           doc,
@@ -2595,9 +2640,105 @@ export class HubService {
           (d) => d.id !== request.id,
         );
         this.markSharedRemoved("kb", request.id);
+        void this.removeKbOriginal(request.id);
         // Before deleteDemoKbDocument: in demo mode the built-ins are the demo store's documents.
         this.markBuiltinDismissed(request.id, getBuiltinKbDocuments());
         if (isDemoMode()) deleteDemoKbDocument(request.id);
+        break;
+      }
+      case "kb-ingest-file": {
+        const data = Buffer.from(String(request.dataBase64 ?? ""), "base64");
+        const name = boundedContext(requiredText(request.name), 200);
+        if (data.length > MAX_UPLOAD_BYTES)
+          throw new Error(`"${name}" is larger than ${Math.round(MAX_UPLOAD_BYTES / 1024 / 1024)} MB.`);
+        const extracted = await extractText({ name, mime: request.mime, data });
+        reply = {
+          ingest: await this.ingestExtracted(extracted, {
+            name,
+            sourceType: "upload",
+            sourceRef: name,
+            original: { name, mime: request.mime, data },
+          }),
+        };
+        break;
+      }
+      case "kb-ingest-text": {
+        const text = requiredText(request.text);
+        const title = request.title?.trim() || firstHeading(text);
+        reply = {
+          ingest: await this.ingestExtracted(
+            { text, format: "text", title },
+            {
+              name: title || text.trim().split("\n")[0].replace(/^[#>*\s-]+/, "").slice(0, 80) || "Pasted note",
+              sourceType: "paste",
+            },
+          ),
+        };
+        break;
+      }
+      case "kb-ingest-url": {
+        const fetched = await fetchUrl(requiredText(request.url));
+        reply = {
+          ingest: await this.ingestExtracted(fetched, {
+            name: fetched.title || fetched.url,
+            sourceType: "url",
+            sourceRef: fetched.url,
+          }),
+        };
+        break;
+      }
+      case "kb-read": {
+        const found = this.getKbDocumentsList().find((d) => d.id === request.id);
+        if (!found) throw new Error("Document not found");
+        reply = { kbDocument: found };
+        break;
+      }
+      case "kb-search": {
+        const query = requiredText(request.query);
+        const docs = this.getKbDocumentsList();
+        const result = await this.kb.searchHybrid(
+          docs,
+          { query, limit: Math.max(1, Math.min(20, request.limit ?? 8)) },
+          await this.kbEmbedder(),
+          this.embeddings,
+        );
+        const byId = new Map(docs.map((d) => [d.id, d]));
+        reply = {
+          kbSearch: {
+            query,
+            byMeaning: result.retrieval === "hybrid",
+            hits: result.matches.map((m) => ({
+              docId: m.docId,
+              title: m.title,
+              collection: m.collection,
+              heading: byId.get(m.docId)?.chunks?.[m.chunkIndex]?.heading,
+              snippet: boundedContext(m.snippet, 420),
+              score: m.score,
+            })),
+          },
+        };
+        break;
+      }
+      case "kb-original": {
+        const found = this.getKbDocumentsList().find((d) => d.id === request.id);
+        if (!found?.original) throw new Error("This document has no original file.");
+        const data = await this.readKbOriginal(found);
+        if (!data) throw new Error("The original file is not on this computer and could not be fetched from the team bucket.");
+        reply = {
+          download: {
+            name: found.original.name,
+            mime: found.original.mime || "application/octet-stream",
+            dataBase64: data.toString("base64"),
+          },
+        };
+        break;
+      }
+      case "kb-reread": {
+        const found = (this.store.data.kbDocuments ?? []).find((d) => d.id === request.id);
+        if (!found) throw new Error("Document not found");
+        found.reading = { state: "queued", at: Date.now() };
+        this.kbRetryAt = 0;
+        void this.readNextKb();
         break;
       }
       case "kb-ingest-folder": {
@@ -2612,10 +2753,24 @@ export class HubService {
         const map = new Map(
           (this.store.data.kbDocuments ?? []).map((x) => [x.id, x]),
         );
+        const known = new Set(
+          [...map.values()].map((x) => x.contentHash).filter((h): h is string => Boolean(h)),
+        );
         for (const doc of docs) {
+          doc.contentHash = contentHash(doc.content);
+          const existing = map.get(doc.id);
+          // The same file again and unchanged: nothing to do. The same text under another name: not added twice.
+          if (existing?.contentHash === doc.contentHash) continue;
+          if (!existing && known.has(doc.contentHash)) continue;
+          known.add(doc.contentHash);
+          doc.titleFromSource = true;
+          doc.summary = existing?.summary;
+          doc.reading = { state: "queued", at: Date.now() };
           map.set(doc.id, doc);
           if (isDemoMode()) saveDemoKbDocument(doc);
         }
+        this.lastWorkSync = 0;
+        void this.readNextKb();
         this.store.data.kbDocuments = Array.from(map.values());
         break;
       }
@@ -2714,6 +2869,7 @@ export class HubService {
     }
     await this.store.save();
     const snap = await this.snapshot();
+    if (reply) snap.reply = reply;
     this.changed();
     return snap;
   }
@@ -3270,6 +3426,209 @@ export class HubService {
       });
   }
 
+  // ---- knowledge base: what is dropped in ----------------------------------
+
+  private kbOriginalDir(docId: string): string {
+    return path.join(this.directory, "kb-originals", docId.replace(/[^A-Za-z0-9._-]/g, "_"));
+  }
+  private kbOriginalKey(doc: Pick<KbDocument, "id" | "original">): string {
+    const name = (doc.original?.name ?? "file").replace(/[^A-Za-z0-9._-]/g, "_").slice(-120);
+    return `kb/originals/${doc.id.replace(/[^A-Za-z0-9._-]/g, "_")}/${name}`;
+  }
+
+  /** The file a document was taken from: from this computer, else from the team bucket (and then kept here). */
+  private async readKbOriginal(doc: KbDocument): Promise<Buffer | undefined> {
+    const fsp = await import("node:fs/promises");
+    const local = path.join(this.kbOriginalDir(doc.id), path.basename(this.kbOriginalKey(doc)));
+    try {
+      return await fsp.readFile(local);
+    } catch {
+      // Not here: a teammate added it.
+    }
+    if (!this.s3Workspace.canUseBucket()) return undefined;
+    const remote = await this.s3Workspace.objects.read(this.kbOriginalKey(doc)).catch(() => undefined);
+    if (remote) {
+      await fsp.mkdir(path.dirname(local), { recursive: true }).catch(() => undefined);
+      await fsp.writeFile(local, remote).catch(() => undefined);
+    }
+    return remote;
+  }
+
+  private async removeKbOriginal(docId: string): Promise<void> {
+    const fsp = await import("node:fs/promises");
+    const doc = { id: docId };
+    await fsp.rm(this.kbOriginalDir(docId), { recursive: true, force: true }).catch(() => undefined);
+    if (!this.s3Workspace.canUseBucket()) return;
+    const dir = path.posix.dirname(this.kbOriginalKey(doc));
+    const names = await this.s3Workspace.objects.list(dir).catch(() => [] as string[]);
+    for (const name of names) await this.s3Workspace.objects.remove(`${dir}/${name}`).catch(() => undefined);
+  }
+
+  /**
+   * Text that was taken out of a file, a link or a paste becomes one document
+   * (or several, when it is very long), queued to be read for title, summary
+   * and tags. Text that is already in the knowledge base is not added again.
+   */
+  private async ingestExtracted(
+    extracted: Extracted,
+    source: {
+      name: string;
+      sourceType: KbDocument["sourceType"];
+      sourceRef?: string;
+      original?: { name: string; mime?: string; data: Buffer };
+    },
+  ): Promise<NonNullable<HubReply["ingest"]>> {
+    const hash = contentHash(extracted.text);
+    const all = this.getKbDocumentsList();
+    const twin = all.find((d) => (d.contentHash ?? contentHash(d.content)) === hash);
+    if (twin) return { added: [], duplicates: [twin.title], failed: [] };
+    const baseTitle = extracted.title?.trim() || titleFromName(source.name);
+    const parts = splitLongText(extracted.text);
+    const author = await this.resolveActorName();
+    const now = Date.now();
+    const added: KbDocument[] = parts.map((text, i) => ({
+      ...this.kb.createDocument({
+        title: parts.length > 1 ? `${baseTitle} — part ${i + 1} of ${parts.length}` : baseTitle,
+        sourceType: source.sourceType,
+        sourceRef: source.sourceRef,
+        content: text,
+        author,
+      }),
+      contentHash: parts.length > 1 ? contentHash(text) : hash,
+      titleFromSource: !extracted.title,
+      pages: extracted.pages,
+      reading: { state: "queued" as const, at: now + i },
+    }));
+    if (source.original) {
+      const first = added[0];
+      first.original = {
+        name: source.original.name,
+        mime: source.original.mime,
+        size: source.original.data.length,
+      };
+      const fsp = await import("node:fs/promises");
+      const local = path.join(this.kbOriginalDir(first.id), path.basename(this.kbOriginalKey(first)));
+      await fsp.mkdir(path.dirname(local), { recursive: true });
+      await fsp.writeFile(local, source.original.data);
+      if (this.s3Workspace.canUseBucket())
+        void this.s3Workspace.objects
+          .write(this.kbOriginalKey(first), source.original.data)
+          .catch((e) => log.warn("Could not upload a knowledge base original", safeError(e)));
+    }
+    this.store.data.kbDocuments = [...(this.store.data.kbDocuments ?? []), ...added];
+    this.lastWorkSync = 0;
+    void this.readNextKb();
+    return { added: added.map((d) => d.title), duplicates: [], failed: [] };
+  }
+
+  /**
+   * Reads the next document that is waiting: one model run gives it a title,
+   * a summary, tags and a place. With a team bucket the document is claimed
+   * first, so the team's installations (a server included) share the queue
+   * instead of all reading the same document.
+   */
+  private async readNextKb(now = Date.now()): Promise<void> {
+    if (this.kbReadingId || this.disposed || isDemoMode() || now < this.kbRetryAt) return;
+    const waiting = (this.store.data.kbDocuments ?? [])
+      .filter(
+        (d) =>
+          d.reading &&
+          (d.reading.state === "queued" ||
+            (d.reading.state === "reading" && now - d.reading.at > 10 * 60_000)) &&
+          (this.kbSkipUntil.get(d.id) ?? 0) < now,
+      )
+      .sort((a, b) => a.reading!.at - b.reading!.at);
+    const doc = waiting[0];
+    if (!doc) return;
+    if (!(await this.config.getView().catch(() => ({ enabled: false }))).enabled) {
+      this.kbNeedsModel = true;
+      return;
+    }
+    this.kbReadingId = doc.id;
+    const client = this.clientId();
+    const sync = doc.shared !== false ? this.work() : undefined;
+    let claimed = false;
+    try {
+      if (sync) {
+        const held = await sync.claim(`kb-${doc.id}`, { by: await this.resolveActorName(), client }, now);
+        if (held.client !== client) {
+          this.kbSkipUntil.set(doc.id, now + 3 * 60_000);
+          return;
+        }
+        claimed = true;
+      }
+      doc.reading = { ...doc.reading!, state: "reading", at: now };
+      this.changed();
+      const extra = await this.collectExtraContext();
+      const servers = extra.workspaceServers ?? [];
+      const known = {
+        clusters: [...new Set(servers.map((s) => s.cluster).filter((c): c is string => Boolean(c)))],
+        servers: servers.map((s) => s.name),
+        collections: [
+          ...new Set(
+            this.getKbDocumentsList()
+              .map((d) => d.collection)
+              .filter((c): c is string => Boolean(c) && c !== "General"),
+          ),
+        ],
+      };
+      const task = await this.runBackground(
+        {
+          prompt: buildReadingPrompt(doc, known),
+          mode: "advice",
+          agentName: "Knowledge base",
+          maxCommands: 1,
+          maxMinutes: 5,
+        },
+        { distillSourceId: `kb:${doc.id}`, title: `Reading · ${boundedContext(doc.title, 80)}` },
+      );
+      const answer = task.messages.filter((m) => m.role === "assistant").at(-1)?.text ?? "";
+      if (task.status !== "completed") throw new Error(task.error || "The reading run did not finish.");
+      const reading = parseReading(answer, known);
+      if (!reading) throw new Error("The model's answer could not be used.");
+      // The document may have been edited or removed while it was read.
+      const current = (this.store.data.kbDocuments ?? []).find((d) => d.id === doc.id);
+      if (current) {
+        if (current.titleFromSource && reading.title) current.title = reading.title;
+        current.titleFromSource = false;
+        current.summary = reading.summary;
+        current.kind = reading.kind;
+        current.tags = [...new Set([...(current.tags ?? []), ...reading.tags])].slice(0, 12);
+        if (reading.cluster && !current.cluster) {
+          current.cluster = reading.cluster;
+          current.targetCluster = reading.cluster;
+        }
+        if (reading.collection && (!current.collection || current.collection === "General"))
+          current.collection = reading.collection;
+        current.reading = { state: "done", at: Date.now() };
+        current.updatedAt = Date.now();
+        this.lastWorkSync = 0;
+      }
+      this.kbNeedsModel = false;
+    } catch (error) {
+      const reason = safeError(error);
+      const current = (this.store.data.kbDocuments ?? []).find((d) => d.id === doc.id);
+      if (/api key|choose a model|endpoint missing|enable ai|not signed in|oauth/i.test(reason)) {
+        // Nothing is wrong with the document: there is no model to read it with yet.
+        this.kbNeedsModel = true;
+        this.kbRetryAt = Date.now() + 5 * 60_000;
+        if (current) current.reading = { state: "queued", at: current.reading?.at ?? now };
+      } else if (current) {
+        const attempts = (current.reading?.attempts ?? 0) + 1;
+        current.reading =
+          attempts >= 2
+            ? { state: "failed", attempts, error: boundedContext(reason, 300), at: Date.now() }
+            : { state: "queued", attempts, at: Date.now() };
+      }
+    } finally {
+      if (claimed) await sync?.release(`kb-${doc.id}`, client).catch(() => undefined);
+      this.kbReadingId = undefined;
+      await this.store.save().catch(() => undefined);
+      this.changed();
+    }
+    if (!this.disposed) void this.readNextKb();
+  }
+
   // ---- the board ----------------------------------------------------------
 
   /** Names this installation in ticket claims; made once and kept. */
@@ -3318,16 +3677,26 @@ export class HubService {
     }
 
     const docs = this.store.data.kbDocuments ?? [];
+    const mine = new Map(docs.map((d) => [d.id, d]));
+    // The pieces are made from the text, so they are not sent: a document travels once, not twice.
     const kb = await sync.reconcile(
       "kb",
-      withRemovals(docs.filter((d) => d.shared !== false), removed.kb),
+      withRemovals(
+        docs.filter((d) => d.shared !== false).map((d) => ({ ...d, chunks: [] })),
+        removed.kb,
+      ),
     );
     const k = splitRemovals(kb.items);
     removed.kb = k.removed;
     if (kb.changed) {
       this.store.data.kbDocuments = [
         ...docs.filter((d) => d.shared === false && !(d.id in k.removed)),
-        ...(k.alive as KbDocument[]),
+        ...(k.alive as KbDocument[]).map((d) => {
+          const local = mine.get(d.id);
+          return local && local.updatedAt === d.updatedAt
+            ? local
+            : { ...d, chunks: sectionsOf(d.id, d.content) };
+        }),
       ];
       changed = true;
     }
@@ -3645,6 +4014,7 @@ export class HubService {
         await this.readLearningQueue(now);
       })().catch((e) => log.warn("Learning failed", safeError(e)));
       void this.workTick(now).catch((e) => log.warn("Board tick failed", safeError(e)));
+      void this.readNextKb(now).catch((e) => log.warn("Knowledge base reading failed", safeError(e)));
       let historyChanged = false;
       for (const session of this.terminals.list()) {
         const text = this.terminals.context(session.id);
