@@ -487,6 +487,8 @@ describe("Production multi-user workspace sync & auto-memory", () => {
       "sshs3_kb_search",
       "sshs3_kb_manage",
       "sshs3_agent_and_mcp_manage",
+      // The agent's own task list is part of every normal run.
+      "todo_write",
     ]);
     expect(events.find((e) => e.type === "run.completed")?.output).toContain(
       "Hej! Jag kan hjälpa dig",
@@ -515,6 +517,8 @@ describe("Production multi-user workspace sync & auto-memory", () => {
       "sshs3_kb_search",
       "sshs3_kb_manage",
       "sshs3_agent_and_mcp_manage",
+      // The agent's own task list is part of every normal run.
+      "todo_write",
     ]);
 
     // Includes terminal execution tools + sshs3_* tools in assisted mode when target is attached
@@ -548,6 +552,8 @@ describe("Production multi-user workspace sync & auto-memory", () => {
       "sshs3_kb_search",
       "sshs3_kb_manage",
       "sshs3_agent_and_mcp_manage",
+      // The agent's own task list is part of every normal run.
+      "todo_write",
     ]);
   });
 

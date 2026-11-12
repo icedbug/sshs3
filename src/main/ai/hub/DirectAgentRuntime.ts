@@ -17,6 +17,29 @@ import type { ToolRequest } from "./ToolBroker";
 import type { AgentRuntime, RunEvent } from "./AgentRuntime";
 import { isDemoMode } from "./demoWorkspace";
 import { boundedContext, maskContext, safeError } from "./privacy";
+import {
+  TODO_TOOL,
+  continuationMessage,
+  failureHints,
+  newDiscipline,
+  noteToolResult,
+  operatingInstructions,
+  parseTodos,
+  renderFailureHints,
+  wantsThoroughMode,
+  type RunDiscipline,
+} from "./AgentDiscipline";
+
+/**
+ * How a provider request that failed for a passing reason is tried again:
+ * rate limits and server-side errors, not rejected requests. Mutable so tests
+ * need not wait out the real delays.
+ */
+export const retryPolicy = { attempts: 3, baseDelayMs: 1000, maxDelayMs: 20_000 };
+const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504, 529]);
+
+const lastUserText = (task: AgentTask): string =>
+  task.messages.filter((m) => m.role === "user").at(-1)?.text ?? "";
 
 export type DirectToolInvoker = (request: ToolRequest) => Promise<unknown>;
 
@@ -1109,7 +1132,7 @@ export function toolsForTask(
   if (isReadOnlyRun(task))
     return AGENT_TOOLS.filter((t) => READ_ONLY_RUN_TOOLS.has(t.name));
   const activeAgent = resolveActiveAgent(task, initialContext);
-  let baseTools =
+  let baseTools: FunctionToolDef[] =
     task.mode === "advice" || !task.target
       ? AGENT_TOOLS.filter(
           (t) =>
@@ -1118,6 +1141,12 @@ export function toolsForTask(
             t.name.startsWith("sshs3_"),
         )
       : [...AGENT_TOOLS];
+  // The agent's own task list: every normal run has it, whatever else it may call.
+  baseTools.push({
+    name: TODO_TOOL.name,
+    description: TODO_TOOL.description,
+    parameters: TODO_TOOL.parameters as unknown as Record<string, unknown>,
+  });
 
   if (
     activeAgent?.allowedTools?.length &&
@@ -1128,7 +1157,8 @@ export function toolsForTask(
       (t) =>
         allowed.has(t.name) ||
         t.name === "workspace_context" ||
-        t.name === "sshs3_kb_search",
+        t.name === "sshs3_kb_search" ||
+        t.name === TODO_TOOL.name,
     );
   }
 
@@ -1205,7 +1235,14 @@ function extractAiRuntimeTuning(
   return {
     snapshotMaxChars,
     maxOutputTokens,
-    maxTurns: Math.max(4, Math.min(60, maxToolTurns)),
+    // Thorough mode reads more and verifies each step: it gets twice the turns.
+    maxTurns: Math.max(
+      4,
+      Math.min(
+        60,
+        wantsThoroughMode(lastUserText(task)) ? maxToolTurns * 2 : maxToolTurns,
+      ),
+    ),
     reasoningEffort,
     temperature,
   };
@@ -1266,38 +1303,12 @@ function buildSystemInstructions(
     }
   }
 
-  return [
-    "You are the built-in AI Copilot and Master Architect of **sshs3** — a modern cross-platform SSH, SFTP, S3, and Kubernetes/Cluster workspace platform with an integrated AI Workspace, Mission Agents, MCP (Model Context Protocol) support, Knowledge Base (KB), S3 Team Workspace sync, YubiKey/PIV Team Vault, and Multi-User Web Server mode.",
-    `Current autonomy mode: ${task.mode}. Primary terminal target: ${JSON.stringify(task.target ?? null)}.`,
-    ...agentSection,
-    "",
-    "### YOUR CORE MANDATE",
-    "1. **YOU CAN ANSWER ANYTHING ABOUT SSHS3 & INFRASTRUCTURE**: You have complete, encyclopedic understanding of how `sshs3` works, how all its features are configured, and the user's current servers, clusters, folders, S3 buckets, Directory Sync profiles, Dotfile Pools, keyboard shortcuts, memories, recent team changes, schedules, Mission Agents, MCP servers, Knowledge Base documents, and settings (provided automatically in `[Automatic Workspace & Terminal Snapshot]`).",
-    "2. **YOU CAN CONFIGURE & ORCHESTRATE 100% OF SSHS3 AT ANY TIME**:",
-    "   - **SSH Servers, Clusters, Advanced SSH & Tunnels (`sshs3_manage_server` & `sshs3_manage_cluster_and_folders`)**: Create/update/delete servers, assign clusters/roles/folders/tags, configure `authType` (`password`/`privateKey`/`smartcard`/`agent`/`fido2`), `privateKeyPath`, `pkcs11LibPath`, `proxyJump` bastion, `forwardAgent` (`-A`), `x11Forwarding` (`-Y`), `compression`, `serverAliveInterval`, `poolId` + `dotfilesSyncPolicy`, local per-user auth overrides, and SSH Port Forwarding Tunnels (`save_tunnel`, `delete_tunnel`, `list_tunnels` for `-L` local, `-R` remote, and `-D` dynamic SOCKS proxies).",
-    "   - **S3 Profiles, S3 Team Workspace & Directory Sync (`sshs3_manage_s3_and_sync`)**: Configure/connect/disconnect the S3 Team Workspace bucket (`configure_s3_workspace`, `disconnect_s3_workspace`, `sync_now`), create/update/delete S3 bucket profiles (`upsert_s3_profile`, `delete_s3_profile`), and manage saved Directory Sync profiles (`list_dir_sync_profiles`, `save_dir_sync_profile`, `delete_dir_sync_profile`).",
-    "   - **All App Settings, AI Model/Context Budget, Shortcuts, Dotfiles & Snippets (`sshs3_manage_app_and_settings`)**: Update any `AppSettings` field (theme `dark`/`light`/`breeze`/`system`, terminal font/size/cursor/scrollback, Performance Monitor bar `perfMetricsEnabled`/`perfMetricsLayout`/`perfMetricsItems`/`perfMetricsIntervalSec`, File Manager `showHiddenFiles`/`defaultConflictPolicy`/`verifyTransferIntegrity`/`fileManagerGitIntegration`, Kubernetes/OpenShift `enableOpenShift`/`k8sDebugImages`, Smartcard/YubiKey `smartcardAuthMode`/`smartcardLibPath`, X11 server), configure AI model & context window parameters (`configure_ai`: `aiProvider`, `aiModel`, `contextWindowTokens` `16k`–`900k`, `terminalContextChars`, `maxOutputTokens`, `maxToolTurns`, `reasoningEffort`, `temperature`), customize keyboard shortcuts (`update_shortcuts`), manage Dotfile Pools & synced files (`list_dotfiles`, `save_dotfile`, `delete_dotfile` for `~/.bashrc`, `~/.vimrc`, `~/.tmux.conf`, etc.), and manage command snippets (`save_snippet`, `delete_snippet`).",
-    "   - **Parallel Cluster Execution (`sshs3_cluster_exec`)**: Run commands in parallel across an entire cluster or list of nodes.",
-    "   - **UI Workspace Layout (`sshs3_workspace_layout`)**: Open single terminals, 2x2/horizontal/vertical Konsole split-pane grids for a cluster, or Dual-Pane SFTP/S3 File Explorer tabs directly in the UI.",
-    "   - **Storage & Diff Operations (`sshs3_storage_ops`)**: List/inspect remote SFTP & S3 files and diff configuration files across two nodes or buckets.",
-    "   - **Knowledge Base (`sshs3_kb_search` & `sshs3_kb_manage`)**: Search and manage the built-in Knowledge Base (`add_document`, `delete_document`, `ingest_local_folder`, `ingest_s3_prefix`).",
-    "   - **Mission Agents & MCP Servers (`sshs3_agent_and_mcp_manage`)**: Create/manage/run Mission Agents and stdio/HTTP MCP servers, and invoke discovered external MCP tools (`mcp__<server>__<tool>`).",
-    "   - **Schedules & Team Memory (`sshs3_manage_schedule` & `sshs3_manage_memory_and_activity`)**: Manage recurring AI health checks and shared team memories/skills.",
-    "3. **TERMINAL & FILE EXECUTION**: When troubleshooting or operating on a single server/shell (and mode is `assisted` or `autonomous`), use `terminal_command`, `terminal_verify`, `file_read`, and `file_write`. Never run interactive full-screen TUI programs (`vim`, `nano`, `top`, `less` without flags).",
-    "",
-    "### COMPLETE KNOWLEDGE BASE OF SSHS3",
-    "- **Workspace VMs & Clusters (`LandingView`)**: Servers have `name`, `host`, `port`, `username`, `cluster` (e.g. `NetApp-ONTAP-Prod-SE`, `NetApp-StorageGRID-S3`, `Ceph-NVMe-Block-Pool`, `K8s-Trident-CSI-Prod`), `nodeRole`, infrastructure `role`, `folder`, `tags`, `description`, and `shared`.",
-    "- **@-Context Mentions in Chat**: Typing `@` autocompletes `@workspace`, `@team-changes`, `@cluster:<name>`, `@agent:<name>` (Mission Agents), `@kb:<title>` (Knowledge Base docs), or `@<server>`.",
-    "- **Proactive 'Fix with AI' Terminal Banner & Inline AI (`Ctrl+K`)**: When a command fails in any terminal, sshs3 surfaces a 1-click `✨ Förklara & fixa felet` chip that attaches the failed command, exit code, and terminal output to AI chat.",
-    "- **Mission Agents, MCP & Knowledge Base**: Users can configure specialized Mission Agents with custom system prompts, target clusters, KB collections, and stdio/HTTP MCP servers, plus control context window size (`16k`–`900k`), terminal scrollback budget, reasoning effort, and max tool turns.",
-    "",
-    "### RESPONSE FORMATTING & VISUAL CLARITY",
-    "- Structure technical answers with clear `###` headings, bullet points, and **Markdown tables** (`| Nod | Roll | Status | Latens / Värde |`) whenever comparing multiple servers, clusters, volumes, or metrics.",
-    "- Always use fenced code blocks with an explicit language tag (` ```bash `, ` ```diff `, ` ```yaml `, ` ```json `) for CLI commands, scripts, and configuration diffs so the user can copy or run them with 1 click.",
-    "- Highlight key takeaways, root causes, or safety warnings in a concise callout blockquote (`> **Rotorsak / Rekommendation:** ...`).",
-    "",
-    "Always respond in the same language as the user (e.g. Swedish if the user writes in Swedish). Be clear, helpful, and proactive.",
-  ].join("\n");
+  return operatingInstructions({
+    mode: task.mode,
+    target: task.target ?? null,
+    thorough: wantsThoroughMode(lastUserText(task)),
+    agentSection,
+  });
 }
 
 interface ParsedToolCall {
@@ -1338,6 +1349,9 @@ export class DirectAgentRuntime implements AgentRuntime {
   /** Names of the tools this run offered the model; anything else is refused. */
   private offered?: Set<string>;
   private onEvent?: (event: RunEvent) => void;
+  /** The run's task list and what it has changed and verified (AgentDiscipline). */
+  private discipline: RunDiscipline = newDiscipline();
+  private task?: AgentTask;
 
   constructor(
     private readonly invokeBroker: DirectToolInvoker,
@@ -1361,6 +1375,11 @@ export class DirectAgentRuntime implements AgentRuntime {
     onEvent: (event: RunEvent) => void,
   ): Promise<void> {
     this.onEvent = onEvent;
+    this.task = task;
+    this.discipline = newDiscipline(
+      task.todos ? [...task.todos] : [],
+      wantsThoroughMode(lastUserText(task)),
+    );
     try {
       if (model.kind === "openai-codex") {
         const auth = new CodexAuthProvider(this.authBaseDir);
@@ -1721,6 +1740,87 @@ export class DirectAgentRuntime implements AgentRuntime {
     return tools;
   }
 
+  /**
+   * When a command has just failed, adds what the team's memory holds about
+   * this failure to its result, so the model sees it before its next attempt.
+   * Looking it up must never fail the tool call.
+   */
+  private async withFailureHints(
+    tool: string,
+    args: Record<string, unknown>,
+    result: unknown,
+  ): Promise<unknown> {
+    if (tool !== "terminal_command" && tool !== "terminal_verify") return result;
+    const r = (result ?? {}) as Record<string, unknown>;
+    if (typeof r.exitCode !== "number" || r.exitCode === 0) return result;
+    try {
+      const known = [
+        ...(((await this.invokeBroker({ action: "skills" })) as MemoryEntry[]) ?? []),
+        ...(((await this.invokeBroker({ action: "memory" })) as MemoryEntry[]) ?? []),
+      ];
+      const hints = failureHints(
+        typeof args.command === "string" ? args.command : "",
+        typeof r.output === "string" ? r.output : "",
+        Array.isArray(known) ? known : [],
+      );
+      if (hints.length === 0) return result;
+      return {
+        ...r,
+        teamMemoryOnThisFailure: renderFailureHints(hints),
+      };
+    } catch {
+      return result;
+    }
+  }
+
+  /** The message that sends the run back to work when it wants to stop too early, if any. */
+  private nudge(): string | undefined {
+    if (!this.task || isReadOnlyRun(this.task) || isDistillRun(this.task))
+      return undefined;
+    return continuationMessage(this.discipline);
+  }
+
+  /** A provider request, tried again after a rate limit or a server-side error. */
+  private async request(url: string, init: RequestInit): Promise<Response> {
+    for (let attempt = 0; ; attempt++) {
+      let response: Response | undefined;
+      let failure: unknown;
+      try {
+        response = await this.fetchImpl(url, init);
+      } catch (error) {
+        if (this.cancelled || this.abort.signal.aborted) throw error;
+        failure = error;
+      }
+      const retryable = response
+        ? RETRYABLE_STATUS.has(response.status)
+        : true;
+      if (!retryable || attempt >= retryPolicy.attempts) {
+        if (response) return response;
+        throw failure;
+      }
+      const asked = Number(response?.headers.get("retry-after"));
+      const delay = Math.min(
+        retryPolicy.maxDelayMs,
+        Number.isFinite(asked) && asked > 0
+          ? asked * 1000
+          : retryPolicy.baseDelayMs * 2 ** attempt,
+      );
+      await response?.body?.cancel().catch(() => {});
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, delay);
+        this.abort.signal.addEventListener(
+          "abort",
+          () => {
+            clearTimeout(timer);
+            resolve();
+          },
+          { once: true },
+        );
+      });
+      if (this.cancelled) throw new Error("Run cancelled");
+    }
+  }
+
   private async executeToolCall(call: ParsedToolCall): Promise<string> {
     if (this.offered && !this.offered.has(call.name))
       return JSON.stringify({
@@ -1733,12 +1833,33 @@ export class DirectAgentRuntime implements AgentRuntime {
       return JSON.stringify({ error: "Invalid JSON arguments for tool " + call.name });
     }
     let output: string;
-    try {
-      const req = mapToolCallToBrokerRequest(call.name, parsedArgs);
-      const result = await this.invokeBroker(req);
-      output = JSON.stringify(result ?? { ok: true });
-    } catch (error) {
-      output = JSON.stringify({ error: safeError(error) });
+    if (call.name === TODO_TOOL.name) {
+      // Kept by the run itself, not by the workspace: nothing to ask the broker.
+      const parsed = parseTodos(parsedArgs);
+      if ("error" in parsed) {
+        output = JSON.stringify({ error: parsed.error });
+      } else {
+        this.discipline.todos = parsed.todos;
+        this.discipline.nudgesWithoutProgress = 0;
+        this.onEvent?.({ type: "todos.updated", todos: parsed.todos });
+        const open = parsed.todos.filter(
+          (t) => t.status === "pending" || t.status === "in_progress",
+        ).length;
+        output = JSON.stringify({ ok: true, items: parsed.todos.length, open });
+      }
+    } else {
+      try {
+        const req = mapToolCallToBrokerRequest(call.name, parsedArgs);
+        const result = await this.invokeBroker(req);
+        noteToolResult(this.discipline, call.name, parsedArgs, result);
+        output = JSON.stringify(
+          (await this.withFailureHints(call.name, parsedArgs, result)) ?? {
+            ok: true,
+          },
+        );
+      } catch (error) {
+        output = JSON.stringify({ error: safeError(error) });
+      }
     }
     this.onEvent?.({
       type: "tool.result",
@@ -1843,7 +1964,7 @@ export class DirectAgentRuntime implements AgentRuntime {
         });
       }
 
-      const response = await this.fetchImpl(`${baseUrl}/responses`, {
+      const response = await this.request(`${baseUrl}/responses`, {
         method: "POST",
         headers: buildCodexHeaders(creds.accessToken, baseUrl),
         body: JSON.stringify({
@@ -1925,6 +2046,16 @@ export class DirectAgentRuntime implements AgentRuntime {
       }
 
       if (toolCalls.length === 0) {
+        const nudge = this.nudge();
+        if (nudge) {
+          inputItems.push({
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: nudge }],
+          });
+          if (turnText) onEvent({ type: "message.delta", delta: "\n\n" });
+          continue;
+        }
         onEvent({
           type: "run.completed",
           output: finalOutput,
@@ -2025,7 +2156,7 @@ export class DirectAgentRuntime implements AgentRuntime {
       };
       if (model.apiKey) headers.Authorization = `Bearer ${model.apiKey}`;
 
-      const response = await this.fetchImpl(`${baseUrl}/chat/completions`, {
+      const response = await this.request(`${baseUrl}/chat/completions`, {
         method: "POST",
         headers,
         body: JSON.stringify({
@@ -2092,6 +2223,13 @@ export class DirectAgentRuntime implements AgentRuntime {
       if (turnText) finalOutput = turnText;
 
       if (toolCalls.length === 0) {
+        const nudge = this.nudge();
+        if (nudge) {
+          messages.push({ role: "assistant", content: turnText || "(no text)" });
+          messages.push({ role: "user", content: nudge });
+          if (turnText) onEvent({ type: "message.delta", delta: "\n\n" });
+          continue;
+        }
         onEvent({ type: "run.completed", output: finalOutput, usage });
         return;
       }
@@ -2207,7 +2345,7 @@ export class DirectAgentRuntime implements AgentRuntime {
         messages.push({ role: "user", content: this.steeringQueue.shift()! });
       }
 
-      const response = await this.fetchImpl(endpoint, {
+      const response = await this.request(endpoint, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -2323,6 +2461,18 @@ export class DirectAgentRuntime implements AgentRuntime {
         );
 
       if (calls.length === 0) {
+        // The turn as produced (thinking included), so it can be followed by a message.
+        const said = [...blocks.entries()]
+          .sort((a, b) => a[0] - b[0])
+          .map(([, block]) => block)
+          .filter((block) => block.type !== "text" || block.text);
+        const nudge = said.length > 0 ? this.nudge() : undefined;
+        if (nudge) {
+          messages.push({ role: "assistant", content: said });
+          messages.push({ role: "user", content: nudge });
+          if (turnText) onEvent({ type: "message.delta", delta: "\n\n" });
+          continue;
+        }
         onEvent({ type: "run.completed", output: finalOutput, usage });
         return;
       }

@@ -32,6 +32,7 @@ import {
 } from "../../lib/aiHub";
 import { isWebBrowserMode } from "../../lib/webClientBridge";
 import "./aiHub.css";
+import { TaskTodos } from "./TaskTodos";
 import { DEMO_MODE_SET_BY_SERVER, modes, } from "./panelShared";
 import { RichMarkdownContent } from "./RichMarkdownContent";
 import { Settings } from "./SettingsView";
@@ -1465,6 +1466,7 @@ export function AiHubPanel({
                     )}
                   </div>
                 )}
+                <TaskTodos todos={task?.todos} />
                 {timeline.map((item, idx) =>
                   item.message ? (
                     <article

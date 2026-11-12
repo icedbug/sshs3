@@ -20,6 +20,8 @@ export interface RunEvent {
   usage?: Record<string, number>;
   /** With `tool.result`: the call that was made and what it returned. */
   tool?: { name: string; input: string; output: string };
+  /** With `todos.updated`: the agent's task list as it now stands. */
+  todos?: import("../../../shared/types/aiHub").AgentTodo[];
 }
 export interface AgentRuntime {
   start(

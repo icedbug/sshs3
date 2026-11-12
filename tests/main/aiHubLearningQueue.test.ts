@@ -274,6 +274,11 @@ describe("learning through the team bucket", () => {
     const sara = await makeHub("sara", bucket);
     await new LearningQueue(erik.s3Workspace.objects).enqueue(record("task:x", Date.now()));
 
+    // A 529 is retried a few times first; do not wait out the real delays here.
+    const { retryPolicy } = await import("../../src/main/ai/hub/DirectAgentRuntime");
+    const realDelay = retryPolicy.baseDelayMs;
+    retryPolicy.baseDelayMs = 1;
+    disposals.push(() => void (retryPolicy.baseDelayMs = realDelay));
     vi.stubGlobal("fetch", vi.fn(async () => new Response('{"error":"overloaded"}', { status: 529 })));
     await internals(sara).readLearningQueue(Date.now() + 60_000);
     expect(pending(bucket)).toHaveLength(1);

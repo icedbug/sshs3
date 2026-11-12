@@ -48,6 +48,14 @@ export interface AgentMessage {
   images?: Array<{ label: string; dataUrl: string; mimeType?: string }>;
   at: number;
 }
+/** One item of an agent's own task list for a job. */
+export interface AgentTodo {
+  id: string;
+  content: string;
+  status: "pending" | "in_progress" | "completed" | "cancelled" | "blocked";
+  /** What showed it done, or why it was dropped or waits for the user. */
+  note?: string;
+}
 /** One tool call an agent made, with what it got back (both masked and shortened). */
 export interface AgentToolRecord {
   name: string;
@@ -103,6 +111,11 @@ export interface AgentTask {
    * and ran instead of only what it said.
    */
   toolLog?: AgentToolRecord[];
+  /**
+   * The agent's task list for this conversation, as it last wrote it. The run
+   * is held to it: stopping with open items sends the agent back to work.
+   */
+  todos?: AgentTodo[];
   createdAt: number;
   updatedAt: number;
   error?: string;

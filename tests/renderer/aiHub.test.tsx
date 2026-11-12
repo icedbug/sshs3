@@ -394,3 +394,29 @@ describe("persistent AI chat", () => {
     );
   });
 });
+
+describe("the agent's task list", () => {
+  it("shows each item with its state and the note that says what showed it done", async () => {
+    const { TaskTodos } = await import("../../src/renderer/src/components/AiHub/TaskTodos");
+    const { container } = render(
+      <TaskTodos
+        todos={[
+          { id: "t1", content: "Raise proxy_read_timeout", status: "completed", note: "nginx -t: syntax is ok" },
+          { id: "t2", content: "Verify an SSE stream", status: "in_progress" },
+          { id: "t3", content: "Restart haproxy", status: "blocked", note: "needs your go-ahead" },
+        ]}
+      />,
+    );
+    const list = screen.getByTestId("task-todos");
+    expect(list).toHaveTextContent("Task list · 1/3 done");
+    expect(list).toHaveTextContent("nginx -t: syntax is ok");
+    expect(within(list).getByText("(waiting for you)")).toBeInTheDocument();
+    expect(container.querySelector('[data-status="in_progress"]')).toHaveTextContent("Verify an SSE stream");
+  });
+
+  it("is absent when the agent has no list", async () => {
+    const { TaskTodos } = await import("../../src/renderer/src/components/AiHub/TaskTodos");
+    const { container } = render(<TaskTodos todos={[]} />);
+    expect(container).toBeEmptyDOMElement();
+  });
+});

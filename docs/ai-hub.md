@@ -59,6 +59,30 @@ explicitly enabled presentation on top of the same terminal authority.
   parameters) and reports the run's tokens summed over all turns, input read
   from `message_start` including cache writes and reads. A run may only call
   the tools it was offered.
+- **`AgentDiscipline`** — what keeps a run on the rails, for all three
+  providers and without a model call of its own:
+  - *Operating instructions* (`operatingInstructions`): a way of working
+    instead of a feature catalogue. Classify the request (question,
+    investigation, change, app configuration), read what the team already
+    knows, evidence before action, one change at a time with its check, finish
+    with a report. They claim only the abilities the run has.
+  - *Task list* (`todo_write`, kept by the run, stored as `task.todos`, shown
+    in the conversation): the call replaces the list; one item in progress; a
+    cancelled or blocked item needs its reason. The list carries over to the
+    next reply of the conversation.
+  - *Held to it* (`continuationMessage`): when the model ends a turn without a
+    tool call, the run sends it back if items are still open, if thorough mode
+    has no list, or if something was changed and no `terminal_verify` has
+    passed since (a command counts as a change by the same classification the
+    approval prompt uses). Each is bounded, so a stuck run can end.
+  - *Thorough mode*: `ultrawork` / `ulw` in the request adds a section to the
+    instructions, asks for a task list and doubles the turn budget.
+  - *What the team knows about a failure* (`failureHints`): a failed command's
+    result carries the team memories and skills that match it (exact error
+    signature first, else at least three distinctive shared words).
+  - *Passing provider errors*: 408/429/5xx/529 and network errors are tried
+    again up to three times with backoff, honouring `retry-after`; a rejected
+    request (4xx) is not.
 - **`KnowledgeBaseService`** — lexical search with `@orama/orama` (BM25, typo
   tolerance and a hand-written Swedish/English synonym table) and, when the
   provider is an OpenAI-compatible endpoint with `embeddingModel` set, ranking

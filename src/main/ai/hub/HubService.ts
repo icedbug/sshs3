@@ -2638,6 +2638,7 @@ export class HubService {
       }
       message.text = boundedContext(message.text + event.delta, 128_000);
     }
+    if (event.type === "todos.updated" && event.todos) task.todos = event.todos;
     if (event.type === "tool.result" && event.tool) {
       task.toolLog = [
         ...(task.toolLog ?? []),
