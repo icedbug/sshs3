@@ -2566,3 +2566,92 @@
   margin-top: 8px;
   color: var(--ai-ink-faint);
 }
+/* ---- settings ----------------------------------------------------------- */
+.ai-set {
+  display: grid;
+  gap: 12px;
+  margin-top: 22px;
+  padding-top: 18px;
+  border-top: 1px solid var(--ai-line);
+}
+.ai-set h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--ai-ink);
+}
+.ai-set > small,
+.ai-set label > small {
+  display: block;
+  margin-top: 4px;
+  color: var(--ai-ink-faint);
+  font-weight: 400;
+  line-height: 1.5;
+}
+.ai-set .ai-card {
+  margin: 0;
+}
+.ai-form label.ai-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  font-weight: 500;
+  color: var(--ai-ink);
+  cursor: pointer;
+}
+.ai-check input {
+  margin-top: 2px;
+  accent-color: var(--ai-accent);
+}
+.ai-check small {
+  display: block;
+  margin-top: 2px;
+  color: var(--ai-ink-faint);
+  font-weight: 400;
+}
+.ai-set-fold {
+  margin-top: 22px;
+}
+.ai-set-fold > .ai-form {
+  padding: 4px 14px 14px;
+  display: grid;
+  gap: 12px;
+}
+.ai-set-save {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 22px;
+  padding: 12px 0;
+  background: linear-gradient(to top, var(--ai-bg, #0f1420) 70%, transparent);
+}
+.ai-set-data {
+  margin-bottom: 12px;
+}
+.ai-hub .ai-settings-dialog {
+  width: min(660px, 100%);
+}
+.ai-hub .ai-settings-dialog .ai-scroll {
+  padding: 22px 26px 0;
+}
+.ai-settings-dialog .ai-view-head {
+  margin-bottom: 0;
+}
+.ai-settings-dialog .ai-view-head + .ai-set {
+  margin-top: 6px;
+  padding-top: 0;
+  border-top: 0;
+}
+.ai-settings-dialog .ai-set-save {
+  margin: 22px -26px 0;
+  padding: 12px 26px;
+  border-top: 1px solid var(--ai-line);
+  background: var(--color-app-surface, #191b21);
+  z-index: 1;
+}
+.ai-settings-dialog .ai-set-data {
+  order: 0;
+  padding-bottom: 22px;
+}
