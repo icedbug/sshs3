@@ -27,7 +27,7 @@ export function Memory({
 
   return (
     <div className="ai-scroll">
-      <h2>🧠 Memory & skills</h2>
+      <h2>Memory & skills</h2>
       <p className="ai-hint">
         What the team has chosen to remember about its infrastructure. Agents read these when they work; team-scoped entries are shared through the workspace sync. A note that closely resembles an existing one is merged into it.
       </p>
@@ -109,6 +109,9 @@ export function Memory({
         </article>
       )}
 
+      {/* The list is what one comes for; adding by hand is the exception. */}
+      <details className="ai-fold" data-testid="memory-add-form" open={Boolean(id || suggestion)}>
+        <summary>{id ? "Edit this entry" : "Add a memory or a skill by hand"}</summary>
       <form
         className="ai-form"
         onSubmit={(e) => {
@@ -178,6 +181,7 @@ export function Memory({
         </label>
         <button>Save</button>
       </form>
+      </details>
       {hub.memories.map((m) => (
         <article className="ai-card" key={m.id}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6, flexWrap: "wrap" }}>

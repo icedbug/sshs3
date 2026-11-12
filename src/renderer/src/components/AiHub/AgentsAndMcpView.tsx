@@ -74,15 +74,15 @@ export function AgentsAndMcpView({
       <div className="ai-stat-grid">
         <div className="ai-stat-box">
           <strong>{(hub.agents ?? []).length}</strong>
-          <small>🤖 Mission Agents</small>
+          <small>Mission agents</small>
         </div>
         <div className="ai-stat-box">
           <strong>{(hub.mcpServers ?? []).filter((s) => s.enabled).length}</strong>
-          <small>🔌 Active MCP Servers</small>
+          <small>Active MCP servers</small>
         </div>
         <div className="ai-stat-box">
           <strong>{totalMcpTools}</strong>
-          <small>🛠️ Discovered MCP Tools</small>
+          <small>MCP tools found</small>
         </div>
       </div>
 
@@ -90,7 +90,7 @@ export function AgentsAndMcpView({
       <article className="ai-card" data-testid="workforce-orchestrator-card">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           <div>
-            <strong>🤝 Workforce review</strong>
+            <strong>Workforce review</strong>
             <div style={{ marginTop: 2 }}>
               <small>
                 Each Mission Agent investigates the objective in its own read-only run; one more run combines their reports.
@@ -168,7 +168,7 @@ export function AgentsAndMcpView({
                   }}
                 >
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 6 }}>
-                    <strong>🤖 {step.agentName}</strong>
+                    <strong>{step.agentName}</strong>
                     {step.targetCluster && (
                       <span className="ai-badge ai-badge-cluster">
                         🧩 {step.targetCluster}
@@ -197,7 +197,7 @@ export function AgentsAndMcpView({
       </article>
 
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-        <h2>🤖 Mission Agents ({(hub.agents ?? []).length})</h2>
+        <h2>Mission agents ({(hub.agents ?? []).length})</h2>
         <button className="ai-btn-accent" onClick={() => setShowAgentForm((v) => !v)}>
           {showAgentForm ? "Close Form" : "+ New Mission Agent"}
         </button>
@@ -260,7 +260,7 @@ export function AgentsAndMcpView({
             />
           </label>
           <label>
-            Mission (Uppdrag)
+            Mission
             <textarea
               required
               placeholder="e.g. Audit SnapMirror lag, aggregate capacity, and LIF failover policies across the cluster and propose remediations."
@@ -340,7 +340,7 @@ export function AgentsAndMcpView({
             </div>
           </div>
           <p style={{ marginTop: 8 }}>
-            <strong>Uppdrag:</strong> {ag.mission}
+            <strong>Mission:</strong> {ag.mission}
           </p>
           {((ag.kbCollectionIds ?? ag.kbDocIds ?? []).length > 0 ||
             (ag.mcpServerIds ?? []).length > 0) && (
@@ -414,7 +414,7 @@ export function AgentsAndMcpView({
       <hr style={{ border: "none", borderTop: "1px solid var(--border-subtle, #2a3140)", margin: "18px 0" }} />
 
       {/* PILLAR 5: 1-Click Open-Source MCP Marketplace */}
-      <h2>🛒 1-Click Open-Source MCP Marketplace ({(hub.mcpCatalog ?? []).length})</h2>
+      <h2>MCP servers to install ({(hub.mcpCatalog ?? []).length})</h2>
       <p className="ai-hint">
         Install a preconfigured open-source MCP server (Prometheus, Grafana/Loki, Kubernetes/Helm, PostgreSQL, Terraform, GitHub).
       </p>
@@ -473,7 +473,7 @@ export function AgentsAndMcpView({
       </div>
 
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-        <h2>🔌 Installed MCP Servers ({(hub.mcpServers ?? []).length})</h2>
+        <h2>Installed MCP servers ({(hub.mcpServers ?? []).length})</h2>
         <button onClick={() => setShowMcpForm((v) => !v)}>
           {showMcpForm ? "Close Form" : "+ Custom MCP Server"}
         </button>
@@ -572,7 +572,7 @@ export function AgentsAndMcpView({
       {(hub.mcpServers ?? []).map((srv: McpServerConfig) => (
         <article className="ai-card" key={srv.id}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-            <strong>🔌 {srv.name}</strong>
+            <strong>{srv.name}</strong>
             <span
               className={`ai-badge ${
                 srv.status === "connected" ? "ai-badge-success" : ""
@@ -644,7 +644,7 @@ export function AgentsAndMcpView({
       {/* PILLAR 2B: Temporal Infrastructure & Storage Dependency Graph (Zep / Graphiti) */}
       <article className="ai-card" data-testid="infra-dependency-graph-card">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-          <strong>🕸️ Service & Storage Dependency Graph ({(hub.infraEdges ?? []).length})</strong>
+          <strong>Service and storage dependencies ({(hub.infraEdges ?? []).length})</strong>
           <button type="button" onClick={() => setShowEdgeForm((v) => !v)}>
             {showEdgeForm ? "Close" : "+ Add Dependency Link"}
           </button>
@@ -748,7 +748,7 @@ export function AgentsAndMcpView({
 
       {/* PILLAR 4: AST Shell Command Safety Guardrails */}
       <article className="ai-card" data-testid="safety-policy-card">
-        <strong>🛡️ AST Shell Command Safety Guardrails</strong>
+        <strong>Command safety checks</strong>
         <small style={{ display: "block", marginTop: 4, marginBottom: 8 }}>
           Classifies every part of a command line, across pipelines (<code>|</code>), chains (<code>&amp;&amp;</code>) and subshells, as{" "}
           <span className="ai-badge ai-badge-success">🟢 Safe Read-Only</span>,{" "}

@@ -2024,3 +2024,103 @@
     scroll-behavior: auto !important;
   }
 }
+
+/* ---- the other views: one reading column, quieter chrome ---------------- */
+.ai-hub nav {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.ai-hub nav::-webkit-scrollbar {
+  display: none;
+}
+.ai-hub nav button {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.ai-hub-panel nav button {
+  padding: 8px 9px 10px;
+}
+.ai-hub-hub .ai-scroll {
+  padding: 24px max(24px, calc((100% - 1040px) / 2)) 48px;
+}
+.ai-hub-web .ai-scroll {
+  padding-bottom: 84px;
+}
+.ai-scroll h2 {
+  margin: 0 0 4px;
+  font-size: 18px;
+  font-weight: 650;
+  letter-spacing: -0.015em;
+  color: var(--ai-ink);
+}
+.ai-scroll > h2:not(:first-child) {
+  margin-top: 22px;
+}
+.ai-hint {
+  color: var(--ai-ink-faint);
+  line-height: 1.55;
+}
+.ai-stat-grid {
+  gap: 10px;
+}
+.ai-stat-box {
+  border: 1px solid var(--ai-line);
+  border-radius: var(--ai-radius);
+  background: var(--ai-surface);
+  padding: 12px 14px;
+  animation: ai-rise 320ms var(--ai-ease) both;
+}
+.ai-stat-box strong {
+  font-size: 20px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  color: var(--ai-ink);
+}
+.ai-stat-box small {
+  color: var(--ai-ink-faint);
+}
+.ai-form label {
+  color: var(--ai-ink-soft);
+  font-size: 12px;
+  font-weight: 600;
+}
+.ai-tool-tag {
+  border: 1px solid var(--ai-line);
+  border-radius: 7px;
+  background: var(--ai-surface);
+  color: var(--ai-ink-soft);
+}
+.ai-fold {
+  margin: 12px 0;
+  border: 1px solid var(--ai-line);
+  border-radius: var(--ai-radius);
+  background: var(--ai-surface);
+}
+.ai-fold > summary {
+  cursor: pointer;
+  padding: 10px 14px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ai-ink-soft);
+  list-style: none;
+}
+.ai-fold > summary::-webkit-details-marker {
+  display: none;
+}
+.ai-fold > summary::before {
+  content: "+";
+  display: inline-block;
+  width: 16px;
+  color: var(--ai-accent);
+  transition: transform 200ms var(--ai-ease);
+}
+.ai-fold[open] > summary::before {
+  transform: rotate(45deg);
+}
+.ai-fold > .ai-form {
+  padding: 4px 14px 14px;
+}
+.ai-hub [hidden] {
+  display: none !important;
+}

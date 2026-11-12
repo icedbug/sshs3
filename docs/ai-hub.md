@@ -234,6 +234,36 @@ explicitly enabled presentation on top of the same terminal authority.
   `errorSignature`) through S3 and Team Vault sync (`WorkspaceMemoryEntry` in
   `src/shared/types/teamVault.ts`); credentials are never uploaded.
 
+## The panel (`src/renderer/src/components/AiHub/`)
+
+One chat, and six views beside it: Agents & MCP, Knowledge base, Infrastructure,
+Changes, Memory & skills, Schedules. `AiHubPanel.tsx` holds the chat and the
+navigation; each view is its own file. Styling is in `aiHub.css`, whose last
+sections ("AI chat: visual layer" and "the other views") carry the current look.
+
+- The chat column has the conversation, then the run dock above the composer:
+  the task list (`TaskTodos`) while a run has one, and the approval or question
+  that is waiting. A proposed plan (`PlanCard`) sits in the conversation where
+  it was proposed and folds once decided.
+- The left column lists conversations and mission agents. "Active Terminals"
+  and "Recent Team Activity" are shown only when they have something in them.
+- The navigation is one row in both the full view and the narrow sidebar; in
+  the sidebar it scrolls sideways instead of wrapping.
+- The other views read as one column of at most 1040 px in the full view. In
+  Memory & skills the list comes first; adding an entry by hand is a folded
+  form that opens by itself when an entry is being edited.
+- The "Sync S3 Runbooks" button points at a demo-lab profile and is shown only
+  in demo mode.
+- Motion (`ai-rise`, `ai-pop`, `ai-sheen`, `ai-dots`, `ai-attention`) marks
+  something arriving, running or waiting, and is switched off under
+  `prefers-reduced-motion`.
+- The interface is in English. The demo lab's data, and the example answer,
+  are still partly Swedish.
+
+Checked in a browser against the web build with demo data (screenshots of each
+view, no page errors). Not checked: the packaged Electron window, and how the
+motion feels with a real model streaming.
+
 ## Native Hermes Desktop host
 
 The pinned Hermes Desktop application can be hosted inside sshs3 (opt-in, see

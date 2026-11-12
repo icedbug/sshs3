@@ -359,7 +359,7 @@ describe("persistent AI chat", () => {
     };
 
     render(<AiHubPanel mode="hub" setMode={() => {}} />);
-    // The nav label is "🧠 Memory & skills" followed by the memory count badge.
+    // The nav label is "Memory & skills" followed by the memory count badge.
     fireEvent.click(
       within(screen.getByRole("navigation", { name: "Hub views" })).getByRole(
         "button",

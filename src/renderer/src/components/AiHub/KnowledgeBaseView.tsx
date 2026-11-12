@@ -72,22 +72,23 @@ export function KnowledgeBaseView({
       <div className="ai-stat-grid">
         <div className="ai-stat-box">
           <strong>{(hub.kbDocuments ?? []).length}</strong>
-          <small>📚 Runbooks & Docs</small>
+          <small>Runbooks and documents</small>
         </div>
         <div className="ai-stat-box">
           <strong>{totalChunks}</strong>
-          <small>🧩 Indexed BM25 Chunks</small>
+          <small>Indexed sections</small>
         </div>
         <div className="ai-stat-box">
           <strong>BM25 + synonyms{hub.config.provider === "openai-compatible" && hub.config.embeddingModel ? ` + embeddings (${hub.config.embeddingModel})` : ""}</strong>
-          <small>⚡ Orama Retrieval Engine</small>
+          <small>How search ranks</small>
         </div>
       </div>
 
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <h2>📚 Knowledge Base ({(hub.kbDocuments ?? []).length} docs)</h2>
+        <h2>Knowledge base ({(hub.kbDocuments ?? []).length} docs)</h2>
         <div style={{ display: "flex", gap: 6 }}>
           <button
+            hidden={!hub.demoMode}
             onClick={() =>
               void act({
                 action: "kb-ingest-s3",
@@ -105,7 +106,7 @@ export function KnowledgeBaseView({
         </div>
       </div>
       <p className="ai-hint">
-        Store NetApp ONTAP, StorageGRID, Ceph, ZFS, and Kubernetes runbooks, CLI cheat-sheets, and architecture docs. Documents are automatically chunked and indexed for Hybrid BM25 + Bilingual Semantic Concept RAG via <code>sshs3_kb_search</code> and synced with your S3 Team Workspace.
+        Runbooks, command references and architecture notes. The assistant searches them with <code>sshs3_kb_search</code>, and agents can be bound to a collection.
       </p>
 
       <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
@@ -122,7 +123,7 @@ export function KnowledgeBaseView({
       </div>
 
       <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 10, alignItems: "center" }}>
-        <small style={{ opacity: 0.75 }}>🧠 Orama Concept Clusters:</small>
+        <small style={{ opacity: 0.75 }}>Try:</small>
         {[
           { label: "⚡ Latency / QoS", q: "high latency" },
           { label: "🔄 SnapMirror / DR", q: "replication" },
@@ -259,7 +260,7 @@ export function KnowledgeBaseView({
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
               <div>
                 <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                  <strong>📄 {doc.title}</strong>
+                  <strong>{doc.title}</strong>
                   {matchedConcepts.map((mc) => (
                     <span key={mc} className="ai-badge ai-badge-purple">
                       🧠 {mc}

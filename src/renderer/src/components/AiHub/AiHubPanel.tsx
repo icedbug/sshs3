@@ -876,17 +876,17 @@ export function AiHubPanel({
             >
               <span>
                 {name === "Work"
-                  ? "💬 Chat"
+                  ? "Chat"
                     : name === "Agents & MCP"
-                    ? "🤖 Agents & MCP"
+                    ? "Agents & MCP"
                     : name === "Knowledge Base"
                       ? mode === "panel"
-                        ? "📚 KB"
-                        : "📚 Knowledge Base"
+                        ? "Runbooks"
+                        : "Knowledge base"
                       : name === "Memory & skills"
                         ? mode === "panel"
-                          ? "🧠 Memory"
-                          : "🧠 Memory & skills"
+                          ? "Memory"
+                          : "Memory & skills"
                         : name}
               </span>
               {badgeCount > 0 && (
@@ -955,7 +955,11 @@ export function AiHubPanel({
                     </div>
                   </div>
 
-                  <div className="ai-sidebar-section">
+                  {/* A section with nothing in it is not shown. */}
+                  <div
+                    className="ai-sidebar-section"
+                    hidden={hub.sessions.every((s) => s.state === "disconnected")}
+                  >
                     <div className="ai-sidebar-header">
                       <strong>Active Terminals</strong>
                       <small>{hub.sessions.filter((s) => s.state !== "disconnected").length}</small>
@@ -1049,7 +1053,10 @@ export function AiHubPanel({
                     </div>
                   </div>
 
-                  <div className="ai-sidebar-section">
+                  <div
+                    className="ai-sidebar-section"
+                    hidden={(hub.activityLog ?? []).length === 0}
+                  >
                     <div className="ai-sidebar-header">
                       <strong>Recent Team Activity</strong>
                     </div>
@@ -1092,7 +1099,7 @@ export function AiHubPanel({
                           style={{ marginBottom: 14, textAlign: "left" }}
                         >
                           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                            <strong>⚡ Connect your AI</strong>
+                            <strong>Connect your AI</strong>
                             <span className="ai-badge ai-badge-green">
                               {(hub.agents ?? []).length} agent(s) · {(hub.kbDocuments ?? []).length} runbooks
                             </span>
@@ -1187,7 +1194,7 @@ export function AiHubPanel({
                           )}
                         </div>
                         <p style={{ fontSize: 12, margin: "8px 0" }}>
-                          <strong>Uppdrag:</strong> {activeAgent.mission}
+                          <strong>Mission:</strong> {activeAgent.mission}
                         </p>
                         <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                           <button
@@ -1231,7 +1238,7 @@ export function AiHubPanel({
                           )
                         }
                       >
-                        <strong>⚡ Run across a cluster (@cluster)</strong>
+                        <strong>Run across a cluster</strong>
                         <small>Run a command on every node of a cluster and get one report</small>
                       </button>
                       <button
@@ -1243,7 +1250,7 @@ export function AiHubPanel({
                           )
                         }
                       >
-                        <strong>🪟 Open a 2×2 cluster split view</strong>
+                        <strong>Open a cluster split view</strong>
                         <small>Have the assistant open a split terminal grid or the dual-pane explorer</small>
                       </button>
                       <button
@@ -1255,7 +1262,7 @@ export function AiHubPanel({
                           )
                         }
                       >
-                        <strong>🔍 Cross-Server Config Diff &amp; SFTP/S3</strong>
+                        <strong>Compare configuration between servers</strong>
                         <small>Diff configuration files between two nodes, or inspect S3 buckets</small>
                       </button>
                       <button
@@ -1267,7 +1274,7 @@ export function AiHubPanel({
                           )
                         }
                       >
-                        <strong>📚 Search the knowledge base</strong>
+                        <strong>Search the runbooks</strong>
                         <small>Find the runbook that applies; combine it with data from connected MCP servers</small>
                       </button>
                       <button
@@ -1280,7 +1287,7 @@ export function AiHubPanel({
                           )
                         }
                       >
-                        <strong>🛠️ Configure sshS3 with AI</strong>
+                        <strong>Configure sshS3</strong>
                         <small>Tunnels, S3 profiles, shortcuts, dotfiles, cloud sync and themes</small>
                       </button>
                       <button
@@ -1301,7 +1308,7 @@ export function AiHubPanel({
                           });
                         }}
                       >
-                        <strong>🤝 Run a workforce review</strong>
+                        <strong>Run a workforce review</strong>
                         <small>Your Mission Agents investigate in parallel (read-only) and one report combines their findings</small>
                       </button>
                       <button
@@ -1313,7 +1320,7 @@ export function AiHubPanel({
                           )
                         }
                       >
-                        <strong>🗺️ /plan and /grill-me</strong>
+                        <strong>Plan first: /plan</strong>
                         <small>Have a change planned and reviewed before anything runs, or your design questioned</small>
                       </button>
                     </div>
@@ -1440,7 +1447,7 @@ export function AiHubPanel({
                     </div>
                     {(hub.agents ?? []).length > 0 && (
                       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                        <small>🤝 Hand over:</small>
+                        <small>Hand over:</small>
                         <select
                           aria-label="Swarm Handoff to specialist agent"
                           data-testid="chat-swarm-handoff-select"
@@ -2123,7 +2130,7 @@ export function AiHubPanel({
                         zIndex: 46,
                       }}
                     >
-                      <strong>⚡ Slash Commands (Tab / Enter)</strong>
+                      <strong>Commands (Tab / Enter)</strong>
                       {activeSlashSuggestions.map((item, idx) => (
                         <button
                           key={item.cmd}
