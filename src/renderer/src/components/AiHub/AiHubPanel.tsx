@@ -41,6 +41,8 @@ import { Memory } from "./MemoryView";
 import { Schedules } from "./SchedulesView";
 import { ChangesView } from "./ChangesView";
 import { WorkforceView } from "./WorkforceView";
+import { InboxView } from "./InboxView";
+import { inboxItems } from "./workforceModel";
 import { InfrastructureView } from "./InfrastructureView";
 import { AgentsAndMcpView } from "./AgentsAndMcpView";
 import { KnowledgeBaseView } from "./KnowledgeBaseView";
@@ -48,6 +50,7 @@ import { KnowledgeBaseView } from "./KnowledgeBaseView";
 
 type View =
   | "Work"
+  | "Inbox"
   | "Workforce"
   | "Agents & MCP"
   | "Knowledge Base"
@@ -855,6 +858,7 @@ export function AiHubPanel({
           mode === "hub"
             ? ([
                 "Work",
+                "Inbox",
                 "Workforce",
                 "Agents & MCP",
                 "Knowledge Base",
@@ -865,6 +869,7 @@ export function AiHubPanel({
               ] as View[])
             : ([
                 "Work",
+                "Inbox",
                 "Workforce",
                 "Agents & MCP",
                 "Knowledge Base",
@@ -872,7 +877,9 @@ export function AiHubPanel({
               ] as View[])
         ).map((name) => {
           const badgeCount =
-            name === "Workforce"
+            name === "Inbox"
+              ? (hub ? inboxItems(hub).length : 0)
+              : name === "Workforce"
               ? (hub?.workTickets ?? []).filter((t) => t.status === "review" || t.status === "in_progress").length
               : name === "Agents & MCP"
               ? (hub?.agents?.length ?? 0) + (hub?.mcpServers?.length ?? 0)
@@ -2463,6 +2470,17 @@ export function AiHubPanel({
               </div>
             </div>
             </div>
+          )}
+          {activeView === "Inbox" && (
+            <InboxView
+              hub={hub}
+              act={act}
+              onOpenTask={(id) => {
+                setTaskId(id);
+                setView("Work");
+              }}
+              onOpenView={(next) => setView(next)}
+            />
           )}
           {activeView === "Workforce" && (
             <WorkforceView

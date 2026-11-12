@@ -122,6 +122,10 @@ export interface HubData {
   agentUsage?: Record<string, AgentUsage>;
   /** Removals of shared agents, runbooks and dependencies (id → when), so they reach teammates. */
   sharedRemoved?: Partial<Record<"agents" | "kb" | "edges" | "pages", Record<string, number>>>;
+  /** The secret alerts are posted with (only its hash), and what came in. */
+  alertHook?: { hash: string; createdAt: number; lastAt?: number; received: number };
+  alertRules?: { match: string; agentId: string }[];
+  dailyReport?: { day: string; at: number; text: string; readAt?: number };
   /** The pages agents read, written from the sources and from finished work. */
   kbPages?: KbPage[];
   /** Questions agents asked the knowledge base that found nothing. */

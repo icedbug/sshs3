@@ -613,6 +613,16 @@ export interface WorkTicket {
   blockedBy?: string[];
   /** The ticket this one was split off from. */
   parentId?: string;
+  /** Set on a ticket an alert created: the alert, and how often it fired. */
+  alert?: {
+    fingerprint: string;
+    source: string;
+    severity: "critical" | "warning" | "info";
+    firstAt: number;
+    lastAt: number;
+    count: number;
+    resolvedAt?: number;
+  };
   /** Who is running it: a person's app, since when, last seen. */
   claim?: { by: string; client: string; at: number; seenAt: number };
   /** The conversation of the latest run, on the computer that ran it. */
@@ -799,6 +809,10 @@ export interface KbSearchHit {
 
 /** What one request asked for, beside the snapshot. Present only on that request's answer. */
 export interface HubReply {
+  /** A new alert hook's address (the path on this server), shown this once. Empty where there is no address. */
+  alertHook?: { path: string };
+  /** Tickets an alert request created or updated. */
+  alerts?: { created: string[]; updated: string[] };
   kbDocument?: KbDocument;
   kbPage?: KbPage;
   kbSearch?: { query: string; hits: KbSearchHit[]; byMeaning: boolean };
@@ -859,6 +873,17 @@ export interface HubSnapshot {
   mcpServers?: McpServerConfig[];
   mcpCatalog?: McpCatalogPreset[];
   reply?: HubReply;
+  /** Whether alerts can be posted to this installation, and who gets which. */
+  alertIntake?: {
+    /** Whether this installation has an address to post to (the web server has, the desktop app has not). */
+    canReceive: boolean;
+    enabled: boolean;
+    lastAt?: number;
+    received: number;
+    rules: { match: string; agentId: string }[];
+  };
+  /** The latest nightly summary of what happened, until it has been read. */
+  dailyReport?: { day: string; at: number; text: string; readAt?: number };
   /** The pages agents read. Bodies are shortened here; `kb-page-read` returns one in full. */
   kbPages?: KbPage[];
   kbFindings?: KbFinding[];
@@ -1017,6 +1042,13 @@ export type HubRequest =
   | { action: "ticket-review"; id: string; approve: boolean; note?: string }
   | { action: "workforce-template-apply"; templateId: string; goalTitle?: string }
   | { action: "agent-pause"; id: string; paused: boolean }
+  /** Makes (or replaces) the address alerts are posted to; it comes back once in `reply.alertHook`. */
+  | { action: "alert-hook-create" }
+  | { action: "alert-hook-disable" }
+  | { action: "alert-rules-save"; rules: { match: string; agentId: string }[] }
+  | { action: "daily-report-read" }
+  /** An alert pasted by hand: JSON as a monitoring system posts it, or text. */
+  | { action: "alert-paste"; text: string }
   | { action: "runner-save"; runner: { id: string; name: string; command: string; args: string[]; cwd?: string } }
   | { action: "runner-delete"; id: string }
   | { action: "mcp-test"; id: string }

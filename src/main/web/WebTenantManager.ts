@@ -480,6 +480,7 @@ export class WebTenantManager {
         aiConfigFilePath: path.join(userDir, 'ai-config.json'),
         s3ConfigFilePath: this.getSharedS3ConfigPath(),
         defaultActorName: user.displayName || user.username,
+        alertHookOwner: user.id,
         peerPresenceProvider: () => this.getAllLocalTenantsPresence(),
         onSharedWorkspaceChanged: () =>
           this.notifyCrossTenantChanged(user.id),

@@ -45,6 +45,16 @@ as. Then:
 4. Give the server's SSH key access to the systems the agents work on, or add
    the servers with their own credentials, as you would in the app.
 
+## Alerts
+
+In the Inbox, open "Alerts in" and create an address. Point your monitoring at
+it: an Alertmanager `webhook_configs` url, a Grafana webhook contact point, a
+PagerDuty webhook, or anything that can post JSON with a `title` or `message`.
+Each alert becomes a ticket; with the heartbeat on, an agent starts on it at
+once, critical alerts first. The address is the key: it is shown once, and
+"Replace the address" makes the old one stop working. Keep the server behind
+TLS, or the address travels in the clear.
+
 ## What to know
 
 - **Modes still apply.** An agent set to ask before commands waits for a

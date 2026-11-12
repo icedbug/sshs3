@@ -3251,3 +3251,41 @@
   font-weight: 500;
   line-height: 1.45;
 }
+
+/* ---- inbox --------------------------------------------------------------- */
+.ai-inbox-list {
+  display: grid;
+  gap: 10px;
+}
+.ai-inbox-item {
+  margin: 0;
+  border-left: 2px solid var(--ai-line-strong);
+  animation: ai-rise 240ms var(--ai-ease) both;
+}
+.ai-inbox-now {
+  border-left-color: var(--ai-accent);
+}
+.ai-inbox-warn {
+  border-left-color: #fbbf24;
+}
+.ai-inbox-kind {
+  display: block;
+  margin-bottom: 2px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ai-ink-faint);
+}
+.ai-inbox-item .ai-card-actions input {
+  flex: 1;
+  min-width: 160px;
+}
+.ai-alert-rules {
+  grid-template-columns: 1fr;
+}
+.ai-alert-rules .ai-inline-form {
+  margin-top: 0;
+}
+.ai-hub nav .ai-nav-badge {
+  font-variant-numeric: tabular-nums;
+}

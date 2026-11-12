@@ -125,6 +125,31 @@ describe('Sshs3WebServer Multi-User Hybrid Mode', () => {
     expect(server.tenants.runningUserIds()).toHaveLength(1);
   });
 
+  it('takes a posted alert at the user\'s hook address and answers a wrong address like a missing one', async () => {
+    await apiJson('/api/auth/setup', {
+      method: 'POST',
+      body: JSON.stringify({ username: 'jacob', password: 'test-pass-123', displayName: 'Jacob' }),
+    });
+    const [user] = await server.auth.listUsers();
+    const tenant = await server.tenants.getOrCreateTenant(user);
+    const address = (await tenant.hub.request({ action: 'alert-hook-create' })).reply!.alertHook!.path;
+    expect(address.startsWith(`/api/hooks/${user.id}.`)).toBe(true);
+    const secret = address.split('.').pop()!;
+    const post = (token: string, body: unknown): Promise<Response> =>
+      fetch(`${baseUrl}/api/hooks/${token}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    const alert = { alerts: [{ status: 'firing', fingerprint: 'f1', labels: { alertname: 'DiskFull', severity: 'critical' }, annotations: { summary: 'Disk full' } }] };
+
+    const ok = await post(`${user.id}.${secret}`, alert);
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({ ok: true, created: 1, updated: 0 });
+    expect(tenant.hub.store.data.workTickets!.map((t) => t.title)).toEqual(['Alert (critical): Disk full']);
+    // No session is needed, and nothing tells a wrong secret from a user that does not exist.
+    expect((await post(`${user.id}.wrong`, alert)).status).toBe(404);
+    expect((await post('nobody.x', alert)).status).toBe(404);
+    expect((await post('garbage', alert)).status).toBe(404);
+    expect((await fetch(`${baseUrl}/api/hooks/${user.id}.${secret}`, { method: 'POST', body: 'not json' })).status).toBe(400);
+  });
+
   it('supports First-Run Admin setup, Invite redemption, per-user SSH keys, and Hybrid Multi-User WebSocket sharing', async () => {
     // 1. Check initial status -> uninitialized
     const initStatus = await apiJson('/api/auth/status');

@@ -306,6 +306,47 @@ export class Sshs3WebServer {
     return { port: this.boundPort, host };
   }
 
+  private hookHits = new Map<string, number[]>();
+
+  /**
+   * A monitoring system posting an alert. The address names the user and
+   * carries the secret; a wrong address is answered exactly like a missing
+   * one. At most 60 posts a minute per address and 256 kB per post.
+   */
+  private async handleAlertHook(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    token: string,
+  ): Promise<void> {
+    const dot = token.indexOf('.');
+    const userId = dot > 0 ? token.slice(0, dot) : '';
+    const secret = dot > 0 ? token.slice(dot + 1) : '';
+    const now = Date.now();
+    const hits = (this.hookHits.get(userId) ?? []).filter((t) => now - t < 60_000);
+    if (hits.length >= 60) {
+      sendJson(res, 429, { error: 'Too many alerts; try again in a minute.' });
+      return;
+    }
+    hits.push(now);
+    this.hookHits.set(userId, hits);
+    if (this.hookHits.size > 2000) this.hookHits.clear();
+    let body: Record<string, unknown>;
+    try {
+      body = await readJsonBody(req);
+    } catch {
+      sendJson(res, 400, { error: 'The body must be JSON of at most 256 kB.' });
+      return;
+    }
+    const user = userId && secret ? (await this.auth.listUsers()).find((u) => u.id === userId) : undefined;
+    const tenant = user ? await this.tenants.getOrCreateTenant(user).catch(() => undefined) : undefined;
+    const result = tenant ? await tenant.hub.receiveAlert(secret, body) : undefined;
+    if (!result) {
+      sendJson(res, 404, { error: 'Not found' });
+      return;
+    }
+    sendJson(res, 200, { ok: true, created: result.created.length, updated: result.updated.length });
+  }
+
   /**
    * Starts each user's hub, whose timer runs their schedules, takes tickets
    * when their heartbeat is on, and reads the team's learning queue. A user
@@ -379,6 +420,12 @@ export class Sshs3WebServer {
     // Health check endpoint
     if (pathname === '/api/health' && method === 'GET') {
       sendJson(res, 200, { ok: true, mode: 'web-multiuser' });
+      return;
+    }
+
+    // Alerts in: POST /api/hooks/<user id>.<secret>. No session: the secret in the address is the key.
+    if (pathname.startsWith('/api/hooks/') && method === 'POST') {
+      await this.handleAlertHook(req, res, pathname.slice('/api/hooks/'.length));
       return;
     }
 

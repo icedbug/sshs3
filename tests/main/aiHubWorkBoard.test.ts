@@ -94,6 +94,20 @@ describe("board rules", () => {
     expect(tokensLeft(agents[2], { broke: { month: "2000-01", tokens: 99999, runs: 3 } })).toBe(1000);
   });
 
+  it("takes a firing alert before ordinary work, a critical one first, and not one that has resolved", () => {
+    const alert = (severity: "critical" | "warning", extra = {}) => ({ fingerprint: severity, source: "x", severity, firstAt: 1, lastAt: 1, count: 1, ...extra });
+    const tickets = [
+      ticket("old-chore", { createdAt: 1 }),
+      ticket("resolved", { createdAt: 2, alert: alert("critical", { resolvedAt: 5 }) }),
+      ticket("warning", { createdAt: 3, alert: alert("warning") }),
+      ticket("critical", { createdAt: 4, alert: alert("critical") }),
+    ];
+    const ctx = { agents: [agent("a1")], client: "me" };
+    expect(nextForHeartbeat({ ...ctx, tickets })!.id).toBe("critical");
+    expect(nextForHeartbeat({ ...ctx, tickets: tickets.filter((t) => t.id !== "critical") })!.id).toBe("warning");
+    expect(nextForHeartbeat({ ...ctx, tickets: tickets.slice(0, 2) })!.id).toBe("old-chore");
+  });
+
   it("refuses a reporting line that closes a circle", () => {
     const agents = [agent("lead"), agent("mid", { reportsTo: "lead" }), agent("leaf", { reportsTo: "mid" })];
     expect(wouldCycle(agents, "lead", "leaf")).toBe(true);

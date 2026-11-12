@@ -77,6 +77,16 @@ import {
   PAGE_KINDS,
 } from "./KbCompile";
 import {
+  alertTarget,
+  alertTicketText,
+  hookSecretMatches,
+  newHookSecret,
+  parseAlerts,
+  parsePastedAlert,
+  routeAlert,
+  type IncomingAlert,
+} from "./AlertIntake";
+import {
   buildContradictionPrompt,
   lintKnowledgeBase,
   noteGap,
@@ -261,6 +271,8 @@ export interface HubHost {
   aiConfigFilePath?: string;
   s3ConfigFilePath?: string;
   defaultActorName?: string;
+  /** On the web server: the user id that goes in front of the alert hook's secret in its address. */
+  alertHookOwner?: string;
   peerPresenceProvider?: () => import("../../../shared/types/aiHub").WorkspacePresenceEntry[];
   onSharedWorkspaceChanged?: () => void;
   extraAppContext?(): Promise<{
@@ -1418,6 +1430,14 @@ export class HubService {
         chunks: [],
         chunkCount: Math.max(1, d.chunks?.length ?? d.chunkCount ?? 1),
       })),
+      dailyReport: this.store.data.dailyReport,
+      alertIntake: {
+        canReceive: Boolean(this.host.alertHookOwner),
+        enabled: Boolean(this.store.data.alertHook),
+        lastAt: this.store.data.alertHook?.lastAt,
+        received: this.store.data.alertHook?.received ?? 0,
+        rules: this.store.data.alertRules ?? [],
+      },
       // History keeps what a change replaced; the list does not carry those texts.
       kbPages: (this.store.data.kbPages ?? []).map((p) => ({
         ...p,
@@ -2340,6 +2360,33 @@ export class HubService {
           saved,
         ];
         if (isDemoMode()) saveDemoAgent(saved);
+        break;
+      }
+      case "alert-hook-create": {
+        const { secret, hash } = newHookSecret();
+        this.store.data.alertHook = { hash, createdAt: Date.now(), received: 0 };
+        // Shown this once. On the web server the address names the user; the desktop app has no address to post to.
+        reply = {
+          alertHook: { path: this.host.alertHookOwner ? `/api/hooks/${this.host.alertHookOwner}.${secret}` : "" },
+        };
+        break;
+      }
+      case "daily-report-read":
+        if (this.store.data.dailyReport) this.store.data.dailyReport.readAt = Date.now();
+        break;
+      case "alert-hook-disable":
+        this.store.data.alertHook = undefined;
+        break;
+      case "alert-rules-save":
+        this.store.data.alertRules = (request.rules ?? [])
+          .map((r) => ({ match: boundedContext(String(r.match ?? "").trim(), 80), agentId: String(r.agentId ?? "") }))
+          .filter((r) => r.match && this.getAgentsList().some((a) => a.id === r.agentId))
+          .slice(0, 40);
+        break;
+      case "alert-paste": {
+        const alerts = parsePastedAlert(requiredText(request.text));
+        if (alerts.length === 0) throw new Error("No alert could be made of that.");
+        reply = { alerts: await this.takeAlerts(alerts) };
         break;
       }
       case "runner-save": {
@@ -3884,6 +3931,90 @@ export class HubService {
       this.changed();
     }
     if (!this.disposed) void this.readNextKb();
+  }
+
+  // ---- alerts in -----------------------------------------------------------
+
+  /**
+   * A posted alert, from the web server. Returns undefined when the secret is
+   * wrong or alerts are off: the caller answers as if nothing were there.
+   */
+  async receiveAlert(
+    secret: string,
+    body: unknown,
+  ): Promise<{ created: string[]; updated: string[] } | undefined> {
+    await this.initialize();
+    const hook = this.store.data.alertHook;
+    if (!hook || !hookSecretMatches(secret, hook.hash)) return undefined;
+    const alerts = parseAlerts(body);
+    hook.lastAt = Date.now();
+    hook.received += 1;
+    const result = await this.takeAlerts(alerts);
+    await this.store.save().catch(() => undefined);
+    this.changed();
+    return result;
+  }
+
+  /**
+   * Alerts become tickets. The same alert firing again raises the count on
+   * its open ticket instead of making another; a resolved one is noted. A
+   * closed ticket is not reopened: the alert firing again later is new work.
+   */
+  private async takeAlerts(alerts: IncomingAlert[]): Promise<{ created: string[]; updated: string[] }> {
+    const servers = (await this.collectExtraContext()).workspaceServers ?? [];
+    const agents = this.getAgentsList();
+    const created: string[] = [];
+    const updated: string[] = [];
+    const now = Date.now();
+    for (const alert of alerts.slice(0, 50)) {
+      const open = live(this.store.data.workTickets).find(
+        (t) => t.alert?.fingerprint === alert.fingerprint && t.status !== "done",
+      );
+      if (open) {
+        const note =
+          alert.status === "resolved"
+            ? `${alert.source} says this has resolved.`
+            : `Fired again (${(open.alert?.count ?? 1) + 1} times).`;
+        this.putTicket({
+          ...withComment(open, alert.source, note, now),
+          alert: {
+            ...open.alert!,
+            lastAt: now,
+            count: (open.alert?.count ?? 1) + (alert.status === "resolved" ? 0 : 1),
+            resolvedAt: alert.status === "resolved" ? now : undefined,
+          },
+        });
+        updated.push(open.id);
+        continue;
+      }
+      // An alert that is already over when it arrives is nothing to work on.
+      if (alert.status === "resolved") continue;
+      const target = alertTarget(alert, servers);
+      const agent = routeAlert(alert, target, this.store.data.alertRules ?? [], agents);
+      const ticket = await this.saveTicketFrom(
+        {
+          title: boundedContext(`${alert.severity === "critical" ? "Alert (critical)" : "Alert"}: ${alert.title}`, 200),
+          description: alertTicketText(alert),
+          assigneeAgentId: agent?.id,
+          target,
+        },
+        alert.source,
+      );
+      this.putTicket({
+        ...ticket,
+        alert: {
+          fingerprint: alert.fingerprint,
+          source: alert.source,
+          severity: alert.severity,
+          firstAt: now,
+          lastAt: now,
+          count: 1,
+        },
+      });
+      created.push(ticket.id);
+    }
+    if (created.length) this.notify("New alert", `${created.length} ticket${created.length === 1 ? "" : "s"} on the board`);
+    return { created, updated };
   }
 
   // ---- the board ----------------------------------------------------------

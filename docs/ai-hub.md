@@ -234,6 +234,30 @@ explicitly enabled presentation on top of the same terminal authority.
   `errorSignature`) through S3 and Team Vault sync (`WorkspaceMemoryEntry` in
   `src/shared/types/teamVault.ts`); credentials are never uploaded.
 
+## Alerts in, and the inbox (`AlertIntake`, `InboxView`)
+
+- **Alerts in.** On the web server, `POST /api/hooks/<user id>.<secret>` takes
+  an alert: Alertmanager and Grafana (a list under `alerts`), PagerDuty
+  (`event` with incident data), or any JSON with a title or message
+  (`parseAlerts`). There is no session; the secret in the address is the key,
+  only its hash is stored, a wrong address is answered like a missing one, and
+  an address takes at most 60 posts a minute of 256 kB each. The desktop app
+  has no address; an alert can be pasted there.
+- **Alert → ticket.** The alert is matched to a server or cluster of the
+  workspace (`alertTarget`) and given to an agent: the first matching rule,
+  else the agent bound to that cluster, else a team's lead, else nobody
+  (`routeAlert`). The same alert firing again is counted on its open ticket; a
+  resolve is noted. The alert's own words are quoted in the ticket as data
+  from the monitoring system. The heartbeat takes firing alerts before other
+  work, critical ones first.
+- **Inbox.** One list of everything that waits for a person, built from the
+  snapshot (`inboxItems`): commands waiting for approval, plans, questions,
+  tickets in review, runs that stopped, alerts nobody has, knowledge base gaps
+  and contradictions, the nightly report. Each can be dealt with in place.
+
+Checked with real HTTP posts against the web server in tests and in a browser
+with a stand-in model. Not checked: a real Alertmanager or PagerDuty sending.
+
 ## Knowledge base: what agents know (`KbCompile`, `KbLint`)
 
 The knowledge base is for the agents, not a document store for people. It has
@@ -399,7 +423,7 @@ unattended heartbeat.
 
 ## The panel (`src/renderer/src/components/AiHub/`)
 
-One chat, and seven views beside it: Workforce, Agents & MCP, Knowledge base, Infrastructure,
+One chat, and eight views beside it: Inbox, Workforce, Agents & MCP, Knowledge base, Infrastructure,
 Changes, Memory & skills, Schedules. `AiHubPanel.tsx` holds the chat and the
 navigation; each view is its own file. Styling is in `aiHub.css`, whose last
 sections ("AI chat: visual layer" and "the other views") carry the current look.

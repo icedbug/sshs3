@@ -114,7 +114,13 @@ export function whyNotRunnable(
   return undefined;
 }
 
-/** The ticket the heartbeat should start next: the oldest "todo" that can run. */
+/** How soon a ticket should be taken: a firing alert before ordinary work, a critical one first. */
+function urgency(t: WorkTicket): number {
+  if (!t.alert || t.alert.resolvedAt) return 3;
+  return t.alert.severity === "critical" ? 0 : t.alert.severity === "warning" ? 1 : 2;
+}
+
+/** The ticket the heartbeat should start next: alerts first (critical before the rest), then the oldest "todo" that can run. */
 export function nextForHeartbeat(ctx: {
   tickets: WorkTicket[];
   agents: MissionAgent[];
@@ -124,7 +130,7 @@ export function nextForHeartbeat(ctx: {
 }): WorkTicket | undefined {
   return live(ctx.tickets)
     .filter((t) => t.status === "todo")
-    .sort((a, b) => a.createdAt - b.createdAt)
+    .sort((a, b) => urgency(a) - urgency(b) || a.createdAt - b.createdAt)
     .find((t) => whyNotRunnable(t, ctx) === undefined);
 }
 

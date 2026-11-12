@@ -38,6 +38,8 @@ export interface CreateHubOptions {
   aiConfigFilePath?: string;
   s3ConfigFilePath?: string;
   defaultActorName?: string;
+  /** On the web server: the user id in the alert hook's address. */
+  alertHookOwner?: string;
   peerPresenceProvider?: HubHost["peerPresenceProvider"];
   onSharedWorkspaceChanged?: () => void;
 }
@@ -284,6 +286,7 @@ export function createHub(
     aiConfigFilePath: options?.aiConfigFilePath,
     s3ConfigFilePath: options?.s3ConfigFilePath,
     defaultActorName: options?.defaultActorName,
+    alertHookOwner: options?.alertHookOwner,
     peerPresenceProvider: options?.peerPresenceProvider,
     onSharedWorkspaceChanged: options?.onSharedWorkspaceChanged,
     file: (...args) => files.invoke(...args),
