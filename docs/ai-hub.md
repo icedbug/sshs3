@@ -95,6 +95,11 @@ explicitly enabled presentation on top of the same terminal authority.
     conversation, and it is the same for all three providers. If the agent
     calls a tool instead of writing the note, it is asked again after that
     round.
+  - *Earlier conversations* (`sshs3_session_search`): the agent can search
+    this user's own earlier conversations (every word must appear; newest
+    first, with the matching lines) and read one in full, with its task list
+    and the commands and their results. Runs the hub started itself and the
+    current conversation are left out.
   - *Passing provider errors*: 408/429/5xx/529 and network errors are tried
     again up to three times with backoff, honouring `retry-after`; a rejected
     request (4xx) is not.

@@ -652,6 +652,20 @@ const AGENT_TOOLS: FunctionToolDef[] = [
     },
   },
   {
+    name: "sshs3_session_search",
+    description:
+      "Look up your earlier conversations with this user in this workspace. With `query`: the conversations that mention those words, newest first, each with its date, target and the matching lines. With `id`: that conversation in full (what was asked and answered, the task list, and the commands and file changes with their results). Use it when the user refers to earlier work (\"like last week\", \"what did we do about …\") or before repeating an investigation you may already have done. These are this user's own conversations; what the whole team knows is in the team memory and activity.",
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Words to look for: a server, a service, an error text, a topic." },
+        id: { type: "string", description: "The id of one conversation from an earlier search, to read it in full." },
+        limit: { type: "number", description: "How many conversations to return for a query (default 5, at most 10)." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: "sshs3_cluster_exec",
     description:
       "Execute a shell/CLI command in parallel across an entire cluster (e.g. 'NetApp-ONTAP-Prod-SE', 'Ceph-NVMe-Block-Pool') or a list of nodes, and return aggregated per-node output. In 'assisted' mode, prompts the user once to approve the multi-node run; in 'autonomous' mode, executes immediately.",

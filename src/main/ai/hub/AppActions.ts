@@ -950,6 +950,83 @@ export async function handleAppAction(
         };
       }
 
+      case "sshs3_session_search": {
+        // The user's own conversations: not the runs the hub started itself, and not this one.
+        const sessions = hub.store.data.tasks.filter(
+          (t) =>
+            t.id !== task.id &&
+            !t.workforceRunId &&
+            !t.distillSourceId,
+        );
+        const wantedId = str("id");
+        if (wantedId) {
+          const found = sessions.find((t) => t.id === wantedId);
+          if (!found) throw new Error(`No earlier conversation with id ${wantedId}`);
+          return {
+            id: found.id,
+            title: found.title,
+            startedAt: new Date(found.createdAt).toISOString(),
+            target: found.target?.label,
+            status: found.status,
+            verification: found.verification,
+            messages: found.messages
+              .filter((m) => m.role !== "system")
+              .map((m) => ({
+                role: m.role,
+                at: new Date(m.at).toISOString(),
+                text: boundedContext(m.text, 4000),
+              })),
+            todos: found.todos ?? [],
+            changes: found.changes.map((c) => ({
+              kind: c.kind,
+              target: c.target,
+              command: c.command ? boundedContext(c.command, 600) : undefined,
+              description: c.kind === "file" ? boundedContext(c.description, 300) : undefined,
+              status: c.status,
+              exitCode: c.exitCode,
+              output: c.output ? boundedContext(c.output, 600) : undefined,
+            })),
+          };
+        }
+        const query = (str("query") ?? "").toLowerCase();
+        const terms = query.split(/\s+/).filter((w) => w.length >= 2);
+        if (terms.length === 0)
+          throw new Error("sshs3_session_search needs a query or an id");
+        const limit = Math.max(1, Math.min(10, Math.round(num("limit") ?? 5)));
+        const scored = sessions
+          .map((t) => {
+            const lines = [
+              t.title,
+              t.target?.label ?? "",
+              ...t.messages.filter((m) => m.role !== "system").map((m) => m.text),
+              ...t.changes.map((c) => `${c.target} ${c.command ?? c.description}`),
+            ];
+            const haystack = lines.join("\n").toLowerCase();
+            const hits = terms.filter((w) => haystack.includes(w)).length;
+            const matching = lines
+              .flatMap((l) => l.split("\n"))
+              .filter((l) => terms.some((w) => l.toLowerCase().includes(w)))
+              .slice(0, 3)
+              .map((l) => boundedContext(l.trim(), 240));
+            return { t, hits, matching };
+          })
+          // Every word must appear somewhere in the conversation.
+          .filter((x) => x.hits === terms.length)
+          .sort((a, b) => b.t.updatedAt - a.t.updatedAt);
+        return {
+          query,
+          found: scored.length,
+          conversations: scored.slice(0, limit).map(({ t, matching }) => ({
+            id: t.id,
+            title: t.title,
+            startedAt: new Date(t.createdAt).toISOString(),
+            target: t.target?.label,
+            status: t.status,
+            matching,
+          })),
+        };
+      }
+
       case "sshs3_cluster_exec": {
         const command = str("command");
         const description =
