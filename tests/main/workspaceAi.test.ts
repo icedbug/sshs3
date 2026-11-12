@@ -1430,14 +1430,19 @@ describe("Production multi-user workspace sync & auto-memory", () => {
     // --- PILLAR 5: 1-Click Open-Source MCP Marketplace ---
     const snapMcp = await hub.request({
       action: "mcp-install-preset",
-      presetId: "preset-mcp-prometheus",
+      presetId: "preset-mcp-filesystem",
     });
-    expect((snapMcp.mcpCatalog ?? []).length).toBeGreaterThanOrEqual(6);
-    expect(
-      (snapMcp.mcpServers ?? []).some((s) =>
-        s.name.includes("Prometheus & Alertmanager"),
-      ),
-    ).toBe(true);
+    // Outside the demo lab the catalog holds only servers that exist, and an
+    // installed one claims neither a connection nor tools before it is tested.
+    expect((snapMcp.mcpCatalog ?? []).map((p) => p.id)).toEqual([
+      "preset-mcp-kubernetes",
+      "preset-mcp-filesystem",
+    ]);
+    const installedPreset = (snapMcp.mcpServers ?? []).find(
+      (s) => s.id === "preset-mcp-filesystem",
+    );
+    expect(installedPreset?.status).toBe("unknown");
+    expect(installedPreset?.discoveredTools).toEqual([]);
 
     // --- PILLAR 1: Multi-Agent Workforce Orchestrator & Swarm Handoff ---
     await hub.request({

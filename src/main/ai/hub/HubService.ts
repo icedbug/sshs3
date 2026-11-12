@@ -59,7 +59,7 @@ import {
   getDemoTasks,
   getDemoWorkforceRuns,
   isDemoMode,
-  MCP_MARKETPLACE_CATALOG,
+  mcpCatalog,
   saveDemoAgent,
   saveDemoInfraEdge,
   saveDemoKbDocument,
@@ -1325,7 +1325,7 @@ export class HubService {
       localOverrides: { ...(this.store.data.localOverrides ?? {}) },
       agents: this.getAgentsList(),
       mcpServers: allMcpServers,
-      mcpCatalog: MCP_MARKETPLACE_CATALOG,
+      mcpCatalog: mcpCatalog(),
       kbDocuments: kbDocs,
       workforceRuns: this.getWorkforceRunsList(),
       infraEdges: allInfraEdges,
@@ -2183,6 +2183,8 @@ export class HubService {
           kbDocIds: a.kbDocIds?.filter(Boolean),
           mcpServerIds: a.mcpServerIds?.filter(Boolean),
           scheduleMinutes: a.scheduleMinutes,
+          modelOverride: a.modelOverride,
+          enabled: a.enabled ?? true,
           updatedAt: Date.now(),
           author: actor,
         };
@@ -2259,7 +2261,7 @@ export class HubService {
         break;
       }
       case "mcp-install-preset": {
-        const preset = MCP_MARKETPLACE_CATALOG.find(
+        const preset = mcpCatalog().find(
           (p) =>
             p.id === request.presetId ||
             p.name.toLowerCase() === request.presetId.toLowerCase(),
@@ -2273,11 +2275,23 @@ export class HubService {
           args: preset.args,
           url: preset.url,
           enabled: true,
-          status: "connected",
-          lastTestedAt: Date.now(),
-          discoveredTools: preset.defaultTools,
+          status: "unknown",
+          discoveredTools: [],
           updatedAt: Date.now(),
         };
+        if (isDemoMode()) {
+          // The demo lab's servers are scripted; there is nothing to start.
+          installed.status = "connected";
+          installed.lastTestedAt = Date.now();
+          installed.discoveredTools = preset.defaultTools;
+        } else if (!preset.needs) {
+          // Connected, and its tools, are what the server itself answered.
+          const result = await this.mcp.testAndDiscover(installed);
+          installed.status = result.ok ? "connected" : "error";
+          installed.lastError = result.error;
+          installed.lastTestedAt = Date.now();
+          installed.discoveredTools = result.tools;
+        }
         this.store.data.mcpServers = [
           ...(this.store.data.mcpServers ?? []).filter((x) => x.id !== installed.id),
           installed,
@@ -2344,6 +2358,15 @@ export class HubService {
           lastError: existing?.lastError,
           lastTestedAt: existing?.lastTestedAt,
         };
+        const reach = (x: McpServerConfig): string =>
+          JSON.stringify([x.transport, x.command, x.args ?? [], x.url]);
+        if (existing && reach(existing) !== reach(saved)) {
+          // It is a different server now: what the old one answered no longer holds.
+          saved.discoveredTools = [];
+          saved.status = "unknown";
+          saved.lastError = undefined;
+          saved.lastTestedAt = undefined;
+        }
         this.store.data.mcpServers = [
           ...(this.store.data.mcpServers ?? []).filter((x) => x.id !== id),
           saved,

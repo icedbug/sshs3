@@ -338,6 +338,8 @@ export interface WorkforceRun {
 }
 
 export interface McpCatalogPreset {
+  /** What the person has to fill in or have installed before it can connect. */
+  needs?: string;
   id: string;
   name: string;
   category:

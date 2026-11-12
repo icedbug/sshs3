@@ -17,7 +17,7 @@ import {
 } from "./CommandSafetyService";
 import {
   isDemoMode,
-  MCP_MARKETPLACE_CATALOG,
+  mcpCatalog,
 } from "./demoWorkspace";
 import { isDemoTarget } from "../../demo/demoMode";
 import { boundedContext, safeError } from "./privacy";
@@ -1443,7 +1443,7 @@ export async function handleAppAction(
           return {
             agents: hub.getAgentsList(),
             mcpServers: hub.getMcpServersList(),
-            mcpCatalog: MCP_MARKETPLACE_CATALOG,
+            mcpCatalog: mcpCatalog(),
             workforceRuns: hub.getWorkforceRunsList(),
             infraEdges: hub.getInfraEdgesList(),
           };

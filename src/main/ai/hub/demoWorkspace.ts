@@ -1445,6 +1445,47 @@ export function deleteDemoKbDocument(id: string): void {
   if (idx >= 0) demoKbStore.splice(idx, 1);
 }
 
+/**
+ * Starting points offered outside the demo lab. Only packages that exist on
+ * npm under a known publisher belong here: "Install" runs the command, so a
+ * name nobody has registered would be an open door. Nothing is claimed about
+ * a server's tools until it has been started and asked.
+ */
+export const MCP_PRESETS: McpCatalogPreset[] = [
+  {
+    id: "preset-mcp-kubernetes",
+    name: "Kubernetes",
+    category: "kubernetes",
+    icon: "",
+    description:
+      "Pods, deployments, events, logs and Helm releases through kubectl on this computer.",
+    needs: "kubectl and a kubeconfig for the cluster on this computer.",
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "mcp-server-kubernetes"],
+    defaultTools: [],
+  },
+  {
+    id: "preset-mcp-filesystem",
+    name: "Local files",
+    category: "storage",
+    icon: "",
+    description:
+      "Read and search a folder on this computer, for example a checkout of your runbooks or infrastructure code.",
+    needs: "Replace the last argument with the folder to share before testing.",
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "."],
+    defaultTools: [],
+  },
+];
+
+/** The catalog shown: invented servers in the demo lab, real ones otherwise. */
+export function mcpCatalog(): McpCatalogPreset[] {
+  return isDemoMode() ? MCP_MARKETPLACE_CATALOG : MCP_PRESETS;
+}
+
+/** Demo lab only: none of these servers exist. */
 export const MCP_MARKETPLACE_CATALOG: McpCatalogPreset[] = [
   {
     id: "preset-mcp-prometheus",

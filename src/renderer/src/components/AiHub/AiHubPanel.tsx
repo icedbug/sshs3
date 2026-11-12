@@ -39,6 +39,7 @@ import { RichMarkdownContent } from "./RichMarkdownContent";
 import { Settings } from "./SettingsView";
 import { Memory } from "./MemoryView";
 import { Schedules } from "./SchedulesView";
+import { DependencyLinks } from "./DependencyLinks";
 import { AgentsAndMcpView } from "./AgentsAndMcpView";
 import { KnowledgeBaseView } from "./KnowledgeBaseView";
 
@@ -2580,6 +2581,7 @@ export function AiHubPanel({
                   </button>
                 </article>
               ))}
+              <DependencyLinks hub={hub} act={act} />
             </div>
           )}
           {activeView === "Changes" && (
