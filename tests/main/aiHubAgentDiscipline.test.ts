@@ -209,9 +209,10 @@ async function run(
 ): Promise<{ bodies: Array<Record<string, unknown>>; events: RunEvent[] }> {
   const bodies: Array<Record<string, unknown>> = [];
   const fetchImpl = vi.fn(async (_url: unknown, init?: RequestInit) => {
-    bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
     const next = responses.shift();
-    if (!next) throw new Error("the test ran out of model responses");
+    // Answered as a rejected request, so a run that asks too often fails at once instead of retrying.
+    if (!next) return new Response("the test ran out of model responses", { status: 400 });
+    bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
     return next;
   });
   const events: RunEvent[] = [];
@@ -387,5 +388,96 @@ describe("the same discipline with an OpenAI-compatible model", () => {
     // The early stop is kept in the conversation before the message that answers it.
     expect(bodies[3].messages.at(-2)).toMatchObject({ role: "assistant", content: "I will look at it." });
     expect(events.find((e) => e.type === "run.completed")!.output).toBe("Replication lag is 0s.");
+  });
+});
+
+describe("a run that outgrows its context", () => {
+  const BIG = "x".repeat(30_000);
+  // A small window, so the transcript budget is the 40,000-character floor.
+  const broker = (req: Record<string, unknown>): unknown =>
+    req.action === "context"
+      ? { appSettings: { aiConfig: { contextWindowTokens: 16_000 } } }
+      : req.action === "command"
+        ? { exitCode: 0, output: `${String(req.command)}: 41% used ${BIG}` }
+        : {};
+  const looking = task({ messages: [{ id: "m", role: "user", text: "Is any disk on prod filling up?", at: 1 }] });
+
+  it("asks the agent for a handover note and continues from the conversation, the note and a digest, replaying nothing else", async () => {
+    const { bodies, events } = await run(
+      [
+        call("todo_write", { todos: [{ content: "Check disks on prod-api-01", status: "in_progress" }] }, "tu_0"),
+        call("terminal_command", { command: "df -h /" }, "tu_1"),
+        call("terminal_command", { command: "df -h /var" }, "tu_2"),
+        say("HANDOVER: / is at 41% on prod-api-01 (df -h /). /var also 41%. Next: check /data."),
+        call("todo_write", { todos: [{ content: "Check disks on prod-api-01", status: "completed", note: "all at 41%" }] }, "tu_3"),
+        say("No disk on prod-api-01 is filling up: all at 41%."),
+      ],
+      broker,
+      looking,
+    );
+    expect(bodies).toHaveLength(6);
+    // Two large results in: the fourth request asks for the note instead of going on.
+    expect(lastUser(bodies[3])).toContain("write a handover note for yourself");
+    // The fifth starts over from the conversation plus the handover.
+    const after = bodies[4].messages as Array<{ role: string; content: unknown }>;
+    expect(after).toHaveLength(2);
+    expect(after[0]).toMatchObject({ role: "user", content: "Is any disk on prod filling up?" });
+    const handover = String(after[1].content);
+    expect(handover).toContain("HANDOVER: / is at 41% on prod-api-01");
+    expect(handover).toContain("(in_progress) Check disks on prod-api-01");
+    expect(handover).toContain("terminal_command(");
+    expect(handover).toContain("df -h /var");
+    // The bulk is gone, and no earlier turn or tool block is replayed.
+    expect(JSON.stringify(after).length).toBeLessThan(12_000);
+    expect(JSON.stringify(after)).not.toContain("tool_use");
+    // The system prompt and tools are untouched by a compaction.
+    expect(bodies[4].system).toEqual(bodies[0].system);
+    expect(bodies[4].tools).toEqual(bodies[0].tools);
+    expect(events.find((e) => e.type === "run.completed")!.output).toContain("all at 41%");
+  });
+
+  it("asks again after the round when the agent calls a tool instead of writing the note", async () => {
+    const { bodies } = await run(
+      [
+        call("terminal_command", { command: "df -h /" }, "tu_1"),
+        call("terminal_command", { command: "df -h /var" }, "tu_2"),
+        call("terminal_command", { command: "df -h /data" }, "tu_3"), // ignores the request
+        say("HANDOVER: all three at 41%."),
+        say("Nothing is filling up."),
+      ],
+      broker,
+      looking,
+    );
+    expect(lastUser(bodies[2])).toContain("handover note");
+    expect(lastUser(bodies[3])).toContain("handover note");
+    const after = bodies[4].messages as Array<{ content: unknown }>;
+    expect(after).toHaveLength(2);
+    expect(String(after[1].content)).toContain("HANDOVER: all three at 41%.");
+  });
+
+  it("does not compact a run that stays within its budget", async () => {
+    const { bodies } = await run(
+      [call("terminal_command", { command: "uptime" }), say("Load is fine.")],
+      (req) => (req.action === "command" ? { exitCode: 0, output: "load 0.1" } : {}),
+      looking,
+    );
+    expect(JSON.stringify(bodies)).not.toContain("handover note");
+  });
+});
+
+describe("handoverMessage", () => {
+  it("keeps the note, the task list with its evidence and the latest calls, and says when there was no note", async () => {
+    const { handoverMessage } = await import("../../src/main/ai/hub/AgentDiscipline");
+    const text = handoverMessage(
+      "  Disk is at 41%.  ",
+      [todo("Check disk", "completed", "df: 41%"), todo("Check inodes", "pending")],
+      [{ name: "terminal_command", input: '{"command":"df -h"}', output: "41% " + "y".repeat(5000) }],
+    );
+    expect(text).toContain("Disk is at 41%.");
+    expect(text).toContain("- (completed) Check disk — df: 41%");
+    expect(text).toContain("- (pending) Check inodes");
+    expect(text).toContain('terminal_command({"command":"df -h"})');
+    expect(text.length).toBeLessThan(2000);
+    expect(handoverMessage("", [], [])).toContain("You wrote no note");
   });
 });

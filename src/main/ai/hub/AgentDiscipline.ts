@@ -228,6 +228,76 @@ export function noteToolResult(
   }
 }
 
+// ------------------------------------------------- when the context fills up
+
+/**
+ * A long run reads more than a model's context holds. Before that happens the
+ * run is compacted, in the one shape that is safe with every provider and
+ * with models that bind their thinking to the conversation: the agent writes
+ * a handover note for itself, and the next request starts from the original
+ * conversation plus that note, its task list and a digest of its recent tool
+ * calls. Nothing else is replayed, so nothing earlier is edited.
+ */
+export const HANDOVER_REQUEST = [
+  "[sshs3] This run's context is nearly full. Before it is compacted, write a handover note for yourself; you will continue from it and from nothing else of what came before.",
+  "Do not call a tool in this reply. Cover, concretely:",
+  "1. The goal, in the user's terms, and any constraint they set.",
+  "2. What you found: each fact with its evidence (server, file or command, and the value or line that showed it).",
+  "3. What you changed: target, exact command or file, and whether a check has passed since.",
+  "4. What you ruled out, and what failed and why.",
+  "5. What remains and the very next step.",
+  "Exact values matter more than prose: keep paths, names, numbers and error texts verbatim.",
+].join("\n");
+
+export interface ToolDigestEntry {
+  name: string;
+  input: string;
+  output: string;
+}
+
+/** What the run continues from after a compaction. */
+export function handoverMessage(
+  note: string,
+  todos: AgentTodo[],
+  recentCalls: ToolDigestEntry[],
+): string {
+  const list =
+    todos.length === 0
+      ? []
+      : [
+          "",
+          "Your task list:",
+          ...todos.map(
+            (t) => `- (${t.status}) ${t.content}${t.note ? ` — ${t.note}` : ""}`,
+          ),
+        ];
+  const calls =
+    recentCalls.length === 0
+      ? []
+      : [
+          "",
+          "Your most recent tool calls (results shortened):",
+          ...recentCalls.map(
+            (c) =>
+              `- ${c.name}(${boundedContext(c.input, 300)}) → ${boundedContext(c.output, 500)}`,
+          ),
+        ];
+  return [
+    "[sshs3] The earlier part of this run was compacted to save context. What follows is all that is kept of it.",
+    "",
+    "Your handover note:",
+    note.trim() ||
+      "(You wrote no note. Rely on the task list and the tool calls below, and re-check what you need.)",
+    ...list,
+    ...calls,
+    "",
+    "Continue from the next step. The note is a summary: read again anything you need exactly before acting on it.",
+  ].join("\n");
+}
+
+/** How many of the latest tool calls a compaction keeps as a digest. */
+export const DIGEST_CALLS = 12;
+
 // ------------------------------------- what the team knows about this failure
 
 const WORD = /[a-z0-9][a-z0-9._/-]{2,}/g;

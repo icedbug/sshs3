@@ -13,9 +13,15 @@ export function maskContext(value: string): string {
       "[redacted]",
     )
     .replace(/\bBearer\s+[^\s"']+/gi, "Bearer [redacted]")
-    .replace(/([a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:)[^\s/@]+@/gi, "$1[redacted]@")
+    // The runs before `://` and around the keyword are bounded: unbounded, each
+    // start position scans to the end of a long unbroken run (base64, a hex
+    // dump, minified JSON) and masking 30,000 such characters takes a second.
     .replace(
-      /(["']?[\w-]*(?:password|passphrase|passwd|secret|token|api[_-]?key|credential)[\w-]*["']?\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)/gi,
+      /([a-z][a-z0-9+.-]{0,30}:\/\/[^\s/:@]{1,255}:)[^\s/@]+@/gi,
+      "$1[redacted]@",
+    )
+    .replace(
+      /(["']?[\w-]{0,40}(?:password|passphrase|passwd|secret|token|api[_-]?key|credential)[\w-]{0,40}["']?\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)/gi,
       "$1[redacted]",
     );
 }

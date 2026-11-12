@@ -86,6 +86,15 @@ explicitly enabled presentation on top of the same terminal authority.
     `workspace_context`, `sshs3_kb_search` and `sshs3_storage_ops`; it gets
     their reports back together, a failed one with its error. They cannot run
     commands (the terminals belong to the asking run) and cannot delegate.
+  - *Compaction*: when a run's transcript passes about half the context
+    window (`compactAtChars`), the agent is asked, between tool rounds, for a
+    handover note to itself; the next request then starts from the original
+    conversation plus that note, its task list and a digest of its last twelve
+    tool calls, and replays nothing else. No earlier message is edited, which
+    is the shape that stays valid with models that bind their thinking to the
+    conversation, and it is the same for all three providers. If the agent
+    calls a tool instead of writing the note, it is asked again after that
+    round.
   - *Passing provider errors*: 408/429/5xx/529 and network errors are tried
     again up to three times with backoff, honouring `retry-after`; a rejected
     request (4xx) is not.

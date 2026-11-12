@@ -18,8 +18,11 @@ import type { AgentRuntime, RunEvent } from "./AgentRuntime";
 import { isDemoMode } from "./demoWorkspace";
 import { boundedContext, maskContext, safeError } from "./privacy";
 import {
+  DIGEST_CALLS,
+  HANDOVER_REQUEST,
   TODO_TOOL,
   continuationMessage,
+  handoverMessage,
   failureHints,
   newDiscipline,
   noteToolResult,
@@ -28,6 +31,7 @@ import {
   renderFailureHints,
   wantsThoroughMode,
   type RunDiscipline,
+  type ToolDigestEntry,
 } from "./AgentDiscipline";
 
 /**
@@ -1232,6 +1236,8 @@ function extractAiRuntimeTuning(
   initialContext?: unknown,
 ): {
   snapshotMaxChars: number;
+  /** Size of the run's transcript, in characters, at which it is compacted. */
+  compactAtChars: number;
   maxOutputTokens: number;
   maxTurns: number;
   reasoningEffort: "low" | "medium" | "high";
@@ -1266,6 +1272,12 @@ function extractAiRuntimeTuning(
   );
   return {
     snapshotMaxChars,
+    // About half the window (4 characters per token is generous for tool
+    // output), less what the instructions and the snapshot take.
+    compactAtChars: Math.max(
+      40_000,
+      Math.round(contextWindowTokens * 4 * 0.55) - snapshotMaxChars - 20_000,
+    ),
     maxOutputTokens,
     // Thorough mode reads more and verifies each step: it gets twice the turns.
     maxTurns: Math.max(
@@ -1384,6 +1396,10 @@ export class DirectAgentRuntime implements AgentRuntime {
   /** The run's task list and what it has changed and verified (AgentDiscipline). */
   private discipline: RunDiscipline = newDiscipline();
   private task?: AgentTask;
+  /** `asked`: the handover note has been requested and the next text-only turn is it. */
+  private compaction: "idle" | "asked" = "idle";
+  /** This run's tool calls, newest last, for the digest a compaction keeps. */
+  private runCalls: ToolDigestEntry[] = [];
 
   constructor(
     private readonly invokeBroker: DirectToolInvoker,
@@ -1408,6 +1424,8 @@ export class DirectAgentRuntime implements AgentRuntime {
   ): Promise<void> {
     this.onEvent = onEvent;
     this.task = task;
+    this.compaction = "idle";
+    this.runCalls = [];
     this.discipline = newDiscipline(
       task.todos ? [...task.todos] : [],
       wantsThoroughMode(lastUserText(task)),
@@ -1805,6 +1823,26 @@ export class DirectAgentRuntime implements AgentRuntime {
     }
   }
 
+  /**
+   * Whether to ask for the handover note now: the transcript has outgrown its
+   * budget and no request for one is pending. Called between tool rounds.
+   */
+  private handoverDue(transcriptChars: number, limit: number): boolean {
+    if (this.compaction !== "idle" || transcriptChars <= limit) return false;
+    this.compaction = "asked";
+    return true;
+  }
+
+  /** Ends a compaction: what the run continues from, built from the note the model just wrote. */
+  private finishCompaction(note: string): string {
+    this.compaction = "idle";
+    return handoverMessage(
+      note,
+      this.discipline.todos,
+      this.runCalls.slice(-DIGEST_CALLS),
+    );
+  }
+
   /** The message that sends the run back to work when it wants to stop too early, if any. */
   private nudge(): string | undefined {
     if (!this.task || isReadOnlyRun(this.task) || isDistillRun(this.task))
@@ -1893,14 +1931,15 @@ export class DirectAgentRuntime implements AgentRuntime {
         output = JSON.stringify({ error: safeError(error) });
       }
     }
-    this.onEvent?.({
-      type: "tool.result",
-      tool: {
-        name: call.name,
-        input: boundedContext(call.argumentsJson || "{}", 800),
-        output: boundedContext(output, 3000),
-      },
-    });
+    const record = {
+      name: call.name,
+      input: boundedContext(call.argumentsJson || "{}", 800),
+      output: boundedContext(output, 3000),
+    };
+    this.runCalls.push(record);
+    // A tool call instead of the note: the note is asked for again after this round.
+    if (this.compaction === "asked") this.compaction = "idle";
+    this.onEvent?.({ type: "tool.result", tool: record });
     return output;
   }
 
@@ -1986,6 +2025,8 @@ export class DirectAgentRuntime implements AgentRuntime {
     const maxTurns = tuning.maxTurns;
     let finalOutput = "";
 
+    // What a compaction keeps: the conversation as it stood when the run began.
+    const baseLength = inputItems.length;
     for (let turn = 0; turn < maxTurns && !this.cancelled; turn++) {
       while (this.steeringQueue.length > 0) {
         const steered = this.steeringQueue.shift()!;
@@ -1996,6 +2037,12 @@ export class DirectAgentRuntime implements AgentRuntime {
         });
       }
 
+      if (this.handoverDue(JSON.stringify(inputItems).length, tuning.compactAtChars))
+        inputItems.push({
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: HANDOVER_REQUEST }],
+        });
       const response = await this.request(`${baseUrl}/responses`, {
         method: "POST",
         headers: buildCodexHeaders(creds.accessToken, baseUrl),
@@ -2078,6 +2125,16 @@ export class DirectAgentRuntime implements AgentRuntime {
       }
 
       if (toolCalls.length === 0) {
+        if (this.compaction === "asked") {
+          inputItems.length = baseLength;
+          inputItems.push({
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: this.finishCompaction(turnText) }],
+          });
+          onEvent({ type: "message.delta", delta: "\n\n" });
+          continue;
+        }
         const nudge = this.nudge();
         if (nudge) {
           inputItems.push({
@@ -2178,6 +2235,8 @@ export class DirectAgentRuntime implements AgentRuntime {
     const maxTurns = tuning.maxTurns;
     let finalOutput = "";
 
+    // What a compaction keeps: the conversation as it stood when the run began.
+    const baseLength = messages.length;
     for (let turn = 0; turn < maxTurns && !this.cancelled; turn++) {
       while (this.steeringQueue.length > 0) {
         messages.push({ role: "user", content: this.steeringQueue.shift()! });
@@ -2188,6 +2247,8 @@ export class DirectAgentRuntime implements AgentRuntime {
       };
       if (model.apiKey) headers.Authorization = `Bearer ${model.apiKey}`;
 
+      if (this.handoverDue(JSON.stringify(messages).length, tuning.compactAtChars))
+        messages.push({ role: "user", content: HANDOVER_REQUEST });
       const response = await this.request(`${baseUrl}/chat/completions`, {
         method: "POST",
         headers,
@@ -2255,6 +2316,12 @@ export class DirectAgentRuntime implements AgentRuntime {
       if (turnText) finalOutput = turnText;
 
       if (toolCalls.length === 0) {
+        if (this.compaction === "asked") {
+          messages.length = baseLength;
+          messages.push({ role: "user", content: this.finishCompaction(turnText) });
+          onEvent({ type: "message.delta", delta: "\n\n" });
+          continue;
+        }
         const nudge = this.nudge();
         if (nudge) {
           messages.push({ role: "assistant", content: turnText || "(no text)" });
@@ -2372,11 +2439,15 @@ export class DirectAgentRuntime implements AgentRuntime {
     // read from it.
     const total = { input_tokens: 0, output_tokens: 0 };
 
+    // What a compaction keeps: the conversation as it stood when the run began.
+    const baseLength = messages.length;
     for (let turn = 0; turn < maxTurns && !this.cancelled; turn++) {
       while (this.steeringQueue.length > 0) {
         messages.push({ role: "user", content: this.steeringQueue.shift()! });
       }
 
+      if (this.handoverDue(JSON.stringify(messages).length, tuning.compactAtChars))
+        messages.push({ role: "user", content: HANDOVER_REQUEST });
       const response = await this.request(endpoint, {
         method: "POST",
         headers: {
@@ -2492,6 +2563,14 @@ export class DirectAgentRuntime implements AgentRuntime {
           "The model reached its output limit in the middle of a tool call; raise the max output tokens setting.",
         );
 
+      if (calls.length === 0 && this.compaction === "asked") {
+        // Only the conversation and the note go on: no earlier turn and none of
+        // its thinking is replayed, so nothing that was sent before is edited.
+        messages.length = baseLength;
+        messages.push({ role: "user", content: this.finishCompaction(turnText) });
+        onEvent({ type: "message.delta", delta: "\n\n" });
+        continue;
+      }
       if (calls.length === 0) {
         // The turn as produced (thinking included), so it can be followed by a message.
         const said = [...blocks.entries()]
