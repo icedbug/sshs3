@@ -18,6 +18,7 @@ export function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Elem
   const [embeddingModel, setEmbeddingModel] = useState(
     hub.config.embeddingModel ?? "",
   );
+  const [fastModel, setFastModel] = useState(hub.config.fastModel ?? "");
   const [key, setKey] = useState("");
   const [actorName, setActorName] = useState(hub.config.actorName ?? "");
   const [enabled, setEnabled] = useState(hub.config.enabled);
@@ -49,6 +50,7 @@ export function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Elem
     setCustomModelMode(false);
     setUrl(hub.config.baseUrl ?? "");
     setEmbeddingModel(hub.config.embeddingModel ?? "");
+    setFastModel(hub.config.fastModel ?? "");
     setActorName(hub.config.actorName ?? "");
     setEnabled(hub.config.enabled);
     setContextWindowTokens(hub.config.contextWindowTokens ?? 128000);
@@ -62,6 +64,7 @@ export function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Elem
     hub.config.model,
     hub.config.baseUrl,
     hub.config.embeddingModel,
+    hub.config.fastModel,
     hub.config.actorName,
     hub.config.enabled,
     hub.config.contextWindowTokens,
@@ -98,6 +101,7 @@ export function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Elem
             baseUrl: provider === "openai-codex" ? "" : url.trim(),
             embeddingModel:
               provider === "openai-compatible" ? embeddingModel.trim() : "",
+            fastModel: fastModel.trim(),
             actorName,
             useHermes: false,
             contextWindowTokens,
@@ -275,6 +279,26 @@ export function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Elem
               : "Model offered by your endpoint"
           }
         />
+      </label>
+      <label>
+        Model for background work (optional)
+        <input
+          data-testid="ai-fast-model-input"
+          value={fastModel}
+          onChange={(e) => setFastModel(e.target.value)}
+          placeholder={
+            provider === "anthropic"
+              ? "claude-haiku-5-5"
+              : "a smaller model from the same provider"
+          }
+        />
+        <small>
+          Used for what the assistant does in the background: its
+          investigators, workforce reviews and reading sessions for team
+          memory. Your conversations keep the model above. Empty: everything
+          uses the model above. If a background run fails on this model it is
+          run again on the main one.
+        </small>
       </label>
       {provider !== "openai-codex" && (
         <>

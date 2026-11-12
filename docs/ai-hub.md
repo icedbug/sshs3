@@ -100,6 +100,12 @@ explicitly enabled presentation on top of the same terminal authority.
     first, with the matching lines) and read one in full, with its task list
     and the commands and their results. Runs the hub started itself and the
     current conversation are left out.
+  - *A fast model for background work* (`fastModel` in the AI configuration):
+    the hub's own runs (investigators, workforce reviews, reading for memory)
+    are started on it when it is set and the run uses the configured
+    provider; conversations keep `model`. A background run that fails on the
+    fast model is run once more on the main model (`mainModelOnly`). Every
+    task records the model it ran on (`task.model`).
   - *Passing provider errors*: 408/429/5xx/529 and network errors are tried
     again up to three times with backoff, honouring `retry-after`; a rejected
     request (4xx) is not.

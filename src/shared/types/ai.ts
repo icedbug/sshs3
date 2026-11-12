@@ -33,6 +33,14 @@ export interface AiConfig {
    * otherwise it is lexical only.
    */
   embeddingModel?: string;
+  /**
+   * A smaller, cheaper model of the same provider for the work the hub does
+   * in the background: an agent's investigators, workforce reviews and
+   * reading sessions for team memory. Conversations keep `model`. Unset:
+   * everything runs on `model`. A background run that fails on this model is
+   * run again on `model`.
+   */
+  fastModel?: string;
 }
 
 /** What the renderer sees: the API key itself never leaves the main process. */

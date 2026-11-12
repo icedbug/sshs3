@@ -135,6 +135,10 @@ export interface AgentTask {
    * listed as a conversation.
    */
   distillSourceId?: string;
+  /** The model the task's latest run was started on. */
+  model?: string;
+  /** Set on a background run that is the second attempt, on the main model, after the fast model failed. */
+  mainModelOnly?: boolean;
 }
 export interface MemoryEntry {
   id: string;

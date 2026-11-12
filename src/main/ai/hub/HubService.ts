@@ -880,6 +880,27 @@ export class HubService {
   }
 
   /**
+   * Starts one of the hub's own background runs and waits for it to end. A
+   * run that fails on the fast model (not served by this endpoint, overloaded,
+   * declined) is run once more on the main model, so setting a fast model can
+   * make background work cheaper but not make it fail.
+   */
+  private async runBackground(
+    input: StartAgentTask,
+    tag: { workforceRunId?: string; distillSourceId?: string; title: string },
+  ): Promise<AgentTask> {
+    const task = await this.start(input, undefined, tag);
+    await this.whenSettled(task);
+    if (task.status !== "failed") return task;
+    const fast = (await this.config.getConfig().catch(() => undefined))?.fastModel;
+    if (!fast || task.model !== fast) return task;
+    log.warn("Background run failed on the fast model; trying the main model", safeError(task.error));
+    const again = await this.start(input, undefined, { ...tag, mainModel: true });
+    await this.whenSettled(again);
+    return again;
+  }
+
+  /**
    * One read-only model run to its end (context, knowledge base, remote files;
    * no terminal, no management tool), and what it answered. Used by workforce
    * reviews and by an agent's own investigations.
@@ -895,7 +916,7 @@ export class HubService {
     text: string;
     error?: string;
   }> {
-    const task = await this.start(
+    const task = await this.runBackground(
       {
         prompt: input.prompt,
         mode: "advice",
@@ -904,10 +925,8 @@ export class HubService {
         maxCommands: 1,
         maxMinutes: 10,
       },
-      undefined,
       { workforceRunId: input.runId, title: `${input.agentName} · read-only` },
     );
-    await this.whenSettled(task);
     const text =
       task.messages.filter((m) => m.role === "assistant").at(-1)?.text ?? "";
     return task.status === "completed"
@@ -2426,6 +2445,7 @@ export class HubService {
       workforceRunId?: string;
       distillSourceId?: string;
       title: string;
+      mainModel?: boolean;
     },
   ): Promise<AgentTask> {
     if (!["advice", "assisted", "autonomous"].includes(input.mode))
@@ -2464,6 +2484,7 @@ export class HubService {
       ...(readOnly?.distillSourceId
         ? { distillSourceId: readOnly.distillSourceId }
         : {}),
+      ...(readOnly?.mainModel ? { mainModelOnly: true } : {}),
       mode: input.mode,
       agentId: matchedAgent?.id ?? input.agentId,
       agentName: matchedAgent?.name ?? input.agentName,
@@ -2609,6 +2630,17 @@ export class HubService {
       }
     }
     if (!model) throw new Error("Choose a model");
+    // The hub's own background work (investigators, reviews, reading for
+    // memory) runs on the fast model when one is set for this provider.
+    if (
+      isBackgroundRun(task) &&
+      !schedule &&
+      !task.mainModelOnly &&
+      config.fastModel &&
+      provider === config.provider
+    )
+      model = config.fastModel;
+    task.model = model;
     // Credentials are never silently reused for another endpoint/provider.
     if (
       schedule &&
@@ -3328,7 +3360,7 @@ export class HubService {
         (m) => m.scope !== "personal",
       );
       const existing = this.kb.rankMemories(shared, query, undefined, 10);
-      const task = await this.start(
+      const task = await this.runBackground(
         {
           prompt: buildDistillPrompt(source, existing),
           mode: "advice",
@@ -3336,13 +3368,11 @@ export class HubService {
           maxCommands: 1,
           maxMinutes: 5,
         },
-        undefined,
         {
           distillSourceId: source.id,
           title: `Memory · ${boundedContext(source.title, 80)}`,
         },
       );
-      await this.whenSettled(task);
       const answer =
         task.messages.filter((m) => m.role === "assistant").at(-1)?.text ?? "";
       if (task.status !== "completed")

@@ -104,6 +104,11 @@ export class AiConfigStore {
           Math.min(1_000_000, Math.round(Number(update.contextWindowTokens) || 128000)),
         );
       }
+      if (update.fastModel !== undefined) {
+        const name = String(update.fastModel).trim().slice(0, 200);
+        if (name) next.fastModel = name;
+        else delete next.fastModel;
+      }
       if (update.embeddingModel !== undefined) {
         const name = String(update.embeddingModel).trim().slice(0, 200);
         if (name) next.embeddingModel = name;
@@ -281,6 +286,9 @@ export class AiConfigStore {
         : {}),
       ...(typeof stored.actorName === "string" && stored.actorName
         ? { actorName: stored.actorName }
+        : {}),
+      ...(typeof stored.fastModel === "string" && stored.fastModel
+        ? { fastModel: stored.fastModel }
         : {}),
       ...(typeof stored.embeddingModel === "string" && stored.embeddingModel
         ? { embeddingModel: stored.embeddingModel }
