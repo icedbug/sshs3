@@ -234,6 +234,58 @@ explicitly enabled presentation on top of the same terminal authority.
   `errorSignature`) through S3 and Team Vault sync (`WorkspaceMemoryEntry` in
   `src/shared/types/teamVault.ts`); credentials are never uploaded.
 
+## Knowledge base: what agents know (`KbCompile`, `KbLint`)
+
+The knowledge base is for the agents, not a document store for people. It has
+three layers, and what people drop in is only the lowest.
+
+- **Sources** are what is dropped in (next section): kept as they are, with
+  their original files. They are evidence.
+- **Pages** (`KbPage`) are what agents read. Three kinds: `system` (how
+  something is set up here), `procedure` (when, steps, verify, undo, what not
+  to do), `troubleshooting` (a symptom, likely causes in order, the check that
+  tells them apart, red herrings). A page has one line saying when to open it,
+  the clusters and servers it is about, and the sources it rests on.
+- **The index** is the list of pages, one line each, in every agent's context
+  (`pageIndex`, put first in `snapshotText`), with the pages about the server,
+  cluster or ticket at hand first. An agent opens a page with
+  `sshs3_kb_search page=<id>` and is told to work from the page that covers
+  what it is about to do and to say which page it used.
+
+How pages come to be and stay right:
+
+- **From a source.** After a source is read for its title and summary, one
+  more run (on the main model) works what it says into the pages:
+  `buildCompilePrompt` shows the pages the source bears on in full, and
+  `parsePageOps` takes the answer strictly: only a shown page may be updated,
+  a target must be one of the workspace's own names, at most four pages per
+  source. A long source is worked in stretch by stretch.
+- **From finished work.** When a conversation or a ticket ends and something
+  was run, or a page covers the subject, `buildLearnPrompt` asks what was
+  confirmed and adds it to the right page (through the same learning queue as
+  memory, so any installation can do it).
+- **Saved at once, undoable.** A change is applied immediately and recorded
+  in the page's history with the text it replaced (the newest three);
+  `kb-page-undo` takes it back, and undoing a page's creation removes it. A
+  page a person edited is marked: from then on the assistant's text is added
+  under a heading of its own instead of replacing theirs.
+- **Review** (`lintKnowledgeBase`): pages about servers the workspace no
+  longer has, pages whose sources were all removed, pages unchanged for 180
+  days, pages no agent opened in 30, sources that led to no page, and gaps:
+  questions an agent asked that found nothing real (`coverage` tells a match
+  from a stray shared word). On request a model compares pages about the same
+  systems for contradictions; a quote that is not in its page is dropped.
+- **Shared.** Pages travel through the team bucket like agents and sources.
+
+The context no longer carries every document in full (it did, and was cut):
+it carries the page index, a short list of the sources, and in full only what
+the active agent is bound to.
+
+Checked with stubbed model responses (`aiHubKbPages.test.ts`,
+`knowledgeBaseView.test.tsx`) and in a browser against a stand-in model. Not
+checked, and it is what matters most: what a real model writes. A page is
+acted on, so read the first ones it produces before trusting them.
+
 ## Knowledge base: an inbox (`KbExtract`, `KbEnrich`)
 
 The knowledge base takes material as it is and makes it usable; nobody has to

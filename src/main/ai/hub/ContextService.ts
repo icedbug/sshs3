@@ -3,12 +3,16 @@ import type {
   InfraGraphEdge,
   InventoryEntry,
   AgentTask,
+  KbDocument,
+  KbPage,
   MemoryEntry,
+  MissionAgent,
   WorkforceRun,
   WorkspaceActivityEvent,
   WorkspaceServerSummary,
 } from "../../../shared/types/aiHub";
 import type { HubStore } from "./HubStore";
+import { pageIndex } from "./KbCompile";
 import type { KnowledgeBaseService } from "./KnowledgeBaseService";
 import type { TerminalRegistry } from "./TerminalRegistry";
 
@@ -115,6 +119,7 @@ export interface ExtraWorkspaceContext {
   agents?: unknown[];
   mcpServers?: unknown[];
   kbDocuments?: unknown[];
+  kbPages?: KbPage[];
   infraEdges?: InfraGraphEdge[];
   workforceRuns?: WorkforceRun[];
   terminalContextChars?: number;
@@ -180,7 +185,7 @@ export class ContextService {
       appSettings: extra?.appSettings ?? {},
       agents: extra?.agents ?? this.store.data.agents ?? [],
       mcpServers: extra?.mcpServers ?? this.store.data.mcpServers ?? [],
-      kbDocuments: extra?.kbDocuments ?? [],
+      ...this.knowledge(task, id, servers, extra),
       infraDependencyGraph: extra?.infraEdges ?? this.store.data.infraEdges ?? [],
       recentWorkforceRuns: (extra?.workforceRuns ?? this.store.data.workforceRuns ?? []).slice(0, 5),
       workspaceServers: servers.filter(
@@ -252,6 +257,43 @@ export class ContextService {
             (!q || s.text.toLowerCase().includes(q)),
         )
         .slice(-10),
+    };
+  }
+
+  /**
+   * The knowledge base as an agent carries it: the list of pages (those about
+   * what it is working on first), a short list of the sources, and in full
+   * only what its agent is bound to. The texts themselves are read on demand;
+   * putting them all here would push everything else out of the snapshot.
+   */
+  private knowledge(
+    task: AgentTask,
+    sessionId: string | undefined,
+    servers: WorkspaceServerSummary[],
+    extra?: ExtraWorkspaceContext,
+  ): { kbPageIndex: string; kbDocuments: unknown[]; kbBoundPages: KbPage[] } {
+    const docs = (extra?.kbDocuments ?? []) as KbDocument[];
+    const pages = extra?.kbPages ?? [];
+    const agent = (extra?.agents as MissionAgent[] | undefined)?.find((a) => a.id === task.agentId);
+    const bound = new Set(agent?.kbDocIds ?? []);
+    const session = sessionId ? this.terminals.get(sessionId) : undefined;
+    const server = servers.find(
+      (s) =>
+        (session?.profileId && s.id === session.profileId) ||
+        (session?.label && s.name.toLowerCase() === session.label.toLowerCase()),
+    );
+    const ticket = (this.store.data.workTickets ?? []).find((t) => t.id === task.ticketId);
+    const focus = [server?.name, server?.cluster, agent?.targetCluster, ticket?.target].filter(
+      (x): x is string => Boolean(x),
+    );
+    return {
+      kbPageIndex: pageIndex(pages, focus),
+      kbBoundPages: pages.filter((p) => bound.has(p.id)),
+      kbDocuments: docs.slice(0, 80).map((d) =>
+        bound.has(d.id)
+          ? d
+          : { id: d.id, title: d.title, summary: d.summary, collection: d.collection, cluster: d.cluster },
+      ),
     };
   }
 

@@ -240,9 +240,24 @@ export function AgentsAndMcpView({
               </select>
             </label>
           </div>
+          {(hub.kbPages ?? []).length > 0 && (
+            <fieldset className="ai-checks" data-testid="agent-pages">
+              <legend>Knowledge base pages it always has at hand (every agent can open any page; these are given in full)</legend>
+              {(hub.kbPages ?? []).map((p) => (
+                <label key={p.id}>
+                  <input
+                    type="checkbox"
+                    checked={draft.kbDocIds.includes(p.id)}
+                    onChange={() => setDraft({ ...draft, kbDocIds: toggled(draft.kbDocIds, p.id) })}
+                  />
+                  <span>{p.title}</span>
+                </label>
+              ))}
+            </fieldset>
+          )}
           {docs.length > 0 && (
             <fieldset className="ai-checks">
-              <legend>Runbooks it always has at hand</legend>
+              <legend>Sources it always has at hand</legend>
               {docs.map((d) => (
                 <label key={d.id}>
                   <input
@@ -292,7 +307,7 @@ export function AgentsAndMcpView({
 
       {agents.map((ag: MissionAgent) => {
         const boundDocs = (ag.kbDocIds ?? [])
-          .map((id) => docs.find((d) => d.id === id)?.title)
+          .map((id) => docs.find((d) => d.id === id)?.title ?? (hub.kbPages ?? []).find((p) => p.id === id)?.title)
           .filter((t): t is string => Boolean(t));
         const boundServers = (ag.mcpServerIds ?? [])
           .map((id) => servers.find((m) => m.id === id)?.name)

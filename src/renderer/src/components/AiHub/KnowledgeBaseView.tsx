@@ -3,11 +3,14 @@ import {
   type HubRequest,
   type HubSnapshot,
   type KbDocument,
+  type KbPage,
   type KbSearchHit,
 } from "@shared/types/aiHub";
 import { hubRequest } from "../../lib/aiHub";
 import { isWebBrowserMode } from "../../lib/webClientBridge";
 import { ConfirmButton } from "./ConfirmButton";
+import { KbPages, KbReview } from "./KbPagesView";
+import { emptyPage, type PageDraft } from "./kbPageDraft";
 import { type Act } from "./panelShared";
 import { RichMarkdownContent } from "./RichMarkdownContent";
 
@@ -120,6 +123,11 @@ export function KnowledgeBaseView({
   const [open, setOpen] = useState<KbDocument | undefined>();
   const [problem, setProblem] = useState("");
   const [limit, setLimit] = useState(40);
+  const [tab, setTab] = useState<"pages" | "sources" | "review">(
+    (hub.kbPages ?? []).length > 0 ? "pages" : "sources",
+  );
+  const [pageDraft, setPageDraft] = useState<PageDraft | undefined>();
+  const [openPage, setOpenPage] = useState<KbPage | undefined>();
   const picker = useRef<HTMLInputElement>(null);
   const searchSeq = useRef(0);
 
@@ -228,6 +236,21 @@ export function KnowledgeBaseView({
     }
   };
 
+  const showSource = (docId: string): void => {
+    const doc = all.find((d) => d.id === docId);
+    setTab("sources");
+    setCollectionFilter("");
+    if (doc) void whole(doc).then((full) => full && setOpen(full));
+  };
+  const showPage = (id: string): void => {
+    setTab("pages");
+    setProblem("");
+    request({ action: "kb-page-read", id })
+      .then((snap) => setOpenPage(snap.reply?.kbPage))
+      .catch((error) => setProblem(error instanceof Error ? error.message : String(error)));
+  };
+  const findings = hub.kbFindings ?? [];
+
   const busy = inbox.filter((x) => x.state === "reading").length;
 
   return (
@@ -252,9 +275,9 @@ export function KnowledgeBaseView({
       <header className="ai-view-head">
         <h2>Knowledge base</h2>
         <p className="ai-hint">
-          Put everything the assistant should know here: runbooks, vendor manuals, wiki pages, config files, notes
-          from an incident. It is read, described and made searchable; the assistant looks things up on its own and
-          says where it found them.
+          What your agents know about your systems. Drop in what the team has (runbooks, vendor manuals, wiki pages,
+          config files, incident notes); the assistant works it into pages on how things are set up, how to do things
+          and how to troubleshoot, and keeps them up to date from finished work.
         </p>
       </header>
 
@@ -340,6 +363,90 @@ export function KnowledgeBaseView({
         </details>
       )}
 
+      <div className="ai-filter-bar">
+        <input
+          type="search"
+          data-testid="kb-hybrid-search-input"
+          aria-label="Search the knowledge base"
+          placeholder="Ask it something: what an agent would find for these words…"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+      </div>
+      {hits && (
+        <section className="ai-hits" data-testid="kb-hits">
+          <small>
+            {hits.hits.length === 0
+              ? `Nothing found for “${hits.query}”. An agent would not find anything either: this is a gap.`
+              : `What an agent finds for “${hits.query}”, pages first${hits.byMeaning || embeddings ? "" : " (matched by wording)"}:`}
+          </small>
+          {hits.hits.map((h, i) => (
+            <button
+              key={`${h.docId}-${i}`}
+              type="button"
+              className={`ai-hit ${h.pageId ? "ai-hit-page" : ""}`}
+              onClick={() => (h.pageId ? showPage(h.pageId) : showSource(h.docId))}
+            >
+              <strong>
+                {h.pageId ? <em>page</em> : <em>source</em>} {h.title}
+                {h.heading && h.heading !== h.title ? <span> › {h.heading.replace(`${h.title} › `, "")}</span> : null}
+              </strong>
+              <span>{h.snippet.replace(/\s+/g, " ").slice(0, 260)}</span>
+            </button>
+          ))}
+        </section>
+      )}
+
+      <div className="ai-tabs ai-kb-tabs" role="tablist">
+        {(
+          [
+            ["pages", `Pages · ${(hub.kbPages ?? []).length}`],
+            ["sources", `Sources · ${all.length}`],
+            ["review", `To review · ${findings.length}`],
+          ] as const
+        ).map(([key, label]) => (
+          <button
+            key={key}
+            type="button"
+            role="tab"
+            aria-selected={tab === key}
+            className={`${tab === key ? "ai-tab-on" : ""} ${key === "review" && findings.length ? "ai-tab-alert" : ""}`}
+            onClick={() => setTab(key)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {problem && <p className="ai-error">{problem}</p>}
+
+      {tab === "pages" && (
+        <KbPages
+          hub={hub}
+          act={act}
+          request={request}
+          draft={pageDraft}
+          setDraft={setPageDraft}
+          open={openPage}
+          setOpen={setOpenPage}
+          onOpenSource={showSource}
+        />
+      )}
+      {tab === "review" && (
+        <KbReview
+          hub={hub}
+          act={act}
+          onOpenPage={showPage}
+          onOpenSource={showSource}
+          onWritePage={(title) => {
+            setTab("pages");
+            setPageDraft(emptyPage("troubleshooting", title));
+          }}
+        />
+      )}
+
+      {tab === "sources" && (
+        <>
       {draft && (
         <form
           className="ai-form ai-card"
@@ -503,66 +610,25 @@ export function KnowledgeBaseView({
 
       <div className="ai-section-head">
         <h3>
-          Documents <span className="ai-count">{all.length}</span>
+          Sources <span className="ai-count">{all.length}</span>
         </h3>
       </div>
 
-      {all.length > 0 && (
-        <div className="ai-filter-bar">
-          <input
-            type="search"
-            data-testid="kb-hybrid-search-input"
-            aria-label="Search the knowledge base"
-            placeholder="Ask it something: what the assistant would find for these words…"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-          />
-          {collections.length > 1 && (
-            <div className="ai-tags">
-              {["", ...collections].map((c) => (
-                <button
-                  key={c || "all"}
-                  type="button"
-                  className={`ai-chip ${collectionFilter === c ? "ai-chip-on" : ""}`}
-                  aria-pressed={collectionFilter === c}
-                  onClick={() => setCollectionFilter(c)}
-                >
-                  {c || "All"}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-
-      {hits && (
-        <section className="ai-hits" data-testid="kb-hits">
-          <small>
-            {hits.hits.length === 0
-              ? `Nothing found for “${hits.query}”. The assistant would not find anything either: this is a gap.`
-              : `What the assistant finds for “${hits.query}”, best first${hits.byMeaning ? "" : embeddings ? "" : " (by wording; set an embedding model in Settings to search by meaning too)"}:`}
-          </small>
-          {hits.hits.map((h, i) => (
+      {collections.length > 1 && (
+        <div className="ai-tags ai-kb-chips">
+          {["", ...collections].map((c) => (
             <button
-              key={`${h.docId}-${i}`}
+              key={c || "all"}
               type="button"
-              className="ai-hit"
-              onClick={() => {
-                const doc = all.find((d) => d.id === h.docId);
-                if (doc) void whole(doc).then((full) => full && setOpen(full));
-              }}
+              className={`ai-chip ${collectionFilter === c ? "ai-chip-on" : ""}`}
+              aria-pressed={collectionFilter === c}
+              onClick={() => setCollectionFilter(c)}
             >
-              <strong>
-                {h.title}
-                {h.heading && h.heading !== h.title ? <span> › {h.heading.replace(`${h.title} › `, "")}</span> : null}
-              </strong>
-              <span>{h.snippet.replace(/\s+/g, " ").slice(0, 260)}</span>
+              {c || "All"}
             </button>
           ))}
-        </section>
+        </div>
       )}
-
-      {problem && <p className="ai-error">{problem}</p>}
 
       {all.length === 0 && !draft && (
         <p className="ai-empty">
@@ -613,6 +679,16 @@ export function KnowledgeBaseView({
               </div>
             ) : (
               <p className="ai-doc-excerpt">{doc.summary || excerpt(doc.content)}</p>
+            )}
+            {doc.compiled && (
+              <small className="ai-last-run">
+                {doc.compiled.pages > 0
+                  ? `Worked into ${doc.compiled.pages} page${doc.compiled.pages === 1 ? "" : "s"}.`
+                  : "Read; led to no page."}
+              </small>
+            )}
+            {doc.reading?.state === "done" && doc.reading.error && (
+              <small className="ai-last-run">{doc.reading.error}</small>
             )}
             {doc.sourceType === "url" && doc.sourceRef && (
               <small className="ai-last-run ai-mono">{doc.sourceRef}</small>
@@ -686,6 +762,8 @@ export function KnowledgeBaseView({
         <button type="button" className="ai-more" onClick={() => setLimit(limit + 40)}>
           Show {Math.min(40, docs.length - limit)} more
         </button>
+      )}
+        </>
       )}
     </div>
   );

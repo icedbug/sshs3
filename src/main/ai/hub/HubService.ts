@@ -8,6 +8,8 @@ import type {
   AgentUsage,
   ExternalRunner,
   HubReply,
+  KbPage,
+  KbPageSource,
   AgentSchedule,
   AgentTask,
   HubRequest,
@@ -62,6 +64,25 @@ import {
   type Extracted,
 } from "./KbExtract";
 import { buildReadingPrompt, parseReading } from "./KbEnrich";
+import {
+  applyPageOps,
+  buildCompilePrompt,
+  buildLearnPrompt,
+  candidatePages,
+  parsePageOps,
+  savePageByPerson,
+  searchPages,
+  sourceParts,
+  undoPageChange,
+  PAGE_KINDS,
+} from "./KbCompile";
+import {
+  buildContradictionPrompt,
+  lintKnowledgeBase,
+  noteGap,
+  pairsToCompare,
+  parseContradictions,
+} from "./KbLint";
 import { sectionsOf } from "./KnowledgeBaseService";
 import {
   deleteDemoAgent,
@@ -1397,6 +1418,20 @@ export class HubService {
         chunks: [],
         chunkCount: Math.max(1, d.chunks?.length ?? d.chunkCount ?? 1),
       })),
+      // History keeps what a change replaced; the list does not carry those texts.
+      kbPages: (this.store.data.kbPages ?? []).map((p) => ({
+        ...p,
+        body: p.body.slice(0, 500),
+        history: p.history.map((h) => ({ at: h.at, by: h.by, summary: h.summary, ...(h.previous ? { previous: { title: "", when: "", body: "", targets: [], sources: [] } } : {}) })),
+      })),
+      kbFindings: lintKnowledgeBase({
+        pages: this.store.data.kbPages ?? [],
+        docs: kbDocs,
+        known: (extra.workspaceServers ?? []).flatMap((x) => [x.name, x.cluster]).filter((x): x is string => Boolean(x)),
+        gaps: this.store.data.kbGaps ?? [],
+        contradictions: this.store.data.kbContradictions,
+        dismissed: this.store.data.kbDismissedFindings,
+      }),
       kbReading: {
         waiting: kbDocs.filter((d) => d.reading?.state === "queued" || d.reading?.state === "reading").length,
         reading: kbDocs.find((d) => d.id === this.kbReadingId)?.title,
@@ -2707,7 +2742,17 @@ export class HubService {
           kbSearch: {
             query,
             byMeaning: result.retrieval === "hybrid",
-            hits: result.matches.map((m) => ({
+            hits: [
+              ...searchPages(this.store.data.kbPages ?? [], query).map((h) => ({
+                pageId: h.page.id,
+                docId: h.page.id,
+                title: h.page.title,
+                collection: h.page.kind,
+                heading: h.page.when,
+                snippet: boundedContext(h.snippet, 420),
+                score: h.score,
+              })),
+              ...result.matches.map((m) => ({
               docId: m.docId,
               title: m.title,
               collection: m.collection,
@@ -2715,6 +2760,7 @@ export class HubService {
               snippet: boundedContext(m.snippet, 420),
               score: m.score,
             })),
+            ],
           },
         };
         break;
@@ -2737,8 +2783,66 @@ export class HubService {
         const found = (this.store.data.kbDocuments ?? []).find((d) => d.id === request.id);
         if (!found) throw new Error("Document not found");
         found.reading = { state: "queued", at: Date.now() };
+        found.compiled = undefined;
         this.kbRetryAt = 0;
         void this.readNextKb();
+        break;
+      }
+      case "kb-page-read": {
+        const found = (this.store.data.kbPages ?? []).find((p) => p.id === request.id);
+        if (!found) throw new Error("Page not found");
+        reply = { kbPage: found };
+        break;
+      }
+      case "kb-page-save": {
+        const p = request.page;
+        if (!PAGE_KINDS.includes(p.kind)) throw new Error("Unknown kind of page");
+        const existing = (this.store.data.kbPages ?? []).find((x) => x.id === p.id);
+        const saved = savePageByPerson(
+          existing,
+          { kind: p.kind, title: requiredText(p.title), when: requiredText(p.when), body: requiredText(p.body), targets: p.targets },
+          await this.resolveActorName(),
+        );
+        this.store.data.kbPages = [...(this.store.data.kbPages ?? []).filter((x) => x.id !== saved.id), saved];
+        this.lastWorkSync = 0;
+        reply = { kbPage: saved };
+        break;
+      }
+      case "kb-page-delete":
+        this.store.data.kbPages = (this.store.data.kbPages ?? []).filter((p) => p.id !== request.id);
+        this.markSharedRemoved("pages", request.id);
+        break;
+      case "kb-page-undo": {
+        const found = (this.store.data.kbPages ?? []).find((p) => p.id === request.id);
+        if (!found) throw new Error("Page not found");
+        const result = undoPageChange(found, await this.resolveActorName());
+        if (!result.undone) throw new Error("The text this change replaced is no longer kept, so it cannot be undone.");
+        this.store.data.kbPages = (this.store.data.kbPages ?? []).flatMap((p) =>
+          p.id === found.id ? (result.page ? [result.page] : []) : [p],
+        );
+        if (!result.page) this.markSharedRemoved("pages", found.id);
+        this.lastWorkSync = 0;
+        break;
+      }
+      case "kb-page-rebuild": {
+        const found = (this.store.data.kbPages ?? []).find((p) => p.id === request.id);
+        if (!found) throw new Error("Page not found");
+        const docs = this.getKbDocumentsList().filter((d) => found.sources.some((s) => s.docId === d.id));
+        if (docs.length === 0) throw new Error("None of this page's sources is in the knowledge base any more.");
+        void this.rebuildPage(found.id, docs).catch((e) => log.warn("Rebuilding a page failed", safeError(e)));
+        break;
+      }
+      case "kb-check-contradictions":
+        void this.checkContradictions().catch((e) => log.warn("Contradiction check failed", safeError(e)));
+        break;
+      case "kb-finding-dismiss": {
+        const id = requiredText(request.id);
+        if (id.startsWith("gap:"))
+          this.store.data.kbGaps = (this.store.data.kbGaps ?? []).filter((g) => `gap:${g.id}` !== id);
+        else if (id.startsWith("contradiction:"))
+          this.store.data.kbContradictions = (this.store.data.kbContradictions ?? []).filter((c) => c.id !== id);
+        else
+          this.store.data.kbDismissedFindings = [...(this.store.data.kbDismissedFindings ?? []), id].slice(-300);
         break;
       }
       case "kb-ingest-folder": {
@@ -3521,6 +3625,150 @@ export class HubService {
     return { added: added.map((d) => d.title), duplicates: [], failed: [] };
   }
 
+  // ---- knowledge base: the pages agents read --------------------------------
+
+  private knownSystems(servers: WorkspaceServerSummary[]): { clusters: string[]; servers: string[] } {
+    return {
+      clusters: [...new Set(servers.map((s) => s.cluster).filter((c): c is string => Boolean(c)))],
+      servers: servers.map((s) => s.name),
+    };
+  }
+
+  /** One model run that proposes page changes, applied at once (they can be undone). Returns how many pages changed. */
+  private async runPageOps(
+    prompt: string,
+    shownFor: string,
+    source: KbPageSource,
+    runId: string,
+    title: string,
+    known: { clusters: string[]; servers: string[] },
+    only?: string,
+  ): Promise<number> {
+    // The pages the model is shown are the only ones it may update: the same choice as in the prompt.
+    const before = this.store.data.kbPages ?? [];
+    const shown = only ? before.filter((p) => p.id === only) : candidatePages(before, shownFor);
+    const task = await this.runBackground(
+      { prompt, mode: "advice", agentName: "Knowledge base", maxCommands: 1, maxMinutes: 8 },
+      // Pages are what agents act on: written on the main model, not the cheap one.
+      { distillSourceId: runId, title: boundedContext(title, 100), mainModel: true },
+    );
+    if (task.status !== "completed") throw new Error(task.error || "The run did not finish.");
+    const answer = task.messages.filter((m) => m.role === "assistant").at(-1)?.text ?? "";
+    const ops = parsePageOps(answer, shown, known);
+    if (!ops) throw new Error("The model's answer could not be used.");
+    if (ops.length === 0) return 0;
+    const applied = applyPageOps(this.store.data.kbPages ?? [], ops, { by: "assistant", source });
+    this.store.data.kbPages = applied.pages;
+    this.lastWorkSync = 0;
+    this.changed();
+    return applied.changed.length;
+  }
+
+  /** Works a source into the pages, stretch by stretch when it is long. */
+  private async compileSource(
+    doc: KbDocument,
+    known: { clusters: string[]; servers: string[] },
+  ): Promise<number> {
+    const parts = sourceParts(doc);
+    let touched = 0;
+    for (let i = 0; i < parts.length; i++) {
+      const pages = this.store.data.kbPages ?? [];
+      touched += await this.runPageOps(
+        buildCompilePrompt(doc, parts[i], pages, known, parts.length > 1 ? { index: i + 1, of: parts.length } : undefined),
+        `${doc.title} ${parts[i]}`,
+        { docId: doc.id, title: doc.title },
+        `kbc:${doc.id}:${i}`,
+        `Pages · ${doc.title}`,
+        known,
+      );
+    }
+    return touched;
+  }
+
+  /** Has one page written again from the sources it rests on. */
+  private async rebuildPage(pageId: string, docs: KbDocument[]): Promise<void> {
+    const known = this.knownSystems((await this.collectExtraContext()).workspaceServers ?? []);
+    for (const doc of docs) {
+      const page = (this.store.data.kbPages ?? []).find((p) => p.id === pageId);
+      if (!page) return;
+      for (const part of sourceParts(doc))
+        await this.runPageOps(
+          buildCompilePrompt(doc, part, [page], known),
+          `${page.title} ${page.targets.join(" ")}`,
+          { docId: doc.id, title: doc.title },
+          `kbr:${pageId}:${doc.id}`,
+          `Rebuilding · ${page.title}`,
+          known,
+          pageId,
+        );
+    }
+    await this.store.save().catch(() => undefined);
+    this.changed();
+  }
+
+  /**
+   * What a finished conversation or ticket established, added to the pages:
+   * a confirmed cause, a red herring, a procedure that was carried out.
+   */
+  private async learnPagesFrom(source: DistillSource): Promise<void> {
+    if (isDemoMode() || !source.id.startsWith("task:")) return;
+    const known = this.knownSystems((await this.collectExtraContext()).workspaceServers ?? []);
+    const remembered = (this.store.data.memoryProposals ?? [])
+      .filter((p) => p.sourceId === source.id)
+      .map((p) => `${p.title}: ${p.text}`);
+    await this.runPageOps(
+      buildLearnPrompt(source, this.store.data.kbPages ?? [], known, remembered),
+      `${source.title} ${source.transcript}`,
+      { docId: source.id, title: source.title },
+      `kbl:${source.id}`,
+      `Pages · ${source.title}`,
+      known,
+    );
+  }
+
+  private checkingContradictions = false;
+  /** Compares pages about the same systems and keeps where they disagree, for the review list. */
+  private async checkContradictions(): Promise<void> {
+    if (this.checkingContradictions) return;
+    const pairs = pairsToCompare(this.store.data.kbPages ?? []);
+    if (pairs.length === 0) {
+      this.store.data.kbContradictions = [];
+      return;
+    }
+    this.checkingContradictions = true;
+    try {
+      const task = await this.runBackground(
+        { prompt: buildContradictionPrompt(pairs), mode: "advice", agentName: "Knowledge base", maxCommands: 1, maxMinutes: 8 },
+        { distillSourceId: `kbx:${Date.now()}`, title: "Checking pages for contradictions", mainModel: true },
+      );
+      const answer = task.messages.filter((m) => m.role === "assistant").at(-1)?.text ?? "";
+      const found = task.status === "completed" ? parseContradictions(answer, pairs) : undefined;
+      if (found) this.store.data.kbContradictions = found;
+      await this.store.save().catch(() => undefined);
+    } finally {
+      this.checkingContradictions = false;
+      this.changed();
+    }
+  }
+
+  /** An agent opened a page: counted, so pages nobody uses show up. */
+  private notePageOpened(id: string): KbPage | undefined {
+    const page = (this.store.data.kbPages ?? []).find((p) => p.id === id);
+    if (!page) return undefined;
+    page.opens = (page.opens ?? 0) + 1;
+    page.lastOpenedAt = Date.now();
+    return page;
+  }
+
+  /** An agent's search found nothing: kept for the review list. */
+  private noteKbGap(query: string, task: AgentTask): void {
+    this.store.data.kbGaps = noteGap(this.store.data.kbGaps ?? [], {
+      query,
+      agent: task.agentName,
+      target: task.target?.label,
+    });
+  }
+
   /**
    * Reads the next document that is waiting: one model run gives it a title,
    * a summary, tags and a place. With a team bucket the document is claimed
@@ -3603,6 +3851,15 @@ export class HubService {
         current.reading = { state: "done", at: Date.now() };
         current.updatedAt = Date.now();
         this.lastWorkSync = 0;
+        // Then what it says is worked into the pages agents read. A failure
+        // here leaves the document read and searchable; it can be read again.
+        try {
+          const touched = await this.compileSource(current, known);
+          current.compiled = { at: Date.now(), pages: touched };
+        } catch (error) {
+          current.reading = { state: "done", at: Date.now(), error: `Not worked into the pages: ${boundedContext(safeError(error), 200)}` };
+        }
+        current.updatedAt = Date.now();
       }
       this.kbNeedsModel = false;
     } catch (error) {
@@ -3650,7 +3907,7 @@ export class HubService {
   }
 
   /** Notes that a shared agent, runbook or dependency was removed here, and syncs soon. */
-  private markSharedRemoved(collection: "agents" | "kb" | "edges", id: string): void {
+  private markSharedRemoved(collection: "agents" | "kb" | "edges" | "pages", id: string): void {
     const all = (this.store.data.sharedRemoved ??= {});
     all[collection] = { ...(all[collection] ?? {}), [id]: Date.now() };
     this.lastWorkSync = 0;
@@ -3698,6 +3955,14 @@ export class HubService {
             : { ...d, chunks: sectionsOf(d.id, d.content) };
         }),
       ];
+      changed = true;
+    }
+
+    const pages = await sync.reconcile("pages", withRemovals(this.store.data.kbPages ?? [], removed.pages));
+    const pg = splitRemovals(pages.items);
+    removed.pages = pg.removed;
+    if (pages.changed) {
+      this.store.data.kbPages = pg.alive as KbPage[];
       changed = true;
     }
 
@@ -4520,6 +4785,16 @@ export class HubService {
       this.store.data.memoryProposals = [...pending, ...fresh].slice(
         -MAX_STORED_PROPOSALS,
       );
+      // The same record may also belong on a page: what was confirmed about a
+      // symptom or a procedure. Only when something was actually run, or a
+      // page already covers the subject; a chat about nothing teaches no page.
+      if (
+        /^Command on /m.test(source.transcript) ||
+        candidatePages(this.store.data.kbPages ?? [], `${source.title} ${source.transcript}`).length > 0
+      )
+        await this.learnPagesFrom(source).catch((e) =>
+          log.warn("Could not add what was learned to the pages", safeError(e)),
+        );
       return finish(fresh.length);
     } catch (error) {
       return finish(0, safeError(error));
@@ -5137,6 +5412,7 @@ export class HubService {
       agents: this.getAgentsList(),
       mcpServers: this.getMcpServersList(),
       kbDocuments: this.getKbDocumentsList(),
+      kbPages: this.store.data.kbPages ?? [],
       infraEdges: this.getInfraEdgesList(),
       workforceRuns: this.getWorkforceRunsList(),
       terminalContextChars: aiCfg?.terminalContextChars ?? 8000,
@@ -5230,6 +5506,8 @@ export class HubService {
       investigate: this.investigate.bind(this),
       reviewPlan: this.reviewPlan.bind(this),
       saveTicketFrom: this.saveTicketFrom.bind(this),
+      notePageOpened: this.notePageOpened.bind(this),
+      noteKbGap: this.noteKbGap.bind(this),
       commentTicket: (id: string, author: string, text: string): void =>
         this.putTicket(withComment(this.ticket(id), author, text)),
     };

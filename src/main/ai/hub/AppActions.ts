@@ -11,6 +11,7 @@ import type {
   WorkspaceServerSummary,
 } from "../../../shared/types/aiHub";
 import { DEFAULT_AI_MODELS } from "../../../shared/types/ai";
+import { coverage, searchPages } from "./KbCompile";
 import {
   analyzeCommandSafety,
   DEFAULT_SAFETY_POLICY,
@@ -1430,6 +1431,25 @@ export async function handleAppAction(
         const cluster = str("cluster");
         const limit = num("limit") ?? 6;
         const docs = hub.getKbDocumentsList();
+        const pages = hub.store.data.kbPages ?? [];
+        const pageId = str("page");
+        if (pageId) {
+          const wanted = pageId.replace(/^page\s+/i, "").toLowerCase();
+          const found =
+            pages.find((p) => p.id.toLowerCase() === wanted) ?? pages.find((p) => p.title.toLowerCase() === wanted);
+          if (!found) throw new Error(`No page ${pageId}. The pages: ${pages.map((p) => `${p.id} (${p.title})`).join(", ") || "none yet"}`);
+          hub.notePageOpened(found.id);
+          return {
+            page: found.id,
+            kind: found.kind,
+            title: found.title,
+            when: found.when,
+            about: found.targets,
+            updated: new Date(found.updatedAt).toISOString().slice(0, 10),
+            restsOn: found.sources.map((s) => s.title),
+            body: found.body,
+          };
+        }
         const readId = str("id");
         if (readId) {
           const doc = docs.find((d) => d.id === readId) ?? docs.find((d) => d.title.toLowerCase() === readId.toLowerCase());
@@ -1454,7 +1474,15 @@ export async function handleAppAction(
             ...(i < doc.chunks.length ? { next: i } : {}),
           };
         }
-        if (!query.trim()) throw new Error("sshs3_kb_search needs a query, or an id to read a document");
+        if (!query.trim()) throw new Error("sshs3_kb_search needs a query, a page to read, or an id to read a source");
+        const pageHits = searchPages(pages, query).map((h) => ({
+          page: h.page.id,
+          kind: h.page.kind,
+          title: h.page.title,
+          when: h.page.when,
+          about: h.page.targets,
+          passage: h.snippet,
+        }));
         const found = await hub.kb.searchHybrid(
           docs,
           { query, cluster, limit },
@@ -1469,6 +1497,14 @@ export async function handleAppAction(
           retrieval: found.retrieval,
           ...(found.embeddingError
             ? { embeddingError: found.embeddingError }
+            : {}),
+          // Pages are what the team keeps for agents; open one with page=<id> before acting on it.
+          pages: pageHits,
+          // A passage that shares a stray word with the question is not an answer to it.
+          ...(pageHits.length === 0 &&
+          !found.matches.some((m) => coverage(query, `${m.title} ${m.snippet}`) >= 0.5)
+            ? (hub.noteKbGap(query, task),
+              { nothingFound: "The knowledge base has nothing on this. Say so rather than guess; the gap was noted for the team." })
             : {}),
           matches: found.matches.map((m) => {
             const doc = docs.find((d) => d.id === m.docId);

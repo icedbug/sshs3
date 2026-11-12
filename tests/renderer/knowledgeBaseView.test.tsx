@@ -2,7 +2,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { HubRequest, HubSnapshot, KbDocument } from "../../src/shared/types/aiHub";
+import type { HubRequest, HubSnapshot, KbDocument, KbPage } from "../../src/shared/types/aiHub";
 import { KnowledgeBaseView } from "../../src/renderer/src/components/AiHub/KnowledgeBaseView";
 
 afterEach(cleanup);
@@ -99,5 +99,82 @@ describe("the knowledge base inbox", () => {
     const hits = await screen.findByTestId("kb-hits");
     expect(within(hits).getByText("› Steps")).toBeVisible();
     expect(within(hits).getByText("zpool replace")).toBeVisible();
+  });
+});
+
+const page = (id: string, extra: Partial<KbPage> = {}): KbPage => ({
+  id,
+  kind: "troubleshooting",
+  title: `Page ${id}`,
+  when: "When the backup runs long",
+  body: "start of the body",
+  targets: ["Backup-ZFS"],
+  sources: [{ docId: "a", title: "Backup notes" }],
+  revision: 2,
+  createdAt: 1,
+  updatedAt: Date.now(),
+  updatedBy: "assistant",
+  history: [{ at: Date.now(), by: "assistant", summary: "Added the quota cause", previous: { title: "", when: "", body: "", targets: [], sources: [] } }],
+  ...extra,
+});
+
+describe("the pages agents read", () => {
+  it("opens on the pages, shows when to open each and what it rests on, and can undo the assistant's change", async () => {
+    const whole = page("p1", { body: "## Symptom\n\nThe **whole** page." });
+    const request = vi.fn(async () => answer({ kbPage: whole }));
+    const act = vi.fn(async () => hub());
+    render(
+      <KnowledgeBaseView
+        hub={hub({ kbPages: [page("p1"), page("p2", { kind: "system", title: "How the pool is set up", history: [{ at: 1, by: "jacob", summary: "Written by hand" }], editedByPerson: true, sources: [] })], kbDocuments: [doc("a")] })}
+        act={act}
+        onAttachDoc={() => {}}
+        request={request}
+      />,
+    );
+    const card = screen.getByTestId("kb-page-p1");
+    expect(within(card).getByText("When the backup runs long")).toBeVisible();
+    expect(within(card).getByText(/the assistant, .*: Added the quota cause/)).toBeVisible();
+    expect(within(screen.getByTestId("kb-pages-system")).getByText("hand-edited")).toBeVisible();
+    // A hand-written page offers no undo of an assistant change.
+    expect(within(screen.getByTestId("kb-page-p2")).queryByRole("button", { name: /Undo/ })).not.toBeInTheDocument();
+
+    fireEvent.click(within(card).getByRole("button", { name: "Read" }));
+    expect(await screen.findByText("whole")).toBeVisible();
+    fireEvent.click(within(card).getByRole("button", { name: "Undo the last change" }));
+    await waitFor(() => expect(act).toHaveBeenCalledWith({ action: "kb-page-undo", id: "p1" }));
+  });
+
+  it("lists what to review, and turns a gap into a page to write", async () => {
+    const act = vi.fn(async () => hub());
+    render(
+      <KnowledgeBaseView
+        hub={hub({
+          kbPages: [page("p1")],
+          kbFindings: [
+            { id: "gap:x", kind: "gap", text: "An agent looked for “rotate the ceph keys” and found nothing.", at: 2 },
+            { id: "dead-target:p1:old", kind: "dead-target", pageId: "p1", text: "“Page p1” is about Old-Cluster, which the workspace no longer has.", at: 1 },
+          ],
+        })}
+        act={act}
+        onAttachDoc={() => {}}
+        request={vi.fn(async () => answer({}))}
+      />,
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "To review · 2" }));
+    const list = screen.getByTestId("kb-findings");
+    expect(within(list).getByText(/Old-Cluster/)).toBeVisible();
+    fireEvent.click(within(screen.getByTestId("kb-finding-dead-target")).getByRole("button", { name: "Dismiss" }));
+    expect(act).toHaveBeenCalledWith({ action: "kb-finding-dismiss", id: "dead-target:p1:old" });
+    fireEvent.click(within(list).getByRole("button", { name: "Write the page" }));
+    const form = await screen.findByTestId("kb-page-form");
+    expect(within(form).getByDisplayValue("rotate the ceph keys")).toBeVisible();
+    fireEvent.change(within(form).getByLabelText(/When should an agent open this/), { target: { value: "When the ceph keys must be rotated" } });
+    fireEvent.click(within(form).getByRole("button", { name: "Save page" }));
+    await waitFor(() =>
+      expect(act).toHaveBeenCalledWith({
+        action: "kb-page-save",
+        page: expect.objectContaining({ kind: "troubleshooting", title: "rotate the ceph keys", when: "When the ceph keys must be rotated" }),
+      }),
+    );
   });
 });

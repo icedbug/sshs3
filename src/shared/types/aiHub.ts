@@ -703,13 +703,92 @@ export interface KbDocument {
   titleFromSource?: boolean;
   /** The file this text was taken from, kept beside it. */
   original?: { name: string; mime?: string; size: number };
+  /** Set once the document was worked into the pages: when, and how many pages it touched. */
+  compiled?: { at: number; pages: number };
   /** Hash of the text, so the same material is not added twice. */
   contentHash?: string;
   pages?: number;
 }
 
+export type KbPageKind = "system" | "procedure" | "troubleshooting";
+
+/** What a page looked like before a change, kept so the change can be undone. */
+export interface KbPageVersion {
+  title: string;
+  when: string;
+  body: string;
+  targets: string[];
+  sources: KbPageSource[];
+}
+export interface KbPageChange {
+  at: number;
+  /** A person's name, or "assistant". */
+  by: string;
+  /** What changed and why, in a line. */
+  summary: string;
+  /** Present on the newest changes only. */
+  previous?: KbPageVersion;
+}
+export interface KbPageSource {
+  /** A source document's id, or `task:<id>` for a session the page learned from. */
+  docId: string;
+  title: string;
+}
+
+/**
+ * What the agents read: a page the assistant writes and keeps up to date from
+ * the sources people drop in and from what was confirmed in finished work.
+ * `when` is the line in the index every agent carries.
+ */
+export interface KbPage {
+  id: string;
+  kind: KbPageKind;
+  title: string;
+  /** When an agent should open this page. One line. */
+  when: string;
+  body: string;
+  /** Clusters and servers of the workspace the page is about. Empty: general. */
+  targets: string[];
+  sources: KbPageSource[];
+  revision: number;
+  createdAt: number;
+  updatedAt: number;
+  updatedBy: string;
+  /** A person changed the text: the assistant adds to it and does not rewrite it. */
+  editedByPerson?: boolean;
+  history: KbPageChange[];
+  /** How often an agent opened it, and when last. */
+  opens?: number;
+  lastOpenedAt?: number;
+}
+
+/** Something about the knowledge base a person should look at. */
+export interface KbFinding {
+  id: string;
+  kind: "dead-target" | "lost-source" | "stale" | "unused" | "unused-source" | "gap" | "contradiction";
+  pageId?: string;
+  docId?: string;
+  /** For a contradiction: the other page. */
+  otherPageId?: string;
+  text: string;
+  detail?: string;
+  at: number;
+}
+
+/** A question an agent asked the knowledge base that found nothing. */
+export interface KbGap {
+  id: string;
+  query: string;
+  agent?: string;
+  target?: string;
+  count: number;
+  at: number;
+}
+
 /** One piece of a document that matched a search. */
 export interface KbSearchHit {
+  /** Set when the hit is a page the agents read, not a source. */
+  pageId?: string;
   docId: string;
   title: string;
   collection: string;
@@ -721,6 +800,7 @@ export interface KbSearchHit {
 /** What one request asked for, beside the snapshot. Present only on that request's answer. */
 export interface HubReply {
   kbDocument?: KbDocument;
+  kbPage?: KbPage;
   kbSearch?: { query: string; hits: KbSearchHit[]; byMeaning: boolean };
   download?: { name: string; mime: string; dataBase64: string };
   ingest?: { added: string[]; duplicates: string[]; failed: { name: string; error: string }[] };
@@ -779,6 +859,9 @@ export interface HubSnapshot {
   mcpServers?: McpServerConfig[];
   mcpCatalog?: McpCatalogPreset[];
   reply?: HubReply;
+  /** The pages agents read. Bodies are shortened here; `kb-page-read` returns one in full. */
+  kbPages?: KbPage[];
+  kbFindings?: KbFinding[];
   /** The queue of documents waiting to be read for title, summary and tags. */
   kbReading?: { waiting: number; reading?: string; failed: number; needsModel?: boolean };
   externalRunners?: ExternalRunner[];
@@ -957,6 +1040,20 @@ export type HubRequest =
   | { action: "kb-original"; id: string }
   /** Read the document again for title, summary and tags. */
   | { action: "kb-reread"; id: string }
+  /** The whole page comes back in `reply.kbPage`. */
+  | { action: "kb-page-read"; id: string }
+  | {
+      action: "kb-page-save";
+      page: { id?: string; kind: KbPageKind; title: string; when: string; body: string; targets?: string[] };
+    }
+  | { action: "kb-page-delete"; id: string }
+  /** Takes back the newest change to the page. */
+  | { action: "kb-page-undo"; id: string }
+  /** Has the page written again from its sources. */
+  | { action: "kb-page-rebuild"; id: string }
+  /** Compares pages about the same systems and lists where they disagree. */
+  | { action: "kb-check-contradictions" }
+  | { action: "kb-finding-dismiss"; id: string }
   | {
       action: "kb-ingest-folder";
       folderPath: string;

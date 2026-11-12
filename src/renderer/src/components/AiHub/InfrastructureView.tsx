@@ -210,7 +210,19 @@ export function InfrastructureView({
                       {server.shared ? "" : " · personal"}
                     </small>
                   </div>
-                  {statusBadge(check)}
+                  <span className="ai-tags">
+                    {(() => {
+                      const about = (hub.kbPages ?? []).filter((p) =>
+                        p.targets.some((t) => [server.name, server.cluster].filter(Boolean).map((x) => x!.toLowerCase()).includes(t.toLowerCase())),
+                      );
+                      return about.length ? (
+                        <span className="ai-badge" title={`Knowledge base pages about it: ${about.map((p) => p.title).join("; ")}`}>
+                          {about.length} page{about.length === 1 ? "" : "s"}
+                        </span>
+                      ) : null;
+                    })()}
+                    {statusBadge(check)}
+                  </span>
                   <button
                     type="button"
                     className={down ? "ai-btn-accent" : ""}

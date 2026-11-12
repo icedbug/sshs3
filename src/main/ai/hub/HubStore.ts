@@ -22,6 +22,9 @@ import type {
   WorkTicket,
   AgentUsage,
   ExternalRunner,
+  KbFinding,
+  KbGap,
+  KbPage,
   WorkspaceActivityEvent,
   WorkspaceServerSummary,
 } from "../../../shared/types/aiHub";
@@ -118,7 +121,13 @@ export interface HubData {
   workTickets?: WorkTicket[];
   agentUsage?: Record<string, AgentUsage>;
   /** Removals of shared agents, runbooks and dependencies (id → when), so they reach teammates. */
-  sharedRemoved?: Partial<Record<"agents" | "kb" | "edges", Record<string, number>>>;
+  sharedRemoved?: Partial<Record<"agents" | "kb" | "edges" | "pages", Record<string, number>>>;
+  /** The pages agents read, written from the sources and from finished work. */
+  kbPages?: KbPage[];
+  /** Questions agents asked the knowledge base that found nothing. */
+  kbGaps?: KbGap[];
+  kbContradictions?: KbFinding[];
+  kbDismissedFindings?: string[];
   /** External coding agents as they are started on this computer. Never shared. */
   externalRunners?: ExternalRunner[];
   /** Names this installation in ticket claims. */

@@ -99,14 +99,17 @@ describe("dropping material into the knowledge base", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (_url: unknown, init?: RequestInit) => {
-        models.push((JSON.parse(String(init?.body)) as { model: string }).model);
+        const body = String(init?.body);
+        models.push((JSON.parse(body) as { model: string }).model);
+        // The second run works the source into pages; here it has nothing to add.
+        if (body.includes("Work what it says into the pages")) return say('{"pages":[]}');
         return say('{"title":"Replace a failed disk in the backup pool","summary":"How to swap a faulted disk in the ZFS backup pool and wait for resilver.","tags":["zfs","disk"],"collection":"Storage","cluster":null,"kind":"runbook"}');
       }),
     );
     const pdf = await fixture("kb-sample.pdf");
     let snap = await hub.request({ action: "kb-ingest-file", name: "scan_0042.pdf", mime: "application/pdf", dataBase64: pdf.toString("base64") });
     expect(snap.reply!.ingest).toEqual({ added: ["scan 0042"], duplicates: [], failed: [] });
-    await waitFor(() => mine(hub)[0]?.reading?.state === "done");
+    await waitFor(() => Boolean(mine(hub)[0]?.compiled));
 
     snap = await hub.request({ action: "snapshot" });
     const doc = snap.kbDocuments!.find((d) => d.original)!;
@@ -120,7 +123,9 @@ describe("dropping material into the knowledge base", () => {
       original: { name: "scan_0042.pdf", mime: "application/pdf", size: pdf.length },
     });
     expect(doc.tags).toEqual(expect.arrayContaining(["zfs", "disk"]));
-    expect(models).toEqual(["claude-haiku-5-5"]);
+    // Describing the source runs on the background model; writing pages on the main one.
+    expect(models).toEqual(["claude-haiku-5-5", "claude-opus-5-5"]);
+    expect(doc.compiled).toMatchObject({ pages: 0 });
     expect(snap.kbReading).toMatchObject({ waiting: 0, failed: 0 });
     // The list carries no pieces and only the start of the text; the whole comes on request.
     expect(doc.chunks).toEqual([]);

@@ -10,6 +10,7 @@ import type {
   AgentToolRecord,
   MemoryEntry,
   KbDocument,
+  KbPage,
   McpServerConfig,
   MissionAgent,
 } from "../../../shared/types/aiHub";
@@ -796,7 +797,7 @@ const AGENT_TOOLS: FunctionToolDef[] = [
   {
     name: "sshs3_kb_search",
     description:
-      "The team's knowledge base: runbooks, references, architecture notes and whatever else the team has put in. With `query`: the pieces that match best, each with its document (`docId`, `title`, `summary`) and where in it the piece sits (`heading`, `section`). A piece is an extract: before you act on a procedure, read the document around it with `id` (and `from` to continue). When you use something from here, say which document and heading it came from.",
+      "The team's knowledge base. Its pages say how the team's systems are set up, how to do things, and how to troubleshoot a symptom; the list of pages is in your context. With `page`: one page in full — open the page that covers what you are about to do before you start, and follow what it says not to do. With `query`: the pages and source passages that match, pages first. With `id` (a source's docId): that source section by section, `from` to continue. When you use something from here, say which page or source it came from. If the knowledge base has nothing on a subject, say so instead of guessing.",
     parameters: {
       type: "object",
       properties: {
@@ -804,9 +805,13 @@ const AGENT_TOOLS: FunctionToolDef[] = [
           type: "string",
           description: "Keywords or question to search in the Knowledge Base.",
         },
+        page: {
+          type: "string",
+          description: "Read one page in full: its id from the list of pages in your context or from a search.",
+        },
         id: {
           type: "string",
-          description: "Read a document instead of searching: its docId from a search result. Returns its sections in order.",
+          description: "Read a source document instead of searching: its docId from a search result. Returns its sections in order.",
         },
         from: {
           type: "number",
@@ -1098,16 +1103,21 @@ const TEAM_MEMORY_CHARS = 12_000;
 export function snapshotText(context: unknown, maxChars: number): string {
   if (!context || typeof context !== "object")
     return boundedContext(JSON.stringify(context ?? null), maxChars);
-  const { workspaceMemories, ...rest } = context as {
+  const { workspaceMemories, kbPageIndex, ...rest } = context as {
     workspaceMemories?: unknown;
+    kbPageIndex?: unknown;
   } & Record<string, unknown>;
+  const pagesBlock = typeof kbPageIndex === "string" && kbPageIndex.trim() ? [kbPageIndex, ""] : [];
   const memories = Array.isArray(workspaceMemories)
     ? (workspaceMemories as Array<Partial<MemoryEntry>>).filter(
         (m) => m && typeof m.text === "string" && m.text.trim(),
       )
     : [];
   const snapshot = boundedContext(JSON.stringify(rest), maxChars);
-  if (memories.length === 0) return snapshot;
+  if (memories.length === 0)
+    return pagesBlock.length
+      ? [...pagesBlock, "Workspace snapshot (JSON; when large, its beginning is cut):", snapshot].join("\n")
+      : snapshot;
   const lines: string[] = [];
   let used = 0;
   let left = 0;
@@ -1121,6 +1131,7 @@ export function snapshotText(context: unknown, maxChars: number): string {
     used += line.length;
   }
   return [
+    ...pagesBlock,
     "Team memory (what the team has learned and chosen to remember; best match first):",
     ...lines,
     ...(left > 0
@@ -1379,9 +1390,19 @@ function buildSystemInstructions(
         : []),
       `- **Agent System Instructions**:\n${activeAgent.systemPrompt}`,
     );
+    const boundPages = Array.isArray((ctx as { kbBoundPages?: unknown }).kbBoundPages)
+      ? ((ctx as { kbBoundPages: KbPage[] }).kbBoundPages)
+      : [];
+    if (boundPages.length > 0)
+      agentSection.push(
+        "- **Pages this agent always has at hand**:",
+        ...boundPages.map(
+          (p) => `  * **${p.title}** (${p.kind}; ${p.when}):\n    ${boundedContext(p.body, 3000).replace(/\n/g, "\n    ")}`,
+        ),
+      );
     if (activeAgent.kbDocIds?.length) {
-      const boundDocs = kbDocs.filter((d) =>
-        activeAgent.kbDocIds!.includes(d.id),
+      const boundDocs = kbDocs.filter(
+        (d) => activeAgent.kbDocIds!.includes(d.id) && typeof d.content === "string",
       );
       if (boundDocs.length > 0) {
         agentSection.push(

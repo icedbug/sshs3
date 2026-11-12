@@ -3200,3 +3200,54 @@
     background-position: -120% 0;
   }
 }
+
+/* ---- knowledge base: pages and review ----------------------------------- */
+.ai-kb-tabs {
+  margin: 16px 0 0;
+}
+.ai-hub .ai-tabs .ai-tab-alert:not(.ai-tab-on) {
+  color: #fbbf24;
+}
+.ai-kb-chips {
+  margin: 0 0 10px;
+}
+.ai-page .ai-page-when {
+  color: var(--ai-ink-soft);
+  font-size: 12.5px;
+}
+.ai-page {
+  border-left: 2px solid color-mix(in srgb, var(--ai-accent) 55%, transparent);
+}
+.ai-hub .ai-linklike {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ai-accent);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.ai-hit em {
+  margin-right: 6px;
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: var(--ai-surface-raised);
+  color: var(--ai-ink-faint);
+  font-size: 10.5px;
+  font-style: normal;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.ai-hit-page em {
+  background: color-mix(in srgb, var(--ai-accent) 18%, transparent);
+  color: var(--ai-accent);
+}
+.ai-finding {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+}
+.ai-finding strong {
+  font-weight: 500;
+  line-height: 1.45;
+}
