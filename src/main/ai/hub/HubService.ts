@@ -86,6 +86,7 @@ import {
 import { boundedContext, safeError } from "./privacy";
 import { createLogger } from "../../log";
 import { runWorkforce } from "./WorkforceRunner";
+import { LearningQueue } from "./LearningQueue";
 import {
   EmbeddingIndex,
   openAiCompatibleEmbedder,
@@ -304,6 +305,10 @@ export class HubService {
   /** Records being read for memory proposals right now. */
   private distilling = new Set<string>();
   private readonly embeddings: EmbeddingIndex;
+  private learningQueue?: LearningQueue;
+  private readingQueue = false;
+  private lastQueueCheck = 0;
+  private recoveredSessions = false;
   private initialized?: Promise<void>;
   private tickTimer?: NodeJS.Timeout;
   private saveTimer?: NodeJS.Timeout;
@@ -2682,7 +2687,7 @@ export class HubService {
         this.store.data.preferences.proposeMemories !== false &&
         worthDistilling(task)
       )
-        void this.proposeMemoriesFrom(
+        void this.queueForLearning(
           {
             id: `task:${task.id}`,
             title: `Session: ${task.title}`,
@@ -2779,9 +2784,11 @@ export class HubService {
     try {
       if (!(await this.config.getView()).enabled) return;
       const now = Date.now();
-      void this.maybeLearnFromOwnActivity(now).catch((e) =>
-        log.warn("Learning from activity failed", safeError(e)),
-      );
+      void (async () => {
+        await this.recoverUnreadSessions(now);
+        await this.maybeLearnFromOwnActivity(now);
+        await this.readLearningQueue(now);
+      })().catch((e) => log.warn("Learning failed", safeError(e)));
       let historyChanged = false;
       for (const session of this.terminals.list()) {
         const text = this.terminals.context(session.id);
@@ -2998,6 +3005,111 @@ export class HubService {
     });
   }
 
+  /** The team's queue of records waiting to be read for memory, when a bucket is in use. */
+  private queue(): LearningQueue | undefined {
+    if (!this.s3Workspace.canUseBucket()) return undefined;
+    this.learningQueue ??= new LearningQueue(this.s3Workspace.objects);
+    return this.learningQueue;
+  }
+
+  /**
+   * Hands a record over to be read for team memory. With a team bucket it is
+   * uploaded to the shared queue at once and read later by whichever
+   * teammate's app is running (this one included), so closing this computer
+   * right after the work does not lose it. Without a bucket, or when the
+   * upload fails, this app reads it itself now.
+   */
+  private async queueForLearning(
+    source: DistillSource,
+    query: string,
+  ): Promise<void> {
+    if (this.store.data.preferences.proposeMemories === false) return;
+    if (isDemoMode()) return;
+    const queued = this.store.data.queuedSourceIds ?? [];
+    const seen = this.store.data.distilledSourceIds ?? [];
+    if (queued.includes(source.id) || seen.includes(source.id)) return;
+    const queue = this.queue();
+    if (queue) {
+      try {
+        await queue.enqueue({
+          v: 1,
+          id: source.id,
+          title: source.title,
+          transcript: source.transcript,
+          query: boundedContext(query, 600),
+          actor: await this.resolveActorName(),
+          createdAt: Date.now(),
+          attempts: 0,
+        });
+        this.store.data.queuedSourceIds = [...queued, source.id].slice(-300);
+        this.changed();
+        return;
+      } catch (error) {
+        log.warn("Could not queue a record for learning", safeError(error));
+      }
+    }
+    await this.proposeMemoriesFrom(source, query);
+  }
+
+  /**
+   * Reads one record from the team's queue with this app's model. Called
+   * from the periodic tick, at most every twenty seconds and one record at a
+   * time. A record whose reading fails goes back for another app to try.
+   */
+  private async readLearningQueue(now = Date.now()): Promise<void> {
+    if (this.readingQueue || now - this.lastQueueCheck < 20_000) return;
+    if (this.store.data.preferences.proposeMemories === false) return;
+    const queue = this.queue();
+    if (!queue) return;
+    this.lastQueueCheck = now;
+    this.readingQueue = true;
+    try {
+      const claimed = await queue.claimNext(await this.resolveActorName(), now);
+      if (!claimed) return;
+      const { record } = claimed;
+      const status = await this.proposeMemoriesFrom(
+        {
+          id: record.id,
+          title: boundedContext(`${record.title} (${record.actor})`, 200),
+          transcript: boundedContext(record.transcript, 24_000),
+        },
+        record.query,
+        { again: true },
+      );
+      // No status: another run of this app is reading the same record right now.
+      if (status && !status.error) await queue.complete(claimed.name);
+      else await queue.release(claimed);
+    } finally {
+      this.readingQueue = false;
+    }
+  }
+
+  /**
+   * Finished sessions that were never handed over for learning, because the
+   * app was closed before it got to them, are handed over now. Once per start.
+   */
+  private async recoverUnreadSessions(now = Date.now()): Promise<void> {
+    if (this.recoveredSessions) return;
+    this.recoveredSessions = true;
+    const recent = this.store.data.tasks
+      .filter(
+        (t) =>
+          !isBackgroundRun(t) &&
+          worthDistilling(t) &&
+          now - t.updatedAt < 7 * 86_400_000,
+      )
+      .slice(-10);
+    for (const task of recent)
+      await this.queueForLearning(
+        {
+          id: `task:${task.id}`,
+          title: `Session: ${task.title}`,
+          transcript: taskTranscript(task),
+        },
+        `${task.title} ${task.target?.label ?? ""}`,
+      );
+  }
+
   /**
    * Reads this user's own recent activity for memories, at most every six
    * hours and only when enough has happened. Each teammate's app reads its own
@@ -3014,7 +3126,7 @@ export class HubService {
     if (own.length < 8) return;
     this.store.data.lastActivityDistillAt = now;
     const events = own.slice(-80);
-    await this.proposeMemoriesFrom(
+    await this.queueForLearning(
       {
         id: `activity:${events.at(-1)!.id}`,
         title: "My recent activity",

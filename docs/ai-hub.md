@@ -126,6 +126,21 @@ explicitly enabled presentation on top of the same terminal authority.
   unusable answer, is `lastMemoryDistill`. This is the extract-and-compare
   method of mem0, done with the configured provider so that it also works with
   ChatGPT/Codex sign-in and keeps the team's existing memory sync.
+- **`LearningQueue` (learning through the team bucket)** — nobody runs a
+  server for the workspace, so the computer that did the work may be closed
+  seconds later. With an S3 team workspace, a finished session (and a batch of
+  the user's own activity) is therefore not read on the spot: it is uploaded
+  as a record to `learn/pending/` under the workspace prefix, one small write.
+  Every running app with AI enabled checks the queue from its tick (at most
+  every 20 s, one record at a time), claims the oldest unclaimed record
+  (`learn/claims/`, a claim goes stale after ten minutes), reads it with its
+  own model through `MemoryDistiller`, and deletes it. A record whose reading
+  fails goes back for another app, and is dropped after three failures. At
+  start an app uploads finished sessions of the last week it never handed
+  over. Without a bucket (or when the upload fails) the app reads the record
+  itself, as before. Records are masked like everything else, but note that a
+  teammate's app sends the session's transcript to that teammate's model
+  provider.
 - **`McpClientManager`** — MCP over stdio and HTTP with a catalog of nine
   presets (`MCP_MARKETPLACE_CATALOG`).
 - **`S3WorkspaceSyncService`** — team workspace sync over an S3 bucket. Memory

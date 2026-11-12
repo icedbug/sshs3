@@ -874,6 +874,60 @@ export class S3WorkspaceSyncService {
     }
   }
 
+  /** Whether this process may use the bucket now: configured, enabled, and not a demo process. */
+  canUseBucket(): boolean {
+    return !this.disposed && this.canReachBucket();
+  }
+
+  private objectPath(relative: string): string {
+    const bucket = this.config.bucket.trim();
+    const prefix = (this.config.prefix || "sshs3-workspace")
+      .trim()
+      .replace(/^\/+|\/+$/g, "");
+    const clean = relative.replace(/^\/+|\/+$/g, "");
+    return prefix ? `${bucket}/${prefix}/${clean}` : `${bucket}/${clean}`;
+  }
+
+  /**
+   * Plain object access under the workspace prefix, for data that lives in
+   * the bucket beside the workspace file (the learning queue). Paths are
+   * relative to the prefix.
+   */
+  readonly objects = {
+    list: async (dir: string): Promise<string[]> => {
+      const provider = await this.getOrCreateProvider();
+      try {
+        return (await provider.list(this.objectPath(dir)))
+          .filter((entry) => !entry.isDirectory)
+          .map((entry) => entry.name);
+      } catch (err) {
+        if (this.isNotFoundError(err)) return [];
+        throw err;
+      }
+    },
+    read: async (relative: string): Promise<Buffer | undefined> => {
+      const provider = await this.getOrCreateProvider();
+      try {
+        return await this.readProviderFile(provider, this.objectPath(relative));
+      } catch (err) {
+        if (this.isNotFoundError(err)) return undefined;
+        throw err;
+      }
+    },
+    write: async (relative: string, content: Buffer): Promise<void> => {
+      const provider = await this.getOrCreateProvider();
+      await this.writeProviderFile(provider, this.objectPath(relative), content);
+    },
+    remove: async (relative: string): Promise<void> => {
+      const provider = await this.getOrCreateProvider();
+      try {
+        await provider.delete(this.objectPath(relative), false);
+      } catch (err) {
+        if (!this.isNotFoundError(err)) throw err;
+      }
+    },
+  };
+
   private workspaceObjectPath(): string {
     const bucket = this.config.bucket.trim();
     const prefix = (this.config.prefix || "sshs3-workspace")
