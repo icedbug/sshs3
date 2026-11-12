@@ -530,6 +530,12 @@ export interface MissionAgent {
   scheduleMinutes?: number;
   /** false: paused. A paused agent is given no tickets by the heartbeat. */
   enabled?: boolean;
+  /**
+   * Set when the agent is an external coding agent (Claude Code, Codex …)
+   * reached over ACP: the id of a runner. The runner itself, a command and a
+   * folder, is set up on each computer and is not shared.
+   */
+  runnerId?: string;
   /** The agent this one reports to in the workforce (an agent id). */
   reportsTo?: string;
   /** Tokens (in + out) this agent may spend on tickets per calendar month. 0 or unset: no limit. */
@@ -537,6 +543,29 @@ export interface MissionAgent {
   author?: string;
   updatedAt: number;
 }
+/**
+ * An external coding agent as it is started on this computer. Kept per
+ * installation: a command that runs with the user's rights is not something a
+ * teammate's app should receive from the bucket.
+ */
+export interface ExternalRunner {
+  /** Stable id agents refer to, e.g. `claude-code`. The same id on every computer means the same agent. */
+  id: string;
+  name: string;
+  command: string;
+  args: string[];
+  /** The folder the agent works in: the checkout of the code. */
+  cwd?: string;
+  updatedAt: number;
+}
+export interface ExternalRunnerPreset {
+  id: string;
+  name: string;
+  command: string;
+  args: string[];
+  note: string;
+}
+
 export type WorkTicketStatus =
   | "backlog"
   | "todo"
@@ -709,6 +738,8 @@ export interface HubSnapshot {
   agents?: MissionAgent[];
   mcpServers?: McpServerConfig[];
   mcpCatalog?: McpCatalogPreset[];
+  externalRunners?: ExternalRunner[];
+  externalRunnerPresets?: ExternalRunnerPreset[];
   workGoals?: WorkGoal[];
   workTickets?: WorkTicket[];
   /** Per agent id: what it has spent on tickets this month. */
@@ -860,6 +891,8 @@ export type HubRequest =
   | { action: "ticket-review"; id: string; approve: boolean; note?: string }
   | { action: "workforce-template-apply"; templateId: string; goalTitle?: string }
   | { action: "agent-pause"; id: string; paused: boolean }
+  | { action: "runner-save"; runner: { id: string; name: string; command: string; args: string[]; cwd?: string } }
+  | { action: "runner-delete"; id: string }
   | { action: "mcp-test"; id: string }
   | {
       action: "kb-save";

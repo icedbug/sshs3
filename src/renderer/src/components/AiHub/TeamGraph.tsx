@@ -33,7 +33,10 @@ function AgentNode({ data }: NodeProps<Node<AgentNodeData>>): JSX.Element {
         <strong>{live.agent.name}</strong>
         <span className="ai-org-state">{STATE_TEXT[live.state]}</span>
       </div>
-      <small>{live.agent.role}</small>
+      <small>
+        {live.agent.role}
+        {live.agent.runnerId ? ` · ${live.agent.runnerId}` : ""}
+      </small>
       {live.ticket ? (
         <div className="ai-org-ticket">
           <span>{live.ticket.title}</span>

@@ -41,6 +41,7 @@
     "copr": "./scripts/copr-build.sh"
   },
   "dependencies": {
+    "@agentclientprotocol/sdk": "^2.6.0",
     "@aws-sdk/client-s3": "^3.1149.0",
     "@aws-sdk/client-sso": "^3.1149.0",
     "@aws-sdk/client-sso-oidc": "^3.1149.0",

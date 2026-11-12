@@ -21,6 +21,7 @@ import type {
   WorkGoal,
   WorkTicket,
   AgentUsage,
+  ExternalRunner,
   WorkspaceActivityEvent,
   WorkspaceServerSummary,
 } from "../../../shared/types/aiHub";
@@ -116,6 +117,10 @@ export interface HubData {
   workGoals?: WorkGoal[];
   workTickets?: WorkTicket[];
   agentUsage?: Record<string, AgentUsage>;
+  /** Removals of shared agents, runbooks and dependencies (id → when), so they reach teammates. */
+  sharedRemoved?: Partial<Record<"agents" | "kb" | "edges", Record<string, number>>>;
+  /** External coding agents as they are started on this computer. Never shared. */
+  externalRunners?: ExternalRunner[];
   /** Names this installation in ticket claims. */
   clientId?: string;
   safetyPolicy?: SafetyPolicyConfig;

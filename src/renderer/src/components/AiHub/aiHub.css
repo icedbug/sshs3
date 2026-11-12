@@ -3025,3 +3025,17 @@
     grid-template-columns: 1fr;
   }
 }
+
+.ai-runner-presets {
+  margin: 8px 0 0;
+}
+.ai-runner-presets small {
+  color: var(--ai-ink-faint);
+}
+.ai-form label > small {
+  display: block;
+  margin-top: 4px;
+  color: var(--ai-ink-faint);
+  font-weight: 400;
+  line-height: 1.5;
+}

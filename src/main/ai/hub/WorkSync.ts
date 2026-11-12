@@ -1,4 +1,5 @@
 import type { QueueStore } from "./LearningQueue";
+import type { AgentUsage } from "../../../shared/types/aiHub";
 import { TICKET_CLAIM_TTL_MS, mergeItems, type Mergeable } from "./WorkBoard";
 
 /**
@@ -6,16 +7,18 @@ import { TICKET_CLAIM_TTL_MS, mergeItems, type Mergeable } from "./WorkBoard";
  * writes the same objects, one per item, so two people changing different
  * tickets never overwrite each other.
  *
- *   work/<collection>/<id>.json   one goal or ticket
+ *   work/<collection>/<id>.json   one goal, ticket, agent, runbook or dependency
+ *   work/usage/<client>.json      what one installation's runs have spent, per agent
  *   work/claims/<ticketId>.json   who is running the ticket, and since when
  *
  * An item is replaced only by a newer copy of itself (updatedAt), and a
  * removal is a copy marked deleted, so it reaches everyone.
  */
 
-export type WorkCollection = "goals" | "tickets";
+export type WorkCollection = "goals" | "tickets" | "agents" | "kb" | "edges";
 
-const MAX_ITEM_BYTES = 200_000;
+/** A runbook may be long; everything else is small. */
+const MAX_ITEM_BYTES = 1_500_000;
 const safeId = (id: string): string => id.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 120);
 
 function parse<T extends Mergeable>(buffer: Buffer | undefined): T | undefined {
@@ -73,6 +76,33 @@ export class WorkSync {
       `work/${collection}/${safeId(item.id)}.json`,
       Buffer.from(JSON.stringify(item), "utf8"),
     );
+  }
+
+  /**
+   * Spending is kept per installation and added up, so two computers never
+   * overwrite each other's count and a budget holds for the whole team.
+   */
+  async putUsage(client: string, usage: Record<string, AgentUsage>): Promise<void> {
+    await this.store.write(`work/usage/${safeId(client)}.json`, Buffer.from(JSON.stringify(usage), "utf8"));
+  }
+
+  /** What every other installation has spent. */
+  async readOtherUsage(client: string): Promise<Record<string, AgentUsage>[]> {
+    const names = (await this.store.list("work/usage")).filter(
+      (n) => n.endsWith(".json") && n !== `${safeId(client)}.json`,
+    );
+    const all = await inBatches(names.slice(0, 200), 8, (name) => this.store.read(`work/usage/${name}`));
+    const out: Record<string, AgentUsage>[] = [];
+    for (const buffer of all) {
+      if (!buffer || buffer.length > 200_000) continue;
+      try {
+        const value = JSON.parse(buffer.toString("utf8")) as Record<string, AgentUsage>;
+        if (value && typeof value === "object") out.push(value);
+      } catch {
+        // An unreadable count is left out; it cannot be guessed.
+      }
+    }
+    return out;
   }
 
   private claimPath(ticketId: string): string {

@@ -20,6 +20,7 @@ interface AgentDraft {
   defaultMode: AgentMode;
   kbDocIds: string[];
   mcpServerIds: string[];
+  runnerId: string;
 }
 
 const emptyAgent: AgentDraft = {
@@ -31,6 +32,7 @@ const emptyAgent: AgentDraft = {
   defaultMode: "assisted",
   kbDocIds: [],
   mcpServerIds: [],
+  runnerId: "",
 };
 
 const toggled = (list: string[], id: string): string[] =>
@@ -63,6 +65,13 @@ export function AgentsAndMcpView({
     | undefined
   >();
   const [testingMcpId, setTestingMcpId] = useState("");
+  const [runnerDraft, setRunnerDraft] = useState<
+    { id: string; name: string; command: string; args: string; cwd: string; note?: string; existing?: boolean } | undefined
+  >();
+  const runners = hub.externalRunners ?? [];
+  const runnerPresets = (hub.externalRunnerPresets ?? []).filter((p) => !runners.some((r) => r.id === p.id));
+  const runnerName = (id: string): string =>
+    runners.find((r) => r.id === id)?.name ?? hub.externalRunnerPresets?.find((p) => p.id === id)?.name ?? id;
 
   const agents = hub.agents ?? [];
   const servers = hub.mcpServers ?? [];
@@ -129,6 +138,7 @@ export function AgentsAndMcpView({
                 defaultMode: draft.defaultMode,
                 kbDocIds: draft.kbDocIds,
                 mcpServerIds: draft.mcpServerIds,
+                runnerId: draft.runnerId || undefined,
               },
             }).then((next) => {
               if (next) setDraft(undefined);
@@ -170,6 +180,38 @@ export function AgentsAndMcpView({
               value={draft.systemPrompt}
               onChange={(e) => setDraft({ ...draft, systemPrompt: e.target.value })}
             />
+          </label>
+          <label>
+            Runs on
+            <select
+              data-testid="agent-runner-select"
+              value={draft.runnerId}
+              onChange={(e) => setDraft({ ...draft, runnerId: e.target.value })}
+            >
+              <option value="">sshS3&apos;s assistant, on your model</option>
+              {runners.map((r) => (
+                <option key={r.id} value={r.id}>
+                  {r.name} (external agent)
+                </option>
+              ))}
+              {runnerPresets.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name} (external agent, not set up on this computer)
+                </option>
+              ))}
+              {draft.runnerId &&
+                !runners.some((r) => r.id === draft.runnerId) &&
+                !runnerPresets.some((p) => p.id === draft.runnerId) && (
+                  <option value={draft.runnerId}>{draft.runnerId} (not set up on this computer)</option>
+                )}
+            </select>
+            {draft.runnerId && (
+              <small>
+                An external agent works in its own folder with its own tools and model. sshS3&apos;s runbooks, MCP
+                servers and terminals are not given to it; what it asks permission for is judged by your safety
+                settings.
+              </small>
+            )}
           </label>
           <div className="ai-form-row">
             <label>
@@ -270,6 +312,19 @@ export function AgentsAndMcpView({
                 <small>{ag.role}</small>
               </div>
               <div className="ai-tags">
+                {ag.runnerId && (
+                  <span
+                    className={`ai-badge ${runners.some((r) => r.id === ag.runnerId) ? "ai-badge-purple" : "ai-badge-danger"}`}
+                    title={
+                      runners.some((r) => r.id === ag.runnerId)
+                        ? "Runs on an external coding agent"
+                        : "This external agent is not set up on this computer"
+                    }
+                  >
+                    {runnerName(ag.runnerId)}
+                    {runners.some((r) => r.id === ag.runnerId) ? "" : " · not set up here"}
+                  </span>
+                )}
                 {selectedAgentId === ag.id && <span className="ai-pill">In chat</span>}
                 <span className="ai-badge ai-badge-mode">{modes[ag.defaultMode] ?? ag.defaultMode}</span>
                 {ag.targetCluster && <span className="ai-badge ai-badge-cluster">{ag.targetCluster}</span>}
@@ -314,6 +369,7 @@ export function AgentsAndMcpView({
                     defaultMode: ag.defaultMode,
                     kbDocIds: ag.kbDocIds ?? [],
                     mcpServerIds: ag.mcpServerIds ?? [],
+                    runnerId: ag.runnerId ?? "",
                   })
                 }
               >
@@ -401,6 +457,163 @@ export function AgentsAndMcpView({
           </details>
         ))}
       </article>
+
+      <div className="ai-section-head">
+        <h3>
+          External agents <span className="ai-count">{runners.length}</span>
+        </h3>
+        <button
+          type="button"
+          onClick={() =>
+            setRunnerDraft(runnerDraft ? undefined : { id: "", name: "", command: "", args: "", cwd: "" })
+          }
+        >
+          {runnerDraft ? "Close" : "Add an agent"}
+        </button>
+      </div>
+      <p className="ai-hint">
+        Coding agents such as Claude Code or Codex, started on this computer and spoken to over the Agent Client
+        Protocol. An agent above can run on one of them. The command and folder are kept on this computer only: a
+        teammate sets up the same agent on theirs.
+      </p>
+      {runnerDraft && (
+        <form
+          className="ai-form ai-card"
+          data-testid="runner-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            const name = runnerDraft.name.trim();
+            if (!name || !runnerDraft.command.trim()) return;
+            void act({
+              action: "runner-save",
+              runner: {
+                id: runnerDraft.id || name,
+                name,
+                command: runnerDraft.command.trim(),
+                args: runnerDraft.args.split(/\s+/).filter(Boolean),
+                cwd: runnerDraft.cwd.trim() || undefined,
+              },
+            }).then((next) => {
+              if (next) setRunnerDraft(undefined);
+            });
+          }}
+        >
+          <strong>{runnerDraft.existing ? "Edit external agent" : "Add an external agent"}</strong>
+          {runnerDraft.note && <p className="ai-hint">{runnerDraft.note}</p>}
+          <label>
+            Name
+            <input
+              required
+              autoFocus
+              placeholder="Claude Code"
+              value={runnerDraft.name}
+              onChange={(e) => setRunnerDraft({ ...runnerDraft, name: e.target.value })}
+            />
+          </label>
+          <div className="ai-form-row">
+            <label>
+              Command
+              <input
+                required
+                className="ai-mono"
+                placeholder="npx"
+                value={runnerDraft.command}
+                onChange={(e) => setRunnerDraft({ ...runnerDraft, command: e.target.value })}
+              />
+            </label>
+            <label>
+              Arguments
+              <input
+                className="ai-mono"
+                placeholder="-y @agentclientprotocol/claude-agent-acp"
+                value={runnerDraft.args}
+                onChange={(e) => setRunnerDraft({ ...runnerDraft, args: e.target.value })}
+              />
+            </label>
+          </div>
+          <label>
+            Folder it works in
+            <input
+              required
+              className="ai-mono"
+              placeholder="/home/you/code/the-product"
+              value={runnerDraft.cwd}
+              onChange={(e) => setRunnerDraft({ ...runnerDraft, cwd: e.target.value })}
+            />
+            <small>The checkout of the code. The agent reads and writes here with your user&apos;s rights.</small>
+          </label>
+          <div className="ai-card-actions">
+            <button type="submit" className="ai-btn-emerald">
+              Save
+            </button>
+            <button type="button" onClick={() => setRunnerDraft(undefined)}>
+              Cancel
+            </button>
+          </div>
+        </form>
+      )}
+      {runners.map((r) => (
+        <article className="ai-card" key={r.id} data-testid={`runner-${r.id}`}>
+          <div className="ai-card-head">
+            <div>
+              <strong>{r.name}</strong>
+              <small className="ai-mono">
+                {r.command} {r.args.join(" ")}
+              </small>
+              <small>{r.cwd ? `Works in ${r.cwd}` : "No folder set: it cannot run yet"}</small>
+            </div>
+            <span className="ai-badge">{agents.filter((a) => a.runnerId === r.id).length} agent(s)</span>
+          </div>
+          <div className="ai-card-actions">
+            <button
+              type="button"
+              onClick={() =>
+                setRunnerDraft({
+                  id: r.id,
+                  name: r.name,
+                  command: r.command,
+                  args: r.args.join(" "),
+                  cwd: r.cwd ?? "",
+                  existing: true,
+                })
+              }
+            >
+              Edit
+            </button>
+            <span className="ai-spacer" />
+            <ConfirmButton
+              label="Remove"
+              confirmLabel="Remove from this computer?"
+              onConfirm={() => void act({ action: "runner-delete", id: r.id })}
+            />
+          </div>
+        </article>
+      ))}
+      {runnerPresets.length > 0 && !runnerDraft && (
+        <div className="ai-tags ai-runner-presets">
+          <small>Set up:</small>
+          {runnerPresets.map((p) => (
+            <button
+              key={p.id}
+              type="button"
+              className="ai-chip"
+              data-testid={`runner-preset-${p.id}`}
+              onClick={() =>
+                setRunnerDraft({
+                  id: p.id,
+                  name: p.name,
+                  command: p.command,
+                  args: p.args.join(" "),
+                  cwd: "",
+                  note: p.note,
+                })
+              }
+            >
+              {p.name}
+            </button>
+          ))}
+        </div>
+      )}
 
       <div className="ai-section-head">
         <h3>

@@ -5,6 +5,8 @@ import { app, Notification, powerMonitor } from "electron";
 import type {
   AgentChange,
   AgentPlan,
+  AgentUsage,
+  ExternalRunner,
   AgentSchedule,
   AgentTask,
   HubRequest,
@@ -44,7 +46,10 @@ import { KnowledgeBaseService } from "./KnowledgeBaseService";
 import { SelfLearningService } from "./SelfLearningService";
 import {
   DEFAULT_SAFETY_POLICY,
+  analyzeCommandSafety,
+  shouldRequireCommandApproval,
 } from "./CommandSafetyService";
+import { AcpRuntime, EXTERNAL_RUNNER_PRESETS } from "./AcpRuntime";
 import {
   deleteDemoAgent,
   deleteDemoInfraEdge,
@@ -100,8 +105,11 @@ import {
   claimIsFresh,
   live,
   nextForHeartbeat,
+  splitRemovals,
+  sumUsage,
   templateSummaries,
   ticketAfterRun,
+  withRemovals,
   ticketPrompt,
   whyNotRunnable,
   wouldCycle,
@@ -338,6 +346,9 @@ export class HubService {
   private workSyncing = false;
   private workSyncAt?: number;
   private workSyncError?: string;
+  /** What other installations' runs have spent, as last read from the bucket. */
+  private othersUsage: Record<string, AgentUsage>[] = [];
+  private uploadedUsage = "";
   private readingQueue = false;
   private lastQueueCheck = 0;
   private lastActivityCheck = 0;
@@ -1349,9 +1360,11 @@ export class HubService {
       agents: this.getAgentsList(),
       mcpServers: allMcpServers,
       mcpCatalog: mcpCatalog(),
+      externalRunners: [...(this.store.data.externalRunners ?? [])],
+      externalRunnerPresets: EXTERNAL_RUNNER_PRESETS,
       workGoals: live(this.store.data.workGoals),
       workTickets: live(this.store.data.workTickets),
-      agentUsage: { ...(this.store.data.agentUsage ?? {}) },
+      agentUsage: this.usageTotal(),
       workforceTemplates: templateSummaries(),
       workBoardSync: {
         shared: this.s3Workspace.canUseBucket(),
@@ -2220,6 +2233,7 @@ export class HubService {
           scheduleMinutes: a.scheduleMinutes,
           modelOverride: a.modelOverride,
           enabled: a.enabled ?? true,
+          runnerId: a.runnerId?.trim() || undefined,
           reportsTo:
             a.reportsTo && a.reportsTo !== id && !wouldCycle(this.getAgentsList(), id, a.reportsTo)
               ? a.reportsTo
@@ -2236,12 +2250,14 @@ export class HubService {
           saved,
         ];
         if (isDemoMode()) saveDemoAgent(saved);
+        this.lastWorkSync = 0;
         break;
       }
       case "agent-delete": {
         this.store.data.agents = (this.store.data.agents ?? []).filter(
           (a) => a.id !== request.id,
         );
+        this.markSharedRemoved("agents", request.id);
         // Before deleteDemoAgent: in demo mode the built-ins are the demo store's agents.
         this.markBuiltinDismissed(request.id, getBuiltinAgents());
         if (isDemoMode()) deleteDemoAgent(request.id);
@@ -2258,6 +2274,28 @@ export class HubService {
         if (isDemoMode()) saveDemoAgent(saved);
         break;
       }
+      case "runner-save": {
+        const r = request.runner;
+        const id = requiredText(r.id).toLowerCase().replace(/[^a-z0-9-]+/g, "-").slice(0, 40);
+        const saved: ExternalRunner = {
+          id,
+          name: boundedContext(requiredText(r.name), 80),
+          command: requiredText(r.command),
+          args: (r.args ?? []).map((x) => String(x)).filter(Boolean).slice(0, 40),
+          cwd: r.cwd?.trim() || undefined,
+          updatedAt: Date.now(),
+        };
+        this.store.data.externalRunners = [
+          ...(this.store.data.externalRunners ?? []).filter((x) => x.id !== id),
+          saved,
+        ];
+        break;
+      }
+      case "runner-delete":
+        this.store.data.externalRunners = (this.store.data.externalRunners ?? []).filter(
+          (x) => x.id !== request.id,
+        );
+        break;
       case "goal-save": {
         const g = request.goal;
         const existing = (this.store.data.workGoals ?? []).find((x) => x.id === g.id);
@@ -2442,6 +2480,7 @@ export class HubService {
         this.store.data.infraEdges = (this.store.data.infraEdges ?? []).filter(
           (x) => x.id !== request.id,
         );
+        this.markSharedRemoved("edges", request.id);
         if (isDemoMode()) {
           this.markBuiltinDismissed(request.id, getDemoInfraEdges());
           deleteDemoInfraEdge(request.id);
@@ -2548,12 +2587,14 @@ export class HubService {
           doc,
         ];
         if (isDemoMode()) saveDemoKbDocument(doc);
+        this.lastWorkSync = 0;
         break;
       }
       case "kb-delete": {
         this.store.data.kbDocuments = (this.store.data.kbDocuments ?? []).filter(
           (d) => d.id !== request.id,
         );
+        this.markSharedRemoved("kb", request.id);
         // Before deleteDemoKbDocument: in demo mode the built-ins are the demo store's documents.
         this.markBuiltinDismissed(request.id, getBuiltinKbDocuments());
         if (isDemoMode()) deleteDemoKbDocument(request.id);
@@ -2827,6 +2868,11 @@ export class HubService {
     assertLaunching();
     if (!config.enabled)
       throw new Error("Enable AI and configure a model in Hub settings first");
+    // An agent that is an external coding agent runs there, not on the configured model.
+    const external = isBackgroundRun(task)
+      ? undefined
+      : this.getAgentsList().find((a) => a.id === task.agentId && a.runnerId);
+    if (external) return this.launchExternal(task, external, assertLaunching);
     let provider = schedule?.provider ?? config.provider;
     let model = schedule?.model ?? config.model;
     let baseUrl = schedule ? schedule.baseUrl : config.baseUrl;
@@ -3121,6 +3167,109 @@ export class HubService {
         .catch((e) => log.warn("Save failed", safeError(e)));
     }, 2000);
   }
+  /**
+   * Runs the task on an external coding agent over ACP. The agent works in
+   * the folder its runner names, with its own tools; every action it asks
+   * permission for is judged by the same rules as sshS3's own commands.
+   */
+  private async launchExternal(
+    task: AgentTask,
+    agent: MissionAgent,
+    assertLaunching: () => void,
+  ): Promise<void> {
+    const runner = (this.store.data.externalRunners ?? []).find((r) => r.id === agent.runnerId);
+    if (!runner)
+      throw new Error(
+        `${agent.name} runs on the external agent "${agent.runnerId}", which is not set up on this computer. Add it under Agents & MCP.`,
+      );
+    const ticket = live(this.store.data.workTickets).find((t) => t.id === task.ticketId);
+    const runtime = new AcpRuntime(runner, {
+      preface: [
+        `You are working as "${agent.name}" (${agent.role}) for a team that uses sshS3.`,
+        agent.systemPrompt?.trim() ? agent.systemPrompt.trim() : "",
+        ticket
+          ? "You were given one ticket from the team's board. Do that ticket and nothing beside it, and end with a report a person can review: what you did, what you verified and how, and what is left."
+          : "",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+      ask: async (question) => {
+        const analysis = question.command
+          ? analyzeCommandSafety(question.command)
+          : {
+              riskLevel: (["read", "search", "think", "fetch"].includes(question.kind ?? "")
+                ? "safe"
+                : question.kind === "delete"
+                  ? "destructive"
+                  : "modify") as AgentChange["riskLevel"] & string,
+              riskReason: `The agent asked to ${question.kind ?? "act"}`,
+              parsedSubcommands: [],
+            };
+        const change: AgentChange = {
+          id: crypto.randomUUID(),
+          kind: "command",
+          target: `${runner.name} in ${runner.cwd ?? "?"}`,
+          description: boundedContext(question.title, 300),
+          command: question.command ? boundedContext(question.command, 4000) : undefined,
+          status: "pending",
+          riskLevel: analysis.riskLevel,
+          riskReason: analysis.riskReason,
+          at: Date.now(),
+        };
+        if (task.mode === "advice") {
+          change.status = "denied";
+          task.changes.push(change);
+          this.changed();
+          return false;
+        }
+        const needsApproval = shouldRequireCommandApproval({
+          analysis,
+          mode: task.mode,
+          policy: this.store.data.safetyPolicy ?? DEFAULT_SAFETY_POLICY,
+        });
+        if (!needsApproval) {
+          change.status = "approved";
+          task.changes.push(change);
+          this.changed();
+          return true;
+        }
+        return this.broker.askApproval(task, change);
+      },
+    });
+    task.model = runner.name;
+    task.status = "running";
+    task.error = undefined;
+    assertLaunching();
+    this.runtimes.set(task.id, runtime);
+    const timer = setTimeout(() => {
+      void this.stop(task, "Run time budget exhausted");
+    }, task.maxMinutes * 60_000);
+    this.changed();
+    void runtime
+      .start(task, undefined, (event) => this.event(task, event))
+      .catch((error) => {
+        if (active(task)) {
+          task.status = "failed";
+          task.error = safeError(error);
+          task.verification = "incomplete";
+        }
+      })
+      .finally(async () => {
+        clearTimeout(timer);
+        this.broker.revoke(task.id);
+        if (active(task)) {
+          task.status = "interrupted";
+          task.error = "The external agent ended without a final result.";
+        }
+        await runtime.stop();
+        if (this.runtimes.get(task.id) === runtime) this.runtimes.delete(task.id);
+        if (task.ticketId) this.settleTickets();
+        this.settled(task.id);
+        this.changed();
+        this.notify(task.status === "completed" ? "Task finished" : "Task needs attention", task.title);
+      });
+  }
+
   // ---- the board ----------------------------------------------------------
 
   /** Names this installation in ticket claims; made once and kept. */
@@ -3134,6 +3283,63 @@ export class HubService {
     if (!this.s3Workspace.canUseBucket()) return undefined;
     this.workSyncStore ??= new WorkSync(this.s3Workspace.objects);
     return this.workSyncStore;
+  }
+
+  /** This month's spending per agent: this installation's runs plus what teammates' apps reported. */
+  private usageTotal(): Record<string, AgentUsage> {
+    return sumUsage([this.store.data.agentUsage, ...this.othersUsage]);
+  }
+
+  /** Notes that a shared agent, runbook or dependency was removed here, and syncs soon. */
+  private markSharedRemoved(collection: "agents" | "kb" | "edges", id: string): void {
+    const all = (this.store.data.sharedRemoved ??= {});
+    all[collection] = { ...(all[collection] ?? {}), [id]: Date.now() };
+    this.lastWorkSync = 0;
+  }
+
+  /**
+   * The team's setup beside the board: agents, shared runbooks and
+   * dependencies. Each is merged per item with the bucket's copy. MCP servers
+   * are left out on purpose (a server is a command that runs with the user's
+   * rights, and may carry secrets), and so are schedules (they belong to the
+   * installation that runs them). The demo lab's invented data is not shared.
+   */
+  private async syncSharedSetup(sync: WorkSync): Promise<boolean> {
+    if (isDemoMode()) return false;
+    const removed = (this.store.data.sharedRemoved ??= {});
+    let changed = false;
+
+    const agents = await sync.reconcile("agents", withRemovals(this.store.data.agents ?? [], removed.agents));
+    const a = splitRemovals(agents.items);
+    removed.agents = a.removed;
+    if (agents.changed) {
+      this.store.data.agents = a.alive as MissionAgent[];
+      changed = true;
+    }
+
+    const docs = this.store.data.kbDocuments ?? [];
+    const kb = await sync.reconcile(
+      "kb",
+      withRemovals(docs.filter((d) => d.shared !== false), removed.kb),
+    );
+    const k = splitRemovals(kb.items);
+    removed.kb = k.removed;
+    if (kb.changed) {
+      this.store.data.kbDocuments = [
+        ...docs.filter((d) => d.shared === false && !(d.id in k.removed)),
+        ...(k.alive as KbDocument[]),
+      ];
+      changed = true;
+    }
+
+    const edges = await sync.reconcile("edges", withRemovals(this.store.data.infraEdges ?? [], removed.edges));
+    const e = splitRemovals(edges.items);
+    removed.edges = e.removed;
+    if (edges.changed) {
+      this.store.data.infraEdges = e.alive as InfraGraphEdge[];
+      changed = true;
+    }
+    return changed;
   }
 
   private ticket(id: string): WorkTicket {
@@ -3228,7 +3434,7 @@ export class HubService {
     const reason = whyNotRunnable(ticket, {
       tickets: live(this.store.data.workTickets),
       agents,
-      usage: this.store.data.agentUsage,
+      usage: this.usageTotal(),
       client,
     });
     if (reason) throw new Error(reason);
@@ -3322,9 +3528,16 @@ export class HubService {
         const tickets = await sync.reconcile("tickets", this.store.data.workTickets ?? []);
         this.store.data.workGoals = goals.items;
         this.store.data.workTickets = tickets.items;
+        const shared = await this.syncSharedSetup(sync);
+        const mine = JSON.stringify(this.store.data.agentUsage ?? {});
+        if (mine !== this.uploadedUsage && mine !== "{}") {
+          await sync.putUsage(client, this.store.data.agentUsage ?? {});
+          this.uploadedUsage = mine;
+        }
+        this.othersUsage = await sync.readOtherUsage(client);
         this.workSyncAt = Date.now();
         this.workSyncError = undefined;
-        if (goals.changed || tickets.changed) this.changed();
+        if (goals.changed || tickets.changed || shared) this.changed();
       } catch (e) {
         this.workSyncError = safeError(e);
       } finally {
@@ -3348,7 +3561,7 @@ export class HubService {
     const next = nextForHeartbeat({
       tickets,
       agents: this.getAgentsList(),
-      usage: this.store.data.agentUsage,
+      usage: this.usageTotal(),
       client,
       now,
     });

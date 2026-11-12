@@ -8,6 +8,9 @@ import {
   addUsage,
   mergeItems,
   nextForHeartbeat,
+  splitRemovals,
+  sumUsage,
+  withRemovals,
   ticketPrompt,
   tokensLeft,
   whyNotRunnable,
@@ -108,6 +111,40 @@ describe("board rules", () => {
     expect(text).toContain("Look at pg_stat_statements.");
     expect(text).toContain("These agents report to you: Worker");
     expect(text).toContain("parent=t1");
+  });
+});
+
+describe("the team's setup in a bucket", () => {
+  it("shares an agent with a teammate, and a removal reaches them instead of the agent coming back", async () => {
+    const bucket = memoryBucket();
+    const mine = new WorkSync(bucket);
+    const theirs = new WorkSync(bucket);
+    // I create an agent; my teammate's app picks it up.
+    await mine.reconcile("agents", withRemovals([agent("watch", { updatedAt: 10 })], {}));
+    let got = splitRemovals((await theirs.reconcile("agents", withRemovals([] as MissionAgent[], {}))).items);
+    expect(got.alive.map((a) => a.id)).toEqual(["watch"]);
+    // They remove it. Without the marker my copy would be uploaded again.
+    await theirs.reconcile("agents", withRemovals([] as MissionAgent[], { watch: 20 }));
+    got = splitRemovals((await mine.reconcile("agents", withRemovals([agent("watch", { updatedAt: 10 })], {}))).items);
+    expect(got.alive).toEqual([]);
+    expect(got.removed).toEqual({ watch: 20 });
+    // Saved again later, it is back for everyone.
+    await mine.reconcile("agents", withRemovals([agent("watch", { updatedAt: 30 })], got.removed));
+    got = splitRemovals((await theirs.reconcile("agents", withRemovals([] as MissionAgent[], { watch: 20 }))).items);
+    expect(got.alive.map((a) => a.id)).toEqual(["watch"]);
+    expect(got.removed).toEqual({});
+  });
+
+  it("adds up what every installation spent, so a budget holds for the whole team", async () => {
+    const bucket = memoryBucket();
+    const sync = new WorkSync(bucket);
+    const month = new Date().toISOString().slice(0, 7);
+    await sync.putUsage("laptop", { a1: { month, tokens: 600, runs: 1 } });
+    await sync.putUsage("server", { a1: { month, tokens: 500, runs: 2 }, old: { month: "2000-01", tokens: 9, runs: 1 } });
+    const others = await sync.readOtherUsage("laptop");
+    const total = sumUsage([{ a1: { month, tokens: 600, runs: 1 } }, ...others]);
+    expect(total).toEqual({ a1: { month, tokens: 1100, runs: 3 } });
+    expect(tokensLeft(agent("a1", { monthlyTokenBudget: 1000 }), total)).toBe(0);
   });
 });
 

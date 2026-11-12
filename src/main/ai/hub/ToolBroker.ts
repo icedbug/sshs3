@@ -106,6 +106,29 @@ export class ToolBroker {
     approval.resolve(allowed);
   }
 
+  /**
+   * Asks the user about an action that does not go through this broker's own
+   * tools (an external agent's request). The action is listed on the task as
+   * pending; the answer comes through approve() like any other.
+   */
+  async askApproval(task: AgentTask, change: AgentChange): Promise<boolean> {
+    task.changes.push(change);
+    task.status = "waiting";
+    this.deps.changed();
+    const allowed = await new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => {
+        this.approvals.delete(change.id);
+        resolve(false);
+      }, 10 * 60_000);
+      this.approvals.set(change.id, { taskId: task.id, resolve, timer });
+    });
+    const still = task.status === "waiting";
+    change.status = allowed && still ? "approved" : "denied";
+    if (still) task.status = "running";
+    this.deps.changed();
+    return allowed && still;
+  }
+
   revoke(taskId: string): void {
     for (const [key, grant] of this.grants)
       if (grant.task.id === taskId) this.grants.delete(key);

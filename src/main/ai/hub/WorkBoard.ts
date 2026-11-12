@@ -211,6 +211,51 @@ export function addUsage(
   return { ...usage, [agentId]: { month, tokens: base.tokens + tokens, runs: base.runs + 1 } };
 }
 
+/** Several installations' counts as one: per agent, this month's tokens and runs added up. */
+export function sumUsage(
+  parts: Array<Record<string, AgentUsage> | undefined>,
+  now = Date.now(),
+): Record<string, AgentUsage> {
+  const month = monthKey(now);
+  const out: Record<string, AgentUsage> = {};
+  for (const part of parts)
+    for (const [agentId, u] of Object.entries(part ?? {})) {
+      if (!u || u.month !== month) continue;
+      const prev = out[agentId] ?? { month, tokens: 0, runs: 0 };
+      out[agentId] = { month, tokens: prev.tokens + (u.tokens || 0), runs: prev.runs + (u.runs || 0) };
+    }
+  return out;
+}
+
+/**
+ * A collection as it is sent to the team: what exists, plus a marker for each
+ * removal, so the removal reaches everyone instead of the item coming back.
+ */
+export function withRemovals<T extends { id: string; updatedAt?: number }>(
+  items: T[],
+  removed: Record<string, number> | undefined,
+): Array<T & Mergeable> {
+  const dead = removed ?? {};
+  const alive = items
+    .map((x) => ({ ...x, updatedAt: x.updatedAt ?? 0 }))
+    .filter((x) => (dead[x.id] ?? -1) < x.updatedAt);
+  const markers = Object.entries(dead)
+    .filter(([id, at]) => !alive.some((x) => x.id === id && x.updatedAt > at))
+    .map(([id, at]) => ({ id, updatedAt: at, deleted: true }) as unknown as T & Mergeable);
+  return [...alive, ...markers];
+}
+
+/** The reverse of withRemovals, after merging with the team's copy. */
+export function splitRemovals<T extends Mergeable>(items: T[]): { alive: T[]; removed: Record<string, number> } {
+  const removed: Record<string, number> = {};
+  const alive: T[] = [];
+  for (const item of items) {
+    if (item.deleted) removed[item.id] = item.updatedAt;
+    else alive.push(item);
+  }
+  return { alive, removed };
+}
+
 /** Whether making `agentId` report to `bossId` would close a circle. */
 export function wouldCycle(agents: MissionAgent[], agentId: string, bossId: string | undefined): boolean {
   let current = bossId;
