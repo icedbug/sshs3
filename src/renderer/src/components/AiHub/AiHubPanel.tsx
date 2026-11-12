@@ -39,7 +39,8 @@ import { RichMarkdownContent } from "./RichMarkdownContent";
 import { Settings } from "./SettingsView";
 import { Memory } from "./MemoryView";
 import { Schedules } from "./SchedulesView";
-import { DependencyLinks } from "./DependencyLinks";
+import { ChangesView } from "./ChangesView";
+import { InfrastructureView } from "./InfrastructureView";
 import { AgentsAndMcpView } from "./AgentsAndMcpView";
 import { KnowledgeBaseView } from "./KnowledgeBaseView";
 
@@ -2501,170 +2502,36 @@ export function AiHubPanel({
             />
           )}
           {activeView === "Infrastructure" && (
-            <div className="ai-scroll">
-              <h2>Saved targets</h2>
-              <p className="ai-hint">
-                Light checks measure endpoint reachability. Health and
-                authentication remain unknown until investigated.
-              </p>
-              <button
-                disabled={busy}
-                onClick={() => void act({ action: "inventory-refresh" })}
-              >
-                Refresh inventory
-              </button>
-              {hub.inventory.map((item) => (
-                <article className="ai-card" key={item.id}>
-                  <strong>{item.label}</strong>
-                  <p>
-                    {item.kind} · {item.address} · {item.status}
-                  </p>
-                  <p>{item.detail}</p>
-                  {item.status === "unreachable" && (
-                    <button
-                      onClick={() => {
-                        setPrompt(
-                          "Investigate why " +
-                            item.label +
-                            " is unreachable. Start with observations and verify the cause.",
-                        );
-                        setTaskId("");
-                        selectAiTerminal(
-                          hub.sessions.find((s) => s.profileId === item.id)
-                            ?.id ?? "",
-                        );
-                        setView("Work");
-                      }}
-                    >
-                      Investigate
-                    </button>
-                  )}
-                  <small>{new Date(item.observedAt).toLocaleString()}</small>
-                </article>
-              ))}
-              {hub.preview && (
-                <article className="ai-card">
-                  <strong>{hub.preview.label}</strong>
-                  <pre>{hub.preview.text || "No captured output yet"}</pre>
-                  <button
-                    onClick={() => {
-                      setAttachments((old) => [...old.slice(-9), hub.preview!]);
-                      setView("Work");
-                    }}
-                  >
-                    Attach this terminal context
-                  </button>
-                </article>
-              )}
-              <h2>Open sessions</h2>
-              {hub.sessions.map((s) => (
-                <article className="ai-card" key={s.id}>
-                  <strong>{s.label}</strong>
-                  <button
-                    onClick={() =>
-                      void act({ action: "inspect", sessionId: s.id })
-                    }
-                  >
-                    Open transcript
-                  </button>
-                  <p>
-                    {s.state} · {s.owner ? "AI working" : "You control"}
-                  </p>
-                  <button
-                    onClick={() => {
-                      selectAiTerminal(s.id);
-                      setTaskId("");
-                      setView("Work");
-                    }}
-                  >
-                    Use as target
-                  </button>
-                </article>
-              ))}
-              <DependencyLinks hub={hub} act={act} />
-            </div>
+            <InfrastructureView
+              hub={hub}
+              act={act}
+              busy={busy}
+              onUseTerminal={(sessionId) => {
+                selectAiTerminal(sessionId);
+                setTaskId("");
+                setView("Work");
+              }}
+              onAsk={(text, attach, sessionId) => {
+                if (sessionId) selectAiTerminal(sessionId);
+                if (attach)
+                  setAttachments((old) => [
+                    ...old.filter((x) => x.label !== attach.label).slice(-9),
+                    { id: crypto.randomUUID(), observedAt: Date.now(), ...attach },
+                  ]);
+                if (text) setPrompt(text);
+                setTaskId("");
+                setView("Work");
+              }}
+            />
           )}
           {activeView === "Changes" && (
-            <div className="ai-scroll">
-              <h2>Team Workspace Activity</h2>
-              {!(hub.activityLog ?? []).length && (
-                <p className="ai-hint">
-                  Config edits, service restarts and infrastructure changes across VMs appear here automatically.
-                </p>
-              )}
-              {(hub.activityLog ?? []).map((ev) => (
-                <article className="ai-card" key={ev.id}>
-                  <strong>
-                    {ev.actor} · {ev.targetLabel}
-                  </strong>
-                  <small>
-                    {" "}
-                    · {ev.kind} · {new Date(ev.at).toLocaleString()}
-                  </small>
-                  <p>{ev.summary}</p>
-                  {ev.detail && <pre>{ev.detail}</pre>}
-                </article>
-              ))}
-              <h2>Action history</h2>
-              {[...hub.tasks].reverse().map((t) => (
-                <section key={t.id}>
-                  <button
-                    onClick={() => {
-                      setTaskId(t.id);
-                      setView("Work");
-                    }}
-                  >
-                    {t.title} ↗
-                  </button>
-                  {t.changes.map((c) => (
-                    <details className="ai-change" key={c.id}>
-                      <summary style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                        <span>
-                          {c.target} · {c.status} ·{" "}
-                          {new Date(c.at).toLocaleString()}
-                        </span>
-                        {c.riskLevel && (
-                          <span
-                            className={`ai-badge ${
-                              c.riskLevel === "destructive"
-                                ? "ai-badge-danger"
-                                : c.riskLevel === "modify"
-                                  ? "ai-badge-warn"
-                                  : "ai-badge-green"
-                            }`}
-                            title={c.riskReason ?? `AST Command Safety: ${c.riskLevel}`}
-                          >
-                            {c.riskLevel === "destructive"
-                              ? "🔴 Destructive"
-                              : c.riskLevel === "modify"
-                                ? "🟡 Modify"
-                                : "🟢 Safe"}
-                          </span>
-                        )}
-                      </summary>
-                      <p>{c.description}</p>
-                      {c.riskReason && (
-                        <small style={{ display: "block", marginBottom: 4, opacity: 0.85 }}>
-                          Safety check: {c.riskReason}
-                        </small>
-                      )}
-                      {c.kind === "file" && (
-                        <>
-                          <strong>Before</strong>
-                          <pre>{c.before}</pre>
-                          <strong>After</strong>
-                        </>
-                      )}
-                      <pre>{c.command ?? c.after}</pre>
-                      <pre>{c.output}</pre>
-                      <small>
-                        Evidence: {c.id} · exit {c.exitCode ?? "unknown"}
-                      </small>
-                    </details>
-                  ))}
-                </section>
-              ))}
-            </div>
+            <ChangesView
+              hub={hub}
+              onOpenTask={(id) => {
+                setTaskId(id);
+                setView("Work");
+              }}
+            />
           )}
           {activeView === "Memory & skills" && (
             <Memory
