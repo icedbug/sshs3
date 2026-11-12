@@ -38,7 +38,7 @@ export function Memory({
         <article className="ai-card" data-testid="self-learning-engine-card">
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             <div>
-              <strong>🧬 Open-Source Self-Learning Engine (Voyager + Reflexion + @orama/orama)</strong>
+              <strong>Learning from the terminal</strong>
               <div style={{ marginTop: 2 }}>
                 <small>
                   Fixes are noted when a failed command is followed by one that works, and your feedback adjusts how memories are ranked.
@@ -66,29 +66,16 @@ export function Memory({
           <div className="ai-stat-grid" style={{ marginTop: 10 }}>
             <div className="ai-stat-box">
               <strong>{sl.totalLearnedSkills}</strong>
-              <small>🛠️ Voyager Skills ({sl.failureToFixPatterns} Auto-Learned)</small>
+              <small>Skills ({sl.failureToFixPatterns} learned from a fix)</small>
             </div>
             <div className="ai-stat-box">
               <strong>{Math.round(sl.averageConfidence * 100)}%</strong>
-              <small>🎯 Snitt-Confidence (Reinforced)</small>
+              <small>Average confidence</small>
             </div>
             <div className="ai-stat-box">
               <strong>{sl.oramaIndexedChunks}</strong>
-              <small>⚡ @orama/orama Vector+BM25 Chunks</small>
+              <small>Indexed runbook sections</small>
             </div>
-          </div>
-
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
-            {sl.openSourceEngines.map((eng) => (
-              <span
-                key={eng.id}
-                className="ai-tool-tag"
-                title={eng.description}
-                data-testid={`os-engine-badge-${eng.id}`}
-              >
-                🟢 <strong>{eng.name}</strong> <small>v{eng.version}</small> · {eng.metricsLabel}
-              </span>
-            ))}
           </div>
 
           {sl.recentEvents.length > 0 && (
@@ -157,7 +144,7 @@ export function Memory({
           </select>
         </label>
         <label>
-          Memory Tier (Letta Architecture)
+          Tier
           <select
             value={tier}
             onChange={(e) => setTier(e.target.value as typeof tier)}

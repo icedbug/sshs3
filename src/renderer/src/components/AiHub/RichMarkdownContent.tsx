@@ -68,7 +68,7 @@ export function RichMarkdownContent({
                       className="ai-code-btn"
                       onClick={() => handleCopy(raw)}
                     >
-                      {copiedBlock === raw ? "✓ Kopierad" : "📋 Kopiera"}
+                      {copiedBlock === raw ? "✓ Copied" : "Copy"}
                     </button>
                   </div>
                 </div>

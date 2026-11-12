@@ -40,44 +40,20 @@ export function PlanCard({
   };
   const waiting = plan.status === "proposed";
   const listed = plan.steps.filter((s) => s.command).length;
-  return (
-    <section
-      className="ai-card"
-      data-testid="plan-card"
-      aria-label="The agent's plan"
-      style={{ margin: "8px 0", padding: "10px 12px", display: "grid", gap: 8 }}
-    >
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
-        <strong style={{ fontSize: 13 }}>
-          Plan{plan.revision > 1 ? ` (version ${plan.revision})` : ""}: {plan.goal}
-        </strong>
-        <span className="ai-badge" data-testid="plan-status">
-          {waiting
-            ? "waiting for your decision"
-            : plan.status === "approved"
-              ? "approved"
-              : "not approved"}
-        </span>
-      </div>
-
-      <ol style={{ margin: 0, paddingLeft: 18, display: "grid", gap: 6, fontSize: 12 }}>
+  const body = (
+    <>
+      <ol className="ai-plan-steps">
         {plan.steps.map((step, index) => (
-          <li key={index} data-testid={`plan-step-${index + 1}`}>
-            <span className={RISK_CLASS[step.risk]} style={{ marginRight: 6 }}>
-              {step.risk} risk
-            </span>
-            {step.action}
-            {step.target && <small style={{ opacity: 0.8 }}> · {step.target}</small>}
-            {step.ranAt && <small style={{ opacity: 0.8 }}> · ran</small>}
-            {step.command && (
-              <code style={{ display: "block", marginTop: 2, whiteSpace: "pre-wrap" }}>
-                $ {step.command}
-              </code>
-            )}
-            <small style={{ display: "block", opacity: 0.85 }}>Check: {step.check}</small>
-            {step.rollback && (
-              <small style={{ display: "block", opacity: 0.85 }}>Undo: {step.rollback}</small>
-            )}
+          <li key={index} data-testid={`plan-step-${index + 1}`} data-risk={step.risk}>
+            <div className="ai-plan-step-head">
+              <span className={RISK_CLASS[step.risk]}>{step.risk} risk</span>
+              <span>{step.action}</span>
+              {step.target && <small>· {step.target}</small>}
+              {step.ranAt && <small>· ran</small>}
+            </div>
+            {step.command && <code>$ {step.command}</code>}
+            <small>Check: {step.check}</small>
+            {step.rollback && <small>Undo: {step.rollback}</small>}
           </li>
         ))}
       </ol>
@@ -86,7 +62,11 @@ export function PlanCard({
         <small>Not checked: {plan.assumptions.join("; ")}</small>
       )}
 
-      <div data-testid="plan-review" style={{ fontSize: 12 }}>
+      <div
+        className="ai-plan-review"
+        data-testid="plan-review"
+        data-verdict={plan.review.verdict}
+      >
         <strong>
           {plan.review.verdict === "approve"
             ? "Review: no problems found"
@@ -95,16 +75,59 @@ export function PlanCard({
               : "Not reviewed"}
         </strong>
         {plan.review.findings.length > 0 && (
-          <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>
+          <ul>
             {plan.review.findings.map((finding, index) => (
               <li key={index}>{finding}</li>
             ))}
           </ul>
         )}
       </div>
+    </>
+  );
+  const status = (
+    <span className="ai-badge" data-testid="plan-status">
+      {waiting
+        ? "waiting for your decision"
+        : plan.status === "approved"
+          ? "approved"
+          : "not approved"}
+    </span>
+  );
+  const title = (
+    <strong>
+      Plan{plan.revision > 1 ? ` (version ${plan.revision})` : ""}: {plan.goal}
+    </strong>
+  );
+  // A decided plan folds away: the work is in the task list now.
+  if (!waiting)
+    return (
+      <details
+        className="ai-plan"
+        data-testid="plan-card"
+        data-status={plan.status}
+        aria-label="The agent's plan"
+      >
+        <summary className="ai-plan-head">
+          {title}
+          {status}
+        </summary>
+        {body}
+      </details>
+    );
+  return (
+    <section
+      className="ai-plan ai-plan-waiting"
+      data-testid="plan-card"
+      data-status={plan.status}
+      aria-label="The agent's plan"
+    >
+      <div className="ai-plan-head">
+        {title}
+        {status}
+      </div>
+      {body}
 
-      {waiting && (
-        <>
+      <div className="ai-plan-decision">
           <input
             aria-label="Note to the agent"
             value={note}
@@ -119,7 +142,7 @@ export function PlanCard({
                 ? `Approving lets the agent carry the plan out. The ${listed} command(s) listed above run without asking you again; anything else, and anything destructive, still asks.`
                 : "Approving lets the agent carry the plan out; commands that change something still ask."}
           </small>
-          <div style={{ display: "flex", gap: 6 }}>
+          <div className="ai-plan-actions">
             <button
               type="button"
               className="ai-btn-emerald"
@@ -138,8 +161,7 @@ export function PlanCard({
               {note.trim() ? "Send back with this note" : "Don't run it"}
             </button>
           </div>
-        </>
-      )}
+      </div>
     </section>
   );
 }

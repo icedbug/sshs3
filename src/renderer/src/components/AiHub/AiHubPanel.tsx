@@ -331,7 +331,7 @@ export function AiHubPanel({
     {
       cmd: "/configure",
       title: "🛠️ Configure sshS3 with AI",
-      subtitle: "Konfigurera SSH-tunnlar, S3-profiler, kortkommandon, teman, dotfiles & Cloud Sync",
+      subtitle: "Set up SSH tunnels, S3 profiles, shortcuts, themes, dotfiles and cloud sync",
       template:
         "Configure sshS3 for me (SSH tunnels, S3 profile, shortcuts, theme or dotfiles): ",
     },
@@ -688,7 +688,8 @@ export function AiHubPanel({
   if (mode === "closed") return <aside hidden aria-label="AI chat" />;
   return (
     <aside
-      className={"ai-hub ai-hub-" + mode}
+      // In the browser a floating account bar sits at the bottom right; the panel leaves room for it.
+      className={"ai-hub ai-hub-" + mode + (isWebBrowserMode() ? " ai-hub-web" : "")}
       style={mode === "panel" && width ? { width: `${width}px` } : undefined}
       aria-label="AI chat"
       onKeyDown={(e) => {
@@ -1093,7 +1094,7 @@ export function AiHubPanel({
                           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                             <strong>⚡ Connect your AI</strong>
                             <span className="ai-badge ai-badge-green">
-                              {(hub.agents ?? []).length} Agenter · {(hub.kbDocuments ?? []).length} Runbooks
+                              {(hub.agents ?? []).length} agent(s) · {(hub.kbDocuments ?? []).length} runbooks
                             </span>
                           </div>
                           <p style={{ fontSize: 11.5, margin: "6px 0 10px" }}>
@@ -1115,7 +1116,7 @@ export function AiHubPanel({
                                 })
                               }
                             >
-                              🔐 ChatGPT / Codex OAuth (1-klick)
+                              Sign in with ChatGPT / Codex
                             </button>
                             <button
                               type="button"
@@ -1132,13 +1133,13 @@ export function AiHubPanel({
                                 })
                               }
                             >
-                              🦙 Lokal Ollama (localhost:11434)
+                              Local Ollama (localhost:11434)
                             </button>
                             <button
                               type="button"
                               onClick={() => setSettingsOpen(true)}
                             >
-                              🔑 Klistra in API-nyckel (OpenAI / Claude)…
+                              Paste an API key (OpenAI / Claude)…
                             </button>
                           </div>
                         </article>
@@ -1150,7 +1151,7 @@ export function AiHubPanel({
                           className={`ai-agent-pill ${!selectedAgentId ? "active" : ""}`}
                           onClick={() => setSelectedAgentId("")}
                         >
-                          ✨ Standard AI
+                          Assistant
                         </button>
                         {(hub.agents ?? []).map((ag) => (
                           <button
@@ -1280,7 +1281,7 @@ export function AiHubPanel({
                         }
                       >
                         <strong>🛠️ Configure sshS3 with AI</strong>
-                        <small>Tunnlar, S3-profiler, kortkommandon, dotfiles, Cloud Sync &amp; UI-teman</small>
+                        <small>Tunnels, S3 profiles, shortcuts, dotfiles, cloud sync and themes</small>
                       </button>
                       <button
                         type="button"
@@ -1312,11 +1313,12 @@ export function AiHubPanel({
                           )
                         }
                       >
-                        <strong>🗺️ /plan &amp; /grill-me Arkitekturgranskning</strong>
-                        <small>Type / in the chat for commands, plans and design reviews</small>
+                        <strong>🗺️ /plan and /grill-me</strong>
+                        <small>Have a change planned and reviewed before anything runs, or your design questioned</small>
                       </button>
                     </div>
-                    <div style={{ marginTop: "14px", display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+                    {/* The example answer is invented data: shown in the demo lab only. */}
+                    <div hidden={!hub.demoMode} style={{ marginTop: "14px", display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
                       <button
                         type="button"
                         className="ai-btn-accent"
@@ -1373,7 +1375,7 @@ export function AiHubPanel({
                                   setTimeout(() => setCopiedMsgId(null), 1800);
                                 }}
                               >
-                                {copiedMsgId === "demo-showcase" ? "✓ Kopierad" : "📋 Kopiera svar"}
+                                {copiedMsgId === "demo-showcase" ? "✓ Copied" : "Copy answer"}
                               </button>
                             </span>
                           </div>
@@ -1394,13 +1396,13 @@ export function AiHubPanel({
                     <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                       <span className="ai-badge ai-badge-purple">
                         {activeAgent?.icon || "🤖"}{" "}
-                        {task.agentName || activeAgent?.name || "Standard AI"}
+                        {task.agentName || activeAgent?.name || "Assistant"}
                       </span>
                       <span
                         className="ai-badge ai-badge-success"
                         title="Command safety checks apply to every command in this conversation"
                       >
-                        🛡️ AST Safety Guard
+                        Safety checks on
                       </span>
                       {task.changes.some(
                         (c) => c.status === "pending" && c.riskLevel === "safe",
@@ -1467,19 +1469,15 @@ export function AiHubPanel({
                     )}
                   </div>
                 )}
-                <TaskTodos todos={task?.todos} />
-                {task && (
-                  <PlanCard
-                    taskId={task.id}
-                    plan={task.plan}
-                    busy={["queued", "running", "waiting"].includes(task.status)}
-                    act={act}
-                  />
-                )}
                 {timeline.map((item, idx) =>
                   item.message ? (
                     <article
-                      className={"ai-message ai-message-" + item.message.role}
+                      className={
+                        "ai-message ai-message-" +
+                        item.message.role +
+                        // What the app told the agent on the user's behalf (a plan decision) is a one-line note.
+                        (item.message.text.startsWith("[sshs3]") ? " ai-message-note" : "")
+                      }
                       key={item.message.id}
                     >
                       <div className="ai-message-header">
@@ -1516,7 +1514,7 @@ export function AiHubPanel({
                             <button
                               type="button"
                               className="ai-code-btn"
-                              title="Kopiera hela svaret"
+                              title="Copy the whole answer"
                               onClick={() => {
                                 void navigator.clipboard?.writeText(
                                   item.message!.text,
@@ -1526,8 +1524,8 @@ export function AiHubPanel({
                               }}
                             >
                               {copiedMsgId === item.message.id
-                                ? "✓ Kopierad"
-                                : "📋 Kopiera"}
+                                ? "✓ Copied"
+                                : "Copy"}
                             </button>
                           )}
                         </span>
@@ -1582,7 +1580,7 @@ export function AiHubPanel({
                             >
                               {copiedMsgId === item.message.id
                                 ? "✓ Copied"
-                                : "📋 Kopiera svar"}
+                                : "Copy answer"}
                             </button>
                             <button
                               type="button"
@@ -1689,7 +1687,7 @@ export function AiHubPanel({
                                 )
                               }
                             >
-                              📋 Kopiera
+                              Copy
                             </button>
                           </div>
                           <pre>{item.change.command}</pre>
@@ -1753,6 +1751,15 @@ export function AiHubPanel({
                       )}
                     </details>
                   ) : null,
+                )}
+                {/* The plan comes where it was proposed: after what was said, as the last thing to read. */}
+                {task?.plan && (
+                  <PlanCard
+                    taskId={task.id}
+                    plan={task.plan}
+                    busy={["queued", "running", "waiting"].includes(task.status)}
+                    act={act}
+                  />
                 )}
                 {task?.error && <p className="ai-task-error">{task.error}</p>}
                 {running && (
@@ -1840,6 +1847,12 @@ export function AiHubPanel({
                 )}
                 <div ref={end} />
               </div>
+              {/* What the agent is working through stays in view above the composer. */}
+              {task && (task.todos?.length ?? 0) > 0 && (
+                <div className="ai-run-dock" data-testid="ai-run-dock">
+                  <TaskTodos todos={task.todos} />
+                </div>
+              )}
               <div className="ai-composer">
                 <div className="ai-context-row">
                   <div className="ai-menu-anchor">
@@ -2623,7 +2636,7 @@ export function AiHubPanel({
                       <p>{c.description}</p>
                       {c.riskReason && (
                         <small style={{ display: "block", marginBottom: 4, opacity: 0.85 }}>
-                          🛡️ AST Safety Guard: {c.riskReason}
+                          Safety check: {c.riskReason}
                         </small>
                       )}
                       {c.kind === "file" && (

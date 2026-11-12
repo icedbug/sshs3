@@ -368,7 +368,8 @@ describe("persistent AI chat", () => {
     );
 
     expect(screen.getByTestId("self-learning-engine-card")).toBeVisible();
-    expect(screen.getByTestId("os-engine-badge-orama-hybrid-rag")).toBeVisible();
+    // The card shows what the app measured, not a list of named "engines" with version numbers.
+    expect(screen.queryByTestId("os-engine-badge-orama-hybrid-rag")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByTestId("run-self-reflection-btn"));
     await waitFor(() =>

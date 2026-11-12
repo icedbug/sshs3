@@ -376,3 +376,17 @@ describe("a plan through the hub", () => {
     ).rejects.toThrow(/at least one step/);
   });
 });
+
+describe("a reply right after a run ends", () => {
+  it("waits for the finished run to release instead of failing with 'Task already running'", async () => {
+    const hub = await makeHub();
+    vi.stubGlobal("fetch", vi.fn(async () => say("ok")));
+    await hub.request({ action: "start", task: { prompt: "hello", mode: "advice" } });
+    const t = hub.store.data.tasks[0];
+    // The instant the status flips, before the runtime has been released.
+    await waitFor(() => t.status === "completed");
+    await expect(hub.request({ action: "reply", taskId: t.id, text: "and again" })).resolves.toBeDefined();
+    await waitFor(() => t.messages.filter((m) => m.role === "assistant").length >= 1 && !["queued", "running", "waiting"].includes(t.status));
+    expect(t.messages.filter((m) => m.role === "user").map((m) => m.text)).toEqual(["hello", "and again"]);
+  });
+});

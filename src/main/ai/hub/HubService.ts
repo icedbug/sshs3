@@ -1502,6 +1502,9 @@ export class HubService {
             at: Date.now(),
           });
         } else {
+          // The run has ended but may still be releasing its runtime: a reply
+          // sent in that instant must not fail with "Task already running".
+          await this.whenSettled(task);
           if (request.sessionId) {
             const explicitTerminal = this.terminals.get(request.sessionId);
             if (explicitTerminal && explicitTerminal.state !== "disconnected") {
