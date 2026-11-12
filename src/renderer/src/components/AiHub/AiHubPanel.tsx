@@ -56,22 +56,22 @@ type View =
 type Menu = "history" | "target" | "control" | "mention" | "agent" | null;
 
 const DEMO_SHOWCASE_RESPONSE = [
-  "## 🗄️ Klusterdiagnos: `NetApp-ONTAP-Prod-SE` & `K8s-Trident-CSI-Prod`",
+  "## Cluster check: `NetApp-ONTAP-Prod-SE` and `K8s-Trident-CSI-Prod`",
   "",
-  "Jag körde en parallell hälsokontroll över samtliga 4 noder i `@cluster:NetApp-ONTAP-Prod-SE` samt diffade `/etc/multipath.conf` mot vår KB-standard (`@kb:trident-csi-multipath-standard`).",
+  "I ran a health check on all 4 nodes of `@cluster:NetApp-ONTAP-Prod-SE` in parallel and compared `/etc/multipath.conf` with our standard (`@kb:trident-csi-multipath-standard`).",
   "",
-  "### 1. Sammanställning av Nodstatus & Latens (ONTAP 9.15.1P2)",
+  "### 1. Node status and latency (ONTAP 9.15.1P2)",
   "",
-  "| Nod | Roll | Aggregat / Kapacitet | Snittlatens | SnapMirror Lag | Status |",
+  "| Node | Role | Aggregate / capacity | Mean latency | SnapMirror lag | Status |",
   "| :--- | :--- | :--- | :--- | :--- | :--- |",
-  "| `netapp-aff-a800-01a` | HA Node A (DC1) | `aggr1_nvme_prod` (64% av 220 TB) | `0.31 ms` | `00:02:44` | **ONLINE · HEALTH_OK** |",
-  "| `netapp-aff-a800-01b` | HA Node B (DC1) | `aggr2_nvme_db` (58% av 180 TB) | `0.48 ms` | `00:03:18` | **ONLINE · HEALTH_OK** |",
-  "| `netapp-fas9000-dr-01` | SnapVault DR (DC2) | `aggr_dr_nlsas` (71% av 1.6 PB) | `1.12 ms` | Synkad (XDP) | **ONLINE · SNAPMIRRORED** |",
+  "| `netapp-aff-a800-01a` | HA Node A (DC1) | `aggr1_nvme_prod` (64% of 220 TB) | `0.31 ms` | `00:02:44` | **ONLINE · HEALTH_OK** |",
+  "| `netapp-aff-a800-01b` | HA Node B (DC1) | `aggr2_nvme_db` (58% of 180 TB) | `0.48 ms` | `00:03:18` | **ONLINE · HEALTH_OK** |",
+  "| `netapp-fas9000-dr-01` | SnapVault DR (DC2) | `aggr_dr_nlsas` (71% of 1.6 PB) | `1.12 ms` | In sync (XDP) | **ONLINE · SNAPMIRRORED** |",
   "| `ontap-aiq-um-01` | Active IQ & Harvest | Prometheus / Grafana | `0.19 ms` | — | **TELEMETRY OK** |",
   "",
-  "> **Rotorsak & Rekommendation:** Volymen `vol_analytics_sc` slår i QoS-taket `pg-batch-ceiling` (`15 000 IOPS` / `600 MB/s`) under batch-körningar, medan produktionsdatabasen `vol_pg_prod_01` ligger stabilt på `0.31 ms`. På `k8s-gpu-io-worker-01` saknas dessutom `no_path_retry queue` i `/etc/multipath.conf`.",
+  "> **Cause and recommendation:** The volume `vol_analytics_sc` hits the QoS ceiling `pg-batch-ceiling` (`15 000 IOPS` / `600 MB/s`) during batch runs, while the production database `vol_pg_prod_01` stays stable. The multipath settings on `k8s-gpu-io-worker-01` differ from the standard.",
   "",
-  "### 2. Cross-Server Config Diff (`/etc/multipath.conf`)",
+  "### 2. Configuration difference (`/etc/multipath.conf`)",
   "",
   "```diff",
   "--- k8s-storage-cp-01:/etc/multipath.conf",
@@ -88,9 +88,9 @@ const DEMO_SHOWCASE_RESPONSE = [
   "     }",
   "```",
   "",
-  "### 3. Föreslagna åtgärdskommandon",
+  "### 3. Proposed commands",
   "",
-  "Höj Adaptive QoS-taket tillfälligt för AI-träningsvolymen på `netapp-aff-a800-01a`:",
+  "Raise the adaptive QoS ceiling for the analytics volume on `netapp-aff-a800-01a` for the time being:",
   "",
   "```bash",
   "volume modify -vserver svm-prod-nfs -volume vol_analytics_sc -qos-policy-group pg-prod-db-extreme",
@@ -226,7 +226,7 @@ export function AiHubPanel({
       items.push({
         label: `@${s.name}`,
         subtitle: [
-          s.cluster ? `🧩 ${s.cluster}` : "",
+          s.cluster ? s.cluster : "",
           s.nodeRole || s.role || "",
           s.description || `${s.username}@${s.host}`,
         ]
@@ -255,7 +255,7 @@ export function AiHubPanel({
       const slug = ag.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
       items.push({
         label: `@agent:${slug}`,
-        subtitle: `🤖 ${ag.name} · ${ag.role} (${ag.mission})`,
+        subtitle: `${ag.name} · ${ag.role} (${ag.mission})`,
         text: [
           `Mission Agent: ${ag.name} (${ag.role})`,
           `Mission: ${ag.mission}`,
@@ -267,7 +267,7 @@ export function AiHubPanel({
       const slug = doc.title.toLowerCase().replace(/[^a-z0-9]+/g, "-");
       items.push({
         label: `@kb:${slug}`,
-        subtitle: `📚 KB (${doc.collection}): ${doc.title}`,
+        subtitle: `Runbook (${doc.collection}): ${doc.title}`,
         text: `# KB Document: ${doc.title} (${doc.collection})\n\n${doc.content.slice(0, 6000)}`,
       });
     }
@@ -290,84 +290,84 @@ export function AiHubPanel({
   const slashCommands = [
     {
       cmd: "/workforce",
-      title: "🤝 Run a workforce review",
+      title: "Run a workforce review",
       subtitle: "Have your Mission Agents investigate an objective in parallel and combine their reports",
       template:
         "Run a workforce review with sshs3_agent_and_mcp_manage (operation=run_workforce) to investigate: ",
     },
     {
       cmd: "/handoff",
-      title: "🔄 Hand over to another agent",
+      title: "Hand over to another agent",
       subtitle: "Hand the active conversation over to another Mission Agent",
       template:
         "Hand over with sshs3_agent_and_mcp_manage (operation=handoff_agent) to our specialist agent for: ",
     },
     {
       cmd: "/mcp",
-      title: "🛒 1-Click Open-Source MCP Marketplace",
-      subtitle: "Install the Prometheus, Grafana/Loki, Kubernetes/Helm, PostgreSQL or Terraform MCP server",
+      title: "Set up an MCP server",
+      subtitle: "See which MCP servers can be set up and add one",
       template:
-        "Install an MCP server from the catalog with sshs3_agent_and_mcp_manage (operation=install_mcp_preset, presetId=preset-mcp-prometheus) and list its tools.",
+        "List the MCP servers that can be set up with sshs3_agent_and_mcp_manage (operation=list) and help me add: ",
     },
     {
       cmd: "/cluster-exec",
-      title: "⚡ Run across a cluster",
+      title: "Run across a cluster",
       subtitle: "Run a command on every node of a cluster in parallel with sshs3_cluster_exec",
       template:
         "Run a parallel health check across the nodes of a cluster with sshs3_cluster_exec: ",
     },
     {
       cmd: "/split-cluster",
-      title: "🪟 2×2 cluster split view",
+      title: "Cluster split view",
       subtitle: "Open a whole cluster in a 2×2 terminal grid with sshs3_workspace_layout",
       template:
         "Open a 2x2 split-view terminal grid for the nodes of one of my clusters with sshs3_workspace_layout; ask me which cluster if there are several.",
     },
     {
       cmd: "/diff",
-      title: "🔍 Cross-Server Config Diff",
+      title: "Compare a file between servers",
       subtitle: "Diff a configuration file between two nodes with sshs3_storage_ops",
       template:
         "Diff a configuration file between two of my servers with sshs3_storage_ops; ask me which file and which servers.",
     },
     {
       cmd: "/configure",
-      title: "🛠️ Configure sshS3 with AI",
+      title: "Configure sshS3",
       subtitle: "Set up SSH tunnels, S3 profiles, shortcuts, themes, dotfiles and cloud sync",
       template:
         "Configure sshS3 for me (SSH tunnels, S3 profile, shortcuts, theme or dotfiles): ",
     },
     {
       cmd: "/tunnel",
-      title: "🚇 Skapa SSH Port-Forwarding Tunnel",
+      title: "Create an SSH tunnel",
       subtitle: "Add a local, remote or dynamic SOCKS5 tunnel to a server profile",
       template:
         "Create an SSH port-forwarding tunnel (local 5432 -> 127.0.0.1:5432) on a server I name, with sshs3_manage_server (operation=save_tunnel).",
     },
     {
       cmd: "/kb",
-      title: "📚 Search runbooks",
+      title: "Search runbooks",
       subtitle: "Search the knowledge base",
       template:
         "Search our knowledge base (@kb) for runbooks and standards about: ",
     },
     {
       cmd: "/memory",
-      title: "🧠 Save to team memory",
+      title: "Save to team memory",
       subtitle: "Save a fact or a procedure to the shared team memory",
       template:
         "Save the following as a shared team memory or skill with sshs3_manage_memory_and_activity: ",
     },
     {
       cmd: "/plan",
-      title: "🗺️ Plan",
+      title: "Plan first",
       subtitle: "Write a step-by-step plan with risks and rollback",
       template:
         "/plan Write a step-by-step plan with risks, verification and rollback for: ",
     },
     {
       cmd: "/grill-me",
-      title: "🔥 Challenge my plan",
+      title: "Challenge my plan",
       subtitle: "Have the assistant question your design or change before production",
       template:
         "/grill-me Question and review my planned infrastructure change critically before production: ",
@@ -752,7 +752,7 @@ export function AiHubPanel({
                 })
               }
             >
-              {hub.demoMode ? "🧪 Demo lab: on" : "🧪 Demo lab: off"}
+              {hub.demoMode ? "Demo lab: on" : "Demo lab: off"}
             </button>
           )}
           <button
@@ -1023,7 +1023,7 @@ export function AiHubPanel({
                             setAutonomy(ag.defaultMode);
                           }}
                         >
-                          <span>{ag.icon || "🤖"}</span>
+                          <span>{ag.icon || ag.name.slice(0, 1).toUpperCase()}</span>
                           <div>
                             <span>{ag.name}</span>
                             <small>
@@ -1050,7 +1050,7 @@ export function AiHubPanel({
                           });
                         }}
                       >
-                        🤝 Run a workforce review
+                        Run a workforce review
                       </button>
                     </div>
                   </div>
@@ -1172,7 +1172,7 @@ export function AiHubPanel({
                               setAutonomy(ag.defaultMode);
                             }}
                           >
-                            <span>{ag.icon || "🤖"}</span>
+                            <span>{ag.icon || ag.name.slice(0, 1).toUpperCase()}</span>
                             <span>{ag.name}</span>
                           </button>
                         ))}
@@ -1183,7 +1183,7 @@ export function AiHubPanel({
                         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
                           <div>
                             <strong>
-                              {activeAgent.icon || "🤖"} {activeAgent.name}
+                              {activeAgent.icon ? `${activeAgent.icon} ` : ""}{activeAgent.name}
                             </strong>
                             <div>
                               <small>{activeAgent.role}</small>
@@ -1191,7 +1191,7 @@ export function AiHubPanel({
                           </div>
                           {activeAgent.targetCluster && (
                             <span className="ai-badge ai-badge-cluster">
-                              🧩 {activeAgent.targetCluster}
+                              {activeAgent.targetCluster}
                             </span>
                           )}
                         </div>
@@ -1215,7 +1215,7 @@ export function AiHubPanel({
                               });
                             }}
                           >
-                            🚀 Run the mission now
+                            Run the mission now
                           </button>
                           <button
                             type="button"
@@ -1225,7 +1225,7 @@ export function AiHubPanel({
                               )
                             }
                           >
-                            ✏️ Anpassa uppdrag i chatten
+                            Adjust the mission in chat
                           </button>
                         </div>
                       </article>
@@ -1334,8 +1334,8 @@ export function AiHubPanel({
                         onClick={() => setShowDemoPreview((prev) => !prev)}
                       >
                         {showDemoPreview
-                          ? "✕ Hide the example conversation"
-                          : "👁️ Show an example answer (invented data)"}
+                          ? "Hide the example"
+                          : "Show an example answer (invented data)"}
                       </button>
                     </div>
                     {showDemoPreview && (
@@ -1343,24 +1343,24 @@ export function AiHubPanel({
                         <article className="ai-message ai-message-user">
                           <div className="ai-message-header">
                             <span className="ai-message-author">
-                              <span className="ai-avatar-badge">👤</span>
+                              <span className="ai-avatar-badge">Y</span>
                               <span>You</span>
                             </span>
-                            <span className="ai-message-meta">Exempel · @cluster:NetApp-ONTAP-Prod-SE</span>
+                            <span className="ai-message-meta">Example · @cluster:NetApp-ONTAP-Prod-SE</span>
                           </div>
                           <p>
-                            Kör en parallell hälsokontroll över @cluster:NetApp-ONTAP-Prod-SE och diffa /etc/multipath.conf mellan k8s-storage-cp-01 och k8s-gpu-io-worker-01.
+                            Run a health check across @cluster:NetApp-ONTAP-Prod-SE in parallel and diff /etc/multipath.conf between k8s-storage-cp-01 and k8s-gpu-io-worker-01.
                           </p>
                         </article>
                         <details className="ai-change ai-change-completed" open>
                           <summary>
                             <Terminal size={13} />
-                            <span>Parallell klusterkörning (sshs3_cluster_exec) på 4 noder i NetApp-ONTAP-Prod-SE</span>
-                            <span className="ai-badge ai-badge-success">✓ Utförd (4/4 noder · exit 0)</span>
+                            <span>Ran on 4 nodes of NetApp-ONTAP-Prod-SE in parallel</span>
+                            <span className="ai-badge ai-badge-success">done · 4 of 4 nodes · exit 0</span>
                           </summary>
                           <pre>qos statistics volume latency show -iterations 1; snapmirror show</pre>
                           <div className="ai-change-meta">
-                            <span className="ai-badge ai-badge-cluster">🧩 NetApp-ONTAP-Prod-SE</span>
+                            <span className="ai-badge ai-badge-cluster">NetApp-ONTAP-Prod-SE</span>
                             <span className="ai-tool-tag">netapp-aff-a800-01a</span>
                             <span className="ai-tool-tag">netapp-aff-a800-01b</span>
                             <span className="ai-tool-tag">netapp-fas9000-dr-01</span>
@@ -1370,7 +1370,7 @@ export function AiHubPanel({
                         <article className="ai-message ai-message-assistant">
                           <div className="ai-message-header">
                             <span className="ai-message-author">
-                              <span className="ai-avatar-badge">🗄️</span>
+                              <span className="ai-avatar-badge">A</span>
                               <span>Assistant</span>
                               <span className="ai-pill">NetApp ONTAP Storage Architect</span>
                             </span>
@@ -1384,7 +1384,7 @@ export function AiHubPanel({
                                   setTimeout(() => setCopiedMsgId(null), 1800);
                                 }}
                               >
-                                {copiedMsgId === "demo-showcase" ? "✓ Copied" : "Copy answer"}
+                                {copiedMsgId === "demo-showcase" ? "Copied" : "Copy answer"}
                               </button>
                             </span>
                           </div>
@@ -1404,7 +1404,7 @@ export function AiHubPanel({
                   >
                     <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                       <span className="ai-badge ai-badge-purple">
-                        {activeAgent?.icon || "🤖"}{" "}
+                        {activeAgent?.icon ? `${activeAgent.icon} ` : ""}
                         {task.agentName || activeAgent?.name || "Assistant"}
                       </span>
                       <span
@@ -1436,7 +1436,7 @@ export function AiHubPanel({
                             }
                           }}
                         >
-                          🟢 Approve all safe (
+                          Approve all read-only (
                           {
                             task.changes.filter(
                               (c) =>
@@ -1470,7 +1470,7 @@ export function AiHubPanel({
                           <option value="">Choose an agent…</option>
                           {(hub.agents ?? []).map((ag) => (
                             <option key={ag.id} value={ag.id}>
-                              {ag.icon || "🤖"} {ag.name}
+                              {ag.icon ? `${ag.icon} ` : ""}{ag.name}
                             </option>
                           ))}
                         </select>
@@ -1493,8 +1493,8 @@ export function AiHubPanel({
                         <small className="ai-message-author">
                           <span className="ai-avatar-badge">
                             {item.message.role === "user"
-                              ? "👤"
-                              : activeAgent?.icon || "✨"}
+                              ? "Y"
+                              : activeAgent?.icon || "A"}
                           </span>
                           <span>
                             {item.message.role === "user"
@@ -1533,7 +1533,7 @@ export function AiHubPanel({
                               }}
                             >
                               {copiedMsgId === item.message.id
-                                ? "✓ Copied"
+                                ? "Copied"
                                 : "Copy"}
                             </button>
                           )}
@@ -1588,7 +1588,7 @@ export function AiHubPanel({
                               }}
                             >
                               {copiedMsgId === item.message.id
-                                ? "✓ Copied"
+                                ? "Copied"
                                 : "Copy answer"}
                             </button>
                             <button
@@ -1608,7 +1608,7 @@ export function AiHubPanel({
                                 });
                               }}
                             >
-                              🧠 Save to team memory
+                              Save to team memory
                             </button>
                             <button
                               type="button"
@@ -1620,7 +1620,7 @@ export function AiHubPanel({
                                 setTimeout(() => composer.current?.focus(), 20);
                               }}
                             >
-                              🔄 Follow up
+                              Follow up
                             </button>
                           </div>
                         )}
@@ -1647,10 +1647,10 @@ export function AiHubPanel({
                             data-testid={`change-risk-${item.change.riskLevel}`}
                           >
                             {item.change.riskLevel === "safe"
-                              ? "🟢 Safe"
+                              ? "read-only"
                               : item.change.riskLevel === "destructive"
-                                ? "🔴 Destructive"
-                                : "🟡 Modify"}
+                                ? "destructive"
+                                : "changes state"}
                           </small>
                         )}
                         <small
@@ -1677,7 +1677,7 @@ export function AiHubPanel({
                             opacity: 0.85,
                           }}
                         >
-                          🛡️ {item.change.riskReason}
+                          {item.change.riskReason}
                           {(item.change.parsedSubcommands?.length ?? 0) > 1
                             ? ` · ${item.change.parsedSubcommands!.length} AST pipeline/chain segments`
                             : ""}
@@ -1713,7 +1713,7 @@ export function AiHubPanel({
                       {item.change.output && <pre>{item.change.output}</pre>}
                       <div className="ai-change-meta">
                         <span className="ai-tool-tag">
-                          🖥 {item.change.target}
+                          {item.change.target}
                         </span>
                         {item.change.exitCode !== undefined && (
                           <span
@@ -1988,8 +1988,8 @@ export function AiHubPanel({
                     >
                       <span>
                         {activeAgent
-                          ? `${activeAgent.icon || "🤖"} ${activeAgent.name}`
-                          : "🤖 Default Agent"}
+                          ? `${activeAgent.icon ? `${activeAgent.icon} ` : ""}${activeAgent.name}`
+                          : "Assistant"}
                       </span>
                       <ChevronDown size={11} />
                     </button>
@@ -2020,7 +2020,7 @@ export function AiHubPanel({
                               setMenu(null);
                             }}
                           >
-                            🤖 {ag.name}
+                            {ag.name}
                             <small>
                               {ag.role}
                               {ag.targetCluster ? ` · ${ag.targetCluster}` : ""}
@@ -2033,7 +2033,7 @@ export function AiHubPanel({
                             setView("Agents & MCP");
                           }}
                         >
-                          ⚙️ Manage Agents & MCP…
+                          Manage agents…
                           <small>Create custom mission agents & MCP servers</small>
                         </button>
                       </div>
@@ -2413,7 +2413,7 @@ export function AiHubPanel({
                       return (
                         <>
                           <span>
-                            📊 {Math.max(1, Math.round(usedTokens / 1000))}k /{" "}
+                            {Math.max(1, Math.round(usedTokens / 1000))}k /{" "}
                             {Math.round(maxTokens / 1000)}k ctx
                           </span>
                           <span className="ai-context-meter-bar" aria-hidden="true">

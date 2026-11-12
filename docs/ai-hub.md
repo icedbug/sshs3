@@ -249,11 +249,32 @@ sections ("AI chat: visual layer" and "the other views") carry the current look.
   and "Recent Team Activity" are shown only when they have something in them.
 - The navigation is one row in both the full view and the narrow sidebar; in
   the sidebar it scrolls sideways instead of wrapping.
-- The other views read as one column of at most 1040 px in the full view. In
-  Memory & skills the list comes first; adding an entry by hand is a folded
-  form that opens by itself when an entry is being edited.
-- The "Sync S3 Runbooks" button points at a demo-lab profile and is shown only
-  in demo mode.
+- The other views read as one column of at most 1040 px in the full view, each
+  in its own file, with the list first and forms folded or opened on demand:
+  - `AgentsAndMcpView` — agents can be created and edited; the form binds the
+    runbooks (`kbDocIds`) and MCP servers the runtime reads. MCP servers are
+    added through a form that saves and then tests; a server counts as
+    connected, and has tools, only after it answered.
+  - `KnowledgeBaseView` — write, edit and read documents (rendered Markdown),
+    import a folder, filter by text and collection. The filter is a plain text
+    filter; ranked search is what the assistant uses.
+  - `InfrastructureView` — open terminals, the workspace's servers by cluster
+    with their reachability, and `DependencyLinks`.
+  - `ChangesView` — one timeline of team activity and the assistant's own
+    commands and file changes, with details folded under each entry.
+  - `MemoryView` — entries with filters (facts, skills, learned, personal).
+    The per-server cards generated on every snapshot (`auto-node:` ids) are
+    not listed here.
+  - `SchedulesView` — jobs can be edited, paused and resumed; a resumed job
+    starts a fresh interval.
+  - `SettingsView` — sections for model, team, safety (`SafetyPolicyCard`),
+    limits, app and data.
+- Anything that cannot be undone goes through `ConfirmButton` (first click
+  asks, second does it).
+- MCP presets: outside the demo lab `mcpCatalog()` returns `MCP_PRESETS`, which
+  may only name packages that exist on npm under a known publisher, because
+  setting one up runs the command. The demo lab keeps its invented catalog
+  (`MCP_MARKETPLACE_CATALOG`), labelled as invented.
 - Motion (`ai-rise`, `ai-pop`, `ai-sheen`, `ai-dots`, `ai-attention`) marks
   something arriving, running or waiting, and is switched off under
   `prefers-reduced-motion`.
