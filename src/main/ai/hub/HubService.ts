@@ -2412,6 +2412,7 @@ export class HubService {
         const d = request.doc;
         const doc = this.kb.createDocument({
           id: d.id,
+          collection: d.collection,
           title: requiredText(d.title),
           sourceType: d.sourceType || "note",
           sourceRef: d.sourceRef,
@@ -2440,6 +2441,7 @@ export class HubService {
         const docs = await this.kb.ingestLocalFolder(
           requiredText(request.folderPath),
           {
+            collection: request.collection,
             cluster: request.cluster,
             tags: request.tags,
           },

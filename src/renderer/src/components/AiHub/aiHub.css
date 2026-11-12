@@ -2355,3 +2355,46 @@
     grid-template-columns: 1fr;
   }
 }
+.ai-filter-bar {
+  display: grid;
+  gap: 8px;
+  margin: 14px 0 10px;
+}
+.ai-filter-bar input {
+  width: 100%;
+}
+.ai-hub .ai-chip {
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--ai-line);
+  background: transparent;
+  color: var(--ai-ink-soft);
+  font-size: 11px;
+  line-height: 1.6;
+  transition: border-color 160ms var(--ai-ease), color 160ms var(--ai-ease), background 160ms var(--ai-ease);
+}
+.ai-hub .ai-chip:hover {
+  border-color: var(--ai-line-strong);
+  color: var(--ai-ink);
+}
+.ai-hub .ai-chip-on {
+  border-color: var(--ai-accent);
+  background: color-mix(in srgb, var(--ai-accent) 14%, transparent);
+  color: var(--ai-ink);
+}
+.ai-doc-excerpt {
+  margin: 8px 0 0;
+  color: var(--ai-ink-soft);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.ai-doc-body {
+  margin-top: 10px;
+  padding: 12px 14px;
+  max-height: 460px;
+  overflow: auto;
+  border-radius: 8px;
+  background: var(--ai-surface);
+  border: 1px solid var(--ai-line);
+  animation: ai-rise 240ms var(--ai-ease) both;
+}
