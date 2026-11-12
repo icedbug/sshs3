@@ -1170,7 +1170,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                         text: latest,
                         label: `${hostLabel || 'Terminal'} error output`,
                         prompt:
-                          'Förklara varför detta fel uppstod i terminalen och föreslå rätt kommando för att lösa det.',
+                          'Explain why this error came up in the terminal and suggest the right command to fix it.',
                       },
                     })
                   );
@@ -1178,7 +1178,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 }}
               >
                 <Sparkles className="h-3 w-3 text-rose-400" />
-                <span>✨ Förklara & fixa felet</span>
+                <span>✨ Explain &amp; fix the error</span>
               </button>
               <button
                 type="button"
@@ -1332,7 +1332,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                   setInlineAiOpen(false);
                 }
               }}
-              placeholder="Beskriv ett kommando (Enter = föreslå kommando direkt här, Shift+Enter = öppna i AI-chatt)…"
+              placeholder="Describe a command (Enter = suggest it right here, Shift+Enter = open in the AI chat)…"
               className="flex-1 bg-transparent text-xs text-txt-primary outline-none placeholder:text-txt-muted"
             />
             <button
@@ -1340,7 +1340,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               disabled={!inlineAiPrompt.trim() || inlineLoading}
               className="rounded-md bg-sky-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-sky-500 disabled:opacity-40 shrink-0"
             >
-              {inlineLoading ? 'Tänker…' : inlineSuggestion ? 'Klistra in (Enter)' : '⚡ Föreslå'}
+              {inlineLoading ? 'Thinking…' : inlineSuggestion ? 'Paste (Enter)' : '⚡ Suggest'}
             </button>
             <button
               type="button"
@@ -1404,7 +1404,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                     }}
                     className="rounded bg-app-surface px-2 py-1 text-[10px] font-medium text-txt-primary hover:bg-app-surface-hover border border-border-subtle"
                   >
-                    Klistra in (Enter)
+                    Paste (Enter)
                   </button>
                   <button
                     type="button"
@@ -1425,7 +1425,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                     }}
                     className="rounded bg-emerald-600 px-2.5 py-1 text-[10px] font-semibold text-white hover:bg-emerald-500"
                   >
-                    ▶ Kör direkt (Ctrl+Enter)
+                    ▶ Run now (Ctrl+Enter)
                   </button>
                 </div>
               </div>

@@ -55,11 +55,39 @@ once, critical alerts first. The address is the key: it is shown once, and
 "Replace the address" makes the old one stop working. Keep the server behind
 TLS, or the address travels in the clear.
 
+## Notifications, and answering from a phone
+
+An agent that asks before a command waits for a person. So that somebody
+knows: under Settings → Notifications, add a channel (Slack incoming webhook,
+Microsoft Teams webhook, ntfy, or any address that takes a JSON POST). When
+something starts to wait in the inbox, the channel is told once, with who asks,
+what, on which target, the risk, and a link to the item.
+
+- Set the address people reach the server at, in the same place or with
+  `SSHS3_PUBLIC_URL` (which then cannot be changed in the interface). Without
+  it notifications carry no link.
+- The link opens the inbox on that item. The interface has a phone layout and
+  can be added to the home screen. Approving needs a signed-in session; there
+  are no approve-by-link tokens.
+- **Only the person whose agent asks can approve.** Each user of the server
+  has their own agents and inbox. A notification in a shared channel says
+  whose answer is awaited; a teammate who opens the link sees their own inbox.
+- How long an agent waits is set under Settings → Safety (10 minutes unless
+  changed, at most 60). The wait does not use up the run's time budget.
+- A channel's address is a secret: it is stored encrypted in the user's own
+  data directory, never in the team bucket, and the interface only ever shows
+  its host.
+- The server will not post to itself or to link-local addresses (the cloud
+  metadata address among them). A channel on the server's private network,
+  such as an ntfy container beside it, needs `SSHS3_NOTIFY_ALLOW_PRIVATE=1`.
+- Notifications are posted directly, not through an HTTP proxy: the server
+  needs a route to the channel.
+
 ## What to know
 
 - **Modes still apply.** An agent set to ask before commands waits for a
   person, also on the server: the ticket sits in progress until somebody
-  opens the server (or the run times out). For unattended work use agents
+  answers (see Notifications above) or the wait runs out. For unattended work use agents
   that only report, or agents that run on their own, with the safety switches
   on. Destructive commands and, by default, changes on production still stop
   for approval.

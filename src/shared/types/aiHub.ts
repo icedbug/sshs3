@@ -592,6 +592,44 @@ export interface HubPreferences {
    * them, one at a time, without being asked. Off unless switched on.
    */
   workforceAutopilot?: boolean;
+  /**
+   * How long an agent waits for a person to approve before it gives up, in
+   * minutes (10 unless set; at most 60). The wait does not count against the
+   * run's time budget.
+   */
+  approvalWaitMinutes?: number;
+}
+
+export type NotifyChannelKind = "slack" | "teams" | "ntfy" | "webhook";
+/** What can be sent to a channel: the kinds of inbox item, without knowledge base findings. */
+export type NotifyEventKind = "approval" | "plan" | "question" | "blocked" | "alert" | "review" | "report";
+
+/** A notification channel as the interface sees it: the address itself never leaves the main process. */
+export interface NotifyChannelView {
+  id: string;
+  kind: NotifyChannelKind;
+  name: string;
+  /** The host of the address, to tell channels apart. */
+  host: string;
+  hasSecret: boolean;
+  enabled: boolean;
+  events: NotifyEventKind[];
+  includeCommand: boolean;
+  alertMinSeverity?: "info" | "warning" | "critical";
+  last?: { at: number; ok: boolean; status?: number; error?: string };
+}
+
+/** A channel as it is saved from the form. `url` and `secret` are sent only when they are set or changed. */
+export interface NotifyChannelInput {
+  id?: string;
+  kind: NotifyChannelKind;
+  name: string;
+  url?: string;
+  secret?: string;
+  enabled: boolean;
+  events: NotifyEventKind[];
+  includeCommand: boolean;
+  alertMinSeverity?: "info" | "warning" | "critical";
 }
 export interface MissionAgent {
   id: string;
@@ -704,6 +742,8 @@ export interface WorkTicket {
     count: number;
     resolvedAt?: number;
   };
+  /** When it came to the status it has now. Comments move `updatedAt`; this stays. */
+  statusAt?: number;
   /** Who is running it: a person's app, since when, last seen. */
   claim?: { by: string; client: string; at: number; seenAt: number };
   /** The conversation of the latest run, on the computer that ran it. */
@@ -894,6 +934,8 @@ export interface HubReply {
   alertHook?: { path: string };
   /** Tickets an alert request created or updated. */
   alerts?: { created: string[]; updated: string[] };
+  /** Whether a test notification arrived. */
+  notifyTest?: { ok: boolean; status?: number; error?: string };
   kbDocument?: KbDocument;
   kbPage?: KbPage;
   kbSearch?: { query: string; hits: KbSearchHit[]; byMeaning: boolean };
@@ -969,6 +1011,16 @@ export interface HubSnapshot {
   evalRunning?: string;
   /** The latest nightly summary of what happened, until it has been read. */
   dailyReport?: { day: string; at: number; text: string; readAt?: number };
+  /** Where notifications go when something starts to wait for a person. */
+  notifications?: {
+    channels: NotifyChannelView[];
+    /** The address people reach this installation at, for links in notifications. Empty: notifications carry no link. */
+    publicUrl: string;
+    /** Set by the administrator (SSHS3_PUBLIC_URL); cannot be changed here. */
+    publicUrlFixed: boolean;
+    /** Minutes after which a waiting approval is told about once more. 0: never. */
+    reminderMinutes: number;
+  };
   /** The pages agents read. Bodies are shortened here; `kb-page-read` returns one in full. */
   kbPages?: KbPage[];
   kbFindings?: KbFinding[];
@@ -1138,6 +1190,11 @@ export type HubRequest =
   /** Replays one case, or all of them when no id is given. Nothing is executed. */
   | { action: "eval-run"; id?: string }
   | { action: "infra-edge-confirm"; id: string }
+  | { action: "notify-channel-save"; channel: NotifyChannelInput }
+  | { action: "notify-channel-delete"; id: string }
+  /** Sends a test message to one channel and reports whether it arrived. */
+  | { action: "notify-channel-test"; id: string }
+  | { action: "notify-settings-save"; publicUrl?: string; reminderMinutes?: number }
   /** An alert pasted by hand: JSON as a monitoring system posts it, or text. */
   | { action: "alert-paste"; text: string }
   | { action: "runner-save"; runner: { id: string; name: string; command: string; args: string[]; cwd?: string } }

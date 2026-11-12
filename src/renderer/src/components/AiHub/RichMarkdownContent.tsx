@@ -82,7 +82,7 @@ export function RichMarkdownContent({
                       <button
                         type="button"
                         className="ai-code-btn"
-                        title="Infoga kommando i chatten / terminalen"
+                        title="Put the command in the chat or the terminal"
                         onClick={() => onUseCommand(raw)}
                       >
                         ▶️ Use

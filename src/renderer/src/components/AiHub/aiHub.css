@@ -3464,3 +3464,123 @@
 .ai-link-proposed {
   border-style: dashed;
 }
+
+/* ---- notifications -------------------------------------------------------- */
+.ai-hub .ai-card-head > button {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.ai-note {
+  margin: 0 0 10px;
+  padding: 9px 12px;
+  border: 1px solid var(--ai-line-strong);
+  border-radius: 10px;
+  background: var(--ai-surface);
+  color: var(--ai-ink-soft);
+}
+.ai-ok {
+  color: var(--ai-ok);
+}
+.ai-bad {
+  color: var(--ai-danger);
+}
+.ai-inbox-focus {
+  border-left-width: 3px;
+  box-shadow: 0 0 0 1px var(--ai-accent-line);
+}
+.ai-notify-editor,
+.ai-notify-links {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--ai-line);
+}
+.ai-notify-editor fieldset {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.ai-notify-editor legend {
+  padding: 0;
+  margin-bottom: 6px;
+  color: var(--ai-ink-soft);
+}
+.ai-notify-links .ai-inline-form input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ---- a phone --------------------------------------------------------------
+   Where an approval is answered from: the hub takes the whole screen, the
+   views are one row that scrolls sideways, and everything that is pressed is
+   big enough to press. The row stays at the top: the bottom corner belongs to
+   the account bar of the web build. */
+@media (max-width: 720px) {
+  .ai-hub,
+  .ai-hub.ai-hub-panel,
+  .ai-hub.ai-hub-hub {
+    left: 0;
+    right: 0;
+    top: 0;
+    width: 100% !important;
+    border-left: 0;
+    z-index: 60;
+    padding-top: env(safe-area-inset-top);
+  }
+  .ai-hub-resize-handle,
+  .ai-work-sidebar {
+    display: none;
+  }
+  .ai-hub nav {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    gap: 4px;
+    padding: 4px 8px 8px;
+    scrollbar-width: none;
+  }
+  .ai-hub nav::-webkit-scrollbar {
+    display: none;
+  }
+  .ai-hub nav button {
+    flex: 0 0 auto;
+    min-height: 40px;
+    padding: 8px 12px;
+    font-size: 13px;
+  }
+  .ai-hub .ai-scroll {
+    padding: 12px 12px calc(76px + env(safe-area-inset-bottom));
+  }
+  /* Sixteen pixels: smaller, and iOS zooms the page when a field is touched. */
+  .ai-hub input,
+  .ai-hub select,
+  .ai-hub textarea {
+    font-size: 16px;
+  }
+  .ai-hub .ai-card-head {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+  }
+  .ai-hub .ai-terminal-peek {
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .ai-inbox-item .ai-card-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .ai-inbox-item .ai-card-actions button,
+  .ai-card.ai-inbox-item .ai-card-actions button {
+    min-height: 46px;
+    justify-content: center;
+    font-size: 14px;
+  }
+  .ai-inbox-item .ai-card-actions input {
+    grid-column: 1 / -1;
+    min-height: 44px;
+  }
+  .ai-hub .ai-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}

@@ -333,6 +333,55 @@ stopped.
   check. The classifier is a set of rules: it can refuse a harmless command,
   and a command it wrongly calls read-only would run.
 
+## Notifications out (`Notifier`, `NotifyStore`)
+
+What waits for a person is defined once, in `src/shared/aiHubInbox.ts`
+(`inboxItems`): the Inbox view and the notifier both use it. Every change in
+the hub goes through `HubService.changed()`, which sets a flag (`pokeInbox`,
+placed before the early return for a pending save); three seconds later
+`flushInbox` compares the inbox with what it has already handled.
+
+- **New** means not seen before and not already old (15 minutes) when first
+  seen: closing the app overnight, or adding a channel, does not push
+  yesterday's inbox to a phone. An item that leaves and comes back is news
+  again. A waiting approval is told about once more after
+  `reminderMinutes`.
+- **Channels:** Slack (incoming webhook), Teams (Adaptive Card), ntfy (JSON
+  publish, push to a phone) and a generic JSON webhook signed with
+  `X-Sshs3-Signature` (HMAC SHA-256). Each chooses its events, a lowest alert
+  severity, and whether the command text may leave the installation. All text
+  is masked with `boundedContext`; Slack's control characters are escaped.
+- **Once per event across installations.** Approvals, plans and questions
+  exist only where the agent runs and are told by that installation. Tickets
+  and alerts are on every installation that shares the bucket: one of them
+  writes a mark under `work/notified/` (`WorkSync.markOnce`: write, let the
+  bucket settle, send only if the mark is still one's own). Marks do not
+  expire; the nightly upkeep removes those older than 14 days. This needs
+  `WorkTicket.statusAt`, set in `putTicket` when the status changes.
+- **Where a notification may go** (`guardUrl`): the name is resolved, every
+  address it leads to is classified, and the request is made to the address
+  that was checked (no redirects, the answer's body is dropped). Link-local
+  is never a destination. On a shared server neither is loopback, and the
+  private network only with `SSHS3_NOTIFY_ALLOW_PRIVATE=1`.
+- **Storage:** `<hub dir>/notify.json`, mode 0600, addresses and secrets
+  through `encryptSecretValue`. Not in `hub.json`, whose save masks anything
+  that looks like a secret, and never in the bucket. The snapshot carries
+  `NotifyChannelView`: the host, not the address.
+- **Links:** `SSHS3_PUBLIC_URL` or the address saved in Settings, never the
+  request's Host header. `?view=Inbox&item=<id>` is read once by
+  `AiHubPanel` and removed from the address; `InboxView` marks the item or
+  says that it no longer waits.
+- **The wait for a person** is `preferences.approvalWaitMinutes` (10, at most
+  60). `ToolBroker.waitForPerson` gives the waited time back: the run's
+  capability and its time budget (`armRunTimer`) both move by as long as it
+  stood still.
+- A desktop notification is now also shown when an approval, a plan or a
+  question starts to wait, which nothing did before.
+
+Not done: delivery through an HTTP proxy, a persistent retry queue (three
+tries in memory, then the failure is shown on the channel), approving from
+inside Slack or Teams.
+
 ## Alerts in, and the inbox (`AlertIntake`, `InboxView`)
 
 - **Alerts in.** On the web server, `POST /api/hooks/<user id>.<secret>` takes

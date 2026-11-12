@@ -71,6 +71,43 @@ export class WorkSync {
     return { items: merged.items, changed: merged.changed };
   }
 
+  /**
+   * For something that must happen once however many installations see it
+   * (telling a channel about a shared ticket). A mark that already exists means
+   * someone did it. Otherwise this installation writes its mark, lets the
+   * bucket settle, and does it only if the mark is still its own: of two that
+   * write at the same moment, both read the same winner. Marks do not expire;
+   * `pruneMarks` removes old ones.
+   */
+  async markOnce(key: string, client: string, settle: () => Promise<void>, now = Date.now()): Promise<boolean> {
+    const at = `work/notified/${safeId(key)}.json`;
+    const mark = async (): Promise<{ client?: string; at?: number } | undefined> => {
+      try {
+        const buffer = await this.store.read(at);
+        return buffer ? (JSON.parse(buffer.toString("utf8")) as { client?: string; at?: number }) : undefined;
+      } catch {
+        return undefined;
+      }
+    };
+    if (await mark()) return false;
+    await this.store.write(at, Buffer.from(JSON.stringify({ client, at: now }), "utf8"));
+    await settle();
+    return (await mark())?.client === client;
+  }
+
+  async pruneMarks(olderThanMs: number, now = Date.now()): Promise<void> {
+    const names = (await this.store.list("work/notified")).filter((n) => n.endsWith(".json"));
+    await inBatches(names.slice(0, 500), 8, async (name) => {
+      let at = 0;
+      try {
+        at = (JSON.parse((await this.store.read(`work/notified/${name}`))?.toString("utf8") ?? "{}") as { at?: number }).at ?? 0;
+      } catch {
+        // An unreadable mark is as good as an old one.
+      }
+      if (now - at > olderThanMs) await this.store.remove(`work/notified/${name}`);
+    });
+  }
+
   async put<T extends Mergeable>(collection: WorkCollection, item: T): Promise<void> {
     await this.store.write(
       `work/${collection}/${safeId(item.id)}.json`,

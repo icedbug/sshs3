@@ -10,6 +10,7 @@ import {
 import { isWebBrowserMode } from "../../lib/webClientBridge";
 import { ConfirmButton } from "./ConfirmButton";
 import { DEMO_MODE_SET_BY_SERVER, type Act } from "./panelShared";
+import { NotificationsCard } from "./NotificationsCard";
 import { SafetyPolicyCard } from "./SafetyPolicyCard";
 
 export function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Element {
@@ -335,6 +336,31 @@ export function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Elem
       <section className="ai-set">
         <h3>Safety</h3>
         <SafetyPolicyCard hub={hub} act={act} />
+        <label>
+          How long an agent waits for your approval
+          <select
+            aria-label="Approval wait"
+            value={hub.preferences.approvalWaitMinutes ?? 10}
+            onChange={(e) =>
+              void act({ action: "configure", config: {}, preferences: { ...hub.preferences, approvalWaitMinutes: Number(e.target.value) } })
+            }
+          >
+            {[10, 20, 30, 45, 60].map((m) => (
+              <option key={m} value={m}>
+                {m} minutes{m === 10 ? " (default)" : ""}
+              </option>
+            ))}
+          </select>
+          <small>
+            After that the action counts as denied and the agent goes on without it. The wait does not use up the run's
+            time budget. Longer suits approvals that are answered from a phone.
+          </small>
+        </label>
+      </section>
+
+      <section className="ai-set">
+        <h3>Notifications</h3>
+        <NotificationsCard hub={hub} act={act} />
       </section>
 
       <details className="ai-fold ai-set-fold">

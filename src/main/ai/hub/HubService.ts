@@ -37,6 +37,7 @@ import type {
   WorkspaceLayoutEvent,
   WorkspacePresenceTerminal,
   WorkspaceServerSummary,
+  NotifyEventKind,
 } from "../../../shared/types/aiHub";
 import type { IStorageProvider } from "../../../shared/types/storage";
 import { SHELL_KINDS } from "../../../shared/types/aiHub";
@@ -79,6 +80,20 @@ import {
   PAGE_KINDS,
 } from "./KbCompile";
 import { buildDailyReport } from "./DailyReport";
+import { inboxItems, type InboxItem } from "../../../shared/aiHubInbox";
+import {
+  NOTIFY_KINDS,
+  channelWants,
+  deliver,
+  diffInbox,
+  guardUrl,
+  hostOf,
+  renderNotification,
+  type GuardOptions,
+  type NotifyChannel,
+  type NotifyItem,
+} from "./Notifier";
+import { NotifyStore } from "./NotifyStore";
 import {
   Replay,
   caseFromTask,
@@ -453,6 +468,7 @@ export class HubService {
     private readonly directory = path.join(app.getPath("userData"), "ai-hub"),
   ) {
     this.store = new HubStore(path.join(directory, "hub.json"));
+    this.notifyStore = new NotifyStore(path.join(directory, "notify.json"));
     this.embeddings = new EmbeddingIndex(
       path.join(directory, "kb-embeddings.json"),
     );
@@ -519,6 +535,12 @@ export class HubService {
       },
       activity: (task, change, sessionId) => {
         void this.recordAgentChangeActivity(task, change, sessionId);
+      },
+      approvalWaitMs: () => this.approvalWaitMinutes() * 60_000,
+      // Time spent waiting for a person is not the run's: its budget moves by as much.
+      waited: (task, ms) => {
+        const armed = this.runTimers.get(task.id);
+        if (armed) this.armRunTimer(task, armed.endsAt + ms);
       },
       safetyContext: (task, targetLabel) => {
         const rawLabel = (targetLabel || task.target?.label || "").trim();
@@ -713,6 +735,7 @@ export class HubService {
         log.warn("HubStore load failed; using default store", safeError(e)),
       );
       this.selfLearning.bindStore(this.store);
+      await this.notifyStore.load();
       const initServers = await this.host.workspaceServers?.().catch(() => []);
       if (Array.isArray(initServers) && initServers.length > 0) {
         this.cachedWorkspaceServers = initServers;
@@ -1483,6 +1506,7 @@ export class HubService {
       evalCases: (this.store.data.evalCases ?? []).map(({ recorded, ...rest }) => ({ ...rest, recordedCalls: recorded.length })),
       evalRunning: this.evalRunningId,
       dailyReport: this.store.data.dailyReport,
+      notifications: this.notificationsView(),
       alertIntake: {
         canReceive: Boolean(this.host.alertHookOwner),
         enabled: Boolean(this.store.data.alertHook),
@@ -1624,6 +1648,8 @@ export class HubService {
           if (p.workforceAutopilot !== undefined)
             this.store.data.preferences.workforceAutopilot =
               p.workforceAutopilot === true;
+          if (p.approvalWaitMinutes !== undefined)
+            this.store.data.preferences.approvalWaitMinutes = integer(p.approvalWaitMinutes, 1, 60);
           if (p.sharedWorkspacePath !== undefined) {
             const cleanedPath = p.sharedWorkspacePath.trim();
             if (cleanedPath) {
@@ -2685,6 +2711,79 @@ export class HubService {
         if (isDemoMode()) saveDemoInfraEdge(savedEdge);
         break;
       }
+      case "notify-channel-save": {
+        const input = request.channel;
+        const channels = this.notifyStore.data.channels;
+        const existing = input.id ? channels.find((c) => c.id === input.id) : undefined;
+        if (input.id && !existing) throw new Error("Channel not found");
+        if (!["slack", "teams", "ntfy", "webhook"].includes(input.kind)) throw new Error("Unknown kind of channel");
+        const url = (input.url ?? "").trim() || existing?.url || "";
+        if (!url) throw new Error("The channel needs an address to post to");
+        // Checked now so a wrong address is said at once, and again each time something is sent.
+        const target = await guardUrl(url, this.notifyGuard());
+        if (input.kind === "ntfy" && !target.url.pathname.split("/").filter(Boolean).length)
+          throw new Error("An ntfy address ends with the topic, like https://ntfy.sh/my-topic");
+        const events = (input.events ?? []).filter((e) => NOTIFY_KINDS.includes(e));
+        const saved: NotifyChannel = {
+          id: existing?.id ?? crypto.randomUUID(),
+          kind: input.kind,
+          name: requiredText(input.name).slice(0, 80),
+          url,
+          // undefined keeps what is there; an empty text removes it.
+          secret: input.secret === undefined ? existing?.secret : input.secret.trim() || undefined,
+          enabled: input.enabled !== false,
+          events: events.length ? events : ["approval", "plan", "question", "blocked", "alert"],
+          includeCommand: input.includeCommand !== false,
+          alertMinSeverity: ["info", "warning", "critical"].includes(input.alertMinSeverity ?? "") ? input.alertMinSeverity : undefined,
+          last: existing?.url === url ? existing?.last : undefined,
+        };
+        this.notifyStore.data.channels = [...channels.filter((c) => c.id !== saved.id), saved];
+        // What already waits is not news to a channel that was just added.
+        for (const item of this.inboxNow()) this.notifyStore.data.seen[item.id] ??= Date.now();
+        await this.notifyStore.save();
+        break;
+      }
+      case "notify-channel-delete":
+        this.notifyStore.data.channels = this.notifyStore.data.channels.filter((c) => c.id !== request.id);
+        await this.notifyStore.save();
+        break;
+      case "notify-channel-test": {
+        const channel = this.notifyStore.data.channels.find((c) => c.id === request.id);
+        if (!channel) throw new Error("Channel not found");
+        const link = this.inboxLink();
+        const result = await deliver(
+          renderNotification(
+            channel,
+            [{ id: "test", kind: "report", headline: "A test from sshs3", title: "If you can read this, the channel works.", link }],
+            { inboxLink: link },
+          ),
+          this.notifyGuard(),
+          { waits: [] },
+        );
+        channel.last = { at: Date.now(), ...result };
+        await this.notifyStore.save();
+        reply = { notifyTest: result };
+        break;
+      }
+      case "notify-settings-save": {
+        if (request.publicUrl !== undefined && !process.env.SSHS3_PUBLIC_URL) {
+          const raw = request.publicUrl.trim();
+          if (raw) {
+            let parsed: URL;
+            try {
+              parsed = new URL(raw);
+            } catch {
+              throw new Error("That is not an address. It should look like https://sshs3.example.com");
+            }
+            if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password)
+              throw new Error("The address has to be http or https, without a user name in it");
+            this.notifyStore.data.publicUrl = `${parsed.origin}${parsed.pathname.replace(/\/+$/, "")}`;
+          } else this.notifyStore.data.publicUrl = "";
+        }
+        if (request.reminderMinutes !== undefined) this.notifyStore.data.reminderMinutes = integer(request.reminderMinutes, 0, 60);
+        await this.notifyStore.save();
+        break;
+      }
       case "infra-edge-confirm": {
         const edge = (this.store.data.infraEdges ?? []).find((x) => x.id === request.id);
         if (!edge) throw new Error("Link not found");
@@ -3390,9 +3489,7 @@ export class HubService {
       this.evalReplays.get(task.id)?.answer.bind(this.evalReplays.get(task.id)),
     );
     this.runtimes.set(task.id, runtime);
-    const timer = setTimeout(() => {
-      void this.stop(task, "Run time budget exhausted");
-    }, task.maxMinutes * 60_000);
+    this.armRunTimer(task, Date.now() + task.maxMinutes * 60_000);
     this.changed();
     void runtime
       .start(task, modelConfig, (event) => this.event(task, event))
@@ -3404,7 +3501,7 @@ export class HubService {
         }
       })
       .finally(async () => {
-        clearTimeout(timer);
+        this.clearRunTimer(task.id);
         this.broker.revoke(task.id);
         this.terminals.release(task.id);
         if (active(task)) {
@@ -3581,6 +3678,8 @@ export class HubService {
   changed(): void {
     if (this.disposed) return;
     this.host.changed();
+    // Before the early return below: a change while a save is pending must still reach the inbox.
+    this.pokeInbox();
     if (!this.initialized || this.saveTimer) return;
     this.saveTimer = setTimeout(() => {
       this.saveTimer = undefined;
@@ -3663,9 +3762,7 @@ export class HubService {
     task.error = undefined;
     assertLaunching();
     this.runtimes.set(task.id, runtime);
-    const timer = setTimeout(() => {
-      void this.stop(task, "Run time budget exhausted");
-    }, task.maxMinutes * 60_000);
+    this.armRunTimer(task, Date.now() + task.maxMinutes * 60_000);
     this.changed();
     void runtime
       .start(task, undefined, (event) => this.event(task, event))
@@ -3677,7 +3774,7 @@ export class HubService {
         }
       })
       .finally(async () => {
-        clearTimeout(timer);
+        this.clearRunTimer(task.id);
         this.broker.revoke(task.id);
         if (active(task)) {
           task.status = "interrupted";
@@ -4048,6 +4145,192 @@ export class HubService {
     if (!this.disposed) void this.readNextKb();
   }
 
+  // ---- notifications out -----------------------------------------------------
+
+  private readonly notifyStore: NotifyStore;
+  private readonly runTimers = new Map<string, { timer: NodeJS.Timeout; endsAt: number }>();
+  private inboxDirty = false;
+  private inboxTimer?: NodeJS.Timeout;
+  private flushingInbox = false;
+  /** How long the bucket is given to settle before a shared item is told about. Replaced in tests. */
+  private notifySettle = (): Promise<void> => new Promise((r) => setTimeout(r, 1500 + Math.random() * 1500));
+  private notifyWaits: number[] | undefined;
+
+  private approvalWaitMinutes(): number {
+    return integer(this.store.data.preferences.approvalWaitMinutes ?? 10, 1, 60);
+  }
+
+  private armRunTimer(task: AgentTask, endsAt: number): void {
+    this.clearRunTimer(task.id);
+    const timer = setTimeout(() => {
+      this.runTimers.delete(task.id);
+      void this.stop(task, "Run time budget exhausted");
+    }, Math.max(0, endsAt - Date.now()));
+    this.runTimers.set(task.id, { timer, endsAt });
+  }
+
+  private clearRunTimer(taskId: string): void {
+    const armed = this.runTimers.get(taskId);
+    if (armed) clearTimeout(armed.timer);
+    this.runTimers.delete(taskId);
+  }
+
+  private notifyGuard(): GuardOptions {
+    // An address on a shared server is typed by one of its users: it must not lead back into the server.
+    return { server: Boolean(this.host.alertHookOwner), allowPrivate: process.env.SSHS3_NOTIFY_ALLOW_PRIVATE === "1" };
+  }
+
+  private publicUrl(): string {
+    return (process.env.SSHS3_PUBLIC_URL?.trim() || this.notifyStore.data.publicUrl || "").replace(/\/+$/, "");
+  }
+
+  private inboxLink(itemId?: string): string | undefined {
+    const base = this.publicUrl();
+    return base ? `${base}/?view=Inbox${itemId ? `&item=${encodeURIComponent(itemId)}` : ""}` : undefined;
+  }
+
+  private notificationsView(): NonNullable<HubSnapshot["notifications"]> {
+    return {
+      channels: this.notifyStore.data.channels.map((c) => ({
+        id: c.id,
+        kind: c.kind,
+        name: c.name,
+        host: hostOf(c.url),
+        hasSecret: Boolean(c.secret),
+        enabled: c.enabled,
+        events: c.events.filter((e): e is NotifyEventKind => e !== "knowledge"),
+        includeCommand: c.includeCommand,
+        alertMinSeverity: c.alertMinSeverity,
+        last: c.last,
+      })),
+      publicUrl: this.publicUrl(),
+      publicUrlFixed: Boolean(process.env.SSHS3_PUBLIC_URL?.trim()),
+      reminderMinutes: this.notifyStore.data.reminderMinutes,
+    };
+  }
+
+  /** What waits for a person right now, from the store itself: no snapshot is built for this. */
+  private inboxNow(): InboxItem[] {
+    return inboxItems({
+      tasks: this.store.data.tasks,
+      workTickets: live(this.store.data.workTickets),
+      dailyReport: this.store.data.dailyReport,
+    }).filter((item) => NOTIFY_KINDS.includes(item.kind));
+  }
+
+  /** Something changed: look at the inbox shortly. Cheap, because every change in the hub comes through here. */
+  private pokeInbox(): void {
+    this.inboxDirty = true;
+    if (this.inboxTimer || this.disposed || !this.initialized) return;
+    this.inboxTimer = setTimeout(() => {
+      this.inboxTimer = undefined;
+      void this.flushInbox().catch((e) => log.warn("Notifications failed", safeError(e)));
+    }, 3000);
+    this.inboxTimer.unref?.();
+  }
+
+  /** The item with what a person needs to decide, from the run it belongs to. */
+  private notifyItem(item: InboxItem): NotifyItem {
+    const task = item.taskId ? this.store.data.tasks.find((t) => t.id === item.taskId) : undefined;
+    const change = item.changeId ? task?.changes.find((c) => c.id === item.changeId) : undefined;
+    return {
+      id: item.id,
+      kind: item.kind,
+      title: item.title,
+      detail: item.detail,
+      from: item.kind === "approval" ? task?.agentName || "Assistant" : item.from,
+      target: item.target,
+      risk: item.risk,
+      reason: change?.riskReason,
+      command: change?.command,
+      check: change?.check?.command,
+      rollback: change?.rollback?.command,
+      waitsMinutes: item.kind === "approval" ? this.approvalWaitMinutes() : undefined,
+      link: this.inboxLink(item.id),
+    };
+  }
+
+  /**
+   * Tells the channels about what is new in the inbox, and reminds once about
+   * an approval nobody answered. What blocks a running agent also gives a
+   * desktop notification, which until now nothing did.
+   */
+  private async flushInbox(now = Date.now()): Promise<void> {
+    if (this.flushingInbox || this.disposed || isDemoMode()) return;
+    this.flushingInbox = true;
+    this.inboxDirty = false;
+    let out: NotifyItem[];
+    let since: Map<string, number>;
+    try {
+      const data = this.notifyStore.data;
+      const items = this.inboxNow();
+      const before = JSON.stringify([data.seen, data.reminded]);
+      const { fresh, seen } = diffInbox(items, data.seen, now);
+      data.seen = seen;
+      const remindAfter = data.reminderMinutes * 60_000;
+      const reminders =
+        remindAfter > 0
+          ? items.filter((i) => i.kind === "approval" && !fresh.includes(i) && !data.reminded[i.id] && now - (i.since ?? i.at) >= remindAfter)
+          : [];
+      data.reminded = Object.fromEntries(Object.entries(data.reminded).filter(([id]) => seen[id] !== undefined));
+      for (const item of reminders) data.reminded[item.id] = now;
+      const blocking = fresh.filter((i) => ["approval", "plan", "question"].includes(i.kind));
+      if (blocking.length)
+        this.notify(
+          blocking.length === 1 ? (blocking[0].kind === "approval" ? "Approval needed" : "An agent is waiting for you") : `${blocking.length} things are waiting for you`,
+          `${blocking[0].from ?? "Assistant"}: ${blocking[0].title}`,
+        );
+      out = [...fresh.map((i) => this.notifyItem(i)), ...reminders.map((i) => ({ ...this.notifyItem(i), reminder: true }))];
+      since = new Map(items.map((i) => [i.id, i.since ?? i.at]));
+      if (before !== JSON.stringify([data.seen, data.reminded])) await this.notifyStore.save();
+    } finally {
+      // Released before anything is sent: a channel that does not answer must not hold up what comes next.
+      this.flushingInbox = false;
+    }
+    if (out.length) {
+      await this.sendToChannels(out, since);
+      await this.notifyStore.save();
+    }
+    if (this.inboxDirty) this.pokeInbox();
+  }
+
+  private async sendToChannels(items: NotifyItem[], since: Map<string, number>): Promise<void> {
+    const channels = this.notifyStore.data.channels.filter((c) => c.enabled);
+    if (!channels.length) return;
+    // On a shared server only the person whose installation this is can answer: the message says who.
+    const owner = this.host.alertHookOwner ? await this.resolveActorName() : undefined;
+    const sync = this.work();
+    const client = this.clientId();
+    const hash = (text: string): string => crypto.createHash("sha256").update(text).digest("hex");
+    await Promise.all(
+      channels.map(async (channel) => {
+        let mine = items.filter((item) => channelWants(channel, item));
+        if (sync) {
+          // A ticket is on every installation that shares the bucket: one of them tells the channel.
+          const kept: NotifyItem[] = [];
+          for (const item of mine) {
+            const shared = ["review", "blocked", "alert"].includes(item.kind);
+            if (
+              !shared ||
+              (await sync
+                .markOnce(hash(`${item.id}|${since.get(item.id) ?? 0}|${hash(channel.url).slice(0, 16)}`), client, this.notifySettle)
+                .catch(() => true))
+            )
+              kept.push(item);
+          }
+          mine = kept;
+        }
+        if (!mine.length) return;
+        const result = await deliver(renderNotification(channel, mine, { owner, inboxLink: this.inboxLink() }), this.notifyGuard(), {
+          waits: this.notifyWaits,
+        });
+        channel.last = { at: Date.now(), ...result };
+        if (!result.ok) log.warn("A notification was not delivered", `${channel.name}: ${result.error ?? result.status}`);
+      }),
+    );
+    this.host.changed();
+  }
+
   // ---- nightly upkeep --------------------------------------------------------
 
   private nightlyRunning = false;
@@ -4071,6 +4354,7 @@ export class HubService {
         const held = await sync.claim(`nightly-${day}`, { by: await this.resolveActorName(), client }, now);
         if (held.client !== client) return; // Another installation has today's upkeep.
       }
+      await sync?.pruneMarks(14 * 24 * 60 * 60_000, now).catch(() => undefined);
       await this.request({ action: "self-learn-reflect" }).catch((e) => log.warn("Nightly tidy failed", safeError(e)));
       await this.checkContradictions().catch((e) => log.warn("Nightly contradiction check failed", safeError(e)));
       const extra = await this.collectExtraContext();
@@ -4347,6 +4631,9 @@ export class HubService {
 
   /** Stores a ticket here and sends it to the team. The upload is not waited for. */
   private putTicket(ticket: WorkTicket): void {
+    const had = (this.store.data.workTickets ?? []).find((t) => t.id === ticket.id);
+    // When it came to this status: what tells a new "review" from an old one with a new comment.
+    ticket = { ...ticket, statusAt: had && had.status === ticket.status ? (had.statusAt ?? ticket.statusAt) : Date.now() };
     this.store.data.workTickets = [
       ...(this.store.data.workTickets ?? []).filter((t) => t.id !== ticket.id),
       ticket,
@@ -4644,6 +4931,7 @@ export class HubService {
       void this.workTick(now).catch((e) => log.warn("Board tick failed", safeError(e)));
       void this.readNextKb(now).catch((e) => log.warn("Knowledge base reading failed", safeError(e)));
       void this.nightly(now).catch((e) => log.warn("Nightly upkeep failed", safeError(e)));
+      void this.flushInbox(now).catch((e) => log.warn("Notifications failed", safeError(e)));
       let historyChanged = false;
       for (const session of this.terminals.list()) {
         const text = this.terminals.context(session.id);

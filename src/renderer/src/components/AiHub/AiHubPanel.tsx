@@ -60,6 +60,7 @@ type View =
   | "Changes"
   | "Memory & skills"
   | "Schedules";
+const VIEWS: View[] = ["Work", "Inbox", "Workforce", "Agents & MCP", "Knowledge Base", "Infrastructure", "Changes", "Memory & skills", "Schedules"];
 type Menu = "history" | "target" | "control" | "mention" | "agent" | null;
 
 const DEMO_SHOWCASE_RESPONSE = [
@@ -119,6 +120,7 @@ export function AiHubPanel({
   const hub = useHub();
   const selectedTerminal = useSelectedTerminal();
   const [view, setView] = useState<View>("Work");
+  const [focusInboxItem, setFocusInboxItem] = useState<string | undefined>();
   const [taskId, setTaskId] = useState("");
   const [prompt, setPrompt] = useState("");
   const [autonomy, setAutonomy] = useState<AgentMode>("assisted");
@@ -511,6 +513,18 @@ export function AiHubPanel({
     };
     window.addEventListener("sshs3:ai-open", open);
     window.addEventListener("sshs3:ai-attach", attach);
+    // A link from a notification: ?view=Inbox&item=…  Opened once, then taken out of the address.
+    const linked = new URLSearchParams(window.location.search);
+    const linkedView = VIEWS.find((v) => v === linked.get("view"));
+    if (linkedView) {
+      setMode("hub");
+      setView(linkedView);
+      setFocusInboxItem(linked.get("item") ?? undefined);
+      linked.delete("view");
+      linked.delete("item");
+      const rest = linked.toString();
+      window.history.replaceState(null, "", `${window.location.pathname}${rest ? `?${rest}` : ""}${window.location.hash}`);
+    }
     return () => {
       window.removeEventListener("sshs3:ai-open", open);
       window.removeEventListener("sshs3:ai-attach", attach);
@@ -1310,7 +1324,7 @@ export function AiHubPanel({
                         data-testid="ai-starter-configure-sshs3"
                         onClick={() =>
                           setPrompt(
-                            "Konfigurera sshS3 åt mig: sätt upp en SSH port-forwarding tunnel (local 5432 -> 127.0.0.1:5432), aktivera prestandaraden i statusfältet och slå på dotfiles-synk för ~/.zshrc och ~/.tmux.conf.",
+                            "Configure sshs3 for me: set up an SSH port-forwarding tunnel (local 5432 -> 127.0.0.1:5432), switch on the performance row in the status bar, and turn on dotfiles sync for ~/.zshrc and ~/.tmux.conf.",
                           )
                         }
                       >
@@ -2499,6 +2513,7 @@ export function AiHubPanel({
                 setView("Work");
               }}
               onOpenView={(next) => setView(next)}
+              focusItemId={focusInboxItem}
             />
           )}
           {activeView === "Workforce" && (

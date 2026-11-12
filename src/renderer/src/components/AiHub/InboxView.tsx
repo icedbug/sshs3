@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { HubSnapshot } from "@shared/types/aiHub";
 import { ChangeProof } from "./ChangeProof";
 import { type Act } from "./panelShared";
@@ -30,17 +30,25 @@ export function InboxView({
   act,
   onOpenTask,
   onOpenView,
+  focusItemId,
 }: {
   hub: HubSnapshot;
   act: Act;
   onOpenTask: (taskId: string) => void;
   onOpenView: (view: "Workforce" | "Knowledge Base") => void;
+  /** The item a notification's link pointed at: shown first, or said to be handled if it is gone. */
+  focusItemId?: string;
 }): JSX.Element {
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [address, setAddress] = useState("");
   const [pasted, setPasted] = useState("");
   const [rules, setRules] = useState<{ match: string; agentId: string }[] | undefined>();
   const items = inboxItems(hub);
+  const focused = useRef<HTMLElement | null>(null);
+  const focusPresent = Boolean(focusItemId && items.some((i) => i.id === focusItemId));
+  useEffect(() => {
+    if (focusPresent) focused.current?.scrollIntoView?.({ block: "center" });
+  }, [focusPresent, focusItemId]);
   const intake = hub.alertIntake;
   const agents = hub.agents ?? [];
   const shownRules = rules ?? intake?.rules ?? [];
@@ -158,6 +166,11 @@ export function InboxView({
         </p>
       </header>
 
+      {focusItemId && !focusPresent && (
+        <p className="ai-note" role="status" data-testid="inbox-handled">
+          What that notification was about no longer waits: it has been answered, or the agent stopped waiting.
+        </p>
+      )}
       {items.length === 0 && (
         <p className="ai-empty" data-testid="inbox-empty">
           Nothing is waiting for you.
@@ -165,12 +178,18 @@ export function InboxView({
       )}
       <div className="ai-inbox-list" data-testid="inbox-list">
         {items.map((item) => (
-          <article key={item.id} className={`ai-card ai-inbox-item ${KIND[item.kind].tone}`} data-testid={`inbox-${item.kind}`}>
+          <article
+            key={item.id}
+            ref={item.id === focusItemId ? focused : undefined}
+            className={`ai-card ai-inbox-item ${KIND[item.kind].tone}${item.id === focusItemId ? " ai-inbox-focus" : ""}`}
+            data-testid={`inbox-${item.kind}`}
+          >
             <div className="ai-card-head">
               <div>
                 <small className="ai-inbox-kind">
                   {KIND[item.kind].label}
-                  {item.from ? ` · ${item.from}` : ""} · {ago(item.at)}
+                  {item.from ? ` · ${item.from}` : ""}
+                  {item.target && !item.from?.includes(item.target) ? ` · ${item.target}` : ""} · {ago(item.at)}
                 </small>
                 <strong>{item.title}</strong>
               </div>

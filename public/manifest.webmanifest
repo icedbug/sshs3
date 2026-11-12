@@ -1,0 +1,11 @@
+{
+  "name": "sshs3",
+  "short_name": "sshs3",
+  "description": "Terminals, servers and a workforce of agents for a team.",
+  "start_url": "./?view=Inbox",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#14161c",
+  "theme_color": "#14161c",
+  "icons": [{ "src": "./icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }]
+}

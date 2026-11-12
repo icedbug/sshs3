@@ -57,6 +57,10 @@ export interface ToolDependencies {
     task: AgentTask,
     targetLabel?: string,
   ): { policy?: SafetyPolicyConfig; targetTags?: string[] };
+  /** How long a person is given to approve, in milliseconds. Ten minutes unless set. */
+  approvalWaitMs?(): number;
+  /** A run stood still this long waiting for a person: that time is not the run's own. */
+  waited?(task: AgentTask, ms: number): void;
   changed(): void;
 }
 
@@ -125,18 +129,33 @@ export class ToolBroker {
     task.changes.push(change);
     task.status = "waiting";
     this.deps.changed();
-    const allowed = await new Promise<boolean>((resolve) => {
-      const timer = setTimeout(() => {
-        this.approvals.delete(change.id);
-        resolve(false);
-      }, 10 * 60_000);
-      this.approvals.set(change.id, { taskId: task.id, resolve, timer });
-    });
+    const allowed = await this.waitForPerson(task, change.id);
     const still = task.status === "waiting";
     change.status = allowed && still ? "approved" : "denied";
     if (still) task.status = "running";
     this.deps.changed();
     return allowed && still;
+  }
+
+  /**
+   * Waits for a person's answer. The time spent waiting is given back to the
+   * run: its capability and its time budget are both moved by as long as it
+   * stood still, so an answer that takes twenty minutes does not find a
+   * fifteen-minute run already dead.
+   */
+  private async waitForPerson(task: AgentTask, changeId: string): Promise<boolean> {
+    const started = Date.now();
+    const allowed = await new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => {
+        this.approvals.delete(changeId);
+        resolve(false);
+      }, this.deps.approvalWaitMs?.() ?? 10 * 60_000);
+      this.approvals.set(changeId, { taskId: task.id, resolve, timer });
+    });
+    const waited = Date.now() - started;
+    for (const grant of this.grants.values()) if (grant.task.id === task.id) grant.expiresAt += waited;
+    this.deps.waited?.(task, waited);
+    return allowed;
   }
 
   revoke(taskId: string): void {
@@ -557,13 +576,7 @@ export class ToolBroker {
     if (requiresApproval) {
       task.status = "waiting";
       this.deps.changed();
-      const allowed = await new Promise<boolean>((resolve) => {
-        const timer = setTimeout(() => {
-          this.approvals.delete(change.id);
-          resolve(false);
-        }, 10 * 60_000);
-        this.approvals.set(change.id, { taskId: task.id, resolve, timer });
-      });
+      const allowed = await this.waitForPerson(task, change.id);
       const grant = this.grants.get(key);
       if (
         !allowed ||
