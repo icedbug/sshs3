@@ -20,6 +20,8 @@ export interface RunEvent {
   usage?: Record<string, number>;
   /** With `tool.result`: the call that was made and what it returned. */
   tool?: { name: string; input: string; output: string };
+  /** With `hypotheses.updated`: the agent's hypotheses as they now stand. */
+  hypotheses?: import("../../../shared/types/aiHub").AgentHypothesis[];
   /** With `todos.updated`: the agent's task list as it now stands. */
   todos?: import("../../../shared/types/aiHub").AgentTodo[];
 }

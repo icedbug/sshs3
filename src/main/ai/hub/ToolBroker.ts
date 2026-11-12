@@ -172,6 +172,8 @@ export class ToolBroker {
         return res;
       }
       if (request.action === "file-read" || request.action === "file-write") {
+        if (request.action === "file-write" && task.investigator)
+          throw new Error("An investigator does not change files.");
         if (
           request.action === "file-write" &&
           ++grant.commands > task.maxCommands
@@ -258,7 +260,7 @@ export class ToolBroker {
         throw new Error("Command budget exhausted");
 
       // Auto-handshake on demand if the terminal has not been armed yet (and was not invalidated)
-      if (task.mode !== "advice") {
+      if (task.mode !== "advice" || task.investigator) {
         const live = this.terminals.get(target.sessionId);
         if (
           live &&
@@ -344,6 +346,20 @@ export class ToolBroker {
     task: AgentTask,
     change: AgentChange,
   ): Promise<void> {
+    if (task.investigator) {
+      // An investigator looks and never changes: only what the classifier calls read-only, and nobody is asked.
+      const readOnly = change.kind === "command" && change.riskLevel === "safe";
+      change.status = readOnly ? "approved" : "denied";
+      this.deps.changed();
+      if (!readOnly)
+        throw new Error(
+          `An investigator only runs read-only commands, and this one is classified as "${change.riskLevel ?? "changing"}"${change.riskReason ? ` (${change.riskReason})` : ""}. Find it out another way, or report that it needs a command you may not run.`,
+        );
+      const grant = this.grants.get(key);
+      if (!grant || Date.now() >= grant.expiresAt || task.status !== "running")
+        throw new Error("Run capability revoked");
+      return;
+    }
     if (task.mode === "advice") {
       change.status = "denied";
       this.deps.changed();

@@ -195,6 +195,26 @@ describe("tool authority", () => {
     expect(writes).toHaveLength(2);
     expect(t.changes[0].status).toBe("completed");
   });
+  it("lets an investigator run read-only commands without asking, and refuses everything else without asking", async () => {
+    const { broker, t, capability, writes } = await setup("advice");
+    t.investigator = true;
+    t.maxCommands = 10;
+    const before = writes.length;
+    // Looking is allowed, and nobody is asked.
+    const looked = await broker.invoke(capability.key, { action: "command", command: "df -h" });
+    expect(looked).toMatchObject({ exitCode: 0 });
+    expect(t.status).toBe("running");
+    expect(writes.length).toBe(before + 1);
+    // Changing is refused, the command never reaches the terminal, and the person is not bothered.
+    for (const command of ["systemctl restart nginx", "rm -rf /var/tmp/x", "df -h && echo x > /etc/motd"]) {
+      await expect(broker.invoke(capability.key, { action: "command", command })).rejects.toThrow(/only runs read-only commands/);
+      expect(t.status).toBe("running");
+    }
+    expect(writes.length).toBe(before + 1);
+    expect(t.changes.map((c) => c.status)).toEqual(["completed", "denied", "denied", "denied"]);
+    // Writing a file is not a command at all.
+    await expect(broker.invoke(capability.key, { action: "file-write", path: "/etc/x", content: "y" } as never)).rejects.toThrow(/does not change files/);
+  });
   it("runs a command an approved plan lists without asking again, once; anything else is still asked about", async () => {
     const { broker, t, capability } = await setup();
     t.maxCommands = 10;

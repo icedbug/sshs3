@@ -56,6 +56,15 @@ export function taskTranscript(task: AgentTask): string {
       );
     }
   }
+  // What was suspected, and what the evidence said: the part of an
+  // investigation worth keeping (the confirmed cause, and the red herrings).
+  if (task.hypotheses?.length) {
+    lines.push("Hypotheses at the end of the run:");
+    for (const h of task.hypotheses) {
+      lines.push(`- [${h.status}] ${h.text}`);
+      for (const e of h.evidence) lines.push(`    ${e.supports ? "for" : "against"}: ${boundedContext(e.text, 300)}`);
+    }
+  }
   return boundedContext(lines.join("\n"), 24_000);
 }
 

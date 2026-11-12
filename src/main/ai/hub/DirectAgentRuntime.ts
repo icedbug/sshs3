@@ -21,8 +21,10 @@ import { boundedContext, maskContext, safeError } from "./privacy";
 import {
   DIGEST_CALLS,
   HANDOVER_REQUEST,
+  HYPOTHESIS_TOOL,
   TODO_TOOL,
   continuationMessage,
+  parseHypotheses,
   handoverMessage,
   failureHints,
   newDiscipline,
@@ -1225,7 +1227,12 @@ export function toolsForTask(
 ): FunctionToolDef[] {
   if (isDistillRun(task)) return [];
   if (isReadOnlyRun(task))
-    return AGENT_TOOLS.filter((t) => READ_ONLY_RUN_TOOLS.has(t.name));
+    return AGENT_TOOLS.filter(
+      (t) =>
+        READ_ONLY_RUN_TOOLS.has(t.name) ||
+        // An investigator with a terminal of its own may look, never change: the broker refuses anything but read-only commands.
+        (task.investigator && task.target && t.name === "terminal_command"),
+    );
   const activeAgent = resolveActiveAgent(task, initialContext);
   let baseTools: FunctionToolDef[] =
     task.mode === "advice" || !task.target
@@ -1236,6 +1243,11 @@ export function toolsForTask(
             t.name.startsWith("sshs3_"),
         )
       : [...AGENT_TOOLS];
+  baseTools.push({
+    name: HYPOTHESIS_TOOL.name,
+    description: HYPOTHESIS_TOOL.description,
+    parameters: HYPOTHESIS_TOOL.parameters as unknown as Record<string, unknown>,
+  });
   // The agent's own task list: every normal run has it, whatever else it may call.
   baseTools.push({
     name: TODO_TOOL.name,
@@ -1253,6 +1265,7 @@ export function toolsForTask(
         allowed.has(t.name) ||
         t.name === "workspace_context" ||
         t.name === "sshs3_kb_search" ||
+        t.name === HYPOTHESIS_TOOL.name ||
         t.name === TODO_TOOL.name,
     );
   }
@@ -1975,7 +1988,22 @@ export class DirectAgentRuntime implements AgentRuntime {
       return JSON.stringify({ error: "Invalid JSON arguments for tool " + call.name });
     }
     let output: string;
-    if (call.name === TODO_TOOL.name) {
+    if (call.name === HYPOTHESIS_TOOL.name) {
+      const parsed = parseHypotheses(parsedArgs);
+      if ("error" in parsed) {
+        output = JSON.stringify({ error: parsed.error });
+      } else {
+        this.discipline.hypotheses = parsed.hypotheses;
+        this.discipline.hypothesesAsked = false;
+        this.onEvent?.({ type: "hypotheses.updated", hypotheses: parsed.hypotheses });
+        output = JSON.stringify({
+          ok: true,
+          open: parsed.hypotheses.filter((h) => h.status === "open").length,
+          confirmed: parsed.hypotheses.filter((h) => h.status === "confirmed").length,
+          ruledOut: parsed.hypotheses.filter((h) => h.status === "ruled-out").length,
+        });
+      }
+    } else if (call.name === TODO_TOOL.name) {
       // Kept by the run itself, not by the workspace: nothing to ask the broker.
       const parsed = parseTodos(parsedArgs);
       if ("error" in parsed) {

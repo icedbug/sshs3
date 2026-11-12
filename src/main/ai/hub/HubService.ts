@@ -202,6 +202,8 @@ export interface HubHost {
   changed(): void;
   inventoryTargets(): Promise<InventoryTarget[]>;
   openSchedule(schedule: AgentSchedule): Promise<string>;
+  /** Closes a terminal the hub opened for itself (an investigator's). */
+  closeSession?(sessionId: string): void;
   backgroundChanged(background: boolean, autoStart: boolean): Promise<void>;
   show(): void;
   /**
@@ -985,6 +987,7 @@ export class HubService {
       distillSourceId?: string;
       title: string;
       mainModel?: boolean;
+      investigator?: boolean;
     },
   ): Promise<AgentTask> {
     const task = await this.start(input, undefined, tag);
@@ -1008,6 +1011,8 @@ export class HubService {
     prompt: string;
     agent?: MissionAgent;
     agentName: string;
+    /** A terminal of the run's own: it may then run read-only commands there. */
+    sessionId?: string;
     /** Work that needs the main model's judgment even when a fast model is set. */
     mainModel?: boolean;
   }): Promise<{
@@ -1022,11 +1027,13 @@ export class HubService {
         mode: "advice",
         agentId: input.agent?.id,
         agentName: input.agentName,
-        maxCommands: 1,
+        sessionId: input.sessionId,
+        maxCommands: input.sessionId ? 15 : 1,
         maxMinutes: 10,
       },
       {
         workforceRunId: input.runId,
+        investigator: Boolean(input.sessionId),
         title: `${input.agentName} · read-only`,
         ...(input.mainModel ? { mainModel: true } : {}),
       },
@@ -1114,11 +1121,21 @@ export class HubService {
           };
           continue;
         }
+        // A terminal of its own on the same target, so it can look for itself. Where
+        // one cannot be opened (the target needs an interactive login) it works from what is known.
+        const sessionId = await this.openInvestigatorTerminal(parent);
         try {
           const result = await this.runReadOnlySpecialist({
             runId,
-            prompt: investigatorPrompt(question, scope, parent.title),
+            prompt:
+              investigatorPrompt(question, scope, parent.title) +
+              (sessionId
+                ? "\n\nYou have a terminal of your own on the target. You may run read-only commands there (looking at state, logs, configuration); anything that would change the system is refused. Say which command showed what."
+                : "\n\nNo terminal could be opened for you on the target, so you cannot run commands: work from the workspace's context and the knowledge base, and say what would have to be checked on the system."),
             agentName: `Investigator ${index + 1}`,
+            sessionId,
+          }).finally(() => {
+            if (sessionId) this.host.closeSession?.(sessionId);
           });
           results[index] =
             result.status === "completed" && result.text.trim()
@@ -1141,6 +1158,24 @@ export class HubService {
       Array.from({ length: Math.min(3, asked.length) }, () => worker()),
     );
     return results;
+  }
+
+  /** Opens a terminal for an investigator on the parent's target. Undefined when that is not possible. */
+  private async openInvestigatorTerminal(parent: AgentTask): Promise<string | undefined> {
+    if (isDemoMode() || !parent.target || !this.host.closeSession) return undefined;
+    const session = this.terminals.get(parent.target.sessionId);
+    if (!session || session.kind === "k8s" || !session.shell) return undefined;
+    try {
+      const id = await this.host.openSchedule({
+        profileId: session.kind === "local" ? "local" : (session.profileId ?? ""),
+        shell: session.shell,
+      } as AgentSchedule);
+      await this.terminals.arm(id, session.shell);
+      return id;
+    } catch (error) {
+      log.info("No terminal for an investigator", safeError(error));
+      return undefined;
+    }
   }
 
   /** The scripted demo-mode workforce run. No model is called; the run says so. */
@@ -3033,6 +3068,7 @@ export class HubService {
       distillSourceId?: string;
       title: string;
       mainModel?: boolean;
+      investigator?: boolean;
     },
   ): Promise<AgentTask> {
     if (!["advice", "assisted", "autonomous"].includes(input.mode))
@@ -3072,6 +3108,7 @@ export class HubService {
         ? { distillSourceId: readOnly.distillSourceId }
         : {}),
       ...(readOnly?.mainModel ? { mainModelOnly: true } : {}),
+      ...(readOnly?.investigator ? { investigator: true } : {}),
       mode: input.mode,
       agentId: matchedAgent?.id ?? input.agentId,
       agentName: matchedAgent?.name ?? input.agentName,
@@ -3341,6 +3378,7 @@ export class HubService {
       message.text = boundedContext(message.text + event.delta, 128_000);
     }
     if (event.type === "todos.updated" && event.todos) task.todos = event.todos;
+    if (event.type === "hypotheses.updated" && event.hypotheses) task.hypotheses = event.hypotheses;
     if (event.type === "tool.result" && event.tool) {
       task.toolLog = [
         ...(task.toolLog ?? []),

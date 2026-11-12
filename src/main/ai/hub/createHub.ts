@@ -787,6 +787,13 @@ export function createHub(
       }
       return targets;
     },
+    closeSession: (sessionId) => {
+      try {
+        bridge.sshPtyManager.kill(sessionId);
+      } catch {
+        // Already gone.
+      }
+    },
     openSchedule: async (schedule) => {
       let id: string;
       if (schedule.profileId === "local") {

@@ -234,6 +234,28 @@ explicitly enabled presentation on top of the same terminal authority.
   `errorSignature`) through S3 and Team Vault sync (`WorkspaceMemoryEntry` in
   `src/shared/types/teamVault.ts`); credentials are never uploaded.
 
+## Investigations: hypotheses and investigators that can look
+
+- **Hypotheses.** `sshs3_hypotheses` is the agent's working list of what might
+  explain a problem, kept by the run like its task list. A hypothesis cannot
+  be marked confirmed without evidence for it, or ruled out without evidence
+  against it (`parseHypotheses`). When the agent wants to stop with hypotheses
+  still open, or with none confirmed, it is sent back once and told not to
+  present a cause as found (`continuationMessage`). The list is shown above
+  the composer (`HypothesisTree`) and goes into the record that memory and
+  the knowledge base learn from, so the confirmed cause and the red herrings
+  end up on the troubleshooting page.
+- **Investigators that can look.** `sshs3_investigate` used to start runs that
+  could only read what the workspace already knew. An investigator now gets a
+  terminal of its own on the asking run's target (opened like a schedule's,
+  closed afterwards) and `terminal_command`, and the broker lets through only
+  what `analyzeCommandSafety` classifies as read-only, without asking anyone;
+  everything else is refused, as is any file write. Where no terminal can be
+  opened (a target that needs an interactive login, Kubernetes sessions, the
+  demo lab) the investigator works from context and says what it could not
+  check. The classifier is a set of rules: it can refuse a harmless command,
+  and a command it wrongly calls read-only would run.
+
 ## Alerts in, and the inbox (`AlertIntake`, `InboxView`)
 
 - **Alerts in.** On the web server, `POST /api/hooks/<user id>.<secret>` takes

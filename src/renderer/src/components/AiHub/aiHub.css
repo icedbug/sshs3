@@ -3289,3 +3289,76 @@
 .ai-hub nav .ai-nav-badge {
   font-variant-numeric: tabular-nums;
 }
+
+/* ---- hypotheses ---------------------------------------------------------- */
+.ai-hyp {
+  margin: 0 0 8px;
+  border: 1px solid var(--ai-line);
+  border-radius: 10px;
+  background: var(--ai-surface);
+  font-size: 12.5px;
+}
+.ai-hyp > summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  cursor: pointer;
+  list-style: none;
+}
+.ai-hyp > summary::-webkit-details-marker {
+  display: none;
+}
+.ai-hyp ul {
+  margin: 0;
+  padding: 0 12px 10px;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+}
+.ai-hyp ul ul {
+  padding: 6px 0 0;
+}
+.ai-hyp-line {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 8px;
+}
+.ai-hyp-mark {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1.5px solid var(--ai-ink-faint);
+  transform: translateY(1px);
+}
+.ai-hyp li[data-status="confirmed"] > .ai-hyp-line .ai-hyp-mark {
+  border-color: var(--ai-accent);
+  background: var(--ai-accent);
+}
+.ai-hyp li[data-status="ruled-out"] > .ai-hyp-line .ai-hyp-text {
+  color: var(--ai-ink-faint);
+  text-decoration: line-through;
+}
+.ai-hyp li[data-status="confirmed"] > .ai-hyp-line .ai-hyp-text {
+  color: var(--ai-ink);
+  font-weight: 600;
+}
+.ai-hyp-status {
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ai-ink-faint);
+}
+.ai-hyp li[data-status="confirmed"] > .ai-hyp-line .ai-hyp-status {
+  color: var(--ai-accent);
+}
+.ai-hyp small {
+  display: block;
+  margin: 2px 0 0 20px;
+  color: var(--ai-ink-faint);
+  line-height: 1.45;
+}
+.ai-hyp .ai-hyp-for {
+  color: var(--ai-ink-soft);
+}

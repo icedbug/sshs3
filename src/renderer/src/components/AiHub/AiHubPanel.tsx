@@ -41,6 +41,7 @@ import { Memory } from "./MemoryView";
 import { Schedules } from "./SchedulesView";
 import { ChangesView } from "./ChangesView";
 import { WorkforceView } from "./WorkforceView";
+import { HypothesisTree } from "./HypothesisTree";
 import { InboxView } from "./InboxView";
 import { inboxItems } from "./workforceModel";
 import { InfrastructureView } from "./InfrastructureView";
@@ -1880,8 +1881,9 @@ export function AiHubPanel({
                 <div ref={end} />
               </div>
               {/* What the agent is working through stays in view above the composer. */}
-              {task && (task.todos?.length ?? 0) > 0 && (
+              {task && ((task.todos?.length ?? 0) > 0 || (task.hypotheses?.length ?? 0) > 0) && (
                 <div className="ai-run-dock" data-testid="ai-run-dock">
+                  <HypothesisTree hypotheses={task.hypotheses} />
                   <TaskTodos todos={task.todos} />
                 </div>
               )}

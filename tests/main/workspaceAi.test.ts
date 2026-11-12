@@ -491,6 +491,7 @@ describe("Production multi-user workspace sync & auto-memory", () => {
       "sshs3_kb_search",
       "sshs3_kb_manage",
       "sshs3_agent_and_mcp_manage",
+      "sshs3_hypotheses",
       // The agent's own task list is part of every normal run.
       "todo_write",
     ]);
@@ -525,6 +526,7 @@ describe("Production multi-user workspace sync & auto-memory", () => {
       "sshs3_kb_search",
       "sshs3_kb_manage",
       "sshs3_agent_and_mcp_manage",
+      "sshs3_hypotheses",
       // The agent's own task list is part of every normal run.
       "todo_write",
     ]);
@@ -564,6 +566,7 @@ describe("Production multi-user workspace sync & auto-memory", () => {
       "sshs3_kb_search",
       "sshs3_kb_manage",
       "sshs3_agent_and_mcp_manage",
+      "sshs3_hypotheses",
       // The agent's own task list is part of every normal run.
       "todo_write",
     ]);

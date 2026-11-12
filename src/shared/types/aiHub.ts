@@ -76,6 +76,15 @@ export interface AgentPlanStep {
  * A plan the agent proposes before changing anything. Nothing that changes a
  * system runs while a plan waits for the user's decision.
  */
+/** Something that might explain what is wrong, and what was found for or against it. */
+export interface AgentHypothesis {
+  id: string;
+  text: string;
+  status: "open" | "confirmed" | "ruled-out";
+  /** The hypothesis this one refines. */
+  parentId?: string;
+  evidence: { supports: boolean; text: string }[];
+}
 export interface AgentPlan {
   id: string;
   goal: string;
@@ -176,6 +185,13 @@ export interface AgentTask {
    * listed as a conversation.
    */
   distillSourceId?: string;
+  /** What might explain the problem at hand, as the agent last recorded it. */
+  hypotheses?: AgentHypothesis[];
+  /**
+   * Set on an investigator: a read-only run that may also run commands, but
+   * only ones classified as read-only, in a terminal of its own.
+   */
+  investigator?: boolean;
   /** Set on a run that works a ticket from the board: that ticket's id. */
   ticketId?: string;
   /** The model the task's latest run was started on. */
