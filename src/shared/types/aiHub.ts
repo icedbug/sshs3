@@ -56,6 +56,45 @@ export interface AgentTodo {
   /** What showed it done, or why it was dropped or waits for the user. */
   note?: string;
 }
+/** One step of an agent's plan for a change. */
+export interface AgentPlanStep {
+  /** What is done, in one sentence. */
+  action: string;
+  /** The server, cluster, file or service it is done to. */
+  target?: string;
+  /** The exact command, when the step is one. */
+  command?: string;
+  risk: "low" | "medium" | "high";
+  /** How it will be shown to have worked: the command and what it should print. */
+  check: string;
+  /** How to undo it. Required for medium and high risk. */
+  rollback?: string;
+  /** Set when an approved plan's command has run without asking again. */
+  ranAt?: number;
+}
+/**
+ * A plan the agent proposes before changing anything. Nothing that changes a
+ * system runs while a plan waits for the user's decision.
+ */
+export interface AgentPlan {
+  id: string;
+  goal: string;
+  steps: AgentPlanStep[];
+  /** What the plan takes for granted and has not checked. */
+  assumptions?: string[];
+  status: "proposed" | "approved" | "rejected";
+  /** How many times the agent has proposed a plan in this conversation. */
+  revision: number;
+  /** A second, read-only run's review of the plan; `unreviewed` when that run could not be had. */
+  review: {
+    verdict: "approve" | "revise" | "unreviewed";
+    findings: string[];
+  };
+  createdAt: number;
+  decidedAt?: number;
+  /** What the user said when asking for changes. */
+  decisionNote?: string;
+}
 /** One tool call an agent made, with what it got back (both masked and shortened). */
 export interface AgentToolRecord {
   name: string;
@@ -116,6 +155,8 @@ export interface AgentTask {
    * is held to it: stopping with open items sends the agent back to work.
    */
   todos?: AgentTodo[];
+  /** The plan the agent last proposed in this conversation, with the user's decision. */
+  plan?: AgentPlan;
   createdAt: number;
   updatedAt: number;
   error?: string;
@@ -627,6 +668,13 @@ export type HubRequest =
   | { action: "takeover"; sessionId: string }
   | { action: "arm"; sessionId: string; shell: ShellKind }
   | { action: "approve"; taskId: string; changeId: string; approved: boolean }
+  /**
+   * The user's decision on the plan a conversation's agent proposed. Approved:
+   * the agent carries it out, and the plan's listed commands run without
+   * asking again (destructive ones still ask). Not approved: with a note the
+   * agent revises the plan, without one the plan is simply dropped.
+   */
+  | { action: "plan-decide"; taskId: string; approved: boolean; note?: string }
   | {
       action: "memory-save";
       entry: Omit<MemoryEntry, "id" | "updatedAt"> & { id?: string };

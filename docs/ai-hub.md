@@ -109,6 +109,29 @@ explicitly enabled presentation on top of the same terminal authority.
   - *Passing provider errors*: 408/429/5xx/529 and network errors are tried
     again up to three times with backoff, honouring `retry-after`; a rejected
     request (4xx) is not.
+- **`PlanMode`** — plan first, then act. The agent proposes a plan with
+  `sshs3_plan_propose` when the user asks for one (`/plan` in the request) or
+  on its own for a risky change. A plan has a goal and steps, each with
+  target, exact command, risk, the check that shows it worked and, above low
+  risk, a rollback; a plan without these is refused with the reason, and a
+  destructive command cannot be called low risk.
+  - *Review*: before the user sees it, a separate read-only run on the main
+    model checks the plan against the workspace and answers `approve` or
+    `revise` with findings. An answer that cannot be read, or a review that
+    could not run, is `unreviewed`, never an approval. The planning agent is
+    told the findings; a fourth version without an approval is refused.
+  - *The gate* (`planGate`, in the run loop before the broker): while a plan
+    is proposed, while a sent-back plan is being revised, and in a request
+    that asked for a plan and has none approved, commands that change
+    something and file writes are refused; reading is allowed.
+  - *The decision* (`plan-decide`, the plan card in the conversation):
+    approving sets the agent's task list to the plan's steps and sends it to
+    carry them out; sending it back with a note has the agent revise;
+    declining without a note drops the plan.
+  - *What approval covers* (`planCoversCommand`, in `ToolBroker.authorize`):
+    the exact command of a step that has not run yet is not asked about
+    again. Anything else, a second run of the same command, and any
+    destructive command are asked about as usual.
 - **`KnowledgeBaseService`** — lexical search with `@orama/orama` (BM25, typo
   tolerance and a hand-written Swedish/English synonym table) and, when the
   provider is an OpenAI-compatible endpoint with `embeddingModel` set, ranking

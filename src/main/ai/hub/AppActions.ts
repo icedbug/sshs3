@@ -29,6 +29,7 @@ import {
   simulateDemoMcpTool,
 } from "./hubHelpers";
 import type { AppActionHost } from "./HubService";
+import { MAX_PLAN_REVISIONS, PLAN_TOOL, newPlan, parsePlan } from "./PlanMode";
 
 /**
  * The agent's sshs3 tools and MCP calls: what each `sshs3_*` tool does when a
@@ -922,6 +923,27 @@ export async function handleAppAction(
           return { ok: true, operation: op, result: res };
         }
         throw new Error(`Unsupported app settings operation: ${op}`);
+      }
+
+      case PLAN_TOOL.name: {
+        const parsed = parsePlan(p);
+        if ("error" in parsed) throw new Error(parsed.error);
+        if ((task.plan?.revision ?? 0) >= MAX_PLAN_REVISIONS && task.plan?.status !== "approved")
+          throw new Error(
+            `This is the plan's fourth version without an approval. Stop proposing: tell the user what the review keeps finding and ask how they want to proceed.`,
+          );
+        const review = await hub.reviewPlan(task, parsed);
+        task.plan = newPlan(parsed, task.plan, review);
+        hub.changed();
+        return {
+          status: "proposed: waiting for the user's approval",
+          version: task.plan.revision,
+          review,
+          next:
+            review.verdict === "revise"
+              ? "The review found problems. Fix them and propose the plan again, or, if a finding does not apply, keep the plan and tell the user the finding and why you disagree. Then stop."
+              : "Tell the user the plan in a few lines and stop. Do not change anything until they approve it.",
+        };
       }
 
       case "sshs3_investigate": {

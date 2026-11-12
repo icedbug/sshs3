@@ -195,6 +195,37 @@ describe("tool authority", () => {
     expect(writes).toHaveLength(2);
     expect(t.changes[0].status).toBe("completed");
   });
+  it("runs a command an approved plan lists without asking again, once; anything else is still asked about", async () => {
+    const { broker, t, capability } = await setup();
+    t.maxCommands = 10;
+    t.plan = {
+      id: "p",
+      goal: "say hi",
+      steps: [{ action: "Say hi", command: "echo hi", risk: "low", check: "prints hi" }],
+      status: "proposed",
+      revision: 1,
+      review: { verdict: "approve", findings: [] },
+      createdAt: 1,
+    };
+    // A plan that is only proposed covers nothing.
+    const early = broker.invoke(capability.key, { action: "command", command: "echo hi" });
+    expect(t.status).toBe("waiting");
+    broker.approve(t.id, t.changes[0].id, true);
+    await early;
+
+    t.plan.status = "approved";
+    expect(await broker.invoke(capability.key, { action: "command", command: "echo hi" })).toMatchObject({ exitCode: 0 });
+    expect(t.plan.steps[0].ranAt).toBeTypeOf("number");
+    // The step has run: the same command a second time is not covered, nor is a different one.
+    const again = broker.invoke(capability.key, { action: "command", command: "echo hi" });
+    expect(t.status).toBe("waiting");
+    broker.approve(t.id, t.changes.at(-1)!.id, true);
+    await again;
+    const other = broker.invoke(capability.key, { action: "command", command: "echo bye" });
+    expect(t.status).toBe("waiting");
+    broker.approve(t.id, t.changes.at(-1)!.id, true);
+    await other;
+  });
   it("revokes pending approvals before any further command can be written", async () => {
     const { broker, t, capability, writes } = await setup();
     const pending = broker.invoke(capability.key, {

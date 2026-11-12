@@ -1,3 +1,4 @@
+import { planCoversCommand } from "./PlanMode";
 import crypto from "node:crypto";
 import http from "node:http";
 import type {
@@ -345,6 +346,15 @@ export class ToolBroker {
         policy: ctx.policy,
       });
     }
+
+    // The user approved a plan that lists exactly this command: it is not asked
+    // about a second time. A destructive command is always asked about.
+    if (
+      requiresApproval &&
+      change.kind === "command" &&
+      planCoversCommand(task, change.command, change.riskLevel)
+    )
+      requiresApproval = false;
 
     if (requiresApproval) {
       task.status = "waiting";

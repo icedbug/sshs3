@@ -33,6 +33,7 @@ import {
 import { isWebBrowserMode } from "../../lib/webClientBridge";
 import "./aiHub.css";
 import { TaskTodos } from "./TaskTodos";
+import { PlanCard } from "./PlanCard";
 import { DEMO_MODE_SET_BY_SERVER, modes, } from "./panelShared";
 import { RichMarkdownContent } from "./RichMarkdownContent";
 import { Settings } from "./SettingsView";
@@ -1467,6 +1468,14 @@ export function AiHubPanel({
                   </div>
                 )}
                 <TaskTodos todos={task?.todos} />
+                {task && (
+                  <PlanCard
+                    taskId={task.id}
+                    plan={task.plan}
+                    busy={["queued", "running", "waiting"].includes(task.status)}
+                    act={act}
+                  />
+                )}
                 {timeline.map((item, idx) =>
                   item.message ? (
                     <article

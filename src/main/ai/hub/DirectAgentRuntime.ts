@@ -34,6 +34,8 @@ import {
   type ToolDigestEntry,
 } from "./AgentDiscipline";
 
+import { PLAN_TOOL, planGate, wantsPlanFirst } from "./PlanMode";
+
 /**
  * How a provider request that failed for a passing reason is tried again:
  * rate limits and server-side errors, not rejected requests. Mutable so tests
@@ -618,6 +620,11 @@ const AGENT_TOOLS: FunctionToolDef[] = [
       required: ["operation"],
       additionalProperties: false,
     },
+  },
+  {
+    name: PLAN_TOOL.name,
+    description: PLAN_TOOL.description,
+    parameters: PLAN_TOOL.parameters as unknown as Record<string, unknown>,
   },
   {
     name: "sshs3_investigate",
@@ -1365,6 +1372,7 @@ function buildSystemInstructions(
     mode: task.mode,
     target: task.target ?? null,
     thorough: wantsThoroughMode(lastUserText(task)),
+    planFirst: wantsPlanFirst(lastUserText(task)),
     agentSection,
   });
 }
@@ -1861,6 +1869,8 @@ export class DirectAgentRuntime implements AgentRuntime {
   private nudge(): string | undefined {
     if (!this.task || isReadOnlyRun(this.task) || isDistillRun(this.task))
       return undefined;
+    // A plan waits for the user: stopping here is what the agent should do.
+    if (this.task.plan?.status === "proposed") return undefined;
     return continuationMessage(this.discipline);
   }
 
@@ -1931,6 +1941,9 @@ export class DirectAgentRuntime implements AgentRuntime {
         ).length;
         output = JSON.stringify({ ok: true, items: parsed.todos.length, open });
       }
+    } else if (this.task && planGate(this.task, call.name, parsedArgs)) {
+      // A plan is pending: nothing that changes a system runs before the user has decided.
+      output = JSON.stringify({ error: planGate(this.task, call.name, parsedArgs) });
     } else {
       try {
         const req = mapToolCallToBrokerRequest(call.name, parsedArgs);

@@ -4,6 +4,7 @@ import path from "node:path";
 import { app, Notification, powerMonitor } from "electron";
 import type {
   AgentChange,
+  AgentPlan,
   AgentSchedule,
   AgentTask,
   HubRequest,
@@ -87,6 +88,13 @@ import { boundedContext, safeError } from "./privacy";
 import { createLogger } from "../../log";
 import { runWorkforce } from "./WorkforceRunner";
 import { LearningQueue } from "./LearningQueue";
+import {
+  approvalMessage,
+  parseReview,
+  rejectionMessage,
+  reviewerPrompt,
+  todosFromPlan,
+} from "./PlanMode";
 import { firstActivityCursor, nextActivityBatch } from "./ActivityBatcher";
 import {
   EmbeddingIndex,
@@ -887,7 +895,12 @@ export class HubService {
    */
   private async runBackground(
     input: StartAgentTask,
-    tag: { workforceRunId?: string; distillSourceId?: string; title: string },
+    tag: {
+      workforceRunId?: string;
+      distillSourceId?: string;
+      title: string;
+      mainModel?: boolean;
+    },
   ): Promise<AgentTask> {
     const task = await this.start(input, undefined, tag);
     await this.whenSettled(task);
@@ -910,6 +923,8 @@ export class HubService {
     prompt: string;
     agent?: MissionAgent;
     agentName: string;
+    /** Work that needs the main model's judgment even when a fast model is set. */
+    mainModel?: boolean;
   }): Promise<{
     taskId?: string;
     status: "completed" | "failed";
@@ -925,7 +940,11 @@ export class HubService {
         maxCommands: 1,
         maxMinutes: 10,
       },
-      { workforceRunId: input.runId, title: `${input.agentName} · read-only` },
+      {
+        workforceRunId: input.runId,
+        title: `${input.agentName} · read-only`,
+        ...(input.mainModel ? { mainModel: true } : {}),
+      },
     );
     const text =
       task.messages.filter((m) => m.role === "assistant").at(-1)?.text ?? "";
@@ -937,6 +956,44 @@ export class HubService {
           text,
           error: task.error ?? `The run ended as ${task.status}.`,
         };
+  }
+
+  /**
+   * Has a plan reviewed by a second, read-only run before the user sees it.
+   * The reviewer has none of the planning agent's conversation, only the plan
+   * and the request, and checks it against the workspace. It runs on the main
+   * model: this is judgment, not reading. A review that cannot be had is
+   * reported as `unreviewed`, never as an approval.
+   */
+  async reviewPlan(
+    task: AgentTask,
+    plan: Parameters<typeof reviewerPrompt>[0],
+  ): Promise<AgentPlan["review"]> {
+    const request =
+      task.messages.filter((m) => m.role === "user").at(-1)?.text ?? task.title;
+    try {
+      const result = await this.runReadOnlySpecialist({
+        runId: `plan-${crypto.randomUUID().slice(0, 8)}`,
+        prompt: reviewerPrompt(plan, request),
+        agentName: "Plan reviewer",
+        mainModel: true,
+      });
+      if (result.status !== "completed" || !result.text.trim())
+        return {
+          verdict: "unreviewed",
+          findings: [
+            `The review could not be done: ${result.error ?? "the reviewer gave no answer"}. This plan has not been reviewed.`,
+          ],
+        };
+      return parseReview(result.text);
+    } catch (error) {
+      return {
+        verdict: "unreviewed",
+        findings: [
+          `The review could not be done: ${safeError(error)}. This plan has not been reviewed.`,
+        ],
+      };
+    }
   }
 
   /**
@@ -1670,6 +1727,38 @@ export class HubService {
         this.appendActivityEvent(event);
         await this.host.recordWorkspaceActivity?.(event).catch(() => {});
         this.s3Workspace.schedulePush(400);
+        break;
+      }
+      case "plan-decide": {
+        const task = this.task(request.taskId);
+        const plan = task.plan;
+        if (!plan || plan.status !== "proposed")
+          throw new Error("There is no plan waiting for a decision in this conversation");
+        if (active(task))
+          throw new Error("The agent is still working; decide when it has stopped");
+        const note = request.note?.trim();
+        plan.decidedAt = Date.now();
+        if (request.approved) {
+          plan.status = "approved";
+          // The agent is held to the plan: its steps become its task list.
+          task.todos = todosFromPlan(plan);
+          this.changed();
+          return this.request({
+            action: "reply",
+            taskId: task.id,
+            text: approvalMessage(plan, note),
+          });
+        }
+        plan.status = "rejected";
+        if (note) {
+          plan.decisionNote = boundedContext(note, 2000);
+          this.changed();
+          return this.request({
+            action: "reply",
+            taskId: task.id,
+            text: rejectionMessage(note),
+          });
+        }
         break;
       }
       case "memory-proposal-accept": {
@@ -4116,6 +4205,7 @@ export class HubService {
       kbEmbedder: this.kbEmbedder.bind(this),
       beginWorkforceRun: this.beginWorkforceRun.bind(this),
       investigate: this.investigate.bind(this),
+      reviewPlan: this.reviewPlan.bind(this),
     };
   }
 

@@ -358,9 +358,10 @@ export function operatingInstructions(options: {
   mode: AgentMode;
   target: unknown;
   thorough: boolean;
+  planFirst?: boolean;
   agentSection: string[];
 }): string {
-  const { mode, target, thorough, agentSection } = options;
+  const { mode, target, thorough, planFirst, agentSection } = options;
   const canAct = mode !== "advice" && Boolean(target);
   return [
     "You are the operations assistant of an sshs3 workspace: a team's shared SSH, SFTP, S3 and Kubernetes environment. You work for the person in this conversation and on behalf of their team, on real systems.",
@@ -393,6 +394,14 @@ export function operatingInstructions(options: {
     "After a change, verify against the original symptom with `terminal_verify` (a command and the output you expect), not merely that the command exited 0. A change without a passed check is unverified, and you say so.",
     "If a step fails, read the error, and check whether the team's memory has this failure, before trying something else. Do not repeat a failing command unchanged. After two failed attempts at the same step, stop and report what you tried and what you saw.",
     "Do not widen the job: no cleanups, upgrades or restarts that were not asked for. On anything tagged or named as production, prefer the reversible step and say how to undo it.",
+    "",
+    "## Plan first, when it matters",
+    "For a change that is risky (several steps on production, data that could be lost, something hard to undo), or whenever the user asks for a plan, propose the plan with `sshs3_plan_propose` before changing anything: investigate first so it rests on what is actually there, then give each step its target, exact command, risk, check and, above low risk, its rollback. A second run reviews it. Then tell the user the plan and the review's findings in a few lines and stop: they approve it in the app. Until then commands that change something and file writes are refused. Do not plan a routine single-step change or a question.",
+    ...(planFirst
+      ? [
+          "The user asked for a plan (`/plan`) in this request: propose one and wait for their approval, whatever the size of the change.",
+        ]
+      : []),
     "",
     "## Finishing",
     "You are done when every item of your task list is completed with its evidence, cancelled with a reason, or blocked on something only the user can provide. Do not stop early, and do not say you will do something later: do it now, or say why not.",

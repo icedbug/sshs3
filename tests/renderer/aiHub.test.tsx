@@ -420,3 +420,61 @@ describe("the agent's task list", () => {
     expect(container).toBeEmptyDOMElement();
   });
 });
+
+describe("the agent's plan", () => {
+  const plan = {
+    id: "p",
+    goal: "SSE streams survive 90s",
+    steps: [
+      { action: "Raise the timeout", target: "prod-api-01", command: "sed -i s/60s/120s/ acme.conf", risk: "medium" as const, check: "nginx -t ok", rollback: "sed it back" },
+      { action: "Watch a stream", risk: "low" as const, check: "curl holds 90s" },
+    ],
+    assumptions: ["haproxy has no shorter timeout"],
+    status: "proposed" as const,
+    revision: 2,
+    review: { verdict: "revise" as const, findings: ["Step 2 does not go through haproxy"] },
+    createdAt: 1,
+  };
+
+  it("shows the steps with risk, check and undo, the review's findings, and what approving allows", async () => {
+    const { PlanCard } = await import("../../src/renderer/src/components/AiHub/PlanCard");
+    render(<PlanCard taskId="t1" plan={plan} busy={false} act={vi.fn()} />);
+    const card = screen.getByTestId("plan-card");
+    expect(card).toHaveTextContent("Plan (version 2): SSE streams survive 90s");
+    expect(screen.getByTestId("plan-step-1")).toHaveTextContent("medium risk");
+    expect(screen.getByTestId("plan-step-1")).toHaveTextContent("$ sed -i s/60s/120s/ acme.conf");
+    expect(screen.getByTestId("plan-step-1")).toHaveTextContent("Undo: sed it back");
+    expect(screen.getByTestId("plan-review")).toHaveTextContent("Review: problems found");
+    expect(screen.getByTestId("plan-review")).toHaveTextContent("Step 2 does not go through haproxy");
+    expect(card).toHaveTextContent("Not checked: haproxy has no shorter timeout");
+    // One of the two steps lists a command: that is what runs without asking again.
+    expect(card).toHaveTextContent("The 1 command(s) listed above run without asking you again");
+  });
+
+  it("sends the decision with the note, and names the second button by what it will do", async () => {
+    const { PlanCard } = await import("../../src/renderer/src/components/AiHub/PlanCard");
+    const act = vi.fn().mockResolvedValue(undefined);
+    render(<PlanCard taskId="t1" plan={plan} busy={false} act={act} />);
+    expect(screen.getByTestId("plan-reject-btn")).toHaveTextContent("Don't run it");
+    fireEvent.change(screen.getByLabelText("Note to the agent"), { target: { value: " test through haproxy " } });
+    expect(screen.getByTestId("plan-reject-btn")).toHaveTextContent("Send back with this note");
+    fireEvent.click(screen.getByTestId("plan-reject-btn"));
+    expect(act).toHaveBeenLastCalledWith({ action: "plan-decide", taskId: "t1", approved: false, note: "test through haproxy" });
+    await waitFor(() => expect(screen.getByTestId("plan-approve-btn")).not.toBeDisabled());
+    fireEvent.change(screen.getByLabelText("Note to the agent"), { target: { value: "" } });
+    fireEvent.click(screen.getByTestId("plan-approve-btn"));
+    expect(act).toHaveBeenLastCalledWith({ action: "plan-decide", taskId: "t1", approved: true });
+  });
+
+  it("cannot be decided while the agent is working, and offers no decision once it is made", async () => {
+    const { PlanCard } = await import("../../src/renderer/src/components/AiHub/PlanCard");
+    const { rerender } = render(<PlanCard taskId="t1" plan={plan} busy act={vi.fn()} />);
+    expect(screen.getByTestId("plan-approve-btn")).toBeDisabled();
+    rerender(<PlanCard taskId="t1" plan={{ ...plan, status: "approved", review: { verdict: "unreviewed", findings: [] } }} busy={false} act={vi.fn()} />);
+    expect(screen.queryByTestId("plan-approve-btn")).not.toBeInTheDocument();
+    expect(screen.getByTestId("plan-status")).toHaveTextContent("approved");
+    expect(screen.getByTestId("plan-review")).toHaveTextContent("Not reviewed");
+    const none = render(<PlanCard taskId="t2" busy={false} act={vi.fn()} />);
+    expect(none.container).toBeEmptyDOMElement();
+  });
+});
