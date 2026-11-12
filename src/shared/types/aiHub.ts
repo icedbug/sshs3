@@ -176,6 +176,8 @@ export interface AgentTask {
    * listed as a conversation.
    */
   distillSourceId?: string;
+  /** Set on a run that works a ticket from the board: that ticket's id. */
+  ticketId?: string;
   /** The model the task's latest run was started on. */
   model?: string;
   /** Set on a background run that is the second attempt, on the main model, after the fast model failed. */
@@ -504,6 +506,11 @@ export interface HubPreferences {
    * its own; each such memory can be undone. Off: a person accepts each one.
    */
   autoSaveMemories?: boolean;
+  /**
+   * Heartbeat: this app takes tickets in "todo" that have an agent and runs
+   * them, one at a time, without being asked. Off unless switched on.
+   */
+  workforceAutopilot?: boolean;
 }
 export interface MissionAgent {
   id: string;
@@ -521,10 +528,91 @@ export interface MissionAgent {
   defaultMode: AgentMode;
   modelOverride?: string;
   scheduleMinutes?: number;
+  /** false: paused. A paused agent is given no tickets by the heartbeat. */
   enabled?: boolean;
+  /** The agent this one reports to in the workforce (an agent id). */
+  reportsTo?: string;
+  /** Tokens (in + out) this agent may spend on tickets per calendar month. 0 or unset: no limit. */
+  monthlyTokenBudget?: number;
   author?: string;
   updatedAt: number;
 }
+export type WorkTicketStatus =
+  | "backlog"
+  | "todo"
+  | "in_progress"
+  | "review"
+  | "blocked"
+  | "done";
+
+/** What the workforce is working towards. Tickets hang on a goal. */
+export interface WorkGoal {
+  id: string;
+  title: string;
+  description?: string;
+  status: "active" | "done";
+  author?: string;
+  createdAt: number;
+  updatedAt: number;
+  deleted?: boolean;
+}
+
+export interface WorkTicketComment {
+  id: string;
+  at: number;
+  author: string;
+  text: string;
+}
+
+/**
+ * One piece of work on the team's board. With a team bucket the board is
+ * shared; whoever's app is running takes a ticket by claiming it.
+ */
+export interface WorkTicket {
+  id: string;
+  title: string;
+  description: string;
+  goalId?: string;
+  status: WorkTicketStatus;
+  /** The agent that should do it. */
+  assigneeAgentId?: string;
+  /** Kept with the ticket so a teammate without that agent still sees who. */
+  assigneeName?: string;
+  /** A cluster or server the work is about. */
+  target?: string;
+  /** Tickets that have to be done first. */
+  blockedBy?: string[];
+  /** The ticket this one was split off from. */
+  parentId?: string;
+  /** Who is running it: a person's app, since when, last seen. */
+  claim?: { by: string; client: string; at: number; seenAt: number };
+  /** The conversation of the latest run, on the computer that ran it. */
+  taskId?: string;
+  /** What the agent reported when it finished, or why it stopped. */
+  result?: string;
+  /** Tokens the runs of this ticket have used. */
+  tokens?: number;
+  comments?: WorkTicketComment[];
+  createdBy: string;
+  createdAt: number;
+  updatedAt: number;
+  deleted?: boolean;
+}
+
+/** Tokens an agent has spent on tickets in one calendar month (`YYYY-MM`). */
+export interface AgentUsage {
+  month: string;
+  tokens: number;
+  runs: number;
+}
+
+export interface WorkforceTemplateSummary {
+  id: string;
+  title: string;
+  description: string;
+  roles: string[];
+}
+
 export interface McpToolSummary {
   name: string;
   description: string;
@@ -621,6 +709,13 @@ export interface HubSnapshot {
   agents?: MissionAgent[];
   mcpServers?: McpServerConfig[];
   mcpCatalog?: McpCatalogPreset[];
+  workGoals?: WorkGoal[];
+  workTickets?: WorkTicket[];
+  /** Per agent id: what it has spent on tickets this month. */
+  agentUsage?: Record<string, AgentUsage>;
+  workforceTemplates?: WorkforceTemplateSummary[];
+  /** Whether the board is shared through the team bucket, and when it was last read. */
+  workBoardSync?: { shared: boolean; lastSyncAt?: number; error?: string };
   kbDocuments?: KbDocument[];
   workforceRuns?: WorkforceRun[];
   infraEdges?: InfraGraphEdge[];
@@ -737,6 +832,34 @@ export type HubRequest =
       server: Omit<McpServerConfig, "id" | "updatedAt"> & { id?: string };
     }
   | { action: "mcp-delete"; id: string }
+  | {
+      action: "goal-save";
+      goal: { id?: string; title: string; description?: string; status?: WorkGoal["status"] };
+    }
+  | { action: "goal-delete"; id: string }
+  | {
+      action: "ticket-save";
+      ticket: {
+        id?: string;
+        title: string;
+        description?: string;
+        goalId?: string;
+        status?: WorkTicketStatus;
+        assigneeAgentId?: string;
+        target?: string;
+        blockedBy?: string[];
+        parentId?: string;
+      };
+    }
+  | { action: "ticket-move"; id: string; status: WorkTicketStatus }
+  | { action: "ticket-delete"; id: string }
+  | { action: "ticket-comment"; id: string; text: string }
+  /** Claims the ticket and runs its agent on it now. */
+  | { action: "ticket-start"; id: string; sessionId?: string }
+  /** The person's verdict on a ticket in review: done, or back to the agent with a note. */
+  | { action: "ticket-review"; id: string; approve: boolean; note?: string }
+  | { action: "workforce-template-apply"; templateId: string; goalTitle?: string }
+  | { action: "agent-pause"; id: string; paused: boolean }
   | { action: "mcp-test"; id: string }
   | {
       action: "kb-save";

@@ -659,6 +659,26 @@ const AGENT_TOOLS: FunctionToolDef[] = [
     },
   },
   {
+    name: "sshs3_tickets",
+    description:
+      "The team's board: goals, tickets and who works them. `list` shows the open tickets, the goals and the agents with who reports to whom. `read` returns one ticket in full with its notes and last report. `create` adds a ticket for another agent (or unassigned): use it to hand out part of your work or to record something that needs doing, with a description that says what done looks like. `comment` adds a note to a ticket. You cannot close a ticket: a finished run goes to a person for review.",
+    parameters: {
+      type: "object",
+      properties: {
+        operation: { type: "string", enum: ["list", "read", "create", "comment"] },
+        id: { type: "string", description: "Ticket id, for read and comment." },
+        title: { type: "string", description: "For create: the outcome in a few words." },
+        description: { type: "string", description: "For create: what to do and what done looks like." },
+        assignee: { type: "string", description: "For create: the name or id of the agent that should do it. Omit to leave it in the backlog." },
+        goal: { type: "string", description: "For create: goal id. Defaults to the goal of the ticket you are working." },
+        target: { type: "string", description: "For create: the cluster or server it concerns." },
+        text: { type: "string", description: "For comment: the note." },
+      },
+      required: ["operation"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "sshs3_session_search",
     description:
       "Look up your earlier conversations with this user in this workspace. With `query`: the conversations that mention those words, newest first, each with its date, target and the matching lines. With `id`: that conversation in full (what was asked and answered, the task list, and the commands and file changes with their results). Use it when the user refers to earlier work (\"like last week\", \"what did we do about …\") or before repeating an investigation you may already have done. These are this user's own conversations; what the whole team knows is in the team memory and activity.",

@@ -22,6 +22,9 @@ import type {
   StartAgentTask,
   TerminalSession,
   WorkforceRun,
+  WorkGoal,
+  WorkTicket,
+  WorkTicketStatus,
   WorkforceStep,
   WorkspaceActivityEvent,
   WorkspaceLayoutEvent,
@@ -88,6 +91,21 @@ import { boundedContext, safeError } from "./privacy";
 import { createLogger } from "../../log";
 import { runWorkforce } from "./WorkforceRunner";
 import { LearningQueue } from "./LearningQueue";
+import { WorkSync } from "./WorkSync";
+import {
+  TICKET_STATUSES,
+  WORKFORCE_TEMPLATES,
+  addUsage,
+  withComment,
+  claimIsFresh,
+  live,
+  nextForHeartbeat,
+  templateSummaries,
+  ticketAfterRun,
+  ticketPrompt,
+  whyNotRunnable,
+  wouldCycle,
+} from "./WorkBoard";
 import {
   approvalMessage,
   parseReview,
@@ -315,6 +333,11 @@ export class HubService {
   private distilling = new Set<string>();
   private readonly embeddings: EmbeddingIndex;
   private learningQueue?: LearningQueue;
+  private workSyncStore?: WorkSync;
+  private lastWorkSync = 0;
+  private workSyncing = false;
+  private workSyncAt?: number;
+  private workSyncError?: string;
   private readingQueue = false;
   private lastQueueCheck = 0;
   private lastActivityCheck = 0;
@@ -1326,6 +1349,15 @@ export class HubService {
       agents: this.getAgentsList(),
       mcpServers: allMcpServers,
       mcpCatalog: mcpCatalog(),
+      workGoals: live(this.store.data.workGoals),
+      workTickets: live(this.store.data.workTickets),
+      agentUsage: { ...(this.store.data.agentUsage ?? {}) },
+      workforceTemplates: templateSummaries(),
+      workBoardSync: {
+        shared: this.s3Workspace.canUseBucket(),
+        lastSyncAt: this.workSyncAt,
+        error: this.workSyncError,
+      },
       kbDocuments: kbDocs,
       workforceRuns: this.getWorkforceRunsList(),
       infraEdges: allInfraEdges,
@@ -2185,6 +2217,14 @@ export class HubService {
           scheduleMinutes: a.scheduleMinutes,
           modelOverride: a.modelOverride,
           enabled: a.enabled ?? true,
+          reportsTo:
+            a.reportsTo && a.reportsTo !== id && !wouldCycle(this.getAgentsList(), id, a.reportsTo)
+              ? a.reportsTo
+              : undefined,
+          monthlyTokenBudget:
+            a.monthlyTokenBudget && a.monthlyTokenBudget > 0
+              ? integer(a.monthlyTokenBudget, 1000, 2_000_000_000)
+              : undefined,
           updatedAt: Date.now(),
           author: actor,
         };
@@ -2204,6 +2244,85 @@ export class HubService {
         if (isDemoMode()) deleteDemoAgent(request.id);
         break;
       }
+      case "agent-pause": {
+        const agent = this.getAgentsList().find((a) => a.id === request.id);
+        if (!agent) throw new Error("Agent not found");
+        const saved = { ...agent, enabled: !request.paused, updatedAt: Date.now() };
+        this.store.data.agents = [
+          ...(this.store.data.agents ?? []).filter((x) => x.id !== saved.id),
+          saved,
+        ];
+        if (isDemoMode()) saveDemoAgent(saved);
+        break;
+      }
+      case "goal-save": {
+        const g = request.goal;
+        const existing = (this.store.data.workGoals ?? []).find((x) => x.id === g.id);
+        const now = Date.now();
+        this.putGoal({
+          id: existing?.id ?? crypto.randomUUID(),
+          title: boundedContext(requiredText(g.title), 200),
+          description: g.description?.trim() ? boundedContext(g.description.trim(), 4000) : undefined,
+          status: g.status === "done" ? "done" : "active",
+          author: existing?.author ?? (await this.resolveActorName()),
+          createdAt: existing?.createdAt ?? now,
+          updatedAt: now,
+        });
+        break;
+      }
+      case "goal-delete": {
+        const goal = (this.store.data.workGoals ?? []).find((x) => x.id === request.id);
+        if (goal) this.putGoal({ ...goal, deleted: true, updatedAt: Date.now() });
+        break;
+      }
+      case "ticket-save":
+        await this.saveTicketFrom(request.ticket);
+        break;
+      case "ticket-move": {
+        const ticket = this.ticket(request.id);
+        if (!TICKET_STATUSES.includes(request.status)) throw new Error("Unknown ticket status");
+        if (request.status === "in_progress")
+          throw new Error("A ticket is in progress while an agent runs it: start it instead.");
+        if (ticket.status === "in_progress" && claimIsFresh(ticket))
+          throw new Error("An agent is running this ticket. Stop the run first.");
+        this.putTicket({ ...ticket, status: request.status, claim: undefined, updatedAt: Date.now() });
+        break;
+      }
+      case "ticket-delete": {
+        const ticket = this.ticket(request.id);
+        this.putTicket({ ...ticket, deleted: true, claim: undefined, updatedAt: Date.now() });
+        break;
+      }
+      case "ticket-comment": {
+        const ticket = this.ticket(request.id);
+        this.putTicket(
+          withComment(ticket, await this.resolveActorName(), requiredText(request.text)),
+        );
+        break;
+      }
+      case "ticket-start":
+        await this.startTicket(request.id, request.sessionId);
+        break;
+      case "ticket-review": {
+        const ticket = this.ticket(request.id);
+        if (ticket.status !== "review" && ticket.status !== "blocked")
+          throw new Error("Only a ticket in review or blocked can be decided.");
+        const who = await this.resolveActorName();
+        const note = request.note?.trim();
+        const decided = note
+          ? withComment(ticket, who, `${request.approve ? "Approved" : "Sent back"}: ${note}`)
+          : ticket;
+        this.putTicket({
+          ...decided,
+          status: request.approve ? "done" : "todo",
+          claim: undefined,
+          updatedAt: Date.now(),
+        });
+        break;
+      }
+      case "workforce-template-apply":
+        await this.applyWorkforceTemplate(request.templateId, request.goalTitle);
+        break;
       case "agent-run-mission": {
         const targetAgentId = request.agentId || request.id;
         const agent = this.getAgentsList().find((a) => a.id === targetAgentId);
@@ -2927,6 +3046,7 @@ export class HubService {
         ).catch((e) => log.warn("Memory proposal run failed", safeError(e)));
     }
     task.updatedAt = Date.now();
+    if (task.ticketId && !active(task)) this.settleTickets();
     this.changed();
   }
 
@@ -2964,6 +3084,7 @@ export class HubService {
     task.verification = "incomplete";
     this.broker.revoke(task.id);
     this.terminals.release(task.id);
+    if (task.ticketId) this.settleTickets();
     this.changed();
     await this.runtimes.get(task.id)?.stop();
     // Stopping a workforce conversation stops its specialists too.
@@ -2997,6 +3118,293 @@ export class HubService {
         .catch((e) => log.warn("Save failed", safeError(e)));
     }, 2000);
   }
+  // ---- the board ----------------------------------------------------------
+
+  /** Names this installation in ticket claims; made once and kept. */
+  private clientId(): string {
+    this.store.data.clientId ??= crypto.randomUUID();
+    return this.store.data.clientId;
+  }
+
+  /** The board in the team bucket, when one is in use. */
+  private work(): WorkSync | undefined {
+    if (!this.s3Workspace.canUseBucket()) return undefined;
+    this.workSyncStore ??= new WorkSync(this.s3Workspace.objects);
+    return this.workSyncStore;
+  }
+
+  private ticket(id: string): WorkTicket {
+    const found = live(this.store.data.workTickets).find((t) => t.id === id);
+    if (!found) throw new Error("Ticket not found");
+    return found;
+  }
+
+  /** Stores a ticket here and sends it to the team. The upload is not waited for. */
+  private putTicket(ticket: WorkTicket): void {
+    this.store.data.workTickets = [
+      ...(this.store.data.workTickets ?? []).filter((t) => t.id !== ticket.id),
+      ticket,
+    ];
+    void this.work()
+      ?.put("tickets", ticket)
+      .catch((e) => (this.workSyncError = safeError(e)));
+    this.changed();
+  }
+
+  private putGoal(goal: WorkGoal): void {
+    this.store.data.workGoals = [
+      ...(this.store.data.workGoals ?? []).filter((g) => g.id !== goal.id),
+      goal,
+    ];
+    void this.work()
+      ?.put("goals", goal)
+      .catch((e) => (this.workSyncError = safeError(e)));
+    this.changed();
+  }
+
+  /** Creates or changes a ticket from a form or from an agent's tool call. */
+  async saveTicketFrom(
+    input: {
+      id?: string;
+      title: string;
+      description?: string;
+      goalId?: string;
+      status?: WorkTicketStatus;
+      assigneeAgentId?: string;
+      target?: string;
+      blockedBy?: string[];
+      parentId?: string;
+    },
+    createdBy?: string,
+  ): Promise<WorkTicket> {
+    const existing = input.id
+      ? live(this.store.data.workTickets).find((t) => t.id === input.id)
+      : undefined;
+    const now = Date.now();
+    const agent = input.assigneeAgentId
+      ? this.getAgentsList().find((a) => a.id === input.assigneeAgentId)
+      : undefined;
+    if (input.assigneeAgentId && !agent) throw new Error("The assigned agent does not exist");
+    const goals = live(this.store.data.workGoals);
+    const status =
+      input.status && TICKET_STATUSES.includes(input.status) && input.status !== "in_progress"
+        ? input.status
+        : (existing?.status ?? (agent ? "todo" : "backlog"));
+    const id = existing?.id ?? `t-${crypto.randomUUID().slice(0, 8)}`;
+    const ticket: WorkTicket = {
+      ...existing,
+      id,
+      title: boundedContext(requiredText(input.title), 200),
+      description: boundedContext(input.description?.trim() ?? existing?.description ?? "", 8000),
+      goalId: goals.some((g) => g.id === input.goalId) ? input.goalId : undefined,
+      status,
+      assigneeAgentId: agent?.id,
+      assigneeName: agent?.name,
+      target: input.target?.trim() ? boundedContext(input.target.trim(), 200) : undefined,
+      blockedBy: (input.blockedBy ?? existing?.blockedBy ?? []).filter(
+        (b) => b !== id && live(this.store.data.workTickets).some((t) => t.id === b),
+      ),
+      parentId: input.parentId ?? existing?.parentId,
+      createdBy: existing?.createdBy ?? createdBy ?? (await this.resolveActorName()),
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    };
+    this.putTicket(ticket);
+    return ticket;
+  }
+
+  /**
+   * Checks the ticket out and wakes its agent for it. With a team bucket the
+   * claim is taken there first, so a teammate's app that reaches for the same
+   * ticket finds it taken.
+   */
+  private async startTicket(id: string, sessionId?: string): Promise<AgentTask> {
+    const ticket = this.ticket(id);
+    const agents = this.getAgentsList();
+    const client = this.clientId();
+    const reason = whyNotRunnable(ticket, {
+      tickets: live(this.store.data.workTickets),
+      agents,
+      usage: this.store.data.agentUsage,
+      client,
+    });
+    if (reason) throw new Error(reason);
+    const agent = agents.find((a) => a.id === ticket.assigneeAgentId)!;
+    const by = await this.resolveActorName();
+    const now = Date.now();
+    const sync = this.work();
+    if (sync) {
+      const held = await sync.claim(ticket.id, { by, client }, now);
+      if (held.client !== client) throw new Error(`${held.by} is already running this ticket.`);
+    }
+    let task: AgentTask;
+    try {
+      task = await this.start({
+        prompt: ticketPrompt(
+          ticket,
+          live(this.store.data.workGoals).find((g) => g.id === ticket.goalId),
+          { tickets: live(this.store.data.workTickets), agents, agent },
+        ),
+        sessionId,
+        mode: agent.defaultMode,
+        agentId: agent.id,
+        agentName: agent.name,
+      });
+    } catch (e) {
+      await sync?.release(ticket.id, client).catch(() => undefined);
+      throw e;
+    }
+    task.ticketId = ticket.id;
+    task.title = boundedContext(`Ticket: ${ticket.title}`, 100);
+    this.putTicket({
+      ...ticket,
+      status: "in_progress",
+      claim: { by, client, at: now, seenAt: now },
+      taskId: task.id,
+      result: undefined,
+      updatedAt: now,
+    });
+    return task;
+  }
+
+  /**
+   * Tickets this app is running whose run has ended: the report goes on the
+   * ticket, the tokens on the agent's budget, and the ticket to review.
+   */
+  private settleTickets(): void {
+    const client = this.clientId();
+    for (const ticket of live(this.store.data.workTickets)) {
+      if (ticket.status !== "in_progress" || ticket.claim?.client !== client) continue;
+      const task = this.store.data.tasks.find((t) => t.id === ticket.taskId);
+      if (task && active(task)) continue;
+      if (!task) {
+        // The conversation is gone (history was deleted): the ticket goes back.
+        this.putTicket({ ...ticket, status: "todo", claim: undefined, updatedAt: Date.now() });
+      } else {
+        const used = (task.usage?.inputTokens ?? 0) + (task.usage?.outputTokens ?? 0);
+        if (ticket.assigneeAgentId)
+          this.store.data.agentUsage = addUsage(
+            this.store.data.agentUsage ?? {},
+            ticket.assigneeAgentId,
+            used,
+          );
+        this.putTicket(ticketAfterRun(ticket, task));
+      }
+      void this.work()
+        ?.release(ticket.id, client)
+        .catch(() => undefined);
+    }
+  }
+
+  /**
+   * The board's share of the timer: finish what ended, keep this app's claims
+   * alive, read the team's copy, free tickets whose runner went away, and, if
+   * the heartbeat is on, take the next ticket.
+   */
+  private async workTick(now = Date.now()): Promise<void> {
+    this.settleTickets();
+    const client = this.clientId();
+    const sync = this.work();
+    if (sync && !this.workSyncing && now - this.lastWorkSync >= 40_000) {
+      this.workSyncing = true;
+      this.lastWorkSync = now;
+      try {
+        for (const t of live(this.store.data.workTickets))
+          if (t.status === "in_progress" && t.claim?.client === client) {
+            await sync.refresh(t.id, client, now);
+            t.claim = { ...t.claim, seenAt: now };
+            t.updatedAt = now;
+          }
+        const goals = await sync.reconcile("goals", this.store.data.workGoals ?? []);
+        const tickets = await sync.reconcile("tickets", this.store.data.workTickets ?? []);
+        this.store.data.workGoals = goals.items;
+        this.store.data.workTickets = tickets.items;
+        this.workSyncAt = Date.now();
+        this.workSyncError = undefined;
+        if (goals.changed || tickets.changed) this.changed();
+      } catch (e) {
+        this.workSyncError = safeError(e);
+      } finally {
+        this.workSyncing = false;
+      }
+    }
+    // A run that stopped reporting (closed laptop, crash) frees its ticket.
+    for (const t of live(this.store.data.workTickets)) {
+      if (t.status !== "in_progress" || claimIsFresh(t, now)) continue;
+      if (t.claim?.client === client && this.store.data.tasks.some((x) => x.id === t.taskId && active(x)))
+        continue;
+      this.putTicket({
+        ...withComment(t, "sshS3", `The run by ${t.claim?.by ?? "somebody"} stopped reporting; the ticket is free again.`),
+        status: "todo",
+        claim: undefined,
+      });
+    }
+    if (this.store.data.preferences.workforceAutopilot !== true) return;
+    const tickets = live(this.store.data.workTickets);
+    if (tickets.some((t) => t.status === "in_progress" && t.claim?.client === client)) return;
+    const next = nextForHeartbeat({
+      tickets,
+      agents: this.getAgentsList(),
+      usage: this.store.data.agentUsage,
+      client,
+      now,
+    });
+    if (next)
+      await this.startTicket(next.id).catch((e) =>
+        log.warn("Heartbeat could not start a ticket", safeError(e)),
+      );
+  }
+
+  /** Creates a template's team (with its reporting lines), goal and first tickets. */
+  private async applyWorkforceTemplate(templateId: string, goalTitle?: string): Promise<void> {
+    const template = WORKFORCE_TEMPLATES.find((t) => t.id === templateId);
+    if (!template) throw new Error("Unknown workforce template");
+    const now = Date.now();
+    const actor = await this.resolveActorName();
+    const ids = new Map(template.team.map((r) => [r.key, `wf-${template.id}-${r.key}-${crypto.randomUUID().slice(0, 6)}`]));
+    const agents: MissionAgent[] = template.team.map((r) => ({
+      id: ids.get(r.key)!,
+      name: r.name,
+      role: r.role,
+      icon: "",
+      mission: r.mission,
+      systemPrompt: r.systemPrompt,
+      defaultMode: r.defaultMode,
+      reportsTo: r.reportsTo ? ids.get(r.reportsTo) : undefined,
+      allowedTools: ["all"],
+      enabled: true,
+      author: actor,
+      updatedAt: now,
+    }));
+    this.store.data.agents = [...(this.store.data.agents ?? []), ...agents];
+    if (isDemoMode()) for (const a of agents) saveDemoAgent(a);
+    const goalId = crypto.randomUUID();
+    this.putGoal({
+      id: goalId,
+      title: boundedContext(goalTitle?.trim() || template.goal.title, 200),
+      description: template.goal.description,
+      status: "active",
+      author: actor,
+      createdAt: now,
+      updatedAt: now,
+    });
+    template.tickets.forEach((t, i) => {
+      const agent = agents.find((a) => a.id === ids.get(t.role));
+      this.putTicket({
+        id: `t-${crypto.randomUUID().slice(0, 8)}`,
+        title: t.title,
+        description: t.description,
+        goalId,
+        status: t.status,
+        assigneeAgentId: agent?.id,
+        assigneeName: agent?.name,
+        createdBy: actor,
+        createdAt: now + i,
+        updatedAt: now + i,
+      });
+    });
+  }
+
   private notify(title: string, body: string): void {
     // Absent where there is no desktop to notify (the web server's Electron stand-in).
     if (Notification?.isSupported?.()) {
@@ -3020,6 +3428,7 @@ export class HubService {
         await this.queueTeamActivity(now);
         await this.readLearningQueue(now);
       })().catch((e) => log.warn("Learning failed", safeError(e)));
+      void this.workTick(now).catch((e) => log.warn("Board tick failed", safeError(e)));
       let historyChanged = false;
       for (const session of this.terminals.list()) {
         const text = this.terminals.context(session.id);
@@ -4234,6 +4643,9 @@ export class HubService {
       beginWorkforceRun: this.beginWorkforceRun.bind(this),
       investigate: this.investigate.bind(this),
       reviewPlan: this.reviewPlan.bind(this),
+      saveTicketFrom: this.saveTicketFrom.bind(this),
+      commentTicket: (id: string, author: string, text: string): void =>
+        this.putTicket(withComment(this.ticket(id), author, text)),
     };
   }
 

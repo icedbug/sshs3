@@ -18,6 +18,9 @@ import type {
   SafetyPolicyConfig,
   SelfLearningEvent,
   WorkforceRun,
+  WorkGoal,
+  WorkTicket,
+  AgentUsage,
   WorkspaceActivityEvent,
   WorkspaceServerSummary,
 } from "../../../shared/types/aiHub";
@@ -109,6 +112,12 @@ export interface HubData {
   kbDocuments?: KbDocument[];
   infraEdges?: InfraGraphEdge[];
   workforceRuns?: WorkforceRun[];
+  /** The board: goals and tickets, removals included so they reach teammates. */
+  workGoals?: WorkGoal[];
+  workTickets?: WorkTicket[];
+  agentUsage?: Record<string, AgentUsage>;
+  /** Names this installation in ticket claims. */
+  clientId?: string;
   safetyPolicy?: SafetyPolicyConfig;
   selfLearningState?: PersistedSelfLearningState;
   localOverrides?: Record<string, LocalServerAuthOverride>;

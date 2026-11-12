@@ -972,6 +972,100 @@ export async function handleAppAction(
         };
       }
 
+      case "sshs3_tickets": {
+        const tickets = (hub.store.data.workTickets ?? []).filter((t) => !t.deleted);
+        const goals = (hub.store.data.workGoals ?? []).filter((g) => !g.deleted);
+        const agents = hub.getAgentsList();
+        const mine = tickets.find((t) => t.id === task.ticketId);
+        const op = str("operation") || "list";
+        const brief = (t: (typeof tickets)[number]) => ({
+          id: t.id,
+          title: t.title,
+          status: t.status,
+          assignee: t.assigneeName,
+          goal: goals.find((g) => g.id === t.goalId)?.title,
+          target: t.target,
+          waitingFor: (t.blockedBy ?? []).filter((b) =>
+            tickets.some((x) => x.id === b && x.status !== "done"),
+          ),
+        });
+        if (op === "list")
+          return {
+            workingOn: mine?.id,
+            goals: goals.map((g) => ({ id: g.id, title: g.title, status: g.status, description: g.description })),
+            tickets: tickets
+              .filter((t) => t.status !== "done")
+              .sort((a, b) => a.createdAt - b.createdAt)
+              .slice(0, 60)
+              .map(brief),
+            done: tickets.filter((t) => t.status === "done").length,
+            team: agents.map((a) => ({
+              id: a.id,
+              name: a.name,
+              role: a.role,
+              reportsTo: agents.find((b) => b.id === a.reportsTo)?.name,
+              paused: a.enabled === false,
+            })),
+          };
+        if (op === "read") {
+          const found = tickets.find((t) => t.id === str("id"));
+          if (!found) throw new Error(`No ticket with id ${str("id") ?? ""}`);
+          return {
+            ...brief(found),
+            description: found.description,
+            result: found.result,
+            notes: (found.comments ?? []).map((c) => ({
+              at: new Date(c.at).toISOString(),
+              author: c.author,
+              text: c.text,
+            })),
+          };
+        }
+        const author = task.agentName || "Assistant";
+        if (op === "comment") {
+          const id = str("id");
+          const text = str("text");
+          if (!id || !text) throw new Error("comment needs id and text");
+          if (!tickets.some((t) => t.id === id)) throw new Error(`No ticket with id ${id}`);
+          hub.commentTicket(id, author, text);
+          return { ok: true, id };
+        }
+        if (op === "create") {
+          const title = str("title");
+          if (!title) throw new Error("create needs a title");
+          // One run hands out a handful of tickets, not a flood.
+          const handedOut = tickets.filter(
+            (t) => t.createdBy === author && Date.now() - t.createdAt < 60 * 60_000,
+          ).length;
+          if (handedOut >= 10)
+            throw new Error(
+              "This agent created 10 tickets in the last hour. Finish or review those before adding more.",
+            );
+          const wanted = str("assignee")?.toLowerCase();
+          const agent = wanted
+            ? agents.find((a) => a.id.toLowerCase() === wanted || a.name.toLowerCase() === wanted) ??
+              agents.find((a) => a.name.toLowerCase().includes(wanted))
+            : undefined;
+          if (wanted && !agent)
+            throw new Error(
+              `No agent called "${str("assignee")}". The team: ${agents.map((a) => a.name).join(", ")}`,
+            );
+          const created = await hub.saveTicketFrom(
+            {
+              title,
+              description: str("description"),
+              assigneeAgentId: agent?.id,
+              goalId: str("goal") || mine?.goalId,
+              target: str("target") || mine?.target,
+              parentId: mine?.id,
+            },
+            author,
+          );
+          return { ok: true, ticket: brief(created) };
+        }
+        throw new Error(`Unknown operation ${op}`);
+      }
+
       case "sshs3_session_search": {
         // The user's own conversations: not the runs the hub started itself, and not this one.
         const sessions = hub.store.data.tasks.filter(

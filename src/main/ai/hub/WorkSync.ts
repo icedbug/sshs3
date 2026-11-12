@@ -1,0 +1,123 @@
+import type { QueueStore } from "./LearningQueue";
+import { TICKET_CLAIM_TTL_MS, mergeItems, type Mergeable } from "./WorkBoard";
+
+/**
+ * The board in the team's bucket. There is no server: every app reads and
+ * writes the same objects, one per item, so two people changing different
+ * tickets never overwrite each other.
+ *
+ *   work/<collection>/<id>.json   one goal or ticket
+ *   work/claims/<ticketId>.json   who is running the ticket, and since when
+ *
+ * An item is replaced only by a newer copy of itself (updatedAt), and a
+ * removal is a copy marked deleted, so it reaches everyone.
+ */
+
+export type WorkCollection = "goals" | "tickets";
+
+const MAX_ITEM_BYTES = 200_000;
+const safeId = (id: string): string => id.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 120);
+
+function parse<T extends Mergeable>(buffer: Buffer | undefined): T | undefined {
+  if (!buffer || buffer.length > MAX_ITEM_BYTES) return undefined;
+  try {
+    const value = JSON.parse(buffer.toString("utf8")) as T;
+    if (!value || typeof value.id !== "string" || typeof value.updatedAt !== "number") return undefined;
+    return value;
+  } catch {
+    return undefined;
+  }
+}
+
+async function inBatches<T, R>(items: T[], size: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = [];
+  for (let i = 0; i < items.length; i += size)
+    out.push(...(await Promise.all(items.slice(i, i + size).map(fn))));
+  return out;
+}
+
+export interface TicketClaim {
+  by: string;
+  client: string;
+  at: number;
+  seenAt: number;
+}
+
+export class WorkSync {
+  constructor(private readonly store: QueueStore) {}
+
+  private async readAll<T extends Mergeable>(collection: WorkCollection): Promise<T[]> {
+    const names = (await this.store.list(`work/${collection}`)).filter((n) => n.endsWith(".json"));
+    const items = await inBatches(names.slice(0, 500), 8, (name) =>
+      this.store.read(`work/${collection}/${name}`).then((b) => parse<T>(b)),
+    );
+    return items.filter((x): x is Awaited<T> => Boolean(x)) as T[];
+  }
+
+  /**
+   * Brings a local collection and the bucket's copy together: what is newer
+   * in the bucket comes back in `items`, what is newer here is uploaded.
+   */
+  async reconcile<T extends Mergeable>(
+    collection: WorkCollection,
+    local: T[],
+  ): Promise<{ items: T[]; changed: boolean }> {
+    const remote = await this.readAll<T>(collection);
+    const merged = mergeItems(local, remote);
+    await inBatches(merged.newerLocally, 6, (item) => this.put(collection, item));
+    return { items: merged.items, changed: merged.changed };
+  }
+
+  async put<T extends Mergeable>(collection: WorkCollection, item: T): Promise<void> {
+    await this.store.write(
+      `work/${collection}/${safeId(item.id)}.json`,
+      Buffer.from(JSON.stringify(item), "utf8"),
+    );
+  }
+
+  private claimPath(ticketId: string): string {
+    return `work/claims/${safeId(ticketId)}.json`;
+  }
+
+  async readClaim(ticketId: string): Promise<TicketClaim | undefined> {
+    const buffer = await this.store.read(this.claimPath(ticketId));
+    if (!buffer) return undefined;
+    try {
+      const value = JSON.parse(buffer.toString("utf8")) as TicketClaim;
+      return typeof value.client === "string" && typeof value.seenAt === "number" ? value : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Checks a ticket out. The claim is written and then read back: only the
+   * app that still finds its own claim proceeds, so two apps that reach for
+   * the same ticket at the same moment normally do not both run it.
+   * Returns the claim that holds, which is somebody else's when this failed.
+   */
+  async claim(ticketId: string, who: { by: string; client: string }, now = Date.now()): Promise<TicketClaim> {
+    const existing = await this.readClaim(ticketId);
+    if (existing && existing.client !== who.client && now - existing.seenAt < TICKET_CLAIM_TTL_MS)
+      return existing;
+    const mine: TicketClaim = { ...who, at: existing?.client === who.client ? existing.at : now, seenAt: now };
+    await this.store.write(this.claimPath(ticketId), Buffer.from(JSON.stringify(mine), "utf8"));
+    return (await this.readClaim(ticketId)) ?? mine;
+  }
+
+  /** Says the run is still alive. Without this the claim lapses and the ticket is free again. */
+  async refresh(ticketId: string, client: string, now = Date.now()): Promise<void> {
+    const existing = await this.readClaim(ticketId);
+    if (!existing || existing.client !== client) return;
+    await this.store.write(
+      this.claimPath(ticketId),
+      Buffer.from(JSON.stringify({ ...existing, seenAt: now }), "utf8"),
+    );
+  }
+
+  async release(ticketId: string, client: string): Promise<void> {
+    const existing = await this.readClaim(ticketId);
+    if (existing && existing.client !== client) return;
+    await this.store.remove(this.claimPath(ticketId));
+  }
+}
