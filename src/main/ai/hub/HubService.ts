@@ -1468,6 +1468,9 @@ export class HubService {
           if (p.autoSaveMemories !== undefined)
             this.store.data.preferences.autoSaveMemories =
               p.autoSaveMemories === true;
+          if (p.workforceAutopilot !== undefined)
+            this.store.data.preferences.workforceAutopilot =
+              p.workforceAutopilot === true;
           if (p.sharedWorkspacePath !== undefined) {
             const cleanedPath = p.sharedWorkspacePath.trim();
             if (cleanedPath) {

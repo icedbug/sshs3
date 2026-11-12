@@ -234,9 +234,55 @@ explicitly enabled presentation on top of the same terminal authority.
   `errorSignature`) through S3 and Team Vault sync (`WorkspaceMemoryEntry` in
   `src/shared/types/teamVault.ts`); credentials are never uploaded.
 
+## Workforce: goals, tickets and a team (`WorkBoard`, `WorkSync`)
+
+A team of mission agents works towards goals through a board of tickets. The
+model is the one Paperclip (MIT) made familiar; the runtime is sshS3's own,
+because there is no server to run one on.
+
+- **Goal → ticket → run.** A ticket hangs on a goal and has one agent.
+  Starting it wakes that agent with the goal, the ticket, its notes and who it
+  can hand work to (`ticketPrompt`). The run is an ordinary conversation
+  tagged with `ticketId`, so approvals, plan mode and the safety policy apply
+  as everywhere else.
+- **Check-out.** With a team bucket, starting a ticket first writes
+  `work/claims/<ticketId>.json` and reads it back; only the app that finds its
+  own claim proceeds. The claim is refreshed while the run lives and lapses
+  after 4 minutes without a sign of life, which frees the ticket with a note.
+- **Review.** A finished run puts the agent's report on the ticket and moves
+  it to Review; a person approves it or sends it back with a note. A run that
+  failed or was stopped leaves the ticket Blocked with the reason. Agents
+  cannot close tickets.
+- **Team.** An agent has `reportsTo` (a circle is refused) and an optional
+  `monthlyTokenBudget`. A paused agent, or one that has spent its budget, is
+  not started. Usage is counted per agent and calendar month from the runs'
+  reported tokens.
+- **Handing out work.** `sshs3_tickets` lets an agent list the board, read a
+  ticket, add a note and create a ticket for another agent (at most 10 an
+  hour). A created ticket hangs on the ticket being worked.
+- **Heartbeat** (`preferences.workforceAutopilot`, off by default): on each
+  timer tick the app takes the oldest runnable ticket in To do and starts it,
+  one at a time. It runs in the agent's own mode, so an agent set to run
+  commands on its own does so unattended, within the safety policy.
+- **Sharing.** `WorkSync` keeps one object per goal and per ticket under
+  `work/` in the team bucket; per item the newer copy wins and a removal is a
+  copy marked deleted. It is read every 40 seconds. Agents themselves are not
+  shared yet: a ticket carries its assignee's name, but a teammate needs the
+  same agent locally to run it.
+- **Templates** (`WORKFORCE_TEMPLATES`): "Operate a system" and "Develop a
+  product" add five agents with reporting lines, a goal and first tickets.
+- **View** (`WorkforceView`, `TeamGraph`, `workforceModel`): the board with
+  drag between columns, ticket detail with report and review, and the team as
+  a live tree on React Flow (MIT) showing what each agent is doing.
+
+Checked with stubbed model responses (`aiHubWorkBoard.test.ts`,
+`workforceView.test.tsx`) and in a browser against a stand-in
+OpenAI-compatible endpoint. Not checked: a real model, two computers sharing
+a real bucket, and a long unattended heartbeat.
+
 ## The panel (`src/renderer/src/components/AiHub/`)
 
-One chat, and six views beside it: Agents & MCP, Knowledge base, Infrastructure,
+One chat, and seven views beside it: Workforce, Agents & MCP, Knowledge base, Infrastructure,
 Changes, Memory & skills, Schedules. `AiHubPanel.tsx` holds the chat and the
 navigation; each view is its own file. Styling is in `aiHub.css`, whose last
 sections ("AI chat: visual layer" and "the other views") carry the current look.

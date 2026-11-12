@@ -40,6 +40,7 @@ import { Settings } from "./SettingsView";
 import { Memory } from "./MemoryView";
 import { Schedules } from "./SchedulesView";
 import { ChangesView } from "./ChangesView";
+import { WorkforceView } from "./WorkforceView";
 import { InfrastructureView } from "./InfrastructureView";
 import { AgentsAndMcpView } from "./AgentsAndMcpView";
 import { KnowledgeBaseView } from "./KnowledgeBaseView";
@@ -47,6 +48,7 @@ import { KnowledgeBaseView } from "./KnowledgeBaseView";
 
 type View =
   | "Work"
+  | "Workforce"
   | "Agents & MCP"
   | "Knowledge Base"
   | "Infrastructure"
@@ -843,6 +845,7 @@ export function AiHubPanel({
           mode === "hub"
             ? ([
                 "Work",
+                "Workforce",
                 "Agents & MCP",
                 "Knowledge Base",
                 "Infrastructure",
@@ -852,13 +855,16 @@ export function AiHubPanel({
               ] as View[])
             : ([
                 "Work",
+                "Workforce",
                 "Agents & MCP",
                 "Knowledge Base",
                 "Memory & skills",
               ] as View[])
         ).map((name) => {
           const badgeCount =
-            name === "Agents & MCP"
+            name === "Workforce"
+              ? (hub?.workTickets ?? []).filter((t) => t.status === "review" || t.status === "in_progress").length
+              : name === "Agents & MCP"
               ? (hub?.agents?.length ?? 0) + (hub?.mcpServers?.length ?? 0)
               : name === "Knowledge Base"
                 ? (hub?.kbDocuments?.length ?? 0)
@@ -2447,6 +2453,16 @@ export function AiHubPanel({
               </div>
             </div>
             </div>
+          )}
+          {activeView === "Workforce" && (
+            <WorkforceView
+              hub={hub}
+              act={act}
+              onOpenTask={(id) => {
+                setTaskId(id);
+                setView("Work");
+              }}
+            />
           )}
           {activeView === "Agents & MCP" && (
             <AgentsAndMcpView
