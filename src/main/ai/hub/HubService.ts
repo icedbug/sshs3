@@ -853,32 +853,7 @@ export class HubService {
       },
       {
         cancelled: () => this.disposed || (lead ? !active(lead) : false),
-        runSpecialist: async ({ runId, prompt, agent, agentName }) => {
-          const task = await this.start(
-            {
-              prompt,
-              mode: "advice",
-              agentId: agent?.id,
-              agentName,
-              maxCommands: 1,
-              maxMinutes: 10,
-            },
-            undefined,
-            { workforceRunId: runId, title: `${agentName} · workforce` },
-          );
-          await this.whenSettled(task);
-          const text =
-            task.messages.filter((m) => m.role === "assistant").at(-1)?.text ??
-            "";
-          return task.status === "completed"
-            ? { taskId: task.id, status: "completed", text }
-            : {
-                taskId: task.id,
-                status: "failed",
-                text,
-                error: task.error ?? `The run ended as ${task.status}.`,
-              };
-        },
+        runSpecialist: (input) => this.runReadOnlySpecialist(input),
         onProgress: (run) => {
           current = run;
           this.storeWorkforceRun(run);
@@ -902,6 +877,109 @@ export class HubService {
     );
     // runWorkforce reports its initial state before its first await.
     return { run: current!, done };
+  }
+
+  /**
+   * One read-only model run to its end (context, knowledge base, remote files;
+   * no terminal, no management tool), and what it answered. Used by workforce
+   * reviews and by an agent's own investigations.
+   */
+  private async runReadOnlySpecialist(input: {
+    runId: string;
+    prompt: string;
+    agent?: MissionAgent;
+    agentName: string;
+  }): Promise<{
+    taskId?: string;
+    status: "completed" | "failed";
+    text: string;
+    error?: string;
+  }> {
+    const task = await this.start(
+      {
+        prompt: input.prompt,
+        mode: "advice",
+        agentId: input.agent?.id,
+        agentName: input.agentName,
+        maxCommands: 1,
+        maxMinutes: 10,
+      },
+      undefined,
+      { workforceRunId: input.runId, title: `${input.agentName} · read-only` },
+    );
+    await this.whenSettled(task);
+    const text =
+      task.messages.filter((m) => m.role === "assistant").at(-1)?.text ?? "";
+    return task.status === "completed"
+      ? { taskId: task.id, status: "completed", text }
+      : {
+          taskId: task.id,
+          status: "failed",
+          text,
+          error: task.error ?? `The run ended as ${task.status}.`,
+        };
+  }
+
+  /**
+   * An agent hands questions to read-only investigators that look in
+   * parallel (at most four questions, three at a time) and gets their reports
+   * back together. Each investigator is a model run of its own with a fresh
+   * context, so the asking agent's context is spent on the answers, not on the
+   * reading. A question whose investigator fails comes back with the error.
+   */
+  async investigate(
+    parent: AgentTask,
+    questions: Array<{ question: string; scope?: string }>,
+  ): Promise<
+    Array<{ question: string; status: "answered" | "failed"; report: string }>
+  > {
+    const asked = questions.slice(0, MAX_INVESTIGATIONS);
+    const runId = `inv-${crypto.randomUUID().slice(0, 8)}`;
+    const results = new Array<{
+      question: string;
+      status: "answered" | "failed";
+      report: string;
+    }>(asked.length);
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      while (next < asked.length) {
+        const index = next++;
+        const { question, scope } = asked[index];
+        if (this.disposed || !active(parent)) {
+          results[index] = {
+            question,
+            status: "failed",
+            report: "Not started: the asking run was stopped.",
+          };
+          continue;
+        }
+        try {
+          const result = await this.runReadOnlySpecialist({
+            runId,
+            prompt: investigatorPrompt(question, scope, parent.title),
+            agentName: `Investigator ${index + 1}`,
+          });
+          results[index] =
+            result.status === "completed" && result.text.trim()
+              ? {
+                  question,
+                  status: "answered",
+                  report: boundedContext(result.text, 12_000),
+                }
+              : {
+                  question,
+                  status: "failed",
+                  report: result.error ?? "The investigator ended without a report.",
+                };
+        } catch (error) {
+          results[index] = { question, status: "failed", report: safeError(error) };
+        }
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(3, asked.length) }, () => worker()),
+    );
+    return results;
   }
 
   /** The scripted demo-mode workforce run. No model is called; the run says so. */
@@ -4007,6 +4085,7 @@ export class HubService {
       recordAgentChangeActivity: this.recordAgentChangeActivity.bind(this),
       kbEmbedder: this.kbEmbedder.bind(this),
       beginWorkforceRun: this.beginWorkforceRun.bind(this),
+      investigate: this.investigate.bind(this),
     };
   }
 
@@ -4065,6 +4144,24 @@ export class HubService {
   }
 }
 /** Whether `file` lies inside this process's data directory (userData: in demo mode, the demo workspace). */
+export const MAX_INVESTIGATIONS = 4;
+
+function investigatorPrompt(
+  question: string,
+  scope: string | undefined,
+  job: string,
+): string {
+  return [
+    "You are an investigator working for another agent on one question. Find the answer, read-only, and report it. You do not fix anything.",
+    `The job this is part of: ${boundedContext(job, 300)}`,
+    `Your question: ${boundedContext(question, 2000)}`,
+    ...(scope ? [`Where to look: ${boundedContext(scope, 500)}`] : []),
+    "",
+    "Use `workspace_context` (team activity, servers, team memory), `sshs3_kb_search` (runbooks) and `sshs3_storage_ops` (list and read files and logs on the servers, diff a file between two servers). You cannot run commands.",
+    "Report: first the answer in one or two sentences; then the evidence, each item with its source (server and file with the relevant lines, activity entry with who and when, runbook title); then what you could not determine from here. Do not go beyond the evidence, and do not answer a different question.",
+  ].join("\n");
+}
+
 /** The workforce conversation's message: per-specialist status, then the combined result. */
 function renderWorkforceProgress(run: WorkforceRun): string {
   const done = run.steps.filter(

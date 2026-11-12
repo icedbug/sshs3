@@ -616,6 +616,38 @@ const AGENT_TOOLS: FunctionToolDef[] = [
     },
   },
   {
+    name: "sshs3_investigate",
+    description:
+      "Hand one to four questions to read-only investigators that look in parallel, each a separate model run with a fresh context, and get their reports back together. Use it when answering needs a lot of reading (configuration and logs on several servers, the team's activity, runbooks) that would otherwise fill your own context, or when independent questions can be looked into at the same time. Investigators can read the workspace, the knowledge base and files on the servers; they cannot run commands or change anything. Give each one a single precise question and where to look. Not for something you can answer with one or two calls yourself.",
+    parameters: {
+      type: "object",
+      properties: {
+        questions: {
+          type: "array",
+          minItems: 1,
+          maxItems: 4,
+          items: {
+            type: "object",
+            properties: {
+              question: {
+                type: "string",
+                description: "One precise question with everything the investigator needs to know: it sees none of your conversation.",
+              },
+              scope: {
+                type: "string",
+                description: "Where to look: servers, clusters, file paths, time window.",
+              },
+            },
+            required: ["question"],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ["questions"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "sshs3_cluster_exec",
     description:
       "Execute a shell/CLI command in parallel across an entire cluster (e.g. 'NetApp-ONTAP-Prod-SE', 'Ceph-NVMe-Block-Pool') or a list of nodes, and return aggregated per-node output. In 'assisted' mode, prompts the user once to approve the multi-node run; in 'autonomous' mode, executes immediately.",

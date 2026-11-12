@@ -924,6 +924,32 @@ export async function handleAppAction(
         throw new Error(`Unsupported app settings operation: ${op}`);
       }
 
+      case "sshs3_investigate": {
+        const raw = Array.isArray(p.questions) ? (p.questions as unknown[]) : [];
+        const questions = raw
+          .map((item) => {
+            const q = (item ?? {}) as Record<string, unknown>;
+            return {
+              question: typeof q.question === "string" ? q.question.trim() : "",
+              scope:
+                typeof q.scope === "string" && q.scope.trim()
+                  ? q.scope.trim()
+                  : undefined,
+            };
+          })
+          .filter((q) => q.question);
+        if (questions.length === 0)
+          throw new Error("sshs3_investigate needs at least one question");
+        const reports = await hub.investigate(task, questions);
+        return {
+          asked: questions.length,
+          answered: reports.filter((r) => r.status === "answered").length,
+          // More questions than investigators: the rest were not looked at.
+          notAsked: Math.max(0, questions.length - reports.length),
+          reports,
+        };
+      }
+
       case "sshs3_cluster_exec": {
         const command = str("command");
         const description =

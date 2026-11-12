@@ -414,3 +414,115 @@ describe("HubService workforce-run", () => {
     expect(lead.messages.at(-1)!.text).toContain("The run failed");
   });
 });
+
+describe("an agent's own investigators (sshs3_investigate)", () => {
+  const toolUse = (name: string, input: unknown): Response => {
+    const sse = [
+      `data: ${JSON.stringify({ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "tu_1", name, input: {} } })}`,
+      `data: ${JSON.stringify({ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: JSON.stringify(input) } })}`,
+      'data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":3}}',
+      "",
+    ].join("\n\n");
+    return new Response(
+      new ReadableStream({
+        start(c) {
+          c.enqueue(new TextEncoder().encode(sse));
+          c.close();
+        },
+      }),
+      { status: 200 },
+    );
+  };
+  const configure = {
+    action: "configure" as const,
+    config: { enabled: true, provider: "anthropic" as const, model: "claude-test", apiKey: "sk-ant-test" }, // pragma: allowlist secret
+    preferences: { proposeMemories: false },
+  };
+
+  it("runs the questions in parallel as read-only runs with fresh contexts, and gives the asking agent their reports", async () => {
+    const hub = await makeHub();
+    await hub.request(configure);
+    const investigatorBodies: Array<Record<string, unknown>> = [];
+    let running = 0;
+    let peak = 0;
+    let mainTurn = 0;
+    let reportsSeen = "";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: unknown, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+        const messages = body.messages as Array<{ role: string; content: unknown }>;
+        const first = JSON.stringify(messages[0].content);
+        if (first.includes("You are an investigator")) {
+          investigatorBodies.push(body);
+          peak = Math.max(peak, ++running);
+          await new Promise((r) => setTimeout(r, 20));
+          running--;
+          return sseResponse(first.includes("nginx") ? "nginx: proxy_read_timeout is 60s (prod-api-01:/etc/nginx/acme.conf)" : "postgres: max_connections is 300");
+        }
+        if (mainTurn++ === 0)
+          return toolUse("sshs3_investigate", {
+            questions: [
+              { question: "What is nginx's proxy_read_timeout?", scope: "prod-api-01 /etc/nginx" },
+              { question: "What is postgres max_connections?", scope: "prod-db" },
+            ],
+          });
+        reportsSeen = JSON.stringify(messages.at(-1)!.content);
+        return sseResponse("The timeout is 60s and max_connections is 300.");
+      }),
+    );
+    await hub.request({ action: "start", task: { prompt: "Why do long requests fail on prod?", mode: "advice" } });
+    await waitFor(() => hub.store.data.tasks.some((t) => !t.workforceRunId && t.status === "completed"));
+
+    expect(investigatorBodies).toHaveLength(2);
+    expect(peak).toBe(2);
+    for (const body of investigatorBodies) {
+      // Read-only, no task list, no way to delegate further; and none of the asking conversation.
+      expect((body.tools as Array<{ name: string }>).map((t) => t.name).sort()).toEqual([
+        "sshs3_kb_search",
+        "sshs3_storage_ops",
+        "workspace_context",
+      ]);
+      const messages = body.messages as unknown[];
+      expect(messages).toHaveLength(1);
+      expect(JSON.stringify(messages[0])).toContain("Why do long requests fail on prod?"); // the job, as its title
+    }
+    expect(JSON.stringify(investigatorBodies.map((b) => b.messages))).toContain("prod-api-01 /etc/nginx");
+
+    expect(reportsSeen).toContain("proxy_read_timeout is 60s");
+    expect(reportsSeen).toContain("max_connections is 300");
+    expect(reportsSeen).toContain('\\"answered\\":2');
+    const main = hub.store.data.tasks.find((t) => !t.workforceRunId)!;
+    expect(main.messages.at(-1)!.text).toBe("The timeout is 60s and max_connections is 300.");
+    // The investigators' runs are kept, tagged, and are not conversations of the user's.
+    expect(hub.store.data.tasks.filter((t) => t.workforceRunId?.startsWith("inv-"))).toHaveLength(2);
+  });
+
+  it("returns a failed investigator's error with its question instead of an invented report, and caps the questions at four", async () => {
+    const hub = await makeHub();
+    await hub.request(configure);
+    const { retryPolicy } = await import("../../src/main/ai/hub/DirectAgentRuntime");
+    retryPolicy.baseDelayMs = 1;
+    disposals.push(() => void (retryPolicy.baseDelayMs = 1000));
+    let investigators = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: unknown, init?: RequestInit) => {
+        const first = JSON.stringify((JSON.parse(String(init?.body)) as { messages: Array<{ content: unknown }> }).messages[0].content);
+        if (first.includes("question two")) return new Response('{"error":"invalid x-api-key"}', { status: 401 });
+        investigators++;
+        return sseResponse("found it");
+      }),
+    );
+    const parent = { id: "p", title: "job", status: "running" } as never;
+    const reports = await hub.investigate(
+      parent,
+      ["question one", "question two", "question three", "question four", "question five"].map((question) => ({ question })),
+    );
+    expect(reports).toHaveLength(4);
+    expect(reports.map((r) => r.status)).toEqual(["answered", "failed", "answered", "answered"]);
+    expect(reports[1].report).toContain("401");
+    expect(reports[1].question).toBe("question two");
+    expect(investigators).toBe(3);
+  });
+});

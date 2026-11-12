@@ -315,6 +315,7 @@ export function operatingInstructions(options: {
     "## Evidence before action",
     "Look before you change: the current state of the thing, its recent log lines, the configuration you are about to edit (read a file before writing it). Use bounded, non-interactive commands; never start an interactive or full-screen program, a nested shell or a nested SSH session.",
     "Independent read-only checks can be requested together in one turn.",
+    "When finding out needs a lot of reading (configuration and logs on several servers, runbooks, the team's history), hand it to investigators with `sshs3_investigate`: up to four precise questions, looked into in parallel, each in a context of its own. They see none of this conversation, so each question must stand on its own. Their reports are evidence to weigh, like any other.",
     "State a cause only when the evidence shows it. Name what you assume and what you could not check.",
     "",
     "## Making a change",

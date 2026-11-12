@@ -80,6 +80,12 @@ explicitly enabled presentation on top of the same terminal authority.
   - *What the team knows about a failure* (`failureHints`): a failed command's
     result carries the team memories and skills that match it (exact error
     signature first, else at least three distinctive shared words).
+  - *Investigators* (`sshs3_investigate`, `HubService.investigate`): the
+    agent hands one to four precise questions to read-only runs that look in
+    parallel (three at a time), each with a fresh context and only
+    `workspace_context`, `sshs3_kb_search` and `sshs3_storage_ops`; it gets
+    their reports back together, a failed one with its error. They cannot run
+    commands (the terminals belong to the asking run) and cannot delegate.
   - *Passing provider errors*: 408/429/5xx/529 and network errors are tried
     again up to three times with backoff, honouring `retry-after`; a rejected
     request (4xx) is not.
