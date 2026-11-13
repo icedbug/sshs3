@@ -41,6 +41,7 @@ import {
 } from '../lib/spatialNavigation';
 import { hubRequest, useHub } from '../lib/aiHub';
 import { isWebBrowserMode } from '../lib/webClientBridge';
+import { MASKED } from './AiHub/dataDestination';
 
 export interface LandingViewProps {
   recentSSH: SSHConnectionConfig[];
@@ -2665,6 +2666,16 @@ export const LandingView: React.FC<LandingViewProps> = ({
                       </button>
                     </div>
                   </div>
+
+                  <p data-testid="quick-connect-ai-data" className="text-[11px] text-txt-muted">
+                    {`Where your data goes: prompts, terminal output you share and tool results go to OpenAI under your ChatGPT account with option 1, to ${
+                      quickAiProvider === 'anthropic'
+                        ? "Anthropic's API"
+                        : quickAiProvider === 'openrouter'
+                          ? 'OpenRouter (openrouter.ai)'
+                          : "OpenAI's API (api.openai.com)"
+                    } with option 2, and stay on this computer with option 3. ${MASKED}`}
+                  </p>
 
                   {quickAiNotice && (
                     <div className="text-[11px] font-medium text-emerald-300">

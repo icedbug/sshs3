@@ -13,6 +13,8 @@ import {
   diffInbox,
   guardUrl,
   renderNotification,
+  standardWebhookHeaders,
+  verifyStandardWebhook,
   type NotifyChannel,
   type NotifyItem,
 } from "../../src/main/ai/hub/Notifier";
@@ -126,6 +128,41 @@ describe("what a channel is sent", () => {
     expect(parsed.title).toBe("2 things are waiting in sshs3");
     expect(parsed.items.map((i) => i.id)).toEqual(["approval:c1", "blocked:t1"]);
     expect(parsed.items[0].command).toBe("systemctl restart pgbouncer");
+  });
+
+  it("signs a webhook the Standard Webhooks way, new id each message, and keeps the old header", () => {
+    const hookChannel = channel({ kind: "webhook", url: "https://example.com/in", secret: "k" });
+    const now = Math.floor(Date.now() / 1000);
+    const first = renderNotification(hookChannel, [approval]);
+    const second = renderNotification(hookChannel, [approval]);
+    expect(first.headers["X-Sshs3-Signature"]).toMatch(/^sha256=[0-9a-f]{64}$/);
+    expect(first.headers["webhook-id"]).toMatch(/^msg_[0-9a-f]{32}$/);
+    expect(second.headers["webhook-id"]).not.toBe(first.headers["webhook-id"]);
+    const ts = Number(first.headers["webhook-timestamp"]);
+    expect(Math.abs(ts - now)).toBeLessThanOrEqual(2);
+    const expected = crypto.createHmac("sha256", "k").update(`${first.headers["webhook-id"]}.${ts}.${first.body}`).digest("base64");
+    expect(first.headers["webhook-signature"]).toBe(`v1,${expected}`);
+    // No key, no signature headers; other kinds never get them.
+    expect(renderNotification(channel({ kind: "webhook", url: "https://example.com/in" }), [approval]).headers["webhook-signature"]).toBeUndefined();
+    expect(renderNotification(channel({ secret: "k" }), [approval]).headers["webhook-id"]).toBeUndefined();
+  });
+
+  it("checks a signed message: key, body, age and the whsec_ key form", () => {
+    const body = JSON.stringify({ a: 1 });
+    const h = standardWebhookHeaders("k", body, "msg_1", 1_700_000_000);
+    const given = { id: h["webhook-id"], timestamp: h["webhook-timestamp"], signature: h["webhook-signature"] };
+    expect(verifyStandardWebhook("k", given, body, 1_700_000_000)).toEqual({ ok: true });
+    expect(verifyStandardWebhook("k", { ...given, signature: `v1,bogus ${given.signature}` }, body, 1_700_000_000)).toEqual({ ok: true });
+    expect(verifyStandardWebhook("other", given, body, 1_700_000_000).ok).toBe(false);
+    expect(verifyStandardWebhook("k", given, `${body} `, 1_700_000_000).ok).toBe(false);
+    expect(verifyStandardWebhook("k", { ...given, id: "msg_2" }, body, 1_700_000_000).ok).toBe(false);
+    expect(verifyStandardWebhook("k", given, body, 1_700_000_000 + 301)).toEqual({ ok: false, reason: "The webhook-timestamp is more than 5 minutes off." });
+    expect(verifyStandardWebhook("k", given, body, 1_700_000_000 - 301).ok).toBe(false);
+    expect(verifyStandardWebhook("k", { id: "msg_1" }, body).ok).toBe(false);
+    // A whsec_ key signs with its decoded bytes, as the Standard Webhooks libraries do.
+    const key = Buffer.from("raw-key-bytes");
+    const ws = standardWebhookHeaders(`whsec_${key.toString("base64")}`, body, "msg_x", 1_700_000_000);
+    expect(ws["webhook-signature"]).toBe(`v1,${crypto.createHmac("sha256", key).update(`msg_x.1700000000.${body}`).digest("base64")}`);
   });
 });
 

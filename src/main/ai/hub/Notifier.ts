@@ -240,10 +240,82 @@ export function renderNotification(channel: NotifyChannel, items: NotifyItem[], 
     url: channel.url,
     headers: {
       ...json,
-      ...(channel.secret ? { "X-Sshs3-Signature": `sha256=${crypto.createHmac("sha256", channel.secret).update(body).digest("hex")}` } : {}),
+      ...(channel.secret
+        ? {
+            "X-Sshs3-Signature": `sha256=${crypto.createHmac("sha256", channel.secret).update(body).digest("hex")}`,
+            ...standardWebhookHeaders(channel.secret, body),
+          }
+        : {}),
     },
     body,
   };
+}
+
+// ---- signed webhooks (Standard Webhooks) ----------------------------------------
+//
+// A webhook with a signing key carries, besides the older X-Sshs3-Signature
+// (sha256=<hex HMAC-SHA256 of the body>), the Standard Webhooks headers
+// (https://www.standardwebhooks.com):
+//   webhook-id:        msg_<random>, new for each message, the same on a retry
+//   webhook-timestamp: unix seconds when the message was made
+//   webhook-signature: v1,<base64 HMAC-SHA256 of "<id>.<timestamp>.<body>">
+// The HMAC key is the signing key as UTF-8 bytes, or, for a key written as
+// whsec_<base64>, the decoded bytes (so the standard libraries verify it as is).
+// A receiver checks the signature, refuses a timestamp more than 5 minutes off,
+// and drops an id it has already seen: a copied request cannot be sent again.
+
+/** The bytes a signing key stands for. */
+export function webhookKey(secret: string): Buffer {
+  return secret.startsWith("whsec_") ? Buffer.from(secret.slice("whsec_".length), "base64") : Buffer.from(secret, "utf8");
+}
+
+/** The v1 signature of one message. */
+export function standardWebhookSignature(secret: string, id: string, timestamp: number, body: string): string {
+  return `v1,${crypto.createHmac("sha256", webhookKey(secret)).update(`${id}.${timestamp}.${body}`).digest("base64")}`;
+}
+
+/** The three Standard Webhooks headers for this body. */
+export function standardWebhookHeaders(
+  secret: string,
+  body: string,
+  id = `msg_${crypto.randomUUID().replace(/-/g, "")}`,
+  timestamp = Math.floor(Date.now() / 1000),
+): Record<string, string> {
+  return {
+    "webhook-id": id,
+    "webhook-timestamp": String(timestamp),
+    "webhook-signature": standardWebhookSignature(secret, id, timestamp, body),
+  };
+}
+
+/** How far a signed message's timestamp may be from now. */
+export const WEBHOOK_TOLERANCE_SECONDS = 5 * 60;
+
+/**
+ * Whether a signed message is genuine and fresh. The signature header may hold
+ * several space-separated signatures; one matching v1 is enough. Says why not
+ * when it is not.
+ */
+export function verifyStandardWebhook(
+  secret: string,
+  headers: { id?: string; timestamp?: string; signature?: string },
+  body: string,
+  nowSeconds = Math.floor(Date.now() / 1000),
+): { ok: true } | { ok: false; reason: string } {
+  const { id, timestamp, signature } = headers;
+  if (!id || !timestamp || !signature) return { ok: false, reason: "The webhook-id, webhook-timestamp and webhook-signature headers must all be present." };
+  if (!/^\d{1,12}$/.test(timestamp)) return { ok: false, reason: "The webhook-timestamp must be unix seconds." };
+  const at = Number(timestamp);
+  if (Math.abs(nowSeconds - at) > WEBHOOK_TOLERANCE_SECONDS) return { ok: false, reason: "The webhook-timestamp is more than 5 minutes off." };
+  const expected = Buffer.from(standardWebhookSignature(secret, id, at, body));
+  const match = signature
+    .split(" ")
+    .filter(Boolean)
+    .some((given) => {
+      const buf = Buffer.from(given);
+      return buf.length === expected.length && crypto.timingSafeEqual(buf, expected);
+    });
+  return match ? { ok: true } : { ok: false, reason: "The webhook-signature does not match." };
 }
 
 // ---- where a notification may be sent ----------------------------------------

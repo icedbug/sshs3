@@ -10,6 +10,7 @@ import { WebTenantManager } from './WebTenantManager';
 import { MCP_SCOPES, McpTokenStore, type McpScope } from './McpTokenStore';
 import { callBudget, handleMcpHttp } from './mcp/McpEndpoint';
 import { AuditLog } from '../ai/hub/AuditLog';
+import { verifyStandardWebhook, WEBHOOK_TOLERANCE_SECONDS } from '../ai/hub/Notifier';
 import { createLogger } from '../log';
 
 const log = createLogger('web');
@@ -57,6 +58,15 @@ async function readJsonBody(
   req: http.IncomingMessage,
   maxBytes = 256_000,
 ): Promise<Record<string, unknown>> {
+  const raw = (await readRawBody(req, maxBytes)).trim();
+  if (!raw) return {};
+  return JSON.parse(raw) as Record<string, unknown>;
+}
+
+async function readRawBody(
+  req: http.IncomingMessage,
+  maxBytes = 256_000,
+): Promise<string> {
   const chunks: Buffer[] = [];
   let total = 0;
   for await (const chunk of req) {
@@ -67,9 +77,7 @@ async function readJsonBody(
     }
     chunks.push(buf);
   }
-  const raw = Buffer.concat(chunks).toString('utf8').trim();
-  if (!raw) return {};
-  return JSON.parse(raw) as Record<string, unknown>;
+  return Buffer.concat(chunks).toString('utf8');
 }
 
 function sendJson(
@@ -323,11 +331,21 @@ export class Sshs3WebServer {
   }
 
   private hookHits = new Map<string, number[]>();
+  /** Message ids of signed alerts already taken, per hook, with when they were taken. */
+  private hookSeenIds = new Map<string, number>();
 
   /**
    * A monitoring system posting an alert. The address names the user and
    * carries the secret; a wrong address is answered exactly like a missing
    * one. At most 60 posts a minute per address and 256 kB per post.
+   *
+   * A sender may also sign the post the Standard Webhooks way, with the
+   * secret in the address as the key (UTF-8 bytes): headers webhook-id,
+   * webhook-timestamp (unix seconds) and webhook-signature
+   * (v1,<base64 HMAC-SHA256 of "<id>.<timestamp>.<body>">). When any of these
+   * headers is present, all must be, the signature must match, the timestamp
+   * must be within 5 minutes, and an id already taken is refused, so a copied
+   * request cannot be sent again. Unsigned posts are still taken.
    */
   private async handleAlertHook(
     req: http.IncomingMessage,
@@ -353,17 +371,43 @@ export class Sshs3WebServer {
     if (this.hookHits.size > 4000)
       for (const [key, times] of this.hookHits) if (!times.some((t) => now - t < 60_000)) this.hookHits.delete(key);
     const count = (key: string): void => void this.hookHits.set(key, [...recent(key), now]);
+    let raw: string;
     let body: Record<string, unknown>;
     try {
-      body = await readJsonBody(req);
+      raw = await readRawBody(req);
+      body = raw.trim() ? (JSON.parse(raw.trim()) as Record<string, unknown>) : {};
     } catch {
       sendJson(res, 400, { error: 'The body must be JSON of at most 256 kB.' });
       return;
+    }
+    const header = (name: string): string | undefined => {
+      const value = req.headers[name];
+      return Array.isArray(value) ? value[0] : value;
+    };
+    const signed = { id: header('webhook-id'), timestamp: header('webhook-timestamp'), signature: header('webhook-signature') };
+    let seenKey: string | undefined;
+    if (signed.id || signed.timestamp || signed.signature) {
+      // Checked with the secret from the address only, before any lookup: the answer says nothing about who exists.
+      const check = verifyStandardWebhook(secret, signed, raw);
+      if (!check.ok) {
+        count(caller);
+        sendJson(res, 401, { error: check.reason });
+        return;
+      }
+      for (const [key, at] of this.hookSeenIds) if (now - at > 2 * WEBHOOK_TOLERANCE_SECONDS * 1000) this.hookSeenIds.delete(key);
+      seenKey = `${userId}:${signed.id}`;
+      if (this.hookSeenIds.has(seenKey)) {
+        sendJson(res, 409, { error: 'This webhook-id was already received.' });
+        return;
+      }
+      // Held now, so the same request sent twice at once is taken once.
+      this.hookSeenIds.set(seenKey, now);
     }
     const user = userId && secret ? (await this.auth.listUsers()).find((u) => u.id === userId) : undefined;
     const tenant = user ? await this.tenants.getOrCreateTenant(user).catch(() => undefined) : undefined;
     const result = tenant ? await tenant.hub.receiveAlert(secret, body) : undefined;
     if (!result) {
+      if (seenKey) this.hookSeenIds.delete(seenKey);
       count(caller);
       sendJson(res, 404, { error: 'Not found' });
       return;

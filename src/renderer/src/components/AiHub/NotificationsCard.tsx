@@ -29,7 +29,7 @@ const KINDS: Record<NotifyChannelKind, { label: string; address: string; hint: s
   webhook: {
     label: "Webhook (JSON)",
     address: "https://example.com/hooks/sshs3",
-    hint: "Any address that takes a JSON POST. With a signing key, each body carries X-Sshs3-Signature (HMAC SHA-256).",
+    hint: "Any address that takes a JSON POST. With a signing key, each request is signed the Standard Webhooks way (webhook-id, webhook-timestamp, webhook-signature) and also carries X-Sshs3-Signature (HMAC SHA-256).",
     secret: "Signing key (optional)",
   },
 };

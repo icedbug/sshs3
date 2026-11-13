@@ -9,6 +9,7 @@ import {
 } from "@shared/types/ai";
 import { isWebBrowserMode } from "../../lib/webClientBridge";
 import { ConfirmButton } from "./ConfirmButton";
+import { dataDestination } from "./dataDestination";
 import { DEMO_MODE_SET_BY_SERVER, type Act } from "./panelShared";
 import { McpKeysPanel } from "../McpKeysPanel";
 import { NotificationsCard } from "./NotificationsCard";
@@ -202,6 +203,7 @@ export function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Elem
           </option>
         </select>
         </label>
+        <small data-testid="ai-data-destination">{dataDestination(provider, url)}</small>
         {provider === "openai-codex" && (
           <small>
             {hub.config.codexConnected

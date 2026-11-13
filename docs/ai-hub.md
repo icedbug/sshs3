@@ -633,6 +633,19 @@ placed before the early return for a pending save); three seconds later
   `X-Sshs3-Signature` (HMAC SHA-256). Each chooses its events, a lowest alert
   severity, and whether the command text may leave the installation. All text
   is masked with `boundedContext`; Slack's control characters are escaped.
+- **Signed webhooks.** A generic webhook with a signing key is also signed the
+  Standard Webhooks way (standardwebhooks.com): `webhook-id` (`msg_…`, new for
+  each message, the same on a retry), `webhook-timestamp` (unix seconds) and
+  `webhook-signature: v1,<base64 HMAC-SHA256 of "<id>.<timestamp>.<body>">`.
+  The key is the signing key as UTF-8 bytes, or the decoded bytes of a key
+  written as `whsec_<base64>`. A receiver should check the signature, refuse a
+  timestamp more than 5 minutes off, and drop an id it has already seen.
+- **Signed alerts.** A monitoring system may sign its posts to the alert hook
+  (`/api/hooks/<user>.<secret>`) the same way, with the secret in the address
+  as the key. When any `webhook-*` header is sent, all three must be present
+  and valid: a bad or stale signature gets 401, an id already received gets
+  409. Unsigned posts are still accepted. This stops replays and changed
+  bodies, not someone who already has the address.
 - **Once per event across installations.** Approvals, plans and questions
   exist only where the agent runs and are told by that installation. Tickets
   and alerts are on every installation that shares the bucket: one of them

@@ -10,6 +10,7 @@ vi.mock('electron', async () => {
 
 import { setHeadlessUserDataPath } from '../../src/main/web/electronShim';
 import { Sshs3WebServer } from '../../src/main/web/WebServer';
+import { standardWebhookHeaders } from '../../src/main/ai/hub/Notifier';
 
 describe('Sshs3WebServer Multi-User Hybrid Mode', () => {
   let tmpDir: string;
@@ -148,6 +149,22 @@ describe('Sshs3WebServer Multi-User Hybrid Mode', () => {
     expect((await post('nobody.x', alert)).status).toBe(404);
     expect((await post('garbage', alert)).status).toBe(404);
     expect((await fetch(`${baseUrl}/api/hooks/${user.id}.${secret}`, { method: 'POST', body: 'not json' })).status).toBe(400);
+
+    // A signed post: taken once, refused when sent again, too old or signed with another key.
+    const signedPost = (headers: Record<string, string>, body: string): Promise<Response> =>
+      fetch(`${baseUrl}/api/hooks/${user.id}.${secret}`, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body });
+    const signedBody = JSON.stringify({ alerts: [{ status: 'firing', fingerprint: 'f2', labels: { alertname: 'CpuHigh' }, annotations: { summary: 'CPU high' } }] });
+    const fresh = standardWebhookHeaders(secret, signedBody);
+    const taken = await signedPost(fresh, signedBody);
+    expect(taken.status).toBe(200);
+    expect(await taken.json()).toMatchObject({ ok: true, created: 1 });
+    expect((await signedPost(fresh, signedBody)).status).toBe(409);
+    const old = standardWebhookHeaders(secret, signedBody, 'msg_old', Math.floor(Date.now() / 1000) - 6 * 60);
+    expect((await signedPost(old, signedBody)).status).toBe(401);
+    expect((await signedPost(standardWebhookHeaders('not-the-secret', signedBody), signedBody)).status).toBe(401);
+    expect((await signedPost({ 'webhook-id': 'msg_only' }, signedBody)).status).toBe(401);
+    // A good signature on a wrong address is still just not found.
+    expect((await fetch(`${baseUrl}/api/hooks/${user.id}.wrong`, { method: 'POST', headers: standardWebhookHeaders('wrong', signedBody), body: signedBody })).status).toBe(404);
   });
 
   it('supports First-Run Admin setup, Invite redemption, per-user SSH keys, and Hybrid Multi-User WebSocket sharing', async () => {
