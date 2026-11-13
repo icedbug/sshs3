@@ -1897,10 +1897,11 @@ export async function handleAppAction(
               systemPrompt: str("systemPrompt") || existing?.systemPrompt || mission,
               targetCluster: str("targetCluster") || str("cluster") || existing?.targetCluster,
               defaultMode: (str("defaultMode") as MissionAgent["defaultMode"]) || existing?.defaultMode || "assisted",
+              // Narrows only: the names given, or what the agent already had.
               allowedTools: list("allowedTools") ?? existing?.allowedTools ?? ["all"],
+              modelOverride: p.modelOverride === undefined ? existing?.modelOverride : str("modelOverride") || undefined,
               kbDocIds: list("kbDocIds") ?? existing?.kbDocIds,
               mcpServerIds: list("mcpServerIds") ?? existing?.mcpServerIds,
-              scheduleMinutes: num("scheduleMinutes") ?? existing?.scheduleMinutes,
             },
           });
           return { ok: true, operation: "save_agent", name, updated: Boolean(existing) };

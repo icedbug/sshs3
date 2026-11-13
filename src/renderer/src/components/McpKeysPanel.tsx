@@ -44,10 +44,17 @@ const ago = (at?: number): string => {
 export function McpKeysPanel({
   api,
   origin,
+  endpoint,
+  title = 'Keys for your own agents (MCP)',
+  intro,
 }: {
   api: <T>(path: string, options?: RequestInit) => Promise<T>;
   /** The address agents would use, for the line a person copies. */
   origin: string;
+  /** The whole address, when it is not `<origin>/api/mcp` (the app's own listener). */
+  endpoint?: string;
+  title?: string;
+  intro?: string;
 }): JSX.Element {
   const [keys, setKeys] = useState<KeyView[]>([]);
   const [name, setName] = useState('');
@@ -107,16 +114,16 @@ export function McpKeysPanel({
     });
   };
 
-  const addCommand = made ? `claude mcp add --transport http sshs3 ${origin}/api/mcp --header "Authorization: Bearer ${made.token}"` : '';
+  const where = endpoint || `${origin}/api/mcp`;
+  const addCommand = made ? `claude mcp add --transport http sshs3 ${where} --header "Authorization: Bearer ${made.token}"` : '';
 
   return (
     <div className="space-y-3 text-xs" data-testid="mcp-keys">
       <div>
-        <h3 className="text-sm font-semibold text-white">Keys for your own agents (MCP)</h3>
+        <h3 className="text-sm font-semibold text-white">{title}</h3>
         <p className="text-slate-400 mt-0.5 leading-relaxed">
-          Give your own coding agent a key and it can ask this sshs3 about your team's servers, what changed on them, and
-          what the team has written down — as you, with what you can see. A key carries what it may do, and you can take
-          it back at any time.
+          {intro ??
+            "Give your own coding agent a key and it can ask this sshs3 about your team's servers, what changed on them, and what the team has written down — as you, with what you can see. A key carries what it may do, and you can take it back at any time."}
         </p>
       </div>
 

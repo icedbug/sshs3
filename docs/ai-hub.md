@@ -391,6 +391,33 @@ Related hardening done with this:
 - "Add to KB" in the file editor asks first, masks recognised secrets, goes
   the same way in as other material, and says when it failed.
 
+### Your own agent, and this app as an MCP server
+
+The desktop app can answer a person's own agent — Claude Code, Cursor,
+anything that speaks MCP — over the same endpoint the team server uses, so
+there is one set of rules for both. It listens on 127.0.0.1 only, it is off
+until switched on in Settings, and it answers nothing without one of that
+person's keys. A key is shown once, acts as them, and can be taken back. A
+request that carries an `Origin` header is refused before the key is read,
+which is what keeps a web page on the same machine from reaching it.
+
+A key says what it may do: read, write tickets, or ask for a command on one
+named server. A command asked for this way waits for the person in the
+inbox — every one of them, including the read-only ones an agent inside
+sshs3 would be allowed to run unasked, because nobody here is watching
+whoever asked (`AgentTask.fromOutside`). It runs in the terminal that is
+already open for that server and nowhere else.
+
+### What an agent may be held to
+
+An agent carries a list of the tools its runs may use. The list only narrows:
+it can never let a run do more than its mode and the safety policy allow, and
+four things are always there because they reach no system — looking at the
+workspace, reading the pages, its own task list and its own hypotheses. An
+agent may also be given a model of its own; it is remembered together with
+the provider it was chosen for, so a change of endpoint lets it go instead of
+sending one provider's model name to another's address.
+
 ### Taking something away
 
 An agent may not quietly remove one of the team's own things. Any operation

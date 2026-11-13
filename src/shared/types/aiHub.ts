@@ -578,6 +578,11 @@ export interface AgentSchedule {
 }
 export interface HubPreferences {
   background: boolean;
+  /**
+   * The desktop app answering this person's own agent over MCP, on
+   * 127.0.0.1. Off until they switch it on; `port` 0 means any free port.
+   */
+  localMcp?: { enabled: boolean; port?: number };
   autoStart: boolean;
   inventory: boolean;
   retentionDays: number;
@@ -704,14 +709,14 @@ export interface MissionAgent {
   systemPrompt: string;
   icon?: string;
   targetCluster?: string;
-  targetServerIds?: string[];
-  kbCollectionIds?: string[];
   kbDocIds?: string[];
   mcpServerIds?: string[];
   allowedTools?: string[];
   defaultMode: AgentMode;
+  /** A model of its own for this agent's runs, on the endpoint that is configured. */
   modelOverride?: string;
-  scheduleMinutes?: number;
+  /** The provider that model was chosen for. After a change of provider the override is let go. */
+  modelProvider?: string;
   /** false: paused. A paused agent is given no tickets by the heartbeat. */
   enabled?: boolean;
   /**
@@ -1077,6 +1082,8 @@ export interface HubReply {
   notifyTest?: { ok: boolean; status?: number; error?: string };
   kbDocument?: KbDocument;
   kbPage?: KbPage;
+  /** A key as it is shown once, when it is made, and never again. */
+  mcpKey?: { token: string; key: unknown };
   kbSearch?: { query: string; hits: KbSearchHit[]; byMeaning: boolean };
   download?: { name: string; mime: string; dataBase64: string };
   /** `updated`: sources that were already there under the same address and got the new text. */
@@ -1184,6 +1191,8 @@ export interface HubSnapshot {
     reminderMinutes: number;
   };
   /** The pages agents read. Bodies are shortened here; `kb-page-read` returns one in full. */
+  /** The local MCP listener: whether it is on, where it answers, and this person's keys. */
+  localMcp?: { enabled: boolean; address?: string; keys: unknown[]; error?: string };
   kbPages?: KbPage[];
   kbFindings?: KbFinding[];
   /** The queue of documents waiting to be read for title, summary and tags. */
@@ -1415,6 +1424,12 @@ export type HubRequest =
   | { action: "kb-finding-dismiss"; id: string }
   /** A question that found nothing is answered by this page: its words become one of the page's search phrases. */
   | { action: "kb-gap-answered"; id: string; pageId: string }
+  /** The keys this person's own agents use to reach this app. The new key comes back once, in `reply.mcpKey`. */
+  | { action: "mcp-key-list" }
+  | { action: "mcp-key-create"; name: string; scopes: string[]; serverId?: string; expiresInDays?: number }
+  | { action: "mcp-key-revoke"; id: string }
+  /** Switches the local MCP listener on or off. */
+  | { action: "mcp-local-set"; enabled: boolean; port?: number }
   | {
       action: "kb-ingest-folder";
       folderPath: string;

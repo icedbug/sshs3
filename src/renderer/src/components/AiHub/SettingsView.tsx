@@ -10,10 +10,28 @@ import {
 import { isWebBrowserMode } from "../../lib/webClientBridge";
 import { ConfirmButton } from "./ConfirmButton";
 import { DEMO_MODE_SET_BY_SERVER, type Act } from "./panelShared";
+import { McpKeysPanel } from "../McpKeysPanel";
 import { NotificationsCard } from "./NotificationsCard";
 import { SafetyPolicyCard } from "./SafetyPolicyCard";
 
 export function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Element {
+  // The keys panel is written against the team server's HTTP API; on this app the same
+  // calls are the hub's own requests.
+  const localKeysApi = async <T,>(path: string, options?: RequestInit): Promise<T> => {
+    if (options?.method === "POST") {
+      const body = JSON.parse(String(options.body)) as { name: string; scopes: string[]; serverId?: string };
+      const next = await act({ action: "mcp-key-create", name: body.name, scopes: body.scopes, serverId: body.serverId });
+      const made = next?.reply?.mcpKey;
+      if (!made) throw new Error("The key could not be made.");
+      return made as T;
+    }
+    if (options?.method === "DELETE") {
+      await act({ action: "mcp-key-revoke", id: decodeURIComponent(path.split("/").pop() ?? "") });
+      return { ok: true } as T;
+    }
+    const next = await act({ action: "mcp-key-list" });
+    return { keys: next?.localMcp?.keys ?? [] } as T;
+  };
   const [provider, setProvider] = useState(hub.config.provider);
   const [model, setModel] = useState(hub.config.model);
   const [customModelMode, setCustomModelMode] = useState(false);
@@ -364,6 +382,41 @@ export function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Elem
       <section className="ai-set">
         <h3>Notifications</h3>
         <NotificationsCard hub={hub} act={act} />
+      </section>
+
+      <section className="ai-set" data-testid="local-mcp">
+        <h3>Your own agents (MCP)</h3>
+        <label className="ai-check">
+          <input
+            type="checkbox"
+            checked={Boolean(hub.localMcp?.enabled)}
+            aria-label="Let your own agents reach this app"
+            onChange={(e) => void act({ action: "mcp-local-set", enabled: e.target.checked })}
+          />
+          <span>
+            Let your own agents reach this app
+            <small>
+              Claude Code, Cursor or anything else that speaks MCP can then ask this sshs3 about your servers, what
+              changed on them and what you have written down. It listens on this computer only (127.0.0.1), it is off
+              until you switch it on, and it answers nothing without one of your keys.
+            </small>
+          </span>
+        </label>
+        {hub.localMcp?.error && <p className="ai-error">It could not start: {hub.localMcp.error}</p>}
+        {hub.localMcp?.enabled && hub.localMcp.address && (
+          <>
+            <p className="ai-hint">
+              It answers at <code>{hub.localMcp.address}</code>.
+            </p>
+            <McpKeysPanel
+              api={localKeysApi}
+              origin=""
+              endpoint={hub.localMcp.address}
+              title="Your keys"
+              intro="A key is shown once, when you make it. It acts as you and sees what you see; take it back at any time."
+            />
+          </>
+        )}
       </section>
 
       <details className="ai-fold ai-set-fold">

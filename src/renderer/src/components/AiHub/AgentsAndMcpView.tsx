@@ -21,8 +21,40 @@ interface AgentDraft {
   defaultMode: AgentMode;
   kbDocIds: string[];
   mcpServerIds: string[];
+  allowedTools: string[];
+  modelOverride: string;
   runnerId: string;
 }
+
+/**
+ * What an agent may be held to. A list here narrows what its runs are offered;
+ * it never widens anything, and what a run may actually do is still decided by
+ * its mode and by the approvals. Reading the workspace, the knowledge base, its
+ * own task list and its own hypotheses are always there and are not listed.
+ */
+const NARROWABLE: { name: string; label: string }[] = [
+  { name: "terminal_command", label: "Run commands in the terminal" },
+  { name: "sshs3_change", label: "Make a change that carries its check and its rollback" },
+  { name: "terminal_verify", label: "Check the result of a command" },
+  { name: "sshs3_cluster_exec", label: "Run the same command across a cluster" },
+  { name: "file_read", label: "Read files on a server" },
+  { name: "file_write", label: "Write files on a server" },
+  { name: "sshs3_storage_ops", label: "List, read and compare remote files" },
+  { name: "sshs3_tickets", label: "Read and write the team's tickets" },
+  { name: "sshs3_investigate", label: "Start investigators" },
+  { name: "sshs3_plan_propose", label: "Propose a plan" },
+  { name: "sshs3_session_search", label: "Search earlier conversations" },
+  { name: "workspace_remember", label: "Write to the team's memory" },
+  { name: "sshs3_kb_manage", label: "Add or remove knowledge base sources" },
+  { name: "sshs3_manage_server", label: "Change servers and tunnels" },
+  { name: "sshs3_manage_cluster_and_folders", label: "Change clusters and folders" },
+  { name: "sshs3_manage_memory_and_activity", label: "Change memories, skills and the activity log" },
+  { name: "sshs3_manage_schedule", label: "Change schedules" },
+  { name: "sshs3_manage_s3_and_sync", label: "Change storage and sync" },
+  { name: "sshs3_manage_app_and_settings", label: "Change the app's own settings" },
+  { name: "sshs3_agent_and_mcp_manage", label: "Change agents and MCP servers" },
+  { name: "sshs3_workspace_layout", label: "Open terminals and panes" },
+];
 
 const emptyAgent: AgentDraft = {
   name: "",
@@ -33,6 +65,8 @@ const emptyAgent: AgentDraft = {
   defaultMode: "assisted",
   kbDocIds: [],
   mcpServerIds: [],
+  allowedTools: [],
+  modelOverride: "",
   runnerId: "",
 };
 
@@ -149,6 +183,9 @@ export function AgentsAndMcpView({
                 defaultMode: draft.defaultMode,
                 kbDocIds: draft.kbDocIds,
                 mcpServerIds: draft.mcpServerIds,
+                // Nothing ticked means it is held to nothing: its mode decides, as before.
+                allowedTools: draft.allowedTools.length ? draft.allowedTools : ["all"],
+                modelOverride: draft.modelOverride.trim() || undefined,
                 runnerId: draft.runnerId || undefined,
               },
             }).then((next) => {
@@ -298,6 +335,36 @@ export function AgentsAndMcpView({
               ))}
             </fieldset>
           )}
+          <fieldset className="ai-checks">
+            <legend>What it may do (none ticked: whatever its mode allows)</legend>
+            <small className="ai-hint">
+              Ticking narrows this agent and nothing else: it can never do more than its mode and the
+              safety policy allow. It may always look at the workspace, read the knowledge base pages and
+              keep its own notes.
+            </small>
+            {NARROWABLE.map((t) => (
+              <label key={t.name}>
+                <input
+                  type="checkbox"
+                  checked={draft.allowedTools.includes(t.name)}
+                  onChange={() => setDraft({ ...draft, allowedTools: toggled(draft.allowedTools, t.name) })}
+                />
+                <span>{t.label}</span>
+              </label>
+            ))}
+          </fieldset>
+          <label>
+            A model of its own (optional)
+            <input
+              placeholder="Empty: the model set in Settings"
+              value={draft.modelOverride}
+              onChange={(e) => setDraft({ ...draft, modelOverride: e.target.value })}
+            />
+            <small>
+              A model of the endpoint that is configured now. After a change of provider the agent follows
+              the configured model again instead of failing.
+            </small>
+          </label>
           <div className="ai-card-actions">
             <button type="submit" className="ai-btn-emerald">
               {draft.id ? "Save changes" : "Create agent"}
@@ -395,6 +462,8 @@ export function AgentsAndMcpView({
                     defaultMode: ag.defaultMode,
                     kbDocIds: ag.kbDocIds ?? [],
                     mcpServerIds: ag.mcpServerIds ?? [],
+                    allowedTools: (ag.allowedTools ?? []).filter((t) => t !== "all"),
+                    modelOverride: ag.modelOverride ?? "",
                     runnerId: ag.runnerId ?? "",
                   })
                 }

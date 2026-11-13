@@ -179,6 +179,8 @@ import {
   type ExtraWorkspaceContext,
   type InventoryTarget,
 } from "./ContextService";
+import { LocalMcpServer } from "./LocalMcpServer";
+import { McpTokenStore } from "../../web/McpTokenStore";
 import { boundedContext, clip, maskContext, safeError } from "./privacy";
 import { createLogger } from "../../log";
 import { runWorkforce } from "./WorkforceRunner";
@@ -821,6 +823,9 @@ export class HubService {
           this.store.data.preferences.autoStart,
         )
         ?.catch((e) => log.warn("Background setting apply failed", safeError(e)));
+      // On again if it was on when the app last closed. Off is the default and needs nothing.
+      if (this.store.data.preferences.localMcp?.enabled)
+        await this.applyLocalMcp().catch((e) => log.warn("The local MCP listener did not start", safeError(e)));
       await this.store
         .save()
         .catch((e) => log.warn("Initial store save failed", safeError(e)));
@@ -1565,6 +1570,7 @@ export class HubService {
         rules: this.store.data.alertRules ?? [],
       },
       // History keeps what a change replaced; the list does not carry those texts.
+      localMcp: this.localMcpView(),
       kbPages: kbPagesUsed.map((p) => ({
         ...p,
         body: p.body.slice(0, 500),
@@ -2447,15 +2453,18 @@ export class HubService {
           mission: boundedContext(requiredText(a.mission), 2000),
           systemPrompt: boundedContext(a.systemPrompt?.trim() || a.mission, 8000),
           targetCluster: a.targetCluster?.trim() || undefined,
-          targetServerIds: a.targetServerIds?.filter(Boolean),
           defaultMode: ["advice", "assisted", "autonomous"].includes(a.defaultMode)
             ? a.defaultMode
             : "assisted",
           allowedTools: a.allowedTools?.length ? a.allowedTools : ["all"],
           kbDocIds: a.kbDocIds?.filter(Boolean),
           mcpServerIds: a.mcpServerIds?.filter(Boolean),
-          scheduleMinutes: a.scheduleMinutes,
-          modelOverride: a.modelOverride,
+          modelOverride: a.modelOverride?.trim() || undefined,
+          // Which endpoint it was chosen for, so that a change of provider lets it go
+          // instead of sending one provider's model name to another's address.
+          modelProvider: a.modelOverride?.trim()
+            ? (a.modelProvider ?? (await this.config.getConfig().catch(() => undefined))?.provider)
+            : undefined,
           enabled: a.enabled ?? true,
           runnerId: a.runnerId?.trim() || undefined,
           reportsTo:
@@ -3267,6 +3276,31 @@ export class HubService {
         } else this.store.data.kbDismissedFindings = [...(this.store.data.kbDismissedFindings ?? []), id].slice(-300);
         break;
       }
+      case "mcp-key-list":
+        await this.mcpTokens().initialize();
+        break;
+      case "mcp-key-create": {
+        const made = await this.mcpTokens().create({
+          userId: "local",
+          name: requiredText(request.name),
+          createdBy: await this.resolveActorName(),
+          scopes: (request.scopes ?? []).filter((x): x is "read" | "tickets" | "run" => ["read", "tickets", "run"].includes(x)),
+          serverId: request.serverId,
+          expiresInDays: request.expiresInDays,
+        });
+        // The only time the key itself leaves this process.
+        reply = { mcpKey: { token: made.token, key: made.view } };
+        break;
+      }
+      case "mcp-key-revoke":
+        await this.mcpTokens().revoke("local", requiredText(request.id));
+        break;
+      case "mcp-local-set": {
+        const port = Math.max(0, Math.min(65535, request.port ?? this.store.data.preferences.localMcp?.port ?? 0));
+        this.store.data.preferences.localMcp = { enabled: request.enabled, port };
+        await this.applyLocalMcp();
+        break;
+      }
       case "kb-gap-answered": {
         const gap = (this.store.data.kbGaps ?? []).find((g) => `gap:${g.id}` === request.id || g.id === request.id);
         const page = (this.store.data.kbPages ?? []).find((p) => p.id === request.pageId);
@@ -3614,6 +3648,12 @@ export class HubService {
       provider === config.provider
     )
       model = config.fastModel;
+    // An agent may be given a model of its own. It names a model of the endpoint that is
+    // configured now; after a change of provider it follows the configured model instead
+    // of being refused for ever — the same rule a schedule's own model follows.
+    const runAgent = task.agentId ? this.getAgentsList().find((a) => a.id === task.agentId) : undefined;
+    if (runAgent?.modelOverride?.trim() && (!runAgent.modelProvider || runAgent.modelProvider === provider))
+      model = runAgent.modelOverride.trim();
     task.model = model;
     if (provider === "anthropic" && !config.apiKey)
       throw new Error("Anthropic API key missing");
@@ -3906,6 +3946,54 @@ export class HubService {
     if (used <= 0) return;
     this.store.data.agentUsage = addUsage(this.store.data.agentUsage ?? {}, task.agentId, used);
     this.lastWorkSync = 0;
+  }
+
+  private mcpTokenStore?: McpTokenStore;
+  private localMcp?: LocalMcpServer;
+  private localMcpError?: string;
+
+  /** This installation's own MCP keys, kept beside the hub's other data. */
+  private mcpTokens(): McpTokenStore {
+    this.mcpTokenStore ??= new McpTokenStore(this.directory);
+    return this.mcpTokenStore;
+  }
+
+  /**
+   * Starts or stops the listener that lets this person's own agent reach this
+   * app. It is off until they switch it on, and it listens on 127.0.0.1 only.
+   */
+  private async applyLocalMcp(): Promise<void> {
+    const want = this.store.data.preferences.localMcp;
+    this.localMcpError = undefined;
+    if (!want?.enabled) {
+      await this.localMcp?.stop();
+      return;
+    }
+    await this.mcpTokens().initialize();
+    this.localMcp ??= new LocalMcpServer({
+      tokens: this.mcpTokens(),
+      hubFor: async () => ({
+        request: (r) => this.request(r),
+        actor: await this.resolveActorName(),
+        runCommand: (input) => this.runForMcp({ ...input, by: "your agent" }),
+        commandStatus: (id) => this.mcpCommandStatus(id),
+      }),
+    });
+    try {
+      await this.localMcp.set(true, want.port ?? 0);
+    } catch (error) {
+      this.localMcpError = safeError(error);
+    }
+  }
+
+  /** What the settings screen shows about the local listener. */
+  private localMcpView(): { enabled: boolean; address?: string; keys: unknown[]; error?: string } {
+    return {
+      enabled: Boolean(this.store.data.preferences.localMcp?.enabled),
+      address: this.localMcp?.address(),
+      keys: this.mcpTokenStore?.list("local") ?? [],
+      error: this.localMcpError,
+    };
   }
 
   /** For tests: what a finished run did, put down to the pages it worked from. */
@@ -7051,6 +7139,7 @@ export class HubService {
         .filter(active)
         .map((t) => this.stop(t, "Application shutting down")),
     );
+    await this.localMcp?.stop();
     await this.s3Workspace.dispose();
     await this.broker.dispose();
     this.terminals.dispose();

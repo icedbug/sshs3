@@ -199,3 +199,20 @@ describe("what a run is offered", () => {
     expect(names.some((n) => n.startsWith("mcp__"))).toBe(false);
   });
 });
+
+describe("an agent held to a list, and given a model", () => {
+  it("is narrowed by its list and keeps what it may always do", async () => {
+    const { toolsForTask } = await import("../../src/main/ai/hub/DirectAgentRuntime");
+    const task = { id: "t", mode: "assisted", agentId: "a1", target: { sessionId: "s", generation: "g", label: "db01" }, messages: [], changes: [], sources: [], maxCommands: 5 } as never;
+    const agent = { id: "a1", name: "Watch", role: "r", mission: "m", systemPrompt: "s", defaultMode: "assisted", updatedAt: 1 };
+    const held = toolsForTask(task, { agents: [{ ...agent, allowedTools: ["terminal_command"] }] }).map((t) => t.name);
+    expect(held).toContain("terminal_command");
+    expect(held).not.toContain("file_write");
+    expect(held).not.toContain("sshs3_manage_app_and_settings");
+    // What it may always do, whatever the list says.
+    expect(held).toEqual(expect.arrayContaining(["workspace_context", "sshs3_kb_search", "todo_write", "sshs3_hypotheses"]));
+    // ["all"], or nothing at all, holds it to nothing.
+    expect(toolsForTask(task, { agents: [{ ...agent, allowedTools: ["all"] }] }).length).toBeGreaterThan(held.length);
+    expect(toolsForTask(task, { agents: [agent] }).length).toBeGreaterThan(held.length);
+  });
+});

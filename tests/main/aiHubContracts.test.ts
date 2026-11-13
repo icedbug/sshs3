@@ -258,3 +258,38 @@ describe("a tool call reaching the right place", () => {
     expect(mapToolCallToBrokerRequest("terminal_command", { command: "ls" })).toMatchObject({ action: "command", command: "ls" });
   });
 });
+
+describe("an agent's own model", () => {
+  it("is used for its runs, and is let go after a change of provider", async () => {
+    const { hub } = await makeHub();
+    await hub.request({
+      action: "configure",
+      config: { enabled: true, provider: "anthropic", model: "claude-opus-5-5", apiKey: "sk-ant-test" }, // pragma: allowlist secret
+    } as never);
+    await hub.request({
+      action: "agent-save",
+      agent: { name: "Watch", role: "r", mission: "m", systemPrompt: "s", defaultMode: "advice", modelOverride: "claude-haiku-5-5" },
+    } as never);
+    const agent = (await hub.snapshot()).agents!.find((a) => a.name === "Watch")!;
+    expect(agent.modelOverride).toBe("claude-haiku-5-5");
+
+    const models: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_u: unknown, init?: RequestInit) => {
+      models.push((JSON.parse(String(init?.body)) as { model: string }).model);
+      return say("Done.");
+    }));
+    await hub.request({ action: "start", task: { prompt: "look at it", mode: "advice", agentId: agent.id } } as never);
+    await vi.waitFor(() => expect(models.length).toBeGreaterThan(0));
+    expect(models[0]).toBe("claude-haiku-5-5");
+
+    // The endpoint changes: the agent follows the configured model rather than failing.
+    await hub.request({
+      action: "configure",
+      config: { enabled: true, provider: "openai-compatible", model: "local-model", baseUrl: "https://llm.example/v1", apiKey: "sk-x" }, // pragma: allowlist secret
+    } as never);
+    models.length = 0;
+    await hub.request({ action: "start", task: { prompt: "again", mode: "advice", agentId: agent.id } } as never);
+    await vi.waitFor(() => expect(models.length).toBeGreaterThan(0));
+    expect(models[0]).toBe("local-model");
+  });
+});

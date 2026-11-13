@@ -1012,6 +1012,17 @@ const AGENT_TOOLS: FunctionToolDef[] = [
           enum: ["advice", "assisted", "autonomous"],
           description: "Default execution mode for the Mission Agent.",
         },
+        allowedTools: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "The tool names this agent's runs may use, to NARROW it. Leave it out to keep what the agent has; ['all'] removes the restriction. It never widens what a run may do: its mode and the safety policy still decide, and it may always read the workspace and the knowledge base.",
+        },
+        modelOverride: {
+          type: "string",
+          description:
+            "A model of its own for this agent's runs, of the endpoint configured now. Leave it out to keep what the agent has; an empty string clears it.",
+        },
         transport: {
           type: "string",
           enum: ["stdio", "http"],
