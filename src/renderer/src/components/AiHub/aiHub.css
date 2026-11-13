@@ -3854,3 +3854,36 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.ai-recording-sealed {
+  color: var(--ai-ok);
+}
+.ai-recording-broken {
+  color: var(--ai-danger);
+  font-weight: 600;
+}
+.ai-exit-ok {
+  color: var(--ai-ok);
+  margin-left: auto;
+}
+.ai-exit-bad {
+  color: var(--ai-danger);
+  margin-left: auto;
+  white-space: nowrap;
+}
+.ai-audit-gaps {
+  color: var(--ai-warn);
+}
+.ai-diff {
+  white-space: pre;
+  overflow-x: auto;
+}
+.ai-recording-marks code {
+  flex: 1 1 auto;
+}
+.ai-recording-marks .ai-exit-ok,
+.ai-recording-marks .ai-exit-bad {
+  flex: none;
+}
+.ai-recording-marks {
+  grid-template-columns: minmax(0, 1fr);
+}

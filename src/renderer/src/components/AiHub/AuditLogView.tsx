@@ -18,6 +18,7 @@ const KIND_TEXT: Record<string, string> = {
   setting: "setting",
   mcp: "MCP",
   "sign-in": "sign-in",
+  recording: "recording",
 };
 
 const OUTCOME_TONE: Record<string, string> = {
@@ -40,7 +41,7 @@ export function AuditLogView({
   request: (r: HubRequest) => Promise<HubSnapshot>;
   hub: HubSnapshot;
   onOpenTask: (taskId: string) => void;
-  onWatch: (recordingId: string, title: string) => void;
+  onWatch: (recordingId: string, title: string, startAt?: string) => void;
 }): JSX.Element {
   const [entries, setEntries] = useState<AuditEntryView[]>([]);
   const [verification, setVerification] = useState<AuditVerificationView | undefined>();
@@ -88,10 +89,14 @@ export function AuditLogView({
     }
   };
 
-  const recordingOf = (taskId?: string): { id: string; title: string } | undefined => {
-    const task = taskId ? hub.tasks.find((t) => t.id === taskId) : undefined;
+  const recordingOf = (e: AuditEntryView): { id: string; title: string } | undefined => {
+    const task = e.taskId ? hub.tasks.find((t) => t.id === e.taskId) : undefined;
+    // The seal of a recording names the recording itself.
+    if (e.kind === "recording" && e.changeId) return { id: e.changeId, title: task?.title ?? e.what };
     return task?.recordingId ? { id: task.recordingId, title: task.title } : undefined;
   };
+  const when2 = (at: number): string =>
+    new Date(at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 
   const q = filter.trim().toLowerCase();
   const shown = entries.filter(
@@ -112,8 +117,30 @@ export function AuditLogView({
             <strong>The log holds.</strong> All {verification.entries} entries hash to what they say, each follows the one
             before it
             {verification.anchors && verification.anchors.checked > 0
-              ? `, and all ${verification.anchors.checked} anchors in the team bucket match it, so nothing was cut from its end.`
+              ? `, and all ${verification.anchors.checked} anchors in the team bucket match it and follow each other.`
               : ". There is no team bucket to anchor it in, so a cut from its very end would not show."}
+            {verification.anchors?.coveredSeq !== undefined && verification.anchors.lastAt !== undefined && (
+              <>
+                {" "}
+                Entries up to #{verification.anchors.coveredSeq} are anchored (last {when2(verification.anchors.lastAt)})
+                {verification.entries > verification.anchors.coveredSeq
+                  ? `; the ${verification.entries - verification.anchors.coveredSeq} after it are only chained until the next anchor.`
+                  : "."}
+              </>
+            )}
+            {(verification.anchors?.gaps?.length ?? 0) > 0 && (
+              <span className="ai-audit-gaps">
+                {" "}
+                No anchor was written between{" "}
+                {verification.anchors!.gaps!.slice(-3).map((g, i) => (
+                  <span key={g.from}>
+                    {i > 0 ? ", " : ""}
+                    {when2(g.from)} and {when2(g.to)}
+                  </span>
+                ))}
+                : this computer was off then, or anchors were removed.
+              </span>
+            )}
           </span>
         ) : (
           <span>
@@ -158,7 +185,7 @@ export function AuditLogView({
 
       <ol className="ai-audit-list">
         {shown.map((e) => {
-          const rec = recordingOf(e.taskId);
+          const rec = recordingOf(e);
           return (
             <li key={e.seq} className="ai-audit-entry">
               <details>
@@ -199,7 +226,7 @@ export function AuditLogView({
                   </small>
                   <span className="ai-audit-actions">
                     {rec && (
-                      <button type="button" onClick={() => onWatch(rec.id, rec.title)}>
+                      <button type="button" onClick={() => onWatch(rec.id, rec.title, e.kind === "recording" ? undefined : e.what)}>
                         Watch the terminal recording
                       </button>
                     )}

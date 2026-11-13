@@ -163,6 +163,7 @@ export function registerTerminalHandlers(bridge: TerminalHost): void {
   bridge.registerHandler(
     IPC_CHANNELS.TERMINAL_RESIZE,
     async (_event, sessionId: string, cols: number, rows: number) => {
+      bridge.aiHub?.terminals.resized(sessionId, cols, rows);
       bridge.sshPtyManager.resize(sessionId, cols, rows);
     }
   );

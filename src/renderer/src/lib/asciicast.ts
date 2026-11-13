@@ -2,7 +2,7 @@
 
 export interface CastEvent {
   t: number;
-  kind: "o" | "m" | "r";
+  kind: "o" | "m" | "r" | "x";
   data: string;
 }
 
@@ -31,7 +31,7 @@ export function parseCast(text: string): ParsedCast {
   for (const line of lines.slice(1)) {
     try {
       const [t, kind, data] = JSON.parse(line) as [number, string, string];
-      if (typeof t !== "number" || typeof data !== "string" || !["o", "m", "r"].includes(kind)) continue;
+      if (typeof t !== "number" || typeof data !== "string" || !["o", "m", "r", "x"].includes(kind)) continue;
       const gap = t - last;
       if (gap > IDLE_LIMIT) shifted += gap - IDLE_LIMIT;
       last = t;

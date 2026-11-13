@@ -98,6 +98,8 @@ export function ChangesView({
   const [watching, setWatching] = useState<{
     title: string;
     cast: string;
+    sealed?: boolean;
+    startAt?: string;
   } | null>(null);
   const [watchProblem, setWatchProblem] = useState("");
   const [source, setSource] = useState<Source>("all");
@@ -153,12 +155,12 @@ export function ChangesView({
   const count = (s: Source): number =>
     s === "all" ? entries.length : entries.filter((e) => e.source === s).length;
 
-  const watch = async (recordingId: string, title: string): Promise<void> => {
+  const watch = async (recordingId: string, title: string, startAt?: string): Promise<void> => {
     setWatchProblem("");
     try {
       const rec = (await request({ action: "recording-read", id: recordingId }))
         .reply?.recording;
-      if (rec) setWatching({ title, cast: rec.cast });
+      if (rec) setWatching({ title, cast: rec.cast, sealed: rec.sealed, startAt });
     } catch (error) {
       setWatchProblem(error instanceof Error ? error.message : String(error));
     }
@@ -208,6 +210,8 @@ export function ChangesView({
         <RecordingPlayer
           cast={watching.cast}
           title={watching.title}
+          sealed={watching.sealed}
+          startAt={watching.startAt}
           onClose={() => setWatching(null)}
         />
       )}
@@ -217,7 +221,7 @@ export function ChangesView({
           request={request}
           hub={hub}
           onOpenTask={onOpenTask}
-          onWatch={(id, title) => void watch(id, title)}
+          onWatch={(id, title, at) => void watch(id, title, at)}
         />
       )}
 
@@ -350,6 +354,7 @@ export function ChangesView({
                             void watch(
                               recordingOf(e.taskId)!,
                               e.taskTitle ?? e.summary,
+                              c?.command,
                             )
                           }
                         >

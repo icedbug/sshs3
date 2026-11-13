@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -35,18 +35,56 @@ describe("what an agent saw in a terminal", () => {
     expect(info).toMatchObject({ markers: 1, endedAt: 1_002_000 });
   });
 
-  it("masks a secret even when it arrives in two pieces, and keeps the colours", async () => {
+  it("masks a secret even when it arrives in two pieces, and keeps the colours where there is no secret", async () => {
     const rec = await recorder();
     await rec.start({ sessionId: "s1", taskId: "t1", label: "db01" }, 0);
     // A key printed by a program, split across two chunks of output, inside colour codes.
     rec.output("s1", "\x1b[32mexport AWS_KEY=AKIAIOSF", 10);
     rec.output("s1", "ODNN7EXAMPLE\x1b[0m\r\n", 20);
+    // A line with nothing secret in it keeps its colours, so it replays as it looked.
+    rec.output("s1", "\x1b[1;32mactive (running)\x1b[0m\r\n", 25);
     const info = await rec.stop("s1", 30);
     const text = (await rec.read(info!.id))!;
     expect(text).not.toContain("AKIAIOSFODNN7EXAMPLE");
     expect(text).toContain("[redacted]");
-    // The colour codes are still there, so it replays as it looked.
-    expect(text).toContain("\\u001b[32m");
+    expect(text).toContain("\\u001b[1;32mactive");
+  });
+
+  it("masks a secret that colour codes cut apart, as jq prints it", async () => {
+    const rec = await recorder();
+    await rec.start({ sessionId: "s1", taskId: "t1", label: "db01" }, 0);
+    rec.output("s1", '  \x1b[1;34m"api_token"\x1b[0m\x1b[1;39m: \x1b[0;32m"s3cr3tvalue123"\x1b[0m\r\n', 10);
+    const info = await rec.stop("s1", 20);
+    const text = (await rec.read(info!.id))!;
+    expect(text).not.toContain("s3cr3tvalue123");
+  });
+
+  it("writes a prompt that has no newline after a short pause, not with the next line", async () => {
+    vi.useFakeTimers();
+    const rec = await recorder();
+    await rec.start({ sessionId: "s1", taskId: "t1", label: "db01" }, 0);
+    rec.output("s1", "Are you sure? [y/N] ", 1000);
+    await vi.advanceTimersByTimeAsync(400);
+    const info = await rec.stop("s1", 9000);
+    vi.useRealTimers();
+    const lines = (await rec.read(info!.id))!.trim().split("\n").slice(1).map((l) => JSON.parse(l) as [number, string, string]);
+    expect(lines[0][2]).toBe("Are you sure? [y/N] ");
+    expect(lines[0][0]).toBeLessThan(2);
+  });
+
+  it("keeps the first output of a run, written while the file was still being made, and how each command ended", async () => {
+    const rec = await recorder();
+    const started = rec.start({ sessionId: "s1", taskId: "t1", label: "db01", cols: 200, rows: 50 }, 0);
+    rec.marker("s1", "uptime", 1);
+    rec.output("s1", "up 3 days\r\n", 2);
+    rec.exit("s1", 0, 3);
+    await started;
+    const info = await rec.stop("s1", 4);
+    const text = (await rec.read(info!.id))!;
+    expect(JSON.parse(text.split("\n")[0])).toMatchObject({ width: 200, height: 50 });
+    expect(text).toContain('"m","uptime"');
+    expect(text).toContain("up 3 days");
+    expect(text).toContain('"x","0"');
   });
 
   it("does not record a terminal nobody asked to record, and gives each run its own recording", async () => {

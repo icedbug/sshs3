@@ -30,7 +30,8 @@ export type AuditKind =
   | "approval" // a person said yes or no
   | "setting" // sshs3's own rules were changed
   | "mcp" // somebody's own agent asked for something over MCP
-  | "sign-in"; // a person signed in or out
+  | "sign-in" // a person signed in or out
+  | "recording"; // a terminal recording was finished: its hash, so it can be shown not to have been changed
 
 export interface AuditInput {
   kind: AuditKind;
@@ -65,15 +66,29 @@ export interface AuditAnchor {
   hash: string;
   at: number;
   client: string;
+  /** The anchor's own number: one more for every anchor, also when the log did not move. */
+  n?: number;
+  /** sha256 of the anchor before it, as written: the anchors are a chain of their own. */
+  prev?: string;
 }
+
+/** Two anchors further apart than this mean the installation was off, or anchors are missing. */
+const ANCHOR_GAP_MS = 45 * 60_000;
+/** How many of the newest anchors a verification reads. */
+const ANCHORS_READ = 2000;
 
 export interface AuditVerification {
   ok: boolean;
   entries: number;
   /** The first place the chain does not hold, said so a person understands it. */
   problem?: { seq: number; text: string };
-  /** Anchors that were checked against the chain, and how many of them held. */
-  anchors?: { checked: number; held: number };
+  /**
+   * Anchors that were checked against the chain, and how many of them held.
+   * `coveredSeq`/`lastAt`: the newest entry an anchor vouches for, and when;
+   * entries after it are only chained. `gaps`: stretches with no anchor, when
+   * the installation was off or anchors were removed.
+   */
+  anchors?: { checked: number; held: number; coveredSeq?: number; lastAt?: number; gaps?: { from: number; to: number }[] };
   lastAt?: number;
 }
 
@@ -117,7 +132,9 @@ export class AuditLog {
   private head: { seq: number; hash: string } = { seq: 0, hash: "" };
   private loaded = false;
   private writes: Promise<unknown> = Promise.resolve();
-  private lastAnchoredSeq = 0;
+  /** The newest anchor this installation wrote, read back from the bucket once. */
+  private lastAnchor?: { n: number; bytes: string };
+  private anchorRead = false;
 
   constructor(
     private readonly dir: string,
@@ -218,33 +235,52 @@ export class AuditLog {
     await this.writes;
     await this.load();
     const bucket = this.bucket?.();
-    if (!bucket || this.head.seq === 0 || this.head.seq === this.lastAnchoredSeq) return undefined;
-    const anchor: AuditAnchor = { seq: this.head.seq, hash: this.head.hash, at: now, client: this.client };
-    // The seq is padded so that the objects list in the order they were written.
-    await bucket.write(
-      `audit/${this.client}/anchors/${String(anchor.seq).padStart(12, "0")}.json`,
-      Buffer.from(JSON.stringify(anchor), "utf8"),
-    );
-    this.lastAnchoredSeq = anchor.seq;
+    if (!bucket || this.head.seq === 0) return undefined;
+    // Where the anchors stand, read back from the bucket, so a restart continues the chain.
+    if (!this.anchorRead) {
+      const newest = (await this.anchorFiles()).at(-1);
+      if (newest) this.lastAnchor = { n: newest.anchor.n ?? 0, bytes: newest.bytes };
+      this.anchorRead = true;
+    }
+    // Written also when nothing happened: a gap in the anchors then means the installation was off
+    // or anchors were removed, never just "nothing to say".
+    const n = (this.lastAnchor?.n ?? 0) + 1;
+    const anchor: AuditAnchor = {
+      seq: this.head.seq,
+      hash: this.head.hash,
+      at: now,
+      client: this.client,
+      n,
+      prev: this.lastAnchor ? crypto.createHash("sha256").update(this.lastAnchor.bytes).digest("hex") : "",
+    };
+    const bytes = JSON.stringify(anchor);
+    // Named by the anchor's number, padded, so they list in the order they were written.
+    await bucket.write(`audit/${this.client}/anchors/n${String(n).padStart(12, "0")}.json`, Buffer.from(bytes, "utf8"));
+    this.lastAnchor = { n, bytes };
     return anchor;
   }
 
-  /** The anchors this installation left in the bucket. */
-  async anchors(): Promise<AuditAnchor[]> {
+  /** The anchors in the bucket as written, oldest first: numbered ones by number, older ones before them. */
+  private async anchorFiles(): Promise<{ anchor: AuditAnchor; bytes: string }[]> {
     const bucket = this.bucket?.();
     if (!bucket) return [];
     const dir = `audit/${this.client}/anchors`;
     const names = (await bucket.list(dir).catch(() => [] as string[])).filter((n) => n.endsWith(".json")).sort();
-    const out: AuditAnchor[] = [];
-    for (const name of names.slice(-500)) {
+    const out: { anchor: AuditAnchor; bytes: string }[] = [];
+    for (const name of names.slice(-ANCHORS_READ)) {
       try {
         const raw = await bucket.read(`${dir}/${name}`);
-        if (raw) out.push(JSON.parse(raw.toString("utf8")) as AuditAnchor);
+        if (raw) out.push({ anchor: JSON.parse(raw.toString("utf8")) as AuditAnchor, bytes: raw.toString("utf8") });
       } catch {
         // An anchor that cannot be read proves nothing either way.
       }
     }
-    return out;
+    return out.sort((a, b) => (a.anchor.n ?? 0) - (b.anchor.n ?? 0) || a.anchor.seq - b.anchor.seq);
+  }
+
+  /** The anchors this installation left in the bucket. */
+  async anchors(): Promise<AuditAnchor[]> {
+    return (await this.anchorFiles()).map((f) => f.anchor);
   }
 
   /**
@@ -285,8 +321,28 @@ export class AuditLog {
       expected++;
       lastAt = item.at;
     }
-    const anchors = await this.anchors();
+    const files = await this.anchorFiles();
+    const anchors = files.map((f) => f.anchor);
     let held = 0;
+    // The anchors' own chain: each numbered anchor carries the hash of the one before it.
+    for (let i = 1; i < files.length; i++) {
+      const { anchor } = files[i];
+      const before = files[i - 1];
+      if (anchor.n === undefined || before.anchor.n === undefined) continue;
+      if (anchor.n !== before.anchor.n + 1 || anchor.prev !== crypto.createHash("sha256").update(before.bytes).digest("hex"))
+        return {
+          ok: false,
+          entries: bySeq.size,
+          anchors: { checked: anchors.length, held },
+          problem: {
+            seq: anchor.seq,
+            text: `Anchor ${anchor.n} in the team bucket does not follow anchor ${before.anchor.n}: anchors were removed or replaced there.`,
+          },
+        };
+    }
+    const gaps: { from: number; to: number }[] = [];
+    for (let i = 1; i < anchors.length; i++)
+      if (anchors[i].n !== undefined && anchors[i].at - anchors[i - 1].at > ANCHOR_GAP_MS) gaps.push({ from: anchors[i - 1].at, to: anchors[i].at });
     for (const anchor of anchors) {
       const at = bySeq.get(anchor.seq);
       if (at === undefined)
@@ -308,7 +364,13 @@ export class AuditLog {
         };
       held++;
     }
-    return { ok: true, entries: bySeq.size, anchors: { checked: anchors.length, held }, lastAt };
+    const newest = anchors.at(-1);
+    return {
+      ok: true,
+      entries: bySeq.size,
+      anchors: { checked: anchors.length, held, coveredSeq: newest?.seq, lastAt: newest?.at, gaps: gaps.slice(-20) },
+      lastAt,
+    };
   }
 
   /** The whole log as it is on disk, with what its verification found, for handing to somebody. */

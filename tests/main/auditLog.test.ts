@@ -89,11 +89,11 @@ describe("what was done here, kept so it can be trusted", () => {
     const log = await makeLog(bucket);
     for (const c of ["a", "b", "c"]) await log.append(command(c));
     const anchor = await log.anchor();
-    expect(anchor).toMatchObject({ seq: 3, client: "client-1" });
-    expect([...bucket.files.keys()]).toEqual(["audit/client-1/anchors/000000000003.json"]);
-    // Nothing new since: no second anchor.
-    expect(await log.anchor()).toBeUndefined();
-    expect(await log.verify()).toMatchObject({ ok: true, anchors: { checked: 1, held: 1 } });
+    expect(anchor).toMatchObject({ seq: 3, client: "client-1", n: 1, prev: "" });
+    expect([...bucket.files.keys()]).toEqual(["audit/client-1/anchors/n000000000001.json"]);
+    // Nothing new since: an anchor all the same, as a heartbeat, chained to the one before.
+    expect(await log.anchor()).toMatchObject({ seq: 3, n: 2, prev: expect.stringMatching(/^[0-9a-f]{64}$/) });
+    expect(await log.verify()).toMatchObject({ ok: true, anchors: { checked: 2, held: 2, coveredSeq: 3 } });
 
     // The last entry is cut off. On its own the chain would still verify.
     const lines = (await fs.readFile(log.file, "utf8")).trim().split("\n");
@@ -102,6 +102,27 @@ describe("what was done here, kept so it can be trusted", () => {
       ok: false,
       problem: { seq: 3, text: expect.stringContaining("removed from its end") },
     });
+  });
+
+  it("notices anchors removed from the team bucket, by the anchors' own chain", async () => {
+    const bucket = memoryBucket();
+    const log = await makeLog(bucket);
+    await log.append(command("a"));
+    await log.anchor(1000);
+    await log.anchor(2000);
+    await log.anchor(3000);
+    bucket.files.delete("audit/client-1/anchors/n000000000002.json");
+    expect(await log.verify()).toMatchObject({ ok: false, problem: { text: expect.stringContaining("does not follow anchor 1") } });
+  });
+
+  it("says where no anchor was written for a long time", async () => {
+    const bucket = memoryBucket();
+    const log = await makeLog(bucket);
+    await log.append(command("a"));
+    await log.anchor(0);
+    await log.anchor(10 * 60_000);
+    await log.anchor(3 * 3600_000);
+    expect((await log.verify()).anchors?.gaps).toEqual([{ from: 10 * 60_000, to: 3 * 3600_000 }]);
   });
 
   it("notices a log rewritten from the start, by the same anchors", async () => {

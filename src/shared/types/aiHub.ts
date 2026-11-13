@@ -1085,7 +1085,7 @@ export interface AuditVerificationView {
   ok: boolean;
   entries: number;
   problem?: { seq: number; text: string };
-  anchors?: { checked: number; held: number };
+  anchors?: { checked: number; held: number; coveredSeq?: number; lastAt?: number; gaps?: { from: number; to: number }[] };
   lastAt?: number;
 }
 
@@ -1153,7 +1153,8 @@ export interface HubReply {
   /** A key as it is shown once, when it is made, and never again. */
   mcpKey?: { token: string; key: unknown };
   audit?: { entries: AuditEntryView[]; verification: AuditVerificationView };
-  recording?: { id: string; cast: string };
+  /** `sealed`: it matches the hash the audit log kept when it was finished; false: it does not; absent: no seal (still being made, or older). */
+  recording?: { id: string; cast: string; sealed?: boolean };
   kbSearch?: { query: string; hits: KbSearchHit[]; byMeaning: boolean };
   download?: { name: string; mime: string; dataBase64: string };
   /** `updated`: sources that were already there under the same address and got the new text. */

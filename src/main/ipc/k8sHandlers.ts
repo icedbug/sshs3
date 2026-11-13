@@ -154,6 +154,7 @@ export function registerK8sHandlers(bridge: K8sHost, deps: K8sHandlerDeps = {}):
   bridge.registerHandler(
     IPC_CHANNELS.K8S_TERMINAL_RESIZE,
     async (_event, sessionId: string, cols: number, rows: number) => {
+      bridge.aiHub?.terminals.resized(sessionId, cols, rows);
       bridge.k8sTerminalManager.resize(sessionId, cols, rows);
     }
   );

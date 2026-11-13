@@ -15,14 +15,28 @@ const clock = (s: number): string => `${Math.floor(s / 60)}:${String(Math.floor(
 export function RecordingPlayer({
   cast,
   title,
+  sealed,
+  startAt,
   onClose,
 }: {
   cast: string;
   title: string;
+  /** Whether it matches the hash the audit log kept when it was finished. */
+  sealed?: boolean;
+  /** A command to open the recording at: its marker. */
+  startAt?: string;
   onClose: () => void;
 }): JSX.Element {
   const parsed = useMemo(() => parseCast(cast), [cast]);
-  const markers = useMemo(() => parsed.events.filter((e) => e.kind === "m"), [parsed]);
+  // Each command, with how it ended: the exit event that follows its marker, before the next one.
+  const markers = useMemo(() => {
+    const out: { t: number; data: string; exit?: string }[] = [];
+    for (const e of parsed.events) {
+      if (e.kind === "m") out.push({ t: e.t, data: e.data });
+      else if (e.kind === "x" && out.length && out[out.length - 1].exit === undefined) out[out.length - 1].exit = e.data;
+    }
+    return out;
+  }, [parsed]);
   const host = useRef<HTMLDivElement>(null);
   const term = useRef<Terminal | null>(null);
   const [playing, setPlaying] = useState(false);
@@ -43,10 +57,22 @@ export function RecordingPlayer({
     });
     if (host.current) t.open(host.current);
     term.current = t;
+    // Opened at a command: the screen as it was when that command started.
+    const at = startAt ? markers.find((m) => m.data === startAt) : undefined;
+    if (at) {
+      let out = "";
+      let index = 0;
+      for (; index < parsed.events.length && parsed.events[index].t <= at.t; index++)
+        if (parsed.events[index].kind === "o") out += parsed.events[index].data;
+      t.write(out);
+      cursor.current = { index, at: at.t };
+      setPosition(at.t);
+    }
     return () => {
       t.dispose();
       term.current = null;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- opened once per recording
   }, [parsed]);
 
   useEffect(() => {
@@ -106,7 +132,11 @@ export function RecordingPlayer({
             <strong>{title}</strong>
             <small>
               What the terminal showed while the run had it. Secrets were masked as it was recorded; what a person typed
-              is not in it. Pauses longer than {IDLE_LIMIT}s are shortened.
+              is not in it. Pauses longer than {IDLE_LIMIT}s are shortened.{" "}
+              {sealed === true && <span className="ai-recording-sealed">It matches the hash the audit log kept when it was finished.</span>}
+              {sealed === false && (
+                <span className="ai-recording-broken">It does not match the hash the audit log kept when it was finished: it was changed since.</span>
+              )}
             </small>
           </div>
           <button type="button" onClick={onClose} aria-label="Close the recording">
@@ -129,6 +159,7 @@ export function RecordingPlayer({
                     title={m.data}
                   >
                     <time>{clock(m.t)}</time> <code>{m.data}</code>
+                    {m.exit !== undefined && <span className={m.exit === "0" ? "ai-exit-ok" : "ai-exit-bad"}>{m.exit === "0" ? "✓" : `exit ${m.exit}`}</span>}
                   </button>
                 </li>
               ))}

@@ -797,7 +797,7 @@ export class HubService {
       const task = this.store.data.tasks.find((t) => t.id === owner);
       if (!task || isBackgroundRun(task) || isDemoMode() || this.store.data.preferences.recordSessions === false) return;
       void this.recordings()
-        .start({ sessionId: session.id, taskId: task.id, label: session.label })
+        .start({ sessionId: session.id, taskId: task.id, label: session.label, ...this.terminals.size(session.id) })
         .then((info) => {
           task.recordingId = info.id;
         })
@@ -809,8 +809,32 @@ export class HubService {
     this.terminals.on("executing", (sessionId: string, command: string) => {
       this.recorder?.marker(sessionId, command);
     });
+    this.terminals.on("executed", (sessionId: string, exitCode: number) => {
+      this.recorder?.exit(sessionId, exitCode);
+    });
+    this.terminals.on("resized", (sessionId: string, cols: number, rows: number) => {
+      this.recorder?.resize(sessionId, cols, rows);
+    });
+    // A finished recording is sealed into the audit log: its hash there shows later that it was not changed.
     this.terminals.on("released", (session: TerminalSession) => {
-      void this.recorder?.stop(session.id).catch(() => undefined);
+      void this.recorder
+        ?.stop(session.id)
+        .then(async (info) => {
+          if (!info || isDemoMode()) return;
+          const digest = await this.recordings().digest(info.id);
+          const task = this.store.data.tasks.find((t) => t.id === info.taskId);
+          if (!digest) return;
+          await this.audit().append({
+            kind: "recording",
+            actor: `${task?.agentName ?? "Assistant"} (run ${info.taskId.slice(0, 8)})`,
+            target: info.label,
+            what: `Terminal recording, ${Math.round((info.endedAt! - info.startedAt) / 1000)} s, ${info.markers} command${info.markers === 1 ? "" : "s"}`,
+            taskId: info.taskId,
+            changeId: info.id,
+            detail: `sha256 ${digest}`,
+          });
+        })
+        .catch(() => undefined);
     });
   }
 
@@ -3359,7 +3383,11 @@ export class HubService {
       case "recording-read": {
         const cast = await this.recordings().read(requiredText(request.id));
         if (!cast) throw new Error("That recording is not on this computer any more.");
-        reply = { recording: { id: request.id, cast } };
+        // Whether it is still what was sealed into the audit log when it was finished.
+        const digest = await this.recordings().digest(request.id);
+        const seal = (await this.audit().recent(5000)).find((e) => e.kind === "recording" && e.changeId === request.id);
+        const sealed = seal ? seal.detail === `sha256 ${digest}` : undefined;
+        reply = { recording: { id: request.id, cast, sealed } };
         break;
       }
       case "mcp-key-list":
@@ -4095,6 +4123,7 @@ export class HubService {
 
   private auditLog?: AuditLog;
   private lastAnchorAt = 0;
+  private lastRecordingPruneAt = 0;
   private recorder?: SessionRecorder;
 
   /** This installation's audit log, kept beside the hub's other data, anchored in the team bucket. */
@@ -5433,10 +5462,6 @@ export class HubService {
       await sync?.pruneMarks(14 * 24 * 60 * 60_000, now).catch(() => undefined);
       await this.request({ action: "self-learn-reflect" }).catch((e) => log.warn("Nightly tidy failed", safeError(e)));
       await this.refetchWatchedSources(now).catch((e) => log.warn("Fetching the knowledge base's links again failed", safeError(e)));
-      // Recordings are kept as long as conversations are.
-      await this.recordings()
-        .prune(this.store.data.preferences.retentionDays || 30, now)
-        .catch((e) => log.warn("Removing old recordings failed", safeError(e)));
       await this.checkContradictions().catch((e) => log.warn("Nightly contradiction check failed", safeError(e)));
       const extra = await this.collectExtraContext();
       const snap = await this.snapshot();
@@ -6053,6 +6078,14 @@ export class HubService {
         void this.audit()
           .anchor(now)
           .catch((e) => log.warn("Could not anchor the audit log in the team bucket", safeError(e)));
+      }
+      // Recordings are this computer's own: each installation removes its old ones, once a day,
+      // whichever installation does the team's nightly upkeep.
+      if (now - this.lastRecordingPruneAt > 24 * 3600_000) {
+        this.lastRecordingPruneAt = now;
+        void this.recordings()
+          .prune(this.store.data.preferences.retentionDays || 30, now)
+          .catch((e) => log.warn("Removing old recordings failed", safeError(e)));
       }
       void this.readNextKb(now).catch((e) => log.warn("Knowledge base reading failed", safeError(e)));
       void this.nightly(now).catch((e) => log.warn("Nightly upkeep failed", safeError(e)));

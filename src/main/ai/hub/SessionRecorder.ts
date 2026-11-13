@@ -1,6 +1,7 @@
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { maskSecrets } from "./privacy";
+import { maskSecrets, maskTerminalOutput } from "./privacy";
 
 /**
  * What an agent saw in a terminal, kept so it can be watched again.
@@ -37,8 +38,13 @@ interface Open {
   file: string;
   started: number;
   pending: string;
+  /** When a prompt or a redraw stops without a newline, it is written after a short pause instead of late. */
+  flush?: NodeJS.Timeout;
   writes: Promise<unknown>;
 }
+
+/** Output with no newline is written after this long without more. */
+const IDLE_FLUSH_MS = 300;
 
 /** Held back until a line ends, or until there is this much: then masked and written all the same. */
 const MAX_PENDING = 4096;
@@ -64,9 +70,10 @@ export class SessionRecorder {
     const existing = this.open.get(input.sessionId);
     if (existing?.info.taskId === input.taskId) return existing.info;
     // A terminal still recorded for another run: that recording ends here, this run gets its own.
-    if (existing) await this.stop(input.sessionId, now);
-    await fs.mkdir(this.dir, { recursive: true, mode: 0o700 });
-    const id = `${input.taskId}-${input.sessionId}`.slice(0, 120);
+    if (existing) void this.stop(input.sessionId, now);
+    // One file per time a run holds the terminal: a run that takes it again after a person had it
+    // gets a second recording, and the first is never written over.
+    const id = `${input.taskId}-${input.sessionId}`.slice(0, 100) + `-${now.toString(36)}`;
     const info: RecordingInfo = { id, taskId: input.taskId, sessionId: input.sessionId, label: input.label, startedAt: now, bytes: 0, markers: 0 };
     const file = this.fileOf(id);
     const header = {
@@ -77,8 +84,12 @@ export class SessionRecorder {
       title: `${input.label} — run ${input.taskId}`,
       env: { TERM: "xterm-256color" },
     };
-    await fs.writeFile(file, `${JSON.stringify(header)}\n`, { mode: 0o600 });
-    this.open.set(input.sessionId, { info, file, started: now, pending: "", writes: Promise.resolve() });
+    // Registered before anything is written, so the first output and marker are not lost while the file is made.
+    const ready = fs
+      .mkdir(this.dir, { recursive: true, mode: 0o700 })
+      .then(() => fs.writeFile(file, `${JSON.stringify(header)}\n`, { mode: 0o600 }));
+    this.open.set(input.sessionId, { info, file, started: now, pending: "", writes: ready });
+    await ready;
     return info;
   }
 
@@ -87,11 +98,37 @@ export class SessionRecorder {
     const rec = this.open.get(sessionId);
     if (!rec || !data) return;
     rec.pending += data;
+    if (rec.flush) clearTimeout(rec.flush);
     const cut = rec.pending.lastIndexOf("\n");
-    if (cut < 0 && rec.pending.length < MAX_PENDING) return;
-    const ready = cut >= 0 ? rec.pending.slice(0, cut + 1) : rec.pending;
-    rec.pending = cut >= 0 ? rec.pending.slice(cut + 1) : "";
-    this.event(rec, "o", maskSecrets(ready), now);
+    if (cut >= 0 || rec.pending.length >= MAX_PENDING) {
+      const ready = cut >= 0 ? rec.pending.slice(0, cut + 1) : rec.pending;
+      rec.pending = cut >= 0 ? rec.pending.slice(cut + 1) : "";
+      this.event(rec, "o", maskTerminalOutput(ready), now);
+    }
+    // A prompt ("Are you sure? [y/N] ") has no newline after it: written once the terminal goes quiet.
+    if (rec.pending)
+      rec.flush = setTimeout(() => {
+        rec.flush = undefined;
+        if (!rec.pending || !this.open.has(sessionId)) return;
+        const text = rec.pending;
+        rec.pending = "";
+        this.event(rec, "o", maskTerminalOutput(text), now + IDLE_FLUSH_MS);
+      }, IDLE_FLUSH_MS);
+  }
+
+  /** How the last command ended: an asciicast exit event ("x"), which players that do not know it skip. */
+  exit(sessionId: string, exitCode: number, now = Date.now()): void {
+    const rec = this.open.get(sessionId);
+    if (!rec) return;
+    this.flushPending(rec, now);
+    this.event(rec, "x", String(exitCode), now);
+  }
+
+  private flushPending(rec: Open, now: number): void {
+    if (rec.flush) clearTimeout(rec.flush);
+    rec.flush = undefined;
+    if (rec.pending) this.event(rec, "o", maskTerminalOutput(rec.pending), now);
+    rec.pending = "";
   }
 
   /** A point to jump to: the command that is about to run. */
@@ -99,10 +136,7 @@ export class SessionRecorder {
     const rec = this.open.get(sessionId);
     if (!rec) return;
     // What is held back belongs before the marker.
-    if (rec.pending) {
-      this.event(rec, "o", maskSecrets(rec.pending), now);
-      rec.pending = "";
-    }
+    this.flushPending(rec, now);
     rec.info.markers++;
     this.event(rec, "m", maskSecrets(label).slice(0, 300), now);
   }
@@ -116,7 +150,7 @@ export class SessionRecorder {
   async stop(sessionId: string, now = Date.now()): Promise<RecordingInfo | undefined> {
     const rec = this.open.get(sessionId);
     if (!rec) return undefined;
-    if (rec.pending) this.event(rec, "o", maskSecrets(rec.pending), now);
+    this.flushPending(rec, now);
     this.open.delete(sessionId);
     rec.info.endedAt = now;
     await rec.writes;
@@ -143,6 +177,12 @@ export class SessionRecorder {
     return fs.readFile(this.fileOf(id), "utf8").catch(() => undefined);
   }
 
+  /** The sha256 of a recording as it is on disk: what the audit log keeps of it. */
+  async digest(id: string): Promise<string | undefined> {
+    const bytes = await fs.readFile(this.fileOf(id)).catch(() => undefined);
+    return bytes ? crypto.createHash("sha256").update(bytes).digest("hex") : undefined;
+  }
+
   /** Recordings older than `days` are removed. */
   async prune(days: number, now = Date.now()): Promise<number> {
     let removed = 0;
@@ -154,12 +194,12 @@ export class SessionRecorder {
     return removed;
   }
 
-  private event(rec: Open, kind: "o" | "m" | "r", text: string, now: number): void {
+  private event(rec: Open, kind: "o" | "m" | "r" | "x", text: string, now: number): void {
     if (!text) return;
     if (rec.info.bytes > MAX_BYTES) return;
     const seconds = Math.max(0, (now - rec.started) / 1000);
     let line = `${JSON.stringify([Number(seconds.toFixed(3)), kind, text])}\n`;
-    rec.info.bytes += line.length;
+    rec.info.bytes += Buffer.byteLength(line, "utf8");
     if (rec.info.bytes > MAX_BYTES)
       line += `${JSON.stringify([Number(seconds.toFixed(3)), "m", "The recording stopped here: it reached its size limit."])}\n`;
     const write = (): Promise<void> => fs.appendFile(rec.file, line);

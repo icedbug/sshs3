@@ -42,6 +42,9 @@ interface LiveTerminal {
   write: (data: string) => void;
   output: string;
   inputBuffer: string;
+  /** The size the person's terminal has, as last reported. */
+  cols?: number;
+  rows?: number;
   /** The last bit the terminal showed, kept always: to tell a password prompt from a shell prompt. */
   tail?: string;
   /** When connecting automatically last failed, and why: it is not tried again for a while. */
@@ -313,6 +316,7 @@ export class TerminalRegistry extends EventEmitter {
             }
           }
           pending.resolve({ ...result, output: boundedContext(result.output) });
+          if (!pending.handshake) this.emit("executed", id, result.exitCode);
           this.emit("changed");
         }
         return display;
@@ -663,6 +667,20 @@ export class TerminalRegistry extends EventEmitter {
    * running (Ctrl-C), when the person asked for control with a button rather
    * than by typing — their own keys, Ctrl-C included, go through by themselves.
    */
+  /** The person's terminal was resized: kept for a recording to replay at the right size. */
+  resized(id: string, cols: number, rows: number): void {
+    const s = this.sessions.get(id);
+    if (!s || !Number.isFinite(cols) || !Number.isFinite(rows)) return;
+    s.cols = Math.round(cols);
+    s.rows = Math.round(rows);
+    this.emit("resized", id, s.cols, s.rows);
+  }
+
+  size(id: string): { cols?: number; rows?: number } {
+    const s = this.sessions.get(id);
+    return { cols: s?.cols, rows: s?.rows };
+  }
+
   takeover(id: string, options: { interrupt?: boolean } = {}): void {
     const s = this.require(id);
     const owner = s.view.owner;

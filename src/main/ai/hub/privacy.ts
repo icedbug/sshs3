@@ -105,3 +105,17 @@ export function maskStrings<T>(value: T): T {
   }
   return value;
 }
+
+/**
+ * Terminal output with its secrets masked, as a terminal shows it. Masking
+ * the raw stream misses a secret that colour codes cut into pieces (jq,
+ * kubectl and yq colour a key, its colon and its value separately). So the
+ * visible text is checked: if it holds no secret, the output is kept with
+ * its colours; if it does, the visible text is kept, masked, and the colours
+ * of that piece are given up.
+ */
+export function maskTerminalOutput(raw: string): string {
+  const visible = stripVTControlCharacters(raw);
+  const masked = maskSecrets(visible);
+  return masked === visible ? maskSecrets(raw) : masked;
+}
