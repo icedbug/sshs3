@@ -1761,22 +1761,22 @@ describe("Production multi-user workspace sync & auto-memory", () => {
     const autoLearnedSkill = afterFixSnap.memories.find(
       (m) => m.autoLearned && m.sourceCommand?.includes("multipath -r"),
     );
+    // Kept as a note of what was seen, not as a skill: nothing showed that this command was the fix.
     expect(autoLearnedSkill).toBeDefined();
-    expect(autoLearnedSkill?.confidence).toBeGreaterThanOrEqual(0.8);
+    expect(autoLearnedSkill?.title).toMatch(/^Seen after a failure/);
+    expect(autoLearnedSkill?.confidence).toBeLessThan(0.65);
+    expect(autoLearnedSkill?.tier).toBe("archival");
     expect(
       afterFixSnap.selfLearning?.failureToFixPatterns,
     ).toBeGreaterThanOrEqual(1);
 
-    // 5. Verify Ctrl+K Inline Suggestion adapts to learned Voyager skills
+    // 5. Ctrl+K does not offer an unproven note as a learned command.
     const inlineLearnedSnap = await hub.request({
       action: "inline-suggest",
       prompt: "multipathd daemon stale file handle",
       shell: "bash",
     });
-    expect(inlineLearnedSnap.reply?.inlineSuggestion?.command).toContain(
-      "multipath -r",
-    );
-    expect(inlineLearnedSnap.reply?.inlineSuggestion?.explanation).toContain(
+    expect(inlineLearnedSnap.reply?.inlineSuggestion?.explanation ?? "").not.toContain(
       "Auto-Learned Skill",
     );
 

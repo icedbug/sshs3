@@ -414,6 +414,21 @@ export function sectionsOf(docId: string, content: string): KbDocument["chunks"]
   }));
 }
 
+/** How long a memory's text may be: what the distiller writes (4,000), not less. */
+export const MAX_MEMORY_TEXT = 4000;
+/** How many learned (automatic) memories are kept; the newest stay. What a person wrote is never dropped by this. */
+const MAX_LEARNED = 300;
+
+/**
+ * The store with its learned entries capped, newest first. What a person
+ * wrote, and personal notes, are never dropped to make room: they used to
+ * fall off silently once there were a hundred entries of any kind.
+ */
+export function capMemories(memories: MemoryEntry[]): MemoryEntry[] {
+  let learned = 0;
+  return memories.filter((m) => !m.autoLearned || ++learned <= MAX_LEARNED);
+}
+
 export class KnowledgeBaseService {
   private oramaDb?: AnyOrama;
   private oramaSignature = "";
@@ -862,26 +877,23 @@ export class KnowledgeBaseService {
         incoming.text.includes(prev.text.trim())
           ? incoming.text.trim()
           : `${incoming.text.trim()} (Earlier note: ${prev.text.trim().slice(0, 240)})`;
+      // Saying the same thing again is not evidence that it is true: no confidence for repeating it.
       const prevConfidence = prev.confidence ?? 0.78;
-      const nextConfidence = Math.min(
-        0.99,
-        Math.round(
-          Math.max(incoming.confidence ?? prevConfidence, prevConfidence + 0.04) *
-            100,
-        ) / 100,
-      );
+      const nextConfidence = editedById
+        ? (incoming.confidence ?? prevConfidence)
+        : Math.min(0.99, Math.max(incoming.confidence ?? prevConfidence, prevConfidence));
       const updated: MemoryEntry = {
         ...prev,
         ...incoming,
         id: prev.id,
         title: incoming.title.trim() || prev.title,
-        text: mergedText.slice(0, 1200),
+        text: mergedText.slice(0, MAX_MEMORY_TEXT),
         tier: incoming.tier ?? prev.tier ?? "archival",
         cluster: incoming.cluster ?? prev.cluster,
         updatedCount: (prev.updatedCount ?? 1) + 1,
         confidence: nextConfidence,
-        successCount:
-          incoming.successCount ?? (prev.successCount ?? 0) + (incoming.autoLearned ? 1 : 0),
+        // Only what a verified run counted: being learned again is not working again.
+        successCount: incoming.successCount ?? prev.successCount ?? 0,
         failureCount: incoming.failureCount ?? prev.failureCount ?? 0,
         usageCount: incoming.usageCount ?? (prev.usageCount ?? 0) + 1,
         feedbackScore: incoming.feedbackScore ?? prev.feedbackScore ?? 0,
@@ -893,7 +905,7 @@ export class KnowledgeBaseService {
       const next = [...existing];
       next.splice(matchIdx, 1);
       return {
-        memories: [updated, ...next].slice(0, 100),
+        memories: capMemories([updated, ...next]),
         saved: updated,
         merged: true,
       };
@@ -906,11 +918,11 @@ export class KnowledgeBaseService {
       cluster: incoming.cluster,
       scope: incoming.scope.trim().slice(0, 80) || "workspace",
       title: incoming.title.trim().slice(0, 120),
-      text: incoming.text.trim().slice(0, 1200),
+      text: incoming.text.trim().slice(0, MAX_MEMORY_TEXT),
       author: incoming.author,
       updatedCount: 1,
       confidence: incoming.confidence ?? (incoming.kind === "skill" ? 0.85 : 0.78),
-      successCount: incoming.successCount ?? (incoming.autoLearned ? 1 : 0),
+      successCount: incoming.successCount ?? 0,
       failureCount: incoming.failureCount ?? 0,
       usageCount: incoming.usageCount ?? 1,
       feedbackScore: incoming.feedbackScore ?? 0,
@@ -921,7 +933,7 @@ export class KnowledgeBaseService {
     };
 
     return {
-      memories: [created, ...existing].slice(0, 100),
+      memories: capMemories([created, ...existing]),
       saved: created,
       merged: false,
     };

@@ -579,10 +579,10 @@ export async function handleAppAction(
         if (op === "delete") {
           const q = (str("idOrTitle") || str("id") || str("title") || "").toLowerCase();
           if (!q) throw new Error("idOrTitle is required to delete a memory");
-          const match = (extra.memories ?? []).find(
-            (m) => m.id.toLowerCase() === q || m.title.toLowerCase() === q || m.title.toLowerCase().includes(q),
-          );
-          const targetId = match?.id || str("idOrTitle") || str("id")!;
+          // By its exact id or title only: removing a team memory because its title contains a word is not on.
+          const match = (extra.memories ?? []).find((m) => m.id.toLowerCase() === q || m.title.toLowerCase() === q);
+          if (!match) throw new Error(`No memory has the id or title "${q}". List them, and give the exact one.`);
+          const targetId = match.id;
           await hub.request({ action: "memory-delete", id: targetId });
           return { ok: true, operation: "delete", deletedMemoryId: targetId, title: match?.title };
         }
@@ -594,7 +594,7 @@ export async function handleAppAction(
           );
           const targetId = match?.id || str("idOrTitle") || str("id")!;
           const delta: 1 | -1 = num("delta") === -1 ? -1 : 1;
-          await hub.request({ action: "memory-feedback", id: targetId, delta });
+          await hub.request({ action: "memory-feedback", id: targetId, delta, voter: `${task.agentName ?? "Assistant"} (agent)` });
           return { ok: true, operation: "feedback", id: targetId, delta };
         }
         if (op === "self_reflect") {
@@ -641,7 +641,7 @@ export async function handleAppAction(
             : rawTier === "episodic"
               ? "episodic"
               : "archival";
-        const entry = await hub.saveMemoryInternal({
+        const out = await hub.rememberFromRun(task, {
           id: existing?.id || str("id"),
           kind: str("kind") === "skill" ? "skill" : "memory",
           tier,
@@ -652,7 +652,9 @@ export async function handleAppAction(
           sourceCommand: str("sourceCommand"),
         });
         await hub.store.save();
-        return { ok: true, operation: op, entry };
+        return out.proposal
+          ? { ok: true, operation: op, proposed: true, note: "A person reviews it under Memory & skills before it is used or shared." }
+          : { ok: true, operation: op, entry: out.entry };
       }
 
       case "sshs3_manage_schedule": {

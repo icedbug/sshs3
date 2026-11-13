@@ -118,7 +118,7 @@ export function guardAsk(
   if (op.startsWith("delete") && spec.ops[op] !== "read")
     return {
       title: `Remove ${REMOVES[tool] ?? "something"} from this workspace`,
-      detail: show(payload, ["idOrName", "id", "name", "title", "folderName", "cluster", "s3ProfileId", "edgeId"]),
+      detail: show(payload, ["idOrName", "idOrTitle", "id", "name", "title", "folderName", "cluster", "s3ProfileId", "edgeId"]),
     };
 
   if (tool === "sshs3_manage_app_and_settings") {

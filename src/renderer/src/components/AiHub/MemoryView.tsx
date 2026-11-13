@@ -100,7 +100,7 @@ export function Memory({
               type="button"
               disabled={reflecting}
               data-testid="run-self-reflection-btn"
-              title="Merges entries that say the same thing and turns repeated incident notes into one entry"
+              title="Merges entries that say the same thing, turns repeated incident notes into one entry, writes down the steps of finished runs not looked at yet, notes a read-only check for open failures, and adds links it finds between servers. What it writes is shared with the team."
               onClick={() => {
                 setReflecting(true);
                 void act({ action: "self-learn-reflect" }).finally(() => setReflecting(false));

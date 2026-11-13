@@ -260,6 +260,8 @@ export interface AgentTask {
   kbCounted?: number;
   /** What this run spent has been added to its agent's month. Counted once, wherever it ended. */
   usageCounted?: boolean;
+  /** When learning last reflected on this run: it is reflected on once, not again every night. */
+  reflectedAt?: number;
   /** A handover asked for while a run was going: made when that run ends, so its spending stays with the agent that spent it. */
   handoffTo?: { agentId: string; reason?: string };
   /** The recording of the terminal this run owned, when one was made. */
@@ -333,6 +335,8 @@ export interface MemoryEntry {
   failureCount?: number;
   usageCount?: number;
   feedbackScore?: number;
+  /** Who said it was useful (1) or not (-1): one vote each, which can be changed but not repeated. */
+  votes?: Record<string, 1 | -1>;
   autoLearned?: boolean;
   sourceCommand?: string;
   errorSignature?: string;
@@ -1351,7 +1355,7 @@ export type HubRequest =
       entry: Omit<MemoryEntry, "id" | "updatedAt"> & { id?: string };
     }
   | { action: "memory-delete"; id: string }
-  | { action: "memory-feedback"; id: string; delta: 1 | -1 }
+  | { action: "memory-feedback"; id: string; delta: 1 | -1; voter?: string }
   /** Saves a proposal as a memory (or applies its update), optionally with edited text. */
   | { action: "memory-proposal-accept"; id: string; title?: string; text?: string }
   | { action: "memory-proposal-reject"; id: string }

@@ -127,8 +127,16 @@ export class SelfLearningService {
     fixOutput?: string;
     cluster?: string;
     scope?: string;
+    /**
+     * Shown to be the fix: a change whose own check passed afterwards and had
+     * not passed before. Anything else is only what happened to succeed next,
+     * kept as a low-confidence note that is never suggested as a command and
+     * never takes the place of a proven fix.
+     */
+    proven?: boolean;
   }): { memories: MemoryEntry[]; learnedSkill?: MemoryEntry } {
     const { memories, failure, fixCommand, fixOutput, cluster, scope } = params;
+    const proven = params.proven === true;
     const cleanFix = maskContext(fixCommand.trim());
     const cleanFail = maskContext(failure.command.trim());
     if (!cleanFix || cleanFix === cleanFail) {
@@ -139,7 +147,7 @@ export class SelfLearningService {
     const errorSignature = extractErrorSignature(cleanFail, maskedSnippet);
     const shortTarget = failure.label || scope || "workspace";
     // Named for what it is: the command that succeeded next, which may or may not be the fix.
-    const title = `Worked after a failure (${shortTarget}): ${errorSignature.replace(/^err:/, "").replace(/_/g, " ")}`;
+    const title = `${proven ? "Fixed a failure" : "Seen after a failure"} (${shortTarget}): ${errorSignature.replace(/^err:/, "").replace(/_/g, " ")}`;
     const snippetClean = maskedSnippet.replace(/\s+/g, " ").trim().slice(0, 220);
     const fixOutClean = maskContext(fixOutput ?? "")
       .replace(/\s+/g, " ")
@@ -148,7 +156,9 @@ export class SelfLearningService {
 
     const text = [
       `When \`${cleanFail}\` failed on ${shortTarget}${snippetClean ? ` with "${snippetClean}"` : ""}:`,
-      `The next command that succeeded there was \`${cleanFix}\`. It has not been checked to be the fix.`,
+      proven
+        ? `\`${cleanFix}\` fixed it: its check passed afterwards and had not passed before.`
+        : `The next command that succeeded there was \`${cleanFix}\`. It has not been checked to be the fix.`,
       fixOutClean ? `What it printed: ${fixOutClean}` : "",
     ]
       .filter(Boolean)
@@ -156,16 +166,19 @@ export class SelfLearningService {
 
     const merged = this.kb.deduplicateOrMergeMemory(memories, {
       kind: "skill",
-      tier: "core",
+      tier: proven ? "core" : "archival",
       cluster,
       scope: scope || `server:${shortTarget}`,
       title,
       text,
       author: "Voyager Self-Learning Engine",
-      confidence: 0.89,
+      // Below what Ctrl+K and failure hints suggest (0.65), unless it was shown to be the fix.
+      confidence: proven ? 0.89 : 0.5,
       autoLearned: true,
       sourceCommand: cleanFix,
-      errorSignature,
+      // A note of what was seen never merges into (and so never overwrites) a proven fix for the same error.
+      errorSignature: proven ? errorSignature : `seen|${errorSignature}`,
+      ...(proven ? { successCount: 1 } : {}),
     });
 
     this.failureToFixCount += 1;
@@ -239,6 +252,7 @@ export class SelfLearningService {
           fixOutput: change.output,
           cluster,
           scope: change.target ? `server:${change.target}` : "workspace",
+          proven: change.check?.after === true && change.check.before === false,
         });
         currentMemories = res.memories;
         lastFailedChange = undefined;
@@ -255,14 +269,10 @@ export class SelfLearningService {
 
     if (succeededCommands.length > 0 || failedCommands.length > 0) {
       currentMemories = currentMemories.map((mem) => {
-        const matchedSuccess = succeededCommands.some(
-          (c) =>
-            (mem.sourceCommand &&
-              c.command?.trim().includes(mem.sourceCommand.trim())) ||
-            (mem.kind === "skill" &&
-              c.command &&
-              mem.text.toLowerCase().includes(c.command.trim().toLowerCase())),
-        );
+        // The same command, exactly; and it counts as having worked only in a run that was verified.
+        const matchedSuccess =
+          task.verification === "verified" &&
+          succeededCommands.some((c) => mem.sourceCommand && c.command?.trim() === mem.sourceCommand.trim());
         const matchedFail = failedCommands.some(
           (c) =>
             mem.sourceCommand &&
@@ -309,7 +319,8 @@ export class SelfLearningService {
         title: `Playbook: ${cleanTitle || primaryCmd}`,
         text: `Commands that completed on ${targetLabel} (${task.verification === "verified" ? "the task was verified" : "each exited 0; the result was not checked"}): ${uniqueCmds.map((cmd) => `\`${cmd}\``).join(" → ")}.`,
         author: "Reflexion Post-Task Learner",
-        confidence: task.verification === "verified" ? 0.92 : 0.84,
+        // Unverified steps are a record, not a recipe: below what is suggested as a command.
+        confidence: task.verification === "verified" ? 0.92 : 0.6,
         autoLearned: true,
         sourceCommand: primaryCmd,
       });
@@ -398,7 +409,7 @@ export class SelfLearningService {
           this.recordEvent({
             kind: "topology_discovery",
             title: `Noticed a link: ${from} → ${to}`,
-            summary: `Automatiskt identifierad relation (${relation}: ${label}).`,
+            summary: `Found automatically (${relation}: ${label}).`,
             confidence: 0.9,
           }),
         );
@@ -482,9 +493,11 @@ export class SelfLearningService {
     let currentEdges = [...params.infraEdges];
     const events: SelfLearningEvent[] = [];
 
-    // 1. Reflect on any completed tasks
-    for (const task of params.tasks.slice(0, 12)) {
+    // 1. Reflect on finished tasks not reflected on yet, newest first. A task is reflected on once:
+    // doing it again every night raised confidence and "worked ×N" with no new evidence.
+    for (const task of [...params.tasks].reverse().filter((t) => !t.reflectedAt).slice(0, 12)) {
       if (task.status === "completed" || task.verification === "verified") {
+        task.reflectedAt = Date.now();
         const res = this.reflectOnCompletedTask({
           task,
           memories: currentMemories,
@@ -528,7 +541,7 @@ export class SelfLearningService {
         events.push(
           this.recordEvent({
             kind: "memory_consolidation",
-            title: `Befordrade episodiskt minne till Core: ${merged.saved.title.slice(0, 42)}`,
+            title: `Promoted an episodic memory to core: ${merged.saved.title.slice(0, 42)}`,
             summary: `Merged what kept recurring in ${ep.scope} into a core memory.`,
             targetCluster: ep.cluster || params.targetCluster,
             confidence: merged.saved.confidence ?? 0.86,
@@ -555,10 +568,12 @@ export class SelfLearningService {
         title: `Check after a failure (${failure.label}): ${sig.replace(/^err:/, "").replace(/_/g, " ")}`,
         text: `When \`${cleanFailCmd}\` fails (${cleanFailSnippet.slice(0, 120)}): a read-only check to narrow it down is \`${recommendedFix}\`. A suggestion from the kind of error, not something that was tried.`,
         author: "Voyager Self-Learning Engine",
-        confidence: 0.86,
+        // Never tried: below what is suggested as a command, and in a namespace of its own, so it never
+        // merges into (and overwrites) what was learned about the same error from a real fix.
+        confidence: 0.5,
         autoLearned: true,
         sourceCommand: recommendedFix,
-        errorSignature: sig,
+        errorSignature: `guess|${sig}`,
       });
       currentMemories = merged.memories;
     }
@@ -624,29 +639,33 @@ export class SelfLearningService {
   /**
    * Applies user thumbs-up (+1) or thumbs-down (-1) reinforcement feedback to a MemoryEntry.
    */
+  /**
+   * Somebody says a memory was useful, or not. One vote per person (a second
+   * click changes their vote, it does not add one); the score is the sum of
+   * the votes. A vote does not pin the entry for the team (pinning is its own
+   * choice) and does not count as the entry having worked in a run: that
+   * count is for runs that ended verified.
+   */
   applyMemoryFeedback(
     memories: MemoryEntry[],
     id: string,
     delta: 1 | -1,
+    voter = "someone",
   ): { memories: MemoryEntry[]; updated?: MemoryEntry } {
     let updatedTarget: MemoryEntry | undefined;
     const next = memories.map((m) => {
       if (m.id !== id) return m;
+      const votes = { ...(m.votes ?? {}) };
+      const before = votes[voter] ?? 0;
+      votes[voter] = delta;
+      const change = delta - before;
       const prevConf = m.confidence ?? (m.kind === "skill" ? 0.82 : 0.75);
-      const nextConf = Math.max(
-        0.2,
-        Math.min(0.99, Math.round((prevConf + delta * 0.06) * 100) / 100),
-      );
-      const nextFeedback = (m.feedbackScore ?? 0) + delta;
+      const nextConf = Math.max(0.2, Math.min(0.99, Math.round((prevConf + change * 0.03) * 100) / 100));
       updatedTarget = {
         ...m,
+        votes,
         confidence: nextConf,
-        feedbackScore: nextFeedback,
-        tier: delta > 0 && nextFeedback >= 1 ? "core" : m.tier,
-        successCount:
-          delta > 0 ? (m.successCount ?? 0) + 1 : m.successCount ?? 0,
-        failureCount:
-          delta < 0 ? (m.failureCount ?? 0) + 1 : m.failureCount ?? 0,
+        feedbackScore: Object.values(votes).reduce((sum: number, v) => sum + v, 0),
         updatedAt: Date.now(),
       };
       return updatedTarget;

@@ -54,7 +54,7 @@ import { HermesManager, type HermesModelConfig } from "../HermesManager";
 import { HubStore } from "./HubStore";
 import { S3WorkspaceSyncService } from "./S3WorkspaceSyncService";
 import { McpClientManager } from "./McpClientManager";
-import { KnowledgeBaseService } from "./KnowledgeBaseService";
+import { MAX_MEMORY_TEXT, KnowledgeBaseService } from "./KnowledgeBaseService";
 import { SelfLearningService } from "./SelfLearningService";
 import {
   DEFAULT_SAFETY_POLICY,
@@ -553,13 +553,15 @@ export class HubService {
       },
       memory: async (task, request) => {
         if (request.action === "memory-save") {
-          const entry = await this.saveMemoryInternal({
+          const out = await this.rememberFromRun(task, {
             kind: request.kind === "skill" ? "skill" : "memory",
             scope: request.scope || "workspace",
             title: request.title || "Workspace note",
             text: request.text || "",
           });
-          return { saved: true, entry };
+          return out.proposal
+            ? { saved: false, proposed: true, note: "A person reviews it under Memory & skills before it is used or shared." }
+            : { saved: true, entry: out.entry };
         }
         const extra = await this.collectExtraContext();
         const terminal =
@@ -1997,6 +1999,7 @@ export class HubService {
           combined,
           request.id,
           request.delta,
+          request.voter ?? (await this.resolveActorName()),
         );
         if (
           updated &&
@@ -4278,6 +4281,7 @@ export class HubService {
           (session?.profileId && s.id === session.profileId) ||
           s.name.toLowerCase() === (task.target?.label ?? "").toLowerCase(),
       );
+      task.reflectedAt = Date.now();
       const reflected = this.selfLearning.reflectOnCompletedTask({
         task,
         memories: this.store.data.memories,
@@ -6818,7 +6822,9 @@ export class HubService {
         });
         this.store.data.memories = res.memories;
         this.terminals.dismissFailure(session.id);
-        if (res.learnedSkill && res.learnedSkill.scope !== "personal") {
+        // What a person happened to run next is a note on this computer, not a skill for the team:
+        // nothing showed it was the fix. Only a proven fix (core) is shared.
+        if (res.learnedSkill && res.learnedSkill.scope !== "personal" && res.learnedSkill.tier === "core") {
           await this.host.saveWorkspaceMemory?.(res.learnedSkill).catch(() => {});
         }
       }
@@ -6849,13 +6855,12 @@ export class HubService {
       const provenFix =
         change.kind === "command" &&
         change.exitCode === 0 &&
-        (!change.check || (change.status === "completed" && change.check.after === true && change.check.before === false));
+        // A plain command proves nothing about a failure before it; only a change whose own check showed it.
+        Boolean(change.check && change.status === "completed" && change.check.after === true && change.check.before === false);
       const activeFailure =
         session && provenFix
           ? this.terminals.consumeResolvedFailure(session.id)
-          : session
-            ? this.terminals.failures()[session.id]
-            : undefined;
+          : undefined;
       const actor = `${await this.resolveActorName()} (AI)`;
       const targetLabel = change.target || session?.label || task.title;
       const how = change.rollback?.ran
@@ -6900,6 +6905,8 @@ export class HubService {
           fixCommand: change.command,
           fixOutput: change.output,
           scope: `server:${targetLabel}`,
+          // Only reached for a proven fix (see provenFix above).
+          proven: true,
         });
         this.store.data.memories = res.memories;
         this.terminals.dismissFailure(session.id);
@@ -7155,6 +7162,45 @@ export class HubService {
       createdAt: Date.now(),
       source: learnedMatch ? "skill" : "fallback",
     };
+  }
+
+  /**
+   * What an agent writes into memory during a run. It is saved at once only
+   * when the workspace saves memories without review (the default) and it
+   * does not overwrite something a person wrote; otherwise it becomes a
+   * suggestion a person accepts or not, as the review switch promises. Its
+   * author is the agent, so a person's note is never mistaken for one.
+   */
+  async rememberFromRun(
+    task: AgentTask,
+    input: { id?: string; kind: "memory" | "skill"; tier?: MemoryEntry["tier"]; cluster?: string; scope: string; title: string; text: string; sourceCommand?: string },
+  ): Promise<{ entry?: MemoryEntry; proposal?: MemoryProposal }> {
+    const memories = this.store.data.memories;
+    const existing = input.id ? memories.find((m) => m.id === input.id) : undefined;
+    const author = `${task.agentName ?? "Assistant"} (agent)`;
+    const scope = /^(workspace|personal|(server|cluster|target):.+)$/.test(input.scope) ? input.scope : "workspace";
+    const writtenByPerson = Boolean(existing && !existing.autoLearned && !/\(agent\)$|assistant|learner|learning|distill/i.test(existing.author ?? ""));
+    if (this.store.data.preferences.autoSaveMemories === false || writtenByPerson) {
+      const proposal: MemoryProposal = {
+        id: crypto.randomUUID(),
+        op: existing ? "update" : "add",
+        ...(existing ? { targetId: existing.id, previousText: existing.text } : {}),
+        kind: input.kind,
+        scope,
+        title: clip(input.title, 200),
+        text: boundedContext(input.text, MAX_MEMORY_TEXT),
+        evidence: writtenByPerson ? `Would change a memory ${existing!.author} wrote.` : "Written by an agent during a run.",
+        sourceId: task.id,
+        sourceTitle: clip(task.title, 160),
+        createdAt: Date.now(),
+      };
+      this.store.data.memoryProposals = [...(this.store.data.memoryProposals ?? []), proposal].slice(-MAX_STORED_PROPOSALS);
+      this.changed();
+      return { proposal };
+    }
+    // An agent does not pin for the whole team: pinned (core) is a person's choice.
+    const entry = await this.saveMemoryInternal({ ...input, scope, author, tier: input.tier === "core" ? "archival" : input.tier });
+    return { entry };
   }
 
   private async saveMemoryInternal(input: {
@@ -7471,6 +7517,7 @@ export class HubService {
       resolveServerTarget: this.resolveServerTarget.bind(this),
       isDemoTargetRef: this.isDemoTargetRef.bind(this),
       saveMemoryInternal: this.saveMemoryInternal.bind(this),
+      rememberFromRun: this.rememberFromRun.bind(this),
       resolveActorName: this.resolveActorName.bind(this),
       recordAgentChangeActivity: this.recordAgentChangeActivity.bind(this),
       kbEmbedder: this.kbEmbedder.bind(this),

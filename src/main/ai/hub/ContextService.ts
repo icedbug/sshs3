@@ -74,22 +74,14 @@ export function scopedMemory(
       if (isUnboundScope) return true;
       const srvTarget = mScopeLower.slice("server:".length).trim();
       if (!srvTarget) return true;
-      return Array.from(serverIdentifiers).some(
-        (id) => id === srvTarget || id.includes(srvTarget) || srvTarget.includes(id),
-      );
+      // The server itself, by its id, name, label or host: "web1" is not "web10", "prod" is not "nonprod-db".
+      return serverIdentifiers.has(srvTarget);
     }
     if (mScopeLower.startsWith("cluster:")) {
       if (isUnboundScope) return true;
       const clTarget = mScopeLower.slice("cluster:".length).trim();
       if (!clTarget) return true;
-      if (
-        clusterLower &&
-        (clusterLower === clTarget ||
-          clusterLower.includes(clTarget) ||
-          clTarget.includes(clusterLower))
-      ) {
-        return true;
-      }
+      if (clusterLower && clusterLower === clTarget) return true;
       return serverIdentifiers.has(clTarget);
     }
     return false;
@@ -283,14 +275,26 @@ export class ContextService {
             (activeSession?.label &&
               s.name.toLowerCase() === activeSession.label.toLowerCase()),
         );
+        // A run on a server is told what applies there: the workspace's memories, its own, and those of
+        // this server and its cluster — not every other server's notes.
+        const scope = activeSession ? `target:${activeSession.profileId ?? activeSession.id}` : "workspace";
+        const context = {
+          targetLabel: activeSession?.label,
+          serverName: activeSrv?.name,
+          serverHost: activeSrv?.host,
+          cluster: activeSrv?.cluster,
+        };
+        const applies = activeSession
+          ? [...scopedMemory(filtered, scope, false, context), ...scopedMemory(filtered, scope, true, context)]
+          : filtered;
         return this.kb
           ? this.kb.rankMemories(
-              filtered,
+              applies,
               q || task.title || "",
               activeSrv?.cluster,
               40,
             )
-          : filtered.slice(0, 40);
+          : applies.slice(0, 40);
       })(),
       inventory: this.store.data.inventory,
       target: id
