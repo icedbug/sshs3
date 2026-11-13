@@ -40,7 +40,9 @@ export function commandEnvelope(
   if (shell === "fish") {
     return `printf '\\033]777;${prefix};BEGIN\\007'; eval ${fishQuote(command)}; set -l __sshs3_rc $status; printf '\\033]777;${prefix};END;%s;%s\\007' $__sshs3_rc "$PWD"\r`;
   }
-  return `printf '\\033]777;${prefix};BEGIN\\007'; eval ${quote(command)}; __sshs3_rc=$?; printf '\\033]777;${prefix};END;%s;%s\\007' "$__sshs3_rc" "$PWD"\r`;
+  // The command runs in a subshell: what it defines (a function called printf, say) cannot reach the
+  // line that reports its exit code, and an `exit` or `cd` in it does not end or move the person's shell.
+  return `printf '\\033]777;${prefix};BEGIN\\007'; (eval ${quote(command)}); __sshs3_rc=$?; printf '\\033]777;${prefix};END;%s;%s\\007' "$__sshs3_rc" "$PWD"\r`;
 }
 
 export interface CommandResult {

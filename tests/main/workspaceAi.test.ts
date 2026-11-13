@@ -183,8 +183,9 @@ describe("Collaborative terminal input & activity detection", () => {
     // Simulate user typing a config edit command in the terminal
     terminals.observeHumanInput("t1", "sudo nano /etc/nginx/sites-enabled/default\r");
 
-    // Readiness is preserved!
-    expect(terminals.get("t1")?.state).toBe("ready");
+    // What a person ran may have changed the shell (an editor, another user, another host): the
+    // terminal is no longer taken to be at a known prompt, and an agent connects again first.
+    expect(terminals.get("t1")?.state).toBe("unknown");
     expect(detected).toEqual([
       {
         label: "web-prod-01",
@@ -1746,16 +1747,14 @@ describe("Production multi-user workspace sync & auto-memory", () => {
     expect(assistedTask.changes[0].status).toBe("completed");
 
     // 4. Verify Voyager Failure -> Fix Automatic Skill Synthesis
-    // Simulate a failed command followed by a successful fix in the same terminal session
-    hub.terminals.feed(
-      "sess-learn-1",
-      `\x1b]777;SSHS3;0123456789abcdef0123456789abcdef;BEGIN\x07multipath -ll\nerror: multipathd daemon not running or Stale file handle\n\x1b]777;SSHS3;0123456789abcdef0123456789abcdef;END;1;/etc\x07`, // pragma: allowlist secret
-    );
+    // A person runs a command that fails, then one that fixes it, in the same terminal. The shell's
+    // own integration marks (OSC 133;D) say how each ended. (A frame that only looks like sshs3's own,
+    // with a nonce this app never issued, is program output and teaches nothing.)
+    hub.terminals.observeHumanInput("sess-learn-1", "multipath -ll\r");
+    hub.terminals.feed("sess-learn-1", "error: multipathd daemon not running or Stale file handle\r\n\x1b]133;D;1\x07");
     await new Promise((r) => setTimeout(r, 30));
-    hub.terminals.feed(
-      "sess-learn-1",
-      `\x1b]777;SSHS3;fedcba9876543210fedcba9876543210;BEGIN\x07systemctl restart multipathd && multipath -r && multipath -ll\nmpathe (3600a098038314654) dm-2 NETAPP,LUN C-Mode\n\x1b]777;SSHS3;fedcba9876543210fedcba9876543210;END;0;/etc\x07`, // pragma: allowlist secret
-    );
+    hub.terminals.observeHumanInput("sess-learn-1", "systemctl restart multipathd && multipath -r && multipath -ll\r");
+    hub.terminals.feed("sess-learn-1", "mpathe (3600a098038314654) dm-2 NETAPP,LUN C-Mode\r\n\x1b]133;D;0\x07");
     await new Promise((r) => setTimeout(r, 40));
 
     const afterFixSnap = await hub.snapshot();

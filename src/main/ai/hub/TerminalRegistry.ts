@@ -12,6 +12,24 @@ import {
 } from "./shellAdapters";
 import { boundedContext } from "./privacy";
 
+/**
+ * Whether what the terminal last showed looks like a shell waiting for a
+ * command: a line ending in $, #, %, > or ❯, and not the prompt of a database
+ * client, a REPL or a pager. Nothing shown yet counts as a prompt: a terminal
+ * that was just opened.
+ */
+export function atShellPrompt(tail: string | undefined): boolean {
+  if (!tail) return true;
+  // eslint-disable-next-line no-control-regex -- matching terminal escape sequences is the point
+  const text = tail.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[()][A-Z0-9]/g, "");
+  const last = text.split(/\r?\n|\r/).filter((l) => l.trim()).at(-1) ?? "";
+  if (atSecretPrompt(last)) return false;
+  if (/^(mysql|mariadb|sqlite|redis|irb|pry|mongo|cqlsh|ftp|sftp|telnet|\(gdb\)|>>>|\.\.\.|In \[\d+\])/i.test(last.trim())) return false;
+  if (/^[\w-]+=[#>]\s*$/.test(last.trim())) return false; // psql: postgres=#
+  if (/(--More--|\(END\)|^:)\s*$/.test(last)) return false;
+  return /[$#%>❯»]\s*$/.test(last) || /^PS [A-Za-z]:\\.*>\s*$/.test(last.trim());
+}
+
 /** Whether the terminal is asking for a password, passphrase or token (and so not echoing what is typed). */
 export function atSecretPrompt(tail: string): boolean {
   // eslint-disable-next-line no-control-regex -- matching terminal escape sequences is the point
@@ -26,6 +44,9 @@ interface LiveTerminal {
   inputBuffer: string;
   /** The last bit the terminal showed, kept always: to tell a password prompt from a shell prompt. */
   tail?: string;
+  /** When connecting automatically last failed, and why: it is not tried again for a while. */
+  armFailedAt?: number;
+  armFailure?: string;
   lastSubmittedCommand?: string;
   lastSubmittedAt?: number;
   trimPostHandshakeNewline?: boolean;
@@ -168,6 +189,8 @@ export function classifyNotableCommand(
 /** Authoritative ownership lives beside the PTYs, never in React or in an LLM prompt. */
 export class TerminalRegistry extends EventEmitter {
   private sessions = new Map<string, LiveTerminal>();
+  /** The nonces of the commands this registry wrote, with the command: a late frame is known by them. */
+  private issued = new Map<string, string>();
   private lastFailures = new Map<string, TerminalCommandFailure>();
   private lastResolvedFailures = new Map<string, TerminalCommandFailure>();
   private observing = false;
@@ -323,18 +346,19 @@ export class TerminalRegistry extends EventEmitter {
     // 0. Check passive OSC 777;SSHS3;<nonce>;BEGIN ... END;<exitCode>;<cwd> frame
     const sshs3Match =
       // eslint-disable-next-line no-control-regex
-      /\x1b\]777;SSHS3;[a-f0-9]{32};BEGIN\x07([\s\S]*?)\x1b\]777;SSHS3;[a-f0-9]{32};END;([0-9]+);([^\x07]*)\x07/i.exec(
+      /\x1b\]777;SSHS3;([a-f0-9]{32});BEGIN\x07([\s\S]*?)\x1b\]777;SSHS3;([a-f0-9]{32});END;([0-9]+);([^\x07]*)\x07/i.exec(
         chunk,
       );
     if (sshs3Match) {
-      const body = sshs3Match[1] ?? "";
-      const code = Number(sshs3Match[2]);
-      const lines = body
-        .split(/\r?\n/)
-        .map((l) => l.trim())
-        .filter(Boolean);
-      const inferredCmd = lines[0] || s.lastSubmittedCommand || "";
-      const outSnippet = lines.slice(1).join("\n") || body;
+      // Only a frame this app wrote, for a command it ran (one that ended after its run let go of it).
+      // Anything else that looks like one is a program's output, and invents nothing.
+      const issued = this.issued.get(sshs3Match[1]);
+      if (!issued || sshs3Match[1] !== sshs3Match[3]) return;
+      this.issued.delete(sshs3Match[1]);
+      const body = sshs3Match[2] ?? "";
+      const code = Number(sshs3Match[4]);
+      const inferredCmd = issued;
+      const outSnippet = body;
       if (code !== 0) {
         this.lastResolvedFailures.delete(id);
         this.lastFailures.set(id, {
@@ -425,18 +449,7 @@ export class TerminalRegistry extends EventEmitter {
     }
   }
 
-  /** Called on ALL human write paths, including snippets and paste. */
-  humanWrite(id: string): void {
-    const s = this.sessions.get(id);
-    if (!s) return;
-    if (s.view.owner || s.pending)
-      throw new Error(
-        "AI owns this terminal. Choose Take control before typing.",
-      );
-    s.view.state = "unknown";
-  }
-
-  /**
+    /**
    * Collaborative human input observer used by the live terminal IPC bridge.
    * Never throws or revokes terminal readiness between AI turns, while still
    * allowing Ctrl+C takeover during an active framed AI command and detecting
@@ -445,12 +458,9 @@ export class TerminalRegistry extends EventEmitter {
   observeHumanInput(id: string, data: string): void {
     const s = this.sessions.get(id);
     if (!s || !data) return;
-    if (s.pending) {
-      if (data.includes("\x03")) {
-        this.takeover(id);
-      }
-      return;
-    }
+    // A person typing into a terminal an agent holds takes it back: the agent's run lets go at
+    // once, and what they typed goes through as typed (their own Ctrl-C included, and no second one).
+    if (s.pending || s.view.owner) this.takeover(id, { interrupt: false });
     // Strip ANSI escape sequences (arrow keys, function keys, bracketed paste markers)
     // eslint-disable-next-line no-control-regex -- matching terminal escape sequences is the point
     const cleaned = data.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "");
@@ -462,6 +472,13 @@ export class TerminalRegistry extends EventEmitter {
       } else if (ch === "\r" || ch === "\n") {
         const submitted = s.inputBuffer.trim();
         s.inputBuffer = "";
+        // What the person ran may have changed the shell (another program, another user, another host):
+        // the agent connects again at a prompt before it runs anything here.
+        if (s.view.state === "ready") {
+          s.view.state = "unknown";
+          s.view.generation = crypto.randomUUID();
+          this.emit("changed");
+        }
         // An answer to a password prompt is not a command: it is never kept, so it can
         // never be named as the command that failed, nor learned from.
         if (submitted && atSecretPrompt(s.tail ?? "")) {
@@ -494,6 +511,11 @@ export class TerminalRegistry extends EventEmitter {
       return { ...s.view };
     }
     if (s.pending) throw new Error("Terminal is currently busy");
+    if (s.armFailedAt && Date.now() - s.armFailedAt < 5 * 60_000)
+      throw new Error(s.armFailure ?? "This terminal did not answer like a shell a moment ago. Connect it at a prompt by hand.");
+    // The handshake is typed into the terminal: only where a shell is waiting, never into a running program.
+    if (!atShellPrompt(s.tail))
+      throw new Error("This terminal is not at a shell prompt (a program is running in it, or it is waiting for input). Leave it at a prompt, or connect it by hand.");
     const labelLower = s.view.label.toLowerCase();
     const outLower = s.output.toLowerCase();
     const inferredShell: ShellKind =
@@ -512,6 +534,11 @@ export class TerminalRegistry extends EventEmitter {
     s.view.owner = undefined;
     try {
       await this.arm(id, inferredShell);
+      s.armFailedAt = undefined;
+    } catch (error) {
+      s.armFailedAt = Date.now();
+      s.armFailure = `This terminal did not answer like a ${inferredShell} shell (${error instanceof Error ? error.message : String(error)}). sshs3 runs commands in bash, zsh, sh, fish and PowerShell; connect it by hand at such a prompt.`;
+      throw new Error(s.armFailure, { cause: error });
     } finally {
       if (prevOwner && !s.view.owner && s.view.state === "ready") {
         s.view.owner = prevOwner;
@@ -589,8 +616,15 @@ export class TerminalRegistry extends EventEmitter {
       throw new Error("Terminal is not ready for this command");
     if (!handshake && s.view.owner !== owner)
       throw new Error("Terminal ownership was revoked");
+    // Something half-typed at the prompt would run together with the command: never write over it.
+    if (!handshake && s.inputBuffer.trim())
+      throw new Error("Something is typed at the prompt of this terminal. Clear it, or take control, before the agent runs anything there.");
     const nonce = crypto.randomBytes(16).toString("hex");
     const envelope = commandEnvelope(s.view.shell, command, nonce);
+    if (!handshake) {
+      this.issued.set(nonce, command);
+      if (this.issued.size > 200) this.issued.delete(this.issued.keys().next().value as string);
+    }
     // The command as it was asked for, before the envelope around it: a recording marks it.
     if (!handshake) this.emit("executing", id, command, owner);
     s.view.state = "busy";
@@ -624,7 +658,12 @@ export class TerminalRegistry extends EventEmitter {
     return promise;
   }
 
-  takeover(id: string): void {
+  /**
+   * Gives the terminal back to the person. `interrupt`: stop what the agent is
+   * running (Ctrl-C), when the person asked for control with a button rather
+   * than by typing — their own keys, Ctrl-C included, go through by themselves.
+   */
+  takeover(id: string, options: { interrupt?: boolean } = {}): void {
     const s = this.require(id);
     const owner = s.view.owner;
     const running = Boolean(s.pending);
@@ -632,7 +671,7 @@ export class TerminalRegistry extends EventEmitter {
       id,
       "Control returned to the user. Inspect the terminal before resuming.",
     );
-    if (running) s.write("\x03");
+    if (running && options.interrupt !== false) s.write("\x03");
     if (owner) this.emit("takeover", owner);
   }
 

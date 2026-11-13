@@ -104,7 +104,7 @@ describe("native Hermes terminal authority", () => {
     expect(writes).toHaveLength(2);
     await post("end");
     expect(task.status).toBe("interrupted");
-    expect(() => terminals.humanWrite("one")).not.toThrow();
+    expect(() => terminals.observeHumanInput("one", "ls")).not.toThrow();
     expect((await post("begin", { platform: "desktop" })).body.result).toMatchObject({ bound: true, active: false });
     expect((await post("tool", { request: { action: "command", command: "echo retry" } })).status).toBe(400);
   });

@@ -127,13 +127,21 @@ describe("terminal ownership", () => {
     await terminals.arm("one", "bash");
     const generation = terminals.get("one")!.generation;
     terminals.claim("one", generation, "a");
-    expect(() => terminals.humanWrite("one")).toThrow();
     expect(() => terminals.claim("one", generation, "b")).toThrow();
-    terminals.takeover("one");
+    // A person typing into it takes it back: the agent can no longer run anything there.
+    terminals.observeHumanInput("one", "l");
+    expect(terminals.get("one")!.owner).toBeUndefined();
     expect(() =>
       terminals.execute("one", generation, "a", "echo unsafe"),
     ).toThrow();
-    expect(() => terminals.humanWrite("one")).not.toThrow();
+  });
+  it("never writes a command over what a person has half-typed at the prompt", async () => {
+    const { terminals } = terminal();
+    await terminals.arm("one", "bash");
+    terminals.observeHumanInput("one", "sudo systemctl sto");
+    const generation = terminals.get("one")!.generation;
+    terminals.claim("one", generation, "a");
+    expect(() => terminals.execute("one", generation, "a", "uptime")).toThrow(/typed at the prompt/);
   });
   it("preserves shell cwd after commands and requires a handshake after human input", async () => {
     const { terminals } = terminal();
@@ -144,7 +152,7 @@ describe("terminal ownership", () => {
       await terminals.execute("one", generation, "a", "pwd"),
     ).toMatchObject({ cwd: "/srv", exitCode: 0 });
     terminals.release("a");
-    terminals.humanWrite("one");
+    terminals.observeHumanInput("one", "sudo -i\r");
     expect(() => terminals.claim("one", generation, "a")).toThrow();
   });
   it("does not replay commands after a network failure", async () => {
