@@ -405,7 +405,7 @@ export class TerminalRegistry extends EventEmitter {
           label: s.view.label,
           command: s.lastSubmittedCommand || "",
           exitCode: code,
-          snippet: boundedContext(s.output.slice(-1500), 1500),
+          snippet: boundedContext(s.output.slice(-16_000), 1500),
           at: Date.now(),
         });
         this.emit("changed");

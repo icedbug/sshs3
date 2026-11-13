@@ -11,7 +11,13 @@ import {
   analyzeCommandSafety,
   shouldRequireCommandApproval,
 } from "./CommandSafetyService";
-import { boundedContext, exactHash, forApproval, safeError } from "./privacy";
+import { boundedContext, exactHash, forApproval, maskStrings, safeError } from "./privacy";
+
+/** A person's answer, and how it came about when nobody answered. */
+interface Answer {
+  allowed: boolean;
+  how: NonNullable<AgentChange["decidedHow"]>;
+}
 
 /** A changed service gets this long before a first failing look at its check counts. */
 const SETTLE_MS = 3000;
@@ -93,7 +99,7 @@ export class ToolBroker {
     string,
     {
       taskId: string;
-      resolve: (allowed: boolean) => void;
+      resolve: (answer: Answer) => void;
       timer: NodeJS.Timeout;
     }
   >();
@@ -134,7 +140,12 @@ export class ToolBroker {
       throw new Error("Approval expired or belongs to another task");
     clearTimeout(approval.timer);
     this.approvals.delete(changeId);
-    approval.resolve(allowed);
+    approval.resolve({ allowed, how: "person" });
+  }
+
+  /** Whether a run has a question out to a person. */
+  waitingOnPerson(taskId: string): boolean {
+    return [...this.approvals.values()].some((a) => a.taskId === taskId);
   }
 
   /**
@@ -146,12 +157,15 @@ export class ToolBroker {
     task.changes.push(change);
     task.status = "waiting";
     this.deps.changed();
-    const allowed = await this.waitForPerson(task, change.id);
-    const still = task.status === "waiting";
-    change.status = allowed && still ? "approved" : "denied";
-    if (still) task.status = "running";
+    const answer = await this.waitForPerson(task, change.id);
+    // Stopped while it waited: no answer lets it through. Otherwise the run waits on while
+    // another of its questions is still open (an external agent may ask several at once).
+    const still = task.status === "waiting" || task.status === "running";
+    change.status = answer.allowed && still ? "approved" : "denied";
+    change.decidedHow = still ? answer.how : "stopped";
+    if (still) task.status = this.waitingOnPerson(task.id) ? "waiting" : "running";
     this.deps.changed();
-    return allowed && still;
+    return answer.allowed && still;
   }
 
   /**
@@ -160,19 +174,19 @@ export class ToolBroker {
    * stood still, so an answer that takes twenty minutes does not find a
    * fifteen-minute run already dead.
    */
-  private async waitForPerson(task: AgentTask, changeId: string): Promise<boolean> {
+  private async waitForPerson(task: AgentTask, changeId: string): Promise<Answer> {
     const started = Date.now();
-    const allowed = await new Promise<boolean>((resolve) => {
+    const answer = await new Promise<Answer>((resolve) => {
       const timer = setTimeout(() => {
         this.approvals.delete(changeId);
-        resolve(false);
+        resolve({ allowed: false, how: "timeout" });
       }, this.deps.approvalWaitMs?.() ?? 10 * 60_000);
       this.approvals.set(changeId, { taskId: task.id, resolve, timer });
     });
     const waited = Date.now() - started;
     for (const grant of this.grants.values()) if (grant.task.id === task.id) grant.expiresAt += waited;
     this.deps.waited?.(task, waited);
-    return allowed;
+    return answer;
   }
 
   revoke(taskId: string): void {
@@ -182,7 +196,7 @@ export class ToolBroker {
       if (approval.taskId !== taskId) continue;
       clearTimeout(approval.timer);
       this.approvals.delete(id);
-      approval.resolve(false);
+      approval.resolve({ allowed: false, how: "stopped" });
     }
   }
 
@@ -629,6 +643,7 @@ export class ToolBroker {
       // An investigator looks and never changes: only what the classifier calls read-only, and nobody is asked.
       const readOnly = change.kind === "command" && change.riskLevel === "safe";
       change.status = readOnly ? "approved" : "denied";
+      change.decidedHow = "policy";
       this.deps.changed();
       if (!readOnly)
         throw new Error(
@@ -643,6 +658,7 @@ export class ToolBroker {
     // own rules is another matter: it is the person's to decide, and they are asked below.
     if (task.mode === "advice" && !change.guard) {
       change.status = "denied";
+      change.decidedHow = "policy";
       this.deps.changed();
       throw new Error("Advice mode does not execute commands or change files");
     }
@@ -677,6 +693,7 @@ export class ToolBroker {
         (change.riskLevel ?? "modify") !== "safe"
       ) {
         change.status = "denied";
+        change.decidedHow = "policy";
         this.deps.changed();
         throw new Error(
           "This target is production and you are running on your own: a change here must be made with sshs3_change, which carries the check that shows it worked and the rollback that takes it back.",
@@ -691,8 +708,10 @@ export class ToolBroker {
       change.kind === "command" &&
       !change.hiddenValues &&
       planCoversCommand(task, change.commandHash, change.riskLevel)
-    )
+    ) {
       requiresApproval = false;
+      change.decidedHow = "plan";
+    }
     // A change to the rules themselves is a person's to make: no mode, policy or plan lets it through unasked.
     if (change.guard) requiresApproval = true;
     // Asked for from outside sshs3: a person decides every one of these, even the
@@ -702,7 +721,9 @@ export class ToolBroker {
     if (requiresApproval) {
       task.status = "waiting";
       this.deps.changed();
-      const allowed = await this.waitForPerson(task, change.id);
+      const answer = await this.waitForPerson(task, change.id);
+      const allowed = answer.allowed;
+      change.decidedHow = answer.how;
       const grant = this.grants.get(key);
       if (
         !allowed ||
@@ -718,9 +739,15 @@ export class ToolBroker {
       task.status = "running";
     }
     const grant = this.grants.get(key);
-    if (!grant || Date.now() >= grant.expiresAt || task.status !== "running")
+    if (!grant || Date.now() >= grant.expiresAt || task.status !== "running") {
+      // Never left pending or approved: the run that asked is gone.
+      change.status = "denied";
+      change.decidedHow = "stopped";
+      this.deps.changed();
       throw new Error("Run capability revoked");
+    }
     change.status = "approved";
+    change.decidedHow ??= "policy";
     this.deps.changed();
   }
 
@@ -753,7 +780,8 @@ export class ToolBroker {
       const result = await this.invoke(key, input as ToolRequest);
       res
         .writeHead(200, { "Content-Type": "application/json" })
-        .end(JSON.stringify({ result }));
+        // Masked here, for every runtime that reaches tools this way: a file, a page or an output may hold a secret.
+        .end(JSON.stringify({ result: maskStrings(result) }));
     } catch (error) {
       res
         .writeHead(400, { "Content-Type": "application/json" })

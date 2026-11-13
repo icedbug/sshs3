@@ -55,7 +55,8 @@ export function inboxItems(hub: InboxInput): InboxItem[] {
           id: `approval:${change.id}`,
           kind: "approval",
           title: change.description || change.command || "An action",
-          detail: change.command && change.command !== change.description ? change.command : undefined,
+          // A file change shows what changes in it; a command shows the command.
+          detail: change.diff ?? (change.command && change.command !== change.description ? change.command : undefined),
           from: `${who} on ${change.target}`,
           at: change.at,
           since: change.at,

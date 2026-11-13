@@ -10,12 +10,14 @@ const RULES: { key: keyof SafetyPolicy; title: string; detail: string }[] = [
   {
     key: "requireApprovalOnProdTags",
     title: "Always ask before a change on production",
-    detail: "A command that changes something on a server tagged prod needs your approval, also in Auto mode.",
+    detail:
+      "On a server tagged prod, critical or production: when the assistant asks before commands, a change is always asked about. In Auto mode a bare command that changes something is refused there; a change has to come with its check and its rollback.",
   },
   {
     key: "blockDestructiveWithoutConfirm",
     title: "Stop destructive commands until reviewed",
-    detail: "Commands that delete or overwrite (rm -rf, mkfs, drop …) never run without an explicit approval.",
+    detail:
+      "Commands that are hard to take back — rm -r, mkfs, dd onto a disk, DROP DATABASE, kubectl delete of a namespace, terraform destroy, piping a download into sh — never run without an explicit approval, in any mode.",
   },
 ];
 
@@ -33,8 +35,15 @@ export function SafetyPolicyCard({ hub, act }: { hub: HubSnapshot; act: Act }): 
           <strong>Command safety</strong>
           <small>
             Before a command runs, each part of it is classified as read-only, changing or destructive — also inside
-            pipes, chains and subshells.
+            pipes, chains, subshells, bash -c and find -exec. What is not known to be read-only counts as changing.
+            These rules apply to runs on this computer; they are not shared with the team.
           </small>
+          {hub.safetyPolicyChanged && (
+            <small data-testid="safety-policy-changed">
+              Last changed by {hub.safetyPolicyChanged.by},{" "}
+              {new Date(hub.safetyPolicyChanged.at).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}.
+            </small>
+          )}
         </div>
       </div>
       <div className="ai-switches">

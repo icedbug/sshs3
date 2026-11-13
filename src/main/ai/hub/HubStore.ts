@@ -151,6 +151,8 @@ export interface HubData {
   /** Names this installation in ticket claims. */
   clientId?: string;
   safetyPolicy?: SafetyPolicyConfig;
+  /** Who last changed the safety policy here, and when. */
+  safetyPolicyChanged?: { by: string; at: number };
   selfLearningState?: PersistedSelfLearningState;
   localOverrides?: Record<string, LocalServerAuthOverride>;
   deletedServerIds?: Record<string, string>;

@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { app, Notification, powerMonitor } from "electron";
 import type {
+  SafetyPolicyConfig,
   AgentChange,
   AgentPlan,
   AgentUsage,
@@ -183,7 +184,7 @@ import { AuditLog } from "./AuditLog";
 import { LocalMcpServer } from "./LocalMcpServer";
 import { SessionRecorder } from "./SessionRecorder";
 import { McpTokenStore } from "../../web/McpTokenStore";
-import { boundedContext, clip, maskContext, safeError } from "./privacy";
+import { boundedContext, clip, maskContext, maskStrings, safeError } from "./privacy";
 import { createLogger } from "../../log";
 import { runWorkforce } from "./WorkforceRunner";
 import { LearningQueue } from "./LearningQueue";
@@ -259,6 +260,20 @@ const READ_ONLY_ACTIONS: ReadonlySet<HubRequest["action"]> = new Set<HubRequest[
   "server-facts-read",
   "inline-suggest",
 ]);
+/** The safety policy's switches as the screen names them. */
+const POLICY_NAMES: Record<keyof SafetyPolicyConfig, string> = {
+  autoApproveSafeReadOnly: "run read-only commands without asking",
+  requireApprovalOnProdTags: "always ask before a change on production",
+  blockDestructiveWithoutConfirm: "stop destructive commands until a person says yes",
+};
+/** How a change was let through or stopped when no person decided it, said for the log. */
+const DECIDED_HOW: Record<NonNullable<AgentChange["decidedHow"]>, string> = {
+  person: "a person",
+  policy: "the safety policy, without asking",
+  plan: "an approved plan that lists it",
+  timeout: "nobody: the question timed out",
+  stopped: "nobody: the run was stopped",
+};
 const active = (t: AgentTask): boolean =>
   ["queued", "running", "waiting"].includes(t.status);
 /** A run the hub started itself (workforce specialist, memory proposals). */
@@ -1620,6 +1635,7 @@ export class HubService {
       workforceRuns: this.getWorkforceRunsList(),
       infraEdges: allInfraEdges,
       safetyPolicy: this.store.data.safetyPolicy ?? DEFAULT_SAFETY_POLICY,
+      safetyPolicyChanged: this.store.data.safetyPolicyChanged,
       pendingLayoutEvent: this.pendingLayoutEvent,
       selfLearning: this.selfLearning.getStatus({
         memories: allMemories,
@@ -2987,6 +3003,17 @@ export class HubService {
             request.policy.blockDestructiveWithoutConfirm ??
             current.blockDestructiveWithoutConfirm,
         };
+        // Who loosened or tightened the rules, and from what to what, goes into the audit log.
+        const next = this.store.data.safetyPolicy;
+        const moved = (Object.keys(next) as (keyof SafetyPolicyConfig)[])
+          .filter((k) => next[k] !== current[k])
+          .map((k) => `${POLICY_NAMES[k]}: ${current[k] ? "on" : "off"} → ${next[k] ? "on" : "off"}`);
+        if (moved.length && !isDemoMode()) {
+          this.store.data.safetyPolicyChanged = { by: await this.resolveActorName(), at: Date.now() };
+          void this.audit()
+            .append({ kind: "setting", actor: await this.resolveActorName(), target: "sshs3 on this computer", what: `Safety policy: ${moved.join("; ")}`, outcome: "completed" })
+            .catch((e) => log.warn("Could not write to the audit log", safeError(e)));
+        }
         break;
       }
       case "mcp-save": {
@@ -4096,6 +4123,17 @@ export class HubService {
     for (const task of this.store.data.tasks) {
       if (task.distillSourceId) continue;
       for (const change of task.changes) {
+        // A run that has ended leaves nothing half-way: what was never answered was not allowed,
+        // and what was allowed but never reported back (an external agent's action) is not known.
+        if (!active(task) && (change.status === "pending" || change.status === "approved" || change.status === "running")) {
+          if (change.status === "pending") {
+            change.status = "denied";
+            change.decidedHow ??= "stopped";
+          } else {
+            change.status = "uncertain";
+            change.output ??= "The run ended without saying how this went. Look at the target to know.";
+          }
+        }
         // A change that carries its own proof gets its final status only after its check (and rollback) had their say.
         if (change.audited || !FINAL.has(change.status)) continue;
         change.audited = true;
@@ -4108,7 +4146,11 @@ export class HubService {
             what: change.command || change.description,
             outcome: rolledBack ? "rolled-back" : change.status,
             exitCode: change.exitCode,
-            approvedBy: change.decidedBy ? `${change.decidedBy.name} (${change.decidedBy.allowed ? "allowed" : "refused"})` : undefined,
+            approvedBy: change.decidedBy
+              ? `${change.decidedBy.name} (${change.decidedBy.allowed ? "allowed" : "refused"})`
+              : change.decidedHow && change.decidedHow !== "person"
+                ? DECIDED_HOW[change.decidedHow]
+                : undefined,
             taskId: task.id,
             changeId: change.id,
             detail: [
@@ -4243,12 +4285,10 @@ export class HubService {
         const analysis = question.command
           ? analyzeCommandSafety(question.command)
           : {
-              riskLevel: (["read", "search", "think", "fetch"].includes(question.kind ?? "")
-                ? "safe"
-                : question.kind === "delete"
-                  ? "destructive"
-                  : "modify") as AgentChange["riskLevel"] & string,
-              riskReason: `The agent asked to ${question.kind ?? "act"}`,
+              // What the agent calls its action is its own word, not a check: without a command to
+              // read, nothing is taken to be read-only.
+              riskLevel: (question.kind === "delete" ? "destructive" : "modify") as AgentChange["riskLevel"] & string,
+              riskReason: `The agent asked to ${question.kind ?? "act"}, and gave no command that could be checked`,
               parsedSubcommands: [],
             };
         const change: AgentChange = {
@@ -4256,7 +4296,8 @@ export class HubService {
           kind: "command",
           target: `${runner.name} in ${runner.cwd ?? "?"}`,
           description: boundedContext(question.title, 300),
-          command: question.command ? boundedContext(question.command, 4000) : undefined,
+          command: question.command ? maskContext(question.command) : undefined,
+          ...(question.command && maskContext(question.command) !== question.command ? { hiddenValues: true } : {}),
           status: "pending",
           riskLevel: analysis.riskLevel,
           riskReason: analysis.riskReason,
@@ -5180,6 +5221,13 @@ export class HubService {
   private armRunTimer(task: AgentTask, endsAt: number): void {
     this.clearRunTimer(task.id);
     const timer = setTimeout(() => {
+      // A run that is waiting for a person is not out of time: the wait is given back to it when
+      // the answer comes (`waited`). Until then it looks again a little later, at the same end.
+      if (this.broker.waitingOnPerson(task.id)) {
+        const again = setTimeout(() => this.armRunTimer(task, endsAt), 15_000);
+        this.runTimers.set(task.id, { timer: again, endsAt });
+        return;
+      }
       this.runTimers.delete(task.id);
       void this.stop(task, "Run time budget exhausted");
     }, Math.max(0, endsAt - Date.now()));
@@ -5622,11 +5670,17 @@ export class HubService {
     const removed = (this.store.data.sharedRemoved ??= {});
     let changed = false;
 
-    const agents = await sync.reconcile("agents", withRemovals(this.store.data.agents ?? [], removed.agents));
+    // What goes to the bucket is masked: a teammate (and every model their agents use) reads it.
+    const agents = await sync.reconcile("agents", withRemovals(maskStrings(this.store.data.agents ?? []), removed.agents));
     const a = splitRemovals(agents.items);
     removed.agents = a.removed;
     if (agents.changed) {
-      this.store.data.agents = a.alive as MissionAgent[];
+      // The masked copy went to the bucket; an agent that did not change there stays as it is here.
+      const ownAgents = new Map((this.store.data.agents ?? []).map((x) => [x.id, x]));
+      this.store.data.agents = (a.alive as MissionAgent[]).map((x) => {
+        const local = ownAgents.get(x.id);
+        return local && local.updatedAt === x.updatedAt ? local : x;
+      });
       changed = true;
     }
 
@@ -5636,7 +5690,7 @@ export class HubService {
     const kb = await sync.reconcile(
       "kb",
       withRemovals(
-        docs.filter((d) => d.shared !== false).map((d) => ({ ...d, chunks: [] })),
+        docs.filter((d) => d.shared !== false).map((d) => maskStrings({ ...d, chunks: [] })),
         removed.kb,
       ),
     );
@@ -6625,15 +6679,23 @@ export class HubService {
             : undefined;
       const actor = `${await this.resolveActorName()} (AI)`;
       const targetLabel = change.target || session?.label || task.title;
+      const how = change.rollback?.ran
+        ? change.rollback.restored === false
+          ? "rolled back, not as it was"
+          : "rolled back"
+        : change.status === "completed"
+          ? ""
+          : change.status;
       const event: WorkspaceActivityEvent = {
-        id: crypto.randomUUID(),
+        // Named after the change, so this computer's own Changes list shows it once, not twice.
+        id: `change-${change.id}`,
         at: Date.now(),
         actor,
         profileId: session?.profileId,
         targetLabel,
         kind: change.kind === "file" ? "config-edit" : "command",
         summary: boundedContext(
-          `${change.description}${change.exitCode !== undefined ? ` (exit ${change.exitCode})` : ""}`,
+          `${change.description}${how ? ` (${how})` : change.exitCode !== undefined && change.exitCode !== 0 ? ` (exit ${change.exitCode})` : ""}`,
           400,
         ),
         detail: change.command

@@ -18,21 +18,31 @@ export function maskSecrets(value: string): string {
     .replace(/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g, "[private key redacted]")
     // eslint-disable-next-line security/detect-unsafe-regex -- each repetition starts at a newline, so it cannot backtrack across lines
     .replace(/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----(?:\r?\n[A-Za-z0-9+/=]{8,})*/g, "[private key redacted]")
+    .replace(/-----BEGIN PGP PRIVATE KEY BLOCK-----[\s\S]*?(?:-----END PGP PRIVATE KEY BLOCK-----|$)/g, "[private key redacted]")
     .replace(/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g, "[redacted]")
     .replace(
-      /\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{12,})\b/g,
+      /\b(?:sk-[A-Za-z0-9_-]{12,}|sk_(?:live|test)_[A-Za-z0-9]{12,}|rk_(?:live|test)_[A-Za-z0-9]{12,}|gh[pousr]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{16,}|xox[abposr]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{30,}|npm_[A-Za-z0-9]{30,})\b/g,
       "[redacted]",
     )
-    .replace(/\bBearer\s+[^\s"']+/gi, "Bearer [redacted]")
+    // A JSON Web Token: three base64url parts, the first two starting with {"…
+    .replace(/\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, "[redacted]")
+    .replace(/\b(Bearer|Basic)\s+[^\s"']+/gi, "$1 [redacted]")
+    // kubeconfig keys and certificates' private halves, and a docker config's auth.
+    .replace(/\b((?:client-key|token)-data:\s*)\S+/g, "$1[redacted]")
+    .replace(/("auth"\s*:\s*")[^"]+"/g, '$1[redacted]"')
+    // A password given as a flag: --password x, --password=x, mysql -pSECRET.
+    .replace(/(--pass(?:word)?[= ])(?!\$\(|`)[^\s;&|]+/gi, "$1[redacted]")
+    .replace(/\b((?:mysql|mysqldump|mariadb|mysqladmin)\b[^\n;&|]*?\s-p)(?!\s)[^\s;&|]+/g, "$1[redacted]")
     // The runs before `://` and around the keyword are bounded: unbounded, each
     // start position scans to the end of a long unbroken run (base64, a hex
     // dump, minified JSON) and masking 30,000 such characters takes a second.
+    // The password in a URL, up to the last @ before the host (a password may hold @ and /).
     .replace(
-      /([a-z][a-z0-9+.-]{0,30}:\/\/[^\s/:@]{1,255}:)[^\s/@]+@/gi,
+      /([a-z][a-z0-9+.-]{0,30}:\/\/[^\s/:@]{1,255}:)[^\s]*@(?=[^\s@/]+(?:[/:?#\s]|$))/gi,
       "$1[redacted]@",
     )
     .replace(
-      /(["']?[\w-]{0,40}(?:password|passphrase|passwd|secret|token|api[_-]?key|credential)[\w-]{0,40}["']?\s*[:=]\s*)(?:"(?![^"\r\n]*(?:\$\(|`))[^"\r\n]*"|'[^'\r\n]*'|(?!\$\(|`)[^\s,;&|<>()`"']+)/gi,
+      /(["']?[\w-]{0,40}(?:password|passphrase|passwd|secret|token|api[_-]?key|credential|_pass|_pwd|^pwd|\bpwd)[\w-]{0,40}["']?\s*[:=]\s*)(?:"(?![^"\r\n]*(?:\$\(|`))[^"\r\n]*"|'[^'\r\n]*'|(?!\$\(|`)[^\s,;&|<>()`"']+)/gi,
       "$1[redacted]",
     );
 }
@@ -78,4 +88,20 @@ export function forApproval(raw: string, max: number, what: string): { text: str
       `The ${what} is too long to be shown in full for approval (${text.length} characters, at most ${max}). Make it shorter, or put it in a script on the server and run that.`,
     );
   return { text, hidden: text !== raw };
+}
+
+/**
+ * Every string inside a value, masked; the shape left as it was. For what
+ * leaves this computer as structured data (the team bucket, a runtime's tool
+ * results), where masking the JSON text itself could break its quoting.
+ */
+export function maskStrings<T>(value: T): T {
+  if (typeof value === "string") return maskContext(value) as T;
+  if (Array.isArray(value)) return value.map((v) => maskStrings(v)) as T;
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = maskStrings(v);
+    return out as T;
+  }
+  return value;
 }

@@ -223,6 +223,14 @@ export interface AgentChange {
     restored?: boolean;
     skipped?: string;
   };
+  /**
+   * How it came to be allowed or refused: a person said so (see `decidedBy`),
+   * the safety policy let it through or stopped it, an approved plan listed it,
+   * nobody answered in time, or the run was stopped while it waited.
+   */
+  decidedHow?: "person" | "policy" | "plan" | "timeout" | "stopped";
+  /** For a file: what changes, as a unified diff. */
+  diff?: string;
   /** Secrets in what is shown here were masked: the shown text is not the exact text that ran. */
   hiddenValues?: boolean;
   /** sha256 of the exact command that runs, so that what was approved can be matched exactly. */
@@ -1272,6 +1280,8 @@ export interface HubSnapshot {
   workforceRuns?: WorkforceRun[];
   infraEdges?: InfraGraphEdge[];
   safetyPolicy?: SafetyPolicyConfig;
+  /** Who last changed the safety policy on this computer, and when. */
+  safetyPolicyChanged?: { by: string; at: number };
   pendingLayoutEvent?: WorkspaceLayoutEvent;
   selfLearning?: SelfLearningStatus;
   contextBudget?: {

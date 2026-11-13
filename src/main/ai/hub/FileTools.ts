@@ -5,7 +5,11 @@ import type { IpcBridge } from "../../IpcBridge";
 import type { AgentChange, AgentTask } from "../../../shared/types/aiHub";
 import type { ToolRequest } from "./ToolBroker";
 import type { TerminalRegistry } from "./TerminalRegistry";
+import { createTwoFilesPatch } from "diff";
 import { clip, maskContext, safeError } from "./privacy";
+
+/** The longest file a model is shown whole, and so may rewrite whole: what fits in what a runtime passes on. */
+const MAX_WHOLE_FILE = 28_000;
 
 /** File providers are resolved from the bound live session, never from model-supplied host IDs. */
 export class FileTools {
@@ -140,9 +144,13 @@ export class FileTools {
     assertTarget();
     const hash = (text: string): string =>
       crypto.createHash("sha256").update(text).digest("hex");
+    // What a model is shown of a file: all of it, or it is told it saw only the start, and may not rewrite it.
     if (request.action === "file-read")
       return {
-        content: clip(before, 64_000),
+        content: clip(before, MAX_WHOLE_FILE),
+        ...(before.length > MAX_WHOLE_FILE
+          ? { complete: false, note: `Only the first ${MAX_WHOLE_FILE} of ${before.length} characters are shown. This file is too long to be rewritten whole through file_write; change it with a command in the terminal (sed, a patch) instead.` }
+          : {}),
         hash: hash(before),
         source: session.label + ":" + file,
         observedAt: Date.now(),
@@ -153,6 +161,10 @@ export class FileTools {
       request.expected !== hash(before)
     )
       throw new Error("Read this file first and provide its expected hash");
+    if (before.length > MAX_WHOLE_FILE)
+      throw new Error(
+        `This file is ${before.length} characters long; a file is rewritten through the model only when it could be read whole (at most ${MAX_WHOLE_FILE}). Change it with a command in the terminal instead.`,
+      );
     if (maskContext(before) !== before)
       throw new Error(
         "This file contains redacted secrets. Edit it in the terminal without asking the model to reproduce secrets.",
@@ -170,6 +182,8 @@ export class FileTools {
       description: clip(request.description ? `${file} — ${request.description}` : file, 300),
       before,
       after: request.content,
+      // What changes, line by line: what a person approves.
+      diff: createTwoFilesPatch(file, file, before, request.content, "now", "proposed", { context: 3 }),
       status: "pending",
       at: Date.now(),
     };
@@ -210,8 +224,16 @@ export class FileTools {
         verified: "file-content-only",
       };
     } catch (error) {
-      change.status = "uncertain";
-      change.output = safeError(error);
+      // A write that failed half-way leaves a file nobody wanted: put back what was there.
+      let restored: boolean;
+      try {
+        await this.bridge.fileEditorService.saveFile(this.bridge.storageRegistry, providerId, file, before);
+        restored = (await read()) === before;
+      } catch {
+        restored = false;
+      }
+      change.status = restored ? "failed" : "uncertain";
+      change.output = `${safeError(error)}\n${restored ? "The file was put back as it was." : "The file could not be put back as it was: look at it on the server."}`;
       task.verification = "incomplete";
       this.changed();
       throw error;

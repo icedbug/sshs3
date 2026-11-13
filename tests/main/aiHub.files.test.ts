@@ -244,3 +244,72 @@ describe("task-bound file changes", () => {
     }
   });
 });
+
+describe("what is approved of a file change, and what happens when the write fails", () => {
+  async function setup(initial: string) {
+    const terminals = new TerminalRegistry();
+    terminals.register({ id: "s", kind: "local", label: "local" }, (data) => {
+      const nonce = /SSHS3;([a-f0-9]{32});BEGIN/.exec(data)?.[1];
+      if (nonce) queueMicrotask(() => terminals.feed("s", `\x1b]777;SSHS3;${nonce};BEGIN\x07\x1b]777;SSHS3;${nonce};END;0;/\x07`));
+    });
+    await terminals.arm("s", process.platform === "win32" ? "powershell" : "bash");
+    const target = { sessionId: "s", generation: terminals.get("s")!.generation, label: "local" };
+    terminals.claim("s", target.generation, "t");
+    const task: AgentTask = { id: "t", title: "repair", target, mode: "assisted", status: "running", messages: [], changes: [], sources: [], createdAt: 1, updatedAt: 1, maxCommands: 10, maxMinutes: 5, verification: "not-verified" };
+    let content = initial;
+    let failNext = false;
+    const saveFile = vi.fn(async (_r, _p, _path, value: string) => {
+      if (failNext) {
+        failNext = false;
+        content = value.slice(0, 3); // half-written
+        throw new Error("connection lost");
+      }
+      content = value;
+    });
+    const host = {
+      storageRegistry: { has: () => true },
+      fileEditorService: { readFile: vi.fn(async () => ({ content, isBinary: false, truncated: false, notUtf8: false })), saveFile },
+    } as unknown as IpcBridge;
+    const tools = new FileTools(host, terminals, () => {});
+    const hash = crypto.createHash("sha256").update(initial).digest("hex");
+    return { terminals, task, tools, hash, current: () => content, failWrite: () => (failNext = true) };
+  }
+  const file = process.platform === "win32" ? "C:\\test.conf" : "/test.conf";
+
+  it("shows what changes as a diff, and keeps the path when the agent describes the change", async () => {
+    const { terminals, task, tools, hash } = await setup("a\nb\nc\n");
+    try {
+      await tools.invoke(task, { action: "file-write", path: file, expected: hash, content: "a\nB\nc\n", description: "fix b" }, async () => {
+        expect(task.changes[0].diff).toContain("-b\n+B");
+        expect(task.changes[0].description).toBe(`${file} — fix b`);
+      });
+    } finally {
+      terminals.dispose();
+    }
+  });
+
+  it("will not rewrite a file the model could not have read whole", async () => {
+    const long = "x".repeat(30_000);
+    const { terminals, task, tools, hash } = await setup(long);
+    try {
+      const read = (await tools.invoke(task, { action: "file-read", path: file }, async () => {})) as { complete?: boolean; content: string };
+      expect(read.complete).toBe(false);
+      await expect(tools.invoke(task, { action: "file-write", path: file, expected: hash, content: "short" }, async () => {})).rejects.toThrow(/could be read whole/);
+    } finally {
+      terminals.dispose();
+    }
+  });
+
+  it("puts the file back as it was when the write fails half-way", async () => {
+    const { terminals, task, tools, hash, current, failWrite } = await setup("original\n");
+    try {
+      failWrite();
+      await expect(tools.invoke(task, { action: "file-write", path: file, expected: hash, content: "replacement\n" }, async () => {})).rejects.toThrow("connection lost");
+      expect(current()).toBe("original\n");
+      expect(task.changes[0].status).toBe("failed");
+      expect(task.changes[0].output).toContain("put back as it was");
+    } finally {
+      terminals.dispose();
+    }
+  });
+});

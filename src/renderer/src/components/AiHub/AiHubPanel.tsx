@@ -1758,7 +1758,13 @@ export function AiHubPanel({
                           <pre>{item.change.command}</pre>
                         </div>
                       )}
-                      {item.change.kind === "file" && (
+                      {item.change.kind === "file" && item.change.diff && (
+                        <div className="ai-diff">
+                          <strong>What changes</strong>
+                          <pre>{item.change.diff}</pre>
+                        </div>
+                      )}
+                      {item.change.kind === "file" && !item.change.diff && (
                         <div className="ai-diff">
                           <strong>Before</strong>
                           <pre>{item.change.before}</pre>

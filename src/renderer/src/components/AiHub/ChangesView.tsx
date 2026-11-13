@@ -50,6 +50,24 @@ const STATUS_TONE: Record<AgentChange["status"], string> = {
   running: "",
 };
 
+/** Who let a change through or stopped it, and how, said plainly. */
+function decision(c: AgentChange): string {
+  const at = (t: number): string => new Date(t).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  if (c.decidedBy) return `${c.decidedBy.allowed ? "Allowed" : "Refused"} by ${c.decidedBy.name} at ${at(c.decidedBy.at)}`;
+  switch (c.decidedHow) {
+    case "policy":
+      return c.status === "denied" ? "Refused by the safety rules" : "Let through by the safety rules, without asking";
+    case "plan":
+      return "Let through without asking: an approved plan lists exactly this command";
+    case "timeout":
+      return "Not allowed: nobody answered in time";
+    case "stopped":
+      return "Not allowed: the run was stopped before anyone answered";
+    default:
+      return "";
+  }
+}
+
 const day = (at: number): string =>
   new Date(at).toLocaleDateString(undefined, {
     weekday: "long",
@@ -86,8 +104,10 @@ export function ChangesView({
   const [filter, setFilter] = useState("");
   const [limit, setLimit] = useState(60);
 
+  // This computer's own assistant changes are in the list once, with all they carry, not again as team activity.
+  const ownChanges = new Set(hub.tasks.flatMap((t) => t.changes.map((c) => `change-${c.id}`)));
   const entries: Entry[] = [
-    ...(hub.activityLog ?? []).map(
+    ...(hub.activityLog ?? []).filter((ev) => !ownChanges.has(ev.id)).map(
       (ev): Entry => ({
         id: `team-${ev.id}`,
         at: ev.at,
@@ -298,7 +318,13 @@ export function ChangesView({
                     <div className="ai-timeline-more">
                       {e.command && <pre>{e.command}</pre>}
                       {e.detail && <p>{e.detail}</p>}
-                      {c?.kind === "file" && c.before !== undefined && (
+                      {c?.kind === "file" && c.diff && (
+                      <>
+                        <small>What changed</small>
+                        <pre className="ai-diff">{c.diff}</pre>
+                      </>
+                    )}
+                    {c?.kind === "file" && !c.diff && c.before !== undefined && (
                         <>
                           <small>Before</small>
                           <pre>{c.before}</pre>
@@ -312,7 +338,8 @@ export function ChangesView({
                           <pre>{c.output}</pre>
                         </>
                       )}
-                      {c && <ChangeProof change={c} />}
+                      {c && decision(c) && <small data-testid="change-decision">{decision(c)}</small>}
+                    {c && <ChangeProof change={c} />}
                       {c?.riskReason && (
                         <small>Safety check: {c.riskReason}</small>
                       )}
