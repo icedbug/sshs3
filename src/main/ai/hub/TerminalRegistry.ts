@@ -12,11 +12,20 @@ import {
 } from "./shellAdapters";
 import { boundedContext } from "./privacy";
 
+/** Whether the terminal is asking for a password, passphrase or token (and so not echoing what is typed). */
+export function atSecretPrompt(tail: string): boolean {
+  // eslint-disable-next-line no-control-regex -- matching terminal escape sequences is the point
+  const last = tail.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "").split(/\r?\n|\r/).filter((l) => l.trim()).at(-1) ?? "";
+  return /(?:password|passphrase|passcode|pin|token|secret|otp|verification code)[^:]{0,60}:\s*$/i.test(last) || /^\[sudo\]/i.test(last.trim());
+}
+
 interface LiveTerminal {
   view: TerminalSession;
   write: (data: string) => void;
   output: string;
   inputBuffer: string;
+  /** The last bit the terminal showed, kept always: to tell a password prompt from a shell prompt. */
+  tail?: string;
   lastSubmittedCommand?: string;
   lastSubmittedAt?: number;
   trimPostHandshakeNewline?: boolean;
@@ -300,6 +309,7 @@ export class TerminalRegistry extends EventEmitter {
     if (this.observing && clean) {
       s.output = (s.output + clean).slice(-128_000);
     }
+    if (clean) s.tail = ((s.tail ?? "") + clean).slice(-240);
     this.detectHumanOutputFailure(id, s, clean);
     return clean;
   }
@@ -452,7 +462,12 @@ export class TerminalRegistry extends EventEmitter {
       } else if (ch === "\r" || ch === "\n") {
         const submitted = s.inputBuffer.trim();
         s.inputBuffer = "";
-        if (submitted) {
+        // An answer to a password prompt is not a command: it is never kept, so it can
+        // never be named as the command that failed, nor learned from.
+        if (submitted && atSecretPrompt(s.tail ?? "")) {
+          s.lastSubmittedCommand = undefined;
+          s.lastSubmittedAt = undefined;
+        } else if (submitted) {
           s.lastSubmittedCommand = submitted;
           s.lastSubmittedAt = Date.now();
           const classified = classifyNotableCommand(submitted);

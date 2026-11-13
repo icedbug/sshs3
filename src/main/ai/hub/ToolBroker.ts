@@ -11,7 +11,24 @@ import {
   analyzeCommandSafety,
   shouldRequireCommandApproval,
 } from "./CommandSafetyService";
-import { boundedContext, safeError } from "./privacy";
+import { boundedContext, exactHash, forApproval, safeError } from "./privacy";
+
+/** A changed service gets this long before a first failing look at its check counts. */
+const SETTLE_MS = 3000;
+
+/**
+ * Whether output shows what a check expects: as a whole word or phrase, not
+ * inside another word, so "inactive" does not pass for "active".
+ */
+export function showsExpected(output: string, expected: string): boolean {
+  const escaped = expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // The edge is only held to a word boundary where the expected text itself starts or ends with a word character.
+  const word = /[A-Za-z0-9_]/;
+  const left = word.test(expected[0] ?? "") ? "(?:^|[^A-Za-z0-9_-])" : "";
+  const right = word.test(expected.at(-1) ?? "") ? "(?:$|[^A-Za-z0-9_-])" : "";
+  // eslint-disable-next-line security/detect-non-literal-regexp -- every special character of `expected` is escaped above
+  return new RegExp(`${left}${escaped}${right}`, "m").test(output);
+}
 
 export interface ToolRequest {
   action: string;
@@ -326,6 +343,7 @@ export class ToolBroker {
         return await this.runChange(key, task, target, request);
 
       const safety = analyzeCommandSafety(request.command);
+      const shown = forApproval(request.command!, 16_000, "command");
       const change: AgentChange = {
         id: crypto.randomUUID(),
         kind: "command",
@@ -333,7 +351,9 @@ export class ToolBroker {
         description: boundedContext(
           request.description || "Run terminal command",
         ),
-        command: boundedContext(request.command, 16_000),
+        command: shown.text,
+        ...(shown.hidden ? { hiddenValues: true } : {}),
+        commandHash: exactHash(request.command!.trim()),
         status: "pending",
         riskLevel: safety.riskLevel,
         riskReason: safety.riskReason,
@@ -387,11 +407,16 @@ export class ToolBroker {
   wait: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
   /**
-   * A change that carries its own proof and its own way back. The check is
-   * looked at before, the change runs after the usual approval, and the check
-   * has to pass afterwards and keep passing for the observation time. If it
-   * does not, the rollback runs at once, once, and the agent is told what
-   * happened instead of being left to notice.
+   * A change that carries its own proof and its own way back. Nothing runs
+   * before the change is approved: then the check is looked at (how things
+   * stand right before), the change runs, and the check has to pass afterwards
+   * and keep passing for the observation time. If it does not, the rollback
+   * runs at once, once, and the agent is told what happened instead of being
+   * left to notice.
+   *
+   * What it can prove is said as it is: a check that already passed before
+   * the change does not show the change did anything, and a rollback that
+   * exits 0 has only "taken it back" when the check reads as it did before.
    */
   private async runChange(
     key: string,
@@ -408,10 +433,16 @@ export class ToolBroker {
     if (!rollback) throw new Error("A change needs a rollback: the command that takes it back.");
     if (analyzeCommandSafety(checkCommand).riskLevel !== "safe")
       throw new Error("The check must only look: it is run before and after the change, and again after a rollback.");
+    // Shown in full or refused: the person approves the change, its check and its rollback as one.
+    const shown = {
+      command: forApproval(command, 16_000, "command"),
+      check: forApproval(checkCommand, 2000, "check"),
+      expected: forApproval(expected, 400, "expected output"),
+      rollback: forApproval(rollback, 4000, "rollback"),
+    };
     const run = (c: string) => this.terminals.execute(target.sessionId, target.generation, task.id, c);
-    const passes = (r: { exitCode: number; output: string }): boolean => r.exitCode === 0 && r.output.includes(expected);
+    const passes = (r: { exitCode: number; output: string }): boolean => r.exitCode === 0 && showsExpected(r.output, expected);
 
-    const before = await run(checkCommand);
     const safety = analyzeCommandSafety(command);
     const undo = analyzeCommandSafety(rollback);
     // Approved as one thing: the worse of the change and its way back decides how it is treated.
@@ -423,13 +454,15 @@ export class ToolBroker {
       kind: "command",
       target: target.label,
       description: boundedContext(request.description || "Make a change"),
-      command: boundedContext(command, 16_000),
+      command: shown.command.text,
+      commandHash: exactHash(command.trim()),
+      ...(Object.values(shown).some((x) => x.hidden) ? { hiddenValues: true } : {}),
       status: "pending",
       riskLevel: worst.riskLevel,
       riskReason: worst.riskReason,
       parsedSubcommands: safety.parsedSubcommands,
-      check: { command: boundedContext(checkCommand, 2000), expected: boundedContext(expected, 400), before: passes(before) },
-      rollback: { command: boundedContext(rollback, 4000) },
+      check: { command: shown.check.text, expected: shown.expected.text },
+      rollback: { command: shown.rollback.text },
       ref: nextRef(task),
       at: Date.now(),
     };
@@ -437,26 +470,58 @@ export class ToolBroker {
     await this.authorize(key, task, change);
     change.status = "running";
     this.deps.changed();
+
+    // How things stand right before the change: looked at only now that it may run.
+    let before: boolean;
     try {
-      const result = await run(command);
+      before = passes(await run(checkCommand));
+    } catch (error) {
+      change.status = "failed";
+      change.output = `The check could not be run before the change, so the change was not made: ${safeError(error)}`;
+      change.check = { ...change.check!, skipped: "the change was not made" };
+      change.rollback = { ...change.rollback!, skipped: "the change was not made" };
+      task.verification = "incomplete";
+      this.deps.changed();
+      throw error;
+    }
+    change.check = { ...change.check!, before };
+    this.deps.changed();
+
+    let result: { exitCode: number; output: string } | undefined;
+    let last: { exitCode: number; output: string } | undefined;
+    try {
+      result = await run(command);
       change.exitCode = result.exitCode;
       change.output = result.output;
       const observeMs = Math.max(0, Math.min(180, Math.round(request.observeSeconds ?? 0))) * 1000;
-      const until = Date.now() + observeMs;
-      let last = result;
-      let ok = result.exitCode === 0;
-      while (ok) {
-        last = await run(checkCommand);
-        ok = passes(last);
-        const left = until - Date.now();
-        if (!ok || left <= 0) break;
-        await this.wait(Math.min(10_000, left));
+      let ok = false;
+      if (result.exitCode === 0) {
+        const until = Date.now() + observeMs;
+        let looks = 0;
+        for (;;) {
+          last = await run(checkCommand);
+          ok = passes(last);
+          looks++;
+          // A service that was just restarted is given a moment before the first look counts against it.
+          if (!ok && looks === 1) {
+            await this.wait(SETTLE_MS);
+            last = await run(checkCommand);
+            ok = passes(last);
+          }
+          const left = until - Date.now();
+          if (!ok || left <= 0) break;
+          await this.wait(Math.min(10_000, left));
+        }
+        change.check = { ...change.check!, after: ok, output: boundedContext(last.output, 2000) };
+      } else {
+        change.check = { ...change.check!, skipped: `the change command itself failed (exit ${result.exitCode})` };
       }
-      change.check = { ...change.check!, after: ok, output: boundedContext(last.output, 2000) };
-      this.deps.activity?.(task, change, target.sessionId);
       if (ok) {
         change.status = "completed";
-        task.verification = "verified";
+        // Passing afterwards proves the change only when it did not pass before.
+        task.verification = before ? "not-verified" : "verified";
+        // Told to the team (and to learning) only once its outcome is known.
+        this.deps.activity?.(task, change, target.sessionId);
         this.deps.changed();
         return {
           id: change.id,
@@ -464,49 +529,95 @@ export class ToolBroker {
           exitCode: result.exitCode,
           output: result.output,
           checkPassed: true,
-          checkPassedBefore: change.check.before,
+          checkPassedBefore: before,
           observedSeconds: observeMs / 1000,
+          ...(before
+            ? {
+                note: "The check already passed before the change, so passing now does not show that the change did anything. Do not report it as proven: say what else shows it, or that it is not shown.",
+              }
+            : {}),
         };
       }
-      // The change did not hold: take it back now, once.
-      let undone: { exitCode: number; output: string };
-      try {
-        undone = await run(rollback);
-      } catch (error) {
-        undone = { exitCode: -1, output: safeError(error) };
+      // A change command that failed, where the check reads as before and did not pass then: nothing to take back.
+      if (result.exitCode !== 0 && !before) {
+        const now = await run(checkCommand).catch(() => undefined);
+        if (now && !passes(now)) {
+          change.status = "failed";
+          change.rollback = { ...change.rollback!, skipped: "the change failed and the check reads as it did before, so there was nothing to take back" };
+          task.verification = "incomplete";
+          this.deps.activity?.(task, change, target.sessionId);
+          this.deps.changed();
+          return {
+            id: change.id,
+            exitCode: result.exitCode,
+            output: result.output,
+            checkPassed: false,
+            rolledBack: false,
+            next: "The change command failed and nothing seems to have changed. Find out why it failed before trying again.",
+          };
+        }
       }
-      let checkAfter: boolean | undefined;
-      try {
-        checkAfter = passes(await run(checkCommand));
-      } catch {
-        checkAfter = undefined;
-      }
-      change.rollback = { command: change.rollback!.command, ran: true, exitCode: undone.exitCode, output: boundedContext(undone.output, 2000), checkAfter };
-      change.status = "failed";
-      task.verification = "incomplete";
-      this.deps.changed();
-      return {
-        id: change.id,
-        exitCode: result.exitCode,
-        output: result.output,
-        checkPassed: false,
-        checkOutput: last.output,
-        rolledBack: undone.exitCode === 0,
-        rollbackExitCode: undone.exitCode,
-        rollbackOutput: undone.output,
-        checkPassesAfterRollback: checkAfter,
-        next:
-          undone.exitCode === 0
-            ? "The change did not pass its check and was rolled back. Do not make the same change again: find out why the check failed first."
-            : "The change did not pass its check, and the rollback failed too. Stop making changes. Report exactly this state to the person, with the outputs above.",
-      };
     } catch (error) {
+      // The terminal was taken from the run (stop, takeover, timeout) while the change or its check ran.
+      // Nothing more can be run on it, so the rollback does not run: say so, and say what it would have been.
       change.status = "uncertain";
-      change.output = safeError(error);
+      change.output = [result?.output, safeError(error)].filter(Boolean).join("\n");
+      if (change.check && change.check.after === undefined)
+        change.check = { ...change.check, skipped: change.check.skipped ?? "the run lost the terminal before the check had its say" };
+      change.rollback = {
+        ...change.rollback!,
+        skipped: "the run lost the terminal before the change was shown to hold; look at the server, and run the rollback yourself if it is needed",
+      };
       task.verification = "incomplete";
       this.deps.changed();
       throw error;
     }
+
+    // The change did not hold: take it back now, once.
+    let undone: { exitCode: number; output: string };
+    try {
+      undone = await run(rollback);
+    } catch (error) {
+      undone = { exitCode: -1, output: safeError(error) };
+    }
+    let checkAfter: boolean | undefined;
+    try {
+      checkAfter = passes(await run(checkCommand));
+    } catch {
+      checkAfter = undefined;
+    }
+    // Taken back means: the rollback ran, and the check reads as it did before the change.
+    const restored = undone.exitCode === 0 && checkAfter !== undefined ? checkAfter === before : undefined;
+    change.rollback = {
+      command: change.rollback!.command,
+      ran: true,
+      exitCode: undone.exitCode,
+      output: boundedContext(undone.output, 2000),
+      checkAfter,
+      ...(restored !== undefined ? { restored } : {}),
+    };
+    change.status = "failed";
+    task.verification = "incomplete";
+    this.deps.activity?.(task, change, target.sessionId);
+    this.deps.changed();
+    return {
+      id: change.id,
+      exitCode: result.exitCode,
+      output: result.output,
+      checkPassed: false,
+      checkOutput: last?.output,
+      rolledBack: undone.exitCode === 0,
+      rollbackExitCode: undone.exitCode,
+      rollbackOutput: undone.output,
+      checkPassesAfterRollback: checkAfter,
+      backAsBefore: restored,
+      next:
+        undone.exitCode !== 0
+          ? "The change did not pass its check, and the rollback failed too. Stop making changes. Report exactly this state to the person, with the outputs above."
+          : restored === false
+            ? "The change did not pass its check. The rollback ran, but the check does not read as it did before the change. Stop making changes and report this state to the person."
+            : "The change did not pass its check and was rolled back. Do not make the same change again: find out why the check failed first.",
+    };
   }
 
   private async authorize(
@@ -578,7 +689,8 @@ export class ToolBroker {
     if (
       requiresApproval &&
       change.kind === "command" &&
-      planCoversCommand(task, change.command, change.riskLevel)
+      !change.hiddenValues &&
+      planCoversCommand(task, change.commandHash, change.riskLevel)
     )
       requiresApproval = false;
     // A change to the rules themselves is a person's to make: no mode, policy or plan lets it through unasked.

@@ -7,7 +7,7 @@ import type {
 } from "../../../shared/types/aiHub";
 import { APP_OPS, type AppOpClass } from "./AppGuard";
 import { analyzeCommandSafety } from "./CommandSafetyService";
-import { boundedContext } from "./privacy";
+import { boundedContext, exactHash } from "./privacy";
 
 /**
  * Plan first, then act. For a change that is risky or that the user asked to
@@ -92,6 +92,7 @@ export function parsePlan(
     const rollback = text(s.rollback, 500);
     if (risk !== "low" && !rollback)
       return { error: `Step ${n} ("${action.slice(0, 60)}") is ${risk} risk and has no rollback` };
+    const rawCommand = typeof s.command === "string" ? s.command.trim() : "";
     const command = text(s.command, 2000);
     // A command that deletes or overwrites is never "low risk", whatever the plan calls it.
     if (command && risk === "low" && analyzeCommandSafety(command).riskLevel === "destructive")
@@ -100,7 +101,7 @@ export function parsePlan(
     steps.push({
       action,
       ...(target ? { target } : {}),
-      ...(command ? { command } : {}),
+      ...(command ? { command, commandHash: exactHash(rawCommand) } : {}),
       risk,
       check,
       ...(rollback ? { rollback } : {}),
@@ -267,16 +268,14 @@ export function planGate(
  */
 export function planCoversCommand(
   task: AgentTask,
-  command: string | undefined,
+  commandHash: string | undefined,
   riskLevel: string | undefined,
   now = Date.now(),
 ): boolean {
-  if (task.plan?.status !== "approved" || !command) return false;
+  if (task.plan?.status !== "approved" || !commandHash) return false;
   if (riskLevel === "destructive") return false;
-  const wanted = command.trim();
-  const step = task.plan.steps.find(
-    (s) => !s.ranAt && s.command?.trim() === wanted,
-  );
+  // Matched on the exact command, never on how it looks once its secrets are masked.
+  const step = task.plan.steps.find((s) => !s.ranAt && s.commandHash === commandHash);
   if (!step) return false;
   step.ranAt = now;
   return true;

@@ -1,3 +1,4 @@
+import { exactHash } from "../../src/main/ai/hub/privacy";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -222,8 +223,10 @@ describe("tool authority", () => {
 
     // 2. A change whose check fails afterwards: the rollback runs, once, and the agent is told.
     run.mockClear();
-    answer("worker_processes 4;");
+    // The site answered before the change; the new config breaks it (also after a moment to settle).
+    answer("200");
     answer("");
+    answer("502 Bad Gateway", 22);
     answer("502 Bad Gateway", 22);
     answer("restored");
     answer("200 OK");
@@ -236,7 +239,7 @@ describe("tool authority", () => {
     })) as Record<string, unknown>;
     expect(bad).toMatchObject({ checkPassed: false, rolledBack: true, checkPassesAfterRollback: true });
     expect(String(bad.next)).toContain("Do not make the same change again");
-    expect(t.changes[1]).toMatchObject({ status: "failed", check: { after: false }, rollback: { ran: true, exitCode: 0, checkAfter: true } });
+    expect(t.changes[1]).toMatchObject({ status: "failed", check: { before: true, after: false }, rollback: { ran: true, exitCode: 0, checkAfter: true, restored: true } });
     expect(run.mock.calls.map((c) => c[3]).slice(-2)).toEqual([
       "cp /etc/nginx/nginx.conf.bak /etc/nginx/nginx.conf && systemctl reload nginx",
       "curl -fsS -o /dev/null -w '%{http_code}' http://localhost/",
@@ -246,6 +249,7 @@ describe("tool authority", () => {
     run.mockClear();
     answer("ok");
     answer("");
+    answer("down", 1);
     answer("down", 1);
     answer("cannot restore", 1);
     answer("down", 1);
@@ -307,7 +311,7 @@ describe("tool authority", () => {
     t.plan = {
       id: "p",
       goal: "say hi",
-      steps: [{ action: "Say hi", command: "echo hi", risk: "low", check: "prints hi" }],
+      steps: [{ action: "Say hi", command: "echo hi", commandHash: exactHash("echo hi"), risk: "low", check: "prints hi" }],
       status: "proposed",
       revision: 1,
       review: { verdict: "approve", findings: [] },

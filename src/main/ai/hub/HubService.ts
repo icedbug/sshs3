@@ -3952,24 +3952,35 @@ export class HubService {
         }
       : { action: "command" as const, command, description: input.description || command, id: session.id };
     // Not awaited: the answer is "it is waiting", and the agent asks again.
-    void this.broker
+    let settled: { error?: unknown } | undefined;
+    const running = this.broker
       .invoke(capability.key, request as never)
       .then(() => {
-        task.status = "completed";
+        // Done is not the same as worked: a change that failed its check, or was taken back, did not.
+        task.status = task.changes[0]?.status === "completed" ? "completed" : "failed";
+        settled = {};
       })
       .catch((error) => {
         task.status = "failed";
         task.error = safeError(error);
+        settled = { error };
       })
       .finally(() => {
         task.updatedAt = Date.now();
         this.broker.revoke(task.id);
         this.changed();
       });
-    // The change the broker made for it, once it exists.
-    for (let i = 0; i < 100 && task.changes.length === 0; i++) await new Promise((r) => setTimeout(r, 20));
+    // The change the broker made for it, once it exists: getting the terminal ready can take a while.
+    const until = Date.now() + 20_000;
+    while (task.changes.length === 0 && !settled && Date.now() < until) await new Promise((r) => setTimeout(r, 20));
     const change = task.changes[0];
-    if (!change) throw new Error("The command could not be prepared.");
+    if (!change) {
+      if (settled?.error) throw settled.error instanceof Error ? settled.error : new Error(String(settled.error));
+      // Still not ready after this long: it is called off, so that asking again does not leave two behind.
+      this.broker.revoke(task.id);
+      await running;
+      throw new Error("The terminal did not get ready in time. Nothing has run; ask again in a moment.");
+    }
     this.changed();
     return { changeId: change.id, taskId: task.id, status: change.status };
   }
@@ -4085,9 +4096,8 @@ export class HubService {
     for (const task of this.store.data.tasks) {
       if (task.distillSourceId) continue;
       for (const change of task.changes) {
+        // A change that carries its own proof gets its final status only after its check (and rollback) had their say.
         if (change.audited || !FINAL.has(change.status)) continue;
-        // A change that carries its own proof is final only once its check has had its say.
-        if (change.check && change.check.after === undefined && change.status !== "denied") continue;
         change.audited = true;
         const rolledBack = Boolean(change.rollback?.ran);
         void this.audit()
@@ -4103,8 +4113,15 @@ export class HubService {
             changeId: change.id,
             detail: [
               change.riskLevel ? `risk: ${change.riskLevel}` : "",
-              change.check ? `check ${change.check.after ? "passed" : "failed"}: ${change.check.command}` : "",
-              rolledBack ? `taken back with: ${change.rollback!.command}` : "",
+              change.check
+                ? `check ${change.check.after === true ? (change.check.before ? "passed (it already passed before)" : "passed") : change.check.after === false ? "failed" : `not looked at (${change.check.skipped ?? "unknown"})`}: ${change.check.command}`
+                : "",
+              rolledBack
+                ? `taken back with: ${change.rollback!.command}${change.rollback!.restored === false ? " (the check does not read as before)" : ""}`
+                : change.rollback?.skipped
+                  ? `rollback not run: ${change.rollback.skipped}`
+                  : "",
+              change.hiddenValues ? "secrets in it were masked here" : "",
               change.ref ? `ref ${change.ref}` : "",
             ]
               .filter(Boolean)
@@ -6593,8 +6610,15 @@ export class HubService {
         : task.target
           ? this.terminals.get(task.target.sessionId)
           : undefined;
+      // Only a command that is shown to have worked may be learned as the fix for a failure.
+      // A change with its own check counts only when the check passed and had not passed before:
+      // otherwise the "failure" before it is its own failed check, and the change is what broke it.
+      const provenFix =
+        change.kind === "command" &&
+        change.exitCode === 0 &&
+        (!change.check || (change.status === "completed" && change.check.after === true && change.check.before === false));
       const activeFailure =
-        session && change.kind === "command" && change.exitCode === 0
+        session && provenFix
           ? this.terminals.consumeResolvedFailure(session.id)
           : session
             ? this.terminals.failures()[session.id]

@@ -26,7 +26,7 @@ import {
   mcpCatalog,
 } from "./demoWorkspace";
 import { isDemoTarget } from "../../demo/demoMode";
-import { boundedContext, safeError } from "./privacy";
+import { boundedContext, exactHash, forApproval, safeError } from "./privacy";
 
 import {
   requiredText,
@@ -1359,6 +1359,8 @@ export async function handleAppAction(
           : matchedServers.map((s) => s.name).join(", ");
 
         const safety = analyzeCommandSafety(command);
+        // Shown in full for approval or refused: it runs on every node exactly as written.
+        const shown = forApproval(command, 8000, "command");
         const change: AgentChange = {
           id: crypto.randomUUID(),
           kind: "command",
@@ -1366,7 +1368,9 @@ export async function handleAppAction(
           description: boundedContext(
             `[Parallel Cluster Exec · ${matchedServers.length} nodes] ${description}`,
           ),
-          command: boundedContext(command, 8000),
+          command: shown.text,
+          ...(shown.hidden ? { hiddenValues: true } : {}),
+          commandHash: exactHash(command.trim()),
           status: "pending",
           riskLevel: safety.riskLevel,
           riskReason: safety.riskReason,
@@ -1387,9 +1391,8 @@ export async function handleAppAction(
               .find(
                 (t) =>
                   t.state !== "disconnected" &&
-                  (t.profileId === srv.id ||
-                    t.label.toLowerCase() === srv.name.toLowerCase() ||
-                    t.label.toLowerCase().includes(srv.name.toLowerCase())),
+                  // This node's own terminal and no other: "web-1" must not find "web-10".
+                  (t.profileId === srv.id || t.label.toLowerCase() === srv.name.toLowerCase()),
               );
             if (openSession) {
               try {
@@ -1410,12 +1413,13 @@ export async function handleAppAction(
                   source: `terminal:${ready.id}`,
                 };
               } catch (err) {
+                // Not "failed": a timeout or a lost terminal leaves it unknown whether it ran.
                 return {
                   node: srv.name,
                   host: srv.host,
                   nodeRole: srv.nodeRole,
-                  exitCode: 1,
-                  output: safeError(err),
+                  exitCode: -1,
+                  output: `Unknown whether it ran: ${safeError(err)}`,
                   source: `terminal:${openSession.id}`,
                 };
               }
@@ -1454,8 +1458,8 @@ export async function handleAppAction(
                   node: srv.name,
                   host: srv.host,
                   nodeRole: srv.nodeRole,
-                  exitCode: 1,
-                  output: safeError(err),
+                  exitCode: -1,
+                  output: `Unknown whether it ran: ${safeError(err)}`,
                   source: `ssh:${srv.id}`,
                 };
               }
@@ -1472,7 +1476,8 @@ export async function handleAppAction(
         );
 
         const allOk = perNodeResults.every((r) => r.exitCode === 0);
-        change.status = allOk ? "completed" : "failed";
+        const unknown = perNodeResults.some((r) => r.exitCode === -1);
+        change.status = allOk ? "completed" : unknown ? "uncertain" : "failed";
         change.exitCode = allOk ? 0 : 1;
         change.output = perNodeResults
           .map(

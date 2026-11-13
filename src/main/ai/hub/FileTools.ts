@@ -157,13 +157,19 @@ export class FileTools {
       throw new Error(
         "This file contains redacted secrets. Edit it in the terminal without asking the model to reproduce secrets.",
       );
+    // What is approved is what is written: new content that would be shown masked is refused like an old one.
+    if (maskContext(request.content) !== request.content)
+      throw new Error(
+        "The new content contains something that looks like a secret, and it would be shown masked to the person approving it. Write the secret on the server yourself, not through the model.",
+      );
     const change: AgentChange = {
       id: crypto.randomUUID(),
       kind: "file",
       target: session.label,
-      description: clip(request.description || file, 300),
+      // The path is always kept, whatever the agent says the change is.
+      description: clip(request.description ? `${file} — ${request.description}` : file, 300),
       before,
-      after: clip(request.content, 64_000),
+      after: request.content,
       status: "pending",
       at: Date.now(),
     };

@@ -69,6 +69,8 @@ export interface AgentPlanStep {
   check: string;
   /** How to undo it. Required for medium and high risk. */
   rollback?: string;
+  /** sha256 of the exact command as proposed: a plan covers that command and no other. */
+  commandHash?: string;
   /** Set when an approved plan's command has run without asking again. */
   ranAt?: number;
 }
@@ -201,9 +203,30 @@ export interface AgentChange {
    * On a change that carries its own proof: the read-only check that shows it
    * worked, and whether it passed before and after.
    */
-  check?: { command: string; expected: string; before?: boolean; after?: boolean; output?: string };
-  /** The command that takes the change back, and what happened if it had to run. */
-  rollback?: { command: string; ran?: boolean; exitCode?: number; output?: string; checkAfter?: boolean };
+  /**
+   * `before`: whether the check already passed before the change (then passing
+   * afterwards does not show that the change did it). `skipped`: why the check
+   * was never looked at after the change.
+   */
+  check?: { command: string; expected: string; before?: boolean; after?: boolean; output?: string; skipped?: string };
+  /**
+   * The command that takes the change back, and what happened if it had to run.
+   * `restored`: after the rollback the check reads as it did before the change.
+   * `skipped`: why it did not run although the change did not hold.
+   */
+  rollback?: {
+    command: string;
+    ran?: boolean;
+    exitCode?: number;
+    output?: string;
+    checkAfter?: boolean;
+    restored?: boolean;
+    skipped?: string;
+  };
+  /** Secrets in what is shown here were masked: the shown text is not the exact text that ran. */
+  hiddenValues?: boolean;
+  /** sha256 of the exact command that runs, so that what was approved can be matched exactly. */
+  commandHash?: string;
   at: number;
 }
 export interface AgentTask {
