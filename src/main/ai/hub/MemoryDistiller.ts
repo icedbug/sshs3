@@ -4,7 +4,7 @@ import type {
   MemoryProposal,
   WorkspaceActivityEvent,
 } from "../../../shared/types/aiHub";
-import { boundedContext } from "./privacy";
+import { boundedContext, clip } from "./privacy";
 
 /**
  * Turns what happened (a finished agent task, a stretch of team activity) into
@@ -36,7 +36,7 @@ export function taskTranscript(task: AgentTask): string {
   for (const message of task.messages) {
     if (message.role === "system" || !message.text.trim()) continue;
     lines.push(
-      `${message.role === "user" ? "User" : "Assistant"}: ${boundedContext(message.text, 4000)}`,
+      `${message.role === "user" ? "User" : "Assistant"}: ${clip(message.text, 4000)}`,
     );
   }
   for (const change of task.changes) {
@@ -46,13 +46,13 @@ export function taskTranscript(task: AgentTask): string {
           ? change.status
           : `exit ${change.exitCode}`;
       lines.push(
-        `Command on ${change.target}: ${boundedContext(change.command, 600)} → ${result}`,
+        `Command on ${change.target}: ${clip(change.command, 600)} → ${result}`,
       );
       if (change.output?.trim())
         lines.push(`  output: ${boundedContext(change.output, 500)}`);
     } else if (change.kind === "file") {
       lines.push(
-        `File change on ${change.target}: ${boundedContext(change.description, 300)} (${change.status})`,
+        `File change on ${change.target}: ${clip(change.description, 300)} (${change.status})`,
       );
     }
   }
@@ -62,7 +62,7 @@ export function taskTranscript(task: AgentTask): string {
     lines.push("Hypotheses at the end of the run:");
     for (const h of task.hypotheses) {
       lines.push(`- [${h.status}] ${h.text}`);
-      for (const e of h.evidence) lines.push(`    ${e.supports ? "for" : "against"}: ${boundedContext(e.text, 300)}`);
+      for (const e of h.evidence) lines.push(`    ${e.supports ? "for" : "against"}: ${clip(e.text, 300)}`);
     }
   }
   return boundedContext(lines.join("\n"), 24_000);
@@ -79,11 +79,11 @@ export function confirmedSomething(transcript: string): boolean {
 
 /** A stretch of the team's activity log, oldest first. */
 export function activityTranscript(events: WorkspaceActivityEvent[]): string {
-  return boundedContext(
+  return clip(
     [...events]
       .sort((a, b) => a.at - b.at)
       .map((e) =>
-        `[${clock(e.at)}] ${e.actor} on ${e.targetLabel} (${e.kind}): ${boundedContext(e.summary, 400)}${e.commandOrPath ? ` — ${boundedContext(e.commandOrPath, 300)}` : ""}`,
+        `[${clock(e.at)}] ${e.actor} on ${e.targetLabel} (${e.kind}): ${clip(e.summary, 400)}${e.commandOrPath ? ` — ${clip(e.commandOrPath, 300)}` : ""}`,
       )
       .join("\n"),
     24_000,
@@ -112,7 +112,7 @@ export function buildDistillPrompt(
       : existing
           .map(
             (m) =>
-              `- id=${m.id} [${m.kind}, scope ${m.scope}] ${m.title}: ${boundedContext(m.text, 500)}`,
+              `- id=${m.id} [${m.kind}, scope ${m.scope}] ${m.title}: ${clip(m.text, 500)}`,
           )
           .join("\n");
   return [
@@ -179,10 +179,10 @@ export function parseDistillAnswer(
     if (!text || !evidence) continue;
     const base = {
       id: `prop-${now.toString(36)}-${out.length}-${Math.random().toString(36).slice(2, 8)}`,
-      text: boundedContext(text, 4000),
-      evidence: boundedContext(evidence, 600),
+      text: clip(text, 4000),
+      evidence: clip(evidence, 600),
       sourceId: source.id,
-      sourceTitle: boundedContext(source.title, 160),
+      sourceTitle: clip(source.title, 160),
       createdAt: now,
     };
     if (p.op === "update") {
@@ -199,7 +199,7 @@ export function parseDistillAnswer(
         targetId: target.id,
         kind: target.kind,
         scope: target.scope,
-        title: boundedContext(title, 200),
+        title: clip(title, 200),
         previousText: target.text,
       });
     } else if (p.op === "add") {
@@ -211,7 +211,7 @@ export function parseDistillAnswer(
         op: "add",
         kind: p.kind === "skill" ? "skill" : "memory",
         scope,
-        title: boundedContext(title, 200),
+        title: clip(title, 200),
       });
     }
   }

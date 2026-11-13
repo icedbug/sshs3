@@ -5,7 +5,7 @@ import type { IpcBridge } from "../../IpcBridge";
 import type { AgentChange, AgentTask } from "../../../shared/types/aiHub";
 import type { ToolRequest } from "./ToolBroker";
 import type { TerminalRegistry } from "./TerminalRegistry";
-import { boundedContext, maskContext, safeError } from "./privacy";
+import { clip, maskContext, safeError } from "./privacy";
 
 /** File providers are resolved from the bound live session, never from model-supplied host IDs. */
 export class FileTools {
@@ -142,7 +142,7 @@ export class FileTools {
       crypto.createHash("sha256").update(text).digest("hex");
     if (request.action === "file-read")
       return {
-        content: boundedContext(before, 64_000),
+        content: clip(before, 64_000),
         hash: hash(before),
         source: session.label + ":" + file,
         observedAt: Date.now(),
@@ -161,9 +161,9 @@ export class FileTools {
       id: crypto.randomUUID(),
       kind: "file",
       target: session.label,
-      description: boundedContext(request.description || file),
+      description: clip(request.description || file, 300),
       before,
-      after: boundedContext(request.content, 64_000),
+      after: clip(request.content, 64_000),
       status: "pending",
       at: Date.now(),
     };

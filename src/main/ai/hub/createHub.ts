@@ -19,7 +19,7 @@ import type {
 } from "../../../shared/types/storage";
 import type { TeamVaultPayload } from "../../../shared/types/teamVault";
 import type { InventoryTarget } from "./ContextService";
-import { boundedContext, maskContext, safeError } from "./privacy";
+import { boundedContext, clip, maskContext, safeError } from "./privacy";
 import {
   appendDemoActivity,
   deleteDemoMemory,
@@ -267,11 +267,11 @@ export function createHub(
       if (res.isBinary || res.notUtf8) {
         throw new Error(`File "${remotePath}" is binary or non-UTF8`);
       }
-      return boundedContext(maskContext(res.content), 64_000);
+      return clip(maskContext(res.content), 64_000);
     }
     if (typeof provider.readFile === "function") {
       const buf = await provider.readFile(remotePath);
-      return boundedContext(maskContext(buf.toString("utf-8")), 64_000);
+      return clip(maskContext(buf.toString("utf-8")), 64_000);
     }
     const stream = await provider.createReadStream(remotePath);
     const chunks: Buffer[] = [];

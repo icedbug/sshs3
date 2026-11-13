@@ -7,7 +7,7 @@ import type {
   WorkTicketStatus,
   WorkforceTemplateSummary,
 } from "../../../shared/types/aiHub";
-import { boundedContext } from "./privacy";
+import { clip } from "./privacy";
 
 /**
  * The team's board: goals, tickets hanging on them, and agents that take
@@ -148,15 +148,15 @@ export function ticketPrompt(
     `You were woken to work one ticket from the team's board. Ticket ${ticket.id}: ${ticket.title}`,
     "",
     goal
-      ? `It serves this goal: ${goal.title}${goal.description ? ` — ${boundedContext(goal.description, 800)}` : ""}`
+      ? `It serves this goal: ${goal.title}${goal.description ? ` — ${clip(goal.description, 800)}` : ""}`
       : "It is not tied to a goal.",
     parent ? `It was split off from the ticket "${parent.title}".` : "",
     ticket.target ? `It concerns: ${ticket.target}` : "",
     "",
     "## What to do",
-    boundedContext(ticket.description || ticket.title, 6000),
+    clip(ticket.description || ticket.title, 6000),
     notes.length ? "\n## Notes on the ticket (oldest first)" : "",
-    ...notes.map((n) => `- ${n.author}: ${boundedContext(n.text, 800)}`),
+    ...notes.map((n) => `- ${n.author}: ${clip(n.text, 800)}`),
     "",
     "## How to work it",
     `You are ${ctx.agent.name}${boss ? `, reporting to ${boss.name}` : ""}.`,
@@ -181,7 +181,7 @@ export function ticketAfterRun(ticket: WorkTicket, task: AgentTask, now = Date.n
   return {
     ...ticket,
     status: ok ? "review" : "blocked",
-    result: boundedContext(
+    result: clip(
       ok
         ? report || "The run ended without a report."
         : `The run ${task.status === "failed" ? "failed" : "stopped"}: ${task.error || report || "no reason was given."}`,
@@ -199,7 +199,7 @@ export function withComment(ticket: WorkTicket, author: string, text: string, no
     ...ticket,
     comments: [
       ...(ticket.comments ?? []),
-      { id: `c-${now.toString(36)}-${Math.random().toString(36).slice(2, 7)}`, at: now, author, text: boundedContext(text, 4000) },
+      { id: `c-${now.toString(36)}-${Math.random().toString(36).slice(2, 7)}`, at: now, author, text: clip(text, 4000) },
     ].slice(-40),
     updatedAt: now,
   };

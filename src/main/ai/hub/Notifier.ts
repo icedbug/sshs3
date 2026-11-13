@@ -5,7 +5,7 @@ import https from "node:https";
 import net from "node:net";
 import type { InboxItem, InboxKind } from "../../../shared/aiHubInbox";
 import type { NotifyChannelKind } from "../../../shared/types/aiHub";
-import { boundedContext } from "./privacy";
+import { clip } from "./privacy";
 
 /** What a channel can be told about. Knowledge base findings are not urgent enough to push to a phone. */
 export const NOTIFY_KINDS: InboxKind[] = ["approval", "plan", "question", "blocked", "alert", "health", "review", "report"];
@@ -104,24 +104,21 @@ const HEADLINE: Record<InboxKind, string> = {
 };
 const RISK: Record<string, string> = { safe: "read-only", modify: "changes the system", destructive: "destructive" };
 
-const clip = (text: string | undefined, max: number): string => {
-  const clean = boundedContext(text ?? "", max * 4).replace(/\[earlier output omitted\]\n/, "").trim();
-  return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
-};
+const shorten = (text: string | undefined, max: number): string => clip((text ?? "").trim(), max);
 
 /** The lines of one item, plain: every channel builds on these. */
 function lines(item: NotifyItem, channel: Pick<NotifyChannel, "includeCommand">, context: NotifyContext): { head: string; body: string[]; command?: string } {
   const where = [item.from, item.target && !item.from?.includes(item.target) ? `on ${item.target}` : ""].filter(Boolean).join(" ");
-  const head = `${item.reminder ? "Still waiting: " : ""}${item.headline ?? HEADLINE[item.kind]}${where ? ` — ${clip(where, 80)}` : ""}`;
+  const head = `${item.reminder ? "Still waiting: " : ""}${item.headline ?? HEADLINE[item.kind]}${where ? ` — ${shorten(where, 80)}` : ""}`;
   const body: string[] = [];
-  const command = channel.includeCommand && item.command ? clip(item.command, 600) : undefined;
-  if (item.title && item.title !== item.command) body.push(clip(item.title, 200));
+  const command = channel.includeCommand && item.command ? shorten(item.command, 600) : undefined;
+  if (item.title && item.title !== item.command) body.push(shorten(item.title, 200));
   else if (!command && item.command) body.push("A command (its text is not sent to this channel).");
-  if (item.detail && item.detail !== item.command && item.kind !== "approval") body.push(clip(item.detail, 300));
-  if (item.risk && item.kind === "approval") body.push(`Risk: ${RISK[item.risk] ?? item.risk}${item.reason ? ` (${clip(item.reason, 140)})` : ""}`);
+  if (item.detail && item.detail !== item.command && item.kind !== "approval") body.push(shorten(item.detail, 300));
+  if (item.risk && item.kind === "approval") body.push(`Risk: ${RISK[item.risk] ?? item.risk}${item.reason ? ` (${shorten(item.reason, 140)})` : ""}`);
   if ((item.kind === "alert" || item.kind === "health") && item.risk) body.push(`Severity: ${item.risk}`);
-  if (channel.includeCommand && item.check) body.push(`Check: ${clip(item.check, 160)}`);
-  if (channel.includeCommand && item.rollback) body.push(`Way back: ${clip(item.rollback, 160)}`);
+  if (channel.includeCommand && item.check) body.push(`Check: ${shorten(item.check, 160)}`);
+  if (channel.includeCommand && item.rollback) body.push(`Way back: ${shorten(item.rollback, 160)}`);
   if (item.waitsMinutes && ["approval", "plan", "question"].includes(item.kind))
     body.push(`The agent waits ${item.waitsMinutes} min${context.owner ? ` for ${context.owner}` : ""}.`);
   else if (context.owner && ["approval", "plan", "question"].includes(item.kind)) body.push(`Waiting for ${context.owner}.`);
@@ -150,7 +147,7 @@ export function renderNotification(channel: NotifyChannel, items: NotifyItem[], 
     ? single.body
     : items.slice(0, 12).map((item) => {
         const l = lines(item, channel, context);
-        return `${l.head}${item.title && item.title !== item.command ? `: ${clip(item.title, 120)}` : ""}`;
+        return `${l.head}${item.title && item.title !== item.command ? `: ${shorten(item.title, 120)}` : ""}`;
       });
   if (!single && items.length > 12) rows.push(`…and ${items.length - 12} more`);
   const json = { "Content-Type": "application/json" };
@@ -229,12 +226,12 @@ export function renderNotification(channel: NotifyChannel, items: NotifyItem[], 
     items: items.map((item) => ({
       id: item.id,
       kind: item.kind,
-      title: clip(item.title, 300),
-      detail: item.detail ? clip(item.detail, 600) : undefined,
+      title: shorten(item.title, 300),
+      detail: item.detail ? shorten(item.detail, 600) : undefined,
       from: item.from,
       target: item.target,
       risk: item.risk,
-      command: channel.includeCommand && item.command ? clip(item.command, 2000) : undefined,
+      command: channel.includeCommand && item.command ? shorten(item.command, 2000) : undefined,
       link: item.link,
       reminder: item.reminder || undefined,
     })),
@@ -425,7 +422,7 @@ export async function deliver(
       last = { ok: false, status, error: `The channel answered ${status}` };
       if (status < 500 && status !== 429) return last;
     } catch (error) {
-      last = { ok: false, error: boundedContext(error instanceof Error ? error.message : String(error), 200) };
+      last = { ok: false, error: clip(error instanceof Error ? error.message : String(error), 200) };
     }
     if (attempt < waits.length) await sleep(waits[attempt]);
   }

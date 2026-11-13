@@ -6,7 +6,7 @@ import type {
   WorkTicket,
   WorkspaceActivityEvent,
 } from "../../../shared/types/aiHub";
-import { boundedContext } from "./privacy";
+import { clip } from "./privacy";
 
 /**
  * What happened in the last day, put together from what the workspace
@@ -58,11 +58,11 @@ export function buildDailyReport(input: {
   section(
     "Went wrong",
     [
-      ...rolledBack.map((x) => `${x.who} on ${x.c.target}: ${boundedContext(x.c.description, 120)} — its check failed and it was ${x.c.rollback!.exitCode === 0 ? "rolled back" : "NOT rolled back (the rollback failed)"}`),
-      ...failed.slice(0, 6).map((x) => `${x.who} on ${x.c.target}: ${boundedContext(x.c.description, 120)} — ${x.c.status}${x.c.exitCode !== undefined ? `, exit ${x.c.exitCode}` : ""}`),
+      ...rolledBack.map((x) => `${x.who} on ${x.c.target}: ${clip(x.c.description, 120)} — its check failed and it was ${x.c.rollback!.exitCode === 0 ? "rolled back" : "NOT rolled back (the rollback failed)"}`),
+      ...failed.slice(0, 6).map((x) => `${x.who} on ${x.c.target}: ${clip(x.c.description, 120)} — ${x.c.status}${x.c.exitCode !== undefined ? `, exit ${x.c.exitCode}` : ""}`),
       ...recent(input.tickets.filter((t) => t.status === "blocked"), (t) => t.updatedAt)
         .slice(0, 6)
-        .map((t) => `Ticket “${t.title}” stopped: ${boundedContext(t.result ?? "no reason recorded", 160)}`),
+        .map((t) => `Ticket “${t.title}” stopped: ${clip(t.result ?? "no reason recorded", 160)}`),
     ],
   );
 
@@ -70,13 +70,13 @@ export function buildDailyReport(input: {
   const [okRows, okMore] = cap(ok, 8);
   section(
     "Changed by agents",
-    okRows.map((x) => `${x.who} on ${x.c.target}: ${boundedContext(x.c.description, 120)}${x.c.check?.after ? " (check passed)" : ""}`),
+    okRows.map((x) => `${x.who} on ${x.c.target}: ${clip(x.c.description, 120)}${x.c.check?.after ? " (check passed)" : ""}`),
     okMore,
   );
 
   const team = recent(input.activity, (a) => a.at).filter((a) => a.kind !== "ai-action");
   const [teamRows, teamMore] = cap(team, 8);
-  section("Changed by the team", teamRows.map((a) => `${a.actor} on ${a.targetLabel}: ${boundedContext(a.summary, 140)}`), teamMore);
+  section("Changed by the team", teamRows.map((a) => `${a.actor} on ${a.targetLabel}: ${clip(a.summary, 140)}`), teamMore);
 
   const done = recent(input.tickets.filter((t) => t.status === "done" && !t.alert), (t) => t.updatedAt);
   const [doneRows, doneMore] = cap(done, 8);

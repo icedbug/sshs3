@@ -4,7 +4,7 @@ import type {
   WorkforceRun,
   WorkforceStep,
 } from "../../../shared/types/aiHub";
-import { boundedContext, safeError } from "./privacy";
+import { boundedContext, clip, safeError } from "./privacy";
 
 /** The outcome of one specialist's model run. */
 export interface SpecialistResult {
@@ -82,7 +82,7 @@ export function synthesisPrompt(
 ): string {
   const reports = steps.map((s) =>
     s.status === "completed"
-      ? `## ${s.agentName} (${s.targetCluster || s.role})\n${boundedContext(s.findings, 12_000)}`
+      ? `## ${s.agentName} (${s.targetCluster || s.role})\n${clip(s.findings, 12_000)}`
       : `## ${s.agentName} (${s.targetCluster || s.role})\nNO REPORT — this specialist failed: ${s.error ?? "unknown error"}`,
   );
   return [
@@ -119,15 +119,15 @@ export async function runWorkforce(
       agentIcon: agent.icon || "🤖",
       role: agent.role,
       targetCluster: cluster && cluster !== "ALL" ? cluster : undefined,
-      subTask: boundedContext(request.prompt, 400),
+      subTask: clip(request.prompt, 400),
       status: "queued",
       findings: "",
     };
   });
   const run: WorkforceRun = {
     id: runId,
-    title: boundedContext(request.prompt, 90),
-    prompt: boundedContext(request.prompt, 2000),
+    title: clip(request.prompt, 90),
+    prompt: clip(request.prompt, 2000),
     leadAgentName: "Workforce lead",
     targetCluster: request.targetCluster || "ALL",
     status: "running",

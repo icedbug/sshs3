@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import type { MissionAgent, WorkspaceServerSummary } from "../../../shared/types/aiHub";
-import { boundedContext } from "./privacy";
+import { clip } from "./privacy";
 
 /**
  * Alerts from outside (Alertmanager, Grafana, PagerDuty, or any JSON a
@@ -46,7 +46,7 @@ function stringMap(value: unknown): Record<string, string> {
   if (value && typeof value === "object")
     for (const [k, v] of Object.entries(value as Record<string, unknown>).slice(0, 40)) {
       const s = str(v);
-      if (s) out[k] = boundedContext(s, 300);
+      if (s) out[k] = clip(s, 300);
     }
   return out;
 }
@@ -71,11 +71,11 @@ function fromAlertmanager(a: Record<string, unknown>, source: string): IncomingA
   if (!title) return undefined;
   return {
     fingerprint: str(a.fingerprint) || hash(JSON.stringify(Object.entries(labels).sort())),
-    title: boundedContext(title, 200),
+    title: clip(title, 200),
     severity: severityOf(labels.severity || labels.priority || ""),
     status: str(a.status).toLowerCase() === "resolved" ? "resolved" : "firing",
     subjects: subjectsOf(labels),
-    text: boundedContext(
+    text: clip(
       [annotations.description || annotations.message, labels.alertname && labels.alertname !== title ? `Alert: ${labels.alertname}` : "", str(a.generatorURL)]
         .filter(Boolean)
         .join("\n"),
@@ -111,11 +111,11 @@ export function parseAlerts(body: unknown): IncomingAlert[] {
     return [
       {
         fingerprint: str(data.id) || hash(title),
-        title: boundedContext(title, 200),
+        title: clip(title, 200),
         severity: severityOf(str(data.urgency) || str((data.priority as Record<string, unknown> | undefined)?.summary)),
         status: /resolved/.test(str(event.event_type)) ? "resolved" : "firing",
         subjects: service ? [service] : [],
-        text: boundedContext([service ? `Service: ${service}` : "", str(data.html_url)].filter(Boolean).join("\n"), 2000),
+        text: clip([service ? `Service: ${service}` : "", str(data.html_url)].filter(Boolean).join("\n"), 2000),
         source: "PagerDuty",
         labels: service ? { service } : {},
       },
@@ -129,11 +129,11 @@ export function parseAlerts(body: unknown): IncomingAlert[] {
   return [
     {
       fingerprint: str(b.fingerprint) || str(b.id) || str(b.incident_key) || hash(`${title}|${subjectsOf(labels).join(",")}`),
-      title: boundedContext(title, 200),
+      title: clip(title, 200),
       severity: severityOf(str(b.severity) || str(b.priority) || str(b.level)),
       status: /resolved|ok\b|recovered|closed/.test(status) ? "resolved" : "firing",
       subjects: subjectsOf(labels),
-      text: boundedContext([str(b.description) || str(b.message) || str(b.text) || str(b.body), str(b.url)].filter(Boolean).join("\n"), 2000),
+      text: clip([str(b.description) || str(b.message) || str(b.text) || str(b.body), str(b.url)].filter(Boolean).join("\n"), 2000),
       source: str(b.source) || "Alert",
       labels,
     },

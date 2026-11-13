@@ -21,11 +21,13 @@ const ALLOWED: Record<string, string> = {
   "src/main/ai/hub/KnowledgeBaseService.ts": "search synonyms: a team may write and ask in Swedish, and the tokenizer keeps å, ä, ö",
   "src/main/ai/hub/KbCompile.ts": "the tokenizer keeps å, ä, ö and ü",
   "src/main/ai/hub/KbLint.ts": "the same tokenizer, for the words of a page's title",
+  "src/main/ai/hub/hubHelpers.ts": "recognises the Swedish words a user may type in the terminal (utrymme, fel)",
 };
 
 const LETTERS = /[åäöÅÄÖ]/;
 // Swedish that has none of those letters. Whole words only, and only words that are not also English.
-const WORDS = /\b(och|inte|eller|kunde|saknar|ogiltig|ogiltigt|sparad|sparat|kopierad|misslyckades|lyckades|uppdrag|anledning|tidigare|notering|kontrollerar|verifierad|verifierat|visar|kopplad|synka|kluster|felaktigt|vald|valda|klar|klart|avbryt|spara|redigera)\b/i;
+const WORDS =
+  /\b(och|inte|eller|kunde|saknar|saknas|ogiltig|ogiltigt|sparad|sparat|kopierad|misslyckades|lyckades|uppdrag|anledning|tidigare|notering|kontrollerar|verifierad|verifierat|visar|kopplad|synka|kluster|felaktigt|vald|valda|klar|klart|avbryt|spara|redigera|inloggad|utloggad|anv[a\u00e4]ndare|l[o\u00f6]senord|nyckel|servrar|hittades|beh[o\u00f6]righet|fel(?:meddelande)?|ingen|inga|m[a\u00e5]ste)\b/i;
 
 function sources(dir: string, out: string[] = []): string[] {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {

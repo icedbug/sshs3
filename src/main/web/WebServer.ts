@@ -529,7 +529,7 @@ export class Sshs3WebServer {
     if (pathname.startsWith('/api/')) {
       const user = await this.authenticateRequest(req);
       if (!user) {
-        sendJson(res, 401, { error: 'Ej inloggad' });
+        sendJson(res, 401, { error: 'Not signed in' });
         return;
       }
 
@@ -669,7 +669,7 @@ export class Sshs3WebServer {
         }
       }
 
-      sendJson(res, 404, { error: 'Endpoint saknas' });
+      sendJson(res, 404, { error: 'No such endpoint' });
       return;
     }
 
