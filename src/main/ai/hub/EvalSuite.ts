@@ -21,6 +21,14 @@ import { boundedContext } from "./privacy";
 /** Tools the run keeps for itself; they are not answered from a recording. */
 const LOCAL_TOOLS = new Set(["todo_write", "sshs3_hypotheses"]);
 
+/**
+ * Tools that are not answered from the recording but asked for real. The
+ * knowledge base is what a test is usually about: changing a page must change
+ * what the replay sees, or the test cannot tell whether the page helped.
+ * Reading it changes nothing on any system.
+ */
+export const LIVE_TOOLS = new Set(["sshs3_kb_search"]);
+
 const norm = (s: string): string => s.toLowerCase().replace(/\s+/g, " ").trim();
 const tokens = (s: string): Set<string> => new Set(norm(s).split(/[^a-z0-9_./:-]+/).filter((w) => w.length > 1));
 
@@ -41,7 +49,7 @@ export function caseFromTask(
     agentId: task.agentId,
     fromTaskId: task.id,
     recorded: (task.toolLog ?? [])
-      .filter((r) => !LOCAL_TOOLS.has(r.name))
+      .filter((r) => !LOCAL_TOOLS.has(r.name) && !LIVE_TOOLS.has(r.name))
       .map((r) => ({ name: r.name, input: r.input, output: r.output })),
     expect: normalizeExpectation(input.expect),
     runs: [],
@@ -78,7 +86,16 @@ export function normalizeExpectation(e: Partial<EvalExpectation> | undefined): E
 export class Replay {
   private used = new Set<number>();
   unrecorded = 0;
+  /** Tool calls the replay let through to the workspace, by name. */
+  live: Record<string, number> = {};
   constructor(private readonly recorded: EvalCase["recorded"]) {}
+
+  /** Whether this call is asked for real instead of answered from the recording. */
+  isLive(name: string): boolean {
+    if (!LIVE_TOOLS.has(name)) return false;
+    this.live[name] = (this.live[name] ?? 0) + 1;
+    return true;
+  }
 
   answer(name: string, input: string): string {
     const wanted = tokens(input);
@@ -160,6 +177,8 @@ export function evalRun(input: {
   task: Pick<AgentTask, "status" | "error" | "messages" | "toolLog" | "usage" | "model">;
   checks: EvalCheck[];
   unrecorded: number;
+  /** Tool calls that were asked for real instead of replayed, by name. */
+  live?: Record<string, number>;
   now?: number;
 }): EvalRun {
   const answer = [...input.task.messages].reverse().find((m) => m.role === "assistant" && m.text.trim())?.text ?? "";
@@ -176,6 +195,7 @@ export function evalRun(input: {
     answer: boundedContext(answer, 4000),
     calls: (input.task.toolLog ?? []).map((r) => ({ name: r.name, input: boundedContext(r.input, 300) })),
     unrecorded: input.unrecorded,
+    ...(input.live && Object.keys(input.live).length ? { live: input.live } : {}),
     tokens: (input.task.usage?.inputTokens ?? 0) + (input.task.usage?.outputTokens ?? 0),
   };
 }

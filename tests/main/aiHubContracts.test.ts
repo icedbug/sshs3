@@ -161,7 +161,7 @@ describe("handlers that said one thing and did another", () => {
     const { hub } = await makeHub();
     const page = (id: string, body: string) => ({ id, kind: "system", title: `Postgres ${id}`, when: "When working on pg-01", targets: ["pg-01"], body, sources: [], history: [], updatedAt: Date.now(), updatedBy: "person", createdAt: Date.now() });
     hub.store.data.kbPages = [page("a", "The pooler listens on port 6432."), page("b", "The pooler listens on port 5432.")] as never;
-    expect((await hub.snapshot()).kbWork).toEqual({ rebuilding: [], checkingContradictions: false, lastCheck: undefined });
+    expect((await hub.snapshot()).kbWork).toEqual({ rebuilding: [], checkingContradictions: false, lastCheck: undefined, rebuilt: {} });
     let release!: (r: Response) => void;
     vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((r) => (release = r))));
     const asked = await hub.request({ action: "kb-check-contradictions" });

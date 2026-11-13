@@ -91,6 +91,10 @@ export function KbPages({
                   .split(",")
                   .map((t) => t.trim())
                   .filter(Boolean),
+                keys: draft.keys
+                  .split(/[,\n]/)
+                  .map((k) => k.trim())
+                  .filter(Boolean),
               },
             }).then((next) => {
               if (next) {
@@ -156,6 +160,18 @@ export function KbPages({
             <small>This one line is all an agent sees until it opens the page. Start with the situation.</small>
           </label>
           <label>
+            Search phrases (optional, comma-separated)
+            <input
+              placeholder="ENOSPC, aggr is full, df shows 100%"
+              value={draft.keys}
+              onChange={(e) => setDraft({ ...draft, keys: e.target.value })}
+            />
+            <small>
+              What an agent would type when it needs this page: an error message as it appears, the name of a command, a
+              file or a service. A search for one of these finds the page even when its title says it differently.
+            </small>
+          </label>
+          <label>
             Page (Markdown)
             <textarea
               required
@@ -214,18 +230,59 @@ export function KbPages({
                           hand-edited
                         </span>
                       )}
+                      {p.proven ? (
+                        <span
+                          className="ai-badge ai-badge-ok"
+                          title={`A run that worked from this page made a change that passed its own check, ${ago(p.lastProvenAt ?? p.updatedAt)}`}
+                        >
+                          held up ×{p.proven}
+                        </span>
+                      ) : null}
                       {p.opens ? (
                         <span className="ai-badge" title={`Last opened by an agent ${ago(p.lastOpenedAt ?? p.updatedAt)}`}>
                           opened ×{p.opens}
                         </span>
                       ) : null}
+                      {p.unverified ? (
+                        <span
+                          className="ai-badge ai-badge-danger"
+                          title="Lines on this page were in none of its sources: the assistant may have written them itself"
+                        >
+                          unverified
+                        </span>
+                      ) : null}
+                      {(p.alerts ?? []).map((a) => (
+                        <span key={a} className="ai-badge" title="The page a run worked from on a ticket for this alert">
+                          alert: {a}
+                        </span>
+                      ))}
                     </div>
                   </div>
                   {isOpen ? (
                     <div className="ai-doc-body">
+                      {open.unverified && (
+                        <p className="ai-error" data-testid={`kb-unverified-${p.id}`}>
+                          {open.unverified.commands.length > 0 && (
+                            <>
+                              These lines are in none of the page&apos;s sources:{" "}
+                              {open.unverified.commands.map((c) => (
+                                <code key={c}>{c}</code>
+                              ))}
+                              .{" "}
+                            </>
+                          )}
+                          {open.unverified.citations.length > 0 && (
+                            <>The page names {open.unverified.citations.join(", ")}, which it does not rest on. </>
+                          )}
+                          Check them against the system; agents are told about this when they open the page.
+                        </p>
+                      )}
                       <RichMarkdownContent text={open.body} />
                     </div>
                   ) : null}
+                  {(p.keys ?? []).length > 0 && (
+                    <small className="ai-muted">Also found by: {(p.keys ?? []).join(" · ")}</small>
+                  )}
                   <small className="ai-last-run">
                     {p.sources.length > 0 ? "Rests on " : "Written by hand"}
                     {p.sources.map((s, i) => (
@@ -262,6 +319,7 @@ export function KbPages({
                               title: full.title,
                               when: full.when,
                               targets: full.targets.join(", "),
+                              keys: (full.keys ?? []).join(", "),
                               body: full.body,
                             }),
                         )
@@ -291,6 +349,19 @@ export function KbPages({
                         {busy === p.id || (hub.kbWork?.rebuilding ?? []).includes(p.id) ? "Reading its sources…" : "Update from its sources"}
                       </button>
                     )}
+                    {hub.kbWork?.rebuilt?.[p.id] && !(hub.kbWork?.rebuilding ?? []).includes(p.id) && (
+                      <small
+                        className={hub.kbWork.rebuilt[p.id].error ? "ai-bad" : "ai-muted"}
+                        role="status"
+                        data-testid={`kb-rebuilt-${p.id}`}
+                      >
+                        {hub.kbWork.rebuilt[p.id].error
+                          ? `Could not be read again: ${hub.kbWork.rebuilt[p.id].error}`
+                          : hub.kbWork.rebuilt[p.id].changed
+                            ? "Read again and updated."
+                            : "Read again; the page already said what its sources say."}
+                      </small>
+                    )}
                     <span className="ai-spacer" />
                     <ConfirmButton
                       label="Delete"
@@ -311,11 +382,15 @@ export function KbPages({
 const FINDING: Record<KbFinding["kind"], string> = {
   "dead-target": "About something that is gone",
   "lost-source": "Its source was removed",
+  "source-changed": "Its source has changed",
+  "source-unreachable": "Its source could not be fetched",
   stale: "Not changed in a long time",
   unused: "Never opened",
-  "unused-source": "Led to no page",
+  "unused-source": "No page rests on it",
   gap: "A gap",
   contradiction: "Pages disagree",
+  unverified: "Not found in its sources",
+  "rolled-back": "A run from it was taken back",
 };
 
 /** What a person should look at: gaps, pages that disagree, pages about what no longer exists. */
@@ -333,6 +408,7 @@ export function KbReview({
   onWritePage: (title: string) => void;
 }): JSX.Element {
   const [checking, setChecking] = useState(false);
+  const [answering, setAnswering] = useState("");
   const findings = hub.kbFindings ?? [];
   const pages = hub.kbPages ?? [];
   return (
@@ -357,8 +433,8 @@ export function KbReview({
             {hub.kbWork.lastCheck.error
               ? `The last comparison did not finish: ${hub.kbWork.lastCheck.error}`
               : hub.kbWork.lastCheck.found
-                ? `The last comparison found ${hub.kbWork.lastCheck.found} place${hub.kbWork.lastCheck.found === 1 ? "" : "s"} where pages disagree.`
-                : "The last comparison found no pages that disagree."}
+                ? `The last comparison read ${hub.kbWork.lastCheck.compared ?? 0} of ${hub.kbWork.lastCheck.of ?? 0} pairs of pages and found ${hub.kbWork.lastCheck.found} place${hub.kbWork.lastCheck.found === 1 ? "" : "s"} where they disagree.`
+                : `The last comparison read ${hub.kbWork.lastCheck.compared ?? 0} of ${hub.kbWork.lastCheck.of ?? 0} pairs of pages and found none that disagree.${(hub.kbWork.lastCheck.of ?? 0) > (hub.kbWork.lastCheck.compared ?? 0) ? " Check again to go on with the next pairs." : ""}`}
           </small>
         )}
       </div>
@@ -379,12 +455,58 @@ export function KbReview({
             </div>
             <div className="ai-tags">
               {f.kind === "gap" && (
+                <>
+                  <button
+                    type="button"
+                    className="ai-btn-accent"
+                    onClick={() => onWritePage(/“(.+?)”/.exec(f.text)?.[1] ?? "")}
+                  >
+                    Write the page
+                  </button>
+                  {answering === f.id ? (
+                    <select
+                      autoFocus
+                      aria-label="The page that answers this"
+                      defaultValue=""
+                      onChange={(e) => {
+                        const pageId = e.target.value;
+                        setAnswering("");
+                        if (pageId) void act({ action: "kb-gap-answered", id: f.id, pageId });
+                      }}
+                    >
+                      <option value="">Which page answers it?</option>
+                      {pages.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.title}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    pages.length > 0 && (
+                      <button
+                        type="button"
+                        title="The question's own words become one of that page's search phrases, so the same question finds it next time"
+                        onClick={() => setAnswering(f.id)}
+                      >
+                        A page answers this
+                      </button>
+                    )
+                  )}
+                </>
+              )}
+              {f.kind === "unverified" && f.pageId && (
                 <button
                   type="button"
-                  className="ai-btn-accent"
-                  onClick={() => onWritePage(/“(.+?)”/.exec(f.text)?.[1] ?? "")}
+                  className="ai-btn-emerald"
+                  title="The lines are right: the page stops calling them unverified and agents are no longer warned"
+                  onClick={() => void act({ action: "kb-finding-dismiss", id: f.id })}
                 >
-                  Write the page
+                  I checked them, they are right
+                </button>
+              )}
+              {f.kind === "source-changed" && f.pageId && (
+                <button type="button" onClick={() => void act({ action: "kb-page-rebuild", id: f.pageId! })}>
+                  Update the page from its sources
                 </button>
               )}
               {f.pageId && (
@@ -408,9 +530,11 @@ export function KbReview({
                 </button>
               )}
             </div>
-            <button type="button" title="Hide this" onClick={() => void act({ action: "kb-finding-dismiss", id: f.id })}>
-              Dismiss
-            </button>
+            {f.kind !== "unverified" && (
+              <button type="button" title="Hide this" onClick={() => void act({ action: "kb-finding-dismiss", id: f.id })}>
+                Dismiss
+              </button>
+            )}
           </div>
         ))}
       </div>

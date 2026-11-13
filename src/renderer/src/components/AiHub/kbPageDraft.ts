@@ -6,6 +6,7 @@ export interface PageDraft {
   title: string;
   when: string;
   targets: string;
+  keys: string;
   body: string;
 }
 
@@ -35,6 +36,7 @@ export const emptyPage = (kind: KbPageKind = "troubleshooting", title = ""): Pag
   title,
   when: "",
   targets: "",
+  keys: "",
   body: KINDS.find((k) => k.kind === kind)!.template,
 });
 

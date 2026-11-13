@@ -20,6 +20,7 @@ const ALLOWED: Record<string, string> = {
   "src/main/services/AgePtyPinRelay.ts": "cites a section title of the team vault design",
   "src/main/ai/hub/KnowledgeBaseService.ts": "search synonyms: a team may write and ask in Swedish, and the tokenizer keeps å, ä, ö",
   "src/main/ai/hub/KbCompile.ts": "the tokenizer keeps å, ä, ö and ü",
+  "src/main/ai/hub/KbLint.ts": "the same tokenizer, for the words of a page's title",
 };
 
 const LETTERS = /[åäöÅÄÖ]/;

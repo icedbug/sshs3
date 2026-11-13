@@ -68,6 +68,15 @@ export function taskTranscript(task: AgentTask): string {
   return boundedContext(lines.join("\n"), 24_000);
 }
 
+/**
+ * Whether a record shows that something was established: a command that ran
+ * and succeeded, or a hypothesis the run marked as confirmed. A conversation
+ * in which the assistant only said things teaches the pages nothing.
+ */
+export function confirmedSomething(transcript: string): boolean {
+  return (/^Command on /m.test(transcript) && /→ exit 0$/m.test(transcript)) || /^- \[confirmed\] /m.test(transcript);
+}
+
 /** A stretch of the team's activity log, oldest first. */
 export function activityTranscript(events: WorkspaceActivityEvent[]): string {
   return boundedContext(

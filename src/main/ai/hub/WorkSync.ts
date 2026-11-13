@@ -9,6 +9,7 @@ import { TICKET_CLAIM_TTL_MS, mergeItems, type Mergeable } from "./WorkBoard";
  *
  *   work/<collection>/<id>.json   one goal, ticket, agent, runbook or dependency
  *   work/usage/<client>.json      what one installation's runs have spent, per agent
+ *   work/pageuse/<client>.json    how one installation's runs used the knowledge base pages
  *   work/claims/<ticketId>.json   who is running the ticket, and since when
  *
  * An item is replaced only by a newer copy of itself (updatedAt), and a
@@ -134,6 +135,32 @@ export class WorkSync {
       if (!buffer || buffer.length > 200_000) continue;
       try {
         const value = JSON.parse(buffer.toString("utf8")) as Record<string, AgentUsage>;
+        if (value && typeof value === "object") out.push(value);
+      } catch {
+        // An unreadable count is left out; it cannot be guessed.
+      }
+    }
+    return out;
+  }
+
+  /**
+   * How the pages were used is kept the same way: one object per installation,
+   * added up by whoever reads. A page is not rewritten because somebody opened it.
+   */
+  async putPageUse(client: string, use: unknown): Promise<void> {
+    await this.store.write(`work/pageuse/${safeId(client)}.json`, Buffer.from(JSON.stringify(use), "utf8"));
+  }
+
+  async readOtherPageUse<T>(client: string): Promise<T[]> {
+    const names = (await this.store.list("work/pageuse")).filter(
+      (n) => n.endsWith(".json") && n !== `${safeId(client)}.json`,
+    );
+    const all = await inBatches(names.slice(0, 200), 8, (name) => this.store.read(`work/pageuse/${name}`));
+    const out: T[] = [];
+    for (const buffer of all) {
+      if (!buffer || buffer.length > 400_000) continue;
+      try {
+        const value = JSON.parse(buffer.toString("utf8")) as T;
         if (value && typeof value === "object") out.push(value);
       } catch {
         // An unreadable count is left out; it cannot be guessed.

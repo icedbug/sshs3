@@ -4,6 +4,7 @@ import type {
   AgentSchedule,
   AgentTask,
   InfraGraphEdge,
+  KbPage,
   MemoryEntry,
   MissionAgent,
   WorkspaceActivityEvent,
@@ -12,6 +13,7 @@ import type {
 } from "../../../shared/types/aiHub";
 import { DEFAULT_AI_MODELS } from "../../../shared/types/ai";
 import { coverage, searchPages } from "./KbCompile";
+import { unverifiedNote } from "./KbCheck";
 import {
   analyzeCommandSafety,
   DEFAULT_SAFETY_POLICY,
@@ -38,6 +40,28 @@ import { guardAsk } from "./AppGuard";
  * model (or the demo copilot) calls it. It reaches the hub only through
  * `AppActionHost`, the list of hub members these handlers use.
  */
+/**
+ * A page as an agent gets it. What the page says is not all an agent needs to
+ * know about it: where it came from, how often work that followed it held up,
+ * and which of its lines were never found in its sources.
+ */
+function pageForAgent(page: KbPage): Record<string, unknown> {
+  return {
+    page: page.id,
+    kind: page.kind,
+    title: page.title,
+    when: page.when,
+    about: page.targets,
+    updated: new Date(page.updatedAt).toISOString().slice(0, 10),
+    writtenBy: page.editedByPerson ? "a person" : "the assistant, from the sources below",
+    restsOn: page.sources.map((s) => (s.docId.startsWith("task:") ? `${s.title} (a finished run)` : s.title)),
+    ...(page.proven ? { provenInUse: `${page.proven} run${page.proven === 1 ? "" : "s"} that worked from this page made a change that passed its own check` } : {}),
+    ...(page.alerts?.length ? { handlesAlerts: page.alerts } : {}),
+    ...(page.unverified ? { unverified: { ...page.unverified, note: unverifiedNote(page.unverified) } } : {}),
+    body: page.body,
+  };
+}
+
 export async function handleAppAction(
     hub: AppActionHost,
     task: AgentTask,
@@ -1471,24 +1495,18 @@ export async function handleAppAction(
         const cluster = str("cluster");
         const limit = num("limit") ?? 6;
         const docs = hub.getKbDocumentsList();
-        const pages = hub.store.data.kbPages ?? [];
+        const pages = hub.pagesWithUse();
         const pageId = str("page");
         if (pageId) {
           const wanted = pageId.replace(/^page\s+/i, "").toLowerCase();
           const found =
             pages.find((p) => p.id.toLowerCase() === wanted) ?? pages.find((p) => p.title.toLowerCase() === wanted);
-          if (!found) throw new Error(`No page ${pageId}. The pages: ${pages.map((p) => `${p.id} (${p.title})`).join(", ") || "none yet"}`);
-          hub.notePageOpened(found.id);
-          return {
-            page: found.id,
-            kind: found.kind,
-            title: found.title,
-            when: found.when,
-            about: found.targets,
-            updated: new Date(found.updatedAt).toISOString().slice(0, 10),
-            restsOn: found.sources.map((s) => s.title),
-            body: found.body,
-          };
+          if (!found)
+            throw new Error(
+              `No page ${pageId}. Find one with query=…; some of the pages: ${pages.slice(0, 30).map((p) => `${p.id} (${p.title})`).join(", ") || "none yet"}`,
+            );
+          hub.notePageOpened(found.id, task);
+          return pageForAgent(found);
         }
         const readId = str("id");
         if (readId) {
@@ -1521,6 +1539,7 @@ export async function handleAppAction(
           title: h.page.title,
           when: h.page.when,
           about: h.page.targets,
+          ...(h.page.proven ? { provenInUse: h.page.proven } : {}),
           passage: h.snippet,
         }));
         const found = await hub.kb.searchHybrid(
@@ -1529,6 +1548,10 @@ export async function handleAppAction(
           await hub.kbEmbedder(),
           hub.embeddings,
         );
+        // A passage that shares a stray word with the question is not an answer to it.
+        const answered = found.matches.some((m) => coverage(query, `${m.title} ${m.snippet}`) >= 0.5);
+        // No page on it is a gap even when a source mentions it: pages are what agents are meant to work from.
+        if (pageHits.length === 0) hub.noteKbGap(query, task);
         return {
           query,
           cluster,
@@ -1540,12 +1563,13 @@ export async function handleAppAction(
             : {}),
           // Pages are what the team keeps for agents; open one with page=<id> before acting on it.
           pages: pageHits,
-          // A passage that shares a stray word with the question is not an answer to it.
-          ...(pageHits.length === 0 &&
-          !found.matches.some((m) => coverage(query, `${m.title} ${m.snippet}`) >= 0.5)
-            ? (hub.noteKbGap(query, task),
-              { nothingFound: "The knowledge base has nothing on this. Say so rather than guess; the gap was noted for the team." })
-            : {}),
+          ...(pageHits.length === 0 && !answered && found.matches.length === 0
+            ? { nothingFound: "The knowledge base has nothing on this. Say so rather than guess; the gap was noted for the team." }
+            : pageHits.length === 0 && !answered
+              ? { weakMatches: "No page covers this, and the passages below share only a word or two with the question. Read them before you rely on them, and say that the team has no page for it; the gap was noted." }
+              : pageHits.length === 0
+                ? { noPage: "No page covers this yet; the passages below are from the sources. The gap was noted for the team." }
+                : {}),
           matches: found.matches.map((m) => {
             const doc = docs.find((d) => d.id === m.docId);
             return {
@@ -1576,14 +1600,16 @@ export async function handleAppAction(
           };
         }
         if (op === "delete_document") {
-          const q = (str("idOrTitle") || str("id") || str("title") || "").toLowerCase();
-          const existing = hub.getKbDocumentsList().find(
-            (d) =>
-              d.id.toLowerCase() === q ||
-              d.title.toLowerCase() === q ||
-              d.title.toLowerCase().includes(q),
-          );
-          if (!existing) throw new Error(`KB document "${q}" not found`);
+          // Deleting is for the whole team: it takes the document's id or its whole title, never a part of one.
+          const q = (str("idOrTitle") || str("id") || str("title") || "").trim().toLowerCase();
+          if (!q) throw new Error("delete_document needs the document's id or its exact title (see operation list).");
+          const all = hub.getKbDocumentsList();
+          const named = all.filter((d) => d.id.toLowerCase() === q);
+          const titled = named.length ? named : all.filter((d) => d.title.trim().toLowerCase() === q);
+          if (titled.length > 1)
+            throw new Error(`${titled.length} documents are called "${q}". Give the id: ${titled.map((d) => d.id).join(", ")}`);
+          const existing = titled[0];
+          if (!existing) throw new Error(`No knowledge base document has the id or the exact title "${q}".`);
           await hub.request({ action: "kb-delete", id: existing.id });
           return { ok: true, deletedId: existing.id, title: existing.title };
         }

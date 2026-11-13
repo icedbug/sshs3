@@ -47,10 +47,13 @@ export class HermesRuntime implements AgentRuntime {
     invokeTool?: DirectToolInvoker,
     /** For a run that replays a test case: answers every workspace tool call from the recording. */
     replay?: (tool: string, argumentsJson: string) => string,
+    /** On a replayed run: which tools are asked for real anyway (the knowledge base). */
+    replayLive?: (tool: string) => boolean,
   ) {
     if (invokeTool && process.env.SSHS3_HERMES_INTEGRATION !== "1") {
       this.direct = new DirectAgentRuntime(invokeTool);
       this.direct.replay = replay;
+      this.direct.replayLive = replayLive;
     }
   }
 

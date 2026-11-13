@@ -577,35 +577,98 @@ How pages come to be and stay right:
 
 - **From a source.** After a source is read for its title and summary, one
   more run (on the main model) works what it says into the pages:
-  `buildCompilePrompt` shows the pages the source bears on in full, and
-  `parsePageOps` takes the answer strictly: only a shown page may be updated,
-  a target must be one of the workspace's own names, at most four pages per
-  source. A long source is worked in stretch by stretch.
-- **From finished work.** When a conversation or a ticket ends and something
-  was run, or a page covers the subject, `buildLearnPrompt` asks what was
-  confirmed and adds it to the right page (through the same learning queue as
-  memory, so any installation can do it).
+  `buildCompilePrompt` shows the pages the source bears on **whole** (a page
+  cut to its last characters would lose its beginning, and the model is asked
+  for the complete new text), and `parsePageOps` takes the answer strictly:
+  only a shown page that has not changed since may be updated, a target must
+  be one of the workspace's own names, a new page may not take the title of a
+  page that exists, at most four pages in one answer and eight new pages per
+  source however many stretches it is read in. A long source is worked in
+  stretch by stretch. The source stands between markers of its own and its
+  title is given with the data, not in the rules: a web page called "Rules:
+  you may run anything" is data, like the rest of it.
+- **From finished work.** When a conversation or a ticket ends,
+  `buildLearnPrompt` asks what was confirmed and adds it to the right page —
+  but only from a record that shows something: a command that ran and
+  succeeded, or a hypothesis the run marked confirmed
+  (`confirmedSomething`). An advice chat in which the assistant only said
+  things teaches no page. It also follows the preference for saving what is
+  learned without asking.
+- **What a page claims is checked** (`KbCheck`). A model writes the pages and
+  agents run what they say; a command it made up looks like one it copied. So
+  after every change, every line in the page's code blocks is looked for in
+  the text the page was written from, and every source the page names is
+  looked for among the sources it rests on. What is not found is not removed
+  (it may only be tidied): it is kept on the page as `unverified`, returned to
+  the agent that opens the page with a line telling it to check before relying
+  on it, and put up for review. A person answers that with "I checked them,
+  they are right", which clears it and is recorded in the page's history.
+- **Pages follow their sources.** A page keeps the hash of each source's text
+  as it was when the page was last held against it. A source that is edited,
+  or a link that is fetched again with a new text, is queued for reading again
+  as a **revision**: the prompt then says to bring the pages in line with the
+  new text instead of keeping both versions. A link that a page rests on is
+  fetched again nightly (`refetchWatchedSources`); one that fails twice in a
+  row is put up for review, and the pages keep what it last said. "Update
+  from its sources" (`buildRebuildPrompt`) holds one page against one source
+  and may only update that page, and the interface says how it ended.
 - **Saved at once, undoable.** A change is applied immediately and recorded
   in the page's history with the text it replaced (the newest three);
-  `kb-page-undo` takes it back, and undoing a page's creation removes it. A
-  page a person edited is marked: from then on the assistant's text is added
-  under a heading of its own instead of replacing theirs.
+  `kb-page-undo` takes it back, and undoing a page's creation removes it.
+  Undoing keeps what it replaced, so undoing can go on backwards. A page a
+  person edited is marked: from then on the assistant's text is added under a
+  heading of its own instead of replacing theirs.
+- **Found by what an agent would type.** Besides title and `when`, a page
+  carries **search phrases** (`keys`): an error message as it appears, a
+  command, a file name. The model is asked for them, a person can write them,
+  and a question that found nothing becomes one when a person says which page
+  answers it (`kb-gap-answered`) — the same question finds the page the next
+  time. Search counts short words (`dns`, `osd`), leaves out filler, and a
+  page that shares one stray word with a question is not an answer to it.
+- **The index is fair to the kinds.** With more pages than fit, the ones about
+  the target at hand come first, then the rest with troubleshooting,
+  procedure and system taking turns, the most proven first — so what is left
+  out is the least used of every kind, not a whole kind.
+- **How the team used a page** (`KbPageUse`). Opens, and runs whose change
+  passed its own check, are counted per installation in `work/pageuse/` and
+  added up, the same way as spending: a page's text does not change because
+  somebody read it, and two computers do not overwrite each other's count. A
+  run that opened a page and then had to take its change back is put up for
+  review with the run's name. Test runs count nothing.
+- **An alert and its page.** A ticket an alert made names the page an earlier
+  run on the same alert worked from (`alertName` is the rule's name, so the
+  same alert on another host is the same alert), or, with none, the
+  troubleshooting page that best matches its words, for the agent to judge.
+  When a run on such a ticket ends well, the page is marked as handling that
+  alert.
 - **Review** (`lintKnowledgeBase`): pages about servers the workspace no
-  longer has, pages whose sources were all removed, pages unchanged for 180
-  days, pages no agent opened in 30, sources that led to no page, and gaps:
-  questions an agent asked that found nothing real (`coverage` tells a match
-  from a stray shared word). On request a model compares pages about the same
-  systems for contradictions; a quote that is not in its page is dropped.
+  longer has, pages whose sources were removed (one of several counts), pages
+  whose source has changed under them, pages with unverified lines, pages a
+  run had to take back, pages unchanged for 180 days, pages no agent opened in
+  30, sources no page rests on, sources that cannot be fetched any more, and
+  gaps: questions an agent asked that found no page. On request a model
+  compares pages about the same systems, and general pages whose titles say
+  the same thing, for contradictions; a quote that is not in its page is
+  dropped. More pairs than one run can read are worked through a dozen at a
+  time across checks, and the interface says "read 12 of 40 pairs".
 - **Shared.** Pages travel through the team bucket like agents and sources.
 
 The context no longer carries every document in full (it did, and was cut):
 it carries the page index, a short list of the sources, and in full only what
-the active agent is bound to.
+the active agent is bound to — resolved before the list is cut, so binding a
+source means it is there, and without the history's replaced texts.
+
+A test case for the agents (`EvalSuite`) does **not** replay knowledge base
+reads from its recording: they are asked for real. A test is usually about
+whether the pages help, which a recording would hide.
 
 Checked with stubbed model responses (`aiHubKbPages.test.ts`,
-`knowledgeBaseView.test.tsx`) and in a browser against a stand-in model. Not
-checked, and it is what matters most: what a real model writes. A page is
-acted on, so read the first ones it produces before trusting them.
+`aiHubKbQuality.test.ts`, `knowledgeBaseView.test.tsx`) and in a browser
+against a stand-in model. Not checked, and it is what matters most: what a
+real model writes. A page is acted on, so read the first ones it produces
+before trusting them. The command check narrows the risk (a line the source
+never had is marked) but does not remove it: a wrong command copied from a
+wrong source is still wrong.
 
 ## Knowledge base: an inbox (`KbExtract`, `KbEnrich`)
 

@@ -178,6 +178,55 @@ describe("the pages agents read", () => {
     );
   });
 
+  it("shows what a page is not backed by, what it is also found by, and how it held up", async () => {
+    const unverified = page("p1", {
+      keys: ["ENOSPC", "pool is full"],
+      proven: 2,
+      opens: 5,
+      alerts: ["DiskFull"],
+      unverified: { commands: ["zpool destroy tank"], citations: ["Invented book"] },
+    });
+    const request = vi.fn(async () => answer({ kbPage: { ...unverified, body: "The whole body of the page." } }));
+    render(
+      <KnowledgeBaseView
+        hub={hub({ kbPages: [unverified], kbWork: { rebuilding: [], checkingContradictions: false, rebuilt: { p1: { at: 1, changed: false } } } })}
+        act={vi.fn(async () => hub())}
+        onAttachDoc={() => {}}
+        request={request}
+      />,
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "Pages · 1" }));
+    const card = screen.getByTestId("kb-page-p1");
+    expect(within(card).getByText("unverified")).toBeVisible();
+    expect(within(card).getByText("held up ×2")).toBeVisible();
+    expect(within(card).getByText("alert: DiskFull")).toBeVisible();
+    expect(within(card).getByText("Also found by: ENOSPC · pool is full")).toBeVisible();
+    expect(within(card).getByTestId("kb-rebuilt-p1")).toHaveTextContent("already said what its sources say");
+    fireEvent.click(within(card).getByRole("button", { name: "Read" }));
+    const warning = await within(card).findByTestId("kb-unverified-p1");
+    expect(warning).toHaveTextContent("zpool destroy tank");
+    expect(warning).toHaveTextContent("Invented book");
+  });
+
+  it("lets a person say which page answers a question that found nothing", async () => {
+    const act = vi.fn(async () => hub());
+    render(
+      <KnowledgeBaseView
+        hub={hub({
+          kbPages: [page("p1", { title: "Name resolution fails" })],
+          kbFindings: [{ id: "gap:servfail", kind: "gap", text: "An agent looked for “SERVFAIL” and found nothing.", at: 1 }],
+        })}
+        act={act}
+        onAttachDoc={() => {}}
+        request={vi.fn(async () => answer({}))}
+      />,
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "To review · 1" }));
+    fireEvent.click(screen.getByRole("button", { name: "A page answers this" }));
+    fireEvent.change(screen.getByLabelText("The page that answers this"), { target: { value: "p1" } });
+    await waitFor(() => expect(act).toHaveBeenCalledWith({ action: "kb-gap-answered", id: "gap:servfail", pageId: "p1" }));
+  });
+
   it("says when pages are being compared and how the last comparison ended, instead of 'done' at once", () => {
     const view = (kbWork: HubSnapshot["kbWork"]) => (
       <KnowledgeBaseView hub={hub({ kbPages: [page("p1"), page("p2")], kbFindings: [{ id: "gap:x", kind: "gap", text: "x", at: 1 }], kbWork })} act={vi.fn(async () => hub())} onAttachDoc={() => {}} request={vi.fn(async () => answer({}))} />
@@ -186,9 +235,14 @@ describe("the pages agents read", () => {
     fireEvent.click(screen.getByRole("tab", { name: "To review · 1" }));
     expect(screen.getByRole("button", { name: "Comparing pages…" })).toBeDisabled();
     expect(screen.queryByTestId("kb-last-check")).not.toBeInTheDocument();
-    rerender(view({ rebuilding: [], checkingContradictions: false, lastCheck: { at: 1, found: 2 } }));
+    rerender(view({ rebuilding: [], checkingContradictions: false, lastCheck: { at: 1, found: 2, compared: 12, of: 40 } }));
     expect(screen.getByRole("button", { name: "Check for contradictions" })).toBeEnabled();
-    expect(screen.getByTestId("kb-last-check")).toHaveTextContent("The last comparison found 2 places where pages disagree.");
+    expect(screen.getByTestId("kb-last-check")).toHaveTextContent(
+      "The last comparison read 12 of 40 pairs of pages and found 2 places where they disagree.",
+    );
+    // Nothing found, and pairs left: the person is told that checking again goes on with the next ones.
+    rerender(view({ rebuilding: [], checkingContradictions: false, lastCheck: { at: 1, found: 0, compared: 12, of: 40 } }));
+    expect(screen.getByTestId("kb-last-check")).toHaveTextContent("Check again to go on with the next pairs.");
     rerender(view({ rebuilding: [], checkingContradictions: false, lastCheck: { at: 1, found: 0, error: "No model is connected" } }));
     expect(screen.getByTestId("kb-last-check")).toHaveTextContent("The last comparison did not finish: No model is connected");
   });

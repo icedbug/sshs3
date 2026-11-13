@@ -33,6 +33,16 @@ export function boundedContext(value: string, max = 32_000): string {
     : clean;
 }
 
+/**
+ * A text that is read from its start (a title, a line, a page): masked, and
+ * cut at the end when too long. `boundedContext` keeps the end, which is right
+ * for output and wrong for these.
+ */
+export function clip(value: string, max: number): string {
+  const clean = maskContext(value);
+  return clean.length > max ? `${clean.slice(0, Math.max(0, max - 1)).trimEnd()}…` : clean;
+}
+
 export function safeError(error: unknown): string {
   return boundedContext(
     error instanceof Error ? error.message : String(error),

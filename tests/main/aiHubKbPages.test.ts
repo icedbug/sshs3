@@ -138,7 +138,7 @@ describe("the list of pages every agent carries", () => {
     expect(pageIndex([])).toBe("");
     // A long list is cut, and says so.
     const many = Array.from({ length: 80 }, (_, i) => page(`p${i}`, { title: `Page number ${i}` }));
-    expect(pageIndex(many, [], 1500)).toMatch(/\(\d+ more; find them with sshs3_kb_search query=…\)$/);
+    expect(pageIndex(many, [], 1500)).toMatch(/\(\d+ more pages are not listed here; find them with sshs3_kb_search query=…\)$/);
   });
 });
 
@@ -175,8 +175,8 @@ describe("what a person should look at", () => {
     const a = page("a", { body: "The scrub runs on Sundays at 02:00." });
     const b = page("b", { body: "The scrub runs on Wednesdays at 02:00." });
     const c = page("c", { targets: ["DB-Prod"], body: "Unrelated." });
-    const pairs = pairsToCompare([a, b, c]);
-    expect(pairs.map(([x, y]) => `${x.id}-${y.id}`)).toEqual(["a-b"]);
+    const { pairs } = pairsToCompare([a, b, c]);
+    expect(pairs.map(([x, y]: [KbPage, KbPage]) => `${x.id}-${y.id}`)).toEqual(["a-b"]);
     expect(buildContradictionPrompt(pairs)).toContain("## Pair 1");
     const found = parseContradictions(
       JSON.stringify({ contradictions: [{ pair: 1, about: "when the scrub runs", first: "The scrub runs on Sundays at 02:00.", second: "The scrub runs on Wednesdays at 02:00." }, { pair: 1, about: "invented", first: "The pool is mirrored.", second: "The pool is raidz." }, { pair: 9, first: "x", second: "y" }] }),
@@ -202,6 +202,12 @@ function sse(events: Array<Record<string, unknown>>): Response {
 }
 const say = (text: string): Response =>
   sse([{ type: "content_block_delta", index: 0, delta: { type: "text_delta", text } }, { type: "message_delta", usage: { output_tokens: 1 } }]);
+const callTool = (name: string, input: Record<string, unknown>): Response =>
+  sse([
+    { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: `tu_${name}`, name, input: {} } },
+    { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: JSON.stringify(input) } },
+    { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 1 } },
+  ]);
 async function makeHub() {
   const { HubService } = await import("../../src/main/ai/hub/HubService");
   const { setDemoModeForTesting } = await import("../../src/main/demo/demoMode");
@@ -255,10 +261,15 @@ describe("the knowledge base through the hub", () => {
     const opened = (await handleAppAction(hub.appActionHost(), task, { action: "sshs3_kb_search", payload: { page: listed.id } } as never)) as { body: string; restsOn: string[] };
     expect(opened.body).toContain("zpool status");
     expect(opened.restsOn).toEqual(["Backup notes"]);
-    expect(hub.store.data.kbPages![0].opens).toBe(1);
+    expect(hub.store.data.kbUse![listed.id]).toMatchObject({ opens: 1 });
+    expect((await hub.request({ action: "snapshot" })).kbPages![0].opens).toBe(1);
     // A question the knowledge base has nothing on is noted as a gap for the team.
-    const miss = (await handleAppAction(hub.appActionHost(), task, { action: "sshs3_kb_search", payload: { query: "recalibrate the zxqvplumbus flange" } } as never)) as { nothingFound?: string };
-    expect(miss.nothingFound).toBeTruthy();
+    const miss = (await handleAppAction(hub.appActionHost(), task, { action: "sshs3_kb_search", payload: { query: "recalibrate the zxqvplumbus flange" } } as never)) as {
+      nothingFound?: string;
+      weakMatches?: string;
+    };
+    // Nothing at all, or only passages sharing a word or two: either way the agent is told not to guess.
+    expect(miss.nothingFound ?? miss.weakMatches).toBeTruthy();
     snap = await hub.request({ action: "snapshot" });
     expect(snap.kbFindings!.filter((f) => f.kind === "gap").map((f) => f.text)).toEqual([expect.stringContaining("recalibrate the zxqvplumbus flange")]);
     await hub.request({ action: "kb-finding-dismiss", id: snap.kbFindings!.find((f) => f.kind === "gap")!.id });
@@ -290,6 +301,7 @@ describe("the knowledge base through the hub", () => {
     const hub = await makeHub();
     const existing = (await hub.request({ action: "kb-page-save", page: { kind: "troubleshooting", title: "Nightly backup runs long", when: "When the nightly backup is still running in the morning", body: "Known cause: a scrub at the same time. " + "Detail. ".repeat(12) } })).reply!.kbPage!;
     let learnPrompt = "";
+    let hypothesised = false;
     vi.stubGlobal("fetch", vi.fn(async (_u: unknown, init?: RequestInit) => {
       const body = String(init?.body);
       if (body.includes("A piece of work just ended")) {
@@ -297,7 +309,11 @@ describe("the knowledge base through the hub", () => {
         return say(JSON.stringify({ pages: [{ op: "update", id: existing.id, title: "x", when: "y", targets: [], body: `${existing.body}\n\nAlso confirmed: a full snapshot quota delays the backup (learned from: the session).`, summary: "Added the snapshot quota cause" }] }));
       }
       if (body.includes("long-term memory")) return say('{"proposals":[]}');
-      return say(`The nightly backup ran long because the snapshot quota was full. ${"I checked the quota and the scrub schedule. ".repeat(20)}`);
+      if (hypothesised) return say(`The nightly backup ran long because the snapshot quota was full. ${"I checked the quota and the scrub schedule. ".repeat(20)}`);
+      hypothesised = true;
+      return callTool("sshs3_hypotheses", {
+        hypotheses: [{ id: "h1", text: "The snapshot quota is full", status: "confirmed", evidence: [{ text: "zfs list -o quota,used showed the quota reached", supports: true }] }],
+      });
     }));
     await hub.request({ action: "start", task: { prompt: "Why is the nightly backup still running this morning?", mode: "advice" } });
     await waitFor(() => (hub.store.data.kbPages![0].revision ?? 1) > 1);

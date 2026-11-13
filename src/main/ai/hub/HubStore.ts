@@ -26,6 +26,7 @@ import type {
   KbFinding,
   KbGap,
   KbPage,
+  KbPageUse,
   WorkspaceActivityEvent,
   WorkspaceServerSummary,
 } from "../../../shared/types/aiHub";
@@ -139,6 +140,12 @@ export interface HubData {
   kbGaps?: KbGap[];
   kbContradictions?: KbFinding[];
   kbDismissedFindings?: string[];
+  /** How this installation's runs used the pages; shared per installation and added up (see `KbPageUse`). */
+  kbUse?: Record<string, KbPageUse>;
+  /** Set once the counts earlier versions kept on the pages themselves were moved to `kbUse`. */
+  kbUseMoved?: boolean;
+  /** Where the next comparison of pages starts, so that successive ones get through all pairs. */
+  kbPairOffset?: number;
   /** External coding agents as they are started on this computer. Never shared. */
   externalRunners?: ExternalRunner[];
   /** Names this installation in ticket claims. */

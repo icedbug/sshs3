@@ -335,7 +335,7 @@ export class ContextService {
     sessionId: string | undefined,
     servers: WorkspaceServerSummary[],
     extra?: ExtraWorkspaceContext,
-  ): { kbPageIndex: string; kbDocuments: unknown[]; kbBoundPages: KbPage[] } {
+  ): { kbPageIndex: string; kbDocuments: unknown[]; kbBoundPages: KbPage[]; kbBoundDocuments: KbDocument[] } {
     const docs = (extra?.kbDocuments ?? []) as KbDocument[];
     const pages = extra?.kbPages ?? [];
     const agent = (extra?.agents as MissionAgent[] | undefined)?.find((a) => a.id === task.agentId);
@@ -350,14 +350,16 @@ export class ContextService {
     const focus = [server?.name, server?.cluster, agent?.targetCluster, ticket?.target].filter(
       (x): x is string => Boolean(x),
     );
+    // A page's history keeps the text a change replaced: an agent reading the page must not be given that too.
+    const plain = (p: KbPage): KbPage => ({ ...p, history: [] });
     return {
       kbPageIndex: pageIndex(pages, focus),
-      kbBoundPages: pages.filter((p) => bound.has(p.id)),
-      kbDocuments: docs.slice(0, 80).map((d) =>
-        bound.has(d.id)
-          ? d
-          : { id: d.id, title: d.title, summary: d.summary, collection: d.collection, cluster: d.cluster },
-      ),
+      kbBoundPages: pages.filter((p) => bound.has(p.id)).map(plain),
+      // Bound sources are given whole wherever they sit in the list; the pieces are made from the text, so they are left out.
+      kbBoundDocuments: docs.filter((d) => bound.has(d.id)).map((d) => ({ ...d, chunks: [] })),
+      kbDocuments: docs
+        .slice(0, 80)
+        .map((d) => ({ id: d.id, title: d.title, summary: d.summary, collection: d.collection, cluster: d.cluster })),
     };
   }
 

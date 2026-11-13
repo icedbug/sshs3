@@ -44,7 +44,8 @@ describe("a test case made from a conversation", () => {
   it("keeps the question and what every workspace tool answered, not the run's own lists", () => {
     const c = caseFromTask(finished(), { expect: { mention: ["scrub"], mustCall: "sshs3_kb_search\nzpool status" as never, mustNotRun: ["systemctl restart"], conclusion: " A scrub at the same time. " } }, "jacob", 10);
     expect(c).toMatchObject({ title: "Backup runs long", prompt: "Why is the nightly backup still running?", mode: "assisted", agentId: "watch", fromTaskId: "t1", createdBy: "jacob" });
-    expect(c.recorded.map((r) => r.name)).toEqual(["sshs3_kb_search", "terminal_command", "terminal_command"]);
+    // The knowledge base is not recorded: a replay reads the pages as they are now, so that changing a page shows.
+    expect(c.recorded.map((r) => r.name)).toEqual(["terminal_command", "terminal_command"]);
     expect(c.expect).toEqual({ mention: ["scrub"], notMention: [], mustCall: ["sshs3_kb_search", "zpool status"], mustNotRun: ["systemctl restart"], conclusion: "A scrub at the same time." });
     expect(() => caseFromTask({ ...finished(), messages: [] } as AgentTask, {}, "x")).toThrow(/no question/);
   });
@@ -58,6 +59,10 @@ describe("a test case made from a conversation", () => {
     expect(replay.unrecorded).toBe(0);
     expect(replay.answer("file_read", '{"path":"/etc/x"}')).toContain("nothing was recorded for file_read");
     expect(replay.unrecorded).toBe(1);
+    // The knowledge base is read for real, not from the recording.
+    expect(replay.isLive("sshs3_kb_search")).toBe(true);
+    expect(replay.isLive("terminal_command")).toBe(false);
+    expect(replay.live).toEqual({ sshs3_kb_search: 1 });
   });
 
   it("checks what the run said and did against what a person expects", () => {
@@ -113,7 +118,7 @@ describe("running a test case", () => {
     hub.store.data.tasks.push(finished());
     let snap = await hub.request({ action: "eval-case-save", fromTaskId: "t1", expect: { mention: ["scrub"], mustCall: ["zpool status"], mustNotRun: ["systemctl restart"], conclusion: "A scrub runs at the same time." } });
     const id = snap.evalCases![0].id;
-    expect(snap.evalCases![0]).toMatchObject({ recordedCalls: 3, runs: [] });
+    expect(snap.evalCases![0]).toMatchObject({ recordedCalls: 2, runs: [] });
     expect(snap.evalCases![0]).not.toHaveProperty("recorded");
 
     const execute = vi.spyOn(hub.appActionHost().terminals, "execute");

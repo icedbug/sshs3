@@ -137,6 +137,8 @@ export interface EvalRun {
   calls: { name: string; input: string }[];
   /** Tool calls the case had no recording for. */
   unrecorded: number;
+  /** Tool calls the replay asked for real instead of answering from the recording (the knowledge base). */
+  live?: Record<string, number>;
   tokens: number;
 }
 /** A test for the agents, made from a real conversation and replayed without running anything. */
@@ -217,6 +219,10 @@ export interface AgentTask {
    * and ran instead of only what it said.
    */
   toolLog?: AgentToolRecord[];
+  /** The knowledge base pages this conversation opened, so its outcome can be put down to them. */
+  kbPages?: string[];
+  /** How many of `changes` have been put down to those pages already. */
+  kbCounted?: number;
   /**
    * The agent's task list for this conversation, as it last wrote it. The run
    * is held to it: stopping with open items sends the agent back to work.
@@ -785,6 +791,8 @@ export interface WorkTicket {
   /** Set on a ticket an alert created: the alert, and how often it fired. */
   alert?: {
     fingerprint: string;
+    /** What the alert is called wherever it fires (its rule's name, else its title): pages are noted as handling it by this. */
+    name?: string;
     source: string;
     severity: "critical" | "warning" | "info";
     firstAt: number;
@@ -879,7 +887,16 @@ export interface KbDocument {
    * Where the reading that gives a dropped-in document its title, summary and
    * tags stands. Absent on a document a person wrote.
    */
-  reading?: { state: "queued" | "reading" | "done" | "failed"; attempts?: number; error?: string; at: number };
+  reading?: {
+    state: "queued" | "reading" | "done" | "failed";
+    attempts?: number;
+    error?: string;
+    at: number;
+    /** The text changed since pages were written from it: they are brought in line with it, not added to. */
+    revised?: boolean;
+  };
+  /** For a source with an address: when it was last fetched again, and what went wrong if it could not be. */
+  sourceCheck?: { at: number; error?: string; failures?: number };
   /** The title is only the file's name or the link: the reading may replace it. */
   titleFromSource?: boolean;
   /** The file this text was taken from, kept beside it. */
@@ -900,6 +917,8 @@ export interface KbPageVersion {
   body: string;
   targets: string[];
   sources: KbPageSource[];
+  keys?: string[];
+  unverified?: { commands: string[]; citations: string[] };
 }
 export interface KbPageChange {
   at: number;
@@ -914,6 +933,9 @@ export interface KbPageSource {
   /** A source document's id, or `task:<id>` for a session the page learned from. */
   docId: string;
   title: string;
+  /** Hash of the source's text when the page was last held against it, and when that was. */
+  hash?: string;
+  at?: number;
 }
 
 /**
@@ -938,15 +960,62 @@ export interface KbPage {
   /** A person changed the text: the assistant adds to it and does not rewrite it. */
   editedByPerson?: boolean;
   history: KbPageChange[];
-  /** How often an agent opened it, and when last. */
+  /**
+   * What an agent would type when it needs this page: an error message as it
+   * appears, the name of a command or a file. Search matches these like the
+   * title; a question that found nothing becomes one when a person says which
+   * page answers it.
+   */
+  keys?: string[];
+  /**
+   * What the assistant wrote that could not be found where it said it came
+   * from: a command that is in none of the page's sources, a source it names
+   * that the page does not rest on. Shown to the agent that opens the page
+   * and listed for review; cleared when a person says they checked.
+   */
+  unverified?: { commands: string[]; citations: string[] };
+  /** Alerts this page was worked from, by title: the next ticket for the same alert names the page. */
+  alerts?: string[];
+  /**
+   * How the page was used, added up over the team's installations. Not part
+   * of the stored page: use is not a change to its text (see `KbPageUse`).
+   */
   opens?: number;
   lastOpenedAt?: number;
+  /** Runs that opened it and whose change then passed its check. */
+  proven?: number;
+  lastProvenAt?: number;
+}
+
+/**
+ * How one installation's runs used a page. Kept beside the pages and shared
+ * per installation, so two computers never overwrite each other's count and
+ * the page's text does not change because somebody read it.
+ */
+export interface KbPageUse {
+  opens: number;
+  lastOpenedAt?: number;
+  proven?: number;
+  lastProvenAt?: number;
+  /** Runs that opened the page and then had to take a change back. Newest first. */
+  rolledBack?: { at: number; title: string }[];
 }
 
 /** Something about the knowledge base a person should look at. */
 export interface KbFinding {
   id: string;
-  kind: "dead-target" | "lost-source" | "stale" | "unused" | "unused-source" | "gap" | "contradiction";
+  kind:
+    | "dead-target"
+    | "lost-source"
+    | "stale"
+    | "unused"
+    | "unused-source"
+    | "gap"
+    | "contradiction"
+    | "unverified"
+    | "rolled-back"
+    | "source-changed"
+    | "source-unreachable";
   pageId?: string;
   docId?: string;
   /** For a contradiction: the other page. */
@@ -995,7 +1064,8 @@ export interface HubReply {
   kbPage?: KbPage;
   kbSearch?: { query: string; hits: KbSearchHit[]; byMeaning: boolean };
   download?: { name: string; mime: string; dataBase64: string };
-  ingest?: { added: string[]; duplicates: string[]; failed: { name: string; error: string }[] };
+  /** `updated`: sources that were already there under the same address and got the new text. */
+  ingest?: { added: string[]; duplicates: string[]; failed: { name: string; error: string }[]; updated?: string[] };
 }
 export interface TerminalCommandFailure {
   sessionId: string;
@@ -1071,7 +1141,10 @@ export interface HubSnapshot {
     rebuilding: string[];
     checkingContradictions: boolean;
     /** How the last comparison of pages ended. */
-    lastCheck?: { at: number; found: number; error?: string };
+    /** `compared` of `of`: how many pairs of pages the comparison read, of how many there are. */
+    lastCheck?: { at: number; found: number; compared?: number; of?: number; error?: string };
+    /** How the latest "Update from its sources" of a page ended. */
+    rebuilt?: Record<string, { at: number; changed: boolean; error?: string }>;
   };
   /** What is read from the servers on a schedule, and what changed. */
   serverFacts?: {
@@ -1304,7 +1377,18 @@ export type HubRequest =
   | { action: "kb-page-read"; id: string }
   | {
       action: "kb-page-save";
-      page: { id?: string; kind: KbPageKind; title: string; when: string; body: string; targets?: string[] };
+      page: {
+        id?: string;
+        kind: KbPageKind;
+        title: string;
+        when: string;
+        body: string;
+        targets?: string[];
+        /** Search phrases. Absent: the page keeps the ones it has. */
+        keys?: string[];
+        /** The alerts the page handles, by name. Absent: kept. */
+        alerts?: string[];
+      };
     }
   | { action: "kb-page-delete"; id: string }
   /** Takes back the newest change to the page. */
@@ -1314,6 +1398,8 @@ export type HubRequest =
   /** Compares pages about the same systems and lists where they disagree. */
   | { action: "kb-check-contradictions" }
   | { action: "kb-finding-dismiss"; id: string }
+  /** A question that found nothing is answered by this page: its words become one of the page's search phrases. */
+  | { action: "kb-gap-answered"; id: string; pageId: string }
   | {
       action: "kb-ingest-folder";
       folderPath: string;
