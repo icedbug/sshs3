@@ -34,7 +34,9 @@ const full = hub({
 describe("what is waiting for a person", () => {
   it("gathers approvals, plans, questions, tickets, unowned alerts and gaps, what blocks an agent first", () => {
     const items = inboxItems(full);
-    expect(items.map((i) => i.kind)).toEqual(["approval", "plan", "question", "alert", "blocked", "review", "knowledge"]);
+    // An alert assigned to an agent that has not started on it still waits for a person (feature 6 review).
+    expect(items.map((i) => i.kind)).toEqual(["approval", "plan", "question", "alert", "blocked", "alert", "review", "knowledge"]);
+    expect(items.find((i) => i.id === "alert:k4")?.detail).toBe("With an agent, not started yet");
     expect(items[0]).toMatchObject({ title: "Restart nginx", detail: "systemctl restart nginx", from: "Operator on web-01", risk: "modify" });
     expect(items[1].detail).toBe("2 steps · the reviewer has objections");
     expect(items[3].detail).toBe("Nobody has it · fired 3 times");

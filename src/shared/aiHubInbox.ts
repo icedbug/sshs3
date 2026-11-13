@@ -101,7 +101,7 @@ export function inboxItems(hub: InboxInput): InboxItem[] {
         id: `alert:${t.id}`,
         kind: "alert",
         title: t.title,
-        detail: `${t.assigneeName ? `With ${t.assigneeName}, not started yet` : "Nobody has it"}${t.alert.count > 1 ? ` · fired ${t.alert.count} times` : ""}`,
+        detail: `${t.assigneeAgentId ? `With ${t.assigneeName ?? "an agent"}, not started yet` : "Nobody has it"}${t.alert.count > 1 ? ` · fired ${t.alert.count} times` : ""}`,
         from: t.alert.source,
         at: t.alert.lastAt,
         // The current firing: one that comes back after it had resolved is news again.
