@@ -503,7 +503,6 @@ describe("Production multi-user workspace sync & auto-memory", () => {
       "sshs3_investigate",
       "sshs3_tickets",
       "sshs3_session_search",
-      "sshs3_cluster_exec",
       "sshs3_workspace_layout",
       "sshs3_storage_ops",
       "sshs3_kb_search",
@@ -524,6 +523,8 @@ describe("Production multi-user workspace sync & auto-memory", () => {
       () => {},
     );
     expect(capturedBody.model).toBe("gpt-6.1-sol");
+    // A conversation with no terminal is offered no tool that runs something on a server:
+    // every such call would be refused, and a tool that is always refused is a trap.
     const contextOnlyTools = ((capturedBody.tools as Array<{ name: string }>) ?? []).map((t) => t.name);
     expect(contextOnlyTools).toEqual([
       "workspace_context",
@@ -538,7 +539,6 @@ describe("Production multi-user workspace sync & auto-memory", () => {
       "sshs3_investigate",
       "sshs3_tickets",
       "sshs3_session_search",
-      "sshs3_cluster_exec",
       "sshs3_workspace_layout",
       "sshs3_storage_ops",
       "sshs3_kb_search",

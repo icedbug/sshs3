@@ -161,3 +161,29 @@ describe("running a test case", () => {
     execute.mockRestore();
   });
 });
+
+describe("a run that never starts", () => {
+  it("settles anyway, so whoever waits for it is not left waiting", async () => {
+    const { HubService } = await import("../../src/main/ai/hub/HubService");
+    const { setDemoModeForTesting } = await import("../../src/main/demo/demoMode");
+    setDemoModeForTesting(false);
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "sshs3-settle-"));
+    const hub = new HubService(
+      { changed: () => {}, inventoryTargets: async () => [], backgroundChanged: async () => {}, openSchedule: async () => "s1", show: () => {}, aiConfigFilePath: path.join(dir, "ai.json") } as never,
+      dir,
+    );
+    disposals.push(async () => { await hub.dispose(); setDemoModeForTesting(undefined); await fs.rm(dir, { recursive: true, force: true }); });
+    await hub.initialize();
+    // No model is configured, so launching throws.
+    await expect(hub.request({ action: "start", task: { prompt: "do something", mode: "advice" } } as never)).rejects.toThrow();
+    const task = hub.store.data.tasks.at(-1)!;
+    expect(task.status).toBe("failed");
+    // The wait resolves instead of hanging for ever.
+    await expect(
+      Promise.race([
+        (hub as unknown as { whenSettled: (t: unknown) => Promise<void> }).whenSettled(task),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("still waiting")), 2000)),
+      ]),
+    ).resolves.toBeUndefined();
+  });
+});

@@ -1283,8 +1283,10 @@ export function toolsForTask(
           (t) =>
             t.name === "workspace_context" ||
             t.name === "workspace_remember" ||
-            // The management tools, but not the one that runs a change in a terminal.
-            (t.name.startsWith("sshs3_") && t.name !== "sshs3_change"),
+            // The management tools, but not the ones that run something on a server:
+            // a conversation that only advises would have every one of those refused,
+            // and a tool that is offered and always refused is a trap for the model.
+            (t.name.startsWith("sshs3_") && t.name !== "sshs3_change" && t.name !== "sshs3_cluster_exec"),
         )
       : [...AGENT_TOOLS];
   baseTools.push({

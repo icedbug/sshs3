@@ -3525,6 +3525,10 @@ export class HubService {
       throw error;
     } finally {
       if (this.launches.get(task.id) === launchMarker) this.launches.delete(task.id);
+      // A launch that failed leaves a run that never ran. Whoever waits for it to
+      // settle — a test case holding its recording, a ticket, the workforce — would
+      // otherwise wait for ever.
+      if (!this.runtimes.has(task.id) && !active(task)) this.settled(task.id);
     }
   }
 

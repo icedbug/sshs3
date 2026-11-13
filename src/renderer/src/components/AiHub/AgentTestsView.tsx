@@ -20,7 +20,9 @@ const lines = (s: string): string[] => s.split("\n").map((x) => x.trim()).filter
 /**
  * Tests for the agents, made from real conversations. A case is replayed
  * against the agents as they are now, with the tools answering from what was
- * recorded: nothing is run on any system. It shows whether a change to
+ * recorded: nothing is run on any system. The knowledge base is the one
+ * exception — it is read as it is now, so that changing a page shows in the
+ * result, which is usually the point. It shows whether a change to
  * instructions, pages or model made the agents better or worse at the things
  * that actually happened here.
  */
@@ -69,6 +71,7 @@ export function AgentTestsView({ hub, act }: { hub: HubSnapshot; act: Act }): JS
       <p className="ai-hint">
         A test is a real conversation kept with what every tool answered at the time. Running it asks the same
         question of the agents as they are now; the tools answer from the recording and nothing is run on any system.
+        The knowledge base is read as it is now, not from the recording, so that changing a page shows here.
         Use it before and after you change an agent&apos;s instructions, a knowledge base page, or the model.
         {ran.length > 0 &&
           ` ${passing} of ${ran.length} passing.${better.length ? ` Better than last time: ${better.join(", ")}.` : ""}${worse.length ? ` Worse than last time: ${worse.join(", ")}.` : ""}`}
@@ -185,6 +188,11 @@ export function AgentTestsView({ hub, act }: { hub: HubSnapshot; act: Act }): JS
                     {run.unrecorded} tool call{run.unrecorded === 1 ? "" : "s"} had no recording: the agent went somewhere the original conversation did not.
                   </li>
                 )}
+                {Object.entries(run.live ?? {}).map(([name, count]) => (
+                  <li data-passed="note" key={name}>
+                    {count} call{count === 1 ? "" : "s"} to {name} were answered by the knowledge base as it is now, not from the recording.
+                  </li>
+                ))}
               </ul>
             )}
             {open && run && (
