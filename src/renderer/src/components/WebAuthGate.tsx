@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
+import { McpKeysPanel } from './McpKeysPanel';
 import {
   isWebBrowserMode,
   ensureWebClientBridgeInstalled,
@@ -859,6 +860,11 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                         </button>
                       </form>
                     )}
+                  </div>
+
+                  {/* Keys for the person's own agents */}
+                  <div className="rounded-xl bg-slate-900/80 border border-slate-800 p-4">
+                    <McpKeysPanel api={webApiFetch} origin={typeof window !== 'undefined' ? window.location.origin : ''} />
                   </div>
 
                   {/* Password change card */}
