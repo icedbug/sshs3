@@ -25,7 +25,7 @@ describe.skipIf(process.platform === 'win32')('config stores replace their file 
     dir = await fs.mkdtemp(path.join(os.tmpdir(), 'stores-atomic-'));
   });
   afterEach(async () => {
-    await fs.rm(dir, { recursive: true, force: true });
+    await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   async function expectOldFileSurvivesSave(file: string, save: () => Promise<unknown>) {

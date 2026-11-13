@@ -25,7 +25,7 @@ describe('DirectorySyncProfileStore', () => {
   });
 
   afterEach(async () => {
-    await fs.rm(dir, { recursive: true, force: true });
+    await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   it('soft-deletes: hidden from list() but kept as a tombstone', async () => {

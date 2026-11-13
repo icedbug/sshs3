@@ -194,6 +194,7 @@ import {
   nextForHeartbeat,
   splitRemovals,
   sumUsage,
+  tokensLeft,
   templateSummaries,
   ticketAfterRun,
   withRemovals,
@@ -2671,6 +2672,8 @@ export class HubService {
         // so "Run mission" started an agent a person had switched off.
         if (agent.enabled === false)
           throw new Error(`${agent.name} is paused. Switch it on again before starting it.`);
+        if (tokensLeft(agent, this.usageTotal()) <= 0)
+          throw new Error(`${agent.name} has used its token budget for this month. Raise it or wait for the new month.`);
         const clusterTag = agent.targetCluster
           ? ` (cluster: @cluster:${agent.targetCluster})`
           : "";
@@ -3003,9 +3006,9 @@ export class HubService {
           srv.status = result.ok ? "connected" : "error";
           srv.lastError = result.error;
           srv.lastTestedAt = Date.now();
-          if (result.tools.length > 0) {
-            srv.discoveredTools = result.tools;
-          }
+          // What it answered, including an empty list: a server that no longer offers a tool
+          // must not keep offering it here, and a name that cannot be resolved is not offered.
+          if (result.ok) srv.discoveredTools = result.tools;
         }
         this.store.data.mcpServers = [
           ...(this.store.data.mcpServers ?? []).filter((x) => x.id !== srv.id),
@@ -3761,6 +3764,7 @@ export class HubService {
       if (event.error) task.error = boundedContext(event.error);
       if (task.status === "completed" || task.status === "failed") {
         this.reflectTaskCompletion(task);
+        this.countAgentUsage(task);
       }
       if (!isBackgroundRun(task)) this.notePageOutcome(task);
       if (
@@ -3887,6 +3891,21 @@ export class HubService {
         };
     }
     return undefined;
+  }
+
+  /**
+   * What a run spent, put down to the agent it ran as. A ticket run was the
+   * only one counted, so a mission run or a chat with an agent selected spent
+   * nothing as far as the budget was concerned — and the budget is what the
+   * screen calls "tokens this month".
+   */
+  private countAgentUsage(task: AgentTask): void {
+    if (!task.agentId || task.usageCounted) return;
+    const used = (task.usage?.inputTokens ?? 0) + (task.usage?.outputTokens ?? 0);
+    task.usageCounted = true;
+    if (used <= 0) return;
+    this.store.data.agentUsage = addUsage(this.store.data.agentUsage ?? {}, task.agentId, used);
+    this.lastWorkSync = 0;
   }
 
   /** For tests: what a finished run did, put down to the pages it worked from. */
@@ -5529,6 +5548,7 @@ export class HubService {
       tickets: live(this.store.data.workTickets),
       agents,
       usage: this.usageTotal(),
+      runners: (this.store.data.externalRunners ?? []).map((r) => r.id),
       client,
     });
     if (reason) throw new Error(reason);
@@ -5585,12 +5605,11 @@ export class HubService {
         this.putTicket({ ...ticket, status: "todo", claim: undefined, updatedAt: Date.now() });
       } else {
         const used = (task.usage?.inputTokens ?? 0) + (task.usage?.outputTokens ?? 0);
-        if (ticket.assigneeAgentId)
-          this.store.data.agentUsage = addUsage(
-            this.store.data.agentUsage ?? {},
-            ticket.assigneeAgentId,
-            used,
-          );
+        // Counted once. A run that carries the agent has already been counted when it ended.
+        if (ticket.assigneeAgentId && !task.usageCounted) {
+          task.usageCounted = true;
+          this.store.data.agentUsage = addUsage(this.store.data.agentUsage ?? {}, ticket.assigneeAgentId, used);
+        }
         this.putTicket(ticketAfterRun(ticket, task));
       }
       void this.work()
@@ -5662,6 +5681,7 @@ export class HubService {
       tickets,
       agents: this.getAgentsList(),
       usage: this.usageTotal(),
+      runners: (this.store.data.externalRunners ?? []).map((r) => r.id),
       client,
       now,
     });
@@ -7034,6 +7054,11 @@ export class HubService {
     await this.s3Workspace.dispose();
     await this.broker.dispose();
     this.terminals.dispose();
+    // A document being read, or facts being collected, writes into the hub's folder when it
+    // ends. A hub that has been disposed of must have stopped writing before it says so.
+    for (let i = 0; i < 100 && (this.kbReadingId || this.factsRound); i++)
+      await new Promise((r) => setTimeout(r, 20));
+    await this.factsRound?.catch(() => undefined);
     if (this.initialized) await this.store.save();
   }
 }

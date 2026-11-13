@@ -37,7 +37,7 @@ afterEach(async () => {
 
 async function createService(): Promise<TeamVaultService> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'sshs3-team-vault-mode-'));
-  disposals.push(() => fs.rm(dir, { recursive: true, force: true }));
+  disposals.push(() => fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
   return new TeamVaultService({ baseDir: dir });
 }
 

@@ -304,7 +304,7 @@ async function makeHub(answers: Record<string, () => { ok: boolean; stdout: stri
     } as never,
     dir,
   );
-  disposals.push(async () => { await hub.dispose(); setDemoModeForTesting(undefined); await fs.rm(dir, { recursive: true, force: true }); });
+  disposals.push(async () => { await hub.dispose(); setDemoModeForTesting(undefined); await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); });
   await hub.initialize();
   return { hub, calls, scripts, dir };
 }

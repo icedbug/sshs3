@@ -23,7 +23,7 @@ describe('Fido2KeyManager', () => {
         generateFido2Key({ outPath, keyType: 'ed25519-sk', resident: true, verifyRequired: true })
       ).rejects.toThrow(/already exists/);
 
-      await fs.rm(dir, { recursive: true, force: true });
+      await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     });
 
     it.skipIf(process.platform === 'win32')('deletes the stale local file first and proceeds when overwrite is explicitly requested', async () => {
@@ -58,7 +58,7 @@ describe('Fido2KeyManager', () => {
         expect(await fs.readFile(outPath, 'utf-8')).toBe('new private\n');
       } finally {
         process.env.PATH = originalPath;
-        await fs.rm(dir, { recursive: true, force: true });
+        await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
         await fs.rm(fakeBinDir, { recursive: true, force: true });
       }
     });
@@ -141,7 +141,7 @@ describe('Fido2KeyManager', () => {
         expect(events.indexOf('generate:end')).toBeGreaterThan(events.indexOf('occupier:end'));
       } finally {
         process.env.PATH = originalPath;
-        await fs.rm(dir, { recursive: true, force: true });
+        await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
         await fs.rm(fakeBinDir, { recursive: true, force: true });
       }
     });
@@ -172,7 +172,7 @@ describe('Fido2KeyManager', () => {
         expect(capturedArgs).toContain('application=ssh:id_work_server_sk');
       } finally {
         process.env.PATH = originalPath;
-        await fs.rm(dir, { recursive: true, force: true });
+        await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
         await fs.rm(fakeBinDir, { recursive: true, force: true });
       }
     });

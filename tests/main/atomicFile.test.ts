@@ -10,7 +10,7 @@ describe('writeFileAtomic', () => {
     dir = await fs.mkdtemp(path.join(os.tmpdir(), 'atomic-file-'));
   });
   afterEach(async () => {
-    await fs.rm(dir, { recursive: true, force: true });
+    await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   it('creates the file and its parent folders and leaves no temp file behind', async () => {
@@ -131,7 +131,7 @@ describe('backupCorruptFile', () => {
       expect(await fs.readFile(`${file}.corrupt`, 'utf-8')).toBe('{"half": ');
       await expect(backupCorruptFile(path.join(dir, 'no', 'such', 'x'), 'y')).resolves.toBeUndefined();
     } finally {
-      await fs.rm(dir, { recursive: true, force: true });
+      await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 });

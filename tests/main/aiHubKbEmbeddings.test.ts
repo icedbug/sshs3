@@ -14,7 +14,7 @@ import type { KbDocument } from "../../src/shared/types/aiHub";
 
 const dirs: string[] = [];
 afterEach(async () => {
-  for (const dir of dirs.splice(0)) await fs.rm(dir, { recursive: true, force: true });
+  for (const dir of dirs.splice(0)) await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   vi.unstubAllGlobals();
 });
 const tmp = async (): Promise<string> => {

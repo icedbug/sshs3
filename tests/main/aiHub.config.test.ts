@@ -26,7 +26,7 @@ describe("AI model credentials", () => {
     file = path.join(dir, "config.json");
   });
   afterEach(async () => {
-    await fs.rm(dir, { recursive: true, force: true });
+    await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
   it("stores ciphertext but never returns the key to the renderer", async () => {
     const store = new AiConfigStore(file);

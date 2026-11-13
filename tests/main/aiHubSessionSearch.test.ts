@@ -38,7 +38,7 @@ async function hubWith(tasks: AgentTask[]) {
   disposals.push(async () => {
     await hub.dispose();
     setDemoModeForTesting(undefined);
-    await fs.rm(dir, { recursive: true, force: true });
+    await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
   await hub.initialize();
   hub.store.data.tasks.push(...tasks);

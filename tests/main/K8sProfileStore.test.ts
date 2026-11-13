@@ -15,7 +15,7 @@ describe('K8sProfileStore', () => {
     dir = await fs.mkdtemp(path.join(os.tmpdir(), 'k8s-profiles-test-'));
     file = path.join(dir, 'nested', 'k8s-profiles.json');
   });
-  afterEach(() => fs.rm(dir, { recursive: true, force: true }));
+  afterEach(() => fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
 
   const base = { id: 'p1', name: 'Prod', server: 'https://api.example.com:6443' };
 

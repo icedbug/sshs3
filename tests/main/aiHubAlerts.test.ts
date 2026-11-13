@@ -90,7 +90,7 @@ describe("alerts through the hub", () => {
       { changed: () => {}, inventoryTargets: async () => [], backgroundChanged: async () => {}, openSchedule: async () => "s1", show: () => {}, aiConfigFilePath: path.join(dir, "ai.json"), workspaceServers: async () => servers, alertHookOwner: "u1" } as never,
       dir,
     );
-    disposals.push(async () => { await hub.dispose(); setDemoModeForTesting(undefined); await fs.rm(dir, { recursive: true, force: true }); });
+    disposals.push(async () => { await hub.dispose(); setDemoModeForTesting(undefined); await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); });
     await hub.initialize();
     return hub;
   }

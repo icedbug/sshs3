@@ -486,9 +486,11 @@ export async function handleAppAction(
             description: str("description") ?? existing?.description,
             tags: tags ?? existing?.tags,
             shared: bool("shared") ?? existing?.shared ?? true,
-            localUsername: str("localUsername"),
-            localPrivateKeyPath: str("localPrivateKeyPath"),
-            localAuthType: normalizedLocalAuth,
+            // Only what was given: the rest of what this computer knows about the server
+            // stays. Sending these as undefined used to wipe the user name or the key.
+            localUsername: str("localUsername") ?? existing?.localUsername,
+            localPrivateKeyPath: str("localPrivateKeyPath") ?? existing?.localPrivateKeyPath,
+            localAuthType: normalizedLocalAuth ?? existing?.localAuthType,
           },
         });
         const saved = (snap.workspaceServers ?? []).find(

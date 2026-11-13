@@ -54,7 +54,7 @@ async function create() {
   );
   cleanups.push(async () => {
     await hub.dispose();
-    await fs.rm(dir, { recursive: true, force: true });
+    await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
   await hub.initialize();
   return hub;

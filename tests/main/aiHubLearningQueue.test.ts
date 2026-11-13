@@ -193,7 +193,7 @@ async function makeHub(name: string, bucket: Map<string, Buffer>, saved: MemoryE
   disposals.push(async () => {
     await hub.dispose();
     setDemoModeForTesting(undefined);
-    await fs.rm(dir, { recursive: true, force: true });
+    await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
   await hub.initialize();
   await hub.request({

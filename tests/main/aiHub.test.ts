@@ -390,7 +390,7 @@ describe("tool authority", () => {
 describe("durable evidence", () => {
   it("redacts secrets and marks interrupted changes uncertain without replay on reload", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "sshs3-hub-test-"));
-    disposals.push(() => fs.rm(dir, { recursive: true, force: true }));
+    disposals.push(() => fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
     const file = path.join(dir, "hub.json");
     const store = new HubStore(file);
     const t = task();
@@ -442,7 +442,7 @@ describe("durable evidence", () => {
   });
   it("loads hub.json with UTF-8 BOM and recovers from corrupt store without failing initialization", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "sshs3-hub-bom-"));
-    disposals.push(() => fs.rm(dir, { recursive: true, force: true }));
+    disposals.push(() => fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
     const file = path.join(dir, "hub.json");
     const store = new HubStore(file);
     await store.save();

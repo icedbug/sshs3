@@ -235,7 +235,7 @@ async function makeHub() {
   disposals.push(async () => {
     await hub.dispose();
     setDemoModeForTesting(undefined);
-    await fs.rm(dir, { recursive: true, force: true });
+    await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
   await hub.initialize();
   await hub.request({
@@ -318,5 +318,24 @@ describe("working a ticket", () => {
     await expect(hub.request({ action: "ticket-start", id: first.id })).rejects.toThrow(/budget/);
     snap = await hub.request({ action: "snapshot" });
     expect(snap.workTickets!.find((t) => t.id === first.id)!.status).toBe("todo");
+  });
+});
+
+describe("a ticket whose agent runs somewhere else", () => {
+  const agent = (extra: Record<string, unknown> = {}) =>
+    ({ id: "a1", name: "Coder", role: "r", mission: "m", systemPrompt: "s", defaultMode: "assisted", updatedAt: 1, ...extra }) as never;
+  const ticket = (extra: Record<string, unknown> = {}) =>
+    ({ id: "t1", title: "Fix it", status: "todo", assigneeAgentId: "a1", createdBy: "jacob", createdAt: 1, updatedAt: 1, ...extra }) as never;
+
+  it("is left to the computer that has the runner", () => {
+    const ctx = { tickets: [ticket()], agents: [agent({ runnerId: "claude-code" })], client: "c1" };
+    expect(whyNotRunnable(ticket(), { ...ctx, runners: [] })).toMatch(/not set up on this computer/);
+    expect(whyNotRunnable(ticket(), { ...ctx, runners: ["claude-code"] })).toBeUndefined();
+    // Not checked at all where nothing was passed: an older caller is not made to fail.
+    expect(whyNotRunnable(ticket(), ctx)).toBeUndefined();
+    // And an agent that needs no runner is unaffected.
+    expect(whyNotRunnable(ticket(), { tickets: [ticket()], agents: [agent()], client: "c1", runners: [] })).toBeUndefined();
+    expect(nextForHeartbeat({ ...ctx, runners: [] })).toBeUndefined();
+    expect(nextForHeartbeat({ ...ctx, runners: ["claude-code"] })?.id).toBe("t1");
   });
 });

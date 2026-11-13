@@ -223,6 +223,8 @@ export interface AgentTask {
   kbPages?: string[];
   /** How many of `changes` have been put down to those pages already. */
   kbCounted?: number;
+  /** What this run spent has been added to its agent's month. Counted once, wherever it ended. */
+  usageCounted?: boolean;
   /**
    * The run was asked for from outside sshs3 — by somebody's own agent over
    * MCP. Nobody is watching it here, so every command it asks for is put to a

@@ -14,7 +14,7 @@ afterEach(async () => {
 });
 const tmp = async (name: string): Promise<string> => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), `sshs3-${name}-`));
-  disposals.push(() => fs.rm(dir, { recursive: true, force: true }));
+  disposals.push(() => fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
   return dir;
 };
 

@@ -221,7 +221,7 @@ async function makeHub(host: Record<string, unknown> = {}) {
     { changed: () => {}, inventoryTargets: async () => [], backgroundChanged: async () => {}, openSchedule: async () => "s1", show: () => {}, aiConfigFilePath: path.join(dir, "ai.json"), ...host } as never,
     dir,
   );
-  disposals.push(async () => { await hub.dispose(); setDemoModeForTesting(undefined); await fs.rm(dir, { recursive: true, force: true }); });
+  disposals.push(async () => { await hub.dispose(); setDemoModeForTesting(undefined); await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); });
   await hub.initialize();
   const inner = hub as unknown as Inner;
   inner.notifySettle = async () => {};

@@ -164,7 +164,7 @@ describe('ProfileSyncService', () => {
 
   afterEach(async () => {
     for (const dir of dirs) {
-      await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+      await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }).catch(() => {});
     }
   });
 

@@ -104,7 +104,7 @@ describe("a ticket for an external agent", () => {
     disposals.push(async () => {
       await hub.dispose();
       setDemoModeForTesting(undefined);
-      await fs.rm(dir, { recursive: true, force: true });
+      await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     });
     await hub.initialize();
     // No model is configured: the external agent brings its own.

@@ -129,7 +129,7 @@ async function makeHub() {
     { changed: () => {}, inventoryTargets: async () => [], backgroundChanged: async () => {}, openSchedule: async () => "s1", show: () => {}, aiConfigFilePath: path.join(dir, "ai.json") } as never,
     dir,
   );
-  disposals.push(async () => { await hub.dispose(); setDemoModeForTesting(undefined); await fs.rm(dir, { recursive: true, force: true }); });
+  disposals.push(async () => { await hub.dispose(); setDemoModeForTesting(undefined); await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); });
   await hub.initialize();
   await hub.request({ action: "configure", config: { enabled: true, provider: "openai-compatible", model: "m", baseUrl: "https://llm.internal.example/v1", apiKey: "sk-test-1234567890abcdef" }, preferences: { proposeMemories: false } } as never); // pragma: allowlist secret
   return { hub, dir };

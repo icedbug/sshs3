@@ -92,6 +92,8 @@ export function whyNotRunnable(
     tickets: WorkTicket[];
     agents: MissionAgent[];
     usage?: Record<string, AgentUsage>;
+    /** The external runners set up on THIS installation. Undefined: not checked. */
+    runners?: string[];
     client: string;
     now?: number;
   },
@@ -105,6 +107,11 @@ export function whyNotRunnable(
   const agent = ctx.agents.find((a) => a.id === ticket.assigneeAgentId);
   if (!agent) return "No agent is assigned.";
   if (agent.enabled === false) return `${agent.name} is paused.`;
+  // A runner is a command and a folder on one computer, and is never shared. A ticket for
+  // an agent whose runner is not set up here belongs to whoever has it; otherwise this
+  // installation takes it, fails, and takes it again for ever.
+  if (agent.runnerId && ctx.runners && !ctx.runners.includes(agent.runnerId))
+    return `${agent.name} runs with an external agent that is not set up on this computer.`;
   if (tokensLeft(agent, ctx.usage, now) <= 0)
     return `${agent.name} has used its token budget for this month.`;
   const open = (ticket.blockedBy ?? [])
@@ -125,6 +132,7 @@ export function nextForHeartbeat(ctx: {
   tickets: WorkTicket[];
   agents: MissionAgent[];
   usage?: Record<string, AgentUsage>;
+  runners?: string[];
   client: string;
   now?: number;
 }): WorkTicket | undefined {

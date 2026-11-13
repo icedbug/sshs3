@@ -155,7 +155,7 @@ describe('IpcBridge — Team Vault sync status (TEAM_VAULT_SYNC_STATUS reference
       expect(cleared.lastSyncedRevision).toBeUndefined();
       expect(cleared.remoteFormatVersion).toBeUndefined();
     } finally {
-      await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+      await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }).catch(() => {});
     }
   });
 });

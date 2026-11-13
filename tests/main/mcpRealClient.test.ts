@@ -22,7 +22,7 @@ const running: Array<{ server: Sshs3WebServer; dir: string }> = [];
 afterEach(async () => {
   for (const { server, dir } of running.splice(0)) {
     await server.stop().catch(() => undefined);
-    await fs.rm(dir, { recursive: true, force: true });
+    await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
 });
 

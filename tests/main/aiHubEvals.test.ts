@@ -112,7 +112,7 @@ describe("running a test case", () => {
       { changed: () => {}, inventoryTargets: async () => [], backgroundChanged: async () => {}, openSchedule: async () => "s1", show: () => {}, aiConfigFilePath: path.join(dir, "ai.json") },
       dir,
     );
-    disposals.push(async () => { await hub.dispose(); setDemoModeForTesting(undefined); await fs.rm(dir, { recursive: true, force: true }); });
+    disposals.push(async () => { await hub.dispose(); setDemoModeForTesting(undefined); await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); });
     await hub.initialize();
     await hub.request({ action: "configure", config: { enabled: true, provider: "anthropic", model: "claude-opus-5-5", fastModel: "claude-haiku-5-5", apiKey: "sk-ant-test" }, preferences: { proposeMemories: false } }); // pragma: allowlist secret
     hub.store.data.tasks.push(finished());
@@ -172,7 +172,7 @@ describe("a run that never starts", () => {
       { changed: () => {}, inventoryTargets: async () => [], backgroundChanged: async () => {}, openSchedule: async () => "s1", show: () => {}, aiConfigFilePath: path.join(dir, "ai.json") } as never,
       dir,
     );
-    disposals.push(async () => { await hub.dispose(); setDemoModeForTesting(undefined); await fs.rm(dir, { recursive: true, force: true }); });
+    disposals.push(async () => { await hub.dispose(); setDemoModeForTesting(undefined); await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); });
     await hub.initialize();
     // No model is configured, so launching throws.
     await expect(hub.request({ action: "start", task: { prompt: "do something", mode: "advice" } } as never)).rejects.toThrow();

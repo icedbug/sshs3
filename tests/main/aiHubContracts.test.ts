@@ -32,7 +32,7 @@ async function makeHub(options: { demo?: boolean; model?: boolean } = {}) {
     { changed, inventoryTargets: async () => [], backgroundChanged: async () => {}, openSchedule: async () => "s1", show: () => {}, aiConfigFilePath: path.join(dir, "ai.json") } as never,
     dir,
   );
-  disposals.push(async () => { await hub.dispose(); setDemoModeForTesting(undefined); await fs.rm(dir, { recursive: true, force: true }); });
+  disposals.push(async () => { await hub.dispose(); setDemoModeForTesting(undefined); await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); });
   await hub.initialize();
   if (options.model !== false)
     await hub.request({ action: "configure", config: { enabled: true, provider: "anthropic", model: "claude-opus-5-5", apiKey: "sk-ant-test" }, preferences: { proposeMemories: false } } as never); // pragma: allowlist secret
