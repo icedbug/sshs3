@@ -161,6 +161,21 @@ describe("persistent AI chat", () => {
       }),
     );
   });
+  it("sends a note with a refusal, for the agent to read", async () => {
+    render(<Harness />);
+    openPreviousChat();
+    fireEvent.change(screen.getByLabelText("Note for the agent"), { target: { value: " reload instead " } });
+    fireEvent.click(screen.getByRole("button", { name: "Decline" }));
+    await waitFor(() =>
+      expect(request).toHaveBeenCalledWith({
+        action: "approve",
+        taskId: "task",
+        changeId: "change",
+        approved: false,
+        note: "reload instead",
+      }),
+    );
+  });
   it("keeps the draft across settings and closing the panel", () => {
     const view = render(<AiHubPanel mode="panel" setMode={() => {}} />);
     fireEvent.change(screen.getByLabelText("Message to agent"), {

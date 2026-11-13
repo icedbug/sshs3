@@ -175,6 +175,16 @@ recordings are sealed into it. See "The audit log and terminal recordings" in
   the team bucket, and it gives no more than the person could do themselves.
 - **MCP servers and schedules are per installation.** An MCP server an agent
   needs must be added on the server too. A schedule runs where it was created.
+- **What each person has on the server is theirs.** Saved S3 profiles are
+  personal; a shared one reaches others without its keys. A server profile
+  someone marks personal stays out of the team's shared list. Local terminals
+  and folder ingestion from the server's own disk are not offered: a signed-in
+  person works in their own folder only. Who did something is the signed-in
+  person, never a name sent with the request.
+- **Team settings are an admin's.** Changing the shared workspace, the team
+  bucket or other team-wide settings needs a team admin (set with the host
+  option for admins). Changing a password signs out the account's other
+  sessions; sign-in attempts are limited per account as well as per address.
 - **One server per team is enough.** Two would work (claims decide who runs a
   ticket) but gain nothing.
 

@@ -1069,6 +1069,88 @@ that specific check, not resolution of an entire incident. File read-back checks
 bytes, not application behavior. The current file hash recheck does not provide
 atomic compare-and-write against an unrelated external writer.
 
+## What the second review changed (features 4 to 13)
+
+Each part of the hub was read by a reviewer and compared with how other tools
+do the same; every finding below was checked in the code before it was fixed,
+and each has a test.
+
+**Chat and the agent loop.** Tokens are counted on every way a turn ends, also
+when it fails or is stopped. A handover note (compaction) is written from the
+transcript without dropping the person's latest steering. External agents
+(ACP) get the same command limit as built-in ones and never inherit the
+app's SSH agent socket or its own `SSHS3_*` variables. Investigators started
+from a conversation are linked to it and their spending counts toward it. A
+handoff to another agent takes effect after the current turn, and never raises
+the run's mode. A person can answer an approval with a note: a refusal tells
+the agent why and the run goes on; an approval with a note hands the note to
+the agent with the command's result. The agent is given its target's last
+facts reading, with how old it is, and is told to look again before acting on it.
+
+**Workforce.** A ticket is claimed in the bucket and the claim is read back
+after a pause, so two installations do not both run it. Pause and budget are
+checked for every way a run starts: a ticket, a handoff, a mission, a reply or
+a resume. A ticket an agent opened from something it read outside sshs3 is
+marked so, and what it asks for is treated as data.
+
+**Inbox, alerts and notifications.** An alert assigned to an agent stays in
+the inbox ("With X, not started yet") until a run takes it. An alert that
+resolved and fires again is news again. Alert hooks are limited per caller and
+per hook. A reminder is sent while there is still time to answer, with the
+minutes left.
+
+**Memory and learning.** A fix is kept as proven only when a check showed it
+worked; one seen after a failure is kept as a guess with lower confidence.
+Learned memories are capped at 300 (the ones listed first are kept; what a person wrote is never dropped). Votes are counted
+per person. A memory saved for one server is only used on that server.
+
+**Server facts and context.** Facts are read only from shared servers. A
+server that stops answering keeps its last problems and says it is
+unreachable. Agents may suggest links on the dependency map but cannot change
+or remove links a person confirmed. Nothing about a target is guessed from
+"the first open terminal". What is about the target comes last in the context,
+so it is what survives when a long context is cut.
+
+**Schedules, nightly upkeep and the daily report.** Nightly upkeep is marked
+done once per team day. Each installation's report covers the time since its
+last report, however long the computer was off. A scheduled run records how it
+ended. A schedule counts as missed only if it was due before the previous check.
+
+**AI in the terminal.** A suggestion is cleaned of control characters, says
+when it is more than one line and how risky it is, and runs with one key only
+when it is a single read-only line on an empty prompt; otherwise it is pasted
+for the person to read. What is sent to the model is masked.
+
+**Settings and first start.** Saved settings are never rewritten when they are
+read: a ChatGPT/Codex sign-in is offered on first start, not switched to.
+Changing the provider clears the endpoint. App settings beyond how things look
+(smartcard mode, PKCS#11 library, which agent local shells use, X11, update
+checks …) need a person's approval when an agent changes them.
+
+**Shared server and team sync.** See [the workforce server](workforce-server.md):
+personal data stays personal, the signed-in person is who did something, team
+settings need a team admin.
+
+**Hub core.** The shared workspace file carries only shared server topology
+and is written only when it changed. A store that cannot be read is never
+overwritten, and one that cannot be parsed is backed up before it is replaced.
+A request saves once, and the panel ignores a refresh that started before the
+latest action's result. Activity entries name the agent and the person it ran
+for; the model cannot choose the name.
+
+**The rest of the app.** Overwriting a file during a transfer writes to a
+hidden temporary file and renames it over the target only after the copy and
+its checks succeeded. Folder transfers copy links to files and report links
+they skip. Closing a terminal tab never reconnects its session. Kubernetes
+login refuses to replace a kubeconfig it cannot read and keeps a backup.
+Importing profiles keeps saved passwords and never takes machine-local paths
+from a file. Profile sync checks for conflicts before writing, so an ordinary
+conflict between two devices no longer blocks both; a background push that
+conflicts pulls and pushes again. In a Team Vault only an admin can set what
+a shared profile does on a teammate's machine (agent forwarding, X11, tunnels,
+key and library paths, extra ssh options), and the documentation now says
+plainly that every member can decrypt every secret in the vault.
+
 ## Build and focused checks
 
 Generated frontend source and runtime distributions are ignored by Git. Stage
