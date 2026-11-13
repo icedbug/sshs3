@@ -86,6 +86,8 @@ export interface ToolDependencies {
   approvalWaitMs?(): number;
   /** A run stood still this long waiting for a person: that time is not the run's own. */
   waited?(task: AgentTask, ms: number): void;
+  /** The run asked for another action after it was told its budget is spent: end it. */
+  budgetSpent?(task: AgentTask): void;
   changed(): void;
 }
 
@@ -95,7 +97,7 @@ export class ToolBroker {
   private listening?: Promise<void>;
   private grants = new Map<
     string,
-    { task: AgentTask; commands: number; expiresAt: number; busy: boolean }
+    { task: AgentTask; commands: number; refused?: number; expiresAt: number; busy: boolean }
   >();
   private approvals = new Map<
     string,
@@ -134,6 +136,28 @@ export class ToolBroker {
       busy: false,
     });
     return { url: `http://127.0.0.1:${address.port}/tool`, key };
+  }
+
+  /**
+   * Counts one action against the run's budget. Past it, the action is refused
+   * and the agent told to report; asking again after that ends the run.
+   */
+  private spend(
+    grant: { commands: number; refused?: number },
+    task: AgentTask,
+  ): void {
+    if (grant.commands < task.maxCommands) {
+      task.commandsUsed = ++grant.commands;
+      return;
+    }
+    task.commandsUsed = task.maxCommands;
+    task.budgetStop ??= { kind: "commands", limit: task.maxCommands, at: Date.now() };
+    grant.refused = (grant.refused ?? 0) + 1;
+    this.deps.changed();
+    if (grant.refused > 1) this.deps.budgetSpent?.(task);
+    throw new Error(
+      `Command budget exhausted: this run may take ${task.maxCommands} actions and has taken them all. Do not call more tools: report what you found and what is left to do.`,
+    );
   }
 
   approve(taskId: string, changeId: string, allowed: boolean, note?: string): void {
@@ -231,10 +255,7 @@ export class ToolBroker {
           // A tool that reaches outside sshs3 — a command on a cluster, a call to
           // somebody else's MCP server — counts against the run's budget like any
           // other action. A change to sshs3's own rules does not: a person decides it.
-          if (!change.guard && ++grant.commands > task.maxCommands)
-            throw new Error(
-              `This run may take ${task.maxCommands} actions and has taken them all. Report what you found and what is left to do.`,
-            );
+          if (!change.guard) this.spend(grant, task);
           return this.authorize(key, task, change);
         });
         this.deps.changed();
@@ -243,11 +264,7 @@ export class ToolBroker {
       if (request.action === "file-read" || request.action === "file-write") {
         if (request.action === "file-write" && task.investigator)
           throw new Error("An investigator does not change files.");
-        if (
-          request.action === "file-write" &&
-          ++grant.commands > task.maxCommands
-        )
-          throw new Error("Action budget exhausted");
+        if (request.action === "file-write") this.spend(grant, task);
         const fileRes = await this.deps.file(task, request, (change) =>
           this.authorize(key, task, change),
         );
@@ -325,8 +342,7 @@ export class ToolBroker {
       }
       if (!target)
         throw new Error("No terminal was assigned to this task");
-      if (++grant.commands > task.maxCommands)
-        throw new Error("Command budget exhausted");
+      this.spend(grant, task);
 
       // Auto-handshake on demand if the terminal has not been armed yet (and was not invalidated)
       if (task.mode !== "advice" || task.investigator) {

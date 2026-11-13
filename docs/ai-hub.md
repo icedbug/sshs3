@@ -1099,6 +1099,11 @@ the run's mode. A person can answer an approval with a note: a refusal tells
 the agent why and the run goes on; an approval with a note hands the note to
 the agent with the command's result. The agent is given its target's last
 facts reading, with how old it is, and is told to look again before acting on it.
+Each run has a command and time budget. When it is used up, the run stops with
+a line such as "Stopped after 20 commands, the limit for this conversation.
+Continue to give it 20 more." and a Continue button resumes the same
+conversation with the same budget again (pause and spending limits still
+apply). While a run works, the chat shows "7 of 20 commands".
 
 **Workforce.** A ticket is claimed in the bucket and the claim is read back
 after a pause, so two installations do not both run it. Pause and budget are
@@ -1114,7 +1119,7 @@ minutes left.
 
 **Memory and learning.** A fix is kept as proven only when a check showed it
 worked; one seen after a failure is kept as a guess with lower confidence.
-Learned memories are capped at 300 (the ones listed first are kept; what a person wrote is never dropped). Votes are counted
+Learned memories are capped at 300; replaced ones go first, oldest first, and what a person wrote is otherwise never dropped. When a newer memory replaces an older one (an update the assistant learned, or a different proven fix for the same error), the older one is kept as history: shown greyed under the newer one as "Replaced <date>", never given to agents or found by search. Undoing the update brings it back. Votes are counted
 per person. A memory saved for one server is only used on that server.
 
 **Server facts and context.** Facts are read only from shared servers. A

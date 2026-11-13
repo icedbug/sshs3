@@ -332,6 +332,13 @@ const DECIDED_HOW: Record<NonNullable<AgentChange["decidedHow"]>, string> = {
 };
 const active = (t: AgentTask): boolean =>
   ["queued", "running", "waiting"].includes(t.status);
+/** The line a conversation ends with when its run used its command or time budget. */
+export function budgetStopLine(stop: NonNullable<AgentTask["budgetStop"]>): string {
+  const n = stop.limit;
+  return stop.kind === "commands"
+    ? `Stopped after ${n} ${n === 1 ? "command" : "commands"}, the limit for this conversation. Continue to give it ${n} more.`
+    : `Stopped after ${n} ${n === 1 ? "minute" : "minutes"}, the time limit for this conversation. Continue to give it ${n} more.`;
+}
 /** A run the hub started itself (workforce specialist, memory proposals). */
 const isBackgroundRun = (t: AgentTask | undefined): boolean =>
   Boolean(t?.workforceRunId || t?.distillSourceId || t?.evalCaseId);
@@ -691,6 +698,8 @@ export class HubService {
         const armed = this.runTimers.get(task.id);
         if (armed) this.armRunTimer(task, armed.endsAt + ms);
       },
+      // Told its budget is spent, the agent asked for more anyway: the run ends here.
+      budgetSpent: (task) => void this.stop(task, "Command budget exhausted"),
       safetyContext: (task, targetLabel) => {
         const rawLabel = (targetLabel || task.target?.label || "").trim();
         const label = rawLabel.toLowerCase();
@@ -1876,12 +1885,19 @@ export class HubService {
             };
           }
         }
+        // After a spent budget, resuming is "Continue": the run gets the same budget again.
+        const spent = task.budgetStop;
+        const more = spent
+          ? `You have ${task.maxCommands} more commands and ${task.maxMinutes} more minutes. Continue where you stopped. `
+          : "";
         task.messages.push({
           id: crypto.randomUUID(),
           role: "user",
           text: task.target
-            ? "Resume on this terminal. Recheck the current state; do not replay any uncertain command."
-            : "Resume the conversation.",
+            ? `${more}Resume on this terminal. Recheck the current state; do not replay any uncertain command.`
+            : spent
+              ? more.trim()
+              : "Resume the conversation.",
           at: Date.now(),
         });
         await this.launch(task);
@@ -2073,16 +2089,29 @@ export class HubService {
         });
         break;
       }
-      case "memory-delete":
+      case "memory-delete": {
+        // Forgetting a memory forgets the history it replaced too.
+        const gone = new Set([request.id]);
+        for (let grew = true; grew; ) {
+          grew = false;
+          for (const m of this.store.data.memories)
+            if (m.supersededBy && gone.has(m.supersededBy) && !gone.has(m.id)) {
+              gone.add(m.id);
+              grew = true;
+            }
+        }
         this.store.data.memories = this.store.data.memories.filter(
-          (m) => m.id !== request.id,
+          (m) => !gone.has(m.id),
         );
         this.markBuiltinDismissed(request.id, getBuiltinSkillsAndMemories());
         this.store.data.deletedMemoryIds ??= {};
-        this.store.data.deletedMemoryIds[request.id] = Date.now();
-        await this.host.deleteWorkspaceMemory?.(request.id).catch(() => {});
+        for (const id of gone) {
+          this.store.data.deletedMemoryIds[id] = Date.now();
+          await this.host.deleteWorkspaceMemory?.(id).catch(() => {});
+        }
         this.s3Workspace.schedulePush(400);
         break;
+      }
       case "memory-feedback": {
         const storedIds = new Set(this.store.data.memories.map((m) => m.id));
         const builtinOrDemoIds = new Set([
@@ -2283,7 +2312,21 @@ export class HubService {
           throw new Error("There is nothing to undo for this entry");
         const memoryId = proposal.appliedMemoryId;
         const current = this.store.data.memories.find((m) => m.id === memoryId);
-        if (proposal.op === "update") {
+        const replaced = this.store.data.memories.find((m) => m.supersededBy === memoryId);
+        if (proposal.op === "update" && replaced) {
+          // The update was saved as a new memory: forget it and bring back the one it replaced.
+          if (current && current.text !== proposal.text)
+            throw new Error(
+              "This memory has been changed since; edit it in the list instead",
+            );
+          delete replaced.supersededBy;
+          delete replaced.supersededAt;
+          replaced.updatedAt = Date.now();
+          await this.request({ action: "memory-delete", id: memoryId });
+          if (replaced.scope !== "personal")
+            await this.host.saveWorkspaceMemory?.(replaced).catch(() => {});
+          this.s3Workspace.schedulePush();
+        } else if (proposal.op === "update") {
           // Put the earlier text back, unless somebody has edited it since.
           if (current && current.text === proposal.text && proposal.previousText)
             await this.saveMemoryInternal({
@@ -3826,6 +3869,9 @@ export class HubService {
     const launchMarker = Symbol(task.id);
     this.launches.set(task.id, launchMarker);
     task.status = "queued";
+    // Every run has the conversation's whole budget: what the last one used is not carried over.
+    task.budgetStop = undefined;
+    task.commandsUsed = 0;
     try {
       await this.launchReserved(task, launchMarker, schedule);
     } catch (error) {
@@ -4083,6 +4129,7 @@ export class HubService {
           });
       }
       if (event.error) task.error = boundedContext(event.error);
+      this.noteBudgetStop(task);
       if (task.status === "completed" || task.status === "failed") this.reflectTaskCompletion(task);
       // Whatever way it ended, what it spent is put down to the agent.
       this.countAgentUsage(task);
@@ -4410,7 +4457,9 @@ export class HubService {
     if (!active(task)) return;
     this.launches.delete(task.id);
     task.status = "interrupted";
-    task.error = reason;
+    // A spent budget is said in the conversation, with the way on: not as an error.
+    if (task.budgetStop) this.noteBudgetStop(task);
+    else task.error = reason;
     task.verification = "incomplete";
     this.broker.revoke(task.id);
     this.terminals.release(task.id);
@@ -4425,6 +4474,14 @@ export class HubService {
       ))
         await this.stop(child, reason);
     }
+  }
+  /** Ends the conversation with the line that says its budget was used, once per run. */
+  private noteBudgetStop(task: AgentTask): void {
+    if (!task.budgetStop) return;
+    const text = budgetStopLine(task.budgetStop);
+    const last = task.messages.at(-1);
+    if (last?.role === "system" && last.text === text) return;
+    task.messages.push({ id: crypto.randomUUID(), role: "system", text, at: Date.now() });
   }
   private scope(task: AgentTask): string {
     const terminal = task.target && this.terminals.get(task.target.sessionId);
@@ -4530,6 +4587,8 @@ export class HubService {
         }
         // The run's command budget holds for an external agent's actions too.
         if (++actions > task.maxCommands) {
+          task.commandsUsed = task.maxCommands;
+          task.budgetStop ??= { kind: "commands", limit: task.maxCommands, at: Date.now() };
           change.status = "denied";
           change.decidedHow = "policy";
           change.output = `This run may take ${task.maxCommands} actions, and has.`;
@@ -4537,6 +4596,7 @@ export class HubService {
           this.changed();
           return false;
         }
+        task.commandsUsed = actions;
         const needsApproval =
           // Without a command to read, a change to files or a deletion is always put to a person.
           (!question.command && ["edit", "delete", "execute", "move"].includes(question.kind ?? "execute")) ||
@@ -5519,6 +5579,7 @@ export class HubService {
         return;
       }
       this.runTimers.delete(task.id);
+      task.budgetStop ??= { kind: "minutes", limit: task.maxMinutes, at: Date.now() };
       void this.stop(task, "Run time budget exhausted");
     }, Math.max(0, endsAt - Date.now()));
     this.runTimers.set(task.id, { timer, endsAt });
@@ -6633,6 +6694,7 @@ export class HubService {
         scope: target.scope,
         title,
         text,
+        supersede: true,
       });
     }
     return this.saveMemoryInternal({
@@ -7401,7 +7463,9 @@ export class HubService {
       return { proposal };
     }
     // An agent does not pin for the whole team: pinned (core) is a person's choice.
-    const entry = await this.saveMemoryInternal({ ...input, scope, author, tier: input.tier === "core" ? "archival" : input.tier });
+    // Saying something else about the same memory replaces it, and keeps what it said as history; adding to it does not.
+    const supersede = Boolean(existing && !input.text.trim().startsWith(existing.text.trim()));
+    const entry = await this.saveMemoryInternal({ ...input, scope, author, tier: input.tier === "core" ? "archival" : input.tier, supersede });
     return { entry };
   }
 
@@ -7418,9 +7482,11 @@ export class HubService {
     autoLearned?: boolean;
     sourceCommand?: string;
     errorSignature?: string;
+    /** A newer memory replaces the one it matches; the old one is kept as history. */
+    supersede?: boolean;
   }): Promise<MemoryEntry> {
     const author = input.author?.trim() || (await this.resolveActorName());
-    const { memories, saved } = this.kb.deduplicateOrMergeMemory(
+    const { memories, saved, superseded } = this.kb.deduplicateOrMergeMemory(
       this.store.data.memories,
       {
         id: input.id,
@@ -7439,9 +7505,12 @@ export class HubService {
         errorSignature: input.errorSignature
           ? boundedContext(input.errorSignature, 160)
           : undefined,
+        supersede: input.supersede,
       },
     );
     this.store.data.memories = memories;
+    if (superseded && superseded.scope !== "personal")
+      await this.host.saveWorkspaceMemory?.(superseded).catch(() => {});
     if (this.store.data.deletedMemoryIds?.[saved.id]) {
       delete this.store.data.deletedMemoryIds[saved.id];
     }

@@ -57,8 +57,28 @@ export function Memory({
   for (const s of hub.workspaceServers ?? []) names.set(s.id, s.name);
   const targets = Array.from(names.entries());
 
-  const all = hub.memories.filter((m) => !generated(m));
-  const serverCards = hub.memories.length - all.length;
+  const listed = hub.memories.filter((m) => !generated(m));
+  const serverCards = hub.memories.length - listed.length;
+  // What a newer memory replaced is not an entry of its own: it is shown, greyed, under the newer one.
+  const all = listed.filter((m) => !m.supersededBy);
+  const replacedBy = new Map<string, MemoryEntry[]>();
+  for (const m of listed)
+    if (m.supersededBy) replacedBy.set(m.supersededBy, [...(replacedBy.get(m.supersededBy) ?? []), m]);
+  const historyOf = (id: string): MemoryEntry[] => {
+    const out: MemoryEntry[] = [];
+    const seen = new Set<string>([id]);
+    for (let next = replacedBy.get(id) ?? []; next.length > 0; ) {
+      const older: MemoryEntry[] = [];
+      for (const h of next) {
+        if (seen.has(h.id)) continue;
+        seen.add(h.id);
+        out.push(h);
+        older.push(...(replacedBy.get(h.id) ?? []));
+      }
+      next = older;
+    }
+    return out;
+  };
   const is: Record<Show, (m: MemoryEntry) => boolean> = {
     all: () => true,
     memory: (m) => m.kind === "memory",
@@ -278,6 +298,12 @@ export function Memory({
               </div>
             </div>
             <p className={`ai-memory-text ${long && !open ? "ai-clamped" : ""}`}>{m.text}</p>
+            {historyOf(m.id).map((h) => (
+              <div key={h.id} className="ai-hint" style={{ opacity: 0.6 }} data-testid={`memory-replaced-${h.id}`}>
+                <small>Replaced {new Date(h.supersededAt ?? h.updatedAt).toLocaleDateString()}</small>
+                <p className="ai-memory-text">{h.text}</p>
+              </div>
+            ))}
             <div className="ai-card-actions">
               {long && (
                 <button

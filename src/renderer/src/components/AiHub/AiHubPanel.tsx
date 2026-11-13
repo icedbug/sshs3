@@ -1856,9 +1856,28 @@ export function AiHubPanel({
                       : task?.status === "queued"
                         ? "Starting…"
                         : "Working…"}
+                    {task && task.status !== "queued" && (
+                      <small className="ai-hint" data-testid="run-budget">
+                        {" "}· {task.commandsUsed ?? 0} of {task.maxCommands} commands
+                      </small>
+                    )}
                   </p>
                 )}
-                {task?.status === "interrupted" && (
+                {task?.budgetStop && !running && (
+                  <div className="ai-resume">
+                    <p>The run used its budget. Continue gives it the same budget again.</p>
+                    <button
+                      className="ai-primary"
+                      disabled={busy}
+                      onClick={() =>
+                        void act({ action: "resume", taskId: task.id })
+                      }
+                    >
+                      Continue
+                    </button>
+                  </div>
+                )}
+                {task?.status === "interrupted" && !task.budgetStop && (
                   <div className="ai-resume">
                     <p>Paused. Check the terminal before continuing.</p>
                     <button

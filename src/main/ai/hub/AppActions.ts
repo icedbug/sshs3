@@ -572,7 +572,7 @@ export async function handleAppAction(
         const extra = await hub.collectExtraContext();
         if (op === "list") {
           return {
-            memories: extra.memories ?? [],
+            memories: (extra.memories ?? []).filter((m) => !m.supersededBy),
             recentActivity: (extra.activityLog ?? []).slice(0, 30),
           };
         }
@@ -629,7 +629,7 @@ export async function handleAppAction(
         const rawText = str("text") || str("content") || "";
         const q = (str("idOrTitle") || title).toLowerCase();
         const existing = (extra.memories ?? []).find(
-          (m) => m.id.toLowerCase() === q || m.title.toLowerCase() === q,
+          (m) => !m.supersededBy && (m.id.toLowerCase() === q || m.title.toLowerCase() === q),
         );
         const text =
           op === "core_append" && existing

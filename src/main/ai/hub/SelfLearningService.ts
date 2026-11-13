@@ -179,6 +179,8 @@ export class SelfLearningService {
       // A note of what was seen never merges into (and so never overwrites) a proven fix for the same error.
       errorSignature: proven ? errorSignature : `seen|${errorSignature}`,
       ...(proven ? { successCount: 1 } : {}),
+      // A different proven fix for the same error takes the old one's place; the old one is kept as history.
+      supersede: proven,
     });
 
     this.failureToFixCount += 1;

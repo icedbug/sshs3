@@ -288,6 +288,13 @@ export interface AgentTask {
   /** Explicit command budget for this task; never inferred from model text. */
   maxCommands: number;
   maxMinutes: number;
+  /** Actions counted against `maxCommands` in the current (or last) run. Every run starts again at 0. */
+  commandsUsed?: number;
+  /**
+   * The last run ended because it used its command or time budget. Resuming
+   * gives it the same budget again; cleared when the next run starts.
+   */
+  budgetStop?: { kind: "commands" | "minutes"; limit: number; at: number };
   usage?: { inputTokens: number; outputTokens: number; costUsd?: number };
   /** How much the model was sent at its last call in this conversation: how full its window was. Absent before the first run. */
   contextTokens?: number;
@@ -342,6 +349,13 @@ export interface MemoryEntry {
   autoLearned?: boolean;
   sourceCommand?: string;
   errorSignature?: string;
+  /**
+   * A newer memory said otherwise and took this one's place: its id. Kept as
+   * history, shown under the newer one; never given to agents or found by search.
+   */
+  supersededBy?: string;
+  /** When it was replaced. */
+  supersededAt?: number;
   updatedAt: number;
 }
 

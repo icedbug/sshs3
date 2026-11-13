@@ -334,10 +334,16 @@ describe("HubService memory proposals (a person accepts each one: autoSaveMemori
     expect(snap.memoryProposals![0]).toMatchObject({ op: "update", targetId: team.id, previousText: "max_connections is 150" });
 
     const after = await hub.request({ action: "memory-proposal-accept", id: snap.memoryProposals![0].id });
-    const updated = after.memories.find((m) => m.id === team.id)!;
+    // The update is a new memory; the one it replaced is kept as history, marked with the new one's id.
+    const updated = after.memories.find((m) => m.title === "Postgres connections" && !m.supersededBy)!;
+    expect(updated.id).not.toBe(team.id);
     expect(updated.text).toBe("max_connections is 300 (raised by Sara)");
-    expect(updated.title).toBe("Postgres connections");
-    expect(after.memories).toHaveLength(2);
+    expect(after.memories.find((m) => m.id === team.id)).toMatchObject({ text: "max_connections is 150", supersededBy: updated.id });
+    expect(after.memories).toHaveLength(3);
+    // Forgetting the newer memory forgets its history too, for teammates as well.
+    const forgot = await hub.request({ action: "memory-delete", id: updated.id });
+    expect(forgot.memories.map((m) => m.title)).toEqual(["My note"]);
+    expect(Object.keys(hub.store.data.deletedMemoryIds ?? {})).toEqual(expect.arrayContaining([updated.id, team.id]));
   });
 
   it("rejecting removes the proposal and saves nothing; turning the preference off stops reading sessions", async () => {
@@ -409,12 +415,17 @@ describe("HubService learned memories (saved automatically, the default)", () =>
       vi.fn(async () => proposalAnswer([{ op: "update", id: team.id, text: "max_connections is 300", evidence: "raised max_connections to 300" }])),
     );
     const learned = await hub.request({ action: "memory-distill-activity" });
-    expect(learned.memories.find((m) => m.id === team.id)!.text).toBe("max_connections is 300");
+    const newer = learned.memories.find((m) => !m.supersededBy)!;
+    expect(newer.text).toBe("max_connections is 300");
+    expect(learned.memories.find((m) => m.id === team.id)).toMatchObject({ text: "max_connections is 150", supersededBy: newer.id });
     const record = learned.memoryProposals![0];
-    expect(record).toMatchObject({ op: "update", appliedMemoryId: team.id, previousText: "max_connections is 150" });
+    expect(record).toMatchObject({ op: "update", appliedMemoryId: newer.id, previousText: "max_connections is 150" });
 
+    // Undo forgets the newer memory and brings the one it replaced back.
     const undone = await hub.request({ action: "memory-proposal-undo", id: record.id });
-    expect(undone.memories.find((m) => m.id === team.id)!.text).toBe("max_connections is 150");
+    expect(undone.memories).toHaveLength(1);
+    expect(undone.memories[0]).toMatchObject({ id: team.id, text: "max_connections is 150" });
+    expect(undone.memories[0].supersededBy).toBeUndefined();
     expect(undone.memoryProposals).toHaveLength(0);
 
     // Learn it again, then a person edits the memory: undo must not throw that edit away.
@@ -426,10 +437,10 @@ describe("HubService learned memories (saved automatically, the default)", () =>
     const second = again.memoryProposals![0];
     await hub.request({
       action: "memory-save",
-      entry: { id: team.id, kind: "memory", scope: "workspace", title: "Postgres connections", text: "max_connections is 300; PgBouncer on 6432" },
+      entry: { id: second.appliedMemoryId, kind: "memory", scope: "workspace", title: "Postgres connections", text: "max_connections is 300; PgBouncer on 6432" },
     });
     await expect(hub.request({ action: "memory-proposal-undo", id: second.id })).rejects.toThrow(/changed since/);
-    expect(hub.store.data.memories.find((m) => m.id === team.id)!.text).toBe("max_connections is 300; PgBouncer on 6432");
+    expect(hub.store.data.memories.find((m) => m.id === second.appliedMemoryId)!.text).toBe("max_connections is 300; PgBouncer on 6432");
   });
 
   it("keeps a learned memory when its record is dismissed, and has nothing to undo for a pending proposal", async () => {

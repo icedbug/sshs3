@@ -423,10 +423,21 @@ const MAX_LEARNED = 300;
  * The store with its learned entries capped, newest first. What a person
  * wrote, and personal notes, are never dropped to make room: they used to
  * fall off silently once there were a hundred entries of any kind.
+ * Replaced (superseded) entries are history: they count toward the same cap
+ * whoever wrote them, and are the first to go.
  */
 export function capMemories(memories: MemoryEntry[]): MemoryEntry[] {
+  const liveLearned = memories.filter((m) => !m.supersededBy && m.autoLearned).length;
+  let history = Math.max(0, MAX_LEARNED - liveLearned);
   let learned = 0;
-  return memories.filter((m) => !m.autoLearned || ++learned <= MAX_LEARNED);
+  return memories.filter((m) =>
+    m.supersededBy ? history-- > 0 : !m.autoLearned || ++learned <= MAX_LEARNED,
+  );
+}
+
+/** What agents are given and search finds: not the entries a newer one replaced. */
+export function liveMemories(memories: MemoryEntry[]): MemoryEntry[] {
+  return memories.filter((m) => !m.supersededBy);
 }
 
 export class KnowledgeBaseService {
@@ -826,8 +837,17 @@ export class KnowledgeBaseService {
    */
   deduplicateOrMergeMemory(
     existing: MemoryEntry[],
-    incoming: Omit<MemoryEntry, "id" | "updatedAt"> & { id?: string },
-  ): { memories: MemoryEntry[]; saved: MemoryEntry; merged: boolean } {
+    input: Omit<MemoryEntry, "id" | "updatedAt"> & {
+      id?: string;
+      /**
+       * The new text takes the place of what the matched memory said: the old
+       * entry is kept as history (`supersededBy`) instead of being written over
+       * or merged into. Not when both name the same command: that is the same advice.
+       */
+      supersede?: boolean;
+    },
+  ): { memories: MemoryEntry[]; saved: MemoryEntry; merged: boolean; superseded?: MemoryEntry } {
+    const { supersede, ...incoming } = input;
     const now = Date.now();
     const normTitle = incoming.title.trim().toLowerCase();
     const incomingTokens = tokenize(`${incoming.title} ${incoming.text}`);
@@ -838,6 +858,7 @@ export class KnowledgeBaseService {
     }
     if (matchIdx === -1) {
       matchIdx = existing.findIndex((m) => {
+        if (m.supersededBy) return false;
         if (m.kind !== incoming.kind || m.scope !== incoming.scope) return false;
         if (m.title.trim().toLowerCase() === normTitle) return true;
         if (
@@ -903,6 +924,33 @@ export class KnowledgeBaseService {
         updatedAt: now,
       };
       const next = [...existing];
+      if (
+        supersede &&
+        incoming.text.trim() !== prev.text.trim() &&
+        !(incoming.sourceCommand && prev.sourceCommand && incoming.sourceCommand === prev.sourceCommand)
+      ) {
+        // A new entry says it now; the old one stays, marked, where it was.
+        const replacement: MemoryEntry = {
+          ...updated,
+          id: crypto.randomUUID(),
+          text: incoming.text.trim().slice(0, MAX_MEMORY_TEXT),
+          // What the old text earned is not the new text's.
+          successCount: incoming.successCount ?? 0,
+          failureCount: incoming.failureCount ?? 0,
+          feedbackScore: incoming.feedbackScore ?? 0,
+        };
+        delete replacement.votes;
+        delete replacement.supersededBy;
+        delete replacement.supersededAt;
+        const old: MemoryEntry = { ...prev, supersededBy: replacement.id, supersededAt: now, updatedAt: now };
+        next[matchIdx] = old;
+        return {
+          memories: capMemories([replacement, ...next]),
+          saved: replacement,
+          merged: true,
+          superseded: old,
+        };
+      }
       next.splice(matchIdx, 1);
       return {
         memories: capMemories([updated, ...next]),
@@ -950,6 +998,7 @@ export class KnowledgeBaseService {
     cluster?: string,
     limit = 16,
   ): MemoryEntry[] {
+    memories = liveMemories(memories);
     if (memories.length === 0) return [];
     const qTokens = tokenize(query);
     const qConcepts = extractSemanticConcepts(qTokens);

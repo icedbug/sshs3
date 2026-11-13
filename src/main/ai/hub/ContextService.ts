@@ -59,6 +59,8 @@ export function scopedMemory(
   const clusterLower = (targetContext?.cluster ?? "").trim().toLowerCase();
 
   return entries.filter((m) => {
+    // What a newer memory replaced is history: never handed to an agent.
+    if (m.supersededBy) return false;
     if ((m.kind === "skill") !== skills) return false;
     if (
       m.scope === "personal" ||
@@ -255,10 +257,11 @@ export class ContextService {
       workspaceMemories: (() => {
         const filtered = memorySource.filter(
           (m) =>
-            !q ||
+            !m.supersededBy &&
+            (!q ||
             `${m.title} ${m.text} ${m.scope} ${m.cluster ?? ""} ${m.sourceCommand ?? ""}`
               .toLowerCase()
-              .includes(q),
+              .includes(q)),
         );
         const activeSession = id ? this.terminals.get(id) : undefined;
         const activeSrv = servers.find(
