@@ -1025,6 +1025,23 @@ export class HubService {
     return allAgents.filter((a) => tokensLeft(a, this.usageTotal()) > 0);
   }
 
+  /** The conversation changes hands. A notice, not an answer: it is never written over by a run's text. */
+  private applyHandoff(task: AgentTask, toAgent: MissionAgent, reason?: string): void {
+    const prevAgentName = task.agentName || "Default Assistant";
+    task.agentId = toAgent.id;
+    task.agentName = toAgent.name;
+    task.handoffTo = undefined;
+    // Handing over never gives more freedom: the conversation keeps the more careful of the two modes.
+    task.mode = lowerMode(task.mode, toAgent.defaultMode);
+    task.updatedAt = Date.now();
+    task.messages.push({
+      id: crypto.randomUUID(),
+      role: "system",
+      text: `**Handed over: ${prevAgentName} → ${toAgent.name}**\n${reason ? `Reason: *${clip(reason, 400)}*\n` : ""}Mission: ${toAgent.mission}`,
+      at: Date.now(),
+    });
+  }
+
   /** Paused means paused, and a spent budget is spent: however an agent is started. */
   private assertMayRun(agent: MissionAgent): void {
     if (agent.enabled === false) throw new Error(`${agent.name} is paused. Switch it on again before starting it.`);
@@ -1282,6 +1299,8 @@ export class HubService {
       report: string;
     }>(asked.length);
     let next = 0;
+    // Its investigators belong to the asking run: stopping it stops them (stop() follows workforceLeads).
+    this.workforceLeads.set(runId, parent.id);
     const worker = async (): Promise<void> => {
       while (next < asked.length) {
         const index = next++;
@@ -1327,9 +1346,20 @@ export class HubService {
         }
       }
     };
-    await Promise.all(
-      Array.from({ length: Math.min(3, asked.length) }, () => worker()),
-    );
+    try {
+      await Promise.all(
+        Array.from({ length: Math.min(3, asked.length) }, () => worker()),
+      );
+    } finally {
+      this.workforceLeads.delete(runId);
+      // What the investigators spent is the asking agent's spending.
+      if (parent.agentId) {
+        const used = this.store.data.tasks
+          .filter((t) => t.workforceRunId === runId)
+          .reduce((sum, t) => sum + (t.usage?.inputTokens ?? 0) + (t.usage?.outputTokens ?? 0), 0);
+        if (used > 0) this.store.data.agentUsage = addUsage(this.store.data.agentUsage ?? {}, parent.agentId, used);
+      }
+    }
     return results;
   }
 
@@ -1842,7 +1872,8 @@ export class HubService {
         const rawText =
           request.text?.trim() ||
           (replyImages.length > 0 ? "Analyze the attached image(s)." : "");
-        const text = boundedContext(requiredText(rawText), 16_000);
+        // A message is read from its start: what a person says first (or an approval's instruction) is kept.
+        const text = clip(requiredText(rawText), 16_000);
         if (active(task)) {
           await this.runtimes.get(task.id)?.steer(text);
           task.messages.push({
@@ -2810,22 +2841,19 @@ export class HubService {
         );
         if (!toAgent) throw new Error("Target Mission Agent not found for handoff");
         this.assertMayRun(toAgent);
-        const prevAgentName = task.agentName || "Default Assistant";
-        task.agentId = toAgent.id;
-        task.agentName = toAgent.name;
-        // Handing over never gives more freedom: the conversation keeps the more careful of the two modes.
-        task.mode = lowerMode(task.mode, toAgent.defaultMode);
-        task.updatedAt = Date.now();
-        task.messages.push({
-          id: crypto.randomUUID(),
-          role: "assistant",
-          text: `**Handed over: ${prevAgentName} → ${toAgent.name}**\n${
-            request.reason
-              ? `Reason: *${boundedContext(request.reason, 400)}*\n`
-              : ""
-          }Mission: ${toAgent.mission}`,
-          at: Date.now(),
-        });
+        // During a run, the run finishes as the agent it started as (its instructions and tools were set
+        // then, and what it spends is that agent's); the conversation changes hands when it ends.
+        if (active(task)) {
+          task.handoffTo = { agentId: toAgent.id, reason: request.reason };
+          task.messages.push({
+            id: crypto.randomUUID(),
+            role: "system",
+            text: `Hands over to ${toAgent.name} when this run ends.`,
+            at: Date.now(),
+          });
+          break;
+        }
+        this.applyHandoff(task, toAgent, request.reason);
         break;
       }
       case "mcp-install-preset": {
@@ -3945,6 +3973,9 @@ export class HubService {
       if (task.status === "completed" || task.status === "failed") this.reflectTaskCompletion(task);
       // Whatever way it ended, what it spent is put down to the agent.
       this.countAgentUsage(task);
+      // A handover asked for during the run happens now.
+      const next = task.handoffTo && this.getAgentsList().find((a) => a.id === task.handoffTo!.agentId);
+      if (next) this.applyHandoff(task, next, task.handoffTo!.reason);
       if (!isBackgroundRun(task)) this.notePageOutcome(task);
       if (
         !isBackgroundRun(task) &&
@@ -4327,9 +4358,15 @@ export class HubService {
         `${agent.name} runs on the external agent "${agent.runnerId}", which is not set up on this computer. Add it under Agents & MCP.`,
       );
     const ticket = live(this.store.data.workTickets).find((t) => t.id === task.ticketId);
+    // The change each of the agent's tool calls became, by the agent's id for the call: how it ended is written onto it.
+    const changeOfCall = new Map<string, AgentChange>();
+    let actions = 0;
     const runtime = new AcpRuntime(runner, {
       preface: [
         `You are working as "${agent.name}" (${agent.role}) for a team that uses sshS3.`,
+        task.mode === "advice"
+          ? "This conversation is advice only: do not change files, run commands or take any action; read and explain. Anything you ask permission for will be refused."
+          : "",
         agent.systemPrompt?.trim() ? agent.systemPrompt.trim() : "",
         ticket
           ? "You were given one ticket from the team's board. Do that ticket and nothing beside it, and end with a report a person can review: what you did, what you verified and how, and what is left."
@@ -4337,6 +4374,14 @@ export class HubService {
       ]
         .filter(Boolean)
         .join("\n"),
+      settled: (callId, outcome) => {
+        const change = changeOfCall.get(callId);
+        if (!change || change.status !== "approved") return;
+        change.status = outcome.failed ? "failed" : "completed";
+        change.output = outcome.output ? maskContext(outcome.output) : change.output;
+        changeOfCall.delete(callId);
+        this.changed();
+      },
       ask: async (question) => {
         const analysis = question.command
           ? analyzeCommandSafety(question.command)
@@ -4352,26 +4397,42 @@ export class HubService {
           kind: "command",
           target: `${runner.name} in ${runner.cwd ?? "?"}`,
           description: clip(question.title, 300),
-          command: question.command ? maskContext(question.command) : undefined,
+          // The command, or else everything the agent said it would do: a person is not asked about a title alone.
+          command: question.command ? maskContext(question.command) : question.rawInput ? maskContext(question.rawInput) : undefined,
           ...(question.command && maskContext(question.command) !== question.command ? { hiddenValues: true } : {}),
           status: "pending",
           riskLevel: analysis.riskLevel,
           riskReason: analysis.riskReason,
           at: Date.now(),
         };
+        if (question.toolCallId) changeOfCall.set(question.toolCallId, change);
         if (task.mode === "advice") {
           change.status = "denied";
+          change.decidedHow = "policy";
           task.changes.push(change);
           this.changed();
           return false;
         }
-        const needsApproval = shouldRequireCommandApproval({
-          analysis,
-          mode: task.mode,
-          policy: this.store.data.safetyPolicy ?? DEFAULT_SAFETY_POLICY,
-        });
+        // The run's command budget holds for an external agent's actions too.
+        if (++actions > task.maxCommands) {
+          change.status = "denied";
+          change.decidedHow = "policy";
+          change.output = `This run may take ${task.maxCommands} actions, and has.`;
+          task.changes.push(change);
+          this.changed();
+          return false;
+        }
+        const needsApproval =
+          // Without a command to read, a change to files or a deletion is always put to a person.
+          (!question.command && ["edit", "delete", "execute", "move"].includes(question.kind ?? "execute")) ||
+          shouldRequireCommandApproval({
+            analysis,
+            mode: task.mode,
+            policy: this.store.data.safetyPolicy ?? DEFAULT_SAFETY_POLICY,
+          });
         if (!needsApproval) {
           change.status = "approved";
+          change.decidedHow = "policy";
           task.changes.push(change);
           this.changed();
           return true;
@@ -7482,7 +7543,7 @@ function investigatorPrompt(
     `Your question: ${boundedContext(question, 2000)}`,
     ...(scope ? [`Where to look: ${boundedContext(scope, 500)}`] : []),
     "",
-    "Use `workspace_context` (team activity, servers, team memory), `sshs3_kb_search` (runbooks) and `sshs3_storage_ops` (list and read files and logs on the servers, diff a file between two servers). You cannot run commands.",
+    "Use `workspace_context` (team activity, servers, team memory), `sshs3_kb_search` (runbooks) and `sshs3_storage_ops` (list and read files and logs on the servers, diff a file between two servers). Whether you can also run read-only commands is said at the end.",
     "Report: first the answer in one or two sentences; then the evidence, each item with its source (server and file with the relevant lines, activity entry with who and when, runbook title); then what you could not determine from here. Do not go beyond the evidence, and do not answer a different question.",
   ].join("\n");
 }

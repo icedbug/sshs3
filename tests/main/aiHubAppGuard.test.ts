@@ -224,10 +224,19 @@ describe("a run that tries to change its own rules", () => {
     await hub.request({ action: "agent-save", agent: { id: "auto", name: "Night operator", role: "r", mission: "Keep it running", systemPrompt: "", defaultMode: "autonomous" } as never });
     const careful = await startRun(hub, "assisted", "run-careful");
     await careful.call("sshs3_agent_and_mcp_manage", { operation: "handoff_agent", idOrName: "Night operator", reason: "they know storage" });
+    // The run finishes as the agent it started as; the conversation changes hands when it ends.
+    expect(careful.task).toMatchObject({ agentName: "Operator", handoffTo: { agentId: "auto" } });
+    const end = (t: unknown) => (hub as unknown as { event: (t: unknown, e: unknown) => void }).event(t, { type: "run.completed", output: "done" });
+    end(careful.task);
     expect(careful.task).toMatchObject({ agentName: "Night operator", mode: "assisted" });
-    expect(careful.task.messages.at(-1)!.text).toBe("**Handed over: Operator → Night operator**\nReason: *they know storage*\nMission: Keep it running");
+    expect(careful.task.handoffTo).toBeUndefined();
+    expect(careful.task.messages.at(-1)).toMatchObject({
+      role: "system",
+      text: "**Handed over: Operator → Night operator**\nReason: *they know storage*\nMission: Keep it running",
+    });
     // And the other way a handover does make it more careful.
     await hub.request({ action: "agent-save", agent: { id: "look", name: "Reader", role: "r", mission: "Read", systemPrompt: "", defaultMode: "advice" } as never });
+    end(task);
     await hub.request({ action: "agent-handoff", taskId: task.id, toAgentId: "look" });
     expect(task.mode).toBe("advice");
   });

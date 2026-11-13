@@ -260,6 +260,8 @@ export interface AgentTask {
   kbCounted?: number;
   /** What this run spent has been added to its agent's month. Counted once, wherever it ended. */
   usageCounted?: boolean;
+  /** A handover asked for while a run was going: made when that run ends, so its spending stays with the agent that spent it. */
+  handoffTo?: { agentId: string; reason?: string };
   /** The recording of the terminal this run owned, when one was made. */
   recordingId?: string;
   /**

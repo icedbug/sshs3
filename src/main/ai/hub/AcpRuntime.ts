@@ -53,6 +53,10 @@ export interface PermissionQuestion {
   kind?: string;
   /** The shell command, when the tool call is one. */
   command?: string;
+  /** Everything the agent said it would do, as it said it (masked by the hub before it is shown). */
+  rawInput?: string;
+  /** The agent's id for the tool call: how it reports, later, how the call ended. */
+  toolCallId?: string;
 }
 /** Resolves true to allow this once, false to refuse. */
 export type PermissionAsk = (question: PermissionQuestion) => Promise<boolean>;
@@ -99,7 +103,8 @@ export class AcpRuntime implements AgentRuntime {
   private stopped = false;
   private exited = false;
   private stderr = "";
-  private tools = new Map<string, { title: string; input: string }>();
+  /** Each tool call the agent announced: its title, input (parsed and as text) and kind, by its id. */
+  private tools = new Map<string, { title: string; input: string; raw?: unknown; kind?: string }>();
 
   constructor(
     private readonly runner: ExternalRunner,
@@ -108,6 +113,8 @@ export class AcpRuntime implements AgentRuntime {
       preface: string;
       ask: PermissionAsk;
       clientVersion?: string;
+      /** How a tool call the person was asked about ended, as the agent reported it. */
+      settled?: (toolCallId: string, outcome: { failed: boolean; output: string }) => void;
     },
   ) {}
 
@@ -122,7 +129,9 @@ export class AcpRuntime implements AgentRuntime {
     try {
       this.child = spawn(this.runner.command, this.runner.args ?? [], {
         cwd,
-        env: process.env,
+        // The agent gets what a program needs to run, not this app's own credentials: no SSH agent
+        // socket, no cloud keys, no tokens it was never given.
+        env: childEnv(process.env),
         stdio: ["pipe", "pipe", "pipe"],
         // npx and friends are .cmd files on Windows.
         shell: process.platform === "win32",
@@ -287,13 +296,20 @@ export class AcpRuntime implements AgentRuntime {
         const callId = String(update.toolCallId ?? "");
         const known = this.tools.get(callId);
         const title = typeof update.title === "string" ? update.title : (known?.title ?? "tool");
-        const input =
-          update.rawInput !== undefined && update.rawInput !== null
-            ? boundedContext(JSON.stringify(update.rawInput), 2000)
-            : (known?.input ?? "");
-        this.tools.set(callId, { title, input });
+        const hasRaw = update.rawInput !== undefined && update.rawInput !== null;
+        const input = hasRaw ? boundedContext(JSON.stringify(update.rawInput), 2000) : (known?.input ?? "");
+        this.tools.set(callId, {
+          title,
+          input,
+          raw: hasRaw ? update.rawInput : known?.raw,
+          kind: typeof update.kind === "string" ? update.kind : known?.kind,
+        });
         if (update.status === "completed" || update.status === "failed") {
           this.tools.delete(callId);
+          this.options.settled?.(callId, {
+            failed: update.status === "failed",
+            output: boundedContext(toolOutput(update.content, update.rawOutput), 4000),
+          });
           onEvent({
             type: "tool.result",
             tool: {
@@ -316,15 +332,20 @@ export class AcpRuntime implements AgentRuntime {
         optionId?: string;
         kind?: string;
       }>;
-      const known = this.tools.get(String(call.toolCallId ?? ""));
+      const callId = String(call.toolCallId ?? "");
+      const known = this.tools.get(callId);
+      // A permission request may carry only the call's id: what it would do was said when the call was announced.
+      const raw = call.rawInput ?? known?.raw;
       let allowed = false;
       try {
         allowed =
           !this.stopped &&
           (await this.options.ask({
             title: typeof call.title === "string" ? call.title : (known?.title ?? "An action"),
-            kind: typeof call.kind === "string" ? call.kind : undefined,
-            command: commandOf(call.rawInput),
+            kind: typeof call.kind === "string" ? call.kind : known?.kind,
+            command: commandOf(raw),
+            rawInput: raw !== undefined && raw !== null ? JSON.stringify(raw).slice(0, 8000) : undefined,
+            toolCallId: callId || undefined,
           }));
       } catch {
         allowed = false;
@@ -380,4 +401,19 @@ export class AcpRuntime implements AgentRuntime {
       setTimeout(() => !this.exited && child.kill(), 800);
     });
   }
+}
+
+/**
+ * Names of variables an external agent is not handed: this app's way into the
+ * team's servers (the SSH agent that holds the keys sshs3 logs in with) and
+ * sshs3's own settings. Its model key and the tools it needs for the code it
+ * works on stay: it runs as the person, in their checkout.
+ */
+const WITHHELD = /^(SSH_AUTH_SOCK|SSH_AGENT_PID|SSHS3_)/i;
+
+/** The environment an external agent runs with: everything but sshs3's own way into the servers. */
+export function childEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(env)) if (!WITHHELD.test(k)) out[k] = v;
+  return out;
 }

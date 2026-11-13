@@ -564,6 +564,7 @@ export class ToolBroker {
           this.deps.changed();
           return {
             id: change.id,
+            ref: change.ref,
             exitCode: result.exitCode,
             output: result.output,
             checkPassed: false,
@@ -617,6 +618,7 @@ export class ToolBroker {
     this.deps.changed();
     return {
       id: change.id,
+      ref: change.ref,
       exitCode: result.exitCode,
       output: result.output,
       checkPassed: false,

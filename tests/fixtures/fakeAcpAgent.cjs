@@ -31,6 +31,17 @@ readline.createInterface({ input: process.stdin }).on("line", async (line) => {
     update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Prompt was: " + m.params.prompt[0].text.slice(0, 4000) + "\n" } });
     if (mode === "hang") return;
     let verdict = "not asked";
+    if (mode === "ask-by-id") {
+      // As the spec allows: the command is said when the call is announced, the permission request names only the call.
+      update({ sessionUpdate: "tool_call", toolCallId: "c2", title: "Terminal", kind: "execute", status: "pending", rawInput: { command: "rm -rf /srv/data" } });
+      const answer = await ask("session/request_permission", {
+        sessionId: "s1",
+        toolCall: { toolCallId: "c2" },
+        options: [{ optionId: "yes", name: "Allow", kind: "allow_once" }, { optionId: "no", name: "Reject", kind: "reject_once" }],
+      });
+      verdict = answer.outcome.outcome === "selected" ? answer.outcome.optionId : "cancelled";
+      update({ sessionUpdate: "tool_call_update", toolCallId: "c2", status: "failed", content: [{ type: "content", content: { type: "text", text: "rm: permission denied" } }] });
+    }
     if (mode === "ask") {
       update({ sessionUpdate: "tool_call", toolCallId: "c1", title: "Run npm test", kind: "execute", status: "pending", rawInput: { command: process.env.FAKE_ACP_COMMAND || "npm test" } });
       const answer = await ask("session/request_permission", {

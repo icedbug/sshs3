@@ -82,13 +82,17 @@ explicitly enabled presentation on top of the same terminal authority.
     signature first, else at least three distinctive shared words).
   - *Investigators* (`sshs3_investigate`, `HubService.investigate`): the
     agent hands one to four precise questions to read-only runs that look in
-    parallel (three at a time), each with a fresh context and only
-    `workspace_context`, `sshs3_kb_search` and `sshs3_storage_ops`; it gets
-    their reports back together, a failed one with its error. They cannot run
-    commands (the terminals belong to the asking run) and cannot delegate.
-  - *Compaction*: when a run's transcript passes about half the context
-    window (`compactAtChars`), the agent is asked, between tool rounds, for a
-    handover note to itself; the next request then starts from the original
+    parallel (three at a time), each with a fresh context,
+    `workspace_context`, `sshs3_kb_search` and `sshs3_storage_ops`, and, when
+    one can be opened, a terminal of its own on the asking run's target where
+    only read-only commands run; it gets their reports back together, a
+    failed one with its error. They cannot delegate. Stopping the asking run
+    stops them, and what they spend is put down to the asking agent.
+  - *Compaction*: when everything sent (the transcript and the tool
+    definitions) passes about half the context window (`compactAtChars`),
+    and the run itself has grown by enough for a note to replace, the agent
+    is asked, between tool rounds, for a handover note to itself (the note is
+    not shown in the chat); the next request then starts from the original
     conversation plus that note, its task list and a digest of its last twelve
     tool calls, and replays nothing else. No earlier message is edited, which
     is the shape that stays valid with models that bind their thinking to the

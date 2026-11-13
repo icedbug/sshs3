@@ -44,6 +44,32 @@ async function run(mode: string, ask: (q: PermissionQuestion) => Promise<boolean
   return { events, questions, error, runtime };
 }
 
+describe("an external agent's request that names only its call", () => {
+  it("is asked about with the command the agent announced, and hears how it ended", async () => {
+    const settled: Array<[string, { failed: boolean; output: string }]> = [];
+    process.env.FAKE_ACP = "ask-by-id";
+    const questions: PermissionQuestion[] = [];
+    const runtime = new AcpRuntime(runner(), {
+      preface: "p",
+      ask: async (q) => {
+        questions.push(q);
+        return true;
+      },
+      settled: (id, o) => settled.push([id, o]),
+    });
+    disposals.push(() => runtime.stop());
+    await runtime.start(task("x"), undefined, () => undefined);
+    expect(questions[0]).toMatchObject({ kind: "execute", command: "rm -rf /srv/data", toolCallId: "c2" });
+    expect(settled).toEqual([["c2", { failed: true, output: "rm: permission denied" }]]);
+  });
+
+  it("does not hand the agent sshs3's SSH agent or its own settings", async () => {
+    const { childEnv } = await import("../../src/main/ai/hub/AcpRuntime");
+    const env = childEnv({ PATH: "/bin", SSH_AUTH_SOCK: "/tmp/agent", SSHS3_DATA_DIR: "/x", ANTHROPIC_API_KEY: "k" });
+    expect(env).toEqual({ PATH: "/bin", ANTHROPIC_API_KEY: "k" });
+  });
+});
+
 describe("an external agent over ACP", () => {
   it("sends the prompt with who the agent is, shows its plan and text, and refuses file access it does not offer", async () => {
     const { events, error } = await run("plain");
@@ -61,7 +87,7 @@ describe("an external agent over ACP", () => {
 
   it("asks before a command and passes the answer on as this once, never as always", async () => {
     const yes = await run("ask", async () => true);
-    expect(yes.questions).toEqual([{ title: "Run npm test", kind: "execute", command: "npm test" }]);
+    expect(yes.questions).toMatchObject([{ title: "Run npm test", kind: "execute", command: "npm test" }]);
     expect(yes.events.at(-1)!.output).toContain("Permission: yes.");
     expect(yes.events.find((e) => e.type === "tool.result")!.tool).toMatchObject({ name: "Run npm test", output: "12 passed" });
 

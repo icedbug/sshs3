@@ -26,6 +26,7 @@ import {
   mcpCatalog,
 } from "./demoWorkspace";
 import { isDemoTarget } from "../../demo/demoMode";
+import { nextRef } from "./ToolBroker";
 import { boundedContext, exactHash, forApproval, safeError } from "./privacy";
 
 import {
@@ -1375,6 +1376,8 @@ export async function handleAppAction(
           command: shown.text,
           ...(shown.hidden ? { hiddenValues: true } : {}),
           commandHash: exactHash(command.trim()),
+          // Cited in a report like any command's result.
+          ref: nextRef(task),
           status: "pending",
           riskLevel: safety.riskLevel,
           riskReason: safety.riskReason,
@@ -1493,6 +1496,7 @@ export async function handleAppAction(
         hub.changed();
         return {
           ok: allOk,
+          ref: change.ref,
           cluster: clusterName,
           nodeCount: perNodeResults.length,
           results: perNodeResults,
