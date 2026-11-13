@@ -533,6 +533,8 @@ export interface S3WorkspaceSyncStatus {
 }
 export interface WorkspaceServerSummary {
   id: string;
+  /** Comes from an unlocked Team Vault: shared through the vault, never copied into the plain team bucket. */
+  fromVault?: boolean;
   name: string;
   host: string;
   port: number;

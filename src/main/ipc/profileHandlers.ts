@@ -68,7 +68,7 @@ export function registerProfileHandlers(bridge: ProfileHost): void {
       bridge.scheduleAutoSync();
       // A demo instance never rewrites the real ~/.ssh/config from its own demo profiles.
       if (!isDemoMode()) void bridge.profileSyncService.autoSyncLocalSshConfig();
-      await bridge.aiHub?.recordServerSaved(config.id);
+      await bridge.aiHub?.recordServerSaved(config.id, config.shared);
       bridge.aiHub?.changed();
     }
   );

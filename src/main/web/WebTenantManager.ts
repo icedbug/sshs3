@@ -133,16 +133,12 @@ export class HybridTenantProfileStore extends ProfileStore {
     }
 
     const activeSharedS3 = (sharedWithTombstones.s3 ?? []).filter((s) => !s.deletedAt);
-    const deletedSharedS3Ids = new Set(
-      (sharedWithTombstones.s3 ?? []).filter((s) => Boolean(s.deletedAt)).map((s) => s.id),
-    );
     const s3Map = new Map<string, import('../../shared/types/storage').S3Config>();
-    for (const s of activeSharedS3) s3Map.set(s.id, s);
-    for (const p of personal.s3 ?? []) {
-      if (!s3Map.has(p.id) && !deletedSharedS3Ids.has(p.id)) {
-        s3Map.set(p.id, p);
-      }
-    }
+    // Profiles left in the server-wide list from before are shown without anybody's keys.
+    for (const s of activeSharedS3) s3Map.set(s.id, { ...s, secretAccessKey: '', sessionToken: undefined });
+    // One's own profiles, with their keys, win over a keyless copy in the server-wide list. (Moving a
+    // profile out of that list leaves a tombstone there; it hides nothing of one's own.)
+    for (const p of personal.s3 ?? []) s3Map.set(p.id, p);
 
     const folders = Array.from(
       new Set([...(sharedWithTombstones.folders ?? []), ...(personal.folders ?? [])]),
@@ -201,9 +197,18 @@ export class HybridTenantProfileStore extends ProfileStore {
     this.onSharedChanged();
   }
 
+  /**
+   * An S3 profile carries its owner's keys: it is the owner's own. It used to go to the server-wide
+   * list as it was, secret key included, for every user of the server to read and use. (A bucket a
+   * team shares goes through a Team Vault, or the team workspace an administrator sets up.)
+   */
   override async saveS3(config: import('../../shared/types/storage').S3Config): Promise<void> {
-    await this.sharedStore.saveS3(config);
-    this.onSharedChanged();
+    await super.saveS3(config);
+    const shared = await this.sharedStore.getProfiles();
+    if (shared.s3.some((x) => x.id === config.id)) {
+      await this.sharedStore.deleteS3(config.id).catch(() => {});
+      this.onSharedChanged();
+    }
   }
 
   override async deleteS3(id: string): Promise<void> {
@@ -481,6 +486,7 @@ export class WebTenantManager {
         s3ConfigFilePath: this.getSharedS3ConfigPath(),
         defaultActorName: user.displayName || user.username,
         alertHookOwner: user.id,
+        teamAdmin: () => user.role === 'admin',
         peerPresenceProvider: () => this.getAllLocalTenantsPresence(),
         onSharedWorkspaceChanged: () =>
           this.notifyCrossTenantChanged(user.id),

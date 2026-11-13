@@ -409,12 +409,16 @@ export class WebAuthService {
     clientIp = 'local',
   ): Promise<{ user: WebUserPublic; sessionToken: string }> {
     const now = Date.now();
-    const rate = this.loginAttempts.get(clientIp);
-    if (rate && rate.resetAt > now && rate.count >= 15) {
-      throw new Error('Too many sign-in attempts. Wait a minute and try again.');
+    const username = usernameInput.trim().toLowerCase();
+    // Per caller and per account: behind a proxy every caller is the proxy, and a guesser who spreads
+    // over many addresses still meets the account's own limit.
+    const accountKey = `account:${username}`;
+    for (const key of [clientIp, accountKey]) {
+      const rate = this.loginAttempts.get(key);
+      if (rate && rate.resetAt > now && rate.count >= (key === accountKey ? 10 : 30))
+        throw new Error('Too many sign-in attempts. Wait a minute and try again.');
     }
 
-    const username = usernameInput.trim().toLowerCase();
     const user = this.data.users.find((u) => u.username === username);
     if (!user) {
       this.recordFailedAttempt(clientIp, now);
@@ -424,10 +428,12 @@ export class WebAuthService {
     const candidateHash = hashPassword(passwordInput, user.passwordSalt);
     if (!timingSafeEqualHex(candidateHash, user.passwordHash)) {
       this.recordFailedAttempt(clientIp, now);
+      this.recordFailedAttempt(accountKey, now);
       throw new Error('Wrong user name or password');
     }
 
     this.loginAttempts.delete(clientIp);
+    this.loginAttempts.delete(accountKey);
     user.lastLoginAt = now;
     const sessionToken = await this.createSession(user.id);
     return {
@@ -564,6 +570,8 @@ export class WebAuthService {
     userId: string,
     currentPassword: string,
     newPassword: string,
+    /** The session the change is made from: it stays; every other session of this user ends. */
+    keepSessionToken?: string | null,
   ): Promise<void> {
     const user = this.data.users.find((u) => u.id === userId);
     if (!user) {
@@ -577,6 +585,9 @@ export class WebAuthService {
     const newSalt = crypto.randomBytes(16).toString('hex');
     user.passwordSalt = newSalt;
     user.passwordHash = hashPassword(newPassword, newSalt);
+    // A new password ends every other sign-in: whoever had the old one is out, not for another 30 days.
+    const keep = keepSessionToken ? sessionHash(keepSessionToken) : undefined;
+    this.data.sessions = this.data.sessions.filter((s) => s.userId !== userId || s.hash === keep);
     await this.save();
   }
 

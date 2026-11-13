@@ -1,3 +1,4 @@
+import fs from 'node:fs/promises';
 import { LocalStorageProvider } from './LocalStorageProvider';
 import { SFTPStorageProvider } from './SFTPStorageProvider';
 import { S3StorageProvider } from './S3StorageProvider';
@@ -15,6 +16,12 @@ export interface StorageRegistryOptions {
   /** Touch-your-key banner hooks for an SFTP connection. */
   sftpPresenceFactory?: (config: SFTPConfig) => { onPresence: () => void; onPresenceCleared: () => void };
   sftpPinPromptHandlerFactory?: (config: SFTPConfig) => (prompt: string) => Promise<string> | string;
+  /**
+   * On a shared server: the one folder "local" files may be in, whatever a
+   * client asks for. Without it, a user of the server could read the whole
+   * disk of the server, other users' data and keys included.
+   */
+  localSandbox?: string;
 }
 
 export class StorageRegistry {
@@ -49,10 +56,13 @@ export class StorageRegistry {
 
     switch (config.type) {
       case 'local': {
+        const sandbox = this.options.localSandbox;
+        if (sandbox) await fs.mkdir(sandbox, { recursive: true, mode: 0o700 });
         provider = new LocalStorageProvider({
           id: config.id,
           name: config.name || 'Local Storage',
-          basePath: config.localBasePath,
+          // The sandbox, not what the client asked for, when there is one.
+          basePath: sandbox ?? config.localBasePath,
         });
         break;
       }

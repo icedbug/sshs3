@@ -1,3 +1,4 @@
+import path from 'node:path';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import type { HubService } from './ai/hub/HubService';
@@ -309,6 +310,8 @@ export class IpcBridge {
     this.storageRegistry =
       options.storageRegistry ??
       new StorageRegistry({
+        // A user of a shared server sees their own folder as "local" files, never the server's disk.
+        localSandbox: options.tenantHomeDir ? path.join(options.tenantHomeDir, 'files') : undefined,
         sftpHostVerifierFactory: (host, port) =>
           createHostVerifier({
             host,

@@ -300,7 +300,8 @@ describe('Sshs3WebServer Multi-User Hybrid Mode', () => {
       expect(hashErik).toBeTruthy();
       expect(hashJacob).not.toBe(hashErik);
 
-      // 12. Shared folders and S3 profiles propagate (and delete cleanly) across tenants
+      // 12. Shared folders propagate (and delete cleanly) across tenants. An S3 profile carries its
+      // owner's keys: it is the owner's own, and another user of the server never sees it.
       await jacobWs.invoke('profiles:save-folder', 'Production Cluster');
       await jacobWs.invoke('profiles:save-s3', {
         id: 'team-s3-1',
@@ -308,16 +309,22 @@ describe('Sshs3WebServer Multi-User Hybrid Mode', () => {
         bucket: 'team-backups',
         region: 'eu-north-1',
         accessKeyId: 'AKIA123',
+        secretAccessKey: 'jacobs-secret',
       });
       const erikProfilesAfterFolder = await erikWs.invoke('profiles:get');
       expect(erikProfilesAfterFolder.folders).toContain('Production Cluster');
-      expect(erikProfilesAfterFolder.s3.some((s: any) => s.id === 'team-s3-1')).toBe(true);
+      expect(erikProfilesAfterFolder.s3.some((s: any) => s.id === 'team-s3-1')).toBe(false);
+      expect(JSON.stringify(erikProfilesAfterFolder)).not.toContain('jacobs-secret');
+      expect((await jacobWs.invoke('profiles:get')).s3.some((s: any) => s.id === 'team-s3-1')).toBe(true);
 
       await erikWs.invoke('profiles:delete-folder', 'Production Cluster');
-      await erikWs.invoke('profiles:delete-s3', 'team-s3-1');
+      await jacobWs.invoke('profiles:delete-s3', 'team-s3-1');
       const jacobProfilesAfterFolderDel = await jacobWs.invoke('profiles:get');
       expect(jacobProfilesAfterFolderDel.folders ?? []).not.toContain('Production Cluster');
       expect(jacobProfilesAfterFolderDel.s3.some((s: any) => s.id === 'team-s3-1')).toBe(false);
+
+      // 12b. A user of the server gets no shell on the server itself, and "local" files are their own folder.
+      await expect(erikWs.invoke('terminal:create', { local: true })).rejects.toThrow(/no local terminal/);
 
       // 13. Even after Erik saves a personal copy of shared-prod-vm (e.g. on connect),
       // Jacob's topology updates and deletion propagate to Erik without zombie resurrection

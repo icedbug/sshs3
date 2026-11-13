@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { app, Notification, powerMonitor } from "electron";
 import type {
+  AgentMode,
   SafetyPolicyConfig,
   AgentChange,
   AgentPlan,
@@ -262,6 +263,34 @@ const READ_ONLY_ACTIONS: ReadonlySet<HubRequest["action"]> = new Set<HubRequest[
   "server-facts-read",
   "inline-suggest",
 ]);
+/**
+ * An agent as it arrives from the team bucket, made safe to take: whoever can
+ * write to the bucket must not be able to make an agent on this computer freer
+ * than a person here made it. A known agent keeps the stricter of the two
+ * modes, and its tool and MCP lists cannot widen; a new one arrives at most
+ * assisted (a person here raises it); a date in the future is not believed;
+ * and its texts are bounded as a person's save would bound them.
+ */
+export const incomingAgentForTesting = (remote: MissionAgent, local: MissionAgent | undefined): MissionAgent => incomingAgent(remote, local);
+
+function incomingAgent(remote: MissionAgent, local: MissionAgent | undefined, now = Date.now()): MissionAgent {
+  const modes: AgentMode[] = ["advice", "assisted", "autonomous"];
+  const mode = modes.includes(remote.defaultMode) ? remote.defaultMode : "assisted";
+  const narrower = (mine: string[] | undefined, theirs: string[] | undefined): string[] | undefined =>
+    mine === undefined ? (theirs ? theirs.slice(0, 40) : undefined) : (theirs ?? mine).filter((x) => mine.includes(x));
+  return {
+    ...remote,
+    name: clip(remote.name ?? "Agent", 120),
+    role: clip(remote.role ?? "", 160),
+    mission: clip(remote.mission ?? "", 4000),
+    systemPrompt: clip(remote.systemPrompt ?? "", 8000),
+    defaultMode: local ? lowerMode(local.defaultMode, mode) : lowerMode("assisted", mode),
+    allowedTools: local ? narrower(local.allowedTools, remote.allowedTools) : remote.allowedTools?.slice(0, 40),
+    mcpServerIds: local ? narrower(local.mcpServerIds, remote.mcpServerIds) : remote.mcpServerIds?.slice(0, 40),
+    updatedAt: Math.min(remote.updatedAt, now + 5 * 60_000),
+  };
+}
+
 /** The safety policy's switches as the screen names them. */
 const POLICY_NAMES: Record<keyof SafetyPolicyConfig, string> = {
   autoApproveSafeReadOnly: "run read-only commands without asking",
@@ -383,6 +412,8 @@ export interface HubHost {
   defaultActorName?: string;
   /** On the web server: the user id that goes in front of the alert hook's secret in its address. */
   alertHookOwner?: string;
+  /** On the web server: whether this user administers it. Absent on the desktop, where the one user does. */
+  teamAdmin?: () => boolean;
   peerPresenceProvider?: () => import("../../../shared/types/aiHub").WorkspacePresenceEntry[];
   onSharedWorkspaceChanged?: () => void;
   extraAppContext?(): Promise<{
@@ -728,7 +759,7 @@ export class HubService {
             }
           }
           for (const s of hostServers) {
-            if (s?.id && s.shared !== false) {
+            if (s?.id && s.shared !== false && !s.fromVault) {
               const delVal = deletedServerIds[s.id];
               const delMs =
                 typeof delVal === "number"
@@ -1092,6 +1123,21 @@ export class HubService {
       text: `**Handed over: ${prevAgentName} → ${toAgent.name}**\n${reason ? `Reason: *${clip(reason, 400)}*\n` : ""}Mission: ${toAgent.mission}`,
       at: Date.now(),
     });
+  }
+
+  /** On a shared server, the team's bucket is the administrator's to set up, change or disconnect: one member's change is everyone's. */
+  private assertTeamAdmin(): void {
+    if (this.sharedServer() && !this.host.teamAdmin?.())
+      throw new Error("Only an administrator of this server sets up, changes or disconnects the team's bucket.");
+  }
+
+  /**
+   * The team bucket as this user sees it. Its invite code carries the bucket's secret key, so on a
+   * shared server only an administrator is given it.
+   */
+  private teamBucketView(): ReturnType<S3WorkspaceSyncService["getStatus"]> {
+    const status = this.s3Workspace.getStatus();
+    return this.sharedServer() && !this.host.teamAdmin?.() ? { ...status, inviteCode: undefined } : status;
   }
 
   /** Paused means paused, and a spent budget is spent: however an agent is started. */
@@ -1682,7 +1728,7 @@ export class HubService {
       inventory: this.store.data.inventory,
       activityLog: extra.activityLog ?? this.store.data.activityLog ?? [],
       workspaceServers: extra.workspaceServers ?? [],
-      s3Workspace: this.s3Workspace.getStatus(),
+      s3Workspace: this.teamBucketView(),
       presence: this.mergePresence(
         this.s3Workspace.getPresence(),
         this.host.peerPresenceProvider?.() ?? [],
@@ -2522,10 +2568,16 @@ export class HubService {
         break;
       }
       case "workspace-s3-configure": {
-        if (request.config?.actorName !== undefined) {
+        // On a shared server the name is the account's: nobody signs the team's records as somebody else.
+        if (request.config?.actorName !== undefined && !this.sharedServer()) {
           await this.config.update({ actorName: request.config.actorName.trim() });
         }
-        await this.s3Workspace.configure(request.config, request.inviteCode);
+        const asked = { ...request.config };
+        delete (asked as { actorName?: string }).actorName;
+        if (Object.values(asked).some((v) => v !== undefined) || request.inviteCode) {
+          this.assertTeamAdmin();
+          await this.s3Workspace.configure(request.config, request.inviteCode);
+        }
         break;
       }
       case "workspace-s3-sync-now": {
@@ -2533,6 +2585,7 @@ export class HubService {
         break;
       }
       case "workspace-s3-disconnect": {
+        this.assertTeamAdmin();
         await this.s3Workspace.disconnect();
         break;
       }
@@ -5898,7 +5951,7 @@ export class HubService {
       const ownAgents = new Map((this.store.data.agents ?? []).map((x) => [x.id, x]));
       this.store.data.agents = (a.alive as MissionAgent[]).map((x) => {
         const local = ownAgents.get(x.id);
-        return local && local.updatedAt === x.updatedAt ? local : x;
+        return local && local.updatedAt === x.updatedAt ? local : incomingAgent(x, local);
       });
       changed = true;
     }
@@ -7661,10 +7714,13 @@ export class HubService {
     this.changed();
   }
 
-  async recordServerSaved(id: string): Promise<void> {
+  async recordServerSaved(id: string, shared?: boolean): Promise<void> {
     const trimmed = id?.trim();
     if (!trimmed) return;
     await this.initialize().catch(() => {});
+    // Made personal: it is no longer pushed as the team's (it used to come straight back as shared).
+    if (shared === false)
+      this.store.data.s3SyncedServers = (this.store.data.s3SyncedServers ?? []).filter((s) => s.id !== trimmed);
     if (this.store.data.deletedServerIds?.[trimmed]) {
       const next = { ...this.store.data.deletedServerIds };
       delete next[trimmed];

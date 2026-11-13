@@ -714,6 +714,8 @@ export class Sshs3WebServer {
             user.id,
             String(body.currentPassword || ''),
             String(body.newPassword || ''),
+            // This sign-in stays; every other one of this user ends.
+            this.extractSessionToken(req),
           );
           sendJson(res, 200, { ok: true });
         } catch (err) {

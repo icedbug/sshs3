@@ -43,6 +43,7 @@ export type TerminalHost = Pick<
   | 'sshPtyManager'
   | 'teamVaultService'
   | 'aiHub'
+  | 'tenantHomeDir'
 > & {
   smartcard: Pick<
     SmartcardCoordinator,
@@ -59,6 +60,11 @@ export function registerTerminalHandlers(bridge: TerminalHost): void {
     ) => {
       if (!options || (!options.config && !options.local)) {
         throw new Error('Connection config is required to create terminal');
+      }
+      // On a shared server a "local" terminal would be a shell on the server itself, as the server's
+      // own user, which can read every other user's data. There is none: connect to a server instead.
+      if (options.local && bridge.tenantHomeDir) {
+        throw new Error('This is a shared sshs3 server: there is no local terminal here. Connect to one of your servers instead.');
       }
 
       // A startup unlock error does not block the session; it proceeds and prompts if needed.

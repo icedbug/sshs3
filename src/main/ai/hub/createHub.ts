@@ -43,6 +43,8 @@ export interface CreateHubOptions {
   defaultActorName?: string;
   /** On the web server: the user id in the alert hook's address. */
   alertHookOwner?: string;
+  /** On the web server: whether this user administers it (sets up the team's bucket). */
+  teamAdmin?: () => boolean;
   peerPresenceProvider?: HubHost["peerPresenceProvider"];
   onSharedWorkspaceChanged?: () => void;
 }
@@ -367,6 +369,7 @@ export function createHub(
     s3ConfigFilePath: options?.s3ConfigFilePath,
     defaultActorName: options?.defaultActorName,
     alertHookOwner: options?.alertHookOwner,
+    teamAdmin: options?.teamAdmin,
     peerPresenceProvider: options?.peerPresenceProvider,
     onSharedWorkspaceChanged: options?.onSharedWorkspaceChanged,
     file: (...args) => files.invoke(...args),
@@ -416,6 +419,8 @@ export function createHub(
               role: p.role,
               tags: p.tags,
               shared: true,
+              // Its members get it through the vault, encrypted; it is not copied into the plain team bucket.
+              fromVault: true,
               updatedAt: p.updatedAt,
               updatedBy: p.updatedBy,
             });
@@ -781,7 +786,8 @@ export function createHub(
         const byId = new Map(profiles.ssh.map((p) => [p.id, p]));
         for (const [delId, delIso] of Object.entries(deletedServerIds ?? {})) {
           const existing = byId.get(delId);
-          if (!existing) continue;
+          // A team deletion removes the team's copy, never a profile a person here keeps as their own.
+          if (!existing || existing.shared === false) continue;
           const delMs =
             typeof delIso === "number"
               ? delIso
@@ -797,7 +803,9 @@ export function createHub(
           const existing = byId.get(s.id);
           const tRemote = Date.parse(s.updatedAt || "") || 0;
           const tLocal = Date.parse(existing?.updatedAt || "") || 0;
-          if (!existing || tRemote > tLocal || !existing.shared) {
+          // A profile a person here made personal stays personal: the team's copy does not take it back.
+          if (existing?.shared === false) continue;
+          if (!existing || tRemote > tLocal) {
             await bridge.profileStore.saveSSH({
               ...existing,
               id: s.id,
@@ -877,6 +885,8 @@ export function createHub(
     openSchedule: async (schedule) => {
       let id: string;
       if (schedule.profileId === "local") {
+        // On a shared server a local shell is a shell on the server itself, as its own user: there is none.
+        if (bridge.tenantHomeDir) throw new Error("This is a shared sshs3 server: a schedule runs on one of your servers, not on the server itself.");
         const session = await bridge.sshPtyManager.createShellSession({
           cols: 100,
           rows: 30,
@@ -1325,6 +1335,7 @@ export function createHub(
         return { deletedSnippetId: targetId };
       }
       if (input.operation === "open_local_terminal") {
+        if (bridge.tenantHomeDir) throw new Error("This is a shared sshs3 server: there is no local terminal here.");
         const shell = process.platform === "win32" ? "powershell" : "bash";
         const session = await bridge.sshPtyManager.createShellSession({
           cols: 100,
