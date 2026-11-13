@@ -264,9 +264,9 @@ const certIn = (days: number): string => {
 };
 
 const servers = [
-  { id: "web", name: "web-01", host: "10.0.0.4", cluster: "Web-Prod" },
-  { id: "db", name: "pg-01", host: "10.0.0.5", cluster: "DB-Prod" },
-  { id: "nas", name: "netapp-01", host: "10.0.0.9" },
+  { id: "web", name: "web-01", host: "10.0.0.4", cluster: "Web-Prod", shared: true },
+  { id: "db", name: "pg-01", host: "10.0.0.5", cluster: "DB-Prod", shared: true },
+  { id: "nas", name: "netapp-01", host: "10.0.0.9", shared: true },
 ] as WorkspaceServerSummary[];
 
 function memoryBucket(): QueueStore {
@@ -442,5 +442,38 @@ describe("server facts in the hub", () => {
     const [sa, sb] = [await a.hub.snapshot(), await b.hub.snapshot()];
     expect(sa.serverFacts!.servers[0]).toMatchObject({ status: "ok", packages: 3 });
     expect(sb.serverFacts!.servers[0]).toMatchObject({ status: "ok", packages: 3, collectedAt: sa.serverFacts!.servers[0].collectedAt });
+  });
+});
+
+describe("facts and links after the review of feature 8", () => {
+  it("keeps a server's problems when it stops answering, said as last seen, and names a server that has not answered for a while", async () => {
+    let answer: () => { ok: boolean; stdout: string; error?: string } = () => ({ ok: true, stdout: debian({ disk: 96 }) });
+    const { hub } = await makeHub({ web: () => answer() });
+    await hub.request({ action: "facts-configure", enabled: true });
+    await hub.request({ action: "facts-collect-now", serverId: "web" });
+    const problems = async () =>
+      ((await hub.snapshot()).serverFacts!.servers.find((s) => s.serverId === "web")!.problems ?? []).map((p) => p.text);
+    await vi.waitFor(async () => expect((await problems()).some((t) => t.startsWith("Disk / is 96"))).toBe(true));
+    answer = () => ({ ok: false, stdout: "", error: "No answer in time" });
+    for (let i = 0; i < 3; i++) await hub.request({ action: "facts-collect-now", serverId: "web" });
+    await vi.waitFor(async () => {
+      const now = await problems();
+      expect(now.some((t) => /Disk \/ is 96.*not answering/.test(t))).toBe(true);
+      expect(now.some((t) => t.startsWith("Could not be read 3 times"))).toBe(true);
+    });
+  });
+
+  it("does not let an agent replace or remove a link a person confirmed", async () => {
+    const { hub } = await makeHub({});
+    await hub.request({ action: "infra-edge-save", edge: { from: "web-01", to: "DB-Prod", relation: "depends_on" } });
+    const confirmed = (await hub.snapshot()).infraEdges![0];
+    const { handleAppAction } = await import("../../src/main/ai/hub/AppActions");
+    const task = { id: "t", agentName: "Agent", mode: "autonomous", status: "running", changes: [], messages: [], sources: [] } as unknown as AgentTask;
+    const call = (payload: Record<string, unknown>) =>
+      handleAppAction((hub as unknown as { appActionHost: () => never }).appActionHost(), task, { action: "sshs3_agent_and_mcp_manage", payload } as never, async () => undefined);
+    await call({ operation: "save_infra_edge", id: confirmed.id, from: "web-01", to: "cache-1" }).catch(() => undefined);
+    const edges = (await hub.snapshot()).infraEdges!;
+    expect(edges.find((e) => e.id === confirmed.id)).toMatchObject({ to: "DB-Prod" });
+    await expect(call({ operation: "delete_infra_edge", id: confirmed.id })).rejects.toThrow(/confirmed by a person/);
   });
 });

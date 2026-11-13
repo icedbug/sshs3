@@ -1857,10 +1857,16 @@ export async function handleAppAction(
           const toNode = requiredText(str("toNode") || str("to"));
           const relation =
             (str("relation") as InfraGraphEdge["relation"]) || "depends_on";
+          // An agent's suggestion is always a new link: it can never take over the id of one a person
+          // confirmed (and so replace it). Its own earlier suggestion it may change.
+          const ownId = str("id");
+          const mine = ownId
+            ? (hub.store.data.infraEdges ?? []).find((e) => e.id === ownId && e.proposed)
+            : undefined;
           await hub.request({
             action: "infra-edge-save",
             edge: {
-              id: str("id"),
+              id: mine?.id,
               from: fromNode,
               to: toNode,
               relation,
@@ -1881,6 +1887,11 @@ export async function handleAppAction(
         }
         if (op === "delete_infra_edge") {
           const edgeId = requiredText(str("idOrName") || str("id"));
+          // A link a person confirmed is a person's to remove: an agent may take back only a suggestion.
+          const edge = (hub.store.data.infraEdges ?? []).find((e) => e.id === edgeId);
+          if (!edge) throw new Error(`No dependency link has the id "${edgeId}".`);
+          if (!edge.proposed)
+            throw new Error("That link was confirmed by a person. An agent can remove only its own suggestions; say why it is wrong in your report instead.");
           await hub.request({
             action: "infra-edge-delete",
             id: edgeId,

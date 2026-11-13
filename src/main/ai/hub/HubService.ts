@@ -5086,11 +5086,35 @@ export class HubService {
   }
 
   /** Problems that are there now and were not dismissed since they appeared. */
+  /**
+   * The problems a server's last reading shows. A server that stopped
+   * answering keeps them (a full disk does not empty itself because nobody can
+   * look), said as last seen; one that has not answered three times running is
+   * a problem of its own; and a reading older than twice the interval says how
+   * old it is.
+   */
   private factsProblems(record: FactsRecord, now = Date.now()): FactProblem[] {
-    if (!record.facts || record.status !== "ok") return [];
-    return problems(record.facts, now)
+    if (!record.facts) return [];
+    const intervalMs = this.factsSettings().intervalHours * 3_600_000;
+    const at = record.collectedAt ?? 0;
+    const old = record.status !== "ok" || now - at > 2 * intervalMs;
+    const when = new Date(at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    const found: FactProblem[] = problems(record.facts, now)
       .filter((p) => (record.dismissed?.[p.key] ?? 0) < (record.problemsSince?.[p.key] ?? 1))
-      .map((p) => ({ ...p, since: record.problemsSince?.[p.key] }));
+      .map((p) => ({
+        ...p,
+        since: record.problemsSince?.[p.key],
+        ...(old ? { text: `${p.text} (last seen ${when}${record.status !== "ok" ? "; the server is not answering" : ""})` } : {}),
+      }));
+    if (record.status === "failed" && (record.failures ?? 0) >= 3)
+      found.push({
+        kind: "unreachable",
+        key: "unreachable",
+        severity: "warning",
+        text: `Could not be read ${record.failures} times running${record.error ? `: ${clip(record.error, 120)}` : ""}`,
+        since: at,
+      });
+    return found;
   }
 
   private factsView(): NonNullable<HubSnapshot["serverFacts"]> {
@@ -5173,15 +5197,19 @@ export class HubService {
     if (!this.s3Workspace.canUseBucket() || isDemoMode()) return;
     const objects = this.s3Workspace.objects;
     const names = (await objects.list("work/facts/heads")).filter((n) => n.endsWith(".json")).slice(0, 1000);
+    // Only readings of servers this installation knows as shared: a teammate's personal server is not ours to see.
+    const shared = new Set(this.getKnownServers().filter((s) => s.shared).map((s) => s.id));
     for (const name of names) {
       try {
         const head = JSON.parse((await objects.read(`work/facts/heads/${name}`))?.toString("utf8") ?? "null") as { serverId?: string; collectedAt?: number; hash?: string } | null;
-        if (!head?.serverId || !head.collectedAt) continue;
+        if (!head?.serverId || !head.collectedAt || !shared.has(head.serverId)) continue;
         this.factsHeads.set(head.serverId, { collectedAt: head.collectedAt, hash: head.hash ?? "" });
         const mine = this.factsStore.get(head.serverId);
         if ((mine?.collectedAt ?? 0) >= head.collectedAt) continue;
         const data = JSON.parse((await objects.read(`work/facts/data/${name}`))?.toString("utf8") ?? "null") as FactsRecord | null;
-        if (data?.serverId === head.serverId && data.facts) await this.factsStore.put({ ...data, dismissed: mine?.dismissed, changes: data.changes ?? [] });
+        // Stamped with the head's time: the data is written only when it changed, so it can be older than the reading.
+        if (data?.serverId === head.serverId && data.facts)
+          await this.factsStore.put({ ...data, collectedAt: Math.max(data.collectedAt ?? 0, head.collectedAt), dismissed: mine?.dismissed, changes: data.changes ?? [] });
       } catch {
         // One unreadable object does not stop the rest.
       }
@@ -5274,7 +5302,8 @@ export class HubService {
       };
       await this.factsStore.put(record);
       if (!facts.unsupported) this.proposeEdgesFrom(server, facts, now);
-      if (sync) {
+      // A personal server's reading stays on this computer: only shared servers are read for the team.
+      if (sync && server.shared) {
         const objects = this.s3Workspace.objects;
         const name = `${server.id.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 120)}.json`;
         // The whole record only when something is different; the small head every time, so others know it was read.
@@ -5410,7 +5439,11 @@ export class HubService {
       workTickets: live(this.store.data.workTickets),
       dailyReport: this.store.data.dailyReport,
       serverFacts: {
-        servers: this.factsStore.all().map((r) => ({ serverId: r.serverId, name: r.name, status: r.status, collectedAt: r.collectedAt, problems: this.factsProblems(r), changes: [] })),
+        // Only servers this installation still has and has not left alone: a deleted or excluded server reports nothing.
+        servers: this.factsStore
+          .all()
+          .filter((r) => this.getKnownServers().some((s) => s.id === r.serverId) && !this.factsSettings().exclude.includes(r.serverId))
+          .map((r) => ({ serverId: r.serverId, name: r.name, status: r.status, collectedAt: r.collectedAt, problems: this.factsProblems(r), changes: [] })),
       },
     }).filter((item) => NOTIFY_KINDS.includes(item.kind));
   }

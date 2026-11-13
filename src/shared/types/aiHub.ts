@@ -688,7 +688,7 @@ export interface FactChange {
   text: string;
 }
 export interface FactProblem {
-  kind: "disk" | "cert" | "service";
+  kind: "disk" | "cert" | "service" | "unreachable";
   /** Stable for the same problem on the same server, so it can be dismissed. */
   key: string;
   severity: "warning" | "critical";
