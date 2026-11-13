@@ -384,6 +384,9 @@ export function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Elem
         <NotificationsCard hub={hub} act={act} />
       </section>
 
+      {/* The app answering this person's own agent. In a browser the team server already
+          has its endpoint and the keys live with the account, so this is not shown there. */}
+      {!isWebBrowserMode() && (
       <section className="ai-set" data-testid="local-mcp">
         <h3>Your own agents (MCP)</h3>
         <label className="ai-check">
@@ -418,6 +421,7 @@ export function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Elem
           </>
         )}
       </section>
+      )}
 
       <details className="ai-fold ai-set-fold">
         <summary>Limits and model parameters</summary>
