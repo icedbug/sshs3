@@ -117,6 +117,15 @@ describe("the plan gate", () => {
     expect(planGate(asked, "sshs3_cluster_exec", { command: "systemctl reload nginx" })).toBeDefined();
     expect(planGate(asked, "terminal_command", { command: "cat /etc/nginx/acme.conf" })).toBeUndefined();
     expect(planGate(asked, "workspace_context", {})).toBeUndefined();
+    // A management tool that writes, and a tool on somebody else's MCP server, change
+    // things too. They used to walk straight past a waiting plan.
+    expect(planGate(asked, "sshs3_manage_server", { operation: "delete", idOrName: "db01" })).toBeDefined();
+    expect(planGate(asked, "sshs3_manage_app_and_settings", { operation: "update_safety_policy" })).toBeDefined();
+    expect(planGate(asked, "mcp__srv-1__set_thermostat", { to: 30 })).toBeDefined();
+    // Reading is still reading.
+    expect(planGate(asked, "sshs3_manage_server", { operation: "list_tunnels" })).toBeUndefined();
+    expect(planGate(asked, "sshs3_kb_search", { query: "x" })).toBeUndefined();
+    expect(planGate(asked, "sshs3_manage_app_and_settings", { operation: "get_state" })).toBeUndefined();
 
     const waiting = task({ messages: [{ id: "m", role: "user", text: "fix the timeout", at: 1 }], plan: plan() });
     expect(planGate(waiting, "terminal_command", { command: "systemctl restart nginx" })).toMatch(/waiting for the user's approval/);

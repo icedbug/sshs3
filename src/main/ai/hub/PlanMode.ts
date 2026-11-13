@@ -5,6 +5,7 @@ import type {
   AgentTask,
   AgentTodo,
 } from "../../../shared/types/aiHub";
+import { APP_OPS, type AppOpClass } from "./AppGuard";
 import { analyzeCommandSafety } from "./CommandSafetyService";
 import { boundedContext } from "./privacy";
 
@@ -223,6 +224,14 @@ export function planPending(task: AgentTask): boolean {
  * nothing that changes a system does. Reading is always allowed, so the agent
  * can investigate for its plan.
  */
+/** What a management tool's call would do: read, or write something. */
+function appOpClass(tool: string, args: Record<string, unknown>): AppOpClass | undefined {
+  const spec = APP_OPS[tool];
+  if (!spec) return undefined;
+  const op = typeof args.operation === "string" && args.operation.trim() ? args.operation.trim() : spec.fallback;
+  return spec.ops[op] ?? "change";
+}
+
 export function planGate(
   task: AgentTask,
   tool: string,
@@ -236,7 +245,15 @@ export function planGate(
     tool === "sshs3_change" ||
     ((tool === "terminal_command" || tool === "sshs3_cluster_exec") &&
       command !== "" &&
-      analyzeCommandSafety(command).riskLevel !== "safe");
+      analyzeCommandSafety(command).riskLevel !== "safe") ||
+    // A tool on somebody else's MCP server changes something outside sshs3, unless
+    // that server said the tool only looks; the call itself decides below.
+    tool.startsWith("mcp__") ||
+    // And so does a management tool that writes: saving a server, a schedule, a
+    // memory. Only the ones that read are let through while a plan waits.
+    appOpClass(tool, args) === "change" ||
+    appOpClass(tool, args) === "guard" ||
+    appOpClass(tool, args) === "guard-if";
   if (!changes) return undefined;
   return task.plan?.status === "proposed"
     ? "A plan is waiting for the user's approval. Nothing that changes a system runs until they approve it. Tell the user the plan and stop; read-only checks are still allowed."
