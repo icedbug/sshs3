@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { McpTokenStore } from "../../src/main/web/McpTokenStore";
-import { SUPPORTED_PROTOCOL_VERSIONS, handleMcpHttp } from "../../src/main/web/mcp/McpEndpoint";
+import { SUPPORTED_PROTOCOL_VERSIONS, callBudget, handleMcpHttp } from "../../src/main/web/mcp/McpEndpoint";
 import type { HubRequest, HubSnapshot } from "../../src/shared/types/aiHub";
 
 const dirs: string[] = [];
@@ -33,13 +33,14 @@ async function setup(opts: { scopes?: ("read" | "tickets" | "run")[]; enabled?: 
     tokens,
     hubFor: vi.fn(async (userId: string) => (userId === "u1" ? { request, actor: "Jacob" } : undefined)),
     enabled: () => opts.enabled ?? true,
+    rate: callBudget(),
   };
   const call = async (body: unknown, headers: Record<string, string> = {}, method = "POST") =>
     handleMcpHttp(
       { method, headers: { authorization: `Bearer ${made.token}`, ...headers }, body: typeof body === "string" ? body : JSON.stringify(body) },
       deps,
     );
-  return { tokens, token: made.token, call, deps, sent };
+  return { tokens, token: made.token, call, deps: deps as typeof deps & { allowedHosts?: () => string[] }, sent };
 }
 const parse = (r: { body: string }): Record<string, unknown> => JSON.parse(r.body) as Record<string, unknown>;
 const rpc = (method: string, params?: Record<string, unknown>, id: number | string = 1) => ({ jsonrpc: "2.0", id, method, ...(params ? { params } : {}) });
@@ -70,7 +71,7 @@ describe("sshs3 answering an MCP client", () => {
     // Even a wrong key gets the same answer: the Origin is what decided it.
     const anon = await handleMcpHttp(
       { method: "POST", headers: { origin: "http://127.0.0.1:8795" }, body: JSON.stringify(rpc("tools/list")) },
-      { tokens: new McpTokenStore(dirs[0]), hubFor: async () => undefined, enabled: () => true },
+      { tokens: new McpTokenStore(dirs[0]), hubFor: async () => undefined, enabled: () => true, rate: callBudget() },
     );
     expect(anon.status).toBe(403);
   });
@@ -79,7 +80,7 @@ describe("sshs3 answering an MCP client", () => {
     const { call, token } = await setup();
     const bare = await handleMcpHttp(
       { method: "POST", headers: { cookie: `sshs3_session=${token}` }, body: JSON.stringify(rpc("tools/list")) },
-      { tokens: new McpTokenStore(dirs[0]), hubFor: async () => undefined, enabled: () => true },
+      { tokens: new McpTokenStore(dirs[0]), hubFor: async () => undefined, enabled: () => true, rate: callBudget() },
     );
     expect(bare.status).toBe(401);
     expect(bare.headers["WWW-Authenticate"]).toContain("Bearer");
@@ -210,6 +211,45 @@ describe("sshs3 answering an MCP client", () => {
     });
     expect(res.status).toBe(404);
     expect(parse(res).error).toMatchObject({ code: -32601 });
+  });
+
+  it("will not answer to a name this server does not have", async () => {
+    const { token, deps } = await setup();
+    deps.allowedHosts = () => ["sshs3.example.com", "localhost", "127.0.0.1"];
+    const call = (host: string) =>
+      handleMcpHttp(
+        { method: "POST", headers: { authorization: `Bearer ${token}`, host }, body: JSON.stringify(rpc("ping")) },
+        deps,
+      );
+    expect((await call("sshs3.example.com:8443")).status).toBe(200);
+    expect((await call("127.0.0.1:8795")).status).toBe(200);
+    // A page that made its own name resolve to this machine gets nowhere.
+    const rebound = await call("attacker.example");
+    expect(rebound.status).toBe(403);
+    expect(rebound.body).toContain("does not answer to that name");
+  });
+
+  it("holds one key to a rate, and says to wait rather than going quiet", async () => {
+    const { call } = await setup();
+    let last = await call(rpc("ping"));
+    let n = 0;
+    while (last.status === 200 && n < 200) {
+      last = await call(rpc("ping"));
+      n++;
+    }
+    expect(last.status).toBe(429);
+    expect(last.headers["Retry-After"]).toBe("10");
+    expect(n).toBeGreaterThan(10);
+  });
+
+  it("fills the bucket again as time passes", () => {
+    const rate = callBudget({ perMinute: 60, burst: 2 });
+    expect(rate.take("k", 0)).toBe(true);
+    expect(rate.take("k", 0)).toBe(true);
+    expect(rate.take("k", 0)).toBe(false);
+    // A second later there is one more, and another key was never affected.
+    expect(rate.take("k", 1200)).toBe(true);
+    expect(rate.take("other", 0)).toBe(true);
   });
 
   it("counts that the key was used", async () => {

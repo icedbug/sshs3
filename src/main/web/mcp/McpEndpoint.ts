@@ -78,11 +78,41 @@ export interface McpHttpResponse {
 
 export interface McpEndpointDeps {
   tokens: McpTokenStore;
+  /**
+   * The names this server answers to. A request for any other host is
+   * refused: with the Origin check, that closes DNS rebinding, where a page
+   * resolves its own name to 127.0.0.1 and talks to a listener there.
+   * Undefined: any host, for a listener that is not reachable from outside.
+   */
+  allowedHosts?: () => string[] | undefined;
   /** The hub of the person a key acts for, or undefined when there is no such person any more. */
   hubFor: (userId: string) => Promise<{ request: (r: HubRequest) => Promise<HubSnapshot>; actor: string } | undefined>;
   /** Switched off: the endpoint answers 404, as if it were not there. */
   enabled: () => boolean;
+  /** How many calls a key may make. Its own clock, so a test can drive it. */
+  rate: { take: (id: string, now: number) => boolean };
   now?: () => number;
+}
+
+/**
+ * A bucket per key: it holds `burst` calls and fills at `perMinute`. An agent
+ * that works normally never notices it; one that loops does.
+ */
+export function callBudget({ perMinute = 120, burst = 40 } = {}): { take: (id: string, now: number) => boolean } {
+  const buckets = new Map<string, { left: number; at: number }>();
+  return {
+    take(id, now) {
+      if (buckets.size > 5000) buckets.clear();
+      const have = buckets.get(id) ?? { left: burst, at: now };
+      const refilled = Math.min(burst, have.left + ((now - have.at) / 60_000) * perMinute);
+      if (refilled < 1) {
+        buckets.set(id, { left: refilled, at: now });
+        return false;
+      }
+      buckets.set(id, { left: refilled - 1, at: now });
+      return true;
+    },
+  };
 }
 
 const ERR = {
@@ -294,6 +324,14 @@ export async function handleMcpHttp(req: McpHttpRequest, deps: McpEndpointDeps):
   // A browser sends Origin; an agent does not. This is checked before anything else.
   if (header(req, 'origin')) return json(403, { error: 'This endpoint is for an MCP client, not a browser.' });
 
+  // And the name it was asked for has to be one this server answers to.
+  const allowed = deps.allowedHosts?.();
+  if (allowed && allowed.length) {
+    const asked = header(req, 'host').toLowerCase().split(':')[0];
+    if (asked && !allowed.some((h) => h.toLowerCase() === asked))
+      return json(403, { error: 'This server does not answer to that name.' });
+  }
+
   // No session lives here, so there is nothing to open a stream for or to delete.
   if (req.method !== 'POST')
     return json(405, { error: 'Use POST with a JSON-RPC body. This server keeps no session, so there is no stream to open.' }, { Allow: 'POST' });
@@ -306,6 +344,14 @@ export async function handleMcpHttp(req: McpHttpRequest, deps: McpEndpointDeps):
       401,
       { error: 'A key is needed. Send it as "Authorization: Bearer s3k_…"; make one in sshs3 under your account.' },
       { 'WWW-Authenticate': 'Bearer realm="sshs3", error="invalid_token"' },
+    );
+
+  // One key cannot be made to carry a flood: a burst is allowed, a stream is not.
+  if (!deps.rate.take(token.id, now))
+    return json(
+      429,
+      { error: 'This key has made too many calls just now. Wait a moment and try again.' },
+      { 'Retry-After': '10' },
     );
 
   let parsed: unknown;

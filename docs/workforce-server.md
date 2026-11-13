@@ -94,6 +94,44 @@ server reads with its own key or agent; a machine that needs a password or a
 touch is not read from the server. With a team bucket the result is shared, and
 a machine is read by one installation, not by each.
 
+## Your own agent asking this server (MCP)
+
+Claude Code, Cursor, Codex and anything else that speaks MCP can ask this
+sshs3 about the team's systems. Open your account window and make a key under
+"Keys for your own agents"; it is shown once, with the line to paste:
+
+```bash
+claude mcp add --transport http sshs3 https://your-server/api/mcp --header "Authorization: Bearer s3k_…"
+```
+
+What a key may do is chosen when it is made. Reading is always allowed: the
+servers, what was last read from each, what changed there, what depends on
+what, the knowledge base, and the board. Writing tickets is a separate choice;
+a ticket made this way goes to the backlog, says it came from outside, and
+starts nothing by itself. Running commands is not built yet.
+
+A key acts as the person who made it and sees exactly what they see. It is
+kept as a hash, so it cannot be read back; "Take it back" stops it at once.
+
+What the endpoint does and does not do:
+
+- It takes the key in the `Authorization` header and nothing else. A session
+  cookie is not a key: being signed in in a browser does not let that page act
+  as you.
+- A request that carries an `Origin` header is refused before the key is read.
+  A browser sends one and an agent does not, so this closes the attack where a
+  web page makes its own name resolve to a machine on your network. With
+  `SSHS3_MCP_HOSTS` set, the `Host` of the request is checked too.
+- It speaks both the protocol clients use today and the newer revision
+  (2026-07-28), which has no handshake and no sessions. Which one a request
+  belongs to is read off the request itself.
+- One key is held to a rate. `SSHS3_MCP=0` switches the whole endpoint off,
+  and it then answers as if it were not there.
+
+Checked against both official MCP clients over real HTTP. Not checked: Claude
+Code, Cursor and Codex themselves, and the newer protocol against anything but
+the SDK that implements it.
+
 ## What to know
 
 - **Modes still apply.** An agent set to ask before commands waits for a
@@ -108,6 +146,8 @@ a machine is read by one installation, not by each.
   set up. To run them on the server, install the agent in the image, sign it
   in, and add the runner on the server with the folder of the checkout. The
   provided image does not include them.
+- **A key is per person, and only for this server.** It is not shared through
+  the team bucket, and it gives no more than the person could do themselves.
 - **MCP servers and schedules are per installation.** An MCP server an agent
   needs must be added on the server too. A schedule runs where it was created.
 - **One server per team is enough.** Two would work (claims decide who runs a

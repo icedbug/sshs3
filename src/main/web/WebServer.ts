@@ -8,7 +8,7 @@ import { setWebDataDir } from './electronShim';
 import { WebAuthService, type WebUserPublic } from './WebAuthService';
 import { WebTenantManager } from './WebTenantManager';
 import { MCP_SCOPES, McpTokenStore, type McpScope } from './McpTokenStore';
-import { handleMcpHttp } from './mcp/McpEndpoint';
+import { callBudget, handleMcpHttp } from './mcp/McpEndpoint';
 import { createLogger } from '../log';
 
 const log = createLogger('web');
@@ -255,6 +255,7 @@ export class Sshs3WebServer {
   public readonly tenants: WebTenantManager;
   /** The keys that let a person's own agent reach this server over MCP. */
   public readonly mcpTokens: McpTokenStore;
+  private readonly mcpRate = callBudget();
   private httpServer?: http.Server;
   private boundPort = 0;
   private activeSockets = new Set<Duplex>();
@@ -418,6 +419,11 @@ export class Sshs3WebServer {
       { method, headers: req.headers as Record<string, string | string[] | undefined>, body },
       {
         tokens: this.mcpTokens,
+        rate: this.mcpRate,
+        allowedHosts: () => {
+          const configured = (process.env.SSHS3_MCP_HOSTS ?? '').split(',').map((h) => h.trim()).filter(Boolean);
+          return configured.length ? [...configured, 'localhost', '127.0.0.1'] : undefined;
+        },
         enabled: () => process.env.SSHS3_MCP !== '0',
         hubFor: async (userId) => {
           const user = (await this.auth.listUsers()).find((u) => u.id === userId);
