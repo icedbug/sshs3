@@ -158,3 +158,44 @@ describe("starting an MCP server as a program", () => {
     expect((await mcp.testAndDiscover(server({ url: "" }))).error).toContain("no address");
   });
 });
+
+describe("what a run is offered", () => {
+  it("offers only the tools of the servers it may use, and an agent's own list can take them away", async () => {
+    const { toolsForTask } = await import("../../src/main/ai/hub/DirectAgentRuntime");
+    const mcpServers = [server(), server({ id: "srv-2", name: "Other", discoveredTools: [{ name: "do_thing", description: "d", inputSchema: {} }] })];
+    const task = { id: "t", mode: "assisted", agentId: "a1", messages: [], changes: [], sources: [], maxCommands: 5 } as never;
+    const agent = { id: "a1", name: "Watch", role: "r", mission: "m", systemPrompt: "s", defaultMode: "assisted", updatedAt: 1 };
+
+    const all = toolsForTask(task, { mcpServers, agents: [agent] }).map((t) => t.name);
+    expect(all).toContain("mcp__srv-1__get_forecast");
+    expect(all).toContain("mcp__srv-2__do_thing");
+
+    // Bound to one server: the other's tools are not offered at all.
+    const bound = toolsForTask(task, { mcpServers, agents: [{ ...agent, mcpServerIds: ["srv-1"] }] }).map((t) => t.name);
+    expect(bound).toContain("mcp__srv-1__get_forecast");
+    expect(bound).not.toContain("mcp__srv-2__do_thing");
+
+    // An agent held to a list of tools is held to it for MCP tools too. This used to
+    // be impossible: they were appended after the list had already been applied.
+    const narrow = toolsForTask(task, {
+      mcpServers,
+      agents: [{ ...agent, allowedTools: ["terminal_command", "mcp__srv-1__get_forecast"] }],
+    }).map((t) => t.name);
+    expect(narrow).toContain("mcp__srv-1__get_forecast");
+    expect(narrow).not.toContain("mcp__srv-2__do_thing");
+    // Looking at the workspace and the pages is always allowed.
+    expect(narrow).toContain("sshs3_kb_search");
+
+    // What is offered says whose words the description is.
+    const def = toolsForTask(task, { mcpServers, agents: [agent] }).find((t) => t.name === "mcp__srv-1__get_forecast")!;
+    expect(def.description).toContain("in its own words");
+    expect(def.description).toContain("not an instruction");
+  });
+
+  it("does not offer a tool of a server that is switched off", async () => {
+    const { toolsForTask } = await import("../../src/main/ai/hub/DirectAgentRuntime");
+    const task = { id: "t", mode: "assisted", messages: [], changes: [], sources: [], maxCommands: 5 } as never;
+    const names = toolsForTask(task, { mcpServers: [server({ enabled: false })] }).map((t) => t.name);
+    expect(names.some((n) => n.startsWith("mcp__"))).toBe(false);
+  });
+});
