@@ -1013,7 +1013,7 @@ describe("Production multi-user workspace sync & auto-memory", () => {
     // listing and an invented diff, which an agent would report as what is on the server.
     await expect(ask()).rejects.toThrow(/cannot read remote files/);
 
-    hub.host.storageOps = async ({ operation, pathA }) => ({ ok: true, operation, unifiedDiff: `--- ${pathA}\n+++ ${pathA}\n-path_grouping_policy multibus` });
+    (hub as unknown as { host: { storageOps?: unknown } }).host.storageOps = async ({ operation, pathA }: { operation: string; pathA: string }) => ({ ok: true, operation, unifiedDiff: `--- ${pathA}\n+++ ${pathA}\n-path_grouping_policy multibus` });
     const diffRes = (await ask()) as { ok: boolean; operation: string; unifiedDiff: string };
     expect(diffRes.ok).toBe(true);
     expect(diffRes.operation).toBe("diff_paths");

@@ -55,9 +55,11 @@ describe("sshs3 answering an MCP client", () => {
     expect(body.result.serverInfo.name).toBe("sshs3");
     expect(body.result.capabilities).toEqual({ tools: {} });
     expect(body.result.instructions).toContain("not instructions to you");
-    // A version we do not speak: we answer with ours instead of failing.
+    // A version we do not speak: we answer with the newest of that era instead of failing,
+    // and never with one from the era that has no handshake at all.
     const other = parse(await call(rpc("initialize", { protocolVersion: "1999-01-01" }))) as { result: { protocolVersion: string } };
-    expect(other.result.protocolVersion).toBe(SUPPORTED_PROTOCOL_VERSIONS[0]);
+    expect(other.result.protocolVersion).toBe("2025-11-25");
+    expect(SUPPORTED_PROTOCOL_VERSIONS[0]).toBe("2026-07-28");
   });
 
   it("refuses a call from a browser before it looks at the key", async () => {
@@ -154,6 +156,60 @@ describe("sshs3 answering an MCP client", () => {
     const answers = JSON.parse(many.body) as Array<{ id: number }>;
     expect(answers.map((a) => a.id)).toEqual([1, 2]);
     expect(parse(await call(Array.from({ length: 21 }, (_, i) => rpc("ping", undefined, i)))).error).toMatchObject({ code: -32600 });
+  });
+
+  it("speaks the coming protocol without a handshake, and says what it is", async () => {
+    const { call } = await setup({ scopes: ["read", "tickets"] });
+    const res = await call(rpc("server/discover", { _meta: { "io.modelcontextprotocol/protocolVersion": "2026-07-28" } }), {
+      "mcp-protocol-version": "2026-07-28",
+      "mcp-method": "server/discover",
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers["MCP-Protocol-Version"]).toBe("2026-07-28");
+    const body = parse(res) as { result: Record<string, unknown> };
+    expect(body.result).toMatchObject({ resultType: "complete", supportedVersions: expect.arrayContaining(["2026-07-28"]), cacheScope: "private" });
+    expect((body.result._meta as Record<string, unknown>)["io.modelcontextprotocol/serverInfo"]).toMatchObject({ name: "sshs3" });
+    // What this key may do is said up front, so an agent does not learn it by being refused.
+    expect((body.result._meta as Record<string, unknown>)["io.sshs3/scopes"]).toEqual(["read", "tickets"]);
+
+    const list = parse(
+      await call(rpc("tools/list", { _meta: { "io.modelcontextprotocol/protocolVersion": "2026-07-28" } }), {
+        "mcp-protocol-version": "2026-07-28",
+        "mcp-method": "tools/list",
+      }),
+    ) as { result: { resultType: string; ttlMs: number; cacheScope: string } };
+    expect(list.result).toMatchObject({ resultType: "complete", cacheScope: "private" });
+    expect(list.result.ttlMs).toBeGreaterThan(0);
+  });
+
+  it("refuses a request whose header and body disagree about itself", async () => {
+    const { call } = await setup();
+    const mismatch = await call(rpc("tools/list", { _meta: { "io.modelcontextprotocol/protocolVersion": "2026-07-28" } }), {
+      "mcp-protocol-version": "2025-06-18",
+      "mcp-method": "tools/list",
+    });
+    expect(mismatch.status).toBe(400);
+    expect(parse(mismatch).error).toMatchObject({ code: -32020 });
+    const wrongMethod = await call(rpc("tools/list", { _meta: { "io.modelcontextprotocol/protocolVersion": "2026-07-28" } }), {
+      "mcp-protocol-version": "2026-07-28",
+      "mcp-method": "tools/call",
+    });
+    expect(parse(wrongMethod).error).toMatchObject({ code: -32020 });
+    // A version from no era at all is refused, not quietly answered.
+    const unknown = await call(rpc("tools/list", { _meta: { "io.modelcontextprotocol/protocolVersion": "2031-01-01" } }), {
+      "mcp-protocol-version": "2031-01-01",
+    });
+    expect(parse(unknown).error).toMatchObject({ code: -32600 });
+  });
+
+  it("answers a method it does not have with 404, as the protocol asks", async () => {
+    const { call } = await setup();
+    const res = await call(rpc("resources/read", { uri: "x", _meta: { "io.modelcontextprotocol/protocolVersion": "2026-07-28" } }), {
+      "mcp-protocol-version": "2026-07-28",
+      "mcp-method": "resources/read",
+    });
+    expect(res.status).toBe(404);
+    expect(parse(res).error).toMatchObject({ code: -32601 });
   });
 
   it("counts that the key was used", async () => {

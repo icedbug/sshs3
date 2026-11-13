@@ -4,12 +4,18 @@ import os from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { Client as ModernClient, StreamableHTTPClientTransport as ModernTransport } from "@modelcontextprotocol/client";
 import { Sshs3WebServer } from "../../src/main/web/WebServer";
 
 /**
- * The endpoint against the official MCP client, not our own idea of one. If
- * the protocol is wrong, this is where it shows: the SDK validates every
+ * The endpoint against the official MCP clients, not our own idea of one. If
+ * the protocol is wrong, this is where it shows: each SDK validates every
  * answer against the schema and refuses what does not fit.
+ *
+ * Both eras are tried. The v1 client speaks what clients speak today (a
+ * handshake, then calls). The v2 client, pinned to 2026-07-28, speaks the one
+ * that is coming: no handshake, `server/discover` instead, and the version in
+ * a header and in the body of every request.
  */
 
 const running: Array<{ server: Sshs3WebServer; dir: string }> = [];
@@ -94,5 +100,33 @@ describe("the official MCP client against this server", () => {
     const { url } = await serveWithKey();
     const client = new Client({ name: "nosy", version: "1.0.0" });
     await expect(client.connect(new StreamableHTTPClientTransport(url))).rejects.toThrow();
+  });
+});
+
+describe("the official MCP client of the coming protocol", () => {
+  it("discovers this server without a handshake, and lists and calls its tools", async () => {
+    const { url, token } = await serveWithKey(["read", "tickets"]);
+    const client = new ModernClient(
+      { name: "sshs3-test-client", version: "1.0.0" },
+      { versionNegotiation: { mode: { pin: "2026-07-28" } } },
+    );
+    await client.connect(
+      new ModernTransport(url, { requestInit: { headers: { authorization: `Bearer ${token}` } } }),
+    );
+    // It got here through server/discover: there is no initialize in this era.
+    expect(client.getServerVersion()).toMatchObject({ name: "sshs3" });
+    const { tools } = await client.listTools();
+    expect(tools.map((t) => t.name)).toContain("list_servers");
+    expect(tools.find((t) => t.name === "ticket_create")?.annotations?.readOnlyHint).toBe(false);
+    const res = await client.callTool({ name: "list_servers", arguments: {} });
+    expect(res.isError).toBeFalsy();
+    expect(res.structuredContent).toHaveProperty("servers");
+    await client.close();
+  });
+
+  it("will not connect without a key, in this era either", async () => {
+    const { url } = await serveWithKey();
+    const client = new ModernClient({ name: "nosy", version: "1.0.0" }, { versionNegotiation: { mode: { pin: "2026-07-28" } } });
+    await expect(client.connect(new ModernTransport(url))).rejects.toThrow();
   });
 });
