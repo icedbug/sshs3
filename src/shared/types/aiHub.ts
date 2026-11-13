@@ -193,6 +193,10 @@ export interface AgentChange {
   parsedSubcommands?: string[];
   /** A short name for this command within its conversation (c1, c2 …), so a report can point at it. */
   ref?: string;
+  /** Who answered, when a person had to: their name, and when. Kept where the decision is made. */
+  decidedBy?: { name: string; at: number; allowed: boolean };
+  /** It has gone into the audit log in the state it ended in. */
+  audited?: boolean;
   /**
    * On a change that carries its own proof: the read-only check that shows it
    * worked, and whether it passed before and after.
@@ -225,6 +229,8 @@ export interface AgentTask {
   kbCounted?: number;
   /** What this run spent has been added to its agent's month. Counted once, wherever it ended. */
   usageCounted?: boolean;
+  /** The recording of the terminal this run owned, when one was made. */
+  recordingId?: string;
   /**
    * The run was asked for from outside sshs3 — by somebody's own agent over
    * MCP. Nobody is watching it here, so every command it asks for is put to a
@@ -583,6 +589,11 @@ export interface HubPreferences {
    * 127.0.0.1. Off until they switch it on; `port` 0 means any free port.
    */
   localMcp?: { enabled: boolean; port?: number };
+  /**
+   * Whether the terminal an agent's run owns is recorded. On unless switched
+   * off; recordings are kept as long as conversations are (`retentionDays`).
+   */
+  recordSessions?: boolean;
   autoStart: boolean;
   inventory: boolean;
   retentionDays: number;
@@ -1021,6 +1032,32 @@ export interface KbPageUse {
   rolledBack?: { at: number; title: string }[];
 }
 
+/** One line of the audit log, as the screen shows it. */
+export interface AuditEntryView {
+  seq: number;
+  at: number;
+  kind: string;
+  actor: string;
+  target?: string;
+  what: string;
+  outcome?: string;
+  exitCode?: number;
+  approvedBy?: string;
+  taskId?: string;
+  changeId?: string;
+  detail?: string;
+  hash: string;
+}
+
+/** Whether the audit log's chain holds, and where it does not. */
+export interface AuditVerificationView {
+  ok: boolean;
+  entries: number;
+  problem?: { seq: number; text: string };
+  anchors?: { checked: number; held: number };
+  lastAt?: number;
+}
+
 /** Something about the knowledge base a person should look at. */
 export interface KbFinding {
   id: string;
@@ -1084,6 +1121,8 @@ export interface HubReply {
   kbPage?: KbPage;
   /** A key as it is shown once, when it is made, and never again. */
   mcpKey?: { token: string; key: unknown };
+  audit?: { entries: AuditEntryView[]; verification: AuditVerificationView };
+  recording?: { id: string; cast: string };
   kbSearch?: { query: string; hits: KbSearchHit[]; byMeaning: boolean };
   download?: { name: string; mime: string; dataBase64: string };
   /** `updated`: sources that were already there under the same address and got the new text. */
@@ -1430,6 +1469,12 @@ export type HubRequest =
   | { action: "mcp-key-revoke"; id: string }
   /** Switches the local MCP listener on or off. */
   | { action: "mcp-local-set"; enabled: boolean; port?: number }
+  /** The newest audit entries, and whether the chain holds, in `reply.audit`. */
+  | { action: "audit-read"; limit?: number }
+  /** The whole log with its verification, as a file in `reply.download`. */
+  | { action: "audit-export" }
+  /** One recording as asciicast text, in `reply.recording`. */
+  | { action: "recording-read"; id: string }
   | {
       action: "kb-ingest-folder";
       folderPath: string;

@@ -2,7 +2,16 @@ import { stripVTControlCharacters } from "node:util";
 
 /** Mask BEFORE clipping. Call on complete records, not individual transport chunks. */
 export function maskContext(value: string): string {
-  return stripVTControlCharacters(value)
+  return maskSecrets(stripVTControlCharacters(value));
+}
+
+/**
+ * The secrets in a text, masked, and everything else left exactly as it was —
+ * including the control codes a terminal draws with. For a recording that has
+ * to replay as it looked, which `maskContext` (which strips them) cannot give.
+ */
+export function maskSecrets(value: string): string {
+  return value
     .replace(
       /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)/g,
       "[private key redacted]",

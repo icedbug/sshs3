@@ -231,7 +231,19 @@ export class TerminalRegistry extends EventEmitter {
     return boundedContext(this.sessions.get(id)?.output ?? "");
   }
 
+  /**
+   * What a terminal sent, with sshs3's own markers taken out. Listeners get
+   * the same text a person sees ("output"), with the terminal's owner at that
+   * moment — which is what a recording of an agent's run is made from.
+   */
   feed(id: string, data: string): string {
+    const shown = this.feedInner(id, data);
+    const owner = this.sessions.get(id)?.view.owner;
+    if (shown && owner && this.listenerCount("output")) this.emit("output", id, shown, owner);
+    return shown;
+  }
+
+  private feedInner(id: string, data: string): string {
     const s = this.sessions.get(id);
     if (!s) return data;
     if (s.pending) {
@@ -528,12 +540,14 @@ export class TerminalRegistry extends EventEmitter {
     if (s.view.owner && s.view.owner !== owner)
       throw new Error("Another task owns this terminal");
     s.view.owner = owner;
+    this.emit("claimed", { ...s.view }, owner);
     this.emit("changed");
   }
 
   release(owner: string): void {
     for (const s of this.sessions.values()) {
       if (s.view.owner !== owner) continue;
+      this.emit("released", { ...s.view }, owner);
       if (s.pending) this.takeover(s.view.id);
       else {
         s.view.owner = undefined;
@@ -562,6 +576,8 @@ export class TerminalRegistry extends EventEmitter {
       throw new Error("Terminal ownership was revoked");
     const nonce = crypto.randomBytes(16).toString("hex");
     const envelope = commandEnvelope(s.view.shell, command, nonce);
+    // The command as it was asked for, before the envelope around it: a recording marks it.
+    if (!handshake) this.emit("executing", id, command, owner);
     s.view.state = "busy";
     const promise = new Promise<CommandResult>((resolve, reject) => {
       s.pending = {

@@ -143,3 +143,31 @@ describe("the MCP endpoint on the team server", () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe("who came through the door", () => {
+  it("writes a sign-in, a failed one and a sign-out into the server's own chain", async () => {
+    const { base, server } = await serve();
+    await fetch(`${base}/api/auth/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username: "jacob", password: "wrong-password" }),
+    });
+    const ok = await fetch(`${base}/api/auth/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username: "jacob", password: "test-pass-123" }),
+    });
+    const cookie = (ok.headers.get("set-cookie") ?? "").split(";")[0];
+    await fetch(`${base}/api/auth/logout`, { method: "POST", headers: { cookie } });
+    const entries = await server.signIns.recent(10);
+    expect(entries.map((e) => `${e.actor}: ${e.what}`)).toEqual([
+      "jacob: signed out",
+      "jacob: signed in",
+      "jacob: failed to sign in",
+      "jacob: set the server up as its first administrator",
+    ]);
+    // The password that was tried is not in it.
+    expect(JSON.stringify(entries)).not.toContain("wrong-password");
+    expect((await server.signIns.verify()).ok).toBe(true);
+  });
+});

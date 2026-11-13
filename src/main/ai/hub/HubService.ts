@@ -179,7 +179,9 @@ import {
   type ExtraWorkspaceContext,
   type InventoryTarget,
 } from "./ContextService";
+import { AuditLog } from "./AuditLog";
 import { LocalMcpServer } from "./LocalMcpServer";
+import { SessionRecorder } from "./SessionRecorder";
 import { McpTokenStore } from "../../web/McpTokenStore";
 import { boundedContext, clip, maskContext, safeError } from "./privacy";
 import { createLogger } from "../../log";
@@ -247,6 +249,9 @@ const log = createLogger("ai-hub");
  * as a person types must not cost a save and a broadcast per keystroke.
  */
 const READ_ONLY_ACTIONS: ReadonlySet<HubRequest["action"]> = new Set<HubRequest["action"]>([
+  "audit-read",
+  "audit-export",
+  "recording-read",
   "kb-search",
   "kb-read",
   "kb-page-read",
@@ -770,6 +775,27 @@ export class HubService {
     this.terminals.on("invalidated", (owner: string, reason: string) => {
       const task = this.store.data.tasks.find((t) => t.id === owner);
       if (task && active(task)) void this.stop(task, reason);
+    });
+    // A terminal an agent's run owns is recorded while it owns it: what the terminal
+    // showed, masked, with a marker per command. What a person types is never recorded.
+    this.terminals.on("claimed", (session: TerminalSession, owner: string) => {
+      const task = this.store.data.tasks.find((t) => t.id === owner);
+      if (!task || isBackgroundRun(task) || isDemoMode() || this.store.data.preferences.recordSessions === false) return;
+      void this.recordings()
+        .start({ sessionId: session.id, taskId: task.id, label: session.label })
+        .then((info) => {
+          task.recordingId = info.id;
+        })
+        .catch((e) => log.warn("Could not start recording a terminal", safeError(e)));
+    });
+    this.terminals.on("output", (sessionId: string, text: string) => {
+      this.recorder?.output(sessionId, text);
+    });
+    this.terminals.on("executing", (sessionId: string, command: string) => {
+      this.recorder?.marker(sessionId, command);
+    });
+    this.terminals.on("released", (session: TerminalSession) => {
+      void this.recorder?.stop(session.id).catch(() => undefined);
     });
   }
 
@@ -1818,13 +1844,20 @@ export class HubService {
           throw new Error("Unsupported shell");
         await this.terminals.arm(request.sessionId, request.shell);
         break;
-      case "approve":
+      case "approve": {
+        // Who answered is written down where the answer is given, before anything runs on it.
+        const change = this.store.data.tasks
+          .find((t) => t.id === request.taskId)
+          ?.changes.find((c) => c.id === request.changeId);
+        if (change && change.status === "pending")
+          change.decidedBy = { name: await this.resolveActorName(), at: Date.now(), allowed: request.approved === true };
         this.broker.approve(
           request.taskId,
           request.changeId,
           request.approved === true,
         );
         break;
+      }
       case "memory-save": {
         const entry = request.entry;
         if (!["memory", "skill"].includes(entry.kind))
@@ -3276,6 +3309,32 @@ export class HubService {
         } else this.store.data.kbDismissedFindings = [...(this.store.data.kbDismissedFindings ?? []), id].slice(-300);
         break;
       }
+      case "audit-read": {
+        const log = this.audit();
+        reply = {
+          audit: {
+            entries: await log.recent(Math.max(1, Math.min(1000, request.limit ?? 200))),
+            verification: await log.verify(),
+          },
+        };
+        break;
+      }
+      case "audit-export": {
+        const out = await this.audit().export();
+        const day = new Date().toISOString().slice(0, 10);
+        // The log as it is on disk, line for line, and what its check found, in one file a person can hand on.
+        const text = `${out.jsonl}${JSON.stringify({ verification: out.verification, exportedAt: Date.now() })}\n`;
+        reply = {
+          download: { name: `sshs3-audit-${day}.jsonl`, mime: "application/x-ndjson", dataBase64: Buffer.from(text, "utf8").toString("base64") },
+        };
+        break;
+      }
+      case "recording-read": {
+        const cast = await this.recordings().read(requiredText(request.id));
+        if (!cast) throw new Error("That recording is not on this computer any more.");
+        reply = { recording: { id: request.id, cast } };
+        break;
+      }
       case "mcp-key-list":
         await this.mcpTokens().initialize();
         break;
@@ -3996,6 +4055,66 @@ export class HubService {
     };
   }
 
+  private auditLog?: AuditLog;
+  private lastAnchorAt = 0;
+  private recorder?: SessionRecorder;
+
+  /** This installation's audit log, kept beside the hub's other data, anchored in the team bucket. */
+  audit(): AuditLog {
+    this.auditLog ??= new AuditLog(path.join(this.directory, "audit"), this.clientId(), () =>
+      this.s3Workspace.canUseBucket() && !isDemoMode() ? this.s3Workspace.objects : undefined,
+    );
+    return this.auditLog;
+  }
+
+  /** Where the terminals an agent owned are recorded. */
+  recordings(): SessionRecorder {
+    this.recorder ??= new SessionRecorder(path.join(this.directory, "recordings"));
+    return this.recorder;
+  }
+
+  /**
+   * Every change that has reached the state it ends in goes into the audit
+   * log once: what ran, where, as whose run, who allowed it, and how it ended.
+   * Read off the changes themselves rather than from each place that makes
+   * one, so a path that is added later is not a path that is left out.
+   */
+  private auditFinishedChanges(): void {
+    if (isDemoMode()) return;
+    const FINAL = new Set(["completed", "failed", "denied", "uncertain"]);
+    for (const task of this.store.data.tasks) {
+      if (task.distillSourceId) continue;
+      for (const change of task.changes) {
+        if (change.audited || !FINAL.has(change.status)) continue;
+        // A change that carries its own proof is final only once its check has had its say.
+        if (change.check && change.check.after === undefined && change.status !== "denied") continue;
+        change.audited = true;
+        const rolledBack = Boolean(change.rollback?.ran);
+        void this.audit()
+          .append({
+            kind: change.kind === "setting" ? "setting" : change.kind === "file" ? "file-write" : change.check ? "change" : task.fromOutside ? "mcp" : "command",
+            actor: `${task.agentName ?? "Assistant"} (${task.fromOutside ? "from outside" : `run ${task.id.slice(0, 8)}`}, ${task.mode})`,
+            target: change.target,
+            what: change.command || change.description,
+            outcome: rolledBack ? "rolled-back" : change.status,
+            exitCode: change.exitCode,
+            approvedBy: change.decidedBy ? `${change.decidedBy.name} (${change.decidedBy.allowed ? "allowed" : "refused"})` : undefined,
+            taskId: task.id,
+            changeId: change.id,
+            detail: [
+              change.riskLevel ? `risk: ${change.riskLevel}` : "",
+              change.check ? `check ${change.check.after ? "passed" : "failed"}: ${change.check.command}` : "",
+              rolledBack ? `taken back with: ${change.rollback!.command}` : "",
+              change.ref ? `ref ${change.ref}` : "",
+            ]
+              .filter(Boolean)
+              .join("; "),
+          })
+          .catch((e) => log.warn("Could not write to the audit log", safeError(e)));
+      }
+    }
+  }
+
   /** For tests: what a finished run did, put down to the pages it worked from. */
   notePageOutcomeForTesting(task: AgentTask): void {
     this.notePageOutcome(task);
@@ -4068,6 +4187,7 @@ export class HubService {
     this.host.changed();
     // Before the early return below: a change while a save is pending must still reach the inbox.
     this.pokeInbox();
+    this.auditFinishedChanges();
     if (!this.initialized || this.saveTimer) return;
     this.saveTimer = setTimeout(() => {
       this.saveTimer = undefined;
@@ -5248,6 +5368,10 @@ export class HubService {
       await sync?.pruneMarks(14 * 24 * 60 * 60_000, now).catch(() => undefined);
       await this.request({ action: "self-learn-reflect" }).catch((e) => log.warn("Nightly tidy failed", safeError(e)));
       await this.refetchWatchedSources(now).catch((e) => log.warn("Fetching the knowledge base's links again failed", safeError(e)));
+      // Recordings are kept as long as conversations are.
+      await this.recordings()
+        .prune(this.store.data.preferences.retentionDays || 30, now)
+        .catch((e) => log.warn("Removing old recordings failed", safeError(e)));
       await this.checkContradictions().catch((e) => log.warn("Nightly contradiction check failed", safeError(e)));
       const extra = await this.collectExtraContext();
       const snap = await this.snapshot();
@@ -5853,6 +5977,12 @@ export class HubService {
         await this.readLearningQueue(now);
       })().catch((e) => log.warn("Learning failed", safeError(e)));
       void this.workTick(now).catch((e) => log.warn("Board tick failed", safeError(e)));
+      if (now - this.lastAnchorAt > 10 * 60_000) {
+        this.lastAnchorAt = now;
+        void this.audit()
+          .anchor(now)
+          .catch((e) => log.warn("Could not anchor the audit log in the team bucket", safeError(e)));
+      }
       void this.readNextKb(now).catch((e) => log.warn("Knowledge base reading failed", safeError(e)));
       void this.nightly(now).catch((e) => log.warn("Nightly upkeep failed", safeError(e)));
       void this.flushInbox(now).catch((e) => log.warn("Notifications failed", safeError(e)));
@@ -7140,6 +7270,7 @@ export class HubService {
         .map((t) => this.stop(t, "Application shutting down")),
     );
     await this.localMcp?.stop();
+    await this.recorder?.stopAll().catch(() => undefined);
     await this.s3Workspace.dispose();
     await this.broker.dispose();
     this.terminals.dispose();

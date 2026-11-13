@@ -9,6 +9,7 @@ import { WebAuthService, type WebUserPublic } from './WebAuthService';
 import { WebTenantManager } from './WebTenantManager';
 import { MCP_SCOPES, McpTokenStore, type McpScope } from './McpTokenStore';
 import { callBudget, handleMcpHttp } from './mcp/McpEndpoint';
+import { AuditLog } from '../ai/hub/AuditLog';
 import { createLogger } from '../log';
 
 const log = createLogger('web');
@@ -256,6 +257,12 @@ export class Sshs3WebServer {
   /** The keys that let a person's own agent reach this server over MCP. */
   public readonly mcpTokens: McpTokenStore;
   private readonly mcpRate = callBudget();
+  /**
+   * The server's own chain: who signed in, who failed to, who was added or
+   * removed. Each person's hub keeps its own log of what was run; this one is
+   * about the door.
+   */
+  public readonly signIns: AuditLog;
   private httpServer?: http.Server;
   private boundPort = 0;
   private activeSockets = new Set<Duplex>();
@@ -265,6 +272,7 @@ export class Sshs3WebServer {
     this.auth = new WebAuthService(options.dataDir);
     this.tenants = new WebTenantManager(options.dataDir);
     this.mcpTokens = new McpTokenStore(options.dataDir);
+    this.signIns = new AuditLog(path.join(options.dataDir, 'audit'), 'server');
   }
 
   getPort(): number {
@@ -554,6 +562,9 @@ export class Sshs3WebServer {
           password: String(body.password || ''),
           displayName: body.displayName ? String(body.displayName) : undefined,
         });
+        await this.signIns
+          .append({ kind: 'setting', actor: user.username, target: 'server', what: 'set the server up as its first administrator' })
+          .catch(() => undefined);
         sendJson(
           res,
           200,
@@ -577,7 +588,16 @@ export class Sshs3WebServer {
           String(body.username || ''),
           String(body.password || ''),
           clientIp,
-        );
+        ).catch(async (err: unknown) => {
+          // A failed attempt is written down too: a run of them is what an incident looks like.
+          await this.signIns
+            .append({ kind: 'sign-in', actor: String(body.username || '(no name)').slice(0, 80), what: 'failed to sign in', outcome: 'refused', detail: `from ${clientIp}` })
+            .catch(() => undefined);
+          throw err;
+        });
+        await this.signIns
+          .append({ kind: 'sign-in', actor: user.username, what: 'signed in', outcome: 'allowed', detail: `from ${clientIp}` })
+          .catch(() => undefined);
         sendJson(
           res,
           200,
@@ -619,6 +639,9 @@ export class Sshs3WebServer {
     // Logout
     if (pathname === '/api/auth/logout' && method === 'POST') {
       const token = this.extractSessionToken(req);
+      const who = await this.auth.verifySession(token).catch(() => null);
+      if (who)
+        await this.signIns.append({ kind: 'sign-in', actor: who.username, what: 'signed out' }).catch(() => undefined);
       await this.auth.revokeSession(token);
       sendJson(
         res,
@@ -719,6 +742,9 @@ export class Sshs3WebServer {
               displayName: body.displayName ? String(body.displayName) : undefined,
               role: body.role === 'admin' ? 'admin' : 'member',
             });
+            await this.signIns
+              .append({ kind: 'setting', actor: user.username, target: 'server', what: `added the account ${created.username} (${created.role})` })
+              .catch(() => undefined);
             sendJson(res, 200, { user: created });
           } catch (err) {
             sendJson(res, 400, {
@@ -739,6 +765,9 @@ export class Sshs3WebServer {
           const targetUserId = String(pathUserId || body.userId || '');
           try {
             await this.auth.deleteUserByAdmin(targetUserId, user.id);
+            await this.signIns
+              .append({ kind: 'setting', actor: user.username, target: 'server', what: `removed the account ${targetUserId}` })
+              .catch(() => undefined);
             await this.tenants.disposeTenant(targetUserId);
             await this.mcpTokens.forgetUser(targetUserId);
             sendJson(res, 200, { ok: true });
