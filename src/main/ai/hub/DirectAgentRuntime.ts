@@ -1524,6 +1524,27 @@ function isBlank(value: string | undefined): boolean {
 export class DirectAgentRuntime implements AgentRuntime {
   private abort = new AbortController();
   private cancelled = false;
+  /**
+   * What the whole run has spent so far, over all its turns. A provider says
+   * what one call used; the run is all of them, and it is told to the hub
+   * however the run ends — completed, failed, stopped or out of turns — so a
+   * budget counts what was spent, not only runs that finished well.
+   */
+  private spent = { input_tokens: 0, output_tokens: 0 };
+  /** The newest usage a provider reported for the call in progress, not yet added to `spent`. */
+  private turnUsage?: Record<string, number>;
+  private commitTurn(): void {
+    if (this.turnUsage) {
+      this.spent.input_tokens += this.turnUsage.input_tokens ?? 0;
+      this.spent.output_tokens += this.turnUsage.output_tokens ?? 0;
+    }
+    this.turnUsage = undefined;
+  }
+  /** The run's total, for the event that ends it. */
+  private spentUsage(context?: number): Record<string, number> {
+    this.commitTurn();
+    return { ...this.spent, ...(context ? { context_tokens: context } : {}) };
+  }
   private steeringQueue: string[] = [];
   /** Names of the tools this run offered the model; anything else is refused. */
   private offered?: Set<string>;
@@ -1570,6 +1591,8 @@ export class DirectAgentRuntime implements AgentRuntime {
   ): Promise<void> {
     this.onEvent = onEvent;
     this.task = task;
+    this.spent = { input_tokens: 0, output_tokens: 0 };
+    this.turnUsage = undefined;
     this.compaction = "idle";
     this.runCalls = [];
     this.discipline = newDiscipline(
@@ -1597,7 +1620,7 @@ export class DirectAgentRuntime implements AgentRuntime {
       }
     } catch (error) {
       if (this.cancelled || this.abort.signal.aborted) {
-        onEvent({ type: "run.cancelled" });
+        onEvent({ type: "run.cancelled", usage: this.spentUsage() });
         return;
       }
       // A configured provider's own failure (rejected key, network, HTTP status)
@@ -1605,6 +1628,7 @@ export class DirectAgentRuntime implements AgentRuntime {
       onEvent({
         type: "run.failed",
         error: safeError(error),
+        usage: this.spentUsage(),
       });
     }
   }
@@ -2287,6 +2311,7 @@ export class DirectAgentRuntime implements AgentRuntime {
 
       const toolCalls: ParsedToolCall[] = [];
       let turnText = "";
+      this.commitTurn();
       let usage: Record<string, number> | undefined;
 
       await consumeSseStream(response.body, (data) => {
@@ -2325,6 +2350,7 @@ export class DirectAgentRuntime implements AgentRuntime {
               output_tokens: u.output_tokens ?? 0,
               context_tokens: u.input_tokens ?? 0,
             };
+            this.turnUsage = usage;
           }
         } else if (type === "error" || type === "response.failed") {
           const msg =
@@ -2368,7 +2394,7 @@ export class DirectAgentRuntime implements AgentRuntime {
         onEvent({
           type: "run.completed",
           output: finalOutput,
-          usage,
+          usage: this.spentUsage(usage?.context_tokens),
         });
         return;
       }
@@ -2397,6 +2423,7 @@ export class DirectAgentRuntime implements AgentRuntime {
     onEvent({
       type: "run.completed",
       output: ranOutOfTurns(finalOutput, turnsUsed, maxTurns),
+      usage: this.spentUsage(),
     });
   }
 
@@ -2493,6 +2520,7 @@ export class DirectAgentRuntime implements AgentRuntime {
 
       let turnText = "";
       const toolCallsByIndex = new Map<number, ParsedToolCall>();
+      this.commitTurn();
       let usage: Record<string, number> | undefined;
 
       await consumeSseStream(response.body, (data) => {
@@ -2510,6 +2538,7 @@ export class DirectAgentRuntime implements AgentRuntime {
             output_tokens: u.completion_tokens ?? u.output_tokens ?? 0,
             context_tokens: u.prompt_tokens ?? u.input_tokens ?? 0,
           };
+          this.turnUsage = usage;
         }
         const choices = chunk.choices as Array<Record<string, unknown>> | undefined;
         const delta = choices?.[0]?.delta as Record<string, unknown> | undefined;
@@ -2552,7 +2581,7 @@ export class DirectAgentRuntime implements AgentRuntime {
           if (turnText) onEvent({ type: "message.delta", delta: "\n\n" });
           continue;
         }
-        onEvent({ type: "run.completed", output: finalOutput, usage });
+        onEvent({ type: "run.completed", output: finalOutput, usage: this.spentUsage(usage?.context_tokens) });
         return;
       }
 
@@ -2579,7 +2608,7 @@ export class DirectAgentRuntime implements AgentRuntime {
       }
     }
 
-    onEvent({ type: "run.completed", output: ranOutOfTurns(finalOutput, turnsUsed, maxTurns) });
+    onEvent({ type: "run.completed", output: ranOutOfTurns(finalOutput, turnsUsed, maxTurns), usage: this.spentUsage() });
   }
 
   private async runAnthropicLoop(
@@ -2773,6 +2802,7 @@ export class DirectAgentRuntime implements AgentRuntime {
       });
       total.output_tokens += turnOutputTokens;
       total.input_tokens += turnInputTokens;
+      this.spent = { ...total };
       if (turnInputTokens) lastCallInput = turnInputTokens;
       const usage = { ...total, ...(lastCallInput ? { context_tokens: lastCallInput } : {}) };
 

@@ -181,6 +181,54 @@ describe("the board in a bucket", () => {
     expect((await b.readClaim("t1"))?.client).toBe("B");
   });
 
+  it("lets only one of two apps that ask at the same moment run a ticket, once the bucket has settled", async () => {
+    const files = new Map<string, Buffer>();
+    // A bucket where every call takes a little while, so the two apps' reads and writes interleave.
+    const slow = (ms: number): QueueStore => ({
+      list: async () => [],
+      read: async (p) => {
+        await new Promise((r) => setTimeout(r, ms));
+        return files.get(p);
+      },
+      write: async (p, c) => {
+        await new Promise((r) => setTimeout(r, ms));
+        files.set(p, c);
+      },
+      remove: async (p) => void files.delete(p),
+    });
+    const settle = () => new Promise<void>((r) => setTimeout(r, 40));
+    const [a, b] = await Promise.all([
+      new WorkSync(slow(5)).claim("t1", { by: "jacob", client: "A" }, 1000, { settle }),
+      new WorkSync(slow(8)).claim("t1", { by: "erik", client: "B" }, 1000, { settle }),
+    ]);
+    // Both read the same winner: exactly one of them goes ahead.
+    expect(a.client).toBe(b.client);
+  });
+
+  it("tells a run that lost its claim, so it can stop", async () => {
+    const bucket = memoryBucket();
+    const a = new WorkSync(bucket);
+    const b = new WorkSync(bucket);
+    await a.claim("t1", { by: "jacob", client: "A" }, 1000);
+    expect(await a.refresh("t1", "A", 2000)).toBe(true);
+    await b.claim("t1", { by: "erik", client: "B" }, 1000 + TICKET_CLAIM_TTL_MS * 3);
+    expect(await a.refresh("t1", "A", 1000 + TICKET_CLAIM_TTL_MS * 3 + 1)).toBe(false);
+  });
+
+  it("judges another app's claim by whether it moves, not by that app's clock", async () => {
+    const bucket = memoryBucket();
+    const a = new WorkSync(bucket);
+    // A's clock runs ten minutes behind: by B's clock, A's claim looks stale the moment it is written.
+    await a.claim("t1", { by: "jacob", client: "A" }, 1000);
+    const b = new WorkSync(bucket);
+    const seen = new Map<number, number>();
+    const fresh = (c: { seenAt: number }) => {
+      if (!seen.has(c.seenAt)) seen.set(c.seenAt, Date.now());
+      return Date.now() - seen.get(c.seenAt)! < TICKET_CLAIM_TTL_MS;
+    };
+    expect((await b.claim("t1", { by: "erik", client: "B" }, 1000 + 10 * 60_000, { fresh })).client).toBe("A");
+  });
+
   it("brings two computers' tickets together in both directions", async () => {
     const bucket = memoryBucket();
     const mine = new WorkSync(bucket);

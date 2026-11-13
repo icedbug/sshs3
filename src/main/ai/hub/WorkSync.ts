@@ -190,23 +190,36 @@ export class WorkSync {
    * the same ticket at the same moment normally do not both run it.
    * Returns the claim that holds, which is somebody else's when this failed.
    */
-  async claim(ticketId: string, who: { by: string; client: string }, now = Date.now()): Promise<TicketClaim> {
+  async claim(
+    ticketId: string,
+    who: { by: string; client: string },
+    now = Date.now(),
+    options: {
+      /** Whether another installation's claim is still alive. Judged by the caller's own observation, not the other machine's clock. */
+      fresh?: (claim: TicketClaim) => boolean;
+      /** Waits for the bucket to settle, so that of two writing at once both read the same winner. */
+      settle?: () => Promise<void>;
+    } = {},
+  ): Promise<TicketClaim> {
+    const fresh = options.fresh ?? ((c: TicketClaim) => now - c.seenAt < TICKET_CLAIM_TTL_MS);
     const existing = await this.readClaim(ticketId);
-    if (existing && existing.client !== who.client && now - existing.seenAt < TICKET_CLAIM_TTL_MS)
-      return existing;
+    if (existing && existing.client !== who.client && fresh(existing)) return existing;
     const mine: TicketClaim = { ...who, at: existing?.client === who.client ? existing.at : now, seenAt: now };
     await this.store.write(this.claimPath(ticketId), Buffer.from(JSON.stringify(mine), "utf8"));
+    await options.settle?.();
     return (await this.readClaim(ticketId)) ?? mine;
   }
 
   /** Says the run is still alive. Without this the claim lapses and the ticket is free again. */
-  async refresh(ticketId: string, client: string, now = Date.now()): Promise<void> {
+  /** Says the run is still alive. False: the claim is not this installation's any more, and the run should stop. */
+  async refresh(ticketId: string, client: string, now = Date.now()): Promise<boolean> {
     const existing = await this.readClaim(ticketId);
-    if (!existing || existing.client !== client) return;
+    if (!existing || existing.client !== client) return false;
     await this.store.write(
       this.claimPath(ticketId),
       Buffer.from(JSON.stringify({ ...existing, seenAt: now }), "utf8"),
     );
+    return true;
   }
 
   async release(ticketId: string, client: string): Promise<void> {

@@ -425,6 +425,7 @@ export async function callMcpTool(
           target: str(args.target, 120) || undefined,
           // Not "todo": the backlog is where work waits for a person to pick it.
           status: 'backlog',
+          outside: `an MCP key of ${ctx.actor}`,
         },
       });
       const made = (after.workTickets ?? []).find((t) => !before.has(t.id));

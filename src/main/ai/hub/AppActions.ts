@@ -1221,8 +1221,11 @@ export async function handleAppAction(
               goalId: str("goal") || mine?.goalId,
               target: str("target") || mine?.target,
               parentId: mine?.id,
+              // Made while working a ticket from outside the team: the mark goes with it.
+              outside: mine?.outside ? `made while working "${mine.title}" (${mine.outside})` : undefined,
             },
             author,
+            true,
           );
           return { ok: true, ticket: brief(created) };
         }

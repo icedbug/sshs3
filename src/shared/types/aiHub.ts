@@ -844,6 +844,13 @@ export interface WorkTicket {
   blockedBy?: string[];
   /** The ticket this one was split off from. */
   parentId?: string;
+  /**
+   * Where text on it came from outside the team (an MCP key, an alert), or
+   * that it was made while working such a ticket. An agent's ticket that
+   * carries it stays in Backlog until a person moves it: outside text never
+   * starts work by itself, not even through a ticket an agent copied it into.
+   */
+  outside?: string;
   /** Set on a ticket an alert created: the alert, and how often it fired. */
   alert?: {
     fingerprint: string;
@@ -1408,6 +1415,8 @@ export type HubRequest =
         status?: WorkTicketStatus;
         assigneeAgentId?: string;
         target?: string;
+        /** Where it came from when that was outside the team. Only ever adds the mark. */
+        outside?: string;
         blockedBy?: string[];
         parentId?: string;
       };

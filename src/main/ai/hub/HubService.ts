@@ -190,8 +190,10 @@ import { runWorkforce } from "./WorkforceRunner";
 import { LearningQueue } from "./LearningQueue";
 import { WorkSync } from "./WorkSync";
 import {
+  TICKET_CLAIM_TTL_MS,
   TICKET_STATUSES,
   WORKFORCE_TEMPLATES,
+  mergeItems,
   addUsage,
   withComment,
   claimIsFresh,
@@ -1000,12 +1002,14 @@ export class HubService {
       const filtered = allAgents.filter((a) =>
         qList.some(
           (q) =>
-            a.id.toLowerCase() === q ||
-            a.name.toLowerCase().includes(q) ||
-            (a.targetCluster && a.targetCluster.toLowerCase().includes(q)),
+            // By id or exact name only: "db" must not also start "db-backup".
+            a.id.toLowerCase() === q || a.name.toLowerCase() === q,
         ),
       );
-      if (filtered.length > 0) return filtered;
+      // Named agents that are all paused or unknown: nobody runs, rather than everybody.
+      if (filtered.length === 0)
+        throw new Error(`None of ${opts.agentIds.join(", ")} can run: they are paused, or there is no agent by that name.`);
+      return filtered.filter((a) => tokensLeft(a, this.usageTotal()) > 0);
     } else if (opts.targetCluster && opts.targetCluster !== "ALL") {
       const cl = opts.targetCluster.toLowerCase();
       const clusterMatched = allAgents.filter(
@@ -1018,7 +1022,14 @@ export class HubService {
         ];
       }
     }
-    return allAgents;
+    return allAgents.filter((a) => tokensLeft(a, this.usageTotal()) > 0);
+  }
+
+  /** Paused means paused, and a spent budget is spent: however an agent is started. */
+  private assertMayRun(agent: MissionAgent): void {
+    if (agent.enabled === false) throw new Error(`${agent.name} is paused. Switch it on again before starting it.`);
+    if (tokensLeft(agent, this.usageTotal()) <= 0)
+      throw new Error(`${agent.name} has used its token budget for this month. Raise it or wait for the new month.`);
   }
 
   private storeWorkforceRun(run: WorkforceRun): void {
@@ -1797,9 +1808,13 @@ export class HubService {
             await this.stop(task, "AI disabled");
         break;
       }
-      case "start":
+      case "start": {
+        // Chatting with an agent runs that agent: its pause and its budget hold here too.
+        const as = request.task.agentId ? this.getAgentsList().find((a) => a.id === request.task.agentId) : undefined;
+        if (as) this.assertMayRun(as);
         reply = { started: { taskId: (await this.start(request.task)).id } };
         break;
+      }
       case "reply": {
         const task = this.task(request.taskId);
         const rawAttachments = (request.attachments ?? []).slice(0, 10);
@@ -2752,10 +2767,7 @@ export class HubService {
         if (!agent) throw new Error("Mission Agent not found");
         // Paused means paused. It used to hold only for the tickets the heartbeat picks up,
         // so "Run mission" started an agent a person had switched off.
-        if (agent.enabled === false)
-          throw new Error(`${agent.name} is paused. Switch it on again before starting it.`);
-        if (tokensLeft(agent, this.usageTotal()) <= 0)
-          throw new Error(`${agent.name} has used its token budget for this month. Raise it or wait for the new month.`);
+        this.assertMayRun(agent);
         const clusterTag = agent.targetCluster
           ? ` (cluster: @cluster:${agent.targetCluster})`
           : "";
@@ -2797,6 +2809,7 @@ export class HubService {
             a.name.toLowerCase() === request.toAgentId.toLowerCase(),
         );
         if (!toAgent) throw new Error("Target Mission Agent not found for handoff");
+        this.assertMayRun(toAgent);
         const prevAgentName = task.agentName || "Default Assistant";
         task.agentId = toAgent.id;
         task.agentName = toAgent.name;
@@ -3857,7 +3870,19 @@ export class HubService {
   }
 
   private event(task: AgentTask, event: RunEvent): void {
-    if (!active(task)) return;
+    if (!active(task)) {
+      // A run that was already stopped still says what it spent when it ends: that counts too.
+      if (/^run\./.test(event.type) && event.usage && !task.usageCounted) {
+        task.usage = {
+          inputTokens: (task.usage?.inputTokens ?? 0) + (event.usage.input_tokens ?? 0),
+          outputTokens: (task.usage?.outputTokens ?? 0) + (event.usage.output_tokens ?? 0),
+          costUsd: task.usage?.costUsd,
+        };
+        this.countAgentUsage(task);
+        this.changed();
+      }
+      return;
+    }
     if (event.type === "message.delta" && event.delta) {
       let message = task.messages.at(-1);
       if (!message || message.role !== "assistant") {
@@ -3917,10 +3942,9 @@ export class HubService {
           });
       }
       if (event.error) task.error = boundedContext(event.error);
-      if (task.status === "completed" || task.status === "failed") {
-        this.reflectTaskCompletion(task);
-        this.countAgentUsage(task);
-      }
+      if (task.status === "completed" || task.status === "failed") this.reflectTaskCompletion(task);
+      // Whatever way it ended, what it spent is put down to the agent.
+      this.countAgentUsage(task);
       if (!isBackgroundRun(task)) this.notePageOutcome(task);
       if (
         !isBackgroundRun(task) &&
@@ -4068,8 +4092,9 @@ export class HubService {
   private countAgentUsage(task: AgentTask): void {
     if (!task.agentId || task.usageCounted) return;
     const used = (task.usage?.inputTokens ?? 0) + (task.usage?.outputTokens ?? 0);
-    task.usageCounted = true;
+    // Nothing reported yet (a stopped run says what it spent a moment later): not counted yet either.
     if (used <= 0) return;
+    task.usageCounted = true;
     this.store.data.agentUsage = addUsage(this.store.data.agentUsage ?? {}, task.agentId, used);
     this.lastWorkSync = 0;
   }
@@ -5637,6 +5662,7 @@ export class HubService {
           description: alertTicketText(alert, this.changesOn(target, 24 * 3_600_000), this.pagesForAlert(alert, target)),
           assigneeAgentId: agent?.id,
           target,
+          outside: `an alert from ${alert.source}`,
         },
         alert.source,
       );
@@ -5806,8 +5832,11 @@ export class HubService {
       target?: string;
       blockedBy?: string[];
       parentId?: string;
+      outside?: string;
     },
     createdBy?: string,
+    /** Made by an agent's run, not by a person. */
+    byAgent = false,
   ): Promise<WorkTicket> {
     const existing = input.id
       ? live(this.store.data.workTickets).find((t) => t.id === input.id)
@@ -5818,10 +5847,15 @@ export class HubService {
       : undefined;
     if (input.assigneeAgentId && !agent) throw new Error("The assigned agent does not exist");
     const goals = live(this.store.data.workGoals);
-    const status =
+    // Outside text travels: a ticket split off one that came from outside carries the mark too.
+    const parent = input.parentId ? live(this.store.data.workTickets).find((t) => t.id === input.parentId) : undefined;
+    const outside = existing?.outside ?? input.outside ?? (parent?.outside ? `split off "${clip(parent.title, 80)}" (${parent.outside})` : undefined);
+    const wanted =
       input.status && TICKET_STATUSES.includes(input.status) && input.status !== "in_progress"
         ? input.status
         : (existing?.status ?? (agent ? "todo" : "backlog"));
+    // An agent cannot put work that started outside the team in front of another agent: a person moves it.
+    const status = byAgent && outside && !existing && wanted === "todo" ? "backlog" : wanted;
     const id = existing?.id ?? `t-${crypto.randomUUID().slice(0, 8)}`;
     const ticket: WorkTicket = {
       ...existing,
@@ -5837,6 +5871,7 @@ export class HubService {
         (b) => b !== id && live(this.store.data.workTickets).some((t) => t.id === b),
       ),
       parentId: input.parentId ?? existing?.parentId,
+      ...(outside ? { outside } : {}),
       createdBy: existing?.createdBy ?? createdBy ?? (await this.resolveActorName()),
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
@@ -5867,7 +5902,12 @@ export class HubService {
     const now = Date.now();
     const sync = this.work();
     if (sync) {
-      const held = await sync.claim(ticket.id, { by, client }, now);
+      // The claim is decided only after the bucket has settled, and another installation's claim is
+      // judged alive by this machine's own observation, not by that machine's clock.
+      const held = await sync.claim(ticket.id, { by, client }, now, {
+        fresh: (c) => this.claimAlive(ticket.id, c.seenAt, Date.now()),
+        settle: this.notifySettle,
+      });
       if (held.client !== client) throw new Error(`${held.by} is already running this ticket.`);
     }
     let task: AgentTask;
@@ -5916,7 +5956,7 @@ export class HubService {
       } else {
         const used = (task.usage?.inputTokens ?? 0) + (task.usage?.outputTokens ?? 0);
         // Counted once. A run that carries the agent has already been counted when it ended.
-        if (ticket.assigneeAgentId && !task.usageCounted) {
+        if (ticket.assigneeAgentId && !task.usageCounted && used > 0) {
           task.usageCounted = true;
           this.store.data.agentUsage = addUsage(this.store.data.agentUsage ?? {}, ticket.assigneeAgentId, used);
         }
@@ -5933,6 +5973,20 @@ export class HubService {
    * alive, read the team's copy, free tickets whose runner went away, and, if
    * the heartbeat is on, take the next ticket.
    */
+  /** When this machine last saw each other installation's claim move: its own clock, never theirs. */
+  private readonly claimSeen = new Map<string, { seenAt: number; at: number }>();
+
+  private observeClaim(ticketId: string, seenAt: number, now: number): void {
+    const known = this.claimSeen.get(ticketId);
+    if (!known || known.seenAt !== seenAt) this.claimSeen.set(ticketId, { seenAt, at: now });
+  }
+
+  /** Another installation's claim is alive while its seenAt keeps moving, as observed from here. */
+  private claimAlive(ticketId: string, seenAt: number, now: number): boolean {
+    this.observeClaim(ticketId, seenAt, now);
+    return now - this.claimSeen.get(ticketId)!.at < TICKET_CLAIM_TTL_MS;
+  }
+
   private async workTick(now = Date.now()): Promise<void> {
     this.settleTickets();
     const client = this.clientId();
@@ -5941,16 +5995,26 @@ export class HubService {
       this.workSyncing = true;
       this.lastWorkSync = now;
       try {
+        // Liveness goes into the claim file only. Raising the ticket's own updatedAt would make this
+        // copy win every merge, and wipe out what teammates wrote on it meanwhile.
         for (const t of live(this.store.data.workTickets))
           if (t.status === "in_progress" && t.claim?.client === client) {
-            await sync.refresh(t.id, client, now);
-            t.claim = { ...t.claim, seenAt: now };
-            t.updatedAt = now;
+            const still = await sync.refresh(t.id, client, now);
+            const run = this.store.data.tasks.find((x) => x.id === t.taskId);
+            if (!still && run && active(run)) void this.stop(run, "Another installation took this ticket over; this run stops so that only one works on it.");
           }
         const goals = await sync.reconcile("goals", this.store.data.workGoals ?? []);
         const tickets = await sync.reconcile("tickets", this.store.data.workTickets ?? []);
-        this.store.data.workGoals = goals.items;
-        this.store.data.workTickets = tickets.items;
+        // Merged into the board as it is now, not over it: what changed here while the bucket was read stays.
+        this.store.data.workGoals = mergeItems(this.store.data.workGoals ?? [], goals.items).items;
+        this.store.data.workTickets = mergeItems(this.store.data.workTickets ?? [], tickets.items).items;
+        // Another installation's run is judged alive by its claim file, and by this machine's own clock:
+        // a claim whose seenAt has not moved for the claim's lifetime, as seen from here, has lapsed.
+        for (const t of live(this.store.data.workTickets))
+          if (t.status === "in_progress" && t.claim && t.claim.client !== client) {
+            const c = await sync.readClaim(t.id).catch(() => undefined);
+            if (c) this.observeClaim(t.id, c.seenAt, now);
+          }
         const shared = await this.syncSharedSetup(sync);
         const mine = JSON.stringify(this.store.data.agentUsage ?? {});
         if (mine !== this.uploadedUsage && mine !== "{}") {
@@ -5975,9 +6039,10 @@ export class HubService {
     }
     // A run that stopped reporting (closed laptop, crash) frees its ticket.
     for (const t of live(this.store.data.workTickets)) {
-      if (t.status !== "in_progress" || claimIsFresh(t, now)) continue;
-      if (t.claim?.client === client && this.store.data.tasks.some((x) => x.id === t.taskId && active(x)))
-        continue;
+      if (t.status !== "in_progress") continue;
+      if (t.claim?.client === client) {
+        if (this.store.data.tasks.some((x) => x.id === t.taskId && active(x))) continue;
+      } else if (t.claim && (sync ? this.claimAlive(t.id, t.claim.seenAt, now) : claimIsFresh(t, now))) continue;
       this.putTicket({
         ...withComment(t, "sshS3", `The run by ${t.claim?.by ?? "somebody"} stopped reporting; the ticket is free again.`),
         status: "todo",
