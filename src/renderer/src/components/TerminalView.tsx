@@ -294,7 +294,42 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const [inlineSuggestion, setInlineSuggestion] = useState<{
     command: string;
     explanation: string;
+    /** May run with one key: one line, classified read-only. */
+    runnable?: boolean;
+    riskLevel?: string;
+    riskReason?: string;
+    multiline?: boolean;
   } | null>(null);
+  const inlineSuggestionRef = useRef(inlineSuggestion);
+  inlineSuggestionRef.current = inlineSuggestion;
+  /** Which question an answer belongs to: an answer to an earlier one, or one asked in a bar since closed, is dropped. */
+  const inlineAskRef = useRef(0);
+
+  /**
+   * Runs a suggestion with one key: only one line classified read-only, and only onto an empty prompt
+   * (a half-typed line, a running program or an unanswered question would take it as input).
+   * Anything else is pasted for the person to read and run.
+   */
+  const runInlineSuggestion = (): void => {
+    const term = termRef.current;
+    const suggestion = inlineSuggestionRef.current;
+    if (!term || !suggestion) return;
+    if (suggestion.multiline) return;
+    if (!suggestion.runnable || !isAtEmptyPrompt(term)) {
+      term.paste(suggestion.command);
+    } else {
+      term.paste(suggestion.command);
+      if (sessionIdRef.current) {
+        outputTrackerRef.current?.recordEnter();
+        const write = k8sTarget ? window.multissh?.k8sTerminalWrite : window.multissh?.terminalWrite;
+        write?.(sessionIdRef.current, '\r');
+      }
+    }
+    setInlineSuggestion(null);
+    setInlineAiPrompt('');
+    setInlineAiOpen(false);
+    term.focus();
+  };
   const [inlineLoading, setInlineLoading] = useState(false);
   const [terminalErrorHint, setTerminalErrorHint] = useState<string | null>(null);
   const inlineAiInputRef = useRef<HTMLInputElement>(null);
@@ -764,8 +799,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       if (e.type === 'keydown' && (e.ctrlKey || e.metaKey) && !e.altKey) {
         const keyLower = e.key.toLowerCase();
         // Ctrl+K: Open Inline Terminal AI bar (VS Code / Cursor style)
-        if (!e.shiftKey && keyLower === 'k') {
+        // A full-screen program (an editor, a pager) keeps its own Ctrl+K.
+        if (!e.shiftKey && keyLower === 'k' && term.buffer.active.type !== 'alternate') {
           e.preventDefault();
+          inlineAskRef.current++;
+          setInlineSuggestion(null);
           setInlineAiOpen(true);
           setTimeout(() => inlineAiInputRef.current?.focus(), 20);
           return false;
@@ -897,6 +935,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
           // 3. User input to PTY
           let inputLineBuffer = '';
+          /** When a person last pressed Enter here: error words in output count only shortly after. */
+          let lastEnterAt = 0;
           term.onData((data) => {
             const write = k8sTarget ? window.multissh?.k8sTerminalWrite : window.multissh?.terminalWrite;
             if (sessionIdRef.current && write) {
@@ -907,6 +947,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               // The terminal answering a query from the program (fish asks before every prompt), not typing.
             } else if (data.includes('\r') || data.includes('\n')) {
               outputTracker.recordEnter();
+              lastEnterAt = Date.now();
+              // A new command: the last one's error chip is stale.
+              setTerminalErrorHint(null);
               sudoRetryRef.current.notifyEnter();
               const parts = data.split(/[\r\n]+/);
               const cmd = (inputLineBuffer + (parts[0] || '')).trim();
@@ -951,11 +994,17 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 }
                 // eslint-disable-next-line no-control-regex -- matching terminal escape sequences is the point
                 const oscExitMatch = /\x1b\]133;D;([1-9][0-9]*)(?:\x07|\x1b\\)/.exec(data);
+                // A command that ended well clears the chip: the error it pointed at is behind us.
+                // eslint-disable-next-line no-control-regex -- matching terminal escape sequences is the point
+                if (/\x1b\]133;D;0(?:\x07|\x1b\\)/.test(data)) setTerminalErrorHint(null);
                 if (
                   oscExitMatch ||
+                  // Words in output count only right after a person ran something: `tail -f` or a grep that
+                  // prints "Permission denied" is not a failed command.
+                  (Date.now() - lastEnterAt < 20_000 &&
                   /(?:command not found|Permission denied|Connection refused|No such file or directory|502 Bad Gateway|CrashLoopBackOff|MountVolume\.SetUp failed|AttachVolume\.Attach failed|snapmirror.*broken-off|HEALTH_ERR|CommandNotFoundException|ParserError|failed \(Result: exit-code\)|ERR!|fatal:)/i.test(
                     data
-                  )
+                  ))
                 ) {
                   // eslint-disable-next-line no-control-regex
                   const clean = (outputTracker.lastOutput() || data).replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').trim();
@@ -1161,7 +1210,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 data-testid="terminal-fix-error-btn"
                 className="inline-flex items-center gap-1 hover:text-white"
                 onClick={() => {
-                  const latest = outputTrackerRef.current?.lastOutput() || terminalErrorHint;
+                  // What raised the chip, not whatever was printed since.
+                  const latest = terminalErrorHint;
                   window.dispatchEvent(new CustomEvent('sshs3:ai-open'));
                   window.dispatchEvent(
                     new CustomEvent('sshs3:ai-attach', {
@@ -1236,7 +1286,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               const q = inlineAiPrompt.trim();
               if (!q) return;
               if (inlineSuggestion) {
-                // Pressing Enter when a suggestion is ready pastes it into the terminal
+                // Pressing Enter when a suggestion is ready pastes it into the terminal (never more than one line).
+                if (inlineSuggestion.multiline) return;
                 termRef.current?.paste(inlineSuggestion.command);
                 setInlineSuggestion(null);
                 setInlineAiPrompt('');
@@ -1245,6 +1296,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 return;
               }
               setInlineLoading(true);
+              const asked = ++inlineAskRef.current;
               try {
                 const contextText =
                   termRef.current?.getSelection() || outputTrackerRef.current?.lastOutput() || '';
@@ -1255,9 +1307,15 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                   context: contextText || undefined,
                 });
                 const suggested = snap.reply?.inlineSuggestion;
+                // Asked again, or closed, while this was on its way: it answers nothing any more.
+                if (asked !== inlineAskRef.current) return;
                 if (suggested) {
                   setInlineSuggestion({
                     command: suggested.command,
+                    runnable: suggested.runnable === true,
+                    riskLevel: suggested.riskLevel,
+                    riskReason: suggested.riskReason,
+                    multiline: suggested.multiline,
                     // A general check picked by keyword must not pass for an answer.
                     explanation:
                       suggested.source === 'fallback'
@@ -1295,29 +1353,19 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               value={inlineAiPrompt}
               onChange={(e) => {
                 setInlineAiPrompt(e.target.value);
+                inlineAskRef.current++;
                 if (inlineSuggestion) setInlineSuggestion(null);
               }}
               onKeyDown={(e) => {
                 if (e.key === 'Escape') {
                   e.preventDefault();
+                  inlineAskRef.current++;
                   setInlineAiOpen(false);
                   setInlineSuggestion(null);
                   termRef.current?.focus();
                 } else if (e.key === 'Enter' && e.ctrlKey && inlineSuggestion) {
                   e.preventDefault();
-                  const cmd = inlineSuggestion.command.replace(/[\r\n]+$/, '');
-                  termRef.current?.paste(cmd);
-                  if (sessionIdRef.current) {
-                    outputTrackerRef.current?.recordEnter();
-                    const write = k8sTarget
-                      ? window.multissh?.k8sTerminalWrite
-                      : window.multissh?.terminalWrite;
-                    write?.(sessionIdRef.current, '\r');
-                  }
-                  setInlineSuggestion(null);
-                  setInlineAiPrompt('');
-                  setInlineAiOpen(false);
-                  termRef.current?.focus();
+                  runInlineSuggestion();
                 } else if (e.key === 'Enter' && e.shiftKey && inlineAiPrompt.trim()) {
                   e.preventDefault();
                   const q = inlineAiPrompt.trim();
@@ -1374,12 +1422,13 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               }}
               className="rounded-md border border-border-subtle bg-app px-2 py-1 text-[11px] text-txt-secondary hover:text-txt-primary disabled:opacity-40 shrink-0"
             >
-              Till Chatt
+              To chat
             </button>
             <button
               type="button"
               aria-label="Close inline AI"
               onClick={() => {
+                inlineAskRef.current++;
                 setInlineAiOpen(false);
                 setInlineSuggestion(null);
                 termRef.current?.focus();
@@ -1395,47 +1444,60 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               data-testid="terminal-inline-suggestion"
               className="flex flex-col gap-1.5 rounded-lg border border-sky-500/30 bg-app px-3 py-2"
             >
-              <div className="flex items-center justify-between gap-2">
-                <code className="font-mono text-xs text-emerald-300 break-all">
+              <div className="flex items-start justify-between gap-2">
+                {/* Shown as it is, line for line: what is pasted is what is seen. */}
+                <pre className="m-0 whitespace-pre-wrap font-mono text-xs text-emerald-300 break-all">
                   $ {inlineSuggestion.command}
-                </code>
+                </pre>
                 <div className="flex items-center gap-1.5 shrink-0">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      termRef.current?.paste(inlineSuggestion.command);
-                      setInlineSuggestion(null);
-                      setInlineAiPrompt('');
-                      setInlineAiOpen(false);
-                      termRef.current?.focus();
-                    }}
-                    className="rounded bg-app-surface px-2 py-1 text-[10px] font-medium text-txt-primary hover:bg-app-surface-hover border border-border-subtle"
-                  >
-                    Paste (Enter)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const cmd = inlineSuggestion.command.replace(/[\r\n]+$/, '');
-                      termRef.current?.paste(cmd);
-                      if (sessionIdRef.current) {
-                        outputTrackerRef.current?.recordEnter();
-                        const write = k8sTarget
-                          ? window.multissh?.k8sTerminalWrite
-                          : window.multissh?.terminalWrite;
-                        write?.(sessionIdRef.current, '\r');
-                      }
-                      setInlineSuggestion(null);
-                      setInlineAiPrompt('');
-                      setInlineAiOpen(false);
-                      termRef.current?.focus();
-                    }}
-                    className="rounded bg-emerald-600 px-2.5 py-1 text-[10px] font-semibold text-white hover:bg-emerald-500"
-                  >
-                    ▶ Run now (Ctrl+Enter)
-                  </button>
+                  {inlineSuggestion.multiline ? (
+                    <button
+                      type="button"
+                      onClick={() => void navigator.clipboard?.writeText(inlineSuggestion.command)}
+                      className="rounded bg-app-surface px-2 py-1 text-[10px] font-medium text-txt-primary hover:bg-app-surface-hover border border-border-subtle"
+                    >
+                      Copy
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        termRef.current?.paste(inlineSuggestion.command);
+                        setInlineSuggestion(null);
+                        setInlineAiPrompt('');
+                        setInlineAiOpen(false);
+                        termRef.current?.focus();
+                      }}
+                      className="rounded bg-app-surface px-2 py-1 text-[10px] font-medium text-txt-primary hover:bg-app-surface-hover border border-border-subtle"
+                    >
+                      Paste (Enter)
+                    </button>
+                  )}
+                  {inlineSuggestion.runnable && (
+                    <button
+                      type="button"
+                      onClick={() => runInlineSuggestion()}
+                      className="rounded bg-emerald-600 px-2.5 py-1 text-[10px] font-semibold text-white hover:bg-emerald-500"
+                    >
+                      ▶ Run now (Ctrl+Enter)
+                    </button>
+                  )}
                 </div>
               </div>
+              {inlineSuggestion.riskLevel && inlineSuggestion.riskLevel !== 'safe' && (
+                <span
+                  className={`text-[11px] ${inlineSuggestion.riskLevel === 'destructive' ? 'text-rose-300' : 'text-amber-300'}`}
+                  title={inlineSuggestion.riskReason}
+                >
+                  {inlineSuggestion.riskLevel === 'destructive' ? 'Hard to take back' : 'Changes something'}
+                  {inlineSuggestion.riskReason ? `: ${inlineSuggestion.riskReason}` : ''}. Read it before you press Enter.
+                </span>
+              )}
+              {inlineSuggestion.multiline && (
+                <span className="text-[11px] text-amber-300">
+                  More than one command: copy it and run each one yourself.
+                </span>
+              )}
               <span className="text-[11px] text-txt-muted">{inlineSuggestion.explanation}</span>
             </div>
           )}

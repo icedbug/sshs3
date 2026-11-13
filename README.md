@@ -54,7 +54,7 @@ Infrastructure, Storage, and DevOps teams typically juggle **5+ disconnected too
   </p>
   <p align="center">
     <img src="docs/screenshots/demo-7-inline-terminal-suggest.png" alt="Ctrl+K Inline Terminal AI Command Bar" width="850" />
-    <br><em><b><code>Ctrl+K</code> Inline Terminal AI:</b> Describe what you want in plain language right inside the terminal to get an OS/shell-aware command suggestion with a one-sentence explanation — press <b>Run (`Enter`)</b> or <b>Insert (`Tab`)</b>.</em>
+    <br><em><b><code>Ctrl+K</code> Inline Terminal AI:</b> Describe what you want in plain language right inside the terminal to get a command for that shell with a one-sentence explanation — <b>Enter</b> pastes it for you to read and run; <b>Ctrl+Enter</b> runs it at once, but only a single read-only command at an empty prompt. A command that changes something is marked, and pasted, never run for you.</em>
   </p>
   <p align="center">
     <img src="docs/screenshots/demo-3-team-memory-and-skills.png" alt="Shared Team Memories and Runbook Skills" width="850" />

@@ -708,10 +708,12 @@ export class SelfLearningService {
       const sTokens = tokenize(
         `${top.title} ${top.text} ${top.sourceCommand ?? ""}`,
       );
-      const overlap = qTokens.filter((q) =>
-        sTokens.some((t) => t === q || t.includes(q)),
-      ).length;
-      if (overlap === 0) continue;
+      // Whole words, or a longer word inside another: "is" is not a match because "disk" contains it.
+      const overlap = qTokens
+        .filter((q) => q.length > 2)
+        .filter((q) => sTokens.some((t) => t === q || (q.length >= 4 && t.includes(q)))).length;
+      // More than one shared word: "disk" alone does not make a command about purging WAL files an answer.
+      if (overlap < Math.min(2, qTokens.length)) continue;
 
       const cmd =
         top.sourceCommand ||

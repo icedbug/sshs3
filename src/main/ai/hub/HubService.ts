@@ -268,6 +268,31 @@ const POLICY_NAMES: Record<keyof SafetyPolicyConfig, string> = {
   requireApprovalOnProdTags: "always ask before a change on production",
   blockDestructiveWithoutConfirm: "stop destructive commands until a person says yes",
 };
+/**
+ * A suggested command made fit to put in a terminal. Text from a model is not
+ * trusted to be one command: control characters (an escape that ends a
+ * bracketed paste early) are taken out, a second line is not run by
+ * pressing Enter on the first, and the command is classified like any other.
+ * Only a single-line command classified read-only may run with one key; the
+ * rest is pasted for the person to read and press Enter themselves.
+ */
+export const checkedSuggestionForTesting = (s: InlineCommandSuggestion): InlineCommandSuggestion => checkedSuggestion(s);
+
+function checkedSuggestion(s: InlineCommandSuggestion): InlineCommandSuggestion {
+  // eslint-disable-next-line no-control-regex -- removing control characters is the point
+  const cleaned = s.command.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u0080-\u009f]/g, "").replace(/\r\n?/g, "\n").trim().slice(0, 4000);
+  const lines = cleaned.split("\n").filter((l) => l.trim());
+  const safety = analyzeCommandSafety(cleaned);
+  return {
+    ...s,
+    command: lines.join("\n"),
+    riskLevel: safety.riskLevel,
+    riskReason: safety.riskReason,
+    multiline: lines.length > 1 || undefined,
+    runnable: safety.riskLevel === "safe" && lines.length === 1,
+  };
+}
+
 /** How a change was let through or stopped when no person decided it, said for the log. */
 const DECIDED_HOW: Record<NonNullable<AgentChange["decidedHow"]>, string> = {
   person: "a person",
@@ -2513,11 +2538,13 @@ export class HubService {
       }
       case "inline-suggest": {
         reply = {
-          inlineSuggestion: await this.generateInlineSuggestion(
-            requiredText(request.prompt),
-            request.sessionId,
-            request.context,
-            request.shell,
+          inlineSuggestion: checkedSuggestion(
+            await this.generateInlineSuggestion(
+              requiredText(request.prompt),
+              request.sessionId,
+              request.context,
+              request.shell,
+            ),
           ),
         };
         break;
@@ -7095,13 +7122,27 @@ export class HubService {
       targetShell !== "cmd" &&
       targetShell !== "powershell" &&
       targetShell !== "pwsh"
-        ? this.selfLearning.findBestLearnedCommand(candidateSkills, q)
+        ? this.selfLearning.findBestLearnedCommand(
+            // Only what applies here: a command saved for another server is not offered on this one.
+            session
+              ? [
+                  ...scopedMemory(candidateSkills, `target:${session.profileId ?? session.id}`, true, {
+                    targetLabel: session.label,
+                    serverName: this.getKnownServers().find((s) => s.id === session.profileId)?.name,
+                    serverHost: this.getKnownServers().find((s) => s.id === session.profileId)?.host,
+                    cluster: this.getKnownServers().find((s) => s.id === session.profileId)?.cluster,
+                  }),
+                ]
+              : candidateSkills.filter((m) => !/^(server|target|cluster):/.test(m.scope)),
+            q,
+          )
         : undefined;
     const fallback =
       learnedMatch ?? buildInstantCommandSuggestion(q, lower, targetShell);
 
     const sysPrompt = `You are an inline terminal command generator for ${targetShell}. Return ONLY a JSON object {"command":"...","explanation":"..."} with a single safe shell command matching the user's request and a 1-sentence explanation in the user's language.`;
-    const userPrompt = `Request: ${q}\n${context ? `Terminal output context:\n${boundedContext(context, 1500)}` : ""}`;
+    // What the person typed is masked and bounded like the output around it.
+    const userPrompt = `Request: ${clip(q, 1000)}\n${context ? `Terminal output context:\n${boundedContext(context, 1500)}` : ""}`;
 
     try {
       const config = await this.config.getConfig();

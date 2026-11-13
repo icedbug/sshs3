@@ -591,6 +591,13 @@ export interface InlineCommandSuggestion {
    * says which, so that a canned check is not taken for an answer.
    */
   source?: "model" | "skill" | "fallback";
+  /** How the command is classified, as any agent's command would be. */
+  riskLevel?: CommandRiskLevel;
+  riskReason?: string;
+  /** More than one line: pasted only, never run with one key. */
+  multiline?: boolean;
+  /** May run with one key: one line, classified read-only. Anything else is pasted for the person to read. */
+  runnable?: boolean;
 }
 export interface InventoryEntry {
   id: string;
