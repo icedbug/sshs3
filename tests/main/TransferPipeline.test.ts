@@ -1716,7 +1716,10 @@ describe('late open after a failed transfer', () => {
     return stream;
   }
 
-  async function run(targetContent: string | undefined, resolveOpen: (t: { value: boolean }) => void) {
+  async function run(
+    targetContent: string | undefined,
+    resolveOpen: (t: { value: boolean }, at: { target: MemoryStorageProvider; path: string }) => void,
+  ) {
     const memSource = new MemoryStorageProvider();
     memSource.files.set('data.txt', Buffer.from('new content'));
     const memTarget = new MemoryStorageProvider();
@@ -1725,13 +1728,17 @@ describe('late open after a failed transfer', () => {
     let release!: () => void;
     let lateRuns = 0;
     const settle = new Promise<void>((r) => { release = r; }).then(() => { lateRuns++; });
-    memTarget.createWriteStream = vi.fn().mockImplementation(async () => slowOpenStream(touched, settle));
+    let openedPath = '';
+    memTarget.createWriteStream = vi.fn().mockImplementation(async (p: string) => {
+      openedPath = p;
+      return slowOpenStream(touched, settle);
+    });
     const deleteSpy = vi.spyOn(memTarget, 'delete');
     await expect(
       transferFile({ sourceProvider: memSource, sourcePath: 'data.txt', targetProvider: memTarget, targetPath: 'data.txt', targetSettleTimeoutMs: 20 })
     ).rejects.toThrow('source failed');
     expect(deleteSpy).not.toHaveBeenCalled(); // nothing is deleted while the open is unanswered
-    resolveOpen(touched);
+    resolveOpen(touched, { target: memTarget, path: openedPath });
     release();
     await new Promise((r) => setTimeout(r, 0));
     await vi.waitFor(() => expect(lateRuns).toBeGreaterThan(0), { timeout: 2000 });
@@ -1740,9 +1747,21 @@ describe('late open after a failed transfer', () => {
   }
 
   it('removes the empty file the late open left behind', async () => {
-    const { memTarget, deleteSpy } = await run('', (t) => { t.value = true; });
+    const { memTarget, deleteSpy } = await run(undefined, (t, at) => {
+      t.value = true;
+      at.target.files.set(at.path, Buffer.alloc(0));
+    });
     expect(deleteSpy).toHaveBeenCalledTimes(1);
     expect(memTarget.files.has('data.txt')).toBe(false);
+  });
+
+  it('never deletes an existing file it was going to replace: the copy went to a temporary file', async () => {
+    const { memTarget } = await run('', (t, at) => {
+      t.value = true;
+      at.target.files.set(at.path, Buffer.alloc(0));
+    });
+    expect(memTarget.files.get('data.txt')?.toString()).toBe('');
+    expect([...memTarget.files.keys()].filter((k) => k.includes('sshs3-part'))).toEqual([]);
   });
 
   it('leaves a file alone that a newer transfer has written since', async () => {

@@ -77,7 +77,11 @@ class FakeStorageProvider implements IStorageProvider {
     return Readable.from([entry.buffer]);
   }
 
+  /** Test-only: the write to this path fails, as a dropped connection would. */
+  failWritesTo?: string;
+
   async createWriteStream(remotePath: string, _options?: WriteStreamOptions): Promise<NodeJS.WritableStream> {
+    if (this.failWritesTo && remotePath.startsWith(this.failWritesTo)) throw new Error('connection dropped');
     const chunks: Buffer[] = [];
     return new Writable({
       write(chunk, _enc, cb) {
@@ -894,6 +898,25 @@ describe('ProfileSyncService', () => {
     await expect(machineA.sync.pushToRemote(provider)).rejects.toThrow(SyncConflictError);
   });
 
+  it('an ordinary two-device conflict leaves nothing behind that blocks either device', async () => {
+    const a = await harness();
+    const b = await harness();
+    await a.profileStore.saveSSH({ id: 'ssh-1', name: 'A', host: 'h', username: 'u', authType: 'password' });
+    await a.sync.pushToRemote(provider);
+    await b.sync.pullFromRemote(provider);
+    await b.profileStore.saveSSH({ id: 'ssh-2', name: 'B', host: 'h2', username: 'u', authType: 'password' });
+    await b.sync.pushToRemote(provider);
+    await a.profileStore.saveSSH({ id: 'ssh-3', name: 'A2', host: 'h3', username: 'u', authType: 'password' });
+
+    await expect(a.sync.pushToRemote(provider)).rejects.toThrow(SyncConflictError);
+    // Nothing was written, so both can still pull, and A can push after it has.
+    await b.sync.pullFromRemote(provider);
+    await a.sync.pullFromRemote(provider);
+    await a.sync.pushToRemote(provider);
+    await b.sync.pullFromRemote(provider);
+    expect((await b.profileStore.getProfiles()).ssh.map((p) => p.id).sort()).toEqual(['ssh-1', 'ssh-2', 'ssh-3']);
+  });
+
   it('resetRemoteState() clears stale concurrency state left over from a previously configured target', async () => {
     // The real ProfileSyncService instance lives for the app's whole lifetime (see
     // IpcBridge), reused across however many times the user reconfigures Settings >
@@ -929,18 +952,28 @@ describe('ProfileSyncService', () => {
     await machineA.profileStore.saveSSH({ id: 'ssh-1', name: 'A', host: 'h', username: 'u', authType: 'password' });
     await machineA.sync.pushToRemote(provider); // Establishes lastKnownRemoteState for every category.
 
-    // A third machine changes settings.enc without machineA knowing, so
-    // machineA's next push conflicts partway through the sequence: topology,
-    // credentials, and dotfile-pools all succeed before the settings check throws.
-    provider.simulateExternalWrite('~/.sshs3/settings.enc', Buffer.from('not a real sync file'));
+    // The connection drops after topology, credentials and dotfile-pools were uploaded.
+    provider.failWritesTo = '~/.sshs3/settings.enc';
     await machineA.profileStore.saveSSH({ id: 'ssh-1', name: 'A edited', host: 'h', username: 'u', authType: 'password' });
 
-    await expect(machineA.sync.pushToRemote(provider)).rejects.toThrow(SyncConflictError);
+    await expect(machineA.sync.pushToRemote(provider)).rejects.toThrow('connection dropped');
     expect(provider.hasFile('~/.sshs3/.push-in-progress')).toBe(true);
 
     const machineB = await harness();
     await expect(machineB.sync.pullFromRemote(provider)).rejects.toThrow(SyncInProgressError);
     await expect(machineB.sync.compareWithRemote(provider)).rejects.toThrow(SyncInProgressError);
+  });
+
+  it('a conflict found before anything is uploaded writes nothing, not even the marker', async () => {
+    const machineA = await harness();
+    await machineA.profileStore.saveSSH({ id: 'ssh-1', name: 'A', host: 'h', username: 'u', authType: 'password' });
+    await machineA.sync.pushToRemote(provider);
+    provider.simulateExternalWrite('~/.sshs3/settings.enc', Buffer.from('not a real sync file'));
+    const topologyBefore = provider.getRawBuffer('~/.sshs3/topology.enc');
+    await machineA.profileStore.saveSSH({ id: 'ssh-1', name: 'A edited', host: 'h', username: 'u', authType: 'password' });
+    await expect(machineA.sync.pushToRemote(provider)).rejects.toThrow(SyncConflictError);
+    expect(provider.hasFile('~/.sshs3/.push-in-progress')).toBe(false);
+    expect(provider.getRawBuffer('~/.sshs3/topology.enc')).toBe(topologyBefore);
   });
 
   it('wipeRemote deletes every category file for the "delete all sync data" action', async () => {

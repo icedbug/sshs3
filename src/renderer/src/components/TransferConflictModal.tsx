@@ -71,6 +71,8 @@ export const TransferConflictModal: React.FC = () => {
     return null;
   }
 
+  const isFolder = currentPrompt.isDirectory;
+
   return (
     <div
       ref={dialogRef}
@@ -87,7 +89,7 @@ export const TransferConflictModal: React.FC = () => {
           </div>
           <div>
             <h2 id="transfer-conflict-modal-title" className="text-base font-semibold text-txt-primary">
-              File Already Exists
+              {isFolder ? 'Folder Already Exists' : 'File Already Exists'}
             </h2>
             <p className="break-all text-xs text-txt-muted">{currentPrompt.targetPath}</p>
           </div>
@@ -95,10 +97,16 @@ export const TransferConflictModal: React.FC = () => {
 
         <div className="mt-4 text-sm text-txt-secondary">
           <p>
-            {currentPrompt.isDirectory ? 'The folder' : 'The file'}{' '}
+            {isFolder ? 'The folder' : 'The file'}{' '}
             <span className="font-medium text-txt-primary">{currentPrompt.fileName}</span> already exists
             at the destination. What would you like to do?
           </p>
+          {isFolder && (
+            <p className="mt-2" data-testid="transfer-conflict-merge-note">
+              Merge copies this folder into the existing one: files with the same name inside are replaced,
+              and other files already in the destination folder are kept.
+            </p>
+          )}
         </div>
 
         <label className="mt-4 flex items-center gap-2 text-xs text-txt-muted cursor-pointer">
@@ -138,7 +146,7 @@ export const TransferConflictModal: React.FC = () => {
             data-testid="transfer-conflict-overwrite"
             className="rounded-lg bg-red-600 px-3.5 py-2 text-xs font-medium text-white hover:bg-red-500 shadow-sm transition-colors"
           >
-            Overwrite
+            {isFolder ? 'Merge and replace files' : 'Overwrite'}
           </button>
         </div>
       </div>

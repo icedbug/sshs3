@@ -131,6 +131,8 @@ export function AiHubPanel({
   const [shell, setShell] = useState<ShellKind>("bash");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  /** What the person wants to say with an answer, per pending action; the agent is given it. */
+  const [approvalNotes, setApprovalNotes] = useState<Record<string, string>>({});
   const [attachments, setAttachments] = useState<ContextSource[]>([]);
   const [menu, setMenu] = useState<Menu>(null);
   const [atIndex, setAtIndex] = useState(0);
@@ -1791,6 +1793,13 @@ export function AiHubPanel({
                       </div>
                       {item.change.status === "pending" && (
                         <div className="ai-approval-actions">
+                          <input
+                            type="text"
+                            aria-label="Note for the agent"
+                            placeholder="Note for the agent (optional), e.g. use --dry-run first"
+                            value={approvalNotes[item.change.id] ?? ""}
+                            onChange={(e) => setApprovalNotes({ ...approvalNotes, [item.change!.id]: e.target.value })}
+                          />
                           <button
                             className="ai-primary"
                             disabled={busy}
@@ -1800,6 +1809,7 @@ export function AiHubPanel({
                                 taskId: task.id,
                                 changeId: item.change!.id,
                                 approved: true,
+                                note: approvalNotes[item.change!.id]?.trim() || undefined,
                               })
                             }
                           >
@@ -1807,18 +1817,23 @@ export function AiHubPanel({
                           </button>
                           <button
                             disabled={busy}
+                            title="The run goes on; the agent is told no, and why if you wrote a note"
                             onClick={() =>
                               void act({
                                 action: "approve",
                                 taskId: task.id,
                                 changeId: item.change!.id,
                                 approved: false,
+                                note: approvalNotes[item.change!.id]?.trim() || undefined,
                               })
                             }
                           >
                             Decline
                           </button>
                         </div>
+                      )}
+                      {item.change.decisionNote && (
+                        <small className="ai-hint">Note with the answer: {item.change.decisionNote}</small>
                       )}
                     </details>
                   ) : null,

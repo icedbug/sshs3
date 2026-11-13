@@ -247,7 +247,7 @@ A second group of tools targets the same audience as sshs3: developers and admin
 | **Edit as root (sudo)** | — | ✅ Privileged save | N/A | — | — | — |
 | **Rich previews** | ✅ Markdown, HTML, SVG, CSV/TSV table, images, PDF | — | N/A | — | — | — |
 | **Edit in external IDE** | ✅ Auto-upload on save | — | N/A | — | — | ✅ "Edit locally" |
-| **Live log streaming (`tail -f`)** | ✅ Pause, resume, search | — | N/A | — | — | — |
+| **Live log streaming (`tail -f`)** | ✅ Pause, resume, search; `tail -f` over ssh for SFTP files, polling every 2 s (at most 1 MB per poll) for S3 and local files | — | N/A | — | — | — |
 | **File content search** | ✅ Regex across local, SFTP, and S3 | — | N/A | — | — | — |
 | **Folder sync / diff** | ✅ Local, SFTP, S3, saved sync profiles | — | N/A | — | — | — |
 | **Git integration** | ✅ Clone, pull, status, commit signing, dotfile import | — | N/A | — | — | — |

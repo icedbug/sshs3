@@ -2036,10 +2036,12 @@ export class HubService {
           ?.changes.find((c) => c.id === request.changeId);
         if (change && change.status === "pending")
           change.decidedBy = { name: await this.resolveActorName(), at: Date.now(), allowed: request.approved === true };
+        const approvalNote = typeof request.note === "string" && request.note.trim() ? clip(request.note.trim(), 1000) : undefined;
         this.broker.approve(
           request.taskId,
           request.changeId,
           request.approved === true,
+          approvalNote,
         );
         break;
       }
@@ -5271,6 +5273,35 @@ export class HubService {
       .filter((r) => r.lines.length);
   }
 
+  /**
+   * How each server stood when its facts were last read, in a few lines, with
+   * how old that reading is: the agent knows the state it starts from, and
+   * knows to look again before it acts on a reading that is hours old.
+   */
+  private serverFactsNow(now = Date.now()): { name: string; cluster?: string; collectedAt: number; age: string; lines: string[] }[] {
+    const clusters = new Map(this.getKnownServers().map((s) => [s.id, s.cluster]));
+    const ago = (ms: number): string =>
+      ms < 3_600_000 ? `${Math.max(1, Math.round(ms / 60_000))} min` : ms < 172_800_000 ? `${Math.round(ms / 3_600_000)} h` : `${Math.round(ms / 86_400_000)} days`;
+    return this.factsStore
+      .all()
+      .filter((r) => r.facts && r.collectedAt)
+      .map((r) => {
+        const f = r.facts!;
+        const lines = [
+          f.os?.pretty ? `OS: ${f.os.pretty}${f.kernel ? `, kernel ${f.kernel}` : ""}` : "",
+          f.rebootRequired ? "A reboot is pending" : "",
+          f.failedServices.length ? `Failed services: ${f.failedServices.slice(0, 10).join(", ")}` : "",
+          ...f.disks.filter((d) => d.usedPct >= 80).slice(0, 5).map((d) => `Disk ${d.mount} is ${d.usedPct}% full`),
+          ...f.certs
+            .filter((c) => c.notAfter - now < 30 * 86_400_000)
+            .slice(0, 5)
+            .map((c) => (c.notAfter < now ? `Certificate ${c.path} has expired` : `Certificate ${c.path} expires in ${Math.ceil((c.notAfter - now) / 86_400_000)} days`)),
+          f.listening.length ? `Listening: ${[...new Set(f.listening.map((l) => `${l.port}/${l.proto}${l.process ? ` (${l.process})` : ""}`))].slice(0, 15).join(", ")}` : "",
+        ].filter(Boolean);
+        return { name: r.name, cluster: clusters.get(r.serverId), collectedAt: r.collectedAt!, age: ago(now - r.collectedAt!), lines };
+      });
+  }
+
   /** The same for one server or cluster by name: what an alert's ticket is given. */
   private changesOn(name: string | undefined, withinMs: number, now = Date.now()): string[] {
     const wanted = (name ?? "").trim().toLowerCase();
@@ -7603,6 +7634,7 @@ export class HubService {
       kbPages: this.pagesWithUse(),
       infraEdges: this.getInfraEdgesList(),
       recentServerChanges: this.recentServerChanges(48 * 3_600_000),
+      serverFactsNow: this.serverFactsNow(),
       workforceRuns: this.getWorkforceRunsList(),
       terminalContextChars: aiCfg?.terminalContextChars ?? 8000,
       appSettings: {

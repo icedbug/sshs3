@@ -436,10 +436,23 @@ export const FilePane: React.FC<FilePaneProps> = ({
     [onPathChange]
   );
 
+  // Sessions opened with "Open in External Editor" from this pane: their automatic uploads report failures here,
+  // since no editor tab is open to show them.
+  const externalSessionsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!window.multissh?.onExternalFileStatus) return;
+    return window.multissh.onExternalFileStatus((event) => {
+      if (event.status !== 'error' || !externalSessionsRef.current.has(event.sessionToken)) return;
+      const name = event.remotePath.split(/[\\/]/).pop() || event.remotePath;
+      setError(`Could not upload "${name}" from the external editor: ${event.error || 'unknown error'}`);
+    });
+  }, []);
+
   const handleOpenExternal = useCallback(
     async (entry: FileEntry) => {
       try {
-        await window.multissh.fileOpenExternal(source.providerId, entry.path);
+        const res = await window.multissh.fileOpenExternal(source.providerId, entry.path);
+        if (res?.sessionToken) externalSessionsRef.current.add(res.sessionToken);
       } catch (err) {
         setError(describeIpcError(err, 'Failed to open external editor'));
       }

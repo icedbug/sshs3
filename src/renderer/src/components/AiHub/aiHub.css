@@ -709,8 +709,13 @@
 }
 .ai-approval-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   margin-top: 12px;
+}
+.ai-approval-actions input {
+  flex: 1 1 220px;
+  min-width: 0;
 }
 .ai-hub .ai-primary {
   background: #3b82f620;

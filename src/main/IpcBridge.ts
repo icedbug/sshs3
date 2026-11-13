@@ -1035,6 +1035,9 @@ export class IpcBridge {
   }
 
 
+  /** The last background push's failure, shown in the sync settings until a push succeeds. */
+  private autoSyncError: string | undefined;
+
   public scheduleAutoSync(delayMs = 2000): void {
     // A demo process never pushes (demo/outwardSync.ts); buildSyncStatus reports why.
     if (outwardSyncDisabledReason('Remote profile sync')) return;
@@ -1052,12 +1055,22 @@ export class IpcBridge {
           return;
         }
         const provider = await this.getSyncProvider(config.target);
-        await this.profileSyncService.pushToRemote(provider, config.remoteBasePath ?? '');
+        try {
+          await this.profileSyncService.pushToRemote(provider, config.remoteBasePath ?? '');
+        } catch (err) {
+          // Another device pushed since this one last pulled: take its changes in, then push once more.
+          if ((err as Error)?.name !== 'SyncConflictError') throw err;
+          await this.profileSyncService.pullFromRemote(provider, config.remoteBasePath ?? '');
+          await this.profileSyncService.pushToRemote(provider, config.remoteBasePath ?? '');
+        }
+        this.autoSyncError = undefined;
         await this.syncConfigStore.setLastSyncAt(new Date().toISOString());
         await this.pushSyncStatusToRenderer();
-      this.aiHub?.changed();
+        this.aiHub?.changed();
       } catch (err) {
         autosyncLog.warn('Background push failed:', err);
+        this.autoSyncError = err instanceof Error ? err.message : String(err);
+        await this.pushSyncStatusToRenderer().catch(() => {});
       }
     }, delayMs);
   }
@@ -1343,6 +1356,7 @@ export class IpcBridge {
       topologyUnlocked: this.syncCryptoService.isUnlocked('topology'),
       credentialsUnlocked: this.syncCryptoService.isUnlocked('credentials'),
       lastSyncAt: config.lastSyncAt,
+      ...(this.autoSyncError ? { autoSyncError: this.autoSyncError } : {}),
       comparison: this.profileSyncService.getLastComparison() ?? undefined,
       autoSync: Boolean(config.autoSync),
       smartcardLinked: Boolean(config.smartcardSync),

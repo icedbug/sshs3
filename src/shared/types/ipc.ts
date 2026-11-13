@@ -739,7 +739,7 @@ export interface MultiSSHApi extends AiHubApi {
   profilesRenameFolder(oldName: string, newName: string): Promise<void>;
   profilesImportSshConfig(): Promise<{ profiles: SSHConnectionConfig[]; filePath: string }>;
   profilesExportJson(): Promise<{ count: number; filePath: string } | null>;
-  profilesImportJson(): Promise<{ count: number }>;
+  profilesImportJson(): Promise<{ count: number; added?: number; updated?: number }>;
 
   // Session
   sessionGet(): Promise<SessionData | null>;

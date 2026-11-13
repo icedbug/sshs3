@@ -73,6 +73,22 @@ describe("how a change was decided", () => {
     expect(stopped.t.changes[0]).toMatchObject({ status: "denied", decidedHow: "stopped" });
   });
 
+  it("gives the agent what the person said with the answer, and keeps the run going after a no", async () => {
+    const no = await setup("assisted");
+    const p = no.broker.invoke(no.capability.key, { action: "command", command: "systemctl restart nginx" });
+    await vi.waitFor(() => expect(no.t.status).toBe("waiting"));
+    no.broker.approve(no.t.id, no.t.changes[0].id, false, "reload instead of restart");
+    await expect(p).rejects.toThrow("Not approved. The person said: reload instead of restart");
+    expect(no.t.status).toBe("running");
+    expect(no.t.changes[0]).toMatchObject({ status: "denied", decisionNote: "reload instead of restart" });
+
+    const yes = await setup("assisted");
+    const q = yes.broker.invoke(yes.capability.key, { action: "command", command: "systemctl restart nginx" });
+    await vi.waitFor(() => expect(yes.t.status).toBe("waiting"));
+    yes.broker.approve(yes.t.id, yes.t.changes[0].id, true, "watch the error log after");
+    expect(await q).toMatchObject({ personNote: "Approved with a note from the person: watch the error log after" });
+  });
+
   it("keeps a run waiting while an external agent still has a question open, and answers each one as given", async () => {
     const { broker, t } = await setup("assisted");
     const change = (id: string): AgentChange => ({ id, kind: "command", target: "x", description: id, status: "pending", at: Date.now() });

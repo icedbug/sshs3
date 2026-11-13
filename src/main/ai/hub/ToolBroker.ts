@@ -17,6 +17,8 @@ import { boundedContext, exactHash, forApproval, maskStrings, safeError, clip } 
 interface Answer {
   allowed: boolean;
   how: NonNullable<AgentChange["decidedHow"]>;
+  /** What the person said with the answer, for the agent to act on. */
+  note?: string;
 }
 
 /** A changed service gets this long before a first failing look at its check counts. */
@@ -134,13 +136,13 @@ export class ToolBroker {
     return { url: `http://127.0.0.1:${address.port}/tool`, key };
   }
 
-  approve(taskId: string, changeId: string, allowed: boolean): void {
+  approve(taskId: string, changeId: string, allowed: boolean, note?: string): void {
     const approval = this.approvals.get(changeId);
     if (!approval || approval.taskId !== taskId)
       throw new Error("Approval expired or belongs to another task");
     clearTimeout(approval.timer);
     this.approvals.delete(changeId);
-    approval.resolve({ allowed, how: "person" });
+    approval.resolve({ allowed, how: "person", ...(note ? { note } : {}) });
   }
 
   /** Whether a run has a question out to a person. */
@@ -403,6 +405,7 @@ export class ToolBroker {
           // Cite this in the report, in brackets, after what it shows.
           ref: change.ref,
           commandId: change.id,
+          ...(change.decisionNote ? { personNote: `Approved with a note from the person: ${change.decisionNote}` } : {}),
           source: `terminal:${target.sessionId}`,
           observedAt: Date.now(),
         };
@@ -727,6 +730,7 @@ export class ToolBroker {
       const answer = await this.waitForPerson(task, change.id);
       const allowed = answer.allowed;
       change.decidedHow = answer.how;
+      if (answer.note) change.decisionNote = answer.note;
       const grant = this.grants.get(key);
       if (
         !allowed ||
@@ -737,7 +741,12 @@ export class ToolBroker {
         change.status = "denied";
         if (grant && task.status === "waiting") task.status = "running";
         this.deps.changed();
-        throw new Error("Action not approved or task stopped");
+        // A refusal with a reason is something to act on: the run goes on, and the agent reads why.
+        throw new Error(
+          answer.note && answer.how === "person"
+            ? `Not approved. The person said: ${answer.note}`
+            : "Action not approved or task stopped",
+        );
       }
       task.status = "running";
     }

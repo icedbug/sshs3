@@ -103,6 +103,8 @@ export class InternalSSHPtySession implements SSHPtySession {
   private dataListeners: Set<(data: string) => void> = new Set();
   private exitListeners: Set<(event: SSHPtyExitEvent) => void> = new Set();
   private disposed: boolean = false;
+  /** Set by kill(): the user closed this session, so its exit is final and must never reconnect. */
+  private killedByUser: boolean = false;
   private cleanupPromise?: Promise<void>;
   private reconnecting: boolean = false;
   private reconnectAttempts: number = 0;
@@ -202,6 +204,7 @@ export class InternalSSHPtySession implements SSHPtySession {
     }
     const shouldReconnect =
       !this.disposed &&
+      !this.killedByUser &&
       !changedKey &&
       Boolean(this.config.autoReconnect) &&
       // 255 is ssh's own "the connection failed or dropped" code; any other non-zero code is the remote shell or
@@ -224,9 +227,16 @@ export class InternalSSHPtySession implements SSHPtySession {
       this.manager.emit('data', { sessionId: this.sessionId, data: msg });
 
       this.reconnectTimer = setTimeout(async () => {
-        if (this.disposed) return;
+        this.reconnectTimer = undefined;
+        if (this.disposed || this.killedByUser) return;
         try {
           const success = await this.manager.reconnectSession(this);
+          if (success && this.killedByUser) {
+            // Closed while the new ssh was starting: end that one too (its exit then ends the session).
+            this.reconnecting = false;
+            this.pty.kill();
+            return;
+          }
           if (success) {
             this.reconnecting = false;
             // A successful spawn is not a successful connection: ssh may exit seconds later
@@ -255,6 +265,10 @@ export class InternalSSHPtySession implements SSHPtySession {
       return;
     }
 
+    this.emitFinalExit(event);
+  }
+
+  private emitFinalExit(event: { exitCode: number; signal?: number }): void {
     for (const listener of this.exitListeners) {
       listener(event);
     }
@@ -329,18 +343,25 @@ export class InternalSSHPtySession implements SSHPtySession {
   }
 
   public kill(signal?: string): void {
+    this.killedByUser = true;
     if (this.reconnectStableTimer) {
       clearTimeout(this.reconnectStableTimer);
       this.reconnectStableTimer = undefined;
     }
+    const pendingReconnect = this.reconnectTimer !== undefined;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = undefined;
     }
     this.reconnecting = false;
-    if (!this.disposed) {
-      this.pty.kill(signal);
+    if (this.disposed) return;
+    if (pendingReconnect) {
+      // The ssh process is already gone and only the reconnect was waiting: no pty exit will follow,
+      // so end the session here.
+      this.emitFinalExit({ exitCode: 255 });
+      return;
     }
+    this.pty.kill(signal);
   }
 
   public onData(listener: (data: string) => void): { dispose: () => void } {

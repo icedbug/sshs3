@@ -260,13 +260,13 @@ interface FieldSplitSpec<T> {
   proxyCredentialFields: Array<'username' | 'password'>;
 }
 
-const SSH_FIELD_SPLIT: FieldSplitSpec<SSHConnectionConfig> = {
+export const SSH_FIELD_SPLIT: FieldSplitSpec<SSHConnectionConfig> = {
   credentialFields: ['username', 'password', 'passphrase'],
   excludedFields: ['privateKeyPath', 'pkcs11LibPath', 'agentPath', 'agentIdentityFiles', 'certificateFile', 'pin'],
   proxyCredentialFields: ['username', 'password'],
 };
 
-const S3_FIELD_SPLIT: FieldSplitSpec<S3Config> = {
+export const S3_FIELD_SPLIT: FieldSplitSpec<S3Config> = {
   credentialFields: ['accessKeyId', 'secretAccessKey', 'sessionToken'],
   excludedFields: ['customCaPath'],
   proxyCredentialFields: ['username', 'password'],
@@ -845,6 +845,14 @@ export class ProfileSyncService {
     // files as a clean, in-sync snapshot. Best-effort: a provider that
     // can't write it (e.g. read-only mount) still proceeds with the push.
     const markerPath = buildPushMarkerPath(effectiveBasePath);
+    // Every category is checked once before the marker goes up: an ordinary
+    // conflict (another device pushed since this one pulled) then stops the
+    // push with nothing written, instead of leaving a marker that blocks
+    // every device's pull while this one cannot push either.
+    const categories: SyncDataCategory[] = ['topology', 'credentials', 'dotfile-pools', 'settings', 'ssh-native'];
+    if (dirSyncProfiles) categories.push('dirsync-profiles');
+    if (k8sProfiles) categories.push('k8s-profiles');
+    for (const category of categories) await this.checkNotChangedRemotely(provider, category, remoteFiles);
     await this.writeProviderFile(provider, markerPath, Buffer.from(formatTimestamp(), 'utf-8')).catch(() => {});
 
     // M3 (code review): each category's optimistic-concurrency check is run

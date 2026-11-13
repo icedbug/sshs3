@@ -197,6 +197,8 @@ export interface AgentChange {
   ref?: string;
   /** Who answered, when a person had to: their name, and when. Kept where the decision is made. */
   decidedBy?: { name: string; at: number; allowed: boolean };
+  /** What the person said with their answer; the agent is given it. */
+  decisionNote?: string;
   /** It has gone into the audit log in the state it ended in. */
   audited?: boolean;
   /**
@@ -1351,7 +1353,7 @@ export type HubRequest =
   | { action: "stop"; taskId: string }
   | { action: "takeover"; sessionId: string }
   | { action: "arm"; sessionId: string; shell: ShellKind }
-  | { action: "approve"; taskId: string; changeId: string; approved: boolean }
+  | { action: "approve"; taskId: string; changeId: string; approved: boolean; note?: string }
   /**
    * The user's decision on the plan a conversation's agent proposed. Approved:
    * the agent carries it out, and the plan's listed commands run without

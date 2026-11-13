@@ -325,6 +325,26 @@ describe('TeamVaultService', () => {
       );
     });
 
+    it('lets a member edit a shared profile but not make it reach back into teammates\' machines', async () => {
+      const first = makeService();
+      const vaultId = (await first.createVault('alice@piv:abc', 'age1yubikey1alice')).vaultId;
+      await first.addMember(vaultId, 'bob@piv:def', 'age1yubikey1bob', 'member');
+      const base = { id: 'p1', name: 'web', host: 'web-01', port: 22, username: 'ops', authType: 'privateKey' as const, forwardAgent: true };
+      await first.saveSSHProfile(vaultId, base);
+
+      const asBob = new TeamVaultService({ cryptoService: fakeCrypto(), baseDir: tempDir });
+      await asBob.unlock(vaultId, 'bob@piv:def', '/tmp/fake-bob-identity.txt');
+      await asBob.saveSSHProfile(vaultId, { ...base, name: 'web (renamed)', tags: [] });
+      await expect(asBob.saveSSHProfile(vaultId, { ...base, pkcs11LibPath: '\\\\share\\x.dll' })).rejects.toThrow('Only a Team Vault admin');
+      await expect(asBob.saveSSHProfile(vaultId, { ...base, tunnels: [{ id: 't', type: 'remote', localPort: 22, remoteHost: '127.0.0.1', remotePort: 2222 } as never] })).rejects.toThrow('Only a Team Vault admin');
+      await expect(asBob.saveSSHProfile(vaultId, { ...base, id: 'p2', host: 'bobs-box' })).rejects.toThrow('Only a Team Vault admin');
+      // It forwards the agent: where it connects is an admin's to change.
+      await expect(asBob.saveSSHProfile(vaultId, { ...base, host: 'bobs-box' })).rejects.toThrow('Only a Team Vault admin');
+      // Without forwarding, a member may still repoint a profile with no stored secret.
+      await asBob.saveSSHProfile(vaultId, { id: 'p3', name: 'db', host: 'db-01', username: 'ops', authType: 'privateKey' });
+      await asBob.saveSSHProfile(vaultId, { id: 'p3', name: 'db', host: 'db-02', username: 'ops', authType: 'privateKey' });
+    });
+
     it('attributes addedBy/updatedBy to whoever actually unlocked the vault, never a caller-supplied value', async () => {
       // There is no `addedBy` parameter on addMember at all — this is the whole point of the fix:
       // the audit trail can't be spoofed by whatever string a (potentially compromised) renderer
@@ -1942,6 +1962,19 @@ describe('TeamVaultService', () => {
       await service.deleteK8sProfile(vaultId, 'k1');
       payload = await service.getPayload(vaultId);
       expect(payload.k8s?.map((p) => p.id)).toEqual(['k2']);
+    });
+
+    it('lets only an admin move a shared cluster to another server or turn off its certificate check', async () => {
+      const first = makeService();
+      const vaultId = (await first.createVault('alice@piv:abc', 'age1yubikey1alice')).vaultId;
+      await first.addMember(vaultId, 'bob@piv:def', 'age1yubikey1bob', 'member');
+      await first.saveK8sProfile(vaultId, k8s('k1'));
+      const asBob = new TeamVaultService({ cryptoService: fakeCrypto(), baseDir: tempDir });
+      await asBob.unlock(vaultId, 'bob@piv:def', '/tmp/fake-bob-identity.txt');
+      await asBob.saveK8sProfile(vaultId, k8s('k1', 'Prod (team A)'));
+      await expect(asBob.saveK8sProfile(vaultId, { ...k8s('k1'), server: 'https://bob.example:6443' })).rejects.toThrow('Only a Team Vault admin');
+      await expect(asBob.saveK8sProfile(vaultId, { ...k8s('k1'), insecureSkipTlsVerify: true })).rejects.toThrow('Only a Team Vault admin');
+      await first.saveK8sProfile(vaultId, { ...k8s('k1'), server: 'https://api2.example.com:6443' });
     });
 
     it('never stores a kubeconfig context, a tombstone or unknown fields such as a token', async () => {

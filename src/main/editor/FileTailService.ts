@@ -30,6 +30,9 @@ interface ActiveTailSession {
 }
 
 export class FileTailService {
+  /** Most bytes one poll reads; a larger burst is skipped down to its last part, with a notice in the output. */
+  public static MAX_POLL_BYTES = 1024 * 1024;
+
   private activeTails = new Map<string, ActiveTailSession>();
 
   /**
@@ -82,73 +85,30 @@ export class FileTailService {
     const tailId = crypto.randomUUID();
     let stopFn: () => void = () => {};
 
-    // Check if SFTP provider is available and supports exec stream
+    // SFTP: stream `tail -f` over ssh (SFTPStorageProvider.createExecStream, through the session's control socket).
     let startedSftpTail = false;
     if (provider.type === 'sftp' && provider instanceof SFTPStorageProvider) {
       try {
         await provider.ensureConnected();
         const resolvedPath = await provider.resolveRemotePath(remotePath);
         const cmd = `tail -n 0 -f ${quotePathOperand(resolvedPath)}`;
-
-        if (typeof (provider as any).createExecStream === 'function') {
+        const stream = provider.createExecStream(cmd);
+        const decoder = new StringDecoder('utf8'); // a character may be split across two chunks
+        stream.on('data', (data: Buffer) => {
+          const chunk = decoder.write(data);
+          if (chunk) onData({ tailId, chunk });
+        });
+        stream.on('error', (err: any) => {
+          onError({ tailId, error: err?.message || String(err) });
+        });
+        stopFn = () => {
           try {
-            const stream = (provider as any).createExecStream(cmd);
-            stream.on('data', (data: Buffer) => {
-              onData({ tailId, chunk: data.toString('utf-8') });
-            });
-            stream.on('error', (err: any) => {
-              onError({ tailId, error: err.message || String(err) });
-            });
-            stopFn = () => {
-              try {
-                (stream as any).destroy?.();
-              } catch {
-                // ignore
-              }
-            };
-            startedSftpTail = true;
+            (stream as any).destroy?.();
           } catch {
-            startedSftpTail = false;
+            // ignore
           }
-        }
-
-        if (!startedSftpTail) {
-          const rawSshClient = (provider as any).client?.client;
-          if (rawSshClient && typeof rawSshClient.exec === 'function') {
-            await new Promise<void>((resolve, reject) => {
-              rawSshClient.exec(cmd, (err: any, stream: any) => {
-                if (err || !stream) {
-                  return reject(err || new Error('Failed to open exec stream'));
-                }
-
-                const decoder = new StringDecoder('utf8'); // a character may be split across two chunks
-                stream.on('data', (data: Buffer) => {
-                  const chunk = decoder.write(data);
-                  if (chunk) onData({ tailId, chunk });
-                });
-
-                stream.stderr?.on('data', (data: Buffer) => {
-                  const errStr = data.toString('utf-8');
-                  if (errStr.trim()) {
-                    onError({ tailId, error: errStr });
-                  }
-                });
-
-                stopFn = () => {
-                  try {
-                    stream.close?.();
-                    stream.destroy?.();
-                  } catch {
-                    // ignore
-                  }
-                };
-
-                startedSftpTail = true;
-                resolve();
-              });
-            });
-          }
-        }
+        };
+        startedSftpTail = true;
       } catch (sftpErr) {
         filetailserviceLog.warn('SFTP tail command execution failed, falling back to polling:', sftpErr);
         startedSftpTail = false;
@@ -159,7 +119,7 @@ export class FileTailService {
     if (!startedSftpTail) {
       let lastSize = size;
       let isPolling = false;
-      const decoder = new StringDecoder('utf8');
+      let decoder = new StringDecoder('utf8');
 
       const intervalId = setInterval(async () => {
         if (isPolling) return;
@@ -167,17 +127,33 @@ export class FileTailService {
         try {
           const currentStat = await provider.stat(remotePath);
           if (currentStat.size > lastSize) {
+            // Read at most MAX_POLL_BYTES per poll: if more was appended, skip to the last part of it.
+            let readFrom = lastSize;
+            const appended = currentStat.size - lastSize;
+            const skipped = appended > FileTailService.MAX_POLL_BYTES ? appended - FileTailService.MAX_POLL_BYTES : 0;
+            if (skipped > 0) {
+              readFrom = currentStat.size - FileTailService.MAX_POLL_BYTES;
+              decoder = new StringDecoder('utf8'); // the bytes before the gap are not continued
+            }
             // The end of a range is inclusive: the last byte of the file is at size - 1.
-            const rangeStream = await provider.createReadStream(remotePath, lastSize, currentStat.size - 1);
+            const rangeStream = await provider.createReadStream(remotePath, readFrom, currentStat.size - 1);
             const chunks: Buffer[] = [];
             await new Promise<void>((resolve, reject) => {
               rangeStream.on('data', (chunk: Buffer) => chunks.push(chunk));
               rangeStream.on('end', () => resolve());
               rangeStream.on('error', (err) => reject(err));
             });
-            const newBuf = Buffer.concat(chunks);
+            let newBuf = Buffer.concat(chunks);
             lastSize = currentStat.size;
-            const text = decoder.write(newBuf);
+            let notice = '';
+            if (skipped > 0) {
+              // Do not start inside a multi-byte character (UTF-8 continuation bytes are 10xxxxxx).
+              let cut = 0;
+              while (cut < newBuf.length && cut < 3 && (newBuf[cut] & 0xc0) === 0x80) cut++;
+              newBuf = newBuf.subarray(cut);
+              notice = `\n… ${skipped + cut} bytes skipped …\n`;
+            }
+            const text = notice + decoder.write(newBuf);
             if (text) {
               onData({ tailId, chunk: text });
             }

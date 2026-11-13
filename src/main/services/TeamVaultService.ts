@@ -167,10 +167,9 @@ export class TeamVaultRotationProofError extends Error {
 
 /** A smartcard/FIDO2 PIN is never written to disk anywhere in this app (see
  * `ProfileStore.persist()`'s identical rule for local profiles) — dropped unconditionally on
- * every save, regardless of who's calling. Every other field on a shared profile (including
- * `pkcs11LibPath`/`agentPath`/`privateKeyPath`/`customCaPath`) is just a string that either
- * resolves on a given member's machine or silently doesn't — none of them execute anything on
- * their own, so there's nothing else to strip here. */
+ * every save, regardless of who's calling. Fields that act on a teammate's own machine
+ * (`pkcs11LibPath` is loaded by ssh, `agentPath`, forwarding, tunnels) are guarded separately,
+ * see `sshReachesBackChanged`. */
 function withoutPin(profile: SSHConnectionConfig): SSHConnectionConfig {
   if (!('pin' in profile)) return profile;
   const { pin: _pin, ...rest } = profile;
@@ -250,12 +249,38 @@ function sshRoutingChanged(incoming: SSHConnectionConfig, existing: SSHConnectio
  * `sshRoutingChanged`'s doc comment — that's an exfiltration path, not a harmless edit).
  * Otherwise the previously stored secret value (if any) is kept, discarding whatever
  * blank/redacted value the non-admin's own copy of the field held. */
+/** The fields of a shared SSH profile that reach back into the machine of whoever connects with
+ * it: ssh loads `pkcs11LibPath` as a library, `agentPath`/`forwardAgent` hand over their keys,
+ * X11 and tunnels (`-R` included) open their screen and their network to the server, and
+ * `extraOptions` can say any of these again. Only an admin may set or change them, on every
+ * shared profile, new or old, with or without a stored secret. */
+const SSH_REACH_BACK_FIELDS = ['pkcs11LibPath', 'agentPath', 'privateKeyPath', 'forwardAgent', 'x11Forwarding', 'x11Display', 'tunnels', 'extraOptions'] as const;
+const emptyish = (v: unknown): unknown =>
+  v === undefined || v === null || v === '' || v === false || (Array.isArray(v) && v.length === 0) ||
+  (typeof v === 'object' && v !== null && !Array.isArray(v) && Object.keys(v).length === 0)
+    ? null
+    : v;
+const sameValue = (a: unknown, b: unknown): boolean => JSON.stringify(emptyish(a)) === JSON.stringify(emptyish(b));
+export function sshReachesBackChanged(incoming: SSHConnectionConfig, existing: SSHConnectionConfig | undefined): boolean {
+  return SSH_REACH_BACK_FIELDS.some((f) => !sameValue(incoming[f], existing?.[f]));
+}
+/** Whether a profile already hands something of the connecting machine to its server: then where
+ * it connects is as sensitive as a stored password. */
+function sshReachesBack(profile: SSHConnectionConfig | undefined): boolean {
+  return Boolean(profile?.forwardAgent || profile?.x11Forwarding || profile?.tunnels?.some((t) => (t as { type?: string }).type === 'remote'));
+}
+
 function guardSshSecretWrite(incoming: SSHConnectionConfig, existing: SSHConnectionConfig | undefined): SSHConnectionConfig {
+  if (sshReachesBackChanged(incoming, existing)) {
+    throw new Error(
+      'Only a Team Vault admin can set agent forwarding, X11, tunnels, key or library paths, or extra ssh options on a shared profile',
+    );
+  }
   if (
     isSecretChangeAttempt(incoming.password, existing?.password) ||
     isSecretChangeAttempt(incoming.passphrase, existing?.passphrase) ||
     isSecretChangeAttempt(incoming.proxy?.password, existing?.proxy?.password) ||
-    (hasSshSecret(existing) && existing && sshRoutingChanged(incoming, existing))
+    ((hasSshSecret(existing) || sshReachesBack(existing)) && existing && sshRoutingChanged(incoming, existing))
   ) {
     throw new Error('Only a Team Vault admin can set or change a profile password, or where it connects');
   }
@@ -1180,6 +1205,14 @@ export class TeamVaultService {
       const file = await this.requireFile(vaultId);
       const vaultKey = this.requireUnlocked(vaultId);
       const payload = await this.decryptPayload(file, vaultKey);
+      // Teammates log in to the server a template names, with their own token: where it points,
+      // and whether its certificate is checked, are an admin's to set.
+      const existing = (payload.k8s ?? []).find((p) => p.id === clean.id && !p.deletedAt);
+      const turnsOffTls = Boolean(clean.insecureSkipTlsVerify) && !existing?.insecureSkipTlsVerify;
+      const moves = Boolean(existing) && existing!.server !== clean.server;
+      if ((turnsOffTls || moves) && !this.isSelfAdmin(file, this.requireUnlockedRecipientId(vaultId))) {
+        throw new Error('Only a Team Vault admin can change the server of a shared cluster, or turn off its certificate check');
+      }
       const k8s = upsertK8sProfile(payload.k8s ?? [], clean, new Date().toISOString());
       await this.persistPayload(vaultId, file, vaultKey, { ...payload, k8s });
     });

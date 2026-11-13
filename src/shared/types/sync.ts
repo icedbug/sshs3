@@ -84,6 +84,8 @@ export interface ProfileSyncStatus {
   topologyUnlocked: boolean;
   credentialsUnlocked: boolean;
   lastSyncAt?: string;
+  /** Why the last automatic push failed, until one succeeds. */
+  autoSyncError?: string;
   comparison?: SyncComparisonResult;
   /** Whether automatic synchronization (auto-push on changes) is enabled. */
   autoSync?: boolean;

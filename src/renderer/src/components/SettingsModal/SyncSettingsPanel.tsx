@@ -467,6 +467,11 @@ export const SyncSettingsPanel: React.FC = () => {
 
           <div className="text-xs text-txt-muted pt-1 border-t border-divider">
             Last sync: {formatTimestampWithRelative(status.lastSyncAt)}
+            {status.autoSyncError && (
+              <div role="alert" className="text-red-400 pt-1">
+                Automatic sync failed: {status.autoSyncError}
+              </div>
+            )}
           </div>
 
           <div className="flex items-center justify-between pt-2 border-t border-divider">

@@ -13,8 +13,9 @@ export interface FileEntry {
    * LocalStorageProvider and SFTPStorageProvider; storage types without a
    * real symlink concept (S3, K8s pod exec) leave it undefined. Transfer's
    * directory scan skips any entry with this set — see TransferPipeline's
-   * scanDirectory — to avoid following a symlink outside the intended
-   * source tree or into a cycle (see the H6 code-review finding).
+   * scanDirectory: a link to a regular file is copied as that file; links to
+   * folders are never followed (no escaping the source tree, no cycles) and are
+   * counted as skipped (see the H6 code-review finding).
    */
   isSymlink?: boolean;
   mtime?: string; // ISO 8601 string yyyy-mm-dd HH:mm or ISO

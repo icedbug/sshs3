@@ -440,6 +440,17 @@ export async function transferFile(options: TransferOptions): Promise<void> {
   }
 }
 
+/**
+ * Hidden temporary sibling of `targetPath` (".<name>.sshs3-part-<random>") that an overwrite is written to before it
+ * is renamed over the target.
+ */
+export function tempSiblingPath(providerType: StorageType, targetPath: string): string {
+  const name = getBaseName(targetPath) || 'file';
+  const tempName = `.${name}.sshs3-part-${crypto.randomBytes(6).toString('hex')}`;
+  const sep = providerType === 'local' ? Math.max(targetPath.lastIndexOf('/'), targetPath.lastIndexOf(path.sep)) : targetPath.lastIndexOf('/');
+  return sep >= 0 ? `${targetPath.slice(0, sep + 1)}${tempName}` : tempName;
+}
+
 async function executeTransferFile(options: TransferOptions): Promise<void> {
   if (options.signal?.aborted) {
     const err = new Error('Transfer aborted');
@@ -496,6 +507,8 @@ async function executeTransferFile(options: TransferOptions): Promise<void> {
   });
   let writeStream: NodeJS.WritableStream | undefined;
   let earlyWriteError: Error | undefined;
+  // Path the bytes are written to: the final path, or a temporary sibling when an existing file is being replaced.
+  let writePath = resolvedTargetPath;
 
   try {
     if (options.signal?.aborted) {
@@ -504,8 +517,19 @@ async function executeTransferFile(options: TransferOptions): Promise<void> {
       throw err;
     }
 
+    // Overwriting an existing file: write a temporary sibling first and rename it over the target only once
+    // the copy is complete and verified, so a failed or cancelled overwrite leaves the original file in place.
+    // S3 uploads only replace the object when they finish, so S3 keeps writing straight to the key.
+    const existingTarget =
+      options.targetProvider.type === 's3'
+        ? undefined
+        : await options.targetProvider.stat(resolvedTargetPath).catch(() => undefined);
+    if (existingTarget && !existingTarget.isDirectory) {
+      writePath = tempSiblingPath(options.targetProvider.type, resolvedTargetPath);
+    }
+
     writeStream = await options.targetProvider.createWriteStream(
-      resolvedTargetPath,
+      writePath,
       { size: totalBytes }
     );
     // Same reasoning as readStream above, for the equivalent gap before
@@ -549,7 +573,7 @@ async function executeTransferFile(options: TransferOptions): Promise<void> {
     if (options.verifyIntegrity !== false) {
       let targetStat: FileEntry | undefined;
       try {
-        targetStat = await options.targetProvider.stat(resolvedTargetPath);
+        targetStat = await options.targetProvider.stat(writePath);
       } catch (statErr: any) {
         throw new Error(
           `Transfer integrity verification failed: could not stat target file "${fileName}": ${statErr?.message || statErr}`,
@@ -577,7 +601,7 @@ async function executeTransferFile(options: TransferOptions): Promise<void> {
       if (options.verifyChecksum) {
         const algo = typeof options.verifyChecksum === 'string' ? options.verifyChecksum : 'sha256';
         if (typeof options.targetProvider.getChecksum === 'function') {
-          const targetChecksum = await options.targetProvider.getChecksum(resolvedTargetPath, algo);
+          const targetChecksum = await options.targetProvider.getChecksum(writePath, algo);
           const sourceChecksum = algo === 'md5' ? meter.md5 : meter.sha256;
           if (targetChecksum && sourceChecksum && targetChecksum.toLowerCase() !== sourceChecksum.toLowerCase()) {
             throw new Error(
@@ -586,6 +610,15 @@ async function executeTransferFile(options: TransferOptions): Promise<void> {
           }
         }
       }
+    }
+
+    if (writePath !== resolvedTargetPath) {
+      // Keep the replaced file's permissions (a new file gets the default mode). Best effort.
+      const mode = existingTarget?.permissions;
+      if (mode && /^[0-7]{3,4}$/.test(mode) && typeof options.targetProvider.chmod === 'function') {
+        await options.targetProvider.chmod(writePath, mode).catch(() => {});
+      }
+      await options.targetProvider.rename(writePath, resolvedTargetPath);
     }
 
     if (options.emitCompleted ?? true) {
@@ -613,16 +646,17 @@ async function executeTransferFile(options: TransferOptions): Promise<void> {
     // or replaced the target. A cancelled S3 overwrite, a read-only file that
     // could not be opened or an SFTP open that never happened leave the
     // original in place, and deleting it would destroy the user's data.
+    // When replacing an existing file, writePath is the temporary sibling: only that is removed, never the original.
     const settled = writeStream ? await settleTargetTouched(writeStream, options.targetSettleTimeoutMs) : true;
     if (writeStream && wasTargetTouched(writeStream)) {
-      await options.targetProvider.delete(resolvedTargetPath, false).catch(() => {});
+      await options.targetProvider.delete(writePath, false).catch(() => {});
     } else if (writeStream && !settled) {
       // The server has not answered the open yet and may still truncate the file: clean up if it did, without holding up the error.
       whenTargetSettledLater(writeStream, async () => {
         if (!wasTargetTouched(writeStream)) return;
         // Only the empty file our own late open left behind: a newer transfer may have written the path since.
-        const now = await options.targetProvider.stat(resolvedTargetPath).catch(() => null);
-        if (now && now.size === 0) await options.targetProvider.delete(resolvedTargetPath, false).catch(() => {});
+        const now = await options.targetProvider.stat(writePath).catch(() => null);
+        if (now && now.size === 0) await options.targetProvider.delete(writePath, false).catch(() => {});
       });
     }
     throw err;
@@ -639,6 +673,8 @@ interface ScanResult {
   folders: string[];
   files: ScannedFile[];
   totalBytes: number;
+  /** Symbolic links that were not copied: links to folders, broken links, links to special files. */
+  skippedLinks: number;
 }
 
 async function scanDirectory(
@@ -660,6 +696,7 @@ async function scanDirectory(
     folders: [],
     files: [],
     totalBytes: 0,
+    skippedLinks: 0,
   };
 
   const entries = await sourceProvider.list(currentSourcePath);
@@ -676,22 +713,32 @@ async function scanDirectory(
     if (!baseName || baseName === '.' || baseName === '..') {
       continue;
     }
-    // Never follow a symlink during a directory transfer (H6 code-review
-    // finding): entry.isDirectory for a symlinked directory comes from a
-    // followed stat(), so recursing into it can escape the source tree
-    // entirely (a link to "/" or a parent) or spin forever on a symlink
-    // cycle, since no cycle detection exists here. Matches the same
-    // skip-symlinks policy LocalContentSearchService already uses.
+    const childTargetPath = joinPaths(targetType, currentTargetPath, baseName);
+    const childSourcePath =
+      entry.path || joinPaths(sourceProvider.type, currentSourcePath, baseName);
+    // Never recurse through a symlink during a directory transfer (H6 code-review
+    // finding): that can escape the source tree entirely (a link to "/" or a
+    // parent) or spin forever on a symlink cycle, since no cycle detection
+    // exists here. A link to a regular file is copied as that file's content
+    // (the link is followed for files only); links to folders, broken links
+    // and links to special files are skipped and counted, so the job can say so.
     if (entry.isSymlink) {
+      const linked = await sourceProvider.stat(childSourcePath).catch(() => undefined);
+      if (!linked || linked.isDirectory || linked.isSpecial) {
+        result.skippedLinks++;
+        continue;
+      }
+      state.filesCount++;
+      const size = linked.size > 0 ? linked.size : 0;
+      result.files.push({ sourcePath: childSourcePath, targetPath: childTargetPath, size });
+      result.totalBytes += size;
+      onScanProgress?.(state.filesCount, baseName);
       continue;
     }
     // FIFOs, sockets and devices cannot be copied: reading a FIFO blocks until something writes to it (M7).
     if (entry.isSpecial) {
       continue;
     }
-    const childTargetPath = joinPaths(targetType, currentTargetPath, baseName);
-    const childSourcePath =
-      entry.path || joinPaths(sourceProvider.type, currentSourcePath, baseName);
 
     if (entry.isDirectory) {
       result.folders.push(childTargetPath);
@@ -708,6 +755,7 @@ async function scanDirectory(
       result.folders.push(...subResult.folders);
       result.files.push(...subResult.files);
       result.totalBytes += subResult.totalBytes;
+      result.skippedLinks += subResult.skippedLinks;
     } else {
       state.filesCount++;
       result.files.push({
@@ -793,6 +841,11 @@ export async function transferDirectory(
     await options.targetProvider.createFolder(folder);
   }
 
+  const doneMessage =
+    scan.skippedLinks > 0
+      ? `Done — ${scan.skippedLinks} symbolic ${scan.skippedLinks === 1 ? 'link' : 'links'} skipped (links to folders or missing files are not copied)`
+      : 'Done';
+
   if (scan.files.length === 0) {
     options.onProgress?.({
       jobId: options.jobId ?? 'directory-transfer',
@@ -802,7 +855,7 @@ export async function transferDirectory(
       percentage: 100,
       bytesPerSecond: 0,
       status: 'completed',
-      statusMessage: 'Done',
+      statusMessage: doneMessage,
     });
     return;
   }
@@ -896,7 +949,7 @@ export async function transferDirectory(
     percentage: 100,
     bytesPerSecond: 0,
     status: 'completed',
-    statusMessage: 'Done',
+    statusMessage: doneMessage,
   });
 }
 

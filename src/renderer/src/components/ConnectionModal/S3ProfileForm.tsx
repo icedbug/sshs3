@@ -399,21 +399,20 @@ export const S3ProfileForm: React.FC<S3ProfileFormProps> = ({
         <label className="flex items-center gap-2 text-xs text-txt-primary cursor-pointer">
           <input
             type="checkbox"
-            checked={config.forcePathStyle ?? false}
+            // Same default as S3StorageProvider (path-style when unset).
+            checked={config.forcePathStyle ?? true}
             onChange={(e) => update('forcePathStyle', e.target.checked)}
             className="h-4 w-4 rounded border-border-subtle bg-app-input text-sky-600 focus:ring-sky-500"
           />
           <span>Path-style addressing (commonly required for MinIO / NetApp)</span>
         </label>
-        <label className="flex items-center gap-2 text-xs text-txt-primary cursor-pointer">
-          <input
-            type="checkbox"
-            checked={config.ssl ?? true}
-            onChange={(e) => update('ssl', e.target.checked)}
-            className="h-4 w-4 rounded border-border-subtle bg-app-input text-sky-600 focus:ring-sky-500"
-          />
-          <span>Use SSL/TLS</span>
-        </label>
+        {/* Encryption follows the endpoint's scheme (the stored `ssl` flag is not used by the S3 client). */}
+        {/^http:\/\//i.test((config.endpoint ?? '').trim()) && (
+          <p role="status" className="flex items-center gap-1.5 text-xs text-amber-500">
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+            This endpoint uses http: keys and data are sent unencrypted. Use an https:// endpoint to encrypt them.
+          </p>
+        )}
         <label className="flex items-center gap-2 text-xs text-txt-primary cursor-pointer">
           <input
             type="checkbox"

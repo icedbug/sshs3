@@ -439,7 +439,8 @@ export class TransferQueue extends EventEmitter {
         job.progress.status = 'completed';
         job.progress.percentage = 100;
         job.completedAt = new Date();
-        job.progress.statusMessage = 'Done';
+        // The pipeline may have said more ("Done — 2 symbolic links skipped"): keep it.
+        job.progress.statusMessage = job.progress.statusMessage?.startsWith('Done') ? job.progress.statusMessage : 'Done';
         this.emit('progress', job.progress, job);
         this.emit('completed', job);
         context.resolveWait(job);

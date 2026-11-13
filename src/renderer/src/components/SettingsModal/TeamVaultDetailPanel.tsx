@@ -296,7 +296,7 @@ export const TeamVaultDetailPanel: React.FC<TeamVaultDetailPanelProps> = ({ vaul
   const handleRemoveMember = async (recipientId: string) => {
     if (!(await confirm({
       title: 'Remove member',
-      message: `Remove "${recipientId}" from the Team Vault? They keep whatever they already synced, but lose access to anything added after this.`,
+      message: `Remove "${recipientId}" from the Team Vault? They lose access to anything added after this, but may still know every password and key that was shared while they were a member, and the bucket credentials. Rotate those afterwards.`,
     }))) {
       return;
     }

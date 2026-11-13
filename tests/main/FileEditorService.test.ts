@@ -507,7 +507,7 @@ describe('FileEditorService', () => {
       await slowDebounce.dispose();
     });
 
-    it('does not report an error for a pending upload after the session was disposed', async () => {
+    it('uploads a pending save when the session is disposed, without reporting an error', async () => {
       const slowDebounce = new FileEditorService({ shell: mockShell, baseTempDir: tempBaseDir, uploadDebounceMs: 100 });
       remoteProvider();
       const events: Array<{ status: string }> = [];
@@ -518,7 +518,7 @@ describe('FileEditorService', () => {
       await slowDebounce.dispose();
       await sleep(250);
 
-      expect(events).toEqual([]);
+      expect(events.filter((e) => e.status === 'error')).toEqual([]);
     });
   });
 

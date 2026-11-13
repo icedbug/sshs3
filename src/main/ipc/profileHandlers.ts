@@ -1,4 +1,3 @@
-import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import { dialog as electronDialog } from 'electron';
 import { importSshConfigFile } from '../services/SshConfigImporter';
@@ -6,6 +5,8 @@ import { IPC_CHANNELS } from '../../shared/types/ipc';
 import type { SSHConnectionConfig } from '../../shared/types/ssh';
 import type { S3Config } from '../../shared/types/storage';
 import type { IpcBridge } from '../IpcBridge';
+import { planProfileImport } from '../profile/profileImport';
+import { S3_FIELD_SPLIT, SSH_FIELD_SPLIT } from '../services/ProfileSyncService';
 import { getDemoS3Profiles, getDemoServers, isDemoMode } from '../ai/hub/demoWorkspace';
 
 /** The part of IpcBridge this handler group may use. */
@@ -201,33 +202,36 @@ export function registerProfileHandlers(bridge: ProfileHost): void {
       const s3List = Array.isArray(parsed.s3) ? parsed.s3 : [];
       const foldersList = Array.isArray(parsed.folders) ? parsed.folders : [];
 
-      let count = 0;
       for (const f of foldersList) {
         if (typeof f === 'string' && f.trim()) {
           await bridge.profileStore.saveFolder(f.trim()).catch(() => {});
         }
       }
-      for (const ssh of sshList) {
-        if (ssh && typeof ssh === 'object' && ssh.host) {
-          const id = ssh.id || crypto.randomUUID();
-          await bridge.profileStore.saveSSH({ ...ssh, id });
-          count++;
-        }
-      }
-      for (const s3 of s3List) {
-        if (s3 && typeof s3 === 'object' && s3.name) {
-          const id = s3.id || crypto.randomUUID();
-          await bridge.profileStore.saveS3({ ...s3, id });
-          count++;
-        }
-      }
+      const current = await bridge.profileStore.getProfiles();
+      const ssh = planProfileImport(sshList, current.ssh, {
+        valid: (p) => typeof p.host === 'string' && Boolean(p.host),
+        secretFields: ['password', 'passphrase'],
+        localOnlyFields: SSH_FIELD_SPLIT.excludedFields as string[],
+        identityFields: ['host', 'port', 'username'],
+      });
+      const s3 = planProfileImport(s3List, current.s3, {
+        valid: (p) => typeof p.name === 'string' && Boolean(p.name),
+        secretFields: ['accessKeyId', 'secretAccessKey', 'sessionToken'],
+        localOnlyFields: S3_FIELD_SPLIT.excludedFields as string[],
+        identityFields: ['endpoint', 'bucket'],
+      });
+      for (const p of ssh.save) await bridge.profileStore.saveSSH(p);
+      for (const p of s3.save) await bridge.profileStore.saveS3(p);
+      const added = ssh.added + s3.added;
+      const updated = ssh.updated + s3.updated;
+      const count = added + updated;
 
       bridge.scheduleAutoSync();
       if (sshList.length > 0) {
         if (!isDemoMode()) void bridge.profileSyncService.autoSyncLocalSshConfig();
       bridge.aiHub?.changed();
       }
-      return { count };
+      return { count, added, updated };
     }
   );
 }

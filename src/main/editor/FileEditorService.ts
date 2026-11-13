@@ -309,6 +309,14 @@ export class FileEditorService {
       throw new Error(`Storage provider not found: ${providerId}`);
     }
 
+    // Checked for local files too: shell.openPath would run an executable rather than open it for editing.
+    const requestedName = toSafeLocalFileName(remotePath);
+    if (isBlockedExecutableType(requestedName)) {
+      throw new Error(
+        `Refusing to open "${requestedName}" with the OS default handler: this file type would be executed. Use the built-in editor instead.`
+      );
+    }
+
     // Local filesystem: open directly in OS default application
     if (provider.type === 'local' && provider instanceof LocalStorageProvider) {
       const fullPath = provider.resolvePath(remotePath);
@@ -335,12 +343,6 @@ export class FileEditorService {
     if (path.dirname(tempFilePath) !== tempDir) {
       throw new Error(`Refusing to write outside the temp directory: ${remotePath}`);
     }
-    if (isBlockedExecutableType(baseName)) {
-      throw new Error(
-        `Refusing to open "${baseName}" with the OS default handler: this file type would be executed. Use the built-in editor instead.`
-      );
-    }
-
     // mode: 0o700 restricts this to the owning user. On a shared/multi-user
     // machine, the default (umask-derived, typically 0o755) would let any
     // other local user list this directory — defeating the random UUID as a
@@ -537,10 +539,27 @@ export class FileEditorService {
    * Disposes all active watchers and temporary directories.
    */
   public async dispose(): Promise<void> {
-    for (const session of this.sessions.values()) {
+    const sessions = Array.from(this.sessions.values());
+    for (const session of sessions) {
       session.closed = true;
-      session.uploader?.dispose();
       session.watcher?.close();
+    }
+    // A save made just before quitting may still be waiting out the debounce: upload it (and so report a failure)
+    // rather than drop it. One shared bound, so an unreachable server cannot hold up the shutdown.
+    const flushes = sessions.flatMap((session) => (session.uploader ? [session.uploader.flush().catch(() => {})] : []));
+    if (flushes.length > 0) {
+      let timer: NodeJS.Timeout | undefined;
+      await Promise.race([
+        Promise.all(flushes),
+        new Promise((resolve) => {
+          timer = setTimeout(resolve, CLOSE_FLUSH_TIMEOUT_MS);
+          timer.unref?.();
+        }),
+      ]);
+      clearTimeout(timer);
+    }
+    for (const session of sessions) {
+      session.uploader?.dispose();
       if (session.tempDir) {
         try {
           await fsp.rm(session.tempDir, { recursive: true, force: true });

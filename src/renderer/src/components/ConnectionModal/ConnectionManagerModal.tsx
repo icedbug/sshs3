@@ -623,7 +623,10 @@ export const ConnectionManagerModal: React.FC<ConnectionManagerModalProps> = ({
       const res = await window.multissh.profilesImportJson();
       if (res && res.count > 0) {
         await load();
-        window.alert(`Successfully imported ${res.count} profiles!`);
+        window.alert(
+          `Imported ${res.added ?? res.count} new profile${(res.added ?? res.count) === 1 ? '' : 's'}` +
+            (res.updated ? ` and updated ${res.updated}. Saved passwords and keys were kept.` : '.'),
+        );
       }
     } catch (err) {
       setError(describeIpcError(err, 'Failed to import profiles'));

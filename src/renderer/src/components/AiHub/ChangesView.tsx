@@ -343,6 +343,7 @@ export function ChangesView({
                         </>
                       )}
                       {c && decision(c) && <small data-testid="change-decision">{decision(c)}</small>}
+                      {c?.decisionNote && <small>Note with the answer: {c.decisionNote}</small>}
                     {c && <ChangeProof change={c} />}
                       {c?.riskReason && (
                         <small>Safety check: {c.riskReason}</small>

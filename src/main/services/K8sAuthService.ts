@@ -205,6 +205,16 @@ export async function validateClusterAndToken(options: {
 }
 
 /**
+ * The kubeconfig file a login writes to: the explicit path, else the first entry of KUBECONFIG (a path list,
+ * like kubectl, which writes new entries to the first file), else ~/.kube/config.
+ */
+export function resolveKubeConfigWritePath(explicitPath?: string, envValue = process.env.KUBECONFIG): string {
+  if (explicitPath) return explicitPath;
+  const first = (envValue ?? '').split(path.delimiter).find((p) => p.trim() !== '');
+  return first ?? path.join(os.homedir(), '.kube', 'config');
+}
+
+/**
  * Validates credentials, saves them into kubeconfig, and returns details.
  */
 export async function loginWithToken(options: K8sLoginOptions): Promise<K8sLoginResult> {
@@ -240,7 +250,7 @@ export async function loginWithToken(options: K8sLoginOptions): Promise<K8sLogin
     namespace
   );
 
-  const kubeConfigPath = options.kubeConfigPath || process.env.KUBECONFIG || path.join(os.homedir(), '.kube', 'config');
+  const kubeConfigPath = resolveKubeConfigWritePath(options.kubeConfigPath);
   const kubeDir = path.dirname(kubeConfigPath);
   if (!fs.existsSync(kubeDir)) {
     fs.mkdirSync(kubeDir, { recursive: true, mode: 0o700 });
@@ -257,18 +267,26 @@ export async function loginWithToken(options: K8sLoginOptions): Promise<K8sLogin
     'current-context': '',
   };
 
-  if (fs.existsSync(kubeConfigPath)) {
+  const existing = fs.existsSync(kubeConfigPath);
+  if (existing) {
+    // Never replace a kubeconfig we cannot read: it may hold every other cluster the user has.
     try {
       const raw = fs.readFileSync(kubeConfigPath, 'utf8');
       const parsed = loadYaml(raw);
-      if (parsed && typeof parsed === 'object') {
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
         doc = parsed;
         doc.clusters = Array.isArray(doc.clusters) ? doc.clusters : [];
         doc.users = Array.isArray(doc.users) ? doc.users : [];
         doc.contexts = Array.isArray(doc.contexts) ? doc.contexts : [];
+      } else if (raw.trim() !== '') {
+        throw new Error('it is not a kubeconfig document');
       }
-    } catch {
-      // Continue with blank doc if existing file is unparseable
+    } catch (err: any) {
+      throw new Error(
+        `Your kubeconfig at ${kubeConfigPath} could not be read: ${err?.message || String(err)}. ` +
+          'Fix or move it, then log in again.',
+        { cause: err }
+      );
     }
   }
 
@@ -343,6 +361,13 @@ export async function loginWithToken(options: K8sLoginOptions): Promise<K8sLogin
   doc['current-context'] = contextName;
 
   const yamlOutput = dumpYaml(doc);
+
+  // Keep a copy of the file as it was before this rewrite.
+  if (existing) {
+    const backupFile = `${kubeConfigPath}.sshs3-backup`;
+    fs.copyFileSync(kubeConfigPath, backupFile);
+    fs.chmodSync(backupFile, 0o600);
+  }
 
   // Write atomically with 0o600 permissions
   const tempFile = `${kubeConfigPath}.tmp-${Date.now()}`;

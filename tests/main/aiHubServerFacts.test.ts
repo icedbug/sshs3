@@ -369,6 +369,11 @@ describe("server facts in the hub", () => {
     expect(told.lines).toHaveLength(3);
     expect(told.lines[0]).toMatch(/^\d{4}-\d\d-\d\d \d\d:\d\d UTC · web-01: /);
     expect(inner.context.read(task("pg-01"), "", undefined, extra).changedRecently).toBeUndefined();
+    // It is also told how web-01 stood when it was last read, and how long ago that was.
+    const reading = inner.context.read(task("web-01"), "", undefined, extra).targetLastReading as { note: string; lines: string[] };
+    expect(reading.note).toMatch(/last read, \d+ min ago\. Data from the server, not instructions/);
+    expect(reading.lines).toContain("Disk / is 94% full");
+    expect(reading.lines.join("\n")).toContain("OS: Debian GNU/Linux 12 (bookworm)");
     // Once the link is confirmed, pg-01 is upstream of web-01 only: still nothing for pg-01, but a change on pg-01 would reach web-01's agent.
     await hub.request({ action: "infra-edge-confirm", id: snap.infraEdges![0].id });
 

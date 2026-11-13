@@ -514,7 +514,7 @@ export function createMultiSSHApi(ipcRenderer: IpcRendererTransport): MultiSSHAp
     profilesExportJson: (): Promise<{ count: number; filePath: string } | null> =>
       ipcRenderer.invoke(IPC_CHANNELS.PROFILES_EXPORT_JSON),
 
-    profilesImportJson: (): Promise<{ count: number }> =>
+    profilesImportJson: (): Promise<{ count: number; added?: number; updated?: number }> =>
       ipcRenderer.invoke(IPC_CHANNELS.PROFILES_IMPORT_JSON),
 
     // Session

@@ -1,6 +1,6 @@
 ## Team Vault: Shared Connection Profiles
 
-**Team Vault** lets operations teams securely share SSH and S3 connection profiles (including server hostnames, accounts, passwords, and secret access keys) through any standard S3 bucket. There is no shared master password, no centralized sshs3 cloud service, and no user tracking: every member unlocks the vault with their own hardware **YubiKey**. Removing a team member cryptographically revokes access through automatic key rotation, and the S3 storage backend only ever sees authenticated ciphertext.
+**Team Vault** lets operations teams securely share SSH and S3 connection profiles (including server hostnames, accounts, passwords, and secret access keys) through any standard S3 bucket. There is no shared master password, no centralized sshs3 cloud service, and no user tracking: every member unlocks the vault with their own hardware **YubiKey**. Removing a team member re-keys the vault so they cannot read later changes, and the S3 storage backend only ever sees authenticated ciphertext. Every member can decrypt the whole vault, secrets included; see [Roles & Secret Protection](#4-roles--secret-protection).
 
 Team Vault operates completely independently from [Remote Profile Synchronization](/docs/security/sync-environment/), which synchronizes *personal* profiles across your own workstations. Personal profiles never enter any Team Vault, and shared profiles never land in your personal profile store. Furthermore, you can belong to **multiple Team Vaults** concurrently (e.g. *Infra Team*, *Database Ops*, *Customer Staging*), each with its own isolated vault file, membership list, and S3 backend.
 
@@ -126,8 +126,8 @@ Team Vault enforces strict role separation directly within the main process:
 | Capability | Admin | Member |
 | :--- | :---: | :---: |
 | Connect to shared SSH and S3 targets | Allowed | Allowed |
-| Add, edit, and organize shared profiles & folders | Allowed | Allowed (restricted if profile has stored secret) |
-| **View plaintext passwords, passphrases & secret keys** | Allowed | Redacted |
+| Add, edit, and organize shared profiles & folders | Allowed | Allowed, with limits (see below) |
+| **View plaintext passwords, passphrases & secret keys** in the app | Allowed | Hidden in the app (not a cryptographic barrier) |
 | **Modify or overwrite stored credentials** | Allowed | Preserved |
 | Copy member invites (`team-vault:build-invite`) | Allowed | Denied |
 | Add / remove members, promote / demote roles | Allowed | Denied |
@@ -136,11 +136,13 @@ Team Vault enforces strict role separation directly within the main process:
 | Remove a locked team from this device (Local cleanup) | Allowed | Allowed |
 
 ### How Credential Protection Works for Members
-Non-admin members can connect to shared servers and S3 endpoints transparently, but they cannot read or exfiltrate passwords or secret access keys:
+Members can connect to shared servers and S3 endpoints without the app showing them passwords or secret access keys. This is a convenience, **not a cryptographic barrier**: every member's key unlocks the same Vault Key, so a member who decrypts the vault file outside the app (for example with `age -d` and their own identity) can read every secret in it. Only put a secret in a Team Vault if every member may know it.
 - When a non-admin reads the vault payload (`getPayloadForRenderer`), the main process strips all plaintext secrets (`password`, `passphrase`, `proxy.password`, `secretAccessKey`, `sessionToken`) and replaces them with boolean flags (`hasPassword: true`, `hasSecretAccessKey: true`).
 - When a non-admin initiates an SSH or SFTP connection, the main process looks up the full profile internally in memory (`resolveProfileForConnect`), authenticating the connection without exposing the raw secret to the renderer process.
 - If a non-admin saves changes to a shared profile, any existing secrets are preserved intact. An attempt to set or change a password, passphrase, proxy password or S3 secret key is rejected ("Only a Team Vault admin can …").
-- On a profile that has a stored secret, a non-admin also cannot change where it connects (host, port, username, auth type, jump host or proxy), because that would let them redirect the admin-set secret to a server of their choosing. On profiles without a stored secret, members can edit those fields freely.
+- Only an admin can set or change what a shared SSH profile does on the machine of whoever connects with it: agent forwarding, X11, tunnels (local and remote), the PKCS#11 library, agent socket and key paths, and extra ssh options. This holds on every shared profile, new or old.
+- On a profile that has a stored secret, or that forwards the agent, X11 or a remote tunnel, a non-admin also cannot change where it connects (host, port, username, auth type, jump host or proxy). On other profiles, members can edit those fields.
+- On a shared Kubernetes/OpenShift cluster, only an admin can change its server or turn off its certificate check.
 
 ### Offboarding a Member
 When an Admin removes a member (**Remove member**):
@@ -148,7 +150,11 @@ When an Admin removes a member (**Remove member**):
 2. The entire payload (profiles, folders, credentials) is re-encrypted with the new key.
 3. The new Vault Key is wrapped individually for each remaining member and for the recovery key.
 4. The file's cryptographic rotation proof (`prevKeyProof`) is signed with the old Vault Key.
-5. The removed member retains only whatever local snapshot they had previously downloaded; they are permanently locked out of all subsequent pulls, profile updates, and key rotations.
+5. The removed member cannot decrypt anything written after this point.
+
+What re-keying does not do: the removed member may still know every secret that was in the vault while they were a member, and, if the invite gave them the bucket's own credentials, can still write to or delete the vault file in the bucket. After removing someone:
+- rotate every password and secret key that was shared in the vault, and
+- rotate the bucket credentials the vault syncs with, then give the new ones to the remaining members.
 
 Keep **at least two admins** in every vault. The settings view warns whenever a vault has only one admin, as losing that single card leaves the emergency recovery key as the only administrative path. When another member is present, the warning provides a direct **Promote** `<member>` action to elevate them to co-admin with one click.
 
