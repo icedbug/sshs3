@@ -392,16 +392,30 @@ describe("the knowledge base through the hub", () => {
     expect(again.pages[0].page).toBe(written.id);
   });
 
-  it("will not delete a team's source on half a word", async () => {
+  it("asks a person before removing a source, and still will not take half a word for it", async () => {
     const hub = await makeHub();
     await hub.request({ action: "kb-save", doc: { title: "Backup notes", content: "x".repeat(200), sourceType: "note" } });
     await hub.request({ action: "kb-save", doc: { title: "Backup runbook", content: "y".repeat(200), sourceType: "note" } });
     const task = { id: "t", agentName: "Watch", messages: [], changes: [], sources: [] } as never;
-    const call = (payload: Record<string, unknown>): Promise<unknown> =>
-      handleAppAction(hub.appActionHost(), task, { action: "sshs3_kb_manage", payload: { operation: "delete_document", ...payload } } as never);
+    const asked: string[] = [];
+    const call = (payload: Record<string, unknown>, allow = true): Promise<unknown> =>
+      handleAppAction(
+        hub.appActionHost(),
+        task,
+        { action: "sshs3_kb_manage", payload: { operation: "delete_document", ...payload } } as never,
+        async (change: { description: string }) => {
+          asked.push(change.description);
+          if (!allow) throw new Error("Action not approved");
+        },
+      );
+    // Taking a source away from the team waits for a person.
+    await expect(call({ idOrTitle: "backup notes" }, false)).rejects.toThrow("Action not approved");
+    expect(asked).toEqual(["Remove a knowledge base source from this workspace"]);
+    expect(hub.store.data.kbDocuments ?? []).toHaveLength(2);
+    // And once allowed, the name still has to be the whole one.
     await expect(call({})).rejects.toThrow(/needs the document's id or its exact title/);
     await expect(call({ idOrTitle: "Backup" })).rejects.toThrow(/No knowledge base document has the id or the exact title/);
-    expect((hub.store.data.kbDocuments ?? [])).toHaveLength(2);
+    expect(hub.store.data.kbDocuments ?? []).toHaveLength(2);
     await call({ idOrTitle: "backup notes" });
     expect((hub.store.data.kbDocuments ?? []).map((d) => d.title)).toEqual(["Backup runbook"]);
   });

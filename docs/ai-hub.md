@@ -391,6 +391,16 @@ Related hardening done with this:
 - "Add to KB" in the file editor asks first, masks recognised secrets, goes
   the same way in as other material, and says when it failed.
 
+### Taking something away
+
+An agent may not quietly remove one of the team's own things. Any operation
+whose name begins with `delete` — a server, a folder, an agent, an MCP
+server, a knowledge base source, a schedule, a profile, a snippet, a
+dependency — goes to a person first, in every mode, including autonomous. An
+agent trusted to act on its own is trusted to change systems, not to make the
+workspace's own entries disappear, and what gets deleted is not always what
+the model meant to name. The question shows the name it gave.
+
 ## Requests: what they return, and what a read costs
 
 The interface talks to the hub through one call, `aiHubRequest(HubRequest)`,

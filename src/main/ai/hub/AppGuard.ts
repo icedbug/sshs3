@@ -88,6 +88,18 @@ export function agentNamed<T extends Pick<MissionAgent, "id" | "name" | "default
   return agents.find((a) => a.id.toLowerCase() === q || a.name.toLowerCase() === q);
 }
 
+/** What each tool's delete takes away, said in the question a person is asked. */
+const REMOVES: Record<string, string> = {
+  sshs3_manage_server: "a server",
+  sshs3_manage_cluster_and_folders: "a folder of servers",
+  sshs3_manage_memory_and_activity: "a team memory or skill",
+  sshs3_manage_schedule: "a schedule",
+  sshs3_manage_s3_and_sync: "a storage or sync profile",
+  sshs3_manage_app_and_settings: "a saved snippet or dotfile",
+  sshs3_kb_manage: "a knowledge base source",
+  sshs3_agent_and_mcp_manage: "an agent, an MCP server or a dependency",
+};
+
 export function guardAsk(
   tool: string,
   payload: Record<string, unknown>,
@@ -97,6 +109,17 @@ export function guardAsk(
   const spec = APP_OPS[tool];
   if (!spec) return undefined;
   const op = text(payload, "operation") || spec.fallback;
+
+  // Taking something the team has out of the workspace — a server, an agent, a
+  // source, a profile — is a person's decision in every mode. An agent that is
+  // trusted to act on its own is trusted to change systems, not to make the
+  // team's own things disappear; and what is deleted here is not always what
+  // the model meant to name.
+  if (op.startsWith("delete") && spec.ops[op] !== "read")
+    return {
+      title: `Remove ${REMOVES[tool] ?? "something"} from this workspace`,
+      detail: show(payload, ["idOrName", "id", "name", "title", "folderName", "cluster", "s3ProfileId", "edgeId"]),
+    };
 
   if (tool === "sshs3_manage_app_and_settings") {
     // The fields decide, not the operation's name: the same handler takes them under any of its names.

@@ -67,8 +67,21 @@ describe("which calls move the fence", () => {
     expect(guardAsk(agents, { operation: "run_agent_mission", idOrName: "night" }, run("assisted"), known)).toBeUndefined();
     expect(guardAsk(agents, { operation: "run_agent_mission" }, run("assisted"), known)).toBeUndefined();
     expect(guardAsk(agents, { operation: "run_agent_mission", idOrName: "careful" }, run("assisted"), known)).toBeUndefined();
-    for (const operation of ["list", "run_workforce", "delegate_to_agent", "handoff_agent", "delete_agent", "delete_mcp_server", "test_mcp_server", "save_infra_edge"])
+    for (const operation of ["list", "run_workforce", "delegate_to_agent", "handoff_agent", "test_mcp_server", "save_infra_edge"])
       expect(guardAsk(agents, { operation, idOrName: "x" }, run("assisted"), known), operation).toBeUndefined();
+    // Taking one of the team's own things away is a person's decision, in every mode.
+    expect(guardAsk(agents, { operation: "delete_agent", idOrName: "Careful" }, run("autonomous"), known)).toMatchObject({
+      title: "Remove an agent, an MCP server or a dependency from this workspace",
+      detail: "idOrName: Careful",
+    });
+    expect(guardAsk("sshs3_manage_server", { operation: "delete", idOrName: "db01" }, run("autonomous"), known)?.title).toBe(
+      "Remove a server from this workspace",
+    );
+    expect(guardAsk("sshs3_kb_manage", { operation: "delete_document", idOrName: "Vendor manual" }, run("autonomous"), known)?.title).toBe(
+      "Remove a knowledge base source from this workspace",
+    );
+    // Reading a list is not removing anything.
+    expect(guardAsk("sshs3_kb_manage", { operation: "list" }, run("autonomous"), known)).toBeUndefined();
 
     const schedule = "sshs3_manage_schedule";
     expect(guardAsk(schedule, { operation: "save", title: "Patch", prompt: "apt upgrade", mode: "autonomous" }, run("assisted"), known)?.title).toBe("Save a schedule that acts on its own, without asking");
@@ -360,7 +373,7 @@ describe("which agent a call is about", () => {
     await expect(call("sshs3_agent_and_mcp_manage", { operation: "run_agent_mission", idOrName: "night" })).rejects.toThrow(
       /No agent is called "night"/,
     );
-    await expect(call("sshs3_agent_and_mcp_manage", { operation: "delete_agent", idOrName: "" })).rejects.toThrow(/needs the name/);
+    await expect(call("sshs3_agent_and_mcp_manage", { operation: "handoff_agent", idOrName: "" })).rejects.toThrow(/needs the name/);
     expect(hub.store.data.agents).toHaveLength(2);
   });
 
@@ -394,5 +407,32 @@ describe("which agent a call is about", () => {
     const after = (await hub.snapshot()).workTickets!.find((t) => t.id === ticket.id)!;
     expect(after.assigneeAgentId).toBeUndefined();
     expect(after.comments?.at(-1)?.text).toContain("was removed, so this ticket has nobody");
+  });
+});
+
+describe("taking something away", () => {
+  it("waits for a person before a delete, in every mode, and nothing is gone until they say yes", async () => {
+    const { hub } = await makeHub();
+    hub.store.data.agents = [
+      { id: "a1", name: "Careful", role: "r", mission: "m", systemPrompt: "s", defaultMode: "assisted", updatedAt: 1 } as never,
+    ];
+    for (const mode of ["autonomous", "assisted"] as const) {
+      const { task, broker, call, pending } = await startRun(hub, mode, `run-del-${mode}`);
+      const asked = call("sshs3_agent_and_mcp_manage", { operation: "delete_agent", idOrName: "Careful" });
+      const change = await pending();
+      expect(change).toMatchObject({ kind: "setting", guard: true, target: "sshs3" });
+      expect(change.description).toBe("Remove an agent, an MCP server or a dependency from this workspace");
+      expect(hub.store.data.agents).toHaveLength(1);
+      broker.approve(task.id, change.id, false);
+      await expect(asked).rejects.toThrow("Action not approved");
+      expect(hub.store.data.agents).toHaveLength(1);
+    }
+    // And with a yes it goes.
+    const { task, broker, call, pending } = await startRun(hub, "assisted", "run-del-yes");
+    const asked = call("sshs3_agent_and_mcp_manage", { operation: "delete_agent", idOrName: "Careful" });
+    const change = await pending();
+    broker.approve(task.id, change.id, true);
+    await asked;
+    expect(hub.store.data.agents).toHaveLength(0);
   });
 });
