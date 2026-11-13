@@ -31,6 +31,7 @@ import {
 } from "./hubHelpers";
 import type { AppActionHost } from "./HubService";
 import { MAX_PLAN_REVISIONS, PLAN_TOOL, newPlan, parsePlan } from "./PlanMode";
+import { guardAsk } from "./AppGuard";
 
 /**
  * The agent's sshs3 tools and MCP calls: what each `sshs3_*` tool does when a
@@ -98,6 +99,44 @@ export async function handleAppAction(
       };
     }
 
+    // What moves the fence agents run inside waits for a person, in every mode (see AppGuard.ts).
+    const ask = guardAsk(request.action, p, task, { agents: hub.getAgentsList(), schedules: hub.store.data.schedules });
+    let guarded: AgentChange | undefined;
+    if (ask) {
+      guarded = {
+        id: crypto.randomUUID(),
+        kind: "setting",
+        guard: true,
+        target: "sshs3",
+        description: boundedContext(ask.title, 300),
+        command: boundedContext(ask.detail, 3000),
+        status: "pending",
+        riskLevel: "modify",
+        riskReason: "Changes the rules agents run under. Only a person can approve it.",
+        at: Date.now(),
+      };
+      task.changes.push(guarded);
+      if (!authorize) {
+        guarded.status = "denied";
+        throw new Error("Only a person can change this, in the app.");
+      }
+      await authorize(guarded);
+      guarded.status = "running";
+      hub.changed();
+    }
+    try {
+      const result = await dispatch();
+      if (guarded) guarded.status = "completed";
+      return result;
+    } catch (error) {
+      if (guarded && guarded.status === "running") {
+        guarded.status = "failed";
+        guarded.output = boundedContext(error instanceof Error ? error.message : String(error), 600);
+      }
+      throw error;
+    }
+
+    async function dispatch(): Promise<unknown> {
     switch (request.action) {
       case "sshs3_manage_server": {
         const op = str("operation") || "upsert";
@@ -1802,5 +1841,6 @@ export async function handleAppAction(
 
       default:
         throw new Error(`Unknown sshs3 action: ${request.action}`);
+    }
     }
   }

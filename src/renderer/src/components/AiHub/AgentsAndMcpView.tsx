@@ -62,7 +62,18 @@ export function AgentsAndMcpView({
   const [runningWorkforce, setRunningWorkforce] = useState(false);
 
   const [mcpDraft, setMcpDraft] = useState<
-    | { id?: string; name: string; transport: "stdio" | "http"; command: string; args: string; url: string; needs?: string }
+    | {
+        id?: string;
+        name: string;
+        transport: "stdio" | "http";
+        command: string;
+        args: string;
+        url: string;
+        needs?: string;
+        /** Environment variables (stdio) or headers (http). A stored value is never sent here: `kept` rows keep theirs unless retyped. */
+        secrets?: { name: string; value: string; kept: boolean }[];
+        enabled?: boolean;
+      }
     | undefined
   >();
   const [testingMcpId, setTestingMcpId] = useState("");
@@ -670,7 +681,12 @@ export function AgentsAndMcpView({
                 command: stdio ? mcpDraft.command.trim() : undefined,
                 args: stdio ? mcpDraft.args.split(/\s+/).filter(Boolean) : undefined,
                 url: stdio ? undefined : mcpDraft.url.trim(),
-                enabled: true,
+                // An empty value keeps what is stored under that name; a row that was removed is removed.
+                ...(() => {
+                  const values = Object.fromEntries((mcpDraft.secrets ?? []).filter((r) => r.name.trim()).map((r) => [r.name.trim(), r.value]));
+                  return stdio ? { env: values, headers: {} } : { headers: values, env: {} };
+                })(),
+                enabled: mcpDraft.enabled ?? true,
               },
             }).then((next) => {
               if (!next) return;
@@ -738,6 +754,46 @@ export function AgentsAndMcpView({
               />
             </label>
           )}
+          <fieldset className="ai-secret-rows" data-testid="mcp-secrets">
+            <legend>{mcpDraft.transport === "stdio" ? "Environment variables" : "Headers"} (tokens and keys go here)</legend>
+            {(mcpDraft.secrets ?? []).map((row, i) => (
+              <div className="ai-inline-form" key={i}>
+                <input
+                  aria-label="Name"
+                  placeholder={mcpDraft.transport === "stdio" ? "GITHUB_TOKEN" : "Authorization"}
+                  value={row.name}
+                  disabled={row.kept}
+                  onChange={(e) =>
+                    setMcpDraft({ ...mcpDraft, secrets: mcpDraft.secrets!.map((r, j) => (j === i ? { ...r, name: e.target.value } : r)) })
+                  }
+                />
+                <input
+                  aria-label={`Value of ${row.name || "the new one"}`}
+                  type="password"
+                  autoComplete="off"
+                  placeholder={row.kept ? "Kept. Type a new value to change it." : "Value"}
+                  value={row.value}
+                  onChange={(e) =>
+                    setMcpDraft({ ...mcpDraft, secrets: mcpDraft.secrets!.map((r, j) => (j === i ? { ...r, value: e.target.value } : r)) })
+                  }
+                />
+                <button
+                  type="button"
+                  aria-label={`Remove ${row.name || "this row"}`}
+                  onClick={() => setMcpDraft({ ...mcpDraft, secrets: mcpDraft.secrets!.filter((_, j) => j !== i) })}
+                >
+                  Remove
+                </button>
+              </div>
+            ))}
+            <button
+              type="button"
+              onClick={() => setMcpDraft({ ...mcpDraft, secrets: [...(mcpDraft.secrets ?? []), { name: "", value: "", kept: false }] })}
+            >
+              Add one
+            </button>
+            <small>Values are stored encrypted and never shown again, here or to a model. Only the names are.</small>
+          </fieldset>
           <p className="ai-hint">
             Saving starts the program (or calls the URL) once to ask which tools it has. Only add servers you trust:
             a stdio server runs with your user&apos;s rights.
@@ -810,6 +866,8 @@ export function AgentsAndMcpView({
                     command: srv.command ?? "",
                     args: (srv.args ?? []).join(" "),
                     url: srv.url ?? "",
+                    secrets: Object.keys((srv.transport === "http" ? srv.headers : srv.env) ?? {}).map((name) => ({ name, value: "", kept: true })),
+                    enabled: srv.enabled,
                   })
                 }
               >

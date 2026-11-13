@@ -23,6 +23,24 @@ function fakeJwt(payload: Record<string, unknown>): string {
   return `${header}.${body}.sig`;
 }
 
+/**
+ * Runs a tool call that changes sshs3's own rules the way it now goes: the
+ * call waits, a person approves it in the inbox, and only then is it done.
+ * `beforeApproval` sees the hub while the call is still waiting.
+ */
+async function approving<T>(
+  hub: { broker: { approve: (taskId: string, changeId: string, allowed: boolean) => void }; snapshot: () => Promise<any> },
+  task: { id: string; changes: Array<{ id: string; status: string }> },
+  call: () => Promise<T>,
+  beforeApproval?: (snapshot: any) => void,
+): Promise<T> {
+  const result = call();
+  await vi.waitFor(() => expect(task.changes.some((c) => c.status === "pending")).toBe(true));
+  if (beforeApproval) beforeApproval(await hub.snapshot());
+  hub.broker.approve(task.id, task.changes.find((c) => c.status === "pending")!.id, true);
+  return result;
+}
+
 describe("CodexAuthProvider", () => {
   it("loads ChatGPT/Codex OAuth tokens from hermes-native/auth.json and extracts JWT claims", async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "sshs3-codex-test-"));
@@ -1219,7 +1237,8 @@ describe("Production multi-user workspace sync & auto-memory", () => {
     expect(listTunnelsRes.tunnelsByServer[0].tunnels).toHaveLength(1);
 
     // 3. Configure Directory Sync profile & S3 profile
-    await hub.broker.invoke(cap.key, {
+    // Copying a folder to a bucket is a person's to allow: the call waits until they do.
+    await approving(hub, task, () => hub.broker.invoke(cap.key, {
       action: "sshs3_manage_s3_and_sync",
       payload: {
         operation: "save_dir_sync_profile",
@@ -1230,7 +1249,7 @@ describe("Production multi-user workspace sync & auto-memory", () => {
         targetPath: "s3://netapp-runbooks/prod",
         deleteExtraneous: true,
       },
-    });
+    }));
     expect(dirSyncProfiles).toHaveLength(1);
     expect(dirSyncProfiles[0].name).toBe("ONTAP Runbooks to S3");
     expect(dirSyncProfiles[0].deleteExtraneous).toBe(true);
@@ -1516,7 +1535,7 @@ describe("Production multi-user workspace sync & auto-memory", () => {
     const updatedTask = snapHandoff.tasks.find((t) => t.id === createdTask.id);
     expect(updatedTask?.agentId).toBe("ag-k8s-test");
     expect(
-      updatedTask?.messages.some((m) => m.text.includes("Agent Handoff")),
+      updatedTask?.messages.some((m) => m.text.includes("Handed over")),
     ).toBe(true);
   });
 
@@ -2226,13 +2245,14 @@ describe("Production multi-user workspace sync & auto-memory", () => {
     }) as { ok: boolean };
     expect(reflectRes.ok).toBe(true);
 
-    const policyRes = await hub.broker.invoke(prodCap.key, {
+    // The tool exists, but an agent does not switch off its own rules: the change waits for a person.
+    const policyRes = await approving(hub, prodFileTask, () => hub.broker.invoke(prodCap.key, {
       action: "sshs3_manage_app_and_settings",
       payload: {
         operation: "update_safety_policy",
         requireApprovalOnProdTags: false,
       },
-    }) as { safetyPolicy?: { requireApprovalOnProdTags: boolean } };
+    }), (snapshot) => expect(snapshot.safetyPolicy?.requireApprovalOnProdTags ?? true).toBe(true)) as { safetyPolicy?: { requireApprovalOnProdTags: boolean } };
     expect(policyRes.safetyPolicy?.requireApprovalOnProdTags).toBe(false);
   });
 });

@@ -555,7 +555,7 @@ export class Sshs3WebServer {
             sendJson(res, 200, { ...imported, sshPublicKey: imported.publicKey });
             return;
           }
-          sendJson(res, 400, { error: 'Ogiltig åtgärd' });
+          sendJson(res, 400, { error: 'Unknown action' });
         } catch (err) {
           sendJson(res, 400, {
             error: err instanceof Error ? err.message : String(err),
@@ -584,7 +584,7 @@ export class Sshs3WebServer {
       // Admin endpoints
       if (pathname.startsWith('/api/admin/')) {
         if (user.role !== 'admin') {
-          sendJson(res, 403, { error: 'Endast administratörer har behörighet' });
+          sendJson(res, 403, { error: 'Only an administrator can do this' });
           return;
         }
 

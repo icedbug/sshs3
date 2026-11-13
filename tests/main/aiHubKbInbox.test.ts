@@ -158,6 +158,8 @@ describe("dropping material into the knowledge base", () => {
     const longNote = ["# Certificate renewal", "", "## When", "Thirty days before expiry, or at once when the monitoring alert fires. ".repeat(6), "", "## Steps", "Run certbot renew on the bastion and reload nginx. ".repeat(12)].join("\n");
     let snap = await hub.request({ action: "kb-ingest-text", text: longNote });
     expect(snap.reply!.ingest!.added).toEqual(["Certificate renewal"]);
+    // The page comes from the stand-in above; where the name leads is still checked, against an address given here.
+    (hub as unknown as { kbNetwork: unknown }).kbNetwork = { fetchImpl: fetch, lookup: async () => [{ address: "93.184.216.34", family: 4 }] };
     snap = await hub.request({ action: "kb-ingest-url", url: "https://wiki.example.internal/ops/queue" });
     expect(snap.reply!.ingest!.added[0]).toMatch(/queue restart/i);
     expect(hub.store.data.kbDocuments!.find((d) => d.sourceType === "url")!.sourceRef).toBe("https://wiki.example.internal/ops/queue");

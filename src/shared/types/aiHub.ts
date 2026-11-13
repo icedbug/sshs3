@@ -167,7 +167,10 @@ export interface SafetyPolicyConfig {
 
 export interface AgentChange {
   id: string;
-  kind: "command" | "file";
+  /** "setting": a change to sshs3's own rules that an agent asked for and only a person can let through. */
+  kind: "command" | "file" | "setting";
+  /** Moves the fence agents run inside: asked about in every mode, whatever the safety policy says. */
+  guard?: boolean;
   target: string;
   description: string;
   command?: string;
@@ -1288,7 +1291,8 @@ export type HubRequest =
   | { action: "kb-delete"; id: string }
   /** One file as it was dropped in. */
   | { action: "kb-ingest-file"; name: string; mime?: string; dataBase64: string }
-  | { action: "kb-ingest-text"; text: string; title?: string }
+  /** `mask`: run the text through the secret masking first (a configuration file, a log). `sourceRef`: where it came from. */
+  | { action: "kb-ingest-text"; text: string; title?: string; mask?: boolean; sourceRef?: string }
   | { action: "kb-ingest-url"; url: string }
   /** The whole document comes back in `reply.kbDocument`. */
   | { action: "kb-read"; id: string }

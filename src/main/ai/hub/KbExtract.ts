@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import path from "node:path";
+import { get, guardUrl, type GuardOptions } from "./Notifier";
 
 /**
  * Turns what people drop into the knowledge base into text: PDF, Word, web
@@ -158,7 +159,19 @@ export async function extractText(input: { name: string; mime?: string; data: Bu
 }
 
 /** Fetches a page or a file from a link and takes its text. Only http and https. */
-export async function fetchUrl(url: string, fetchImpl: typeof fetch = fetch): Promise<Extracted & { url: string }> {
+/**
+ * Fetches a page for the knowledge base. Where the link leads is checked
+ * before it is called, and again at every redirect: a link must not be a way
+ * to make sshs3 (on a shared server, the server) read from its own loopback
+ * or the cloud metadata address. `fetchImpl` replaces the network in tests.
+ */
+export async function fetchUrl(
+  url: string,
+  fetchImpl?: typeof fetch,
+  guardOptions?: GuardOptions,
+): Promise<Extracted & { url: string }> {
+  // With the real network the check always runs; a stand-in network (tests) is checked only when a guard is given.
+  const guard = guardOptions ?? (fetchImpl ? undefined : { server: false, allowPrivate: true, allowPlainHttp: true });
   let parsed: URL;
   try {
     parsed = new URL(url.trim());
@@ -166,17 +179,39 @@ export async function fetchUrl(url: string, fetchImpl: typeof fetch = fetch): Pr
     throw new Error("That is not a link.", { cause: error });
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("Only http and https links can be fetched.");
+  const headers = { accept: "text/html,application/pdf,text/plain;q=0.9,*/*;q=0.5", "user-agent": "sshS3-knowledge-base" };
   let response: Response;
-  try {
-    response = await fetchImpl(parsed.toString(), {
-      redirect: "follow",
-      signal: AbortSignal.timeout(25_000),
-      headers: { accept: "text/html,application/pdf,text/plain;q=0.9,*/*;q=0.5", "user-agent": "sshS3-knowledge-base" },
-    });
-  } catch (error) {
-    throw new Error(`The link could not be reached (${error instanceof Error ? error.message : "no answer"}).`, {
-      cause: error,
-    });
+  for (let hop = 0; ; hop++) {
+    if (hop > 5) throw new Error("The link redirects too many times.");
+    // Checked before it is called. This throws in words a person can act on.
+    const target = guard
+      ? await guardUrl(parsed.toString(), guard).catch((error: unknown) => {
+          throw new Error(error instanceof Error ? error.message : "The link could not be checked.", { cause: error });
+        })
+      : undefined;
+    try {
+      if (fetchImpl || !target) {
+        response = await (fetchImpl ?? fetch)(parsed.toString(), { redirect: "manual", signal: AbortSignal.timeout(25_000), headers });
+      } else {
+        const got = await get(target, headers, MAX_UPLOAD_BYTES);
+        response = new Response(got.status === 204 || got.status === 304 || (got.status >= 300 && got.status < 400) ? null : new Uint8Array(got.data), {
+          status: got.status,
+          headers: Object.entries(got.headers).flatMap(([k, v]) => (v === undefined ? [] : [[k, Array.isArray(v) ? v.join(", ") : v] as [string, string]])),
+        });
+      }
+    } catch (error) {
+      throw new Error(`The link could not be reached (${error instanceof Error ? error.message : "no answer"}).`, {
+        cause: error,
+      });
+    }
+    const next = response.status >= 300 && response.status < 400 ? response.headers.get("location") : null;
+    if (!next) break;
+    try {
+      parsed = new URL(next, parsed);
+    } catch (error) {
+      throw new Error("The link redirects to something that is not a link.", { cause: error });
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("Only http and https links can be fetched.");
   }
   if (!response.ok)
     throw new Error(

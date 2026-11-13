@@ -148,16 +148,16 @@ describe("where a notification may go", () => {
     const server = { server: true, allowPrivate: false };
     await expect(guardUrl("ftp://x", server)).rejects.toThrow("Only http and https");
     await expect(guardUrl("https://user:pw@example.com/x", server)).rejects.toThrow("its own field");
-    await expect(guardUrl("http://127.0.0.1:9/x", server)).rejects.toThrow("does not send notifications to itself");
-    await expect(guardUrl("https://metadata.example/x", { ...server, lookup: lookup("169.254.169.254") })).rejects.toThrow("never notified");
-    await expect(guardUrl("https://ntfy.lan/t", { ...server, lookup: lookup("10.0.0.7") })).rejects.toThrow("SSHS3_NOTIFY_ALLOW_PRIVATE=1");
+    await expect(guardUrl("http://127.0.0.1:9/x", server)).rejects.toThrow("does not call itself");
+    await expect(guardUrl("https://metadata.example/x", { ...server, lookup: lookup("169.254.169.254") })).rejects.toThrow("never calls");
+    await expect(guardUrl("https://ntfy.lan/t", { ...server, lookup: lookup("10.0.0.7") })).rejects.toThrow("SSHS3_ALLOW_PRIVATE_ADDRESSES=1");
     await expect(guardUrl("http://example.com/x", { ...server, lookup: lookup("93.184.216.34") })).rejects.toThrow("has to be https");
     await expect(guardUrl("https://gone.example/x", { ...server, lookup: async () => { throw new Error("ENOTFOUND"); } })).rejects.toThrow("could not be found");
 
     expect(await guardUrl("http://ntfy.lan/t", { server: true, allowPrivate: true, lookup: lookup("10.0.0.7") })).toMatchObject({ address: "10.0.0.7", family: 4 });
     // On a person's own computer, their own machine and network are theirs to notify.
     expect((await guardUrl("http://127.0.0.1:8080/t", { server: false, allowPrivate: false })).address).toBe("127.0.0.1");
-    await expect(guardUrl("http://169.254.169.254/latest", { server: false, allowPrivate: true })).rejects.toThrow("never notified");
+    await expect(guardUrl("http://169.254.169.254/latest", { server: false, allowPrivate: true })).rejects.toThrow("never calls");
   });
 
   it("tries again when the other side is down, and not when it refuses", async () => {
@@ -293,7 +293,7 @@ describe("notifications from the hub", () => {
     const again = await hub.request({ action: "notify-channel-save", channel: { id: snap.notifications!.channels[0].id, kind: "webhook", name: "siem 2", enabled: false, events: ["alert"], includeCommand: false } });
     expect(again.notifications!.channels).toMatchObject([{ name: "siem 2", enabled: false, hasSecret: true, events: ["alert"] }]);
     await expect(hub.request({ action: "notify-channel-save", channel: { kind: "ntfy", name: "n", url: "http://127.0.0.1:9", enabled: true, events: [...ALL], includeCommand: true } })).rejects.toThrow("ends with the topic");
-    await expect(hub.request({ action: "notify-channel-save", channel: { kind: "slack", name: "n", url: "http://169.254.169.254/x", enabled: true, events: [...ALL], includeCommand: true } })).rejects.toThrow("never notified");
+    await expect(hub.request({ action: "notify-channel-save", channel: { kind: "slack", name: "n", url: "http://169.254.169.254/x", enabled: true, events: [...ALL], includeCommand: true } })).rejects.toThrow("never calls");
     expect((await hub.request({ action: "notify-channel-delete", id: snap.notifications!.channels[0].id })).notifications!.channels).toEqual([]);
   });
 
@@ -310,7 +310,7 @@ describe("notifications from the hub", () => {
   it("on a shared server, never sends to the server itself and says whose answer is awaited", async () => {
     const { hub } = await makeHub({ alertHookOwner: "u1", defaultActorName: "Jacob" });
     const local = await receiver();
-    await expect(hub.request({ action: "notify-channel-save", channel: { kind: "slack", name: "x", url: `${local.url}/x`, enabled: true, events: [...ALL], includeCommand: true } })).rejects.toThrow("does not send notifications to itself");
+    await expect(hub.request({ action: "notify-channel-save", channel: { kind: "slack", name: "x", url: `${local.url}/x`, enabled: true, events: [...ALL], includeCommand: true } })).rejects.toThrow("does not call itself");
     vi.stubEnv("SSHS3_PUBLIC_URL", "https://team.example.com");
     const snap = await hub.request({ action: "notify-settings-save", publicUrl: "https://evil.example.com" });
     expect(snap.notifications).toMatchObject({ publicUrl: "https://team.example.com", publicUrlFixed: true });

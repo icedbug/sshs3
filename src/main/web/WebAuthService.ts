@@ -38,11 +38,16 @@ export interface WebInviteRecord {
 }
 
 interface WebSessionRecord {
-  token: string;
+  /** SHA-256 of the session token. The token itself is only ever held by the browser. */
+  hash: string;
+  /** Left by an older version that stored the token itself: turned into `hash` when the file is read. */
+  token?: string;
   userId: string;
   createdAt: number;
   expiresAt: number;
 }
+
+const sessionHash = (token: string): string => crypto.createHash('sha256').update(token).digest('hex');
 
 interface StoredAuthData {
   version: 1;
@@ -177,7 +182,11 @@ export class WebAuthService {
           version: 1,
           users: Array.isArray(parsed.users) ? parsed.users : [],
           invites: Array.isArray(parsed.invites) ? parsed.invites : [],
-          sessions: Array.isArray(parsed.sessions) ? parsed.sessions : [],
+          // A session stored by its token (an older version) keeps working: only its hash is kept from now on.
+          sessions: (Array.isArray(parsed.sessions) ? parsed.sessions : []).map(({ token, ...rest }) => ({
+            ...rest,
+            hash: rest.hash || (token ? sessionHash(token) : ''),
+          })),
         };
       }
     } catch (err) {
@@ -276,25 +285,38 @@ export class WebAuthService {
   ): Promise<{ privateKeyPath: string; publicKey: string }> {
     const trimmedPriv = privateKeyPem.trim();
     if (!trimmedPriv.includes('PRIVATE KEY')) {
-      throw new Error('Ogiltig privat SSH-nyckel (måste vara i OpenSSH/PEM-format)');
+      throw new Error('Not a valid private SSH key (OpenSSH or PEM format is needed)');
     }
     const sshDir = this.getUserSshDir(userId);
     const privPath = this.getUserPrivateKeyPath(userId);
     const pubPath = this.getUserPublicKeyPath(userId);
     await fsp.mkdir(sshDir, { recursive: true, mode: 0o700 });
-    await fsp.writeFile(privPath, `${trimmedPriv}\n`, { mode: 0o600 });
 
+    // The public key is worked out from the pasted key in a file of its own
+    // first. Only a key that it could be worked out from replaces the one
+    // that is there: a key with a passphrase, or a damaged paste, changes nothing.
     let derivedPub = publicKeyLine?.trim() || '';
     if (!derivedPub) {
+      const trial = `${privPath}.import-${crypto.randomBytes(6).toString('hex')}`;
       try {
-        derivedPub = execFileSync('ssh-keygen', ['-y', '-f', privPath], {
+        await fsp.writeFile(trial, `${trimmedPriv}\n`, { mode: 0o600 });
+        derivedPub = execFileSync('ssh-keygen', ['-y', '-P', '', '-f', trial], {
           encoding: 'utf8',
           timeout: 5000,
+          stdio: ['ignore', 'pipe', 'ignore'],
         }).trim();
       } catch {
-        derivedPub = 'Egen privat SSH-nyckel installerad';
+        derivedPub = '';
+      } finally {
+        await fsp.rm(trial, { force: true });
+      }
+      if (!/^(ssh-|ecdsa-|sk-)\S+ \S+/.test(derivedPub)) {
+        throw new Error(
+          'The public key could not be worked out from this key. Is it protected by a passphrase? Paste a key without one, or give the public key too.',
+        );
       }
     }
+    await fsp.writeFile(privPath, `${trimmedPriv}\n`, { mode: 0o600 });
     await fsp.writeFile(pubPath, `${derivedPub}\n`, { mode: 0o644 });
     return { privateKeyPath: privPath, publicKey: derivedPub };
   }
@@ -320,7 +342,7 @@ export class WebAuthService {
     const clean = username.trim().toLowerCase();
     if (!/^[a-z0-9_.-]{2,40}$/.test(clean)) {
       throw new Error(
-        'Användarnamn måste vara 2–40 tecken (a-z, 0-9, punkt, bindestreck eller understreck)',
+        'The user name must be 2–40 characters (a-z, 0-9, dot, hyphen or underscore)',
       );
     }
     return clean;
@@ -328,7 +350,7 @@ export class WebAuthService {
 
   private validatePassword(password: string): void {
     if (typeof password !== 'string' || password.length < 6) { // pragma: allowlist secret
-      throw new Error('Lösenordet måste vara minst 6 tecken långt');
+      throw new Error('The password must be at least 6 characters');
     }
   }
 
@@ -341,7 +363,7 @@ export class WebAuthService {
     const username = this.normalizeUsername(input.username);
     this.validatePassword(input.password);
     if (this.data.users.some((u) => u.username === username)) {
-      throw new Error(`Användarnamnet "${username}" finns redan`);
+      throw new Error(`The user name "${username}" is taken`);
     }
     const salt = crypto.randomBytes(16).toString('hex');
     const hash = hashPassword(input.password, salt);
@@ -366,7 +388,7 @@ export class WebAuthService {
     displayName?: string;
   }): Promise<{ user: WebUserPublic; sessionToken: string }> {
     if (this.data.users.length > 0) {
-      throw new Error('Admin-konto är redan konfigurerat på denna server');
+      throw new Error('An administrator is already set up on this server');
     }
     const user = await this.createUserInternal({
       username: input.username,
@@ -389,20 +411,20 @@ export class WebAuthService {
     const now = Date.now();
     const rate = this.loginAttempts.get(clientIp);
     if (rate && rate.resetAt > now && rate.count >= 15) {
-      throw new Error('För många inloggningsförsök. Vänta en minut och försök igen.');
+      throw new Error('Too many sign-in attempts. Wait a minute and try again.');
     }
 
     const username = usernameInput.trim().toLowerCase();
     const user = this.data.users.find((u) => u.username === username);
     if (!user) {
       this.recordFailedAttempt(clientIp, now);
-      throw new Error('Felaktigt användarnamn eller lösenord');
+      throw new Error('Wrong user name or password');
     }
 
     const candidateHash = hashPassword(passwordInput, user.passwordSalt);
     if (!timingSafeEqualHex(candidateHash, user.passwordHash)) {
       this.recordFailedAttempt(clientIp, now);
-      throw new Error('Felaktigt användarnamn eller lösenord');
+      throw new Error('Wrong user name or password');
     }
 
     this.loginAttempts.delete(clientIp);
@@ -428,7 +450,7 @@ export class WebAuthService {
     this.data.sessions = this.data.sessions.filter((s) => s.expiresAt > now);
     const token = crypto.randomBytes(32).toString('hex');
     this.data.sessions.push({
-      token,
+      hash: sessionHash(token),
       userId,
       createdAt: now,
       expiresAt: now + SESSION_TTL_MS,
@@ -440,9 +462,12 @@ export class WebAuthService {
   async verifySession(token?: string | null): Promise<WebUserPublic | null> {
     if (!token) return null;
     const now = Date.now();
-    const session = this.data.sessions.find(
-      (s) => s.token === token && s.expiresAt > now,
-    );
+    const given = Buffer.from(sessionHash(token), 'hex');
+    const session = this.data.sessions.find((s) => {
+      const stored = Buffer.from(s.hash || '', 'hex');
+      // Compared in constant time: how long a wrong token takes says nothing about a right one.
+      return stored.length === given.length && crypto.timingSafeEqual(stored, given) && s.expiresAt > now;
+    });
     if (!session) return null;
     const user = this.data.users.find((u) => u.id === session.userId);
     if (!user) return null;
@@ -452,7 +477,8 @@ export class WebAuthService {
   async revokeSession(token?: string | null): Promise<void> {
     if (!token) return;
     const before = this.data.sessions.length;
-    this.data.sessions = this.data.sessions.filter((s) => s.token !== token);
+    const hash = sessionHash(token);
+    this.data.sessions = this.data.sessions.filter((s) => s.hash !== hash);
     if (this.data.sessions.length !== before) {
       await this.save();
     }
@@ -483,7 +509,7 @@ export class WebAuthService {
 
   async deleteUserByAdmin(targetUserId: string, actorUserId: string): Promise<void> {
     if (targetUserId === actorUserId) {
-      throw new Error('Du kan inte ta bort ditt eget inloggade konto');
+      throw new Error('You cannot remove the account you are signed in with');
     }
     const target = this.data.users.find((u) => u.id === targetUserId);
     if (!target) return;
@@ -541,11 +567,11 @@ export class WebAuthService {
   ): Promise<void> {
     const user = this.data.users.find((u) => u.id === userId);
     if (!user) {
-      throw new Error('Användaren hittades inte');
+      throw new Error('User not found');
     }
     const candidateHash = hashPassword(currentPassword, user.passwordSalt);
     if (!timingSafeEqualHex(candidateHash, user.passwordHash)) {
-      throw new Error('Nuvarande lösenord är felaktigt');
+      throw new Error('The current password is wrong');
     }
     this.validatePassword(newPassword);
     const newSalt = crypto.randomBytes(16).toString('hex');
@@ -569,7 +595,7 @@ export class WebAuthService {
         i.usedCount < i.maxUses,
     );
     if (!invite) {
-      throw new Error('Invite-länken är ogiltig eller har gått ut');
+      throw new Error('The invite link is not valid, or has expired');
     }
 
     const user = await this.createUserInternal({

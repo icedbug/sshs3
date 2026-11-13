@@ -321,16 +321,19 @@ export function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Elem
               }`
             : "No team bucket is connected. Memory, runbooks and activity stay on this computer until one is; connect it from the start page (Invite / team)."}
         </small>
-        <label>
-          Shared workspace file (optional)
-          <input
-            className="ai-mono"
-            value={prefs.sharedWorkspacePath ?? ""}
-            onChange={(e) => setPrefs({ ...prefs, sharedWorkspacePath: e.target.value })}
-            placeholder="~/team/sshs3-workspace.json"
-          />
-          <small>A file in a synced folder or a Git checkout, used in addition to the team bucket.</small>
-        </label>
+        {/* A path on the computer that runs sshs3: on a shared server that is the administrator's, not the browser's. */}
+        {!isWebBrowserMode() && (
+          <label>
+            Shared workspace file (optional)
+            <input
+              className="ai-mono"
+              value={prefs.sharedWorkspacePath ?? ""}
+              onChange={(e) => setPrefs({ ...prefs, sharedWorkspacePath: e.target.value })}
+              placeholder="~/team/sshs3-workspace.json"
+            />
+            <small>A file in a synced folder or a Git checkout, used in addition to the team bucket.</small>
+          </label>
+        )}
       </section>
 
       <section className="ai-set">

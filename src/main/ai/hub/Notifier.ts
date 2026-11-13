@@ -278,6 +278,8 @@ export interface GuardOptions {
   /** A shared server: its own loopback is never a destination, and its private network only if the administrator said so. */
   server: boolean;
   allowPrivate: boolean;
+  /** A page that is only read may be plain http; an address something is posted to may not. */
+  allowPlainHttp?: boolean;
   lookup?: (host: string) => Promise<{ address: string; family: number }[]>;
 }
 
@@ -288,11 +290,11 @@ export interface GuardedTarget {
 }
 
 /**
- * Checks where an address the user typed really leads before anything is sent
- * there, and fixes the IP address so that what was checked is what is used.
- * On a shared server a user must not be able to make the server call its own
- * loopback, the cloud metadata address, or (unless allowed) the private
- * network around it.
+ * Checks where an address the user typed really leads before sshs3 calls it
+ * (a notification, a page fetched into the knowledge base), and fixes the IP
+ * address so that what was checked is what is used. On a shared server a user
+ * must not be able to make the server call its own loopback, the cloud
+ * metadata address, or (unless allowed) the private network around it.
  */
 export async function guardUrl(raw: string, options: GuardOptions): Promise<GuardedTarget> {
   let url: URL;
@@ -301,7 +303,7 @@ export async function guardUrl(raw: string, options: GuardOptions): Promise<Guar
   } catch {
     throw new Error("That is not an address. It should look like https://…");
   }
-  if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("Only http and https addresses can be notified.");
+  if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("Only http and https addresses can be used.");
   if (url.username || url.password) throw new Error("Put the token in its own field, not in the address.");
   const host = url.hostname.replace(/^\[|\]$/g, "");
   const found = net.isIP(host)
@@ -312,11 +314,11 @@ export async function guardUrl(raw: string, options: GuardOptions): Promise<Guar
   if (!found.length) throw new Error(`${host} could not be found.`);
   for (const { address } of found) {
     const kind = addressClass(address);
-    if (kind === "never" || kind === "link-local") throw new Error(`${host} leads to an address that is never notified (${address}).`);
-    if (kind === "loopback" && options.server) throw new Error("A shared server does not send notifications to itself.");
+    if (kind === "never" || kind === "link-local") throw new Error(`${host} leads to an address that sshs3 never calls (${address}).`);
+    if (kind === "loopback" && options.server) throw new Error("A shared server does not call itself.");
     if (kind === "private" && options.server && !options.allowPrivate)
-      throw new Error(`${host} is on the server's private network. The administrator allows that with SSHS3_NOTIFY_ALLOW_PRIVATE=1.`);
-    if (kind === "public" && url.protocol !== "https:") throw new Error("An address on the internet has to be https.");
+      throw new Error(`${host} is on the server's private network. The administrator allows that with SSHS3_ALLOW_PRIVATE_ADDRESSES=1.`);
+    if (kind === "public" && url.protocol !== "https:" && !options.allowPlainHttp) throw new Error("An address on the internet has to be https.");
   }
   return { url, address: found[0].address, family: found[0].family };
 }
@@ -348,6 +350,50 @@ export function post(target: GuardedTarget, request: OutgoingRequest, timeoutMs 
     req.on("timeout", () => req.destroy(new Error("No answer in time")));
     req.on("error", reject);
     req.end(request.body);
+  });
+}
+
+/**
+ * Fetches from the checked address. A redirect is returned to the caller, who
+ * checks where it leads before following it. Stops reading at `maxBytes`.
+ */
+export function get(
+  target: GuardedTarget,
+  headers: Record<string, string>,
+  maxBytes: number,
+  timeoutMs = 25_000,
+): Promise<{ status: number; headers: http.IncomingHttpHeaders; data: Buffer }> {
+  return new Promise((resolve, reject) => {
+    const url = target.url;
+    const lib = url.protocol === "https:" ? https : http;
+    const req = lib.request(
+      {
+        protocol: url.protocol,
+        hostname: url.hostname.replace(/^\[|\]$/g, ""),
+        port: url.port || undefined,
+        path: `${url.pathname}${url.search}`,
+        method: "GET",
+        headers,
+        timeout: timeoutMs,
+        lookup: (_host, _options, callback) => {
+          (callback as (e: Error | null, address: string, family: number) => void)(null, target.address, target.family);
+        },
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        let size = 0;
+        res.on("data", (chunk: Buffer) => {
+          size += chunk.length;
+          if (size > maxBytes) return void req.destroy(new Error("The page is too large."));
+          chunks.push(chunk);
+        });
+        res.on("end", () => resolve({ status: res.statusCode ?? 0, headers: res.headers, data: Buffer.concat(chunks) }));
+        res.on("error", reject);
+      },
+    );
+    req.on("timeout", () => req.destroy(new Error("No answer in time")));
+    req.on("error", reject);
+    req.end();
   });
 }
 

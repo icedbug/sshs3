@@ -79,7 +79,7 @@ what, on which target, the risk, and a link to the item.
   its host.
 - The server will not post to itself or to link-local addresses (the cloud
   metadata address among them). A channel on the server's private network,
-  such as an ntfy container beside it, needs `SSHS3_NOTIFY_ALLOW_PRIVATE=1`.
+  such as an ntfy container beside it, needs `SSHS3_ALLOW_PRIVATE_ADDRESSES=1`.
 - Notifications are posted directly, not through an HTTP proxy: the server
   needs a route to the channel.
 

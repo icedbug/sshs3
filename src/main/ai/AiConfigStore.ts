@@ -159,6 +159,20 @@ export class AiConfigStore {
           next.model = codex.defaultModel || DEFAULT_AI_MODELS["openai-codex"];
         }
       }
+      // A key belongs to the endpoint it was given for. When the provider or
+      // the address (its origin) changes and no new key comes with the change,
+      // the old key is forgotten rather than sent somewhere new.
+      const origin = (url?: string): string => {
+        try {
+          return url ? new URL(url).origin : "";
+        } catch {
+          return "";
+        }
+      };
+      if (update.apiKey === undefined && (next.provider !== current.provider || origin(next.baseUrl) !== origin(current.baseUrl))) {
+        delete next.apiKey;
+        this.sessionKey = "";
+      }
       if (update.apiKey === null || update.apiKey === "") {
         delete next.apiKey;
         this.sessionKey = "";

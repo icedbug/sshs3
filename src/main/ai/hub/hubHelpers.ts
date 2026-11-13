@@ -18,6 +18,27 @@ export function insideDataDirectory(file: string): boolean {
     return false;
   }
 }
+/**
+ * Secret values (an MCP server's environment and headers) as they come back
+ * from a form that was never shown them: an empty value keeps what is stored
+ * under that name, a typed value replaces it, a name that is gone is removed.
+ * Nothing given at all keeps everything.
+ */
+export function keepSecrets(
+  stored: Record<string, string> | undefined,
+  given: Record<string, string> | undefined,
+): Record<string, string> | undefined {
+  if (given === undefined) return stored;
+  const out: Record<string, string> = {};
+  for (const [rawName, value] of Object.entries(given)) {
+    const name = rawName.trim();
+    if (!name || typeof value !== "string") continue;
+    if (value !== "") out[name] = value;
+    else if (stored?.[name] !== undefined) out[name] = stored[name];
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
 export function requiredText(value: unknown): string {
   if (typeof value !== "string" || !value.trim())
     throw new Error("Text is required");

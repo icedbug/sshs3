@@ -333,6 +333,64 @@ stopped.
   check. The classifier is a set of rules: it can refuse a harmless command,
   and a command it wrongly calls read-only would run.
 
+## What an agent may not change about its own rules (`AppGuard`)
+
+The management tools (`sshs3_manage_*`, `sshs3_agent_and_mcp_manage`,
+`sshs3_kb_manage`) let an agent work in the app: save a snippet, tag a server,
+write a ticket. A few of their operations move the fence the agent itself runs
+inside. Those are a person's to decide. `guardAsk` (`AppGuard.ts`) names them,
+`handleAppAction` turns each into an `AgentChange` of kind `setting` with
+`guard: true`, and `ToolBroker.authorize` asks about a guarded change in every
+mode, whatever the safety policy or an approved plan says. It waits in the
+inbox and goes out to the notification channels like a command.
+
+Guarded:
+- the command safety policy (under any of the operation names the handler
+  accepts: the fields decide, not the name);
+- which model endpoint is used (`aiProvider`, `aiBaseUrl`, `aiEnabled`);
+- adding or changing an MCP server, and installing one from the list (a stdio
+  server is a program started on this computer);
+- an agent or a schedule that acts on its own (`autonomous`), made, started or
+  switched on by a run that does not;
+- where the team's workspace is synced to, disconnecting it, and a folder that
+  is synced to a bucket;
+- reading a local folder or a bucket prefix into the shared knowledge base.
+
+Not guarded: everything else, including an agent or a schedule that asks before
+each command. A conversation in Ask mode still runs no command and writes no
+file, but it does ask about a guarded change: the person is there to answer.
+
+Beside the gate:
+- **A handover never gives more freedom.** `agent-handoff` keeps the more
+  careful of the conversation's mode and the receiving agent's (`lowerMode`).
+- **A stored API key belongs to its endpoint.** `AiConfigStore.update` forgets
+  it when the provider or the address's origin changes and no new key comes
+  with the change.
+- **`APP_OPS` lists every operation** the management tools offer, as read,
+  change, guard or guard-if. A test compares it with the tool schemas, so a
+  new operation has to be given a place before it ships.
+
+Not guarded, on purpose, and worth knowing: an agent can create a ticket for
+another agent, and the heartbeat runs it in that agent's mode. That is the
+workforce doing its job; the safety switches (production, destructive
+commands) still apply to the run.
+
+Related hardening done with this:
+- MCP servers' environment variables and headers leave the hub as names only
+  (`mcpServersShown`), to the interface and to a model. The form can now set
+  them; an empty value keeps what is stored (`keepSecrets`). Editing a server
+  no longer wipes them or switches it back on.
+- A link fetched into the knowledge base is checked where it leads before it
+  is called and at every redirect (`guardUrl`, the same check notifications
+  use), and fetched from the address that was checked.
+- On a shared server, `sharedWorkspacePath` from a request is ignored and
+  `kb-ingest-folder` is refused: both are paths on the server.
+- Web sessions are stored by SHA-256 and compared in constant time; a file
+  from an older version is read and converted. Importing an SSH key works out
+  the public key first and changes nothing when it cannot.
+- "Add to KB" in the file editor asks first, masks recognised secrets, goes
+  the same way in as other material, and says when it failed.
+
 ## Server facts, and what changed (`ServerFacts`, `FactsStore`)
 
 Most faults follow a change, so the hub reads the servers on a schedule and
@@ -421,7 +479,7 @@ placed before the early return for a pending save); three seconds later
   address it leads to is classified, and the request is made to the address
   that was checked (no redirects, the answer's body is dropped). Link-local
   is never a destination. On a shared server neither is loopback, and the
-  private network only with `SSHS3_NOTIFY_ALLOW_PRIVATE=1`.
+  private network only with `SSHS3_ALLOW_PRIVATE_ADDRESSES=1`.
 - **Storage:** `<hub dir>/notify.json`, mode 0600, addresses and secrets
   through `encryptSecretValue`. Not in `hub.json`, whose save masks anything
   that looks like a secret, and never in the bucket. The snapshot carries

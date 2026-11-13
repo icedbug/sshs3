@@ -3509,6 +3509,31 @@
   min-width: 0;
 }
 
+.ai-secret-rows {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  display: grid;
+  gap: 6px;
+}
+.ai-secret-rows legend {
+  padding: 0;
+  margin-bottom: 4px;
+  color: var(--ai-ink-soft);
+  font-size: 12px;
+  font-weight: 600;
+}
+.ai-secret-rows .ai-inline-form {
+  margin-top: 0;
+}
+.ai-secret-rows .ai-inline-form input {
+  flex: 1;
+  min-width: 0;
+}
+.ai-secret-rows > button {
+  justify-self: start;
+}
+
 /* ---- server facts -------------------------------------------------------- */
 .ai-facts-changes {
   margin: 6px 0 10px;

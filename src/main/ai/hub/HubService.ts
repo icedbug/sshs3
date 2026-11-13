@@ -84,6 +84,7 @@ import {
   PAGE_KINDS,
 } from "./KbCompile";
 import { buildDailyReport } from "./DailyReport";
+import { lowerMode } from "./AppGuard";
 import { inboxItems, type InboxItem } from "../../../shared/aiHubInbox";
 import {
   NOTIFY_KINDS,
@@ -170,7 +171,7 @@ import {
   type ExtraWorkspaceContext,
   type InventoryTarget,
 } from "./ContextService";
-import { boundedContext, safeError } from "./privacy";
+import { boundedContext, maskContext, safeError } from "./privacy";
 import { createLogger } from "../../log";
 import { runWorkforce } from "./WorkforceRunner";
 import { LearningQueue } from "./LearningQueue";
@@ -217,6 +218,7 @@ import {
 
 import {
   insideDataDirectory,
+  keepSecrets,
   requiredText,
   integer,
   extractResponseTextFromRaw,
@@ -822,6 +824,17 @@ export class HubService {
         (ba) => !dismissed.has(ba.id) && !stored.some((a) => a.id === ba.id),
       ),
     ];
+  }
+
+  /**
+   * The MCP servers as they may leave the hub (to the interface, to a model):
+   * with the names of their environment variables and headers, and no values.
+   * An empty value means "set, not shown".
+   */
+  private mcpServersShown(): McpServerConfig[] {
+    const names = (values?: Record<string, string>): Record<string, string> | undefined =>
+      values && Object.keys(values).length ? Object.fromEntries(Object.keys(values).map((k) => [k, ""])) : undefined;
+    return this.getMcpServersList().map((s) => ({ ...s, env: names(s.env), headers: names(s.headers) }));
   }
 
   private getMcpServersList(): McpServerConfig[] {
@@ -1454,7 +1467,7 @@ export class HubService {
       : this.store.data.tasks;
     const allMemories = extra.memories ?? this.store.data.memories;
     const allInfraEdges = this.getInfraEdgesList();
-    const allMcpServers = this.getMcpServersList();
+    const allMcpServers = this.mcpServersShown();
 
     return {
       preview: preview
@@ -1670,7 +1683,8 @@ export class HubService {
               p.workforceAutopilot === true;
           if (p.approvalWaitMinutes !== undefined)
             this.store.data.preferences.approvalWaitMinutes = integer(p.approvalWaitMinutes, 1, 60);
-          if (p.sharedWorkspacePath !== undefined) {
+          // On a shared server the path is the server's own and set by its administrator: not by whoever is signed in.
+          if (p.sharedWorkspacePath !== undefined && !this.sharedServer()) {
             const cleanedPath = p.sharedWorkspacePath.trim();
             if (cleanedPath) {
               this.store.data.preferences.sharedWorkspacePath = cleanedPath;
@@ -2612,11 +2626,11 @@ export class HubService {
         const agent = this.getAgentsList().find((a) => a.id === targetAgentId);
         if (!agent) throw new Error("Mission Agent not found");
         const clusterTag = agent.targetCluster
-          ? ` (Kluster: @cluster:${agent.targetCluster})`
+          ? ` (cluster: @cluster:${agent.targetCluster})`
           : "";
         const missionPrompt =
           request.promptOverride?.trim() ||
-          `[Uppdrag för ${agent.icon} ${agent.name}${clusterTag}]\n${agent.mission}`;
+          `[Mission for ${agent.name}${clusterTag}]\n${agent.mission}`;
         await this.start({
           prompt: missionPrompt,
           sessionId: request.sessionId,
@@ -2649,16 +2663,17 @@ export class HubService {
         const prevAgentName = task.agentName || "Default Assistant";
         task.agentId = toAgent.id;
         task.agentName = toAgent.name;
-        task.mode = toAgent.defaultMode || task.mode;
+        // Handing over never gives more freedom: the conversation keeps the more careful of the two modes.
+        task.mode = lowerMode(task.mode, toAgent.defaultMode);
         task.updatedAt = Date.now();
         task.messages.push({
           id: crypto.randomUUID(),
           role: "assistant",
-          text: `🤝 **Agent Handoff (${prevAgentName} → ${toAgent.icon || "🤖"} ${toAgent.name})**\n${
+          text: `**Handed over: ${prevAgentName} → ${toAgent.name}**\n${
             request.reason
-              ? `Anledning: *${boundedContext(request.reason, 400)}*\n`
+              ? `Reason: *${boundedContext(request.reason, 400)}*\n`
               : ""
-          }Uppdrag: ${toAgent.mission}`,
+          }Mission: ${toAgent.mission}`,
           at: Date.now(),
         });
         break;
@@ -2781,7 +2796,7 @@ export class HubService {
         const url = (input.url ?? "").trim() || existing?.url || "";
         if (!url) throw new Error("The channel needs an address to post to");
         // Checked now so a wrong address is said at once, and again each time something is sent.
-        const target = await guardUrl(url, this.notifyGuard());
+        const target = await guardUrl(url, this.outboundGuard());
         if (input.kind === "ntfy" && !target.url.pathname.split("/").filter(Boolean).length)
           throw new Error("An ntfy address ends with the topic, like https://ntfy.sh/my-topic");
         const events = (input.events ?? []).filter((e) => NOTIFY_KINDS.includes(e));
@@ -2818,7 +2833,7 @@ export class HubService {
             [{ id: "test", kind: "report", headline: "A test from sshs3", title: "If you can read this, the channel works.", link }],
             { inboxLink: link },
           ),
-          this.notifyGuard(),
+          this.outboundGuard(),
           { waits: [] },
         );
         channel.last = { at: Date.now(), ...result };
@@ -2887,10 +2902,11 @@ export class HubService {
           transport: s.transport === "http" ? "http" : "stdio",
           command: s.command?.trim() || undefined,
           args: s.args?.map((x) => x.trim()).filter(Boolean),
-          env: s.env,
+          env: keepSecrets(existing?.env, s.env),
           url: s.url?.trim() || undefined,
-          headers: s.headers,
-          enabled: s.enabled ?? true,
+          headers: keepSecrets(existing?.headers, s.headers),
+          // Editing a server does not switch it back on.
+          enabled: s.enabled ?? existing?.enabled ?? true,
           discoveredTools: s.discoveredTools ?? existing?.discoveredTools ?? [],
           status: existing?.status ?? "unknown",
           lastError: existing?.lastError,
@@ -3007,7 +3023,8 @@ export class HubService {
         break;
       }
       case "kb-ingest-text": {
-        const text = requiredText(request.text);
+        // A file out of an editor may hold a password; a note somebody wrote for the team is kept as written.
+        const text = request.mask ? maskContext(requiredText(request.text)) : requiredText(request.text);
         const title = request.title?.trim() || firstHeading(text);
         reply = {
           ingest: await this.ingestExtracted(
@@ -3015,13 +3032,18 @@ export class HubService {
             {
               name: title || text.trim().split("\n")[0].replace(/^[#>*\s-]+/, "").slice(0, 80) || "Pasted note",
               sourceType: "paste",
+              sourceRef: request.sourceRef ? boundedContext(request.sourceRef, 300) : undefined,
             },
           ),
         };
         break;
       }
       case "kb-ingest-url": {
-        const fetched = await fetchUrl(requiredText(request.url));
+        const fetched = await fetchUrl(requiredText(request.url), this.kbNetwork?.fetchImpl, {
+          ...this.outboundGuard(),
+          allowPlainHttp: true,
+          lookup: this.kbNetwork?.lookup,
+        });
         reply = {
           ingest: await this.ingestExtracted(fetched, {
             name: fetched.title || fetched.url,
@@ -3155,6 +3177,8 @@ export class HubService {
         break;
       }
       case "kb-ingest-folder": {
+        // A folder path here would be a folder on the server, readable by any signed-in user through the knowledge base.
+        if (this.sharedServer() && !isDemoMode()) throw new Error("A folder on the server cannot be read into the knowledge base from the browser. Drop the files in instead.");
         const docs = await this.kb.ingestLocalFolder(
           requiredText(request.folderPath),
           {
@@ -4208,6 +4232,7 @@ export class HubService {
 
   // ---- server facts ----------------------------------------------------------
 
+
   private readonly factsStore: FactsStore;
   private readonly factsCollecting = new Set<string>();
   private readonly factsInFlight = new Map<string, Promise<void>>();
@@ -4494,9 +4519,17 @@ export class HubService {
     this.runTimers.delete(taskId);
   }
 
-  private notifyGuard(): GuardOptions {
-    // An address on a shared server is typed by one of its users: it must not lead back into the server.
-    return { server: Boolean(this.host.alertHookOwner), allowPrivate: process.env.SSHS3_NOTIFY_ALLOW_PRIVATE === "1" };
+  /** Stands in for the network when a page is fetched for the knowledge base. Set in tests only. */
+  private kbNetwork?: { fetchImpl: typeof fetch; lookup: GuardOptions["lookup"] };
+
+  /** A shared server with several users: what one of them types must not reach into the server itself. */
+  private sharedServer(): boolean {
+    return Boolean(this.host.alertHookOwner);
+  }
+
+  /** Where sshs3 may call out to on a user's word: a notification channel, a page for the knowledge base. */
+  private outboundGuard(): GuardOptions {
+    return { server: this.sharedServer(), allowPrivate: !this.sharedServer() || process.env.SSHS3_ALLOW_PRIVATE_ADDRESSES === "1" };
   }
 
   private publicUrl(): string {
@@ -4643,7 +4676,7 @@ export class HubService {
           mine = kept;
         }
         if (!mine.length) return;
-        const result = await deliver(renderNotification(channel, mine, { owner, inboxLink: this.inboxLink() }), this.notifyGuard(), {
+        const result = await deliver(renderNotification(channel, mine, { owner, inboxLink: this.inboxLink() }), this.outboundGuard(), {
           waits: this.notifyWaits,
         });
         channel.last = { at: Date.now(), ...result };
@@ -6387,7 +6420,7 @@ export class HubService {
       dirSyncProfiles: appExtra?.dirSyncProfiles ?? [],
       activeTunnels: appExtra?.activeTunnels ?? [],
       agents: this.getAgentsList(),
-      mcpServers: this.getMcpServersList(),
+      mcpServers: this.mcpServersShown(),
       kbDocuments: this.getKbDocumentsList(),
       kbPages: this.store.data.kbPages ?? [],
       infraEdges: this.getInfraEdgesList(),

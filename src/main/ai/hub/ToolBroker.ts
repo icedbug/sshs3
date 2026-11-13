@@ -521,7 +521,9 @@ export class ToolBroker {
         throw new Error("Run capability revoked");
       return;
     }
-    if (task.mode === "advice") {
+    // A conversation that only advises runs nothing and changes no file. A change to sshs3's
+    // own rules is another matter: it is the person's to decide, and they are asked below.
+    if (task.mode === "advice" && !change.guard) {
       change.status = "denied";
       this.deps.changed();
       throw new Error("Advice mode does not execute commands or change files");
@@ -572,6 +574,8 @@ export class ToolBroker {
       planCoversCommand(task, change.command, change.riskLevel)
     )
       requiresApproval = false;
+    // A change to the rules themselves is a person's to make: no mode, policy or plan lets it through unasked.
+    if (change.guard) requiresApproval = true;
 
     if (requiresApproval) {
       task.status = "waiting";

@@ -112,6 +112,7 @@ export const FileEditorModal: React.FC<FileEditorModalProps> = ({
   const saveBlocked = isBinary || truncated || notUtf8 || isDirectPreview;
   const [wordWrap, setWordWrap] = useState(true);
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
+  const [kbConfirm, setKbConfirm] = useState(false);
   const [isMaximized, setIsMaximized] = useState(false);
   const [viewMode, setViewMode] = useState<'source' | 'preview'>('source');
 
@@ -762,14 +763,14 @@ export const FileEditorModal: React.FC<FileEditorModalProps> = ({
                 <button
                   type="button"
                   data-testid="file-editor-ask-ai-btn"
-                  title="Bifoga filinnehållet till AI Hub för analys, felsökning eller konfigurationsgranskning"
+                  title="Attach this file to the assistant, for analysis, troubleshooting or a configuration review"
                   onClick={() => {
                     window.dispatchEvent(
                       new CustomEvent('sshs3:ai-attach', {
                         detail: {
                           label: `@file:${entry.name}`,
                           text: `File: ${entry.path} (source: ${providerId}, type: ${sourceType})\n\n${content.slice(0, 12000)}`,
-                          prompt: `Granska och analysera @file:${entry.name} (${entry.path}). Kontrollera om det finns några fel, risker eller förbättringar mot våra klusterstandarder.`,
+                          prompt: `Review @file:${entry.name} (${entry.path}). Look for errors, risks and anything that departs from how our clusters are set up.`,
                         },
                       })
                     );
@@ -777,32 +778,46 @@ export const FileEditorModal: React.FC<FileEditorModalProps> = ({
                   className="flex items-center gap-1 rounded-lg border border-sky-500/40 bg-sky-500/15 px-2.5 py-1 text-xs font-semibold text-sky-300 hover:bg-sky-500/25 transition-colors"
                 >
                   <span>✨</span>
-                  <span className="hidden sm:inline">Fråga AI</span>
+                  <span className="hidden sm:inline">Ask the assistant</span>
                 </button>
                 <button
                   type="button"
                   data-testid="file-editor-save-kb-btn"
-                  title="Indexera och spara denna fil som ett dokument/runbook i Workspace Knowledge Base (KB)"
+                  title="Share this file's text with the team's knowledge base. Agents will read it. Secrets it recognises are masked first."
                   onClick={() => {
-                    void hubRequest({
-                      action: 'kb-save',
-                      doc: {
-                        title: `${entry.name} (${providerId})`,
-                        sourceType: sourceType === 's3' ? 's3' : 'upload',
-                        sourceRef: `${providerId}:${entry.path}`,
-                        tags: [sourceType, entry.name.split('.').pop() || 'config'],
-                        content: content.slice(0, 24000),
-                        shared: true,
-                      },
-                    }).then(() => {
-                      setSaveStatus('Sparad i Knowledge Base (KB)!');
-                      setTimeout(() => setSaveStatus(null), 2500);
-                    });
+                    // Shared with the team and read by agents: asked about first, never on a single click.
+                    if (!kbConfirm) {
+                      setKbConfirm(true);
+                      setTimeout(() => setKbConfirm(false), 5000);
+                      return;
+                    }
+                    setKbConfirm(false);
+                    hubRequest({
+                      action: 'kb-ingest-text',
+                      title: `${entry.name} (${providerId})`,
+                      text: content,
+                      mask: true,
+                      sourceRef: `${providerId}:${entry.path}`,
+                    })
+                      .then((next) => {
+                        const result = next.reply?.ingest;
+                        setSaveStatus(
+                          result?.failed.length
+                            ? `Not saved to the knowledge base: ${result.failed[0].error}`
+                            : result?.duplicates.length
+                              ? 'Already in the knowledge base'
+                              : 'Saved to the knowledge base (recognised secrets masked)',
+                        );
+                      })
+                      .catch((error: unknown) =>
+                        setSaveStatus(`Not saved to the knowledge base: ${error instanceof Error ? error.message : 'the request failed'}`),
+                      )
+                      .finally(() => setTimeout(() => setSaveStatus(null), 4000));
                   }}
                   className="flex items-center gap-1 rounded-lg border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-1 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/25 transition-colors"
                 >
                   <span>📚</span>
-                  <span className="hidden sm:inline">Spara i KB</span>
+                  <span className="hidden sm:inline">{kbConfirm ? 'Share with the team?' : 'Add to KB'}</span>
                 </button>
               </>
             )}
