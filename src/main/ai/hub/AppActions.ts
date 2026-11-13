@@ -200,7 +200,7 @@ export async function handleAppAction(
         kind: "setting",
         guard: true,
         target: "sshs3",
-        description: boundedContext(ask.title, 300),
+        description: clip(ask.title, 300),
         command: boundedContext(ask.detail, 3000),
         status: "pending",
         riskLevel: "modify",
@@ -1365,8 +1365,9 @@ export async function handleAppAction(
           id: crypto.randomUUID(),
           kind: "command",
           target: targetSummary,
-          description: boundedContext(
+          description: clip(
             `[Parallel Cluster Exec · ${matchedServers.length} nodes] ${description}`,
+            400,
           ),
           command: shown.text,
           ...(shown.hidden ? { hiddenValues: true } : {}),

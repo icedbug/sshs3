@@ -1077,7 +1077,7 @@ export class HubService {
       const now = Date.now();
       lead = {
         id: crypto.randomUUID(),
-        title: `Workforce: ${boundedContext(opts.prompt, 90)}`,
+        title: `Workforce: ${clip(opts.prompt, 90)}`,
         agentName: "Workforce lead",
         mode: "advice",
         status: "running",
@@ -1457,7 +1457,7 @@ export class HubService {
 
     const run: WorkforceRun = {
       id: `wf-${crypto.randomUUID().slice(0, 8)}`,
-      title: boundedContext(opts.prompt, 90),
+      title: clip(opts.prompt, 90),
       prompt: boundedContext(opts.prompt, 2000),
       leadAgentName: "Lead SRE Workforce Orchestrator",
       targetCluster: opts.targetCluster || "ALL",
@@ -1810,7 +1810,7 @@ export class HubService {
               s.imageDataUrl.startsWith("data:image/"),
           )
           .map((s) => ({
-            label: boundedContext(s.label || "image", 200),
+            label: clip(s.label || "image", 200),
             dataUrl: s.imageDataUrl!.slice(0, 6_000_000),
             mimeType: s.mimeType,
           }));
@@ -1818,7 +1818,7 @@ export class HubService {
           if (!s.imageDataUrl && s.text?.trim()) {
             task.sources.push({
               id: crypto.randomUUID(),
-              label: boundedContext(s.label || "attachment", 200),
+              label: clip(s.label || "attachment", 200),
               text: boundedContext(s.text),
               observedAt: Date.now(),
             });
@@ -2060,12 +2060,12 @@ export class HubService {
           at: Date.now(),
           actor: boundedContext(actor, 80),
           profileId: request.event.profileId,
-          targetLabel: boundedContext(
+          targetLabel: clip(
             requiredText(request.event.targetLabel),
             200,
           ),
           kind: request.event.kind,
-          summary: boundedContext(requiredText(request.event.summary), 400),
+          summary: clip(requiredText(request.event.summary), 400),
           detail: request.event.detail
             ? boundedContext(request.event.detail, 2000)
             : undefined,
@@ -2461,7 +2461,7 @@ export class HubService {
         const schedule: AgentSchedule = {
           ...s,
           id,
-          title: boundedContext(requiredText(s.title), 200),
+          title: clip(requiredText(s.title), 200),
           prompt: boundedContext(requiredText(s.prompt)),
           profileId: requiredText(s.profileId),
           model: requiredText(s.model),
@@ -2520,8 +2520,8 @@ export class HubService {
         const actor = a.author?.trim() || (await this.resolveActorName());
         const saved: MissionAgent = {
           id,
-          name: boundedContext(requiredText(a.name), 120),
-          role: boundedContext(a.role?.trim() || "Infrastructure Specialist", 160),
+          name: clip(requiredText(a.name), 120),
+          role: clip(a.role?.trim() || "Infrastructure Specialist", 160),
           icon: boundedContext(a.icon?.trim() || "", 16),
           mission: boundedContext(requiredText(a.mission), 2000),
           systemPrompt: boundedContext(a.systemPrompt?.trim() || a.mission, 8000),
@@ -2661,7 +2661,7 @@ export class HubService {
         const id = requiredText(r.id).toLowerCase().replace(/[^a-z0-9-]+/g, "-").slice(0, 40);
         const saved: ExternalRunner = {
           id,
-          name: boundedContext(requiredText(r.name), 80),
+          name: clip(requiredText(r.name), 80),
           command: requiredText(r.command),
           args: (r.args ?? []).map((x) => String(x)).filter(Boolean).slice(0, 40),
           cwd: r.cwd?.trim() || undefined,
@@ -2684,7 +2684,7 @@ export class HubService {
         const now = Date.now();
         this.putGoal({
           id: existing?.id ?? crypto.randomUUID(),
-          title: boundedContext(requiredText(g.title), 200),
+          title: clip(requiredText(g.title), 200),
           description: g.description?.trim() ? boundedContext(g.description.trim(), 4000) : undefined,
           status: g.status === "done" ? "done" : "active",
           author: existing?.author ?? (await this.resolveActorName()),
@@ -3046,7 +3046,7 @@ export class HubService {
         const existing = this.getMcpServersList().find((x) => x.id === id);
         const saved: McpServerConfig = {
           id,
-          name: boundedContext(requiredText(s.name), 120),
+          name: clip(requiredText(s.name), 120),
           transport: s.transport === "http" ? "http" : "stdio",
           command: s.command?.trim() || undefined,
           args: s.args?.map((x) => x.trim()).filter(Boolean),
@@ -3565,7 +3565,7 @@ export class HubService {
           s.imageDataUrl.startsWith("data:image/"),
       )
       .map((s) => ({
-        label: boundedContext(s.label || "image", 200),
+        label: clip(s.label || "image", 200),
         dataUrl: s.imageDataUrl!.slice(0, 6_000_000),
         mimeType: s.mimeType,
       }));
@@ -3613,7 +3613,7 @@ export class HubService {
         .filter((s) => !s.imageDataUrl && s.text?.trim())
         .map((s) => ({
           id: crypto.randomUUID(),
-          label: boundedContext(requiredText(s.label), 200),
+          label: clip(requiredText(s.label), 200),
           text: boundedContext(requiredText(s.text)),
           observedAt: now,
         })),
@@ -4324,7 +4324,7 @@ export class HubService {
           id: crypto.randomUUID(),
           kind: "command",
           target: `${runner.name} in ${runner.cwd ?? "?"}`,
-          description: boundedContext(question.title, 300),
+          description: clip(question.title, 300),
           command: question.command ? maskContext(question.command) : undefined,
           ...(question.command && maskContext(question.command) !== question.command ? { hiddenValues: true } : {}),
           status: "pending",
@@ -4915,7 +4915,7 @@ export class HubService {
           maxCommands: 1,
           maxMinutes: 5,
         },
-        { distillSourceId: `kb:${doc.id}`, title: `Reading · ${boundedContext(doc.title, 80)}` },
+        { distillSourceId: `kb:${doc.id}`, title: `Reading · ${clip(doc.title, 80)}` },
       );
       const answer = task.messages.filter((m) => m.role === "assistant").at(-1)?.text ?? "";
       if (task.status !== "completed") throw new Error(task.error || "The reading run did not finish.");
@@ -5508,7 +5508,7 @@ export class HubService {
           const task = await this.start(
             { prompt: found.prompt, mode: found.mode, agentId: found.agentId, maxCommands: 40, maxMinutes: 10 },
             undefined,
-            { evalCaseId: id, title: `Test · ${boundedContext(found.title, 80)}`, mainModel: true },
+            { evalCaseId: id, title: `Test · ${clip(found.title, 80)}`, mainModel: true },
             replay,
           );
           await this.whenSettled(task);
@@ -5517,7 +5517,7 @@ export class HubService {
           if (found.expect.conclusion && task.status === "completed" && answer) {
             const judge = await this.runBackground(
               { prompt: judgePrompt(found, answer), mode: "advice", agentName: "Tests", maxCommands: 1, maxMinutes: 5 },
-              { distillSourceId: `eval:${id}:${Date.now()}`, title: `Judging · ${boundedContext(found.title, 80)}`, mainModel: true },
+              { distillSourceId: `eval:${id}:${Date.now()}`, title: `Judging · ${clip(found.title, 80)}`, mainModel: true },
             );
             const verdict = parseJudgement(judge.messages.filter((m) => m.role === "assistant").at(-1)?.text ?? "");
             checks.push(verdict ?? { name: "reaches the expected conclusion", passed: false, detail: "The judgement could not be read." });
@@ -5631,7 +5631,7 @@ export class HubService {
       const agent = routeAlert(alert, target, this.store.data.alertRules ?? [], agents);
       const ticket = await this.saveTicketFrom(
         {
-          title: boundedContext(`${alert.severity === "critical" ? "Alert (critical)" : "Alert"}: ${alert.title}`, 200),
+          title: clip(`${alert.severity === "critical" ? "Alert (critical)" : "Alert"}: ${alert.title}`, 200),
           description: alertTicketText(alert, this.changesOn(target, 24 * 3_600_000), this.pagesForAlert(alert, target)),
           assigneeAgentId: agent?.id,
           target,
@@ -5824,8 +5824,8 @@ export class HubService {
     const ticket: WorkTicket = {
       ...existing,
       id,
-      title: boundedContext(requiredText(input.title), 200),
-      description: boundedContext(input.description?.trim() ?? existing?.description ?? "", 8000),
+      title: clip(requiredText(input.title), 200),
+      description: clip(input.description?.trim() ?? existing?.description ?? "", 8000),
       goalId: goals.some((g) => g.id === input.goalId) ? input.goalId : undefined,
       status,
       assigneeAgentId: agent?.id,
@@ -6025,7 +6025,7 @@ export class HubService {
     const goalId = crypto.randomUUID();
     this.putGoal({
       id: goalId,
-      title: boundedContext(goalTitle?.trim() || template.goal.title, 200),
+      title: clip(goalTitle?.trim() || template.goal.title, 200),
       description: template.goal.description,
       status: "active",
       author: actor,
@@ -6372,7 +6372,7 @@ export class HubService {
       const status = await this.proposeMemoriesFrom(
         {
           id: record.id,
-          title: boundedContext(`${record.title} (${record.actor})`, 200),
+          title: clip(`${record.title} (${record.actor})`, 200),
           transcript: boundedContext(record.transcript, 24_000),
         },
         record.query,
@@ -6529,7 +6529,7 @@ export class HubService {
     ): MemoryDistillStatus => {
       const status: MemoryDistillStatus = {
         at: Date.now(),
-        sourceTitle: boundedContext(source.title, 160),
+        sourceTitle: clip(source.title, 160),
         proposed,
         ...(error ? { error } : {}),
       };
@@ -6558,7 +6558,7 @@ export class HubService {
         },
         {
           distillSourceId: source.id,
-          title: `Memory · ${boundedContext(source.title, 80)}`,
+          title: `Memory · ${clip(source.title, 80)}`,
         },
       );
       const answer =
@@ -6657,7 +6657,7 @@ export class HubService {
         profileId: session.profileId,
         targetLabel: session.label,
         kind: classified.kind,
-        summary: boundedContext(classified.summary, 400),
+        summary: clip(classified.summary, 400),
         detail: boundedContext(commandLine, 1000),
       };
       this.appendActivityEvent(event);
@@ -6727,7 +6727,7 @@ export class HubService {
         profileId: session?.profileId,
         targetLabel,
         kind: change.kind === "file" ? "config-edit" : "command",
-        summary: boundedContext(
+        summary: clip(
           `${change.description}${how ? ` (${how})` : change.exitCode !== undefined && change.exitCode !== 0 ? ` (exit ${change.exitCode})` : ""}`,
           400,
         ),
@@ -7034,7 +7034,7 @@ export class HubService {
         tier: input.tier,
         cluster: input.cluster?.trim() || undefined,
         scope: input.scope,
-        title: boundedContext(input.title, 200),
+        title: clip(input.title, 200),
         text: boundedContext(input.text),
         author: boundedContext(author, 80),
         confidence: input.confidence,

@@ -7,7 +7,7 @@ import type {
   EvalExpectation,
   EvalRun,
 } from "../../../shared/types/aiHub";
-import { boundedContext } from "./privacy";
+import { boundedContext, clip } from "./privacy";
 
 /**
  * Tests for the agents, made from the team's own conversations. A case keeps
@@ -43,7 +43,7 @@ export function caseFromTask(
   if (!prompt.trim()) throw new Error("That conversation has no question to replay.");
   return {
     id: `e-${crypto.randomUUID().slice(0, 8)}`,
-    title: boundedContext(input.title?.trim() || task.title, 160),
+    title: clip(input.title?.trim() || task.title, 160),
     prompt: boundedContext(prompt, 12_000),
     mode: task.mode,
     agentId: task.agentId,

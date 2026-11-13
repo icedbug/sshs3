@@ -11,7 +11,7 @@ import {
   analyzeCommandSafety,
   shouldRequireCommandApproval,
 } from "./CommandSafetyService";
-import { boundedContext, exactHash, forApproval, maskStrings, safeError } from "./privacy";
+import { boundedContext, exactHash, forApproval, maskStrings, safeError, clip } from "./privacy";
 
 /** A person's answer, and how it came about when nobody answered. */
 interface Answer {
@@ -362,8 +362,9 @@ export class ToolBroker {
         id: crypto.randomUUID(),
         kind: "command",
         target: target.label,
-        description: boundedContext(
+        description: clip(
           request.description || "Run terminal command",
+          400,
         ),
         command: shown.text,
         ...(shown.hidden ? { hiddenValues: true } : {}),
@@ -467,7 +468,7 @@ export class ToolBroker {
       id: crypto.randomUUID(),
       kind: "command",
       target: target.label,
-      description: boundedContext(request.description || "Make a change"),
+      description: clip(request.description || "Make a change", 400),
       command: shown.command.text,
       commandHash: exactHash(command.trim()),
       ...(Object.values(shown).some((x) => x.hidden) ? { hiddenValues: true } : {}),
