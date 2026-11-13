@@ -510,6 +510,31 @@ export class HubService {
   private pendingLayoutEvent?: WorkspaceLayoutEvent;
   private cachedWorkspaceServers: WorkspaceServerSummary[] = [];
   private ticking = false;
+  /** When the previous pass over the schedules began: a job that fell due after it is late, not missed. */
+  private lastScheduleLoopAt = 0;
+  /** The terminal each scheduled run was given, so it is closed when the run ends. */
+  private readonly scheduleSessions = new Map<string, string>();
+
+  /**
+   * A scheduled run has ended: its schedule says how (not just "Started"),
+   * a failure is told to the person, and the terminal opened for it is closed.
+   */
+  private scheduledRunEnded(taskId: string): void {
+    const sessionId = this.scheduleSessions.get(taskId);
+    if (sessionId) {
+      this.scheduleSessions.delete(taskId);
+      this.host.closeSession?.(sessionId);
+    }
+    const schedule = this.store.data.schedules.find((s) => s.lastTaskId === taskId);
+    const task = this.store.data.tasks.find((t) => t.id === taskId);
+    if (!schedule || !task || active(task)) return;
+    const at = new Date().toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+    schedule.lastStatus =
+      task.status === "completed"
+        ? `Completed at ${at}${task.verification === "verified" ? ", verified" : ""}`
+        : `${task.status === "failed" ? "Failed" : "Stopped"} at ${at}${task.error ? `: ${clip(task.error, 160)}` : ""}`;
+    if (task.status !== "completed") this.notify("Scheduled task did not finish", schedule.title);
+  }
   private disposed = false;
   private resume = (): void => {
     const now = Date.now();
@@ -1074,6 +1099,7 @@ export class HubService {
   }
 
   private settled(taskId: string): void {
+    this.scheduledRunEnded(taskId);
     const list = this.settleWaiters.get(taskId);
     if (!list) return;
     this.settleWaiters.delete(taskId);
@@ -5582,24 +5608,28 @@ export class HubService {
     if (this.store.data.tasks.some((t) => active(t) && !isBackgroundRun(t))) return;
     this.nightlyRunning = true;
     try {
-      this.store.data.lastNightlyDay = day;
       const sync = this.work();
       const client = this.clientId();
-      if (sync) {
-        const held = await sync.claim(`nightly-${day}`, { by: await this.resolveActorName(), client }, now);
-        if (held.client !== client) return; // Another installation has today's upkeep.
+      // The team's upkeep (tidying team memory, fetching the knowledge base's links again, looking for
+      // contradictions) is done once a day by one installation: a mark that stays for the day, not a
+      // lease that lapses after four minutes and lets the next one do it all again.
+      const mine = sync ? await sync.markOnce(`nightly-${day}`, client, this.notifySettle, now).catch(() => false) : true;
+      this.store.data.lastNightlyDay = day;
+      if (mine) {
+        await sync?.pruneMarks(14 * 24 * 60 * 60_000, now).catch(() => undefined);
+        await this.request({ action: "self-learn-reflect" }).catch((e) => log.warn("Nightly tidy failed", safeError(e)));
+        await this.refetchWatchedSources(now).catch((e) => log.warn("Fetching the knowledge base's links again failed", safeError(e)));
+        await this.checkContradictions().catch((e) => log.warn("Nightly contradiction check failed", safeError(e)));
       }
-      await sync?.pruneMarks(14 * 24 * 60 * 60_000, now).catch(() => undefined);
-      await this.request({ action: "self-learn-reflect" }).catch((e) => log.warn("Nightly tidy failed", safeError(e)));
-      await this.refetchWatchedSources(now).catch((e) => log.warn("Fetching the knowledge base's links again failed", safeError(e)));
-      await this.checkContradictions().catch((e) => log.warn("Nightly contradiction check failed", safeError(e)));
+      // The report is each installation's own: since its last one, however long the computer was off.
       const extra = await this.collectExtraContext();
       const snap = await this.snapshot();
+      const since = this.store.data.dailyReport?.at ?? now - 24 * 60 * 60_000;
       this.store.data.dailyReport = {
         day,
         at: Date.now(),
         text: buildDailyReport({
-          since: now - 24 * 60 * 60_000,
+          since,
           now,
           activity: extra.activityLog ?? this.store.data.activityLog ?? [],
           tickets: live(this.store.data.workTickets),
@@ -5607,7 +5637,7 @@ export class HubService {
           pages: this.store.data.kbPages ?? [],
           memories: extra.memories ?? this.store.data.memories,
           findings: snap.kbFindings ?? [],
-          serverChanges: this.recentServerChanges(24 * 3_600_000, now).flatMap((r) => r.lines).sort().reverse(),
+          serverChanges: this.recentServerChanges(Math.max(24 * 3_600_000, now - since), now).flatMap((r) => r.lines).sort().reverse(),
           serverProblems: this.factsStore.all().flatMap((r) => this.factsProblems(r, now).map((p) => `${r.name}: ${p.text}`)),
         }),
       };
@@ -6320,11 +6350,16 @@ export class HubService {
             this.notify("Endpoint became unreachable", entry.label);
         this.changed();
       }
+      // Missed means the app was not there when it fell due: a job that fell due while the previous pass
+      // was still busy (an inventory probe on a VPN that is down, a slow SSH open) is late, and runs.
+      const previousLoop = this.lastScheduleLoopAt || now;
+      this.lastScheduleLoopAt = now;
       for (const schedule of this.store.data.schedules) {
         if (!schedule.enabled || schedule.nextRunAt > now) continue;
-        const overdue = now - schedule.nextRunAt;
+        const dueAt = schedule.nextRunAt;
+        const overdue = now - dueAt;
         schedule.nextRunAt = now + schedule.intervalMinutes * 60_000;
-        if (overdue > 60_000) {
+        if (overdue > 60_000 && dueAt < previousLoop - 60_000) {
           schedule.lastStatus = "Missed while unavailable; not replayed.";
           this.changed();
           continue;
@@ -6339,8 +6374,10 @@ export class HubService {
           this.changed();
           continue;
         }
+        let opened: string | undefined;
         try {
           const id = await this.host.openSchedule(schedule);
+          opened = id;
           await this.terminals.arm(id, schedule.shell);
           const task = await this.start(
             {
@@ -6353,10 +6390,14 @@ export class HubService {
             schedule,
           );
           schedule.lastTaskId = task.id;
-          schedule.lastStatus = "Started";
+          schedule.lastStatus = "Running";
+          this.scheduleSessions.set(task.id, id);
+          opened = undefined;
         } catch (e) {
           schedule.lastStatus = `Blocked: ${safeError(e)}`;
           this.notify("Scheduled task blocked", schedule.title);
+          // A run that never started leaves no terminal behind.
+          if (opened) this.host.closeSession?.(opened);
         }
         this.changed();
       }

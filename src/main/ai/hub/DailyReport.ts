@@ -56,10 +56,11 @@ export function buildDailyReport(input: {
   const rolledBack = changes.filter((x) => x.c.rollback?.ran);
   const failed = changes.filter((x) => !x.c.rollback?.ran && x.c.status !== "completed");
   section(
-    "Went wrong",
+    "Went wrong (runs on this computer, and the board)",
     [
-      ...rolledBack.map((x) => `${x.who} on ${x.c.target}: ${clip(x.c.description, 120)} — its check failed and it was ${x.c.rollback!.exitCode === 0 ? "rolled back" : "NOT rolled back (the rollback failed)"}`),
+      ...rolledBack.map((x) => `${x.who} on ${x.c.target}: ${clip(x.c.description, 120)} — its check failed and it was ${x.c.rollback!.exitCode !== 0 ? "NOT rolled back (the rollback failed)" : x.c.rollback!.restored === false ? "rolled back, but the check does not read as before" : "rolled back"}`),
       ...failed.slice(0, 6).map((x) => `${x.who} on ${x.c.target}: ${clip(x.c.description, 120)} — ${x.c.status}${x.c.exitCode !== undefined ? `, exit ${x.c.exitCode}` : ""}`),
+      ...(failed.length > 6 ? [`…and ${failed.length - 6} more`] : []),
       ...recent(input.tickets.filter((t) => t.status === "blocked"), (t) => t.updatedAt)
         .slice(0, 6)
         .map((t) => `Ticket “${t.title}” stopped: ${clip(t.result ?? "no reason recorded", 160)}`),
@@ -69,14 +70,17 @@ export function buildDailyReport(input: {
   const ok = changes.filter((x) => x.c.status === "completed" && !x.c.rollback?.ran);
   const [okRows, okMore] = cap(ok, 8);
   section(
-    "Changed by agents",
-    okRows.map((x) => `${x.who} on ${x.c.target}: ${clip(x.c.description, 120)}${x.c.check?.after ? " (check passed)" : ""}`),
+    "Changed by agents on this computer",
+    okRows.map((x) => `${x.who} on ${x.c.target}: ${clip(x.c.description, 120)}${x.c.check?.after && !x.c.check.before ? " (its check showed it worked)" : ""}`),
     okMore,
   );
 
-  const team = recent(input.activity, (a) => a.at).filter((a) => a.kind !== "ai-action");
+  // Everyone's, from the shared activity: people, and agents on other computers. This computer's own agent
+  // changes are listed above already.
+  const own = new Set(input.tasks.flatMap((t) => t.changes.map((c) => `change-${c.id}`)));
+  const team = recent(input.activity, (a) => a.at).filter((a) => a.kind !== "ai-action" && !own.has(a.id));
   const [teamRows, teamMore] = cap(team, 8);
-  section("Changed by the team", teamRows.map((a) => `${a.actor} on ${a.targetLabel}: ${clip(a.summary, 140)}`), teamMore);
+  section("Changed by the team (people, and agents on other computers)", teamRows.map((a) => `${a.actor} on ${a.targetLabel}: ${clip(a.summary, 140)}`), teamMore);
 
   const done = recent(input.tickets.filter((t) => t.status === "done" && !t.alert), (t) => t.updatedAt);
   const [doneRows, doneMore] = cap(done, 8);
@@ -100,10 +104,13 @@ export function buildDailyReport(input: {
   const contradictions = input.findings.filter((f) => f.kind === "contradiction").length;
   section("Waiting for you", [
     ...(review ? [`${review} ticket${review === 1 ? "" : "s"} to review`] : []),
-    ...(blocked ? [`${blocked} run${blocked === 1 ? "" : "s"} that stopped`] : []),
+    ...(blocked ? [`${blocked} blocked ticket${blocked === 1 ? "" : "s"}`] : []),
     ...(gaps ? [`${gaps} question${gaps === 1 ? "" : "s"} agents found nothing on in the knowledge base`] : []),
     ...(contradictions ? [`${contradictions} place${contradictions === 1 ? "" : "s"} where knowledge base pages disagree`] : []),
   ]);
 
-  return lines.length ? lines.join("\n").trim() : "Nothing was recorded in the last day: no alerts, no changes, no tickets.";
+  const period = `Since ${new Date(since).toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}.`;
+  return lines.length
+    ? `${period}\n\n${lines.join("\n").trim()}`
+    : `${period} Nothing was recorded: no alerts, no changes, no tickets.`;
 }

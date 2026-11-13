@@ -49,14 +49,14 @@ describe("the daily report", () => {
     expect(text).toContain("Disk almost full on pg-01 — still firing, fired 3 times; ticket is in progress (DBA)");
     expect(text).toContain("Restart pgbouncer — its check failed and it was rolled back");
     expect(text).toContain("Ticket “Fix replication” stopped: No access to the replica");
-    expect(text).toContain("DBA on pg-01: Raise max_connections (check passed)");
+    expect(text).toContain("DBA on pg-01: Raise max_connections (its check showed it worked)");
     expect(text).not.toContain("df -h");
     expect(text).not.toContain("Old change");
     expect(text).toContain("Ana on web-01: Reloaded nginx");
     expect(text).toContain("- Rotate certificates");
     expect(text).toContain("Page “Postgres”: Added the pgbouncer restart pitfall");
     expect(text).toContain("1 ticket to review");
-    expect(text).toContain("1 run that stopped");
+    expect(text).toContain("1 blocked ticket");
     expect(text).toContain("1 question agents found nothing on");
     expect(buildDailyReport({ since: NOW - 24 * HOUR, now: NOW, activity: [], tickets: [], tasks: [], pages: [], memories: [], findings: [] })).toContain("Nothing was recorded");
   });
@@ -146,5 +146,52 @@ describe("in the hub", () => {
     await nightly(NOW + 24 * HOUR);
     expect(hub.store.data.dailyReport!.day).toBe("2026-05-13");
     expect(hub.store.data.dailyReport!.readAt).toBeUndefined();
+  });
+
+  it("does the team's upkeep once a day in all, and still writes each installation's own report", async () => {
+    const files = new Map<string, Buffer>();
+    const bucket = {
+      list: async (dir: string) => [...files.keys()].filter((k) => k.startsWith(`${dir}/`)).map((k) => k.slice(dir.length + 1)),
+      read: async (p: string) => files.get(p),
+      write: async (p: string, c: Buffer) => void files.set(p, c),
+      remove: async (p: string) => void files.delete(p),
+    };
+    const { WorkSync } = await import("../../src/main/ai/hub/WorkSync");
+    const reflections: string[] = [];
+    const install = async (name: string) => {
+      const hub = await makeHub();
+      const inner = hub as unknown as {
+        work: () => unknown;
+        notifySettle: () => Promise<void>;
+        request: (r: { action: string }) => Promise<unknown>;
+        nightly: (n: number) => Promise<void>;
+      };
+      inner.work = () => new WorkSync(bucket);
+      inner.notifySettle = async () => undefined;
+      const request = inner.request.bind(hub);
+      inner.request = async (r) => {
+        if (r.action === "self-learn-reflect") reflections.push(name);
+        return request(r);
+      };
+      return inner;
+    };
+    const a = await install("A");
+    const b = await install("B");
+    const c = await install("C");
+    // Hours apart: a lease of four minutes let each of these do it all again.
+    await a.nightly(NOW);
+    await b.nightly(NOW + 2 * HOUR);
+    await c.nightly(NOW + 5 * HOUR);
+    expect(reflections).toEqual(["A"]);
+    for (const h of [a, b, c]) expect((h as unknown as { store: { data: { dailyReport?: unknown } } }).store.data.dailyReport).toBeDefined();
+  });
+
+  it("reports on the time since the last report, however long the computer was off", async () => {
+    const hub = await makeHub();
+    const nightly = (now: number): Promise<void> => (hub as unknown as { nightly: (n: number) => Promise<void> }).nightly(now);
+    await nightly(NOW);
+    const first = hub.store.data.dailyReport!.at;
+    await nightly(NOW + 3 * 24 * HOUR);
+    expect(hub.store.data.dailyReport!.text).toContain(`Since ${new Date(first).toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}`);
   });
 });
