@@ -52,6 +52,39 @@ export const APP_OPS: Record<string, { fallback: string; ops: Record<string, App
 
 const SAFETY_FIELDS = ["safetyPolicy", "autoApproveSafeReadOnly", "requireApprovalOnProdTags", "blockDestructiveWithoutConfirm"];
 const ENDPOINT_FIELDS = ["aiProvider", "aiBaseUrl", "aiEnabled"];
+/**
+ * App settings an agent may change on its own: how things look. Everything
+ * else (which image a debug pod runs, which PKCS#11 library ssh loads, the X11
+ * server, sync, logging, updates, transfer limits …) reaches beyond the screen
+ * and is a person's to change.
+ */
+const HARMLESS_APP_SETTINGS = new Set([
+  "theme",
+  "terminalFontSize",
+  "terminalFontFamily",
+  "terminalScrollback",
+  "scrollbackLines",
+  "terminalCursorStyle",
+  "cursorStyle",
+  "cursorBlink",
+  "showHiddenFiles",
+  "perfMetricsEnabled",
+  "perfMetricsLayout",
+  "perfMetricsItems",
+  "perfMetricsIntervalSec",
+  "perfBarVisible",
+  "perfBarLayout",
+  "defaultNewTabType",
+]);
+/** The app settings the settings tool knows (see AppActions). Any of them outside the harmless list is asked about. */
+const APP_SETTING_FIELDS = [
+  "defaultNewTabType", "copyOnSelect", "rightClickPaste", "clipboardHistoryScope", "clipboardHistoryClearOnExit",
+  "sessionExitAction", "localTerminalAgentMode", "autoSyncLocalSshConfig", "confirmBeforeQuit", "confirmBeforeDelete",
+  "defaultConflictPolicy", "verifyTransferIntegrity", "fileManagerGitIntegration", "shareFoldersAcrossTypes",
+  "maxConcurrentTransfers", "maxBandwidthBps", "enableOpenShift", "k8sDebugImages", "smartcardAuthMode",
+  "smartcardUnlockAtStartup", "smartcardLibPath", "x11ServerMode", "x11ServerPath", "x11ServerArgs",
+  "dotfilesPoolEnabled", "logLevel", "autoCheckUpdates",
+];
 
 export interface GuardAsk {
   /** What is asked for, in a line a person reads in the inbox. */
@@ -129,6 +162,12 @@ export function guardAsk(
       return {
         title: "Change which model endpoint is used",
         detail: `${show(payload, ENDPOINT_FIELDS)}\nEvery conversation is sent to this endpoint. A stored key is forgotten when the provider or the address changes.`,
+      };
+    const reaching = APP_SETTING_FIELDS.filter((k) => has(payload, k) && !HARMLESS_APP_SETTINGS.has(k));
+    if (reaching.length)
+      return {
+        title: "Change app settings that reach beyond the screen",
+        detail: show(payload, reaching),
       };
     return undefined;
   }

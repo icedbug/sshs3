@@ -212,33 +212,10 @@ export class AiConfigStore {
         throw new SyntaxError("Invalid AI config JSON");
       }
       const data = parsed as Partial<StoredAiConfig>;
+      // What was saved is what holds: the switch, the provider and its address are never changed on
+      // reading because a ChatGPT/Codex sign-in happens to be there. Only a Codex model name that
+      // Codex does not have is put right, for a configuration that is Codex already.
       const merged = { ...DEFAULT_AI_CONFIG, ...data } as StoredAiConfig;
-      const hasStoredKey = Boolean(data.apiKey || this.sessionKey);
-      const isUnconfiguredDefault =
-        !hasStoredKey &&
-        (((!data.provider || data.provider === "anthropic") &&
-          (!data.model || data.model === DEFAULT_AI_MODELS.anthropic)) ||
-          (data.provider === "openai-compatible" && !data.baseUrl));
-      const isLegacyStaleCodexConfig =
-        isStaleOrNonCodexModel(data.model) &&
-        (!hasStoredKey ||
-          data.provider === "openai-codex" ||
-          (data.provider === "openai-compatible" &&
-            (!data.baseUrl || data.baseUrl.includes("openrouter.ai"))));
-
-      if (isUnconfiguredDefault || isLegacyStaleCodexConfig) {
-        const codex = await new CodexAuthProvider(path.dirname(this.filePath)).getStatus();
-        if (codex.connected) {
-          return {
-            ...merged,
-            enabled: true,
-            provider: "openai-codex",
-            model: codex.defaultModel || DEFAULT_AI_MODELS["openai-codex"],
-            baseUrl: undefined,
-            useHermes: false,
-          };
-        }
-      }
       if (merged.provider === "openai-codex") {
         if (merged.baseUrl && merged.baseUrl.includes("openrouter.ai")) {
           delete merged.baseUrl;
@@ -256,11 +233,12 @@ export class AiConfigStore {
       ) {
         throw error;
       }
+      // Nothing saved yet: a ChatGPT/Codex sign-in found in this workspace's own folder is offered as the
+      // provider, but the assistant stays off until a person switches it on.
       const codex = await new CodexAuthProvider(path.dirname(this.filePath)).getStatus();
       if (codex.connected) {
         return {
           ...DEFAULT_AI_CONFIG,
-          enabled: true,
           provider: "openai-codex",
           model: codex.defaultModel || DEFAULT_AI_MODELS["openai-codex"],
           useHermes: false,

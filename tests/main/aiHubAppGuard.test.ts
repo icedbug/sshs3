@@ -445,3 +445,14 @@ describe("taking something away", () => {
     expect(hub.store.data.agents).toHaveLength(0);
   });
 });
+
+describe("app settings an agent may change on its own", () => {
+  it("is how things look; anything that reaches beyond the screen is a person's", async () => {
+    const { guardAsk } = await import("../../src/main/ai/hub/AppGuard");
+    const run = { mode: "autonomous" } as never;
+    const settings = "sshs3_manage_app_and_settings";
+    expect(guardAsk(settings, { operation: "update_settings", theme: "dark", terminalFontSize: 14 }, run, [] as never)).toBeUndefined();
+    for (const [k, v] of [["k8sDebugImages", ["evil/debug:latest"]], ["smartcardLibPath", "/tmp/evil.so"], ["x11ServerPath", "/tmp/x"], ["autoCheckUpdates", false], ["logLevel", "debug"]] as const)
+      expect(guardAsk(settings, { operation: "update_settings", [k]: v }, run, [] as never)).toMatchObject({ title: "Change app settings that reach beyond the screen" });
+  });
+});

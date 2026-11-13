@@ -1263,7 +1263,8 @@ describe("Production multi-user workspace sync & auto-memory", () => {
     expect(dirSyncProfiles[0].deleteExtraneous).toBe(true);
 
     // 4. Configure AppSettings (Perf Bar, Smartcard Auth, Transfer Integrity, Terminal Cursor, etc.)
-    await hub.broker.invoke(cap.key, {
+    // Smartcards and transfer limits reach beyond the screen: a person allows them (the call waits until they do).
+    await approving(hub, task, () => hub.broker.invoke(cap.key, {
       action: "sshs3_manage_app_and_settings",
       payload: {
         operation: "update_settings",
@@ -1277,7 +1278,7 @@ describe("Production multi-user workspace sync & auto-memory", () => {
         maxConcurrentTransfers: 8,
         maxBandwidthBps: 50_000_000,
       },
-    });
+    }));
     expect(appSettings.theme).toBe("breeze");
     expect(appSettings.terminalCursorStyle).toBe("bar");
     expect(appSettings.perfBarVisible).toBe(true);

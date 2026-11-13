@@ -828,7 +828,8 @@ export const LandingView: React.FC<LandingViewProps> = ({
     setQuickAiSaving(true);
     setQuickAiNotice(null);
     try {
-      await hubRequest({
+      // Said done only when a sign-in is actually there: choosing the provider signs nobody in.
+      const next = await hubRequest({
         action: 'configure',
         config: {
           enabled: true,
@@ -837,8 +838,14 @@ export const LandingView: React.FC<LandingViewProps> = ({
           useHermes: false,
         },
       });
-      setQuickAiNotice('✅ ChatGPT / Codex sign-in enabled');
-      setTimeout(() => setQuickAiOpen(false), 1200);
+      if (next.config?.codexConnected) {
+        setQuickAiNotice('✅ Signed in to ChatGPT / Codex');
+        setTimeout(() => setQuickAiOpen(false), 1200);
+      } else {
+        setQuickAiNotice(
+          'ChatGPT / Codex is chosen, but nobody is signed in yet. Sign in under AI settings (or with `codex login` on this computer), then try again.'
+        );
+      }
     } catch (err) {
       setQuickAiNotice(err instanceof Error ? err.message : String(err));
     } finally {

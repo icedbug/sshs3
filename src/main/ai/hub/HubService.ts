@@ -3527,7 +3527,8 @@ export class HubService {
       }
       case "kb-ingest-folder": {
         // A folder path here would be a folder on the server, readable by any signed-in user through the knowledge base.
-        if (this.sharedServer() && !isDemoMode()) throw new Error("A folder on the server cannot be read into the knowledge base from the browser. Drop the files in instead.");
+        // Also in a demo on a shared server: the folder is still a folder of the machine it runs on.
+        if (this.sharedServer()) throw new Error("A folder on the server cannot be read into the knowledge base from the browser. Drop the files in instead.");
         const docs = await this.kb.ingestLocalFolder(
           requiredText(request.folderPath),
           {
@@ -3816,19 +3817,8 @@ export class HubService {
         ? path.dirname(this.config.getFilePath())
         : undefined;
     {
-      if (
-        (provider === "anthropic" && !config.apiKey) ||
-        (provider === "openai-compatible" &&
-          (!baseUrl || model === "gpt-sol-latest")) ||
-        !model
-      ) {
-        const codex = await new CodexAuthProvider(configDir).getStatus();
-        if (codex.connected) {
-          provider = "openai-codex";
-          model = codex.defaultModel || DEFAULT_AI_MODELS["openai-codex"];
-          baseUrl = undefined;
-        }
-      }
+      // The team's conversations go to the provider it chose, or nowhere: a missing key or address is
+      // reported as the step that is missing, never quietly made up for by a ChatGPT sign-in on this machine.
       if (provider === "openai-codex") {
         if (baseUrl && baseUrl.includes("openrouter.ai")) {
           baseUrl = undefined;
@@ -3904,6 +3894,9 @@ export class HubService {
       (req) => this.broker.invoke(capability.key, req),
       this.evalReplays.get(task.id)?.answer.bind(this.evalReplays.get(task.id)),
       this.evalReplays.get(task.id)?.isLive.bind(this.evalReplays.get(task.id)),
+      // On a shared server or in the demo, only this workspace's own sign-in: never the host's ~/.codex.
+      // The desktop app's own process may use the person's `codex login`.
+      isDemoMode() || this.sharedServer() ? configDir : undefined,
     );
     this.runtimes.set(task.id, runtime);
     this.armRunTimer(task, Date.now() + task.maxMinutes * 60_000);

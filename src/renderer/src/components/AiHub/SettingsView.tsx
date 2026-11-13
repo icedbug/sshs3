@@ -164,6 +164,8 @@ export function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Elem
           value={provider}
           onChange={(e) => {
             const next = e.target.value as typeof provider;
+            // Another provider starts from its own address: a key typed next must not go to the old gateway.
+            if (next !== provider) setUrl("");
             setProvider(next);
             setCustomModelMode(false);
             setSavedNotice(false);

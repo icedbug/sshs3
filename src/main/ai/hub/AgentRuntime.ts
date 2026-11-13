@@ -49,9 +49,11 @@ export class HermesRuntime implements AgentRuntime {
     replay?: (tool: string, argumentsJson: string) => string,
     /** On a replayed run: which tools are asked for real anyway (the knowledge base). */
     replayLive?: (tool: string) => boolean,
+    /** Where this workspace keeps its own ChatGPT/Codex sign-in: never the host's ~/.codex for a tenant or the demo. */
+    authBaseDir?: string,
   ) {
     if (invokeTool && process.env.SSHS3_HERMES_INTEGRATION !== "1") {
-      this.direct = new DirectAgentRuntime(invokeTool);
+      this.direct = new DirectAgentRuntime(invokeTool, authBaseDir);
       this.direct.replay = replay;
       this.direct.replayLive = replayLive;
     }

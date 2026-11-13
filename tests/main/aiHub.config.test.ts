@@ -80,7 +80,7 @@ describe("AI model credentials", () => {
       enabled: true,
     });
   });
-  it("auto-detects Codex OAuth and migrates legacy stale gpt-sol-latest OpenRouter config", async () => {
+  it("reports a Codex sign-in, but never moves a saved configuration to it or switches the assistant on", async () => {
     const hermesDir = path.join(dir, "hermes-native");
     await fs.mkdir(hermesDir, { recursive: true });
     const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url");
@@ -127,22 +127,21 @@ describe("AI model credentials", () => {
       }),
     );
 
+    // What was saved holds: the team's endpoint is not quietly swapped for this machine's ChatGPT sign-in.
     const store = new AiConfigStore(file);
     const view = await store.getView();
     expect(view).toMatchObject({
       enabled: true,
-      provider: "openai-codex",
-      model: "gpt-6.1-sol",
-      hasApiKey: true,
-      keyStorage: "oauth",
+      provider: "openai-compatible",
+      model: "gpt-sol-latest",
+      baseUrl: "https://openrouter.ai/api/v1",
       codexConnected: true,
       codexAccountEmail: "jacob@example.com",
       codexDefaultModel: "gpt-6.1-sol",
       codexModels: ["gpt-6.1-sol", "gpt-6-astra", "gpt-5.6-sol"],
     });
-    expect(view.baseUrl).toBeUndefined();
 
-    // Also auto-detects when enabled: true with an unconfigured default anthropic config (no apiKey)
+    // An Anthropic configuration without its key stays Anthropic (the run says the key is missing).
     await fs.writeFile(
       file,
       JSON.stringify({
@@ -154,10 +153,13 @@ describe("AI model credentials", () => {
     const storeAnthropicDefault = new AiConfigStore(file);
     expect(await storeAnthropicDefault.getView()).toMatchObject({
       enabled: true,
-      provider: "openai-codex",
-      model: "gpt-6.1-sol",
+      provider: "anthropic",
+      model: "claude-sonnet-4-5",
       codexConnected: true,
     });
+    // Switched off stays off.
+    await storeAnthropicDefault.update({ enabled: false });
+    expect((await new AiConfigStore(file).getView()).enabled).toBe(false);
 
     // Handles UTF-8 BOM in ai-config.json (e.g. written by Windows PowerShell Set-Content)
     await fs.writeFile(
@@ -182,11 +184,12 @@ describe("AI model credentials", () => {
       actorName: "jacob",
     });
 
-    // Recovers when ai-config.json contains non-object JSON (e.g. null or array)
+    // Recovers when ai-config.json contains non-object JSON (e.g. null or array): as on a first start, the
+    // sign-in found is offered as the provider, and the assistant stays off until a person switches it on.
     await fs.writeFile(file, "null", "utf-8");
     const nullStore = new AiConfigStore(file);
     expect(await nullStore.getView()).toMatchObject({
-      enabled: true,
+      enabled: false,
       provider: "openai-codex",
       model: "gpt-6.1-sol",
     });
