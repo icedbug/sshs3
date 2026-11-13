@@ -40,6 +40,8 @@ export interface McpTokenRecord {
   uses?: number;
   expiresAt?: number;
   revokedAt?: number;
+  /** Only these tools, when set: a key can be narrower than its scopes. */
+  tools?: string[];
 }
 
 /** A key as it may be shown: never its secret, never its hash. */
@@ -54,6 +56,7 @@ export interface McpTokenView {
   uses: number;
   expiresAt?: number;
   expired: boolean;
+  tools?: string[];
 }
 
 interface StoredTokens {
@@ -97,6 +100,7 @@ export const tokenView = (t: McpTokenRecord, now = Date.now()): McpTokenView => 
   uses: t.uses ?? 0,
   expiresAt: t.expiresAt,
   expired: Boolean(t.expiresAt && t.expiresAt < now),
+  ...(t.tools ? { tools: t.tools } : {}),
 });
 
 export class McpTokenStore {
@@ -154,6 +158,7 @@ export class McpTokenStore {
     scopes: McpScope[];
     serverId?: string;
     expiresInDays?: number;
+    tools?: string[];
     now?: number;
   }): Promise<{ token: string; view: McpTokenView }> {
     await this.initialize();
@@ -175,7 +180,8 @@ export class McpTokenStore {
       serverId: scopes.includes('run') ? input.serverId : undefined,
       createdAt: now,
       createdBy: input.createdBy,
-      expiresAt: input.expiresInDays ? now + input.expiresInDays * 24 * 3600_000 : undefined,
+      expiresAt: input.expiresInDays ? now + Math.min(3650, Math.max(1, input.expiresInDays)) * 24 * 3600_000 : undefined,
+      ...(input.tools?.length ? { tools: [...new Set(input.tools.map((t) => t.trim()).filter(Boolean))].slice(0, 40) } : {}),
     };
     this.data.tokens.push(record);
     await this.save();

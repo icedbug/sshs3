@@ -15,7 +15,30 @@ interface KeyView {
   lastUsedAt?: number;
   uses: number;
   expired: boolean;
+  expiresAt?: number;
+  tools?: string[];
 }
+
+/** The tools of each right, by name, for a key that should be narrower than its rights. */
+const TOOLS: Record<string, string[]> = {
+  read: ['list_servers', 'server_facts', 'recent_changes', 'dependency_map', 'kb_search', 'kb_read_page', 'tickets_list'],
+  tickets: ['ticket_create', 'ticket_update'],
+  run: ['run_command', 'change_with_check', 'command_status'],
+};
+
+const EXPIRY: { days: number; label: string }[] = [
+  { days: 30, label: 'In 30 days' },
+  { days: 90, label: 'In 90 days' },
+  { days: 7, label: 'In 7 days' },
+  { days: 365, label: 'In a year' },
+  { days: 0, label: 'Never' },
+];
+
+const expiresText = (at?: number): string => {
+  if (!at) return 'never expires';
+  const days = Math.round((at - Date.now()) / 86_400_000);
+  return days <= 0 ? 'expires today' : `expires in ${days} day${days === 1 ? '' : 's'}`;
+};
 
 const WHAT: Record<string, { label: string; hint: string }> = {
   read: {
@@ -60,6 +83,10 @@ export function McpKeysPanel({
   const [name, setName] = useState('');
   const [scopes, setScopes] = useState<string[]>(['read']);
   const [serverId, setServerId] = useState('');
+  const [expiresInDays, setExpiresInDays] = useState(30);
+  // Empty: every tool its rights allow. Otherwise only these.
+  const [only, setOnly] = useState<string[]>([]);
+  const [narrow, setNarrow] = useState(false);
   const [made, setMade] = useState<{ token: string; name: string } | null>(null);
   const [problem, setProblem] = useState('');
   const [copied, setCopied] = useState('');
@@ -85,7 +112,13 @@ export function McpKeysPanel({
     try {
       const res = await api<{ token: string; key: KeyView }>('/api/mcp-keys', {
         method: 'POST',
-        body: JSON.stringify({ name, scopes, serverId: serverId.trim() || undefined }),
+        body: JSON.stringify({
+          name,
+          scopes,
+          serverId: serverId.trim() || undefined,
+          expiresInDays: expiresInDays || undefined,
+          tools: narrow && only.length ? only : undefined,
+        }),
       });
       setMade({ token: res.token, name: res.key.name });
       setName('');
@@ -183,7 +216,8 @@ export function McpKeysPanel({
                 <div className="text-slate-500 text-[11px]">
                   {k.scopes.map((s) => WHAT[s]?.label ?? s).join(' · ')}
                   {k.serverId ? ` (${k.serverId})` : ''} — {ago(k.lastUsedAt)}
-                  {k.uses ? `, ${k.uses} call${k.uses === 1 ? '' : 's'}` : ''}
+                  {k.uses ? `, ${k.uses} call${k.uses === 1 ? '' : 's'}` : ''}, {expiresText(k.expiresAt)}
+                  {k.tools?.length ? <span className="block">Only: {k.tools.join(', ')}</span> : null}
                 </div>
               </div>
               <button
@@ -243,9 +277,44 @@ export function McpKeysPanel({
             </span>
           </label>
         )}
+        <label className="block text-slate-300 font-medium">
+          It stops working
+          <select
+            value={expiresInDays}
+            onChange={(e) => setExpiresInDays(Number(e.target.value))}
+            aria-label="When the key stops working"
+            className="mt-1 w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2 text-white"
+          >
+            {EXPIRY.map((x) => (
+              <option key={x.days} value={x.days}>
+                {x.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="space-y-1">
+          <label className="flex items-center gap-2 text-slate-300">
+            <input type="checkbox" checked={narrow} onChange={(e) => setNarrow(e.target.checked)} />
+            Only some of the tools these rights allow
+          </label>
+          {narrow && (
+            <div className="flex flex-wrap gap-1.5 pl-6" data-testid="mcp-key-tools">
+              {['read', ...scopes.filter((x) => x !== 'read')].flatMap((scope) => TOOLS[scope] ?? []).map((tool) => (
+                <label key={tool} className="flex items-center gap-1 rounded bg-slate-900 border border-slate-800 px-2 py-1 text-[11px] text-slate-300">
+                  <input
+                    type="checkbox"
+                    checked={only.includes(tool)}
+                    onChange={(e) => setOnly((o) => (e.target.checked ? [...o, tool] : o.filter((x) => x !== tool)))}
+                  />
+                  <code>{tool}</code>
+                </label>
+              ))}
+            </div>
+          )}
+        </div>
         <button
           type="submit"
-          disabled={busy || !name.trim() || (scopes.includes('run') && !serverId.trim())}
+          disabled={busy || !name.trim() || (scopes.includes('run') && !serverId.trim()) || (narrow && only.length === 0)}
           className="px-3 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 disabled:opacity-50 text-slate-950 font-semibold transition"
         >
           {busy ? 'Making it…' : 'Make the key'}

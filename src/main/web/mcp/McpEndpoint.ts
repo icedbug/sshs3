@@ -94,6 +94,8 @@ export interface McpEndpointDeps {
     | {
         request: (r: HubRequest) => Promise<HubSnapshot>;
         actor: string;
+        /** Writes one entry into that person's audit log. */
+        audit?: (entry: { kind: "mcp"; actor: string; target?: string; what: string; outcome: string; detail?: string }) => Promise<unknown>;
         runCommand?: McpCallContext['runCommand'];
         commandStatus?: McpCallContext['commandStatus'];
       }
@@ -165,8 +167,12 @@ const toolFailed = (message: string): Record<string, unknown> => ({
   isError: true,
 });
 
+/** The tools a key may see: those of its scopes, narrowed to its own list when it has one. */
+const allowedFor = (token: McpTokenRecord) =>
+  toolsForScopes(token.scopes).filter((t) => !token.tools?.length || token.tools.includes(t.name));
+
 const toolsFor = (token: McpTokenRecord): Record<string, unknown>[] =>
-  toolsForScopes(token.scopes).map((t) => ({
+  allowedFor(token).map((t) => ({
     name: t.name,
     title: t.title,
     description: t.description,
@@ -243,6 +249,23 @@ async function handleRpc(
     if (!name) return rpcError(id, ERR.invalidParams, 'tools/call needs the name of a tool.');
     const hub = await deps.hubFor(token.userId);
     if (!hub) return rpcError(id, ERR.internal, 'The person this key belongs to is no longer on this server.');
+    // Every call is written into the key owner's audit log: which key, which tool, with what, and how it ended.
+    const logged = (outcome: string, detail?: string): void => {
+      void hub
+        .audit?.({
+          kind: 'mcp',
+          actor: `${token.name} (a key of ${hub.actor})`,
+          target: typeof args.server === 'string' ? args.server : token.serverId,
+          what: `${name} ${JSON.stringify(args).slice(0, 600)}`,
+          outcome,
+          detail,
+        })
+        .catch(() => undefined);
+    };
+    if (token.tools?.length && !token.tools.includes(name)) {
+      logged('denied', 'not one of the tools this key may use');
+      return complete(toolFailed(`This key may only use: ${token.tools.join(', ')}.`));
+    }
     try {
       const out = await callMcpTool(name, args, {
         request: hub.request,
@@ -252,10 +275,12 @@ async function handleRpc(
         serverId: token.serverId,
         actor: hub.actor,
       });
+      logged('completed');
       return complete(toolResult(out));
     } catch (error) {
       // A tool that could not do its work is not a protocol error: the model is
       // told what went wrong so it can choose again.
+      logged('failed', error instanceof Error ? error.message : String(error));
       return complete(toolFailed(error instanceof Error ? error.message : String(error)));
     }
   }

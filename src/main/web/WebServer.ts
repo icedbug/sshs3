@@ -442,6 +442,7 @@ export class Sshs3WebServer {
             actor: user.displayName || user.username,
             runCommand: (input) => tenant.hub.runForMcp({ ...input, by: user.displayName || user.username }),
             commandStatus: (id) => tenant.hub.mcpCommandStatus(id),
+            audit: (entry) => tenant.hub.audit().append(entry),
           };
         },
       },
@@ -473,6 +474,7 @@ export class Sshs3WebServer {
           scopes: MCP_SCOPES.filter((s) => asked.includes(s)) as McpScope[],
           serverId: body.serverId ? String(body.serverId) : undefined,
           expiresInDays: body.expiresInDays ? Number(body.expiresInDays) : undefined,
+          tools: Array.isArray(body.tools) ? body.tools.map(String) : undefined,
         });
         // The only time the key itself is ever sent anywhere.
         sendJson(res, 200, { key: made.view, token: made.token });

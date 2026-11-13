@@ -3401,6 +3401,7 @@ export class HubService {
           scopes: (request.scopes ?? []).filter((x): x is "read" | "tickets" | "run" => ["read", "tickets", "run"].includes(x)),
           serverId: request.serverId,
           expiresInDays: request.expiresInDays,
+          tools: request.tools,
         });
         // The only time the key itself leaves this process.
         reply = { mcpKey: { token: made.token, key: made.view } };
@@ -4102,6 +4103,7 @@ export class HubService {
         actor: await this.resolveActorName(),
         runCommand: (input) => this.runForMcp({ ...input, by: "your agent" }),
         commandStatus: (id) => this.mcpCommandStatus(id),
+        audit: (entry) => this.audit().append(entry),
       }),
     });
     try {

@@ -1499,7 +1499,7 @@ export type HubRequest =
   | { action: "kb-gap-answered"; id: string; pageId: string }
   /** The keys this person's own agents use to reach this app. The new key comes back once, in `reply.mcpKey`. */
   | { action: "mcp-key-list" }
-  | { action: "mcp-key-create"; name: string; scopes: string[]; serverId?: string; expiresInDays?: number }
+  | { action: "mcp-key-create"; name: string; scopes: string[]; serverId?: string; expiresInDays?: number; tools?: string[] }
   | { action: "mcp-key-revoke"; id: string }
   /** Switches the local MCP listener on or off. */
   | { action: "mcp-local-set"; enabled: boolean; port?: number }

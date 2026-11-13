@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -169,5 +169,37 @@ describe("who came through the door", () => {
     // The password that was tried is not in it.
     expect(JSON.stringify(entries)).not.toContain("wrong-password");
     expect((await server.signIns.verify()).ok).toBe(true);
+  });
+});
+
+describe("narrower keys, and every call in the owner's audit log", () => {
+  it("lists and allows only the tools a key was made for, and writes each call down", async () => {
+    const { base, cookie, server } = await serve();
+    const made = await fetch(`${base}/api/mcp-keys`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({ name: "Only search", scopes: ["read"], tools: ["kb_search"], expiresInDays: 7 }),
+    });
+    const { token, key } = (await made.json()) as { token: string; key: { tools: string[]; expiresAt: number } };
+    expect(key.tools).toEqual(["kb_search"]);
+    expect(key.expiresAt - Date.now()).toBeGreaterThan(6 * 86_400_000);
+    const call = async (body: string) =>
+      (await (await fetch(`${base}/api/mcp`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body })).json()) as {
+        result: { tools?: Array<{ name: string }>; isError?: boolean; content?: Array<{ text: string }> };
+      };
+    expect((await call(rpc("tools/list"))).result.tools!.map((t) => t.name)).toEqual(["kb_search"]);
+    const refused = await call(rpc("tools/call", { name: "list_servers", arguments: {} }));
+    expect(refused.result.isError).toBe(true);
+    expect(refused.result.content![0].text).toContain("may only use: kb_search");
+    await call(rpc("tools/call", { name: "kb_search", arguments: { query: "disk full" } }));
+    // Both calls are in the key owner's audit log, with the key's name and how they ended.
+    const user = (await server.auth.listUsers())[0];
+    const tenant = await (server as unknown as { tenants: { getOrCreateTenant: (u: unknown) => Promise<{ hub: { request: (r: unknown) => Promise<{ reply?: { audit?: { entries: Array<{ kind: string; actor: string; what: string; outcome: string }> } } }> } }> } }).tenants.getOrCreateTenant(user);
+    await vi.waitFor(async () => {
+      const log = await tenant.hub.request({ action: "audit-read" });
+      const mcp = (log.reply?.audit?.entries ?? []).filter((e) => e.kind === "mcp");
+      expect(mcp.map((e) => `${e.outcome} ${e.what.split(" ")[0]}`)).toEqual(["completed kb_search", "denied list_servers"]);
+      expect(mcp[0].actor).toContain("Only search");
+    });
   });
 });

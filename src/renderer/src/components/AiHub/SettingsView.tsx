@@ -19,8 +19,8 @@ export function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Elem
   // calls are the hub's own requests.
   const localKeysApi = async <T,>(path: string, options?: RequestInit): Promise<T> => {
     if (options?.method === "POST") {
-      const body = JSON.parse(String(options.body)) as { name: string; scopes: string[]; serverId?: string };
-      const next = await act({ action: "mcp-key-create", name: body.name, scopes: body.scopes, serverId: body.serverId });
+      const body = JSON.parse(String(options.body)) as { name: string; scopes: string[]; serverId?: string; expiresInDays?: number; tools?: string[] };
+      const next = await act({ action: "mcp-key-create", name: body.name, scopes: body.scopes, serverId: body.serverId, expiresInDays: body.expiresInDays, tools: body.tools });
       const made = next?.reply?.mcpKey;
       if (!made) throw new Error("The key could not be made.");
       return made as T;
