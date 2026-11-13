@@ -4,7 +4,7 @@ import type { AgentTask, HubSnapshot } from "./types/aiHub";
 export const isConversation = (t: Pick<AgentTask, "workforceRunId" | "distillSourceId" | "evalCaseId">): boolean =>
   !t.workforceRunId && !t.distillSourceId && !t.evalCaseId;
 
-export type InboxKind = "approval" | "plan" | "question" | "review" | "blocked" | "alert" | "knowledge" | "report";
+export type InboxKind = "approval" | "plan" | "question" | "review" | "blocked" | "alert" | "health" | "knowledge" | "report";
 
 /** One thing that is waiting for a person. */
 export interface InboxItem {
@@ -23,6 +23,8 @@ export interface InboxItem {
   changeId?: string;
   ticketId?: string;
   findingId?: string;
+  /** A server with problems of its own (disk, certificate, failed service). */
+  serverId?: string;
   risk?: string;
 }
 
@@ -36,7 +38,9 @@ const KB_WORTH_A_LOOK = new Set(["gap", "contradiction", "dead-target", "lost-so
  */
 /** What the inbox is built from: the same on screen and where notifications are sent from. */
 export type InboxInput = Pick<HubSnapshot, "tasks"> &
-  Partial<Pick<HubSnapshot, "workTickets" | "kbFindings" | "dailyReport">>;
+  Partial<Pick<HubSnapshot, "workTickets" | "kbFindings" | "dailyReport">> & {
+    serverFacts?: Pick<NonNullable<HubSnapshot["serverFacts"]>, "servers">;
+  };
 
 export function inboxItems(hub: InboxInput): InboxItem[] {
   const out: InboxItem[] = [];
@@ -104,11 +108,28 @@ export function inboxItems(hub: InboxInput): InboxItem[] {
         risk: t.alert.severity,
       });
   }
+  // One item per server, however many things are wrong with it: thirty servers must not be ninety items.
+  for (const server of hub.serverFacts?.servers ?? []) {
+    const wrong = server.problems;
+    if (!wrong.length) continue;
+    out.push({
+      id: `health:${server.serverId}`,
+      kind: "health",
+      title: wrong.length === 1 ? wrong[0].text : `${wrong.length} things need attention`,
+      detail: wrong.length === 1 ? undefined : wrong.map((p) => p.text).join(" · "),
+      from: server.name,
+      target: server.name,
+      at: server.collectedAt ?? 0,
+      since: Math.min(...wrong.map((p) => p.since ?? server.collectedAt ?? 0)),
+      serverId: server.serverId,
+      risk: wrong.some((p) => p.severity === "critical") ? "critical" : "warning",
+    });
+  }
   for (const f of hub.kbFindings ?? [])
     if (KB_WORTH_A_LOOK.has(f.kind))
       out.push({ id: `knowledge:${f.id}`, kind: "knowledge", title: f.text, detail: f.detail, at: f.at, findingId: f.id });
   if (hub.dailyReport && !hub.dailyReport.readAt)
     out.push({ id: `report:${hub.dailyReport.day}`, kind: "report", title: `What happened ${hub.dailyReport.day}`, detail: hub.dailyReport.text.slice(0, 240), at: hub.dailyReport.at, since: hub.dailyReport.at });
-  const rank: Record<InboxKind, number> = { approval: 0, plan: 0, question: 0, alert: 1, blocked: 1, review: 2, report: 3, knowledge: 4 };
+  const rank: Record<InboxKind, number> = { approval: 0, plan: 0, question: 0, alert: 1, blocked: 1, health: 2, review: 2, report: 3, knowledge: 4 };
   return out.sort((a, b) => rank[a.kind] - rank[b.kind] || b.at - a.at);
 }

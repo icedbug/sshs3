@@ -1,7 +1,10 @@
 import crypto from "node:crypto";
+import { spawn } from "node:child_process";
+import fs from "node:fs";
 import { createTwoFilesPatch } from "diff";
 import { nativeEvents } from '../desktop/nativeEvents';
 import { FileTools } from "./FileTools";
+import { SmartcardDetector } from "../../smartcard/SmartcardDetector";
 import type { IpcBridge } from "../../IpcBridge";
 import { HubService, type HubHost } from "./HubService";
 import {
@@ -16,7 +19,7 @@ import type {
 } from "../../../shared/types/storage";
 import type { TeamVaultPayload } from "../../../shared/types/teamVault";
 import type { InventoryTarget } from "./ContextService";
-import { boundedContext, maskContext } from "./privacy";
+import { boundedContext, maskContext, safeError } from "./privacy";
 import {
   appendDemoActivity,
   deleteDemoMemory,
@@ -280,6 +283,83 @@ export function createHub(
       64_000,
     );
   };
+
+  /**
+   * The saved profile of a server, as it can be used with nobody there to
+   * answer a prompt. A profile that needs a password, a smartcard or a touch
+   * is refused: its terminal has to be opened by a person first.
+   */
+  const resolveUnattendedProfile = async (profileId: string) => {
+    const profiles = await bridge.profileStore.getProfiles();
+    let profile = profiles.ssh.find((p) => p.id === profileId);
+    if (!profile) {
+      const team = await findTeamVaultProfile(profileId);
+      if (team) profile = team.profile;
+    }
+    if (!profile) {
+      const synced = (hub.store.data.s3SyncedServers ?? []).find(
+        (s) => s.id === profileId,
+      );
+      if (synced) {
+        profile = {
+          ...synced,
+          authType: synced.authType ?? "agent",
+        };
+      }
+    }
+    if (!profile) throw new Error(`Saved SSH profile "${profileId}" not found`);
+    const localOv = hub.store.data.localOverrides?.[profileId];
+    const effectiveProfile = {
+      ...profile,
+      ...(localOv?.username ? { username: localOv.username } : {}),
+      ...(localOv?.privateKeyPath ? { privateKeyPath: localOv.privateKeyPath } : {}),
+      ...(localOv?.authType ? { authType: localOv.authType } : {}),
+    };
+    if (["password", "smartcard", "fido2"].includes(effectiveProfile.authType)) {
+      throw new Error(
+        `Node "${effectiveProfile.name || effectiveProfile.host}" requires interactive auth; open its terminal tab first.`,
+      );
+    }
+    return effectiveProfile;
+  };
+
+  /** Runs a script on stdin of a process and collects what it prints. Nothing is typed into a terminal. */
+  const runWithStdin = (
+    file: string,
+    args: string[],
+    script: string,
+    env: NodeJS.ProcessEnv,
+    timeoutMs: number,
+  ): Promise<{ ok: boolean; stdout: string; error?: string }> =>
+    new Promise((resolve) => {
+      const child = spawn(file, args, { env, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+      let stdout = "";
+      let stderr = "";
+      let done = false;
+      const finish = (result: { ok: boolean; stdout: string; error?: string }): void => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        resolve(result);
+      };
+      const timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        finish({ ok: false, stdout, error: "No answer in time" });
+      }, timeoutMs);
+      child.stdout.on("data", (chunk: Buffer) => {
+        if (stdout.length < 8_000_000) stdout += chunk.toString("utf8");
+      });
+      child.stderr.on("data", (chunk: Buffer) => {
+        if (stderr.length < 4000) stderr += chunk.toString("utf8");
+      });
+      child.on("error", (error) => finish({ ok: false, stdout, error: safeError(error) }));
+      child.on("close", (code) =>
+        // ssh answers 255 when it could not connect or sign in; anything else is the script's own business.
+        finish(code === 255 ? { ok: false, stdout, error: boundedContext(stderr.trim() || "Could not connect", 300) } : { ok: true, stdout }),
+      );
+      child.stdin.on("error", () => undefined);
+      child.stdin.end(script);
+    });
 
   const hub: HubService = new HubService({
     ...lifecycle,
@@ -852,37 +932,38 @@ export function createHub(
       );
       return id;
     },
+    execOnServer: async (profileId, script, timeoutMs = 60_000) => {
+      if (profileId === "local") return { ...(await runWithStdin("sh", ["-s"], script, process.env, timeoutMs)), via: "local" as const };
+      const sshBinary = process.platform === "win32" ? "ssh.exe" : "ssh";
+      // An open tab to this server already has a connection: the script goes over it, beside the terminal, not into it.
+      const open = hub.terminals.list().find((t) => t.kind === "ssh" && t.profileId === profileId && t.state !== "disconnected");
+      const live = open ? bridge.sshPtyManager.getSession(open.id) : undefined;
+      if (live?.controlPath && process.platform !== "win32" && fs.existsSync(live.controlPath) && !live.config.host.startsWith("-") && !live.controlPath.startsWith("-")) {
+        const viaTab = await runWithStdin(
+          sshBinary,
+          ["-S", live.controlPath, "-T", "-o", "ControlMaster=no", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ClearAllForwardings=yes", "-o", "RemoteCommand=none", "--", live.config.host, "sh -s"],
+          script,
+          process.env,
+          timeoutMs,
+        );
+        if (viaTab.ok) return { ...viaTab, via: "open-tab" as const };
+      }
+      // Otherwise a connection of the hub's own, for as long as the script takes. BatchMode: no prompt is ever shown.
+      const profile = await resolveUnattendedProfile(profileId);
+      const config = await bridge.resolveProxyJumpConfig({ ...profile, id: crypto.randomUUID(), autoReconnect: false });
+      const env: NodeJS.ProcessEnv = { ...process.env, ...SmartcardDetector.buildProxyEnv(config) };
+      if (config.agentPath) env.SSH_AUTH_SOCK = config.agentPath;
+      const own = await runWithStdin(
+        sshBinary,
+        ["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ClearAllForwardings=yes", "-o", "RemoteCommand=none", ...SmartcardDetector.buildSSHArguments({ ...config, tunnels: [], x11Forwarding: false }), "sh -s"],
+        script,
+        env,
+        timeoutMs,
+      );
+      return { ...own, via: "own-connection" as const };
+    },
     openServerTerminal: async (profileId) => {
-      const profiles = await bridge.profileStore.getProfiles();
-      let profile = profiles.ssh.find((p) => p.id === profileId);
-      if (!profile) {
-        const team = await findTeamVaultProfile(profileId);
-        if (team) profile = team.profile;
-      }
-      if (!profile) {
-        const synced = (hub.store.data.s3SyncedServers ?? []).find(
-          (s) => s.id === profileId,
-        );
-        if (synced) {
-          profile = {
-            ...synced,
-            authType: synced.authType ?? "agent",
-          };
-        }
-      }
-      if (!profile) throw new Error(`Saved SSH profile "${profileId}" not found`);
-      const localOv = hub.store.data.localOverrides?.[profileId];
-      const effectiveProfile = {
-        ...profile,
-        ...(localOv?.username ? { username: localOv.username } : {}),
-        ...(localOv?.privateKeyPath ? { privateKeyPath: localOv.privateKeyPath } : {}),
-        ...(localOv?.authType ? { authType: localOv.authType } : {}),
-      };
-      if (["password", "smartcard", "fido2"].includes(effectiveProfile.authType)) {
-        throw new Error(
-          `Node "${effectiveProfile.name || effectiveProfile.host}" requires interactive auth; open its terminal tab first.`,
-        );
-      }
+      const effectiveProfile = await resolveUnattendedProfile(profileId);
       const config = await bridge.resolveProxyJumpConfig({
         ...effectiveProfile,
         id: crypto.randomUUID(),

@@ -11,6 +11,7 @@ const KIND: Record<InboxKind, { label: string; tone: string }> = {
   question: { label: "Asks you", tone: "ai-inbox-now" },
   alert: { label: "Alert", tone: "ai-inbox-warn" },
   blocked: { label: "Stopped", tone: "ai-inbox-warn" },
+  health: { label: "Server", tone: "ai-inbox-warn" },
   review: { label: "To review", tone: "" },
   report: { label: "Report", tone: "" },
   knowledge: { label: "Knowledge base", tone: "" },
@@ -35,7 +36,7 @@ export function InboxView({
   hub: HubSnapshot;
   act: Act;
   onOpenTask: (taskId: string) => void;
-  onOpenView: (view: "Workforce" | "Knowledge Base") => void;
+  onOpenView: (view: "Workforce" | "Knowledge Base" | "Infrastructure") => void;
   /** The item a notification's link pointed at: shown first, or said to be handled if it is gone. */
   focusItemId?: string;
 }): JSX.Element {
@@ -135,6 +136,17 @@ export function InboxView({
           <button type="button" className="ai-btn-accent" onClick={() => onOpenView("Workforce")}>
             Assign it
           </button>
+        );
+      case "health":
+        return (
+          <>
+            <button type="button" onClick={() => onOpenView("Infrastructure")}>
+              Look at the server
+            </button>
+            <button type="button" onClick={() => void act({ action: "facts-problem-dismiss", serverId: item.serverId! })}>
+              Dismiss
+            </button>
+          </>
         );
       case "knowledge":
         return (

@@ -284,6 +284,10 @@ const SAFE_READONLY_PATTERNS: RegExp[] = [
   /^(?:sudo\s+|)(nginx\s+-[tTvV]|apachectl\s+(-t|configtest)|apache2ctl\s+(-t|configtest)|sshd\s+-[tT]|haproxy\s+-c\b|named-checkconf|visudo\s+-c)\b/i,
   /^(?:sudo\s+|)(docker|podman)\s+(ps|images|inspect|logs|version|info|top|port|diff|history|stats\s+--no-stream|network\s+(ls|inspect)|volume\s+(ls|inspect)|compose\s+(ps|logs|config|images|top))\b/i,
   /^(?:sudo\s+|)openssl\s+(x509|verify|version|s_client)\b(?!.*\s-out\b)/i,
+  // Asking the package manager what is installed. Only the query forms: rpm -q…, never -i/-U/-e.
+  /^(?:sudo\s+|)(dpkg-query\s+(-W|-l|-s|-L|--show|--list|--status)|dpkg\s+(-l|-s|-L|--list|--status)|rpm\s+-q[a-zA-Z]*|apk\s+(info|list|version)|apt\s+list|apt-cache\s+(policy|show|search)|pip3?\s+(list|show|freeze)|snap\s+list)\b/i,
+  // Asking whether a program exists.
+  /^(command\s+-v|which|type)\s+[\w.+-]+$/,
 ];
 
 /** Words of a command segment, quotes removed. Good enough to read flags; not a shell parser. */

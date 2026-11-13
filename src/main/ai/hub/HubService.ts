@@ -38,6 +38,10 @@ import type {
   WorkspacePresenceTerminal,
   WorkspaceServerSummary,
   NotifyEventKind,
+  FactProblem,
+  ServerFacts,
+  ServerFactsView,
+  FactChange,
 } from "../../../shared/types/aiHub";
 import type { IStorageProvider } from "../../../shared/types/storage";
 import { SHELL_KINDS } from "../../../shared/types/aiHub";
@@ -94,6 +98,9 @@ import {
   type NotifyItem,
 } from "./Notifier";
 import { NotifyStore } from "./NotifyStore";
+import { FactsStore, type FactsRecord } from "./FactsStore";
+import { buildScript, diffFacts, factsHash, factsSummary, isWatchPath, parseFacts, problems } from "./ServerFacts";
+import { demoFactsOutput } from "./demoFacts";
 import {
   Replay,
   caseFromTask,
@@ -382,6 +389,16 @@ export interface HubHost {
     };
   }): Promise<unknown>;
   openServerTerminal?(profileId: string): Promise<string>;
+  /**
+   * Runs a script on a server and returns what it printed, without a terminal:
+   * over the connection of an open tab where there is one, otherwise over a
+   * connection of its own that never prompts. "local" is this computer.
+   */
+  execOnServer?(
+    profileId: string,
+    script: string,
+    timeoutMs?: number,
+  ): Promise<{ ok: boolean; stdout: string; error?: string; via: "open-tab" | "own-connection" | "local" }>;
   resolveStorageProvider?(targetRef: string): Promise<IStorageProvider | undefined>;
   storageOps?(input: {
     operation: "list_files" | "read_remote_file" | "diff_paths";
@@ -469,6 +486,7 @@ export class HubService {
   ) {
     this.store = new HubStore(path.join(directory, "hub.json"));
     this.notifyStore = new NotifyStore(path.join(directory, "notify.json"));
+    this.factsStore = new FactsStore(path.join(directory, "facts"));
     this.embeddings = new EmbeddingIndex(
       path.join(directory, "kb-embeddings.json"),
     );
@@ -736,6 +754,7 @@ export class HubService {
       );
       this.selfLearning.bindStore(this.store);
       await this.notifyStore.load();
+      await this.factsStore.load();
       const initServers = await this.host.workspaceServers?.().catch(() => []);
       if (Array.isArray(initServers) && initServers.length > 0) {
         this.cachedWorkspaceServers = initServers;
@@ -1507,6 +1526,7 @@ export class HubService {
       evalRunning: this.evalRunningId,
       dailyReport: this.store.data.dailyReport,
       notifications: this.notificationsView(),
+      serverFacts: this.factsView(),
       alertIntake: {
         canReceive: Boolean(this.host.alertHookOwner),
         enabled: Boolean(this.store.data.alertHook),
@@ -2709,6 +2729,47 @@ export class HubService {
           ...(this.store.data.infraEdges ?? []).filter((x) => x.id !== savedEdge.id),
         ];
         if (isDemoMode()) saveDemoInfraEdge(savedEdge);
+        break;
+      }
+      case "facts-configure": {
+        const current = (this.store.data.factsSettings ??= {});
+        if (request.enabled !== undefined) current.enabled = request.enabled === true;
+        if (request.intervalHours !== undefined) current.intervalHours = integer(request.intervalHours, 1, 168);
+        if (request.exclude !== undefined) current.exclude = request.exclude.filter((id) => typeof id === "string").slice(0, 500);
+        if (request.watchPaths !== undefined) {
+          const bad = request.watchPaths.map((p) => p.trim()).filter((p) => p && !isWatchPath(p));
+          if (bad.length) throw new Error(`Not a path that can be watched: ${bad[0]}. Use an absolute path of plain characters; * is allowed.`);
+          current.watchPaths = request.watchPaths.map((p) => p.trim()).filter(Boolean).slice(0, 40);
+        }
+        // Switched on: read what is due now, not at the next round.
+        this.lastFactsTick = 0;
+        if (current.enabled) void this.factsTick().catch((e) => log.warn("Reading server facts failed", safeError(e)));
+        break;
+      }
+      case "facts-collect-now": {
+        if (request.serverId) {
+          const server = this.getKnownServers().find((x) => x.id === request.serverId);
+          if (!server) throw new Error("Server not found");
+          await this.collectFacts(server, Date.now(), true);
+        } else {
+          this.lastFactsTick = 0;
+          await this.factsTick(Date.now(), true);
+        }
+        break;
+      }
+      case "server-facts-read": {
+        const record = this.factsStore.get(request.serverId);
+        reply = { serverFacts: { serverId: request.serverId, facts: record?.facts, changes: record?.changes ?? [] } };
+        break;
+      }
+      case "facts-problem-dismiss": {
+        const record = this.factsStore.get(request.serverId);
+        if (record) {
+          // One problem, or everything this server has right now.
+          const keys = request.key ? [request.key] : this.factsProblems(record).map((p) => p.key);
+          const at = Date.now();
+          await this.factsStore.put({ ...record, dismissed: { ...(record.dismissed ?? {}), ...Object.fromEntries(keys.map((k) => [k, at])) } });
+        }
         break;
       }
       case "notify-channel-save": {
@@ -4145,6 +4206,264 @@ export class HubService {
     if (!this.disposed) void this.readNextKb();
   }
 
+  // ---- server facts ----------------------------------------------------------
+
+  private readonly factsStore: FactsStore;
+  private readonly factsCollecting = new Set<string>();
+  private readonly factsInFlight = new Map<string, Promise<void>>();
+  private lastFactsTick = 0;
+  /** What the bucket says each server was last read as, by whichever installation read it. */
+  private readonly factsHeads = new Map<string, { collectedAt: number; hash: string }>();
+
+  private factsSettings(): { enabled: boolean; intervalHours: number; exclude: string[]; watchPaths: string[] } {
+    const s = this.store.data.factsSettings ?? {};
+    return {
+      enabled: s.enabled === true,
+      intervalHours: integer(s.intervalHours ?? 6, 1, 168),
+      exclude: s.exclude ?? [],
+      watchPaths: (s.watchPaths ?? []).filter(isWatchPath),
+    };
+  }
+
+  /** Problems that are there now and were not dismissed since they appeared. */
+  private factsProblems(record: FactsRecord, now = Date.now()): FactProblem[] {
+    if (!record.facts || record.status !== "ok") return [];
+    return problems(record.facts, now)
+      .filter((p) => (record.dismissed?.[p.key] ?? 0) < (record.problemsSince?.[p.key] ?? 1))
+      .map((p) => ({ ...p, since: record.problemsSince?.[p.key] }));
+  }
+
+  private factsView(): NonNullable<HubSnapshot["serverFacts"]> {
+    const settings = this.factsSettings();
+    const servers = this.getKnownServers().map((server): ServerFactsView => {
+      const record = this.factsStore.get(server.id);
+      if (!record) return { serverId: server.id, name: server.name, status: "never", problems: [], changes: [] };
+      const summary = record.facts && !record.facts.unsupported ? factsSummary(record.facts) : undefined;
+      return {
+        serverId: server.id,
+        name: server.name,
+        status: record.status,
+        error: record.error,
+        collectedAt: record.collectedAt,
+        via: record.via,
+        os: summary?.os,
+        kernel: summary?.kernel,
+        bootAt: summary?.bootAt,
+        rebootRequired: summary?.rebootRequired,
+        packages: summary?.packages,
+        listening: summary?.listening,
+        services: summary?.services,
+        disks: summary?.disks,
+        problems: this.factsProblems(record),
+        changes: record.changes.slice(0, 20),
+      };
+    });
+    return { ...settings, servers, collecting: [...this.factsCollecting] };
+  }
+
+  private static changeLine(change: FactChange, name: string): string {
+    return `${new Date(change.at).toISOString().slice(0, 16).replace("T", " ")} UTC · ${name}: ${change.text}`;
+  }
+
+  /** What changed lately, per server, as lines that start with the time: handed to the agent's context, which picks the target's. */
+  private recentServerChanges(withinMs: number, now = Date.now()): { name: string; cluster?: string; lines: string[] }[] {
+    const clusters = new Map(this.getKnownServers().map((s) => [s.id, s.cluster]));
+    return this.factsStore
+      .all()
+      .map((r) => ({
+        name: r.name,
+        cluster: clusters.get(r.serverId),
+        lines: r.changes.filter((c) => now - c.at <= withinMs).slice(0, 20).map((c) => HubService.changeLine(c, r.name)),
+      }))
+      .filter((r) => r.lines.length);
+  }
+
+  /** The same for one server or cluster by name: what an alert's ticket is given. */
+  private changesOn(name: string | undefined, withinMs: number, now = Date.now()): string[] {
+    const wanted = (name ?? "").trim().toLowerCase();
+    if (!wanted) return [];
+    return this.recentServerChanges(withinMs, now)
+      .filter((r) => r.name.toLowerCase() === wanted || r.cluster?.toLowerCase() === wanted)
+      .flatMap((r) => r.lines)
+      .sort()
+      .reverse()
+      .slice(0, 20);
+  }
+
+  private factsDue(serverId: string, now: number, intervalHours: number): boolean {
+    const record = this.factsStore.get(serverId);
+    const head = this.factsHeads.get(serverId)?.collectedAt ?? 0;
+    const last = Math.max(record?.attemptedAt ?? 0, head);
+    if (!last) return true;
+    // Spread over ten minutes so a fleet is not read in one burst.
+    const jitter = (parseInt(crypto.createHash("sha256").update(serverId).digest("hex").slice(0, 6), 16) % 600) * 1000;
+    // No answer twice in a row: once a day is enough, and does not look like someone trying passwords.
+    // A system the collection does not know: once a week, in case it was replaced.
+    const wait =
+      record?.status === "unsupported" && head <= (record.attemptedAt ?? 0)
+        ? 7 * 24 * 3_600_000
+        : (record?.failures ?? 0) >= 2 && head <= (record?.attemptedAt ?? 0)
+          ? 24 * 3_600_000
+          : intervalHours * 3_600_000;
+    return now - last >= wait + jitter;
+  }
+
+  /** Takes over what another installation read since last time, so that no server is read twice. */
+  private async pullSharedFacts(): Promise<void> {
+    if (!this.s3Workspace.canUseBucket() || isDemoMode()) return;
+    const objects = this.s3Workspace.objects;
+    const names = (await objects.list("work/facts/heads")).filter((n) => n.endsWith(".json")).slice(0, 1000);
+    for (const name of names) {
+      try {
+        const head = JSON.parse((await objects.read(`work/facts/heads/${name}`))?.toString("utf8") ?? "null") as { serverId?: string; collectedAt?: number; hash?: string } | null;
+        if (!head?.serverId || !head.collectedAt) continue;
+        this.factsHeads.set(head.serverId, { collectedAt: head.collectedAt, hash: head.hash ?? "" });
+        const mine = this.factsStore.get(head.serverId);
+        if ((mine?.collectedAt ?? 0) >= head.collectedAt) continue;
+        const data = JSON.parse((await objects.read(`work/facts/data/${name}`))?.toString("utf8") ?? "null") as FactsRecord | null;
+        if (data?.serverId === head.serverId && data.facts) await this.factsStore.put({ ...data, dismissed: mine?.dismissed, changes: data.changes ?? [] });
+      } catch {
+        // One unreadable object does not stop the rest.
+      }
+    }
+  }
+
+  private factsRound?: Promise<void>;
+  /**
+   * One round: every server that is due, three at a time, until none is left.
+   * Rounds do not overlap; one that is asked for while another runs waits for
+   * it and then reads what was asked.
+   */
+  private async factsTick(now = Date.now(), asked = false): Promise<void> {
+    const settings = this.factsSettings();
+    if (!settings.enabled && !asked) return;
+    if (this.factsRound) {
+      if (!asked) return;
+      await this.factsRound.catch(() => undefined);
+    } else if (!asked && now - this.lastFactsTick < 5 * 60_000) return;
+    this.lastFactsTick = now;
+    const round = (async () => {
+      await this.pullSharedFacts().catch((e) => log.warn("Reading shared server facts failed", safeError(e)));
+      const due = this.getKnownServers()
+        .filter((s) => !settings.exclude.includes(s.id) && (asked || this.factsDue(s.id, now, settings.intervalHours)))
+        .slice(0, 500);
+      for (let i = 0; i < due.length && !this.disposed; i += 3) await Promise.all(due.slice(i, i + 3).map((s) => this.collectFacts(s, now, asked)));
+    })();
+    this.factsRound = round;
+    try {
+      await round;
+    } finally {
+      if (this.factsRound === round) this.factsRound = undefined;
+    }
+  }
+
+  /** Reads one server: runs the script, compares with last time, keeps the difference. No model is involved. */
+  private collectFacts(server: WorkspaceServerSummary, now = Date.now(), asked = false): Promise<void> {
+    // A reading that is under way is the reading: whoever asks again waits for the same one.
+    const running = this.factsInFlight.get(server.id);
+    if (running) return running;
+    const reading = this.readFacts(server, now, asked).finally(() => this.factsInFlight.delete(server.id));
+    this.factsInFlight.set(server.id, reading);
+    return reading;
+  }
+
+  private async readFacts(server: WorkspaceServerSummary, now: number, asked: boolean): Promise<void> {
+    this.factsCollecting.add(server.id);
+    this.host.changed();
+    try {
+      const settings = this.factsSettings();
+      const sync = isDemoMode() ? undefined : this.work();
+      const client = this.clientId();
+      if (sync && !asked) {
+        const held = await sync.claim(`facts-${server.id}`, { by: await this.resolveActorName(), client }, now).catch(() => undefined);
+        if (held && held.client !== client) return; // Another installation is reading it.
+      }
+      const prev = this.factsStore.get(server.id);
+      const base = { serverId: server.id, name: server.name, attemptedAt: now, dismissed: prev?.dismissed };
+      const demo = isDemoMode();
+      const result = demo
+        ? { ok: true, stdout: demoFactsOutput(server, now, prev?.facts ? 1 : 0), via: "demo" as const, error: undefined }
+        : this.host.execOnServer
+          ? await this.host
+              .execOnServer(server.id, buildScript(settings.watchPaths), 60_000)
+              .catch((e) => ({ ok: false, stdout: "", error: safeError(e), via: "own-connection" as const }))
+          : { ok: false, stdout: "", error: "Reading servers is not available in this installation", via: "own-connection" as const };
+      if (!result.ok) {
+        await this.factsStore.put({
+          ...(prev ?? { changes: [] }),
+          ...base,
+          status: "failed",
+          error: boundedContext(result.error ?? "No answer", 240),
+          failures: (prev?.failures ?? 0) + 1,
+        });
+        return;
+      }
+      const facts = parseFacts(result.stdout, now);
+      const fresh = prev?.facts && !prev.facts.unsupported ? diffFacts(prev.facts, facts) : [];
+      const present = problems(facts, now);
+      const record: FactsRecord = {
+        ...base,
+        status: facts.unsupported ? "unsupported" : "ok",
+        collectedAt: now,
+        via: result.via,
+        hash: factsHash(facts),
+        facts,
+        failures: 0,
+        changes: [...fresh, ...(prev?.changes ?? [])].filter((c) => now - c.at < 30 * 24 * 3_600_000).slice(0, 200),
+        problemsSince: Object.fromEntries(present.map((p) => [p.key, prev?.problemsSince?.[p.key] ?? now])),
+      };
+      await this.factsStore.put(record);
+      if (!facts.unsupported) this.proposeEdgesFrom(server, facts, now);
+      if (sync) {
+        const objects = this.s3Workspace.objects;
+        const name = `${server.id.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 120)}.json`;
+        // The whole record only when something is different; the small head every time, so others know it was read.
+        if (record.hash !== prev?.hash || fresh.length)
+          await objects.write(`work/facts/data/${name}`, Buffer.from(JSON.stringify({ ...record, dismissed: undefined }), "utf8")).catch(() => undefined);
+        await objects
+          .write(`work/facts/heads/${name}`, Buffer.from(JSON.stringify({ serverId: server.id, collectedAt: now, hash: record.hash, client }), "utf8"))
+          .catch(() => undefined);
+        this.factsHeads.set(server.id, { collectedAt: now, hash: record.hash ?? "" });
+      }
+    } finally {
+      this.factsCollecting.delete(server.id);
+      this.changed();
+    }
+  }
+
+  /**
+   * A connection this server holds to another server of the workspace is a
+   * dependency somebody may want on the map. It is suggested with what was
+   * seen; a person confirms it. A link that exists, or one that was removed,
+   * is not suggested again.
+   */
+  private proposeEdgesFrom(server: WorkspaceServerSummary, facts: ServerFacts, now: number): void {
+    const others = this.getKnownServers().filter((s) => s.id !== server.id && s.host);
+    const edges = (this.store.data.infraEdges ??= []);
+    let added = false;
+    for (const peer of facts.peers) {
+      const at = peer.lastIndexOf(":");
+      const [address, port] = [peer.slice(0, at), peer.slice(at + 1)];
+      const other = others.find((s) => s.host === address);
+      if (!other) continue;
+      const id = `edge-facts-${crypto.createHash("sha256").update(`${server.id}|${other.id}`).digest("hex").slice(0, 16)}`;
+      if (this.store.data.sharedRemoved?.edges?.[id]) continue;
+      if (edges.some((e) => e.id === id || (e.from === server.name && e.to === other.name))) continue;
+      edges.push({
+        id,
+        from: server.name,
+        to: other.name,
+        relation: "depends_on",
+        proposed: true,
+        evidence: `${server.name} had a connection open to ${other.name} (${address}:${port}) when it was read.`,
+        proposedBy: "Server facts",
+        updatedAt: now,
+      });
+      added = true;
+    }
+    if (added) this.lastWorkSync = 0;
+  }
+
   // ---- notifications out -----------------------------------------------------
 
   private readonly notifyStore: NotifyStore;
@@ -4215,6 +4534,9 @@ export class HubService {
       tasks: this.store.data.tasks,
       workTickets: live(this.store.data.workTickets),
       dailyReport: this.store.data.dailyReport,
+      serverFacts: {
+        servers: this.factsStore.all().map((r) => ({ serverId: r.serverId, name: r.name, status: r.status, collectedAt: r.collectedAt, problems: this.factsProblems(r), changes: [] })),
+      },
     }).filter((item) => NOTIFY_KINDS.includes(item.kind));
   }
 
@@ -4309,7 +4631,7 @@ export class HubService {
           // A ticket is on every installation that shares the bucket: one of them tells the channel.
           const kept: NotifyItem[] = [];
           for (const item of mine) {
-            const shared = ["review", "blocked", "alert"].includes(item.kind);
+            const shared = ["review", "blocked", "alert", "health"].includes(item.kind);
             if (
               !shared ||
               (await sync
@@ -4371,6 +4693,8 @@ export class HubService {
           pages: this.store.data.kbPages ?? [],
           memories: extra.memories ?? this.store.data.memories,
           findings: snap.kbFindings ?? [],
+          serverChanges: this.recentServerChanges(24 * 3_600_000, now).flatMap((r) => r.lines).sort().reverse(),
+          serverProblems: this.factsStore.all().flatMap((r) => this.factsProblems(r, now).map((p) => `${r.name}: ${p.text}`)),
         }),
       };
       await this.store.save().catch(() => undefined);
@@ -4502,7 +4826,7 @@ export class HubService {
       const ticket = await this.saveTicketFrom(
         {
           title: boundedContext(`${alert.severity === "critical" ? "Alert (critical)" : "Alert"}: ${alert.title}`, 200),
-          description: alertTicketText(alert),
+          description: alertTicketText(alert, this.changesOn(target, 24 * 3_600_000)),
           assigneeAgentId: agent?.id,
           target,
         },
@@ -4932,6 +5256,7 @@ export class HubService {
       void this.readNextKb(now).catch((e) => log.warn("Knowledge base reading failed", safeError(e)));
       void this.nightly(now).catch((e) => log.warn("Nightly upkeep failed", safeError(e)));
       void this.flushInbox(now).catch((e) => log.warn("Notifications failed", safeError(e)));
+      void this.factsTick(now).catch((e) => log.warn("Reading server facts failed", safeError(e)));
       let historyChanged = false;
       for (const session of this.terminals.list()) {
         const text = this.terminals.context(session.id);
@@ -6066,6 +6391,7 @@ export class HubService {
       kbDocuments: this.getKbDocumentsList(),
       kbPages: this.store.data.kbPages ?? [],
       infraEdges: this.getInfraEdgesList(),
+      recentServerChanges: this.recentServerChanges(48 * 3_600_000),
       workforceRuns: this.getWorkforceRunsList(),
       terminalContextChars: aiCfg?.terminalContextChars ?? 8000,
       appSettings: {

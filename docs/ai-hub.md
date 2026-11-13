@@ -333,6 +333,65 @@ stopped.
   check. The classifier is a set of rules: it can refuse a harmless command,
   and a command it wrongly calls read-only would run.
 
+## Server facts, and what changed (`ServerFacts`, `FactsStore`)
+
+Most faults follow a change, so the hub reads the servers on a schedule and
+keeps what is different. No model is involved.
+
+- **What is read** (`FACT_COMMANDS`, `buildScript`): system and kernel, boot
+  time, packages (dpkg, rpm or apk), failed and running services, listening
+  ports with their process, connections the server opened itself, disks,
+  certificates in the usual places with their end date, and SHA-256 of a list
+  of configuration files (`DEFAULT_WATCH` plus the user's own paths). One
+  script for `sh -s`, a marker line before each section, nothing written. A
+  test holds every command to `analyzeCommandSafety`; the classifier learned
+  the asking forms of the package managers (`rpm -q…`, `dpkg-query -W`,
+  `apk info`) for this, and only those.
+- **How it runs** (`HubHost.execOnServer`, in `createHub.ts`): over the
+  ControlMaster socket of an open tab to that server when there is one
+  (beside the terminal, nothing is typed into it), otherwise a connection of
+  the hub's own with `BatchMode=yes` for as long as the script takes. A
+  profile that needs a password, a smartcard or a touch is read only while
+  its tab is open. Unknown host keys fail closed.
+- **Off until switched on** (Infrastructure → "What is on them, and what
+  changed"). Every six hours by default, three servers at a time, spread over
+  ten minutes; a server can be left alone. Two failures in a row: once a day.
+  A system that answers nothing the script knows (an appliance with its own
+  shell) is marked unsupported and tried once a week.
+- **What changed** (`diffFacts`): sentences such as "Package nginx 1.24.0-2 →
+  1.26.1-1", "Service pgbouncer has failed", "New listening port tcp/8443
+  (java)", "/etc/nginx/nginx.conf changed", "Disk / 45 % → 93 %", "Restarted
+  at …". Left out on purpose: connections, disk use below a threshold (80, 90,
+  95), and a watched file that only went between readable and unreadable. A
+  big upgrade is one line.
+- **Where it goes:** `ContextService.read` adds `changedRecently` for the
+  run's target and for what the target leans on (confirmed links), 48 hours
+  back, labelled as data; the troubleshooting instructions say to start
+  there. `alertTicketText` puts the last 24 hours on the alert's target into
+  the ticket. The daily report has "Changed on the servers" and "Needs
+  attention on the servers". Disks at 90 % or more, certificates within 14
+  days of their end and failed services are inbox items of kind `health`
+  (dismissable until they are new again) and can be sent to a channel. A
+  connection to another server of the workspace is suggested as a dependency
+  link with what was seen.
+- **What a server says is data.** Unit, process and file names are cut to
+  plain characters and a short length (`plain`), paths a person adds are held
+  to `isWatchPath` before they reach the script.
+- **Storage:** `<hub dir>/facts/<server>.json`, one file per server with the
+  latest facts and a change log of 30 days. Not in `hub.json`: a package list
+  is large, and that store is rewritten and masked on every save. With a team
+  bucket: `work/facts/heads/<server>.json` (when, hash, who) is written at
+  every reading and `work/facts/data/<server>.json` when something differs;
+  an installation takes over what another read and does not read it again. A
+  claim covers the minute a reading takes.
+- **Demo mode** answers from `demoFacts.ts` in the script's own format, with
+  a second reading that differs, so the view can be shown without servers.
+
+Not done: non-Linux systems (the BSDs and macOS mostly lack `/proc` and
+`systemctl` and give partial facts; Windows and appliances give none), package
+vulnerability lookups, and reading through a jump host that itself needs a
+prompt.
+
 ## Notifications out (`Notifier`, `NotifyStore`)
 
 What waits for a person is defined once, in `src/shared/aiHubInbox.ts`

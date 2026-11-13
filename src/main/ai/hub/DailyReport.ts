@@ -23,6 +23,10 @@ export function buildDailyReport(input: {
   pages: KbPage[];
   memories: MemoryEntry[];
   findings: KbFinding[];
+  /** What was found different on the servers, newest first, each line with its time and server. */
+  serverChanges?: string[];
+  /** What needs attention on the servers right now. */
+  serverProblems?: string[];
 }): string {
   const { since } = input;
   const recent = <T>(items: T[], at: (x: T) => number): T[] => items.filter((x) => at(x) >= since);
@@ -84,6 +88,11 @@ export function buildDailyReport(input: {
     ...learnedPages.slice(0, 6).map((p) => `Page “${p.title}”: ${p.history[0]?.summary ?? "updated"}`),
     ...learnedMemories.slice(0, 6).map((m) => `Memory: ${m.title}`),
   ]);
+
+  const [changeRows, changeMore] = cap(input.serverChanges ?? [], 12);
+  section("Changed on the servers", changeRows, changeMore);
+  const [problemRows, problemMore] = cap(input.serverProblems ?? [], 10);
+  section("Needs attention on the servers", problemRows, problemMore);
 
   const review = input.tickets.filter((t) => t.status === "review").length;
   const blocked = input.tickets.filter((t) => t.status === "blocked").length;

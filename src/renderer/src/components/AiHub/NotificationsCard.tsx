@@ -40,6 +40,7 @@ const EVENTS: { kind: NotifyEventKind; label: string }[] = [
   { kind: "question", label: "An agent asks a question" },
   { kind: "blocked", label: "A run stopped" },
   { kind: "alert", label: "An alert nobody has taken" },
+  { kind: "health", label: "A server needs attention (disk, certificate, failed service)" },
   { kind: "review", label: "A ticket is ready for review" },
   { kind: "report", label: "The daily report" },
 ];

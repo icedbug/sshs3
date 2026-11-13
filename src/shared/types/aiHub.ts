@@ -600,9 +600,67 @@ export interface HubPreferences {
   approvalWaitMinutes?: number;
 }
 
+/** What was read from a server, without a model: see ServerFacts.ts. */
+export interface ServerFacts {
+  collectedAt: number;
+  /** The system answered nothing the collection knows (a storage appliance with a shell of its own). */
+  unsupported?: boolean;
+  os?: { name: string; version: string; pretty: string };
+  kernel?: string;
+  hostname?: string;
+  bootAt?: number;
+  packageManager?: "dpkg" | "rpm" | "apk";
+  packages?: Record<string, string>;
+  failedServices: string[];
+  runningServices: string[];
+  listening: { proto: "tcp" | "udp"; address: string; port: number; process?: string }[];
+  /** Addresses this server has connections to that it opened itself. */
+  peers: string[];
+  disks: { mount: string; fs: string; type: string; sizeKb: number; usedPct: number }[];
+  certs: { path: string; subject?: string; notAfter: number }[];
+  /** Watched files: path to SHA-256, or "unreadable" for a file that is there but may not be read. */
+  files: Record<string, string>;
+  rebootRequired?: boolean;
+}
+export interface FactChange {
+  at: number;
+  kind: "os" | "kernel" | "reboot" | "package" | "service" | "port" | "file" | "disk" | "cert";
+  text: string;
+}
+export interface FactProblem {
+  kind: "disk" | "cert" | "service";
+  /** Stable for the same problem on the same server, so it can be dismissed. */
+  key: string;
+  severity: "warning" | "critical";
+  text: string;
+  /** When it was first seen. */
+  since?: number;
+}
+/** One server's facts as the interface gets them: the summary, not the package list. */
+export interface ServerFactsView {
+  serverId: string;
+  name: string;
+  /** ok: collected. unsupported: not a system the collection knows. failed: could not be reached or signed in to. never: not collected yet. */
+  status: "ok" | "unsupported" | "failed" | "never";
+  error?: string;
+  collectedAt?: number;
+  via?: "open-tab" | "own-connection" | "local" | "demo";
+  os?: string;
+  kernel?: string;
+  bootAt?: number;
+  rebootRequired?: boolean;
+  packages?: number;
+  listening?: number;
+  services?: number;
+  disks?: { mount: string; usedPct: number }[];
+  problems: FactProblem[];
+  /** Newest first. */
+  changes: FactChange[];
+}
+
 export type NotifyChannelKind = "slack" | "teams" | "ntfy" | "webhook";
 /** What can be sent to a channel: the kinds of inbox item, without knowledge base findings. */
-export type NotifyEventKind = "approval" | "plan" | "question" | "blocked" | "alert" | "review" | "report";
+export type NotifyEventKind = "approval" | "plan" | "question" | "blocked" | "alert" | "health" | "review" | "report";
 
 /** A notification channel as the interface sees it: the address itself never leaves the main process. */
 export interface NotifyChannelView {
@@ -934,6 +992,7 @@ export interface HubReply {
   alertHook?: { path: string };
   /** Tickets an alert request created or updated. */
   alerts?: { created: string[]; updated: string[] };
+  serverFacts?: { serverId: string; facts?: ServerFacts; changes: FactChange[] };
   /** Whether a test notification arrived. */
   notifyTest?: { ok: boolean; status?: number; error?: string };
   kbDocument?: KbDocument;
@@ -1011,6 +1070,18 @@ export interface HubSnapshot {
   evalRunning?: string;
   /** The latest nightly summary of what happened, until it has been read. */
   dailyReport?: { day: string; at: number; text: string; readAt?: number };
+  /** What is read from the servers on a schedule, and what changed. */
+  serverFacts?: {
+    enabled: boolean;
+    intervalHours: number;
+    /** Servers left alone. */
+    exclude: string[];
+    /** Extra files to watch, beside the built-in list. */
+    watchPaths: string[];
+    servers: ServerFactsView[];
+    /** Server ids being read right now. */
+    collecting: string[];
+  };
   /** Where notifications go when something starts to wait for a person. */
   notifications?: {
     channels: NotifyChannelView[];
@@ -1190,6 +1261,13 @@ export type HubRequest =
   /** Replays one case, or all of them when no id is given. Nothing is executed. */
   | { action: "eval-run"; id?: string }
   | { action: "infra-edge-confirm"; id: string }
+  | { action: "facts-configure"; enabled?: boolean; intervalHours?: number; exclude?: string[]; watchPaths?: string[] }
+  /** Reads one server now, or every server that is due when no id is given. */
+  | { action: "facts-collect-now"; serverId?: string }
+  /** The whole of one server's facts, packages and all, for the reply. */
+  | { action: "server-facts-read"; serverId: string }
+  /** Dismisses one problem of a server, or all it has now when no key is given. They come back when they are new again. */
+  | { action: "facts-problem-dismiss"; serverId: string; key?: string }
   | { action: "notify-channel-save"; channel: NotifyChannelInput }
   | { action: "notify-channel-delete"; id: string }
   /** Sends a test message to one channel and reports whether it arrived. */

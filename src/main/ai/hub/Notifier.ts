@@ -8,7 +8,7 @@ import type { NotifyChannelKind } from "../../../shared/types/aiHub";
 import { boundedContext } from "./privacy";
 
 /** What a channel can be told about. Knowledge base findings are not urgent enough to push to a phone. */
-export const NOTIFY_KINDS: InboxKind[] = ["approval", "plan", "question", "blocked", "alert", "review", "report"];
+export const NOTIFY_KINDS: InboxKind[] = ["approval", "plan", "question", "blocked", "alert", "health", "review", "report"];
 
 /** A channel as it is kept in memory: the address and the secret in the clear. */
 export interface NotifyChannel {
@@ -97,6 +97,7 @@ const HEADLINE: Record<InboxKind, string> = {
   question: "An agent has a question",
   blocked: "A run stopped",
   alert: "An alert nobody has taken",
+  health: "A server needs attention",
   review: "Ready for review",
   report: "Daily report",
   knowledge: "Knowledge base",
@@ -118,7 +119,7 @@ function lines(item: NotifyItem, channel: Pick<NotifyChannel, "includeCommand">,
   else if (!command && item.command) body.push("A command (its text is not sent to this channel).");
   if (item.detail && item.detail !== item.command && item.kind !== "approval") body.push(clip(item.detail, 300));
   if (item.risk && item.kind === "approval") body.push(`Risk: ${RISK[item.risk] ?? item.risk}${item.reason ? ` (${clip(item.reason, 140)})` : ""}`);
-  if (item.kind === "alert" && item.risk) body.push(`Severity: ${item.risk}`);
+  if ((item.kind === "alert" || item.kind === "health") && item.risk) body.push(`Severity: ${item.risk}`);
   if (channel.includeCommand && item.check) body.push(`Check: ${clip(item.check, 160)}`);
   if (channel.includeCommand && item.rollback) body.push(`Way back: ${clip(item.rollback, 160)}`);
   if (item.waitsMinutes && ["approval", "plan", "question"].includes(item.kind))
@@ -203,7 +204,7 @@ export function renderNotification(channel: NotifyChannel, items: NotifyItem[], 
     at.pathname = `/${parts.join("/")}`;
     at.search = "";
     const top = items.reduce((max, item) => Math.max(max, item.kind === "alert" ? (item.risk === "critical" ? 5 : 4) : ["approval", "plan", "question"].includes(item.kind) ? 4 : item.kind === "report" ? 2 : 3), 1);
-    const tag: Record<InboxKind, string> = { approval: "lock", plan: "clipboard", question: "question", blocked: "octagonal_sign", alert: "rotating_light", review: "eyes", report: "memo", knowledge: "books" };
+    const tag: Record<InboxKind, string> = { approval: "lock", plan: "clipboard", question: "question", blocked: "octagonal_sign", alert: "rotating_light", health: "warning", review: "eyes", report: "memo", knowledge: "books" };
     return {
       url: at.toString(),
       headers: { ...json, ...(channel.secret ? { Authorization: `Bearer ${channel.secret}` } : {}) },

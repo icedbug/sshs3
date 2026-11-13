@@ -489,6 +489,8 @@ export function operatingInstructions(options: {
     "## When something is wrong",
     "An investigation is a search among possible causes, not a walk through commands. Before you dig, write down what could explain the symptom with `sshs3_hypotheses` (the knowledge base page for the symptom, if there is one, lists the usual causes in order). Aim each check at one hypothesis, record what it showed, and close hypotheses as the evidence comes in. Independent hypotheses can be looked into at the same time by investigators (`sshs3_investigate`): they can read and run read-only commands on the target in a terminal of their own. Name a cause in your report only if its hypothesis is confirmed; otherwise say what is most likely and what would settle it.",
     "",
+    "If the workspace context has `changedRecently`, begin there: it lists what was found different on this target and on what it depends on (packages, services, ports, configuration files, restarts). Most faults follow a change. A change is a lead to check, not a cause until a command shows it.",
+    "",
     "## Evidence before action",
     "Look before you change: the current state of the thing, its recent log lines, the configuration you are about to edit (read a file before writing it). Use bounded, non-interactive commands; never start an interactive or full-screen program, a nested shell or a nested SSH session.",
     "Independent read-only checks can be requested together in one turn.",

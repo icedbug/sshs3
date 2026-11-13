@@ -83,6 +83,17 @@ what, on which target, the risk, and a link to the item.
 - Notifications are posted directly, not through an HTTP proxy: the server
   needs a route to the channel.
 
+## What is on the servers, and what changed
+
+Under Infrastructure, "Read the servers on a schedule" lets the server read
+each machine every few hours with read-only commands (system, packages,
+services, ports, disks, certificates, a list of configuration files) and keep
+what is different from last time. An agent that troubleshoots a machine is
+given what changed there, and so is the ticket of an alert about it. The
+server reads with its own key or agent; a machine that needs a password or a
+touch is not read from the server. With a team bucket the result is shared, and
+a machine is read by one installation, not by each.
+
 ## What to know
 
 - **Modes still apply.** An agent set to ask before commands waits for a

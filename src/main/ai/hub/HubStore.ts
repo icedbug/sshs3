@@ -129,6 +129,8 @@ export interface HubData {
   dailyReport?: { day: string; at: number; text: string; readAt?: number };
   /** The day (local, YYYY-MM-DD) the nightly upkeep last ran. */
   lastNightlyDay?: string;
+  /** Reading facts from the servers: off unless switched on. */
+  factsSettings?: { enabled?: boolean; intervalHours?: number; exclude?: string[]; watchPaths?: string[] };
   /** Test cases for the agents, with their recordings and latest runs. */
   evalCases?: EvalCase[];
   /** The pages agents read, written from the sources and from finished work. */

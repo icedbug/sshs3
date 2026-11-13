@@ -7,6 +7,7 @@ import type {
   WorkspaceServerSummary,
 } from "@shared/types/aiHub";
 import { DependencyLinks } from "./DependencyLinks";
+import { ServerFactsCard } from "./ServerFactsCard";
 import type { Act } from "./panelShared";
 
 const STATUS: Record<InventoryEntry["status"], { text: string; tone: string }> = {
@@ -265,6 +266,11 @@ export function InfrastructureView({
           </div>
         </section>
       )}
+
+      <div className="ai-section-head">
+        <h3>What is on them, and what changed</h3>
+      </div>
+      <ServerFactsCard hub={hub} act={act} />
 
       <div className="ai-section-head">
         <h3>How it hangs together</h3>

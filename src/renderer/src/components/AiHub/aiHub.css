@@ -3509,6 +3509,53 @@
   min-width: 0;
 }
 
+/* ---- server facts -------------------------------------------------------- */
+.ai-facts-changes {
+  margin: 6px 0 10px;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 3px;
+  font-size: 12.5px;
+  color: var(--ai-ink-soft);
+}
+.ai-facts-changes small {
+  display: inline-block;
+  min-width: 74px;
+  color: var(--ai-ink-faint);
+}
+.ai-facts-changes b {
+  color: var(--ai-ink);
+  font-weight: 600;
+}
+.ai-hub .ai-link-button {
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  color: var(--ai-accent);
+  font-size: 12px;
+}
+.ai-hub .ai-link-button:hover {
+  text-decoration: underline;
+}
+.ai-facts-server {
+  border-bottom: 1px solid var(--ai-line);
+}
+.ai-facts-server:last-child {
+  border-bottom: 0;
+}
+.ai-facts-server > .ai-row {
+  border-bottom: 0;
+}
+.ai-facts-details {
+  display: grid;
+  gap: 10px;
+  padding: 2px 14px 14px;
+}
+.ai-facts-details .ai-tags {
+  margin-top: 4px;
+}
+
 /* ---- a phone --------------------------------------------------------------
    Where an approval is answered from: the hub takes the whole screen, the
    views are one row that scrolls sideways, and everything that is pressed is
