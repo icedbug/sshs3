@@ -72,6 +72,22 @@ const show = (p: Record<string, unknown>, keys: string[]): string =>
  * Whether this call moves the fence, and if so what to ask the person. A call
  * that does not is ordinary work and returns nothing.
  */
+/**
+ * The agent a call names, by its id or its whole name. The same rule as the
+ * one the tool itself uses: a part of a name, or no name at all, names
+ * nobody — otherwise the guard and the tool could disagree about which agent
+ * a call is about, and the guard would be looking at the wrong one.
+ */
+export function agentNamed<T extends Pick<MissionAgent, "id" | "name" | "defaultMode">>(
+  agents: T[],
+  payload: Record<string, unknown>,
+  keys: string[],
+): T | undefined {
+  const q = keys.map((k) => text(payload, k)).find(Boolean)?.toLowerCase() ?? "";
+  if (!q) return undefined;
+  return agents.find((a) => a.id.toLowerCase() === q || a.name.toLowerCase() === q);
+}
+
 export function guardAsk(
   tool: string,
   payload: Record<string, unknown>,
@@ -121,14 +137,21 @@ What is in the folder is copied to the bucket.`,
       };
     if (op === "install_mcp_preset")
       return { title: "Install an MCP server from the list", detail: `${show(payload, ["presetId", "idOrName", "id", "name"])}\nInstalling starts the preset's program on this computer.` };
-    if (op === "save_agent" && isMode(payload.defaultMode) && actsAlone(payload.defaultMode, run))
-      return {
-        title: "Create or change an agent that acts on its own, without asking",
-        detail: show(payload, ["name", "role", "defaultMode", "targetCluster", "mission"]),
-      };
+    if (op === "save_agent") {
+      // The mode it would END UP with: a call that leaves the mode out keeps the one the
+      // agent has, so rewriting an agent that already acts on its own is the same decision.
+      const named = agentNamed(known.agents, payload, ["idOrName", "id", "name"]);
+      const mode = isMode(payload.defaultMode) ? payload.defaultMode : named?.defaultMode;
+      if (mode && actsAlone(mode, run))
+        return {
+          title: named
+            ? `Change ${named.name}, an agent that acts on its own, without asking`
+            : "Create an agent that acts on its own, without asking",
+          detail: show(payload, ["name", "role", "defaultMode", "targetCluster", "mission"]),
+        };
+    }
     if (op === "run_agent_mission") {
-      const q = (text(payload, "idOrName") || text(payload, "id") || text(payload, "name")).toLowerCase();
-      const agent = known.agents.find((a) => a.id.toLowerCase() === q || (q && a.name.toLowerCase().includes(q)));
+      const agent = agentNamed(known.agents, payload, ["idOrName", "id", "name"]);
       if (agent && actsAlone(agent.defaultMode, run))
         return { title: `Start ${agent.name}, which acts on its own, without asking`, detail: show(payload, ["idOrName", "id", "name", "promptOverride"]) };
     }

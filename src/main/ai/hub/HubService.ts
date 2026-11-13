@@ -2431,6 +2431,12 @@ export class HubService {
       case "agent-save": {
         const a = request.agent;
         const id = a.id?.trim() || crypto.randomUUID();
+        // Three code paths look an agent up by name. Two agents of one name would make
+        // which one they find a matter of order.
+        const clash = this.getAgentsList().find(
+          (x) => x.id !== id && x.name.trim().toLowerCase() === (a.name ?? "").trim().toLowerCase(),
+        );
+        if (clash) throw new Error(`There is already an agent called "${clash.name}". Give this one another name.`);
         const actor = a.author?.trim() || (await this.resolveActorName());
         const saved: MissionAgent = {
           id,
@@ -2471,10 +2477,29 @@ export class HubService {
         break;
       }
       case "agent-delete": {
+        const gone = this.getAgentsList().find((a) => a.id === request.id);
         this.store.data.agents = (this.store.data.agents ?? []).filter(
           (a) => a.id !== request.id,
         );
         this.markSharedRemoved("agents", request.id);
+        // A ticket that was this agent's is free again, and says so. Left as it was it
+        // would sit for ever: nothing would run it, and the board would say it has no assignee.
+        for (const ticket of live(this.store.data.workTickets))
+          if (ticket.assigneeAgentId === request.id)
+            this.putTicket({
+              ...withComment(
+                ticket,
+                "sshS3",
+                `${gone?.name ?? "The agent"} was removed, so this ticket has nobody. Assign it to another agent or do it by hand.`,
+              ),
+              assigneeAgentId: undefined,
+              assigneeName: undefined,
+            });
+        // An agent that reported to it reports to nobody now, rather than to a gap.
+        this.store.data.agents = (this.store.data.agents ?? []).map((a) =>
+          a.reportsTo === request.id ? { ...a, reportsTo: undefined, updatedAt: Date.now() } : a,
+        );
+        this.store.data.alertRules = (this.store.data.alertRules ?? []).filter((r) => r.agentId !== request.id);
         // Before deleteDemoAgent: in demo mode the built-ins are the demo store's agents.
         this.markBuiltinDismissed(request.id, getBuiltinAgents());
         if (isDemoMode()) deleteDemoAgent(request.id);
@@ -2642,6 +2667,10 @@ export class HubService {
         const targetAgentId = request.agentId || request.id;
         const agent = this.getAgentsList().find((a) => a.id === targetAgentId);
         if (!agent) throw new Error("Mission Agent not found");
+        // Paused means paused. It used to hold only for the tickets the heartbeat picks up,
+        // so "Run mission" started an agent a person had switched off.
+        if (agent.enabled === false)
+          throw new Error(`${agent.name} is paused. Switch it on again before starting it.`);
         const clusterTag = agent.targetCluster
           ? ` (cluster: @cluster:${agent.targetCluster})`
           : "";

@@ -13,6 +13,7 @@ import type {
   WorkspaceServerSummary,
 } from "../../../shared/types/aiHub";
 import { DEFAULT_AI_MODELS } from "../../../shared/types/ai";
+import { agentNamed } from "./AppGuard";
 import { coverage, searchPages } from "./KbCompile";
 import { clip } from "./privacy";
 import { unverifiedNote } from "./KbCheck";
@@ -42,6 +43,22 @@ import { guardAsk } from "./AppGuard";
  * model (or the demo copilot) calls it. It reaches the hub only through
  * `AppActionHost`, the list of hub members these handlers use.
  */
+/**
+ * The agent an operation names. The same rule as the guard's, so that the two
+ * cannot disagree about which agent a call is about: the whole id or the whole
+ * name, and a call that names nobody is a mistake, not the first agent there is.
+ */
+function namedAgent(agents: MissionAgent[], payload: Record<string, unknown>, op: string): MissionAgent {
+  const found = agentNamed(agents, payload, ["idOrName", "id", "name"]);
+  if (found) return found;
+  const q = ["idOrName", "id", "name"].map((k) => (typeof payload[k] === "string" ? String(payload[k]).trim() : "")).find(Boolean);
+  throw new Error(
+    q
+      ? `No agent is called "${q}". The agents are: ${agents.map((a) => a.name).join(", ") || "none"}.`
+      : `${op} needs the name of the agent, exactly as it is written. The agents are: ${agents.map((a) => a.name).join(", ") || "none"}.`,
+  );
+}
+
 /**
  * The operation a tool was asked for, when it is one the tool has. A name
  * that is not on the list used to fall through to whatever the last branch
@@ -1789,11 +1806,7 @@ export async function handleAppAction(
           };
         }
         if (op === "handoff_agent") {
-          const q = (str("idOrName") || str("id") || str("name") || "").toLowerCase();
-          const match = hub.getAgentsList().find(
-            (a) => a.id.toLowerCase() === q || a.name.toLowerCase().includes(q),
-          );
-          if (!match) throw new Error(`Agent "${q}" not found for handoff`);
+          const match = namedAgent(hub.getAgentsList(), p, "handoff_agent");
           await hub.request({
             action: "agent-handoff",
             taskId: task.id,
@@ -1891,20 +1904,12 @@ export async function handleAppAction(
           return { ok: true, operation: "save_agent", name, updated: Boolean(existing) };
         }
         if (op === "delete_agent") {
-          const q = (str("idOrName") || str("id") || str("name") || "").toLowerCase();
-          const match = hub.getAgentsList().find(
-            (a) => a.id.toLowerCase() === q || a.name.toLowerCase().includes(q),
-          );
-          if (!match) throw new Error(`Agent "${q}" not found`);
+          const match = namedAgent(hub.getAgentsList(), p, "delete_agent");
           await hub.request({ action: "agent-delete", id: match.id });
           return { ok: true, deletedAgentId: match.id, name: match.name };
         }
         if (op === "run_agent_mission") {
-          const q = (str("idOrName") || str("id") || str("name") || "").toLowerCase();
-          const match = hub.getAgentsList().find(
-            (a) => a.id.toLowerCase() === q || a.name.toLowerCase().includes(q),
-          );
-          if (!match) throw new Error(`Agent "${q}" not found`);
+          const match = namedAgent(hub.getAgentsList(), p, "run_agent_mission");
           await hub.request({
             action: "agent-run-mission",
             agentId: match.id,
