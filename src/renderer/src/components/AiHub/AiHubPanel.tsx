@@ -1735,7 +1735,7 @@ export function AiHubPanel({
                         >
                           {item.change.riskReason}
                           {(item.change.parsedSubcommands?.length ?? 0) > 1
-                            ? ` · ${item.change.parsedSubcommands!.length} AST pipeline/chain segments`
+                            ? ` · ${item.change.parsedSubcommands!.length} commands in it, each judged on its own`
                             : ""}
                         </small>
                       )}
