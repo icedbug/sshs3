@@ -1,6 +1,9 @@
 import { useState } from "react";
-import type { AgentChange, HubSnapshot } from "@shared/types/aiHub";
+import type { AgentChange, HubRequest, HubSnapshot } from "@shared/types/aiHub";
+import { hubRequest } from "../../lib/aiHub";
+import { AuditLogView } from "./AuditLogView";
 import { ChangeProof } from "./ChangeProof";
+import { RecordingPlayer } from "./RecordingPlayer";
 
 type Source = "all" | "team" | "assistant";
 
@@ -48,9 +51,16 @@ const STATUS_TONE: Record<AgentChange["status"], string> = {
 };
 
 const day = (at: number): string =>
-  new Date(at).toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
+  new Date(at).toLocaleDateString(undefined, {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+  });
 const time = (at: number): string =>
-  new Date(at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  new Date(at).toLocaleTimeString(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 
 /**
  * One timeline of what was changed: what teammates did on the servers (synced
@@ -60,10 +70,18 @@ const time = (at: number): string =>
 export function ChangesView({
   hub,
   onOpenTask,
+  request = hubRequest,
 }: {
   hub: HubSnapshot;
   onOpenTask: (taskId: string) => void;
+  request?: (r: HubRequest) => Promise<HubSnapshot>;
 }): JSX.Element {
+  const [tab, setTab] = useState<"timeline" | "audit">("timeline");
+  const [watching, setWatching] = useState<{
+    title: string;
+    cast: string;
+  } | null>(null);
+  const [watchProblem, setWatchProblem] = useState("");
   const [source, setSource] = useState<Source>("all");
   const [filter, setFilter] = useState("");
   const [limit, setLimit] = useState(60);
@@ -105,10 +123,28 @@ export function ChangesView({
   const shown = entries
     .filter((e) => source === "all" || e.source === source)
     .filter(
-      (e) => !q || [e.who, e.target, e.summary, e.command, e.detail].some((x) => x?.toLowerCase().includes(q)),
+      (e) =>
+        !q ||
+        [e.who, e.target, e.summary, e.command, e.detail].some((x) =>
+          x?.toLowerCase().includes(q),
+        ),
     );
   const page = shown.slice(0, limit);
-  const count = (s: Source): number => (s === "all" ? entries.length : entries.filter((e) => e.source === s).length);
+  const count = (s: Source): number =>
+    s === "all" ? entries.length : entries.filter((e) => e.source === s).length;
+
+  const watch = async (recordingId: string, title: string): Promise<void> => {
+    setWatchProblem("");
+    try {
+      const rec = (await request({ action: "recording-read", id: recordingId }))
+        .reply?.recording;
+      if (rec) setWatching({ title, cast: rec.cast });
+    } catch (error) {
+      setWatchProblem(error instanceof Error ? error.message : String(error));
+    }
+  };
+  const recordingOf = (taskId?: string): string | undefined =>
+    taskId ? hub.tasks.find((t) => t.id === taskId)?.recordingId : undefined;
 
   let lastDay = "";
   return (
@@ -116,12 +152,56 @@ export function ChangesView({
       <header className="ai-view-head">
         <h2>Changes</h2>
         <p className="ai-hint">
-          What was changed, where, and by whom: the team&apos;s activity from the shared workspace, and every command
-          or file change the assistant made from this computer, with its result.
+          What was changed, where, and by whom: the team&apos;s activity from
+          the shared workspace, and every command or file change the assistant
+          made from this computer, with its result. The audit log keeps the same
+          on this computer in a form that shows when it was tampered with.
         </p>
       </header>
 
-      {entries.length > 0 && (
+      <div className="ai-view-tabs" role="tablist" aria-label="Changes">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === "timeline"}
+          className={`ai-chip ${tab === "timeline" ? "ai-chip-on" : ""}`}
+          onClick={() => setTab("timeline")}
+        >
+          Timeline
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === "audit"}
+          className={`ai-chip ${tab === "audit" ? "ai-chip-on" : ""}`}
+          onClick={() => setTab("audit")}
+        >
+          Audit log
+        </button>
+      </div>
+      {watchProblem && (
+        <p role="alert" className="ai-error">
+          {watchProblem}
+        </p>
+      )}
+      {watching && (
+        <RecordingPlayer
+          cast={watching.cast}
+          title={watching.title}
+          onClose={() => setWatching(null)}
+        />
+      )}
+
+      {tab === "audit" && (
+        <AuditLogView
+          request={request}
+          hub={hub}
+          onOpenTask={onOpenTask}
+          onWatch={(id, title) => void watch(id, title)}
+        />
+      )}
+
+      {tab === "timeline" && entries.length > 0 && (
         <div className="ai-filter-bar">
           <input
             type="search"
@@ -139,93 +219,142 @@ export function ChangesView({
                 aria-pressed={source === s}
                 onClick={() => setSource(s)}
               >
-                {s === "all" ? "Everything" : s === "team" ? "Team activity" : "Assistant actions"} · {count(s)}
+                {s === "all"
+                  ? "Everything"
+                  : s === "team"
+                    ? "Team activity"
+                    : "Assistant actions"}{" "}
+                · {count(s)}
               </button>
             ))}
           </div>
         </div>
       )}
 
-      {entries.length === 0 && (
+      {tab === "timeline" && entries.length === 0 && (
         <p className="ai-empty">
-          Nothing has been recorded yet. Config edits, service restarts and the assistant&apos;s commands appear here
-          as they happen.
+          Nothing has been recorded yet. Config edits, service restarts and the
+          assistant&apos;s commands appear here as they happen.
         </p>
       )}
-      {entries.length > 0 && shown.length === 0 && <p className="ai-empty">Nothing matches.</p>}
+      {tab === "timeline" && entries.length > 0 && shown.length === 0 && (
+        <p className="ai-empty">Nothing matches.</p>
+      )}
 
-      <div className="ai-timeline">
-        {page.map((e) => {
-          const heading = day(e.at) !== lastDay ? (lastDay = day(e.at)) : "";
-          const c = e.change;
-          const hasMore = Boolean(e.command || e.detail || c?.output || c?.before || c?.after || c?.check);
-          const head = (
-            <>
-              <time>{time(e.at)}</time>
-              <span className="ai-timeline-text">
-                <strong>{e.who}</strong> on <strong>{e.target}</strong>
-                <span>{e.summary}</span>
-              </span>
-              <span className="ai-tags">
-                {c?.riskLevel && RISK[c.riskLevel] && (
-                  <span className={`ai-badge ${RISK[c.riskLevel].tone}`} title={c.riskReason}>
-                    {RISK[c.riskLevel].text}
-                  </span>
-                )}
-                {c ? (
-                  <span className={`ai-badge ${STATUS_TONE[c.status]}`}>
-                    {c.rollback?.ran ? (c.rollback.exitCode === 0 ? "rolled back" : "rollback failed") : c.status}
-                    {c.exitCode !== undefined && c.exitCode !== 0 ? ` · exit ${c.exitCode}` : ""}
-                  </span>
+      {tab === "timeline" && (
+        <div className="ai-timeline">
+          {page.map((e) => {
+            const heading = day(e.at) !== lastDay ? (lastDay = day(e.at)) : "";
+            const c = e.change;
+            const hasMore = Boolean(
+              e.command ||
+              e.detail ||
+              c?.output ||
+              c?.before ||
+              c?.after ||
+              c?.check,
+            );
+            const head = (
+              <>
+                <time>{time(e.at)}</time>
+                <span className="ai-timeline-text">
+                  <strong>{e.who}</strong> on <strong>{e.target}</strong>
+                  <span>{e.summary}</span>
+                </span>
+                <span className="ai-tags">
+                  {c?.riskLevel && RISK[c.riskLevel] && (
+                    <span
+                      className={`ai-badge ${RISK[c.riskLevel].tone}`}
+                      title={c.riskReason}
+                    >
+                      {RISK[c.riskLevel].text}
+                    </span>
+                  )}
+                  {c ? (
+                    <span className={`ai-badge ${STATUS_TONE[c.status]}`}>
+                      {c.rollback?.ran
+                        ? c.rollback.exitCode === 0
+                          ? "rolled back"
+                          : "rollback failed"
+                        : c.status}
+                      {c.exitCode !== undefined && c.exitCode !== 0
+                        ? ` · exit ${c.exitCode}`
+                        : ""}
+                    </span>
+                  ) : (
+                    <span className="ai-badge">{e.kind}</span>
+                  )}
+                </span>
+              </>
+            );
+            return (
+              <div key={e.id}>
+                {heading && <h4 className="ai-timeline-day">{heading}</h4>}
+                {hasMore ? (
+                  <details
+                    className={`ai-timeline-item ai-timeline-${e.source}`}
+                  >
+                    <summary>{head}</summary>
+                    <div className="ai-timeline-more">
+                      {e.command && <pre>{e.command}</pre>}
+                      {e.detail && <p>{e.detail}</p>}
+                      {c?.kind === "file" && c.before !== undefined && (
+                        <>
+                          <small>Before</small>
+                          <pre>{c.before}</pre>
+                          <small>After</small>
+                          <pre>{c.after}</pre>
+                        </>
+                      )}
+                      {c?.output && (
+                        <>
+                          <small>Output</small>
+                          <pre>{c.output}</pre>
+                        </>
+                      )}
+                      {c && <ChangeProof change={c} />}
+                      {c?.riskReason && (
+                        <small>Safety check: {c.riskReason}</small>
+                      )}
+                      {recordingOf(e.taskId) && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void watch(
+                              recordingOf(e.taskId)!,
+                              e.taskTitle ?? e.summary,
+                            )
+                          }
+                        >
+                          Watch the terminal recording
+                        </button>
+                      )}
+                      {e.taskId && (
+                        <button
+                          type="button"
+                          onClick={() => onOpenTask(e.taskId!)}
+                        >
+                          Open the conversation: {e.taskTitle}
+                        </button>
+                      )}
+                    </div>
+                  </details>
                 ) : (
-                  <span className="ai-badge">{e.kind}</span>
-                )}
-              </span>
-            </>
-          );
-          return (
-            <div key={e.id}>
-              {heading && <h4 className="ai-timeline-day">{heading}</h4>}
-              {hasMore ? (
-                <details className={`ai-timeline-item ai-timeline-${e.source}`}>
-                  <summary>{head}</summary>
-                  <div className="ai-timeline-more">
-                    {e.command && <pre>{e.command}</pre>}
-                    {e.detail && <p>{e.detail}</p>}
-                    {c?.kind === "file" && c.before !== undefined && (
-                      <>
-                        <small>Before</small>
-                        <pre>{c.before}</pre>
-                        <small>After</small>
-                        <pre>{c.after}</pre>
-                      </>
-                    )}
-                    {c?.output && (
-                      <>
-                        <small>Output</small>
-                        <pre>{c.output}</pre>
-                      </>
-                    )}
-                    {c && <ChangeProof change={c} />}
-                    {c?.riskReason && <small>Safety check: {c.riskReason}</small>}
-                    {e.taskId && (
-                      <button type="button" onClick={() => onOpenTask(e.taskId!)}>
-                        Open the conversation: {e.taskTitle}
-                      </button>
-                    )}
+                  <div className={`ai-timeline-item ai-timeline-${e.source}`}>
+                    <div className="ai-timeline-flat">{head}</div>
                   </div>
-                </details>
-              ) : (
-                <div className={`ai-timeline-item ai-timeline-${e.source}`}>
-                  <div className="ai-timeline-flat">{head}</div>
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-      {shown.length > limit && (
-        <button type="button" className="ai-more" onClick={() => setLimit(limit + 60)}>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {tab === "timeline" && shown.length > limit && (
+        <button
+          type="button"
+          className="ai-more"
+          onClick={() => setLimit(limit + 60)}
+        >
           Show {Math.min(60, shown.length - limit)} more
         </button>
       )}

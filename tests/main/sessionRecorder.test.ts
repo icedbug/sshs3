@@ -49,15 +49,22 @@ describe("what an agent saw in a terminal", () => {
     expect(text).toContain("\\u001b[32m");
   });
 
-  it("does not record a terminal nobody asked to record, and keeps one recording per terminal", async () => {
+  it("does not record a terminal nobody asked to record, and gives each run its own recording", async () => {
     const rec = await recorder();
     rec.output("nobody", "should not be anywhere\n", 1);
     expect(await rec.list()).toEqual([]);
     const a = await rec.start({ sessionId: "s1", taskId: "t1", label: "db01" }, 0);
+    // The same run claiming again keeps its recording.
+    expect((await rec.start({ sessionId: "s1", taskId: "t1", label: "db01" }, 2)).id).toBe(a.id);
+    rec.output("s1", "first run\n", 3);
+    // Another run on the same terminal: the first recording ends, the second run is not written into it.
     const b = await rec.start({ sessionId: "s1", taskId: "t2", label: "db01" }, 5);
-    expect(b.id).toBe(a.id);
+    expect(b.id).not.toBe(a.id);
+    rec.output("s1", "second run\n", 6);
     await rec.stop("s1");
-    expect((await rec.list()).map((r) => r.id)).toEqual([a.id]);
+    expect((await rec.list()).map((r) => r.id).sort()).toEqual([a.id, b.id].sort());
+    expect(await rec.read(a.id)).toContain("first run");
+    expect(await rec.read(a.id)).not.toContain("second run");
   });
 
   it("writes what was held back when it stops, and before a marker", async () => {

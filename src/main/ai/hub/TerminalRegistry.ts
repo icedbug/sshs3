@@ -631,6 +631,8 @@ export class TerminalRegistry extends EventEmitter {
       s.pending = undefined;
     }
     s.view.generation = crypto.randomUUID();
+    // Whatever held the terminal lets go of it here too, so a recording ends with the run that made it.
+    if (owner) this.emit("released", { ...s.view }, owner);
     s.view.owner = undefined;
     s.view.state = disconnected ? "disconnected" : "unknown";
     s.view.updatedAt = Date.now();

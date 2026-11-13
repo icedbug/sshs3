@@ -62,7 +62,9 @@ export class SessionRecorder {
   /** Starts recording a terminal for a run. A terminal already being recorded keeps its recording. */
   async start(input: { sessionId: string; taskId: string; label: string; cols?: number; rows?: number }, now = Date.now()): Promise<RecordingInfo> {
     const existing = this.open.get(input.sessionId);
-    if (existing) return existing.info;
+    if (existing?.info.taskId === input.taskId) return existing.info;
+    // A terminal still recorded for another run: that recording ends here, this run gets its own.
+    if (existing) await this.stop(input.sessionId, now);
     await fs.mkdir(this.dir, { recursive: true, mode: 0o700 });
     const id = `${input.taskId}-${input.sessionId}`.slice(0, 120);
     const info: RecordingInfo = { id, taskId: input.taskId, sessionId: input.sessionId, label: input.label, startedAt: now, bytes: 0, markers: 0 };
