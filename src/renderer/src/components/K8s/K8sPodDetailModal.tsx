@@ -181,7 +181,7 @@ export const K8sPodDetailModal: React.FC<K8sPodDetailModalProps> = ({
               <button
                 type="button"
                 data-testid="k8s-pod-analyze-ai-btn"
-                title="Bifoga poddens status, containers, events och YAML till AI Hub för diagnos"
+                title="Send the pod's status, containers, events and YAML to the assistant for diagnosis"
                 onClick={() => {
                   const eventsText = (pod.events ?? [])
                     .slice(0, 15)
@@ -198,7 +198,7 @@ export const K8sPodDetailModal: React.FC<K8sPodDetailModalProps> = ({
                           ...(eventsText ? [`Recent Events:\n${eventsText}`] : []),
                           ...(pod.yaml ? [`\nYAML (excerpt):\n${pod.yaml.slice(0, 6000)}`] : []),
                         ].join('\n'),
-                        prompt: `Analysera Kubernetes-podden @k8s-pod:${podName} i namespace ${namespace} och kontrollera PVC/CSI-volymer, events och container-status.`,
+                        prompt: `Analyze the Kubernetes pod @k8s-pod:${podName} in namespace ${namespace} and check its PVC/CSI volumes, events and container status.`,
                       },
                     })
                   );
@@ -206,7 +206,7 @@ export const K8sPodDetailModal: React.FC<K8sPodDetailModalProps> = ({
                 }}
                 className="flex items-center gap-1.5 rounded-lg border border-sky-500/40 bg-sky-500/15 px-2.5 py-1.5 text-xs font-semibold text-sky-300 hover:bg-sky-500/25 transition-colors"
               >
-                <span>✨ Analysera med AI</span>
+                <span>✨ Ask the assistant</span>
               </button>
             )}
             {onDebug && (

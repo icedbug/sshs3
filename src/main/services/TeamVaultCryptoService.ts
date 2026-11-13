@@ -679,11 +679,11 @@ function runAgeCommand(
           // A bare ENOENT (no stdout/stderr at all) means the OS never found the binary to
           // launch it — surfacing the raw "spawn age ENOENT" is unhelpful; name what's actually
           // missing and point at how it's supposed to get there (CI-bundled in a packaged build,
-          // or a local install in dev — see docs/team-vault-plan.md Fas 1).
+          // or a local install in dev — see docs/team-vault-plan.md, phase 1).
           if ((err as any).code === 'ENOENT') {
             reject(
               new Error(
-                `"${binary}" was not found. In a packaged build this is bundled automatically; in development, install it locally or run a build that fetches it (see docs/team-vault-plan.md Fas 1).`
+                `"${binary}" was not found. In a packaged build this is bundled automatically; in development, install it locally or run a build that fetches it (see docs/team-vault-plan.md, phase 1).`
               )
             );
             return;

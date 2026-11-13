@@ -5,7 +5,6 @@ import type {
   InfraGraphEdge,
   KbDocument,
   MemoryEntry,
-  OpenSourceEngineInfo,
   SelfLearningEvent,
   SelfLearningStatus,
   TerminalCommandFailure,
@@ -139,7 +138,8 @@ export class SelfLearningService {
     const maskedSnippet = maskContext(failure.snippet);
     const errorSignature = extractErrorSignature(cleanFail, maskedSnippet);
     const shortTarget = failure.label || scope || "workspace";
-    const title = `Auto-Learned Fix (${shortTarget}): ${errorSignature.replace(/^err:/, "").replace(/_/g, " ")}`;
+    // Named for what it is: the command that succeeded next, which may or may not be the fix.
+    const title = `Worked after a failure (${shortTarget}): ${errorSignature.replace(/^err:/, "").replace(/_/g, " ")}`;
     const snippetClean = maskedSnippet.replace(/\s+/g, " ").trim().slice(0, 220);
     const fixOutClean = maskContext(fixOutput ?? "")
       .replace(/\s+/g, " ")
@@ -147,9 +147,9 @@ export class SelfLearningService {
       .slice(0, 180);
 
     const text = [
-      `När kommandot \`${cleanFail}\` misslyckas på ${shortTarget}${snippetClean ? ` med felutdata "${snippetClean}"` : ""}:`,
-      `Verifierad lösning / diagnostik: kör \`${cleanFix}\`.`,
-      fixOutClean ? `Verifierat resultat: ${fixOutClean}` : "",
+      `When \`${cleanFail}\` failed on ${shortTarget}${snippetClean ? ` with "${snippetClean}"` : ""}:`,
+      `The next command that succeeded there was \`${cleanFix}\`. It has not been checked to be the fix.`,
+      fixOutClean ? `What it printed: ${fixOutClean}` : "",
     ]
       .filter(Boolean)
       .join(" ");
@@ -171,8 +171,8 @@ export class SelfLearningService {
     this.failureToFixCount += 1;
     this.recordEvent({
       kind: "failure_to_fix",
-      title: `Lärde ny felsöknings-skill: ${errorSignature.replace(/^err:/, "")}`,
-      summary: `Fångade verifierad fix \`${cleanFix}\` efter fel i \`${cleanFail}\` på ${shortTarget}.`,
+      title: `Noted what worked after a failure: ${errorSignature.replace(/^err:/, "")}`,
+      summary: `After \`${cleanFail}\` failed on ${shortTarget}, \`${cleanFix}\` succeeded.`,
       targetCluster: cluster,
       confidence: merged.saved.confidence ?? 0.89,
       memoryId: merged.saved.id,
@@ -297,7 +297,7 @@ export class SelfLearningService {
       const targetLabel =
         succeededCommands[0]?.target || task.target?.label || "workspace";
       const cleanTitle = maskContext(task.title)
-        .replace(/^(AI|Run|Task|Uppgift):\s*/i, "")
+        .replace(/^(AI|Run|Task):\s*/i, "")
         .trim()
         .slice(0, 72);
 
@@ -307,7 +307,7 @@ export class SelfLearningService {
         cluster,
         scope: cluster ? `cluster:${cluster}` : `server:${targetLabel}`,
         title: `Playbook: ${cleanTitle || primaryCmd}`,
-        text: `Verifierat arbetsflöde på ${targetLabel} (${task.verification === "verified" ? "formellt verifierad" : "slutförd med exit 0"}): ${uniqueCmds.map((cmd) => `\`${cmd}\``).join(" → ")}.`,
+        text: `Commands that completed on ${targetLabel} (${task.verification === "verified" ? "the task was verified" : "each exited 0; the result was not checked"}): ${uniqueCmds.map((cmd) => `\`${cmd}\``).join(" → ")}.`,
         author: "Reflexion Post-Task Learner",
         confidence: task.verification === "verified" ? 0.92 : 0.84,
         autoLearned: true,
@@ -316,8 +316,8 @@ export class SelfLearningService {
       currentMemories = merged.memories;
       const ev = this.recordEvent({
         kind: "task_reflexion",
-        title: `Syntetiserade Playbook från uppgift: ${cleanTitle.slice(0, 40)}`,
-        summary: `Extraherade ${uniqueCmds.length} verifierade kommandon (${uniqueCmds.map((c) => `\`${c}\``).join(", ")}) med confidence ${Math.round((merged.saved.confidence ?? 0.88) * 100)}%.`,
+        title: `Wrote down the steps of a finished task: ${cleanTitle.slice(0, 40)}`,
+        summary: `Kept ${uniqueCmds.length} commands that completed (${uniqueCmds.map((c) => `\`${c}\``).join(", ")}).`,
         targetCluster: cluster,
         confidence: merged.saved.confidence ?? 0.88,
         memoryId: merged.saved.id,
@@ -397,7 +397,7 @@ export class SelfLearningService {
         events.push(
           this.recordEvent({
             kind: "topology_discovery",
-            title: `Upptäckte topologi-koppling: ${from} → ${to}`,
+            title: `Noticed a link: ${from} → ${to}`,
             summary: `Automatiskt identifierad relation (${relation}: ${label}).`,
             confidence: 0.9,
           }),
@@ -516,8 +516,8 @@ export class SelfLearningService {
           tier: "core",
           cluster: ep.cluster || params.targetCluster,
           scope: ep.scope,
-          title: maskContext(ep.title).replace(/^Senaste aktivitet på/i, "Konsoliderad driftprofil:"),
-          text: `${maskedEpText} [Konsoliderad av Letta/Mem0 Self-Reflection till Core Memory].`,
+          title: maskContext(ep.title).replace(/^(Senaste aktivitet p\u00e5|Recent activity on)/i, "Operating profile:"), // also the title older versions wrote, in Swedish
+          text: `${maskedEpText} [Merged from repeated notes into a core memory.]`,
           author: "Letta/Mem0 Memory Consolidator",
           confidence: Math.min(0.95, (ep.confidence ?? 0.78) + 0.08),
           autoLearned: true,
@@ -529,7 +529,7 @@ export class SelfLearningService {
           this.recordEvent({
             kind: "memory_consolidation",
             title: `Befordrade episodiskt minne till Core: ${merged.saved.title.slice(0, 42)}`,
-            summary: `Konsoliderade driftmönster i ${ep.scope} till permanent Core-tier med confidence ${Math.round((merged.saved.confidence ?? 0.86) * 100)}%.`,
+            summary: `Merged what kept recurring in ${ep.scope} into a core memory.`,
             targetCluster: ep.cluster || params.targetCluster,
             confidence: merged.saved.confidence ?? 0.86,
             memoryId: merged.saved.id,
@@ -548,11 +548,12 @@ export class SelfLearningService {
       );
       const merged = this.kb.deduplicateOrMergeMemory(currentMemories, {
         kind: "skill",
-        tier: "core",
+        // A suggestion from the kind of error, never tried: not something to put in front of every run.
+        tier: "archival",
         cluster: params.targetCluster,
         scope: `server:${failure.label}`,
-        title: `Diagnostik-skill (${failure.label}): ${sig.replace(/^err:/, "").replace(/_/g, " ")}`,
-        text: `Vid fel i \`${cleanFailCmd}\` (${cleanFailSnippet.slice(0, 120)}): kör icke-destruktiv diagnostik \`${recommendedFix}\` för att isolera grundorsak.`,
+        title: `Check after a failure (${failure.label}): ${sig.replace(/^err:/, "").replace(/_/g, " ")}`,
+        text: `When \`${cleanFailCmd}\` fails (${cleanFailSnippet.slice(0, 120)}): a read-only check to narrow it down is \`${recommendedFix}\`. A suggestion from the kind of error, not something that was tried.`,
         author: "Voyager Self-Learning Engine",
         confidence: 0.86,
         autoLearned: true,
@@ -577,8 +578,8 @@ export class SelfLearningService {
       events.push(
         this.recordEvent({
           kind: "memory_consolidation",
-          title: "Körde Self-Reflection & Orama Index-optimering",
-          summary: `Verifierade ${currentMemories.length} minnen/skills och optimerade vikter baserat på framgångsfrekvens.`,
+          title: "Went through the memories and skills",
+          summary: `Looked at ${currentMemories.length} memories and skills and adjusted their weight from how often they helped.`,
           targetCluster: params.targetCluster,
           confidence: 0.91,
         }),
@@ -654,8 +655,8 @@ export class SelfLearningService {
     if (updatedTarget) {
       this.recordEvent({
         kind: "user_feedback",
-        title: `${delta > 0 ? "Förstärkte" : "Nedprioriterade"} minne/skill: ${updatedTarget.title.slice(0, 42)}`,
-        summary: `Användarfeedback (${delta > 0 ? "+1" : "-1"}) uppdaterade confidence till ${Math.round((updatedTarget.confidence ?? 0.8) * 100)}%.`,
+        title: `${delta > 0 ? "Raised" : "Lowered"} a memory or skill: ${updatedTarget.title.slice(0, 42)}`,
+        summary: `Feedback (${delta > 0 ? "+1" : "-1"}) set its confidence to ${Math.round((updatedTarget.confidence ?? 0.8) * 100)} %.`,
         targetCluster: updatedTarget.cluster,
         confidence: updatedTarget.confidence ?? 0.8,
         memoryId: updatedTarget.id,
@@ -717,126 +718,17 @@ export class SelfLearningService {
     const autoLearnedCount = params.memories.filter(
       (m) => m.autoLearned || m.author?.includes("Learner") || m.author?.includes("Voyager"),
     ).length;
-    const finishedTasks = params.tasks.filter((t) =>
-      ["completed", "failed"].includes(t.status),
-    );
-    const verifiedTasks = params.tasks.filter(
-      (t) =>
-        t.verification === "verified" ||
-        (t.status === "completed" &&
-          t.changes.some((c) => c.status === "completed" && c.exitCode === 0)),
-    );
-    const verifiedTaskRate =
-      finishedTasks.length > 0
-        ? Math.round((verifiedTasks.length / finishedTasks.length) * 100) / 100
-        : 0.92;
-
-    const confidences = params.memories.map(
-      (m) => m.confidence ?? (m.kind === "skill" ? 0.85 : 0.78),
-    );
-    const averageConfidence =
-      confidences.length > 0
-        ? Math.round(
-            (confidences.reduce((a, b) => a + b, 0) / confidences.length) * 100,
-          ) / 100
-        : 0.85;
-
-    const indexedChunks =
-      this.kb.getIndexedChunkCount() ||
-      params.kbDocuments.reduce(
-        (acc, d) => acc + Math.max(1, d.chunks?.length ?? 1),
-        0,
-      );
-
-    const openSourceEngines: OpenSourceEngineInfo[] = [
-      {
-        id: "orama-hybrid-rag",
-        name: "Orama Hybrid Search & Vector RAG",
-        packageName: "@orama/orama",
-        version: "3.1.18",
-        category: "rag",
-        status: "active",
-        description:
-          "In-memory BM25 + synonymtabell (SV/EN) + trigram/typo-tolerant sökindex för flerspråkig (SV/EN) infrastrukturdokumentation.",
-        metricsLabel: `${indexedChunks} indexerade chunks • ${params.kbDocuments.length} dokument`,
-      },
-      {
-        id: "voyager-reflexion-learner",
-        name: "Voyager & Reflexion Skill Learner",
-        packageName: "oss-voyager-reflexion",
-        version: "2.4.0",
-        category: "learning",
-        status: "active",
-        description:
-          "Självlärande motor som automatiskt fångar Failure→Fix-mönster i terminalen, verifierar tasks och syntetiserar återanvändbara Playbooks.",
-        metricsLabel: `${skills.length} skills (${autoLearnedCount} auto-lärda) • ${Math.round(averageConfidence * 100)}% snitt-confidence`,
-      },
-      {
-        id: "letta-mem0-memory",
-        name: "Letta (MemGPT) & Mem0 Tiered Memory",
-        packageName: "oss-mem0-letta",
-        version: "1.8.0",
-        category: "memory",
-        status: "active",
-        description:
-          "Hierarkiskt minne (Core, Archival, Episodic) med automatisk semantisk deduplicering, konsolidering och reinforcement-ranking.",
-        metricsLabel: `${params.memories.length} minnen • ${params.memories.filter((m) => m.tier === "core").length} Core`,
-      },
-      {
-        id: "mcp-jsonrpc-sdk",
-        name: "Model Context Protocol (MCP) Bridge",
-        packageName: "@modelcontextprotocol/jsonrpc",
-        version: "2024-11-05",
-        category: "mcp",
-        status: "active",
-        description:
-          "Öppen standard för verktygsbryggor (Prometheus, Kubernetes, NetApp, Ceph, Postgres, Trivy, ArgoCD) via Stdio & HTTP JSON-RPC.",
-        metricsLabel: `${params.mcpServerCount} konfigurerade MCP-servrar`,
-      },
-      {
-        id: "myers-unified-diff",
-        name: "Myers Unified Diff Engine",
-        packageName: "diff",
-        version: "9.0.0",
-        category: "diff",
-        status: "active",
-        description:
-          "Äkta open-source Myers diff-algoritm (createTwoFilesPatch) för konfigurationsjämförelse mellan SSH-noder, SFTP och S3-buckets.",
-        metricsLabel: "Cross-server & S3 patch diff",
-      },
-      {
-        id: "ast-shell-safety",
-        name: "AST Shell Safety & Policy Guard",
-        packageName: "oss-shell-ast-guard",
-        version: "2.1.0",
-        category: "safety",
-        status: "active",
-        description:
-          "Parser som bryter ned kedjade pipelines, subshells ($(), bash -c), omdirigeringar och prod-taggar innan kommandon får köras.",
-        metricsLabel: `${params.infraEdges.length} topologi-kopplingar vaktade`,
-      },
-    ];
+    const confidences = params.memories.map((m) => m.confidence).filter((c): c is number => typeof c === "number");
 
     return {
-      enabled: true,
       totalLearnedSkills: skills.length,
-      failureToFixPatterns: Math.max(
-        this.failureToFixCount,
-        skills.filter((s) => Boolean(s.errorSignature)).length,
-      ),
-      consolidatedMemories: Math.max(
-        this.consolidatedCount,
-        params.memories.filter((m) => (m.updatedCount ?? 1) > 1).length,
-      ),
-      autoDiscoveredEdges: Math.max(
-        this.autoDiscoveredEdgeCount,
-        params.infraEdges.filter((e) => e.id.startsWith("edge-auto-")).length,
-      ),
-      verifiedTaskRate,
-      averageConfidence,
-      oramaIndexedChunks: indexedChunks,
+      autoLearned: autoLearnedCount,
+      failureToFixPatterns: skills.filter((s) => Boolean(s.errorSignature)).length,
+      // The mean of what the entries carry. With nothing to average there is no number, not a made-up one.
+      averageConfidence: confidences.length
+        ? Math.round((confidences.reduce((a, b) => a + b, 0) / confidences.length) * 100) / 100
+        : undefined,
       lastReflectionAt: this.lastReflectionAt,
-      openSourceEngines,
       recentEvents: this.recentEvents,
     };
   }

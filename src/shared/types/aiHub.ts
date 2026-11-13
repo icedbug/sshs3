@@ -231,6 +231,8 @@ export interface AgentTask {
   maxCommands: number;
   maxMinutes: number;
   usage?: { inputTokens: number; outputTokens: number; costUsd?: number };
+  /** How much the model was sent at its last call in this conversation: how full its window was. Absent before the first run. */
+  contextTokens?: number;
   verification: "not-verified" | "verified" | "incomplete";
   /**
    * Set on a read-only specialist run started by a workforce run. Such a task
@@ -320,24 +322,6 @@ export interface MemoryDistillStatus {
   error?: string;
 }
 
-export interface OpenSourceEngineInfo {
-  id: string;
-  name: string;
-  packageName: string;
-  version: string;
-  category:
-    | "rag"
-    | "mcp"
-    | "safety"
-    | "learning"
-    | "diff"
-    | "memory"
-    | "runtime";
-  status: "active" | "ready";
-  description: string;
-  metricsLabel?: string;
-}
-
 export interface SelfLearningEvent {
   id: string;
   kind:
@@ -354,17 +338,16 @@ export interface SelfLearningEvent {
   createdAt: number;
 }
 
+/** What the team memory holds that the assistant wrote itself. Counts only: nothing here is a score. */
 export interface SelfLearningStatus {
-  enabled: boolean;
   totalLearnedSkills: number;
+  /** Entries the assistant wrote from what it saw. */
+  autoLearned: number;
+  /** Skills that record a failure and the command that succeeded after it. */
   failureToFixPatterns: number;
-  consolidatedMemories: number;
-  autoDiscoveredEdges: number;
-  verifiedTaskRate: number;
-  averageConfidence: number;
-  oramaIndexedChunks: number;
+  /** The mean of the confidence the entries carry. Absent when there is nothing to average. */
+  averageConfidence?: number;
   lastReflectionAt?: number;
-  openSourceEngines: OpenSourceEngineInfo[];
   recentEvents: SelfLearningEvent[];
 }
 
@@ -544,6 +527,12 @@ export interface InlineCommandSuggestion {
   explanation: string;
   sessionId?: string;
   createdAt: number;
+  /**
+   * Where the command came from: the model, a skill the team has saved, or a
+   * general check picked by keyword because no model answered. The terminal
+   * says which, so that a canned check is not taken for an answer.
+   */
+  source?: "model" | "skill" | "fallback";
 }
 export interface InventoryEntry {
   id: string;
@@ -995,6 +984,10 @@ export interface HubReply {
   alertHook?: { path: string };
   /** Tickets an alert request created or updated. */
   alerts?: { created: string[]; updated: string[] };
+  /** The conversation a request started, so that the interface opens that one and not "the newest". */
+  started?: { taskId: string };
+  /** The answer to `inline-suggest`. In the reply, not in shared state: two terminals may ask at once. */
+  inlineSuggestion?: InlineCommandSuggestion;
   serverFacts?: { serverId: string; facts?: ServerFacts; changes: FactChange[] };
   /** Whether a test notification arrived. */
   notifyTest?: { ok: boolean; status?: number; error?: string };
@@ -1050,7 +1043,6 @@ export interface HubSnapshot {
   inventory: InventoryEntry[];
   activityLog?: WorkspaceActivityEvent[];
   workspaceServers?: WorkspaceServerSummary[];
-  inlineSuggestion?: InlineCommandSuggestion;
   s3Workspace?: S3WorkspaceSyncStatus;
   presence?: WorkspacePresenceEntry[];
   localOverrides?: Record<string, LocalServerAuthOverride>;
@@ -1073,6 +1065,14 @@ export interface HubSnapshot {
   evalRunning?: string;
   /** The latest nightly summary of what happened, until it has been read. */
   dailyReport?: { day: string; at: number; text: string; readAt?: number };
+  /** Knowledge base work that goes on after the request that asked for it has returned. */
+  kbWork?: {
+    /** Pages being rewritten from their sources right now. */
+    rebuilding: string[];
+    checkingContradictions: boolean;
+    /** How the last comparison of pages ended. */
+    lastCheck?: { at: number; found: number; error?: string };
+  };
   /** What is read from the servers on a schedule, and what changed. */
   serverFacts?: {
     enabled: boolean;
@@ -1113,7 +1113,6 @@ export interface HubSnapshot {
   workforceRuns?: WorkforceRun[];
   infraEdges?: InfraGraphEdge[];
   safetyPolicy?: SafetyPolicyConfig;
-  lastTerminalFailures?: Record<string, TerminalCommandFailure>;
   pendingLayoutEvent?: WorkspaceLayoutEvent;
   selfLearning?: SelfLearningStatus;
   contextBudget?: {
@@ -1123,7 +1122,6 @@ export interface HubSnapshot {
     maxToolTurns: number;
     reasoningEffort: string;
     temperature: number;
-    estimatedUsedTokens: number;
   };
 }
 export interface StartAgentTask {
@@ -1332,7 +1330,6 @@ export type HubRequest =
       cluster?: string;
       targetCluster?: string;
     }
-  | { action: "terminal-failure-dismiss"; sessionId: string }
   | { action: "layout-event-ack"; id: string }
   | {
       action: "activity-record";

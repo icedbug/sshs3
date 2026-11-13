@@ -76,7 +76,8 @@ describe("Anthropic agent loop: prompt caching and token accounting", () => {
     const done = events.find((e) => e.type === "run.completed")!;
     expect(done.output).toBe("Erik raised the timeout.");
     // Input: everything read in both turns (40+3000+0 and 60+200+3000); output: 25+12.
-    expect(done.usage).toEqual({ input_tokens: 6300, output_tokens: 37 });
+    // context_tokens is what the last call was sent (60+200+3000): how full the window is, not the sum.
+    expect(done.usage).toEqual({ input_tokens: 6300, output_tokens: 37, context_tokens: 3260 });
   });
 
   it("still counts input from an endpoint that reports it only at the end of the message", async () => {
@@ -89,7 +90,7 @@ describe("Anthropic agent loop: prompt caching and token accounting", () => {
     const events: RunEvent[] = [];
     const runtime = new DirectAgentRuntime((async () => ({})) as never, undefined, fetchImpl as unknown as typeof fetch);
     await runtime.start(task, { kind: "anthropic", model: "claude-opus-5-5", apiKey: "sk-ant-test" }, (e) => events.push(e)); // pragma: allowlist secret
-    expect(events.find((e) => e.type === "run.completed")!.usage).toEqual({ input_tokens: 50, output_tokens: 10 });
+    expect(events.find((e) => e.type === "run.completed")!.usage).toEqual({ input_tokens: 50, output_tokens: 10, context_tokens: 50 });
   });
 });
 

@@ -391,6 +391,38 @@ Related hardening done with this:
 - "Add to KB" in the file editor asks first, masks recognised secrets, goes
   the same way in as other material, and says when it failed.
 
+## Requests: what they return, and what a read costs
+
+The interface talks to the hub through one call, `aiHubRequest(HubRequest)`,
+and gets a `HubSnapshot` back. What a particular request has to say rides in
+`snapshot.reply` (`HubReply`), which is local to that call: requests overlap,
+so an answer must never travel through shared hub state.
+
+- `start`, `agent-run-mission` and `ticket-start` answer `reply.started` with
+  the conversation they created. The panel opens that one, not "the newest in
+  the list", which may be a background run that began in the meantime.
+- `inline-suggest` answers `reply.inlineSuggestion`, with `source`: `model`,
+  `skill` (a command the team saved) or `fallback` (a general check picked by
+  keyword because no model answered). The terminal says which.
+- Requests in `READ_ONLY_ACTIONS` (searching and reading the knowledge base,
+  reading a server's facts, an inline suggestion) do not rewrite the store and
+  do not tell the other windows to refetch.
+- Work that goes on after its request has returned is visible in the
+  snapshot: `kbWork` (pages being rewritten from their sources, a comparison
+  of pages under way, how the last one ended), `evalRunning`,
+  `serverFacts.collecting`.
+- Every action in `HubRequest` has a case in `HubService.request`; the
+  `default` branch assigns the request to `never`, so an action that is typed
+  but not handled does not compile.
+- A schedule runs on the endpoint that is configured now. It keeps a model of
+  its own only while it was saved for that same provider and address.
+- `task.contextTokens` is what the model was sent at its last call in a
+  conversation. The meter in the composer shows that against the window, and
+  only the window before the first run. (It used to show an estimate built
+  from the newest task in the store, whichever that was.)
+- The self-learning status is counts of what is in the team memory. It names
+  no engines and has no default percentages.
+
 ## Server facts, and what changed (`ServerFacts`, `FactsStore`)
 
 Most faults follow a change, so the hub reads the servers on a schedule and
@@ -730,8 +762,11 @@ sections ("AI chat: visual layer" and "the other views") carry the current look.
 - Motion (`ai-rise`, `ai-pop`, `ai-sheen`, `ai-dots`, `ai-attention`) marks
   something arriving, running or waiting, and is switched off under
   `prefers-reduced-motion`.
-- The interface is in English. The demo lab's data, and the example answer,
-  are still partly Swedish.
+- The interface, what is said to a model, what is written into memory, the
+  demo lab and the comments are English. `tests/main/englishOnly.test.ts`
+  keeps it so; the few files that have to recognise Swedish (output of a
+  Swedish system, search terms a team may use) are listed there with the
+  reason.
 
 Checked in a browser against the web build with demo data (screenshots of each
 view, no page errors). Not checked: the packaged Electron window, and how the

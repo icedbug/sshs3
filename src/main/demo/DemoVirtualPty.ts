@@ -61,38 +61,37 @@ export function executeDemoServerCommand(
       return {
         exitCode: 0,
         output: [
-          '\x1b[1;36mNetApp ONTAP 9.15.1 Interactive Demo CLI — Tillgängliga kommandon:\x1b[0m',
-          '  \x1b[33mqos statistics volume latency show\x1b[0m      Visa latens per volym & WAFL/QoS-center',
-          '  \x1b[33mqos statistics volume performance show\x1b[0m  Visa IOPS & throughput per FlexVol',
-          '  \x1b[33mstorage aggregate show\x1b[0m                  Visa NVMe RAID-TEC aggregat & FabricPool',
-          '  \x1b[33mvolume show\x1b[0m                             Lista alla FlexVol & FlexGroup-volymer',
-          '  \x1b[33msnapmirror show\x1b[0m                         Visa SnapMirror XDP-replikering till Uppsala DC2',
-          '  \x1b[33msnapmirror resync\x1b[0m                       Återuppta bruten SnapMirror-relation',
-          '  \x1b[33mvolume modify ... -qos-policy-group ...\x1b[0m Applicera QoS-tak på noisy-neighbor-volym',
-          '  \x1b[33mstorage failover show\x1b[0m                   Visa HA-par & NVRAM-synkstatus',
-          '  \x1b[33mnetwork interface show\x1b[0m                  Visa LIF:ar (NFSv4.1, iSCSI, Intercluster)',
-          '  \x1b[33msimulate-error\x1b[0m                          Simulera ett lagringsfel (testa "✨ Förklara & fixa felet")',
+          '\x1b[1;36mNetApp ONTAP 9.15.1 Interactive Demo CLI — available commands:\x1b[0m',
+          '  \x1b[33mqos statistics volume latency show\x1b[0m      Show latency per volume, by component (network, disk, QoS, WAFL)',
+          '  \x1b[33mqos statistics volume performance show\x1b[0m  Show IOPS and throughput per FlexVol',
+          '  \x1b[33mstorage aggregate show\x1b[0m                  Show the NVMe RAID-TEC aggregates and FabricPool',
+          '  \x1b[33mvolume show\x1b[0m                             List all FlexVol and FlexGroup volumes',
+          '  \x1b[33msnapmirror show\x1b[0m                         Show SnapMirror XDP replication to Uppsala DC2',
+          '  \x1b[33msnapmirror resync\x1b[0m                       Resume a broken SnapMirror relationship',
+          '  \x1b[33mvolume modify ... -qos-policy-group ...\x1b[0m Apply a QoS ceiling to a noisy-neighbor volume',
+          '  \x1b[33mstorage failover show\x1b[0m                   Show the HA pair and NVRAM sync status',
+          '  \x1b[33msimulate-error\x1b[0m                          Simulate a storage error (to try "Explain & fix the error")',
         ].join('\r\n'),
       };
     }
     return {
       exitCode: 0,
       output: [
-        `\x1b[1;36msshs3 Interactive Demo Appliance (${hostOrName}) — Förslag på kommandon:\x1b[0m`,
-        '  \x1b[33muptime && df -h && free -h\x1b[0m              Systemlast, filsystem & RAM',
-        '  \x1b[33mkubectl get pods,pvc -A -o wide\x1b[0m         Kubernetes pods & Astra Trident PVCs',
-        '  \x1b[33mtridentctl get backend -n trident\x1b[0m       Lista NetApp Astra Trident CSI backends',
-        '  \x1b[33mmultipath -ll\x1b[0m                           Visa DM-Multipath ALUA LUN-vägar',
-        '  \x1b[33mceph -s && ceph osd df tree\x1b[0m             Ceph Reef NVMe-klusterstatus & OSD-träd',
-        '  \x1b[33mzpool status -v && zfs list\x1b[0m             TrueNAS OpenZFS RAIDZ3 & snapshots',
-        '  \x1b[33mstoragegrid-status\x1b[0m                      NetApp StorageGRID 11.8 S3 & ILM-status',
-        '  \x1b[33mcat /etc/multipath.conf\x1b[0m                 Inspektera multipath-konfiguration',
-        '  \x1b[33msimulate-error\x1b[0m                          Simulera ett terminalfel (triggar "✨ Förklara & fixa felet")',
+        `\x1b[1;36msshs3 Interactive Demo Appliance (${hostOrName}) — commands to try:\x1b[0m`,
+        '  \x1b[33muptime && df -h && free -h\x1b[0m              System load, file systems and memory',
+        '  \x1b[33mkubectl get pods,pvc -A -o wide\x1b[0m         Kubernetes pods and Astra Trident PVCs',
+        '  \x1b[33mtridentctl get backend -n trident\x1b[0m       List the NetApp Astra Trident CSI backends',
+        '  \x1b[33mmultipath -ll\x1b[0m                           Show the DM-Multipath ALUA LUN paths',
+        '  \x1b[33mceph -s && ceph osd df tree\x1b[0m             Ceph Reef NVMe cluster status and OSD tree',
+        '  \x1b[33mzpool status -v && zfs list\x1b[0m             TrueNAS OpenZFS RAIDZ3 pool and datasets',
+        '  \x1b[33mstoragegrid-status\x1b[0m                      NetApp StorageGRID 11.8 S3 and ILM status',
+        '  \x1b[33mcat /etc/multipath.conf\x1b[0m                 Show the multipath configuration',
+        '  \x1b[33msimulate-error\x1b[0m                          Simulate a terminal error (brings up "Explain & fix the error")',
       ].join('\r\n'),
     };
   }
 
-  // Simulated Error Trigger so the user can test the proactive "✨ Förklara & fixa felet" button
+  // Simulated Error Trigger so the user can test the "Explain & fix the error" button
   if (
     lower === 'simulate-error' ||
     lower === 'test-error' ||
@@ -486,7 +485,7 @@ export function executeDemoServerCommand(
 
   return {
     exitCode: 0,
-    output: `[demo:${hostOrName}] Executed: ${cmd}\r\nStatus: OK (0 errors, response time 0.4ms). Skriv 'help' för fler demokommandon eller 'simulate-error' för att testa AI-felsökning.`,
+    output: `[demo:${hostOrName}] Executed: ${cmd}\r\nStatus: OK (0 errors, response time 0.4ms). Type 'help' for more demo commands, or 'simulate-error' to try AI troubleshooting.`,
   };
 }
 
@@ -556,27 +555,27 @@ export class DemoVirtualPty implements IPty {
       lines.push(
         `\x1b[1;37m  NetApp ONTAP 9.15.1P2 Cluster Shell — ${label} (${this.config.host})\x1b[0m`,
         `  Cluster: \x1b[33m${this.config.cluster || 'NetApp-ONTAP-Prod-SE'}\x1b[0m | HA State: \x1b[32mConnected (NVMe-oF Sync OK)\x1b[0m`,
-        `  💡 \x1b[36mDemo-tips:\x1b[0m Kör \x1b[33mqos statistics volume latency show\x1b[0m, \x1b[33msnapmirror show\x1b[0m, \x1b[33mstorage aggregate show\x1b[0m,`,
-        `     eller skriv \x1b[33msimulate-error\x1b[0m för att trigga knappen \x1b[1;35m✨ Förklara & fixa felet\x1b[0m!`
+        `  \x1b[36mDemo tip:\x1b[0m run \x1b[33mqos statistics volume latency show\x1b[0m, \x1b[33msnapmirror show\x1b[0m or \x1b[33mstorage aggregate show\x1b[0m,`,
+        `  or type \x1b[33msimulate-error\x1b[0m to bring up the \x1b[1;35mExplain & fix the error\x1b[0m button.`
       );
     } else if (isSg) {
       lines.push(
         `\x1b[1;37m  NetApp StorageGRID 11.8 / S3 Appliance — ${label} (${this.config.host})\x1b[0m`,
         `  Cluster: \x1b[33m${this.config.cluster || 'NetApp-StorageGRID-S3'}\x1b[0m | ILM Policy: \x1b[32mILM-Prod-FabricPool-EC63 (6+3)\x1b[0m`,
-        `  💡 \x1b[36mDemo-tips:\x1b[0m Kör \x1b[33mstoragegrid-status\x1b[0m, \x1b[33maws s3 ls\x1b[0m, \x1b[33miostat -xz 1 2\x1b[0m eller \x1b[33msimulate-error\x1b[0m!`
+        `  \x1b[36mDemo tip:\x1b[0m run \x1b[33mstoragegrid-status\x1b[0m, \x1b[33maws s3 ls\x1b[0m, \x1b[33miostat -xz 1 2\x1b[0m or \x1b[33msimulate-error\x1b[0m.`
       );
     } else if (isCeph) {
       lines.push(
         `\x1b[1;37m  Ceph Reef 18.2.4 NVMe & TrueNAS OpenZFS — ${label} (${this.config.host})\x1b[0m`,
         `  Cluster: \x1b[33m${this.config.cluster || 'Ceph-NVMe-Block-Pool'}\x1b[0m | Network: \x1b[32mDual 100GbE RoCEv2\x1b[0m`,
-        `  💡 \x1b[36mDemo-tips:\x1b[0m Kör \x1b[33mceph -s\x1b[0m, \x1b[33mceph osd df tree\x1b[0m, \x1b[33mzpool status\x1b[0m eller \x1b[33msimulate-error\x1b[0m!`
+        `  \x1b[36mDemo tip:\x1b[0m run \x1b[33mceph -s\x1b[0m, \x1b[33mceph osd df tree\x1b[0m, \x1b[33mzpool status\x1b[0m or \x1b[33msimulate-error\x1b[0m.`
       );
     } else {
       lines.push(
         `\x1b[1;37m  Ubuntu 24.04.1 LTS (Kubernetes 1.31 + NetApp Astra Trident 24.06) — ${label}\x1b[0m`,
         `  Cluster: \x1b[33m${this.config.cluster || 'K8s-Trident-CSI-Prod'}\x1b[0m | Multipath: \x1b[32mDM-Multipath NVMe/iSCSI + NFSv4.1\x1b[0m`,
-        `  💡 \x1b[36mDemo-tips:\x1b[0m Kör \x1b[33mkubectl get pods,pvc -A\x1b[0m, \x1b[33mtridentctl get backend -n trident\x1b[0m, \x1b[33mmultipath -ll\x1b[0m,`,
-        `     eller skriv \x1b[33msimulate-error\x1b[0m för att trigga knappen \x1b[1;35m✨ Förklara & fixa felet\x1b[0m!`
+        `  \x1b[36mDemo tip:\x1b[0m run \x1b[33mkubectl get pods,pvc -A\x1b[0m, \x1b[33mtridentctl get backend -n trident\x1b[0m or \x1b[33mmultipath -ll\x1b[0m,`,
+        `  or type \x1b[33msimulate-error\x1b[0m to bring up the \x1b[1;35mExplain & fix the error\x1b[0m button.`
       );
     }
     lines.push(

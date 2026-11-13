@@ -78,7 +78,7 @@ export function decodeS3WorkspaceInvite(
     ? trimmed.slice(S3_INVITE_PREFIX.length).trim()
     : trimmed;
   if (!rawBase64) {
-    throw new Error("Tom S3 invite-kod");
+    throw new Error("The S3 invite code is empty");
   }
   let parsed: Record<string, unknown>;
   try {
@@ -89,7 +89,7 @@ export function decodeS3WorkspaceInvite(
       const json = Buffer.from(rawBase64, "base64").toString("utf8");
       parsed = JSON.parse(json) as Record<string, unknown>;
     } catch {
-      throw new Error("Ogiltig S3 invite-kod (kunde inte avkoda)");
+      throw new Error("The S3 invite code could not be decoded");
     }
   }
   if (
@@ -98,7 +98,7 @@ export function decodeS3WorkspaceInvite(
     typeof parsed.accessKeyId !== "string" ||
     !parsed.accessKeyId.trim()
   ) {
-    throw new Error("S3 invite-koden saknar bucket eller accessKeyId");
+    throw new Error("The S3 invite code has no bucket or access key id");
   }
   return {
     enabled: true,

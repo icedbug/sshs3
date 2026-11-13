@@ -495,8 +495,8 @@ describe('LandingView Component', () => {
       // The team's activity, memory and runbooks are views of the AI panel, not a column of this page.
       expect(screen.queryByTestId('workspace-right-column')).not.toBeInTheDocument();
 
-      // Self-learning reflection button & @orama/orama + Voyager badge are rendered in the command center
-      expect(screen.getByText('@orama/orama + Voyager')).toBeInTheDocument();
+      // The button that tidies memory is there, and the card names no engines: it counts what the hub holds.
+      expect(screen.queryByText(/orama|Voyager/)).not.toBeInTheDocument();
       const reflectBtn = screen.getByTestId('workspace-self-reflect-btn');
       expect(reflectBtn).toBeInTheDocument();
       // hubRequest stores whatever aiHubRequest resolves as the shared hub snapshot, so resolve with

@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
+import { spawnSync } from 'node:child_process';
 import {
   execWithPresenceDetection,
   pinPromptKind,
@@ -115,7 +116,10 @@ describe('isTextlessExitFailure', () => {
  * script placed first on PATH, so the fix for OpenSSH's "-K with nothing on the device" quirk is
  * verified against the actual retry loop rather than just the isolated predicate above.
  */
-describe.skipIf(process.platform === 'win32')('loadFido2ResidentKeysIntoPrivateAgent — "no resident credentials yet" quirk', () => {
+// These start a real `ssh-agent`. Where OpenSSH is not installed there is nothing to start, and the
+// suite is skipped rather than failed: it tests sshs3's handling of the agent, not its presence.
+const hasSshAgent = !spawnSync('ssh-agent', ['-h']).error;
+describe.skipIf(process.platform === 'win32' || !hasSshAgent)('loadFido2ResidentKeysIntoPrivateAgent — "no resident credentials yet" quirk', () => {
   const originalPath = process.env.PATH;
   let fakeBinDir: string | undefined;
 

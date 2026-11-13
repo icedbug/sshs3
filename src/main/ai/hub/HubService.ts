@@ -229,6 +229,19 @@ import {
 import { handleAppAction } from "./AppActions";
 
 const log = createLogger("ai-hub");
+/**
+ * Requests that only read. They answer in `reply` and change nothing, so the
+ * store is not rewritten and no window is told to refetch: a search that runs
+ * as a person types must not cost a save and a broadcast per keystroke.
+ */
+const READ_ONLY_ACTIONS: ReadonlySet<HubRequest["action"]> = new Set<HubRequest["action"]>([
+  "kb-search",
+  "kb-read",
+  "kb-page-read",
+  "kb-original",
+  "server-facts-read",
+  "inline-suggest",
+]);
 const active = (t: AgentTask): boolean =>
   ["queued", "running", "waiting"].includes(t.status);
 /** A run the hub started itself (workforce specialist, memory proposals). */
@@ -460,7 +473,6 @@ export class HubService {
   private saveTimer?: NodeJS.Timeout;
   private lastInventory = 0;
   private previewId?: string;
-  private inlineSuggestion?: InlineCommandSuggestion;
   private pendingLayoutEvent?: WorkspaceLayoutEvent;
   private cachedWorkspaceServers: WorkspaceServerSummary[] = [];
   private ticking = false;
@@ -1305,15 +1317,15 @@ export class HubService {
         clusterNodes.slice(0, 3).map((n) => n.name).join(", ") || cluster;
       const kbHint =
         kbMatches.length > 0
-          ? `Enligt @orama KB "${kbMatches[0].title}": ${kbMatches[0].snippet.slice(0, 160)}…`
-          : `Analyserade ${clusterNodes.length || 1} noder (${nodeNames}) mot uppdraget "${ag.mission.slice(0, 90)}".`;
+          ? `From the knowledge base, "${kbMatches[0].title}": ${kbMatches[0].snippet.slice(0, 160)}…`
+          : `Looked at ${clusterNodes.length || 1} node${(clusterNodes.length || 1) === 1 ? "" : "s"} (${nodeNames}) for the mission "${ag.mission.slice(0, 90)}".`;
       const skillHint =
         rankedSkills.length > 0
-          ? ` [Voyager Skill: ${rankedSkills[0].title} (${Math.round((rankedSkills[0].confidence ?? 0.85) * 100)}%)]`
+          ? ` [Skill: ${rankedSkills[0].title}]`
           : "";
       const edgeHint =
         relatedEdges.length > 0
-          ? ` [Topologi: ${relatedEdges[0].from} → ${relatedEdges[0].to} (${relatedEdges[0].relation})]`
+          ? ` [Depends: ${relatedEdges[0].from} → ${relatedEdges[0].to} (${relatedEdges[0].relation})]`
           : "";
 
       const recCmds = [
@@ -1343,24 +1355,24 @@ export class HubService {
         agentIcon: ag.icon || "🤖",
         role: ag.role,
         targetCluster: cluster,
-        subTask: `Deluppdrag för ${ag.name} (${cluster}): ${opts.prompt.slice(0, 140)}`,
+        subTask: `Part for ${ag.name} (${cluster}): ${opts.prompt.slice(0, 140)}`,
         status: "completed",
-        findings: `Kontrollerade ${nodeNames}. ${kbHint}${skillHint}${edgeHint}`,
+        findings: `Covered ${nodeNames}. ${kbHint}${skillHint}${edgeHint}`,
         recommendedCommands: recCmds,
       };
     });
 
     const synthesis = [
-      `### 🤝 AI Workforce Sammanställning (${steps.length} specialistagenter körda parallellt)`,
-      "> **Demoläge:** det här är en förinspelad demokörning. Ingen modell anropades och ingenting kontrollerades.",
-      `Uppdrag: **${opts.prompt}**`,
+      `### Workforce summary (${steps.length} specialist agents, in parallel)`,
+      "> **Demo mode:** this is a scripted run. No model was called and nothing was checked.",
+      `Mission: **${opts.prompt}**`,
       "",
       ...steps.map(
         (s, i) =>
-          `${i + 1}. **${s.agentIcon || "🤖"} ${s.agentName}** (*${s.targetCluster || s.role}*): ${s.findings}`,
+          `${i + 1}. **${s.agentName}** (*${s.targetCluster || s.role}*): ${s.findings}`,
       ),
       "",
-      "**Rekommenderat nästa steg:** Granska föreslagna diagnostikkommandon per kluster eller kör parallell verifiering via `sshs3_cluster_exec`.",
+      "**Next:** go through the suggested checks per cluster, or run them on every node at once with `sshs3_cluster_exec`.",
     ].join("\n");
 
     const run: WorkforceRun = {
@@ -1384,7 +1396,7 @@ export class HubService {
       const now = Date.now();
       const wfTask: AgentTask = {
         id: crypto.randomUUID(),
-        title: `🤝 Workforce: ${run.title}`,
+        title: `Workforce: ${run.title}`,
         agentName: run.leadAgentName,
         mode: "assisted",
         status: "completed",
@@ -1439,19 +1451,7 @@ export class HubService {
     const maxToolTurns = configView.maxToolTurns ?? 20;
     const reasoningEffort = configView.reasoningEffort ?? "medium";
     const temperature = configView.temperature ?? 0.2;
-    const activeTask = this.store.data.tasks.at(-1);
-    const msgChars = (activeTask?.messages ?? []).reduce(
-      (sum, m) => sum + (m.text?.length ?? 0),
-      0,
-    );
     const kbDocs = this.getKbDocumentsList();
-    const kbChars = kbDocs.reduce((sum, d) => sum + Math.min(d.content.length, 3000), 0);
-    const srvChars = (extra.workspaceServers ?? []).length * 220;
-    const memChars = (extra.memories ?? []).length * 180;
-    const estimatedUsedTokens = Math.min(
-      contextWindowTokens,
-      Math.round((msgChars + kbChars + srvChars + memChars + terminalContextChars) / 4) + 1200,
-    );
     const dismissedIds = new Set(
       this.store.data.preferences.dismissedBuiltinIds ?? [],
     );
@@ -1506,7 +1506,6 @@ export class HubService {
       inventory: this.store.data.inventory,
       activityLog: extra.activityLog ?? this.store.data.activityLog ?? [],
       workspaceServers: extra.workspaceServers ?? [],
-      inlineSuggestion: this.inlineSuggestion,
       s3Workspace: this.s3Workspace.getStatus(),
       presence: this.mergePresence(
         this.s3Workspace.getPresence(),
@@ -1538,6 +1537,11 @@ export class HubService {
       evalCases: (this.store.data.evalCases ?? []).map(({ recorded, ...rest }) => ({ ...rest, recordedCalls: recorded.length })),
       evalRunning: this.evalRunningId,
       dailyReport: this.store.data.dailyReport,
+      kbWork: {
+        rebuilding: [...this.rebuildingPages],
+        checkingContradictions: this.checkingContradictions,
+        lastCheck: this.lastContradictionCheck,
+      },
       notifications: this.notificationsView(),
       serverFacts: this.factsView(),
       alertIntake: {
@@ -1570,7 +1574,6 @@ export class HubService {
       workforceRuns: this.getWorkforceRunsList(),
       infraEdges: allInfraEdges,
       safetyPolicy: this.store.data.safetyPolicy ?? DEFAULT_SAFETY_POLICY,
-      lastTerminalFailures: this.terminals.failures(),
       pendingLayoutEvent: this.pendingLayoutEvent,
       selfLearning: this.selfLearning.getStatus({
         memories: allMemories,
@@ -1586,7 +1589,6 @@ export class HubService {
         maxToolTurns,
         reasoningEffort,
         temperature,
-        estimatedUsedTokens,
       },
     };
   }
@@ -1710,7 +1712,7 @@ export class HubService {
         break;
       }
       case "start":
-        await this.start(request.task);
+        reply = { started: { taskId: (await this.start(request.task)).id } };
         break;
       case "reply": {
         const task = this.task(request.taskId);
@@ -2342,12 +2344,14 @@ export class HubService {
         break;
       }
       case "inline-suggest": {
-        this.inlineSuggestion = await this.generateInlineSuggestion(
-          requiredText(request.prompt),
-          request.sessionId,
-          request.context,
-          request.shell,
-        );
+        reply = {
+          inlineSuggestion: await this.generateInlineSuggestion(
+            requiredText(request.prompt),
+            request.sessionId,
+            request.context,
+            request.shell,
+          ),
+        };
         break;
       }
       case "schedule-save": {
@@ -2599,7 +2603,7 @@ export class HubService {
         break;
       }
       case "ticket-start":
-        await this.startTicket(request.id, request.sessionId);
+        reply = { started: { taskId: (await this.startTicket(request.id, request.sessionId)).id } };
         break;
       case "ticket-review": {
         const ticket = this.ticket(request.id);
@@ -2631,13 +2635,19 @@ export class HubService {
         const missionPrompt =
           request.promptOverride?.trim() ||
           `[Mission for ${agent.name}${clusterTag}]\n${agent.mission}`;
-        await this.start({
-          prompt: missionPrompt,
-          sessionId: request.sessionId,
-          mode: agent.defaultMode,
-          agentId: agent.id,
-          agentName: agent.name,
-        });
+        reply = {
+          started: {
+            taskId: (
+              await this.start({
+                prompt: missionPrompt,
+                sessionId: request.sessionId,
+                mode: agent.defaultMode,
+                agentId: agent.id,
+                agentName: agent.name,
+              })
+            ).id,
+          },
+        };
         break;
       }
       case "workforce-run": {
@@ -3160,7 +3170,13 @@ export class HubService {
         if (!found) throw new Error("Page not found");
         const docs = this.getKbDocumentsList().filter((d) => found.sources.some((s) => s.docId === d.id));
         if (docs.length === 0) throw new Error("None of this page's sources is in the knowledge base any more.");
-        void this.rebuildPage(found.id, docs).catch((e) => log.warn("Rebuilding a page failed", safeError(e)));
+        this.rebuildingPages.add(found.id);
+        void this.rebuildPage(found.id, docs)
+          .catch((e) => log.warn("Rebuilding a page failed", safeError(e)))
+          .finally(() => {
+            this.rebuildingPages.delete(found.id);
+            this.changed();
+          });
         break;
       }
       case "kb-check-contradictions":
@@ -3187,28 +3203,7 @@ export class HubService {
             tags: request.tags,
           },
         );
-        const map = new Map(
-          (this.store.data.kbDocuments ?? []).map((x) => [x.id, x]),
-        );
-        const known = new Set(
-          [...map.values()].map((x) => x.contentHash).filter((h): h is string => Boolean(h)),
-        );
-        for (const doc of docs) {
-          doc.contentHash = contentHash(doc.content);
-          const existing = map.get(doc.id);
-          // The same file again and unchanged: nothing to do. The same text under another name: not added twice.
-          if (existing?.contentHash === doc.contentHash) continue;
-          if (!existing && known.has(doc.contentHash)) continue;
-          known.add(doc.contentHash);
-          doc.titleFromSource = true;
-          doc.summary = existing?.summary;
-          doc.reading = { state: "queued", at: Date.now() };
-          map.set(doc.id, doc);
-          if (isDemoMode()) saveDemoKbDocument(doc);
-        }
-        this.lastWorkSync = 0;
-        void this.readNextKb();
-        this.store.data.kbDocuments = Array.from(map.values());
+        this.addIngestedDocs(docs);
         break;
       }
       case "kb-ingest-s3": {
@@ -3231,14 +3226,7 @@ export class HubService {
             `S3:${request.s3ProfileId}`,
             targetCluster,
           );
-          const map = new Map(
-            (this.store.data.kbDocuments ?? []).map((x) => [x.id, x]),
-          );
-          for (const doc of docs) {
-            map.set(doc.id, doc);
-            if (isDemoMode()) saveDemoKbDocument(doc);
-          }
-          this.store.data.kbDocuments = Array.from(map.values());
+          this.addIngestedDocs(docs);
           break;
         }
 
@@ -3253,11 +3241,11 @@ export class HubService {
           cluster: targetCluster || "NetApp-StorageGRID-S3",
           tags: ["s3-kb", "runbook", request.s3ProfileId],
           content: [
-            `# S3 Synkad Kunskapsbas (${request.s3ProfileId}/${prefix})`,
+            `# Knowledge base from S3 (${request.s3ProfileId}/${prefix})`,
             "",
-            "Detta dokument synkroniserades från S3-profilen och indexerade driftdokumentation, runbooks och konfigurationsstandarder.",
-            "- Verifiera S3 ILM-regler och Object Lock WORM-status vid varje release.",
-            "- Kontrollera FabricPool-kopplingen mellan ONTAP (`aggr1_nvme_prod`, `aggr2_nvme_db`) och StorageGRID.",
+            "Demo data: this stands in for the documents a real bucket prefix would hold (operations notes, runbooks, configuration standards).",
+            "- Check the S3 ILM rules and the Object Lock (WORM) status at every release.",
+            "- Check the FabricPool link between ONTAP (`aggr1_nvme_prod`, `aggr2_nvme_db`) and StorageGRID.",
           ].join("\n"),
           shared: true,
         });
@@ -3266,10 +3254,6 @@ export class HubService {
           doc,
         ];
         saveDemoKbDocument(doc);
-        break;
-      }
-      case "terminal-failure-dismiss": {
-        this.terminals.dismissFailure(request.sessionId);
         break;
       }
       case "layout-event-ack": {
@@ -3301,13 +3285,18 @@ export class HubService {
       case "quit":
         app.quit();
         break;
-      default:
-        throw new Error("Unknown AI request");
+      default: {
+        // Every action in HubRequest has a case above: a new one that is typed but not handled does not compile.
+        const unhandled: never = request;
+        throw new Error(`Unknown AI request: ${String((unhandled as { action?: unknown })?.action)}`);
+      }
     }
-    await this.store.save();
+    // A request that only reads changes nothing: the store is not rewritten and the other windows are not told.
+    const read = READ_ONLY_ACTIONS.has(request.action);
+    if (!read) await this.store.save();
     const snap = await this.snapshot();
     if (reply) snap.reply = reply;
-    this.changed();
+    if (!read) this.changed();
     return snap;
   }
 
@@ -3477,14 +3466,19 @@ export class HubService {
       ? undefined
       : this.getAgentsList().find((a) => a.id === task.agentId && a.runnerId);
     if (external) return this.launchExternal(task, external, assertLaunching);
-    let provider = schedule?.provider ?? config.provider;
-    let model = schedule?.model ?? config.model;
-    let baseUrl = schedule ? schedule.baseUrl : config.baseUrl;
+    // A schedule runs on the endpoint that is configured now. It keeps a model
+    // of its own only while it was saved for this same endpoint: after a change
+    // of provider or address it follows the configured model instead of being
+    // refused for ever.
+    const pinned = Boolean(schedule && schedule.provider === config.provider && (schedule.baseUrl ?? "") === (config.baseUrl ?? ""));
+    let provider = config.provider;
+    let model = (pinned && schedule?.model) || config.model;
+    let baseUrl = config.baseUrl;
     const configDir =
       typeof this.config.getFilePath === "function"
         ? path.dirname(this.config.getFilePath())
         : undefined;
-    if (!schedule) {
+    {
       if (
         (provider === "anthropic" && !config.apiKey) ||
         (provider === "openai-compatible" &&
@@ -3530,12 +3524,6 @@ export class HubService {
     )
       model = config.fastModel;
     task.model = model;
-    // Credentials are never silently reused for another endpoint/provider.
-    if (
-      schedule &&
-      (provider !== config.provider || baseUrl !== config.baseUrl)
-    )
-      throw new Error("Scheduled provider differs from configured credentials");
     if (provider === "anthropic" && !config.apiKey)
       throw new Error("Anthropic API key missing");
     if (provider === "openai-compatible" && !baseUrl)
@@ -3657,6 +3645,7 @@ export class HubService {
       });
     if (/^run\.(completed|failed|cancelled|interrupted)$/.test(event.type)) {
       task.status = event.type.slice(4) as AgentTask["status"];
+      if (event.usage?.context_tokens) task.contextTokens = event.usage.context_tokens;
       if (event.usage)
         task.usage = {
           inputTokens:
@@ -3757,8 +3746,13 @@ export class HubService {
   }
   private task(id: string): AgentTask {
     const t = this.store.data.tasks.find((x) => x.id === id);
-    if (!t) throw new Error("Task not found");
-    return t;
+    if (t) return t;
+    // A demo conversation is listed without being stored. The first time something is done to it, it becomes a real one.
+    const demo = isDemoMode() ? getDemoTasks().find((x) => x.id === id) : undefined;
+    if (!demo) throw new Error("Task not found");
+    const copy = structuredClone(demo);
+    this.store.data.tasks.push(copy);
+    return copy;
   }
   changed(): void {
     if (this.disposed) return;
@@ -4071,15 +4065,19 @@ export class HubService {
   }
 
   private checkingContradictions = false;
+  private readonly rebuildingPages = new Set<string>();
+  private lastContradictionCheck?: { at: number; found: number; error?: string };
   /** Compares pages about the same systems and keeps where they disagree, for the review list. */
   private async checkContradictions(): Promise<void> {
     if (this.checkingContradictions) return;
     const pairs = pairsToCompare(this.store.data.kbPages ?? []);
     if (pairs.length === 0) {
       this.store.data.kbContradictions = [];
+      this.lastContradictionCheck = { at: Date.now(), found: 0 };
       return;
     }
     this.checkingContradictions = true;
+    this.changed();
     try {
       const task = await this.runBackground(
         { prompt: buildContradictionPrompt(pairs), mode: "advice", agentName: "Knowledge base", maxCommands: 1, maxMinutes: 8 },
@@ -4088,11 +4086,42 @@ export class HubService {
       const answer = task.messages.filter((m) => m.role === "assistant").at(-1)?.text ?? "";
       const found = task.status === "completed" ? parseContradictions(answer, pairs) : undefined;
       if (found) this.store.data.kbContradictions = found;
+      this.lastContradictionCheck = found
+        ? { at: Date.now(), found: found.length }
+        : { at: Date.now(), found: 0, error: boundedContext(task.error || "The model gave no answer that could be read.", 200) };
       await this.store.save().catch(() => undefined);
+    } catch (error) {
+      this.lastContradictionCheck = { at: Date.now(), found: 0, error: safeError(error) };
+      throw error;
     } finally {
       this.checkingContradictions = false;
       this.changed();
     }
+  }
+
+  /**
+   * Documents read from a folder or a bucket take the same way in as anything
+   * else: the same text is not added twice, an unchanged file is left alone,
+   * and what is new is queued to be read and is shared at the next sync.
+   */
+  private addIngestedDocs(docs: KbDocument[]): void {
+    const map = new Map((this.store.data.kbDocuments ?? []).map((x) => [x.id, x]));
+    const known = new Set([...map.values()].map((x) => x.contentHash).filter((h): h is string => Boolean(h)));
+    for (const doc of docs) {
+      doc.contentHash = contentHash(doc.content);
+      const existing = map.get(doc.id);
+      if (existing?.contentHash === doc.contentHash) continue;
+      if (!existing && known.has(doc.contentHash)) continue;
+      known.add(doc.contentHash);
+      doc.titleFromSource = true;
+      doc.summary = existing?.summary;
+      doc.reading = { state: "queued", at: Date.now() };
+      map.set(doc.id, doc);
+      if (isDemoMode()) saveDemoKbDocument(doc);
+    }
+    this.store.data.kbDocuments = Array.from(map.values());
+    this.lastWorkSync = 0;
+    void this.readNextKb();
   }
 
   /** An agent opened a page: counted, so pages nobody uses show up. */
@@ -6179,6 +6208,7 @@ export class HubService {
               explanation: parsed.explanation,
               sessionId,
               createdAt: Date.now(),
+              source: "model",
             };
           }
         } finally {
@@ -6189,10 +6219,12 @@ export class HubService {
       // Fall back to instant deterministic command suggestion
     }
 
+    // No model answered (none is connected, it took too long, or it did not give a command).
     return {
       ...fallback,
       sessionId,
       createdAt: Date.now(),
+      source: learnedMatch ? "skill" : "fallback",
     };
   }
 
@@ -6603,19 +6635,13 @@ function renderWorkforceProgress(run: WorkforceRun): string {
     (s) => s.status === "completed" || s.status === "failed",
   ).length;
   const lines = run.steps.map((s) => {
-    const mark =
-      s.status === "completed"
-        ? "✅"
-        : s.status === "failed"
-          ? "❌"
-          : s.status === "running"
-            ? "⏳"
-            : "•";
+    // Words, as everywhere else in the hub: a mark means nothing to a screen reader or a log.
+    const mark = s.status === "completed" ? "done" : s.status === "failed" ? "failed" : s.status === "running" ? "running" : "waiting";
     const where = s.targetCluster ? ` (${s.targetCluster})` : "";
     const time =
       s.durationMs === undefined ? "" : ` — ${Math.round(s.durationMs / 1000)} s`;
     const problem = s.error ? ` — ${s.error}` : "";
-    return `- ${mark} **${s.agentName}**${where}${time}${problem}`;
+    return `- **${s.agentName}**${where}: ${mark}${time}${problem}`;
   });
   const status = [
     `**Workforce** — ${done}/${run.steps.length} specialists finished`,

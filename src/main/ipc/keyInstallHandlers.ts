@@ -23,17 +23,17 @@ export type KeyInstallHost = Pick<
 };
 
 /**
- * ssh-copy-id: listar installerbara publika nycklar, probar hosten och lägger nycklarna i
- * `authorized_keys`. Fungerar på en osparad profil (formuläret skickar hela configen, på samma sätt som
- * TERMINAL_CREATE och CONNECTION_TEST_SSH redan gör, så det ger ingen ny förmåga). Configen valideras och
- * `agentPath` nollas, eftersom main själv sätter den; nyckelraderna valideras om innan de når ssh.
+ * ssh-copy-id: lists the public keys that can be installed, probes the host and adds the keys to
+ * `authorized_keys`. Works on an unsaved profile (the form sends the whole config, the same way
+ * TERMINAL_CREATE and CONNECTION_TEST_SSH already do, so it adds no new capability). The config is validated and
+ * `agentPath` is cleared, because main sets it itself; the key lines are validated again before they reach ssh.
  */
 export function registerKeyInstallHandlers(bridge: KeyInstallHost): void {
   const MAX_KEYS = 50;
   const AUTH_TYPES = new Set(['password', 'privateKey', 'smartcard', 'agent', 'fido2']);
   const LOGIN_METHODS = new Set(['auto', 'password', 'profile', 'smartcard', 'agent']);
 
-  /** Validerar och normaliserar en config från renderern; kastar vid ogiltig form. */
+  /** Validates and normalizes a config from the renderer; throws if its shape is invalid. */
   const resolveDraft = async (raw: unknown): Promise<SSHConnectionConfig> => {
     const c = raw as Partial<SSHConnectionConfig> | undefined;
     if (
@@ -59,7 +59,7 @@ export function registerKeyInstallHandlers(bridge: KeyInstallHost): void {
     return bridge.resolveProxyJumpConfig(config);
   };
 
-  /** Laddar kortets/säkerhetsnyckelns agent (PIN/touch). Anropas först när profilens egen inloggning behövs. */
+  /** Loads the card's/security key's agent (PIN/touch). Called only when the profile's own login is needed. */
   const prepareHardware = async (config: SSHConnectionConfig, agentId: string): Promise<SSHConnectionConfig> => {
     let prepared = (await bridge.smartcard.prepareSftpSmartcardConfig(config as unknown as SFTPConfig, agentId)) as unknown as SSHConnectionConfig;
     prepared = (await bridge.smartcard.prepareFido2SftpConfig(prepared as unknown as SFTPConfig, agentId)) as unknown as SSHConnectionConfig;
@@ -152,7 +152,7 @@ export function registerKeyInstallHandlers(bridge: KeyInstallHost): void {
     }
   );
 
-  /** Gemensamma prompt-handlers (PIN/lösen/värdnyckel/touch) för probe, test och installation. */
+  /** Shared prompt handlers (PIN/password/host key/touch) for the probe, the test and the install. */
   const promptHandlersFor = (profile: SSHConnectionConfig, installId: string, presenceMessage: string) => {
     const label = profile.name || profile.host;
     const presence = bridge.makePresenceNotifier(installId, presenceMessage);
@@ -223,7 +223,7 @@ export function registerKeyInstallHandlers(bridge: KeyInstallHost): void {
           ...promptHandlersFor(profile, installId, `Touch your security key to install the key on ${label}`),
         });
 
-        // Verifiera nycklar som har en oskyddad privat nyckelfil lokalt; allt annat lämnas som "okänt".
+        // Verify keys that have an unprotected private key file locally; everything else is left as "unknown".
         const fileKeys = outcome.success
           ? await listTenantSafeFileKeys(profile.privateKeyPath)
           : [];

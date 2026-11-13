@@ -98,13 +98,12 @@ export function AgentsAndMcpView({
   const installedIds = new Set(servers.map((s) => s.id));
   const presets = (hub.mcpCatalog ?? []).filter((p) => !installedIds.has(p.id));
 
-  const startMission = (request: Parameters<Act>[0]): Promise<void> => {
-    const before = new Set(hub.tasks.map((t) => t.id));
-    return act(request).then((next) => {
-      const created = next?.tasks.find((t) => !before.has(t.id));
-      if (created) onStartedMission(created.id);
+  // The request says which conversation it started: guessing "the one that is new" picks a background run when one began meanwhile.
+  const startMission = (request: Parameters<Act>[0]): Promise<void> =>
+    act(request).then((next) => {
+      const started = next?.reply?.started?.taskId;
+      if (started) onStartedMission(started);
     });
-  };
 
   return (
     <div className="ai-scroll">
@@ -759,7 +758,7 @@ export function AgentsAndMcpView({
             {(mcpDraft.secrets ?? []).map((row, i) => (
               <div className="ai-inline-form" key={i}>
                 <input
-                  aria-label="Name"
+                  aria-label={mcpDraft.transport === "stdio" ? "Variable name" : "Header name"}
                   placeholder={mcpDraft.transport === "stdio" ? "GITHUB_TOKEN" : "Authorization"}
                   value={row.name}
                   disabled={row.kept}

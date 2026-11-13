@@ -1254,10 +1254,17 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                   sessionId: perfSessionId ?? undefined,
                   context: contextText || undefined,
                 });
-                if (snap.inlineSuggestion) {
+                const suggested = snap.reply?.inlineSuggestion;
+                if (suggested) {
                   setInlineSuggestion({
-                    command: snap.inlineSuggestion.command,
-                    explanation: snap.inlineSuggestion.explanation,
+                    command: suggested.command,
+                    // A general check picked by keyword must not pass for an answer.
+                    explanation:
+                      suggested.source === 'fallback'
+                        ? `No model answered. A general check instead: ${suggested.explanation}`
+                        : suggested.source === 'skill'
+                          ? `From a saved skill: ${suggested.explanation}`
+                          : suggested.explanation,
                   });
                 }
               } catch {

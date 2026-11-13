@@ -688,7 +688,7 @@ const AppContent: React.FC = () => {
               ? "bg-sky-500/15 text-sky-300"
               : "text-sky-400 hover:bg-app-surface-hover"
           }`}
-          title="Öppna / stäng AI Hub (Chat, Mission Agents, MCP, Kunskapsbas)"
+          title="Open or close the AI Hub (chat, mission agents, MCP, knowledge base)"
           onClick={() =>
             nativeHermes
               ? void nativeHermes.set({
@@ -715,8 +715,8 @@ const AppContent: React.FC = () => {
               data-testid="topbar-expand-ai-btn"
               title={
                 aiMode === 'hub'
-                  ? 'Växla tillbaka till sidopanel'
-                  : 'Expandera AI Hub till helskärm (Mission Agents, MCP & KB)'
+                  ? 'Switch back to the side panel'
+                  : 'Expand the AI Hub to full screen (mission agents, MCP and knowledge base)'
               }
               className={`h-full shrink-0 px-3 text-xs font-medium border-l border-divider/40 transition-colors flex items-center gap-1 ${
                 aiMode === 'hub'
@@ -834,21 +834,21 @@ const AppContent: React.FC = () => {
                           <button
                             type="button"
                             data-testid="split-view-ask-ai-btn"
-                            title="Jämför och analysera alla delade terminalpaneler i denna flik med AI"
+                            title="Ask the assistant to compare the split terminal panes in this tab"
                             onClick={() =>
                               window.dispatchEvent(
                                 new CustomEvent("sshs3:ai-open", {
                                   detail: {
                                     view: "Work",
                                     mode: "panel",
-                                    prompt: `Analysera och jämför de ${totalPanes} delade terminalpanelerna i fliken "${tab.title}". Kontrollera skillnader i status, latens, loggar eller konfiguration mellan noderna.`,
+                                    prompt: `Compare the ${totalPanes} split terminal panes in this tab ("${tab.title}"). Check for differences in status, latency, logs or configuration between the nodes.`,
                                   },
                                 }),
                               )
                             }
                             className="inline-flex items-center gap-1 rounded border border-sky-500/40 bg-sky-500/15 px-2 py-0.5 text-[10px] font-semibold text-sky-300 hover:bg-sky-500/25 transition-colors mr-1"
                           >
-                            <span>✨ AI Split-Analys ({totalPanes})</span>
+                            <span>✨ Ask the assistant</span>
                           </button>
                           <UnsplitButton
                             tabId={tab.id}

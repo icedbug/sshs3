@@ -51,7 +51,7 @@ function StepIcon({ status }: { status: StepStatus }) {
   }
 }
 
-/** Översätter probe-resultatet till de tre första stegen i kedjan. */
+/** Translates the probe result into the first three steps of the chain. */
 function applyProbe(probe: ProbeHostResult): Pick<Record<StepId, Step>, 'reach' | 'hostkey' | 'methods'> {
   const reach: Step = probe.reachable
     ? { status: 'ok', detail: 'The host answered.' }
@@ -79,9 +79,9 @@ function applyProbe(probe: ProbeHostResult): Pick<Record<StepId, Step>, 'reach' 
 interface AccessSetupPanelProps {
   config: SSHConnectionConfig;
   onStateChange?: (state: AccessState) => void;
-  /** Ökas av föräldern när inloggningsuppgifterna ändras, så att tidigare resultat nollställs. */
+  /** Changed by the parent when the login details change, so that earlier results are reset. */
   resetKey?: string;
-  /** Låter föräldern (t.ex. spara-påminnelsen) öppna installationsdialogen. */
+  /** Lets the parent (e.g. the save reminder) open the install dialog. */
   openInstallSignal?: number;
 }
 
@@ -99,7 +99,7 @@ export const AccessSetupPanel: React.FC<AccessSetupPanelProps> = ({
 
   const setStep = (id: StepId, step: Step) => setSteps((prev) => ({ ...prev, [id]: step }));
 
-  // Nollställ när det som kedjan bygger på ändras.
+  // Reset when what the chain is based on changes.
   const firstRender = useRef(true);
   useEffect(() => {
     if (firstRender.current) {
@@ -123,7 +123,7 @@ export const AccessSetupPanel: React.FC<AccessSetupPanelProps> = ({
       const res = await window.multissh.sshTestLogin(config);
       if (res.success) {
         setStep('verified', { status: 'ok', detail: 'Logged in with this profile.' });
-        // Fungerar inloggningen behövs ingen installation.
+        // If the login works, no install is needed.
         setSteps((prev) => (prev.installed.status === 'pending' ? { ...prev, installed: { status: 'skipped', detail: 'Not needed: login already works.' } } : prev));
         onStateChange?.('verified');
         return true;

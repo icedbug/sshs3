@@ -27,7 +27,7 @@ export class TeamVaultWrongPinError extends Error {
 /** The card still has its factory-default PIN/PUK/management-key, which forces
  * `age-plugin-yubikey` into a mandatory interactive migration wizard that changes
  * card-wide credentials (not just this one slot) — see docs/team-vault-plan.md's
- * "Hårdvaruverifiering" section. We never drive that wizard programmatically. */
+ * "Hårdvaruverifiering" (hardware verification) section. We never drive that wizard programmatically. */
 export class TeamVaultDefaultCredentialsError extends Error {
   constructor(
     message = 'This YubiKey still has its factory-default PIN/PUK. Change them yourself first ' +

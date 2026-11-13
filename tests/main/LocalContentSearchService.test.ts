@@ -128,8 +128,9 @@ describe('LocalContentSearchService', () => {
     expect(results[0].displayPath).toBe('keep.csv');
   });
 
-  it('reports a non-fatal error for an unreadable subdirectory without aborting the search', async () => {
-    if (process.platform === 'win32') return; // chmod-based permission denial isn't reliable on Windows
+  // Needs a directory this process may not read. chmod does not give that on Windows, and nothing is
+  // unreadable to root (a container): there the test has no way to set up what it tests, so it is skipped.
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)('reports a non-fatal error for an unreadable subdirectory without aborting the search', async () => {
 
     await fsp.mkdir(path.join(tempDir, 'locked'));
     await fsp.writeFile(path.join(tempDir, 'locked', 'secret.txt'), 'needle\n');

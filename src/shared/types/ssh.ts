@@ -273,44 +273,44 @@ export interface XServerStatus {
   platform?: string;
 }
 
-/** Varifrån en publik nyckel kommer. */
+/** Where a public key comes from. */
 export type PublicKeySource = 'file' | 'agent' | 'fido2' | 'smartcard' | 'manual' | 'github' | 'gitlab' | 'git-custom';
 
-/** En publik nyckel som kan installeras i `authorized_keys` på en host. */
+/** A public key that can be installed in `authorized_keys` on a host. */
 export interface LocalPublicKey {
-  /** Fingeravtryck (`SHA256:...`), unikt per nyckel. */
+  /** Fingerprint (`SHA256:...`), unique per key. */
   id: string;
-  /** Hela raden som skrivs till authorized_keys (`<typ> <base64>[ <kommentar>]`). */
+  /** The whole line written to authorized_keys (`<type> <base64>[ <comment>]`). */
   line: string;
   type: string;
   fingerprint: string;
   comment: string;
   source: PublicKeySource;
-  /** Visningsnamn, t.ex. filnamn eller agentens kommentar. */
+  /** Display name, e.g. the file name or the agent's comment. */
   label: string;
-  /** Privat nyckelfil bredvid .pub-filen, om den finns. Används för att verifiera inloggning efteråt. */
+  /** Private key file beside the .pub file, if there is one. Used to verify the login afterwards. */
   privateKeyPath?: string;
 }
 
 export interface ListPublicKeysRequest {
-  /** Profilen (sparad eller osparad); ger nyckelfilen och (med includeHardware) kortet/säkerhetsnyckeln. Valfri vid global listning. */
+  /** The profile (saved or unsaved); gives the key file and (with includeHardware) the card/security key. Optional for a global listing. */
   config?: SSHConnectionConfig;
-  /** Läs även nycklar från smartcard/FIDO2 (kräver PIN/touch). */
+  /** Also read keys from the smartcard/FIDO2 key (needs PIN/touch). */
   includeHardware?: boolean;
 }
 
-/** Hur vi loggar in på hosten för att kunna installera nycklarna. */
+/** How we log in to the host to be able to install the keys. */
 export type InstallLoginStep = 'password' | 'profile' | 'smartcard' | 'agent';
 export type InstallLoginMethod = 'auto' | InstallLoginStep;
 
 export interface InstallPublicKeysRequest {
   config: SSHConnectionConfig;
   publicKeys: string[];
-  /** Default 'auto': se `chooseLoginOrder`. */
+  /** Default 'auto': see `chooseLoginOrder`. */
   loginMethod?: InstallLoginMethod;
-  /** true när de valda nycklarna bara är profilens egen inloggningsnyckel (då är det poänglöst att logga in med den). */
+  /** true when the selected keys are only the profile's own login key (logging in with it would then be pointless). */
   installsOwnKeyOnly?: boolean;
-  /** Auth-metoder som servern annonserade vid senaste probe, om kända. */
+  /** Auth methods the server advertised at the latest probe, if known. */
   serverMethods?: string[];
 }
 
@@ -324,12 +324,12 @@ export type ProbeErrorKind =
   | 'hostkey-changed'
   | 'unknown';
 
-/** Resultat av en tyst probe (inga lösen/PIN/touch): nåbarhet, värdnyckel och tillåtna auth-metoder. */
+/** Result of a silent probe (no password/PIN/touch): reachability, host key and allowed auth methods. */
 export interface ProbeHostResult {
   reachable: boolean;
-  /** 'accepted' = användaren litade på en ny värdnyckel nu. */
+  /** 'accepted' = the user trusted a new host key just now. */
   hostKey: 'trusted' | 'accepted' | 'rejected' | 'changed';
-  /** Auth-metoder servern tillåter, t.ex. ['publickey', 'password']. */
+  /** Auth methods the server allows, e.g. ['publickey', 'password']. */
   methods: string[];
   errorKind?: ProbeErrorKind;
   error?: string;
@@ -345,7 +345,7 @@ export type InstallKeyStatus = 'installed' | 'present' | 'invalid' | 'unknown';
 export interface InstallKeyResult {
   fingerprint: string;
   status: InstallKeyStatus;
-  /** Inloggning med bara den nya nyckeln: true = fungerar, false = misslyckades, undefined = kunde inte verifieras. */
+  /** Login with only the new key: true = works, false = failed, undefined = could not be verified. */
   verified?: boolean;
 }
 
@@ -353,6 +353,6 @@ export interface InstallPublicKeysResult {
   success: boolean;
   error?: string;
   results: InstallKeyResult[];
-  /** Vilken inloggning som slutligen användes. */
+  /** Which login was used in the end. */
   loginMethod?: InstallLoginStep;
 }

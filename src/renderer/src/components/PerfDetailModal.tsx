@@ -274,7 +274,7 @@ export const PerfDetailModal: React.FC<PerfDetailModalProps> = ({ kind, history,
               <button
                 type="button"
                 data-testid="perf-analyze-ai-btn"
-                title="Skicka aktuell systemlast (CPU, RAM, Disk, I/O, Nätverk) till AI Hub för diagnos"
+                title="Send the current system load (CPU, memory, disk, I/O, network) to the assistant for diagnosis"
                 onClick={() => {
                   const summary = tooltipText(kind, latest, title).replace(/\nClick for history$/, '');
                   window.dispatchEvent(
@@ -282,7 +282,7 @@ export const PerfDetailModal: React.FC<PerfDetailModalProps> = ({ kind, history,
                       detail: {
                         label: `@perf:${title || kind}`,
                         text: `Live Performance Telemetry (${title || kind}, ${history.length} samples):\n${summary}`,
-                        prompt: `Analysera aktuell prestanda och resursförbrukning för @perf:${title || kind} och identifiera eventuella flaskhalsar i CPU, minne, disk eller I/O.`,
+                        prompt: `Analyze the current performance and resource usage of @perf:${title || kind} and identify any bottlenecks in CPU, memory, disk or I/O.`,
                       },
                     })
                   );
@@ -290,7 +290,7 @@ export const PerfDetailModal: React.FC<PerfDetailModalProps> = ({ kind, history,
                 }}
                 className="inline-flex items-center gap-1 rounded-lg border border-sky-500/40 bg-sky-500/15 px-2.5 py-1 text-xs font-semibold text-sky-300 hover:bg-sky-500/25 transition-colors"
               >
-                <span>✨ Analysera med AI</span>
+                <span>✨ Ask the assistant</span>
               </button>
             )}
             <button

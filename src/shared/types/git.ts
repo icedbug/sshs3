@@ -51,7 +51,7 @@ export interface GitCloneRequest {
   targetDirectory: string;
   directoryName?: string;
   depth?: number;
-  /** Om satt och inte 'local': körs över SFTP/SSH */
+  /** If set and not 'local': runs over SFTP/SSH */
   providerId?: string;
   sftpConfig?: SSHConnectionConfig;
 }

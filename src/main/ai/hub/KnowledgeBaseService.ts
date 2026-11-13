@@ -861,7 +861,7 @@ export class KnowledgeBaseService {
         incoming.text.trim() === prev.text.trim() ||
         incoming.text.includes(prev.text.trim())
           ? incoming.text.trim()
-          : `${incoming.text.trim()} (Tidigare notering: ${prev.text.trim().slice(0, 240)})`;
+          : `${incoming.text.trim()} (Earlier note: ${prev.text.trim().slice(0, 240)})`;
       const prevConfidence = prev.confidence ?? 0.78;
       const nextConfidence = Math.min(
         0.99,

@@ -25,10 +25,10 @@ import { isFeatureBlocked, usePolicy } from '../../lib/usePolicy';
 import { FeatureBlockedNotice } from '../SettingsModal/Managed';
 
 interface InstallKeyModalProps {
-  /** Profilen att installera nycklar på; får vara osparad. */
+  /** The profile to install keys on; may be unsaved. */
   connection: SSHConnectionConfig;
   onClose: () => void;
-  /** Auth-metoder servern annonserade vid en tidigare probe, om kända. */
+  /** Auth methods the server advertised at an earlier probe, if known. */
   serverMethods?: string[];
   onInstalled?: (result: InstallPublicKeysResult) => void;
 }
@@ -122,7 +122,7 @@ export const InstallKeyModal: React.FC<InstallKeyModalProps> = ({ connection, on
     };
   }, [connection.id, connection.privateKeyPath]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  /** Är nyckeln den som profilen själv loggar in med? (Då är det poänglöst att logga in med den för att installera den.) */
+  /** Is this the key the profile itself logs in with? (Logging in with it to install it would then be pointless.) */
   const isOwnKey = useCallback(
     (k: LocalPublicKey): boolean =>
       (!!connection.privateKeyPath && k.privateKeyPath === connection.privateKeyPath) ||

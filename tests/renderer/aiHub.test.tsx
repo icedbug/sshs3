@@ -326,26 +326,10 @@ describe("persistent AI chat", () => {
       },
     ];
     fixture.selfLearning = {
-      enabled: true,
       totalLearnedSkills: 4,
+      autoLearned: 2,
       failureToFixPatterns: 2,
-      consolidatedMemories: 3,
-      autoDiscoveredEdges: 1,
-      verifiedTaskRate: 100,
-      oramaIndexedChunks: 42,
       averageConfidence: 0.88,
-      openSourceEngines: [
-        {
-          id: "orama-hybrid-rag",
-          name: "Orama Hybrid Vector + BM25 Engine",
-          packageName: "@orama/orama",
-          version: "3.1.18",
-          category: "rag",
-          description: "In-memory hybrid BM25 + 16D concept vector search",
-          status: "active",
-          metricsLabel: "42 chunks",
-        },
-      ],
       recentEvents: [
         {
           id: "ev-1",

@@ -441,7 +441,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                 <div className="text-slate-400 mt-0.5">Generated for you</div>
               </div>
               <div className="rounded-lg bg-slate-900/90 border border-slate-800 p-2.5">
-                <div className="font-semibold text-indigo-300">3. Bjud in teamet</div>
+                <div className="font-semibold text-indigo-300">3. Invite the team</div>
                 <div className="text-slate-400 mt-0.5">Share an invite link</div>
               </div>
             </div>
@@ -463,7 +463,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                   autoFocus
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
-                  placeholder="t.ex. jacob"
+                  placeholder="e.g. jacob"
                   className="w-full rounded-lg bg-slate-900/90 border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-400"
                 />
               </div>
@@ -473,7 +473,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                   type="text"
                   value={displayName}
                   onChange={(e) => setDisplayName(e.target.value)}
-                  placeholder="t.ex. Jacob (Admin)"
+                  placeholder="e.g. Jacob (Admin)"
                   className="w-full rounded-lg bg-slate-900/90 border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-400"
                 />
               </div>
@@ -515,7 +515,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                 </div>
               ) : (
                 <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1">Inbjudningskod (Invite Token)</label>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">Invite code</label>
                   <input
                     type="text"
                     required
@@ -534,17 +534,17 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                   autoFocus
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
-                  placeholder="t.ex. erik"
+                  placeholder="e.g. erik"
                   className="w-full rounded-lg bg-slate-900/90 border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-400"
                 />
               </div>
               <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">Ditt visningsnamn i teamet</label>
+                <label className="block text-xs font-medium text-slate-300 mb-1">Your display name in the team</label>
                 <input
                   type="text"
                   value={displayName}
                   onChange={(e) => setDisplayName(e.target.value)}
-                  placeholder="t.ex. Erik"
+                  placeholder="e.g. Erik"
                   className="w-full rounded-lg bg-slate-900/90 border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-400"
                 />
               </div>
@@ -741,7 +741,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                   onClick={handleLogout}
                   className="px-3 py-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-300 text-xs font-medium transition"
                 >
-                  Logga ut
+                  Sign out
                 </button>
                 <button
                   type="button"
@@ -813,7 +813,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                         className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 transition"
                       >
                         {copiedText === 'authcmd'
-                          ? '✓ Kommando kopierat!'
+                          ? '✓ Command copied'
                           : 'Copy the command for ~/.ssh/authorized_keys'}
                       </button>
                       <button
@@ -918,7 +918,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                     </p>
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                       <div>
-                        <label className="block text-slate-400 mb-1">Roll</label>
+                        <label className="block text-slate-400 mb-1">Role</label>
                         <select
                           value={inviteRole}
                           onChange={(e) => setInviteRole(e.target.value as 'member' | 'admin')}
@@ -929,7 +929,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                         </select>
                       </div>
                       <div>
-                        <label className="block text-slate-400 mb-1">Max antal registreringar</label>
+                        <label className="block text-slate-400 mb-1">Maximum number of sign-ups</label>
                         <input
                           type="number"
                           min={1}
@@ -940,12 +940,12 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                         />
                       </div>
                       <div>
-                        <label className="block text-slate-400 mb-1">Notering (valfritt)</label>
+                        <label className="block text-slate-400 mb-1">Note (optional)</label>
                         <input
                           type="text"
                           value={inviteNote}
                           onChange={(e) => setInviteNote(e.target.value)}
-                          placeholder="t.ex. DevOps-teamet"
+                          placeholder="e.g. the DevOps team"
                           className="w-full rounded-lg bg-slate-950 border border-slate-700 px-2.5 py-1.5 text-white"
                         />
                       </div>

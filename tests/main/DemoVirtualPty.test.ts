@@ -327,8 +327,9 @@ describe('executeDemoServerCommand', () => {
   });
 
   it('has a scripted answer for every command the demo suggests', () => {
-    // The ONTAP help and banner. (The help also lists `network interface show`, which has no
-    // scripted answer: it gets the generic acknowledgement.)
+    // The ONTAP help and banner. `network interface show` has no scripted answer (it gets the
+    // generic acknowledgement), so the help does not offer it.
+    expect(run(ONTAP.name, 'help').output).not.toContain('network interface show');
     const ontapSuggestions = [
       'qos statistics volume latency show',
       'qos statistics volume performance show',

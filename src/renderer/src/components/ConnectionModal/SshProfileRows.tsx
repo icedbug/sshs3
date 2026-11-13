@@ -190,7 +190,7 @@ export const SshProfileRow: React.FC<SshProfileRowProps> = ({
     <div className="flex shrink-0 items-center gap-1.5">
       <button
         type="button"
-        title={`Fråga AI om ${profile.name}`}
+        title={`Ask the assistant about ${profile.name}`}
         onClick={(e) => {
           e.stopPropagation();
           window.dispatchEvent(
@@ -198,7 +198,7 @@ export const SshProfileRow: React.FC<SshProfileRowProps> = ({
               detail: {
                 label: `@${profile.name}`,
                 text: `Server: ${profile.name} (${profile.username}@${profile.host}:${profile.port ?? 22})${profile.cluster ? `\nCluster: ${profile.cluster}` : ''}${profile.nodeRole ? `\nNode Role: ${profile.nodeRole}` : ''}${profile.description ? `\nDescription: ${profile.description}` : ''}`,
-                prompt: `Hjälp mig med @${profile.name}: `,
+                prompt: `Help me with @${profile.name}: `,
               },
             })
           );

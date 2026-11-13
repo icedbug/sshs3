@@ -64,6 +64,8 @@ const MAX_SEARCH_RESULTS = 8;
 const NO_PROFILES: SSHConnectionConfig[] = [];
 
 const RESULTS_ID = 'landing-search-results';
+/** Shown as the name of this computer's own sessions until a team name is set. */
+const LOCAL_ACTOR_FALLBACK = 'you';
 const resultId = (profileId: string) => `landing-result-${profileId}`;
 
 const ROLE_OPTIONS = [
@@ -152,7 +154,7 @@ function toggleCommaTag(current: string, tag: string): string {
 function formatRelativeTime(timestamp?: number): string {
   if (!timestamp) return '';
   const diffSec = Math.max(1, Math.floor((Date.now() - timestamp) / 1000));
-  if (diffSec < 60) return 'nyss';
+  if (diffSec < 60) return 'just now';
   const diffMin = Math.floor(diffSec / 60);
   if (diffMin < 60) return `${diffMin}m ago`;
   const diffHours = Math.floor(diffMin / 60);
@@ -426,7 +428,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
         addEntry(t.targetLabel, entry.actor, aiWorking);
       }
     }
-    const localActor = hub?.config?.actorName || 'du';
+    const localActor = hub?.config?.actorName || LOCAL_ACTOR_FALLBACK;
     for (const sess of hub?.sessions ?? []) {
       if (sess.kind === 'ssh' && sess.state !== 'disconnected') {
         const aiWorking = Boolean(sess.owner);
@@ -1198,7 +1200,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         </div>
                         <div>
                           <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                            Taggar (kommaseparerade)
+                            Tags (comma-separated)
                           </label>
                           <input
                             type="text"
@@ -1322,7 +1324,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         list="workspace-clusters-list"
                         value={newNodeCluster}
                         onChange={(e) => setNewNodeCluster(e.target.value)}
-                        placeholder="t.ex. k8s-eu-north-1, Proxmox-01…"
+                        placeholder="e.g. k8s-eu-north-1, Proxmox-01…"
                         className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
                       />
                       <datalist id="workspace-clusters-list">
@@ -1333,14 +1335,14 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     </div>
                     <div>
                       <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                        Nodnamn / Host-alias *
+                        Node name / host alias *
                       </label>
                       <input
                         type="text"
                         required
                         value={newNodeName}
                         onChange={(e) => setNewNodeName(e.target.value)}
-                        placeholder="t.ex. k8s-worker-02"
+                        placeholder="e.g. k8s-worker-02"
                         className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
                       />
                     </div>
@@ -1353,7 +1355,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         required
                         value={newNodeHost}
                         onChange={(e) => setNewNodeHost(e.target.value)}
-                        placeholder="t.ex. 10.20.2.115"
+                        placeholder="e.g. 10.20.2.115"
                         className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
                       />
                     </div>
@@ -1471,7 +1473,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                           checked={newNodeShared}
                           onChange={(e) => setNewNodeShared(e.target.checked)}
                         />
-                        Dela i S3 Team Bucket
+                        Share in the S3 team bucket
                       </label>
                       <button
                         type="submit"
@@ -1795,7 +1797,11 @@ export const LandingView: React.FC<LandingViewProps> = ({
                                 >
                                   <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
                                   <span>
-                                    {p.aiWorking ? `🤖 AI working for ${p.actor}` : `${p.actor} is connected`}
+                                    {p.aiWorking
+                                      ? `🤖 AI working for ${p.actor}`
+                                      : p.actor === LOCAL_ACTOR_FALLBACK
+                                        ? 'you are connected'
+                                        : `${p.actor} is connected`}
                                   </span>
                                 </span>
                               ))}
@@ -1838,7 +1844,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                                   list="workspace-clusters-list"
                                   value={editCluster}
                                   onChange={(e) => setEditCluster(e.target.value)}
-                                  placeholder="t.ex. k8s-eu-north-1"
+                                  placeholder="e.g. k8s-eu-north-1"
                                   className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
                                 />
                               </div>
@@ -1927,7 +1933,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                             <div className="rounded-md border border-purple-500/25 bg-purple-500/5 p-2 space-y-1.5">
                               <div className="flex items-center gap-1 text-[10px] font-semibold text-purple-300">
                                 <Key className="h-3 w-3" />
-                                <span>Min lokala SSH-inloggning (~/.ssh — delas aldrig i S3)</span>
+                                <span>My local SSH login (~/.ssh, never uploaded to S3)</span>
                               </div>
                               <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
                                 <div>
@@ -1950,7 +1956,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                                     type="text"
                                     value={editLocalKeyPath}
                                     onChange={(e) => setEditLocalKeyPath(e.target.value)}
-                                    placeholder="~/.ssh/id_ed25519 (tom = SSH-agent)"
+                                    placeholder="~/.ssh/id_ed25519 (empty = SSH agent)"
                                     className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs font-mono text-txt-primary"
                                   />
                                 </div>
@@ -2210,7 +2216,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                       {s3CopyFeedback ? (
                         <>
                           <Check className="h-3 w-3 text-emerald-400" />
-                          <span>Kopierad!</span>
+                          <span>Copied</span>
                         </>
                       ) : (
                         <>
@@ -2231,7 +2237,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                       <RefreshCw
                         className={`h-3 w-3 ${s3Syncing || hub.s3Workspace.syncing ? 'animate-spin text-sky-400' : ''}`}
                       />
-                      <span>Synka nu</span>
+                      <span>Sync now</span>
                     </button>
                   )}
                   <button
@@ -2245,7 +2251,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                       {s3SetupOpen
                         ? 'Close S3 settings'
                         : hub?.s3Workspace?.configured
-                          ? 'S3-nycklar'
+                          ? 'S3 settings'
                           : 'Connect S3 team bucket'}
                     </span>
                   </button>
@@ -2254,7 +2260,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
 
               {hub?.s3Workspace?.error && (
                 <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-2.5 py-1.5 text-[11px] text-rose-300">
-                  S3-synkfel: {hub.s3Workspace.error}
+                  S3 sync error: {hub.s3Workspace.error}
                 </div>
               )}
 
@@ -2308,7 +2314,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         data-testid="s3-bucket-input"
                         value={s3Bucket}
                         onChange={(e) => setS3Bucket(e.target.value)}
-                        placeholder="t.ex. my-team-infra"
+                        placeholder="e.g. my-team-infra"
                         className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
                       />
                     </div>
@@ -2338,7 +2344,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     </div>
                     <div>
                       <label className="block text-[10px] font-semibold text-txt-muted mb-0.5">
-                        Prefix / Mapp i bucket
+                        Prefix / folder in the bucket
                       </label>
                       <input
                         type="text"
@@ -2376,7 +2382,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         placeholder={
                           hub?.s3Workspace?.configured
                             ? '•••••••• (leave empty to keep)'
-                            : 'Din S3 Secret Access Key'
+                            : 'Your S3 secret access key'
                         }
                         className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs font-mono text-txt-primary"
                       />
@@ -2390,7 +2396,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         data-testid="s3-actor-name-input"
                         value={s3ActorName}
                         onChange={(e) => setS3ActorName(e.target.value)}
-                        placeholder="t.ex. jacob"
+                        placeholder="e.g. jacob"
                         className="w-full rounded border border-border-subtle bg-app px-2 py-1 text-xs text-txt-primary"
                       />
                     </div>
@@ -2463,8 +2469,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     title="Consolidate overlapping memories and refresh the search index"
                     className="rounded-full border border-purple-400/50 bg-purple-500/20 px-2.5 py-0.5 text-[10.5px] font-semibold text-purple-200 hover:bg-purple-500/30 transition-all"
                   >
-                    🧬 Self-Learning ({hub?.selfLearning?.totalLearnedSkills ?? 0} skills ·{' '}
-                    {Math.round((hub?.selfLearning?.averageConfidence ?? 0.85) * 100)}%)
+                    Tidy memory ({hub?.selfLearning?.totalLearnedSkills ?? 0} skills)
                   </button>
                   <button
                     type="button"
@@ -2499,7 +2504,9 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     }`}
                   >
                     {isAiConnected
-                      ? `🟢 AI Kopplad (${hub?.config.model || 'Redo'})`
+                      ? hub?.config.model
+                        ? `AI connected (${hub.config.model})`
+                        : 'AI ready'
                       : '⚡ Connect your AI'}
                   </button>
                   <button
@@ -2705,13 +2712,13 @@ export const LandingView: React.FC<LandingViewProps> = ({
 
               <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
                 <span className="text-[10px] font-bold uppercase tracking-wider text-txt-muted mr-1">
-                  Snabbuppdrag:
+                  Quick tasks:
                 </span>
                 <button
                   type="button"
                   onClick={() =>
                     handleLaunchAiCommand(
-                      'Run a parallel health check across the nodes of my clusters with sshs3_cluster_exec and summarise load, disk, failed services and anything unusualus.'
+                      'Run a parallel health check across the nodes of my clusters with sshs3_cluster_exec and summarise load, disk, failed services and anything unusual.'
                     )
                   }
                   className="rounded-md border border-sky-500/30 bg-app-card/90 px-2 py-0.5 text-[10.5px] font-medium text-sky-300 hover:bg-sky-500/15 transition-colors"
@@ -2796,7 +2803,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     🖥️ Nodes & VMs
                   </span>
                   <span className="rounded-full border border-emerald-500/30 bg-emerald-500/15 px-1.5 py-0.5 text-[9.5px] font-semibold text-emerald-300">
-                    {activeSessionCount > 0 ? `${activeSessionCount} live` : 'Redo'}
+                    {activeSessionCount > 0 ? `${activeSessionCount} live` : 'None live'}
                   </span>
                 </div>
                 <div className="mt-1 flex items-baseline gap-2">
@@ -2804,7 +2811,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     {workspaceServers.length}
                   </span>
                   <span className="text-[11px] text-txt-muted">
-                    ({workspaceServers.filter((s) => s.shared).length} delade i S3)
+                    ({workspaceServers.filter((s) => s.shared).length} shared in S3)
                   </span>
                 </div>
               </div>
@@ -2827,7 +2834,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     {clusters.length}
                   </span>
                   <span className="truncate text-[11px] text-txt-muted">
-                    {selectedCluster !== 'ALL' ? `Aktivt: ${selectedCluster}` : 'ONTAP, Ceph, S3, K8s'}
+                    {selectedCluster !== 'ALL' ? `Selected: ${selectedCluster}` : clusters.map((c) => c.name).join(', ')}
                   </span>
                 </div>
               </div>
@@ -2848,7 +2855,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     🤖 Mission Agents & MCP
                   </span>
                   <span className="rounded-full border border-purple-500/30 bg-purple-500/15 px-1.5 py-0.5 text-[9.5px] font-semibold text-purple-200">
-                    {totalMcpTools} MCP-verktyg
+                    {totalMcpTools} MCP tools
                   </span>
                 </div>
                 <div className="mt-1 flex items-baseline gap-2">
@@ -2856,7 +2863,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     {(hub?.agents ?? []).length}
                   </span>
                   <span className="text-[11px] text-txt-muted">
-                    agenter · {(hub?.mcpServers ?? []).length} MCP-servrar
+                    agents · {(hub?.mcpServers ?? []).length} MCP servers
                   </span>
                 </div>
               </button>
@@ -2877,7 +2884,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     📚 Knowledge base & memory
                   </span>
                   <span className="rounded-full border border-emerald-500/30 bg-emerald-500/15 px-1.5 py-0.5 text-[9.5px] font-semibold text-emerald-200">
-                    @orama/orama + Voyager
+                    {(hub?.kbPages ?? []).length} pages
                   </span>
                 </div>
                 <div className="mt-1 flex items-baseline gap-2">
@@ -2885,8 +2892,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     {(hub?.kbDocuments ?? []).length}
                   </span>
                   <span className="text-[11px] text-txt-muted">
-                    runbooks · {hub?.selfLearning?.totalLearnedSkills ?? (hub?.memories ?? []).length} skills (
-                    {Math.round((hub?.selfLearning?.averageConfidence ?? 0.85) * 100)}%)
+                    documents · {hub?.selfLearning?.totalLearnedSkills ?? 0} skills
                   </span>
                 </div>
               </button>

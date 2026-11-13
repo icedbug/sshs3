@@ -2,9 +2,17 @@ import { describe, it, expect, vi } from 'vitest';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { runCertWorker, readCertificatesFromSlot } = require('../../src/main/smartcard/certWorker.cjs');
+// The worker loads pkcs11js, a native module. Where it was not built (an install without a compiler),
+// the worker cannot be loaded at all and the suite is skipped; any other failure to load is a real one.
+let worker: { runCertWorker: any; readCertificatesFromSlot: any } | undefined;
+try {
+  worker = require('../../src/main/smartcard/certWorker.cjs');
+} catch (error) {
+  if (!/pkcs11\.node|pkcs11js/.test(String((error as Error)?.message))) throw error;
+}
+const { runCertWorker, readCertificatesFromSlot } = worker ?? ({} as { runCertWorker: any; readCertificatesFromSlot: any });
 
-describe('certWorker.cjs', () => {
+describe.skipIf(!worker)('certWorker.cjs', () => {
   it('outputs error JSON when pkcs11LibPath argument is missing', async () => {
     let output = '';
     const mockStdout = {

@@ -711,7 +711,7 @@ export const DualPaneExplorer: React.FC<DualPaneExplorerProps> = ({
             <button
               type="button"
               data-testid="dual-pane-ai-diff-btn"
-              title="Jämför vänster och höger panel med AI (sshs3_storage_ops diff_paths)"
+              title="Ask the assistant to compare the left and right panes (sshs3_storage_ops diff_paths)"
               onClick={() => {
                 const leftTarget = panes.left.source.providerId.replace(/^(sftp-|s3-)/, '');
                 const rightTarget = panes.right.source.providerId.replace(/^(sftp-|s3-)/, '');
@@ -724,19 +724,19 @@ export const DualPaneExplorer: React.FC<DualPaneExplorerProps> = ({
                         `- Left Pane: ${panes.left.source.label} [provider=${panes.left.source.providerId}, type=${panes.left.source.sourceType}] path=${panes.left.path}`,
                         `- Right Pane: ${panes.right.source.label} [provider=${panes.right.source.providerId}, type=${panes.right.source.sourceType}] path=${panes.right.path}`,
                       ].join('\n'),
-                      prompt: `Jämför innehållet och konfigurationsfilerna mellan vänster panel (${leftTarget}:${panes.left.path}) och höger panel (${rightTarget}:${panes.right.path}) med sshs3_storage_ops.`,
+                      prompt: `Compare the contents and configuration files of the left pane (${leftTarget}:${panes.left.path}) and the right pane (${rightTarget}:${panes.right.path}) with sshs3_storage_ops.`,
                     },
                   })
                 );
               }}
               className="inline-flex items-center gap-1 rounded border border-sky-500/40 bg-sky-500/15 px-2 py-0.5 text-2xs font-semibold text-sky-300 hover:bg-sky-500/25 transition-colors"
             >
-              <span>🔍 AI Diff Vänster ↔ Höger</span>
+              <span>🔍 Compare left and right</span>
             </button>
             <button
               type="button"
               data-testid="dual-pane-ingest-kb-btn"
-              title="Indexera aktiv mapp eller S3-prefix direkt i Knowledge Base (@kb)"
+              title="Index the active folder or S3 prefix in the knowledge base (@kb)"
               onClick={() => {
                 const activePane = panes[activeSide];
                 window.dispatchEvent(
@@ -744,19 +744,19 @@ export const DualPaneExplorer: React.FC<DualPaneExplorerProps> = ({
                     detail: {
                       label: `@kb-ingest:${activePane.source.label}`,
                       text: `KB Ingest Request:\nSource: ${activePane.source.label} (${activePane.source.sourceType})\nProvider ID: ${activePane.source.providerId}\nPath: ${activePane.path}`,
-                      prompt: `Indexera och spara viktig dokumentation/runbooks eller konfigurationsfiler från ${activePane.source.label} (${activePane.path}) in i vår Knowledge Base (@kb).`,
+                      prompt: `Index and save the important documentation, runbooks and configuration files from ${activePane.source.label} (${activePane.path}) in our knowledge base (@kb).`,
                     },
                   })
                 );
               }}
               className="inline-flex items-center gap-1 rounded border border-purple-500/40 bg-purple-500/15 px-2 py-0.5 text-2xs font-semibold text-purple-300 hover:bg-purple-500/25 transition-colors"
             >
-              <span>📥 Indexera i KB</span>
+              <span>📥 Index in knowledge base</span>
             </button>
             <button
               type="button"
               data-testid="dual-pane-open-kb-btn"
-              title="Öppna Kunskapsbasen (KB) i AI Hub för att söka eller synka S3/lokala runbooks"
+              title="Open the knowledge base in the AI Hub to search or sync S3 and local runbooks"
               onClick={() => {
                 window.dispatchEvent(
                   new CustomEvent('sshs3:ai-open', {
@@ -766,7 +766,7 @@ export const DualPaneExplorer: React.FC<DualPaneExplorerProps> = ({
               }}
               className="inline-flex items-center gap-1 rounded border border-emerald-500/40 bg-emerald-500/15 px-2 py-0.5 text-2xs font-semibold text-emerald-300 hover:bg-emerald-500/25 transition-colors"
             >
-              <span>📚 Kunskapsbas (KB)</span>
+              <span>📚 Knowledge base</span>
             </button>
           </div>
         </div>

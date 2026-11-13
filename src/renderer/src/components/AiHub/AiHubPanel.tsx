@@ -63,46 +63,49 @@ type View =
 const VIEWS: View[] = ["Work", "Inbox", "Workforce", "Agents & MCP", "Knowledge Base", "Infrastructure", "Changes", "Memory & skills", "Schedules"];
 type Menu = "history" | "target" | "control" | "mention" | "agent" | null;
 
+// The same incident as the demo lab's conversation (demoWorkspace.ts), at the point where it is found.
 const DEMO_SHOWCASE_RESPONSE = [
   "## Cluster check: `NetApp-ONTAP-Prod-SE` and `K8s-Trident-CSI-Prod`",
   "",
-  "I ran a health check on all 4 nodes of `@cluster:NetApp-ONTAP-Prod-SE` in parallel and compared `/etc/multipath.conf` with our standard (`@kb:trident-csi-multipath-standard`).",
+  "I ran a health check on all 4 nodes of `@cluster:NetApp-ONTAP-Prod-SE` in parallel and compared `/etc/multipath.conf` between `k8s-storage-cp-01` and `k8s-gpu-io-worker-01`.",
   "",
   "### 1. Node status and latency (ONTAP 9.15.1P2)",
   "",
-  "| Node | Role | Aggregate / capacity | Mean latency | SnapMirror lag | Status |",
+  "| Node | Role | Aggregate / capacity | Highest volume latency | SnapMirror lag | Status |",
   "| :--- | :--- | :--- | :--- | :--- | :--- |",
-  "| `netapp-aff-a800-01a` | HA Node A (DC1) | `aggr1_nvme_prod` (64% of 220 TB) | `0.31 ms` | `00:02:44` | **ONLINE · HEALTH_OK** |",
-  "| `netapp-aff-a800-01b` | HA Node B (DC1) | `aggr2_nvme_db` (58% of 180 TB) | `0.48 ms` | `00:03:18` | **ONLINE · HEALTH_OK** |",
+  "| `netapp-aff-a800-01a` | HA node A (DC1) | `aggr1_nvme_prod` (72% of 220 TB) | `0.38 ms` | `00:03:18` | **ONLINE · HEALTH_OK** |",
+  "| `netapp-aff-a800-01b` | HA node B (DC1) | `aggr2_nvme_db` (68% of 180 TB) | `2.45 ms` | `00:02:44` | **ONLINE · QoS warning** |",
   "| `netapp-fas9000-dr-01` | SnapVault DR (DC2) | `aggr_dr_nlsas` (71% of 1.6 PB) | `1.12 ms` | In sync (XDP) | **ONLINE · SNAPMIRRORED** |",
-  "| `ontap-aiq-um-01` | Active IQ & Harvest | Prometheus / Grafana | `0.19 ms` | — | **TELEMETRY OK** |",
+  "| `ontap-aiq-um-01` | Active IQ and Harvest | Prometheus / Grafana | — | — | **TELEMETRY OK** |",
   "",
-  "> **Cause and recommendation:** The volume `vol_analytics_sc` hits the QoS ceiling `pg-batch-ceiling` (`15 000 IOPS` / `600 MB/s`) during batch runs, while the production database `vol_pg_prod_01` stays stable. The multipath settings on `k8s-gpu-io-worker-01` differ from the standard.",
+  "> **Cause:** the scratch volume `vol_ai_scratch_03` (`svm-prod-nfs`) on `netapp-aff-a800-01b` has no QoS policy. Its read peaks (`48 200 IOPS`) drive up the queue depth on `aggr2_nvme_db`, which also holds the production database volume `vol_pg_prod_db01` (`1.88 ms`). On `k8s-gpu-io-worker-01`, multipath uses `multibus` instead of ALUA `group_by_prio`, which the Trident multipath standard in the knowledge base requires.",
   "",
   "### 2. Configuration difference (`/etc/multipath.conf`)",
   "",
   "```diff",
   "--- k8s-storage-cp-01:/etc/multipath.conf",
   "+++ k8s-gpu-io-worker-01:/etc/multipath.conf",
-  "@@ -8,7 +8,7 @@",
+  "@@ -7,7 +7,7 @@",
   "     device {",
   "         vendor \"NETAPP\"",
   "         product \"LUN.*\"",
-  "         path_grouping_policy \"group_by_prio\"",
-  "-        features \"2 pg_init_retries 50\"",
-  "-        no_path_retry \"queue\"",
-  "+        features \"0\"",
-  "+        no_path_retry \"fail\"",
-  "     }",
+  "-        path_grouping_policy group_by_prio",
+  "+        path_grouping_policy multibus",
+  "         path_checker tur",
+  "         features \"2 pg_init_retries 50\"",
+  "         hardware_handler \"1 alua\"",
   "```",
   "",
   "### 3. Proposed commands",
   "",
-  "Raise the adaptive QoS ceiling for the analytics volume on `netapp-aff-a800-01a` for the time being:",
+  "Put the QoS ceiling `pg-batch-ceiling` (`15 000 IOPS` / `600 MB/s`) on the scratch volume and check the latency again, then switch the GPU worker's multipath to ALUA:",
   "",
   "```bash",
-  "volume modify -vserver svm-prod-nfs -volume vol_analytics_sc -qos-policy-group pg-prod-db-extreme",
-  "qos statistics volume latency show -vserver svm-prod-nfs -volume vol_analytics_sc -iterations 5",
+  "# On netapp-aff-a800-01b:",
+  "volume modify -vserver svm-prod-nfs -volume vol_ai_scratch_03 -qos-policy-group pg-batch-ceiling",
+  "qos statistics volume latency show -iterations 3",
+  "# On k8s-gpu-io-worker-01:",
+  "sudo multipath -r && sudo multipath -ll",
   "```",
 ].join("\n");
 
@@ -668,7 +671,8 @@ export function AiHubPanel({
           },
         });
     if (result) {
-      if (!task) setTaskId(result.tasks.at(-1)?.id ?? "");
+      // The conversation this request started: "the newest in the list" may be a background run that began meanwhile.
+      if (!task) setTaskId(result.reply?.started?.taskId ?? result.tasks.at(-1)?.id ?? "");
       setPrompt("");
       setAttachments([]);
       setConnection(undefined);
@@ -1242,15 +1246,12 @@ export function AiHubPanel({
                             type="button"
                             className="ai-btn-emerald"
                             onClick={() => {
-                              const prevIds = new Set(hub.tasks.map((t) => t.id));
                               void act({
                                 action: "agent-run-mission",
                                 id: activeAgent.id,
                               }).then((nextSnap) => {
-                                const created = nextSnap?.tasks.find(
-                                  (t) => !prevIds.has(t.id),
-                                );
-                                if (created?.id) setTaskId(created.id);
+                                const started = nextSnap?.reply?.started?.taskId;
+                                if (started) setTaskId(started);
                               });
                             }}
                           >
@@ -2452,31 +2453,19 @@ export function AiHubPanel({
                     onClick={() => setSettingsOpen(true)}
                   >
                     {(() => {
-                      const usedTokens =
-                        (hub.contextBudget?.estimatedUsedTokens ?? 2400) +
-                        attachments.reduce(
-                          (sum, a) => sum + Math.ceil((a.text?.length ?? 0) / 4),
-                          0,
-                        );
-                      const maxTokens =
-                        hub.contextBudget?.contextWindowTokens ??
-                        hub.config.contextWindowTokens ??
-                        128000;
-                      const pct = Math.min(
-                        100,
-                        Math.max(4, Math.round((usedTokens / maxTokens) * 100)),
-                      );
+                      const maxTokens = hub.contextBudget?.contextWindowTokens ?? hub.config.contextWindowTokens ?? 128000;
+                      // What is known: how much the model was sent at its last call in this conversation.
+                      // Before the first run there is nothing to measure, so only the window is shown.
+                      const usedTokens = task?.contextTokens;
+                      if (!usedTokens) return <span>{Math.round(maxTokens / 1000)}k window</span>;
+                      const pct = Math.min(100, Math.max(4, Math.round((usedTokens / maxTokens) * 100)));
                       return (
                         <>
-                          <span>
-                            {Math.max(1, Math.round(usedTokens / 1000))}k /{" "}
-                            {Math.round(maxTokens / 1000)}k ctx
+                          <span title="What the model was sent at its last call in this conversation">
+                            {Math.max(1, Math.round(usedTokens / 1000))}k of {Math.round(maxTokens / 1000)}k
                           </span>
                           <span className="ai-context-meter-bar" aria-hidden="true">
-                            <span
-                              className="ai-context-meter-fill"
-                              style={{ width: `${pct}%` }}
-                            />
+                            <span className="ai-context-meter-fill" style={{ width: `${pct}%` }} />
                           </span>
                         </>
                       );

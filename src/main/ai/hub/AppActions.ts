@@ -1657,7 +1657,7 @@ export async function handleAppAction(
             str("prompt") ||
             str("mission") ||
             str("description") ||
-            "Genomför parallell kluster- och infrastrukturanalys.";
+            "Look over the clusters and the infrastructure in parallel and report what stands out.";
           const rawIds = Array.isArray(p.agentIds)
             ? (p.agentIds as unknown[]).map(String)
             : str("idOrName")
@@ -1749,32 +1749,37 @@ export async function handleAppAction(
           return { ok: true, operation: "delete_infra_edge", deletedId: edgeId };
         }
         if (op === "save_agent") {
-          const name = requiredText(str("name"));
-          const mission = requiredText(str("mission") || str("description"));
+          // "Save" on an agent that exists changes that agent: only what is given, the rest stays
+          // (its budget, its pause, where it runs, who it reports to). Without this an update made a
+          // second agent of the same name, or wiped what the form had set.
+          const q = (str("idOrName") || str("id") || "").toLowerCase();
+          const wanted = (str("name") || "").toLowerCase();
+          const existing = hub
+            .getAgentsList()
+            .find((a) => (q ? a.id.toLowerCase() === q || a.name.toLowerCase() === q : Boolean(wanted) && a.name.toLowerCase() === wanted));
+          if (q && !existing) throw new Error(`Agent "${q}" not found`);
+          const name = requiredText(str("name") || existing?.name);
+          const mission = requiredText(str("mission") || str("description") || existing?.mission);
+          const list = (key: string): string[] | undefined => (Array.isArray(p[key]) ? (p[key] as unknown[]).map(String) : undefined);
           await hub.request({
             action: "agent-save",
             agent: {
-              id: str("id"),
+              ...(existing ?? {}),
+              id: existing?.id,
               name,
-              role: str("role") || "Infrastructure Mission Agent",
-              icon: str("icon") || "🤖",
+              role: str("role") || existing?.role || "Infrastructure specialist",
+              icon: str("icon") ?? existing?.icon ?? "",
               mission,
-              systemPrompt: str("systemPrompt") || mission,
-              targetCluster: str("targetCluster") || str("cluster"),
-              defaultMode: (str("defaultMode") as MissionAgent["defaultMode"]) || "assisted",
-              allowedTools: Array.isArray(p.allowedTools)
-                ? (p.allowedTools as string[])
-                : ["all"],
-              kbDocIds: Array.isArray(p.kbDocIds)
-                ? (p.kbDocIds as string[])
-                : undefined,
-              mcpServerIds: Array.isArray(p.mcpServerIds)
-                ? (p.mcpServerIds as string[])
-                : undefined,
-              scheduleMinutes: num("scheduleMinutes"),
+              systemPrompt: str("systemPrompt") || existing?.systemPrompt || mission,
+              targetCluster: str("targetCluster") || str("cluster") || existing?.targetCluster,
+              defaultMode: (str("defaultMode") as MissionAgent["defaultMode"]) || existing?.defaultMode || "assisted",
+              allowedTools: list("allowedTools") ?? existing?.allowedTools ?? ["all"],
+              kbDocIds: list("kbDocIds") ?? existing?.kbDocIds,
+              mcpServerIds: list("mcpServerIds") ?? existing?.mcpServerIds,
+              scheduleMinutes: num("scheduleMinutes") ?? existing?.scheduleMinutes,
             },
           });
-          return { ok: true, operation: "save_agent", name };
+          return { ok: true, operation: "save_agent", name, updated: Boolean(existing) };
         }
         if (op === "delete_agent") {
           const q = (str("idOrName") || str("id") || str("name") || "").toLowerCase();

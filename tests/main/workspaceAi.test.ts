@@ -777,15 +777,15 @@ describe("Production multi-user workspace sync & auto-memory", () => {
       prompt: "check port 8080",
       shell: "cmd",
     });
-    expect(cmdPortSnap.inlineSuggestion?.command).toBe("netstat -ano | findstr :8080");
+    expect(cmdPortSnap.reply?.inlineSuggestion?.command).toBe("netstat -ano | findstr :8080");
 
     const cmdDefaultSnap = await hub.request({
       action: "inline-suggest",
       prompt: "visa status",
       shell: "cmd",
     });
-    expect(cmdDefaultSnap.inlineSuggestion?.command).toContain("tasklist");
-    expect(cmdDefaultSnap.inlineSuggestion?.command).not.toMatch(/^Get-Process/);
+    expect(cmdDefaultSnap.reply?.inlineSuggestion?.command).toContain("tasklist");
+    expect(cmdDefaultSnap.reply?.inlineSuggestion?.command).not.toMatch(/^Get-Process/);
   });
 
   it("supports Mission Agents, MCP servers, Knowledge Base BM25 search, Cluster Exec, Layout Orchestration, Storage Ops, and Context Window settings", async () => {
@@ -1654,12 +1654,10 @@ describe("Production multi-user workspace sync & auto-memory", () => {
     // 1. Verify @orama/orama index & bilingual 16D vector + BM25 search
     const initialSnap = await hub.snapshot();
     expect(initialSnap.selfLearning).toBeDefined();
-    expect(initialSnap.selfLearning?.oramaIndexedChunks).toBeGreaterThan(0);
-    expect(
-      initialSnap.selfLearning?.openSourceEngines.some(
-        (e) => e.id === "orama-hybrid-rag" && e.packageName === "@orama/orama",
-      ),
-    ).toBe(true);
+    // The status is counts of what is there; it names no engines and invents no scores.
+    expect(typeof initialSnap.selfLearning?.totalLearnedSkills).toBe("number");
+    expect(initialSnap.selfLearning).not.toHaveProperty("openSourceEngines");
+    expect(initialSnap.selfLearning).not.toHaveProperty("verifiedTaskRate");
     expect((initialSnap.mcpCatalog ?? []).length).toBe(9);
 
     // Search with Swedish semantic concept + slight typo
@@ -1769,10 +1767,10 @@ describe("Production multi-user workspace sync & auto-memory", () => {
       prompt: "multipathd daemon stale file handle",
       shell: "bash",
     });
-    expect(inlineLearnedSnap.inlineSuggestion?.command).toContain(
+    expect(inlineLearnedSnap.reply?.inlineSuggestion?.command).toContain(
       "multipath -r",
     );
-    expect(inlineLearnedSnap.inlineSuggestion?.explanation).toContain(
+    expect(inlineLearnedSnap.reply?.inlineSuggestion?.explanation).toContain(
       "Auto-Learned Skill",
     );
 
@@ -2115,10 +2113,9 @@ describe("Production multi-user workspace sync & auto-memory", () => {
       tasks: [],
       mcpServerCount: 0,
     });
-    expect(
-      status.openSourceEngines.find((e) => e.id === "myers-unified-diff")
-        ?.version,
-    ).toBe("9.0.0");
+    // With nothing learned there is nothing to report: no default percentages.
+    expect(status).toMatchObject({ totalLearnedSkills: 0, autoLearned: 0, failureToFixPatterns: 0 });
+    expect(status.averageConfidence).toBeUndefined();
     const maskedLearn = hub.selfLearning.learnFromCommandResolution({
       memories: [],
       failure: {

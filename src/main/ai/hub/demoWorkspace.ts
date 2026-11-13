@@ -45,7 +45,7 @@ const initialDemoServers: WorkspaceServerSummary[] = [
     nodeRole: "ontap-ha-node-a",
     role: "storage-controller",
     description:
-      "NetApp AFF A800 All-Flash HA-nod A (ONTAP 9.15.1) i Stockholm DC1. Äger aggr1_nvme_prod (220 TB NVMe) och betjänar SVM:erna svm-prod-nfs (NFSv4.1), svm-prod-iscsi (iSCSI/NVMe-oF) samt FabricPool S3-tiering mot StorageGRID.",
+      "NetApp AFF A800 all-flash HA node A (ONTAP 9.15.1) in Stockholm DC1. Owns aggr1_nvme_prod (220 TB NVMe) and serves the SVMs svm-prod-nfs (NFSv4.1) and svm-prod-iscsi (iSCSI/NVMe-oF), plus FabricPool S3 tiering to StorageGRID.",
     tags: ["netapp", "ontap-9.15", "aff-a800", "nvme-of", "nfsv4.1", "fabricpool", "prod"],
     shared: true,
     updatedAt: new Date(now - 8 * min).toISOString(),
@@ -63,7 +63,7 @@ const initialDemoServers: WorkspaceServerSummary[] = [
     nodeRole: "ontap-ha-node-b",
     role: "storage-controller",
     description:
-      "NetApp AFF A800 All-Flash HA-partner B (ONTAP 9.15.1). Äger aggr2_nvme_db (180 TB NVMe) för PostgreSQL/Oracle-LUN:ar, FlexGroup-volymer för AI-träning och synkron MetroCluster/SnapMirror-replikering.",
+      "NetApp AFF A800 all-flash HA partner B (ONTAP 9.15.1). Owns aggr2_nvme_db (180 TB NVMe) for PostgreSQL/Oracle LUNs, FlexGroup volumes for AI training, and synchronous MetroCluster/SnapMirror replication.",
     tags: ["netapp", "ontap-9.15", "aff-a800", "ha-pair", "flexgroup", "iscsi", "prod"],
     shared: true,
     updatedAt: new Date(now - 19 * min).toISOString(),
@@ -81,7 +81,7 @@ const initialDemoServers: WorkspaceServerSummary[] = [
     nodeRole: "snapmirror-snapvault-dr",
     role: "storage-controller",
     description:
-      "NetApp FAS9000 Hybrid Flash DR & SnapVault-kluster i Uppsala DC2 (1.6 PB NLSAS + NVMe FlashPool). Tar emot XDP SnapMirror var 15:e minut från AFF A800 med SnapLock Compliance mot ransomware.",
+      "NetApp FAS9000 hybrid-flash DR and SnapVault cluster in Uppsala DC2 (1.6 PB NLSAS + NVMe FlashPool). Receives XDP SnapMirror every 15 minutes from the AFF A800, with SnapLock Compliance against ransomware.",
     tags: ["netapp", "fas9000", "snapmirror", "snapvault", "snaplock", "dr-dc2"],
     shared: true,
     updatedAt: new Date(now - 34 * min).toISOString(),
@@ -99,7 +99,7 @@ const initialDemoServers: WorkspaceServerSummary[] = [
     nodeRole: "active-iq-harvest",
     role: "monitoring",
     description:
-      "NetApp Active IQ Unified Manager 9.14 + NetApp Harvest 24.05 + Prometheus/Grafana för realtidsmätning av ONTAP IOPS, QoS-latens, WAFL NVRAM och volymtillväxt.",
+      "NetApp Active IQ Unified Manager 9.14 + NetApp Harvest 24.05 + Prometheus/Grafana for real-time metrics on ONTAP IOPS, QoS latency, WAFL NVRAM and volume growth.",
     tags: ["active-iq", "netapp-harvest", "prometheus", "grafana", "qos-monitoring"],
     shared: true,
     updatedAt: new Date(now - 52 * min).toISOString(),
@@ -119,7 +119,7 @@ const initialDemoServers: WorkspaceServerSummary[] = [
     nodeRole: "primary-admin-loadbalancer",
     role: "s3-gateway",
     description:
-      "NetApp StorageGRID 11.8 Primary Admin & High-Availability Load Balancer (S3 HTTPS :10443). Styr ILM-livscykelregler, S3 Object Lock (WORM), S3-buckets och FabricPool-kopplingen från ONTAP.",
+      "NetApp StorageGRID 11.8 primary admin node and high-availability load balancer (S3 HTTPS :10443). Manages the ILM lifecycle rules, S3 Object Lock (WORM), the S3 buckets and the FabricPool connection from ONTAP.",
     tags: ["storagegrid", "netapp-s3", "ilm", "object-lock", "load-balancer", "prod"],
     shared: true,
     updatedAt: new Date(now - 26 * min).toISOString(),
@@ -137,7 +137,7 @@ const initialDemoServers: WorkspaceServerSummary[] = [
     nodeRole: "storage-node-dc1-01",
     role: "object-storage",
     description:
-      "NetApp StorageGRID SG6060 Storage Node 01 (Stockholm DC1) — 60x 드라이브 + NVMe metadata-cache. Kör RangedDB och geo-distribuerad Erasure Coding (6+3) över Stockholm och Uppsala.",
+      "NetApp StorageGRID SG6060 storage node 01 (Stockholm DC1): 60 drives + NVMe metadata cache. Runs RangedDB and geo-distributed erasure coding (6+3) across Stockholm and Uppsala.",
     tags: ["storagegrid", "sg6060", "erasure-coding", "s3-storage-node", "dc1"],
     shared: true,
     updatedAt: new Date(now - 68 * min).toISOString(),
@@ -155,7 +155,7 @@ const initialDemoServers: WorkspaceServerSummary[] = [
     nodeRole: "storage-node-dc1-02",
     role: "object-storage",
     description:
-      "NetApp StorageGRID SG6060 Storage Node 02 (Stockholm DC1). Hanterar S3 multipart uploads för pgBackRest, Loki-loggsegment och ONTAP FabricPool cold blocks.",
+      "NetApp StorageGRID SG6060 storage node 02 (Stockholm DC1). Handles S3 multipart uploads for pgBackRest, Loki log segments and ONTAP FabricPool cold blocks.",
     tags: ["storagegrid", "sg6060", "s3-multipart", "fabricpool-target", "dc1"],
     shared: true,
     updatedAt: new Date(now - 90 * min).toISOString(),
@@ -173,7 +173,7 @@ const initialDemoServers: WorkspaceServerSummary[] = [
     nodeRole: "nvme-s3-tier-cache",
     role: "object-storage",
     description:
-      "MinIO AIStor All-NVMe S3-nod (4x 100GbE RDMA) för höghastighetsläsning av LLM-checkpoints och parquet-datasets med automatisk tiering ned till NetApp StorageGRID.",
+      "MinIO AIStor all-NVMe S3 node (4x 100GbE RDMA) for fast reads of LLM checkpoints and Parquet datasets, with automatic tiering down to NetApp StorageGRID.",
     tags: ["minio", "s3", "nvme", "100gbe", "ai-checkpoints"],
     shared: true,
     updatedAt: new Date(now - 115 * min).toISOString(),
@@ -193,7 +193,7 @@ const initialDemoServers: WorkspaceServerSummary[] = [
     nodeRole: "ceph-mon-mgr-rgw",
     role: "ceph-monitor",
     description:
-      "Ceph Reef (18.2.4) Monitor, Active Manager & RADOS Gateway (RGW). Styr 420 TB NVMe RBD-blockpool för KVM/OpenStack och Rook-Ceph CSI med CRUSH-regler per rack.",
+      "Ceph Reef (18.2.4) monitor, active manager and RADOS Gateway (RGW). Manages the 420 TB NVMe RBD block pool for KVM/OpenStack and Rook-Ceph CSI, with CRUSH rules per rack.",
     tags: ["ceph-reef", "rbd", "radosgw", "crush-map", "nvme-pool"],
     shared: true,
     updatedAt: new Date(now - 42 * min).toISOString(),
@@ -211,7 +211,7 @@ const initialDemoServers: WorkspaceServerSummary[] = [
     nodeRole: "bluestore-osd-node",
     role: "ceph-osd",
     description:
-      "Ceph BlueStore OSD-nod 01 (16x 15.36TB Gen5 NVMe, osd.0–osd.15) med dual 100GbE RoCEv2 klusternätverk och dedikerade RocksDB WAL/DB-partitioner.",
+      "Ceph BlueStore OSD node 01 (16x 15.36TB Gen5 NVMe, osd.0–osd.15) with a dual 100GbE RoCEv2 cluster network and dedicated RocksDB WAL/DB partitions.",
     tags: ["ceph-osd", "bluestore", "gen5-nvme", "rocev2", "100gbe"],
     shared: true,
     updatedAt: new Date(now - 130 * min).toISOString(),
@@ -229,7 +229,7 @@ const initialDemoServers: WorkspaceServerSummary[] = [
     nodeRole: "zfs-immutable-vault",
     role: "zfs-storage",
     description:
-      "TrueNAS Enterprise ZFS-lagringsnod (zpool: tank_backup_01, 1.4 PB RAIDZ3 + Optane SLOG & 2TB L2ARC) för immutable ZFS-snapshots, zfs send/recv och Restic/Veeam-arkiv.",
+      "TrueNAS Enterprise ZFS storage node (zpool: tank_backup_01, 1.4 PB RAIDZ3 + Optane SLOG and 2TB L2ARC) for immutable ZFS snapshots, zfs send/recv and Restic/Veeam archives.",
     tags: ["truenas", "openzfs", "raidz3", "optane-slog", "zfs-send", "backup"],
     shared: true,
     updatedAt: new Date(now - 165 * min).toISOString(),
@@ -249,7 +249,7 @@ const initialDemoServers: WorkspaceServerSummary[] = [
     nodeRole: "k8s-control-plane-trident",
     role: "k8s",
     description:
-      "Kubernetes 1.31 Control Plane med NetApp Astra Trident CSI 24.06 (namespace: trident). Dynamisk provisionering av PVC:er mot ontap-nas (NFSv4.1), ontap-san (iSCSI/NVMe-oF) och ontap-nas-flexgroup.",
+      "Kubernetes 1.31 control plane with NetApp Astra Trident CSI 24.06 (namespace: trident). Provisions PVCs dynamically on ontap-nas (NFSv4.1), ontap-san (iSCSI/NVMe-oF) and ontap-nas-flexgroup.",
     tags: ["k8s", "astra-trident", "csi-driver", "ontap-nas", "ontap-san", "volume-snapshots"],
     shared: true,
     updatedAt: new Date(now - 22 * min).toISOString(),
@@ -267,7 +267,7 @@ const initialDemoServers: WorkspaceServerSummary[] = [
     nodeRole: "nvmeof-nfsv4-worker",
     role: "k8s",
     description:
-      "Kubernetes GPU & High-IOPS Worker-nod. Monterar NetApp FlexGroup-volymer med NFSv4.1 nconnect=8, pNFS/session trunking och DM-Multipath iSCSI/NVMe-oF.",
+      "Kubernetes GPU and high-IOPS worker node. Mounts NetApp FlexGroup volumes with NFSv4.1 nconnect=8, pNFS/session trunking and DM-Multipath iSCSI/NVMe-oF.",
     tags: ["k8s-worker", "nconnect", "dm-multipath", "iscsi-initiator", "nvme-tcp"],
     shared: true,
     updatedAt: new Date(now - 75 * min).toISOString(),
@@ -287,7 +287,7 @@ const initialDemoServers: WorkspaceServerSummary[] = [
     nodeRole: "storage-jump-host",
     role: "bastion",
     description:
-      "Dedikerad Storage Engineering Jump-host med NetApp ONTAP Ansible-playbooks, tridentctl, s3cmd, aws-cli, rclone, fio-benchmarks och Brocade SAN-zoning-skript.",
+      "Dedicated jump host for storage engineering, with NetApp ONTAP Ansible playbooks, tridentctl, s3cmd, aws-cli, rclone, fio benchmarks and Brocade SAN zoning scripts.",
     tags: ["bastion", "tridentctl", "fio", "ansible-ontap", "s3cmd", "brocade-san"],
     shared: true,
     updatedAt: new Date(now - 210 * min).toISOString(),
@@ -354,7 +354,7 @@ const initialDemoActivity: WorkspaceActivityEvent[] = [
     actor: "erik@acme.se",
     kind: "command",
     summary:
-      "Utökade ONTAP FlexVol 'vol_k8s_pvc_prod' i svm-prod-nfs från 12TB till 16TB och slog på FabricPool auto-tiering (snapshot-only, min-cooling-days 14)",
+      "Grew the ONTAP FlexVol 'vol_k8s_pvc_prod' in svm-prod-nfs from 12TB to 16TB and turned on FabricPool tiering (snapshot-only, min-cooling-days 14)",
     detail:
       "volume modify -vserver svm-prod-nfs -volume vol_k8s_pvc_prod -size 16TB -autosize-mode grow_shrink -max-autosize 24TB -tiering-policy snapshot-only -tiering-minimum-cooling-days 14",
     at: now - 8 * min,
@@ -366,9 +366,9 @@ const initialDemoActivity: WorkspaceActivityEvent[] = [
     actor: "sara@acme.se (AI)",
     kind: "ai-action",
     summary:
-      "AI-diagnostik identifierade en noisy-neighbor på 'vol_analytics_scratch' (48 000 IOPS lästopp) och satte QoS-policy 'pg-batch-ceiling' (max 15 000 IOPS) så att PostgreSQL-latensen på aggr2_nvme_db sjönk från 4.8 ms till 0.35 ms",
+      "AI diagnostics found a noisy neighbor, 'vol_ai_scratch_03' (48 200 IOPS read peak), and set the QoS policy 'pg-batch-ceiling' (max 15 000 IOPS); latency on vol_pg_prod_db01 in aggr2_nvme_db fell from 1.88 ms to 0.32 ms",
     detail:
-      "qos statistics volume latency show -iterations 3 && volume modify -vserver svm-prod-iscsi -volume vol_analytics_scratch -qos-policy-group pg-batch-ceiling",
+      "qos statistics volume latency show -iterations 3 && volume modify -vserver svm-prod-nfs -volume vol_ai_scratch_03 -qos-policy-group pg-batch-ceiling",
     at: now - 19 * min,
   },
   {
@@ -378,7 +378,7 @@ const initialDemoActivity: WorkspaceActivityEvent[] = [
     actor: "erik@acme.se",
     kind: "deploy",
     summary:
-      "Uppdaterade NetApp Astra Trident backend 'tbc-ontap-nas-flexgroup' och rullade ut StorageClass 'ontap-flexgroup-ai' med mountOptions: nfsvers=4.1,nconnect=8,noatime",
+      "Updated the NetApp Astra Trident backend 'tbc-ontap-nas-flexgroup-ai' and rolled out the StorageClass 'ontap-flexgroup-ai' with mountOptions: nfsvers=4.1,nconnect=8,noatime",
     detail:
       "kubectl apply -f /etc/trident/storageclass-ontap-flexgroup-ai.yaml && tridentctl get backend -n trident",
     at: now - 22 * min,
@@ -390,7 +390,7 @@ const initialDemoActivity: WorkspaceActivityEvent[] = [
     actor: "sara@acme.se",
     kind: "config-edit",
     summary:
-      "Uppdaterade StorageGRID ILM-policy 'ILM-Prod-FabricPool-EC63' för Erasure Coding 6+3 över DC1/DC2 och verifierade S3 Object Lock-compliance på bucket 'ontap-fabricpool-tier'",
+      "Updated the StorageGRID ILM policy 'ILM-Prod-FabricPool-EC63' for erasure coding 6+3 across DC1/DC2 and verified S3 Object Lock compliance on the bucket 'ontap-fabricpool-tier'",
     detail:
       "storagegrid-cli ilm policy validate --policy ILM-Prod-FabricPool-EC63 && aws --endpoint-url https://localhost:10443 s3api get-object-lock-configuration --bucket ontap-fabricpool-tier",
     at: now - 26 * min,
@@ -402,7 +402,7 @@ const initialDemoActivity: WorkspaceActivityEvent[] = [
     actor: "erik@acme.se",
     kind: "service",
     summary:
-      "Verifierade SnapMirror XDP-replikering till Uppsala DC2 (netapp-fas9000-dr-01): alla 28 relationer är 'Snapmirrored' med lag-time < 4 minuter och SnapLock WORM-retention aktiv",
+      "Verified SnapMirror XDP replication to Uppsala DC2 (netapp-fas9000-dr-01): all 28 relationships are 'Snapmirrored' with lag-time under 4 minutes and SnapLock WORM retention active",
     detail:
       "snapmirror show -fields state,status,lag-time,healthy -destination-vserver svm-dr-uppsala",
     at: now - 34 * min,
@@ -414,7 +414,7 @@ const initialDemoActivity: WorkspaceActivityEvent[] = [
     actor: "linnea@acme.se",
     kind: "command",
     summary:
-      "Åtgärdade Ceph HEALTH_WARN (2 PGs not deep-scrubbed in time) på pool 'rbd-nvme-prod' och justerade osd_max_backfills=2 under kontorstid",
+      "Fixed the Ceph HEALTH_WARN (2 PGs not deep-scrubbed in time) on the pool 'rbd-nvme-prod' and set osd_max_backfills=2 for office hours",
     detail:
       "ceph status && ceph config set osd osd_max_backfills 2 && ceph pg deep-scrub 4.1a",
     at: now - 42 * min,
@@ -426,7 +426,7 @@ const initialDemoActivity: WorkspaceActivityEvent[] = [
     actor: "jacob",
     kind: "config-edit",
     summary:
-      "Uppdaterade /etc/multipath.conf för NetApp LUN ALUA (path_grouping_policy group_by_prio, rr_min_io_rq 1) och laddade om multipathd",
+      "Updated /etc/multipath.conf for the NetApp LUNs (rr_min_io_rq 1) and reloaded multipathd",
     detail:
       "sudo vim /etc/multipath.conf && sudo systemctl reload multipathd && sudo multipath -ll",
     at: now - 75 * min,
@@ -438,7 +438,7 @@ const initialDemoActivity: WorkspaceActivityEvent[] = [
     actor: "jacob (AI)",
     kind: "ai-action",
     summary:
-      "Kontrollerade ZFS pool health på 'tank_backup_01' (ONLINE, 0 errors, 71% cap, compressionratio 2.41x LZ4) och rensade utgångna temporära snapshots äldre än 90 dagar",
+      "Checked ZFS pool health on 'tank_backup_01' (ONLINE, 0 errors, 71% cap, compression ratio 2.41x LZ4) and removed expired temporary snapshots older than 90 days",
     detail:
       "zpool status tank_backup_01 && zfs list -t volume,filesystem -o name,used,avail,compressratio,mountpoint",
     at: now - 165 * min,
@@ -453,12 +453,12 @@ const initialDemoMemories: MemoryEntry[] = [
     tier: "core",
     updatedCount: 5,
     scope: "workspace",
-    title: "NetApp AFF A800 (NetApp-ONTAP-Prod-SE) — Aggregat, SVM:er & LIF-topologi",
+    title: "NetApp AFF A800 (NetApp-ONTAP-Prod-SE) — aggregates, SVMs and LIF topology",
     text: [
-      "Kluster: `NetApp-ONTAP-Prod-SE` (ONTAP 9.15.1) i Stockholm DC1 består av HA-paret `netapp-aff-a800-01a` (10.30.10.11) och `netapp-aff-a800-01b` (10.30.10.12).",
-      "- `aggr1_nvme_prod` (Nod A, 220 TB NVMe RAID-TEC): Primär lagring för `svm-prod-nfs` (Kubernetes Astra Trident NFSv4.1 PVC:er och delade filsystem).",
-      "- `aggr2_nvme_db` (Nod B, 180 TB NVMe RAID-TEC): Låglatens-lagring (< 0.5 ms) för `svm-prod-iscsi` (PostgreSQL/Oracle iSCSI & NVMe/TCP namespaces) samt `svm-prod-s3`.",
-      "- Kalla snapshots och inaktiva block flyttas automatiskt via **NetApp FabricPool** till `NetApp-StorageGRID-S3` (`ontap-fabricpool-tier`) efter 14 dagar.",
+      "The cluster `NetApp-ONTAP-Prod-SE` (ONTAP 9.15.1) in Stockholm DC1 is the HA pair `netapp-aff-a800-01a` (10.30.10.11) and `netapp-aff-a800-01b` (10.30.10.12).",
+      "- `aggr1_nvme_prod` (node A, 220 TB NVMe RAID-TEC): primary storage for `svm-prod-nfs` (Kubernetes Astra Trident NFSv4.1 PVCs and shared file systems).",
+      "- `aggr2_nvme_db` (node B, 180 TB NVMe RAID-TEC): low-latency storage (< 0.5 ms) for `svm-prod-iscsi` (PostgreSQL/Oracle iSCSI and NVMe/TCP namespaces) and `svm-prod-s3`.",
+      "- Cold snapshots and inactive blocks move automatically through **NetApp FabricPool** to `NetApp-StorageGRID-S3` (`ontap-fabricpool-tier`) after 14 days.",
     ].join("\n"),
     author: "erik@acme.se",
     updatedAt: now - 8 * min,
@@ -469,11 +469,11 @@ const initialDemoMemories: MemoryEntry[] = [
     tier: "core",
     updatedCount: 3,
     scope: "workspace",
-    title: "NetApp SnapMirror XDP & SnapLock Ransomware-skydd (Uppsala DC2)",
+    title: "NetApp SnapMirror XDP and SnapLock ransomware protection (Uppsala DC2)",
     text: [
-      "Alla produktionsvolymer på `netapp-aff-a800-01a/01b` replikeras med **SnapMirror XDP** var 15:e minut till `netapp-fas9000-dr-01` (10.30.20.11, SVM `svm-dr-uppsala`).",
-      "- Snapshot-policy `pol-prod-ransomware-safe` tar timvisa snapshots med **Tamperproof Snapshot Locking** i 14 dagar och dagliga SnapVault-kopior i 90 dagar.",
-      "- Vid larm om hög `lag-time` (> 30 min): kontrollera intercluster-LIF:arna `ic-dc1-01a` / `ic-dc2-01a` på VLAN 3090 (MTU 9000 Jumbo Frames).",
+      "All production volumes on `netapp-aff-a800-01a/01b` replicate with **SnapMirror XDP** every 15 minutes to `netapp-fas9000-dr-01` (10.30.20.11, SVM `svm-dr-uppsala`).",
+      "- The snapshot policy `pol-prod-ransomware-safe` takes hourly snapshots with **Tamperproof Snapshot Locking** kept for 14 days, and daily SnapVault copies kept for 90 days.",
+      "- On an alert for high `lag-time` (> 30 min): check the intercluster LIFs `ic-dc1-01a` / `ic-dc2-01a` on VLAN 3090 (MTU 9000 jumbo frames).",
     ].join("\n"),
     author: "erik@acme.se",
     updatedAt: now - 34 * min,
@@ -484,11 +484,11 @@ const initialDemoMemories: MemoryEntry[] = [
     tier: "archival",
     updatedCount: 2,
     scope: "workspace",
-    title: "NetApp StorageGRID 11.8 & MinIO AIStor — S3 Objektlagring & ILM",
+    title: "NetApp StorageGRID 11.8 and MinIO AIStor — S3 object storage and ILM",
     text: [
-      "Objektlagringsklustret `NetApp-StorageGRID-S3` styrs via `sg-admin-primary-01` (10.30.30.10, S3-endpoint `https://s3-dc1.storage.acme.se:10443`) med lagringsnoderna `sg-sn-nvme-01` och `sg-sn-nvme-02`.",
-      "- ILM-policyn `ILM-Prod-FabricPool-EC63` använder Erasure Coding 6+3 över DC1/DC2.",
-      "- För AI/ML-träningsjobb används `minio-aistor-edge-01` (10.30.30.40:9000, bucket `llm-checkpoints-prod`) som NVMe-cache med automatisk tiering till StorageGRID.",
+      "The object storage cluster `NetApp-StorageGRID-S3` is managed through `sg-admin-primary-01` (10.30.30.10, S3 endpoint `https://s3-dc1.storage.acme.se:10443`), with the storage nodes `sg-sn-nvme-01` and `sg-sn-nvme-02`.",
+      "- The ILM policy `ILM-Prod-FabricPool-EC63` uses erasure coding 6+3 across DC1/DC2.",
+      "- AI/ML training jobs use `minio-aistor-edge-01` (10.30.30.40:9000, bucket `llm-checkpoints-prod`) as an NVMe cache with automatic tiering to StorageGRID.",
     ].join("\n"),
     author: "sara@acme.se",
     updatedAt: now - 26 * min,
@@ -499,12 +499,12 @@ const initialDemoMemories: MemoryEntry[] = [
     tier: "core",
     updatedCount: 4,
     scope: "workspace",
-    title: "Kubernetes Astra Trident CSI 24.06 — StorageClasses & Multipath",
+    title: "Kubernetes Astra Trident CSI 24.06 — StorageClasses and multipath",
     text: [
-      "Kubernetes-klustret `K8s-Trident-CSI-Prod` (`k8s-storage-cp-01`, `k8s-gpu-io-worker-01`) använder NetApp Astra Trident i namespace `trident`:",
-      "- `ontap-nas-premium`: `ontap-nas`-drivrutin mot `svm-prod-nfs` (NFSv4.1, `nconnect=8`).",
-      "- `ontap-flexgroup-ai`: `ontap-nas-flexgroup` för parallell högkapacitets-I/O från GPU-workers.",
-      "- `ontap-san-nvme`: `ontap-san`-drivrutin med iSCSI / NVMe-oF och ALUA `group_by_prio` i `/etc/multipath.conf`.",
+      "The Kubernetes cluster `K8s-Trident-CSI-Prod` (`k8s-storage-cp-01`, `k8s-gpu-io-worker-01`) uses NetApp Astra Trident in the namespace `trident`:",
+      "- `ontap-nas-premium`: the `ontap-nas` driver on `svm-prod-nfs` (NFSv4.1, `nconnect=8`).",
+      "- `ontap-flexgroup-ai`: `ontap-nas-flexgroup` for parallel high-capacity I/O from the GPU workers.",
+      "- `ontap-san-nvme`: the `ontap-san` driver with iSCSI / NVMe-oF and ALUA `group_by_prio` in `/etc/multipath.conf`.",
     ].join("\n"),
     author: "jacob",
     updatedAt: now - 22 * min,
@@ -515,10 +515,10 @@ const initialDemoMemories: MemoryEntry[] = [
     tier: "episodic",
     updatedCount: 2,
     scope: "workspace",
-    title: "Ceph Reef NVMe-pool & TrueNAS ZFS Immutable Backup",
+    title: "Ceph Reef NVMe pool and TrueNAS ZFS immutable backup",
     text: [
-      "Klustret `Ceph-NVMe-Block-Pool` (`ceph-mon-mgr-01` 10.30.40.10, `ceph-osd-nvme-01` 10.30.40.21) levererar RBD-blocklagring (`rbd-nvme-prod`, replika 3x, min_size 2) över 100GbE RoCEv2.",
-      "`truenas-zfs-vault-01` (10.30.40.50) håller ZFS-poolen `tank_backup_01` (1.4 PB RAIDZ3 + Optane SLOG) för nattliga ZFS-replikeringar och Restic/Veeam-arkiv.",
+      "The cluster `Ceph-NVMe-Block-Pool` (`ceph-mon-mgr-01` 10.30.40.10, `ceph-osd-nvme-01` 10.30.40.21) provides RBD block storage (`rbd-nvme-prod`, 3 replicas, min_size 2) over 100GbE RoCEv2.",
+      "`truenas-zfs-vault-01` (10.30.40.50) holds the ZFS pool `tank_backup_01` (1.4 PB RAIDZ3 + Optane SLOG) for nightly ZFS replication and Restic/Veeam archives.",
     ].join("\n"),
     author: "linnea@acme.se",
     updatedAt: now - 42 * min,
@@ -529,15 +529,15 @@ const initialDemoMemories: MemoryEntry[] = [
     id: "demo-skill-ontap-latency",
     kind: "skill",
     scope: "workspace",
-    title: "Runbook: Felsök hög I/O-latens i NetApp ONTAP (QoS, WAFL & NVRAM)",
+    title: "Runbook: troubleshoot high I/O latency in NetApp ONTAP (QoS, WAFL and NVRAM)",
     text: [
-      "1. Identifiera vilken komponent i ONTAP som orsakar latensen (Network, Cluster-Interconnect, Disk, WAFL eller QoS ceiling):",
+      "1. Find which ONTAP component causes the latency (Network, Cluster-Interconnect, Disk, WAFL or QoS ceiling):",
       "   `qos statistics volume latency show -iterations 5 -rows 15`",
-      "2. Hitta 'noisy neighbor'-volymer med högst IOPS/throughput:",
+      "2. Find the 'noisy neighbor' volumes with the highest IOPS/throughput:",
       "   `qos statistics volume performance show -iterations 5`",
-      "3. Kontrollera aggregatets diskutnyttjande och CPU/WAFL-belastning per HA-nod:",
+      "3. Check the aggregate's disk utilization and the CPU/WAFL load per HA node:",
       "   `system node run -node netapp-aff-a800-01* -command sysstat -x 1`",
-      "4. Begränsa en stökig batch-/scratch-volym direkt med en QoS-policy:",
+      "4. Throttle a noisy batch or scratch volume right away with a QoS policy:",
       "   `volume modify -vserver <svm> -volume <vol> -qos-policy-group pg-batch-ceiling`",
     ].join("\n"),
     author: "sara@acme.se",
@@ -547,15 +547,15 @@ const initialDemoMemories: MemoryEntry[] = [
     id: "demo-skill-snapmirror-lag",
     kind: "skill",
     scope: "workspace",
-    title: "Runbook: NetApp SnapMirror Lag / Broken-Off Resync & DR-verifiering",
+    title: "Runbook: NetApp SnapMirror lag, Broken-off resync and DR verification",
     text: [
-      "1. Lista alla SnapMirror-relationer som har `lag-time > 30m` eller `healthy: false`:",
+      "1. List all SnapMirror relationships with `lag-time > 30m` or `healthy: false`:",
       "   `snapmirror show -healthy false -fields source-path,destination-path,state,status,lag-time,last-transfer-error`",
-      "2. Verifiera att Intercluster-LIF:ar kan nå varandra med MTU 9000:",
-      "   `cluster peer ping -aca true` och `network interface show -role intercluster`",
-      "3. Trigga en manuell inkrementell uppdatering eller resync:",
+      "2. Verify that the intercluster LIFs reach each other with MTU 9000:",
+      "   `cluster peer ping -aca true` and `network interface show -role intercluster`",
+      "3. Start a manual incremental update or a resync:",
       "   `snapmirror update -destination-path svm-dr-uppsala:<vol_dest>`",
-      "   (Om `Broken-off`: `snapmirror resync -destination-path svm-dr-uppsala:<vol_dest>`)",
+      "   (If `Broken-off`: `snapmirror resync -destination-path svm-dr-uppsala:<vol_dest>`)",
     ].join("\n"),
     author: "erik@acme.se",
     updatedAt: now - 34 * min,
@@ -564,16 +564,16 @@ const initialDemoMemories: MemoryEntry[] = [
     id: "demo-skill-trident-pvc",
     kind: "skill",
     scope: "workspace",
-    title: "Runbook: Felsök Kubernetes Astra Trident PVC i Pending / AttachError",
+    title: "Runbook: troubleshoot a Kubernetes Astra Trident PVC in Pending / AttachError",
     text: [
-      "1. Inspektera PVC-events och Trident-controllerns loggar på `k8s-storage-cp-01`:",
-      "   `kubectl describe pvc <pvc-namn> -n <ns>`",
+      "1. Inspect the PVC events and the Trident controller's logs on `k8s-storage-cp-01`:",
+      "   `kubectl describe pvc <pvc-name> -n <ns>`",
       "   `tridentctl logs -n trident -l trident-operator`",
-      "2. Kontrollera att alla ONTAP-backends i Trident har status `online`:",
+      "2. Check that all ONTAP backends in Trident are `online`:",
       "   `tridentctl get backend -n trident`",
-      "3. Vid iSCSI `Multi-Attach` eller `AttachError` på `k8s-gpu-io-worker-01`, verifiera `iscsid` och multipath:",
+      "3. On an iSCSI `Multi-Attach` or `AttachError` on `k8s-gpu-io-worker-01`, check `iscsid` and multipath:",
       "   `sudo iscsiadm -m session -P 3 && sudo multipath -ll`",
-      "4. Vid NFSv4.1 mount-timeout, verifiera export-policyn i ONTAP:",
+      "4. On an NFSv4.1 mount timeout, check the export policy in ONTAP:",
       "   `vserver export-policy rule show -vserver svm-prod-nfs -policyname trid_export_prod`",
     ].join("\n"),
     author: "erik@acme.se",
@@ -583,13 +583,13 @@ const initialDemoMemories: MemoryEntry[] = [
     id: "demo-skill-storagegrid-ilm",
     kind: "skill",
     scope: "workspace",
-    title: "Runbook: NetApp StorageGRID S3 Hälsokontroll, ILM-kö & FabricPool-tiering",
+    title: "Runbook: NetApp StorageGRID S3 health check, ILM queue and FabricPool tiering",
     text: [
-      "1. På `sg-admin-primary-01`, kontrollera nodstatus och aktiva larm i StorageGRID:",
-      "   `storagegrid-status` och `curl -sk https://localhost:10443/health`",
-      "2. Kontrollera från ONTAP (`netapp-aff-a800-01a`) att FabricPool object-store-target är `available`:",
+      "1. On `sg-admin-primary-01`, check node status and active alerts in StorageGRID:",
+      "   `storagegrid-status` and `curl -sk https://localhost:10443/health`",
+      "2. From ONTAP (`netapp-aff-a800-01a`), check that the FabricPool object store target is `available`:",
       "   `storage aggregate object-store show -fields object-store-name,availability,unavailable-reason`",
-      "3. Testa S3-svarstid och lista buckets via `san-bastion-jump-01`:",
+      "3. Test the S3 response time and list the buckets from `san-bastion-jump-01`:",
       "   `aws --endpoint-url https://s3-dc1.storage.acme.se:10443 s3 ls`",
     ].join("\n"),
     author: "sara@acme.se",
@@ -599,15 +599,15 @@ const initialDemoMemories: MemoryEntry[] = [
     id: "demo-skill-ceph-health",
     kind: "skill",
     scope: "workspace",
-    title: "Runbook: Ceph HEALTH_WARN (Slow Ops, Nearfull OSD & PG Scrubbing)",
+    title: "Runbook: Ceph HEALTH_WARN (slow ops, nearfull OSD and PG scrubbing)",
     text: [
-      "1. Kontrollera klusterhälsa och detaljerade varningar på `ceph-mon-mgr-01`:",
+      "1. Check cluster health and the detailed warnings on `ceph-mon-mgr-01`:",
       "   `ceph status && ceph health detail`",
-      "2. Lista OSD-utnyttjande och identifiera obalanserade NVMe-diskar:",
-      "   `ceph osd df tree` och `ceph df detail`",
-      "3. Vid `SLOW_OPS`: identifiera blockerade OSD:er och kontrollera NVMe-latens:",
+      "2. List OSD utilization and find unbalanced NVMe drives:",
+      "   `ceph osd df tree` and `ceph df detail`",
+      "3. On `SLOW_OPS`: find the blocked OSDs and check NVMe latency:",
       "   `ceph daemon osd.<id> dump_historic_slow_ops`",
-      "4. Om rebalansering påverkar produktions-I/O, dämpa backfill-takten tillfälligt:",
+      "4. If rebalancing affects production I/O, slow the backfill rate for the time being:",
       "   `ceph config set osd osd_max_backfills 1 && ceph config set osd osd_recovery_max_active 1`",
     ].join("\n"),
     author: "linnea@acme.se",
@@ -617,15 +617,15 @@ const initialDemoMemories: MemoryEntry[] = [
     id: "builtin-skill-linux-use-triage",
     kind: "skill",
     scope: "workspace",
-    title: "Runbook: Linux SRE Incident & Performance Triage (USE Method)",
+    title: "Runbook: Linux SRE incident and performance triage (USE method)",
     text: [
-      "1. Snabb 60-sekunders USE-översikt (Utilization, Saturation, Errors):",
+      "1. A quick 60-second USE overview (Utilization, Saturation, Errors):",
       "   `uptime && dmesg -T | tail -n 20 && vmstat 1 3 && iostat -xz 1 2`",
-      "2. Identifiera systemd-tjänster som kraschat eller startat om:",
+      "2. Find systemd services that crashed or restarted:",
       "   `systemctl --failed && journalctl -p err..alert -n 40 --no-pager`",
-      "3. Kontrollera öppna lyssnande portar och TCP-köer:",
+      "3. Check listening ports and TCP queues:",
       "   `ss -tulnp && ss -s`",
-      "4. Kontrollera diskutrymme, inodes och största loggkataloger:",
+      "4. Check disk space, inodes and the largest log directories:",
       "   `df -hT && df -i && sudo du -xhd1 /var/log | sort -hr | head -n 10`",
     ].join("\n"),
     author: "sshs3-stdlib",
@@ -637,11 +637,11 @@ const initialDemoMemories: MemoryEntry[] = [
     tier: "core",
     updatedCount: 1,
     scope: "workspace",
-    title: "SRE Säkerhetsprinciper: Read-Only först, Backup före ändring & Verifiering",
+    title: "SRE safety principles: read-only first, back up before a change, verify after",
     text: [
-      "- Kör alltid icke-destruktiva diagnostikkommandon (🟢 Safe) för att bekräfta nuläget innan du föreslår tillståndsändrande kommandon (🟡 Modify).",
-      "- Ta alltid backup av konfigurationsfiler (`cp -a fil fil.bak.$(date +%F)`) innan redigering och verifiera syntax (`nginx -t`, `sshd -t`, `multipath -t`) före reload.",
-      "- Verifiera alltid tjänste- och klusterhälsa efter varje utförd ändring.",
+      "- Always run non-destructive diagnostic commands (read-only) to confirm the current state before you propose commands that change state.",
+      "- Always back up a configuration file (`cp -a file file.bak.$(date +%F)`) before you edit it, and check the syntax (`nginx -t`, `sshd -t`, `multipath -t`) before a reload.",
+      "- Always check service and cluster health after every change.",
     ].join("\n"),
     author: "sshs3-stdlib",
     updatedAt: now - 60 * min,
@@ -651,9 +651,9 @@ const initialDemoMemories: MemoryEntry[] = [
 const initialDemoSchedules: AgentSchedule[] = [
   {
     id: "demo-sched-ontap-health",
-    title: "NetApp ONTAP Aggregat, Volymkapacitet & QoS-latens (var 30:e min)",
+    title: "NetApp ONTAP aggregates, volume capacity and QoS latency (every 30 min)",
     prompt:
-      "Kontrollera storage failover status, aggregat > 80% fyllnadsgrad, volymer nära kvotgräns samt om någon SVM-volym har QoS-latens över 2 ms på @netapp-aff-a800-01a och @netapp-aff-a800-01b.",
+      "Check storage failover status, aggregates more than 80% full, volumes close to their quota, and whether any SVM volume has QoS latency above 2 ms on @netapp-aff-a800-01a and @netapp-aff-a800-01b.",
     profileId: "demo-netapp-aff-a800-01a",
     shell: "bash",
     intervalMinutes: 30,
@@ -668,9 +668,9 @@ const initialDemoSchedules: AgentSchedule[] = [
   },
   {
     id: "demo-sched-snapmirror-sla",
-    title: "SnapMirror XDP RPO & SnapLock-verifiering (varje timme)",
+    title: "SnapMirror XDP RPO and SnapLock verification (every hour)",
     prompt:
-      "Verifiera på @netapp-fas9000-dr-01 att alla SnapMirror-relationer har healthy=true och lag-time under 30 minuter. Rapportera avvikelser i teamets aktivitetslogg.",
+      "On @netapp-fas9000-dr-01, verify that all SnapMirror relationships have healthy=true and lag-time under 30 minutes. Report deviations in the team's activity log.",
     profileId: "demo-netapp-fas9000-dr-01",
     shell: "bash",
     intervalMinutes: 60,
@@ -685,9 +685,9 @@ const initialDemoSchedules: AgentSchedule[] = [
   },
   {
     id: "demo-sched-storagegrid-ceph",
-    title: "StorageGRID S3 FabricPool & Ceph NVMe Pool Health (var 2:a timme)",
+    title: "StorageGRID S3 FabricPool and Ceph NVMe pool health (every 2 hours)",
     prompt:
-      "Kontrollera S3-endpointstatus och ILM-köer på @sg-admin-primary-01 samt `ceph health detail` och `ceph df` på @ceph-mon-mgr-01.",
+      "Check S3 endpoint status and the ILM queues on @sg-admin-primary-01, and `ceph health detail` and `ceph df` on @ceph-mon-mgr-01.",
     profileId: "demo-ceph-mon-mgr-01",
     shell: "bash",
     intervalMinutes: 120,
@@ -705,70 +705,70 @@ const initialDemoSchedules: AgentSchedule[] = [
 const initialDemoSnippets: Snippet[] = [
   {
     id: "demo-snip-ontap-latency",
-    name: "ONTAP: Top Volume Latency & IOPS (QoS)",
+    name: "ONTAP: top volume latency (QoS)",
     command: "qos statistics volume latency show -iterations 5 -rows 15",
   },
   {
     id: "demo-snip-ontap-aggr-vol",
-    name: "ONTAP: Aggregate & FlexVol Capacity (>75%)",
+    name: "ONTAP: aggregate and FlexVol capacity (>75%)",
     command:
       "storage aggregate show -fields size,usedsize,percent-used,state && volume show -percent-used >75 -fields vserver,volume,size,avail,percent-used,tiering-policy",
   },
   {
     id: "demo-snip-ontap-snapmirror",
-    name: "ONTAP: SnapMirror Health & Lag-Time",
+    name: "ONTAP: SnapMirror health and lag-time",
     command:
       "snapmirror show -fields source-path,destination-path,state,status,healthy,lag-time",
   },
   {
     id: "demo-snip-trident-status",
-    name: "K8s Trident CSI: Backends, StorageClasses & PVCs",
+    name: "K8s Trident CSI: backends, StorageClasses and PVCs",
     command:
       "tridentctl get backend -n trident && kubectl get sc,pvc -A -o wide",
   },
   {
     id: "demo-snip-ceph-health",
-    name: "Ceph: Cluster Status, OSD Utilization & Pool DF",
+    name: "Ceph: cluster status, OSD utilization and pool usage",
     command: "ceph -s && ceph osd df tree && ceph df detail",
   },
   {
     id: "demo-snip-zfs-status",
-    name: "TrueNAS ZFS: Pool Health, ARC Stats & Snapshots",
+    name: "TrueNAS ZFS: pool health and datasets",
     command:
       "zpool status -v && zfs list -o name,used,avail,refer,compressratio,mountpoint",
   },
   {
     id: "builtin-snip-linux-use-triage",
-    name: "Linux SRE: 60s USE Performance Triage (CPU/Mem/IO)",
+    name: "Linux SRE: 60-second USE performance triage (CPU/memory/IO)",
     command:
       "uptime && free -h && vmstat 1 3 && iostat -xz 1 2 && dmesg -T | tail -n 15",
   },
   {
     id: "builtin-snip-systemd-failed",
-    name: "Linux SRE: Failed Systemd Services & Recent Critical Logs",
+    name: "Linux SRE: failed systemd services and recent critical logs",
     command:
       "systemctl --failed --no-pager && journalctl -p err..alert -n 30 --no-pager",
   },
   {
     id: "builtin-snip-net-ports",
-    name: "Nätverk & Säkerhet: Lyssnande Portar & Aktiva SSH/TCP-sessioner",
+    name: "Network and security: listening ports and established TCP sessions",
     command: "ss -tulnp && ss -tan state established | head -n 30",
   },
   {
     id: "builtin-snip-disk-inodes",
-    name: "Lagring: Diskutrymme, Inodes & Topp 10 Största Kataloger i /var",
+    name: "Storage: disk space, inodes and the 10 largest directories in /var",
     command:
       "df -hT -x tmpfs -x devtmpfs && df -i -x tmpfs && sudo du -xhd1 /var | sort -hr | head -n 10",
   },
   {
     id: "builtin-snip-k8s-events",
-    name: "Kubernetes: Pods Not-Ready & Senaste Warning Events",
+    name: "Kubernetes: pods not Running and the latest events",
     command:
       "kubectl get pods -A --field-selector=status.phase!=Running,status.phase!=Succeeded && kubectl get events -A --sort-by='.lastTimestamp' | tail -n 25",
   },
   {
     id: "builtin-snip-docker-health",
-    name: "Containers: Docker / Containerd Status & Resursförbrukning",
+    name: "Containers: Docker status and resource usage",
     command:
       "docker ps --format 'table {{.Names}}\\t{{.Status}}\\t{{.Ports}}' && docker stats --no-stream",
   },
@@ -947,14 +947,15 @@ const initialDemoAgents: MissionAgent[] = [
     id: "demo-agent-ontap-architect",
     name: "NetApp ONTAP Storage Architect",
     role: "ONTAP 9.15 All-Flash SAN/NAS, QoS & SnapMirror Specialist",
-    icon: "🗄️",
+    // The file cabinet emoji as an escape: its UTF-8 bytes match a byte-wise search for Swedish letters.
+    icon: "\u{1F5C4}\uFE0F",
     mission:
-      "Övervaka och optimera NetApp AFF A800 & FAS9000: analysera WAFL/NVRAM-latens, hantera FlexVol/FlexGroup, sätt QoS-gränser mot noisy neighbors och verifiera SnapMirror XDP & SnapLock-replikering.",
+      "Monitor and tune the NetApp AFF A800 and FAS9000: analyze WAFL/NVRAM latency, manage FlexVol/FlexGroup volumes, set QoS limits against noisy neighbors, and verify SnapMirror XDP and SnapLock replication.",
     systemPrompt: [
-      "Du är en senior NetApp ONTAP 9.15 Storage Architect för klustret NetApp-ONTAP-Prod-SE.",
-      "- Prioritera alltid icke-destruktiva ONTAP CLI-kommandon (`qos statistics volume latency show`, `storage aggregate show`, `volume show`, `snapmirror show`).",
-      "- Vid latens > 1.5 ms på `aggr2_nvme_db`, identifiera noisy neighbors och föreslå `volume modify -qos-policy-group pg-batch-ceiling`.",
-      "- Kontrollera alltid KB-dokumentet 'NetApp ONTAP 9.15 CLI & QoS Reference' innan du föreslår ändringar i produktions-SVM:er.",
+      "You are a senior NetApp ONTAP 9.15 storage architect for the cluster NetApp-ONTAP-Prod-SE.",
+      "- Start with non-destructive ONTAP CLI commands (`qos statistics volume latency show`, `storage aggregate show`, `volume show`, `snapmirror show`).",
+      "- When latency on `aggr2_nvme_db` is above 1.5 ms, find the noisy neighbors and propose `volume modify -qos-policy-group pg-batch-ceiling`.",
+      "- Read the knowledge base document 'NetApp ONTAP QoS, 9.15 CLI & FabricPool Reference' before you propose changes to a production SVM.",
     ].join("\n"),
     targetCluster: "NetApp-ONTAP-Prod-SE",
     defaultMode: "assisted",
@@ -970,11 +971,11 @@ const initialDemoAgents: MissionAgent[] = [
     role: "NetApp StorageGRID 11.8, FabricPool & MinIO AIStor Engineer",
     icon: "🪣",
     mission:
-      "Säkerställ S3-tillgänglighet, Erasure Coding 6+3 ILM-komplians, S3 Object Lock (WORM) och optimal FabricPool-tiering mellan ONTAP och StorageGRID.",
+      "Keep S3 available, keep the erasure coding 6+3 ILM policy and S3 Object Lock (WORM) compliant, and keep FabricPool tiering between ONTAP and StorageGRID healthy.",
     systemPrompt: [
-      "Du ansvarar för NetApp StorageGRID 11.8 (`NetApp-StorageGRID-S3`) och MinIO AIStor NVMe-cachen.",
-      "- Verifiera S3-slutpunkter, multipart uploads, ILM-köer och FabricPool object-store availability.",
-      "- Använd `sshs3_storage_ops` för att inspektera buckets och jämföra konfigurationer mellan noder.",
+      "You are responsible for NetApp StorageGRID 11.8 (`NetApp-StorageGRID-S3`) and the MinIO AIStor NVMe cache.",
+      "- Check the S3 endpoints, multipart uploads, the ILM queues and the availability of the FabricPool object store.",
+      "- Use `sshs3_storage_ops` to inspect buckets and to compare configuration between nodes.",
     ].join("\n"),
     targetCluster: "NetApp-StorageGRID-S3",
     defaultMode: "assisted",
@@ -990,11 +991,11 @@ const initialDemoAgents: MissionAgent[] = [
     role: "Ceph Reef BlueStore NVMe & TrueNAS OpenZFS Engineer",
     icon: "⚡",
     mission:
-      "Håll Ceph NVMe-poolen (`rbd-nvme-prod`) i HEALTH_OK, analysera slow ops/PG scrubbing och verifiera immutable ZFS-snapshots på TrueNAS.",
+      "Keep the Ceph NVMe pool (`rbd-nvme-prod`) at HEALTH_OK, analyze slow ops and PG scrubbing, and verify the immutable ZFS snapshots on TrueNAS.",
     systemPrompt: [
-      "Du är specialist på Ceph Reef (18.2) BlueStore NVMe och OpenZFS 2.2 på TrueNAS Enterprise.",
-      "- Kontrollera alltid `ceph status`, `ceph health detail`, `ceph osd df tree` och `zpool status`.",
-      "- Under kontorstid (07:00–19:00) ska `osd_max_backfills` hållas <= 2 för att skydda KVM/OpenStack-latens.",
+      "You are a specialist in Ceph Reef (18.2) BlueStore NVMe and OpenZFS 2.2 on TrueNAS Enterprise.",
+      "- Always check `ceph status`, `ceph health detail`, `ceph osd df tree` and `zpool status`.",
+      "- During office hours (07:00–19:00), keep `osd_max_backfills` <= 2 to protect KVM/OpenStack latency.",
     ].join("\n"),
     targetCluster: "Ceph-NVMe-Block-Pool",
     defaultMode: "assisted",
@@ -1010,10 +1011,10 @@ const initialDemoAgents: MissionAgent[] = [
     role: "K8s PVC, NFSv4.1 nconnect & DM-Multipath iSCSI/NVMe-oF Specialist",
     icon: "☸️",
     mission:
-      "Felsök och åtgärda PVC:er i Pending, VolumeAttachment-fel, iSCSI multipath/ALUA och NFSv4.1 export-policies mellan Kubernetes och NetApp ONTAP.",
+      "Troubleshoot and fix PVCs stuck in Pending, VolumeAttachment errors, iSCSI multipath/ALUA and NFSv4.1 export policies between Kubernetes and NetApp ONTAP.",
     systemPrompt: [
-      "Du felsöker Kubernetes lagring med NetApp Astra Trident CSI 24.06 i klustret `K8s-Trident-CSI-Prod`.",
-      "- Korrelera alltid Kubernetes-sidan (`kubectl describe pvc`, `tridentctl logs`) med ONTAP-sidan (`vserver export-policy`, `lun mapping show`, `igroup show`).",
+      "You troubleshoot Kubernetes storage with NetApp Astra Trident CSI 24.06 in the cluster `K8s-Trident-CSI-Prod`.",
+      "- Always check the Kubernetes side (`kubectl describe pvc`, `tridentctl logs`) against the ONTAP side (`vserver export-policy`, `lun mapping show`, `igroup show`).",
     ].join("\n"),
     targetCluster: "K8s-Trident-CSI-Prod",
     defaultMode: "assisted",
@@ -1029,11 +1030,11 @@ const initialDemoAgents: MissionAgent[] = [
     role: "Linux Kernel, Systemd, Performance (USE Method) & Container SRE",
     icon: "🐧",
     mission:
-      "Felsök hög CPU/load, OOM-kills, disk-I/O-flaskhalsar, kraschande systemd-tjänster, Docker/Containerd och nätverkslatens på alla Linux-servrar.",
+      "Troubleshoot high CPU or load, OOM kills, disk I/O bottlenecks, crashing systemd services, Docker/containerd and network latency on any Linux server.",
     systemPrompt: [
-      "Du är en senior Linux & Infrastruktur SRE-arkitekt.",
-      "- Tillämpa alltid Brendan Greggs USE-metod (Utilization, Saturation, Errors) med icke-destruktiva kommandon först (`uptime`, `vmstat`, `iostat -xz`, `systemctl --failed`, `journalctl -p err`).",
-      "- Ta alltid backup av konfigurationsfiler innan du redigerar dem och verifiera syntax före omstart av tjänster.",
+      "You are a senior Linux and infrastructure SRE.",
+      "- Always apply Brendan Gregg's USE method (Utilization, Saturation, Errors), starting with non-destructive commands (`uptime`, `vmstat`, `iostat -xz`, `systemctl --failed`, `journalctl -p err`).",
+      "- Always back up a configuration file before you edit it, and check its syntax before you restart a service.",
     ].join("\n"),
     defaultMode: "assisted",
     allowedTools: ["all"],
@@ -1048,11 +1049,11 @@ const initialDemoAgents: MissionAgent[] = [
     role: "OpenSSH Hardening, ProxyJump, Port-Forwarding & YubiKey/FIDO2 Specialist",
     icon: "🔐",
     mission:
-      "Granska och härda `sshd_config`, konfigurera säkra ProxyJump-bastioner, felsök SSH-tunnlar (`-L`/`-R`/`-D`), brandväggsregler (`nftables`/`ufw`) och FIDO2/PIV-nycklar.",
+      "Review and harden `sshd_config`, set up secure ProxyJump bastions, and troubleshoot SSH tunnels (`-L`/`-R`/`-D`), firewall rules (`nftables`/`ufw`) and FIDO2/PIV keys.",
     systemPrompt: [
-      "Du är en säkerhets- och OpenSSH-specialist för bastion-hopp, krypterade tunnlar och Linux-härdning.",
-      "- Verifiera alltid `sudo sshd -t` innan du laddar om `sshd` så att du aldrig låser ute administratören.",
-      "- Rekommendera Ed25519-SK (FIDO2/YubiKey) eller certifikatbaserad autentisering, `PermitRootLogin prohibit-password` och strikta `AllowUsers`/`Match`-block.",
+      "You are a security and OpenSSH specialist for bastion hops, encrypted tunnels and Linux hardening.",
+      "- Always run `sudo sshd -t` before you reload `sshd`, so that you never lock the administrator out.",
+      "- Recommend Ed25519-SK (FIDO2/YubiKey) or certificate-based authentication, `PermitRootLogin prohibit-password` and strict `AllowUsers`/`Match` blocks.",
     ].join("\n"),
     defaultMode: "assisted",
     allowedTools: ["all"],
@@ -1493,7 +1494,7 @@ export const MCP_MARKETPLACE_CATALOG: McpCatalogPreset[] = [
     category: "observability",
     icon: "📊",
     description:
-      "Kör PromQL-frågor, inspektera aktiva larm i Alertmanager och korrelera node_exporter-telemetri direkt i AI-chatten.",
+      "Run PromQL queries, inspect firing alerts in Alertmanager and correlate node_exporter telemetry from the AI chat.",
     transport: "stdio",
     command: "npx",
     args: ["-y", "@modelcontextprotocol/server-prometheus", "--url", "http://10.30.10.25:9090"],
@@ -1514,7 +1515,7 @@ export const MCP_MARKETPLACE_CATALOG: McpCatalogPreset[] = [
     category: "observability",
     icon: "📈",
     description:
-      "Hämta paneldata från Grafana, sök i Loki-loggströmmar (LogQL) och skapa incident-annoteringar.",
+      "Fetch panel data from Grafana, search Loki log streams (LogQL) and create incident annotations.",
     transport: "http",
     url: "http://10.30.10.25:3000/api/mcp",
     defaultTools: [
@@ -1534,7 +1535,7 @@ export const MCP_MARKETPLACE_CATALOG: McpCatalogPreset[] = [
     category: "kubernetes",
     icon: "☸️",
     description:
-      "Inspektera K8s pods, PVCs, CSI-events, StatefulSets och Helm-releaser utan att lämna chatten.",
+      "Inspect Kubernetes pods, PVCs, CSI events, StatefulSets and Helm releases without leaving the chat.",
     transport: "stdio",
     command: "npx",
     args: ["-y", "mcp-server-kubernetes"],
@@ -1555,7 +1556,7 @@ export const MCP_MARKETPLACE_CATALOG: McpCatalogPreset[] = [
     category: "database",
     icon: "🐘",
     description:
-      "Analysera pg_stat_activity, långsamma SQL-frågor, tabellstorlekar och lås över sshS3:s lokala port-forwarding-tunnlar.",
+      "Analyze pg_stat_activity, slow SQL queries, table sizes and locks through sshS3's local port-forwarding tunnels.",
     transport: "stdio",
     command: "npx",
     args: ["-y", "@modelcontextprotocol/server-postgres", "postgresql://localhost:5432/prod"],
@@ -1576,7 +1577,7 @@ export const MCP_MARKETPLACE_CATALOG: McpCatalogPreset[] = [
     category: "gitops",
     icon: "🏗️",
     description:
-      "Upptäck konfiguration-drift mellan live-servrar och Terraform state / Ansible playbooks.",
+      "Detect configuration drift between live servers and Terraform state or Ansible playbooks.",
     transport: "stdio",
     command: "npx",
     args: ["-y", "@hashicorp/terraform-mcp-server"],
@@ -1597,7 +1598,7 @@ export const MCP_MARKETPLACE_CATALOG: McpCatalogPreset[] = [
     category: "gitops",
     icon: "🐙",
     description:
-      "Sök i infrastruktur-commits, läs post-mortems och öppna en färdig Pull Request med konfigurationsfixar.",
+      "Search infrastructure commits, read post-mortems and open a pull request with configuration fixes.",
     transport: "stdio",
     command: "npx",
     args: ["-y", "@modelcontextprotocol/server-github"],
@@ -1618,7 +1619,7 @@ export const MCP_MARKETPLACE_CATALOG: McpCatalogPreset[] = [
     category: "security",
     icon: "🛡️",
     description:
-      "Skanna container-images, OS-paket och Kubernetes-kluster efter kritiska CVE:er med Aqua Trivy och läs Falco runtime-larm.",
+      "Scan container images, OS packages and Kubernetes clusters for critical CVEs with Aqua Trivy, and read Falco runtime alerts.",
     transport: "stdio",
     command: "npx",
     args: ["-y", "mcp-server-trivy"],
@@ -1639,7 +1640,7 @@ export const MCP_MARKETPLACE_CATALOG: McpCatalogPreset[] = [
     category: "network",
     icon: "🌐",
     description:
-      "Slå upp VLAN, VRF, rack-placering, LIF-subnät och switch-portar direkt från open-source NetBox SSoT.",
+      "Look up VLANs, VRFs, rack positions, LIF subnets and switch ports in NetBox, the source of truth.",
     transport: "http",
     url: "http://10.30.10.30:8000/api/mcp",
     defaultTools: [
@@ -1659,7 +1660,7 @@ export const MCP_MARKETPLACE_CATALOG: McpCatalogPreset[] = [
     category: "observability",
     icon: "🔭",
     description:
-      "Följ distribuerade OTel-traces över mikrotjänster, S3-anrop och databaser för att isolera p99-flaskhalsar.",
+      "Follow distributed OpenTelemetry traces across microservices, S3 calls and databases to isolate p99 bottlenecks.",
     transport: "http",
     url: "http://10.30.10.25:16686/api/mcp",
     defaultTools: [
@@ -1718,8 +1719,8 @@ const initialDemoInfraEdges: InfraGraphEdge[] = [
   },
   {
     id: "edge-ceph-replicates-zfs",
-    from: "ceph-nvme-osd-01",
-    to: "truenas-zfs-backup-01",
+    from: "ceph-osd-nvme-01",
+    to: "truenas-zfs-vault-01",
     relation: "replicates_to",
     label: "Nightly RBD Snapshot Export -> Immutable ZFS Pool",
     updatedAt: now - 45 * min,
@@ -1729,9 +1730,9 @@ const initialDemoInfraEdges: InfraGraphEdge[] = [
 const initialDemoWorkforceRuns: WorkforceRun[] = [
   {
     id: "demo-wf-cross-cluster-audit",
-    title: "Cross-Cluster Storage & K8s Latency Triage (Multi-Agent Workforce)",
+    title: "Cross-cluster storage and K8s latency triage (multi-agent workforce)",
     prompt:
-      "Analysera varför AI-träningsjobben i K8s upplever p99 I/O-spikar och verifiera ONTAP QoS, StorageGRID FabricPool och Ceph NVMe-hälsa parallellt.",
+      "Analyze why the AI training jobs in K8s see p99 I/O spikes, and check ONTAP QoS, StorageGRID FabricPool and Ceph NVMe health in parallel.",
     leadAgentName: "Lead SRE Workforce Orchestrator",
     targetCluster: "ALL",
     status: "completed",
@@ -1742,17 +1743,17 @@ const initialDemoWorkforceRuns: WorkforceRun[] = [
         id: "wf-step-1",
         agentId: "demo-agent-ontap-architect",
         agentName: "NetApp ONTAP Storage Architect",
-        agentIcon: "🗄️",
+        agentIcon: "\u{1F5C4}\uFE0F",
         role: "ONTAP 9.15 SAN/NAS & QoS",
         targetCluster: "NetApp-ONTAP-Prod-SE",
         subTask:
-          "Kontrollera WAFL/QoS-latens på aggr2_nvme_db och SnapMirror-status till Uppsala DR.",
+          "Check WAFL/QoS latency on aggr2_nvme_db and SnapMirror status to Uppsala DR.",
         status: "completed",
         findings:
-          "Identifierade att scratch-volymen `vol_ai_scratch_03` saknade QoS-tak och drev upp ködjupet på `netapp-aff-a800-01b` (2.4 ms read latency). Rekommenderar `pg-batch-ceiling` (max 15 000 IOPS).",
+          "The scratch volume `vol_ai_scratch_03` had no QoS ceiling and drove up the queue depth on `netapp-aff-a800-01b` (2.45 ms read latency). Recommends `pg-batch-ceiling` (max 15 000 IOPS).",
         recommendedCommands: [
           "qos statistics volume latency show -iterations 1",
-          "volume modify -vserver svm_k8s_prod -volume vol_ai_scratch_03 -qos-policy-group pg-batch-ceiling",
+          "volume modify -vserver svm-prod-nfs -volume vol_ai_scratch_03 -qos-policy-group pg-batch-ceiling",
         ],
         durationMs: 1420,
       },
@@ -1764,10 +1765,10 @@ const initialDemoWorkforceRuns: WorkforceRun[] = [
         role: "K8s PVC & Multipath Specialist",
         targetCluster: "K8s-Trident-CSI-Prod",
         subTask:
-          "Verifiera DM-Multipath ALUA-policy och NFSv4.1 nconnect på k8s-gpu-io-worker-01.",
+          "Check the DM-Multipath ALUA policy and NFSv4.1 nconnect on k8s-gpu-io-worker-01.",
         status: "completed",
         findings:
-          "På `k8s-gpu-io-worker-01` använde `/etc/multipath.conf` `multibus` istället för `group_by_prio` (ALUA), vilket orsakade I/O över non-optimized paths vid hög last.",
+          "On `k8s-gpu-io-worker-01`, `/etc/multipath.conf` used `multibus` instead of `group_by_prio` (ALUA), which sent I/O over non-optimized paths under high load.",
         recommendedCommands: [
           "multipath -ll",
           "kubectl get pvc,volumeattachment -n ai-training -o wide",
@@ -1782,19 +1783,19 @@ const initialDemoWorkforceRuns: WorkforceRun[] = [
         role: "StorageGRID 11.8 & S3 Tiering",
         targetCluster: "NetApp-StorageGRID-S3",
         subTask:
-          "Kontrollera S3 PUT/GET-latens och ILM Erasure Coding 6+3-köer under FabricPool-tiering.",
+          "Check S3 PUT/GET latency and the ILM erasure coding 6+3 queues during FabricPool tiering.",
         status: "completed",
         findings:
-          "StorageGRID S3-klustret är grönt (p99 GET 3.8 ms på `sg-sn-nvme-01`, ILM-kö < 120 objekt, WORM Object Lock verifierat).",
+          "The StorageGRID S3 cluster is healthy (p99 GET 3.4 ms on `sg-sn-nvme-01`, ILM queue under 120 objects, WORM Object Lock verified).",
         recommendedCommands: ["iostat -xz 1 2"],
         durationMs: 950,
       },
     ],
     synthesis: [
-      "### Sammanställd Workforce-diagnos (3 specialistagenter körda parallellt)",
-      "1. **Rotorsak 1 (NetApp ONTAP)**: Volymen `vol_ai_scratch_03` på `netapp-aff-a800-01b` saknade Adaptive QoS-tak och skapade noisy-neighbor-latens (`2.4 ms`).",
-      "2. **Rotorsak 2 (Kubernetes Multipath)**: `k8s-gpu-io-worker-01` hade `path_grouping_policy multibus` istället för ALUA `group_by_prio` i `/etc/multipath.conf`.",
-      "3. **S3 & DR-status**: Både StorageGRID S3 (`ILM-Prod-FabricPool-EC63`) och Ceph/ZFS är i `HEALTH_OK`.",
+      "### Combined workforce diagnosis (3 specialist agents in parallel)",
+      "1. **Root cause 1 (NetApp ONTAP)**: the volume `vol_ai_scratch_03` on `netapp-aff-a800-01b` had no QoS ceiling and caused noisy-neighbor latency (`2.45 ms`).",
+      "2. **Root cause 2 (Kubernetes multipath)**: `k8s-gpu-io-worker-01` had `path_grouping_policy multibus` instead of ALUA `group_by_prio` in `/etc/multipath.conf`.",
+      "3. **S3 and DR status**: StorageGRID S3 (`ILM-Prod-FabricPool-EC63`) is healthy, and Ceph/ZFS is at `HEALTH_OK`.",
     ].join("\n"),
   },
 ];
@@ -1830,7 +1831,7 @@ export function saveDemoWorkforceRun(run: WorkforceRun): void {
 const initialDemoTasks: AgentTask[] = [
   {
     id: "demo-task-ontap-latency-triage",
-    title: "🗄️ ONTAP 9.15 Noisy-Neighbor Latens & K8s Multipath-analys",
+    title: "ONTAP 9.15 noisy-neighbor latency and K8s multipath analysis",
     agentId: "demo-agent-ontap-architect",
     agentName: "NetApp ONTAP Storage Architect",
     mode: "assisted",
@@ -1852,29 +1853,29 @@ const initialDemoTasks: AgentTask[] = [
       {
         id: "msg-demo-1",
         role: "user",
-        text: "Vi ser p99-latensspikar på PostgreSQL-LUN:arna i `aggr2_nvme_db` på @netapp-aff-a800-01b samtidigt som AI-träningsjobben på @k8s-gpu-io-worker-01 kör för fullt. Kan du identifiera rotorsaken och åtgärda den?",
+        text: "We see p99 latency spikes on the PostgreSQL LUNs in `aggr2_nvme_db` on @netapp-aff-a800-01b while the AI training jobs on @k8s-gpu-io-worker-01 run at full load. Can you find the root cause and fix it?",
         at: now - 19 * min,
       },
       {
         id: "msg-demo-2",
         role: "assistant",
         text: [
-          "### 🔍 Rotfelsanalys: Noisy-Neighbor på `aggr2_nvme_db` & DM-Multipath ALUA",
+          "### Root cause: noisy neighbor on `aggr2_nvme_db` and DM-Multipath ALUA",
           "",
-          "Jag har kört diagnostik mot **`netapp-aff-a800-01b`** och korrelerat med **`k8s-gpu-io-worker-01`**:",
+          "I ran diagnostics on **`netapp-aff-a800-01b`** and checked the result against **`k8s-gpu-io-worker-01`**:",
           "",
-          "| Volym / Komponent | Nod / SVM | IOPS | Svarstid (p99) | Status / Observation |",
+          "| Volume / component | Node / SVM | IOPS | Latency | Observation |",
           "| :--- | :--- | :--- | :--- | :--- |",
-          "| `vol_ai_scratch_03` | `svm-prod-nfs` (`aggr2_nvme_db`) | `48 200 IOPS` | `2.45 ms` | ⚠️ **Saknar QoS-policy (`none`)** — driver upp WAFL/NVMe-ködjupet |",
-          "| `vol_pg_prod_db01` | `svm-prod-iscsi` (`aggr2_nvme_db`) | `28 400 IOPS` | `1.88 ms` | Påverkad av scratch-volymens lästoppar |",
-          "| `/etc/multipath.conf` | `k8s-gpu-io-worker-01` | — | — | ⚠️ Använder `multibus` istället för ALUA `group_by_prio` |",
+          "| `vol_ai_scratch_03` | `svm-prod-nfs` (`aggr2_nvme_db`) | `48 200 IOPS` | `2.45 ms` | **No QoS policy (`none`)**: drives up the WAFL/NVMe queue depth |",
+          "| `vol_pg_prod_db01` | `svm-prod-iscsi` (`aggr2_nvme_db`) | `28 400 IOPS` | `1.88 ms` | Affected by the scratch volume's read peaks |",
+          "| `/etc/multipath.conf` | `k8s-gpu-io-worker-01` | — | — | Uses `multibus` instead of ALUA `group_by_prio` |",
           "",
-          "> **Åtgärd utförd & verifierad:** Jag applicerade QoS-policyn `pg-batch-ceiling` (`max 15 000 IOPS, 600 MB/s`) på `vol_ai_scratch_03`. Latensen på `vol_pg_prod_db01` sjönk omedelbart från **1.88 ms till 0.32 ms**.",
+          "> **Fix applied and verified:** I applied the QoS policy `pg-batch-ceiling` (`max 15 000 IOPS, 600 MB/s`) to `vol_ai_scratch_03`. Latency on `vol_pg_prod_db01` fell at once from **1.88 ms to 0.32 ms**.",
           "",
           "```bash",
-          "# Verifiera aktuell QoS-latens på ONTAP:",
+          "# Check the current QoS latency on ONTAP:",
           "qos statistics volume latency show -iterations 3",
-          "# Uppdatera multipath till ALUA på K8s GPU-worker:",
+          "# Switch multipath to ALUA on the K8s GPU worker:",
           "sudo multipath -r && sudo multipath -ll",
           "```",
         ].join("\n"),
@@ -1886,7 +1887,7 @@ const initialDemoTasks: AgentTask[] = [
         id: "chg-demo-safe-1",
         kind: "command",
         target: "netapp-aff-a800-01b",
-        description: "Inspektera ONTAP volymlatens och QoS-statistik (Read-Only)",
+        description: "Inspect ONTAP volume latency and QoS statistics (read-only)",
         command: "qos statistics volume latency show -iterations 1",
         status: "completed",
         riskLevel: "safe",
@@ -1900,7 +1901,7 @@ const initialDemoTasks: AgentTask[] = [
         id: "chg-demo-mod-2",
         kind: "command",
         target: "netapp-aff-a800-01b",
-        description: "Applicera Adaptive QoS-tak 'pg-batch-ceiling' (15 000 IOPS) på vol_ai_scratch_03",
+        description: "Apply the QoS ceiling 'pg-batch-ceiling' (15 000 IOPS) to vol_ai_scratch_03",
         command:
           "volume modify -vserver svm-prod-nfs -volume vol_ai_scratch_03 -qos-policy-group pg-batch-ceiling",
         status: "completed",

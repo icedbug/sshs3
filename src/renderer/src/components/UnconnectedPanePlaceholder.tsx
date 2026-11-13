@@ -215,14 +215,14 @@ export const UnconnectedPanePlaceholder: React.FC<UnconnectedPanePlaceholderProp
       {workspaceClusters.length > 0 && (
         <div className="mt-2 flex flex-col items-center gap-1.5 max-w-md px-4">
           <span className="text-[10px] font-semibold uppercase tracking-wider text-txt-muted">
-            Eller öppna Workspace-kluster i 2×2 Split-View:
+            Or open a workspace cluster in a 2×2 split view:
           </span>
           <div className="flex flex-wrap items-center justify-center gap-1.5">
             {workspaceClusters.map(([cName, ids]) => (
               <button
                 key={cName}
                 type="button"
-                title={`Öppna alla ${ids.length} noder i ${cName} som en 2×2 Konsole Split-View`}
+                title={`Open all ${ids.length} nodes of ${cName} in a 2×2 split view`}
                 onClick={() =>
                   window.dispatchEvent(
                     new CustomEvent('sshs3:open-cluster-split', {
@@ -247,7 +247,7 @@ export const UnconnectedPanePlaceholder: React.FC<UnconnectedPanePlaceholderProp
               }
               className="inline-flex items-center gap-1 rounded-md border border-sky-500/40 bg-sky-500/15 px-2.5 py-1 text-2xs font-medium text-sky-300 hover:bg-sky-500/25 transition-colors"
             >
-              <span>✨ Fråga AI Hub</span>
+              <span>✨ Ask the assistant</span>
             </button>
           </div>
         </div>

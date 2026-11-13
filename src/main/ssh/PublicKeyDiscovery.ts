@@ -29,7 +29,7 @@ function toLocalKey(
   };
 }
 
-/** `~/.ssh/*.pub` samt `<privateKeyPath>.pub` för en profils nyckelfil. Ogiltiga filer hoppas över. */
+/** `~/.ssh/*.pub` plus `<privateKeyPath>.pub` for a profile's key file. Invalid files are skipped. */
 export async function listFilePublicKeys(extraPrivateKeyPath?: string, homeDir?: string): Promise<LocalPublicKey[]> {
   const sshDir = path.join(homeDir || os.homedir(), '.ssh');
   const pubFiles = new Set<string>();
@@ -40,7 +40,7 @@ export async function listFilePublicKeys(extraPrivateKeyPath?: string, homeDir?:
       pubFiles.add(path.join(sshDir, name));
     }
   } catch {
-    // ingen ~/.ssh
+    // no ~/.ssh
   }
 
   const keys: LocalPublicKey[] = [];
@@ -49,7 +49,7 @@ export async function listFilePublicKeys(extraPrivateKeyPath?: string, homeDir?:
       const stat = await fs.stat(file);
       if (!stat.isFile() || stat.size > MAX_PUB_BYTES) continue;
       const parsed = parsePublicKeyLines(await fs.readFile(file, 'utf-8'));
-      // En .pub-fil innehåller normalt en nyckel; privat nyckel antas ligga bredvid utan .pub.
+      // A .pub file normally holds one key; the private key is assumed to sit beside it without .pub.
       for (const p of parsed.slice(0, 1)) {
         const priv = file.slice(0, -'.pub'.length);
         const hasPriv = await fs
@@ -59,13 +59,13 @@ export async function listFilePublicKeys(extraPrivateKeyPath?: string, homeDir?:
         keys.push(toLocalKey(p, 'file', path.basename(file), hasPriv ? priv : undefined));
       }
     } catch {
-      // oläsbar fil
+      // unreadable file
     }
   }
   return keys;
 }
 
-/** Publika nycklar som en ssh-agent håller (`ssh-add -L`). Tom lista om agenten saknas eller är tom. */
+/** Public keys held by an ssh-agent (`ssh-add -L`). An empty list if the agent is missing or empty. */
 export async function listAgentPublicKeys(
   source: PublicKeySource,
   label: string,
@@ -79,7 +79,7 @@ export async function listAgentPublicKeys(
   return parsePublicKeyLines(stdout).map((p) => toLocalKey(p, source, p.comment || label));
 }
 
-/** Vilken källa som får "äga" en nyckel som hittas på flera ställen: maskinvaran först, agenten sist. */
+/** Which source gets to "own" a key found in several places: hardware first, the agent last. */
 const SOURCE_PRIORITY: Record<PublicKeySource, number> = {
   smartcard: 4,
   fido2: 4,
@@ -92,9 +92,9 @@ const SOURCE_PRIORITY: Record<PublicKeySource, number> = {
 };
 
 /**
- * Slår ihop listor och tar bort dubbletter på fingeravtryck. Samma nyckel ligger ofta både i skrivbordets
- * agent, som fil och på kortet; då behålls källan med högst prioritet (kort/FIDO2 > fil > agent), men
- * sökvägen till en privat nyckelfil bevaras från den förekomst som har en.
+ * Merges lists and removes duplicates by fingerprint. The same key is often in the desktop's agent,
+ * in a file and on the card at once; the source with the highest priority is kept (card/FIDO2 > file > agent),
+ * but the path to a private key file is preserved from the occurrence that has one.
  */
 export function dedupeKeys(...lists: LocalPublicKey[][]): LocalPublicKey[] {
   const seen = new Map<string, LocalPublicKey>();

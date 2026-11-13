@@ -118,7 +118,7 @@ export function parseInlineCommandJson(
         explanation:
           typeof parsed.explanation === "string" && parsed.explanation.trim()
             ? parsed.explanation.trim()
-            : "Föreslaget kommando från AI",
+            : "A command suggested by the model.",
       };
     }
   } catch {
@@ -128,7 +128,7 @@ export function parseInlineCommandJson(
 }
 
 export function buildInstantCommandSuggestion(
-  prompt: string,
+  _prompt: string,
   lower: string,
   shell: string,
 ): { command: string; explanation: string } {
@@ -140,91 +140,94 @@ export function buildInstantCommandSuggestion(
     if (isCmd) {
       return {
         command: `netstat -ano | findstr :${port}`,
-        explanation: `Visar vilken process och PID som lyssnar på eller använder port ${port} i cmd.`,
+        explanation: `Shows which process (and PID) listens on or uses port ${port}.`,
       };
     }
     return isPwsh
       ? {
           command: `Get-NetTCPConnection -LocalPort ${port} | Select-Object LocalAddress,LocalPort,State,OwningProcess`,
-          explanation: `Visar vilken process som lyssnar eller använder port ${port} i PowerShell.`,
+          explanation: `Shows which process listens on or uses port ${port}.`,
         }
       : {
           command: `sudo lsof -i :${port} || sudo ss -tulpn | grep :${port}`,
-          explanation: `Visar vilken process och PID som lyssnar på port ${port}.`,
+          explanation: `Shows which process (and PID) listens on port ${port}.`,
         };
   }
-  if (lower.includes("disk") || lower.includes("utrymme") || lower.includes("full")) {
+  // Whole words: "login" is not "log", and "pod" is not in "podman".
+  const said = new Set(lower.split(/[^\p{L}\p{N}]+/u));
+  const has = (...words: string[]): boolean => words.some((w) => said.has(w));
+  if (has("disk", "disks", "space", "full", "utrymme")) {
     if (isCmd) {
       return {
         command: `powershell -NoProfile -Command "Get-PSDrive -PSProvider FileSystem | Select-Object Name, @{N='Used(GB)';E={[math]::Round($_.Used/1GB,2)}}, @{N='Free(GB)';E={[math]::Round($_.Free/1GB,2)}}"`,
-        explanation: "Visar ledigt och använt diskutrymme per volym.",
+        explanation: "Shows free and used disk space per volume.",
       };
     }
     return isPwsh
       ? {
           command: `Get-PSDrive -PSProvider FileSystem | Select-Object Name, @{N="Used(GB)";E={[math]::Round($_.Used/1GB,2)}}, @{N="Free(GB)";E={[math]::Round($_.Free/1GB,2)}}`,
-          explanation: "Visar ledigt och använt diskutrymme per volym.",
+          explanation: "Shows free and used disk space per volume.",
         }
       : {
           command: `df -hT && sudo du -xhd1 /var/log 2>/dev/null | sort -hr | head -n 10`,
-          explanation: "Visar diskutrymme per filsystem samt de största katalogerna i /var/log.",
+          explanation: "Shows disk space per file system and the largest directories under /var/log.",
         };
   }
-  if (lower.includes("nginx")) {
+  if (has("nginx")) {
     return {
       command: `sudo nginx -t && sudo systemctl status nginx --no-pager && sudo tail -n 30 /var/log/nginx/error.log`,
-      explanation: "Validerar nginx-konfigurationen, visar tjänstestatus och de senaste 30 raderna i error.log.",
+      explanation: "Checks the nginx configuration, shows the service's status and the last 30 lines of error.log.",
     };
   }
-  if (lower.includes("k8s") || lower.includes("pod") || lower.includes("crash") || lower.includes("kubectl")) {
+  if (has("k8s", "kubernetes", "pod", "pods", "crash", "crashing", "crashloop", "kubectl")) {
     return {
       command: `kubectl get pods -A | grep -Ev 'Running|Completed' && kubectl get events -A --sort-by=.lastTimestamp | tail -n 20`,
-      explanation: "Hittar alla pods som inte är Running/Completed samt visar de 20 senaste klusterhändelserna.",
+      explanation: "Lists the pods that are not Running or Completed, and the 20 latest cluster events.",
     };
   }
-  if (lower.includes("postgres") || lower.includes("pgbouncer") || lower.includes("db")) {
+  if (has("postgres", "postgresql", "pgbouncer", "db", "database")) {
     return {
       command: `sudo systemctl status postgresql pgbouncer --no-pager && sudo -u postgres psql -c "SELECT state, count(*) FROM pg_stat_activity GROUP BY state;"`,
-      explanation: "Kontrollerar status för PostgreSQL/PgBouncer och antalet aktiva anslutningar per tillstånd.",
+      explanation: "Shows the status of PostgreSQL and PgBouncer and the number of connections per state.",
     };
   }
-  if (lower.includes("docker") || lower.includes("container")) {
+  if (has("docker", "container", "containers")) {
     return {
       command: `docker ps --format "table {{.Names}}\\t{{.Status}}\\t{{.Ports}}" && docker stats --no-stream`,
-      explanation: "Listar körande containrar med portar samt aktuell CPU/minnesförbrukning.",
+      explanation: "Lists the running containers with their ports, and what each uses of CPU and memory now.",
     };
   }
-  if (lower.includes("log") || lower.includes("fel") || lower.includes("error") || lower.includes("journal")) {
+  if (has("log", "logs", "error", "errors", "fel", "journal")) {
     if (isCmd) {
       return {
         command: `powershell -NoProfile -Command "Get-EventLog -LogName System -EntryType Error -Newest 15 | Format-Table TimeGenerated,Source,Message -AutoSize"`,
-        explanation: "Visar de 15 senaste systemfelen i Windows Event Log.",
+        explanation: "Shows the 15 latest system errors in the Windows event log.",
       };
     }
     return isPwsh
       ? {
           command: `Get-EventLog -LogName System -EntryType Error -Newest 15 | Format-Table TimeGenerated,Source,Message -AutoSize`,
-          explanation: "Visar de 15 senaste systemfelen i Windows Event Log.",
+          explanation: "Shows the 15 latest system errors in the Windows event log.",
         }
       : {
           command: `sudo journalctl -p err -n 40 --no-pager`,
-          explanation: "Visar de 40 senaste felen från systemd-journalen.",
+          explanation: "Shows the 40 latest errors in the systemd journal.",
         };
   }
   if (isCmd) {
     return {
       command: `tasklist /FI "MEMUSAGE gt 50000" & systeminfo | findstr /B /C:"OS Name" /C:"System Boot Time" /C:"Total Physical Memory" /C:"Available Physical Memory"`,
-      explanation: `Föreslaget diagnostikkommando för: "${prompt}"`,
+      explanation: "Nothing in the request was recognised. This shows the largest processes and the system's memory.",
     };
   }
   return isPwsh
     ? {
         command: `Get-Process | Sort-Object CPU -Descending | Select-Object -First 10 Name,Id,CPU,WorkingSet`,
-        explanation: `Föreslaget diagnostikkommando för: "${prompt}"`,
+        explanation: "Nothing in the request was recognised. This shows the ten processes that use the most CPU.",
       }
     : {
         command: `uptime && free -h && df -h /`,
-        explanation: `Föreslaget diagnostikkommando för: "${prompt}"`,
+        explanation: "Nothing in the request was recognised. This shows load, memory and the root disk.",
       };
 }
 

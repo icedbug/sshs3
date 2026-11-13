@@ -177,4 +177,19 @@ describe("the pages agents read", () => {
       }),
     );
   });
+
+  it("says when pages are being compared and how the last comparison ended, instead of 'done' at once", () => {
+    const view = (kbWork: HubSnapshot["kbWork"]) => (
+      <KnowledgeBaseView hub={hub({ kbPages: [page("p1"), page("p2")], kbFindings: [{ id: "gap:x", kind: "gap", text: "x", at: 1 }], kbWork })} act={vi.fn(async () => hub())} onAttachDoc={() => {}} request={vi.fn(async () => answer({}))} />
+    );
+    const { rerender } = render(view({ rebuilding: [], checkingContradictions: true }));
+    fireEvent.click(screen.getByRole("tab", { name: "To review · 1" }));
+    expect(screen.getByRole("button", { name: "Comparing pages…" })).toBeDisabled();
+    expect(screen.queryByTestId("kb-last-check")).not.toBeInTheDocument();
+    rerender(view({ rebuilding: [], checkingContradictions: false, lastCheck: { at: 1, found: 2 } }));
+    expect(screen.getByRole("button", { name: "Check for contradictions" })).toBeEnabled();
+    expect(screen.getByTestId("kb-last-check")).toHaveTextContent("The last comparison found 2 places where pages disagree.");
+    rerender(view({ rebuilding: [], checkingContradictions: false, lastCheck: { at: 1, found: 0, error: "No model is connected" } }));
+    expect(screen.getByTestId("kb-last-check")).toHaveTextContent("The last comparison did not finish: No model is connected");
+  });
 });

@@ -25,7 +25,7 @@ import {
 export type KeyInstallStatus = 'installed' | 'present' | 'invalid' | 'unknown';
 
 export interface KeyInstallKeyResult {
-  /** Fingeravtryck (`SHA256:...`), eller tom sträng för ogiltig rad. */
+  /** Fingerprint (`SHA256:...`), or an empty string for an invalid line. */
   fingerprint: string;
   status: KeyInstallStatus;
 }
@@ -34,28 +34,28 @@ export interface KeyInstallOutcome {
   success: boolean;
   error?: string;
   results: KeyInstallKeyResult[];
-  /** Inloggningen som användes (eller sist försöktes). */
+  /** The login that was used (or the last one tried). */
   loginMethod?: InstallLoginStep;
 }
 
-/** Hur frågor från ssh (lösen, PIN, touch, värdnyckel) besvaras. */
+/** How prompts from ssh (password, PIN, touch, host key) are answered. */
 export interface PromptHandlers {
-  /** Frågar användaren efter lösen/PIN/lösenfras. Utan handler nekas allt som inte config redan kan svara på. */
+  /** Asks the user for a password/PIN/passphrase. Without a handler, anything the config cannot already answer is refused. */
   pinPromptHandler?: (prompt: string) => Promise<string> | string;
-  /** Frågar om en okänd värdnyckel ska litas på. Saknas => nekas (fail closed). */
+  /** Asks whether an unknown host key should be trusted. Missing => refused (fail closed). */
   hostKeyPromptHandler?: (info: HostKeyPromptInfo) => Promise<boolean>;
   onPresence?: (prompt: string) => void;
   onPresenceCleared?: () => void;
 }
 
 export interface KeyInstallOptions extends PromptHandlers {
-  /** Config med jump host upplöst men utan smartcard/FIDO2-agent; den laddas först när profilens egen inloggning behövs. */
+  /** Config with the jump host resolved but without a smartcard/FIDO2 agent; that is loaded only when the profile's own login is needed. */
   config: SSHConnectionConfig;
   publicKeys: string[];
   loginMethod?: InstallLoginMethod;
   installsOwnKeyOnly?: boolean;
   serverMethods?: string[];
-  /** Laddar kortets/nyckelns agent (PIN/touch). Anropas bara om profilens egen inloggning faktiskt försöks. */
+  /** Loads the card's/key's agent (PIN/touch). Called only if the profile's own login is actually attempted. */
   prepareProfileConfig?: (config: SSHConnectionConfig) => Promise<SSHConnectionConfig>;
 }
 
@@ -64,10 +64,10 @@ const PRESENCE_RE = /confirm user presence|touch (your )?security key/i;
 const MAX_STDOUT = 64 * 1024;
 
 /**
- * Argument för en engångsanslutning som kör ett kort kommando. Bygger på samma argumentbyggare som
- * terminal och SFTP (jump host, proxy, chiffer, identiteter), men utan vidarebefordring, tunnlar och
- * multiplexing. OBS: OpenSSH låter första `-o` vinna, så `leadingArgs` hamnar FÖRE byggarens
- * alternativ medan övrigt läggs efter (och därför inte kan åsidosätta det byggaren redan satt).
+ * Arguments for a one-off connection that runs a short command. Uses the same argument builder as
+ * the terminal and SFTP (jump host, proxy, ciphers, identities), but without forwarding, tunnels or
+ * multiplexing. NOTE: OpenSSH lets the first `-o` win, so `leadingArgs` go BEFORE the builder's
+ * options while the rest are added after (and so cannot override what the builder already set).
  */
 export function buildKeyInstallArgs(
   config: SSHConnectionConfig,
@@ -81,7 +81,7 @@ export function buildKeyInstallArgs(
     tunnels: undefined,
   };
   const args = SmartcardDetector.buildSSHArguments(clean);
-  // buildSSHArguments slutar med `-- [user@]host`; alternativ måste in före det paret.
+  // buildSSHArguments ends with `-- [user@]host`; options have to go in before that pair.
   const destination = args.splice(-2);
   return [
     ...leadingArgs,
@@ -101,13 +101,13 @@ export interface SshRunResult {
   code: number | null;
   stdout: string;
   stderr: string;
-  /** 'accepted'/'rejected' om ssh ställde en värdnyckelfråga, annars 'trusted' (redan känd). */
+  /** 'accepted'/'rejected' if ssh asked a host-key question, otherwise 'trusted' (already known). */
   hostKey: 'trusted' | 'accepted' | 'rejected';
 }
 
 /**
- * Kör ett kommando över OpenSSH med askpass kopplat till UI:t. Gemensam för installation, probe och
- * inloggningstest. Stdin (om angiven) går aldrig via kommandoraden.
+ * Runs a command over OpenSSH with askpass wired to the UI. Shared by the install, the probe and the
+ * login test. Stdin (if given) never goes through the command line.
  */
 export async function runSshCommand(
   config: SSHConnectionConfig,
@@ -131,8 +131,9 @@ export async function runSshCommand(
         hostKey = trusted ? 'accepted' : 'rejected';
         return trusted ? 'yes' : 'no';
       }
-      // Sparade uppgifter via savedAskpassAnswer: lösen bara på lösenprofil, lösenfras bara på sshs egen lokala
-      // nyckelfråga, aldrig på en fråga servern ställt. Lösen används högst en gång (NumberOfPasswordPrompts=1).
+      // Saved credentials via savedAskpassAnswer: the password only on a password profile, the passphrase only on
+      // ssh's own local key prompt, never on a prompt the server sent. The password is used at most once
+      // (NumberOfPasswordPrompts=1).
       const saved = savedAskpassAnswer(rawPrompt, config);
       if (saved !== undefined) {
         if (!isPasswordPrompt(rawPrompt)) return saved;
@@ -181,7 +182,7 @@ export async function runSshCommand(
   }
 }
 
-/** Config för kortinloggning med profilens PKCS#11-bibliotek, oavsett vilken metod profilen annars har. */
+/** Config for a smartcard login with the profile's PKCS#11 library, whatever method the profile otherwise uses. */
 function toSmartcardConfig(config: SSHConnectionConfig): SSHConnectionConfig {
   return {
     ...config,
@@ -193,7 +194,7 @@ function toSmartcardConfig(config: SSHConnectionConfig): SSHConnectionConfig {
   };
 }
 
-/** Config för redan upplåsta nycklar (skrivbordets ssh-agent och standardnycklar): inget kort, ingen vald fil. */
+/** Config for keys that are already unlocked (the desktop's ssh-agent and default keys): no card, no chosen file. */
 function toAgentConfig(config: SSHConnectionConfig): SSHConnectionConfig {
   return {
     ...config,
@@ -206,7 +207,7 @@ function toAgentConfig(config: SSHConnectionConfig): SSHConnectionConfig {
   };
 }
 
-/** Config för lösenordsinloggning: inga nycklar, kort eller agenter, så inga PIN-/touch-frågor uppstår. */
+/** Config for a password login: no keys, cards or agents, so no PIN/touch prompts come up. */
 function toPasswordConfig(config: SSHConnectionConfig): SSHConnectionConfig {
   return {
     ...config,
@@ -220,11 +221,11 @@ function toPasswordConfig(config: SSHConnectionConfig): SSHConnectionConfig {
 }
 
 function lastErrorLines(stderr: string, code: number | null): string {
-  // stderr kan innehålla ssh-diagnostik men aldrig lösen/PIN (de går via askpass, inte stdin).
+  // stderr can hold ssh diagnostics but never a password/PIN (those go through askpass, not stdin).
   return stderr.trim().split('\n').slice(-3).join(' ').trim() || `ssh exited with code ${code}`;
 }
 
-/** Bygger inloggningsconfig för ett steg; bara kort/FIDO2-steg laddar maskinvaruagenten (PIN/touch). */
+/** Builds the login config for one step; only smartcard/FIDO2 steps load the hardware agent (PIN/touch). */
 async function configForStep(
   step: InstallLoginStep,
   config: SSHConnectionConfig,
@@ -245,10 +246,10 @@ async function configForStep(
 }
 
 /**
- * Installerar publika nycklar i `~/.ssh/authorized_keys` på målhosten, som `ssh-copy-id`.
- * Inloggningsordning enligt `chooseLoginOrder` (aldrig med nyckeln som installeras); nekas en inloggning
- * provas nästa. Alla frågor (lösen, PIN, touch, värdnyckel) går via askpass till UI:t. Nycklarna skickas på
- * stdin och hamnar aldrig i kommandoraden.
+ * Installs public keys in `~/.ssh/authorized_keys` on the target host, like `ssh-copy-id`.
+ * The login order follows `chooseLoginOrder` (never with the key being installed); if one login is denied
+ * the next is tried. All prompts (password, PIN, touch, host key) go through askpass to the UI. The keys are
+ * sent on stdin and never end up on the command line.
  */
 export async function installPublicKeys(options: KeyInstallOptions): Promise<KeyInstallOutcome> {
   const { config, prepareProfileConfig } = options;
@@ -293,7 +294,7 @@ export async function installPublicKeys(options: KeyInstallOptions): Promise<Key
       const { code, stdout, stderr } = await runSshCommand(loginConfig, REMOTE_INSTALL_COMMAND, options, { stdin });
 
       const statuses = parseInstallOutput(stdout);
-      // Skriptet numrerar bara de giltiga raderna, i samma ordning som de skickades.
+      // The script numbers only the valid lines, in the order they were sent.
       let n = 0;
       for (const r of results) {
         if (r.status === 'invalid') continue;
@@ -304,7 +305,7 @@ export async function installPublicKeys(options: KeyInstallOptions): Promise<Key
         return { success: true, results, loginMethod: used };
       }
       lastError = lastErrorLines(stderr, code);
-      // Bara en nekad inloggning motiverar nästa metod; nätverks- eller värdnyckelfel gör det inte.
+      // Only a denied login justifies trying the next method; network or host-key errors do not.
       if (!/Permission denied/i.test(stderr)) break;
     }
     return { success: false, error: lastError, results, loginMethod: used };
@@ -314,12 +315,12 @@ export async function installPublicKeys(options: KeyInstallOptions): Promise<Key
 }
 
 /**
- * Tyst probe utan lösen/PIN/touch: `ssh -o PreferredAuthentications=none ... true`. Svarar på om hosten nås
- * (genom jump host/proxy), om värdnyckeln är betrodd, och vilka auth-metoder servern tillåter. Bara en okänd
- * värdnyckel kan ge en fråga till användaren.
+ * Silent probe without password/PIN/touch: `ssh -o PreferredAuthentications=none ... true`. Tells whether the
+ * host is reachable (through the jump host/proxy), whether the host key is trusted, and which auth methods the
+ * server allows. Only an unknown host key can lead to a question for the user.
  */
 export async function probeHost(config: SSHConnectionConfig, handlers: PromptHandlers = {}): Promise<ProbeHostResult> {
-  // Ingen identitet behövs för probe: minimala argument (jump host och proxy följer med).
+  // The probe needs no identity: minimal arguments (the jump host and proxy still apply).
   const bare: SSHConnectionConfig = {
     ...config,
     authType: 'agent',
@@ -355,8 +356,8 @@ export async function probeHost(config: SSHConnectionConfig, handlers: PromptHan
 }
 
 /**
- * Riktig inloggning med profilens egen metod (kör `true`). Till skillnad från en ren konfigvalidering
- * bevisar det att kedjan fungerar, inklusive PIN/touch för smartcard och FIDO2.
+ * A real login with the profile's own method (runs `true`). Unlike a pure config validation, it
+ * proves that the chain works, including PIN/touch for smartcard and FIDO2.
  */
 export async function testLogin(
   config: SSHConnectionConfig,
@@ -375,9 +376,9 @@ export async function testLogin(
 }
 
 /**
- * Verifierar att inloggning med enbart den givna privata nyckelfilen fungerar (inga lösen, inga agenter).
- * Returnerar undefined när det inte går att avgöra utan interaktion: lösenfrasskyddad nyckel eller
- * FIDO2-nyckel (kräver touch). Då är ett misslyckande ingen information om servern.
+ * Verifies that a login with only the given private key file works (no passwords, no agents).
+ * Returns undefined when that cannot be decided without interaction: a passphrase-protected key or
+ * a FIDO2 key (needs touch). A failure then says nothing about the server.
  */
 export async function verifyKeyLogin(
   config: SSHConnectionConfig,

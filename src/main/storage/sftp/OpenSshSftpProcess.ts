@@ -23,7 +23,7 @@ export interface OpenSshProcessOptions {
   hostKeyPromptHandler?: (info: HostKeyPromptInfo) => Promise<boolean>;
 }
 
-/** SFTPConfig är en delmängd av SSHConnectionConfig; OpenSSH-argumentbyggaren kräver id/name. */
+/** SFTPConfig is a subset of SSHConnectionConfig; the OpenSSH argument builder requires id/name. */
 function toSshConfig(config: SFTPConfig): SSHConnectionConfig {
   // Saved tunnels are only started from the Tunnels panel, never by an SFTP channel. Besides racing the panel
   // for the port, a -L/-R on a multiplexed client makes the master refuse it and ssh then falls back to a

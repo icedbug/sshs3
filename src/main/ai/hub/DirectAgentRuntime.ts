@@ -1631,7 +1631,8 @@ export class DirectAgentRuntime implements AgentRuntime {
     const lower = lastUserMsg.toLowerCase();
 
     const detectCluster = (): string => {
-      if (lower.includes("storagegrid") || lower.includes("s3") || lower.includes("minio")) {
+      // "s3" as a word of its own: the name of every sshs3_* tool contains the letters.
+      if (lower.includes("storagegrid") || /\bs3\b/.test(lower) || lower.includes("minio")) {
         return "NetApp-StorageGRID-S3";
       }
       if (lower.includes("ceph") || lower.includes("zfs") || lower.includes("truenas")) {
@@ -1657,14 +1658,21 @@ export class DirectAgentRuntime implements AgentRuntime {
       });
     };
 
-    // 1. 2x2 Cluster Split-View orchestration
-    if (
-      offered.has("sshs3_workspace_layout") &&
-      (lower.includes("split") ||
-        lower.includes("2x2") ||
-        lower.includes("2×2") ||
-        lower.includes("sida vid sida"))
-    ) {
+    // A request to compare is not a request to open a split view, even when it names the split
+    // panes to compare (the split view's own button asks for that).
+    const wantsCompare =
+      lower.includes("diff") ||
+      lower.includes("compare") ||
+      lower.includes("multipath.conf") ||
+      lower.includes("ceph.conf");
+    const wantsSplit =
+      lower.includes("2x2") ||
+      lower.includes("2\u00d72") ||
+      lower.includes("side by side") ||
+      (lower.includes("split") && !wantsCompare);
+
+    // 1. A cluster's nodes in a split view
+    if (offered.has("sshs3_workspace_layout") && wantsSplit) {
       const cluster = detectCluster();
       const layoutRes = await this.executeToolCall({
         id: `demo_split_${Date.now()}`,
@@ -1677,11 +1685,11 @@ export class DirectAgentRuntime implements AgentRuntime {
       });
       await streamMarkdown(
         [
-          `### 🪟 Öppnade 2×2 Konsole Split-View för \`${cluster}\``,
+          `### Split view for \`${cluster}\``,
           "",
-          `Jag har nu orkestrerat arbetsytan via \`sshs3_workspace_layout\` (\`open_cluster_split\`) och öppnat samtliga noder i klustret **\`${cluster}\`** i en delad 2×2 terminal-grid.`,
+          `I asked the workspace to open the nodes of the cluster **\`${cluster}\`** in a split terminal grid, with \`sshs3_workspace_layout\` (\`open_cluster_split\`).`,
           "",
-          "- Du kan nu skriva kommandon direkt i varje nod-panel eller klicka på **`✨ AI Split-Analys`** i split-vyns topprad för att jämföra noderna i realtid.",
+          "- Type commands in any pane, or use **Ask the assistant** in the split view's top bar to have the panes compared.",
           "",
           "```json",
           layoutRes,
@@ -1691,14 +1699,8 @@ export class DirectAgentRuntime implements AgentRuntime {
       return;
     }
 
-    // 2. Cross-Server Config Diff
-    if (
-      offered.has("sshs3_storage_ops") &&
-      (lower.includes("diff") ||
-        lower.includes("jämför") ||
-        lower.includes("multipath.conf") ||
-        lower.includes("ceph.conf"))
-    ) {
+    // 2. A configuration file compared between two servers
+    if (offered.has("sshs3_storage_ops") && wantsCompare) {
       const pathToDiff = lower.includes("ceph.conf")
         ? "/etc/ceph/ceph.conf"
         : "/etc/multipath.conf";
@@ -1732,74 +1734,111 @@ export class DirectAgentRuntime implements AgentRuntime {
       }
       await streamMarkdown(
         [
-          `### 🔍 Cross-Server Konfigurations-diff: \`${pathToDiff}\``,
+          `### Configuration diff between servers: \`${pathToDiff}\``,
           "",
-          `Jag jämförde \`${pathToDiff}\` mellan **\`${targetA}\`** och **\`${targetB}\`** via \`sshs3_storage_ops\` (\`diff_paths\`):`,
+          `I compared \`${pathToDiff}\` on **\`${targetA}\`** and **\`${targetB}\`** with \`sshs3_storage_ops\` (\`diff_paths\`):`,
           "",
           "```diff",
           diffText,
           "```",
           "",
-          "> **Rotorsak & Rekommendation:** På `" +
-            targetB +
-            "` saknas ALUA `group_by_prio` (använder `multibus`), vilket gör att I/O kan skickas över icke-optimerade HA-vägar. Uppdatera `/etc/multipath.conf` och ladda om med `sudo systemctl reload multipathd`.",
+          `> **Root cause and recommendation:** \`${targetB}\` does not use ALUA \`group_by_prio\` (it uses \`multibus\`), so I/O can go over non-optimized HA paths. Update \`/etc/multipath.conf\` there and reload with \`sudo systemctl reload multipathd\`.`,
         ].join("\n"),
       );
       return;
     }
 
-    // 3. Parallel Cluster Execution
+    // 3. One command on every node of a cluster
     if (
       offered.has("sshs3_cluster_exec") &&
-      (lower.includes("parallell") ||
+      (lower.includes("parallel") ||
         lower.includes("cluster_exec") ||
-        lower.includes("hälsokontroll") ||
-        lower.includes("alla noder"))
+        lower.includes("health check") ||
+        lower.includes("all nodes"))
     ) {
       const cluster = detectCluster();
-      const cmd = cluster.includes("ONTAP")
-        ? "qos statistics volume latency show -iterations 1"
-        : cluster.includes("Ceph")
-          ? "ceph -s && zpool status"
-          : cluster.includes("K8s")
-            ? "kubectl get pvc -A && multipath -ll"
-            : "storagegrid-status";
+      // The scripted result per demo cluster: the command, a row per node, and what to do about it.
+      const report: { cmd: string; rows: string[]; action: string; fix?: string } =
+        cluster.includes("ONTAP")
+          ? {
+              cmd: "qos statistics volume latency show -iterations 1",
+              rows: [
+                "| `netapp-aff-a800-01a` | `ontap-ha-node-a` | OK | `0.38 ms` | `aggr1_nvme_prod` 72% used (48 TB tiered to FabricPool) |",
+                "| `netapp-aff-a800-01b` | `ontap-ha-node-b` | Warning | `2.45 ms` | `vol_ai_scratch_03` has no QoS ceiling (48 200 IOPS) |",
+                "| `netapp-fas9000-dr-01` | `snapmirror-snapvault-dr` | OK | lag `00:03:18` | SnapMirror XDP and SnapLock WORM active |",
+                "| `ontap-aiq-um-01` | `active-iq-harvest` | OK | — | Monitoring host: Harvest and Grafana running |",
+              ],
+              action:
+                "apply the QoS ceiling `pg-batch-ceiling` to `vol_ai_scratch_03` to bring database latency below `0.4 ms`.",
+              fix: "volume modify -vserver svm-prod-nfs -volume vol_ai_scratch_03 -qos-policy-group pg-batch-ceiling",
+            }
+          : cluster.includes("Ceph")
+            ? {
+                cmd: "ceph -s && zpool status",
+                rows: [
+                  "| `ceph-mon-mgr-01` | `ceph-mon-mgr-rgw` | OK | — | 314 TiB of 491 TiB used, all placement groups active+clean |",
+                  "| `ceph-osd-nvme-01` | `bluestore-osd-node` | OK | — | OSDs up; `osd.4` is the fullest at 71% |",
+                  "| `truenas-zfs-vault-01` | `zfs-immutable-vault` | OK | — | `tank_backup_01` ONLINE, 0 errors |",
+                ],
+                action: "none needed, the pool and the backup vault are healthy.",
+              }
+            : cluster.includes("K8s")
+              ? {
+                  cmd: "kubectl get pvc -A && multipath -ll",
+                  rows: [
+                    "| `k8s-storage-cp-01` | `k8s-control-plane-trident` | OK | `0.4 ms` | Astra Trident 24.06, 3 of 3 ONTAP backends online |",
+                    "| `k8s-gpu-io-worker-01` | `nvmeof-nfsv4-worker` | Warning | `1.9 ms` | `/etc/multipath.conf` uses `multibus` |",
+                  ],
+                  action:
+                    "set `path_grouping_policy group_by_prio` in `/etc/multipath.conf` on `k8s-gpu-io-worker-01`, then reload multipathd.",
+                  fix: "sudo systemctl reload multipathd && sudo multipath -ll",
+                }
+              : {
+                  cmd: "storagegrid-status",
+                  rows: [
+                    "| `sg-admin-primary-01` | `primary-admin-loadbalancer` | OK | `2.1 ms` p99 | 14 objects in the ILM queue |",
+                    "| `sg-sn-nvme-01` | `storage-node-dc1-01` | OK | `3.4 ms` p99 | 42 objects in the ILM queue |",
+                    "| `sg-sn-nvme-02` | `storage-node-dc1-02` | OK | `3.6 ms` p99 | 38 objects in the ILM queue |",
+                    "| `minio-aistor-edge-01` | `nvme-s3-tier-cache` | OK | `0.8 ms` p99 | NVMe cache tier, nothing queued |",
+                  ],
+                  action:
+                    "none needed, the grid is healthy and `ILM-Prod-FabricPool-EC63` (erasure coding 6+3, WORM Object Lock) is compliant.",
+                };
 
-      if (task.mode !== "advice") {
+      // Advice mode runs nothing, and the answer says so.
+      const ran = task.mode !== "advice";
+      if (ran) {
         await this.executeToolCall({
           id: `demo_clexec_${Date.now()}`,
           name: "sshs3_cluster_exec",
           argumentsJson: JSON.stringify({
             cluster,
-            command: cmd,
-            description: `Parallell kluster-hälsokontroll över ${cluster}`,
+            command: report.cmd,
+            description: `Health check on every node of ${cluster}`,
           }),
         });
       }
 
       await streamMarkdown(
         [
-          `### ⚡ Parallell Kluster-Analys: \`${cluster}\``,
+          `### Cluster check: \`${cluster}\``,
           "",
-          `Jag körde \`${cmd}\` parallellt över alla noder i **\`${cluster}\`** via \`sshs3_cluster_exec\`:`,
+          ran
+            ? `I ran \`${report.cmd}\` on every node of **\`${cluster}\`** in parallel with \`sshs3_cluster_exec\`:`
+            : `Advice mode runs nothing. This is what \`${report.cmd}\` shows on the nodes of **\`${cluster}\`** in the demo lab:`,
           "",
-          "| Nod | Roll | Status | Svarstid / Telemetri | Observation |",
+          "| Node | Role | Status | Latency / telemetry | Observation |",
           "| :--- | :--- | :--- | :--- | :--- |",
-          cluster.includes("ONTAP")
-            ? "| `netapp-aff-a800-01a` | `ontap-ha-node-a` | 🟢 ONLINE | `0.38 ms` | `aggr1_nvme_prod` 72% (48 TB i FabricPool) |\n| `netapp-aff-a800-01b` | `ontap-ha-node-b` | 🟡 QOS-WARN | `2.45 ms` | `vol_ai_scratch_03` saknar QoS-tak (48k IOPS) |\n| `netapp-fas9000-dr-01` | `snapmirror-dr` | 🟢 ONLINE | `Lag 00:03:18` | SnapMirror XDP + SnapLock WORM aktivt |"
-            : "| `k8s-storage-cp-01` | `control-plane` | 🟢 Ready | `0.4 ms` | Astra Trident 24.06 (3/3 ONTAP backends online) |\n| `k8s-gpu-io-worker-01` | `gpu-io-worker` | 🟡 ALUA-WARN | `1.9 ms` | `/etc/multipath.conf` använder `multibus` |",
+          ...report.rows,
           "",
-          "> **Rekommenderad åtgärd:** Applicera Adaptive QoS-taket `pg-batch-ceiling` på `vol_ai_scratch_03` för att sänka databaslatensen under `0.4 ms`.",
-          "",
-          "```bash",
-          "volume modify -vserver svm-prod-nfs -volume vol_ai_scratch_03 -qos-policy-group pg-batch-ceiling",
-          "```",
+          `> **Recommended action:** ${report.action}`,
+          ...(report.fix ? ["", "```bash", report.fix, "```"] : []),
         ].join("\n"),
       );
       return;
     }
 
-    // 4. Multi-Agent Workforce Swarm
+    // 4. A workforce review
     if (
       offered.has("sshs3_agent_and_mcp_manage") &&
       (lower.includes("workforce") || lower.includes("swarm"))
@@ -1812,24 +1851,29 @@ export class DirectAgentRuntime implements AgentRuntime {
           prompt: lastUserMsg,
         }),
       });
-      let synthesis = wfResRaw;
+      // The tool answers { ok, operation, workforceRun }, or { error } when it did not run.
+      let synthesis =
+        "The workforce review finished without a summary; the Workforce view has each specialist's report.";
       try {
-        const parsed = JSON.parse(wfResRaw) as { run?: { synthesis?: string } };
-        if (parsed.run?.synthesis) synthesis = parsed.run.synthesis;
+        const parsed = JSON.parse(wfResRaw) as {
+          error?: string;
+          workforceRun?: { synthesis?: string };
+        };
+        if (parsed.workforceRun?.synthesis) synthesis = parsed.workforceRun.synthesis;
+        else if (parsed.error) synthesis = `The workforce review did not run: ${parsed.error}`;
       } catch {
-        // keep raw
+        // Not JSON: the sentence above stands.
       }
       await streamMarkdown(synthesis);
       return;
     }
 
-    // 5. Knowledge Base Search & Runbooks
+    // 5. A knowledge base search
     if (
       offered.has("sshs3_kb_search") &&
       (lower.includes("runbook") ||
-        lower.includes("@kb") ||
-        lower.includes("kunskapsbas") ||
-        lower.includes("kb"))
+        lower.includes("knowledge base") ||
+        /\bkb\b/.test(lower))
     ) {
       const kbResRaw = await this.executeToolCall({
         id: `demo_kb_${Date.now()}`,
@@ -1841,15 +1885,17 @@ export class DirectAgentRuntime implements AgentRuntime {
       });
       await streamMarkdown(
         [
-          "### 📚 Hybrid BM25 + Orama Semantisk Runbook-sökning (`sshs3_kb_search`)",
+          "### Knowledge base search (`sshs3_kb_search`)",
           "",
-          "Jag sökte i vår synkade Knowledge Base med semantisk koncept-expansion (svenska ↔ engelska) och matchade följande runbooks:",
+          "I searched the knowledge base with your question; what it returned is at the end. The search matches words and related terms from a synonym table. It ranks by meaning only when an embedding model is set up.",
           "",
-          "1. **NetApp ONTAP 9.15 CLI, Adaptive QoS & FabricPool Reference** (`NetApp-ONTAP-Prod-SE`)",
-          "   - Diagnoskommando (`🟢 Safe`): `qos statistics volume latency show -iterations 5 -rows 15`",
-          "   - Åtgärdskommando (`🟡 Modify`): `volume modify -vserver svm-prod-nfs -volume vol_ai_scratch_03 -qos-policy-group pg-batch-ceiling`",
+          "Two documents in the demo lab's knowledge base cover its open latency incident:",
+          "",
+          "1. **NetApp ONTAP QoS, 9.15 CLI & FabricPool Reference** (`NetApp-ONTAP-Prod-SE`)",
+          "   - To diagnose (read-only): `qos statistics volume latency show -iterations 5 -rows 15`",
+          "   - To fix (changes state): `volume modify -vserver svm-prod-nfs -volume vol_ai_scratch_03 -qos-policy-group pg-batch-ceiling`",
           "2. **Astra Trident 24.06 CSI & Linux Multipath Configuration Standard** (`K8s-Trident-CSI-Prod`)",
-          "   - Verifiera ALUA: `sudo multipath -ll && tridentctl get backend -n trident`",
+          "   - To check ALUA: `sudo multipath -ll && tridentctl get backend -n trident`",
           "",
           "```json",
           boundedContext(kbResRaw, 1800),
@@ -1859,7 +1905,7 @@ export class DirectAgentRuntime implements AgentRuntime {
       return;
     }
 
-    // 6. Terminal command execution & troubleshooting (when connected to a terminal or general prompt)
+    // 6. With a terminal attached (and not in advice mode): a read-only check there, then the overview
     if (
       task.target?.sessionId &&
       task.mode !== "advice" &&
@@ -1880,32 +1926,35 @@ export class DirectAgentRuntime implements AgentRuntime {
         name: "terminal_command",
         argumentsJson: JSON.stringify({
           command: safeDiagCmd,
-          description: "Kör icke-destruktiv read-only diagnostik i aktiv terminal (🟢 Safe)",
+          description: "Run read-only diagnostics in the active terminal",
           sessionId: task.target.sessionId,
         }),
       });
     }
 
+    // The question as asked, secrets masked, cut to fit on a line.
+    const asked = maskContext(lastUserMsg).replace(/\s+/g, " ").trim();
     await streamMarkdown(
       [
-        "### ✨ Interaktiv AI-Analys & Infrastrukturstatus (Demo Mode)",
+        "### Infrastructure status (demo lab)",
         "",
-        `Jag har analyserat din förfrågan (**"${boundedContext(lastUserMsg, 120)}"**) mot våra 5 kluster i \`sshs3\` (**NetApp ONTAP 9.15**, **StorageGRID 11.8 S3**, **Ceph Reef NVMe**, **TrueNAS ZFS** och **Kubernetes Astra Trident**):`,
+        `No AI model is set up, so this is the demo lab's scripted answer to **"${asked.length > 120 ? `${asked.slice(0, 117)}...` : asked}"**. The state of the lab's 5 clusters:`,
         "",
-        "| Kluster | Noder | Hälsa | Aktiva fynd / Rekommendation |",
+        "| Cluster | Nodes | Health | Finding or recommendation |",
         "| :--- | :--- | :--- | :--- |",
-        "| `NetApp-ONTAP-Prod-SE` | 4 noder | 🟡 `QoS-Warn` | `vol_ai_scratch_03` på `netapp-aff-a800-01b` saknar QoS-tak (`2.45 ms`). |",
-        "| `NetApp-StorageGRID-S3` | 4 noder | 🟢 `HEALTHY` | Erasure Coding 6+3 & WORM Object Lock i fas (`3.4 ms` p99). |",
-        "| `Ceph-NVMe-Block-Pool` | 3 noder | 🟢 `ONLINE` | 314 TiB / 491 TiB NVMe BlueStore + 1.4 PB TrueNAS RAIDZ3. |",
-        "| `K8s-Trident-CSI-Prod` | 2 noder | 🟡 `ALUA-Warn` | `k8s-gpu-io-worker-01` har `multibus` istället för `group_by_prio`. |",
+        "| `NetApp-ONTAP-Prod-SE` | 4 nodes | Warning | `vol_ai_scratch_03` on `netapp-aff-a800-01b` has no QoS ceiling (`2.45 ms`). |",
+        "| `NetApp-StorageGRID-S3` | 4 nodes | Healthy | Erasure coding 6+3 and WORM Object Lock compliant (`3.4 ms` p99). |",
+        "| `Ceph-NVMe-Block-Pool` | 3 nodes | Healthy | 314 TiB of 491 TiB NVMe BlueStore used, plus 1.4 PB TrueNAS RAIDZ3. |",
+        "| `K8s-Trident-CSI-Prod` | 2 nodes | Warning | `k8s-gpu-io-worker-01` uses `multibus` instead of `group_by_prio`. |",
+        "| `SAN-Fabric-Mgmt` | 1 node | Healthy | Jump host `san-bastion-jump-01`, nothing to report. |",
         "",
-        "> **💡 Tips i Demo-läget:**",
-        "> - Klicka på **Connect** på valfri server på startsidan (eller klicka **`🪟 Split`** på ett kluster) för att öppna en **riktig interaktiv virtuell SSH-terminal**!",
-        "> - Skriv `simulate-error` i terminalen för att testa den proaktiva knappen **`✨ Förklara & fixa felet`**.",
-        "> - Skriv `/split-cluster`, `/diff`, `/cluster-exec` eller `/workforce` här i chatten för att se AI:n styra hela gränssnittet live!",
+        "> **Things to try in the demo lab:**",
+        "> - Click **Connect** on a server on the start page (or **Split** on a cluster) to open a demo terminal. It is scripted: there is no real SSH connection.",
+        "> - Type `simulate-error` in the terminal to bring up the **Explain & fix the error** button.",
+        "> - Type `/split-cluster`, `/diff`, `/cluster-exec` or `/workforce` here in the chat to have a split view opened, a file compared between servers, a command run across a cluster or a workforce review started.",
         "",
         "```bash",
-        "# Förslag på kommandon du kan köra med 1 klick i terminalen:",
+        "# Commands to try in a demo terminal:",
         "qos statistics volume latency show -iterations 5 -rows 15",
         "snapmirror show -fields state,status,healthy,lag-time",
         "kubectl get pvc,volumeattachment -A -o wide",
@@ -2257,6 +2306,7 @@ export class DirectAgentRuntime implements AgentRuntime {
             usage = {
               input_tokens: u.input_tokens ?? 0,
               output_tokens: u.output_tokens ?? 0,
+              context_tokens: u.input_tokens ?? 0,
             };
           }
         } else if (type === "error" || type === "response.failed") {
@@ -2439,6 +2489,7 @@ export class DirectAgentRuntime implements AgentRuntime {
           usage = {
             input_tokens: u.prompt_tokens ?? u.input_tokens ?? 0,
             output_tokens: u.completion_tokens ?? u.output_tokens ?? 0,
+            context_tokens: u.prompt_tokens ?? u.input_tokens ?? 0,
           };
         }
         const choices = chunk.choices as Array<Record<string, unknown>> | undefined;
@@ -2591,6 +2642,7 @@ export class DirectAgentRuntime implements AgentRuntime {
     // token the model read, whether billed in full, written to the cache or
     // read from it.
     const total = { input_tokens: 0, output_tokens: 0 };
+    let lastCallInput = 0;
 
     // What a compaction keeps: the conversation as it stood when the run began.
     const baseLength = messages.length;
@@ -2651,11 +2703,11 @@ export class DirectAgentRuntime implements AgentRuntime {
           sawMessageStart = true;
           // The input side of the turn is reported once, when the message starts.
           const u = (evt.message as { usage?: Record<string, number> }).usage;
-          if (u)
-            total.input_tokens +=
-              (u.input_tokens ?? 0) +
-              (u.cache_creation_input_tokens ?? 0) +
-              (u.cache_read_input_tokens ?? 0);
+          if (u) {
+            // What the model was sent for this call, cached or not: how full its window is now.
+            lastCallInput = (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0);
+            total.input_tokens += lastCallInput;
+          }
         } else if (type === "content_block_start" && evt.content_block && typeof evt.content_block === "object") {
           const block = evt.content_block as Record<string, unknown>;
           const idx = typeof evt.index === "number" ? evt.index : 0;
@@ -2700,7 +2752,8 @@ export class DirectAgentRuntime implements AgentRuntime {
       });
       total.output_tokens += turnOutputTokens;
       total.input_tokens += turnInputTokens;
-      const usage = { ...total };
+      if (turnInputTokens) lastCallInput = turnInputTokens;
+      const usage = { ...total, ...(lastCallInput ? { context_tokens: lastCallInput } : {}) };
 
       const calls = [...toolCalls.values()].filter((c) => c.name);
       if (turnText) finalOutput = turnText;

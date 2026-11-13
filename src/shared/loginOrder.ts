@@ -5,20 +5,20 @@ const KEY_AUTH_TYPES: SSHAuthType[] = ['privateKey', 'agent', 'smartcard', 'fido
 export interface LoginOrderInput {
   authType: SSHAuthType;
   loginMethod?: InstallLoginMethod;
-  /** true när de valda nycklarna bara är profilens egen inloggningsnyckel. */
+  /** true when the selected keys are only the profile's own login key. */
   installsOwnKeyOnly?: boolean;
-  /** Auth-metoder servern annonserade vid probe, om kända. */
+  /** Auth methods the server advertised at the probe, if known. */
   serverMethods?: string[];
-  /** Profilen har ett PKCS#11-bibliotek angivet (t.ex. kvar från när den använde smartcard). */
+  /** The profile has a PKCS#11 library set (e.g. left over from when it used a smartcard). */
   hasSmartcardLib?: boolean;
 }
 
 /**
- * Ordningen vi försöker logga in i för att installera nycklar. Regel: logga aldrig in med den nyckel som ska
- * installeras. Finns ett smartcard-bibliotek i profilen (typiskt kvar när man bytt till FIDO2) provas kortet
- * före lösenord, eftersom hosten ofta redan litar på det. En tom lista betyder att det inte finns någon
- * vettig inloggning (hosten tar bara nycklar och den enda nyckeln vi har är den som ska in).
- * Delas av main (som kör ordningen) och renderern (som visar den).
+ * The order in which we try to log in to install keys. Rule: never log in with the key that is being
+ * installed. If the profile has a smartcard library (typically left over after a switch to FIDO2) the card
+ * is tried before the password, because the host often trusts it already. An empty list means there is no
+ * sensible login (the host only takes keys and the only key we have is the one to be installed).
+ * Shared by main (which runs the order) and the renderer (which shows it).
  */
 export function chooseLoginOrder(opts: LoginOrderInput): InstallLoginStep[] {
   const { authType, loginMethod = 'auto', installsOwnKeyOnly = false, serverMethods, hasSmartcardLib = false } = opts;

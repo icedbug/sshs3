@@ -147,8 +147,8 @@ export class SettingsStore {
    * calls for two different vaultIds (e.g. two Team Vault detail panels toggled in quick
    * succession) can never race on a stale snapshot and have one overwrite the other's change —
    * `saveSettings`'s top-level merge replaces this nested map wholesale from whatever the caller
-   * last read, which is exactly the gap this closes. Per CLAUDE.md: "Alla stores använder
-   * `queueMutation` för sekventiella skrivningar."
+   * last read, which is exactly the gap this closes. Per CLAUDE.md, every store uses
+   * `queueMutation` for sequential writes.
    */
   public async setTeamVaultTabVisible(vaultId: string, visible: boolean): Promise<AppSettings> {
     return this.queueMutation(async () => {

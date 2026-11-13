@@ -281,14 +281,14 @@ export function KbPages({
                     {docSources.length > 0 && (
                       <button
                         type="button"
-                        disabled={busy === p.id}
+                        disabled={busy === p.id || (hub.kbWork?.rebuilding ?? []).includes(p.id)}
                         title="Has the assistant read the page's sources again and update the page"
                         onClick={() => {
                           setBusy(p.id);
                           void act({ action: "kb-page-rebuild", id: p.id }).finally(() => setBusy(""));
                         }}
                       >
-                        {busy === p.id ? "Asked…" : "Update from its sources"}
+                        {busy === p.id || (hub.kbWork?.rebuilding ?? []).includes(p.id) ? "Reading its sources…" : "Update from its sources"}
                       </button>
                     )}
                     <span className="ai-spacer" />
@@ -343,15 +343,24 @@ export function KbReview({
         </h3>
         <button
           type="button"
-          disabled={checking || pages.length < 2}
+          disabled={checking || hub.kbWork?.checkingContradictions || pages.length < 2}
           title="Compares pages about the same systems and lists where they state things that cannot both be true"
           onClick={() => {
             setChecking(true);
-            void act({ action: "kb-check-contradictions" }).finally(() => setTimeout(() => setChecking(false), 4000));
+            void act({ action: "kb-check-contradictions" }).finally(() => setChecking(false));
           }}
         >
-          {checking ? "Comparing pages…" : "Check for contradictions"}
+          {checking || hub.kbWork?.checkingContradictions ? "Comparing pages…" : "Check for contradictions"}
         </button>
+        {!hub.kbWork?.checkingContradictions && hub.kbWork?.lastCheck && (
+          <small className={hub.kbWork.lastCheck.error ? "ai-bad" : "ai-muted"} role="status" data-testid="kb-last-check">
+            {hub.kbWork.lastCheck.error
+              ? `The last comparison did not finish: ${hub.kbWork.lastCheck.error}`
+              : hub.kbWork.lastCheck.found
+                ? `The last comparison found ${hub.kbWork.lastCheck.found} place${hub.kbWork.lastCheck.found === 1 ? "" : "s"} where pages disagree.`
+                : "The last comparison found no pages that disagree."}
+          </small>
+        )}
       </div>
       <p className="ai-hint">
         What agents asked and found nothing on, pages about systems that are gone, pages nothing backs any more.
