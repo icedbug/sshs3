@@ -614,7 +614,8 @@ export async function handleAppAction(
           await hub.request({
             action: "activity-record",
             event: {
-              actor: str("actor") || (await hub.resolveActorName()),
+              // The agent, for the person it works for: never a name the model chose.
+              actor: `${task.agentName || "Assistant"} (agent, for ${await hub.resolveActorName()})`,
               targetLabel,
               kind: (str("activityKind") as WorkspaceActivityEvent["kind"]) || "note",
               summary,

@@ -2199,18 +2199,23 @@ export class HubService {
         break;
       }
       case "activity-record": {
-        const actor =
-          request.event.actor?.trim() || (await this.resolveActorName());
+        // On a shared server the entry is the signed-in person's: nobody writes the team's log as another.
+        const actor = (!this.sharedServer() && request.event.actor?.trim()) || (await this.resolveActorName());
         const event: WorkspaceActivityEvent = {
           id: crypto.randomUUID(),
           at: Date.now(),
-          actor: boundedContext(actor, 80),
+          actor: clip(actor, 80),
           profileId: request.event.profileId,
           targetLabel: clip(
             requiredText(request.event.targetLabel),
             200,
           ),
-          kind: request.event.kind,
+          // One of the kinds the log knows; anything else is a note.
+          kind: (["config-edit", "service-action", "service", "package-change", "deploy", "command", "profile-update", "note"] as const).includes(
+            request.event.kind as never,
+          )
+            ? request.event.kind
+            : "note",
           summary: clip(requiredText(request.event.summary), 400),
           detail: request.event.detail
             ? boundedContext(request.event.detail, 2000)
@@ -3683,7 +3688,7 @@ export class HubService {
     if (!read) await this.store.save();
     const snap = await this.snapshot();
     if (reply) snap.reply = reply;
-    if (!read) this.changed();
+    if (!read) this.changed(true);
     return snap;
   }
 
@@ -3802,6 +3807,10 @@ export class HubService {
   ): Promise<void> {
     if (this.runtimes.has(task.id) || this.launches.has(task.id))
       throw new Error("Task already running");
+    // Every way into a run (a new message, a reply, resuming) holds an agent to its pause and its budget.
+    // The hub's own background work is bounded by the run that asked for it.
+    const as = task.agentId && !isBackgroundRun(task) ? this.getAgentsList().find((a) => a.id === task.agentId) : undefined;
+    if (as) this.assertMayRun(as);
     // Workforce specialists are bounded by their run's own concurrency and do
     // not take one of the user's three slots.
     const ownRuns = [...this.runtimes.keys(), ...this.launches.keys()].filter(
@@ -4431,13 +4440,14 @@ export class HubService {
     this.store.data.tasks.push(copy);
     return copy;
   }
-  changed(): void {
+  /** `saved`: the store was just written; only tell the windows (a second save of the same data is not needed). */
+  changed(saved = false): void {
     if (this.disposed) return;
     this.host.changed();
     // Before the early return below: a change while a save is pending must still reach the inbox.
     this.pokeInbox();
     this.auditFinishedChanges();
-    if (!this.initialized || this.saveTimer) return;
+    if (saved || !this.initialized || this.saveTimer) return;
     this.saveTimer = setTimeout(() => {
       this.saveTimer = undefined;
       void this.store
@@ -6147,7 +6157,7 @@ export class HubService {
       throw e;
     }
     task.ticketId = ticket.id;
-    task.title = boundedContext(`Ticket: ${ticket.title}`, 100);
+    task.title = clip(`Ticket: ${ticket.title}`, 100);
     this.putTicket({
       ...ticket,
       status: "in_progress",
@@ -6340,7 +6350,7 @@ export class HubService {
     if (Notification?.isSupported?.()) {
       const notification = new Notification({
         title: `sshs3 · ${title}`,
-        body: boundedContext(body, 160),
+        body: clip(body, 160),
       });
       notification.on("click", this.host.show);
       notification.show();
@@ -7389,7 +7399,7 @@ export class HubService {
         scope: input.scope,
         title: clip(input.title, 200),
         text: boundedContext(input.text),
-        author: boundedContext(author, 80),
+        author: clip(author, 80),
         confidence: input.confidence,
         autoLearned: input.autoLearned,
         sourceCommand: input.sourceCommand

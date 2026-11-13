@@ -1,3 +1,4 @@
+import { sanitizeServerForS3 } from "./S3WorkspaceSyncService";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -255,14 +256,27 @@ export class HubStore {
       this.prune();
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      // Only a file that was read and is not a store is replaced, and only once it is kept aside. A file
+      // that could not be read at all (locked by antivirus or a sync client, too many open files) is not
+      // known to be broken: nothing is written over it, and the hub says so instead of starting empty.
+      const unreadable = !(error instanceof SyntaxError) && (error as Error).message !== "Unsupported AI Hub store";
+      if (unreadable) {
+        this.writable = false;
+        throw new Error(`The AI hub's data could not be read (${(error as Error).message}); nothing was changed. Close what holds the file open and start again.`, { cause: error });
+      }
       try {
         await fs.copyFile(this.file, `${this.file}.corrupt-${Date.now()}`);
-      } catch {
-        // Ignore backup failure
+      } catch (copyError) {
+        // Not kept aside, so not replaced either.
+        this.writable = false;
+        throw new Error(`The AI hub's data is not readable as a store, and could not be kept aside (${(copyError as Error).message}); nothing was changed.`, { cause: copyError });
       }
       this.data = defaultHubData();
     }
   }
+
+  /** False after a load that could not read the file: a save would write over data that was never read. */
+  private writable = true;
 
   prune(now = Date.now()): void {
     const cutoff = now - this.data.preferences.retentionDays * 86_400_000;
@@ -289,11 +303,16 @@ export class HubStore {
   }
 
   save(): Promise<void> {
+    if (!this.writable) return Promise.resolve();
     this.prune();
     // Serialize a detached, redacted copy; never mutate live state during an asynchronous write.
+    // Image data is masked by nobody: base64 holds no secret a mask could find, and masking megabytes
+    // of it froze the app for a second and a half per image on every save.
     const clean = (value: unknown): unknown =>
       typeof value === "string"
-        ? maskContext(value)
+        ? value.startsWith("data:image/")
+          ? value
+          : maskContext(value)
         : Array.isArray(value)
           ? value.map(clean)
           : value && typeof value === "object"
@@ -466,7 +485,9 @@ export class HubStore {
       const payload: SharedWorkspaceFilePayload = {
         version: 1,
         updatedAt: Date.now(),
-        servers: mergedServers.filter((s) => s.shared !== false),
+        // A server's topology only, through the same allow-list the team bucket uses: never a key path,
+        // a jump host, extra ssh options or tunnels (those are each person's own), nor a vault's servers.
+        servers: mergedServers.filter((s) => s.shared !== false && !s.fromVault).map(sanitizeServerForS3),
         memories: this.data.memories.filter((m) => m.scope !== "personal"),
         activityLog: this.data.activityLog,
         deletedServerIds,
@@ -482,10 +503,17 @@ export class HubStore {
                   Object.entries(value).map(([k, v]) => [k, clean(v)]),
                 )
               : value;
-      await fs.mkdir(path.dirname(targetPath), { recursive: true });
-      const tmp = `${targetPath}.tmp-${process.pid}-${crypto.randomUUID()}`;
-      await fs.writeFile(tmp, JSON.stringify(clean(payload), null, 2), "utf8");
-      await fs.rename(tmp, targetPath);
+      // Written only when what it says differs from what is there: reading the hub (every snapshot comes
+      // here) rewrote the team's file, with a new date, every time anybody looked.
+      const content = clean(payload) as SharedWorkspaceFilePayload;
+      const same = (a: Partial<SharedWorkspaceFilePayload>, b: Partial<SharedWorkspaceFilePayload>): boolean =>
+        JSON.stringify({ ...a, updatedAt: 0 }) === JSON.stringify({ ...b, updatedAt: 0 });
+      if (!same(content, remote)) {
+        await fs.mkdir(path.dirname(targetPath), { recursive: true });
+        const tmp = `${targetPath}.tmp-${process.pid}-${crypto.randomUUID()}`;
+        await fs.writeFile(tmp, JSON.stringify(content, null, 2), "utf8");
+        await fs.rename(tmp, targetPath);
+      }
     } catch {
       // Non-fatal if shared path is temporarily read-only or unavailable
     }
