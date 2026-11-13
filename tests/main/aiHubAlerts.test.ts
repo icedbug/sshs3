@@ -114,15 +114,25 @@ describe("alerts through the hub", () => {
     expect(ticket).toMatchObject({ title: "Alert (critical): Disk almost full on pg-01", status: "todo", assigneeName: "DBA", target: "pg-01", createdBy: "Alertmanager", alert: { fingerprint: "abc123", count: 1, severity: "critical" } });
     expect(ticket.description).toContain("> /var/lib/postgresql is at 94%");
 
-    // Firing again: the same ticket, counted. Resolved: noted on it.
-    const again = (await hub.receiveAlert(secret, { alerts: [ALERTMANAGER.alerts[0]] }))!;
+    // Sent again as it was (Alertmanager re-sends a group on every change): the same ticket, not a new firing.
+    const resent = (await hub.receiveAlert(secret, { alerts: [{ ...ALERTMANAGER.alerts[0], startsAt: "2026-05-01T10:00:00Z" }] }))!;
+    expect(resent).toEqual({ created: [], updated: [ticket.id] });
+    await hub.receiveAlert(secret, { alerts: [{ ...ALERTMANAGER.alerts[0], startsAt: "2026-05-01T10:00:00Z" }] });
+    expect(hub.store.data.workTickets!.find((t) => t.id === ticket.id)!.alert!.count).toBe(1);
+    // Firing again, with a new start: counted. Resolved: noted on it.
+    const again = (await hub.receiveAlert(secret, { alerts: [{ ...ALERTMANAGER.alerts[0], startsAt: "2026-05-01T11:00:00Z" }] }))!;
     expect(again).toEqual({ created: [], updated: [ticket.id] });
     await hub.receiveAlert(secret, { alerts: [{ ...ALERTMANAGER.alerts[0], status: "resolved" }] });
     ticket = hub.store.data.workTickets!.find((t) => t.id === ticket.id)!;
     expect(ticket.alert).toMatchObject({ count: 2 });
     expect(ticket.alert!.resolvedAt).toBeGreaterThan(0);
     expect(ticket.comments!.map((c) => c.text)).toEqual(["Fired again (2 times).", "Alertmanager says this has resolved."]);
-    expect((await hub.request({ action: "snapshot" })).alertIntake!.received).toBe(3);
+    expect((await hub.request({ action: "snapshot" })).alertIntake!.received).toBe(5);
+    // A resolved alert that fires again later is news again: it is back in the inbox as a fresh firing.
+    await hub.receiveAlert(secret, { alerts: [{ ...ALERTMANAGER.alerts[0], startsAt: "2026-05-01T12:00:00Z" }] });
+    ticket = hub.store.data.workTickets!.find((t) => t.id === ticket.id)!;
+    expect(ticket.alert).toMatchObject({ count: 3, resolvedAt: undefined });
+    expect(ticket.alert!.firingSince).toBeGreaterThan(ticket.alert!.firstAt - 1);
 
     // Turned off: the old secret opens nothing.
     await hub.request({ action: "alert-hook-disable" });

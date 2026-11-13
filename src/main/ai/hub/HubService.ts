@@ -5438,7 +5438,11 @@ export class HubService {
       command: change?.command,
       check: change?.check?.command,
       rollback: change?.rollback?.command,
-      waitsMinutes: item.kind === "approval" ? this.approvalWaitMinutes() : undefined,
+      // What is left of the wait, not the whole of it: a reminder comes when part of it has gone.
+      waitsMinutes:
+        item.kind === "approval"
+          ? Math.max(1, Math.round(this.approvalWaitMinutes() - (Date.now() - (item.since ?? item.at)) / 60_000))
+          : undefined,
       link: this.inboxLink(item.id),
     };
   }
@@ -5460,7 +5464,8 @@ export class HubService {
       const before = JSON.stringify([data.seen, data.reminded]);
       const { fresh, seen } = diffInbox(items, data.seen, now);
       data.seen = seen;
-      const remindAfter = data.reminderMinutes * 60_000;
+      // A reminder comes before the agent stops waiting, or it would never come: at most a minute before the end.
+      const remindAfter = Math.min(data.reminderMinutes, Math.max(1, this.approvalWaitMinutes() - 1)) * 60_000;
       const reminders =
         remindAfter > 0
           ? items.filter((i) => i.kind === "approval" && !fresh.includes(i) && !data.reminded[i.id] && now - (i.since ?? i.at) >= remindAfter)
@@ -5697,19 +5702,31 @@ export class HubService {
         (t) => t.alert?.fingerprint === alert.fingerprint && t.status !== "done",
       );
       if (open) {
-        const note =
-          alert.status === "resolved"
-            ? `${alert.source} says this has resolved.`
-            : `Fired again (${(open.alert?.count ?? 1) + 1} times).`;
-        this.putTicket({
-          ...withComment(open, alert.source, note, now),
-          alert: {
-            ...open.alert!,
-            lastAt: now,
-            count: (open.alert?.count ?? 1) + (alert.status === "resolved" ? 0 : 1),
-            resolvedAt: alert.status === "resolved" ? now : undefined,
-          },
-        });
+        const was = open.alert!;
+        // What this post is: over, a new firing (after it had resolved, or with a new start), or only the
+        // same firing sent again (Alertmanager re-sends a whole group on every change and every repeat
+        // interval; PagerDuty sends acknowledgements and notes). Only the first two are news.
+        const resolved = alert.status === "resolved";
+        const refired =
+          !resolved &&
+          !alert.update &&
+          (Boolean(was.resolvedAt) || (alert.startsAt !== undefined && was.startsAt !== undefined && alert.startsAt !== was.startsAt));
+        const note = resolved
+          ? was.resolvedAt
+            ? undefined
+            : `${alert.source} says this has resolved.`
+          : refired
+            ? `Fired again${was.resolvedAt ? " after it had resolved" : ""} (${was.count + 1} times).`
+            : undefined;
+        const alertNow = {
+          ...was,
+          lastAt: now,
+          count: was.count + (refired ? 1 : 0),
+          resolvedAt: resolved ? (was.resolvedAt ?? now) : refired || !was.resolvedAt ? undefined : was.resolvedAt,
+          ...(refired && was.resolvedAt ? { firingSince: now } : {}),
+          ...(alert.startsAt ? { startsAt: alert.startsAt } : {}),
+        };
+        this.putTicket({ ...(note ? withComment(open, alert.source, note, now) : { ...open, updatedAt: now }), alert: alertNow });
         updated.push(open.id);
         continue;
       }
@@ -5737,6 +5754,7 @@ export class HubService {
           firstAt: now,
           lastAt: now,
           count: 1,
+          ...(alert.startsAt ? { startsAt: alert.startsAt } : {}),
         },
       });
       created.push(ticket.id);

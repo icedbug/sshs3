@@ -95,15 +95,17 @@ export function inboxItems(hub: InboxInput): InboxItem[] {
       out.push({ id: `review:${t.id}`, kind: "review", title: t.title, detail: t.result?.slice(0, 240), from: t.assigneeName, at: t.updatedAt, since: t.statusAt ?? t.updatedAt, target: t.target, ticketId: t.id, taskId: t.taskId });
     else if (t.status === "blocked")
       out.push({ id: `blocked:${t.id}`, kind: "blocked", title: t.title, detail: t.result?.slice(0, 240), from: t.assigneeName, at: t.updatedAt, since: t.statusAt ?? t.updatedAt, target: t.target, ticketId: t.id, taskId: t.taskId });
-    else if (t.alert && !t.alert.resolvedAt && (t.status === "backlog" || (t.status === "todo" && !t.assigneeAgentId)))
+    // An alert waits for a person until a run has taken it: assigned to an agent is not the same as being worked.
+    else if (t.alert && !t.alert.resolvedAt && (t.status === "backlog" || t.status === "todo"))
       out.push({
         id: `alert:${t.id}`,
         kind: "alert",
         title: t.title,
-        detail: `Nobody has it${t.alert.count > 1 ? ` · fired ${t.alert.count} times` : ""}`,
+        detail: `${t.assigneeName ? `With ${t.assigneeName}, not started yet` : "Nobody has it"}${t.alert.count > 1 ? ` · fired ${t.alert.count} times` : ""}`,
         from: t.alert.source,
         at: t.alert.lastAt,
-        since: t.alert.firstAt,
+        // The current firing: one that comes back after it had resolved is news again.
+        since: t.alert.firingSince ?? t.alert.firstAt,
         target: t.target,
         ticketId: t.id,
         risk: t.alert.severity,

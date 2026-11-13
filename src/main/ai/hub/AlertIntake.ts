@@ -23,6 +23,10 @@ export interface IncomingAlert {
   text: string;
   source: string;
   labels: Record<string, string>;
+  /** When this firing began, as the sender says (Alertmanager, Grafana): the same value again is a re-send, not a new firing. */
+  startsAt?: string;
+  /** Not a firing at all: an acknowledgement, a note, a reassignment of the incident (PagerDuty). */
+  update?: boolean;
 }
 
 export interface AlertRule {
@@ -83,6 +87,7 @@ function fromAlertmanager(a: Record<string, unknown>, source: string): IncomingA
     ),
     source,
     labels,
+    ...(str(a.startsAt) ? { startsAt: str(a.startsAt) } : {}),
   };
 }
 
@@ -114,6 +119,8 @@ export function parseAlerts(body: unknown): IncomingAlert[] {
         title: clip(title, 200),
         severity: severityOf(str(data.urgency) || str((data.priority as Record<string, unknown> | undefined)?.summary)),
         status: /resolved/.test(str(event.event_type)) ? "resolved" : "firing",
+        // Only "triggered" (and "reopened") is the incident firing; the rest is something said about it.
+        ...(/resolved|triggered|reopened/.test(str(event.event_type)) ? {} : { update: true }),
         subjects: service ? [service] : [],
         text: clip([service ? `Service: ${service}` : "", str(data.html_url)].filter(Boolean).join("\n"), 2000),
         source: "PagerDuty",
@@ -125,13 +132,19 @@ export function parseAlerts(body: unknown): IncomingAlert[] {
   if (!title) return [];
   const labels = { ...stringMap(b.labels), ...stringMap(b.tags) };
   for (const k of SUBJECT_KEYS) if (str(b[k])) labels[k] = str(b[k]);
+  // Whole words from a known list, negations first: "unresolved" and "not_ok" are still firing,
+  // and anything not known to mean "over" is taken as firing.
   const status = `${str(b.status)} ${str(b.state)}`.toLowerCase();
+  const words = status.split(/[^a-z]+/).filter(Boolean);
+  const over =
+    !/\b(un|not|non)[\s_-]?(resolved|ok|recovered|closed)\b|unresolved/.test(status) &&
+    words.some((w) => ["resolved", "ok", "recovered", "closed", "normal", "cleared"].includes(w));
   return [
     {
       fingerprint: str(b.fingerprint) || str(b.id) || str(b.incident_key) || hash(`${title}|${subjectsOf(labels).join(",")}`),
       title: clip(title, 200),
       severity: severityOf(str(b.severity) || str(b.priority) || str(b.level)),
-      status: /resolved|ok\b|recovered|closed/.test(status) ? "resolved" : "firing",
+      status: over ? "resolved" : "firing",
       subjects: subjectsOf(labels),
       text: clip([str(b.description) || str(b.message) || str(b.text) || str(b.body), str(b.url)].filter(Boolean).join("\n"), 2000),
       source: str(b.source) || "Alert",

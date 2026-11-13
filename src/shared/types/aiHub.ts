@@ -864,6 +864,10 @@ export interface WorkTicket {
     lastAt: number;
     count: number;
     resolvedAt?: number;
+    /** When the current firing began: the first time, or when it fired again after it had resolved. */
+    firingSince?: number;
+    /** The sender's own start of the current firing: a re-send carries the same one. */
+    startsAt?: string;
   };
   /** When it came to the status it has now. Comments move `updatedAt`; this stays. */
   statusAt?: number;

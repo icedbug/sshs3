@@ -338,14 +338,21 @@ export class Sshs3WebServer {
     const userId = dot > 0 ? token.slice(0, dot) : '';
     const secret = dot > 0 ? token.slice(dot + 1) : '';
     const now = Date.now();
-    const hits = (this.hookHits.get(userId) ?? []).filter((t) => now - t < 60_000);
-    if (hits.length >= 60) {
+    // Two limits, neither of which a stranger can use against a real sender: wrong addresses are
+    // limited per caller, and accepted alerts per hook. Old entries age out; nothing is cleared wholesale.
+    const caller = `ip:${req.socket.remoteAddress ?? '?'}`;
+    const recent = (key: string): number[] => (this.hookHits.get(key) ?? []).filter((t) => now - t < 60_000);
+    if (recent(caller).length >= 20) {
+      sendJson(res, 429, { error: 'Too many wrong hook addresses from here; try again in a minute.' });
+      return;
+    }
+    if (recent(`hook:${userId}`).length >= 60) {
       sendJson(res, 429, { error: 'Too many alerts; try again in a minute.' });
       return;
     }
-    hits.push(now);
-    this.hookHits.set(userId, hits);
-    if (this.hookHits.size > 2000) this.hookHits.clear();
+    if (this.hookHits.size > 4000)
+      for (const [key, times] of this.hookHits) if (!times.some((t) => now - t < 60_000)) this.hookHits.delete(key);
+    const count = (key: string): void => void this.hookHits.set(key, [...recent(key), now]);
     let body: Record<string, unknown>;
     try {
       body = await readJsonBody(req);
@@ -357,9 +364,11 @@ export class Sshs3WebServer {
     const tenant = user ? await this.tenants.getOrCreateTenant(user).catch(() => undefined) : undefined;
     const result = tenant ? await tenant.hub.receiveAlert(secret, body) : undefined;
     if (!result) {
+      count(caller);
       sendJson(res, 404, { error: 'Not found' });
       return;
     }
+    count(`hook:${userId}`);
     sendJson(res, 200, { ok: true, created: result.created.length, updated: result.updated.length });
   }
 

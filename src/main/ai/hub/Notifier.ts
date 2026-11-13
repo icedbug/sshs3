@@ -248,12 +248,29 @@ export function renderNotification(channel: NotifyChannel, items: NotifyItem[], 
 
 // ---- where a notification may be sent ----------------------------------------
 
+/**
+ * The IPv4 address an IPv6 address carries, when it carries one: mapped
+ * (::ffff:a.b.c.d, or the same in hex, ::ffff:7f00:1, which is how a URL parser
+ * and a DNS answer write it), NAT64 (64:ff9b::/96) and the old compatible form
+ * (::a.b.c.d). Such an address goes where its IPv4 address goes, and is judged
+ * as that.
+ */
+function embeddedIPv4(address: string): string | undefined {
+  if (!net.isIPv6(address)) return undefined;
+  const dotted = /^(?:::ffff:|::|64:ff9b::)(\d+\.\d+\.\d+\.\d+)$/i.exec(address)?.[1];
+  if (dotted) return dotted;
+  const hex = /^(?:::ffff:|64:ff9b::|::)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(address);
+  if (!hex) return undefined;
+  const hi = parseInt(hex[1], 16);
+  const lo = parseInt(hex[2], 16);
+  return `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
+}
+
 type AddressClass = "public" | "private" | "loopback" | "link-local" | "never";
 
 /** What kind of place an IP address is. */
 export function addressClass(address: string): AddressClass {
-  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(address)?.[1];
-  const ip = mapped ?? address;
+  const ip = embeddedIPv4(address.replace(/^\[|\]$/g, "")) ?? address.replace(/^\[|\]$/g, "");
   if (net.isIPv4(ip)) {
     const [a, b] = ip.split(".").map(Number);
     if (a === 127) return "loopback";

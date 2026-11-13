@@ -327,6 +327,10 @@ export function NotificationsCard({ hub, act }: { hub: HubSnapshot; act: Act }):
             <option value={10}>Once, after 10 minutes</option>
             <option value={20}>Once, after 20 minutes</option>
           </select>
+          <small>
+            An agent waits {hub.preferences?.approvalWaitMinutes ?? 10} min for an answer; a reminder comes at the latest a
+            minute before that, and says how long is left.
+          </small>
         </label>
       </div>
     </article>
