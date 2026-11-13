@@ -7,6 +7,8 @@ import type { Duplex } from 'node:stream';
 import { setWebDataDir } from './electronShim';
 import { WebAuthService, type WebUserPublic } from './WebAuthService';
 import { WebTenantManager } from './WebTenantManager';
+import { MCP_SCOPES, McpTokenStore, type McpScope } from './McpTokenStore';
+import { handleMcpHttp } from './mcp/McpEndpoint';
 import { createLogger } from '../log';
 
 const log = createLogger('web');
@@ -251,6 +253,8 @@ export interface Sshs3WebServerOptions {
 export class Sshs3WebServer {
   public readonly auth: WebAuthService;
   public readonly tenants: WebTenantManager;
+  /** The keys that let a person's own agent reach this server over MCP. */
+  public readonly mcpTokens: McpTokenStore;
   private httpServer?: http.Server;
   private boundPort = 0;
   private activeSockets = new Set<Duplex>();
@@ -259,6 +263,7 @@ export class Sshs3WebServer {
     setWebDataDir(options.dataDir);
     this.auth = new WebAuthService(options.dataDir);
     this.tenants = new WebTenantManager(options.dataDir);
+    this.mcpTokens = new McpTokenStore(options.dataDir);
   }
 
   getPort(): number {
@@ -268,6 +273,7 @@ export class Sshs3WebServer {
   async start(): Promise<{ port: number; host: string }> {
     await this.auth.initialize();
     await this.tenants.initialize();
+    await this.mcpTokens.initialize();
 
     const host = this.options.host ?? process.env.SSHS3_WEB_HOST ?? '0.0.0.0';
     const requestedPort =
@@ -384,6 +390,90 @@ export class Sshs3WebServer {
     }
   }
 
+  /**
+   * The MCP endpoint. The body is read first and whole (at most 1 MB), then
+   * handed to a handler that opens nothing: what comes back is what is sent.
+   */
+  private async handleMcpEndpoint(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    method: string,
+  ): Promise<void> {
+    let body = '';
+    if (method === 'POST') {
+      const chunks: Buffer[] = [];
+      let total = 0;
+      for await (const chunk of req) {
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        total += buf.length;
+        if (total > 1_000_000) {
+          sendJson(res, 413, { error: 'That is more than this endpoint takes.' });
+          return;
+        }
+        chunks.push(buf);
+      }
+      body = Buffer.concat(chunks).toString('utf8');
+    }
+    const answer = await handleMcpHttp(
+      { method, headers: req.headers as Record<string, string | string[] | undefined>, body },
+      {
+        tokens: this.mcpTokens,
+        enabled: () => process.env.SSHS3_MCP !== '0',
+        hubFor: async (userId) => {
+          const user = (await this.auth.listUsers()).find((u) => u.id === userId);
+          if (!user) return undefined;
+          const tenant = await this.tenants.getOrCreateTenant(user);
+          return {
+            request: (r) => tenant.hub.request(r),
+            actor: user.displayName || user.username,
+          };
+        },
+      },
+    );
+    res.writeHead(answer.status, answer.headers);
+    res.end(answer.body);
+  }
+
+  /** A person's own keys: made and revoked while signed in, never shown again after they are made. */
+  private async handleMcpKeys(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    user: WebUserPublic,
+    method: string,
+    pathname: string,
+  ): Promise<void> {
+    if (method === 'GET') {
+      sendJson(res, 200, { keys: this.mcpTokens.list(user.id), scopes: MCP_SCOPES });
+      return;
+    }
+    if (method === 'POST') {
+      const body = await readJsonBody(req);
+      try {
+        const asked = Array.isArray(body.scopes) ? body.scopes.map(String) : [];
+        const made = await this.mcpTokens.create({
+          userId: user.id,
+          name: String(body.name || ''),
+          createdBy: user.displayName || user.username,
+          scopes: MCP_SCOPES.filter((s) => asked.includes(s)) as McpScope[],
+          serverId: body.serverId ? String(body.serverId) : undefined,
+          expiresInDays: body.expiresInDays ? Number(body.expiresInDays) : undefined,
+        });
+        // The only time the key itself is ever sent anywhere.
+        sendJson(res, 200, { key: made.view, token: made.token });
+      } catch (err) {
+        sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+      }
+      return;
+    }
+    if (method === 'DELETE') {
+      const id = decodeURIComponent(pathname.slice('/api/mcp-keys/'.length));
+      const gone = await this.mcpTokens.revoke(user.id, id);
+      sendJson(res, gone ? 200 : 404, gone ? { ok: true } : { error: 'No such key' });
+      return;
+    }
+    sendJson(res, 405, { error: 'Use GET, POST or DELETE.' });
+  }
+
   private extractSessionToken(req: http.IncomingMessage): string | null {
     const authHeader = req.headers.authorization;
     if (authHeader?.startsWith('Bearer ')) {
@@ -427,6 +517,12 @@ export class Sshs3WebServer {
     // Alerts in: POST /api/hooks/<user id>.<secret>. No session: the secret in the address is the key.
     if (pathname.startsWith('/api/hooks/') && method === 'POST') {
       await this.handleAlertHook(req, res, pathname.slice('/api/hooks/'.length));
+      return;
+    }
+
+    // Somebody's own agent, over MCP. Its own key in the Authorization header; no session, no cookie.
+    if (pathname === '/api/mcp') {
+      await this.handleMcpEndpoint(req, res, method);
       return;
     }
 
@@ -533,6 +629,11 @@ export class Sshs3WebServer {
         return;
       }
 
+      if (pathname === '/api/mcp-keys' || pathname.startsWith('/api/mcp-keys/')) {
+        await this.handleMcpKeys(req, res, user, method, pathname);
+        return;
+      }
+
       // Per-user SSH key management on the VM
       if (pathname === '/api/user/ssh-key' && method === 'POST') {
         const body = await readJsonBody(req);
@@ -631,6 +732,7 @@ export class Sshs3WebServer {
           try {
             await this.auth.deleteUserByAdmin(targetUserId, user.id);
             await this.tenants.disposeTenant(targetUserId);
+            await this.mcpTokens.forgetUser(targetUserId);
             sendJson(res, 200, { ok: true });
           } catch (err) {
             sendJson(res, 400, {

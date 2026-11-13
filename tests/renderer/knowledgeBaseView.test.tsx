@@ -47,6 +47,18 @@ describe("the knowledge base inbox", () => {
     expect(atob((sent[0] as { dataBase64: string }).dataBase64)).toBe("hello");
   });
 
+  it("says that a link fetched again has changed, instead of 'nothing was added'", async () => {
+    const request = vi.fn(async () => answer({ ingest: { added: [], duplicates: [], failed: [], updated: ["Vendor page"] } }));
+    render(<KnowledgeBaseView hub={hub()} act={vi.fn()} onAttachDoc={() => {}} request={request} />);
+    fireEvent.change(screen.getByTestId("kb-paste"), { target: { value: "https://wiki.example.internal/ops" } });
+    fireEvent.click(screen.getByRole("button", { name: "Fetch the page" }));
+    const inbox = await screen.findByTestId("kb-inbox");
+    await waitFor(() => expect(within(inbox).queryByText("taking in…")).not.toBeInTheDocument());
+    // The list is folded away when nothing went wrong; the line is there, inside it.
+    expect(within(inbox).getByText(/has changed; its pages are being brought in line with it/)).toBeInTheDocument();
+    expect(screen.getByText(/1 brought up to date/)).toBeInTheDocument();
+  });
+
   it("fetches a pasted link and adds pasted text", async () => {
     const request = vi.fn(async () => answer({ ingest: { added: ["Wiki page"], duplicates: [], failed: [] } }));
     render(<KnowledgeBaseView hub={hub()} act={vi.fn()} onAttachDoc={() => {}} request={request} />);

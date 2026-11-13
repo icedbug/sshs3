@@ -29,7 +29,7 @@ interface DocDraft {
 interface InboxItem {
   key: string;
   name: string;
-  state: "reading" | "added" | "duplicate" | "failed";
+  state: "reading" | "added" | "updated" | "duplicate" | "failed";
   note?: string;
 }
 
@@ -167,6 +167,10 @@ export function KnowledgeBaseView({
     try {
       const result = (await request(r)).reply?.ingest;
       if (result?.added.length) setItem(key, { state: "added", note: result.added.join(", ") });
+      // The same link, fetched again with a new text: the source we have is brought up to date,
+      // and the pages resting on it are brought in line with it.
+      else if (result?.updated?.length)
+        setItem(key, { state: "updated", note: `“${result.updated[0]}” has changed; its pages are being brought in line with it` });
       else if (result?.duplicates.length)
         setItem(key, { state: "duplicate", note: `Already here as "${result.duplicates[0]}"` });
       else setItem(key, { state: "failed", note: "Nothing was added." });
@@ -342,6 +346,7 @@ export function KnowledgeBaseView({
         <details className="ai-fold ai-inbox" open={busy > 0 || inbox.some((x) => x.state === "failed")}>
           <summary>
             {busy > 0 ? `Taking in ${busy} of ${inbox.length}…` : `Taken in: ${inbox.filter((x) => x.state === "added").length} added`}
+            {inbox.some((x) => x.state === "updated") ? ` · ${inbox.filter((x) => x.state === "updated").length} brought up to date` : ""}
             {inbox.some((x) => x.state === "duplicate") ? ` · ${inbox.filter((x) => x.state === "duplicate").length} already here` : ""}
             {inbox.some((x) => x.state === "failed") ? ` · ${inbox.filter((x) => x.state === "failed").length} not readable` : ""}
           </summary>
