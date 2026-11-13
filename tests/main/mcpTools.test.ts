@@ -75,7 +75,10 @@ describe("the tools somebody's own agent gets over MCP", () => {
     await expect(callMcpTool("rm_rf", {}, c)).rejects.toThrow(/No tool called rm_rf/);
     // Every tool says what it is for and whether it only looks.
     expect(MCP_TOOLS.every((t) => t.description.length > 80 && t.inputSchema.additionalProperties === false)).toBe(true);
-    expect(MCP_TOOLS.filter((t) => t.readOnly).map((t) => t.scope)).toEqual(Array(7).fill("read"));
+    // Every tool that only looks is a reading tool, except the one that asks what became of
+    // a command: that belongs to the key that asked for it.
+    expect(MCP_TOOLS.filter((t) => t.readOnly && t.name !== "command_status").map((t) => t.scope)).toEqual(Array(7).fill("read"));
+    expect(toolsForScopes(["read"]).map((t) => t.name)).not.toContain("command_status");
   });
 
   it("lists the servers and what was read from one of them", async () => {

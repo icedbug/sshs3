@@ -35,6 +35,16 @@ export interface McpToolDef {
 export interface McpCallContext {
   /** The hub of the person whose key this is. */
   request: (r: HubRequest) => Promise<HubSnapshot>;
+  /** Asks for a command on the key's own server. Absent: this installation cannot run one. */
+  runCommand?: (input: {
+    serverId: string;
+    command: string;
+    description: string;
+    check?: { command: string; expected: string };
+    rollback?: string;
+  }) => Promise<{ changeId: string }>;
+  /** What became of one. */
+  commandStatus?: (changeId: string) => { status: string; output?: string; exitCode?: number; check?: unknown; rollback?: unknown; target: string } | undefined;
   scopes: McpScope[];
   /** The one server this key may run a command on. */
   serverId?: string;
@@ -45,7 +55,7 @@ export interface McpCallContext {
 const str = (v: unknown, max = 2000): string => (typeof v === 'string' ? v.trim().slice(0, max) : '');
 const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
 
-export const MCP_TOOLS: McpToolDef[] = [
+export const READ_AND_WRITE_TOOLS: McpToolDef[] = [
   {
     name: 'list_servers',
     title: 'List the servers',
@@ -176,6 +186,62 @@ export const MCP_TOOLS: McpToolDef[] = [
     },
   },
 ];
+
+const RUN_TOOLS: McpToolDef[] = [
+  {
+    name: 'run_command',
+    title: 'Ask to run a command',
+    description:
+      'Asks for one command to be run on the one server this key is for. It does not run when you call this: a person in sshs3 sees what you asked for and approves or refuses it. You get an id back; ask command_status for what became of it. Use it for something you cannot find out by reading, and say in `why` what you expect to see.',
+    scope: 'run',
+    readOnly: false,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        command: { type: 'string', description: 'The command, exactly as it should run.' },
+        why: { type: 'string', description: 'What you are trying to find out or change, in one line. A person reads this before deciding.' },
+      },
+      required: ['command', 'why'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'change_with_check',
+    title: 'Ask to make a change that proves itself',
+    description:
+      'Like run_command, but for a change: it carries the read-only check that shows the change worked and the command that takes it back. If the check does not pass afterwards, the change is taken back by itself. A person still approves it first. Prefer this to run_command for anything that changes a system.',
+    scope: 'run',
+    readOnly: false,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        command: { type: 'string', description: 'The change.' },
+        why: { type: 'string', description: 'What it is for, in one line.' },
+        check: { type: 'string', description: 'A read-only command that shows whether it worked.' },
+        expected: { type: 'string', description: "What the check's output has to contain for the change to count as having worked." },
+        rollback: { type: 'string', description: 'The command that takes the change back.' },
+      },
+      required: ['command', 'why', 'check', 'expected', 'rollback'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'command_status',
+    title: 'What became of what you asked for',
+    description:
+      'The state of something you asked to run: waiting for a person, approved, running, what it printed, whether its check passed, and whether it had to be taken back.',
+    scope: 'run',
+    readOnly: true,
+    inputSchema: {
+      type: 'object',
+      properties: { id: { type: 'string', description: 'The id run_command or change_with_check gave you.' } },
+      required: ['id'],
+      additionalProperties: false,
+    },
+  },
+];
+
+export const MCP_TOOLS: McpToolDef[] = [...READ_AND_WRITE_TOOLS, ...RUN_TOOLS];
 
 export const toolByName = (name: string): McpToolDef | undefined => MCP_TOOLS.find((t) => t.name === name);
 
@@ -366,6 +432,44 @@ export async function callMcpTool(
         ticket: made?.id,
         status: 'backlog',
         note: 'It is in the backlog. Nobody is working on it and nothing starts by itself; a person decides what is picked up.',
+      };
+    }
+    case 'run_command':
+    case 'change_with_check': {
+      if (!ctx.runCommand || !ctx.serverId)
+        throw new Error('This key cannot run commands, or this installation cannot run one from outside.');
+      const command = str(args.command, 4000);
+      const why = str(args.why, 600);
+      if (!command || !why) throw new Error(`${name} needs the command and one line saying what it is for.`);
+      const withCheck = name === 'change_with_check';
+      const check = str(args.check, 2000);
+      const expected = str(args.expected, 400);
+      const rollback = str(args.rollback, 2000);
+      if (withCheck && (!check || !expected || !rollback))
+        throw new Error('change_with_check needs the check, what its output must contain, and the command that takes the change back.');
+      const asked = await ctx.runCommand({
+        serverId: ctx.serverId,
+        command,
+        description: why,
+        ...(withCheck ? { check: { command: check, expected }, rollback } : {}),
+      });
+      return {
+        id: asked.changeId,
+        status: 'waiting for a person',
+        note: 'Nothing has run. Somebody in sshs3 sees what you asked for and decides. Ask command_status with this id; do not ask for the same thing again while it waits.',
+      };
+    }
+    case 'command_status': {
+      if (!ctx.commandStatus) throw new Error('This installation cannot run commands from outside, so there is nothing to report.');
+      const found = ctx.commandStatus(str(args.id, 120));
+      if (!found) throw new Error('No command with that id. Use the id run_command or change_with_check gave you.');
+      return {
+        status: found.status === 'pending' ? 'waiting for a person' : found.status,
+        on: found.target,
+        output: found.output,
+        exitCode: found.exitCode,
+        ...(found.check ? { check: found.check } : {}),
+        ...(found.rollback ? { takenBack: found.rollback } : {}),
       };
     }
     case 'ticket_update': {

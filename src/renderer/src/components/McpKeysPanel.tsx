@@ -27,8 +27,8 @@ const WHAT: Record<string, { label: string; hint: string }> = {
     hint: 'May put work in the backlog and comment on a ticket. Nothing starts by itself.',
   },
   run: {
-    label: 'Run commands',
-    hint: 'Not yet: this is being built. A key will have to name the one server, and a person will approve each command.',
+    label: 'Run commands on one server',
+    hint: 'Only on the server you choose, only in a terminal that is already open for it, and only after you approve each command in sshs3.',
   },
 };
 
@@ -52,6 +52,7 @@ export function McpKeysPanel({
   const [keys, setKeys] = useState<KeyView[]>([]);
   const [name, setName] = useState('');
   const [scopes, setScopes] = useState<string[]>(['read']);
+  const [serverId, setServerId] = useState('');
   const [made, setMade] = useState<{ token: string; name: string } | null>(null);
   const [problem, setProblem] = useState('');
   const [copied, setCopied] = useState('');
@@ -77,7 +78,7 @@ export function McpKeysPanel({
     try {
       const res = await api<{ token: string; key: KeyView }>('/api/mcp-keys', {
         method: 'POST',
-        body: JSON.stringify({ name, scopes }),
+        body: JSON.stringify({ name, scopes, serverId: serverId.trim() || undefined }),
       });
       setMade({ token: res.token, name: res.key.name });
       setName('');
@@ -173,7 +174,8 @@ export function McpKeysPanel({
                   {k.name} {k.expired && <span className="text-amber-300">(ran out)</span>}
                 </div>
                 <div className="text-slate-500 text-[11px]">
-                  {k.scopes.map((s) => WHAT[s]?.label ?? s).join(' · ')} — {ago(k.lastUsedAt)}
+                  {k.scopes.map((s) => WHAT[s]?.label ?? s).join(' · ')}
+                  {k.serverId ? ` (${k.serverId})` : ''} — {ago(k.lastUsedAt)}
                   {k.uses ? `, ${k.uses} call${k.uses === 1 ? '' : 's'}` : ''}
                 </div>
               </div>
@@ -207,7 +209,7 @@ export function McpKeysPanel({
               <input
                 type="checkbox"
                 checked={key === 'read' || scopes.includes(key)}
-                disabled={key === 'read' || key === 'run'}
+                disabled={key === 'read'}
                 onChange={(e) => setScopes((s) => (e.target.checked ? [...s, key] : s.filter((x) => x !== key)))}
                 className="mt-0.5"
               />
@@ -218,9 +220,25 @@ export function McpKeysPanel({
             </label>
           ))}
         </div>
+        {scopes.includes('run') && (
+          <label className="block text-slate-300 font-medium">
+            The one server it may run on
+            <input
+              required
+              value={serverId}
+              onChange={(e) => setServerId(e.target.value)}
+              placeholder="The server's name, exactly as it is in sshs3"
+              aria-label="The one server it may run on"
+              className="mt-1 w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2 text-white"
+            />
+            <span className="block text-slate-500 text-[11px]">
+              A key that may run commands is for one server. Nothing it asks for runs until you approve it.
+            </span>
+          </label>
+        )}
         <button
           type="submit"
-          disabled={busy || !name.trim()}
+          disabled={busy || !name.trim() || (scopes.includes('run') && !serverId.trim())}
           className="px-3 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 disabled:opacity-50 text-slate-950 font-semibold transition"
         >
           {busy ? 'Making it…' : 'Make the key'}

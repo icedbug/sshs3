@@ -108,7 +108,23 @@ What a key may do is chosen when it is made. Reading is always allowed: the
 servers, what was last read from each, what changed there, what depends on
 what, the knowledge base, and the board. Writing tickets is a separate choice;
 a ticket made this way goes to the backlog, says it came from outside, and
-starts nothing by itself. Running commands is not built yet.
+starts nothing by itself.
+
+A key may also be allowed to **ask** for a command, and then only on the one
+server you name when you make it. What that is held to:
+
+- Nothing runs when the agent asks. The command appears in your inbox, with
+  the line the agent wrote about why, and waits for you.
+- Every one of them waits, including a read-only command that an agent inside
+  sshs3 would be allowed to run unasked. Nobody here is watching whoever asked.
+- It runs in the terminal that is already open for that server, and nowhere
+  else. If nothing is connected to it, the answer says so instead of borrowing
+  another terminal.
+- One command per request, and the agent is told to ask `command_status`
+  rather than ask again.
+- `change_with_check` carries the check that shows the change worked and the
+  command that takes it back, and takes it back by itself if the check fails —
+  the same path a change made inside sshs3 takes.
 
 A key acts as the person who made it and sees exactly what they see. It is
 kept as a hash, so it cannot be read back; "Take it back" stops it at once.

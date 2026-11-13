@@ -224,6 +224,13 @@ export interface AgentTask {
   /** How many of `changes` have been put down to those pages already. */
   kbCounted?: number;
   /**
+   * The run was asked for from outside sshs3 — by somebody's own agent over
+   * MCP. Nobody is watching it here, so every command it asks for is put to a
+   * person, whatever the command is and whatever the safety policy would
+   * otherwise allow.
+   */
+  fromOutside?: boolean;
+  /**
    * The agent's task list for this conversation, as it last wrote it. The run
    * is held to it: stopping with open items sends the agent back to work.
    */

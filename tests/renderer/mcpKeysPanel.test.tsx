@@ -49,16 +49,22 @@ describe("keys for a person's own agents", () => {
     await waitFor(() => expect(screen.queryByTestId("mcp-new-key")).not.toBeInTheDocument());
   });
 
-  it("will not offer what is not built yet, and always reads", async () => {
+  it("always reads, and asks which server before it will let a key run anything", async () => {
     const api = vi.fn(async () => ({ keys: [] })) as never;
     render(<McpKeysPanel api={api} origin="https://x" />);
     await waitFor(() => expect(api).toHaveBeenCalled());
     const read = screen.getByRole("checkbox", { name: /Read/ });
     expect(read).toBeChecked();
     expect(read).toBeDisabled();
-    expect(screen.getByRole("checkbox", { name: /Run commands/ })).toBeDisabled();
-    expect(screen.getByText(/this is being built/)).toBeVisible();
     expect(screen.getByRole("checkbox", { name: /Write tickets/ })).toBeEnabled();
+
+    fireEvent.change(screen.getByLabelText("What the key is for"), { target: { value: "Claude Code" } });
+    expect(screen.getByRole("button", { name: "Make the key" })).toBeEnabled();
+    // Choosing "run" makes the one server required: a key that may run anywhere is not offered.
+    fireEvent.click(screen.getByRole("checkbox", { name: /Run commands on one server/ }));
+    expect(screen.getByRole("button", { name: "Make the key" })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("The one server it may run on"), { target: { value: "db01" } });
+    expect(screen.getByRole("button", { name: "Make the key" })).toBeEnabled();
   });
 
   it("takes a key back", async () => {

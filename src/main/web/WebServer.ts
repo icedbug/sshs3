@@ -432,6 +432,8 @@ export class Sshs3WebServer {
           return {
             request: (r) => tenant.hub.request(r),
             actor: user.displayName || user.username,
+            runCommand: (input) => tenant.hub.runForMcp({ ...input, by: user.displayName || user.username }),
+            commandStatus: (id) => tenant.hub.mcpCommandStatus(id),
           };
         },
       },

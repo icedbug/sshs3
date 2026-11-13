@@ -3782,6 +3782,113 @@ export class HubService {
     this.changed();
   }
 
+  /**
+   * A command asked for from outside sshs3, over MCP.
+   *
+   * The fence is in what this will not do. It runs on the one server the key
+   * names and nowhere else, in a terminal that is already open for that
+   * server — never "whichever terminal happens to be open", which is what the
+   * ordinary path falls back to. It is always assisted: the change waits in
+   * the inbox until a person approves it, in every mode, whatever the safety
+   * policy says, because nobody is watching the agent that asked. And it
+   * returns at once with the id of what is waiting; the agent asks again for
+   * the outcome instead of holding a connection open.
+   */
+  async runForMcp(input: {
+    serverId: string;
+    command: string;
+    description: string;
+    by: string;
+    check?: { command: string; expected: string };
+    rollback?: string;
+  }): Promise<{ changeId: string; taskId: string; status: AgentChange["status"] }> {
+    if (isDemoMode()) throw new Error("This is the demo lab; nothing is run on a real server here.");
+    const command = requiredText(input.command);
+    const wanted = requiredText(input.serverId).toLowerCase();
+    const server = this.getKnownServers().find((s) => s.id.toLowerCase() === wanted || s.name.toLowerCase() === wanted);
+    if (!server) throw new Error(`No server called "${input.serverId}" in this workspace.`);
+    // The one terminal of that server. Not any other, and not a new one: a command from
+    // outside does not get to open a connection nobody asked for.
+    const session = this.terminals
+      .list()
+      .find((t) => t.state !== "disconnected" && (t.profileId === server.id || t.label.toLowerCase() === server.name.toLowerCase()));
+    if (!session)
+      throw new Error(
+        `Nothing is connected to ${server.name} in sshs3 right now. A command from outside runs in the terminal that is already open for that server; open one and ask again.`,
+      );
+    const task: AgentTask = {
+      id: `mcp-${crypto.randomUUID()}`,
+      title: clip(`From outside: ${input.description || command}`, 120),
+      agentName: `${input.by}'s agent, through MCP`,
+      // Assisted, whatever anything else says: a person approves every one of these.
+      mode: "assisted",
+      status: "running",
+      // Nobody here is watching whoever asked: every command of this run is put to a person.
+      fromOutside: true,
+      target: { sessionId: session.id, generation: session.generation, label: session.label },
+      messages: [{ id: crypto.randomUUID(), role: "user", text: clip(input.description || command, 2000), at: Date.now() }],
+      changes: [],
+      sources: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      maxCommands: 1,
+      maxMinutes: 30,
+      verification: "not-verified",
+    };
+    this.store.data.tasks.push(task);
+    const capability = await this.broker.issue(task);
+    const request = input.check?.command
+      ? {
+          action: "change" as const,
+          command,
+          description: input.description || command,
+          check: input.check,
+          rollback: input.rollback ?? "",
+          observeSeconds: 0,
+          id: session.id,
+        }
+      : { action: "command" as const, command, description: input.description || command, id: session.id };
+    // Not awaited: the answer is "it is waiting", and the agent asks again.
+    void this.broker
+      .invoke(capability.key, request as never)
+      .then(() => {
+        task.status = "completed";
+      })
+      .catch((error) => {
+        task.status = "failed";
+        task.error = safeError(error);
+      })
+      .finally(() => {
+        task.updatedAt = Date.now();
+        this.broker.revoke(task.id);
+        this.changed();
+      });
+    // The change the broker made for it, once it exists.
+    for (let i = 0; i < 100 && task.changes.length === 0; i++) await new Promise((r) => setTimeout(r, 20));
+    const change = task.changes[0];
+    if (!change) throw new Error("The command could not be prepared.");
+    this.changed();
+    return { changeId: change.id, taskId: task.id, status: change.status };
+  }
+
+  /** What became of a command asked for over MCP. */
+  mcpCommandStatus(changeId: string): { status: AgentChange["status"]; output?: string; exitCode?: number; check?: AgentChange["check"]; rollback?: AgentChange["rollback"]; target: string } | undefined {
+    for (const task of this.store.data.tasks) {
+      if (!task.id.startsWith("mcp-")) continue;
+      const change = task.changes.find((c) => c.id === changeId);
+      if (change)
+        return {
+          status: change.status,
+          output: change.output,
+          exitCode: change.exitCode,
+          check: change.check,
+          rollback: change.rollback,
+          target: change.target,
+        };
+    }
+    return undefined;
+  }
+
   /** For tests: what a finished run did, put down to the pages it worked from. */
   notePageOutcomeForTesting(task: AgentTask): void {
     this.notePageOutcome(task);

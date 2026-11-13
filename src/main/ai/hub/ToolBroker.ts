@@ -583,6 +583,9 @@ export class ToolBroker {
       requiresApproval = false;
     // A change to the rules themselves is a person's to make: no mode, policy or plan lets it through unasked.
     if (change.guard) requiresApproval = true;
+    // Asked for from outside sshs3: a person decides every one of these, even the
+    // ones the policy would let through, because nobody here is watching the asker.
+    if (task.fromOutside) requiresApproval = true;
 
     if (requiresApproval) {
       task.status = "waiting";

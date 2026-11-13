@@ -1,6 +1,6 @@
 import type { HubRequest, HubSnapshot } from '../../../shared/types/aiHub';
 import type { McpTokenRecord, McpTokenStore } from '../McpTokenStore';
-import { MCP_TOOLS, callMcpTool, toolsForScopes } from './mcpTools';
+import { MCP_TOOLS, callMcpTool, toolsForScopes, type McpCallContext } from './mcpTools';
 
 /**
  * sshs3 as an MCP server: somebody's own agent — Claude Code, Cursor, Codex —
@@ -85,8 +85,20 @@ export interface McpEndpointDeps {
    * Undefined: any host, for a listener that is not reachable from outside.
    */
   allowedHosts?: () => string[] | undefined;
-  /** The hub of the person a key acts for, or undefined when there is no such person any more. */
-  hubFor: (userId: string) => Promise<{ request: (r: HubRequest) => Promise<HubSnapshot>; actor: string } | undefined>;
+  /**
+   * The hub of the person a key acts for, or undefined when there is no such
+   * person any more. `runCommand`/`commandStatus` are present only where a
+   * command can actually be asked for; without them those tools say so.
+   */
+  hubFor: (userId: string) => Promise<
+    | {
+        request: (r: HubRequest) => Promise<HubSnapshot>;
+        actor: string;
+        runCommand?: McpCallContext['runCommand'];
+        commandStatus?: McpCallContext['commandStatus'];
+      }
+    | undefined
+  >;
   /** Switched off: the endpoint answers 404, as if it were not there. */
   enabled: () => boolean;
   /** How many calls a key may make. Its own clock, so a test can drive it. */
@@ -234,6 +246,8 @@ async function handleRpc(
     try {
       const out = await callMcpTool(name, args, {
         request: hub.request,
+        runCommand: hub.runCommand,
+        commandStatus: hub.commandStatus,
         scopes: token.scopes,
         serverId: token.serverId,
         actor: hub.actor,
