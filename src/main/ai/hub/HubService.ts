@@ -3809,7 +3809,7 @@ export class HubService {
     // of provider or address it follows the configured model instead of being
     // refused for ever.
     const pinned = Boolean(schedule && schedule.provider === config.provider && (schedule.baseUrl ?? "") === (config.baseUrl ?? ""));
-    let provider = config.provider;
+    const provider = config.provider;
     let model = (pinned && schedule?.model) || config.model;
     let baseUrl = config.baseUrl;
     const configDir =
