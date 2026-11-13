@@ -194,9 +194,16 @@ export class ToolBroker {
           request.action.startsWith("mcp__")) &&
         this.deps.appAction
       ) {
-        const res = await this.deps.appAction(task, request, (change) =>
-          this.authorize(key, task, change),
-        );
+        const res = await this.deps.appAction(task, request, (change) => {
+          // A tool that reaches outside sshs3 — a command on a cluster, a call to
+          // somebody else's MCP server — counts against the run's budget like any
+          // other action. A change to sshs3's own rules does not: a person decides it.
+          if (!change.guard && ++grant.commands > task.maxCommands)
+            throw new Error(
+              `This run may take ${task.maxCommands} actions and has taken them all. Report what you found and what is left to do.`,
+            );
+          return this.authorize(key, task, change);
+        });
         this.deps.changed();
         return res;
       }

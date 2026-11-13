@@ -1036,8 +1036,9 @@ const AGENT_TOOLS: FunctionToolDef[] = [
   },
 ];
 
-function mapToolCallToBrokerRequest(name: string, args: Record<string, unknown>): ToolRequest {
-  if (name.startsWith("sshs3_") || name.startsWith("mcp__")) {
+export function mapToolCallToBrokerRequest(name: string, args: Record<string, unknown>): ToolRequest {
+  // sshs3_change has a shape of its own below; it must not be swept up as a management tool.
+  if ((name.startsWith("sshs3_") && name !== "sshs3_change") || name.startsWith("mcp__")) {
     return {
       action: name,
       payload: args,

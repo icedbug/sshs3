@@ -835,6 +835,12 @@ export interface McpToolSummary {
   name: string;
   description: string;
   inputSchema?: Record<string, unknown>;
+  /**
+   * The server said this tool only looks (`annotations.readOnlyHint`). It is
+   * the server's own word, not a guarantee: it decides whether a person is
+   * asked before the tool runs, never whether the tool may exist.
+   */
+  readOnly?: boolean;
 }
 export interface McpServerConfig {
   id: string;

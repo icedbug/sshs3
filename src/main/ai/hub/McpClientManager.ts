@@ -138,7 +138,7 @@ export class McpClientManager {
     first: string | McpServerConfig[],
     second: McpServerConfig[] | string,
     options: { allowedServerIds?: string[] } = {},
-  ): { server: McpServerConfig; toolName: string } | undefined {
+  ): { server: McpServerConfig; toolName: string; tool: McpToolSummary } | undefined {
     const qualifiedName = typeof first === "string" ? first : (second as string);
     const servers = Array.isArray(first) ? first : (second as McpServerConfig[]);
     if (!qualifiedName.startsWith(MCP_PREFIX)) return undefined;
@@ -151,7 +151,7 @@ export class McpClientManager {
         (t) => sanitizeId(t.name) === suffix || t.name === suffix,
       );
       if (!matched) return undefined;
-      return { server: srv, toolName: matched.name };
+      return { server: srv, toolName: matched.name, tool: matched };
     }
     return undefined;
   }
@@ -405,14 +405,19 @@ async function readRpc(resp: Response): Promise<{ result?: unknown; error?: { me
 }
 
 function readTools(raw: Array<Record<string, unknown>> | undefined, serverName: string): McpToolSummary[] {
-  return (raw ?? []).slice(0, 200).map((t) => ({
-    name: String(t.name || "tool"),
-    description: clamp(String(t.description || `A tool of ${serverName}`), MAX_DESCRIPTION_CHARS),
-    inputSchema:
-      t.inputSchema && typeof t.inputSchema === "object"
-        ? (t.inputSchema as Record<string, unknown>)
-        : { type: "object", properties: {}, additionalProperties: true },
-  }));
+  return (raw ?? []).slice(0, 200).map((t) => {
+    const annotations = (t.annotations ?? {}) as { readOnlyHint?: unknown };
+    return {
+      name: String(t.name || "tool"),
+      description: clamp(String(t.description || `A tool of ${serverName}`), MAX_DESCRIPTION_CHARS),
+      inputSchema:
+        t.inputSchema && typeof t.inputSchema === "object"
+          ? (t.inputSchema as Record<string, unknown>)
+          : { type: "object", properties: {}, additionalProperties: true },
+      // The server's own word about its tool: used to decide whether to ask a person first.
+      readOnly: annotations.readOnlyHint === true,
+    };
+  });
 }
 
 /**

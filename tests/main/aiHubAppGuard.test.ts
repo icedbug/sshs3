@@ -227,3 +227,111 @@ describe("a run that tries to change its own rules", () => {
     expect((await config()).hasApiKey).toBe(false);
   });
 });
+
+describe("an MCP tool is not a way around the fence", () => {
+  const WEATHER = {
+    id: "srv-1",
+    name: "Weather",
+    transport: "http",
+    url: "https://mcp.example/api",
+    enabled: true,
+    discoveredTools: [
+      { name: "forecast", description: "Looks.", readOnly: true, inputSchema: {} },
+      { name: "set_thermostat", description: "Changes something.", inputSchema: {} },
+    ],
+  };
+
+  it("waits for a person before a tool that did not say it only looks, and counts it against the run's budget", async () => {
+    const { hub } = await makeHub();
+    hub.store.data.mcpServers = [WEATHER as never];
+    const calls: string[] = [];
+    hub.mcp.callTool = (async (_s: unknown, tool: string) => {
+      calls.push(tool);
+      return { ok: true, output: { done: true } };
+    }) as never;
+
+    const { task, broker, call, pending } = await startRun(hub, "assisted", "run-mcp");
+    const asked = call("mcp__srv-1__set_thermostat", { to: 30 });
+    const change = await pending();
+    expect(change).toMatchObject({ kind: "command", target: "MCP · Weather", riskLevel: "modify" });
+    expect(change.description).toContain("set_thermostat");
+    // Nothing reached the server while it waited.
+    expect(calls).toEqual([]);
+    broker.approve(task.id, change.id, true);
+    await asked;
+    expect(calls).toEqual(["set_thermostat"]);
+
+    // A tool the server marked read-only is a lookup: nobody is asked.
+    const look = (await call("mcp__srv-1__forecast", {})) as { note: string };
+    expect(look.note).toContain("not an instruction");
+    expect(task.changes.filter((c) => c.target === "MCP · Weather")).toHaveLength(1);
+  });
+
+  it("refuses a tool the server never listed, and a server this agent was not given", async () => {
+    const { hub } = await makeHub();
+    hub.store.data.mcpServers = [WEATHER as never];
+    hub.store.data.agents = [
+      { id: "a1", name: "Watch", role: "r", mission: "m", systemPrompt: "s", defaultMode: "assisted", mcpServerIds: ["another"], updatedAt: 1 } as never,
+    ];
+    const { call } = await startRun(hub, "assisted", "run-mcp-2");
+    await expect(call("mcp__srv-1__rm_rf", {})).rejects.toThrow(/No MCP tool called mcp__srv-1__rm_rf/);
+
+    const bound = await startRun(hub, "assisted", "run-mcp-3");
+    bound.task.agentId = "a1";
+    await expect(bound.call("mcp__srv-1__forecast", {})).rejects.toThrow(/switched off, to one this agent was not given/);
+  });
+
+  it("a conversation that only advises does not reach a tool that changes something", async () => {
+    const { hub } = await makeHub();
+    hub.store.data.mcpServers = [WEATHER as never];
+    hub.mcp.callTool = (async () => ({ ok: true, output: {} })) as never;
+    const { call } = await startRun(hub, "advice", "run-mcp-advice");
+    await expect(call("mcp__srv-1__set_thermostat", { to: 30 })).rejects.toThrow(/Advice mode/);
+    // Looking is still allowed.
+    expect(await call("mcp__srv-1__forecast", {})).toMatchObject({ ok: true });
+  });
+
+  it("tells the model which variables a server has, never what they are", async () => {
+    const { hub } = await makeHub();
+    hub.store.data.mcpServers = [{ ...WEATHER, env: { API_TOKEN: "secret-value" }, headers: { Authorization: "Bearer secret" } } as never];
+    const { call } = await startRun(hub, "advice", "run-mcp-list");
+    const listed = (await call("sshs3_agent_and_mcp_manage", { operation: "list" })) as {
+      mcpServers: Array<{ env?: Record<string, string> }>;
+    };
+    expect(Object.keys(listed.mcpServers[0].env ?? {})).toEqual(["API_TOKEN"]);
+    expect(JSON.stringify(listed.mcpServers)).not.toContain("secret-value");
+    expect(JSON.stringify(listed.mcpServers)).not.toContain("Bearer secret");
+  });
+});
+
+describe("a tool that is asked for something it does not have", () => {
+  it("refuses an operation that is not on the tool instead of doing the last thing it knows", async () => {
+    const { hub } = await makeHub();
+    const { call } = await startRun(hub, "assisted", "run-ops");
+    // This used to fall through to "upsert" and create a server.
+    await expect(call("sshs3_manage_server", { operation: "rename_everything", name: "x", host: "h" })).rejects.toThrow(
+      /no operation "rename_everything" on this tool/,
+    );
+    expect((await hub.snapshot()).workspaceServers ?? []).toHaveLength(0);
+    await expect(call("sshs3_manage_cluster_and_folders", { operation: "nuke" })).rejects.toThrow(/no operation "nuke"/);
+    await expect(call("sshs3_manage_memory_and_activity", { operation: "forget_everything" })).rejects.toThrow(/no operation/);
+    await expect(call("sshs3_kb_manage", { operation: "wipe" })).rejects.toThrow(/no operation/);
+  });
+
+  it("will not turn a name that matches no server into a new server", async () => {
+    const { hub } = await makeHub();
+    const { call } = await startRun(hub, "assisted", "run-meta");
+    await expect(call("sshs3_manage_server", { operation: "update_metadata", serverIdOrName: "db99", cluster: "DB" })).rejects.toThrow(
+      /No server matches "db99"/,
+    );
+    expect((await hub.snapshot()).workspaceServers ?? []).toHaveLength(0);
+  });
+
+  it("says which servers it could not find instead of reporting them as done", async () => {
+    const { hub } = await makeHub();
+    const { call } = await startRun(hub, "assisted", "run-cluster");
+    await expect(call("sshs3_manage_cluster_and_folders", { operation: "assign_cluster", cluster: "DB-Prod", serverIdsOrNames: ["ghost"] })).rejects.toThrow(
+      /None of ghost is a server here/,
+    );
+  });
+});

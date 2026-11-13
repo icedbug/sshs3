@@ -998,19 +998,26 @@ describe("Production multi-user workspace sync & auto-memory", () => {
     expect(clusterExecRes.results[0].output).toContain("aggr1_nvme_prod online");
 
     // 6. Deep Storage Ops (cross-server config diff)
-    const diffRes = (await hub.broker.invoke(cap.key, {
-      action: "sshs3_storage_ops",
-      payload: {
-        operation: "diff_paths",
-        targetA: "aff-a800-dc1-01",
-        pathA: "/etc/multipath.conf",
-        targetB: "aff-a800-dc1-02",
-        pathB: "/etc/multipath.conf",
-      },
-    })) as { ok: boolean; operation: string; unifiedDiff: string };
+    const ask = () =>
+      hub.broker.invoke(cap.key, {
+        action: "sshs3_storage_ops",
+        payload: {
+          operation: "diff_paths",
+          targetA: "aff-a800-dc1-01",
+          pathA: "/etc/multipath.conf",
+          targetB: "aff-a800-dc1-02",
+          pathB: "/etc/multipath.conf",
+        },
+      });
+    // With no way to reach the files, it says so. It used to answer with an invented
+    // listing and an invented diff, which an agent would report as what is on the server.
+    await expect(ask()).rejects.toThrow(/cannot read remote files/);
+
+    hub.host.storageOps = async ({ operation, pathA }) => ({ ok: true, operation, unifiedDiff: `--- ${pathA}\n+++ ${pathA}\n-path_grouping_policy multibus` });
+    const diffRes = (await ask()) as { ok: boolean; operation: string; unifiedDiff: string };
     expect(diffRes.ok).toBe(true);
     expect(diffRes.operation).toBe("diff_paths");
-    expect(diffRes.unifiedDiff).toContain("---");
+    expect(diffRes.unifiedDiff).toContain("path_grouping_policy");
   });
 
   it("allows the AI to configure everything in sshs3: advanced SSH profiles, SSH port-forward tunnels (-L/-R/-D), S3 & Directory Sync profiles, Dotfile Pools, keyboard shortcuts, AI model/context settings, and full AppSettings", async () => {

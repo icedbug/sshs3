@@ -1,3 +1,4 @@
+import { mapToolCallToBrokerRequest } from "../../src/main/ai/hub/DirectAgentRuntime";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -232,5 +233,28 @@ describe("handlers nothing tested", () => {
     snap = await hub.request({ action: "inventory-refresh" });
     expect(Array.isArray(snap.inventory)).toBe(true);
     await expect(hub.request({ action: "no-such-thing" } as never)).rejects.toThrow("Unknown AI request: no-such-thing");
+  });
+});
+
+describe("a tool call reaching the right place", () => {
+  it("sends sshs3_change down its own path, not through the management tools", () => {
+    const req = mapToolCallToBrokerRequest("sshs3_change", {
+      command: "systemctl restart nginx",
+      description: "Restart nginx",
+      check: { command: "systemctl is-active nginx", expected: "active" },
+      rollback: "systemctl stop nginx",
+      observeSeconds: 5,
+      sessionId: "s1",
+    }) as unknown as Record<string, unknown>;
+    // "change" is what ToolBroker runs with a check and a rollback; the name itself would be an unknown action.
+    expect(req.action).toBe("change");
+    expect(req).toMatchObject({ command: "systemctl restart nginx", rollback: "systemctl stop nginx", observeSeconds: 5, id: "s1" });
+    expect(req.check).toEqual({ command: "systemctl is-active nginx", expected: "active" });
+  });
+
+  it("still sends the management tools and MCP tools as they are", () => {
+    expect(mapToolCallToBrokerRequest("sshs3_kb_search", { query: "x" })).toEqual({ action: "sshs3_kb_search", payload: { query: "x" } });
+    expect(mapToolCallToBrokerRequest("mcp__srv__tool", { a: 1 })).toEqual({ action: "mcp__srv__tool", payload: { a: 1 } });
+    expect(mapToolCallToBrokerRequest("terminal_command", { command: "ls" })).toMatchObject({ action: "command", command: "ls" });
   });
 });
