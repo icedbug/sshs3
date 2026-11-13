@@ -148,6 +148,15 @@ Checked against both official MCP clients over real HTTP. Not checked: Claude
 Code, Cursor and Codex themselves, and the newer protocol against anything but
 the SDK that implements it.
 
+## Who signed in, and what was done
+
+The server keeps its own tamper-evident log of sign-ins: setup, every sign-in,
+every failed one (the password tried is never written), sign-out, and accounts
+added or removed. Each user's agents keep theirs as in the desktop app:
+Changes → Audit log shows it, checks it and exports it, and finished terminal
+recordings are sealed into it. See "The audit log and terminal recordings" in
+`docs/ai-hub.md`.
+
 ## What to know
 
 - **Modes still apply.** An agent set to ask before commands waits for a

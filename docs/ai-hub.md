@@ -156,12 +156,23 @@ explicitly enabled presentation on top of the same terminal authority.
   `OSC 133;D;<exit>` shell integration. A successful command reports the failure
   it resolved (`resolvedFailure`), which drives self-learning for both agent and
   human commands.
-- **`CommandSafetyService`** — splits shell commands into segments (pipelines,
-  chains, `$()`, backticks, nested `sh -c`/`eval`), classifies them as safe,
-  modifying or destructive and applies the `SafetyPolicyConfig`
-  (`autoApproveSafeReadOnly`, `requireApprovalOnProdTags`,
+- **`CommandSafetyService`** — reads a command the way a careful reviewer
+  would, classifies it as safe, modifying or destructive and applies the
+  `SafetyPolicyConfig` (`autoApproveSafeReadOnly`, `requireApprovalOnProdTags`,
   `blockDestructiveWithoutConfirm`), including file writes on `prod`-tagged
-  servers.
+  servers. It splits on every operator (`;`, newline, `&&`, `||`, `|`, `|&`
+  and a single `&`), follows quotes including `$'…'`, and looks into `$(…)`,
+  backticks, `<(…)`, `bash -c`, `eval`, `find -exec` and `xargs`. It takes
+  away what only runs something else (`sudo`, `env`, `timeout`, `nice`,
+  `nohup`, `xargs`, `FOO=1`) and judges the program that runs on its own
+  arguments, never the raw text — so `grep reboot /var/log/syslog` is a
+  search and `env userdel root` is not read-only. Read-only is a list of
+  known forms with their writing flags excluded (`sort -o`, `sed -i`/`w`,
+  awk's `system()`, `ip link set`, `curl -XDELETE`, `2>file` …). Anything
+  not on the list, or nested more than six deep, is "modify"; a command that
+  never ends by itself (`tail -f`, `less`, `watch`) is not run unasked. It is
+  still a set of rules, not a shell: `tests/main/commandClassifier.test.ts`
+  holds every case the review found.
 - **Team memory in the prompt** — `snapshotText` puts the ranked memories
   first as text with a budget of their own (12,000 characters, whole memories
   only, with a count of those left out), apart from the JSON snapshot, which is
@@ -291,12 +302,24 @@ stopped.
 
 - A change is made with `sshs3_change`: the command, a read-only `check` whose
   output must contain `expected`, the `rollback` command, and how long to
-  observe. The broker (`ToolBroker.runChange`) looks at the check before, runs
-  the change after the usual approval, and then the check must pass and keep
+  observe. Nothing runs before the change is approved, not even the check.
+  Then the broker (`ToolBroker.runChange`) looks at the check (how things
+  stand right before), runs the change, and the check must pass and keep
   passing for the observation time (looked at every ten seconds, at most three
-  minutes). When it fails, the rollback runs at once, once, the check is
-  looked at again, and the agent is told what happened and not to repeat the
-  change. When the rollback fails too, the agent is told to stop.
+  minutes; a first failing look gets three seconds to settle). When it fails,
+  the rollback runs at once, once, the check is looked at again, and the
+  agent is told what happened and not to repeat the change. When the rollback
+  fails too, the agent is told to stop.
+- What it claims is only what it showed. A check that already passed before
+  the change is not proof (the run is "not verified", and the agent is told
+  so). "Rolled back" means the rollback exited 0 *and* the check reads as it
+  did before; otherwise it says it is not back as it was. A change command
+  that failed while the check still reads as before runs no rollback. A run
+  that loses the terminal mid-change (stopped, taken over, timed out) leaves
+  it "uncertain" and says the rollback did not run. The expected text is
+  matched as a word or phrase: "inactive" does not pass for "active".
+- Only a proven fix is learned: a change counts for team memory only when its
+  check passed and had not passed before.
 - The check must be classified read-only. The change is approved as one
   thing: the worse of the command and its rollback decides how it is treated,
   and the approval shows both (`ChangeProof`).
@@ -310,6 +333,75 @@ stopped.
   `logs`, `inspect`, `echo`, `test`. Their mutating forms are still changes.
   It remains a set of rules: something it does not know is treated as a
   change, and a rule that is wrong would let a command through.
+
+## What a person approves is what runs
+
+- The approval shows the exact command, masked only where a literal secret
+  is (`forApproval`). The masker no longer swallows code: a `$(…)`, backticks,
+  a chain after `token=…`, or what follows a lone private-key header stays
+  visible. When anything was masked, the change carries `hiddenValues` and the
+  card says the real values run where it shows `[redacted]`.
+- Nothing is shortened for approval. A command, check, rollback or cluster
+  command too long to show in full is refused, not cut.
+- An approved plan covers a command by its exact text (`commandHash`), never
+  by how it looks once masked, and never one with hidden values.
+- File changes are approved as a unified diff (Inbox, task, Changes), keep
+  their path whatever the agent calls them, and are refused when the new
+  content would be shown masked. A file is rewritten through the model only
+  if it could be read whole (28,000 characters); a longer one is read as
+  "not complete". A write that fails half-way puts the file back.
+- Every change records how it was decided (`decidedHow`): a person (with
+  `decidedBy`: name, time, yes or no), the safety rules, an approved plan,
+  nobody answering in time, or the run being stopped. Changes and the audit
+  log say which. A run that ends leaves nothing pending or "approved": an
+  external agent's action it never reported back becomes "uncertain".
+- A run waiting for a person is not stopped by its own clock; the wait is
+  given back when the answer comes. An external agent may have several
+  questions open; each answer counts as given. Without a command to check,
+  an external agent's own word that an action only reads is not trusted.
+
+## The audit log and terminal recordings (`AuditLog`, `SessionRecorder`)
+
+- **The log.** Every finished command, change, file write, setting change,
+  MCP request and recording goes into `audit/audit-<client>.jsonl`, one JSON
+  line each, masked *before* it is hashed, each carrying the hash of the one
+  before it. Changing, removing or inserting a line breaks the chain where it
+  happened. A person changing the safety rules is logged with what moved
+  from what to what. The team server keeps its own chain of sign-ins.
+- **Anchors.** Every ten minutes the head of the chain is written to the team
+  bucket (`audit/<client>/anchors/n<number>.json`), also when nothing
+  happened. Anchors are numbered and carry the hash of the anchor before
+  them, so they are a chain of their own. Verifying checks the log, then the
+  newest 2000 anchors: an anchor past the log's end means its tail was cut;
+  a hash that differs means it was rewritten; a broken anchor chain means
+  anchors were removed or replaced. It reports up to which entry the log is
+  anchored, and stretches with no anchor (the computer was off, or anchors
+  were removed). Without a team bucket, a cut from the very end does not
+  show, and the screen says so.
+- **The screen.** Changes → Audit log: newest first, the verdict, a filter,
+  "Check it again", and Export (the file as it is on disk plus what the check
+  found).
+- **Recordings.** While an agent's run holds a terminal, what the terminal
+  showed is recorded as asciicast v2 (`recordings/<run>-<terminal>-<time>.cast`):
+  output only, never what a person types, at the terminal's real size, with
+  a marker per command and an exit event (`"x"`) when it ends. Secrets are
+  masked on the visible text, so colour codes cannot hide one; a line holding
+  a secret gives up its colours. A prompt without a newline is written after
+  300 ms. Each time a run holds the terminal gets its own file. A recording
+  ends when the run lets go or loses the terminal, and is sealed into the
+  audit log with its sha256; the player says whether it still matches. They
+  are removed after `retentionDays` on every installation, and are this
+  computer's own: they are not shared. `recordSessions: false` turns them off.
+- **The player.** From a timeline item or a log entry: pauses over 2 s
+  shortened, speed, scrubbing, the commands as a list with ✓ or the exit
+  code, and a log entry opens it at its own command.
+- **What it does not do.** Anchors are not signed, so someone holding the
+  installation's bucket credentials can write a consistent forgery of both
+  log and anchors; other installations do not witness each other's heads
+  yet. Entries since the last anchor are only hash-chained. Nothing is written
+  before a command runs, so a crash between running and logging loses that
+  entry. These are the next steps the research named (signed anchors and
+  witnesses, an HMAC key ratchet, an intent entry before running).
 
 ## Investigations: hypotheses and investigators that can look
 
@@ -915,6 +1007,22 @@ checking its idle prompt and choosing its actual shell, explicitly arm it. The
 existing correlated shell handshake must finish before the agent can own it.
 Selection alone does not allow execution. Human input invalidates prompt
 readiness; a reconnect or uncertain command requires inspection and rearming.
+
+- A person always wins: any key typed into a terminal an agent holds takes it
+  back at once, the run lets go, and the keys go through as typed (their own
+  Ctrl-C once). After a person runs something, the agent connects again first.
+- Connecting by itself (`ensureReady`) happens only at something that looks
+  like a shell prompt — never into `mysql>`, `psql`, a pager or a password
+  prompt — and after a failed connect it is not retried for five minutes.
+- An agent's command is never written over something half-typed at the prompt.
+- The command runs in a subshell, so it cannot redefine `printf` to report a
+  false exit code, and an `exit` or `cd` in it does not end or move the
+  person's shell. (A consequence: `cd` and `export` do not carry over from one
+  agent command to the next.)
+- A frame that only looks like sshs3's own (a nonce it never issued) is
+  program output and becomes nothing.
+- An answer typed at a password prompt is never kept as a command, so it can
+  never be named as a failed command or learned.
 
 The application-owned `sshs3_terminal` backend plugin provides:
 
