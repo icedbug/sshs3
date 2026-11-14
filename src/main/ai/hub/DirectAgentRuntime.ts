@@ -2315,7 +2315,7 @@ export class DirectAgentRuntime implements AgentRuntime {
           ...(wireTools.length > 0 ? { tools: wireTools } : {}),
           max_output_tokens: tuning.maxOutputTokens,
           reasoning: { effort: tuning.reasoningEffort },
-          temperature: tuning.temperature,
+          // No `temperature`: the ChatGPT Codex backend answers 400 "Unsupported parameter: temperature".
           store: false,
           stream: true,
         }),
