@@ -39,11 +39,125 @@ export interface Mergeable {
   id: string;
   updatedAt: number;
   deleted?: boolean;
+  /** The `updatedAt` of the copy this one was edited from: what its author had seen. */
+  baseAt?: number;
+  /** When each field was last changed, where that is kept: two edits of different fields both stay. */
+  fieldAt?: Record<string, number>;
 }
 
 /**
- * Two copies of a collection become one: per id the newer copy wins, and a
- * removal is a copy like any other (it wins when it is the newer one).
+ * A value as text that is the same for the same content, whatever order its keys were written in
+ * (and with what is undefined left out, as JSON does). Two installations build the same object in
+ * different orders; comparing the plain JSON would call them different for ever.
+ */
+export function canonicalJson(value: unknown): string {
+  const sorted = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(sorted);
+    if (v && typeof v === "object") {
+      const out: Record<string, unknown> = {};
+      for (const key of Object.keys(v as object).sort()) {
+        const inner = (v as Record<string, unknown>)[key];
+        if (inner !== undefined) out[key] = sorted(inner);
+      }
+      return out;
+    }
+    return v;
+  };
+  return JSON.stringify(sorted(value)) ?? "null";
+}
+
+/** What says when and from what a copy was made, not what it holds. */
+const META = new Set(["id", "updatedAt", "baseAt", "fieldAt"]);
+
+/**
+ * A copy as it is saved here: each field that differs from the copy it was made from (`had`) is
+ * marked with the time of this change, and the copy remembers which version it was made from. A
+ * merge then keeps a teammate's change of one field and this change of another, and a removal made
+ * after the version this edit started from wins over the edit.
+ */
+export function stampChange<T extends Mergeable>(had: T | undefined, next: T): T {
+  if (!had) return next;
+  const fieldAt: Record<string, number> = { ...(had.fieldAt ?? {}), ...(next.fieldAt ?? {}) };
+  const a = had as unknown as Record<string, unknown>;
+  const b = next as unknown as Record<string, unknown>;
+  for (const key of new Set([...Object.keys(a), ...Object.keys(b)]))
+    if (!META.has(key) && canonicalJson(a[key]) !== canonicalJson(b[key])) fieldAt[key] = next.updatedAt;
+  return { ...next, fieldAt, baseAt: had.updatedAt };
+}
+
+/**
+ * A removal and an edit of the same item, where the edit is the newer copy but was made on a view
+ * from before the removal (its base is older than the removal): the removal stands. The edit's author
+ * had not seen it, and "newer wins" brought the item back without a word. The result is one step
+ * above the edit, the same on both sides, so that it reaches the installation that made the edit.
+ * Undefined where this rule does not decide.
+ */
+export function removalWins<T extends Mergeable>(a: T, b: T): T | undefined {
+  const [removal, edit] = a.deleted && !b.deleted ? [a, b] : b.deleted && !a.deleted ? [b, a] : [undefined, undefined];
+  if (!removal || !edit || edit.updatedAt <= removal.updatedAt) return undefined;
+  if (edit.baseAt === undefined || edit.baseAt >= removal.updatedAt) return undefined;
+  return { ...removal, updatedAt: edit.updatedAt + 1, baseAt: edit.updatedAt };
+}
+
+/**
+ * Two live copies with different times, put together field by field: of each field (or group of
+ * fields that only make sense together) the copy that changed it last gives the value; where neither
+ * says when it changed it, the newer copy does. The result is the newer copy itself when nothing of
+ * the older one is kept, and otherwise one step above it, the same on both sides.
+ */
+export function mergeFields<T extends Mergeable>(
+  local: T,
+  remote: T,
+  groups: readonly (readonly string[])[] = [],
+  skip: readonly string[] = [],
+): T {
+  const [newer, older] = remote.updatedAt > local.updatedAt ? [remote, local] : [local, remote];
+  const n = newer as unknown as Record<string, unknown>;
+  const o = older as unknown as Record<string, unknown>;
+  const out: Record<string, unknown> = { ...n };
+  const keys = new Set(
+    [...Object.keys(n), ...Object.keys(o), ...Object.keys(newer.fieldAt ?? {}), ...Object.keys(older.fieldAt ?? {})].filter(
+      (k) => !META.has(k) && k !== "deleted" && !skip.includes(k),
+    ),
+  );
+  const units: string[][] = groups.map((g) => g.filter((k) => keys.has(k)));
+  for (const k of keys) if (!groups.some((g) => g.includes(k))) units.push([k]);
+  const at = (copy: T, unit: string[]): number => Math.max(0, ...unit.map((k) => copy.fieldAt?.[k] ?? 0));
+  const fieldAt: Record<string, number> = { ...(older.fieldAt ?? {}) };
+  for (const [k, t] of Object.entries(newer.fieldAt ?? {})) fieldAt[k] = Math.max(t, fieldAt[k] ?? 0);
+  for (const unit of units) {
+    if (!unit.length || at(older, unit) <= at(newer, unit)) continue;
+    for (const k of unit) {
+      if (k in o && o[k] !== undefined) out[k] = o[k];
+      else delete out[k];
+    }
+  }
+  if (Object.keys(fieldAt).length) out.fieldAt = fieldAt;
+  return out as unknown as T;
+}
+
+/** Whether two copies hold the same, apart from when they were made. */
+const sameContent = (a: object, b: object): boolean =>
+  canonicalJson({ ...a, updatedAt: 0, baseAt: 0 }) === canonicalJson({ ...b, updatedAt: 0, baseAt: 0 });
+
+/**
+ * The default for two copies of an item: a removal made after the edit's view stands (removalWins);
+ * two live copies that say when their fields changed are put together field by field; otherwise the
+ * newer copy wins.
+ */
+export function mergeCopies<T extends Mergeable>(local: T, remote: T): T {
+  if (local.updatedAt === remote.updatedAt) return local;
+  const removal = removalWins(local, remote);
+  if (removal) return removal;
+  const newer = remote.updatedAt > local.updatedAt ? remote : local;
+  if (local.deleted || remote.deleted || (!local.fieldAt && !remote.fieldAt)) return newer;
+  const merged = mergeFields(local, remote);
+  return sameContent(merged, newer) ? newer : { ...merged, updatedAt: newer.updatedAt + 1, baseAt: newer.updatedAt };
+}
+
+/**
+ * Two copies of a collection become one: per id the newer copy wins (see
+ * mergeCopies for where it does not), and a removal is a copy like any other.
  * `changed` tells whether the result differs from `local`.
  *
  * `resolve` decides for an item both sides have, where "the newer copy wins"
@@ -62,7 +176,7 @@ export function mergeItems<T extends Mergeable>(
   let changed = false;
   for (const r of remote) {
     const l = byId.get(r.id);
-    const kept = !l ? r : resolve ? resolve(l, r) : r.updatedAt > l.updatedAt ? r : l;
+    const kept = !l ? r : resolve ? resolve(l, r) : mergeCopies(l, r);
     if (kept !== l) {
       byId.set(r.id, kept);
       changed = true;
@@ -76,15 +190,14 @@ export function mergeItems<T extends Mergeable>(
   return { items, changed, newerLocally };
 }
 
-const sameComments = (a: WorkTicketComment[] | undefined, b: WorkTicketComment[]): boolean =>
-  (a ?? []).length === b.length && (a ?? []).every((c, i) => c.id === b[i].id);
-
 /**
- * Two copies of one ticket. The newer one wins, with two exceptions that
- * "newer wins" used to get wrong:
+ * Two copies of one ticket, put together field by field (mergeFields), with
+ * the cases "newer wins" used to get wrong:
  *
  * - Comments are kept from both: two people who comment at the same time
- *   both keep their comment.
+ *   both keep their comment, and a comment does not take back a teammate's
+ *   edit of the title made at the same time.
+ * - A removal made after the view an edit was made on stands (removalWins).
  * - The installation that is running the ticket decides about the run. A
  *   teammate who moved, edited or removed the ticket on a view that did not
  *   show the run yet does not take it away: their other changes are taken,
@@ -102,7 +215,8 @@ export function mergeTicketCopies(
     const sameRun = remote.status === "in_progress" && remote.claim?.client === local.claim?.client && !remote.deleted;
     if (!sameRun) {
       const at = remote.updatedAt + 1;
-      const run = { status: local.status, statusAt: local.statusAt, claim: local.claim, taskId: local.taskId, result: local.result };
+      // Made knowing the teammate's copy: its base is that copy, so the teammate's side takes it.
+      const run = { status: local.status, statusAt: local.statusAt, claim: local.claim, taskId: local.taskId, result: local.result, baseAt: remote.updatedAt };
       if (remote.deleted)
         return {
           ...withComment(
@@ -116,17 +230,32 @@ export function mergeTicketCopies(
       return { ...remote, ...run, comments: allComments(local, remote), updatedAt: at };
     }
   }
+  // Removed after the view the edit was made on: the removal stands.
+  const removal = removalWins(local, remote);
+  if (removal) return removal;
   if (newer.deleted || older.deleted) return newer;
-  const comments = allComments(local, remote);
-  if (sameComments(newer.comments, comments)) return newer;
+  // Field by field: a teammate's comment on an older copy does not take back this copy's new title.
+  const merged = { ...mergeFields(local, remote, TICKET_RUN_FIELDS, ["comments"]), comments: allComments(local, remote) };
+  if (sameContent(merged, newer)) return newer;
   // One above the newer copy: the same on both sides, so the two installations agree at once.
-  return { ...newer, comments, updatedAt: newer.updatedAt + 1 };
+  return { ...merged, updatedAt: newer.updatedAt + 1, baseAt: newer.updatedAt };
 }
+
+/** A ticket's run: these change together, and come from the same copy. */
+const TICKET_RUN_FIELDS = [["status", "statusAt", "claim", "taskId", "result", "tokens", "settledRun"]] as const;
 
 function allComments(a: WorkTicket, b: WorkTicket): WorkTicketComment[] {
   const byId = new Map<string, WorkTicketComment>();
   for (const c of [...(a.comments ?? []), ...(b.comments ?? [])]) if (c?.id) byId.set(c.id, c);
   return [...byId.values()].sort((x, y) => x.at - y.at || x.id.localeCompare(y.id)).slice(-40);
+}
+
+/** What to tell somebody who acts on a ticket that was removed, or undefined when it was not. */
+export function ticketRemovedMessage(tickets: WorkTicket[] | undefined, id: string): string | undefined {
+  const gone = (tickets ?? []).find((t) => t.id === id && t.deleted);
+  if (!gone) return undefined;
+  const when = gone.updatedAt ? ` at ${new Date(gone.updatedAt).toISOString().slice(0, 16).replace("T", " ")} UTC` : "";
+  return `This ticket was removed${gone.deletedBy ? ` by ${gone.deletedBy}` : ""}${when}, so nothing was changed.`;
 }
 
 /** What is shown and worked: removals are kept in the data only so they travel. */

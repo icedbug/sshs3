@@ -1006,10 +1006,17 @@ because there is no server to run one on.
   commands on its own does so unattended, within the safety policy.
 - **Sharing.** `WorkSync` keeps one object per item under `work/` in the team
   bucket: goals, tickets, agents, shared runbooks and dependencies. Per item
-  the newer copy wins, with three exceptions where that would lose something.
-  A ticket's comments are kept from both copies, and the installation that
-  runs a ticket keeps the run when a teammate's older view moved or removed
-  it (`mergeTicketCopies`). A page changed in two places at once keeps the
+  the newer copy wins, with these exceptions where that would lose something.
+  Tickets and goals remember when each field changed (`stampChange`) and are
+  merged field by field (`mergeFields`): a title changed in one place and a
+  comment added in another both stay. A ticket's comments are kept from both
+  copies, and the installation that runs a ticket keeps the run when a
+  teammate's older view moved or removed it (`mergeTicketCopies`). An edit
+  made on a view from before a removal does not bring the item back
+  (`removalWins`, tickets and pages): the removal stands, and an edit of a
+  ticket somebody removed is refused with who removed it. Before an edit, and
+  after an action a teammate's run refused, the ticket is read from the bucket
+  at once. A page changed in two places at once keeps the
   newer text, and the other one as an entry in its history with the text it
   would have had (`mergePageCopies`). A memory's votes are kept per person
   (`mergeMemoryCopies`). A removal is carried as a marker (`sharedRemoved`,

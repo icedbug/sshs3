@@ -863,6 +863,10 @@ export interface WorkGoal {
   createdAt: number;
   updatedAt: number;
   deleted?: boolean;
+  /** The `updatedAt` of the copy this one was edited from (see WorkBoard `stampChange`). */
+  baseAt?: number;
+  /** When each field was last changed: a merge keeps two people's changes of different fields. */
+  fieldAt?: Record<string, number>;
 }
 
 export interface WorkTicketComment {
@@ -934,6 +938,12 @@ export interface WorkTicket {
   createdAt: number;
   updatedAt: number;
   deleted?: boolean;
+  /** Who removed it. */
+  deletedBy?: string;
+  /** The `updatedAt` of the copy this one was edited from (see WorkBoard `stampChange`). */
+  baseAt?: number;
+  /** When each field was last changed: a merge keeps two people's changes of different fields. */
+  fieldAt?: Record<string, number>;
 }
 
 /** Tokens an agent has spent on tickets in one calendar month (`YYYY-MM`). */
@@ -1085,6 +1095,8 @@ export interface KbPage {
   createdAt: number;
   updatedAt: number;
   updatedBy: string;
+  /** The `updatedAt` of the version a person's edit was made from: a removal after it wins over the edit. */
+  baseAt?: number;
   /** A person changed the text: the assistant adds to it and does not rewrite it. */
   editedByPerson?: boolean;
   history: KbPageChange[];

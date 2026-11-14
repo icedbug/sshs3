@@ -198,6 +198,8 @@ import {
   WORKFORCE_TEMPLATES,
   mergeItems,
   mergeTicketCopies,
+  stampChange,
+  ticketRemovedMessage,
   addUsage,
   withComment,
   claimIsFresh,
@@ -3182,10 +3184,17 @@ export class HubService {
         // Removing a ticket from under its run would leave the run's result with nowhere to go.
         const running = await this.ticketRunsNow(this.ticket(request.id));
         if (running) throw new Error(running);
-        this.putTicket({ ...this.ticket(request.id), deleted: true, claim: undefined, updatedAt: Date.now() });
+        this.putTicket({
+          ...this.ticket(request.id),
+          deleted: true,
+          deletedBy: await this.resolveActorName(),
+          claim: undefined,
+          updatedAt: Date.now(),
+        });
         break;
       }
       case "ticket-comment": {
+        await this.pullTicket(request.id);
         const ticket = this.ticket(request.id);
         this.putTicket(
           withComment(ticket, await this.resolveActorName(), requiredText(request.text)),
@@ -3193,7 +3202,13 @@ export class HubService {
         break;
       }
       case "ticket-start":
-        reply = { started: { taskId: (await this.startTicket(request.id, request.sessionId)).id } };
+        try {
+          reply = { started: { taskId: (await this.startTicket(request.id, request.sessionId)).id } };
+        } catch (e) {
+          // Refused (a teammate's run has it, it was removed): the board shows why at once.
+          await this.pullTicket(request.id).catch(() => undefined);
+          throw e;
+        }
         break;
       case "ticket-review": {
         const ticket = this.ticket(request.id);
@@ -3795,12 +3810,17 @@ export class HubService {
         const p = request.page;
         if (!PAGE_KINDS.includes(p.kind)) throw new Error("Unknown kind of page");
         const existing = (this.store.data.kbPages ?? []).find((x) => x.id === p.id);
+        // Removed (here, or by a teammate and synced): saving the old view does not bring it back.
+        if (p.id && !existing && this.store.data.sharedRemoved?.pages?.[p.id])
+          throw new Error("This page was removed, so the change was not saved. Create a new page to keep the text.");
         const saved = savePageByPerson(
           existing,
           { kind: p.kind, title: requiredText(p.title), when: requiredText(p.when), body: requiredText(p.body), targets: p.targets, keys: p.keys },
           await this.resolveActorName(),
         );
         if (p.alerts) saved.alerts = cleanKeys(p.alerts).length ? cleanKeys(p.alerts) : undefined;
+        // The version this edit was made from: a teammate's removal after it wins over the edit.
+        if (existing) saved.baseAt = existing.updatedAt;
         this.store.data.kbPages = [...(this.store.data.kbPages ?? []).filter((x) => x.id !== saved.id), saved];
         this.lastWorkSync = 0;
         reply = { kbPage: saved };
@@ -6564,8 +6584,39 @@ export class HubService {
 
   private ticket(id: string): WorkTicket {
     const found = live(this.store.data.workTickets).find((t) => t.id === id);
-    if (!found) throw new Error("Ticket not found");
+    if (!found) throw new Error(ticketRemovedMessage(this.store.data.workTickets, id) ?? "Ticket not found");
     return found;
+  }
+
+  /** Whether this installation's agent is running the ticket now: its run decides about the run's fields. */
+  private ticketRunningHere(t: WorkTicket): boolean {
+    return (
+      !t.deleted &&
+      t.status === "in_progress" &&
+      t.claim?.client === this.clientId() &&
+      this.store.data.tasks.some((x) => x.id === t.taskId)
+    );
+  }
+
+  /**
+   * Takes the bucket's copy of one ticket into the board now, instead of at the next sync (up to a
+   * minute away): before an edit, so that it is not made on a view the team has moved past, and after
+   * an action a teammate's run refused, so that the board shows the run.
+   */
+  private async pullTicket(id: string): Promise<void> {
+    const sync = this.work();
+    if (!sync) return;
+    const remote = await sync.readItem<WorkTicket>("tickets", id).catch(() => undefined);
+    if (!remote) return;
+    const merged = mergeItems(this.store.data.workTickets ?? [], [remote], (l, r) =>
+      mergeTicketCopies(l, r, (t) => this.ticketRunningHere(t)),
+    );
+    if (!merged.changed) return;
+    this.store.data.workTickets = merged.items;
+    // A copy made of both (a removal that stands, two edits put together) goes back to the team.
+    const mine = merged.newerLocally.find((t) => t.id === id);
+    if (mine) void sync.put("tickets", mine).catch((e) => (this.workSyncError = safeError(e)));
+    this.changed();
   }
 
   /** Stores a ticket here and sends it to the team. The upload is not waited for. */
@@ -6573,6 +6624,9 @@ export class HubService {
     const had = (this.store.data.workTickets ?? []).find((t) => t.id === ticket.id);
     // When it came to this status: what tells a new "review" from an old one with a new comment.
     ticket = { ...ticket, statusAt: had && had.status === ticket.status ? (had.statusAt ?? ticket.statusAt) : Date.now() };
+    // Which fields this change touched, and which version it was made from: what a merge needs to
+    // keep a teammate's change of another field, and to let a removal made meanwhile stand.
+    ticket = stampChange(had, ticket);
     this.store.data.workTickets = [
       ...(this.store.data.workTickets ?? []).filter((t) => t.id !== ticket.id),
       ticket,
@@ -6584,6 +6638,7 @@ export class HubService {
   }
 
   private putGoal(goal: WorkGoal): void {
+    goal = stampChange((this.store.data.workGoals ?? []).find((g) => g.id === goal.id), goal);
     this.store.data.workGoals = [
       ...(this.store.data.workGoals ?? []).filter((g) => g.id !== goal.id),
       goal,
@@ -6622,6 +6677,12 @@ export class HubService {
     const running = known ? await this.ticketRunsNow(known) : undefined;
     // Read again after the question: the board may have moved while the bucket answered.
     const existing = known ? live(this.store.data.workTickets).find((t) => t.id === known.id) : undefined;
+    // Removed by a teammate meanwhile: the edit does not bring it back (as a new ticket either).
+    if (known && !existing) throw new Error(ticketRemovedMessage(this.store.data.workTickets, known.id) ?? "Ticket not found");
+    if (!known && input.id) {
+      const removed = ticketRemovedMessage(this.store.data.workTickets, input.id);
+      if (removed) throw new Error(removed);
+    }
     const now = Date.now();
     const agent = input.assigneeAgentId
       ? this.getAgentsList().find((a) => a.id === input.assigneeAgentId)
@@ -6758,9 +6819,14 @@ export class HubService {
       this.store.data.tasks.some((t) => t.id === ticket.taskId && active(t))
     )
       return here;
-    const claim = await this.work()
-      ?.readClaim(ticket.id)
-      .catch(() => undefined);
+    // The ticket as the team has it, taken in now: a refused action shows the run on the board at
+    // once, and an edit of a ticket a teammate removed is told so.
+    const [claim] = await Promise.all([
+      this.work()
+        ?.readClaim(ticket.id)
+        .catch(() => undefined),
+      this.pullTicket(ticket.id).catch(() => undefined),
+    ]);
     if (claim && claim.client !== client && this.claimAlive(ticket.id, claim.seenAt, Date.now()))
       return `${claim.by} is running this ticket on another computer. Stop the run there first.`;
     return ticket.status === "in_progress" && claimIsFresh(ticket) ? here : undefined;

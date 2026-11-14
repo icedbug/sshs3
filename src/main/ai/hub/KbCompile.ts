@@ -10,6 +10,7 @@ import type {
 } from "../../../shared/types/aiHub";
 import { checkPageText, stillUnverified } from "./KbCheck";
 import { clip } from "./privacy";
+import { removalWins } from "./WorkBoard";
 
 /**
  * The knowledge base as agents use it. What people drop in are sources; here
@@ -703,6 +704,9 @@ export function undoPageChange(page: KbPage, by: string, now = Date.now()): { pa
  */
 export function mergePageCopies<T extends KbPage & { deleted?: boolean }>(local: T, remote: T): T {
   if (local.updatedAt === remote.updatedAt) return local;
+  // Removed after the version a person's edit was made from: the removal stands.
+  const removal = removalWins(local, remote);
+  if (removal) return removal;
   const [newer, older] = remote.updatedAt > local.updatedAt ? [remote, local] : [local, remote];
   // A removal is a copy like any other, and carries no text to keep.
   if (newer.deleted || older.deleted || !Array.isArray(newer.history) || !Array.isArray(older.history)) return newer;

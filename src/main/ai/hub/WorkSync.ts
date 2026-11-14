@@ -111,6 +111,11 @@ export class WorkSync {
     });
   }
 
+  /** The bucket's copy of one item, when it has one. */
+  async readItem<T extends Mergeable>(collection: WorkCollection, id: string): Promise<T | undefined> {
+    return parse<T>(await this.store.read(`work/${collection}/${safeId(id)}.json`));
+  }
+
   async put<T extends Mergeable>(collection: WorkCollection, item: T): Promise<void> {
     await this.store.write(
       `work/${collection}/${safeId(item.id)}.json`,
