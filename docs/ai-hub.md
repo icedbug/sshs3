@@ -207,9 +207,23 @@ explicitly enabled presentation on top of the same terminal authority.
   arguments, never the raw text — so `grep reboot /var/log/syslog` is a
   search and `env userdel root` is not read-only. Read-only is a list of
   known forms with their writing flags excluded (`sort -o`, `sed -i`/`w`,
-  awk's `system()`, `ip link set`, `curl -XDELETE`, `2>file` …). Anything
-  not on the list, or nested more than six deep, is "modify"; a command that
-  never ends by itself (`tail -f`, `less`, `watch`) is not run unasked.
+  awk's `system()`, `ip link set`, `curl -XDELETE`, `2>file` …). Where a
+  family has options that write or run, its options are an allowlist: sed's
+  script is read command by command (`w`, `e`, `s///w`, `s///e` with any
+  delimiter, `-f`, every `-i`), git allows its reading subcommands without
+  `--output`, `--upload-pack`, `--ext-diff`, `grep -O` or `-c`, awk refuses
+  pipes, `system()`, print redirections and program files, and rsync is
+  read-only only in a dry run without a remote shell of its own. psql reads
+  with exactly one SHOW, a SELECT without INTO or an unlisted function, or a
+  listing meta-command (`\l`, `\dt`, `\d`); `python3 -m json.tool` and
+  `postgres -C` read too. A redirection is seen with or without a space
+  (`echo x>/etc/y`, `>&`, `&>`, `>|`, `<>`); only /dev/null and a copy of
+  stdout or stderr (`2>&1`) write nothing. A program named by a path outside
+  the system's directories (`./ls`), or an argument the shell fills in
+  (`sed $X f`) for a program whose verdict depends on its arguments, is a
+  change. Anything not on the list, or nested more than six deep, is
+  "modify"; a command that never ends by itself (`tail -f`, `less`, `watch`,
+  `vmstat 1`, a long `sleep`) is not run unasked.
   `sudo -i` and `sudo -s` with nothing after them start a shell as another
   user and are a change. A variable set in front of a command that decides
   what it loads or runs (`LD_PRELOAD`, `PATH` with anything but the system's

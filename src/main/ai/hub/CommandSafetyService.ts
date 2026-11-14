@@ -24,7 +24,13 @@ import type {
  *    raw text, so `grep reboot /var/log/syslog` is a search, not a reboot.
  * 3. Read-only is a list of known forms, each with the flags that would make
  *    it write excluded. Anything not on the list is "modify". A write to a
- *    file with `>`, `>>`, `2>` or `&>` is "modify" whatever the program is.
+ *    file with `>`, `>>`, `2>`, `&>`, `>&`, `>|` or `<>` is "modify" whatever the
+ *    program is, with or without a space around the operator (`echo x>/etc/y`).
+ *
+ * What cannot be read is not guessed at: a program named by a path outside the
+ * system's own directories (`./ls`, `$DIR/cat`), an argument that comes from a
+ * variable or another command where a flag would change the verdict, a brace
+ * expansion there, and shell syntax this does not follow are all "modify".
  */
 
 export interface CommandRiskAnalysis {
@@ -78,6 +84,17 @@ export function splitShellAstSegments(command: string, depth = 0, pipes?: PipeUs
   const text = (command ?? "").trim();
   if (!text) return [];
   if (depth > MAX_DEPTH) return [TOO_DEEP];
+  const bash = splitAs(text, depth, true, pipes);
+  // Shells differ on two things: whether `#` starts a comment (not in an interactive zsh) and whether
+  // $'…' is a quoting of its own (not in dash). Where a line has either, it is read both ways and
+  // every command either reading finds is judged: `ls # it's fine` + newline + `rm -rf /` hides
+  // the rm from a reader that does not know comments, `ls #; rm -rf /` from one that does.
+  if (!/#|\$'/.test(text)) return bash;
+  for (const other of splitAs(text, depth, false)) if (!bash.includes(other)) bash.push(other);
+  return bash;
+}
+
+function splitAs(text: string, depth: number, asBash: boolean, pipes?: PipeUse): string[] {
   const segments: string[] = [];
   const inner: string[] = [];
   let current = "";
@@ -105,8 +122,13 @@ export function splitShellAstSegments(command: string, depth = 0, pipes?: PipeUs
       current += ch;
       continue;
     }
+    // A comment runs to the end of its line. It starts only where a word would.
+    if (asBash && ch === "#" && !double && (i === 0 || /[\s;|&(]/.test(text[i - 1]))) {
+      while (i + 1 < text.length && text[i + 1] !== "\n") i++;
+      continue;
+    }
     // ANSI-C quoting: $'…' with backslash escapes, closed by an unescaped quote.
-    if (ch === "$" && next === "'" && !double) {
+    if (asBash && ch === "$" && next === "'" && !double) {
       let j = i + 2;
       while (j < text.length && text[j] !== "'") j += text[j] === "\\" ? 2 : 1;
       current += text.slice(i, j + 1);
@@ -149,6 +171,11 @@ export function splitShellAstSegments(command: string, depth = 0, pipes?: PipeUs
       continue;
     }
     if (!double) {
+      // >| writes over a file even with noclobber set: an operator, not a pipe.
+      if (ch === "|" && text[i - 1] === ">" && text[i - 2] !== "\\") {
+        current += ch;
+        continue;
+      }
       if ((ch === "&" && next === "&") || (ch === "|" && (next === "|" || next === "&"))) {
         cut();
         afterPipe = ch === "|" && next === "&";
@@ -181,31 +208,53 @@ interface Word {
   text: string;
   /** Some of it was quoted: it cannot be an operator. */
   quoted: boolean;
+  /** A redirection operator (`>`, `2>>`, `&>`, `>&`, `<` …). Its target is the word after it. */
+  redirect?: string;
+  /** Holds a `$…`, a backtick or a brace expansion outside single quotes: the shell decides what it becomes. */
+  expands?: boolean;
+  /** Where the word starts and ends in the command, to tell `>2h` from `> 2h`. */
+  start: number;
+  end: number;
 }
 
-/** The words of one simple command, quotes resolved. */
+/** A redirection operator at the start of the text. */
+const REDIRECT_OP = /^(&>>|&>|>>|>\||>&|>|<<<|<<-|<<|<>|<&|<)/;
+
+/**
+ * The words of one simple command, quotes resolved. A redirection operator is a word of its own
+ * wherever it is written: `echo x>/etc/y` is `echo`, `x`, `>`, `/etc/y`, as the shell reads it.
+ */
 function shellWords(segment: string): Word[] {
   const out: Word[] = [];
   let text = "";
   let quoted = false;
+  let expands = false;
   let started = false;
-  const push = (): void => {
-    if (started) out.push({ text, quoted });
+  let start = 0;
+  const begin = (i: number): void => {
+    if (!started) start = i;
+    started = true;
+  };
+  const push = (end: number): void => {
+    if (started) out.push({ text, quoted, expands, start, end });
     text = "";
     quoted = false;
+    expands = false;
     started = false;
   };
   for (let i = 0; i < segment.length; i++) {
     const ch = segment[i];
+    const next = segment[i + 1];
     if (/\s/.test(ch)) {
-      push();
+      push(i);
       continue;
     }
-    started = true;
     if (ch === "\\") {
-      text += segment[i + 1] ?? "";
+      begin(i);
+      text += next ?? "";
       i++;
-    } else if (ch === "$" && segment[i + 1] === "'") {
+    } else if (ch === "$" && next === "'") {
+      begin(i);
       let j = i + 2;
       while (j < segment.length && segment[j] !== "'") {
         text += segment[j] === "\\" ? segment[++j] ?? "" : segment[j];
@@ -213,41 +262,87 @@ function shellWords(segment: string): Word[] {
       }
       quoted = true;
       i = j;
-    } else if (ch === "'" || ch === '"') {
-      const end = segment.indexOf(ch, i + 1);
+    } else if (ch === "'") {
+      begin(i);
+      const end = segment.indexOf("'", i + 1);
       const stop = end < 0 ? segment.length : end;
       text += segment.slice(i + 1, stop);
       quoted = true;
       i = stop;
-    } else if (ch === "$" && segment[i + 1] === "(") {
+    } else if (ch === '"') {
+      begin(i);
+      let j = i + 1;
+      for (; j < segment.length && segment[j] !== '"'; j++) {
+        if (segment[j] === "\\" && /["\\$`]/.test(segment[j + 1] ?? "")) text += segment[++j];
+        else {
+          if (segment[j] === "`" || (segment[j] === "$" && /[A-Za-z0-9_{(@*#?!$-]/.test(segment[j + 1] ?? ""))) expands = true;
+          text += segment[j];
+        }
+      }
+      quoted = true;
+      i = j;
+    } else if ((ch === "$" || ch === "<" || ch === ">") && next === "(") {
+      // $( … ), <( … ), >( … ): what runs inside is judged as a command of its own.
+      begin(i);
       const end = closeParen(segment, i + 2);
       text += segment.slice(i, end + 1);
+      expands = true;
       i = end;
-    } else text += ch;
+    } else if (ch === "`") {
+      begin(i);
+      let j = i + 1;
+      while (j < segment.length && segment[j] !== "`") j += segment[j] === "\\" ? 2 : 1;
+      text += segment.slice(i, j + 1);
+      expands = true;
+      i = j;
+    } else if (ch === ">" || ch === "<" || (ch === "&" && next === ">")) {
+      // Digits alone in front of it name the stream it is for (2>…). Anything else ends the word: a1>y is "a1" and >y.
+      let fd = "";
+      if (started && !quoted && !expands && /^\d+$/.test(text)) {
+        fd = text;
+        text = "";
+        started = false;
+      } else push(i);
+      const op = REDIRECT_OP.exec(segment.slice(i))?.[1] ?? ch;
+      out.push({ text: fd + op, quoted: false, redirect: fd + op, start: i - fd.length, end: i + op.length });
+      i += op.length - 1;
+    } else {
+      begin(i);
+      if (ch === "$" && /[A-Za-z0-9_{@*#?!$-]/.test(next ?? "")) expands = true;
+      // {a,b} and {1..3} become several words.
+      if (ch === "{" && /^\{[^\s{}'"]*(,|\.\.)[^\s{}'"]*\}/.test(segment.slice(i))) expands = true;
+      text += ch;
+    }
   }
-  push();
+  push(segment.length);
   return out;
 }
 
-/** Where output may go without anything being written. */
-const HARMLESS_TARGET = /^(\/dev\/(null|stdout|stderr|tty)|&-?\d*|-)$/;
+/** Where a redirected stream may go without anything being written. */
+const QUIET_TARGET = /^\/dev\/(null|stdout|stderr|tty)$/;
 
-/** Takes the redirections out of a command's words, and says whether any of them writes a file. */
+/**
+ * Takes the redirections out of a command's words, and says whether any of them writes a file.
+ * Only /dev/null (and the terminal's own streams) and a copy of stdin, stdout or stderr write nothing:
+ * `2>&1` and `>&-` are harmless, `>&3` writes wherever stream 3 was opened, `>& f` is `&> f`.
+ */
 function withoutRedirections(words: Word[]): { words: Word[]; writes?: string } {
   const out: Word[] = [];
   let writes: string | undefined;
   for (let i = 0; i < words.length; i++) {
     const w = words[i];
-    const op = w.quoted ? null : /^(\d*|&)(>>?\|?|>&|<<<|<<-?|<&|<>|<)(.*)$/.exec(w.text);
-    if (!op) {
+    if (!w.redirect) {
       out.push(w);
       continue;
     }
-    let target = op[3];
-    if (!target && i + 1 < words.length) target = words[++i].text;
-    const kind = op[2];
-    if (kind.startsWith(">") || kind === "<>")
-      if (!HARMLESS_TARGET.test(kind === ">&" ? `&${target}` : target)) writes = target || "a file";
+    const target = words[i + 1];
+    if (target && !target.redirect) i++;
+    const op = w.redirect.replace(/^\d+/, "");
+    // Input: <, <&, here-documents and here-strings. <> opens the file for writing too.
+    if (op.startsWith("<") && op !== "<>") continue;
+    const name = target && !target.redirect ? target.text : "";
+    const quiet = target && !target.redirect && !target.expands && (op === ">&" ? /^([012]|-|[012]-)$/.test(name) || QUIET_TARGET.test(name) : QUIET_TARGET.test(name));
+    if (!quiet) writes = name || "a file";
   }
   return { words: out, writes };
 }
@@ -287,7 +382,7 @@ const SHELL_AS = "shell as another user: ";
  * `LD_PRELOAD=/tmp/x.so ls` is not `ls`. Setting one is a change, whatever the command after it.
  */
 const LOADS_CODE =
-  /^(LD_[A-Z0-9_]+|DYLD_[A-Z0-9_]+|IFS|ENV|BASH_ENV|BASH_FUNC_.*|SHELLOPTS|BASHOPTS|PS4|PROMPT_COMMAND|HOME|XDG_CONFIG_HOME|XDG_CONFIG_DIRS|PYTHONPATH|PYTHONSTARTUP|PYTHONHOME|PYTHONINSPECT|PERL5LIB|PERLLIB|PERL5OPT|PERL5DB|RUBYOPT|RUBYLIB|NODE_OPTIONS|NODE_PATH|JAVA_TOOL_OPTIONS|_JAVA_OPTIONS|JDK_JAVA_OPTIONS|GIT_SSH|GIT_SSH_COMMAND|GIT_EXTERNAL_DIFF|GIT_EXEC_PATH|GIT_ASKPASS|GIT_CONFIG[A-Z0-9_]*|GIT_PROXY_COMMAND|SSH_ASKPASS|SUDO_ASKPASS|LESSOPEN|LESSCLOSE|GCONV_PATH|LOCPATH|NLSPATH|HOSTALIASES|RESOLV_HOST_CONF|CURL_HOME|WGETRC|INPUTRC|TERMINFO|TERMINFO_DIRS)$/;
+  /^(LD_[A-Z0-9_]+|DYLD_[A-Z0-9_]+|IFS|ENV|BASH_ENV|BASH_FUNC_.*|SHELLOPTS|BASHOPTS|PS4|PROMPT_COMMAND|HOME|XDG_CONFIG_HOME|XDG_CONFIG_DIRS|PYTHONPATH|PYTHONSTARTUP|PYTHONHOME|PYTHONINSPECT|PERL5LIB|PERLLIB|PERL5OPT|PERL5DB|RUBYOPT|RUBYLIB|NODE_OPTIONS|NODE_PATH|JAVA_TOOL_OPTIONS|_JAVA_OPTIONS|JDK_JAVA_OPTIONS|GIT_SSH|GIT_SSH_COMMAND|GIT_DIR|GIT_COMMON_DIR|KUBECONFIG|RSYNC_RSH|PSQLRC|GIT_EXTERNAL_DIFF|GIT_EXEC_PATH|GIT_ASKPASS|GIT_CONFIG[A-Z0-9_]*|GIT_PROXY_COMMAND|SSH_ASKPASS|SUDO_ASKPASS|LESSOPEN|LESSCLOSE|GCONV_PATH|LOCPATH|NLSPATH|HOSTALIASES|RESOLV_HOST_CONF|CURL_HOME|WGETRC|INPUTRC|TERMINFO|TERMINFO_DIRS)$/;
 /** A pager or an editor is run by the program: harmless only when it is one that just shows the text, or none. */
 const RUNS_AS_HELPER = /^([A-Z0-9_]*PAGER|EDITOR|VISUAL|[A-Z0-9_]*_EDITOR|BROWSER)$/;
 const SYSTEM_PATH = /^(\$PATH|\$\{PATH\}|\/usr\/local\/s?bin|\/usr\/s?bin|\/s?bin|\/snap\/bin)\/?$/;
@@ -303,6 +398,9 @@ function riskyAssignment(word: string): string | undefined {
   if (RUNS_AS_HELPER.test(name) && !PLAIN_PAGER.test(word.slice(at + 1).trim())) return name;
   return undefined;
 }
+
+/** A program named by its path in the system's own directories. */
+const SYSTEM_PROGRAM = /^(\/usr\/local|\/usr|)\/s?bin\/[^/$`]+$|^\/snap\/bin\/[^/$`]+$/;
 
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
@@ -372,13 +470,22 @@ const RULES: Record<string, (args: string[], all: string) => Judgement | undefin
   fdisk: (a) => (flag(a, "l", "--list") ? SAFE() : DESTROY("Edits a partition table")),
   sfdisk: (a) => (flag(a, "l", "--list") || has(a, /^-d$/, /^--dump$/) ? SAFE() : DESTROY("Edits a partition table")),
   gdisk: () => DESTROY("Edits a partition table"),
-  sgdisk: (a) => (has(a, /^-p$/, /^--print$/) ? SAFE() : DESTROY("Edits a partition table")),
-  parted: (a) => (flag(a, "l", "--list") || a.includes("print") ? SAFE() : DESTROY("Edits a partition table")),
+  sgdisk: (a) => (has(a, /^-p$/, /^--print$/) && a.every((x) => /^(-p|--print|-v|--verify)$/.test(x) || !x.startsWith("-")) ? SAFE() : DESTROY("Edits a partition table")),
+  // parted runs every command it is given in turn: `parted /dev/sda rm 1 print` removes, then prints.
+  parted: (a) => {
+    const commands = positional(a).slice(1);
+    return (flag(a, "l", "--list") && positional(a).length === 0) || (commands.length > 0 && commands.every((c) => /^(print|p|unit|[kMGT]?i?B|s|%|cyl|chs|compact|free|all|list|devices)$/.test(c))) ? SAFE() : DESTROY("Edits a partition table");
+  },
   cryptsetup: (a) => (a.some((x) => /^(luksErase|erase|luksKillSlot|luksFormat)$/.test(x)) ? DESTROY("Erases encryption keys or formats a device") : a[0] && /^(status|luksDump|isLuks)$/.test(a[0]) ? SAFE() : MODIFY("Changes disk encryption")),
   lvremove: () => DESTROY("Removes a logical volume"),
   vgremove: () => DESTROY("Removes a volume group"),
   pvremove: () => DESTROY("Removes a physical volume"),
-  mdadm: (a) => (has(a, /^--zero-superblock$/, /^--stop$/, /^-S$/) ? DESTROY("Stops or erases a RAID array") : has(a, /^--detail$/, /^-D$/, /^--examine$/, /^-E$/, /^--query$/, /^-Q$/) ? SAFE() : MODIFY("Changes a RAID array")),
+  mdadm: (a) =>
+    has(a, /^--zero-superblock$/, /^--stop$/, /^-S$/)
+      ? DESTROY("Stops or erases a RAID array")
+      : has(a, /^--detail$/, /^-D$/, /^--examine$/, /^-E$/, /^--query$/, /^-Q$/) && a.every((x) => /^(--detail|-D|--examine|-E|--query|-Q|--scan|-s|--brief|-b|--verbose|-v|--export|-Y|--test|-t)$/.test(x) || !x.startsWith("-"))
+        ? SAFE()
+        : MODIFY("Changes a RAID array"),
   zpool: (a) => (a[0] === "destroy" || a[0] === "labelclear" ? DESTROY("Destroys a ZFS pool") : ["status", "list", "iostat", "history", "get"].includes(a[0] ?? "") ? SAFE() : MODIFY("Changes a ZFS pool")),
   zfs: (a) => (a[0] === "destroy" || a[0] === "rollback" ? DESTROY("Destroys a ZFS dataset or rolls it back") : ["list", "get"].includes(a[0] ?? "") ? SAFE() : MODIFY("Changes a ZFS dataset")),
   ceph: (a, all) =>
@@ -391,7 +498,9 @@ const RULES: Record<string, (args: string[], all: string) => Judgement | undefin
   helm: (a) =>
     ["uninstall", "delete", "del"].includes(a[0] ?? "")
       ? DESTROY("Removes a Helm release")
-      : ["list", "ls", "status", "get", "history", "show", "search", "version", "template", "lint", "env"].includes(a[0] ?? "")
+      : a.some((x) => /^--(post-renderer|output-dir|kubeconfig)/.test(x))
+        ? MODIFY("Runs a program, writes files or reads another cluster's settings")
+        : ["list", "ls", "status", "get", "history", "show", "search", "version", "template", "lint", "env"].includes(a[0] ?? "")
         ? SAFE()
         : MODIFY("Changes a Helm release"),
   shutdown: () => DESTROY("Shuts the system down or reboots it"),
@@ -427,25 +536,28 @@ const RULES: Record<string, (args: string[], all: string) => Judgement | undefin
   terraform: (a) =>
     a[0] === "destroy" || (a[0] === "apply" && a.includes("-destroy"))
       ? DESTROY("Destroys infrastructure")
-      : ["plan", "show", "output", "validate", "version", "fmt", "providers", "graph", "state"].includes(a[0] ?? "") && !(a[0] === "state" && /^(rm|mv|push|replace-provider)$/.test(a[1] ?? "")) && !(a[0] === "fmt" && !a.includes("-check"))
+      : ["plan", "show", "output", "validate", "version", "fmt", "providers", "graph", "state"].includes(a[0] ?? "") && !a.some((x) => /^-(out|state-out|backup)(=|$)/.test(x)) && !(a[0] === "state" && /^(rm|mv|push|replace-provider)$/.test(a[1] ?? "")) && !(a[0] === "fmt" && !a.includes("-check"))
         ? SAFE()
         : MODIFY("Changes infrastructure"),
   aws: (a, all) =>
     /^s3 rb\b/.test(all) || (/^s3 rm\b/.test(all) && a.includes("--recursive")) || /\bdelete-(bucket|db-instance|db-cluster|stack|table|cluster)\b/.test(all) || /\bterminate-instances\b/.test(all)
       ? DESTROY("Removes cloud resources")
-      : /^(s3 ls|sts get-caller-identity)\b/.test(all) || a.some((x) => /^(describe|list|get)-/.test(x))
+      : /^(s3 ls|sts get-caller-identity)\b/.test(all) || awsReads(a)
         ? SAFE()
         : MODIFY("Changes cloud resources"),
   gsutil: (a) => (a[0] === "rb" || (a[0] === "rm" && flag(a, "r")) ? DESTROY("Removes a bucket or a tree of objects") : ["ls", "du", "cat", "stat"].includes(a[0] ?? "") ? SAFE() : MODIFY("Changes cloud storage")),
   s3cmd: (a) => (a[0] === "rb" || (a[0] === "del" && flag(a, "r", "--recursive")) ? DESTROY("Removes a bucket or a tree of objects") : ["ls", "la", "du", "info"].includes(a[0] ?? "") ? SAFE() : MODIFY("Changes object storage")),
   mc: (a) => (a[0] === "rb" || (a[0] === "rm" && has(a, /^--recursive$/, /^-r$/)) ? DESTROY("Removes a bucket or a tree of objects") : ["ls", "du", "cat", "stat", "tree"].includes(a[0] ?? "") ? SAFE() : MODIFY("Changes object storage")),
-  rsync: (a) => (a.some((x) => x.startsWith("--delete") || x === "--remove-source-files") ? DESTROY("Deletes files that are not in the source") : has(a, /^--dry-run$/, /^-n$/) || flag(a, "n") ? SAFE() : MODIFY("Copies files")),
+  rsync: (a) => rsync(a),
   docker: (a) => containers(a),
   podman: (a) => containers(a),
   nerdctl: (a) => containers(a),
   "redis-cli": (a) => redis(a),
   // Database clients: what they run is in the arguments or on stdin.
-  psql: (_a, all) => sql(all),
+  psql: (a) => psql(a),
+  postgres: (a) => postgres(a),
+  python3: (a) => python(a),
+  python: (a) => python(a),
   mysql: (_a, all) => sql(all),
   mariadb: (_a, all) => sql(all),
   sqlite3: (_a, all) => sql(all),
@@ -506,7 +618,7 @@ const RULES: Record<string, (args: string[], all: string) => Judgement | undefin
   diff: () => SAFE(),
   cmp: () => SAFE(),
   seq: () => SAFE(),
-  sleep: () => SAFE(),
+  sleep: (a) => sleep(a),
   echo: () => SAFE(),
   printf: (a) => (a[0] === "-v" ? MODIFY("Sets a variable") : SAFE()),
   true: () => SAFE(),
@@ -522,11 +634,11 @@ const RULES: Record<string, (args: string[], all: string) => Judgement | undefin
   ps: () => SAFE(),
   pgrep: () => SAFE(),
   pstree: () => SAFE(),
-  vmstat: () => SAFE(),
-  iostat: () => SAFE(),
-  mpstat: () => SAFE(),
-  sar: () => SAFE(),
-  pidstat: () => SAFE(),
+  vmstat: sampler(/^-[Spc]$/),
+  iostat: sampler(/^-[pjgc]$/),
+  mpstat: sampler(/^-[PNIo]$/),
+  sar: sampler(/^-[PnfsiI]$/, /^-o/),
+  pidstat: sampler(/^-[pCGUT]$/, /^-e$/),
   numastat: () => SAFE(),
   journalctl: (a) =>
     a.some((x) => /^--(vacuum-|rotate|flush|sync|relinquish-var|setup-keys)/.test(x))
@@ -538,9 +650,9 @@ const RULES: Record<string, (args: string[], all: string) => Judgement | undefin
   tail: (a) => (flag(a, "f", "--follow") || flag(a, "F") ? MODIFY(NEVER_ENDS) : SAFE()),
   less: () => MODIFY(NEVER_ENDS),
   more: () => MODIFY(NEVER_ENDS),
-  top: (a) => (flag(a, "b") && a.some((x, i) => x === "-n" || /^-[a-zA-Z]*n\d*$/.test(x) || a[i - 1] === "-n") ? SAFE() : MODIFY(NEVER_ENDS)),
+  top: (a) => ((flag(a, "b") || a.some((x) => /^-[a-zA-Z]*b[a-zA-Z]*n?\d*$/.test(x))) && a.some((x, i) => x === "-n" || /^-[a-zA-Z]*n\d*$/.test(x) || a[i - 1] === "-n") ? SAFE() : MODIFY(NEVER_ENDS)),
   htop: () => MODIFY(NEVER_ENDS),
-  sort: (a) => (flag(a, "o", "--output") || a.some((x) => /^-[a-zA-Z]*o./.test(x)) ? MODIFY("Writes its output to a file") : SAFE()),
+  sort: (a) => (flag(a, "o", "--output") || a.some((x) => /^-[a-zA-Z]*o./.test(x)) || has(a, /^--compress-program/) ? MODIFY("Writes its output to a file or runs a program") : SAFE()),
   uniq: (a) => (positional(a).length > 1 ? MODIFY("Writes its output to a file") : SAFE()),
   sed: (a) => sed(a),
   awk: (a) => awk(a),
@@ -560,13 +672,14 @@ const RULES: Record<string, (args: string[], all: string) => Judgement | undefin
   tracepath: () => SAFE(),
   mtr: (a) => (flag(a, "r", "--report") || flag(a, "w") ? SAFE() : MODIFY(NEVER_ENDS)),
   dig: () => SAFE(),
-  nslookup: () => SAFE(),
+  // With nothing to look up, nslookup waits for questions from the terminal.
+  nslookup: (a) => (positional(a).length > 0 && !a.includes("-") ? SAFE() : MODIFY(NEVER_ENDS)),
   host: () => SAFE(),
   whois: () => SAFE(),
   ethtool: (a) => (a.length <= 1 || /^-(i|S|k|g|a|c|l|m|P|T|d|e|n|u|t|-show|-driver|-statistics|-module-info)/.test(a[0]) && !/^-[sKGACLEf]$/.test(a[0]) ? SAFE() : MODIFY("Changes a network interface")),
-  multipath: (a) => (flag(a, "l") ? SAFE() : MODIFY("Changes multipath devices")),
+  multipath: (a) => (flag(a, "l") && a.every((x) => /^(-l|-ll|-v\d)$/.test(x) || !x.startsWith("-")) ? SAFE() : MODIFY("Changes multipath devices")),
   iscsiadm: (a) => (a.includes("session") && !has(a, /^--(logout|login|op)/, /^-[uloU]$/) ? SAFE() : MODIFY("Changes iSCSI sessions")),
-  openssl: (a) => (/^(x509|verify|version|s_client|req|crl|rsa|ec|pkey|asn1parse|ciphers)$/.test(a[0] ?? "") && !has(a, /^-out$/, /^-keyout$/, /^-new$/, /^-genkey/) ? SAFE() : MODIFY("Makes keys or certificates")),
+  openssl: (a) => (!has(a, /^-(engine|provider|provider-path)$/) && /^(x509|verify|version|s_client|req|crl|rsa|ec|pkey|asn1parse|ciphers)$/.test(a[0] ?? "") && !has(a, /^-out$/, /^-keyout$/, /^-new$/, /^-genkey/) ? SAFE() : MODIFY("Makes keys or certificates")),
   "pg_isready": () => SAFE(),
   mysqladmin: (a) => (["ping", "status", "version", "processlist", "variables", "extended-status"].includes(a.filter((x) => !x.startsWith("-"))[0] ?? "") ? SAFE() : MODIFY("Changes the MySQL server")),
   nginx: (a) => (a.length > 0 && a.every((x) => /^-[tTvV]+$/.test(x)) ? SAFE() : MODIFY("Starts or signals nginx")),
@@ -575,18 +688,18 @@ const RULES: Record<string, (args: string[], all: string) => Judgement | undefin
   sshd: (a) => (a.length > 0 && a.every((x) => /^-[tT]$/.test(x)) ? SAFE() : MODIFY("Starts sshd")),
   haproxy: (a) => (flag(a, "c") ? SAFE() : MODIFY("Starts haproxy")),
   "named-checkconf": () => SAFE(),
-  "named-checkzone": () => SAFE(),
+  "named-checkzone": (a) => (flag(a, "o") || flag(a, "D") ? MODIFY("Writes the zone to a file") : SAFE()),
   visudo: (a) => (flag(a, "c", "--check") ? SAFE() : MODIFY("Edits sudoers")),
   "dpkg-query": () => SAFE(),
   dpkg: (a) => (/^(-l|-s|-L|-S|--list|--status|--listfiles|--search|--print-architecture)$/.test(a[0] ?? "") ? SAFE() : MODIFY("Installs or removes packages")),
   rpm: (a) => (/^-q[a-zA-Z]*$/.test(a[0] ?? "") || a[0] === "--query" ? SAFE() : MODIFY("Installs or removes packages")),
   apk: (a) => (["info", "list", "version", "search", "policy"].includes(a[0] ?? "") ? SAFE() : MODIFY("Installs or removes packages")),
   apt: (a) => (["list", "show", "search", "policy", "depends", "rdepends"].includes(a[0] ?? "") ? SAFE() : MODIFY("Package manager operation")),
-  "apt-cache": () => SAFE(),
+  "apt-cache": (a) => (a.includes("gencaches") ? MODIFY("Rebuilds the package cache") : SAFE()),
   pip: (a) => (["list", "show", "freeze", "check"].includes(a[0] ?? "") ? SAFE() : MODIFY("Installs or removes Python packages")),
   pip3: (a) => (["list", "show", "freeze", "check"].includes(a[0] ?? "") ? SAFE() : MODIFY("Installs or removes Python packages")),
   snap: (a) => (["list", "info", "version", "services"].includes(a[0] ?? "") ? SAFE() : MODIFY("Installs or removes snaps")),
-  git: (a) => (["status", "log", "diff", "show", "rev-parse", "describe", "ls-files", "blame", "shortlog", "reflog", "grep", "ls-remote"].includes(a[0] ?? "") || (a[0] === "remote" && (a.length === 1 || a[1] === "-v" || a[1] === "show")) || (a[0] === "branch" && a.slice(1).every((x) => /^(-a|-r|-v|-vv|--list|--all|--remotes|--show-current)$/.test(x))) ? SAFE() : MODIFY("Changes a git repository")),
+  git: (a) => git(a),
   curl: (a) => (readOnlyCurl(a) ? SAFE() : MODIFY("Sends data, changes something, or writes a file")),
   wget: (a) => (readOnlyWget(a) ? SAFE() : MODIFY("Downloads to a file or sends data")),
   for: () => SAFE("Loop header"),
@@ -654,15 +767,47 @@ for (const verb of ONTAP_VERBS) RULES[verb] ??= (a) => ontap(verb, a);
  */
 function withOntapComparisons(words: Word[]): Word[] {
   if (!ONTAP_VERBS.has(words[0]?.text ?? "") || words[0].quoted) return words;
-  return words.map((w, i) =>
-    !w.quoted && i > 1 && /^-[a-z]/.test(words[i - 1].text) && /^[<>]=?\d[A-Za-z0-9.:%]*$/.test(w.text) ? { ...w, quoted: true } : w,
-  );
+  const out: Word[] = [];
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    const value = words[i + 1];
+    // `>2h` is read as the operator `>` and the word `2h`, written together (`> 2h` is a redirection).
+    if (w.redirect && /^[<>]$/.test(w.redirect) && i > 1 && /^-[a-z]/.test(words[i - 1].text) && value && !value.redirect && !value.quoted && value.start === w.end) {
+      const text = w.redirect + value.text;
+      if (/^[<>]=?\d[A-Za-z0-9.:%]*$/.test(text)) {
+        out.push({ text, quoted: true, start: w.start, end: value.end });
+        i++;
+        continue;
+      }
+    }
+    out.push(w);
+  }
+  return out;
 }
 
 // mkfs.ext4, mkfs.xfs …
 const familyOf = (verb: string): string => (/^mkfs\./.test(verb) ? "mkfs" : verb);
 
+/** Global options of the aws command line that take a value. */
+const AWS_VALUE = /^--(region|profile|output|endpoint-url|query|color|ca-bundle|cli-read-timeout|cli-connect-timeout|cli-binary-format)$/;
+
+/** `aws <service> <operation>`: the operation decides, and only describe-, list- and get- read (get-object writes the object to a file). */
+function awsReads(a: string[]): boolean {
+  const words: string[] = [];
+  for (let i = 0; i < a.length && words.length < 2; i++) {
+    if (a[i].startsWith("--")) {
+      if (AWS_VALUE.test(a[i])) i++;
+      continue;
+    }
+    words.push(a[i]);
+  }
+  const operation = words[1] ?? "";
+  return /^(describe|list|get)-/.test(operation) && !/^get-object/.test(operation);
+}
+
 function kubectl(a: string[]): Judgement {
+  // A kubeconfig may name a program that kubectl runs for credentials.
+  if (a.some((x) => /^--kubeconfig(=|$)/.test(x))) return MODIFY("Reads another kubeconfig, which may run a program");
   const words = positional(a.filter((_x, i) => !/^-(n|-namespace|-context|-kubeconfig|l|-selector|o|-output)$/.test(a[i - 1] ?? "")));
   const verb = words[0] ?? "";
   if (verb === "delete") {
@@ -724,21 +869,423 @@ function sql(all: string): Judgement {
   return MODIFY("Runs database commands");
 }
 
+/**
+ * sed reads unless told to write: an allowlist of the options that only change how it reads or
+ * prints, and a reading of the script command by command. `-i` in any spelling, a script file
+ * (`-f`, `--file`) and any option not on the list are a change; so is a `w`, `W` or `e` command and
+ * an `s` with the `w` or `e` flag, whatever the delimiter. What cannot be read exactly is a change.
+ */
 function sed(a: string[]): Judgement {
-  if (flag(a, "i", "--in-place") || a.some((x) => x.startsWith("--in-place") || /^-[a-zA-Z]*i/.test(x))) return MODIFY("Edits a file in place");
-  // The script: what follows -e, or the first word that is not an option. A `w` or `e` command writes or runs.
-  const scripts = a.flatMap((x, i) => (a[i - 1] === "-e" || a[i - 1] === "--expression" ? [x] : []));
-  const script = scripts.length ? scripts.join("\n") : positional(a)[0] ?? "";
-  if (/(^|[;}\s/0-9$])[wWe](\s|$)|\/[a-zA-Z]*[we]\b/.test(script)) return MODIFY("The sed script writes a file or runs a command");
-  return SAFE();
+  const scripts: string[] = [];
+  const operands: string[] = [];
+  for (let i = 0; i < a.length; i++) {
+    const w = a[i];
+    if (w === "--") {
+      operands.push(...a.slice(i + 1));
+      break;
+    }
+    if (!w.startsWith("-") || w === "-") {
+      operands.push(w);
+      continue;
+    }
+    if (w.startsWith("--")) {
+      const at = w.indexOf("=");
+      const name = at < 0 ? w : w.slice(0, at);
+      if (/^--(quiet|silent|regexp-extended|separate|unbuffered|null-data|posix|debug|sandbox)$/.test(name) && at < 0) continue;
+      if (name === "--expression") {
+        scripts.push(at < 0 ? a[++i] ?? "" : w.slice(at + 1));
+        continue;
+      }
+      if (name === "--line-length") {
+        if (at < 0) i++;
+        continue;
+      }
+      return MODIFY(name.startsWith("--in") ? "Edits a file in place" : name === "--file" ? "Runs a sed script from a file" : `sed ${name} is not on the read-only list`);
+    }
+    for (let j = 1; j < w.length; j++) {
+      const letter = w[j];
+      if ("nErsuz".includes(letter)) continue;
+      if (letter === "e" || letter === "l") {
+        const value = w.slice(j + 1) || a[++i] || "";
+        if (letter === "e") scripts.push(value);
+        break;
+      }
+      return MODIFY(letter === "i" ? "Edits a file in place" : letter === "f" ? "Runs a sed script from a file" : `sed -${letter} is not on the read-only list`);
+    }
+  }
+  const script = scripts.length ? scripts.join("\n") : operands[0] ?? "";
+  return sedOnlyReads(script) ? SAFE() : MODIFY("The sed script writes a file or runs a command");
 }
 
+/** Reads a sed script command by command. True only when every command is known and none writes or runs. */
+function sedOnlyReads(s: string): boolean {
+  let i = 0;
+  const n = s.length;
+  const end = (c: string | undefined): boolean => c === undefined || /[\s;}#]/.test(c);
+  /** Past a regular expression closed by `delim`. A delimiter or a backslash inside a bracket expression is not read: it differs between seds. */
+  const regex = (delim: string): boolean => {
+    for (; i < n; i++) {
+      const c = s[i];
+      if (c === "\\") {
+        i++;
+        continue;
+      }
+      if (c === "\n") return false;
+      if (c === delim) {
+        i++;
+        return true;
+      }
+      if (c === "[") {
+        let j = i + 1;
+        if (s[j] === "^") j++;
+        if (s[j] === "]") j++;
+        for (; j < n && s[j] !== "]"; j++) {
+          if (s[j] === "\\" || s[j] === delim || s[j] === "\n") return false;
+          if (s[j] === "[" && /[:.=]/.test(s[j + 1] ?? "")) {
+            const close = s.indexOf(`${s[j + 1]}]`, j + 2);
+            if (close < 0) return false;
+            j = close + 1;
+          }
+        }
+        if (j >= n) return false;
+        i = j;
+      }
+    }
+    return false;
+  };
+  /** Past the replacement of `s` or a part of `y`. */
+  const text = (delim: string): boolean => {
+    for (; i < n; i++) {
+      if (s[i] === "\\") i++;
+      else if (s[i] === "\n") return false;
+      else if (s[i] === delim) {
+        i++;
+        return true;
+      }
+    }
+    return false;
+  };
+  const address = (): boolean => {
+    if (/\d/.test(s[i] ?? "")) {
+      while (/\d/.test(s[i] ?? "")) i++;
+      if (s[i] === "~") for (i++; /\d/.test(s[i] ?? ""); ) i++;
+    } else if (s[i] === "$") i++;
+    else if (s[i] === "+" || s[i] === "~") for (i++; /\d/.test(s[i] ?? ""); ) i++;
+    else if (s[i] === "/" || s[i] === "\\") {
+      const delim = s[i] === "/" ? "/" : s[i + 1];
+      i += s[i] === "/" ? 1 : 2;
+      if (!delim || delim === "\n" || delim === "\\" || !regex(delim)) return false;
+      while (s[i] === "I" || s[i] === "M") i++;
+    }
+    return true;
+  };
+  while (i < n) {
+    const c = s[i];
+    if (/[\s;]/.test(c)) {
+      i++;
+      continue;
+    }
+    if (c === "#") {
+      while (i < n && s[i] !== "\n") i++;
+      continue;
+    }
+    if (!address()) return false;
+    if (s[i] === ",") {
+      i++;
+      while (s[i] === " ") i++;
+      if (!address()) return false;
+    }
+    while (s[i] === " " || s[i] === "!") i++;
+    const cmd = s[i++];
+    if (cmd === undefined) return false;
+    if ("{}=dDgGhHnNpPxzF".includes(cmd)) {
+      if (cmd !== "{" && cmd !== "}" && !end(s[i])) return false;
+      continue;
+    }
+    if ("lLqQ".includes(cmd)) {
+      while (s[i] === " ") i++;
+      while (/\d/.test(s[i] ?? "")) i++;
+      if (!end(s[i])) return false;
+      continue;
+    }
+    if ("aic".includes(cmd)) {
+      // Text to the end of the line; a backslash at the end of a line carries it on.
+      while (i < n && s[i] !== "\n") i += s[i] === "\\" ? 2 : 1;
+      continue;
+    }
+    if (":btTrRv".includes(cmd)) {
+      // A label, a file to read or a version: to the end of the command.
+      while (i < n && s[i] !== "\n" && (cmd === "r" || cmd === "R" || s[i] !== ";")) i++;
+      continue;
+    }
+    if (cmd === "s" || cmd === "y") {
+      const delim = s[i++];
+      if (!delim || delim === "\n" || delim === "\\") return false;
+      if (cmd === "s" ? !regex(delim) || !text(delim) : !text(delim) || !text(delim)) return false;
+      if (cmd === "s") {
+        while (i < n && /[gpiImM0-9]/.test(s[i])) i++;
+        // The e flag runs the pattern space, the w flag writes a file. Anything else here is not read.
+      }
+      if (!end(s[i])) return false;
+      continue;
+    }
+    // w, W and e write or run; anything else is not known.
+    return false;
+  }
+  return true;
+}
+
+/**
+ * awk reads unless its program writes or runs: options from an allowlist (-F, -v, their long
+ * forms), so a program file (-f, -E, --file), an extension (-l, @load) or an in-place edit is a
+ * change. In the program, system(), any pipe (`|`, `|&`, `cmd | getline`), an output redirection
+ * of print or printf, gawk's network files and an indirect call (@name) are a change.
+ */
 function awk(a: string[]): Judgement {
-  if (flag(a, "i") || a.includes("--include") || a.some((x) => x === "inplace")) return MODIFY("Edits a file in place");
-  const program = a.filter((x, i) => !x.startsWith("-") && !/^-(F|v|f)$/.test(a[i - 1] ?? "")).at(0) ?? "";
-  if (a.some((_x, i) => a[i - 1] === "-f")) return MODIFY("Runs an awk program from a file");
-  if (/\bsystem\s*\(|\|\s*["\w$]|["\w$)]\s*\|\s*getline|\bprintf?\b[^;}]*>|\bfflush\b|\bclose\s*\(/.test(program)) return MODIFY("The awk program runs a command or writes a file");
-  return SAFE();
+  let i = 0;
+  for (; i < a.length; i++) {
+    const w = a[i];
+    if (w === "--") {
+      i++;
+      break;
+    }
+    if (!w.startsWith("-") || w === "-") break;
+    if (/^-[Fv]./.test(w) || /^--(field-separator|assign)=/.test(w)) continue;
+    if (w === "-F" || w === "-v" || w === "--field-separator" || w === "--assign") {
+      i++;
+      continue;
+    }
+    if (/^--(posix|traditional|sandbox|re-interval|characters-as-bytes)$/.test(w)) continue;
+    if (w === "-i" || w.startsWith("--include") || w === "-l" || w.startsWith("--load")) return MODIFY("Loads awk code or an extension, or edits a file in place");
+    if (/^-[fE]/.test(w) || /^--(file|exec)/.test(w)) return MODIFY("Runs an awk program from a file");
+    return MODIFY(`awk ${w} is not on the read-only list`);
+  }
+  return awkOnlyReads(a[i] ?? "") ? SAFE() : MODIFY("The awk program runs a command or writes a file");
+}
+
+function awkOnlyReads(source: string): boolean {
+  // A backslash at the end of a line joins it to the next: sys\<newline>tem( is system(.
+  const program = source.replace(/\\\r?\n/g, "");
+  if (/\/inet[46]?\//.test(program)) return false;
+  // Strings and regular expressions say nothing about what the program does: take them out.
+  let code = "";
+  let last = "";
+  for (let i = 0; i < program.length; i++) {
+    const c = program[i];
+    if (c === '"' || (c === "/" && (last === "" || /[(,{;!~&|\n=?:}]/.test(last)))) {
+      let j = i + 1;
+      while (j < program.length && program[j] !== c && program[j] !== "\n") j += program[j] === "\\" ? 2 : 1;
+      if (j >= program.length || program[j] !== c) return false;
+      code += c === '"' ? '""' : "/x/";
+      last = "x";
+      i = j;
+      continue;
+    }
+    if (c === "#") {
+      while (i + 1 < program.length && program[i + 1] !== "\n") i++;
+      continue;
+    }
+    code += c;
+    if (!/\s/.test(c) || c === "\n") last = c;
+  }
+  if (/@|\bsystem\b/.test(code) || /\|/.test(code.replace(/\|\|/g, ""))) return false;
+  // print and printf send their output to a file with > or >> (a comparison there needs brackets).
+  for (const m of code.matchAll(/\bprintf?\b/g)) {
+    let depth = 0;
+    for (let j = (m.index ?? 0) + m[0].length; j < code.length && !(depth === 0 && /[;}\n]/.test(code[j])); j++) {
+      if (code[j] === "(") depth++;
+      else if (code[j] === ")") depth--;
+      else if (code[j] === ">" && depth <= 0) return false;
+    }
+  }
+  return true;
+}
+
+/** git's subcommands that read, each with a test of its own arguments where some forms write. */
+const GIT_READS: Record<string, (rest: string[]) => boolean> = {
+  status: () => true,
+  log: () => true,
+  diff: () => true,
+  show: () => true,
+  "rev-parse": () => true,
+  "rev-list": () => true,
+  describe: () => true,
+  "ls-files": () => true,
+  "ls-tree": () => true,
+  "show-ref": () => true,
+  "cat-file": (r) => !has(r, /^--(textconv|filters)$/),
+  blame: () => true,
+  shortlog: () => true,
+  grep: (r) => !r.some((x) => /^-[a-zA-Z]*O/.test(x) || x.startsWith("--open-files-in-pager")),
+  "ls-remote": (r) => !r.some((x) => /^-[a-zA-Z]*u/.test(x)),
+  // `git reflog main` shows; expire, delete and drop take entries away.
+  reflog: (r) => !r[0] || r[0] === "show" || r[0] === "exists" || r[0].startsWith("-") || /[A-Z@/~^]/.test(r[0]),
+  remote: (r) => r.length === 0 || r.every((x) => /^(-v|--verbose)$/.test(x)) || r[0] === "show" || r[0] === "get-url",
+  branch: (r) => r.every((x) => /^(-a|-r|-v|-vv|--list|--all|--remotes|--show-current|--contains|--merged|--no-merged)$/.test(x)),
+  tag: (r) => r.length === 0 || ((r[0] === "-l" || r[0] === "--list") && !r.slice(1).some((x) => x.startsWith("-") && !/^-n\d*$/.test(x))),
+  stash: (r) => r[0] === "list" || r[0] === "show",
+};
+
+/**
+ * git reads only in the subcommands on the list, and only without the options that make any of
+ * them write a file (`--output`), run a program (`--upload-pack`, `--exec`, `--ext-diff`,
+ * `--textconv`, `grep -O`) or read their settings from elsewhere (`-c`, `--git-dir`, `--exec-path`).
+ */
+function git(a: string[]): Judgement {
+  let i = 0;
+  while (i < a.length && a[i].startsWith("-")) {
+    if (a[i] === "-C") i += 2;
+    else if (/^(--no-pager|-P|-p|--paginate|--no-optional-locks|--no-replace-objects|--literal-pathspecs|--no-advice)$/.test(a[i])) i++;
+    else return MODIFY(`git ${a[i]} changes where git reads its settings or what it runs`);
+  }
+  const sub = a[i] ?? "";
+  const rest = a.slice(i + 1);
+  const test = GIT_READS[sub];
+  if (!test) return MODIFY("Changes a git repository");
+  if (rest.some((x) => /^--(output|upload-pack|receive-pack|exec|ext-diff|textconv)(=|$)/.test(x))) return MODIFY("This git option writes a file or runs a program");
+  return test(rest) ? SAFE() : MODIFY("Changes a git repository or runs a program");
+}
+
+/**
+ * rsync changes nothing only in a dry run (-n), and even then it starts a program on the other
+ * side: a remote shell (-e, --rsh) or rsync path of one's own is a command, and a batch or log
+ * file is written.
+ */
+function rsync(a: string[]): Judgement {
+  if (a.some((x) => x.startsWith("--delete") || x === "--remove-source-files")) return DESTROY("Deletes files that are not in the source");
+  if (a.some((x) => /^--(rsh|rsync-path|write-batch|only-write-batch|log-file|daemon|config|temp-dir|backup-dir)/.test(x) || /^-[a-zA-Z]*e/.test(x)))
+    return MODIFY("rsync runs a program of its own or writes a file");
+  return has(a, /^--dry-run$/) || flag(a, "n") ? SAFE() : MODIFY("Copies files");
+}
+
+/**
+ * psql: read-only when it runs exactly one statement given with -c that reads (SHOW; SELECT
+ * without INTO, locking or a function that is not on the list), or one of the listing
+ * meta-commands, or lists databases (-l). A script file, an output file, several statements,
+ * anything else, or psql left to read from the terminal, is not read further.
+ */
+function psql(a: string[]): Judgement {
+  const commands: string[] = [];
+  let lists = false;
+  for (let i = 0; i < a.length; i++) {
+    const w = a[i];
+    if (w.startsWith("--")) {
+      const at = w.indexOf("=");
+      const name = at < 0 ? w : w.slice(0, at);
+      if (name === "--command") commands.push(at < 0 ? a[++i] ?? "" : w.slice(at + 1));
+      else if (name === "--list") lists = true;
+      else if (/^--(host|port|username|dbname|pset|field-separator|record-separator|variable|set)$/.test(name)) {
+        if (at < 0) i++;
+      } else if (!/^--(no-align|tuples-only|no-psqlrc|quiet|expanded|no-password|csv|html|echo-queries|echo-hidden|field-separator-zero|record-separator-zero)$/.test(name))
+        return MODIFY(`psql ${name} is not on the read-only list`);
+      continue;
+    }
+    if (!w.startsWith("-") || w === "-") continue; // the database and user names
+    for (let j = 1; j < w.length; j++) {
+      const letter = w[j];
+      if ("AtXqxnwaeEbHz0".includes(letter)) continue;
+      if (letter === "l") {
+        lists = true;
+        continue;
+      }
+      if ("hpUdcvPFRT".includes(letter)) {
+        const value = w.slice(j + 1) || a[++i] || "";
+        if (letter === "c") commands.push(value);
+        break;
+      }
+      return MODIFY(letter === "f" ? "Runs an SQL script from a file" : letter === "o" || letter === "L" ? "Writes its output to a file" : `psql -${letter} is not on the read-only list`);
+    }
+  }
+  if (commands.length === 0) return lists ? SAFE() : sql(a.join(" "));
+  if (commands.length > 1) return sql(commands.join(";"));
+  return readOnlyStatement(commands[0]) ? SAFE() : sql(commands[0]);
+}
+
+/** Functions a SELECT may call and still only read. */
+const READING_FUNCTIONS = new Set(
+  "count sum avg min max now version coalesce nullif greatest least lower upper length round floor ceil abs substr substring trim to_char to_timestamp date_trunc extract age string_agg array_agg json_agg jsonb_agg row_to_json format concat replace split_part left right cast current_setting current_database current_user current_schema session_user pg_size_pretty pg_database_size pg_relation_size pg_total_relation_size pg_table_size pg_indexes_size pg_is_in_recovery pg_last_wal_receive_lsn pg_last_wal_replay_lsn pg_last_xact_replay_timestamp pg_current_wal_lsn pg_wal_lsn_diff pg_postmaster_start_time pg_backend_pid pg_conf_load_time inet_server_addr inet_client_addr txid_current_snapshot pg_get_userbyid pg_get_viewdef pg_get_indexdef pg_get_constraintdef has_table_privilege has_database_privilege has_schema_privilege pg_has_role obj_description col_description pg_encoding_to_char".split(" "),
+);
+/** Words that may stand before a bracket in a SELECT without being a function. */
+const SQL_KEYWORDS = new Set("select from where and or not in exists any all as on join over filter by having values when then else case between like ilike is lateral using with distinct union intersect except".split(" "));
+
+/** One statement that only reads: SHOW, a SELECT that writes nothing, or a listing meta-command (\l, \dt, \d …). */
+function readOnlyStatement(text: string): boolean {
+  const t = text.trim().replace(/;\s*$/, "").trim();
+  // eslint-disable-next-line security/detect-unsafe-regex -- anchored at both ends, one optional word after a fixed command
+  if (/^\\(l|d|dt|di|dv|ds|dn|du|dg|df|dx|dm|db|dp|z)\+?( [\w.*"]+)?$/.test(t.replace(/\s+/g, " "))) return true;
+  if (/^show\s+[\w.]+$|^show\s+all$/i.test(t)) return true;
+  if (!/^select\b/i.test(t)) return false;
+  // Strings and quoted names say nothing about what runs: take them out. Comments and dollar quoting are not read.
+  if (/--|\/\*|\$/.test(t)) return false;
+  const code = t.replace(/'(?:[^']|'')*'/g, "''").replace(/"(?:[^"]|"")*"/g, "x");
+  if (/['";\\]/.test(code.replace(/''/g, ""))) return false;
+  if (/\binto\b|\bfor\s+(update|share|no\s+key\s+update|key\s+share)\b/i.test(code)) return false;
+  for (let at = code.indexOf("("); at >= 0; at = code.indexOf("(", at + 1)) {
+    // The word right before the bracket, if any: the name of a function, or a keyword.
+    let j = at - 1;
+    while (j >= 0 && /\s/.test(code[j])) j--;
+    let k = j;
+    while (k >= 0 && /[\w.]/.test(code[k])) k--;
+    const name = code.slice(k + 1, j + 1).toLowerCase().replace(/^pg_catalog\./, "");
+    if (name && !READING_FUNCTIONS.has(name) && !SQL_KEYWORDS.has(name)) return false;
+  }
+  return true;
+}
+
+/** `postgres -C setting` prints a setting and exits; anything else starts or changes a server. */
+function postgres(a: string[]): Judgement {
+  let shows = false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] === "-C") {
+      shows = a[++i] !== undefined;
+      continue;
+    }
+    if (a[i] === "-D") {
+      i++;
+      continue;
+    }
+    return MODIFY("Starts or changes a PostgreSQL server");
+  }
+  return shows ? SAFE() : MODIFY("Starts a PostgreSQL server");
+}
+
+/** `python3 -m json.tool` formats JSON to the terminal; any other Python program is a program. */
+function python(a: string[]): Judgement {
+  if (a[0] !== "-m" || a[1] !== "json.tool") return MODIFY("Runs a Python program");
+  const rest = a.slice(2);
+  let operands = 0;
+  for (let i = 0; i < rest.length; i++) {
+    if (rest[i] === "--indent") i++;
+    else if (/^--(sort-keys|compact|tab|no-indent|no-ensure-ascii|json-lines|indent=\d+)$/.test(rest[i])) continue;
+    else if (rest[i].startsWith("-") && rest[i] !== "-") return MODIFY("Runs a Python program");
+    else operands++;
+  }
+  // A second file name is where json.tool writes.
+  return operands <= 1 ? SAFE() : MODIFY("Writes its output to a file");
+}
+
+/**
+ * vmstat, iostat, sar and the like print once, or every interval for a count of times: given an
+ * interval alone they never end. The options named take a value, which is not an interval.
+ */
+function sampler(valueOptions: RegExp, writes?: RegExp): (a: string[]) => Judgement {
+  return (a) => {
+    if (writes && has(a, writes)) return MODIFY("Writes its samples to a file or runs a program");
+    const numbers = a.filter((x, i) => /^\d+$/.test(x) && !valueOptions.test(a[i - 1] ?? ""));
+    return numbers.length === 1 ? MODIFY(NEVER_ENDS) : SAFE();
+  };
+}
+
+/** sleep is a pause: a short one is harmless, a long one holds the run. */
+function sleep(a: string[]): Judgement {
+  const unit: Record<string, number> = { "": 1, s: 1, m: 60, h: 3600, d: 86400 };
+  let seconds = 0;
+  for (const x of a) {
+    const m = /^([\d.]+)([smhd]?)$/.exec(x);
+    if (!m || Number.isNaN(Number(m[1]))) return MODIFY("Waits for a long time (sleep)");
+    seconds += Number(m[1]) * unit[m[2]];
+  }
+  return seconds <= 300 ? SAFE() : MODIFY("Waits for a long time (sleep)");
 }
 
 function find(a: string[]): Judgement {
@@ -760,6 +1307,8 @@ function findExecs(a: string[]): string[][] {
 }
 
 function ip(a: string[]): Judgement {
+  // -batch reads commands from a file; -force goes on after an error in them.
+  if (a.some((x) => /^-(b|batch|force)$/.test(x) || /^-(batch|b)=/.test(x))) return MODIFY("Runs the ip commands in a file");
   const words = a.filter((x) => !/^-/.test(x));
   const object = words[0] ?? "";
   const verb = words[1] ?? "";
@@ -768,12 +1317,17 @@ function ip(a: string[]): Judgement {
   return MODIFY("Changes network interfaces, addresses or routes");
 }
 
+/** Where curl or wget may send what it fetches without writing a file: nowhere, or the terminal (`-`). */
+const HARMLESS_TARGET = /^(\/dev\/(null|stdout|stderr|tty)|-)$/;
+
 /** Flags of curl that take a value as the next word (or the rest of a short-flag group). */
 const CURL_VALUE = "XoDKdFTHAeEuUxbcCrmwyYzQ";
 const CURL_WRITES = /^--(data.*|json|form.*|upload-file|config|remote-name.*|cookie-jar|create-dirs|remote-header-name|dump-header|trace.*|stderr|libcurl|quote|etag-save|hsts|alt-svc|output-dir|output)$/;
 
 /** A curl that only asks: GET or HEAD, nothing sent, nothing written (output to the terminal or /dev/null). */
 function readOnlyCurl(a: string[]): boolean {
+  // gopher://, dict://, telnet:// and the like send bytes of one's choosing to any service: only web, FTP and local file addresses are read.
+  if (a.some((x) => /^[a-z][a-z0-9+.-]*:\/\//i.test(x) && !/^(https?|ftps?|file):\/\//i.test(x))) return false;
   for (let i = 0; i < a.length; i++) {
     const w = a[i];
     if (w.startsWith("--")) {
@@ -897,6 +1451,14 @@ function judge(segment: string, depth: number, found: string[], fedByPipe = fals
   }
   const verb = familyOf((run[0] ?? "").replace(/^.*\//, ""));
   const args = run.slice(1);
+  // `./ls` and `$DIR/cat` are whatever program sits there; /usr/bin/ls is ls.
+  if (run[0].includes("/") && !SYSTEM_PROGRAM.test(run[0])) return worse(verdict, MODIFY(`Runs a program by its path (${run[0]})`));
+  // A word the shell fills in ($X, $(…), {a,b}) may become a flag: `sed $X f` may be `sed -i f`.
+  // Only programs whose verdict never depends on their arguments take one unread.
+  const filled = new Set(words.filter((w) => w.expands).map((w) => w.text));
+  const rule = RULES[verb];
+  if (rule && rule.length > 0 && args.some((x) => filled.has(x)) && !SHELLS.has(verb) && verb !== "eval")
+    return worse(verdict, MODIFY(`An argument of ${verb} is filled in by the shell, so what it runs cannot be read`));
 
   // Something that runs a script: judge the script.
   if (SHELLS.has(verb) || verb === "su" || verb === "runuser") {
@@ -910,7 +1472,6 @@ function judge(segment: string, depth: number, found: string[], fedByPipe = fals
   if (verb === "eval") return worse(verdict, analyze(args.join(" "), depth + 1, found).judgement);
   if (verb === "find") for (const exec of findExecs(args)) verdict = worse(verdict, judgeWords(exec, depth, found));
 
-  const rule = RULES[verb];
   const own = rule?.(args, args.join(" "));
   return worse(verdict, own ?? MODIFY(`Not on the read-only list (${verb})`));
 }

@@ -148,3 +148,210 @@ describe("what the evaluation found", () => {
     expectAll("destructive", ["volume delete -vserver x -volume y"]);
   });
 });
+
+describe("what the third security round found", () => {
+  it("sees a redirection written without a space, and every form of it", () => {
+    notSafe([
+      "echo x>/etc/y",
+      "echo x>>/etc/y",
+      "echo 'x'>/etc/y",
+      'echo "x">/etc/y',
+      "echo $x>/etc/y",
+      "printf x>/etc/y",
+      "cat /etc/passwd>/etc/shadow",
+      "cat a>b",
+      "cat <f>g",
+      "grep x f>out",
+      "ls -la>/etc/y",
+      "df -h>/etc/cron.d/x",
+      "echo '* * * * * root id'>/etc/cron.d/x",
+      "echo x>/dev/sda",
+      "ps aux>/tmp/ps; cat /tmp/ps",
+      "echo x>y && cat y",
+      "kubectl get pods>x",
+      "find . -exec sh -c 'echo x>/etc/y' \\;",
+      "echo x >& /etc/y",
+      "echo x >& y",
+      "echo x&>y",
+      "echo x&>>y",
+      "ls >| /etc/passwd",
+      "ls>|/etc/passwd",
+      "cat <> /etc/x",
+      "ls 2>file",
+      "ls 1>>file",
+      "echo a1>y",
+      "echo a>b>c",
+      "echo x >&3",
+      "echo x > -",
+    ]);
+    expectAll("safe", ["ls 2>/dev/null", "ls 2>&1", "echo x 1>&2", "echo x>&2", "ls >&-", "ls &>/dev/null", "ls 2>/dev/null >/dev/null", "wc -l<f", "cat<f", "tr a b < f", "echo 'a>b'", 'echo "a>b"', "echo a\\>b", "grep 'x>y' f", "cat <<< 'hello'"]);
+  });
+
+  it("reads sed's options and script exactly, whatever the spelling or delimiter", () => {
+    notSafe([
+      "sed --expression='w /etc/x' f",
+      "sed --expression='1e id' f",
+      "sed --expression='s/a/b/e' f",
+      "sudo sed --expression='w /etc/x' f",
+      "sed 's,a,b,e' f",
+      "sed 's#a#b#e' f",
+      "sed 's|a|b|w /etc/x' f",
+      "sed -n '1{w /etc/x\n}' f",
+      "sed '${e id\n}' f",
+      "sed -f /tmp/script.sed f",
+      "sed --file=/tmp/s f",
+      "sed -nf s f",
+      "sed -E -f s f",
+      "sed -i s/a/b/ f",
+      "sed -ni p f",
+      "sed --in-place=.bak s/a/b/ f",
+      "sed --in-pl s/a/b/ f",
+      "sed -e p -i f",
+      "sed 's/[/]/x/w /etc/x' f",
+      "sed 'W /etc/x' f",
+      "sed $X f",
+    ]);
+    expectAll("safe", ["sed -n 15,30p /etc/hosts", "sed '$!N;s/\\n/ /' f", "sed 'y/abc/xyz/' f", "sed --debug -n p f", "sed -l 5 -n l f", "sed -n '$=' f", "sed -n '/x/{p;q}' f", "sed -n 'F' f", "sed -n --expression=p f", "sed -s -n 1p a b", "sed -z 's/a/b/' f", "sed 's,a,b,g' f", "sed -E 's/(a|b)+/x/2' f", "sed '/^#/d' f"]);
+  });
+
+  it("allows only git's reading subcommands, without the options that write or run", () => {
+    notSafe([
+      "git log --output=/etc/x",
+      "git log --output /etc/x",
+      "git show --output=/etc/cron.d/x HEAD",
+      "git diff --output=/etc/x",
+      "sudo git log --output=/etc/sudoers.d/x",
+      "git grep -O'sh -c id' foo",
+      "git grep -Osh foo",
+      "git grep --open-files-in-pager='sh -c id' foo",
+      "git ls-remote --upload-pack='sh -c id' origin",
+      "git ls-remote -u 'sh -c id' origin",
+      "git fetch --upload-pack=x",
+      "git log --exec=x",
+      "git diff --ext-diff",
+      "git log -p --ext-diff",
+      "git log --textconv",
+      "git -c core.pager='sh -c id' log",
+      "git -c core.sshCommand=id ls-remote origin",
+      "git --git-dir=/tmp/evil log",
+      "GIT_DIR=/tmp/evil git log",
+      "git reflog expire --all",
+      "git reflog delete HEAD@{1}",
+      "git tag -d v1",
+      "git stash",
+      "git branch -D x",
+      "git log $OPT",
+    ]);
+    expectAll("safe", ["git status", "git log --oneline -5", "git -C /srv/app log -3", "git --no-pager log -n 1", "git diff", "git diff --no-index /dev/null f", "git show HEAD:file", "git reflog", "git reflog show HEAD", "git remote -v", "git branch -a", "git tag", "git tag -l 'v1*'", "git stash list", "git cat-file -p HEAD", "git grep -n foo", "git ls-remote origin"]);
+  });
+
+  it("reads an awk program for pipes, system(), output files and program files", () => {
+    notSafe([
+      `awk '{print |& "sh"}' f`,
+      "awk -E /tmp/x",
+      "sudo awk -E /tmp/x",
+      "awk --file=/tmp/x f",
+      "awk -f /tmp/x f",
+      "awk -l filefuncs 'BEGIN{}'",
+      `awk 'BEGIN { sys\\\ntem("id") }'`,
+      `awk 'BEGIN{s="sys" "tem"; @s("id")}'`,
+      `awk 'BEGIN{"id" | getline x}'`,
+      `awk '{print $1 > "/etc/x"}' f`,
+      `awk '{print $1 >> "/etc/x"}' f`,
+      `awk '{printf("%s", $1) > "/etc/x"}' f`,
+      `awk 'BEGIN{getline < "/inet/tcp/0/h/80"}'`,
+    ]);
+    expectAll("safe", ["awk '$1>5' f", "awk '$3>100 {print $1}' f", `awk '{printf "%s\\n", $1}' f | sort | uniq -c`, "awk -F: '$3 >= 1000 {print $1}' /etc/passwd", "awk '/error|warn/ {print}' f", "awk '$1 == 1 || $2 == 2' f", "awk -v n=3 'NR <= n' f", `awk '{ if ($1 > 3) print "big" }' f`]);
+  });
+
+  it("does not take a dry run of rsync for read-only when it starts a program", () => {
+    notSafe(["rsync --rsh='sh -c id' -n a host:b", "rsync -n -e 'sh -c id' a host:b", "rsync -ne ssh a host:b", "rsync -n --rsync-path='rm x; rsync' a host:b", "rsync -n --write-batch=/tmp/b a b", "rsync -a a/ b/"]);
+    expectAll("safe", ["rsync -n -a a/ b/", "rsync -avn a/ host:b/", "rsync --dry-run -a a/ b/"]);
+  });
+
+  it("knows the other families that wrote or ran something, and the commands that never end", () => {
+    notSafe([
+      "KUBECONFIG=/tmp/evil kubectl get pods",
+      "kubectl get pods --kubeconfig=/tmp/evil",
+      "curl -s gopher://x",
+      "curl -s telnet://x",
+      "curl dict://x:6379/flushall",
+      "sleep 999999",
+      "sleep infinity",
+      "vmstat 1",
+      "sar 1",
+      "iostat -x 5",
+      "sar -o /tmp/x 1 3",
+      "nslookup",
+      "ip -batch /tmp/x",
+      "ip -b /tmp/x",
+      "parted /dev/sda rm 1 print",
+      "sgdisk -p -Z /dev/sda",
+      "mdadm -D --remove /dev/md0 /dev/sdb",
+      "multipath -l -F",
+      "aws ec2 run-instances --user-data get-x",
+      "aws s3api get-object --bucket b --key k /etc/x",
+      "helm template x --post-renderer ./y",
+      "openssl x509 -engine /tmp/x.so -in c",
+      "sort --compress-program=sh f",
+      "terraform plan -out=/etc/x",
+      "./ls",
+      "$DIR/cat f",
+      "/tmp/bin/ls",
+    ]);
+    expectAll("safe", ["sleep 5", "vmstat 1 5", "iostat -x 1 3", "sar -u 1 3", "vmstat", "nslookup example.com", "ip a", "parted /dev/sda print", "parted -l", "sgdisk -p /dev/sda", "mdadm --detail /dev/md0", "multipath -ll", "aws ec2 describe-instances --region eu-north-1", "aws --region eu-north-1 ec2 describe-instances", "curl -s file:///etc/os-release", "/usr/bin/ls -la", "/bin/cat f", "top -bn1 | head", "echo $HOME", "ls $(cat /tmp/list)"]);
+  });
+
+  it("lets psql, postgres -C and JSON formatting read without asking, and nothing more", () => {
+    expectAll("safe", [
+      "psql -c 'select 1'",
+      "psql -Atc 'SELECT count(*) FROM orders'",
+      `sudo -u postgres psql -Atc "select pg_size_pretty(pg_database_size('shop'))"`,
+      "psql -U app -d shop -c 'SHOW max_connections'",
+      "psql -c '\\l'",
+      "psql -c '\\dt'",
+      "psql -c '\\d orders'",
+      "psql -l",
+      "psql -h db-01 -c 'select state, count(*) from pg_stat_activity group by state'",
+      "postgres -C shared_buffers",
+      "postgres -C data_directory -D /var/lib/postgresql/16/main",
+      "curl -s http://localhost:9200/_cluster/health | python3 -m json.tool",
+      "curl -s http://localhost/api | jq .",
+      "python3 -m json.tool x.json",
+    ]);
+    notSafe([
+      "psql",
+      "psql -c 'select * into x from y'",
+      "psql -c 'select pg_terminate_backend(123)'",
+      "psql -c 'select do_cleanup()'",
+      "psql -c 'insert into x values (1)'",
+      "psql -c 'update x set a = 1'",
+      "psql -c 'delete from x where a = 1'",
+      "psql -c 'alter table x add column y int'",
+      "psql -c 'select 1; select 2'",
+      "psql -c 'select 1' -c 'select 2'",
+      "psql -c 'select 1; drop table x'",
+      "psql -c 'select now() for update'",
+      "psql -f /tmp/x.sql",
+      "psql -c '\\copy x to /tmp/f'",
+      "psql -c 'COPY x TO /tmp/f'",
+      "psql -c '\\o /tmp/f'",
+      "psql -c '\\! id'",
+      "psql -c '\\dt \\! id'",
+      "psql -o /tmp/out -c 'select 1'",
+      "psql -L /tmp/log -c 'select 1'",
+      "psql -c 'select 1 -- x'",
+      "psql -c 'select $$x$$'",
+      "postgres -D /x",
+      "postgres -C x -c y=z",
+      "python3 -c 'print(1)'",
+      "python3 -m json.tool a.json b.json",
+      "python3 -m http.server",
+    ]);
+    expectAll("destructive", ["psql -c 'drop table x'"]);
+  });
+
+  it("keeps ordinary diagnostics unasked", () => {
+    expectAll("safe", ["df -h", "journalctl -u nginx -n 50", "systemctl status", "systemctl status nginx", "grep -n error /var/log/syslog", "find /var/backups -mtime +7 -print", "ls 2>/dev/null", "ls 2>&1", "ps aux | sort -k3 -nr | head", "cat f | wc -l", "tail -n 100 /var/log/x | grep y", "journalctl -u nginx -n 50 2>&1 | tail -20", "du -sh /var/* 2>/dev/null | sort -h | tail"]);
+  });
+});
