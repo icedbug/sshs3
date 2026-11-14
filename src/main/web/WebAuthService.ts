@@ -272,6 +272,11 @@ export class WebAuthService {
     return this.data.users.length > 0;
   }
 
+  /** How many accounts this server has. */
+  userCount(): number {
+    return this.data.users.length;
+  }
+
   getUserDataDir(userId: string): string {
     const safeId = userId.replace(/[^a-zA-Z0-9_-]/g, '');
     return path.join(this.baseDataDir, 'users', safeId);

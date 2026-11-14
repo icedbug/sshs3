@@ -78,3 +78,73 @@ describe("the classifier does not let a second command ride along", () => {
     expect(analyzeCommandSafety("ls").riskReason).not.toContain("AST");
   });
 });
+
+/** From the evaluation on the Nordvik lab: two ways past the classifier, and four read-only commands it stopped. */
+describe("what the evaluation found", () => {
+  it("does not take a root shell for nothing at all", () => {
+    expectAll("modify", ["sudo -i", "sudo -s", "sudo --login", "sudo --shell", "sudo -u root -i", "sudo -E -s", "sudo -is", "doas -s", "ls; sudo -i"]);
+    expect(analyzeCommandSafety("sudo -i").riskReason).toContain("Starts a shell as another user");
+    // With a command it is that command; and asking sudo what it allows starts nothing.
+    expectAll("safe", ["sudo -i ls /root", "sudo -l", "sudo -v", "sudo -n ls /root", "sudo -u postgres ls"]);
+    expectAll("destructive", ["sudo -i rm -rf /srv", "sudo -s bash"]);
+  });
+
+  it("looks at what is set in front of a command, not only at the command", () => {
+    notSafe([
+      "LD_PRELOAD=/tmp/x.so ls",
+      "LD_LIBRARY_PATH=/tmp ls",
+      "LD_AUDIT=/tmp/x.so uptime",
+      "env LD_PRELOAD=/tmp/x.so ls",
+      "sudo LD_PRELOAD=/tmp/x.so ls",
+      "FOO=1 LD_PRELOAD=/tmp/x.so ls",
+      "PATH=/tmp:$PATH ls",
+      "PATH=/tmp",
+      "BASH_ENV=/tmp/x bash -n deploy.sh",
+      "HOME=/tmp/x git status",
+      "PYTHONPATH=/tmp python3 --version",
+      "NODE_OPTIONS=--require=/tmp/x.js uptime",
+      "GIT_SSH_COMMAND='sh -c id' git status",
+      "GIT_PAGER='sh -c id' git log",
+      "PAGER=/tmp/x man ls",
+      "LESSOPEN='|/tmp/x %s' cat f",
+    ]);
+    expect(analyzeCommandSafety("LD_PRELOAD=/tmp/x.so ls").riskReason).toContain("LD_PRELOAD");
+    expectAll("safe", ["FOO=bar ls", "env X=1 ls", "LC_ALL=C sort f", "TZ=UTC date", "PATH=$PATH:/usr/sbin ip a", "PATH=/usr/sbin:/sbin:$PATH ss -tlnp", "PAGER=cat git log", "SYSTEMD_PAGER= systemctl status nginx", "GIT_PAGER=cat git log -n 5"]);
+  });
+
+  it("reads date's options for what they are", () => {
+    expectAll("safe", ["date -Is", "date -Iseconds", "date -Ins", "date -I", "date -u", "date -R", "date -u +%FT%TZ", "date -d yesterday +%F", "date -d '2 days ago'", "date --date=yesterday", "date --date yesterday +%s", "date -r /etc/hosts", "date --iso-8601=seconds", "date --rfc-3339=seconds"]);
+    notSafe(["date -s 2020-01-01T00:00", "date -us '2020-01-01'", "date --set=2020-01-01", "date --set 2020-01-01", "date --s 2020-01-01", "date 010100002020", "date -u 010100002020", "date -d yesterday 010100002020"]);
+  });
+
+  it("knows a syntax check from a run, and only where the shell really runs nothing", () => {
+    expectAll("safe", ["cat backup.sh | bash -n", "bash -n /usr/local/bin/backup.sh", "sh -n /etc/init.d/x && echo ok", "cat x | sh -n", "cat x |& bash -n", "cat x | bash -o noexec", "sudo cat /root/x.sh | bash -n"]);
+    // An interactive shell ignores -n; +n switches it back; after the script's name -n is the script's own.
+    expectAll("destructive", ["bash -n", "cat x | bash", "cat x | bash -in", "bash -n; cat x | bash -n", "cat x || bash -n", "cat x | bash -n -c 'rm -rf /srv'"]);
+    notSafe(["bash deploy.sh -n", "cat x | bash -n > /etc/x", "bash -n -i deploy.sh", "cat x | bash -n +n", "bash -n +o noexec deploy.sh"]);
+  });
+
+  it("reads ONTAP's comparisons as comparisons, and nothing else as one", () => {
+    expectAll("safe", ["event log show -time >2h -message-name *snapmirror*", "volume show -size >1TB", "snapmirror show -lag-time >1h", "volume show -percent-used >=90%", "volume show -size <10GB -fields size"]);
+    expect(analyzeCommandSafety("event log show -time >2h").riskReason).not.toContain("Writes to a file");
+    // A path, a name, a stream, a space after the sign, another program, or a wrapper in front: a redirection as before.
+    notSafe([
+      "volume show >/etc/passwd",
+      "volume show -fields >/etc/x",
+      "volume show -size >report",
+      "volume show -size > 2h",
+      "volume show >2h",
+      "volume show -size 2>1h",
+      "volume show -size >1TB -x >/etc/passwd",
+      "ls -l >2h",
+      "df -h >1TB",
+      "sudo volume show -size >1TB",
+    ]);
+  });
+
+  it("does not take a value for ONTAP's command, or Node.js for ONTAP", () => {
+    notSafe(["volume modify -vserver svm1 -volume show -size 1g", "snapmirror resync -destination-path svm:show", `node -e "require('fs').rmSync('/srv',{recursive:true})" show`, "node --eval 'process.exit()' show", "node show.js show"]);
+    expectAll("safe", ["volume show -vserver svm1", "volume snapshot show -volume vol1", "system node show", "node show", "volume show-space", "version"]);
+    expectAll("destructive", ["volume delete -vserver x -volume y"]);
+  });
+});

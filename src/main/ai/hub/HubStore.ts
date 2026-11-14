@@ -459,6 +459,11 @@ export class HubStore {
       }
     }
     for (const ls of localServers) {
+      // A removal is of the team's copy: a server a person keeps to themselves is neither hidden by it nor takes it back.
+      if (ls.shared === false) {
+        if (!srvMap.has(ls.id)) srvMap.set(ls.id, ls);
+        continue;
+      }
       const delMs = Math.max(
         parseTimeMs(deletedServerIds[ls.id]),
         parseTimeMs(ls.deletedAt),

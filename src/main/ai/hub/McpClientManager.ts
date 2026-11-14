@@ -52,7 +52,15 @@ export interface McpCallResult {
 }
 
 export class McpClientManager {
-  constructor(private readonly fetchImpl: typeof fetch = fetch) {}
+  /**
+   * `allow` is asked before a server is started or called, every time: it throws when this
+   * server may not be reached from here (a program on a shared server's host, an address the
+   * server must not call). Saving a server is not what starts it, so the check sits where it is used.
+   */
+  constructor(
+    private readonly fetchImpl: typeof fetch = fetch,
+    private readonly allow?: (server: McpServerConfig) => Promise<void> | void,
+  ) {}
 
   /** Every child this manager started and has not seen end. */
   private readonly children = new Set<ChildProcess>();
@@ -62,6 +70,7 @@ export class McpClientManager {
     timeoutMs = DISCOVER_TIMEOUT_MS,
   ): Promise<{ ok: boolean; tools: McpToolSummary[]; error?: string }> {
     try {
+      await this.allow?.(server);
       const tools =
         server.transport === "http"
           ? await this.discoverHttp(server, timeoutMs)
@@ -83,6 +92,7 @@ export class McpClientManager {
     timeoutMs = CALL_TIMEOUT_MS,
   ): Promise<McpCallResult> {
     try {
+      await this.allow?.(server);
       const output =
         server.transport === "http"
           ? await this.callHttp(server, toolName, args, timeoutMs)
@@ -186,7 +196,8 @@ export class McpClientManager {
         ...(server.headers ?? {}),
       };
       const post = async (body: unknown, headers: Record<string, string>): Promise<Response> =>
-        this.fetchImpl(url, { method: "POST", headers, body: JSON.stringify(body), signal: controller.signal });
+        // A redirect is not followed: the address that was checked is the one that is called.
+        this.fetchImpl(url, { method: "POST", headers, body: JSON.stringify(body), signal: controller.signal, redirect: "manual" });
 
       const hello = await post(
         {
@@ -203,7 +214,10 @@ export class McpClientManager {
       );
       if (!hello.ok) throw new Error(httpError(hello));
       const session = hello.headers.get("mcp-session-id") ?? "";
-      await readRpc(hello); // read it, so the connection is free and errors are seen
+      // Any web address answers something. Only an answer to `initialize` makes it an MCP server.
+      const greeting = await readRpc(hello);
+      if (greeting?.error) throw new Error(String(greeting.error.message || "The MCP server returned an error."));
+      if (!isRecord(greeting?.result)) throw new Error(NOT_MCP);
       const withSession = session ? { ...base, "Mcp-Session-Id": session } : base;
 
       // Telling the server the handshake is done is a notification: no answer is expected.
@@ -223,7 +237,8 @@ export class McpClientManager {
     const result = (await this.httpSession(server, { id: 2, method: "tools/list", params: {} }, timeoutMs)) as
       | { tools?: Array<Record<string, unknown>> }
       | undefined;
-    return readTools(result?.tools, server.name);
+    if (!Array.isArray(result?.tools)) throw new Error(NOT_MCP);
+    return readTools(result.tools, server.name);
   }
 
   private callHttp(
@@ -367,10 +382,17 @@ function endChild(child: ChildProcess): void {
   child.once("exit", () => clearTimeout(hard));
 }
 
+const NOT_MCP = "This address answered, but not as an MCP server.";
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  Boolean(value) && typeof value === "object" && !Array.isArray(value);
+
 const httpError = (resp: Response): string =>
   resp.status === 401 || resp.status === 403
     ? `The MCP server refused this (${resp.status}). Its address may need a token in a header.`
-    : `The MCP server answered ${resp.status} ${resp.statusText}.`;
+    : resp.status >= 300 && resp.status < 400
+      ? `The MCP server's address redirects elsewhere (${resp.status}). Use the address it leads to.`
+      : `The MCP server answered ${resp.status} ${resp.statusText}.`;
 
 /**
  * One JSON-RPC answer, whether it came as JSON or as an event stream. A

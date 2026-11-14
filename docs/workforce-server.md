@@ -175,12 +175,33 @@ recordings are sealed into it. See "The audit log and terminal recordings" in
   the team bucket, and it gives no more than the person could do themselves.
 - **MCP servers and schedules are per installation.** An MCP server an agent
   needs must be added on the server too. A schedule runs where it was created.
+  On a server with more than one account, an MCP server that runs as a program
+  (stdio) is added and started by an administrator only: it runs on the
+  server's host. Members add MCP servers that have an address; such an address
+  may not be the server itself or, unless `SSHS3_ALLOW_PRIVATE_ADDRESSES=1`,
+  its private network. The local MCP listener is an administrator's too.
 - **What each person has on the server is theirs.** Saved S3 profiles are
   personal; a shared one reaches others without its keys. A server profile
   someone marks personal stays out of the team's shared list. Local terminals
   and folder ingestion from the server's own disk are not offered: a signed-in
   person works in their own folder only. Who did something is the signed-in
-  person, never a name sent with the request.
+  person, never a name sent with the request: that holds for the activity
+  log, for who wrote a memory and for who voted on one.
+- **A server with one account is that person's own.** While the administrator
+  is the only account, folder ingestion and addresses on the machine itself
+  are allowed as in the desktop app. With a second account the rules for a
+  shared server apply again.
+- **Where a shared server leads is an admin's.** On the server, a member
+  describes and tags the servers the team shares and sets their own user name
+  and key for them, and adds new ones. Changing a shared server's name,
+  address, port or user name, taking it out of the team's list, removing it,
+  or taking off the tag that makes changes wait for a person (`prod`,
+  `production`, `critical`) needs a team admin. This is enforced for the
+  AI workspace's own requests on the server (its server list, agents, outside
+  agents). It is not a boundary yet: a member's own copy of a shared profile,
+  edited in the connection editor, and any installation that was given the
+  team bucket's invite code are still trusted with the list (the newest copy
+  wins).
 - **Team settings are an admin's.** Changing the shared workspace, the team
   bucket or other team-wide settings needs a team admin (set with the host
   option for admins). Changing a password signs out the account's other

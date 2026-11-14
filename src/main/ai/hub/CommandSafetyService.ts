@@ -64,11 +64,17 @@ function closeParen(text: string, start: number): number {
   return text.length;
 }
 
+/** Which of a line's commands read from the command before them (`a | b`), and which are also written without one. */
+interface PipeUse {
+  fed: Set<string>;
+  bare: Set<string>;
+}
+
 /**
  * The simple commands a command line is made of, as written, plus everything
  * that runs inside them (substitutions), each as a command of its own.
  */
-export function splitShellAstSegments(command: string, depth = 0): string[] {
+export function splitShellAstSegments(command: string, depth = 0, pipes?: PipeUse): string[] {
   const text = (command ?? "").trim();
   if (!text) return [];
   if (depth > MAX_DEPTH) return [TOO_DEEP];
@@ -77,8 +83,12 @@ export function splitShellAstSegments(command: string, depth = 0): string[] {
   let current = "";
   let single = false;
   let double = false;
+  let afterPipe = false;
   const cut = (): void => {
-    if (current.trim()) segments.push(current.trim());
+    if (current.trim()) {
+      segments.push(current.trim());
+      (afterPipe ? pipes?.fed : pipes?.bare)?.add(current.trim());
+    }
     current = "";
   };
 
@@ -141,17 +151,20 @@ export function splitShellAstSegments(command: string, depth = 0): string[] {
     if (!double) {
       if ((ch === "&" && next === "&") || (ch === "|" && (next === "|" || next === "&"))) {
         cut();
+        afterPipe = ch === "|" && next === "&";
         i++;
         continue;
       }
       if (ch === ";" || ch === "|" || ch === "\n" || ch === "\r") {
         cut();
+        afterPipe = ch === "|";
         continue;
       }
       // A single & sends what came before to the background and goes on: a separator.
       // Not when it belongs to a redirection: &>, >&, <&.
       if (ch === "&" && next !== ">" && text[i - 1] !== ">" && text[i - 1] !== "<") {
         cut();
+        afterPipe = false;
         continue;
       }
     }
@@ -266,15 +279,46 @@ const WRAPPER_ARGS: Record<string, RegExp> = {
 };
 const WRAPPERS = new Set([...Object.keys(WRAPPER_ARGS), "nohup", "command", "exec", "builtin"]);
 
+/** What `sudo -i`, `sudo -s` and `doas -s` leave in `wrappers`: with no command after them they are a shell as another user. */
+const SHELL_AS = "shell as another user: ";
+
+/**
+ * Variables that decide what code a program loads or runs, or where it finds its settings:
+ * `LD_PRELOAD=/tmp/x.so ls` is not `ls`. Setting one is a change, whatever the command after it.
+ */
+const LOADS_CODE =
+  /^(LD_[A-Z0-9_]+|DYLD_[A-Z0-9_]+|IFS|ENV|BASH_ENV|BASH_FUNC_.*|SHELLOPTS|BASHOPTS|PS4|PROMPT_COMMAND|HOME|XDG_CONFIG_HOME|XDG_CONFIG_DIRS|PYTHONPATH|PYTHONSTARTUP|PYTHONHOME|PYTHONINSPECT|PERL5LIB|PERLLIB|PERL5OPT|PERL5DB|RUBYOPT|RUBYLIB|NODE_OPTIONS|NODE_PATH|JAVA_TOOL_OPTIONS|_JAVA_OPTIONS|JDK_JAVA_OPTIONS|GIT_SSH|GIT_SSH_COMMAND|GIT_EXTERNAL_DIFF|GIT_EXEC_PATH|GIT_ASKPASS|GIT_CONFIG[A-Z0-9_]*|GIT_PROXY_COMMAND|SSH_ASKPASS|SUDO_ASKPASS|LESSOPEN|LESSCLOSE|GCONV_PATH|LOCPATH|NLSPATH|HOSTALIASES|RESOLV_HOST_CONF|CURL_HOME|WGETRC|INPUTRC|TERMINFO|TERMINFO_DIRS)$/;
+/** A pager or an editor is run by the program: harmless only when it is one that just shows the text, or none. */
+const RUNS_AS_HELPER = /^([A-Z0-9_]*PAGER|EDITOR|VISUAL|[A-Z0-9_]*_EDITOR|BROWSER)$/;
+const SYSTEM_PATH = /^(\$PATH|\$\{PATH\}|\/usr\/local\/s?bin|\/usr\/s?bin|\/s?bin|\/snap\/bin)\/?$/;
+const PLAIN_PAGER = /^(|cat|less|more|\/bin\/cat|\/usr\/bin\/cat|\/usr\/bin\/less)$/;
+
+/** The name of a variable an assignment sets, when setting it changes what the command loads or runs. */
+function riskyAssignment(word: string): string | undefined {
+  const at = word.indexOf("=");
+  const name = word.slice(0, at);
+  if (LOADS_CODE.test(name)) return name;
+  // PATH with the system's own directories added (PATH=$PATH:/usr/sbin ip a) finds the same programs; anything else may not.
+  if (name === "PATH" && !word.slice(at + 1).split(":").every((dir) => SYSTEM_PATH.test(dir))) return name;
+  if (RUNS_AS_HELPER.test(name) && !PLAIN_PAGER.test(word.slice(at + 1).trim())) return name;
+  return undefined;
+}
+
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
 /**
  * Takes away what only runs something else, and returns what runs. `wrappers`
- * collects what was taken away, for what it adds of its own (`watch` never ends).
+ * collects what was taken away, for what it adds of its own (`watch` never ends),
+ * and `assigned` the variables that were set in front of the command (FOO=bar cmd, env FOO=bar cmd).
  */
-function unwrap(words: string[], wrappers: string[]): string[] {
+function unwrap(words: string[], wrappers: string[], assigned: string[] = []): string[] {
   let w = [...words];
   for (let guard = 0; guard < 20 && w.length; guard++) {
     // Leading assignments: FOO=bar cmd.
-    while (w.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(w[0])) w = w.slice(1);
+    while (w.length && ASSIGNMENT.test(w[0])) {
+      assigned.push(w[0]);
+      w = w.slice(1);
+    }
     const verb = (w[0] ?? "").replace(/^.*\//, "");
     if (!WRAPPERS.has(verb)) break;
     if (verb === "command" && /^-[vV]/.test(w[1] ?? "")) break;
@@ -284,12 +328,20 @@ function unwrap(words: string[], wrappers: string[]): string[] {
       if (verb === "env" && (w[i] === "-S" || w[i].startsWith("--split-string"))) {
         // env -S 'a b c': the string is split into the command.
         const rest = w[i].includes("=") ? w[i].split("=").slice(1).join("=") : w[i + 1] ?? "";
-        return unwrap([...rest.split(/\s+/).filter(Boolean), ...w.slice(w[i].includes("=") ? i + 1 : i + 2)], wrappers);
+        return unwrap([...rest.split(/\s+/).filter(Boolean), ...w.slice(w[i].includes("=") ? i + 1 : i + 2)], wrappers, assigned);
       }
+      // sudo -i, sudo -s (also inside a group: -is, -iu root) and doas -s start a shell.
+      if (
+        (verb === "sudo" && (/^-[a-zA-Z]*[is]/.test(w[i]) || w[i] === "--login" || w[i] === "--shell")) ||
+        (verb === "doas" && /^-[a-zA-Z]*s/.test(w[i]))
+      )
+        wrappers.push(`${SHELL_AS}${verb} ${w[i]}`);
       i += WRAPPER_ARGS[verb]?.test(w[i]) ? 2 : 1;
     }
     if (w[i] === "--") i++;
-    if (verb === "env") while (i < w.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(w[i])) i++;
+    // sudo takes assignments too (sudo LD_PRELOAD=x cmd), like env.
+    if (verb === "env" || verb === "sudo" || verb === "doas")
+      while (i < w.length && ASSIGNMENT.test(w[i])) assigned.push(w[i++]);
     if (verb === "timeout" && i < w.length) i++; // the duration
     w = w.slice(i);
   }
@@ -495,7 +547,7 @@ const RULES: Record<string, (args: string[], all: string) => Judgement | undefin
   gawk: (a) => awk(a),
   mawk: (a) => awk(a),
   find: (a) => find(a),
-  date: (a) => (flag(a, "s", "--set") || positional(a).some((p) => !p.startsWith("+")) ? MODIFY("Sets the clock") : SAFE()),
+  date: (a) => date(a),
   hostname: (a) => (positional(a).length > 0 || flag(a, "F", "--file") || flag(a, "b", "--boot") ? MODIFY("Sets the host name") : SAFE()),
   hostnamectl: (a) => (!a[0] || a[0] === "status" ? SAFE() : MODIFY("Changes the host name")),
   timedatectl: (a) => (!a[0] || ["status", "show", "list-timezones", "timesync-status", "show-timesync"].includes(a[0]) ? SAFE() : MODIFY("Changes time settings")),
@@ -544,18 +596,68 @@ const RULES: Record<string, (args: string[], all: string) => Judgement | undefin
   else: () => SAFE("Condition body follows"),
   fi: () => SAFE("End of a condition"),
 };
+/**
+ * `date` prints unless it is given a time to set: -s/--set, or a bare MMDDhhmm. A letter is read
+ * for what it is in its group: the `s` of `-Is` belongs to -I (ISO format, to the second), and
+ * what follows -d, -f or -r is that option's value, not a time to set.
+ */
+function date(a: string[]): Judgement {
+  const sets = MODIFY("Sets the clock");
+  for (let i = 0; i < a.length; i++) {
+    const w = a[i];
+    if (w.startsWith("+")) continue;
+    if (w.startsWith("--")) {
+      // GNU takes any unambiguous beginning of a long option: --s is --set.
+      if (/^--s/.test(w)) return sets;
+      if (/^--(da|f|ref)[a-z]*$/.test(w)) i++;
+      continue;
+    }
+    if (!/^-[a-zA-Z]/.test(w)) return sets;
+    for (let j = 1; j < w.length; j++) {
+      const letter = w[j];
+      if (letter === "s") return sets;
+      // -I takes its value attached or not at all; -d, -f, -r (and BSD's -v) take the rest of the word or the next one.
+      if (letter === "I") break;
+      if ("dfrv".includes(letter)) {
+        if (j === w.length - 1) i++;
+        break;
+      }
+    }
+  }
+  return SAFE();
+}
+
+/** The first words of NetApp ONTAP's command line. */
+const ONTAP_VERBS = new Set(["snapmirror", "volume", "vol", "aggr", "storage", "network", "qos", "lun", "vserver", "cluster", "event", "statistics", "metrocluster", "snapshot", "version", "node", "nfs", "cifs", "iscsi", "igroup", "qtree", "job", "system"]);
+
 /** NetApp ONTAP's command line: `show` reads; `delete` on a volume, aggregate, LUN or SVM loses data. */
 function ontap(verb: string, a: string[]): Judgement {
   const words = [verb, ...a.filter((x) => !x.startsWith("-"))];
   if (words.includes("delete") && /^(volume|vol|aggr|aggregate|lun|vserver|svm|snapshot|qtree)$/.test(words[0] === "storage" ? words[1] ?? "" : words[0]))
     return DESTROY("Deletes ONTAP storage (volume, aggregate, LUN, SVM, snapshot)");
-  if (words.includes("show") || words.includes("show-space") || (verb === "version" && a.length === 0)) return SAFE();
+  // The command is the words before the first option. A value further on that happens to be "show"
+  // (volume modify -volume show …) does not make it a reading one.
+  const firstOption = a.findIndex((x) => x.startsWith("-"));
+  const command = firstOption < 0 ? a : a.slice(0, firstOption);
+  // `node` is also Node.js, where a word after an option is a script: only ONTAP's own "node show" reads.
+  if (verb === "node") return a[0] === "show" ? SAFE() : MODIFY("Not on the read-only list (node)");
+  if (command.includes("show") || command.includes("show-space") || (verb === "version" && a.length === 0)) return SAFE();
   return MODIFY("NetApp ONTAP storage configuration change");
 }
-for (const verb of ["snapmirror", "volume", "vol", "aggr", "storage", "network", "qos", "lun", "vserver", "cluster", "event", "statistics", "metrocluster", "snapshot", "vserver", "version", "node", "nfs", "cifs", "iscsi", "igroup", "qtree", "job"])
-  RULES[verb] ??= (a) => ontap(verb, a);
-// "system node show": `system` is ONTAP's, not a shell built-in.
-RULES.system ??= (a) => ontap("system", a);
+for (const verb of ONTAP_VERBS) RULES[verb] ??= (a) => ontap(verb, a);
+
+/**
+ * ONTAP's queries compare with < and >: `event log show -time >2h`, `volume show -size >1TB`.
+ * Read as a shell they would be redirections. They are taken as a comparison only where nothing
+ * else fits: the command starts with an ONTAP word, the comparison is the value of an option
+ * (the word before it is one), and it is a bare number with a unit: never a path, a name or a stream.
+ */
+function withOntapComparisons(words: Word[]): Word[] {
+  if (!ONTAP_VERBS.has(words[0]?.text ?? "") || words[0].quoted) return words;
+  return words.map((w, i) =>
+    !w.quoted && i > 1 && /^-[a-z]/.test(words[i - 1].text) && /^[<>]=?\d[A-Za-z0-9.:%]*$/.test(w.text) ? { ...w, quoted: true } : w,
+  );
+}
 
 // mkfs.ext4, mkfs.xfs …
 const familyOf = (verb: string): string => (/^mkfs\./.test(verb) ? "mkfs" : verb);
@@ -732,21 +834,67 @@ function readOnlyWget(a: string[]): boolean {
   return toTerminal;
 }
 
+/**
+ * `bash -n script`, `cat script | sh -n`: the shell reads the script, reports syntax errors and runs none of it.
+ * Only the shell's own options count, the ones before the script's name: `bash x.sh -n` hands -n to the script.
+ * A shell with nothing to read but the terminal is interactive, and an interactive shell ignores -n:
+ * so the script has to be named, or come in through a pipe.
+ */
+function onlyParses(args: string[], fedByPipe: boolean): boolean {
+  let noexec = false;
+  let script = false;
+  for (let i = 0; i < args.length; i++) {
+    const w = args[i];
+    if (w === "--") {
+      script = i + 1 < args.length;
+      break;
+    }
+    if (!/^[-+]/.test(w)) {
+      script = true;
+      break;
+    }
+    if (w === "--no-execute") noexec = true; // fish
+    if (w === "--interactive") return false;
+    if (w.startsWith("--")) {
+      if (w === "--rcfile" || w === "--init-file") i++;
+      continue;
+    }
+    if (w.startsWith("-") && w.includes("i")) return false;
+    // +n and +o noexec switch it back on: whatever came before, the script would run.
+    if (w.startsWith("+") && (w.includes("n") || args[i + 1] === "noexec")) return false;
+    if (w.startsWith("-") && w.includes("n")) noexec = true;
+    if (/^[-+][a-zA-Z]*[oO]$/.test(w)) {
+      if (w.startsWith("-") && args[i + 1] === "noexec") noexec = true;
+      i++;
+    }
+  }
+  return noexec && (script || fedByPipe);
+}
+
 /** One simple command, judged: what runs, after its wrappers, with its own arguments. */
-function judge(segment: string, depth: number, found: string[]): Judgement {
+function judge(segment: string, depth: number, found: string[], fedByPipe = false): Judgement {
   if (segment === TOO_DEEP) return MODIFY("Nested too deep to read");
   // Grouping brackets and the words that only shape a script.
   const cleaned = segment.replace(/^[({\s]+/, "").replace(/[)}\s]+$/, "").replace(/^(!|if|while|until|elif|then|do|else)\s+/, "");
   if (!cleaned) return SAFE();
-  const { words, writes } = withoutRedirections(shellWords(cleaned));
+  const { words, writes } = withoutRedirections(withOntapComparisons(shellWords(cleaned)));
   let verdict: Judgement = writes ? MODIFY(`Writes to a file (> ${writes})`) : SAFE();
   const wrappers: string[] = [];
+  const assigned: string[] = [];
   const run = unwrap(
     words.map((w) => w.text),
     wrappers,
+    assigned,
   );
   if (wrappers.includes("watch")) verdict = worse(verdict, MODIFY(NEVER_ENDS));
-  if (run.length === 0) return wrappers.includes("xargs") ? verdict : worse(verdict, wrappers.length ? SAFE() : verdict);
+  const risky = assigned.map(riskyAssignment).find(Boolean);
+  if (risky) verdict = worse(verdict, MODIFY(`Sets ${risky}, which changes what the command loads or runs`));
+  if (run.length === 0) {
+    // sudo -i, sudo -s: nothing is run, a shell as root is what is left. Every later line would then run as root.
+    const shell = wrappers.find((x) => x.startsWith(SHELL_AS));
+    if (shell) return worse(verdict, MODIFY(`Starts a shell as another user (${shell.slice(SHELL_AS.length)})`));
+    return wrappers.includes("xargs") ? verdict : worse(verdict, wrappers.length ? SAFE() : verdict);
+  }
   const verb = familyOf((run[0] ?? "").replace(/^.*\//, ""));
   const args = run.slice(1);
 
@@ -755,6 +903,7 @@ function judge(segment: string, depth: number, found: string[]): Judgement {
     const at = args.findIndex((x) => /^-[a-zA-Z]*c$/.test(x) || x === "--command");
     if (at >= 0 && args[at + 1] !== undefined) return worse(verdict, analyze(args[at + 1], depth + 1, found).judgement);
     if (verb === "su" || verb === "runuser") return worse(verdict, MODIFY("Runs as another user"));
+    if (onlyParses(args, fedByPipe)) return worse(verdict, SAFE());
     if (positional(args).length === 0) return worse(verdict, DESTROY("Runs whatever it is fed as a script (… | sh)"));
     return worse(verdict, MODIFY("Runs a script"));
   }
@@ -774,12 +923,14 @@ function judgeWords(words: string[], depth: number, found: string[]): Judgement 
 
 /** `found` collects every command read, including those inside scripts and -exec, for the approval card. */
 function analyze(command: string, depth: number, found: string[] = []): { judgement: Judgement; segments: string[]; reasons: string[] } {
-  const segments = splitShellAstSegments(command, depth);
+  const pipes: PipeUse = { fed: new Set(), bare: new Set() };
+  const segments = splitShellAstSegments(command, depth, pipes);
   for (const s of segments) if (!found.includes(s)) found.push(s);
   let judgement: Judgement = SAFE("Empty command");
   const reasons: string[] = [];
   for (const segment of segments) {
-    const j = judge(segment, depth, found);
+    // The same words written once after a pipe and once without one are judged as the one without.
+    const j = judge(segment, depth, found, pipes.fed.has(segment) && !pipes.bare.has(segment));
     if (j.level !== "safe" && !reasons.includes(j.reason)) reasons.push(j.reason);
     judgement = worse(judgement, j);
   }
@@ -797,6 +948,12 @@ export function analyzeCommandSafety(command: string): CommandRiskAnalysis {
   };
 }
 
+/** The tags that mark a server as one where a change waits for a person (see `requireApprovalOnProdTags`). */
+export function isProdTag(tag: string): boolean {
+  const t = tag.toLowerCase();
+  return t === "prod" || t === "production" || t === "critical";
+}
+
 export function shouldRequireCommandApproval(opts: {
   analysis: CommandRiskAnalysis;
   mode: AgentMode;
@@ -804,10 +961,7 @@ export function shouldRequireCommandApproval(opts: {
   policy?: SafetyPolicyConfig;
 }): boolean {
   const policy = opts.policy ?? DEFAULT_SAFETY_POLICY;
-  const tags = (opts.targetTags ?? []).map((t) => t.toLowerCase());
-  const isProdTarget = tags.some(
-    (t) => t === "prod" || t === "production" || t === "critical",
-  );
+  const isProdTarget = (opts.targetTags ?? []).some(isProdTag);
 
   if (opts.mode === "advice") {
     return true;

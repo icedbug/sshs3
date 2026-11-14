@@ -1015,7 +1015,8 @@ export interface KbDocument {
   /** The title is only the file's name or the link: the reading may replace it. */
   titleFromSource?: boolean;
   /** The file this text was taken from, kept beside it. */
-  original?: { name: string; mime?: string; size: number };
+  /** `keptLocal`: its text needed masking, so the file stayed with the person who added it and is not in the team bucket. */
+  original?: { name: string; mime?: string; size: number; keptLocal?: boolean };
   /** Set once the document was worked into the pages: when, and how many pages it touched. */
   compiled?: { at: number; pages: number };
   /** Hash of the text, so the same material is not added twice. */
