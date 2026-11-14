@@ -72,8 +72,16 @@ export interface AuditAnchor {
   prev?: string;
 }
 
-/** Two anchors further apart than this mean the installation was off, or anchors are missing. */
+/** An entry that waited longer than this for an anchor: the installation was off, or anchors are missing. */
 const ANCHOR_GAP_MS = 45 * 60_000;
+/** The entry an anchor, as written, vouches for. */
+function anchoredSeq(bytes: string): number | undefined {
+  try {
+    return (JSON.parse(bytes) as AuditAnchor).seq;
+  } catch {
+    return undefined;
+  }
+}
 /** How many of the newest anchors a verification reads. */
 const ANCHORS_READ = 2000;
 
@@ -85,8 +93,9 @@ export interface AuditVerification {
   /**
    * Anchors that were checked against the chain, and how many of them held.
    * `coveredSeq`/`lastAt`: the newest entry an anchor vouches for, and when;
-   * entries after it are only chained. `gaps`: stretches with no anchor, when
-   * the installation was off or anchors were removed.
+   * entries after it are only chained. `gaps`: stretches in which entries
+   * waited for an anchor, when the installation was off or anchors were
+   * removed. A quiet stretch with nothing to anchor is not a gap.
    */
   anchors?: { checked: number; held: number; coveredSeq?: number; lastAt?: number; gaps?: { from: number; to: number }[] };
   lastAt?: number;
@@ -229,7 +238,7 @@ export class AuditLog {
   /**
    * Writes where the chain stands into the team bucket, as one object of its
    * own. Called now and then; does nothing when there is no bucket or nothing
-   * new since the last anchor.
+   * was added since the last anchor.
    */
   async anchor(now = Date.now()): Promise<AuditAnchor | undefined> {
     await this.writes;
@@ -242,8 +251,10 @@ export class AuditLog {
       if (newest) this.lastAnchor = { n: newest.anchor.n ?? 0, bytes: newest.bytes };
       this.anchorRead = true;
     }
-    // Written also when nothing happened: a gap in the anchors then means the installation was off
-    // or anchors were removed, never just "nothing to say".
+    // Nothing was added since the last anchor: it still vouches for the whole chain, and another one
+    // would only add an object to the bucket every ten minutes for ever (about 430 a day for a team
+    // of three, never pruned). Removed anchors still show, by the anchors' own chain.
+    if (this.lastAnchor && anchoredSeq(this.lastAnchor.bytes) === this.head.seq) return undefined;
     const n = (this.lastAnchor?.n ?? 0) + 1;
     const anchor: AuditAnchor = {
       seq: this.head.seq,
@@ -340,9 +351,18 @@ export class AuditLog {
           },
         };
     }
+    // An anchor is written only after something was added, so a long time between two anchors is
+    // only a gap where entries were waiting for one: from the first entry after the earlier anchor
+    // to the anchor that finally covered it.
+    const atOf = new Map<number, number>();
+    for (const item of all) if (!("broken" in item)) atOf.set(item.seq, item.at);
     const gaps: { from: number; to: number }[] = [];
-    for (let i = 1; i < anchors.length; i++)
-      if (anchors[i].n !== undefined && anchors[i].at - anchors[i - 1].at > ANCHOR_GAP_MS) gaps.push({ from: anchors[i - 1].at, to: anchors[i].at });
+    for (let i = 1; i < anchors.length; i++) {
+      if (anchors[i].n === undefined) continue;
+      const firstAfter = atOf.get(anchors[i - 1].seq + 1);
+      const from = Math.max(anchors[i - 1].at, firstAfter ?? anchors[i].at);
+      if (anchors[i].seq > anchors[i - 1].seq && anchors[i].at - from > ANCHOR_GAP_MS) gaps.push({ from, to: anchors[i].at });
+    }
     for (const anchor of anchors) {
       const at = bySeq.get(anchor.seq);
       if (at === undefined)

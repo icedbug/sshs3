@@ -445,14 +445,14 @@ stopped.
   happened. A person changing the safety rules is logged with what moved
   from what to what. The team server keeps its own chain of sign-ins.
 - **Anchors.** Every ten minutes the head of the chain is written to the team
-  bucket (`audit/<client>/anchors/n<number>.json`), also when nothing
-  happened. Anchors are numbered and carry the hash of the anchor before
+  bucket (`audit/<client>/anchors/n<number>.json`), when something was added
+  since the last anchor. Anchors are numbered and carry the hash of the anchor before
   them, so they are a chain of their own. Verifying checks the log, then the
   newest 2000 anchors: an anchor past the log's end means its tail was cut;
   a hash that differs means it was rewritten; a broken anchor chain means
   anchors were removed or replaced. It reports up to which entry the log is
-  anchored, and stretches with no anchor (the computer was off, or anchors
-  were removed). Without a team bucket, a cut from the very end does not
+  anchored, and stretches in which entries waited for an anchor (the
+  computer was off, or anchors were removed). Without a team bucket, a cut from the very end does not
   show, and the screen says so.
 - **The screen.** Changes → Audit log: newest first, the verdict, a filter,
   "Check it again", and Export (the file as it is on disk plus what the check
