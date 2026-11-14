@@ -16,6 +16,7 @@ import {
   encryptSecretValue,
 } from "../../crypto/SecretFieldCrypto";
 import { maskContext, safeError } from "./privacy";
+import { canonicalJson } from "./WorkBoard";
 import { createLogger } from "../../log";
 import {
   assertOutwardSyncAllowed,
@@ -199,14 +200,46 @@ function mergeVotes(older: Votes | undefined, newer: Votes | undefined, tie: boo
 const score = (votes: Votes): number => Object.values(votes).reduce((sum: number, v) => sum + v, 0);
 
 /**
+ * Two copies with the same `updatedAt` and different content. Neither is newer, and "mine wins"
+ * makes each installation write its own copy over the other's for ever. They are put together
+ * field by field instead, by a rule that gives the same answer whichever side asks: a field only
+ * one copy has is kept, and of two different values the larger one (a number by size, anything
+ * else by its text).
+ */
+export function mergeEqualCopies<T extends object>(a: T, b: T, skip: readonly string[] = []): T {
+  const out = { ...b, ...a } as Record<string, unknown>;
+  for (const key of Object.keys(b)) {
+    if (skip.includes(key)) continue;
+    const [x, y] = [(a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key]];
+    if (x === undefined || y === undefined) continue;
+    if (typeof x === "number" && typeof y === "number") out[key] = Math.max(x, y);
+    else if (canonicalJson(y) > canonicalJson(x)) out[key] = y;
+  }
+  return out as T;
+}
+/** Votes are put together by their own rule (mergeVotes), and the score follows from them. */
+const MEMORY_TIE_SKIP = ["votes", "feedbackScore"] as const;
+
+/** What the bucket's workspace object holds, without the time it was written. */
+function workspaceContent(payload: Partial<S3WorkspaceRemotePayload>): string {
+  return canonicalJson({
+    servers: payload.servers ?? [],
+    memories: payload.memories ?? [],
+    activityLog: payload.activityLog ?? [],
+    deletedServerIds: payload.deletedServerIds ?? {},
+    deletedMemoryIds: payload.deletedMemoryIds ?? {},
+  });
+}
+
+/**
  * Two copies of one shared memory. The newer one decides its text and everything else, including
  * what it no longer has; votes are kept from both.
  */
 export function mergeMemoryCopies(local: MemoryEntry, remote: MemoryEntry): MemoryEntry {
   const [lt, rt] = [local.updatedAt ?? 0, remote.updatedAt ?? 0];
   const [newer, older] = rt > lt ? [remote, local] : [local, remote];
-  const out: MemoryEntry = { ...older, ...newer };
-  for (const key of CLEARED_BY_NEWER) if (newer[key] === undefined) delete out[key];
+  const out: MemoryEntry = lt === rt ? mergeEqualCopies(local, remote, MEMORY_TIE_SKIP) : { ...older, ...newer };
+  if (lt !== rt) for (const key of CLEARED_BY_NEWER) if (newer[key] === undefined) delete out[key];
   const votes = mergeVotes(cleanVotes(older.votes), cleanVotes(newer.votes), lt === rt);
   if (votes) {
     out.votes = votes;
@@ -225,7 +258,10 @@ export function mergeS3WorkspacePayload(
 ): {
   merged: S3WorkspaceRemotePayload;
   activeServers: WorkspaceServerSummary[];
+  /** The merged state differs from what this installation had. */
   changed: boolean;
+  /** The merged state differs from what the bucket holds, so it has to be written there. */
+  remoteChanged: boolean;
 } {
   let changed = false;
 
@@ -237,17 +273,26 @@ export function mergeS3WorkspacePayload(
     if (!id || (typeof delIso !== "string" && typeof delIso !== "number")) continue;
     const prevMs = parseTimeMs(deletedServerIds[id]);
     const nextMs = parseTimeMs(delIso);
-    if (nextMs > prevMs) {
+    // The same moment spelled in two ways (a number, an ISO text) is one removal: both sides keep
+    // the same spelling of it, or each would write its own back for ever.
+    if (nextMs > prevMs || (nextMs > 0 && nextMs === prevMs && String(delIso) > String(deletedServerIds[id]))) {
       deletedServerIds[id] = String(delIso);
-      changed = true;
+      if (nextMs > prevMs) changed = true;
     }
   }
 
   // 2. Merge servers by id + updatedAt, respecting tombstones
   const serverMap = new Map<string, WorkspaceServerSummary>();
+  const remoteServerTime = new Map<string, string>();
+  for (const rs of Array.isArray(remote.servers) ? remote.servers : [])
+    if (rs && typeof rs.id === "string" && typeof rs.updatedAt === "string") remoteServerTime.set(rs.id, rs.updatedAt);
   for (const ls of local.servers ?? []) {
     if (!ls?.id || !ls?.host) continue;
-    const clean = sanitizeServerForS3(ls);
+    // A server saved without a time is not "changed just now" on every sync: it takes the time the
+    // team already has for it, and is stamped once when the team has none.
+    const clean = sanitizeServerForS3(
+      ls.updatedAt ? ls : { ...ls, updatedAt: remoteServerTime.get(String(ls.id).trim()) },
+    );
     if (clean.deletedAt) {
       const delMs = parseTimeMs(clean.deletedAt);
       if (delMs > parseTimeMs(deletedServerIds[clean.id])) {
@@ -256,6 +301,12 @@ export function mergeS3WorkspacePayload(
     }
     serverMap.set(clean.id, clean);
   }
+  // What this installation had, to tell afterwards whether the merge changed anything for it. A
+  // server the team removed stays in the bucket's list as a removal and is not kept here: finding
+  // it there again on every sync is not a change, and used to make every sync write the bucket.
+  const liveServers = (list: WorkspaceServerSummary[]): string =>
+    canonicalJson(list.filter((srv) => !srv.deletedAt).sort((a, b) => a.id.localeCompare(b.id)));
+  const serversBefore = liveServers([...serverMap.values()]);
 
   for (const rs of Array.isArray(remote.servers) ? remote.servers : []) {
     if (!rs || typeof rs.id !== "string" || !rs.host) continue;
@@ -270,14 +321,11 @@ export function mergeS3WorkspacePayload(
     const existing = serverMap.get(cleanRemote.id);
     if (!existing) {
       serverMap.set(cleanRemote.id, cleanRemote);
-      changed = true;
     } else {
       const tLocal = parseTimeMs(existing.updatedAt);
       const tRemote = parseTimeMs(cleanRemote.updatedAt);
-      if (tRemote > tLocal) {
-        serverMap.set(cleanRemote.id, cleanRemote);
-        changed = true;
-      }
+      if (tRemote > tLocal) serverMap.set(cleanRemote.id, cleanRemote);
+      else if (tRemote === tLocal) serverMap.set(cleanRemote.id, mergeEqualCopies(existing, cleanRemote));
     }
   }
 
@@ -298,6 +346,10 @@ export function mergeS3WorkspacePayload(
       activeServers.push(activeSrv);
     }
   }
+  // In the order of their ids, so that two installations write the same list.
+  allMergedServers.sort((a, b) => a.id.localeCompare(b.id));
+  activeServers.sort((a, b) => a.id.localeCompare(b.id));
+  if (liveServers(activeServers) !== serversBefore) changed = true;
 
   // 3. Merge deletedMemoryIds tombstones
   const deletedMemoryIds: Record<string, number> = {
@@ -328,8 +380,9 @@ export function mergeS3WorkspacePayload(
     const rTime = rm.updatedAt ?? 0;
     if ((deletedMemoryIds[rm.id] ?? 0) >= rTime) continue;
     const prev = memMap.get(rm.id);
-    if (!prev || rTime > (prev.updatedAt ?? 0)) {
-      memMap.set(rm.id, {
+    const tie = Boolean(prev) && rTime === (prev!.updatedAt ?? 0);
+    if (!prev || rTime > (prev.updatedAt ?? 0) || tie) {
+      const incoming: MemoryEntry = {
         ...prev,
         ...rm,
         id: rm.id,
@@ -364,8 +417,14 @@ export function mergeS3WorkspacePayload(
           ? String(rm.errorSignature)
           : prev?.errorSignature,
         updatedAt: rTime,
-      });
-      changed = true;
+      };
+      // Equally new and not the same: put together by a rule both sides apply alike, so that
+      // neither keeps writing its own copy over the other's.
+      const next = tie ? mergeEqualCopies(prev!, incoming, MEMORY_TIE_SKIP) : incoming;
+      if (!tie || canonicalJson({ ...next, votes: 0, feedbackScore: 0 }) !== canonicalJson({ ...prev, votes: 0, feedbackScore: 0 })) {
+        memMap.set(rm.id, next);
+        changed = true;
+      }
     }
     const kept = memMap.get(rm.id);
     if (prev && kept) {
@@ -393,7 +452,14 @@ export function mergeS3WorkspacePayload(
   // 5. Merge activityLog by id
   const actMap = new Map<string, WorkspaceActivityEvent>();
   for (const a of local.activityLog ?? []) {
-    if (a?.id) actMap.set(a.id, a);
+    // Masked like a teammate's event is on arrival: an event that one side masks and the other
+    // does not is two different events for ever, and each side writes its own.
+    if (a?.id)
+      actMap.set(a.id, {
+        ...a,
+        summary: maskContext(String(a.summary || "")),
+        detail: a.detail ? maskContext(String(a.detail)) : undefined,
+      });
   }
   for (const ra of Array.isArray(remote.activityLog) ? remote.activityLog : []) {
     if (!ra || typeof ra.id !== "string") continue;
@@ -407,22 +473,23 @@ export function mergeS3WorkspacePayload(
     }
   }
   const mergedActivity = Array.from(actMap.values())
-    .sort((a, b) => a.at - b.at)
+    .sort((a, b) => a.at - b.at || a.id.localeCompare(b.id))
     .slice(-500);
 
-  return {
-    merged: {
-      version: 1,
-      updatedAt: Date.now(),
-      servers: allMergedServers,
-      memories: Array.from(memMap.values()),
-      activityLog: mergedActivity,
-      deletedServerIds,
-      deletedMemoryIds,
-    },
-    activeServers,
-    changed,
+  const merged: S3WorkspaceRemotePayload = {
+    version: 1,
+    updatedAt: Date.now(),
+    servers: allMergedServers,
+    memories: Array.from(memMap.values()).sort((a, b) => a.id.localeCompare(b.id)),
+    activityLog: mergedActivity,
+    deletedServerIds,
+    deletedMemoryIds,
   };
+  // Compared by what it holds, not by when it was made: an idle team's sync then finds the bucket
+  // as it would write it, and writes nothing.
+  const remoteChanged = workspaceContent(merged) !== workspaceContent(remote);
+  if (!remoteChanged && typeof remote.updatedAt === "number") merged.updatedAt = remote.updatedAt;
+  return { merged, activeServers, changed, remoteChanged };
 }
 
 export interface S3WorkspaceSyncCallbacks {
@@ -746,7 +813,7 @@ export class S3WorkspaceSyncService {
     void this.publishAndRefreshPresence().catch(() => {});
   }
 
-  async syncNow(opts: { forcePush?: boolean } = {}): Promise<void> {
+  async syncNow(_opts: { forcePush?: boolean } = {}): Promise<void> {
     // An explicit "sync now" (button, AI tool) in demo mode fails with the reason instead of quietly
     // succeeding; the background paths never get here in demo mode (canReachBucket).
     assertOutwardSyncAllowed(SYNC);
@@ -763,14 +830,15 @@ export class S3WorkspaceSyncService {
         const localPayload: S3WorkspaceRemotePayload = {
           version: 1,
           updatedAt: Date.now(),
-          servers: local.servers.map(sanitizeServerForS3),
+          // Sanitized by the merge, which also gives a server without a time the team's time for it.
+          servers: local.servers,
           memories: local.memories.filter((m) => m.scope !== "personal"),
           activityLog: local.activityLog,
           deletedServerIds: local.deletedServerIds,
           deletedMemoryIds: local.deletedMemoryIds,
         };
 
-        const { merged, activeServers, changed } = mergeS3WorkspacePayload(
+        const { merged, activeServers, changed, remoteChanged } = mergeS3WorkspacePayload(
           localPayload,
           remotePayload ?? {},
         );
@@ -784,13 +852,12 @@ export class S3WorkspaceSyncService {
           changed,
         });
 
-        // Write merged state back to S3 if remote didn't exist, if merge produced changes, or if forcePush
-        const shouldWriteRemote =
-          !remotePayload ||
-          opts.forcePush ||
-          changed ||
-          (localPayload.servers.length > 0 &&
-            (remotePayload.servers?.length ?? 0) !== merged.servers.length);
+        // The bucket is written when it does not hold what the merge came to, and only then. A push
+        // asked for after a change here (`forcePush`) finds that difference; one that finds none has
+        // nothing to send. Writing whenever the merge "changed" something made every installation
+        // rewrite the whole object every few seconds for ever, each one's write being the next
+        // one's reason to sync.
+        const shouldWriteRemote = !remotePayload || remoteChanged;
 
         if (shouldWriteRemote) {
           const buf = Buffer.from(JSON.stringify(merged, null, 2), "utf8");

@@ -482,4 +482,130 @@ describe('S3WorkspaceSyncService & CRDT Merge', () => {
     await syncJacob.dispose();
     await syncErik.dispose();
   });
+
+  it('two installations syncing in turn reach a fixed point and then write nothing', async () => {
+    const bucket = new Map<string, { content: Buffer; mtime: string }>();
+    let writes = 0;
+    const providerFactory = () => {
+      const p = new InMemoryS3BucketProvider(bucket);
+      const write = p.writeFile.bind(p);
+      p.writeFile = async (file: string, data: Buffer) => {
+        if (file.endsWith('workspace.json')) writes += 1;
+        return write(file, data);
+      };
+      return p;
+    };
+    // One installation, held the way the hub holds it: only the servers that are still there, the
+    // removals as tombstones, the merged memories and activity as they came back.
+    const install = (actor: string, dir: string, seed: Partial<S3WorkspaceRemotePayload>) => {
+      const state = {
+        servers: seed.servers ?? [],
+        memories: seed.memories ?? [],
+        activityLog: seed.activityLog ?? [],
+        deletedServerIds: seed.deletedServerIds ?? {},
+        deletedMemoryIds: seed.deletedMemoryIds ?? {},
+      };
+      const service = new S3WorkspaceSyncService(
+        path.join(dir, 's3-workspace.json'),
+        {
+          getLocalState: async () => ({ actor, ...state, activeTerminals: [] }),
+          applyMergedState: async (merged) => {
+            state.servers = merged.activeServers.filter((s) => !s.deletedAt);
+            state.memories = merged.memories;
+            state.activityLog = [...merged.activityLog].sort((a, b) => a.at - b.at);
+            state.deletedServerIds = merged.deletedServerIds;
+            state.deletedMemoryIds = merged.deletedMemoryIds;
+          },
+          onStateChanged: () => {},
+        },
+        { providerFactory },
+      );
+      return { service, state };
+    };
+    const srv = (id: string, extra: Partial<WorkspaceServerSummary> = {}): WorkspaceServerSummary => ({
+      id,
+      name: id,
+      host: `10.0.0.${id.length}`,
+      port: 22,
+      username: 'root',
+      shared: true,
+      updatedAt: '2026-11-01T10:00:00.000Z',
+      ...extra,
+    });
+    // A bucket written by an earlier version: a removed server still in the list, keys in another order.
+    bucket.set('b/team/workspace.json', {
+      content: Buffer.from(
+        JSON.stringify({
+          updatedAt: 1,
+          version: 1,
+          servers: [
+            srv('web-01'),
+            srv('old-01', { deletedAt: '2026-11-02T10:00:00.000Z' }),
+            srv('old-02', { deletedAt: '2026-11-02T11:00:00.000Z' }),
+          ],
+          memories: [{ id: 'm-1', title: 'Backups', text: 'Nightly at 02:00', scope: 'workspace', kind: 'memory', updatedAt: 5 }],
+          activityLog: [
+            { id: 'a-2', at: 10, actor: 'anna', targetLabel: 'web-01', kind: 'note', summary: 'two' },
+            { id: 'a-1', at: 10, actor: 'anna', targetLabel: 'web-01', kind: 'note', summary: 'one' },
+          ],
+          deletedServerIds: { 'old-01': '2026-11-02T10:00:00.000Z', 'old-02': Date.parse('2026-11-02T11:00:00.000Z') },
+          deletedMemoryIds: { 'm-gone': 3 },
+        }),
+      ),
+      mtime: new Date(0).toISOString(),
+    });
+    const anna = install('anna', tmpDirA, {
+      // Saved without a time, and with a copy of web-01 as new as the team's but described differently.
+      servers: [srv('db-01', { updatedAt: undefined }), srv('web-01', { description: 'front' })],
+    });
+    const sara = install('sara', tmpDirB, { servers: [srv('web-01', { description: 'nginx' })] });
+    const cfg = {
+      enabled: true,
+      bucket: 'b',
+      region: 'eu-north-1',
+      prefix: 'team',
+      accessKeyId: 'AKIA',
+      secretAccessKey: 'S', // pragma: allowlist secret
+    };
+    await anna.service.configure(cfg);
+    await sara.service.configure(cfg);
+
+    for (let round = 0; round < 3; round++) {
+      await anna.service.syncNow({ forcePush: true });
+      await sara.service.syncNow({ forcePush: true });
+    }
+    const settled = bucket.get('b/team/workspace.json')!.content.toString('utf8');
+    writes = 0;
+    for (let round = 0; round < 5; round++) {
+      await anna.service.syncNow({ forcePush: true });
+      await sara.service.syncNow({ forcePush: true });
+      await anna.service.pollOnce();
+      await sara.service.pollOnce();
+    }
+    expect(writes).toBe(0);
+    expect(bucket.get('b/team/workspace.json')!.content.toString('utf8')).toBe(settled);
+    // Both have the same, and the removed servers stay removed.
+
+    expect(anna.state.servers.map((s) => s.id)).toEqual(['db-01', 'web-01']);
+    expect(sara.state.servers).toEqual(anna.state.servers);
+    expect(JSON.parse(settled).servers.filter((s: WorkspaceServerSummary) => s.deletedAt).map((s: WorkspaceServerSummary) => s.id)).toEqual(['old-01', 'old-02']);
+
+    // A real change is written once, and then it is quiet again.
+    anna.state.memories = [
+      ...anna.state.memories,
+      { id: 'm-2', title: 'Disk', text: 'Alert at 90%', scope: 'workspace', kind: 'memory', updatedAt: 50 } as MemoryEntry,
+    ];
+    await anna.service.syncNow({ forcePush: true });
+    expect(writes).toBe(1);
+    for (let round = 0; round < 3; round++) {
+      await sara.service.pollOnce();
+      await anna.service.pollOnce();
+      await sara.service.syncNow({ forcePush: true });
+    }
+    expect(writes).toBe(1);
+    expect(sara.state.memories.map((m) => m.id)).toEqual(['m-1', 'm-2']);
+
+    await anna.service.dispose();
+    await sara.service.dispose();
+  });
 });
