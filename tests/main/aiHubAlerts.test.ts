@@ -126,7 +126,7 @@ describe("alerts through the hub", () => {
     ticket = hub.store.data.workTickets!.find((t) => t.id === ticket.id)!;
     expect(ticket.alert).toMatchObject({ count: 2 });
     expect(ticket.alert!.resolvedAt).toBeGreaterThan(0);
-    expect(ticket.comments!.map((c) => c.text)).toEqual(["Fired again (2 times).", "Alertmanager says this has resolved."]);
+    expect(ticket.comments!.map((c) => c.text)).toEqual(["Fired again (2 times).", "Alertmanager says this has resolved. Moved to Backlog: nothing is firing. Move it back if it should still be looked at."]);
     expect((await hub.request({ action: "snapshot" })).alertIntake!.received).toBe(5);
     // A resolved alert that fires again later is news again: it is back in the inbox as a fresh firing.
     await hub.receiveAlert(secret, { alerts: [{ ...ALERTMANAGER.alerts[0], startsAt: "2026-05-01T12:00:00Z" }] });

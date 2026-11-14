@@ -265,7 +265,9 @@ local to the installation that wrote it; it is not synced.
 **Dependency map.** An agent that sees a link (a connection, a mount, a
 replication target) saves it with `save_infra_edge` and an `evidence` text. Such
 a link is stored with `proposed: true` and is shown under Infrastructure →
-Dependencies as a suggestion with Confirm / Dismiss. Only confirmed links are
+Dependencies as a suggestion with Confirm / Dismiss. A link the app finds by
+itself in command output (`discoverTopologyEdges`) is a suggestion in the same
+way. Only confirmed links are
 given to agents (`infraDependencyGraph`), and the links that touch the target
 of the run are also given as sentences in `aroundThisTarget` ("Upstream: …",
 "Downstream: …"), matched on the target's name and cluster. A suggestion never
@@ -283,7 +285,9 @@ stopped.
 
 - **A case** is made from a finished conversation (`caseFromTask`): its first
   question, its mode and agent, and what every workspace tool answered at the
-  time (the run's own lists are left out). A person adds what should happen:
+  time (the run's own lists are left out). The agent is the one that began the
+  conversation, also when it was handed over later. A person adds what should
+  happen:
   words the answer must or must not contain, a tool or part of a command the
   run must use, part of a command it must never try, and the conclusion it
   should reach.
@@ -294,7 +298,15 @@ stopped.
   recorded" and is counted. Nothing is executed. The checks are rules
   (`ruleChecks`) plus, when a conclusion is given, a model's judgement of
   whether the answer reaches it. A case passes when every check does; there is
-  no blended score.
+  no blended score. A run that failed before it gave an answer (the model or
+  its API refused) is recorded as "could not run" (`inconclusive`): it is
+  neither a pass nor a regression and is left out of the comparison.
+- **As it was.** The replay is not given what is known only now
+  (`asOfEvalCase`): activity after the case was made, the servers' latest
+  readings and recent changes, and what the open terminals show. Memory and
+  the pages are given as they are now; they are what a test tries.
+- Editing a case's expectations changes the parts that were sent and keeps
+  the others.
 - The newest five runs are kept per case, so the view can say which cases got
   better or worse since the run before (`compareRuns`). Cases are shared with
   the team like the rest of the setup.
@@ -606,7 +618,9 @@ keeps what is different. No model is involved.
   bucket: `work/facts/heads/<server>.json` (when, hash, who) is written at
   every reading and `work/facts/data/<server>.json` when something differs;
   an installation takes over what another read and does not read it again. A
-  claim covers the minute a reading takes.
+  claim covers the minute a reading takes. Readings are taken over with the
+  board's sync (every 40 seconds), also by an installation that has not
+  switched scheduled readings on: what a teammate read is the team's.
 - **Demo mode** answers from `demoFacts.ts` in the script's own format, with
   a second reading that differs, so the view can be shown without servers.
 
@@ -690,7 +704,9 @@ inside Slack or Teams.
   workspace (`alertTarget`) and given to an agent: the first matching rule,
   else the agent bound to that cluster, else a team's lead, else nobody
   (`routeAlert`). The same alert firing again is counted on its open ticket; a
-  resolve is noted. The alert's own words are quoted in the ticket as data
+  resolve is noted, and a ticket still in To do when its alert resolves goes
+  to Backlog (and back to To do if it fires again), so the heartbeat does not
+  start on an alert that is over. The alert's own words are quoted in the ticket as data
   from the monitoring system. The heartbeat takes firing alerts before other
   work, critical ones first.
 - **Inbox.** One list of everything that waits for a person, built from the
@@ -882,21 +898,36 @@ because there is no server to run one on.
 - **Review.** A finished run puts the agent's report on the ticket and moves
   it to Review; a person approves it or sends it back with a note. A run that
   failed or was stopped leaves the ticket Blocked with the reason. Agents
-  cannot close tickets.
+  cannot close tickets. A run ends when the agent proposes a plan: the ticket
+  then says that the plan waits, and cannot be approved as done until the plan
+  is decided. When the ticket's conversation goes on (the plan is approved, a
+  person answers, "Continue"), the ticket is checked out again and gets the
+  report of that run (`reattachTicket`).
+- **While it runs.** A ticket that an agent is running is not moved, removed
+  or decided, on any installation: the claim in the bucket is asked, not only
+  the local copy of the board, which can be most of a minute behind
+  (`ticketRunsNow`). Its text can still be edited and commented.
 - **Team.** An agent has `reportsTo` (a circle is refused) and an optional
   `monthlyTokenBudget`. A paused agent, or one that has spent its budget, is
   not started. Usage is counted per agent and calendar month from the runs'
   reported tokens.
 - **Handing out work.** `sshs3_tickets` lets an agent list the board, read a
   ticket, add a note and create a ticket for another agent (at most 10 an
-  hour). A created ticket hangs on the ticket being worked.
+  hour). A created ticket hangs on the ticket being worked. What an agent
+  writes on the board is signed "<agent> (agent, for <person>)".
 - **Heartbeat** (`preferences.workforceAutopilot`, off by default): on each
   timer tick the app takes the oldest runnable ticket in To do and starts it,
   one at a time. It runs in the agent's own mode, so an agent set to run
   commands on its own does so unattended, within the safety policy.
 - **Sharing.** `WorkSync` keeps one object per item under `work/` in the team
   bucket: goals, tickets, agents, shared runbooks and dependencies. Per item
-  the newer copy wins; a removal is carried as a marker (`sharedRemoved`,
+  the newer copy wins, with three exceptions where that would lose something.
+  A ticket's comments are kept from both copies, and the installation that
+  runs a ticket keeps the run when a teammate's older view moved or removed
+  it (`mergeTicketCopies`). A page changed in two places at once keeps the
+  newer text, and the other one as an entry in its history with the text it
+  would have had (`mergePageCopies`). A memory's votes are kept per person
+  (`mergeMemoryCopies`). A removal is carried as a marker (`sharedRemoved`,
   `withRemovals`) so it reaches everyone instead of the item coming back. It
   is read every 40 seconds, and at once after a change. Spending is one
   object per installation (`work/usage/<client>.json`) and added up
@@ -916,6 +947,13 @@ because there is no server to run one on.
   schedules and the learning queue are worked without anybody's app open.
 - **Templates** (`WORKFORCE_TEMPLATES`): "Operate a system" and "Develop a
   product" add five agents with reporting lines, a goal and first tickets.
+  An agent of the same name that is already there is used as it is, so
+  applying a template again adds a goal and tickets, not a second team.
+- **Saved differently than asked.** When a request is saved without something
+  it named (a reporting line that would close a circle, an alert rule for an
+  agent that does not exist, a goal or blocker that is not on the board, a
+  runner id that had to be rewritten), the reply says so in `reply.notes` and
+  the panel shows it.
 - **View** (`WorkforceView`, `TeamGraph`, `workforceModel`): the board with
   drag between columns, ticket detail with report and review, and the team as
   a live tree on React Flow (MIT) showing what each agent is doing.
