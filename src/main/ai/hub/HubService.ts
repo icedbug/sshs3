@@ -1284,6 +1284,25 @@ export class HubService {
     if (lifted.length) throw new Error(`${who} takes the tag "${lifted[0]}" off a server the team shares: it is what makes changes there wait for a person.`);
   }
 
+  private assertMayRemoveTeamServer(known: WorkspaceServerSummary | undefined): void {
+    if (known && this.sharedServer() && !this.host.teamAdmin?.())
+      throw new Error("Only an administrator of this server removes a server the team shares.");
+  }
+
+  /**
+   * The ordinary connection editor (`profiles:save-ssh`, `profiles:delete-ssh`, a folder removed with
+   * its servers) is held to the same rule as the hub's own server actions: one rule for both doors.
+   */
+  async assertMayChangeServerProfile(next: { id: string; name?: string; host?: string; port?: number; username?: string; shared?: boolean; tags?: string[] }): Promise<void> {
+    if (!this.sharedServer() || this.host.teamAdmin?.()) return;
+    this.assertMayChangeTeamServer(await this.teamServerCopy(next.id), { ...next, port: next.port || 22, username: next.username?.trim() || "root", tags: next.tags ?? [] });
+  }
+
+  async assertMayRemoveServerProfile(id: string): Promise<void> {
+    if (!this.sharedServer() || this.host.teamAdmin?.()) return;
+    this.assertMayRemoveTeamServer(await this.teamServerCopy(id));
+  }
+
   /** On a shared server, the team's bucket is the administrator's to set up, change or disconnect: one member's change is everyone's. */
   private assertTeamAdmin(): void {
     if (this.sharedServer() && !this.host.teamAdmin?.())
@@ -2587,6 +2606,8 @@ export class HubService {
       }
       case "server-describe": {
         const pid = requiredText(request.profileId);
+        // An id nobody here has describes nothing (and writes nothing into the team's activity).
+        if (this.sharedServer() && !(await this.knownServer(pid))) throw new Error("Server not found");
         this.assertMayChangeTeamServer(await this.teamServerCopy(pid), { shared: request.shared, tags: request.tags });
         if (
           request.localUsername !== undefined ||
@@ -2680,6 +2701,10 @@ export class HubService {
         const host = requiredText(s.host);
         const actor = await this.resolveActorName();
         const nowIso = new Date().toISOString();
+        // On a shared server an id names a server this person has, or none: a teammate's own server
+        // is not taken over by sending its id (nobody is shown it, but an id can be learnt elsewhere).
+        if (s.id?.trim() && this.sharedServer() && !this.host.teamAdmin?.() && !(await this.knownServer(s.id.trim())))
+          throw new Error("Server not found. Leave the id out to add a new server.");
         // What the request leaves out is saved as its default (port 22, root, no tags), so that is what is compared.
         this.assertMayChangeTeamServer(await this.teamServerCopy(s.id), {
           name,
@@ -2810,6 +2835,7 @@ export class HubService {
       }
       case "server-local-override": {
         const pid = requiredText(request.override.profileId);
+        if (this.sharedServer() && !(await this.knownServer(pid))) throw new Error("Server not found");
         this.applyLocalOverride({
           profileId: pid,
           username: request.override.username,
@@ -2824,8 +2850,7 @@ export class HubService {
         // Only a server this person has can be removed by them: an id alone (a teammate's own server, a guess) removes nothing.
         const mine = await this.knownServer(pid);
         if (!mine) throw new Error("Server not found");
-        if (mine.shared !== false && !mine.fromVault && this.sharedServer() && !this.host.teamAdmin?.())
-          throw new Error("Only an administrator of this server removes a server the team shares.");
+        this.assertMayRemoveTeamServer(await this.teamServerCopy(pid));
         if (mine.shared === false) {
           // A person's own server: gone here, and nothing about it goes to the team (no removal mark, no log entry).
           await this.host.deleteServer?.(pid).catch(() => {});
@@ -8202,6 +8227,12 @@ export class HubService {
     for (const s of sharedFileSync.servers) {
       if (!s?.id || !s.host) continue;
       const prev = srvMap.get(s.id);
+      // A person's own server stays theirs: a team copy under the same id (sent by somebody who
+      // learnt the id) neither re-points it nor makes it shared.
+      if (s.shared === false) {
+        srvMap.set(s.id, s);
+        continue;
+      }
       if (!prev) {
         srvMap.set(s.id, s);
       } else {

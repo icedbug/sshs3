@@ -198,12 +198,13 @@ recordings are sealed into it. See "The audit log and terminal recordings" in
   and key for them, and adds new ones. Changing a shared server's name,
   address, port or user name, taking it out of the team's list, removing it,
   or taking off the tag that makes changes wait for a person (`prod`,
-  `production`, `critical`) needs a team admin. This is enforced for the
-  AI workspace's own requests on the server (its server list, agents, outside
-  agents). It is not a boundary yet: a member's own copy of a shared profile,
-  edited in the connection editor, and any installation that was given the
-  team bucket's invite code are still trusted with the list (the newest copy
-  wins).
+  `production`, `critical`) needs a team admin. The same rule holds for the
+  AI workspace's own requests (its server list, agents, outside agents) and
+  for the connection editor (saving or removing a profile, removing a folder
+  with its servers). A member cannot take a teammate's own server by sending
+  its id, and a person's own server stays theirs even when a team copy with
+  the same id arrives. Any installation that was given the team bucket's
+  invite code is still trusted with the list (the newest copy wins).
 - **Team settings are an admin's.** Changing the shared workspace, the team
   bucket or other team-wide settings needs a team admin (set with the host
   option for admins). Changing a password signs out the account's other

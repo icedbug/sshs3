@@ -142,7 +142,7 @@ describe("an external agent's runner, on a shared server", () => {
     const marker = path.join(dir, "ran.txt");
     hub.store.data.externalRunners = [{ ...runner(marker), updatedAt: Date.now() }];
     await hub.request({ action: "agent-save", agent: { name: "Stand-in agent", role: "x", mission: "x", defaultMode: "assisted", runnerId: "stand-in" } } as never);
-    const agent = hub.store.data.agents.find((a) => a.name === "Stand-in agent")!;
+    const agent = hub.store.data.agents!.find((a) => a.name === "Stand-in agent")!;
     await expect(hub.request({ action: "start", task: { prompt: "do nothing", mode: "assisted", agentId: agent.id, agentName: agent.name } } as never)).rejects.toThrow(/Only an administrator/);
     await settle(300);
     expect(existsSync(marker)).toBe(false);
@@ -457,6 +457,65 @@ describe("the servers a team shares, on a shared server", () => {
     expect(merged.servers.map((s) => s.id)).toEqual(["mine"]);
     expect(JSON.parse(await fs.readFile(file, "utf8")).deletedServerIds).toMatchObject({ mine: expect.any(String), db: expect.any(String) });
     expect(await fs.readFile(file, "utf8")).not.toContain("annas-laptop-vm");
+  });
+
+  it("cannot take over a teammate's own server by its id, and an unknown id changes nothing", async () => {
+    const erik = await makeHub({ ...member, ...hostWith([team()]).host });
+    await expect(erik.hub.request({ action: "server-upsert", server: { id: "mine", name: "x", host: "192.0.2.66", username: "erik", shared: true } } as never)).rejects.toThrow("Server not found");
+    await expect(erik.hub.request({ action: "server-describe", profileId: "no-such-server", shared: true, description: "x" })).rejects.toThrow("Server not found");
+    await expect(erik.hub.request({ action: "server-local-override", override: { profileId: "no-such-server", username: "erik" } } as never)).rejects.toThrow("Server not found");
+    expect(JSON.stringify(erik.hub.store.data.activityLog ?? [])).not.toContain("no-such-server");
+
+    // A team copy under the id of Anna's own server (sent before this rule, or by an administrator) does not re-point it for her.
+    const anna = await makeHub({ ...member, ...hostWith([team(), own()]).host });
+    anna.hub.store.data.s3SyncedServers = [{ ...own(), host: "192.0.2.66", username: "erik", shared: true, updatedAt: iso(60_000) }];
+    const mine = ((await anna.hub.snapshot()).workspaceServers ?? []).find((s) => s.id === "mine");
+    expect(mine).toMatchObject({ host: "192.0.2.15", username: "anna", shared: false });
+  });
+
+  it("are held to the same rule through the ordinary connection editor", async () => {
+    const { registerProfileHandlers } = await import("../../src/main/ipc/profileHandlers");
+    const servers = [team(), own()];
+    const { host } = hostWith(servers);
+    for (const who of [member, admin]) {
+      const { hub } = await makeHub({ ...who, ...host });
+      const handlers = new Map<string, (...args: unknown[]) => Promise<unknown>>();
+      const store = { saveSSH: vi.fn(async () => {}), deleteSSH: vi.fn(async () => {}), deleteFolder: vi.fn(async () => {}), getProfiles: async () => ({ ssh: [{ id: "db", group: "Databases" }], s3: [] }) };
+      registerProfileHandlers({
+        aiHub: hub,
+        profileStore: store,
+        profileSyncService: { autoSyncLocalSshConfig: async () => {} },
+        registerHandler: (channel: string, fn: (...args: unknown[]) => Promise<unknown>) => void handlers.set(channel, fn),
+        scheduleAutoSync: () => {},
+        storageRegistry: { disconnect: async () => {} },
+      } as never);
+      const call = (channel: string, ...args: unknown[]): Promise<unknown> => handlers.get(channel)!({}, ...args);
+      const { IPC_CHANNELS } = await import("../../src/shared/types/ipc");
+      const db = { id: "db", name: "db-01", host: "10.20.0.31", port: 22, username: "ops", authType: "agent", tags: ["prod", "postgres"] };
+      const refused = [
+        () => call(IPC_CHANNELS.PROFILES_SAVE_SSH, { ...db, host: "192.0.2.88" }),
+        () => call(IPC_CHANNELS.PROFILES_SAVE_SSH, { ...db, shared: false }),
+        () => call(IPC_CHANNELS.PROFILES_SAVE_SSH, { ...db, tags: ["postgres"] }),
+        () => call(IPC_CHANNELS.PROFILES_DELETE_SSH, "db"),
+        () => call(IPC_CHANNELS.PROFILES_DELETE_FOLDER, "Databases", true),
+      ];
+      if (who === member) {
+        for (const r of refused) await expect(r()).rejects.toThrow(/Only an administrator/);
+        expect(store.saveSSH).not.toHaveBeenCalled();
+        expect(store.deleteSSH).not.toHaveBeenCalled();
+        expect(store.deleteFolder).not.toHaveBeenCalled();
+        // One's own key for it, one's own server, and a folder removed without its servers stay free.
+        await call(IPC_CHANNELS.PROFILES_SAVE_SSH, { ...db, privateKeyPath: "/home/erik/.ssh/id_ed25519" });
+        await call(IPC_CHANNELS.PROFILES_SAVE_SSH, { ...own(), host: "192.0.2.16" });
+        await call(IPC_CHANNELS.PROFILES_DELETE_SSH, "mine");
+        await call(IPC_CHANNELS.PROFILES_DELETE_FOLDER, "Databases", false);
+        expect(store.saveSSH).toHaveBeenCalledTimes(2);
+        expect(store.deleteSSH).toHaveBeenCalledWith("mine");
+      } else {
+        for (const r of refused) await r();
+        expect(store.saveSSH).toHaveBeenCalledTimes(3);
+      }
+    }
   });
 });
 

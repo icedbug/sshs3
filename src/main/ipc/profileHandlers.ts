@@ -63,6 +63,17 @@ export function registerProfileHandlers(bridge: ProfileHost): void {
   bridge.registerHandler(
     IPC_CHANNELS.PROFILES_SAVE_SSH,
     async (_event, config: SSHConnectionConfig) => {
+      // A server the team shares is re-pointed, renamed, made personal or untagged "prod" by an
+      // administrator only: the same rule as the hub's own server actions (one's own key and sign-in stay free).
+      await bridge.aiHub?.assertMayChangeServerProfile({
+        id: config.id,
+        name: config.name,
+        host: config.host,
+        port: config.port,
+        username: config.username,
+        shared: config.shared,
+        tags: config.tags,
+      });
       await bridge.profileStore.saveSSH(config);
       // The file manager caches one live provider per profile id; drop it so the next connect uses the edited settings.
       await bridge.storageRegistry.disconnect?.(`sftp-${config.id}`);
@@ -77,6 +88,7 @@ export function registerProfileHandlers(bridge: ProfileHost): void {
   bridge.registerHandler(
     IPC_CHANNELS.PROFILES_DELETE_SSH,
     async (_event, id: string) => {
+      await bridge.aiHub?.assertMayRemoveServerProfile(id);
       await bridge.profileStore.deleteSSH(id);
       await bridge.storageRegistry.disconnect?.(`sftp-${id}`);
       bridge.scheduleAutoSync();
@@ -116,6 +128,10 @@ export function registerProfileHandlers(bridge: ProfileHost): void {
   bridge.registerHandler(
     IPC_CHANNELS.PROFILES_DELETE_FOLDER,
     async (_event, name: string, deleteProfiles?: boolean) => {
+      // Removing a folder with its servers removes each of them: the same rule as removing one.
+      if (deleteProfiles)
+        for (const p of (await bridge.profileStore.getProfiles()).ssh.filter((x) => x.group === name))
+          await bridge.aiHub?.assertMayRemoveServerProfile(p.id);
       await bridge.profileStore.deleteFolder(name, Boolean(deleteProfiles));
       bridge.scheduleAutoSync();
     }
