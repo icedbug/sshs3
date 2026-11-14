@@ -168,7 +168,7 @@ export function restrictPrivateKeyFile(
     execFileSync(command, args, { timeout: 10_000, stdio: 'ignore', windowsHide: true }),
 ): boolean {
   if (platform !== 'win32') return true;
-  let user = '';
+  let user: string;
   try {
     user = os.userInfo().username;
   } catch {
