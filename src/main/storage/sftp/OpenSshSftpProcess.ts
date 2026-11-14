@@ -21,7 +21,19 @@ export interface OpenSshProcessOptions {
   pinPromptHandler?: (prompt: string) => Promise<string> | string;
   /** Asked when OpenSSH wants to trust an unknown host key. Absent => rejected (fail closed). */
   hostKeyPromptHandler?: (info: HostKeyPromptInfo) => Promise<boolean>;
+  /** How long ssh may stay silent, with nobody being asked anything, before the start is given up. */
+  handshakeSilenceMs?: number;
 }
+
+/**
+ * ssh that neither answers the SFTP handshake, nor exits, nor says or asks
+ * anything for this long has hung (seen with a server that accepts the
+ * connection and never starts the subsystem). Time in which a person is being
+ * asked for a password, a PIN, a touch or a host key does not count.
+ */
+export const SFTP_HANDSHAKE_SILENCE_MS = 45_000;
+/** A touch of a security key is waited for by ssh itself, silently: it gets longer. */
+const SFTP_PRESENCE_WAIT_MS = 180_000;
 
 /** SFTPConfig is a subset of SSHConnectionConfig; the OpenSSH argument builder requires id/name. */
 function toSshConfig(config: SFTPConfig): SSHConnectionConfig {
@@ -119,29 +131,64 @@ export class OpenSshSftpProcess {
 
     let askpassEnv: Record<string, string> = {};
 
+    // The watch on a start that hangs: it runs only while nobody is being asked, and every sign of life restarts it.
+    const silenceMs = options.handshakeSilenceMs ?? SFTP_HANDSHAKE_SILENCE_MS;
+    let asking = 0;
+    let silenceTimer: NodeJS.Timeout | undefined;
+    let handshakeDone = false;
+    let rejectSilent: (err: Error) => void = () => {};
+    const silent = new Promise<never>((_, reject) => {
+      rejectSilent = reject;
+    });
+    silent.catch(() => {});
+    const watch = (ms = silenceMs): void => {
+      clearTimeout(silenceTimer);
+      if (handshakeDone || asking > 0) return;
+      silenceTimer = setTimeout(() => {
+        const said = this.stderrBuffer.trim();
+        rejectSilent(
+          new Error(
+            `ssh did not get as far as the server's SFTP service: it was silent for ${Math.round(ms / 1000)} seconds${said ? ` (it last said: ${said.slice(-300)})` : ''}. The attempt was ended.`
+          )
+        );
+      }, ms);
+    };
+    const whileAsking = async <T>(ask: () => Promise<T>): Promise<T> => {
+      asking++;
+      clearTimeout(silenceTimer);
+      try {
+        return await ask();
+      } finally {
+        asking--;
+        watch();
+      }
+    };
+
     if (needsAskpass) {
       this.askpassServer = new AskpassServer({
         onPresence: (prompt: string) => {
+          watch(Math.max(silenceMs, SFTP_PRESENCE_WAIT_MS));
           if (onPresence) onPresence(prompt);
         },
-        promptHandler: async (rawPrompt: string) => {
-          if (HOST_KEY_CONFIRM_RE.test(rawPrompt)) {
-            // Never answer a trust question with a password; ask the user, fail closed otherwise.
-            if (!hostKeyPromptHandler) return 'no';
-            const info = parseHostKeyPrompt(rawPrompt, config);
-            return (await hostKeyPromptHandler(info)) ? 'yes' : 'no';
-          }
-          if (config.authType === 'password' && config.password) {
-            return config.password;
-          }
-          if (config.passphrase) {
-            return config.passphrase;
-          }
-          if (pinPromptHandler) {
-            return await pinPromptHandler(rawPrompt);
-          }
-          return config.passphrase || config.password || '';
-        },
+        promptHandler: (rawPrompt: string) =>
+          whileAsking(async () => {
+            if (HOST_KEY_CONFIRM_RE.test(rawPrompt)) {
+              // Never answer a trust question with a password; ask the user, fail closed otherwise.
+              if (!hostKeyPromptHandler) return 'no';
+              const info = parseHostKeyPrompt(rawPrompt, config);
+              return (await hostKeyPromptHandler(info)) ? 'yes' : 'no';
+            }
+            if (config.authType === 'password' && config.password) {
+              return config.password;
+            }
+            if (config.passphrase) {
+              return config.passphrase;
+            }
+            if (pinPromptHandler) {
+              return await pinPromptHandler(rawPrompt);
+            }
+            return config.passphrase || config.password || '';
+          }),
       });
 
       await this.askpassServer.start();
@@ -180,7 +227,10 @@ export class OpenSshSftpProcess {
       sftpLog.info(`ssh stderr: ${JSON.stringify(text.slice(0, 500))}`);
 
       if (/confirm user presence|touch (your )?security key/i.test(text)) {
+        watch(Math.max(silenceMs, SFTP_PRESENCE_WAIT_MS));
         if (onPresence) onPresence(text.trim());
+      } else {
+        watch();
       }
     });
 
@@ -205,13 +255,20 @@ export class OpenSshSftpProcess {
 
     // Race between protocol handshake and early process death
     try {
-      await Promise.race([protocol.init(), exitPromise]);
+      watch();
+      await Promise.race([protocol.init(), exitPromise, silent]);
+      handshakeDone = true;
+      clearTimeout(silenceTimer);
       exitPromise.catch(() => {});
       sftpLog.info('SFTP subsystem ready (protocol version negotiated)');
       onPresenceCleared?.();
     } catch (err: any) {
       // If ssh died first, the protocol only sees a closed pipe; surface ssh's own stderr instead.
       const stderrText = this.stderrBuffer.trim();
+      handshakeDone = true;
+      clearTimeout(silenceTimer);
+      // The start was given up while ssh still runs (it hung): its later exit is nobody's to handle.
+      exitPromise.catch(() => {});
       onPresenceCleared?.();
       await this.close();
       if (stderrText && /SFTP stream closed/.test(String(err?.message))) {

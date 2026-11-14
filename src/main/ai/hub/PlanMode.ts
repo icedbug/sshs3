@@ -7,7 +7,7 @@ import type {
 } from "../../../shared/types/aiHub";
 import { APP_OPS, type AppOpClass } from "./AppGuard";
 import { analyzeCommandSafety } from "./CommandSafetyService";
-import { boundedContext, exactHash } from "./privacy";
+import { boundedContext, clip, exactHash, maskContext } from "./privacy";
 
 /**
  * Plan first, then act. For a change that is risky or that the user asked to
@@ -45,7 +45,7 @@ export const PLAN_TOOL = {
             target: { type: "string", description: "The server, cluster, file or service." },
             command: { type: "string", description: "The exact command, when the step is one. An approved plan's commands run without asking again." },
             risk: { type: "string", enum: ["low", "medium", "high"] },
-            check: { type: "string", description: "The command and expected output that show the step worked." },
+            check: { type: "string", description: "The command and expected output that show the step worked. The command must exit with code 0 when the step worked: a check whose last command exits non-zero on success (a `diff` that finds the change, a `grep` that should match nothing) counts as failed and the step is rolled back." },
             rollback: { type: "string", description: "How to undo the step. Required for medium and high risk." },
           },
           required: ["action", "risk", "check"],
@@ -63,8 +63,26 @@ export const PLAN_TOOL = {
   },
 } as const;
 
+/** A text of the plan that is read from its start: masked, and cut at its end when too long. */
 const text = (value: unknown, max: number): string =>
-  typeof value === "string" ? boundedContext(value.trim(), max) : "";
+  typeof value === "string" ? clip(value.trim(), max) : "";
+
+/** The longest command, check or rollback a plan step may carry. */
+export const MAX_PLAN_FIELD = 2000;
+
+/**
+ * A command, check or rollback of a step: what the person approves, so it is
+ * shown whole or the plan is refused. Never shortened: an approval of half a
+ * check is an approval of something the person did not see.
+ */
+function whole(value: unknown, step: number, what: string): { text: string } | { error: string } {
+  const shown = typeof value === "string" ? maskContext(value.trim()) : "";
+  return shown.length > MAX_PLAN_FIELD
+    ? {
+        error: `Step ${step}: the ${what} is ${shown.length} characters, and at most ${MAX_PLAN_FIELD} can be shown in full for approval. Make it shorter, or split the step.`,
+      }
+    : { text: shown };
+}
 
 /** The model's `sshs3_plan_propose` argument as a plan (without status or review), or why it is not one. */
 export function parsePlan(
@@ -86,14 +104,20 @@ export function parsePlan(
     const risk = s.risk;
     if (risk !== "low" && risk !== "medium" && risk !== "high")
       return { error: `Step ${n}: risk must be low, medium or high` };
-    const check = text(s.check, 500);
+    const shownCheck = whole(s.check, n, "check");
+    if ("error" in shownCheck) return shownCheck;
+    const check = shownCheck.text;
     if (!check)
       return { error: `Step ${n} ("${action.slice(0, 60)}") has no check: say how it will be shown to have worked` };
-    const rollback = text(s.rollback, 500);
+    const shownRollback = whole(s.rollback, n, "rollback");
+    if ("error" in shownRollback) return shownRollback;
+    const rollback = shownRollback.text;
     if (risk !== "low" && !rollback)
       return { error: `Step ${n} ("${action.slice(0, 60)}") is ${risk} risk and has no rollback` };
     const rawCommand = typeof s.command === "string" ? s.command.trim() : "";
-    const command = text(s.command, 2000);
+    const shownCommand = whole(s.command, n, "command");
+    if ("error" in shownCommand) return shownCommand;
+    const command = shownCommand.text;
     // A command that deletes or overwrites is never "low risk", whatever the plan calls it.
     if (command && risk === "low" && analyzeCommandSafety(command).riskLevel === "destructive")
       return { error: `Step ${n}: \`${command.slice(0, 80)}\` is destructive; it cannot be low risk, and it needs a rollback` };
@@ -156,7 +180,7 @@ export function reviewerPrompt(
 ): string {
   return [
     "You review an operations plan before it is shown to the person who must approve it. Another agent wrote it; you are the check that it is safe and complete. You change nothing.",
-    `What the user asked for: ${boundedContext(request, 1500)}`,
+    `What the user asked for: ${clip(request, 1500)}`,
     "",
     "Use your tools to test the plan against the workspace: `workspace_context` (the servers, the team's recent activity, the team's memory), `sshs3_kb_search` (runbooks for this kind of change), `sshs3_storage_ops` (the configuration files the plan touches).",
     "Report only real problems, each in one sentence that names the step:",
@@ -285,7 +309,7 @@ export function planCoversCommand(
 export function todosFromPlan(plan: AgentPlan): AgentTodo[] {
   return plan.steps.map((s, i) => ({
     id: `p${i + 1}`,
-    content: boundedContext(
+    content: clip(
       `${s.action}${s.target ? ` (on ${s.target})` : ""} — check: ${s.check}`,
       300,
     ),

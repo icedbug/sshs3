@@ -183,6 +183,12 @@ export class SessionRecorder {
     return bytes ? crypto.createHash("sha256").update(bytes).digest("hex") : undefined;
   }
 
+  /** Removes a finished recording in which nothing ran. One that is still being made is left alone. */
+  async discard(id: string): Promise<void> {
+    if ([...this.open.values()].some((r) => r.info.id === id)) return;
+    await fs.rm(this.fileOf(id), { force: true }).catch(() => undefined);
+  }
+
   /** Recordings older than `days` are removed. */
   async prune(days: number, now = Date.now()): Promise<number> {
     let removed = 0;

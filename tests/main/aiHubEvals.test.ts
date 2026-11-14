@@ -175,9 +175,12 @@ describe("a run that never starts", () => {
     disposals.push(async () => { await hub.dispose(); setDemoModeForTesting(undefined); await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); });
     await hub.initialize();
     // No model is configured, so launching throws.
+    const launch = vi.spyOn(hub as unknown as { launch: (t: { status: string }) => Promise<void> }, "launch");
     await expect(hub.request({ action: "start", task: { prompt: "do something", mode: "advice" } } as never)).rejects.toThrow();
-    const task = hub.store.data.tasks.at(-1)!;
+    const task = launch.mock.calls[0][0];
     expect(task.status).toBe("failed");
+    // The person got the error as the answer: no failed, empty conversation is left in the list beside it.
+    expect(hub.store.data.tasks).toHaveLength(0);
     // The wait resolves instead of hanging for ever.
     await expect(
       Promise.race([

@@ -54,6 +54,18 @@ export interface CommandFrameOptions {
   command?: string;
   shell?: ShellKind;
   handshake?: boolean;
+  /**
+   * The terminal may deliver text that was printed BEFORE a marker only AFTER
+   * it. Windows' pseudo console does this: it passes the marker (an OSC it does
+   * not know) straight through, and repaints the text printed in the same burst
+   * a moment later. With this set, the end marker does not end the frame: what
+   * follows is collected until the shell's prompt is back (`prompt`, when it is
+   * known) or the caller calls `settle()`.
+   */
+  lateOutput?: {
+    /** The last line of the shell's prompt as it was last seen, without escape sequences. */
+    prompt?: string;
+  };
 }
 function cleanInternalTitleOsc(text: string): string {
   // Strip Windows cmd.exe window-title OSC 0 sequences that leak the internal PowerShell wrapper
@@ -63,19 +75,101 @@ function cleanInternalTitleOsc(text: string): string {
     "",
   );
 }
+
+// eslint-disable-next-line no-control-regex -- matching terminal escape sequences is the point
+const ESCAPE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[()][A-Z0-9]|\x1b[=>78]/y;
+
+/**
+ * The characters of a text that a person would see, without white space, and
+ * for each of them where it ends in the text. A pseudo console repaints what
+ * a shell printed (a space becomes "cursor right", a long line is wrapped), so
+ * text is compared on these and never on the raw bytes.
+ */
+function seen(text: string): { chars: string; ends: number[] } {
+  let chars = "";
+  const ends: number[] = [];
+  for (let i = 0; i < text.length; ) {
+    if (text[i] === "\x1b") {
+      ESCAPE.lastIndex = i;
+      const m = ESCAPE.exec(text);
+      if (m) {
+        i += m[0].length;
+        continue;
+      }
+    }
+    const ch = text[i++];
+    if (ch === " " || ch === "\t" || ch === "\r" || ch === "\n" || ch < " ") continue;
+    chars += ch;
+    ends.push(i);
+  }
+  return { chars, ends };
+}
+
+/** A line as a person would see it: escape sequences gone, "cursor right" as spaces, trimmed. */
+export function visibleLine(line: string): string {
+  return (
+    line
+      // eslint-disable-next-line no-control-regex -- matching terminal escape sequences is the point
+      .replace(/\x1b\[(\d*)C/g, (_m, n: string) => " ".repeat(Math.min(200, Number(n) || 1)))
+      // eslint-disable-next-line no-control-regex -- matching terminal escape sequences is the point
+      .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[()][A-Z0-9]|\x1b[=>78]|[\x00-\x08\x0b-\x1f\x7f]/g, "")
+      .trim()
+  );
+}
+
+/** The last line of a text that shows anything, as a person would see it. */
+export function lastVisibleLine(text: string): string {
+  const lines = text.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = visibleLine(lines[i]);
+    if (line) return line;
+  }
+  return "";
+}
+
+/** How much of the typed line holds the frame's random id: `printf '\033]777;SSHS3;` and the 32 characters after it. */
+const ECHO_HEAD = 54;
+
+export const LATE_OUTPUT_NOTE =
+  "[sshs3: the text from the marked line on reached the terminal after the command had ended. It may end with the shell's prompt, which is not output.]";
+
 export class CommandFrames {
   private carry = "";
   private output = "";
   private displayBuffer = "";
   private started = false;
   private structuredOutput: string | undefined;
+  /** What the terminal showed right before the frame began: the end of it is the echo of what was typed. */
+  private before = "";
+  /** Set once the end marker was read while late output is waited for. */
+  private ended: { exitCode: number; cwd: string } | undefined;
+  private trailing = "";
+  /** What was typed to run the command, as seen characters: its echo is not the command's output. */
+  private readonly typed: string;
   constructor(
     private readonly nonce: string,
     private readonly maxOutput = 128_000,
     private readonly options: CommandFrameOptions = {},
-  ) {}
+  ) {
+    const shell = options.shell;
+    // Only where the envelope is typed as it stands (PowerShell and cmd carry the command encoded).
+    const plain = options.command !== undefined && shell !== undefined && shell !== "powershell" && shell !== "pwsh" && shell !== "cmd";
+    let typed = "";
+    if (plain) {
+      try {
+        typed = seen(commandEnvelope(shell, options.command!, nonce)).chars;
+      } catch {
+        typed = "";
+      }
+    }
+    this.typed = typed;
+  }
   get commandText(): string | undefined {
     return this.options.command;
+  }
+  /** The end marker was read and the frame waits for text the terminal delivers late. */
+  get awaitingLate(): boolean {
+    return this.ended !== undefined;
   }
   drainDisplay(): string {
     const out = this.displayBuffer;
@@ -83,6 +177,12 @@ export class CommandFrames {
     return out;
   }
   feed(chunk: string): CommandResult | undefined {
+    if (this.ended) {
+      const text = cleanInternalTitleOsc(chunk);
+      this.trailing = (this.trailing + text).slice(-this.maxOutput);
+      if (text) this.displayBuffer += text;
+      return this.promptIsBack() ? this.settle() : undefined;
+    }
     this.carry += chunk;
     while (this.carry) {
       const start = this.carry.indexOf("\x1b]777;");
@@ -135,20 +235,120 @@ export class CommandFrames {
         } else if (trailing) {
           this.displayBuffer += `\x1b[?25h${trailing}`;
         }
-        return {
-          output: cleanInternalTitleOsc(this.structuredOutput ?? this.output),
-          exitCode: Number(parts[3]),
-          cwd: parts.slice(4).join(";"),
-        };
+        const ended = { exitCode: Number(parts[3]), cwd: parts.slice(4).join(";") };
+        // Output that came in frames of its own cannot arrive late: nothing to wait for.
+        if (!this.options.lateOutput || this.structuredOutput !== undefined)
+          return { output: cleanInternalTitleOsc(this.structuredOutput ?? this.withoutEcho(this.output).text), ...ended };
+        this.ended = ended;
+        this.trailing = trailing;
+        return this.promptIsBack() ? this.settle() : undefined;
       }
     }
   }
+
+  /**
+   * Ends a frame that waits for late output with what has arrived. Text that
+   * came after the end marker is the command's when the known prompt follows
+   * it; when the prompt is not recognised it is kept too, and marked, because
+   * where the output ends cannot be known then.
+   */
+  settle(): CommandResult {
+    if (!this.ended) throw new Error("The command has not ended");
+    const ended = this.ended;
+    const inFrame = this.withoutEcho(this.output);
+    const late = this.withoutEcho(this.trailing, inFrame.left, this.options.handshake === true).text;
+    const split = this.splitAtPrompt(late);
+    let output = inFrame.text;
+    if (split !== undefined) {
+      // Blank lines between the marker and the prompt are the terminal's, not the command's.
+      const rest = late.slice(0, split);
+      if (visibleLine(rest.replace(/\n/g, " "))) output += rest;
+    } else if (!this.options.handshake && visibleLine(late.replace(/\n/g, " ")))
+      output = `${output}${output && !output.endsWith("\n") ? "\n" : ""}[sshs3: late text begins here]\n${late}${late.endsWith("\n") ? "" : "\n"}${LATE_OUTPUT_NOTE}`;
+    return { output: cleanInternalTitleOsc(output).slice(-this.maxOutput), ...ended };
+  }
+
+  /**
+   * The last line the terminal showed after the end marker, once the echo of
+   * what was typed is taken away: after a handshake, which prints nothing,
+   * that is the shell's prompt.
+   */
+  promptSeen(): string {
+    if (!this.ended) return "";
+    const left = this.withoutEcho(this.output).left;
+    return lastVisibleLine(this.withoutEcho(this.trailing, left, true).text).slice(0, 400);
+  }
+
+  private promptIsBack(): boolean {
+    const prompt = this.options.lateOutput?.prompt;
+    return Boolean(prompt) && lastVisibleLine(this.trailing) === prompt;
+  }
+
+  /** Where the known prompt begins at the end of `text`; undefined when the text does not end with it. */
+  private splitAtPrompt(text: string): number | undefined {
+    const prompt = this.options.lateOutput?.prompt;
+    if (!prompt) return undefined;
+    let end = text.length;
+    for (;;) {
+      const nl = text.lastIndexOf("\n", end - 1);
+      const line = visibleLine(text.slice(nl + 1, end));
+      if (line) return line === prompt ? nl + 1 : undefined;
+      if (nl < 0) return undefined;
+      end = nl;
+    }
+  }
+
+  /**
+   * `text` without the rest of the echo of what was typed. The terminal echoes
+   * the typed line before the shell runs it; when the begin marker overtakes
+   * the end of that echo, the echo's rest reads as the start of the output.
+   * It is taken away only when it is exactly what is still missing of the
+   * typed line (which carries this frame's own random id); anything else is
+   * left as it is. `left`: what is still missing after this text.
+   */
+  private withoutEcho(text: string, missing?: string, anywhere = false): { text: string; left: string } {
+    const expect = missing ?? this.echoMissing();
+    if (!expect || !text) return { text, left: expect };
+    const got = seen(text);
+    if (!got.chars) return { text, left: expect };
+    const cutAfter = (count: number): string => text.slice(got.ends[count - 1]).replace(/^[ \t]*\r?\n?/, "");
+    if (got.chars.startsWith(expect)) return { text: cutAfter(expect.length), left: "" };
+    // All of it is echo so far, and more of the echo is still to come. Only once the frame's own id
+    // is among what was matched: a short output that happens to read like the typed line stays output.
+    if (expect.startsWith(got.chars) && this.typed.length - expect.length + got.chars.length >= ECHO_HEAD)
+      return { text: "", left: expect.slice(got.chars.length) };
+    if (anywhere && expect === this.typed) {
+      const at = got.chars.indexOf(expect);
+      if (at >= 0) return { text: cutAfter(at + expect.length), left: "" };
+    }
+    return { text, left: "" };
+  }
+
+  /** What of the typed line had not been echoed when the frame began. */
+  private echoMissing(): string {
+    if (!this.typed) return "";
+    const before = seen(this.before).chars;
+    // The typed line opens with this frame's id: where that was echoed, the echo began.
+    // (Through `;BEGIN`: the line names the id a second time, where it prints the end marker.)
+    const head = this.typed.slice(0, ECHO_HEAD + 6);
+    const at = before.lastIndexOf(head);
+    if (at >= 0) {
+      const echoed = before.slice(at);
+      return this.typed.startsWith(echoed) ? this.typed.slice(echoed.length) : "";
+    }
+    for (let k = Math.min(head.length - 1, before.length); k > 0; k--)
+      if (before.endsWith(this.typed.slice(0, k))) return this.typed.slice(k);
+    return this.typed;
+  }
+
   private append(text: string): void {
     if (this.started) {
       this.output = (this.output + text).slice(-this.maxOutput);
       if (!this.options.handshake && text) {
         this.displayBuffer += cleanInternalTitleOsc(text);
       }
+    } else if (this.typed && text) {
+      this.before = (this.before + text).slice(-(this.typed.length * 3 + 4000));
     }
   }
 }

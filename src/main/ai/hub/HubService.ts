@@ -187,7 +187,7 @@ import { AuditLog } from "./AuditLog";
 import { LocalMcpServer } from "./LocalMcpServer";
 import { SessionRecorder } from "./SessionRecorder";
 import { McpTokenStore } from "../../web/McpTokenStore";
-import { boundedContext, clip, maskContext, maskStrings, safeError } from "./privacy";
+import { boundedContext, boundedPrompt, clip, HUB_PROMPT_MAX, maskContext, maskStrings, PERSON_PROMPT_MAX, safeError } from "./privacy";
 import { createLogger } from "../../log";
 import { runWorkforce } from "./WorkforceRunner";
 import { LearningQueue } from "./LearningQueue";
@@ -344,13 +344,26 @@ export function budgetStopLine(stop: NonNullable<AgentTask["budgetStop"]>): stri
     ? `Stopped after ${n} ${n === 1 ? "command" : "commands"}, the limit for this conversation. Continue to give it ${n} more.`
     : `Stopped after ${n} ${n === 1 ? "minute" : "minutes"}, the time limit for this conversation. Continue to give it ${n} more.`;
 }
+/**
+ * How long the model is given for a one-line command suggestion. Five seconds
+ * was less than a reasoning model takes, so the answer was always the canned
+ * one, after a five-second wait.
+ */
+const INLINE_SUGGEST_TIMEOUT_MS = 15_000;
+/** How long a stopped run is given to end by itself before the hub lets go of it. */
+const RUN_STOP_GRACE_MS = 10_000;
 /** A run the hub started itself (workforce specialist, memory proposals). */
 const isBackgroundRun = (t: AgentTask | undefined): boolean =>
   Boolean(t?.workforceRunId || t?.distillSourceId || t?.evalCaseId);
 export interface HubHost {
   changed(): void;
   inventoryTargets(): Promise<InventoryTarget[]>;
-  openSchedule(schedule: AgentSchedule): Promise<string>;
+  /**
+   * Opens a terminal of the hub's own on a saved target (or "local") and
+   * registers it under `label`. It is not connected to yet: the hub does that
+   * once the prompt is there (`openUnattendedTerminal`).
+   */
+  openSchedule(target: Pick<AgentSchedule, "profileId" | "shell">, label: string): Promise<string>;
   /** Closes a terminal the hub opened for itself (an investigator's). */
   closeSession?(sessionId: string): void;
   backgroundChanged(background: boolean, autoStart: boolean): Promise<void>;
@@ -537,7 +550,8 @@ export interface HubHost {
 export type AppActionHost = ReturnType<HubService["appActionHost"]>;
 
 export class HubService {
-  readonly terminals = new TerminalRegistry();
+  // On Windows the terminals run in a pseudo console that delivers a command's markers ahead of its text.
+  readonly terminals = new TerminalRegistry({ lateOutput: process.platform === "win32" });
   readonly store: HubStore;
   readonly config: AiConfigStore;
   readonly context: ContextService;
@@ -586,8 +600,28 @@ export class HubService {
   private ticking = false;
   /** When the previous pass over the schedules began: a job that fell due after it is late, not missed. */
   private lastScheduleLoopAt = 0;
+  /** For a recording that is being made: the recording its conversation pointed to before. */
+  private readonly recordingBefore = new Map<string, string | undefined>();
   /** The terminal each scheduled run was given, so it is closed when the run ends. */
   private readonly scheduleSessions = new Map<string, string>();
+  /** Terminals the hub opened for a run while it ran (another server of the cluster, a ticket's target). */
+  private readonly runTerminals = new Map<string, Set<string>>();
+
+  /**
+   * A terminal the hub opened for this run is closed when the run ends: it is
+   * nobody's tab, and left open it reads to the team as a person connected to
+   * that server.
+   */
+  closeWhenRunEnds(taskId: string, sessionId: string): void {
+    const task = this.store.data.tasks.find((t) => t.id === taskId);
+    if (!task || (!active(task) && !this.runtimes.has(taskId) && !this.launches.has(taskId))) {
+      this.host.closeSession?.(sessionId);
+      return;
+    }
+    const set = this.runTerminals.get(taskId) ?? new Set<string>();
+    set.add(sessionId);
+    this.runTerminals.set(taskId, set);
+  }
 
   /**
    * A scheduled run has ended: its schedule says how (not just "Started"),
@@ -599,6 +633,8 @@ export class HubService {
       this.scheduleSessions.delete(taskId);
       this.host.closeSession?.(sessionId);
     }
+    for (const opened of this.runTerminals.get(taskId) ?? []) this.host.closeSession?.(opened);
+    this.runTerminals.delete(taskId);
     const schedule = this.store.data.schedules.find((s) => s.lastTaskId === taskId);
     const task = this.store.data.tasks.find((t) => t.id === taskId);
     if (!schedule || !task || active(task)) return;
@@ -899,6 +935,8 @@ export class HubService {
       void this.recordings()
         .start({ sessionId: session.id, taskId: task.id, label: session.label, ...this.terminals.size(session.id) })
         .then((info) => {
+          // Kept, so that a recording in which nothing ran can give the conversation its earlier one back.
+          if (task.recordingId !== info.id) this.recordingBefore.set(info.id, task.recordingId);
           task.recordingId = info.id;
         })
         .catch((e) => log.warn("Could not start recording a terminal", safeError(e)));
@@ -921,8 +959,21 @@ export class HubService {
         ?.stop(session.id)
         .then(async (info) => {
           if (!info || isDemoMode()) return;
-          const digest = await this.recordings().digest(info.id);
           const task = this.store.data.tasks.find((t) => t.id === info.taskId);
+          const before = this.recordingBefore.get(info.id);
+          this.recordingBefore.delete(info.id);
+          // A run that held the terminal and ran nothing recorded nothing worth keeping: no file, no
+          // "0 s, 0 commands" line in the audit log for every resume, and the conversation's
+          // recording stays the one in which something happened.
+          if (info.markers === 0) {
+            await this.recordings().discard(info.id);
+            if (task?.recordingId === info.id) {
+              task.recordingId = before;
+              this.changed();
+            }
+            return;
+          }
+          const digest = await this.recordings().digest(info.id);
           if (!digest) return;
           await this.audit().append({
             kind: "recording",
@@ -1332,7 +1383,7 @@ export class HubService {
           {
             id: crypto.randomUUID(),
             role: "user",
-            text: boundedContext(opts.prompt, 16_000),
+            text: boundedPrompt(opts.prompt, PERSON_PROMPT_MAX),
             at: now,
           },
           { id: crypto.randomUUID(), role: "assistant", text: "", at: now },
@@ -1553,7 +1604,7 @@ export class HubService {
               ? {
                   question,
                   status: "answered",
-                  report: boundedContext(result.text, 12_000),
+                  report: clip(result.text, 12_000),
                 }
               : {
                   question,
@@ -1582,18 +1633,38 @@ export class HubService {
     return results;
   }
 
+  /**
+   * Opens a terminal of the hub's own on a saved target and connects to it at
+   * its prompt: for a run nobody is sitting at (a schedule, a ticket the
+   * heartbeat took, an investigator). The one way such a terminal is made
+   * ready, so that a run is never started on one that cannot run anything.
+   * A terminal that does not get to a prompt is closed again, and the error
+   * says what it last showed.
+   */
+  private async openUnattendedTerminal(
+    target: { profileId: string; shell: AgentSchedule["shell"] },
+    label: string,
+  ): Promise<string> {
+    const id = await this.host.openSchedule({ profileId: target.profileId, shell: target.shell }, label);
+    try {
+      await this.terminals.armAtPrompt(id, target.shell);
+    } catch (error) {
+      this.host.closeSession?.(id);
+      throw error;
+    }
+    return id;
+  }
+
   /** Opens a terminal for an investigator on the parent's target. Undefined when that is not possible. */
   private async openInvestigatorTerminal(parent: AgentTask): Promise<string | undefined> {
     if (isDemoMode() || !parent.target || !this.host.closeSession) return undefined;
     const session = this.terminals.get(parent.target.sessionId);
     if (!session || session.kind === "k8s" || !session.shell) return undefined;
     try {
-      const id = await this.host.openSchedule({
-        profileId: session.kind === "local" ? "local" : (session.profileId ?? ""),
-        shell: session.shell,
-      } as AgentSchedule);
-      await this.terminals.arm(id, session.shell);
-      return id;
+      return await this.openUnattendedTerminal(
+        { profileId: session.kind === "local" ? "local" : (session.profileId ?? ""), shell: session.shell },
+        `Investigator: ${clip(parent.target.label.replace(/^(?:Investigator|Schedule|Ticket): /, ""), 80)}`,
+      );
     } catch (error) {
       log.info("No terminal for an investigator", safeError(error));
       return undefined;
@@ -1980,6 +2051,7 @@ export class HubService {
       case "resume": {
         const task = this.task(request.taskId);
         if (active(task)) throw new Error("Task is still active");
+        await this.reviveOwnTerminal(task);
         if (task.target) {
           const session = this.terminals.get(task.target.sessionId);
           if (!session || session.state === "disconnected") {
@@ -2131,6 +2203,7 @@ export class HubService {
               };
             }
           } else if (task.target) {
+            await this.reviveOwnTerminal(task);
             const terminal = this.terminals.get(task.target.sessionId);
             if (terminal && terminal.state !== "disconnected") {
               task.target = {
@@ -2823,7 +2896,7 @@ export class HubService {
           ...s,
           id,
           title: clip(requiredText(s.title), 200),
-          prompt: boundedContext(requiredText(s.prompt)),
+          prompt: boundedPrompt(requiredText(s.prompt), PERSON_PROMPT_MAX),
           profileId: requiredText(s.profileId),
           model: requiredText(s.model),
           intervalMinutes: integer(s.intervalMinutes, 1, 525600),
@@ -3829,7 +3902,13 @@ export class HubService {
       }
       case "recording-read": {
         const cast = await this.recordings().read(requiredText(request.id));
-        if (!cast) throw new Error("That recording is not on this computer any more.");
+        if (!cast) {
+          // "Not any more" only for one that is known to have been here: a run names it, or the audit log sealed it.
+          const known =
+            this.store.data.tasks.some((t) => t.recordingId === request.id) ||
+            (await this.audit().recent(5000)).some((e) => e.kind === "recording" && e.changeId === request.id);
+          throw new Error(known ? "That recording is not on this computer any more." : "There is no recording with that id.");
+        }
         // Whether it is still what was sealed into the audit log when it was finished.
         const digest = await this.recordings().digest(request.id);
         const seal = (await this.audit().recent(5000)).find((e) => e.kind === "recording" && e.changeId === request.id);
@@ -4028,7 +4107,9 @@ export class HubService {
     const rawPrompt =
       input.prompt?.trim() ||
       (startImages.length > 0 ? "Analyze the attached image(s)." : "");
-    const prompt = boundedContext(requiredText(rawPrompt), 16_000);
+    // The hub's own prompts open with their instructions and quote bounded data after them:
+    // they are passed whole. A person's message that is too long loses its middle, never its start.
+    const prompt = boundedPrompt(requiredText(rawPrompt), readOnly ? HUB_PROMPT_MAX : PERSON_PROMPT_MAX);
     const matchedAgent = input.agentId
       ? this.getAgentsList().find((a) => a.id === input.agentId)
       : undefined;
@@ -4088,12 +4169,17 @@ export class HubService {
     try {
       await this.launch(task, schedule);
     } catch (error) {
+      // A person who stopped it while it started keeps the conversation they stopped. One that could
+      // not be started at all (the terminal is taken, no model is set, three are running) was never
+      // a conversation: the caller gets the error, and no failed, empty entry is left in the list.
+      const neverStarted = active(task) || task.status === "failed";
       if (active(task)) {
         task.status = "failed";
         task.error = safeError(error);
       }
       this.broker.revoke(task.id);
       this.terminals.release(task.id);
+      if (neverStarted) this.store.data.tasks = this.store.data.tasks.filter((t) => t !== task);
       this.changed();
       throw error;
     }
@@ -4126,6 +4212,9 @@ export class HubService {
     // Every run has the conversation's whole budget: what the last one used is not carried over.
     task.budgetStop = undefined;
     task.commandsUsed = 0;
+    // What this run spends is its own to be counted: the earlier runs' share stays as it was put down.
+    task.usageCountedTokens = this.usagePutDown(task, (task.usage?.inputTokens ?? 0) + (task.usage?.outputTokens ?? 0));
+    task.usageCounted = undefined;
     try {
       await this.reattachTicket(task);
       await this.launchReserved(task, launchMarker, schedule);
@@ -4277,6 +4366,9 @@ export class HubService {
         }
       })
       .finally(async () => {
+        // A run that was let go of while it hung (see `releaseStuckRun`) ends here much later, perhaps
+        // beside a new run of the same conversation: it has nothing left to end.
+        if (this.runtimes.get(task.id) !== runtime) return;
         this.clearRunTimer(task.id);
         this.broker.revoke(task.id);
         this.terminals.release(task.id);
@@ -4495,6 +4587,8 @@ export class HubService {
       .finally(() => {
         task.updatedAt = Date.now();
         this.broker.revoke(task.id);
+        // The terminal is the person's again: a command from outside holds it only while it runs.
+        this.terminals.release(task.id);
         this.changed();
       });
     // The change the broker made for it, once it exists: getting the terminal ready can take a while.
@@ -4536,14 +4630,23 @@ export class HubService {
    * nothing as far as the budget was concerned — and the budget is what the
    * screen calls "tokens this month".
    */
-  private countAgentUsage(task: AgentTask): void {
-    if (!task.agentId || task.usageCounted) return;
+  private countAgentUsage(task: AgentTask, agentId = task.agentId): void {
+    if (!agentId) return;
     const used = (task.usage?.inputTokens ?? 0) + (task.usage?.outputTokens ?? 0);
-    // Nothing reported yet (a stopped run says what it spent a moment later): not counted yet either.
-    if (used <= 0) return;
+    // `task.usage` is the whole conversation's: every run of it (a reply, an approved plan, "Continue")
+    // adds to it, and only what was not put down yet is added to the agent's month.
+    const fresh = used - this.usagePutDown(task, used);
+    // Nothing new reported yet (a stopped run says what it spent a moment later): not counted yet either.
+    if (fresh <= 0) return;
     task.usageCounted = true;
-    this.store.data.agentUsage = addUsage(this.store.data.agentUsage ?? {}, task.agentId, used);
+    task.usageCountedTokens = used;
+    this.store.data.agentUsage = addUsage(this.store.data.agentUsage ?? {}, agentId, fresh);
     this.lastWorkSync = 0;
+  }
+
+  /** How many of a conversation's tokens are already on an agent's month. A conversation counted before this was kept per run was counted whole. */
+  private usagePutDown(task: AgentTask, used: number): number {
+    return task.usageCountedTokens ?? (task.usageCounted ? used : 0);
   }
 
   private mcpTokenStore?: McpTokenStore;
@@ -4717,11 +4820,14 @@ export class HubService {
     if (task.budgetStop) this.noteBudgetStop(task);
     else task.error = reason;
     task.verification = "incomplete";
+    task.updatedAt = Date.now();
     this.broker.revoke(task.id);
     this.terminals.release(task.id);
     if (task.ticketId) this.settleTickets();
     this.changed();
-    await this.runtimes.get(task.id)?.stop();
+    const runtime = this.runtimes.get(task.id);
+    await runtime?.stop();
+    if (runtime) this.releaseStuckRun(task, runtime);
     // Stopping a workforce conversation stops its specialists too.
     for (const [runId, leadId] of this.workforceLeads) {
       if (leadId !== task.id) continue;
@@ -4730,6 +4836,31 @@ export class HubService {
       ))
         await this.stop(child, reason);
     }
+  }
+  /**
+   * A stopped run normally ends by itself a moment later. One that is blocked
+   * inside a tool call that never returns (a connection that hangs) does not:
+   * it would stay "running" for ever, whoever waits for it (a ticket, a
+   * workforce run, the asking agent) would wait for ever, and "Continue"
+   * would be refused. After a grace period the hub lets go of it: the
+   * conversation is free again, and whatever the blocked call does later is
+   * refused, because its capability is revoked.
+   */
+  private runStopGraceMs = RUN_STOP_GRACE_MS;
+  private releaseStuckRun(task: AgentTask, runtime: { stop(): Promise<void> }): void {
+    const timer = setTimeout(() => {
+      if (this.disposed || this.runtimes.get(task.id) !== runtime) return;
+      log.warn("A stopped run did not end by itself; letting go of it", task.id);
+      this.clearRunTimer(task.id);
+      this.broker.revoke(task.id);
+      this.terminals.release(task.id);
+      this.runtimes.delete(task.id);
+      task.updatedAt = Date.now();
+      this.settled(task.id);
+      if (task.ticketId) this.settleTickets();
+      this.changed();
+    }, this.runStopGraceMs);
+    timer.unref?.();
   }
   /** Ends the conversation with the line that says its budget was used, once per run. */
   private noteBudgetStop(task: AgentTask): void {
@@ -5155,12 +5286,19 @@ export class HubService {
     // The pages the model was shown are the only ones it may update, and only as they are now.
     const now = this.store.data.kbPages ?? [];
     const stillShown = shown.flatMap((p) => now.filter((q) => q.id === p.id && q.revision === p.revision));
+    const unusable = { count: 0 };
     const ops = parsePageOps(answer, stillShown, known, {
       allTitles: now.map((p) => p.title),
       updatesOnly: options.updatesOnly,
       mayCreate: options.mayCreate,
+      unusable,
     });
     if (!ops) throw new Error("The model's answer could not be used.");
+    // Pages that were answered but not in the format asked for are a failed run, not a run that found nothing to write.
+    if (ops.length === 0 && unusable.count > 0)
+      throw new Error(
+        `The model answered with ${unusable.count} page${unusable.count === 1 ? "" : "s"} in a format that could not be read, so nothing was saved.`,
+      );
     const applied = applyPageOps(now, ops, {
       by: "assistant",
       source,
@@ -6566,22 +6704,31 @@ export class HubService {
       });
       if (held.client !== client) throw new Error(`${held.by} is already running this ticket.`);
     }
+    // Nobody sits at a terminal for a ticket the heartbeat takes (or one started without naming a
+    // terminal): where the ticket names one of the workspace's servers, the run gets a terminal of its own there.
+    const own = sessionId ? undefined : await this.openTicketTerminal(ticket, agent);
     let task: AgentTask;
     try {
       task = await this.start({
-        prompt: ticketPrompt(
-          ticket,
-          live(this.store.data.workGoals).find((g) => g.id === ticket.goalId),
-          { tickets: live(this.store.data.workTickets), agents, agent },
-        ),
-        sessionId,
+        prompt:
+          ticketPrompt(
+            ticket,
+            live(this.store.data.workGoals).find((g) => g.id === ticket.goalId),
+            { tickets: live(this.store.data.workTickets), agents, agent },
+          ) + (own?.note ? `\n\n${own.note}` : ""),
+        sessionId: sessionId ?? own?.sessionId,
         mode: agent.defaultMode,
         agentId: agent.id,
         agentName: agent.name,
       });
     } catch (e) {
+      if (own?.sessionId) this.host.closeSession?.(own.sessionId);
       await sync?.release(ticket.id, client).catch(() => undefined);
       throw e;
+    }
+    if (own?.sessionId) {
+      task.ownTerminal = own.terminal;
+      this.closeWhenRunEnds(task.id, own.sessionId);
     }
     task.ticketId = ticket.id;
     task.title = clip(`Ticket: ${ticket.title}`, 100);
@@ -6647,6 +6794,64 @@ export class HubService {
   }
 
   /**
+   * A terminal for a ticket's run on the server the ticket names. Undefined
+   * when the ticket names none of the workspace's servers or the agent only
+   * advises; a `note` instead of a session when the server is known and no
+   * terminal could be opened on it (it needs a person to sign in, it is
+   * down): the run is told, so that its report says so.
+   */
+  private async openTicketTerminal(
+    ticket: WorkTicket,
+    agent: MissionAgent,
+  ): Promise<{ sessionId?: string; terminal?: NonNullable<AgentTask["ownTerminal"]>; note?: string } | undefined> {
+    const name = ticket.target?.trim().toLowerCase();
+    if (isDemoMode() || !name || agent.defaultMode === "advice" || agent.runnerId) return undefined;
+    if (!this.host.openServerTerminal || !this.host.closeSession) return undefined;
+    if (this.getKnownServers().length === 0) await this.collectExtraContext().catch(() => undefined);
+    const server = this.getKnownServers().find(
+      (s) => s.name.toLowerCase() === name || s.id.toLowerCase() === name || s.host?.toLowerCase() === name,
+    );
+    if (!server) return undefined;
+    try {
+      const sessionId = await this.host.openServerTerminal(server.id);
+      return { sessionId, terminal: { via: "server", profileId: server.id, shell: "bash", label: server.name } };
+    } catch (error) {
+      log.info("No terminal for a ticket run", safeError(error));
+      return {
+        note: `No terminal could be opened on ${server.name} for this run (${clip(safeError(error), 300)}), so you cannot run commands there. Say so in your report, with what a person should check on the server.`,
+      };
+    }
+  }
+
+  /**
+   * A conversation whose terminal the hub opened itself goes on: the terminal
+   * was closed when its last run ended, and is opened again on the same
+   * target. Left as it is when it cannot be opened; the caller then treats
+   * the conversation as one without a terminal.
+   */
+  private async reviveOwnTerminal(task: AgentTask): Promise<void> {
+    const own = task.ownTerminal;
+    if (!own || isDemoMode()) return;
+    const session = task.target && this.terminals.get(task.target.sessionId);
+    if (session && session.state !== "disconnected") return;
+    try {
+      const id =
+        own.via === "server"
+          ? await this.host.openServerTerminal!(own.profileId)
+          : await this.openUnattendedTerminal({ profileId: own.profileId, shell: own.shell }, own.label);
+      const opened = this.terminals.get(id);
+      if (!opened) return;
+      task.target = { sessionId: opened.id, generation: opened.generation, label: opened.label };
+      // Closed again when the run that is about to start ends (also when it fails to start).
+      const set = this.runTerminals.get(task.id) ?? new Set<string>();
+      set.add(id);
+      this.runTerminals.set(task.id, set);
+    } catch (error) {
+      log.info("The run's own terminal could not be opened again", safeError(error));
+    }
+  }
+
+  /**
    * Tickets this app is running whose run has ended: the report goes on the
    * ticket, the tokens on the agent's budget, and the ticket to review.
    */
@@ -6660,12 +6865,8 @@ export class HubService {
         // The conversation is gone (history was deleted): the ticket goes back.
         this.putTicket({ ...ticket, status: "todo", claim: undefined, updatedAt: Date.now() });
       } else {
-        const used = (task.usage?.inputTokens ?? 0) + (task.usage?.outputTokens ?? 0);
-        // Counted once. A run that carries the agent has already been counted when it ended.
-        if (ticket.assigneeAgentId && !task.usageCounted && used > 0) {
-          task.usageCounted = true;
-          this.store.data.agentUsage = addUsage(this.store.data.agentUsage ?? {}, ticket.assigneeAgentId, used);
-        }
+        // Only what was not counted when the run ended (a run that carries the agent has been).
+        this.countAgentUsage(task, ticket.assigneeAgentId ?? task.agentId);
         this.putTicket(ticketAfterRun(ticket, task));
       }
       void this.work()
@@ -6961,9 +7162,8 @@ export class HubService {
         }
         let opened: string | undefined;
         try {
-          const id = await this.host.openSchedule(schedule);
+          const id = await this.openUnattendedTerminal(schedule, `Schedule: ${schedule.title}`);
           opened = id;
-          await this.terminals.arm(id, schedule.shell);
           const task = await this.start(
             {
               prompt: schedule.prompt,
@@ -6974,6 +7174,7 @@ export class HubService {
             },
             schedule,
           );
+          task.ownTerminal = { via: "schedule", profileId: schedule.profileId, shell: schedule.shell, label: `Schedule: ${schedule.title}` };
           schedule.lastTaskId = task.id;
           schedule.lastStatus = "Running";
           this.scheduleSessions.set(task.id, id);
@@ -7336,12 +7537,14 @@ export class HubService {
     const finish = (
       proposed: number,
       error?: string,
+      pagesError?: string,
     ): MemoryDistillStatus => {
       const status: MemoryDistillStatus = {
         at: Date.now(),
         sourceTitle: clip(source.title, 160),
         proposed,
         ...(error ? { error } : {}),
+        ...(pagesError ? { pagesError } : {}),
       };
       this.store.data.lastMemoryDistill = status;
       this.store.data.distilledSourceIds = [
@@ -7413,10 +7616,16 @@ export class HubService {
       // The same record may also belong on a page: what was confirmed about a
       // symptom or a procedure. `learnPagesFrom` decides whether the record
       // confirmed anything; a chat about nothing teaches no page.
-      await this.learnPagesFrom(source).catch((e) =>
-        log.warn("Could not add what was learned to the pages", safeError(e)),
+      // A page that could not be written is said where the outcome of this reading is shown, not only
+      // logged. It is not the reading's own failure: the record is not read again because of it.
+      const pagesError = await this.learnPagesFrom(source).then(
+        () => undefined,
+        (e) => {
+          log.warn("Could not add what was learned to the pages", safeError(e));
+          return clip(safeError(e), 200);
+        },
       );
-      return finish(fresh.length);
+      return finish(fresh.length, undefined, pagesError);
     } catch (error) {
       return finish(0, safeError(error));
     } finally {
@@ -7712,7 +7921,7 @@ export class HubService {
       const config = await this.config.getConfig();
       if (config.enabled) {
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 5000);
+        const timeout = setTimeout(() => controller.abort(), INLINE_SUGGEST_TIMEOUT_MS);
         try {
           let outputText = "";
           if (config.provider === "openai-codex") {
@@ -7734,6 +7943,8 @@ export class HubService {
                 headers: buildCodexHeaders(creds.accessToken, baseUrl),
                 body: JSON.stringify({
                   model: config.model || creds.defaultModel || "gpt-6.1-sol",
+                  // A reasoning model at its default effort takes 5 to 11 seconds for this; one command does not need it.
+                  reasoning: { effort: "low" },
                   instructions: sysPrompt,
                   input: [
                     {
@@ -8198,6 +8409,7 @@ export class HubService {
       },
       request: this.request.bind(this),
       changed: this.changed.bind(this),
+      closeWhenRunEnds: this.closeWhenRunEnds.bind(this),
       getMcpServersList: this.getMcpServersList.bind(this),
       getKbDocumentsList: this.getKbDocumentsList.bind(this),
       getAgentsList: this.getAgentsList.bind(this),

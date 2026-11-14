@@ -8,6 +8,7 @@ import type {
 import {
   CommandFrames,
   commandEnvelope,
+  lastVisibleLine,
   type CommandResult,
 } from "./shellAdapters";
 import { boundedContext } from "./privacy";
@@ -47,20 +48,31 @@ interface LiveTerminal {
   rows?: number;
   /** The last bit the terminal showed, kept always: to tell a password prompt from a shell prompt. */
   tail?: string;
+  /** When the terminal last showed anything. */
+  fedAt?: number;
   /** When connecting automatically last failed, and why: it is not tried again for a while. */
   armFailedAt?: number;
   armFailure?: string;
   lastSubmittedCommand?: string;
   lastSubmittedAt?: number;
   trimPostHandshakeNewline?: boolean;
+  /** The last line of the shell's prompt, as the latest handshake saw it (only where output can arrive late). */
+  promptLine?: string;
   pending?: {
     frames: CommandFrames;
     handshake: boolean;
     resolve: (value: CommandResult) => void;
     reject: (error: Error) => void;
     timer: NodeJS.Timeout;
+    /** Runs while the frame has ended and text the terminal delivers late is waited for. */
+    lateTimer?: NodeJS.Timeout;
+    lateSince?: number;
   };
 }
+
+/** How long a terminal that delivers text late is given after the last text, and at most, before a command's frame is closed. */
+const LATE_QUIET_MS = 150;
+const LATE_MAX_MS = 800;
 
 export interface DetectedCommandActivity {
   kind: "command" | "config-edit" | "service" | "deploy";
@@ -198,6 +210,15 @@ export class TerminalRegistry extends EventEmitter {
   private lastResolvedFailures = new Map<string, TerminalCommandFailure>();
   private observing = false;
 
+  /**
+   * `lateOutput`: the terminals of this registry run in a pseudo console that
+   * may deliver a command's output after its end marker (Windows). The frame
+   * of a command is then closed when the prompt is back, not at the marker.
+   */
+  constructor(private readonly options: { lateOutput?: boolean } = {}) {
+    super();
+  }
+
   observe(enabled: boolean): void {
     this.observing = enabled;
     if (!enabled)
@@ -288,37 +309,8 @@ export class TerminalRegistry extends EventEmitter {
         if (this.observing && display && !s.pending.handshake) {
           s.output = (s.output + display).slice(-128_000);
         }
-        if (result) {
-          const pending = s.pending;
-          clearTimeout(pending.timer);
-          s.pending = undefined;
-          s.trimPostHandshakeNewline = pending.handshake;
-          s.view.state = "ready";
-          s.view.cwd = result.cwd;
-          s.view.updatedAt = Date.now();
-          if (!pending.handshake && result.exitCode !== 0) {
-            this.lastResolvedFailures.delete(id);
-            this.lastFailures.set(id, {
-              sessionId: id,
-              label: s.view.label,
-              command: pending.frames.commandText || s.lastSubmittedCommand || "",
-              exitCode: result.exitCode,
-              snippet: boundedContext(result.output, 1500),
-              at: Date.now(),
-            });
-          } else if (!pending.handshake && result.exitCode === 0) {
-            const prevFailure = this.lastFailures.get(id);
-            if (prevFailure) {
-              this.lastResolvedFailures.set(id, prevFailure);
-              this.lastFailures.delete(id);
-            } else {
-              this.lastResolvedFailures.delete(id);
-            }
-          }
-          pending.resolve({ ...result, output: boundedContext(result.output) });
-          if (!pending.handshake) this.emit("executed", id, result.exitCode);
-          this.emit("changed");
-        }
+        if (result) this.finish(id, s, result);
+        else if (s.pending.frames.awaitingLate) this.awaitLate(id, s);
         return display;
       } catch (error) {
         this.invalidate(
@@ -336,9 +328,70 @@ export class TerminalRegistry extends EventEmitter {
     if (this.observing && clean) {
       s.output = (s.output + clean).slice(-128_000);
     }
-    if (clean) s.tail = ((s.tail ?? "") + clean).slice(-240);
+    if (clean) {
+      s.tail = ((s.tail ?? "") + clean).slice(-240);
+      s.fedAt = Date.now();
+    }
     this.detectHumanOutputFailure(id, s, clean);
     return clean;
+  }
+
+  /** A command's frame is complete: the terminal is ready again and whoever ran it gets the result. */
+  private finish(id: string, s: LiveTerminal, result: CommandResult): void {
+    const pending = s.pending;
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    clearTimeout(pending.lateTimer);
+    // After a handshake, which prints nothing, what the terminal shows last is the prompt.
+    if (pending.handshake && pending.frames.awaitingLate) s.promptLine = pending.frames.promptSeen() || undefined;
+    s.pending = undefined;
+    s.trimPostHandshakeNewline = pending.handshake;
+    s.view.state = "ready";
+    s.view.cwd = result.cwd;
+    s.view.updatedAt = Date.now();
+    if (!pending.handshake && result.exitCode !== 0) {
+      this.lastResolvedFailures.delete(id);
+      this.lastFailures.set(id, {
+        sessionId: id,
+        label: s.view.label,
+        command: pending.frames.commandText || s.lastSubmittedCommand || "",
+        exitCode: result.exitCode,
+        snippet: boundedContext(result.output, 1500),
+        at: Date.now(),
+      });
+    } else if (!pending.handshake && result.exitCode === 0) {
+      const prevFailure = this.lastFailures.get(id);
+      if (prevFailure) {
+        this.lastResolvedFailures.set(id, prevFailure);
+        this.lastFailures.delete(id);
+      } else {
+        this.lastResolvedFailures.delete(id);
+      }
+    }
+    pending.resolve({ ...result, output: boundedContext(result.output) });
+    if (!pending.handshake) this.emit("executed", id, result.exitCode);
+    this.emit("changed");
+  }
+
+  /**
+   * The end marker came, and the terminal may still owe text printed before
+   * it. The frame is closed when nothing has come for a moment (or the prompt
+   * is back, which `feed` sees by itself), and never later than `LATE_MAX_MS`.
+   */
+  private awaitLate(id: string, s: LiveTerminal): void {
+    const pending = s.pending;
+    if (!pending) return;
+    pending.lateSince ??= Date.now();
+    clearTimeout(pending.lateTimer);
+    const left = Math.max(0, pending.lateSince + LATE_MAX_MS - Date.now());
+    pending.lateTimer = setTimeout(() => {
+      if (s.pending !== pending) return;
+      try {
+        this.finish(id, s, pending.frames.settle());
+      } catch (error) {
+        this.invalidate(id, error instanceof Error ? error.message : "Invalid terminal stream");
+      }
+    }, Math.min(LATE_QUIET_MS, left));
   }
 
   private detectHumanOutputFailure(
@@ -551,6 +604,43 @@ export class TerminalRegistry extends EventEmitter {
     return { ...s.view };
   }
 
+  /**
+   * Waits until a terminal that was just opened shows a shell prompt and has
+   * been quiet for a moment. A terminal the hub opens for itself is connected
+   * to only after this: the handshake is typed, and typed into a connection
+   * that is still being made it is lost, or answered too late to be heard.
+   * Fails with what the terminal last showed (ssh's own error, usually).
+   *
+   * A last line that reads as a prompt is taken after a short quiet. A prompt
+   * of a shape this does not know (a theme's arrow, a bare "~") is taken once
+   * the terminal has shown something and been quiet for longer; the handshake
+   * then finds out whether a shell is there. A question for a password is
+   * never a prompt.
+   */
+  async whenAtPrompt(id: string, timeoutMs = 30_000, quietMs = 300, settledMs = 1500): Promise<void> {
+    const until = Date.now() + timeoutMs;
+    for (;;) {
+      const s = this.sessions.get(id);
+      if (!s) throw new Error("No such terminal. It may have been closed; pick one that is open.");
+      const last = lastVisibleLine(s.tail ?? "").slice(-300);
+      if (s.view.state === "disconnected")
+        throw new Error(last ? `The connection ended before a shell prompt came. It last showed: ${last}` : "The connection ended before a shell prompt came.");
+      const quiet = Date.now() - (s.fedAt ?? 0);
+      if (last && !atSecretPrompt(s.tail ?? "") && quiet >= (atShellPrompt(s.tail) ? quietMs : settledMs)) return;
+      if (Date.now() >= until)
+        throw new Error(
+          `No shell prompt within ${Math.round(timeoutMs / 1000)} seconds. ${last ? `The terminal last showed: ${last}` : "The terminal showed nothing."}`,
+        );
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+
+  /** Connects to a terminal the hub opened for itself: once its prompt is there, never before. */
+  async armAtPrompt(id: string, shell: ShellKind, timeoutMs = 30_000): Promise<void> {
+    await this.whenAtPrompt(id, timeoutMs);
+    await this.arm(id, shell);
+  }
+
   async arm(id: string, shell: ShellKind): Promise<void> {
     const s = this.require(id);
     if (s.view.owner || s.pending) throw new Error("Terminal is in use");
@@ -632,12 +722,21 @@ export class TerminalRegistry extends EventEmitter {
     // The command as it was asked for, before the envelope around it: a recording marks it.
     if (!handshake) this.emit("executing", id, command, owner);
     s.view.state = "busy";
+    // A pseudo console that passes markers ahead of text: only for a shell whose output is plain text
+    // (PowerShell's comes in frames of its own), and not for a stream that is no pseudo console.
+    const late =
+      this.options.lateOutput === true &&
+      s.view.kind !== "k8s" &&
+      s.view.shell !== "powershell" &&
+      s.view.shell !== "pwsh" &&
+      s.view.shell !== "cmd";
     const promise = new Promise<CommandResult>((resolve, reject) => {
       s.pending = {
         frames: new CommandFrames(nonce, 128_000, {
           command,
           shell: s.view.shell,
           handshake,
+          ...(late ? { lateOutput: { prompt: s.promptLine } } : {}),
         }),
         handshake,
         resolve,
@@ -699,6 +798,7 @@ export class TerminalRegistry extends EventEmitter {
     const owner = s.view.owner;
     if (s.pending) {
       clearTimeout(s.pending.timer);
+      clearTimeout(s.pending.lateTimer);
       s.pending.reject(new Error(reason));
       s.pending = undefined;
     }
@@ -714,7 +814,9 @@ export class TerminalRegistry extends EventEmitter {
 
   private require(id: string): LiveTerminal {
     const s = this.sessions.get(id);
-    if (!s || s.view.state === "disconnected")
+    // Two different things to a person: an id that names nothing, and a terminal whose connection ended.
+    if (!s) throw new Error("No such terminal. It may have been closed; pick one that is open.");
+    if (s.view.state === "disconnected")
       throw new Error("Terminal is disconnected");
     return s;
   }

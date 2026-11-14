@@ -64,6 +64,33 @@ export function clip(value: string, max: number): string {
   return clean.length > max ? `${clean.slice(0, Math.max(0, max - 1)).trimEnd()}…` : clean;
 }
 
+/** The longest message a person may start or continue a conversation with. */
+export const PERSON_PROMPT_MAX = 16_000;
+/**
+ * The longest prompt of the hub's own runs (reading, pages, reviews, the
+ * workforce lead). Their builders bound the data they quote, so this is a
+ * ceiling that is not normally met, not the place where they are cut.
+ */
+export const HUB_PROMPT_MAX = 200_000;
+
+/**
+ * A text that is read as a whole and whose two ends matter: a prompt, which
+ * opens with what is asked and often closes with the answer format or the
+ * question. Masked; when too long the MIDDLE is left out and the text says so,
+ * so that the instructions are never what is lost.
+ */
+export function boundedPrompt(value: string, max: number): string {
+  const clean = maskContext(value);
+  if (clean.length <= max) return clean;
+  const note = (n: number): string => `
+[… ${n} characters left out here: the text was too long …]
+`;
+  const room = Math.max(0, max - note(clean.length).length);
+  const head = Math.ceil((room * 2) / 3);
+  const tail = room - head;
+  return `${clean.slice(0, head).trimEnd()}${note(clean.length - head - tail)}${tail > 0 ? clean.slice(-tail).trimStart() : ""}`;
+}
+
 export function safeError(error: unknown): string {
   return boundedContext(
     error instanceof Error ? error.message : String(error),

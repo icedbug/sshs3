@@ -212,3 +212,48 @@ describe("what a person types at a password prompt", () => {
     expect(JSON.stringify(failure ?? {})).not.toContain("hunter2");
   });
 });
+
+describe("the rule a check is held to, and the rule the agent is told", () => {
+  it("says in the tool's own text that the check must exit 0 as well as show the expected text", async () => {
+    const { toolsForTask } = await import("../../src/main/ai/hub/DirectAgentRuntime");
+    const AGENT_TOOLS = toolsForTask({ ...task("assisted"), target: { sessionId: "one", generation: "g", label: "host" } });
+    const { PLAN_TOOL } = await import("../../src/main/ai/hub/PlanMode");
+    const change = AGENT_TOOLS.find((t) => t.name === "sshs3_change")!;
+    expect(change.description).toMatch(/must exit with code 0 and whose output must contain `expected`/);
+    const check = (change.parameters as { properties: { check: { properties: Record<string, { description: string }> } } }).properties.check.properties;
+    expect(check.command.description).toMatch(/exit with code 0/);
+    expect(check.expected.description).toMatch(/exiting 0/);
+    expect(PLAN_TOOL.parameters.properties.steps.items.properties.check.description).toMatch(/must exit with code 0/);
+  });
+
+  it("tells the agent why, when the check showed the expected text and still did not pass", async () => {
+    // The check of a real run: `nginx -t && diff -u backup current`. Its output had the text; diff exits 1 on a difference.
+    const { broker, t, capability, answer } = await setup("autonomous");
+    answer("test failed", 1); // the check before
+    answer(""); // the change
+    answer("nginx: configuration file test is successful\n--- a\n+++ b", 1); // the check after
+    answer("nginx: configuration file test is successful\n--- a\n+++ b", 1); // and once more after the settle time
+    answer(""); // the rollback
+    answer("test failed", 1); // the check after the rollback
+    const res = (await broker.invoke(capability.key, {
+      ...nginx,
+      check: { command: "nginx -t 2>&1 && diff -u /etc/nginx/a.bak /etc/nginx/a", expected: "test is successful" },
+    })) as Record<string, unknown>;
+    expect(res).toMatchObject({ checkPassed: false, rolledBack: true, checkExitCode: 1 });
+    expect(String(res.checkFailedBecause)).toMatch(/contained the expected text, but the check exited with code 1.*only when it also exits 0/);
+    // And the person reading the change sees the same reason beside the check's output.
+    expect(t.changes[0].check?.output).toContain("exited with code 1");
+  });
+
+  it("says which of the two it was when the text is missing", async () => {
+    const { broker, capability, answer } = await setup("autonomous");
+    answer("inactive", 3);
+    answer("");
+    answer("starting");
+    answer("starting");
+    answer("");
+    answer("inactive", 3);
+    const res = (await broker.invoke(capability.key, nginx)) as Record<string, unknown>;
+    expect(String(res.checkFailedBecause)).toBe("The check exited 0, but its output did not contain the expected text.");
+  });
+});

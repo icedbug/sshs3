@@ -892,7 +892,7 @@ export function createHub(
         // Already gone.
       }
     },
-    openSchedule: async (schedule) => {
+    openSchedule: async (schedule, label) => {
       let id: string;
       if (schedule.profileId === "local") {
         // On a shared server a local shell is a shell on the server itself, as its own user: there is none.
@@ -944,7 +944,7 @@ export function createHub(
       hub.terminals.register(
         {
           id,
-          label: `Schedule: ${schedule.title}`,
+          label,
           kind: schedule.profileId === "local" ? "local" : "ssh",
           profileId: schedule.profileId,
         },
@@ -1009,7 +1009,21 @@ export function createHub(
         },
         (data) => bridge.sshPtyManager.write(session.sessionId, data),
       );
-      await hub.terminals.arm(session.sessionId, "bash").catch(() => {});
+      // Connected to at its prompt, or not at all: a terminal that never gets ready is closed again
+      // and the caller is told why, instead of being handed a session nothing can run in.
+      try {
+        await hub.terminals.armAtPrompt(session.sessionId, "bash");
+      } catch (error) {
+        try {
+          bridge.sshPtyManager.kill(session.sessionId);
+        } catch {
+          // Already gone.
+        }
+        throw new Error(
+          `No terminal could be opened on ${effectiveProfile.name || effectiveProfile.host}, so nothing was run there: ${safeError(error)}`,
+          { cause: error },
+        );
+      }
       return session.sessionId;
     },
     extraAppContext: async () => {
@@ -1361,7 +1375,9 @@ export function createHub(
           },
           (data) => bridge.sshPtyManager.write(session.sessionId, data),
         );
-        await hub.terminals.arm(session.sessionId, shell).catch(() => {});
+        // A shell that is not at its prompt yet would lose the handshake: wait for it. A local shell
+        // that cannot be connected to stays open for the person; the next command connects again.
+        await hub.terminals.armAtPrompt(session.sessionId, shell).catch(() => {});
         return { sessionId: session.sessionId };
       }
       return {};
