@@ -50,6 +50,16 @@ describe("a test case made from a conversation", () => {
     expect(() => caseFromTask({ ...finished(), messages: [] } as AgentTask, {}, "x")).toThrow(/no question/);
   });
 
+  it("keeps the start of a long question, in the case and in what the judge is asked", () => {
+    const long = `Why is pool tank slow? ${"detail ".repeat(3000)}Answer in one line.`;
+    const task = { ...finished(), messages: [{ role: "user", text: long, at: 1 }] } as AgentTask;
+    const c = caseFromTask(task, {}, "x");
+    expect(c.prompt.startsWith("Why is pool tank slow?")).toBe(true);
+    expect(c.prompt).toContain("left out here");
+    expect(c.prompt.endsWith("Answer in one line.")).toBe(true);
+    expect(judgePrompt({ prompt: long, expect: c.expect }, "a")).toContain("## The question\nWhy is pool tank slow?");
+  });
+
   it("answers a tool call from the closest recording, the same question twice the same way, and says when nothing was recorded", () => {
     const replay = new Replay(caseFromTask(finished(), {}, "x").recorded);
     expect(replay.answer("terminal_command", '{"command":"zfs get quota tank/backup"}')).toContain("quota 40%");

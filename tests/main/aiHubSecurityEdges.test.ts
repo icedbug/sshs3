@@ -155,7 +155,8 @@ describe("sign-in on the server", () => {
     const file = path.join(dir, "web-users.json");
     expect(await fs.readFile(file, "utf8")).not.toContain(sessionToken);
     expect((await auth.verifySession(sessionToken))?.id).toBe(user.id);
-    expect(await auth.verifySession(`${sessionToken.slice(0, -1)}0`)).toBeNull();
+    // A token that differs in its last character, whatever that character is.
+    expect(await auth.verifySession(`${sessionToken.slice(0, -1)}${sessionToken.endsWith("0") ? "1" : "0"}`)).toBeNull();
     expect(await auth.verifySession("")).toBeNull();
 
     // A file written by an older version, with the token itself in it.
