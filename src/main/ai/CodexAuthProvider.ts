@@ -198,6 +198,10 @@ export class CodexAuthProvider {
             accessToken = refreshed.accessToken;
             refreshToken = refreshed.refreshToken;
             await this.persistRefreshedTokens(file, parsed, accessToken, refreshToken);
+          } else if (isTokenExpiring(accessToken, 0)) {
+            // This sign-in has run out and could not be renewed: it is of no use, and a later
+            // file (a newer `codex login`, say) may hold one that works.
+            continue;
           }
         }
 

@@ -137,6 +137,42 @@ describe("CodexAuthProvider", () => {
     expect(creds?.accessToken).toBe(freshToken);
     expect(creds?.accountId).toBe("acct-456");
   });
+
+  it("passes over a sign-in that has run out and cannot be renewed, and uses the next one", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "sshs3-codex-fallthrough-"));
+    disposals.push(() => fs.rm(tmpDir, { recursive: true, force: true }));
+    await fs.mkdir(path.join(tmpDir, "hermes-native"), { recursive: true });
+    const now = Math.floor(Date.now() / 1000);
+    const expired = fakeJwt({ exp: now - 3600 });
+    const valid = fakeJwt({ exp: now + 3600, "https://api.openai.com/auth": { chatgpt_account_id: "acct-next" } });
+    await fs.writeFile(
+      path.join(tmpDir, "hermes-native", "auth.json"),
+      JSON.stringify({ providers: { "openai-codex": { tokens: { access_token: expired, refresh_token: "rt_dead" } } } }),
+    );
+    await fs.writeFile(
+      path.join(tmpDir, "ai-auth.json"),
+      JSON.stringify({ tokens: { access_token: valid, refresh_token: "rt_live" } }),
+    );
+    const refused = vi.fn().mockResolvedValue({ ok: false, json: async () => ({}) });
+    const provider = new CodexAuthProvider(tmpDir);
+
+    const creds = await provider.resolveCredentials(refused as unknown as typeof fetch);
+    expect(refused).toHaveBeenCalledTimes(1);
+    expect(creds?.accessToken).toBe(valid);
+    expect(creds?.accountId).toBe("acct-next");
+
+    // When no file holds a sign-in that works, there is none: an expired token is not handed out.
+    await fs.rm(path.join(tmpDir, "ai-auth.json"));
+    expect(await provider.resolveCredentials(refused as unknown as typeof fetch)).toBeNull();
+
+    // A token that is only close to its end is still good when the renewal did not get through.
+    const closing = fakeJwt({ exp: now + 60 });
+    await fs.writeFile(
+      path.join(tmpDir, "hermes-native", "auth.json"),
+      JSON.stringify({ providers: { "openai-codex": { tokens: { access_token: closing, refresh_token: "rt_slow" } } } }),
+    );
+    expect((await provider.resolveCredentials(refused as unknown as typeof fetch))?.accessToken).toBe(closing);
+  });
 });
 
 describe("Collaborative terminal input & activity detection", () => {

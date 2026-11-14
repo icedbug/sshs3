@@ -11,6 +11,7 @@ import {
   type AiProvider,
 } from "../../shared/types/ai";
 import { CodexAuthProvider } from "./CodexAuthProvider";
+import { isDemoMode } from "../demo/demoMode";
 import {
   decryptSecretValue,
   encryptSecretValue,
@@ -34,8 +35,11 @@ export class AiConfigStore {
   private filePath: string;
   private writeQueue: Promise<void> = Promise.resolve();
   private sessionKey = "";
+  /** A workspace with a folder of its own (a tenant on a shared server, a test): its sign-in is looked for there only. */
+  private readonly ownFolderOnly: boolean;
 
   constructor(customPath?: string) {
+    this.ownFolderOnly = Boolean(customPath);
     if (customPath) {
       this.filePath = customPath;
     } else {
@@ -53,6 +57,16 @@ export class AiConfigStore {
     return this.filePath;
   }
 
+  /**
+   * Where the ChatGPT/Codex sign-in is looked for, as the argument to CodexAuthProvider. A workspace
+   * with its own folder, and the demo, look in that folder only: never in the host's ~/.codex. The
+   * desktop app (undefined) also uses the person's own `codex login`, so the status shown and the
+   * sign-in a run uses are the same one.
+   */
+  public codexAuthDir(): string | undefined {
+    return this.ownFolderOnly || isDemoMode() ? path.dirname(this.filePath) : undefined;
+  }
+
   /** The configuration including the decrypted API key. Main process only. */
   public async getConfig(): Promise<AiConfig & { apiKey: string }> {
     const stored = await this.readWithCodexAutoDetect();
@@ -67,7 +81,7 @@ export class AiConfigStore {
   public async getView(): Promise<AiConfigView> {
     const config = await this.getConfig();
     const { apiKey, ...rest } = config;
-    const codexProvider = new CodexAuthProvider(path.dirname(this.filePath));
+    const codexProvider = new CodexAuthProvider(this.codexAuthDir());
     const codex = await codexProvider.getStatus();
     const codexModels = await codexProvider.getAvailableModels();
     const hasOAuth = rest.provider === "openai-codex" && codex.connected;
@@ -155,7 +169,7 @@ export class AiConfigStore {
           delete next.baseUrl;
         }
         if (isStaleOrNonCodexModel(next.model)) {
-          const codex = await new CodexAuthProvider(path.dirname(this.filePath)).getStatus();
+          const codex = await new CodexAuthProvider(this.codexAuthDir()).getStatus();
           next.model = codex.defaultModel || DEFAULT_AI_MODELS["openai-codex"];
         }
       }
@@ -221,7 +235,7 @@ export class AiConfigStore {
           delete merged.baseUrl;
         }
         if (isStaleOrNonCodexModel(merged.model)) {
-          const codex = await new CodexAuthProvider(path.dirname(this.filePath)).getStatus();
+          const codex = await new CodexAuthProvider(this.codexAuthDir()).getStatus();
           merged.model = codex.defaultModel || DEFAULT_AI_MODELS["openai-codex"];
         }
       }
@@ -233,9 +247,9 @@ export class AiConfigStore {
       ) {
         throw error;
       }
-      // Nothing saved yet: a ChatGPT/Codex sign-in found in this workspace's own folder is offered as the
+      // Nothing saved yet: a ChatGPT/Codex sign-in found for this workspace is offered as the
       // provider, but the assistant stays off until a person switches it on.
-      const codex = await new CodexAuthProvider(path.dirname(this.filePath)).getStatus();
+      const codex = await new CodexAuthProvider(this.codexAuthDir()).getStatus();
       if (codex.connected) {
         return {
           ...DEFAULT_AI_CONFIG,

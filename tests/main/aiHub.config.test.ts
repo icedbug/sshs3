@@ -2,9 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-const crypto = vi.hoisted(() => ({ available: true, fail: false }));
+const crypto = vi.hoisted(() => ({ available: true, fail: false, userData: "" }));
 vi.mock("electron", () => ({
-  app: { getPath: () => os.tmpdir() },
+  app: { getPath: () => crypto.userData || os.tmpdir() },
   safeStorage: {
     isEncryptionAvailable: () => crypto.available,
     encryptString: (value: string) => {
@@ -16,17 +16,66 @@ vi.mock("electron", () => ({
   },
 }));
 import { AiConfigStore } from "../../src/main/ai/AiConfigStore";
+import { setDemoModeForTesting } from "../../src/main/demo/demoMode";
 describe("AI model credentials", () => {
   let dir: string;
   let file: string;
   beforeEach(async () => {
     crypto.available = true;
     crypto.fail = false;
+    crypto.userData = "";
     dir = await fs.mkdtemp(path.join(os.tmpdir(), "sshs3-ai-keys-"));
     file = path.join(dir, "config.json");
   });
   afterEach(async () => {
+    setDemoModeForTesting(undefined);
+    vi.restoreAllMocks();
     await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  });
+
+  it("shows the person's `codex login` as signed in on the desktop app, and never to a workspace with its own folder or the demo", async () => {
+    // A home folder where only `codex login` was run: no sign-in in sshs3's own data folder.
+    const home = path.join(dir, "home");
+    const userData = path.join(dir, "userData");
+    await fs.mkdir(path.join(home, ".codex"), { recursive: true });
+    await fs.mkdir(userData, { recursive: true });
+    const jwt = (payload: Record<string, unknown>) =>
+      `${Buffer.from(JSON.stringify({ alg: "none" })).toString("base64url")}.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.sig`;
+    await fs.writeFile(
+      path.join(home, ".codex", "auth.json"),
+      JSON.stringify({
+        tokens: {
+          access_token: jwt({
+            exp: Math.floor(Date.now() / 1000) + 3600,
+            "https://api.openai.com/profile": { email: "sara@example.com" },
+          }),
+          refresh_token: "rt_cli",
+        },
+      }),
+    );
+    vi.spyOn(os, "homedir").mockReturnValue(home);
+    crypto.userData = userData;
+
+    // The desktop app (no folder given): the status is the sign-in a run would use.
+    const desktop = new AiConfigStore();
+    expect(desktop.codexAuthDir()).toBeUndefined();
+    expect(await desktop.getView()).toMatchObject({
+      codexConnected: true,
+      codexAccountEmail: "sara@example.com",
+      provider: "openai-codex",
+      enabled: false,
+    });
+
+    // A workspace with its own folder (a tenant on a shared server): the host's ~/.codex is not its sign-in.
+    const tenant = new AiConfigStore(path.join(dir, "tenant", "ai-config.json"));
+    expect(tenant.codexAuthDir()).toBe(path.join(dir, "tenant"));
+    expect(await tenant.getView()).toMatchObject({ codexConnected: false });
+
+    // The demo keeps to its own folder too, also on the desktop app.
+    setDemoModeForTesting(true);
+    const demo = new AiConfigStore();
+    expect(demo.codexAuthDir()).toBe(userData);
+    expect(await demo.getView()).toMatchObject({ codexConnected: false });
   });
   it("stores ciphertext but never returns the key to the renderer", async () => {
     const store = new AiConfigStore(file);
