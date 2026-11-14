@@ -429,3 +429,57 @@ describe('OpenSshSftpProcess exec / createExecStream', () => {
     expect((await errored).message).toBe('Cannot run exec: process configuration not available');
   });
 });
+
+describe('OpenSshSftpProcess: a start that hangs', () => {
+  let mockChild: any;
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockChild = resetMockChild();
+  });
+  const config = { host: 'db-01', port: 2203, username: 'ops', authType: 'publickey' } as any;
+
+  it('is given up when ssh stays connected and silent, where it used to wait for ever', async () => {
+    // Seen on the team server: `ssh -s sftp` with the TCP connection up, idle, for 45 minutes.
+    const proc = new OpenSshSftpProcess();
+    const started = Date.now();
+    await expect(proc.start({ config, handshakeSilenceMs: 80 })).rejects.toThrow(
+      /ssh did not get as far as the server's SFTP service: it was silent for 0 seconds\. The attempt was ended\./
+    );
+    expect(Date.now() - started).toBeLessThan(2000);
+    // The hung ssh is ended, not left behind.
+    expect(mockChild.kill).toHaveBeenCalledWith('SIGTERM');
+  });
+
+  it('says what ssh last said, and counts from the last sign of life', async () => {
+    const proc = new OpenSshSftpProcess();
+    const start = proc.start({ config, handshakeSilenceMs: 120 });
+    start.catch(() => {});
+    // Something every 60 ms keeps it alive past the 120 ms it would otherwise get.
+    for (let i = 0; i < 4; i++) {
+      await new Promise((r) => setTimeout(r, 60));
+      mockChild.stderr.write('debug1: still negotiating\n');
+    }
+    expect(mockChild.kill).not.toHaveBeenCalled();
+    await expect(start).rejects.toThrow(/it last said: .*still negotiating/s);
+  });
+
+  it('does not count the time a person is being asked for a touch of their key', async () => {
+    const proc = new OpenSshSftpProcess();
+    const onPresence = vi.fn();
+    const start = proc.start({ config, handshakeSilenceMs: 60, onPresence });
+    mockChild.stderr.write('Confirm user presence for key ED25519-SK SHA256:abc\n');
+    await new Promise((r) => setTimeout(r, 250));
+    expect(onPresence).toHaveBeenCalled();
+    expect(mockChild.kill).not.toHaveBeenCalled();
+    const resp = Buffer.alloc(9);
+    resp.writeUInt32BE(5, 0);
+    resp.writeUInt8(FXP.VERSION, 4);
+    resp.writeUInt32BE(3, 5);
+    mockChild.stdout.write(resp);
+    await expect(start).resolves.toBeDefined();
+    // Once it is up, the watch is over: silence afterwards is an idle connection, not a hang.
+    await new Promise((r) => setTimeout(r, 150));
+    expect(mockChild.kill).not.toHaveBeenCalled();
+    await proc.close();
+  });
+});
