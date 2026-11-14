@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import type {
   KbDocument,
   KbPage,
+  KbPageChange,
   KbPageKind,
   KbPageSource,
   KbPageUse,
@@ -667,6 +668,49 @@ export function undoPageChange(page: KbPage, by: string, now = Date.now()): { pa
       history: [{ at: now, by, summary: `Undid: ${latest.summary}`, previous: versionOf(page) }, ...rest].slice(0, HISTORY_KEPT),
     },
   };
+}
+
+/**
+ * Two copies of one page from two installations. The newer one is the page. When the older one is
+ * not a version the newer one was made from (two people, or two installations' compilers, changed the
+ * page at the same time), its text used to be dropped without a trace. It is kept as an entry in the
+ * page's history instead, with the text it would have given the page, so that somebody can read it
+ * and put back what matters.
+ *
+ * The result is the same whichever side makes it, and one step above the newer copy, so it reaches
+ * everyone and the installations agree at once.
+ */
+export function mergePageCopies<T extends KbPage & { deleted?: boolean }>(local: T, remote: T): T {
+  if (local.updatedAt === remote.updatedAt) return local;
+  const [newer, older] = remote.updatedAt > local.updatedAt ? [remote, local] : [local, remote];
+  // A removal is a copy like any other, and carries no text to keep.
+  if (newer.deleted || older.deleted || !Array.isArray(newer.history) || !Array.isArray(older.history)) return newer;
+  const lost = older.history[0];
+  if (!lost) return newer;
+  const has = (h: KbPageChange): boolean => h.at === lost.at && h.by === lost.by;
+  // The newer copy knows the older one's last change: it was made from it (or from something later).
+  if (newer.history.some(has)) return newer;
+  // Older than everything the newer copy remembers: a copy that was simply far behind.
+  const oldest = newer.history.at(-1);
+  if (newer.history.length >= HISTORY_KEPT && oldest && lost.at < oldest.at) return newer;
+  const kept: KbPageChange = {
+    at: lost.at,
+    by: lost.by,
+    summary: clip(
+      `Not in the page: changed at the same time as the newer change by ${newer.updatedBy}. Its text is kept here. (${lost.summary})`,
+      300,
+    ),
+    previous: versionOf(older),
+  };
+  const history = [...newer.history, kept]
+    .sort((a, b) => b.at - a.at)
+    .slice(0, HISTORY_KEPT)
+    // The kept text is the point of the entry: it stays, whatever its place in the list.
+    .map((h, i) => (i < VERSIONS_KEPT || h === kept ? h : { at: h.at, by: h.by, summary: h.summary }));
+  // The newest change stays first: undoing takes back what the page shows, not the entry beside it.
+  const first = history.findIndex((h) => h !== kept);
+  if (first > 0) history.unshift(...history.splice(first, 1));
+  return { ...newer, revision: Math.max(newer.revision, older.revision) + 1, history, updatedAt: newer.updatedAt + 1 };
 }
 
 /** A page as a person saved it: marked so the assistant adds to it from then on. */

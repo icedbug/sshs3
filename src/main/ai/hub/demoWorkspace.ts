@@ -829,9 +829,10 @@ export function updateDemoServer(input: {
       input.nodeRole !== undefined
         ? input.nodeRole.trim() || undefined
         : existing.nodeRole,
-    description: input.description?.trim() || undefined,
-    role: input.role?.trim() || undefined,
-    tags: input.tags?.length ? input.tags : undefined,
+    // Only what was sent changes.
+    description: input.description !== undefined ? input.description.trim() || undefined : existing.description,
+    role: input.role !== undefined ? input.role.trim() || undefined : existing.role,
+    tags: input.tags !== undefined ? (input.tags.length ? input.tags : undefined) : existing.tags,
     updatedAt: new Date().toISOString(),
     updatedBy: "jacob (demo)",
   });

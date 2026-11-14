@@ -53,7 +53,7 @@ import { AiConfigStore } from "../AiConfigStore";
 import { CodexAuthProvider } from "../CodexAuthProvider";
 import { HermesManager, type HermesModelConfig } from "../HermesManager";
 import { HubStore } from "./HubStore";
-import { S3WorkspaceSyncService } from "./S3WorkspaceSyncService";
+import { S3WorkspaceSyncService, mergeMemoryCopies } from "./S3WorkspaceSyncService";
 import { McpClientManager } from "./McpClientManager";
 import { MAX_MEMORY_TEXT, KnowledgeBaseService } from "./KnowledgeBaseService";
 import { SelfLearningService } from "./SelfLearningService";
@@ -91,6 +91,7 @@ import {
   withUse,
   MAX_NEW_PAGES_PER_SOURCE,
   PAGE_KINDS,
+  mergePageCopies,
 } from "./KbCompile";
 import { buildDailyReport } from "./DailyReport";
 import { lowerMode } from "./AppGuard";
@@ -195,6 +196,7 @@ import {
   TICKET_STATUSES,
   WORKFORCE_TEMPLATES,
   mergeItems,
+  mergeTicketCopies,
   addUsage,
   withComment,
   claimIsFresh,
@@ -374,6 +376,8 @@ export interface HubHost {
     description?: string;
     role?: string;
     tags?: string[];
+    /** Who makes the change: stored with the server as "updated by". */
+    updatedBy?: string;
   }): Promise<void>;
   upsertServer?(input: {
     id?: string;
@@ -407,6 +411,8 @@ export interface HubHost {
     description?: string;
     tags?: string[];
     shared?: boolean;
+    /** Who makes the change: stored with the server as "updated by". */
+    updatedBy?: string;
   }): Promise<WorkspaceServerSummary>;
   deleteServer?(profileId: string): Promise<void>;
   syncSharedServersFromS3?(
@@ -825,13 +831,8 @@ export class HubService {
             if ((state.deletedMemoryIds[m.id] ?? 0) >= (m.updatedAt ?? 0))
               continue;
             const prev = sharedMemMap.get(m.id);
-            if (!prev) {
-              sharedMemMap.set(m.id, m);
-            } else if ((m.updatedAt ?? 0) > (prev.updatedAt ?? 0)) {
-              sharedMemMap.set(m.id, { ...prev, ...m });
-            } else {
-              sharedMemMap.set(m.id, { ...m, ...prev });
-            }
+            // The newer copy decides, also about what it no longer has; votes are kept from both.
+            sharedMemMap.set(m.id, prev ? mergeMemoryCopies(prev, m) : m);
           }
           this.store.data.memories = [
             ...personalMemories,
@@ -2397,6 +2398,7 @@ export class HubService {
           description: request.description,
           role: request.role,
           tags: request.tags,
+          updatedBy: await this.resolveActorName(),
         });
         const actor = await this.resolveActorName();
         const nowIso = new Date().toISOString();
@@ -2497,6 +2499,7 @@ export class HubService {
           description: s.description,
           tags: s.tags,
           shared: s.shared ?? true,
+          updatedBy: actor,
         });
         const targetId = saved?.id ?? s.id ?? crypto.randomUUID();
         if (this.store.data.deletedServerIds?.[targetId]) {
@@ -2903,22 +2906,27 @@ export class HubService {
         if (goal) this.putGoal({ ...goal, deleted: true, updatedAt: Date.now() });
         break;
       }
-      case "ticket-save":
-        await this.saveTicketFrom(request.ticket);
+      case "ticket-save": {
+        const notes: string[] = [];
+        await this.saveTicketFrom(request.ticket, undefined, false, notes);
+        if (notes.length) reply = { notes };
         break;
+      }
       case "ticket-move": {
-        const ticket = this.ticket(request.id);
         if (!TICKET_STATUSES.includes(request.status)) throw new Error("Unknown ticket status");
         if (request.status === "in_progress")
           throw new Error("A ticket is in progress while an agent runs it: start it instead.");
-        if (ticket.status === "in_progress" && claimIsFresh(ticket))
-          throw new Error("An agent is running this ticket. Stop the run first.");
-        this.putTicket({ ...ticket, status: request.status, claim: undefined, updatedAt: Date.now() });
+        const running = await this.ticketRunsNow(this.ticket(request.id));
+        if (running) throw new Error(running);
+        // Read again: the check asked the bucket, and the board may have moved meanwhile.
+        this.putTicket({ ...this.ticket(request.id), status: request.status, claim: undefined, updatedAt: Date.now() });
         break;
       }
       case "ticket-delete": {
-        const ticket = this.ticket(request.id);
-        this.putTicket({ ...ticket, deleted: true, claim: undefined, updatedAt: Date.now() });
+        // Removing a ticket from under its run would leave the run's result with nowhere to go.
+        const running = await this.ticketRunsNow(this.ticket(request.id));
+        if (running) throw new Error(running);
+        this.putTicket({ ...this.ticket(request.id), deleted: true, claim: undefined, updatedAt: Date.now() });
         break;
       }
       case "ticket-comment": {
@@ -2935,6 +2943,13 @@ export class HubService {
         const ticket = this.ticket(request.id);
         if (ticket.status !== "review" && ticket.status !== "blocked")
           throw new Error("Only a ticket in review or blocked can be decided.");
+        const running = await this.ticketRunsNow(ticket);
+        if (running) throw new Error(running);
+        // "Done" would be said of work that has not started: the agent's plan still waits for its answer.
+        if (request.approve && this.store.data.tasks.find((t) => t.id === ticket.taskId)?.plan?.status === "proposed")
+          throw new Error(
+            "The agent proposed a plan and has not carried it out. Approve or reject the plan in the conversation first, or send the ticket back.",
+          );
         const who = await this.resolveActorName();
         const note = request.note?.trim();
         const decided = note
@@ -3873,6 +3888,7 @@ export class HubService {
     task.budgetStop = undefined;
     task.commandsUsed = 0;
     try {
+      await this.reattachTicket(task);
       await this.launchReserved(task, launchMarker, schedule);
     } catch (error) {
       this.broker.revoke(task.id);
@@ -3881,6 +3897,7 @@ export class HubService {
         task.status = "failed";
         task.error = safeError(error);
       }
+      if (task.ticketId) this.settleTickets();
       this.changed();
       throw error;
     } finally {
@@ -5392,9 +5409,14 @@ export class HubService {
     return now - last >= wait + jitter;
   }
 
-  /** Takes over what another installation read since last time, so that no server is read twice. */
-  private async pullSharedFacts(): Promise<void> {
-    if (!this.s3Workspace.canUseBucket() || isDemoMode()) return;
+  /**
+   * Takes over what another installation read since last time, so that no server is read twice.
+   * True when a reading was taken over. This is the team's knowledge, not this person's schedule:
+   * it runs with the board's sync whether or not readings are switched on here.
+   */
+  private async pullSharedFacts(): Promise<boolean> {
+    if (!this.s3Workspace.canUseBucket() || isDemoMode()) return false;
+    let taken = false;
     const objects = this.s3Workspace.objects;
     const names = (await objects.list("work/facts/heads")).filter((n) => n.endsWith(".json")).slice(0, 1000);
     // Only readings of servers this installation knows as shared: a teammate's personal server is not ours to see.
@@ -5408,12 +5430,15 @@ export class HubService {
         if ((mine?.collectedAt ?? 0) >= head.collectedAt) continue;
         const data = JSON.parse((await objects.read(`work/facts/data/${name}`))?.toString("utf8") ?? "null") as FactsRecord | null;
         // Stamped with the head's time: the data is written only when it changed, so it can be older than the reading.
-        if (data?.serverId === head.serverId && data.facts)
+        if (data?.serverId === head.serverId && data.facts) {
           await this.factsStore.put({ ...data, collectedAt: Math.max(data.collectedAt ?? 0, head.collectedAt), dismissed: mine?.dismissed, changes: data.changes ?? [] });
+          taken = true;
+        }
       } catch {
         // One unreadable object does not stop the rest.
       }
     }
+    return taken;
   }
 
   private factsRound?: Promise<void>;
@@ -5968,7 +5993,15 @@ export class HubService {
           ...(refired && was.resolvedAt ? { firingSince: now } : {}),
           ...(alert.startsAt ? { startsAt: alert.startsAt } : {}),
         };
-        this.putTicket({ ...(note ? withComment(open, alert.source, note, now) : { ...open, updatedAt: now }), alert: alertNow });
+        // Over before anybody started on it: out of the heartbeat's way, and back when it fires again.
+        const park = resolved && !was.resolvedAt && open.status === "todo";
+        const unpark = refired && was.parked === true && open.status === "backlog";
+        const text = park ? `${note} Moved to Backlog: nothing is firing. Move it back if it should still be looked at.` : note;
+        this.putTicket({
+          ...(text ? withComment(open, alert.source, text, now) : { ...open, updatedAt: now }),
+          ...(park ? { status: "backlog" as const } : unpark ? { status: "todo" as const } : {}),
+          alert: { ...alertNow, parked: park ? true : unpark || !resolved ? undefined : was.parked },
+        });
         updated.push(open.id);
         continue;
       }
@@ -6083,10 +6116,12 @@ export class HubService {
       changed = true;
     }
 
-    const pages = await sync.reconcile("pages", withRemovals(this.store.data.kbPages ?? [], removed.pages));
-    const pg = splitRemovals(pages.items);
+    const pages = await sync.reconcile("pages", withRemovals(this.store.data.kbPages ?? [], removed.pages), mergePageCopies);
+    // Merged into the pages as they are now: one that was compiled here while the bucket was read stays.
+    const pagesNow = mergeItems(withRemovals(this.store.data.kbPages ?? [], removed.pages), pages.items, mergePageCopies);
+    const pg = splitRemovals(pagesNow.items);
     removed.pages = pg.removed;
-    if (pages.changed) {
+    if (pages.changed || pagesNow.changed) {
       this.store.data.kbPages = pg.alive as KbPage[];
       changed = true;
     }
@@ -6158,10 +6193,17 @@ export class HubService {
     createdBy?: string,
     /** Made by an agent's run, not by a person. */
     byAgent = false,
+    /** Filled with what was saved differently from what was asked, for the reply. */
+    notes: string[] = [],
   ): Promise<WorkTicket> {
-    const existing = input.id
+    const known = input.id
       ? live(this.store.data.workTickets).find((t) => t.id === input.id)
       : undefined;
+    // A ticket that an agent is running keeps its place on the board: its text can be changed, its status
+    // belongs to the run. Asked of the bucket too, because this board can be behind another installation's.
+    const running = known ? await this.ticketRunsNow(known) : undefined;
+    // Read again after the question: the board may have moved while the bucket answered.
+    const existing = known ? live(this.store.data.workTickets).find((t) => t.id === known.id) : undefined;
     const now = Date.now();
     const agent = input.assigneeAgentId
       ? this.getAgentsList().find((a) => a.id === input.assigneeAgentId)
@@ -6176,8 +6218,23 @@ export class HubService {
         ? input.status
         : (existing?.status ?? (agent ? "todo" : "backlog"));
     // An agent cannot put work that started outside the team in front of another agent: a person moves it.
-    const status = byAgent && outside && !existing && wanted === "todo" ? "backlog" : wanted;
+    const status =
+      running && existing ? existing.status : byAgent && outside && !existing && wanted === "todo" ? "backlog" : wanted;
+    if (running && existing && input.status && input.status !== existing.status)
+      notes.push(`The status was not changed. ${running}`);
+    else if (input.status === "in_progress" && existing?.status !== "in_progress")
+      notes.push("The status was not changed: a ticket is in progress while an agent runs it. Start it instead.");
+    if (input.goalId && !goals.some((g) => g.id === input.goalId))
+      notes.push("The goal does not exist, so the ticket was saved without one.");
     const id = existing?.id ?? `t-${crypto.randomUUID().slice(0, 8)}`;
+    const blockers = (input.blockedBy ?? existing?.blockedBy ?? []).filter(
+      (b) => b !== id && live(this.store.data.workTickets).some((t) => t.id === b),
+    );
+    const dropped = (input.blockedBy ?? []).filter((b) => !blockers.includes(b));
+    if (dropped.length)
+      notes.push(
+        `Left out of "waits for", because ${dropped.length === 1 ? "it is" : "they are"} not on the board${dropped.includes(id) ? " (a ticket cannot wait for itself)" : ""}: ${dropped.join(", ")}.`,
+      );
     const ticket: WorkTicket = {
       ...existing,
       id,
@@ -6188,9 +6245,7 @@ export class HubService {
       assigneeAgentId: agent?.id,
       assigneeName: agent?.name,
       target: input.target?.trim() ? boundedContext(input.target.trim(), 200) : undefined,
-      blockedBy: (input.blockedBy ?? existing?.blockedBy ?? []).filter(
-        (b) => b !== id && live(this.store.data.workTickets).some((t) => t.id === b),
-      ),
+      blockedBy: blockers,
       parentId: input.parentId ?? existing?.parentId,
       ...(outside ? { outside } : {}),
       createdBy: existing?.createdBy ?? createdBy ?? (await this.resolveActorName()),
@@ -6262,6 +6317,56 @@ export class HubService {
   }
 
   /**
+   * Why the ticket cannot be moved, removed or decided right now: somebody's agent is running it. Asked
+   * of the claim in the bucket, not only of this installation's copy of the ticket. The board here can
+   * be most of a minute behind, and an edit made on that old view would take the ticket from under a
+   * teammate's run. Undefined when nobody runs it.
+   */
+  private async ticketRunsNow(ticket: WorkTicket): Promise<string | undefined> {
+    const client = this.clientId();
+    const here = "An agent is running this ticket. Stop the run first.";
+    if (
+      ticket.status === "in_progress" &&
+      ticket.claim?.client === client &&
+      this.store.data.tasks.some((t) => t.id === ticket.taskId && active(t))
+    )
+      return here;
+    const claim = await this.work()
+      ?.readClaim(ticket.id)
+      .catch(() => undefined);
+    if (claim && claim.client !== client && this.claimAlive(ticket.id, claim.seenAt, Date.now()))
+      return `${claim.by} is running this ticket on another computer. Stop the run there first.`;
+    return ticket.status === "in_progress" && claimIsFresh(ticket) ? here : undefined;
+  }
+
+  /**
+   * A ticket's conversation that goes on after its run ended (the agent's plan was approved, a person
+   * answered it, "Continue") is the ticket's run again. The ticket is checked out once more, so that
+   * what this run does and reports ends up on the ticket. Without this the ticket kept the report of
+   * the run that only proposed the plan, also after the work was done.
+   */
+  private async reattachTicket(task: AgentTask): Promise<void> {
+    if (!task.ticketId) return;
+    const ticket = live(this.store.data.workTickets).find((t) => t.id === task.ticketId);
+    // Only the ticket's latest conversation, and not one a person has already closed.
+    if (!ticket || ticket.taskId !== task.id || ticket.status === "in_progress" || ticket.status === "done") return;
+    const client = this.clientId();
+    const by = await this.resolveActorName();
+    const now = Date.now();
+    const sync = this.work();
+    if (sync) {
+      const held = await sync
+        .claim(ticket.id, { by, client }, now, { fresh: (c) => this.claimAlive(ticket.id, c.seenAt, Date.now()) })
+        .catch(() => undefined);
+      // Somebody else's app has taken the ticket meanwhile: the conversation goes on, the ticket is theirs.
+      if (held && held.client !== client) return;
+    }
+    const current = live(this.store.data.workTickets).find((t) => t.id === ticket.id);
+    if (!current || current.taskId !== task.id || current.status === "done") return;
+    this.putTicket({ ...current, status: "in_progress", claim: { by, client, at: now, seenAt: now }, updatedAt: now });
+  }
+
+  /**
    * Tickets this app is running whose run has ended: the report goes on the
    * ticket, the tokens on the agent's budget, and the ticket to review.
    */
@@ -6325,10 +6430,18 @@ export class HubService {
             if (!still && run && active(run)) void this.stop(run, "Another installation took this ticket over; this run stops so that only one works on it.");
           }
         const goals = await sync.reconcile("goals", this.store.data.workGoals ?? []);
-        const tickets = await sync.reconcile("tickets", this.store.data.workTickets ?? []);
+        // A ticket this installation is running stays its own to settle: a teammate's edit on a view
+        // that did not show the run yet must not take the ticket from under it.
+        const runningHere = (t: WorkTicket): boolean =>
+          !t.deleted &&
+          t.status === "in_progress" &&
+          t.claim?.client === client &&
+          this.store.data.tasks.some((x) => x.id === t.taskId);
+        const keepRun = (l: WorkTicket, r: WorkTicket): WorkTicket => mergeTicketCopies(l, r, runningHere);
+        const tickets = await sync.reconcile("tickets", this.store.data.workTickets ?? [], keepRun);
         // Merged into the board as it is now, not over it: what changed here while the bucket was read stays.
         this.store.data.workGoals = mergeItems(this.store.data.workGoals ?? [], goals.items).items;
-        this.store.data.workTickets = mergeItems(this.store.data.workTickets ?? [], tickets.items).items;
+        this.store.data.workTickets = mergeItems(this.store.data.workTickets ?? [], tickets.items, keepRun).items;
         // Another installation's run is judged alive by its claim file, and by this machine's own clock:
         // a claim whose seenAt has not moved for the claim's lifetime, as seen from here, has lapsed.
         for (const t of live(this.store.data.workTickets))
@@ -6337,6 +6450,11 @@ export class HubService {
             if (c) this.observeClaim(t.id, c.seenAt, now);
           }
         const shared = await this.syncSharedSetup(sync);
+        // A teammate's reading of a shared server, also for somebody who has not switched readings on.
+        const facts = await this.pullSharedFacts().catch((e) => {
+          log.warn("Reading shared server facts failed", safeError(e));
+          return false;
+        });
         const mine = JSON.stringify(this.store.data.agentUsage ?? {});
         if (mine !== this.uploadedUsage && mine !== "{}") {
           await sync.putUsage(client, this.store.data.agentUsage ?? {});
@@ -6351,7 +6469,7 @@ export class HubService {
         this.othersPageUse = await sync.readOtherPageUse<Record<string, KbPageUse>>(client);
         this.workSyncAt = Date.now();
         this.workSyncError = undefined;
-        if (goals.changed || tickets.changed || shared) this.changed();
+        if (goals.changed || tickets.changed || shared || facts) this.changed();
       } catch (e) {
         this.workSyncError = safeError(e);
       } finally {

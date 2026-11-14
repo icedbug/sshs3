@@ -4,6 +4,7 @@ import type {
   MissionAgent,
   WorkGoal,
   WorkTicket,
+  WorkTicketComment,
   WorkTicketStatus,
   WorkforceTemplateSummary,
 } from "../../../shared/types/aiHub";
@@ -44,26 +45,88 @@ export interface Mergeable {
  * Two copies of a collection become one: per id the newer copy wins, and a
  * removal is a copy like any other (it wins when it is the newer one).
  * `changed` tells whether the result differs from `local`.
+ *
+ * `resolve` decides for an item both sides have, where "the newer copy wins"
+ * would lose something: it gets both copies and returns the one to keep, or a
+ * new one made of both. A copy it makes must carry an `updatedAt` above both,
+ * so that it travels to everyone, and must come out the same whichever side
+ * makes it.
  */
 export function mergeItems<T extends Mergeable>(
   local: T[],
   remote: T[],
+  resolve?: (local: T, remote: T) => T,
 ): { items: T[]; changed: boolean; newerLocally: T[] } {
   const byId = new Map(local.map((x) => [x.id, x]));
   const remoteById = new Map(remote.map((x) => [x.id, x]));
   let changed = false;
   for (const r of remote) {
     const l = byId.get(r.id);
-    if (!l || r.updatedAt > l.updatedAt) {
-      byId.set(r.id, r);
+    const kept = !l ? r : resolve ? resolve(l, r) : r.updatedAt > l.updatedAt ? r : l;
+    if (kept !== l) {
+      byId.set(r.id, kept);
       changed = true;
     }
   }
-  const newerLocally = local.filter((l) => {
+  const items = [...byId.values()];
+  const newerLocally = items.filter((l) => {
     const r = remoteById.get(l.id);
     return !r || l.updatedAt > r.updatedAt;
   });
-  return { items: [...byId.values()], changed, newerLocally };
+  return { items, changed, newerLocally };
+}
+
+const sameComments = (a: WorkTicketComment[] | undefined, b: WorkTicketComment[]): boolean =>
+  (a ?? []).length === b.length && (a ?? []).every((c, i) => c.id === b[i].id);
+
+/**
+ * Two copies of one ticket. The newer one wins, with two exceptions that
+ * "newer wins" used to get wrong:
+ *
+ * - Comments are kept from both: two people who comment at the same time
+ *   both keep their comment.
+ * - The installation that is running the ticket decides about the run. A
+ *   teammate who moved, edited or removed the ticket on a view that did not
+ *   show the run yet does not take it away: their other changes are taken,
+ *   the run's state stays, and a removal is put back with a note, so that the
+ *   run's result has somewhere to go.
+ */
+export function mergeTicketCopies(
+  local: WorkTicket,
+  remote: WorkTicket,
+  runningHere: (ticket: WorkTicket) => boolean = () => false,
+): WorkTicket {
+  if (local.updatedAt === remote.updatedAt) return local;
+  const [newer, older] = remote.updatedAt > local.updatedAt ? [remote, local] : [local, remote];
+  if (newer === remote && runningHere(local)) {
+    const sameRun = remote.status === "in_progress" && remote.claim?.client === local.claim?.client && !remote.deleted;
+    if (!sameRun) {
+      const at = remote.updatedAt + 1;
+      const run = { status: local.status, statusAt: local.statusAt, claim: local.claim, taskId: local.taskId, result: local.result };
+      if (remote.deleted)
+        return {
+          ...withComment(
+            local,
+            "sshS3",
+            "This ticket was removed on another computer while an agent was running it here. It was kept so that the run's result is not lost; remove it again when the run has ended.",
+            at,
+          ),
+          ...run,
+        };
+      return { ...remote, ...run, comments: allComments(local, remote), updatedAt: at };
+    }
+  }
+  if (newer.deleted || older.deleted) return newer;
+  const comments = allComments(local, remote);
+  if (sameComments(newer.comments, comments)) return newer;
+  // One above the newer copy: the same on both sides, so the two installations agree at once.
+  return { ...newer, comments, updatedAt: newer.updatedAt + 1 };
+}
+
+function allComments(a: WorkTicket, b: WorkTicket): WorkTicketComment[] {
+  const byId = new Map<string, WorkTicketComment>();
+  for (const c of [...(a.comments ?? []), ...(b.comments ?? [])]) if (c?.id) byId.set(c.id, c);
+  return [...byId.values()].sort((x, y) => x.at - y.at || x.id.localeCompare(y.id)).slice(-40);
 }
 
 /** What is shown and worked: removals are kept in the data only so they travel. */
@@ -186,21 +249,34 @@ export function ticketAfterRun(ticket: WorkTicket, task: AgentTask, now = Date.n
   const report = [...task.messages].reverse().find((m) => m.role === "assistant" && m.text.trim())?.text;
   const used = (task.usage?.inputTokens ?? 0) + (task.usage?.outputTokens ?? 0);
   const ok = task.status === "completed";
+  // A conversation's count grows with every run of it. What an earlier run of the same
+  // conversation already put on the ticket is not added a second time.
+  const counted = ticket.settledRun?.taskId === task.id ? ticket.settledRun.tokens : 0;
+  // The run ends when the agent proposes a plan. Nothing was done yet: the ticket says that it
+  // waits for the plan's decision, not that the work is ready for review.
+  const waitsForPlan = ok && task.plan?.status === "proposed";
   return {
     ...ticket,
     status: ok ? "review" : "blocked",
     result: clip(
-      ok
-        ? report || "The run ended without a report."
-        : `The run ${task.status === "failed" ? "failed" : "stopped"}: ${task.error || report || "no reason was given."}`,
+      waitsForPlan
+        ? `${PLAN_WAITS} ${report || ""}`.trim()
+        : ok
+          ? report || "The run ended without a report."
+          : `The run ${task.status === "failed" ? "failed" : "stopped"}: ${task.error || report || "no reason was given."}`,
       8000,
     ),
-    tokens: (ticket.tokens ?? 0) + used,
+    tokens: Math.max(0, (ticket.tokens ?? 0) - counted) + used,
+    settledRun: { taskId: task.id, tokens: used },
     claim: undefined,
     taskId: task.id,
     updatedAt: now,
   };
 }
+
+/** How a ticket's result begins while its agent's plan waits for a person. */
+export const PLAN_WAITS =
+  "The agent proposed a plan and has not carried it out. Approve or reject the plan in the conversation; the ticket continues from there.";
 
 export function withComment(ticket: WorkTicket, author: string, text: string, now = Date.now()): WorkTicket {
   return {

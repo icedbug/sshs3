@@ -103,16 +103,25 @@ export class ProfileStore {
     return resultPromise;
   }
 
-  public async saveSSH(config: SSHConnectionConfig): Promise<void> {
+  /**
+   * `keepUpdatedAt`: for a copy that arrives from the team's sync. Its `updatedAt` says when
+   * somebody changed the server, and is kept. Stamping it with "now" made every received copy
+   * newer than the one it came from, so two installations sent the same unchanged server back and
+   * forth for ever, and "newest wins" was decided by who synced last instead of who edited last.
+   */
+  public async saveSSH(config: SSHConnectionConfig, options: { keepUpdatedAt?: boolean } = {}): Promise<void> {
     if (!config || !config.id || typeof config.id !== 'string' || !config.id.trim()) {
       throw new Error('Profile ID is required');
     }
 
     return this.queueMutation(async () => {
       const profiles = await this.getProfilesIncludingTombstones();
+      const given = options.keepUpdatedAt && config.updatedAt && Number.isFinite(Date.parse(config.updatedAt))
+        ? config.updatedAt
+        : undefined;
       const stamped: SSHConnectionConfig = {
         ...withNormalizedSystem(withNormalizedTags(config)),
-        updatedAt: new Date().toISOString(),
+        updatedAt: given ?? new Date().toISOString(),
         deletedAt: undefined,
       };
       const index = profiles.ssh.findIndex((p) => p.id === config.id);

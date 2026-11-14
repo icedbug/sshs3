@@ -65,9 +65,11 @@ export class WorkSync {
   async reconcile<T extends Mergeable>(
     collection: WorkCollection,
     local: T[],
+    /** For an item both sides have, where the newer copy winning would lose something (see mergeItems). */
+    resolve?: (local: T, remote: T) => T,
   ): Promise<{ items: T[]; changed: boolean }> {
     const remote = await this.readAll<T>(collection);
-    const merged = mergeItems(local, remote);
+    const merged = mergeItems(local, remote, resolve);
     await inBatches(merged.newerLocally, 6, (item) => this.put(collection, item));
     return { items: merged.items, changed: merged.changed };
   }
