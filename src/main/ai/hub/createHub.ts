@@ -45,6 +45,8 @@ export interface CreateHubOptions {
   alertHookOwner?: string;
   /** On the web server: whether this user administers it (sets up the team's bucket). */
   teamAdmin?: () => boolean;
+  /** On the web server: whether this user's account is the only one on it. */
+  soleUser?: () => boolean;
   peerPresenceProvider?: HubHost["peerPresenceProvider"];
   onSharedWorkspaceChanged?: () => void;
 }
@@ -370,6 +372,7 @@ export function createHub(
     defaultActorName: options?.defaultActorName,
     alertHookOwner: options?.alertHookOwner,
     teamAdmin: options?.teamAdmin,
+    soleUser: options?.soleUser,
     peerPresenceProvider: options?.peerPresenceProvider,
     onSharedWorkspaceChanged: options?.onSharedWorkspaceChanged,
     file: (...args) => files.invoke(...args),

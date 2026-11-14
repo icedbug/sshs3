@@ -60,6 +60,7 @@ import { SelfLearningService } from "./SelfLearningService";
 import {
   DEFAULT_SAFETY_POLICY,
   analyzeCommandSafety,
+  isProdTag,
   shouldRequireCommandApproval,
 } from "./CommandSafetyService";
 import { AcpRuntime, EXTERNAL_RUNNER_PRESETS } from "./AcpRuntime";
@@ -421,6 +422,8 @@ export interface HubHost {
   alertHookOwner?: string;
   /** On the web server: whether this user administers it. Absent on the desktop, where the one user does. */
   teamAdmin?: () => boolean;
+  /** On the web server: whether this user's account is the only one there is, and administers it. */
+  soleUser?: () => boolean;
   peerPresenceProvider?: () => import("../../../shared/types/aiHub").WorkspacePresenceEntry[];
   onSharedWorkspaceChanged?: () => void;
   extraAppContext?(): Promise<{
@@ -532,7 +535,7 @@ export class HubService {
   readonly context: ContextService;
   readonly broker: ToolBroker;
   readonly s3Workspace: S3WorkspaceSyncService;
-  readonly mcp = new McpClientManager();
+  readonly mcp = new McpClientManager(fetch, (server) => this.assertMcpReach(server));
   readonly kb = new KnowledgeBaseService();
   readonly selfLearning = new SelfLearningService(this.kb);
   private runtimes = new Map<string, AgentRuntime>();
@@ -1132,6 +1135,88 @@ export class HubService {
       text: `**Handed over: ${prevAgentName} → ${toAgent.name}**\n${reason ? `Reason: *${clip(reason, 400)}*\n` : ""}Mission: ${toAgent.mission}`,
       at: Date.now(),
     });
+  }
+
+  /**
+   * A stdio MCP server is a program started on this machine as the app's own account. On a shared
+   * server that account holds every user's keys and sign-ins, so only an administrator adds or starts one.
+   */
+  private assertMcpProgramAllowed(server: Pick<McpServerConfig, "transport">): void {
+    if (server.transport !== "http" && this.sharedServer() && !this.host.teamAdmin?.())
+      throw new Error("An MCP server that runs as a program runs on the shared server itself. Only an administrator of this server adds or starts one. Use one with an address (HTTP) instead.");
+  }
+
+  /** Asked each time an MCP server is about to be started or called: see McpClientManager. */
+  private async assertMcpReach(server: McpServerConfig): Promise<void> {
+    this.assertMcpProgramAllowed(server);
+    if (server.transport !== "http") return;
+    const url = server.url?.trim();
+    if (!url) return;
+    // The person's own machine may talk to a plain-http server on its own network; a shared server may not be sent anywhere.
+    await guardUrl(url, { ...this.outboundGuard(), allowPlainHttp: !this.sharedServer(), ...(this.kbNetwork ? { lookup: this.kbNetwork.lookup } : {}) });
+  }
+
+  /**
+   * On a shared server, a storage target whose address a user typed is checked like a link they
+   * typed: reading a bucket into the knowledge base must not be a way to make the server call
+   * its own loopback or the network around it.
+   */
+  private async assertStorageReach(targetRef: string): Promise<void> {
+    if (!this.sharedServer()) return;
+    const q = targetRef.trim().replace(/^@/, "").toLowerCase();
+    const profiles = (await this.host.extraAppContext?.().catch(() => undefined))?.s3Profiles ?? [];
+    // Every profile the name could stand for: the storage is resolved by id, by name and by part of a name.
+    const meant = profiles.filter((s) => {
+      const id = s.id.toLowerCase();
+      return id === q || `s3-${id}` === q || s.name.toLowerCase().includes(q);
+    });
+    for (const profile of meant) {
+      const endpoint = profile.endpoint?.trim();
+      if (!endpoint) continue;
+      await guardUrl(/^[a-z][a-z0-9+.-]*:\/\//i.test(endpoint) ? endpoint : `https://${endpoint}`, {
+        ...this.outboundGuard(),
+        allowPlainHttp: true,
+        lookup: this.kbNetwork?.lookup,
+      });
+    }
+  }
+
+  /** The server as the team shares it, when it is one: not a person's own server, and not a vault's (the vault has its own roles). */
+  private async teamServerCopy(profileId: string | undefined): Promise<WorkspaceServerSummary | undefined> {
+    if (!profileId) return undefined;
+    const found = await this.knownServer(profileId);
+    return found && found.shared !== false && !found.fromVault ? found : undefined;
+  }
+
+  private async knownServer(profileId: string): Promise<WorkspaceServerSummary | undefined> {
+    const extra = await this.collectExtraContext().catch(() => undefined);
+    return (extra?.workspaceServers ?? []).find((s) => s.id === profileId);
+  }
+
+  /**
+   * On a shared server, where a server the team shares leads is the administrator's to decide:
+   * a member who points it somewhere else, renames it, takes it out of the team or lifts its
+   * "prod" tag changes what every teammate and every teammate's agent connects to and is asked about.
+   * A member still describes it, tags it, and sets their own user name and key for it.
+   */
+  private assertMayChangeTeamServer(
+    known: WorkspaceServerSummary | undefined,
+    next: { name?: string; host?: string; port?: number; username?: string; shared?: boolean; tags?: string[] },
+  ): void {
+    if (!known || !this.sharedServer() || this.host.teamAdmin?.()) return;
+    const who = "Only an administrator of this server";
+    if (next.shared === false) throw new Error(`${who} takes a server out of the team's list.`);
+    const moved =
+      (next.name !== undefined && next.name.trim() !== known.name) ||
+      (next.host !== undefined && next.host.trim() !== known.host) ||
+      (next.port !== undefined && next.port !== (known.port || 22)) ||
+      (next.username !== undefined && next.username !== (known.username || "root"));
+    if (moved)
+      throw new Error(
+        `${who} changes the name, address, port or user name of a server the team shares. Your own user name and key for it are set under "only for me".`,
+      );
+    const lifted = (known.tags ?? []).filter(isProdTag).filter((t) => !(next.tags ?? known.tags ?? []).some((x) => x.trim().toLowerCase() === t.toLowerCase()));
+    if (lifted.length) throw new Error(`${who} takes the tag "${lifted[0]}" off a server the team shares: it is what makes changes there wait for a person.`);
   }
 
   /** On a shared server, the team's bucket is the administrator's to set up, change or disconnect: one member's change is everyone's. */
@@ -1928,7 +2013,7 @@ export class HubService {
           if (p.approvalWaitMinutes !== undefined)
             this.store.data.preferences.approvalWaitMinutes = integer(p.approvalWaitMinutes, 1, 60);
           // On a shared server the path is the server's own and set by its administrator: not by whoever is signed in.
-          if (p.sharedWorkspacePath !== undefined && !this.sharedServer()) {
+          if (p.sharedWorkspacePath !== undefined && !this.hosted()) {
             const cleanedPath = p.sharedWorkspacePath.trim();
             if (cleanedPath) {
               this.store.data.preferences.sharedWorkspacePath = cleanedPath;
@@ -2083,7 +2168,8 @@ export class HubService {
           scope,
           title: requiredText(entry.title),
           text: requiredText(entry.text),
-          author: entry.author,
+          // On a server with accounts the memory is the signed-in person's: nobody writes one in a teammate's name.
+          author: this.hosted() ? await this.resolveActorName() : entry.author,
           sourceCommand: entry.sourceCommand,
           confidence: entry.confidence,
         });
@@ -2127,7 +2213,8 @@ export class HubService {
           combined,
           request.id,
           request.delta,
-          request.voter ?? (await this.resolveActorName()),
+          // One vote per signed-in person on a server with accounts: a made-up voter is not a person.
+          (!this.hosted() && request.voter?.trim()) || (await this.resolveActorName()),
         );
         if (
           updated &&
@@ -2231,7 +2318,7 @@ export class HubService {
       }
       case "activity-record": {
         // On a shared server the entry is the signed-in person's: nobody writes the team's log as another.
-        const actor = (!this.sharedServer() && request.event.actor?.trim()) || (await this.resolveActorName());
+        const actor = (!this.hosted() && request.event.actor?.trim()) || (await this.resolveActorName());
         const event: WorkspaceActivityEvent = {
           id: crypto.randomUUID(),
           at: Date.now(),
@@ -2377,6 +2464,7 @@ export class HubService {
       }
       case "server-describe": {
         const pid = requiredText(request.profileId);
+        this.assertMayChangeTeamServer(await this.teamServerCopy(pid), { shared: request.shared, tags: request.tags });
         if (
           request.localUsername !== undefined ||
           request.localPrivateKeyPath !== undefined ||
@@ -2453,8 +2541,11 @@ export class HubService {
             ? boundedContext(request.description, 400)
             : undefined,
         };
-        this.appendActivityEvent(event);
-        await this.host.recordWorkspaceActivity?.(event).catch(() => {});
+        // The activity log is the team's. A server a person keeps to themselves is not written into it.
+        if ((request.shared ?? matchedServer?.shared) !== false) {
+          this.appendActivityEvent(event);
+          await this.host.recordWorkspaceActivity?.(event).catch(() => {});
+        }
         await this.syncAutoMemoryForTarget(pid, humanLabel);
         this.s3Workspace.schedulePush(400);
         break;
@@ -2465,6 +2556,15 @@ export class HubService {
         const host = requiredText(s.host);
         const actor = await this.resolveActorName();
         const nowIso = new Date().toISOString();
+        // What the request leaves out is saved as its default (port 22, root, no tags), so that is what is compared.
+        this.assertMayChangeTeamServer(await this.teamServerCopy(s.id), {
+          name,
+          host,
+          port: s.port || 22,
+          username: s.username?.trim() || "root",
+          shared: s.shared,
+          tags: s.tags ?? [],
+        });
         const saved = await this.host.upsertServer?.({
           id: s.id,
           name,
@@ -2574,8 +2674,11 @@ export class HubService {
             ? boundedContext(s.description, 400)
             : undefined,
         };
-        this.appendActivityEvent(event);
-        await this.host.recordWorkspaceActivity?.(event).catch(() => {});
+        // The activity log is the team's. A server a person keeps to themselves is not written into it.
+        if (summary.shared) {
+          this.appendActivityEvent(event);
+          await this.host.recordWorkspaceActivity?.(event).catch(() => {});
+        }
         await this.syncAutoMemoryForTarget(targetId, name);
         this.s3Workspace.schedulePush(400);
         break;
@@ -2593,9 +2696,19 @@ export class HubService {
       case "server-delete": {
         const pid = requiredText(request.profileId);
         const actor = await this.resolveActorName();
+        // Only a server this person has can be removed by them: an id alone (a teammate's own server, a guess) removes nothing.
+        const mine = await this.knownServer(pid);
+        if (!mine) throw new Error("Server not found");
+        if (mine.shared !== false && !mine.fromVault && this.sharedServer() && !this.host.teamAdmin?.())
+          throw new Error("Only an administrator of this server removes a server the team shares.");
+        if (mine.shared === false) {
+          // A person's own server: gone here, and nothing about it goes to the team (no removal mark, no log entry).
+          await this.host.deleteServer?.(pid).catch(() => {});
+          break;
+        }
         const existing = (this.store.data.s3SyncedServers ?? []).find(
           (s) => s.id === pid,
-        );
+        ) ?? mine;
         const delIso = new Date().toISOString();
         this.store.data.deletedServerIds ??= {};
         this.store.data.deletedServerIds[pid] = delIso;
@@ -2619,7 +2732,7 @@ export class HubService {
       }
       case "workspace-s3-configure": {
         // On a shared server the name is the account's: nobody signs the team's records as somebody else.
-        if (request.config?.actorName !== undefined && !this.sharedServer()) {
+        if (request.config?.actorName !== undefined && !this.hosted()) {
           await this.config.update({ actorName: request.config.actorName.trim() });
         }
         const asked = { ...request.config };
@@ -3022,6 +3135,8 @@ export class HubService {
             p.name.toLowerCase() === request.presetId.toLowerCase(),
         );
         if (!preset) throw new Error(`MCP preset "${request.presetId}" not found`);
+        // In the demo lab a preset is a scripted fixture: nothing is started for it.
+        if (!isDemoMode()) this.assertMcpProgramAllowed(preset);
         const installed: McpServerConfig = {
           id: preset.id,
           name: preset.name,
@@ -3217,14 +3332,27 @@ export class HubService {
         break;
       }
       case "safety-policy-save": {
-        const current = this.store.data.safetyPolicy ?? DEFAULT_SAFETY_POLICY;
+        const stored = this.store.data.safetyPolicy ?? DEFAULT_SAFETY_POLICY;
+        const asked: Partial<Record<keyof SafetyPolicyConfig, unknown>> =
+          request.policy && typeof request.policy === "object" ? request.policy : {};
+        // A rule is on or off. "no", 0 or null is not an answer: stored as sent it would switch a rule
+        // off, or leave it on while looking like something else, so the whole request is refused.
+        for (const key of Object.keys(POLICY_NAMES) as (keyof SafetyPolicyConfig)[])
+          if (asked[key] !== undefined && typeof asked[key] !== "boolean")
+            throw new Error(`"${POLICY_NAMES[key]}" is either on (true) or off (false).`);
+        // What an earlier version stored as something else counts as what it did: anything but an explicit off kept the rule on.
+        const current: SafetyPolicyConfig = {
+          autoApproveSafeReadOnly: Boolean(stored.autoApproveSafeReadOnly),
+          requireApprovalOnProdTags: Boolean(stored.requireApprovalOnProdTags),
+          blockDestructiveWithoutConfirm: Boolean(stored.blockDestructiveWithoutConfirm),
+        };
         this.store.data.safetyPolicy = {
           autoApproveSafeReadOnly:
-            request.policy.autoApproveSafeReadOnly ?? current.autoApproveSafeReadOnly,
+            (asked.autoApproveSafeReadOnly as boolean | undefined) ?? current.autoApproveSafeReadOnly,
           requireApprovalOnProdTags:
-            request.policy.requireApprovalOnProdTags ?? current.requireApprovalOnProdTags,
+            (asked.requireApprovalOnProdTags as boolean | undefined) ?? current.requireApprovalOnProdTags,
           blockDestructiveWithoutConfirm:
-            request.policy.blockDestructiveWithoutConfirm ??
+            (asked.blockDestructiveWithoutConfirm as boolean | undefined) ??
             current.blockDestructiveWithoutConfirm,
         };
         // Who loosened or tightened the rules, and from what to what, goes into the audit log.
@@ -3260,6 +3388,7 @@ export class HubService {
           lastError: existing?.lastError,
           lastTestedAt: existing?.lastTestedAt,
         };
+        this.assertMcpProgramAllowed(saved);
         const reach = (x: McpServerConfig): string =>
           JSON.stringify([x.transport, x.command, x.args ?? [], x.url]);
         if (existing && reach(existing) !== reach(saved)) {
@@ -3369,13 +3498,20 @@ export class HubService {
         if (data.length > MAX_UPLOAD_BYTES)
           throw new Error(`"${name}" is larger than ${Math.round(MAX_UPLOAD_BYTES / 1024 / 1024)} MB.`);
         const extracted = await extractText({ name, mime: request.mime, data });
+        // A file that is dropped in may hold a password (a .env, a configuration file). Its text is masked
+        // here, as it is on its way to the team, so that this computer and the teammates keep the same text.
+        const masked = maskContext(extracted.text);
         reply = {
-          ingest: await this.ingestExtracted(extracted, {
-            name,
-            sourceType: "upload",
-            sourceRef: name,
-            original: { name, mime: request.mime, data },
-          }),
+          ingest: await this.ingestExtracted(
+            { ...extracted, text: masked },
+            {
+              name,
+              sourceType: "upload",
+              sourceRef: name,
+              // The file itself cannot be masked. One whose text needed masking stays on this computer.
+              original: { name, mime: request.mime, data, keptLocal: masked !== extracted.text },
+            },
+          ),
         };
         break;
       }
@@ -3457,6 +3593,10 @@ export class HubService {
         const found = this.getKbDocumentsList().find((d) => d.id === request.id);
         if (!found?.original) throw new Error("This document has no original file.");
         const data = await this.readKbOriginal(found);
+        if (!data && found.original.keptLocal)
+          throw new Error(
+            `The original file holds something that looks like a password or a key, so it was not shared with the team. ${found.author ? `${found.author} has it` : "The person who added it has it"}; the text here has those parts masked.`,
+          );
         if (!data) throw new Error("The original file is not on this computer and could not be fetched from the team bucket.");
         reply = {
           download: {
@@ -3611,6 +3751,9 @@ export class HubService {
         await this.mcpTokens().revoke("local", requiredText(request.id));
         break;
       case "mcp-local-set": {
+        // The listener is a port on the machine sshs3 runs on. On a shared server that machine is not a member's to open ports on.
+        if (request.enabled && this.sharedServer() && !this.host.teamAdmin?.())
+          throw new Error("Only an administrator of this server switches on its local MCP listener. Outside agents reach your workspace through the server's own MCP address and a key from your account page.");
         const port = Math.max(0, Math.min(65535, request.port ?? this.store.data.preferences.localMcp?.port ?? 0));
         this.store.data.preferences.localMcp = { enabled: request.enabled, port };
         await this.applyLocalMcp();
@@ -3651,6 +3794,7 @@ export class HubService {
           (isDemoMode() && request.s3ProfileId === "sg-fabricpool-dc1");
 
         if (this.host.resolveStorageProvider && !isDemoS3Target) {
+          await this.assertStorageReach(request.s3ProfileId);
           const provider = await this.host.resolveStorageProvider(
             request.s3ProfileId,
           );
@@ -4006,7 +4150,7 @@ export class HubService {
       this.evalReplays.get(task.id)?.isLive.bind(this.evalReplays.get(task.id)),
       // On a shared server or in the demo, only this workspace's own sign-in: never the host's ~/.codex.
       // The desktop app's own process may use the person's `codex login`.
-      isDemoMode() || this.sharedServer() ? configDir : undefined,
+      isDemoMode() || this.hosted() ? configDir : undefined,
     );
     this.runtimes.set(task.id, runtime);
     this.armRunTimer(task, Date.now() + task.maxMinutes * 60_000);
@@ -4666,7 +4810,7 @@ export class HubService {
     } catch {
       // Not here: a teammate added it.
     }
-    if (!this.s3Workspace.canUseBucket()) return undefined;
+    if (doc.original?.keptLocal || !this.s3Workspace.canUseBucket()) return undefined;
     const remote = await this.s3Workspace.objects.read(this.kbOriginalKey(doc)).catch(() => undefined);
     if (remote) {
       await fsp.mkdir(path.dirname(local), { recursive: true }).catch(() => undefined);
@@ -4675,10 +4819,15 @@ export class HubService {
     return remote;
   }
 
-  private async removeKbOriginal(docId: string): Promise<void> {
+  /** This computer's copy of a document's original file. Also called when a teammate removed the document. */
+  private async removeLocalKbOriginal(docId: string): Promise<void> {
     const fsp = await import("node:fs/promises");
-    const doc = { id: docId };
     await fsp.rm(this.kbOriginalDir(docId), { recursive: true, force: true }).catch(() => undefined);
+  }
+
+  private async removeKbOriginal(docId: string): Promise<void> {
+    const doc = { id: docId };
+    await this.removeLocalKbOriginal(docId);
     if (!this.s3Workspace.canUseBucket()) return;
     const dir = path.posix.dirname(this.kbOriginalKey(doc));
     const names = await this.s3Workspace.objects.list(dir).catch(() => [] as string[]);
@@ -4696,7 +4845,7 @@ export class HubService {
       name: string;
       sourceType: KbDocument["sourceType"];
       sourceRef?: string;
-      original?: { name: string; mime?: string; data: Buffer };
+      original?: { name: string; mime?: string; data: Buffer; keptLocal?: boolean };
     },
   ): Promise<NonNullable<HubReply["ingest"]>> {
     const hash = contentHash(extracted.text);
@@ -4745,12 +4894,13 @@ export class HubService {
         name: source.original.name,
         mime: source.original.mime,
         size: source.original.data.length,
+        ...(source.original.keptLocal ? { keptLocal: true as const } : {}),
       };
       const fsp = await import("node:fs/promises");
       const local = path.join(this.kbOriginalDir(first.id), path.basename(this.kbOriginalKey(first)));
       await fsp.mkdir(path.dirname(local), { recursive: true });
       await fsp.writeFile(local, source.original.data);
-      if (this.s3Workspace.canUseBucket())
+      if (!source.original.keptLocal && this.s3Workspace.canUseBucket())
         void this.s3Workspace.objects
           .write(this.kbOriginalKey(first), source.original.data)
           .catch((e) => log.warn("Could not upload a knowledge base original", safeError(e)));
@@ -5594,9 +5744,17 @@ export class HubService {
   /** Stands in for the network when a page is fetched for the knowledge base. Set in tests only. */
   private kbNetwork?: { fetchImpl: typeof fetch; lookup: GuardOptions["lookup"] };
 
-  /** A shared server with several users: what one of them types must not reach into the server itself. */
-  private sharedServer(): boolean {
+  /** The web server, where people sign in to accounts: a person's name and the server's own paths are the account's, not the request's. */
+  private hosted(): boolean {
     return Boolean(this.host.alertHookOwner);
+  }
+
+  /**
+   * A shared server with several users: what one of them types must not reach into the server itself.
+   * A web server with one account, its administrator's, is that person's own machine like the desktop app.
+   */
+  private sharedServer(): boolean {
+    return this.hosted() && !this.host.soleUser?.();
   }
 
   /** Where sshs3 may call out to on a user's word: a notification channel, a page for the knowledge base. */
@@ -6070,6 +6228,8 @@ export class HubService {
     );
     const k = splitRemovals(kb.items);
     removed.kb = k.removed;
+    // A document a teammate removed takes its original file with it: the copy fetched to this computer is not kept behind.
+    for (const d of docs) if (d.original && d.id in k.removed) void this.removeLocalKbOriginal(d.id);
     if (kb.changed) {
       this.store.data.kbDocuments = [
         ...docs.filter((d) => d.shared === false && !(d.id in k.removed)),
@@ -7225,7 +7385,8 @@ export class HubService {
       await this.saveMemoryInternal({
         id: `auto-node:${server?.id || key}`,
         kind: "memory",
-        scope: "workspace",
+        // The card of a server a person keeps to themselves stays with them too.
+        scope: server?.shared === false ? "personal" : "workspace",
         title: `Server card: ${displayName}${server?.cluster ? ` (${server.cluster})` : ""}`,
         text: lines.join("\n"),
         author: "Auto-Memory",
@@ -7586,7 +7747,8 @@ export class HubService {
       const updMs = srv.updatedAt
         ? Number(srv.updatedAt) || Date.parse(srv.updatedAt) || 0
         : 0;
-      if (delMs > 0 && delMs >= updMs) {
+      // A removal is of the team's copy. A person's own server is not hidden by what a teammate removed.
+      if (srv.shared !== false && delMs > 0 && delMs >= updMs) {
         continue;
       }
       const ov = localOverrides[srv.id];

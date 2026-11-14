@@ -259,7 +259,11 @@ export class WebTenantManager {
   private readonly sharedDir: string;
   private notifyTimer?: NodeJS.Timeout;
 
-  constructor(private readonly baseDataDir: string) {
+  constructor(
+    private readonly baseDataDir: string,
+    /** How many accounts the server has: with one, its administrator is alone on their own machine. */
+    private readonly accountCount?: () => number,
+  ) {
     this.sharedDir = path.join(baseDataDir, 'shared-workspace');
   }
 
@@ -487,6 +491,7 @@ export class WebTenantManager {
         defaultActorName: user.displayName || user.username,
         alertHookOwner: user.id,
         teamAdmin: () => user.role === 'admin',
+        soleUser: () => user.role === 'admin' && this.accountCount?.() === 1,
         peerPresenceProvider: () => this.getAllLocalTenantsPresence(),
         onSharedWorkspaceChanged: () =>
           this.notifyCrossTenantChanged(user.id),

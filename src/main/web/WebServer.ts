@@ -278,7 +278,7 @@ export class Sshs3WebServer {
   constructor(private readonly options: Sshs3WebServerOptions) {
     setWebDataDir(options.dataDir);
     this.auth = new WebAuthService(options.dataDir);
-    this.tenants = new WebTenantManager(options.dataDir);
+    this.tenants = new WebTenantManager(options.dataDir, () => this.auth.userCount());
     this.mcpTokens = new McpTokenStore(options.dataDir);
     this.signIns = new AuditLog(path.join(options.dataDir, 'audit'), 'server');
   }

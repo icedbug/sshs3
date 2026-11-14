@@ -174,7 +174,17 @@ explicitly enabled presentation on top of the same terminal authority.
   known forms with their writing flags excluded (`sort -o`, `sed -i`/`w`,
   awk's `system()`, `ip link set`, `curl -XDELETE`, `2>file` …). Anything
   not on the list, or nested more than six deep, is "modify"; a command that
-  never ends by itself (`tail -f`, `less`, `watch`) is not run unasked. It is
+  never ends by itself (`tail -f`, `less`, `watch`) is not run unasked.
+  `sudo -i` and `sudo -s` with nothing after them start a shell as another
+  user and are a change. A variable set in front of a command that decides
+  what it loads or runs (`LD_PRELOAD`, `PATH` with anything but the system's
+  own directories, `BASH_ENV`, `HOME`, a pager that is not `cat`/`less`/`more`)
+  makes it a change too. `bash -n` is a syntax check only where the shell
+  cannot be interactive: the script is named or comes through a pipe. ONTAP's
+  comparisons (`-time >2h`, `-size >1TB`) are read as comparisons only as the
+  value of an option of an ONTAP command and only as a bare number with a
+  unit; on a POSIX shell the same words would create an empty file of that
+  name, which is the one thing knowingly let through. It is
   still a set of rules, not a shell: `tests/main/commandClassifier.test.ts`
   holds every case the review found.
 - **Team memory in the prompt** — `snapshotText` puts the ranked memories
@@ -242,7 +252,13 @@ explicitly enabled presentation on top of the same terminal authority.
   teammate's app sends the session's transcript to that teammate's model
   provider.
 - **`McpClientManager`** — MCP over stdio and HTTP with a catalog of nine
-  presets (`MCP_MARKETPLACE_CATALOG`).
+  presets (`MCP_MARKETPLACE_CATALOG`). Before a server is started or called
+  the hub is asked whether it may be reached (`assertMcpReach`): on a shared
+  server a stdio server is an administrator's only (it runs on the server's
+  host as the server's own account), and an HTTP address goes through
+  `guardUrl` like a notification. Redirects are not followed, and an address
+  counts as connected only when it answers `initialize` and `tools/list` as
+  an MCP server, not whenever it answers JSON.
 - **`S3WorkspaceSyncService`** — team workspace sync over an S3 bucket. Memory
   entries keep all their metadata (tier, cluster, confidence, success/failure
   and usage counts, feedback score, `autoLearned`, `sourceCommand`,
@@ -480,7 +496,12 @@ Related hardening done with this:
   is called and at every redirect (`guardUrl`, the same check notifications
   use), and fetched from the address that was checked.
 - On a shared server, `sharedWorkspacePath` from a request is ignored and
-  `kb-ingest-folder` is refused: both are paths on the server.
+  `kb-ingest-folder` is refused: both are paths on the server. A storage
+  profile read with `kb-ingest-s3` has its endpoint checked like a link. A
+  web server with a single account, its administrator's, is not a shared
+  server for these checks (`HubHost.soleUser`): it is that person's own
+  machine, as the desktop app is. The account's name and the server's own
+  paths stay the server's either way.
 - Web sessions are stored by SHA-256 and compared in constant time; a file
   from an older version is read and converted. Importing an SSH key works out
   the public key first and changes nothing when it cannot.
@@ -845,8 +866,12 @@ give a document a title, a collection or tags first.
   and can be asked for again.
 - **Originals.** The uploaded file is kept under `kb-originals/` and, with a
   team bucket, under `kb/originals/<docId>/`, so the source can be opened and
-  read again later. It is removed with its document. Everything dropped in is
-  readable by the whole team.
+  read again later. The text of an uploaded file is masked like text on its
+  way to the team. A file whose text needed masking cannot be masked itself,
+  so it stays on the computer of the person who added it
+  (`original.keptLocal`) and teammates are told who has it. An original is
+  removed with its document, also the copy a teammate's installation fetched.
+  Everything else dropped in is readable by the whole team.
 - **Out.** The snapshot's document list carries the beginning of each text and
   no pieces; `kb-read` returns one whole document, `kb-search` the ranked
   search the assistant uses, `kb-original` the file. These answers come in
