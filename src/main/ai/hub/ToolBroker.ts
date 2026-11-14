@@ -463,7 +463,7 @@ export class ToolBroker {
     const expected = request.check?.expected?.trim() ?? "";
     const rollback = request.rollback?.trim() ?? "";
     if (!checkCommand || !expected)
-      throw new Error("A change needs a check: a read-only command and what its output must contain when the change worked.");
+      throw new Error("A change needs a check: a read-only command that exits 0, and what its output must contain, when the change worked.");
     if (!rollback) throw new Error("A change needs a rollback: the command that takes it back.");
     if (analyzeCommandSafety(checkCommand).riskLevel !== "safe")
       throw new Error("The check must only look: it is run before and after the change, and again after a rollback.");
@@ -475,7 +475,17 @@ export class ToolBroker {
       rollback: forApproval(rollback, 4000, "rollback"),
     };
     const run = (c: string) => this.terminals.execute(target.sessionId, target.generation, task.id, c);
+    // The rule the model is told in the tool's description: exit code 0 AND the expected text.
     const passes = (r: { exitCode: number; output: string }): boolean => r.exitCode === 0 && showsExpected(r.output, expected);
+    // Why a look at the check did not pass, in the words the agent and the person need to tell the two causes apart.
+    const whyNot = (r: { exitCode: number; output: string } | undefined): string | undefined =>
+      !r || passes(r)
+        ? undefined
+        : r.exitCode !== 0 && showsExpected(r.output, expected)
+          ? `The check's output contained the expected text, but the check exited with code ${r.exitCode}. A check passes only when it also exits 0.`
+          : r.exitCode !== 0
+            ? `The check exited with code ${r.exitCode} and its output did not contain the expected text.`
+            : "The check exited 0, but its output did not contain the expected text.";
 
     const safety = analyzeCommandSafety(command);
     const undo = analyzeCommandSafety(rollback);
@@ -546,7 +556,8 @@ export class ToolBroker {
           if (!ok || left <= 0) break;
           await this.wait(Math.min(10_000, left));
         }
-        change.check = { ...change.check!, after: ok, output: boundedContext(last.output, 2000) };
+        const why = whyNot(last);
+        change.check = { ...change.check!, after: ok, output: boundedContext(why ? `${last.output}\n[${why}]` : last.output, 2000) };
       } else {
         change.check = { ...change.check!, skipped: `the change command itself failed (exit ${result.exitCode})` };
       }
@@ -642,6 +653,8 @@ export class ToolBroker {
       output: result.output,
       checkPassed: false,
       checkOutput: last?.output,
+      ...(last ? { checkExitCode: last.exitCode } : {}),
+      ...(whyNot(last) ? { checkFailedBecause: whyNot(last) } : {}),
       rolledBack: undone.exitCode === 0,
       rollbackExitCode: undone.exitCode,
       rollbackOutput: undone.output,

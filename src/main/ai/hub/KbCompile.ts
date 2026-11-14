@@ -441,7 +441,13 @@ export function parsePageOps(
   answer: string,
   shown: KbPage[],
   known: Known,
-  options: { allTitles?: string[]; mayCreate?: number; updatesOnly?: boolean } = {},
+  options: {
+    allTitles?: string[];
+    mayCreate?: number;
+    updatesOnly?: boolean;
+    /** Filled with how many of the answer's pages were left out because they were not in the format asked for. */
+    unusable?: { count: number };
+  } = {},
 ): PageOp[] | undefined {
   const value = firstJsonObject(answer);
   if (!value || !Array.isArray(value.pages)) return undefined;
@@ -457,7 +463,11 @@ export function parsePageOps(
     const body = typeof p.body === "string" ? p.body.trim() : "";
     const title = typeof p.title === "string" ? p.title.replace(/\s+/g, " ").trim() : "";
     const when = typeof p.when === "string" ? p.when.replace(/\s+/g, " ").trim() : "";
-    if (body.length < 80 || !title || !when) continue;
+    if (body.length < 80 || !title || !when) {
+      // Not "nothing to change" but a page that cannot be read as one: the caller must not take it for success.
+      if (options.unusable) options.unusable.count++;
+      continue;
+    }
     const targets = Array.isArray(p.targets)
       ? [
           ...new Set(

@@ -224,6 +224,8 @@ export function buildContradictionPrompt(pairs: Array<[KbPage, KbPage]>): string
       ([a, b], i) =>
         `## Pair ${i + 1}\n### First: ${a.title}\n${clip(a.body, 5000)}\n\n### Second: ${b.title}\n${clip(b.body, 5000)}`,
     ),
+    "",
+    'That was the last pair. Answer with the JSON described at the top and nothing else: one entry per contradiction, or {"contradictions":[]} when there is none.',
   ].join("\n");
 }
 

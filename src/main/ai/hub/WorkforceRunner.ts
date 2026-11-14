@@ -4,7 +4,7 @@ import type {
   WorkforceRun,
   WorkforceStep,
 } from "../../../shared/types/aiHub";
-import { boundedContext, clip, safeError } from "./privacy";
+import { clip, safeError } from "./privacy";
 
 /** The outcome of one specialist's model run. */
 export interface SpecialistResult {
@@ -93,6 +93,8 @@ export function synthesisPrompt(
     "Do not add findings that are in no report. Do not call anything verified: nothing was executed.",
     "",
     ...reports,
+    "",
+    "That was the last report. Now write the combined result described at the top; do not ask what to do with the reports.",
   ].join("\n");
 }
 
@@ -168,7 +170,7 @@ export async function runWorkforce(
       step.taskId = result.taskId;
       if (result.status === "completed" && result.text.trim()) {
         step.status = "completed";
-        step.findings = boundedContext(result.text, 32_000);
+        step.findings = clip(result.text, 32_000);
       } else {
         step.status = "failed";
         step.error =
@@ -223,7 +225,7 @@ export async function runWorkforce(
       agentName: run.leadAgentName,
     });
     if (result.status === "completed" && result.text.trim()) {
-      run.synthesis = boundedContext(result.text, 64_000);
+      run.synthesis = clip(result.text, 64_000);
       run.status = "completed";
     } else {
       run.status = "failed";

@@ -2,7 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { AgentTask, AgentTodo, ExternalRunner, ExternalRunnerPreset } from "../../../shared/types/aiHub";
 import type { HermesModelConfig } from "../HermesManager";
 import type { AgentRuntime, RunEvent } from "./AgentRuntime";
-import { boundedContext, safeError } from "./privacy";
+import { boundedContext, boundedPrompt, safeError } from "./privacy";
 
 /**
  * Runs a conversation on an external coding agent (Claude Code, Codex, Gemini
@@ -223,7 +223,7 @@ export class AcpRuntime implements AgentRuntime {
     const prompt = [
       this.options.preface,
       earlier.length ? `Earlier in this conversation:\n${earlier.join("\n")}` : "",
-      boundedContext(last?.text ?? "", 24_000),
+      boundedPrompt(last?.text ?? "", 24_000),
     ]
       .filter(Boolean)
       .join("\n\n");

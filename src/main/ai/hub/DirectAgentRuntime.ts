@@ -18,7 +18,7 @@ import type { ToolRequest } from "./ToolBroker";
 import type { AgentRuntime, RunEvent } from "./AgentRuntime";
 import { isDemoMode } from "./demoWorkspace";
 import { McpClientManager } from "./McpClientManager";
-import { boundedContext, clip, maskContext, safeError } from "./privacy";
+import { boundedContext, boundedPrompt, clip, HUB_PROMPT_MAX, maskContext, safeError } from "./privacy";
 import {
   DIGEST_CALLS,
   HANDOVER_REQUEST,
@@ -107,7 +107,7 @@ const AGENT_TOOLS: FunctionToolDef[] = [
   {
     name: "sshs3_change",
     description:
-      "Make a change that carries its own proof and its own way back. Use this instead of terminal_command for anything that changes a system: restarting or reconfiguring a service, changing a setting, deploying. You give the command, a read-only `check` whose output must contain `expected` when the change worked, and the `rollback` command that takes it back. The check is looked at before; the change runs (after approval where that applies); the check must pass afterwards and keep passing for `observeSeconds`. If it does not, the rollback runs at once and you are told. Choose a check that would actually fail if the change went wrong (the service answering, the value in effect), not one that passes regardless.",
+      "Make a change that carries its own proof and its own way back. Use this instead of terminal_command for anything that changes a system: restarting or reconfiguring a service, changing a setting, deploying. You give the command, a read-only `check` that must exit with code 0 and whose output must contain `expected` when the change worked, and the `rollback` command that takes it back. Both are required: a check that prints the expected text but exits non-zero (a `diff` that finds differences, a `grep` that matches nothing, `systemctl is-active` on a stopped unit as its last command) counts as failed and the change is rolled back, so do not put such a command in the check or let it decide the exit code. The check is looked at before; the change runs (after approval where that applies); the check must pass afterwards and keep passing for `observeSeconds`. If it does not, the rollback runs at once and you are told. Choose a check that would actually fail if the change went wrong (the service answering, the value in effect), not one that passes regardless.",
     parameters: {
       type: "object",
       properties: {
@@ -116,8 +116,8 @@ const AGENT_TOOLS: FunctionToolDef[] = [
         check: {
           type: "object",
           properties: {
-            command: { type: "string", description: "Read-only command that shows whether the change worked." },
-            expected: { type: "string", description: "Text the check's output must contain when it worked." },
+            command: { type: "string", description: "Read-only command that shows whether the change worked. It must exit with code 0 when the change worked." },
+            expected: { type: "string", description: "Text the check's output must contain when it worked (as well as the check exiting 0)." },
           },
           required: ["command", "expected"],
         },
@@ -1205,6 +1205,14 @@ export function snapshotText(context: unknown, maxChars: number): string {
  * in the same conversation would not know what the agent had already looked
  * up or run. The newest records are kept when the log exceeds its budget.
  */
+/**
+ * A message as the model is sent it. What was asked is passed whole (it was
+ * bounded when it was taken in): cutting it here to its end would take away
+ * the instructions a prompt opens with.
+ */
+export const messageForModel = (m: Pick<AgentMessage, "role" | "text">): string =>
+  m.role === "user" ? boundedPrompt(m.text, HUB_PROMPT_MAX) : boundedContext(m.text);
+
 export function conversationWithToolLog(task: AgentTask): AgentMessage[] {
   const messages = task.messages.filter((m) => m.role !== "system");
   const log = task.toolLog ?? [];
@@ -2242,7 +2250,7 @@ export class DirectAgentRuntime implements AgentRuntime {
       const contentParts: Array<Record<string, unknown>> = [
         {
           type: role === "user" ? "input_text" : "output_text",
-          text: boundedContext(msg.text),
+          text: messageForModel(msg),
         },
       ];
       if (role === "user" && msg.images?.length) {
@@ -2474,7 +2482,7 @@ export class DirectAgentRuntime implements AgentRuntime {
         messages.push({
           role: "user",
           content: [
-            { type: "text", text: boundedContext(msg.text) },
+            { type: "text", text: messageForModel(msg) },
             ...msg.images
               .filter((img) => img.dataUrl?.startsWith("data:image/"))
               .map((img) => ({
@@ -2484,7 +2492,7 @@ export class DirectAgentRuntime implements AgentRuntime {
           ],
         });
       } else {
-        messages.push({ role: msg.role, content: boundedContext(msg.text) });
+        messages.push({ role: msg.role, content: messageForModel(msg) });
       }
     }
 
@@ -2677,7 +2685,7 @@ export class DirectAgentRuntime implements AgentRuntime {
         const role = m.role === "assistant" ? "assistant" : "user";
         if (role === "user" && m.images?.length) {
           const contentBlocks: Array<Record<string, unknown>> = [
-            { type: "text", text: boundedContext(m.text) },
+            { type: "text", text: messageForModel(m) },
           ];
           for (const img of m.images) {
             const match = /^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/.exec(
@@ -2698,7 +2706,7 @@ export class DirectAgentRuntime implements AgentRuntime {
         }
         return {
           role,
-          content: boundedContext(m.text),
+          content: messageForModel(m),
         };
       });
 
