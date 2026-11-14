@@ -1202,6 +1202,15 @@ export class HubService {
       throw new Error("An MCP server that runs as a program runs on the shared server itself. Only an administrator of this server adds or starts one. Use one with an address (HTTP) instead.");
   }
 
+  /**
+   * An external agent's runner is a program started on this machine as the app's own account, like a
+   * stdio MCP server: on a shared server only an administrator adds or starts one. Asked on save and on every start.
+   */
+  private assertRunnerAllowed(): void {
+    if (this.sharedServer() && !this.host.teamAdmin?.())
+      throw new Error("An external agent runs as a program on the shared server itself. Only an administrator of this server adds or starts one.");
+  }
+
   /** Asked each time an MCP server is about to be started or called: see McpClientManager. */
   private async assertMcpReach(server: McpServerConfig): Promise<void> {
     this.assertMcpProgramAllowed(server);
@@ -3113,6 +3122,7 @@ export class HubService {
         break;
       }
       case "runner-save": {
+        this.assertRunnerAllowed();
         const r = request.runner;
         const asked = requiredText(r.id);
         const id = asked.toLowerCase().replace(/[^a-z0-9-]+/g, "-").slice(0, 40);
@@ -4911,6 +4921,7 @@ export class HubService {
     agent: MissionAgent,
     assertLaunching: () => void,
   ): Promise<void> {
+    this.assertRunnerAllowed();
     const runner = (this.store.data.externalRunners ?? []).find((r) => r.id === agent.runnerId);
     if (!runner)
       throw new Error(

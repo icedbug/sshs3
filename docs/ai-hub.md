@@ -1040,7 +1040,10 @@ because there is no server to run one on.
   through the same approval and safety rules as its own commands, once per
   action. It offers the agent no file access and no terminal: the agent uses
   its own, in the runner's folder. Token use is not reported over ACP, so
-  such runs do not count against a budget.
+  such runs do not count against a budget. On a shared server a runner is a
+  program on the server's host: only an administrator saves one, checked
+  again at every start. On Windows a `.cmd` runner (npx) runs through cmd.exe
+  with every word quoted for it; anything else is started directly.
 - **Server.** `docs/workforce-server.md`: the web build with
   `SSHS3_WORKFORCE=1` starts every user's hub at server start, so tickets,
   schedules and the learning queue are worked without anybody's app open.

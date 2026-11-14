@@ -170,7 +170,9 @@ recordings are sealed into it. See "The audit log and terminal recordings" in
 - **External coding agents** (Claude Code, Codex) run where their runner is
   set up. To run them on the server, install the agent in the image, sign it
   in, and add the runner on the server with the folder of the checkout. The
-  provided image does not include them.
+  provided image does not include them. On a server with more than one
+  account a runner is a program on the server's host, so only an
+  administrator adds one, and a run on one starts only for an administrator.
 - **A key is per person, and only for this server.** It is not shared through
   the team bucket, and it gives no more than the person could do themselves.
 - **MCP servers and schedules are per installation.** An MCP server an agent
