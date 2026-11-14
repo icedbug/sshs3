@@ -61,7 +61,7 @@ export function MemoryProposals({
           <div style={{ marginTop: 2 }}>
             <small>
               {autoSave
-                ? "After a finished session, and from your own activity, the assistant saves what the team should remember and shares it at once. Undo anything that is wrong."
+                ? "After a finished session, and from your own activity, the assistant saves what the team should remember and shares it at once. What would replace something a person wrote, or comes only from the assistant's own answer, waits here until somebody accepts it. Undo anything that is wrong."
                 : "After a finished session the assistant suggests what the team should remember. A suggestion is not used and not shared until somebody accepts it."}
             </small>
           </div>

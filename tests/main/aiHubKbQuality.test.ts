@@ -301,10 +301,14 @@ describe("an alert and the page for it", () => {
 });
 
 describe("what a record has to show before it teaches a page", () => {
-  it("counts a command that succeeded or a confirmed hypothesis, not the assistant's own words", () => {
+  it("counts a command that succeeded and showed something, or a confirmed hypothesis, not the assistant's own words", () => {
     expect(confirmedSomething("User: why\nAssistant: I think the scrub did it.")).toBe(false);
     expect(confirmedSomething("Command on db01: systemctl restart x → exit 1")).toBe(false);
-    expect(confirmedSomething("Command on db01: zpool status → exit 0")).toBe(true);
+    expect(confirmedSomething("Command on db01: zpool status → exit 0\n  output: pool: tank\n state: ONLINE")).toBe(true);
+    // A run whose commands came back with nothing (a schedule whose output was lost) established nothing,
+    // whatever the next command printed when it failed.
+    expect(confirmedSomething("Command on db01: df -h /var → exit 0\nAssistant: could not be determined")).toBe(false);
+    expect(confirmedSomething("Command on db01: df -h /var → exit 0\nCommand on db01: cat /x → exit 1\n  output: No such file")).toBe(false);
     expect(confirmedSomething("Hypotheses at the end of the run:\n- [confirmed] The quota was full")).toBe(true);
     expect(confirmedSomething("Hypotheses at the end of the run:\n- [open] Maybe the quota")).toBe(false);
   });

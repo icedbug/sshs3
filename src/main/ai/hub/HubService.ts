@@ -229,6 +229,8 @@ import {
   buildDistillPrompt,
   parseDistillAnswer,
   confirmedSomething,
+  mayLearnUnreviewed,
+  replacesPersonMemory,
   taskTranscript,
   worthDistilling,
   type DistillSource,
@@ -2090,6 +2092,10 @@ export class HubService {
         break;
       }
       case "memory-delete": {
+        // A server card is written again from the server list every time the memories are read:
+        // answering "deleted" would not be true.
+        if (request.id.startsWith("auto-node:") || request.id.startsWith("auto-cluster:"))
+          throw new Error("This card is written by sshs3 from the server list, so it cannot be forgotten: it would be written again. Remove the server, or correct what it says with a memory of your own.");
         // Forgetting a memory forgets the history it replaced too.
         const gone = new Set([request.id]);
         for (let grew = true; grew; ) {
@@ -2136,6 +2142,7 @@ export class HubService {
         ) {
           saveDemoMemory(updated);
         }
+        if (!updated) throw new Error("Memory not found");
         this.store.data.memories = memories.filter((m) => {
           if (storedIds.has(m.id)) return true;
           if (
@@ -2242,7 +2249,7 @@ export class HubService {
             200,
           ),
           // One of the kinds the log knows; anything else is a note.
-          kind: (["config-edit", "service-action", "service", "package-change", "deploy", "command", "profile-update", "note"] as const).includes(
+          kind: (["config-edit", "service-action", "service", "package-change", "deploy", "command", "ai-action", "profile-update", "note"] as const).includes(
             request.event.kind as never,
           )
             ? request.event.kind
@@ -2351,6 +2358,8 @@ export class HubService {
         break;
       }
       case "memory-proposal-reject": {
+        if (!(this.store.data.memoryProposals ?? []).some((p) => p.id === request.id))
+          throw new Error("Proposal not found");
         this.store.data.memoryProposals = (
           this.store.data.memoryProposals ?? []
         ).filter((p) => p.id !== request.id);
@@ -3322,9 +3331,12 @@ export class HubService {
           tags: d.tags,
           content: requiredText(d.content),
           shared: d.shared ?? true,
+          author: await this.resolveActorName(),
         });
         const before = this.getKbDocumentsList().find((x) => x.id === doc.id);
         if (before) {
+          // Whoever brought it in stays its author; an edit does not take the document over.
+          if (before.author) doc.author = before.author;
           // An edit keeps what the reading and the upload gave the document.
           doc.summary = before.summary;
           doc.kind = before.kind;
@@ -3353,6 +3365,7 @@ export class HubService {
         break;
       }
       case "kb-delete": {
+        if (!this.getKbDocumentsList().some((d) => d.id === request.id)) throw new Error("Document not found");
         this.store.data.kbDocuments = (this.store.data.kbDocuments ?? []).filter(
           (d) => d.id !== request.id,
         );
@@ -3498,6 +3511,7 @@ export class HubService {
         break;
       }
       case "kb-page-delete":
+        if (!(this.store.data.kbPages ?? []).some((p) => p.id === request.id)) throw new Error("Page not found");
         this.store.data.kbPages = (this.store.data.kbPages ?? []).filter((p) => p.id !== request.id);
         this.markSharedRemoved("pages", request.id);
         break;
@@ -3506,6 +3520,11 @@ export class HubService {
         if (!found) throw new Error("Page not found");
         const result = undoPageChange(found, await this.resolveActorName());
         if (!result.undone) throw new Error("The text this change replaced is no longer kept, so it cannot be undone.");
+        // Undoing the creation of a page removes it. That is offered for a page the assistant created;
+        // a page a person wrote has nothing to go back to, and is deleted only by deleting it.
+        if (!result.page && found.history[0]?.by !== "assistant")
+          throw new Error("This page has only its first version, so there is nothing to undo. To remove it, delete the page.");
+        if (!result.page) reply = { kbPageRemoved: { id: found.id, title: found.title } };
         this.store.data.kbPages = (this.store.data.kbPages ?? []).flatMap((p) =>
           p.id === found.id ? (result.page ? [result.page] : []) : [p],
         );
@@ -3517,7 +3536,12 @@ export class HubService {
         const found = (this.store.data.kbPages ?? []).find((p) => p.id === request.id);
         if (!found) throw new Error("Page not found");
         const docs = this.getKbDocumentsList().filter((d) => found.sources.some((s) => s.docId === d.id));
-        if (docs.length === 0) throw new Error("None of this page's sources is in the knowledge base any more.");
+        if (docs.length === 0)
+          throw new Error(
+            found.sources.some((s) => !s.docId.startsWith("task:"))
+              ? "None of this page's sources is in the knowledge base any more."
+              : "This page rests on no source document (it was written by hand or learned from finished work), so there is nothing to update it from.",
+          );
         this.rebuildingPages.add(found.id);
         this.lastRebuilds.delete(found.id);
         void this.rebuildPage(found.id, docs)
@@ -3636,16 +3660,16 @@ export class HubService {
           requiredText(request.folderPath),
           {
             collection: request.collection,
-            cluster: request.cluster,
+            cluster: request.cluster ?? request.targetCluster,
             tags: request.tags,
           },
         );
-        this.addIngestedDocs(docs);
+        reply = { ingest: this.addIngestedDocs(docs, await this.resolveActorName()) };
         break;
       }
       case "kb-ingest-s3": {
         const prefix = request.prefix?.trim() || "runbooks/";
-        const targetCluster = request.cluster;
+        const targetCluster = request.cluster?.trim() || request.targetCluster?.trim() || undefined;
         const isDemoS3Target =
           (await this.isDemoTargetRef(request.s3ProfileId)) ||
           (isDemoMode() && request.s3ProfileId === "sg-fabricpool-dc1");
@@ -3657,13 +3681,16 @@ export class HubService {
           if (!provider) {
             throw new Error(`S3 profile "${request.s3ProfileId}" not found`);
           }
+          const left: { name: string; error: string }[] = [];
           const docs = await this.kb.ingestFromStorageProvider(
             provider,
             prefix,
-            `S3:${request.s3ProfileId}`,
+            request.collection?.trim() || `S3:${request.s3ProfileId}`,
             targetCluster,
+            undefined,
+            { failed: left },
           );
-          this.addIngestedDocs(docs);
+          reply = { ingest: this.addIngestedDocs(docs, await this.resolveActorName(), left) };
           break;
         }
 
@@ -4881,7 +4908,7 @@ export class HubService {
     source: KbPageSource,
     run: { id: string; title: string },
     known: { clusters: string[]; servers: string[] },
-    options: { sourceText: string; updatesOnly?: boolean; mayCreate?: number },
+    options: { sourceText: string; updatesOnly?: boolean; mayCreate?: number; correctPersonText?: boolean },
   ): Promise<number> {
     const task = await this.runBackground(
       { prompt, mode: "advice", agentName: "Knowledge base", maxCommands: 1, maxMinutes: 8 },
@@ -4899,7 +4926,12 @@ export class HubService {
       mayCreate: options.mayCreate,
     });
     if (!ops) throw new Error("The model's answer could not be used.");
-    const applied = applyPageOps(now, ops, { by: "assistant", source, sourceText: options.sourceText });
+    const applied = applyPageOps(now, ops, {
+      by: "assistant",
+      source,
+      sourceText: options.sourceText,
+      correctPersonText: options.correctPersonText,
+    });
     // Shown and left as they were: held against the source all the same.
     this.store.data.kbPages = markHeldAgainst(applied.pages, stillShown.map((p) => p.id), source);
     if (applied.changed.length) this.closeAnsweredGaps(applied.changed.map((c) => c.id));
@@ -4952,7 +4984,8 @@ export class HubService {
           { docId: doc.id, title: doc.title, hash: doc.contentHash ?? contentHash(doc.content) },
           { id: `kbr:${pageId}:${doc.id}:${i}`, title: `Rebuilding · ${page.title}` },
           known,
-          { sourceText: doc.content, updatesOnly: true },
+          // A person asked for this page to be put right from its sources.
+          { sourceText: doc.content, updatesOnly: true, correctPersonText: true },
         );
       }
     }
@@ -5042,17 +5075,27 @@ export class HubService {
    * else: the same text is not added twice, an unchanged file is left alone,
    * and what is new is queued to be read and is shared at the next sync.
    */
-  private addIngestedDocs(docs: KbDocument[]): void {
+  private addIngestedDocs(
+    docs: KbDocument[],
+    author?: string,
+    failed: { name: string; error: string }[] = [],
+  ): NonNullable<HubReply["ingest"]> {
     const map = new Map((this.store.data.kbDocuments ?? []).map((x) => [x.id, x]));
     const known = new Set([...map.values()].map((x) => x.contentHash).filter((h): h is string => Boolean(h)));
+    const result = { added: [] as string[], duplicates: [] as string[], failed, updated: [] as string[] };
     for (const doc of docs) {
       doc.contentHash = contentHash(doc.content);
       const existing = map.get(doc.id);
-      if (existing?.contentHash === doc.contentHash) continue;
-      if (!existing && known.has(doc.contentHash)) continue;
+      if (existing?.contentHash === doc.contentHash || (!existing && known.has(doc.contentHash))) {
+        result.duplicates.push(doc.title);
+        continue;
+      }
+      (existing ? result.updated : result.added).push(doc.title);
       known.add(doc.contentHash);
       doc.titleFromSource = true;
       doc.summary = existing?.summary;
+      // Whoever read the folder or the bucket in is the author, as for a file dropped in.
+      doc.author = existing?.author ?? doc.author ?? author;
       doc.reading = { state: "queued", at: Date.now() };
       map.set(doc.id, doc);
       if (isDemoMode()) saveDemoKbDocument(doc);
@@ -5060,6 +5103,7 @@ export class HubService {
     this.store.data.kbDocuments = Array.from(map.values());
     this.lastWorkSync = 0;
     void this.readNextKb();
+    return result;
   }
 
   /**
@@ -5212,6 +5256,12 @@ export class HubService {
         current.updatedAt = Date.now();
       }
       this.kbNeedsModel = false;
+      // The model reads again. Documents whose reading failed may have failed only because it did
+      // not then (a provider that was down, a setting it refused): they get another try, a bounded
+      // number of times, so a document that cannot be read at all is not tried for ever.
+      for (const other of this.store.data.kbDocuments ?? [])
+        if (other.reading?.state === "failed" && (other.reading.attempts ?? 0) < 4)
+          other.reading = { state: "queued", attempts: other.reading.attempts, at: Date.now() };
     } catch (error) {
       const reason = safeError(error);
       const current = (this.store.data.kbDocuments ?? []).find((d) => d.id === doc.id);
@@ -6983,8 +7033,12 @@ export class HubService {
       // The default: what the assistant learned is saved and shared at once,
       // so the team's memory grows without anyone tending it. Each entry stays
       // in the list as a record that can be undone.
-      if (this.store.data.preferences.autoSaveMemories !== false)
+      // Not everything: what would take the place of a memory a person wrote, and what comes from a
+      // conversation in which nothing was run and shown (the assistant's own answer), waits in the
+      // list for a person to accept.
+      if (this.store.data.preferences.autoSaveMemories !== false && mayLearnUnreviewed(source))
         for (const proposal of fresh) {
+          if (replacesPersonMemory(proposal, this.store.data.memories)) continue;
           const saved = await this.applyMemoryProposal(proposal).catch(
             (e) => {
               log.warn("Could not save a learned memory", safeError(e));
@@ -7304,9 +7358,11 @@ export class HubService {
             const { CodexAuthProvider, buildCodexHeaders } = await import(
               "../CodexAuthProvider"
             );
+            // The same sign-in a run would use: the workspace's own folder, and on the desktop app
+            // the person's `codex login` too.
             const configDir =
-              typeof this.config.getFilePath === "function"
-                ? path.dirname(this.config.getFilePath())
+              typeof this.config.codexAuthDir === "function"
+                ? this.config.codexAuthDir()
                 : undefined;
             const auth = new CodexAuthProvider(configDir);
             const creds = await auth.resolveCredentials();

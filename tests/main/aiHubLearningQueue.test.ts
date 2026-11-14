@@ -224,7 +224,7 @@ async function waitFor(check: () => boolean, ms = 5000): Promise<void> {
 }
 
 describe("learning through the team bucket", () => {
-  it("uploads a finished session at once without reading it, and a teammate's app turns it into a shared memory", async () => {
+  it("uploads a finished session at once without reading it, and a teammate's app reads it: what a conversation alone gave waits for a person", async () => {
     const bucket = new Map<string, Buffer>();
     const erik = await makeHub("erik", bucket);
     const saraSaved: MemoryEntry[] = [];
@@ -256,12 +256,18 @@ describe("learning through the team bucket", () => {
     expect(queued).toMatchObject({ actor: "erik", title: "Session: Reboot node 3 safely" });
     expect(queued.transcript).toContain("Reboot node 3 safely");
 
-    // Sara's app is running: it reads the record with its own model and shares the memory.
+    // Sara's app is running: it reads the record with its own model. Nothing was run in that session,
+    // so what the model drew from the assistant's answer is a proposal, not a memory.
     await internals(sara).readLearningQueue(Date.now() + 60_000);
     expect(calls).toEqual(["session", "learn"]);
+    expect(sara.store.data.memories).toHaveLength(0);
+    expect(saraSaved).toHaveLength(0);
+    expect(sara.store.data.memoryProposals![0].sourceTitle).toBe("Session: Reboot node 3 safely (erik)");
+    expect(sara.store.data.memoryProposals![0].appliedMemoryId).toBeUndefined();
+    // A person accepts it: now it is the team's.
+    await sara.request({ action: "memory-proposal-accept", id: sara.store.data.memoryProposals![0].id });
     expect(sara.store.data.memories.map((m) => m.title)).toEqual(["Drain before reboot"]);
     expect(saraSaved).toHaveLength(1);
-    expect(sara.store.data.memoryProposals![0].sourceTitle).toBe("Session: Reboot node 3 safely (erik)");
     // Read once: the record is gone, so Erik's app does not read it again.
     expect(pending(bucket)).toHaveLength(0);
     await internals(erik).readLearningQueue(Date.now() + 120_000);

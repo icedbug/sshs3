@@ -44,6 +44,32 @@ export function extractErrorSignature(
   return `err:${cmdBase}:${errTokens || "nonzero_exit"}`;
 }
 
+/**
+ * Whether a command only made sense for the file or the moment it was written for: guarded by a
+ * checksum of the file as it was, an edit of one numbered line, a text written in place, or a name
+ * with that day's date in it. Run again later it is refused or changes the wrong line, so it is a
+ * record of what was done (the activity log and the session keep that), never a skill to reuse.
+ */
+export function isOneOffCommand(command: string): boolean {
+  return (
+    // A checksum: of the file as it was (`echo <hash> | sha256sum -c -`), or any other long hash.
+    /\b[0-9a-f]{32,128}\b/i.test(command) ||
+    /\b(?:sha\d*sum|md5sum|shasum|b2sum|cksum)\b[^|;&]*\s(?:-c|--check)\b/.test(command) ||
+    // sed changing or deleting a line by its number.
+    /\bsed\s[^|;&]*(?:-\w*i|--in-place)\S*\s+(?:-e\s)?\s*['"]?[\d,]+\s*[sdaicy]/.test(command) ||
+    // A text written in place: the text is the change, not a procedure.
+    /<<-?\s*['"\\]?\w+/.test(command) ||
+    // A copy or a name stamped with a date or a time.
+    /\b20\d{2}-?[01]\d-?[0-3]\d(?:\b|[T_]\d)/.test(command)
+  );
+}
+
+/** Words that say nothing about what a request is about. */
+const REQUEST_FILLER = new Set([
+  "the", "for", "and", "when", "what", "how", "why", "with", "from", "this", "that", "are", "was", "all", "any", "its",
+  "show", "list", "get", "give", "tell", "find", "check", "see", "look", "please", "can", "you", "out", "into", "does", "has", "have", "not", "now", "then", "there", "which", "much", "many",
+]);
+
 export class SelfLearningService {
   private recentEvents: SelfLearningEvent[] = [];
   private failureToFixCount = 0;
@@ -140,6 +166,10 @@ export class SelfLearningService {
     const cleanFix = maskContext(fixCommand.trim());
     const cleanFail = maskContext(failure.command.trim());
     if (!cleanFix || cleanFix === cleanFail) {
+      return { memories };
+    }
+    // An edit made for that one file as it was then is not a way to fix the next failure.
+    if (isOneOffCommand(cleanFix)) {
       return { memories };
     }
 
@@ -300,11 +330,14 @@ export class SelfLearningService {
     // 3. Synthesize a verified Playbook Skill if the task was verified or completed with successful commands
     if (
       (task.verification === "verified" || task.status === "completed") &&
-      succeededCommands.length >= 1
+      succeededCommands.some((c) => !isOneOffCommand(maskContext(c.command!.trim())))
     ) {
       const uniqueCmds = [
         ...new Set(succeededCommands.map((c) => maskContext(c.command!.trim()))),
-      ].slice(0, 4);
+      ]
+        // A playbook is steps to take again: an edit tied to one file as it was then is not one.
+        .filter((cmd) => !isOneOffCommand(cmd))
+        .slice(0, 4);
       const primaryCmd = uniqueCmds[0];
       const targetLabel =
         succeededCommands[0]?.target || task.target?.label || "workspace";
@@ -701,7 +734,9 @@ export class SelfLearningService {
     const candidateSkills = memories.filter(
       (m) =>
         (m.kind === "skill" || m.sourceCommand) &&
-        (m.confidence ?? 0.8) >= 0.65,
+        (m.confidence ?? 0.8) >= 0.65 &&
+        // Saved before one-off edits were kept out: never offered as a command to run again.
+        !(m.sourceCommand && isOneOffCommand(m.sourceCommand)),
     );
     if (candidateSkills.length === 0) return undefined;
 
@@ -711,11 +746,12 @@ export class SelfLearningService {
         `${top.title} ${top.text} ${top.sourceCommand ?? ""}`,
       );
       // Whole words, or a longer word inside another: "is" is not a match because "disk" contains it.
-      const overlap = qTokens
-        .filter((q) => q.length > 2)
-        .filter((q) => sTokens.some((t) => t === q || (q.length >= 4 && t.includes(q)))).length;
+      // The words that say what is asked for: "show … for the …" is shared by every request.
+      const asked = qTokens.filter((q) => q.length > 2 && !REQUEST_FILLER.has(q));
+      const overlap = asked.filter((q) => sTokens.some((t) => t === q || (q.length >= 4 && t.includes(q)))).length;
       // More than one shared word: "disk" alone does not make a command about purging WAL files an answer.
-      if (overlap < Math.min(2, qTokens.length)) continue;
+      // And at least half of what was asked: two words out of a long request are a coincidence.
+      if (asked.length === 0 || overlap < Math.min(asked.length, Math.max(2, Math.ceil(asked.length / 2)))) continue;
 
       const cmd =
         top.sourceCommand ||

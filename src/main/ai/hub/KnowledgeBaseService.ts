@@ -1118,15 +1118,23 @@ export class KnowledgeBaseService {
     collection = "S3 Docs",
     targetCluster?: string,
     maxFiles = 20,
+    /** Where to put down the files that were left out, and why. */
+    details: { failed?: { name: string; error: string }[] } = {},
   ): Promise<KbDocument[]> {
     const out: KbDocument[] = [];
     const entries = await provider.list(remotePrefix || "/");
     for (const entry of entries) {
-      if (out.length >= maxFiles) break;
       if (entry.isDirectory) continue;
       const ext = path.extname(entry.name).toLowerCase();
       if (!TEXT_EXTENSIONS.has(ext)) continue;
-      if (entry.size > 200_000) continue;
+      if (out.length >= maxFiles) {
+        details.failed?.push({ name: entry.name, error: `Left out: at most ${maxFiles} files are read at a time.` });
+        continue;
+      }
+      if (entry.size > 200_000) {
+        details.failed?.push({ name: entry.name, error: "Larger than 200 kB." });
+        continue;
+      }
       try {
         let text = "";
         if (typeof provider.readFile === "function") {
@@ -1155,8 +1163,9 @@ export class KnowledgeBaseService {
             }),
           );
         }
-      } catch {
-        // skip unreadable object
+      } catch (error) {
+        // An object that cannot be read is left out, and said to be.
+        details.failed?.push({ name: entry.name, error: (error instanceof Error ? error.message : String(error)).slice(0, 200) });
       }
     }
     return out;

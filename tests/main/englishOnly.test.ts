@@ -27,7 +27,7 @@ const ALLOWED: Record<string, string> = {
 const LETTERS = /[åäöÅÄÖ]/;
 // Swedish that has none of those letters. Whole words only, and only words that are not also English.
 const WORDS =
-  /\b(och|inte|eller|kunde|saknar|saknas|ogiltig|ogiltigt|sparad|sparat|kopierad|misslyckades|lyckades|uppdrag|anledning|tidigare|notering|kontrollerar|verifierad|verifierat|visar|kopplad|synka|kluster|felaktigt|vald|valda|klar|klart|avbryt|spara|redigera|inloggad|utloggad|anv[a\u00e4]ndare|l[o\u00f6]senord|nyckel|servrar|hittades|beh[o\u00f6]righet|fel(?:meddelande)?|ingen|inga|m[a\u00e5]ste)\b/i;
+  /\b(och|inte|eller|kunde|saknar|saknas|ogiltig|ogiltigt|sparad|sparat|kopierad|misslyckades|lyckades|uppdrag|anledning|tidigare|notering|kontrollerar|verifierad|verifierat|visar|kopplad|synka|kluster|felaktigt|vald|valda|klar|klart|avbryt|spara|redigera|inloggad|utloggad|anv[a\u00e4]ndare|l[o\u00f6]senord|nyckel|servrar|hittades|beh[o\u00f6]righet|fel(?:meddelande)?|ingen|inga|m[a\u00e5]ste|analysera|bifogad|bifogade|bilden)\b/i;
 
 function sources(dir: string, out: string[] = []): string[] {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {

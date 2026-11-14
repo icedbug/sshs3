@@ -1016,6 +1016,8 @@ export type KbPageKind = "system" | "procedure" | "troubleshooting";
 
 /** What a page looked like before a change, kept so the change can be undone. */
 export interface KbPageVersion {
+  /** Absent on versions kept before the kind could be changed: the kind was the same then. */
+  kind?: KbPageKind;
   title: string;
   when: string;
   body: string;
@@ -1201,6 +1203,8 @@ export interface HubReply {
   download?: { name: string; mime: string; dataBase64: string };
   /** `updated`: sources that were already there under the same address and got the new text. */
   ingest?: { added: string[]; duplicates: string[]; failed: { name: string; error: string }[]; updated?: string[] };
+  /** A page that an undo took away altogether: what was undone was its creation. */
+  kbPageRemoved?: { id: string; title: string };
 }
 export interface TerminalCommandFailure {
   sessionId: string;

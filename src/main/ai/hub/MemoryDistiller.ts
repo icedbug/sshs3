@@ -74,7 +74,31 @@ export function taskTranscript(task: AgentTask): string {
  * in which the assistant only said things teaches the pages nothing.
  */
 export function confirmedSomething(transcript: string): boolean {
-  return (/^Command on /m.test(transcript) && /→ exit 0$/m.test(transcript)) || /^- \[confirmed\] /m.test(transcript);
+  // A command that exited 0 and printed nothing showed nothing (a scheduled run whose output was lost
+  // looks like that): only one whose output is in the record counts.
+  return /^Command on .* → exit 0\n {2}output: \S/m.test(transcript) || /^- \[confirmed\] /m.test(transcript);
+}
+
+/**
+ * Whether what was learned from a record may be saved without a person looking at it first. A
+ * conversation in which nothing was run and shown is the assistant's own words (often the knowledge
+ * base and the memories said back): what it gives is a proposal for a person to accept. The team's
+ * activity is what people and agents did, so it counts.
+ */
+export function mayLearnUnreviewed(source: DistillSource): boolean {
+  return !source.id.startsWith("task:") || confirmedSomething(source.transcript);
+}
+
+/**
+ * Whether a proposal may be saved without review as far as the memories go: it must not take the
+ * place of something a person wrote. An update of a person's memory waits for a person; so does a new
+ * memory under the title of one (saving it would be merged into theirs).
+ */
+export function replacesPersonMemory(proposal: MemoryProposal, memories: MemoryEntry[]): boolean {
+  const live = memories.filter((m) => !m.supersededBy && !m.autoLearned);
+  if (proposal.op === "update") return live.some((m) => m.id === proposal.targetId);
+  const title = proposal.title.trim().toLowerCase();
+  return live.some((m) => m.kind === proposal.kind && m.scope === proposal.scope && m.title.trim().toLowerCase() === title);
 }
 
 /** A stretch of the team's activity log, oldest first. */
@@ -120,8 +144,10 @@ export function buildDistillPrompt(
     "",
     "Worth remembering: how this environment is set up (where things run, what depends on what), a fix that was confirmed to work and the symptom it fixes, a team convention or decision, a pitfall specific to these systems.",
     "Not worth remembering: one-off status (\"disk was at 81%\"), what somebody did today without a lasting consequence, general knowledge any engineer has, anything that was tried but not confirmed, secrets or credentials of any kind.",
+    "What the assistant said in the record is not evidence: an answer that explains or repeats what the existing memories or the knowledge base already say teaches nothing new. Only what a person stated, or what a command's result showed, is.",
     "",
     "Compare with the existing memories. If one already says it, propose nothing. If one covers the subject but is now incomplete or wrong, propose an update of that memory (its full new text). Otherwise propose a new one.",
+    "An existing memory that is still right stays as it is: do not propose an update that only words it differently, makes it longer or adds what the record's assistant said.",
     `Propose at most ${MAX_PROPOSALS_PER_RUN}. Proposing nothing is the normal outcome; propose only what the record itself supports.`,
     "",
     "Answer with JSON only, in this form:",

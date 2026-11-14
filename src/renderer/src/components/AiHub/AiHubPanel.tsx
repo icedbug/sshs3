@@ -652,7 +652,7 @@ export function AiHubPanel({
     const hasImages = attachments.some((a) => !!a.imageDataUrl);
     if (busy || (!prompt.trim() && !hasImages)) return;
     const textToSend =
-      prompt.trim() || "Analysera den bifogade bilden.";
+      prompt.trim() || "Look at the attached image and say what it shows.";
     const result = task
       ? await act({
           action: "reply",

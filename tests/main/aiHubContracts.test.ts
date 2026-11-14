@@ -224,7 +224,7 @@ describe("handlers nothing tested", () => {
     // Pages.
     snap = await hub.request({ action: "kb-page-save", page: { kind: "system", title: "Pooler", when: "When working on the pooler", targets: [], body: "## Facts\npgbouncer listens on 6432." } } as never);
     const page = snap.kbPages![0];
-    await expect(hub.request({ action: "kb-page-rebuild", id: page.id })).rejects.toThrow("None of this page's sources");
+    await expect(hub.request({ action: "kb-page-rebuild", id: page.id })).rejects.toThrow("This page rests on no source document");
     snap = await hub.request({ action: "kb-page-delete", id: page.id });
     expect((snap.kbPages ?? []).some((p) => p.id === page.id)).toBe(false);
     // History and odds and ends.

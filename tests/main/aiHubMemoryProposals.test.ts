@@ -368,23 +368,28 @@ describe("HubService memory proposals (a person accepts each one: autoSaveMemori
 
 const proposalAnswer = (proposals: unknown[]) => sseResponse(JSON.stringify({ proposals }));
 
+/** Has the hub read one record for memory, the way it does after a session or from the team's queue. */
+const learnFrom = (hub: unknown, source: { id: string; title: string; transcript: string }): Promise<unknown> =>
+  (hub as { proposeMemoriesFrom(source: unknown, query: string): Promise<unknown> }).proposeMemoriesFrom(source, source.title);
+
 describe("HubService learned memories (saved automatically, the default)", () => {
-  it("saves and shares what the assistant learned from a session at once, and keeps a record that can be undone", async () => {
+  it("saves and shares what a session showed at once, and keeps a record that can be undone", async () => {
     const saved: MemoryEntry[] = [];
     const hub = await makeHub(saved, true);
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (_url: unknown, init?: RequestInit) => {
-        const first = JSON.stringify((JSON.parse(String(init?.body)) as { messages: unknown[] }).messages[0]);
-        return first.includes("long-term memory")
-          ? proposalAnswer([
-              { op: "add", kind: "skill", scope: "cluster:prod", title: "Drain before reboot", text: "Drain a prod node before rebooting it.", evidence: "kubectl drain → exit 0" },
-            ])
-          : sseResponse(`Drained and rebooted. ${"Details. ".repeat(80)}`);
-      }),
+      vi.fn(async () =>
+        proposalAnswer([
+          { op: "add", kind: "skill", scope: "cluster:prod", title: "Drain before reboot", text: "Drain a prod node before rebooting it.", evidence: "kubectl drain → exit 0" },
+        ]),
+      ),
     );
-    await hub.request({ action: "start", task: { prompt: "Reboot node 3 safely", mode: "advice" } });
-    await waitFor(() => hub.store.data.memories.length === 1);
+    // A session in which a command ran and showed its result.
+    await learnFrom(hub, {
+      id: "task:reboot",
+      title: "Session: Reboot node 3 safely",
+      transcript: "User: Reboot node 3 safely\nCommand on node-3: kubectl drain node-3 → exit 0\n  output: node/node-3 drained\nAssistant: Drained and rebooted.",
+    });
 
     const memory = hub.store.data.memories[0];
     expect(memory).toMatchObject({ kind: "skill", scope: "cluster:prod", title: "Drain before reboot", autoLearned: true });
@@ -400,12 +405,78 @@ describe("HubService learned memories (saved automatically, the default)", () =>
     expect(hub.store.data.deletedMemoryIds?.[memory.id]).toBeTypeOf("number");
   });
 
-  it("applies an update at once, undo restores the earlier text, and does not overwrite a later edit", async () => {
+  it("does not save what the assistant only said: a question and its answer give a proposal for a person", async () => {
+    const saved: MemoryEntry[] = [];
+    const hub = await makeHub(saved, true);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: unknown, init?: RequestInit) => {
+        const first = JSON.stringify((JSON.parse(String(init?.body)) as { messages: unknown[] }).messages[0]);
+        return first.includes("long-term memory")
+          ? proposalAnswer([
+              { op: "add", kind: "skill", scope: "cluster:prod", title: "Drain before reboot", text: "Drain a prod node before rebooting it.", evidence: "the session lists the steps" },
+            ])
+          : sseResponse(`Drain the node, then reboot it. ${"Details. ".repeat(80)}`);
+      }),
+    );
+    await hub.request({ action: "start", task: { prompt: "How do we reboot node 3 safely?", mode: "advice" } });
+    await waitFor(() => (hub.store.data.memoryProposals ?? []).length === 1);
+    await waitFor(() => !hub.store.data.tasks.some((t) => t.status === "running"));
+    // Nothing was run, so nothing was shown: the answer is the assistant's own words.
+    expect(hub.store.data.memories).toHaveLength(0);
+    expect(saved).toHaveLength(0);
+    expect(hub.store.data.memoryProposals![0].appliedMemoryId).toBeUndefined();
+    const accepted = await hub.request({ action: "memory-proposal-accept", id: hub.store.data.memoryProposals![0].id });
+    expect(accepted.memories.map((m) => m.title)).toEqual(["Drain before reboot"]);
+  });
+
+  it("never replaces a memory a person wrote without asking: the update waits, also under the person's title", async () => {
     const hub = await makeHub([], true);
+    const rule = "Always run nginx -t before a reload; never restart.";
     const team = (await hub.request({
       action: "memory-save",
-      entry: { kind: "memory", scope: "workspace", title: "Postgres connections", text: "max_connections is 150" },
+      entry: { kind: "memory", scope: "workspace", title: "nginx change rule", text: rule },
     })).memories[0];
+    await hub.request({
+      action: "activity-record",
+      event: { actor: "sara", targetLabel: "web-01", kind: "config-edit", summary: "reloaded nginx after nginx -t" },
+    });
+    const long = `The documented procedure is: open a ticket, run nginx -t, reload and never restart. ${"More of the answer. ".repeat(20)}`;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        proposalAnswer([
+          { op: "update", id: team.id, text: long, evidence: "the session lists the steps" },
+          { op: "add", kind: "memory", scope: "workspace", title: "Nginx change rule", text: `A second copy. ${long}`, evidence: "the session lists the steps" },
+        ]),
+      ),
+    );
+    const learned = await hub.request({ action: "memory-distill-activity" });
+    // The person's memory is as they wrote it, and nothing took its place.
+    expect(learned.memories).toHaveLength(1);
+    expect(learned.memories[0]).toMatchObject({ id: team.id, text: rule });
+    expect(learned.memories[0].supersededBy).toBeUndefined();
+    expect(learned.memoryProposals!.map((p) => [p.op, p.appliedMemoryId])).toEqual([["update", undefined], ["add", undefined]]);
+    // A person who agrees accepts it; then it replaces the old text, which is kept as history.
+    const accepted = await hub.request({ action: "memory-proposal-accept", id: learned.memoryProposals![0].id });
+    expect(accepted.memories.find((m) => !m.supersededBy)!.text).toBe(long.trim());
+    expect(accepted.memories.find((m) => m.id === team.id)!.supersededBy).toBeTruthy();
+  });
+
+  it("applies an update of what it learned itself at once, undo restores the earlier text, and does not overwrite a later edit", async () => {
+    const hub = await makeHub([], true);
+    await hub.request({
+      action: "activity-record",
+      event: { actor: "sara", targetLabel: "prod-db", kind: "config-edit", summary: "set max_connections to 150" },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => proposalAnswer([{ op: "add", scope: "workspace", title: "Postgres connections", text: "max_connections is 150", evidence: "set max_connections to 150" }])),
+    );
+    const first = await hub.request({ action: "memory-distill-activity" });
+    const team = first.memories[0];
+    expect(team).toMatchObject({ text: "max_connections is 150", autoLearned: true });
+    await hub.request({ action: "memory-proposal-reject", id: first.memoryProposals![0].id });
     await hub.request({
       action: "activity-record",
       event: { actor: "sara", targetLabel: "prod-db", kind: "config-edit", summary: "raised max_connections to 300" },

@@ -147,12 +147,19 @@ explicitly enabled presentation on top of the same terminal authority.
   failed. ChatGPT/Codex sign-in and Anthropic have no embeddings endpoint, so
   search is lexical there. Also memory ranking and ingestion of
   runbooks from a real S3 storage profile (`kb-ingest-s3` →
-  `ingestFromStorageProvider`). The demo StorageGRID documents are used only for
-  demo targets.
+  `ingestFromStorageProvider`), into the collection and cluster the request
+  names, with the person who read them in as author; the answer lists what was
+  added, updated, already there and left out (unreadable, too large, over the
+  limit of files). The demo StorageGRID documents are used only for demo
+  targets.
 - **`SelfLearningService`** — learns a fix from a failed command followed by a
   successful one (`learnFromCommandResolution`), writes post-task playbooks
   (`reflectOnCompletedTask`), consolidates memories (`runReflectionCycle`),
-  discovers topology edges and applies memory feedback. Commands, snippets and
+  discovers topology edges and applies memory feedback. A command tied to one
+  file at one moment (`isOneOffCommand`: guarded by a checksum, an edit of a
+  numbered line, a text written in place, a dated name) is never kept as a fix
+  or a playbook step, and Ctrl+K offers a learned command only when it shares
+  at least half of what the request asks for. Commands, snippets and
   output are masked with `privacy.ts` before they are stored; counters and events
   persist in `HubStore` (`selfLearningState`).
 - **`TerminalRegistry` / `ToolBroker` / `shellAdapters`** — terminal authority:
@@ -209,7 +216,12 @@ explicitly enabled presentation on top of the same terminal authority.
   one. Personal notes are never shown to that run. `proposeMemories: false`
   turns the per-task run off. By default (`autoSaveMemories`, on unless set to
   false) the validated proposals are saved and shared at once, so the team's
-  memory grows on its own: each stays in `memoryProposals` with
+  memory grows on its own, with two exceptions that wait for a person: what
+  would take the place of a memory a person wrote (an update of it, or a new
+  memory under its title), and everything from a conversation in which no
+  command ran and showed a result, because that is the assistant's own answer
+  (`mayLearnUnreviewed`, `replacesPersonMemory`). Each saved one stays in
+  `memoryProposals` with
   `appliedMemoryId` as a record that can be undone (`memory-proposal-undo`
   deletes a new memory, or restores an updated one's earlier text unless it
   was edited since). With it off a person accepts each one. Each user's app
@@ -760,10 +772,14 @@ How pages come to be and stay right:
   and may only update that page, and the interface says how it ended.
 - **Saved at once, undoable.** A change is applied immediately and recorded
   in the page's history with the text it replaced (the newest three);
-  `kb-page-undo` takes it back, and undoing a page's creation removes it.
-  Undoing keeps what it replaced, so undoing can go on backwards. A page a
+  `kb-page-undo` takes it back, and undoing the creation of a page the
+  assistant made removes it (a page a person wrote is removed only by deleting
+  it). Undoing keeps what it replaced, so undoing can go on backwards. A page a
   person edited is marked: from then on the assistant's text is added under a
-  heading of its own instead of replacing theirs.
+  heading of its own instead of replacing theirs. The one exception is "Update
+  from its sources", which a person asks for: there a statement the source
+  contradicts is corrected where it stands (a few lines at most; a rewrite is
+  still added under a heading), and the change can be undone.
 - **Found by what an agent would type.** Besides title and `when`, a page
   carries **search phrases** (`keys`): an error message as it appears, a
   command, a file name. The model is asked for them, a person can write them,
@@ -1141,6 +1157,10 @@ for the person to read. What is sent to the model is masked.
 
 **Settings and first start.** Saved settings are never rewritten when they are
 read: a ChatGPT/Codex sign-in is offered on first start, not switched to.
+The desktop app shows and uses the same sign-in: its own, or the person's
+`codex login` (`~/.codex/auth.json`); one that has run out and cannot be
+renewed is passed over for the next. A workspace on a shared server and the
+demo look in their own folder only.
 Changing the provider clears the endpoint. App settings beyond how things look
 (smartcard mode, PKCS#11 library, which agent local shells use, X11, update
 checks …) need a person's approval when an agent changes them.
