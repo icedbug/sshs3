@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 
 export interface WebUserRecord {
@@ -153,6 +154,41 @@ function generateOpenSshEd25519KeyPair(comment: string): {
   return { privateKeyPem, publicKeyLine };
 }
 
+/**
+ * Makes a private key file readable by the account sshs3 runs as and by nobody else, the way
+ * ssh.exe and ssh-keygen.exe require on Windows. There a file mode sets no access list: the file
+ * inherits its folder's, which usually lets other accounts read it, and OpenSSH then refuses the key
+ * ("UNPROTECTED PRIVATE KEY FILE"). Elsewhere the mode the file was written with is the restriction.
+ * Returns whether the file is restricted now.
+ */
+export function restrictPrivateKeyFile(
+  file: string,
+  platform: NodeJS.Platform = process.platform,
+  run: (command: string, args: string[]) => unknown = (command, args) =>
+    execFileSync(command, args, { timeout: 10_000, stdio: 'ignore', windowsHide: true }),
+): boolean {
+  if (platform !== 'win32') return true;
+  let user = '';
+  try {
+    user = os.userInfo().username;
+  } catch {
+    user = process.env.USERNAME ?? '';
+  }
+  if (!user) return false;
+  const domain = process.env.USERDOMAIN;
+  // The account with its domain (or computer) name first: a bare name can be taken for another
+  // account of the same name. A service account has no such name, so the bare name is tried too.
+  for (const account of domain ? [`${domain}\\${user}`, user] : [user]) {
+    try {
+      run('icacls', [file, '/inheritance:r', '/grant:r', `${account}:F`]);
+      return true;
+    } catch {
+      // try the next way of naming the account
+    }
+  }
+  return false;
+}
+
 export class WebAuthService {
   private readonly authFilePath: string;
   private data: StoredAuthData = {
@@ -241,6 +277,9 @@ export class WebAuthService {
     return path.join(this.baseDataDir, 'users', safeId);
   }
 
+  /** Private key files whose access was restricted by this process (see restrictPrivateKeyFile). */
+  private readonly restrictedKeys = new Set<string>();
+
   getUserSshDir(userId: string): string {
     return path.join(this.getUserDataDir(userId), '.ssh');
   }
@@ -264,6 +303,8 @@ export class WebAuthService {
     await fsp.mkdir(sshDir, { recursive: true, mode: 0o700 });
 
     if (!forceRotate && fs.existsSync(privPath) && fs.existsSync(pubPath)) {
+      // A key written before sshs3 restricted it (on Windows) is put right once, when it is next asked for.
+      if (!this.restrictedKeys.has(privPath) && restrictPrivateKeyFile(privPath)) this.restrictedKeys.add(privPath);
       const pub = (await fsp.readFile(pubPath, 'utf8')).trim();
       return { privateKeyPath: privPath, publicKey: pub };
     }
@@ -272,6 +313,7 @@ export class WebAuthService {
     const { privateKeyPem, publicKeyLine } =
       generateOpenSshEd25519KeyPair(comment);
     await fsp.writeFile(privPath, privateKeyPem, { mode: 0o600 });
+    if (restrictPrivateKeyFile(privPath)) this.restrictedKeys.add(privPath);
     await fsp.writeFile(pubPath, `${publicKeyLine}\n`, { mode: 0o644 });
 
     const pub = (await fsp.readFile(pubPath, 'utf8')).trim();
@@ -300,6 +342,7 @@ export class WebAuthService {
       const trial = `${privPath}.import-${crypto.randomBytes(6).toString('hex')}`;
       try {
         await fsp.writeFile(trial, `${trimmedPriv}\n`, { mode: 0o600 });
+        restrictPrivateKeyFile(trial);
         derivedPub = execFileSync('ssh-keygen', ['-y', '-P', '', '-f', trial], {
           encoding: 'utf8',
           timeout: 5000,
@@ -317,6 +360,7 @@ export class WebAuthService {
       }
     }
     await fsp.writeFile(privPath, `${trimmedPriv}\n`, { mode: 0o600 });
+    if (restrictPrivateKeyFile(privPath)) this.restrictedKeys.add(privPath);
     await fsp.writeFile(pubPath, `${derivedPub}\n`, { mode: 0o644 });
     return { privateKeyPath: privPath, publicKey: derivedPub };
   }

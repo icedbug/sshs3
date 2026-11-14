@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { restrictPrivateKeyFile } from './WebAuthService';
 
 let configuredDataDir =
   process.env.SSHS3_DATA_DIR || path.join(os.homedir(), '.sshs3-server');
@@ -36,12 +37,16 @@ function getOrCreateMasterKey(): Buffer {
       const raw = fs.readFileSync(keyPath, 'utf8').trim();
       const buf = Buffer.from(raw, 'hex');
       if (buf.length === 32) {
+        // Once per start, also for a key file from before this was done.
+        restrictPrivateKeyFile(keyPath);
         cachedMasterKey = buf;
         return cachedMasterKey;
       }
     }
     const generated = crypto.randomBytes(32);
     fs.writeFileSync(keyPath, generated.toString('hex'), { mode: 0o600 });
+    // On Windows the mode restricts nothing: the key that opens every stored secret is for this account only.
+    restrictPrivateKeyFile(keyPath);
     cachedMasterKey = generated;
     return cachedMasterKey;
   } catch {
