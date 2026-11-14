@@ -2153,26 +2153,22 @@ export function AiHubPanel({
                       </div>
                     )}
                   </div>
-                  {task?.usage && (
-                    <small
-                      className="ai-usage"
-                      title={
-                        task.usage.inputTokens +
-                        " input / " +
-                        task.usage.outputTokens +
-                        " output tokens"
-                      }
-                    >
-                      {(
-                        (task.usage.inputTokens + task.usage.outputTokens) /
-                        1000
-                      ).toFixed(1)}
-                      k
-                      {task.usage.costUsd !== undefined
-                        ? " · $" + task.usage.costUsd.toFixed(3)
-                        : ""}
-                    </small>
-                  )}
+                  {task && (task.usage || task.runUsage) && (() => {
+                    // While a run goes on, what it has spent so far is counted in.
+                    const running = ["queued", "running", "waiting"].includes(task.status) ? task.runUsage : undefined;
+                    const input = (task.usage?.inputTokens ?? 0) + (running?.inputTokens ?? 0);
+                    const output = (task.usage?.outputTokens ?? 0) + (running?.outputTokens ?? 0);
+                    if (!input && !output) return null;
+                    return (
+                      <small
+                        className="ai-usage"
+                        title={`${input} input / ${output} output tokens${running ? " (the run in progress included)" : ""}`}
+                      >
+                        {((input + output) / 1000).toFixed(1)}k
+                        {task.usage?.costUsd !== undefined ? " · $" + task.usage.costUsd.toFixed(3) : ""}
+                      </small>
+                    );
+                  })()}
                   {terminal?.owner && (
                     <button
                       className="ai-text-button"

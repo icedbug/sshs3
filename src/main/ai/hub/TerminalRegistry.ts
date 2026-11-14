@@ -812,6 +812,22 @@ export class TerminalRegistry extends EventEmitter {
     this.emit("changed");
   }
 
+  /**
+   * A terminal the hub opened for itself and has closed again is gone, not
+   * "disconnected": it was nobody's tab, and left in the list it reads as a
+   * dead connection that somebody should look at. Whatever waited on it is
+   * released first. A terminal a person opened is never forgotten this way:
+   * theirs stays in the list until they close the tab.
+   */
+  forget(id: string): void {
+    if (!this.sessions.has(id)) return;
+    this.invalidate(id, "Terminal closed", true);
+    this.sessions.delete(id);
+    this.lastFailures.delete(id);
+    this.lastResolvedFailures.delete(id);
+    this.emit("changed");
+  }
+
   private require(id: string): LiveTerminal {
     const s = this.sessions.get(id);
     // Two different things to a person: an id that names nothing, and a terminal whose connection ended.

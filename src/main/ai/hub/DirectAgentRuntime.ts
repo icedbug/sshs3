@@ -1155,6 +1155,10 @@ const TEAM_MEMORY_CHARS = 12_000;
  * has learned must not be what gets cut. A memory that does not fit whole is
  * left out rather than shortened, and the text says how many were.
  */
+/** A team memory as the snapshot gives it: one line. */
+const memoryLine = (m: Partial<MemoryEntry>): string =>
+  `- [${m.kind === "skill" ? "skill" : "memory"}, ${m.scope ?? "workspace"}] ${maskContext(m.title ?? "")}: ${maskContext(m.text ?? "")}`;
+
 export function snapshotText(context: unknown, maxChars: number): string {
   if (!context || typeof context !== "object")
     return boundedContext(JSON.stringify(context ?? null), maxChars);
@@ -1177,7 +1181,7 @@ export function snapshotText(context: unknown, maxChars: number): string {
   let used = 0;
   let left = 0;
   for (const m of memories) {
-    const line = `- [${m.kind === "skill" ? "skill" : "memory"}, ${m.scope ?? "workspace"}] ${maskContext(m.title ?? "")}: ${maskContext(m.text ?? "")}`;
+    const line = memoryLine(m);
     if (used + line.length > TEAM_MEMORY_CHARS) {
       left++;
       continue;
@@ -1282,6 +1286,123 @@ export function isDistillRun(task: AgentTask): boolean {
   return Boolean(task.distillSourceId);
 }
 
+/**
+ * A run that works a ticket from the board or a schedule's job: the work is
+ * on servers, and nobody sits at it to have the app itself rearranged. Such a
+ * run is not offered the tools that manage sshs3 (settings, servers, agents,
+ * buckets, layout, schedules, folders), and its snapshot leaves out what only
+ * those tools act on. Every call carries the tool list and the snapshot again:
+ * here they were half of what a heartbeat run was sent each time.
+ */
+export function worksOnItsOwn(task: Pick<AgentTask, "ticketId" | "scheduleId">): boolean {
+  return Boolean(task.ticketId || task.scheduleId);
+}
+
+/** The management tools a run that works on its own is not given (see worksOnItsOwn). */
+const MANAGEMENT_TOOLS = new Set([
+  "sshs3_manage_app_and_settings",
+  "sshs3_manage_server",
+  "sshs3_agent_and_mcp_manage",
+  "sshs3_manage_s3_and_sync",
+  "sshs3_workspace_layout",
+  "sshs3_manage_schedule",
+  "sshs3_manage_cluster_and_folders",
+]);
+
+/** The parts of the workspace snapshot only the management tools act on. */
+const MANAGEMENT_CONTEXT = [
+  "folders",
+  "s3Profiles",
+  "s3TeamWorkspace",
+  "schedules",
+  "snippets",
+  "dotfilesPools",
+  "dirSyncProfiles",
+  "activeTunnels",
+  "appSettings",
+  "mcpServers",
+];
+
+/**
+ * The workspace context as this run's model is given it. The target's own
+ * output is under `target`, and is not repeated in the list of terminals. A
+ * run that works on its own (see worksOnItsOwn) is not given the parts that
+ * only the management tools act on, nor what other terminals showed or
+ * closed ones: those are a person's tabs, not its target. The context itself
+ * is left as it is: the runtime still reads its settings from it.
+ */
+export function contextForModel(task: Pick<AgentTask, "ticketId" | "scheduleId">, context: unknown): unknown {
+  if (!context || typeof context !== "object" || Array.isArray(context)) return context;
+  const out: Record<string, unknown> = { ...(context as Record<string, unknown>) };
+  const target = out.target as { session?: { id?: string } } | null | undefined;
+  const targetId = target?.session?.id;
+  const alone = worksOnItsOwn(task);
+  if (Array.isArray(out.terminals))
+    out.terminals = (out.terminals as Array<Record<string, unknown>>)
+      .filter((t) => !alone || t.id === targetId || t.state !== "disconnected")
+      .map((t) => {
+        if (t.id !== targetId && !alone) return t;
+        const { recentOutput: _shown, ...rest } = t;
+        return t.id === targetId ? { ...rest, recentOutput: "(the target's: see target.output)" } : rest;
+      });
+  if (alone) {
+    for (const key of MANAGEMENT_CONTEXT) delete out[key];
+    // The team's earlier workforce runs, by what they were and what they concluded: each
+    // specialist's whole report (most of the snapshot on a busy team) is not this run's work.
+    if (Array.isArray(out.recentWorkforceRuns))
+      out.recentWorkforceRuns = (out.recentWorkforceRuns as Array<Record<string, unknown>>).map((r) => ({
+        id: r.id,
+        title: r.title,
+        status: r.status,
+        targetCluster: r.targetCluster,
+        createdAt: r.createdAt,
+        ...(typeof r.synthesis === "string" && r.synthesis ? { synthesis: clip(r.synthesis, 600) } : {}),
+      }));
+  }
+  return out;
+}
+
+/**
+ * A `workspace_context` result without what the model already has: a part
+ * that reads exactly as it did in the snapshot this run began with is named,
+ * not sent again, and so is a team memory the snapshot gave word for word.
+ * The page index is always sent: the snapshot may hold only part of it.
+ */
+export function withoutUnchanged(result: unknown, snapshot: string | undefined): unknown {
+  if (!snapshot || !result || typeof result !== "object" || Array.isArray(result)) return result;
+  const out: Record<string, unknown> = {};
+  const unchanged: string[] = [];
+  for (const [key, value] of Object.entries(result as Record<string, unknown>)) {
+    if (key === "workspaceMemories" && Array.isArray(value)) {
+      let shown = 0;
+      out[key] = (value as Array<Partial<MemoryEntry>>).map((m) => {
+        if (!m || typeof m.text !== "string" || !m.text.trim() || !snapshot.includes(memoryLine(m))) return m;
+        shown++;
+        return { id: m.id, title: m.title, inSnapshot: true };
+      });
+      if (shown > 0) unchanged.push(`workspaceMemories (the ${shown} marked inSnapshot)`);
+      continue;
+    }
+    const json = JSON.stringify(value);
+    if (
+      !["observedAt", "workspaceMemories", "kbPageIndex"].includes(key) &&
+      json !== undefined &&
+      json.length > 40 &&
+      snapshot.includes(`"${key}":${maskContext(json)}`)
+    )
+      unchanged.push(key);
+    else out[key] = value;
+  }
+  if (unchanged.length === 0) return result;
+  return {
+    ...out,
+    unchangedSinceRunStart: {
+      parts: unchanged,
+      note: "These parts read exactly as in the workspace snapshot this run began with: look them up there.",
+    },
+  };
+}
+
 export function toolsForTask(
   task: AgentTask,
   initialContext?: unknown,
@@ -1308,6 +1429,7 @@ export function toolsForTask(
             (t.name.startsWith("sshs3_") && t.name !== "sshs3_change" && t.name !== "sshs3_cluster_exec"),
         )
       : [...AGENT_TOOLS];
+  if (worksOnItsOwn(task)) baseTools = baseTools.filter((t) => !MANAGEMENT_TOOLS.has(t.name));
   baseTools.push({
     name: HYPOTHESIS_TOOL.name,
     description: HYPOTHESIS_TOOL.description,
@@ -1547,6 +1669,8 @@ export class DirectAgentRuntime implements AgentRuntime {
     if (this.turnUsage) {
       this.spent.input_tokens += this.turnUsage.input_tokens ?? 0;
       this.spent.output_tokens += this.turnUsage.output_tokens ?? 0;
+      // What the run has spent so far, while it runs: not only once it has ended.
+      this.onEvent?.({ type: "usage.updated", usage: { ...this.spent } });
     }
     this.turnUsage = undefined;
   }
@@ -1562,6 +1686,13 @@ export class DirectAgentRuntime implements AgentRuntime {
   /** The run's task list and what it has changed and verified (AgentDiscipline). */
   private discipline: RunDiscipline = newDiscipline();
   private task?: AgentTask;
+  /** The workspace snapshot this run began with, as the model was given it. */
+  private snapshot?: string;
+  /** Builds the snapshot the model is given at the start of the run, and remembers it. */
+  private snapshotFor(task: AgentTask, context: unknown, maxChars: number): string {
+    this.snapshot = snapshotText(contextForModel(task, context), maxChars);
+    return this.snapshot;
+  }
   /** `asked`: the handover note has been requested and the next text-only turn is it. */
   private compaction: "idle" | "asked" = "idle";
   /** This run's tool calls, newest last, for the digest a compaction keeps. */
@@ -2188,8 +2319,11 @@ export class DirectAgentRuntime implements AgentRuntime {
     } else {
       try {
         const req = mapToolCallToBrokerRequest(call.name, parsedArgs);
-        const result = await this.invokeBroker(req);
+        let result = await this.invokeBroker(req);
         noteToolResult(this.discipline, call.name, parsedArgs, result);
+        // The workspace again: as the snapshot was cut for this run, and without what it already holds unchanged.
+        if (call.name === "workspace_context" && this.task)
+          result = withoutUnchanged(contextForModel(this.task, result), this.snapshot);
         output = JSON.stringify(
           (await this.withFailureHints(call.name, parsedArgs, result)) ?? {
             ok: true,
@@ -2277,7 +2411,7 @@ export class DirectAgentRuntime implements AgentRuntime {
         content: [
           {
             type: "input_text",
-            text: `[Automatic Workspace & Terminal Snapshot]\n${snapshotText(initialContext, tuning.snapshotMaxChars)}`,
+            text: `[Automatic Workspace & Terminal Snapshot]\n${this.snapshotFor(task, initialContext, tuning.snapshotMaxChars)}`,
           },
         ],
       });
@@ -2472,7 +2606,7 @@ export class DirectAgentRuntime implements AgentRuntime {
     if (initialContext && !isDistillRun(task)) {
       messages.push({
         role: "system",
-        content: `Current Workspace & Terminal Snapshot:\n${snapshotText(initialContext, tuning.snapshotMaxChars)}`,
+        content: `Current Workspace & Terminal Snapshot:\n${this.snapshotFor(task, initialContext, tuning.snapshotMaxChars)}`,
       });
     }
 
@@ -2673,7 +2807,7 @@ export class DirectAgentRuntime implements AgentRuntime {
     if (initialContext && !isDistillRun(task)) {
       system.push({
         type: "text",
-        text: `Current Workspace & Terminal Snapshot:\n${snapshotText(initialContext, tuning.snapshotMaxChars)}`,
+        text: `Current Workspace & Terminal Snapshot:\n${this.snapshotFor(task, initialContext, tuning.snapshotMaxChars)}`,
       });
     }
 

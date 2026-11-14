@@ -317,6 +317,8 @@ export interface AgentTask {
    */
   budgetStop?: { kind: "commands" | "minutes"; limit: number; at: number };
   usage?: { inputTokens: number; outputTokens: number; costUsd?: number };
+  /** What the run in progress has spent so far, not yet in `usage` (added there when it ends). */
+  runUsage?: { inputTokens: number; outputTokens: number };
   /** How much the model was sent at its last call in this conversation: how full its window was. Absent before the first run. */
   contextTokens?: number;
   verification: "not-verified" | "verified" | "incomplete";
@@ -345,6 +347,8 @@ export interface AgentTask {
   evalCaseId?: string;
   /** Set on a run that works a ticket from the board: that ticket's id. */
   ticketId?: string;
+  /** Set on a run a schedule started: that schedule's id. */
+  scheduleId?: string;
   /** Set when the conversation was handed over: the agent and mode it began with, which answered its first question. */
   startedAs?: { agentId?: string; mode: AgentMode };
   /** The model the task's latest run was started on. */

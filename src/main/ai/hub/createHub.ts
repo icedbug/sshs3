@@ -892,6 +892,20 @@ export function createHub(
         // Already gone.
       }
     },
+    sessionAlive: (sessionId) => {
+      const session = bridge.sshPtyManager.getSession(sessionId);
+      // Cleaned up without an exit having been reported for it.
+      if (!session) return false;
+      // A demo terminal has no process, and one that is connecting again has none for a moment.
+      if (isDemoMode() || session.isReconnecting?.() || !Number.isInteger(session.pid) || session.pid <= 0) return true;
+      try {
+        process.kill(session.pid, 0);
+        return true;
+      } catch (error) {
+        // Only "no such process" says it is gone; "not permitted" is a process that is there.
+        return (error as NodeJS.ErrnoException).code !== "ESRCH";
+      }
+    },
     openSchedule: async (schedule, label) => {
       let id: string;
       if (schedule.profileId === "local") {
@@ -1019,6 +1033,8 @@ export function createHub(
         } catch {
           // Already gone.
         }
+        // And out of the list of terminals: it never was one anybody could use.
+        hub.terminals.forget(session.sessionId);
         throw new Error(
           `No terminal could be opened on ${effectiveProfile.name || effectiveProfile.host}, so nothing was run there: ${safeError(error)}`,
           { cause: error },

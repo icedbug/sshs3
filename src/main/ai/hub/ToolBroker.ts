@@ -38,6 +38,12 @@ export function showsExpected(output: string, expected: string): boolean {
   return new RegExp(`${left}${escaped}${right}`, "m").test(output);
 }
 
+/** A wait in whole minutes, as said to the agent. */
+const minutes = (ms: number): string => {
+  const n = Math.max(1, Math.round(ms / 60_000));
+  return `${n} ${n === 1 ? "minute" : "minutes"}`;
+};
+
 export interface ToolRequest {
   action: string;
   command?: string;
@@ -84,6 +90,8 @@ export interface ToolDependencies {
   ): { policy?: SafetyPolicyConfig; targetTags?: string[] };
   /** How long a person is given to approve, in milliseconds. Ten minutes unless set. */
   approvalWaitMs?(): number;
+  /** A run has started to wait for a person's answer about this change. */
+  asking?(task: AgentTask, change: AgentChange): void;
   /** A run stood still this long waiting for a person: that time is not the run's own. */
   waited?(task: AgentTask, ms: number): void;
   /** The run asked for another action after it was told its budget is spent: end it. */
@@ -183,6 +191,7 @@ export class ToolBroker {
     task.changes.push(change);
     task.status = "waiting";
     this.deps.changed();
+    this.deps.asking?.(task, change);
     const answer = await this.waitForPerson(task, change.id);
     // Stopped while it waited: no answer lets it through. Otherwise the run waits on while
     // another of its questions is still open (an external agent may ask several at once).
@@ -756,6 +765,7 @@ export class ToolBroker {
     if (requiresApproval) {
       task.status = "waiting";
       this.deps.changed();
+      this.deps.asking?.(task, change);
       const answer = await this.waitForPerson(task, change.id);
       const allowed = answer.allowed;
       change.decidedHow = answer.how;
@@ -774,7 +784,10 @@ export class ToolBroker {
         throw new Error(
           answer.note && answer.how === "person"
             ? `Not approved. The person said: ${answer.note}`
-            : "Action not approved or task stopped",
+            : answer.how === "timeout"
+              ? // Said as it is, with the command: "not approved" read as a person's no, and the report then left out what waited.
+                `Nobody answered within ${minutes(this.deps.approvalWaitMs?.() ?? 10 * 60_000)}, so this did not run: ${change.command ?? change.description}. It was not refused; nobody was there. Do not ask for it again in this run. Go on with what does not need it, and name this command in your report as waiting for a person's approval.`
+              : "Action not approved or task stopped",
         );
       }
       task.status = "running";
