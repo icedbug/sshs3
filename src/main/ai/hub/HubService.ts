@@ -792,7 +792,7 @@ export class HubService {
           new Set(matchedServers.flatMap((s) => s.tags ?? [])),
         );
         return {
-          policy: this.store.data.safetyPolicy ?? DEFAULT_SAFETY_POLICY,
+          policy: this.safetyPolicy(),
           targetTags: aggregatedTags.length > 0 ? aggregatedTags : undefined,
         };
       },
@@ -1282,6 +1282,26 @@ export class HubService {
       );
     const lifted = (known.tags ?? []).filter(isProdTag).filter((t) => !(next.tags ?? known.tags ?? []).some((x) => x.trim().toLowerCase() === t.toLowerCase()));
     if (lifted.length) throw new Error(`${who} takes the tag "${lifted[0]}" off a server the team shares: it is what makes changes there wait for a person.`);
+  }
+
+  /**
+   * The safety rules a run is held to. On a shared server a member's own rules may be stricter than
+   * the team's, never looser: one stored before that rule (switched off by a member) counts as on.
+   */
+  private safetyPolicy(): SafetyPolicyConfig {
+    const own = this.store.data.safetyPolicy ?? DEFAULT_SAFETY_POLICY;
+    if (!this.sharedServer() || this.host.teamAdmin?.()) return own;
+    return { ...own, requireApprovalOnProdTags: true, blockDestructiveWithoutConfirm: true };
+  }
+
+  /**
+   * The model's address is called on every run with the person's prompt and key. On a shared server it
+   * is held to the same rule as any other address a user gives: not the server itself, not its private
+   * network (unless the administrator allows it). Asked when it is set and again when a run starts.
+   */
+  private async assertModelEndpointReach(baseUrl: string | undefined): Promise<void> {
+    if (!baseUrl || !this.sharedServer()) return;
+    await guardUrl(baseUrl, { ...this.outboundGuard(), allowPlainHttp: true, ...(this.kbNetwork ? { lookup: this.kbNetwork.lookup } : {}) });
   }
 
   private assertMayRemoveTeamServer(known: WorkspaceServerSummary | undefined): void {
@@ -2017,7 +2037,7 @@ export class HubService {
       },
       workforceRuns: this.getWorkforceRunsList(),
       infraEdges: allInfraEdges,
-      safetyPolicy: this.store.data.safetyPolicy ?? DEFAULT_SAFETY_POLICY,
+      safetyPolicy: this.safetyPolicy(),
       safetyPolicyChanged: this.store.data.safetyPolicyChanged,
       pendingLayoutEvent: this.pendingLayoutEvent,
       selfLearning: this.selfLearning.getStatus({
@@ -2156,6 +2176,7 @@ export class HubService {
             throw new Error("Autostart requires background mode");
         }
         // Preferences can be changed on their own: the AI settings are touched only when they were sent.
+        if (request.config?.baseUrl?.trim()) await this.assertModelEndpointReach(request.config.baseUrl.trim());
         if (request.config) await this.config.update(request.config);
         if (request.preferences) {
           if (!("sharedWorkspacePath" in next)) delete this.store.data.preferences.sharedWorkspacePath;
@@ -3540,6 +3561,12 @@ export class HubService {
         for (const key of Object.keys(POLICY_NAMES) as (keyof SafetyPolicyConfig)[])
           if (asked[key] !== undefined && typeof asked[key] !== "boolean")
             throw new Error(`"${POLICY_NAMES[key]}" is either on (true) or off (false).`);
+        // On a shared server the team's rules are a floor: a member switches on what makes changes wait
+        // for a person, never off. Only an administrator loosens them.
+        if (this.sharedServer() && !this.host.teamAdmin?.())
+          for (const key of ["requireApprovalOnProdTags", "blockDestructiveWithoutConfirm"] as const)
+            if (asked[key] === false)
+              throw new Error(`Only an administrator of this server switches off "${POLICY_NAMES[key]}": on a shared server it is the team's rule.`);
         // What an earlier version stored as something else counts as what it did: anything but an explicit off kept the rule on.
         const current: SafetyPolicyConfig = {
           autoApproveSafeReadOnly: Boolean(stored.autoApproveSafeReadOnly),
@@ -4290,6 +4317,8 @@ export class HubService {
     if (!config.enabled)
       throw new Error("Enable AI and configure a model in Hub settings first");
     // An agent that is an external coding agent runs there, not on the configured model.
+    const viaRunner = !isBackgroundRun(task) && this.getAgentsList().some((a) => a.id === task.agentId && a.runnerId);
+    if (!viaRunner) await this.assertModelEndpointReach(config.baseUrl);
     const external = isBackgroundRun(task)
       ? undefined
       : this.getAgentsList().find((a) => a.id === task.agentId && a.runnerId);
@@ -5026,7 +5055,7 @@ export class HubService {
           shouldRequireCommandApproval({
             analysis,
             mode: task.mode,
-            policy: this.store.data.safetyPolicy ?? DEFAULT_SAFETY_POLICY,
+            policy: this.safetyPolicy(),
           });
         if (!needsApproval) {
           change.status = "approved";

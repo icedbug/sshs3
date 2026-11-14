@@ -348,6 +348,46 @@ describe("the safety policy", () => {
     const snap = await hub.request({ action: "safety-policy-save", policy: { autoApproveSafeReadOnly: false } });
     expect(snap.safetyPolicy).toEqual({ autoApproveSafeReadOnly: false, requireApprovalOnProdTags: true, blockDestructiveWithoutConfirm: true });
   });
+
+  it("on a shared server is a floor: a member tightens their own rules, only an administrator loosens them", async () => {
+    const { hub } = await makeHub(member);
+    for (const policy of [{ requireApprovalOnProdTags: false }, { blockDestructiveWithoutConfirm: false }, { requireApprovalOnProdTags: false, blockDestructiveWithoutConfirm: false }])
+      await expect(hub.request({ action: "safety-policy-save", policy })).rejects.toThrow(/Only an administrator/);
+    // Asking for every read-only command is stricter, and a member's own choice.
+    let snap = await hub.request({ action: "safety-policy-save", policy: { autoApproveSafeReadOnly: false } });
+    expect(snap.safetyPolicy).toEqual({ autoApproveSafeReadOnly: false, requireApprovalOnProdTags: true, blockDestructiveWithoutConfirm: true });
+    snap = await hub.request({ action: "safety-policy-save", policy: { autoApproveSafeReadOnly: true } });
+    expect(snap.safetyPolicy?.autoApproveSafeReadOnly).toBe(true);
+    // Rules a member switched off before this held count as on.
+    hub.store.data.safetyPolicy = { autoApproveSafeReadOnly: true, requireApprovalOnProdTags: false, blockDestructiveWithoutConfirm: false };
+    expect((await hub.snapshot()).safetyPolicy).toEqual({ autoApproveSafeReadOnly: true, requireApprovalOnProdTags: true, blockDestructiveWithoutConfirm: true });
+
+    const anna = await makeHub(admin);
+    snap = await anna.hub.request({ action: "safety-policy-save", policy: { requireApprovalOnProdTags: false } });
+    expect(snap.safetyPolicy?.requireApprovalOnProdTags).toBe(false);
+  });
+});
+
+describe("the AI endpoint's address", () => {
+  it("on a shared server is not the server itself or its private network, when set or when a run starts", async () => {
+    const { hub } = await makeHub(member);
+    for (const baseUrl of ["http://127.0.0.1:2299/v1", "http://localhost:8080/v1", "http://169.254.169.254/latest", "http://10.0.0.5:11434/v1"])
+      await expect(hub.request({ action: "configure", config: { baseUrl } } as never)).rejects.toThrow(/does not call itself|never calls|private/);
+    expect((await hub.snapshot()).config?.baseUrl ?? "").toBe("");
+    // One saved before the rule existed is not called either.
+    await (hub as unknown as { config: { update: (c: object) => Promise<void> } }).config.update({ enabled: true, baseUrl: "http://127.0.0.1:2299/v1" });
+    const fetchSpy = vi.fn(async () => new Response("{}"));
+    vi.stubGlobal("fetch", fetchSpy);
+    await expect(hub.request({ action: "start", task: { prompt: "hello", mode: "advice" } } as never)).rejects.toThrow(/does not call itself/);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it("on a person's own computer may be one on that computer", async () => {
+    const { hub } = await makeHub();
+    const snap = await hub.request({ action: "configure", config: { baseUrl: "http://127.0.0.1:11434/v1" } } as never);
+    expect(snap.config?.baseUrl).toBe("http://127.0.0.1:11434/v1");
+  });
 });
 
 describe("the servers a team shares, on a shared server", () => {

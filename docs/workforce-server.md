@@ -207,7 +207,12 @@ recordings are sealed into it. See "The audit log and terminal recordings" in
   invite code is still trusted with the list (the newest copy wins).
 - **Team settings are an admin's.** Changing the shared workspace, the team
   bucket or other team-wide settings needs a team admin (set with the host
-  option for admins). Changing a password signs out the account's other
+  option for admins). The safety rules are a floor on a server with more
+  than one account: a member makes their own stricter (asks before every
+  read-only command), but only an administrator switches off approval on
+  `prod` servers or the confirmation of destructive commands. The AI
+  endpoint's address is held to the same rule as any other address a member
+  gives: not the server itself or its private network. Changing a password signs out the account's other
   sessions; sign-in attempts are limited per account as well as per address.
 - **One server per team is enough.** Two would work (claims decide who runs a
   ticket) but gain nothing.
