@@ -1445,8 +1445,24 @@ export async function handleAppAction(
               };
             }
             if (hub.host.openServerTerminal) {
+              let sessionId: string;
               try {
-                const sessionId = await hub.host.openServerTerminal(srv.id);
+                // Comes back connected at its prompt, or throws having closed what it opened.
+                sessionId = await hub.host.openServerTerminal(srv.id);
+              } catch (err) {
+                // Nothing was typed anywhere: this is "did not run", not "unknown whether it ran".
+                return {
+                  node: srv.name,
+                  host: srv.host,
+                  nodeRole: srv.nodeRole,
+                  exitCode: 1,
+                  output: `Not run: ${safeError(err)}`,
+                  source: `unconnected:${srv.id}`,
+                };
+              }
+              // The run's own terminal on that node: closed when the run ends, not left as somebody's tab.
+              hub.closeWhenRunEnds(task.id, sessionId);
+              try {
                 const ready = await hub.terminals.ensureReady(sessionId);
                 hub.terminals.claim(ready.id, ready.generation, task.id);
                 const res = await hub.terminals.execute(

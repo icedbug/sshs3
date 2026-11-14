@@ -192,3 +192,36 @@ describe("what a run from outside is held to", () => {
     expect(task.maxCommands).toBe(1);
   });
 });
+
+describe("the terminal after a command from outside", () => {
+  it("is the person's again once the command has run, so the next command and the next run can use it", async () => {
+    const { hub, ran } = await hubWithServer();
+    const ctx = ctxFor(hub, SERVERS[0].id);
+    const first = (await callMcpTool("run_command", { command: "uptime", why: "look" }, ctx as never)) as { id: string };
+    const task = hub.store.data.tasks.find((t) => t.changes.some((c) => c.id === first.id))!;
+    hub.broker.approve(task.id, first.id, true);
+    await vi.waitFor(() => expect(task.status).toBe("completed"));
+    // It was held for as long as the command ran, and not a moment longer.
+    await vi.waitFor(() => expect(hub.terminals.get("sess-db01")?.owner).toBeUndefined());
+    expect(hub.terminals.get("sess-db01")?.state).toBe("ready");
+
+    // A second command is taken, where it used to be refused with "Another task owns this terminal".
+    const second = (await callMcpTool("run_command", { command: "df -h", why: "look again" }, ctx as never)) as { id: string; status: string };
+    expect(second.status).toBe("waiting for a person");
+    const again = hub.store.data.tasks.find((t) => t.changes.some((c) => c.id === second.id))!;
+    hub.broker.approve(again.id, second.id, true);
+    await vi.waitFor(() => expect(again.status).toBe("completed"));
+    expect(ran.join("\n")).toContain("df -h");
+    await vi.waitFor(() => expect(hub.terminals.get("sess-db01")?.owner).toBeUndefined());
+  });
+
+  it("is the person's again when the command was refused", async () => {
+    const { hub } = await hubWithServer();
+    const ctx = ctxFor(hub, SERVERS[0].id);
+    const asked = (await callMcpTool("run_command", { command: "systemctl restart nginx", why: "x" }, ctx as never)) as { id: string };
+    const task = hub.store.data.tasks.find((t) => t.changes.some((c) => c.id === asked.id))!;
+    hub.broker.approve(task.id, asked.id, false);
+    await vi.waitFor(() => expect(task.status).toBe("failed"));
+    await vi.waitFor(() => expect(hub.terminals.get("sess-db01")?.owner).toBeUndefined());
+  });
+});

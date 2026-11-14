@@ -102,6 +102,12 @@ export function MemoryProposals({
         </p>
       )}
 
+      {last?.pagesError && (
+        <p className="ai-hint" data-testid="memory-distill-pages-error">
+          {`What the latest reading (${last.sourceTitle}) established was not added to the knowledge base pages: ${last.pagesError}`}
+        </p>
+      )}
+
       {proposals.map((proposal) => (
         <ProposalRow key={proposal.id} proposal={proposal} act={act} />
       ))}

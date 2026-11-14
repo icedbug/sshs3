@@ -260,8 +260,16 @@ export interface AgentTask {
   kbPages?: string[];
   /** How many of `changes` have been put down to those pages already. */
   kbCounted?: number;
-  /** What this run spent has been added to its agent's month. Counted once, wherever it ended. */
+  /** What the latest run of this conversation spent has been added to its agent's month. Set again for every run. */
   usageCounted?: boolean;
+  /** How many of this conversation's tokens have been put down to an agent so far: each run adds only what is new. */
+  usageCountedTokens?: number;
+  /**
+   * The hub opened this conversation's terminal itself (a schedule, a ticket
+   * nobody sat at). It is closed when a run ends, and opened again on the
+   * same target when the conversation goes on.
+   */
+  ownTerminal?: { via: "schedule" | "server"; profileId: string; shell: ShellKind; label: string };
   /** When learning last reflected on this run: it is reflected on once, not again every night. */
   reflectedAt?: number;
   /** A handover asked for while a run was going: made when that run ends, so its spending stays with the agent that spent it. */
@@ -394,6 +402,8 @@ export interface MemoryDistillStatus {
   sourceTitle: string;
   proposed: number;
   error?: string;
+  /** The reading itself worked, but what it established could not be added to the knowledge base pages. */
+  pagesError?: string;
 }
 
 export interface SelfLearningEvent {

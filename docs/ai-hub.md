@@ -118,7 +118,9 @@ explicitly enabled presentation on top of the same terminal authority.
   on its own for a risky change. A plan has a goal and steps, each with
   target, exact command, risk, the check that shows it worked and, above low
   risk, a rollback; a plan without these is refused with the reason, and a
-  destructive command cannot be called low risk.
+  destructive command cannot be called low risk. A command, check or rollback
+  is shown whole (up to 2,000 characters) or the plan is refused: a person
+  never approves half of one. Goal and action are cut at their end when long.
   - *Review*: before the user sees it, a separate read-only run on the main
     model checks the plan against the workspace and answers `approve` or
     `revise` with findings. An answer that cannot be read, or a review that
@@ -160,6 +162,32 @@ explicitly enabled presentation on top of the same terminal authority.
   `OSC 133;D;<exit>` shell integration. A successful command reports the failure
   it resolved (`resolvedFailure`), which drives self-learning for both agent and
   human commands.
+  - *Text that arrives after its marker.* Windows' pseudo console passes the
+    markers straight through and repaints the text printed in the same burst a
+    moment later, so the output of a fast command arrived after its end marker
+    and was lost. On Windows a command's frame is therefore closed when the
+    shell's prompt is back (the prompt is learned at the handshake, which
+    prints nothing), or after 150 ms without text. Where the prompt is not the
+    known one, the late text is kept and marked as such: where the output ends
+    is not guessed. The rest of the typed line's echo is taken out of the
+    output when a marker overtook it, and only when it is exactly what was
+    still missing of the line.
+  - *A terminal the hub opens for itself* (a schedule, an investigator, a
+    ticket nobody sits at, another server of the cluster) is connected to
+    once its prompt is there (`armAtPrompt`), never while the connection is
+    still being made. One that does not get to a prompt is closed again, and
+    the error says what it last showed.
+  - *A run that hangs.* A stopped run that does not end by itself (blocked in
+    a tool call on a connection that hangs) is let go of after ten seconds:
+    whoever waits for it is released and the conversation can go on. An SFTP
+    connection whose ssh stays silent for 45 seconds, with nobody being
+    asked anything, is ended.
+- **Prompts.** A person's message that is longer than 16,000 characters loses
+  its middle, with a line saying so, never its start (`boundedPrompt`). The
+  hub's own prompts (reading, pages, contradictions, reviews, the workforce
+  lead) open with their instructions and quote bounded data, and are passed
+  whole. An answer with pages that are not in the format asked for fails the
+  run with that reason instead of counting as "nothing to write".
 - **`CommandSafetyService`** — reads a command the way a careful reviewer
   would, classifies it as safe, modifying or destructive and applies the
   `SafetyPolicyConfig` (`autoApproveSafeReadOnly`, `requireApprovalOnProdTags`,
@@ -304,9 +332,13 @@ stopped.
 
 ## Changes that prove themselves and take themselves back (`sshs3_change`)
 
-- A change is made with `sshs3_change`: the command, a read-only `check` whose
-  output must contain `expected`, the `rollback` command, and how long to
-  observe. Nothing runs before the change is approved, not even the check.
+- A change is made with `sshs3_change`: the command, a read-only `check` that
+  must exit 0 and whose output must contain `expected`, the `rollback`
+  command, and how long to observe. The tool's own text tells the model both
+  halves of that rule (it used to name only the text, and a correct fix was
+  rolled back because its check ended in a `diff` that exits 1), and a failed
+  check says which half failed (`checkFailedBecause`). Nothing runs before the
+  change is approved, not even the check.
   Then the broker (`ToolBroker.runChange`) looks at the check (how things
   stand right before), runs the change, and the check must pass and keep
   passing for the observation time (looked at every ten seconds, at most three
@@ -393,7 +425,9 @@ stopped.
   a secret gives up its colours. A prompt without a newline is written after
   300 ms. Each time a run holds the terminal gets its own file. A recording
   ends when the run lets go or loses the terminal, and is sealed into the
-  audit log with its sha256; the player says whether it still matches. They
+  audit log with its sha256; the player says whether it still matches. A run
+  that held the terminal and ran no command leaves no recording and no log
+  entry. They
   are removed after `retentionDays` on every installation, and are this
   computer's own: they are not shared. `recordSessions: false` turns them off.
 - **The player.** From a timeline item or a log entry: pauses over 2 s
@@ -421,7 +455,8 @@ stopped.
 - **Investigators that can look.** `sshs3_investigate` used to start runs that
   could only read what the workspace already knew. An investigator now gets a
   terminal of its own on the asking run's target (opened like a schedule's,
-  closed afterwards) and `terminal_command`, and the broker lets through only
+  labelled "Investigator: <target>", closed afterwards) and
+  `terminal_command`, and the broker lets through only
   what `analyzeCommandSafety` classifies as read-only, without asking anyone;
   everything else is refused, as is any file write. Where no terminal can be
   opened (a target that needs an interactive login, Kubernetes sessions, the
@@ -536,7 +571,8 @@ so an answer must never travel through shared hub state.
   the list", which may be a background run that began in the meantime.
 - `inline-suggest` answers `reply.inlineSuggestion`, with `source`: `model`,
   `skill` (a command the team saved) or `fallback` (a general check picked by
-  keyword because no model answered). The terminal says which.
+  keyword because no model answered). The terminal says which. The model is
+  given 15 seconds and, where it reasons, is asked for low effort.
 - Requests in `READ_ONLY_ACTIONS` (searching and reading the knowledge base,
   reading a server's facts, an inline suggestion) do not rewrite the store and
   do not tell the other windows to refetch.
@@ -886,7 +922,15 @@ because there is no server to run one on.
 - **Team.** An agent has `reportsTo` (a circle is refused) and an optional
   `monthlyTokenBudget`. A paused agent, or one that has spent its budget, is
   not started. Usage is counted per agent and calendar month from the runs'
-  reported tokens.
+  reported tokens: every run of a conversation (a reply, an approved plan,
+  "Continue") adds what it spent, not only the first.
+- **A terminal for a ticket nobody sits at.** A ticket started without a
+  terminal (the heartbeat's way) whose `target` names a server of the
+  workspace gets a terminal of the hub's own there (`openTicketTerminal`),
+  unless its agent only advises. It is closed when the run ends and opened
+  again when the conversation goes on (`ownTerminal`). Where none can be
+  opened (the server needs a person to sign in, or is down), the run is told
+  so and says it in its report.
 - **Handing out work.** `sshs3_tickets` lets an agent list the board, read a
   ticket, add a note and create a ticket for another agent (at most 10 an
   hour). A created ticket hangs on the ticket being worked.
