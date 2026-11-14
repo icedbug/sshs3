@@ -214,6 +214,7 @@ import {
   wouldCycle,
 } from "./WorkBoard";
 import {
+  approvalAsksEach,
   approvalMessage,
   parseReview,
   rejectionMessage,
@@ -2467,6 +2468,11 @@ export class HubService {
         plan.decidedAt = Date.now();
         if (request.approved) {
           plan.status = "approved";
+          // What this approval covers is settled here, where the person decided, and written on the plan.
+          const asks = approvalAsksEach(plan, { note, askEach: request.askEach });
+          if (asks) plan.askEach = asks;
+          else delete plan.askEach;
+          if (note) plan.decisionNote = boundedContext(note, 2000);
           // The agent is held to the plan: its steps become its task list.
           task.todos = todosFromPlan(plan);
           this.changed();

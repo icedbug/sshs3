@@ -29,7 +29,7 @@ export const MAX_PLAN_REVISIONS = 3;
 export const PLAN_TOOL = {
   name: "sshs3_plan_propose",
   description:
-    "Propose a plan before changing anything, for the user to approve. Use it when the user asks for a plan (`/plan`), and on your own for a change that is risky: several steps on production, data that could be lost, something hard to undo. Investigate first (read-only) so the plan rests on what is actually there. Each step names its target, the exact command where there is one, its risk, the check that will show it worked and, for medium or high risk, how to undo it. The plan is reviewed by a second read-only run and then waits for the user: until they approve, commands that change something and file writes are refused. After calling this, tell the user the plan briefly, with the review's findings, and stop.",
+    "Propose a plan before changing anything, for the user to approve. Use it when the user asks for a plan (`/plan`), and on your own for a change that is risky: several steps on production, data that could be lost, something hard to undo. Investigate first (read-only) so the plan rests on what is actually there. Each step names its target, the exact command where there is one, its risk, the check that will show it worked and, for medium or high risk, how to undo it. The plan is reviewed by a second read-only run and then waits for the user: until they approve, commands that change something and file writes are refused. What the approval covers: the exact commands the plan lists run without asking the user again, except destructive ones, which always ask. Do not write that each step will be approved separately unless that is what should happen: then set `askBeforeEachChange`, and every changing command asks again. After calling this, tell the user the plan briefly, with the review's findings, and stop.",
   parameters: {
     type: "object",
     properties: {
@@ -56,6 +56,10 @@ export const PLAN_TOOL = {
         type: "array",
         items: { type: "string" },
         description: "What the plan takes for granted and you have not checked.",
+      },
+      askBeforeEachChange: {
+        type: "boolean",
+        description: "True when the user should be asked again before each command that changes something, also the ones this plan lists (the user asked for that). Left out, approving the plan covers its listed commands.",
       },
     },
     required: ["goal", "steps"],
@@ -84,10 +88,29 @@ function whole(value: unknown, step: number, what: string): { text: string } | {
     : { text: shown };
 }
 
+/**
+ * A plan whose own words say that its approval is not enough for its changes
+ * ("separate approval before each modifying command", "plan approval must not
+ * substitute"). The person reads those words on the card, so they hold: such
+ * a plan's commands ask again. It only ever makes more be asked.
+ */
+const PROMISES_TO_ASK = [
+  // eslint-disable-next-line security/detect-unsafe-regex -- alternatives of fixed words, each optional group taken at most once; the text is a plan's bounded fields
+  /\b(?:separate|individual|explicit|additional|another|further|per[- ](?:command|step|change))\s+(?:user\s+|human\s+|operator\s+)?(?:approvals?|confirmations?|consent|sign[- ]?off)\b/i,
+  /\b(?:approv\w*|confirm\w*|ask\w*|consent|sign[- ]?off)\b[^.\n]{0,60}\b(?:before|for|prior to)\s+(?:each|every|any)\b/i,
+  // eslint-disable-next-line security/detect-unsafe-regex -- the gap is bounded ({0,60}) and stops at a full stop or line end
+  /\b(?:each|every)\s+(?:modifying\s+|changing\s+|mutating\s+)?(?:command|step|change)\b[^.\n]{0,60}\b(?:approved|confirmed|asked about)\s+(?:separately|individually|again|first)\b/i,
+  /\bplan approval\b[^.\n]{0,40}\b(?:must|does|will|should|is)\s+not\b/i,
+];
+export const promisesToAskEach = (plan: Pick<AgentPlan, "goal" | "steps" | "assumptions">): boolean => {
+  const said = [plan.goal, ...plan.steps.flatMap((s) => [s.action, s.check, s.rollback ?? ""]), ...(plan.assumptions ?? [])].join("\n");
+  return PROMISES_TO_ASK.some((p) => p.test(said));
+};
+
 /** The model's `sshs3_plan_propose` argument as a plan (without status or review), or why it is not one. */
 export function parsePlan(
   input: unknown,
-): { goal: string; steps: AgentPlanStep[]; assumptions: string[] } | { error: string } {
+): { goal: string; steps: AgentPlanStep[]; assumptions: string[]; askEach?: boolean } | { error: string } {
   const p = (input ?? {}) as Record<string, unknown>;
   const goal = text(p.goal, 600);
   if (!goal) return { error: "A plan needs a `goal`" };
@@ -134,11 +157,12 @@ export function parsePlan(
   const assumptions = Array.isArray(p.assumptions)
     ? p.assumptions.map((a) => text(a, 300)).filter(Boolean).slice(0, 12)
     : [];
-  return { goal, steps, assumptions };
+  const askEach = p.askBeforeEachChange === true || promisesToAskEach({ goal, steps, assumptions });
+  return { goal, steps, assumptions, ...(askEach ? { askEach } : {}) };
 }
 
 export function newPlan(
-  parsed: { goal: string; steps: AgentPlanStep[]; assumptions: string[] },
+  parsed: { goal: string; steps: AgentPlanStep[]; assumptions: string[]; askEach?: boolean },
   previous: AgentPlan | undefined,
   review: AgentPlan["review"],
   now = Date.now(),
@@ -152,7 +176,26 @@ export function newPlan(
     revision: (previous?.revision ?? 0) + 1,
     review,
     createdAt: now,
+    ...(parsed.askEach ? { askEach: "plan" as const } : {}),
   };
+}
+
+/**
+ * What an approval of this plan covers, decided when the person approves and
+ * written on the plan. Asking again wins wherever anything asks for it: the
+ * plan's own words, the person's choice, or a note with no choice made (the
+ * note is read by the agent only, and may well say "ask me before each
+ * change"). Only an approval that says so in as many words, on a plan that
+ * did not promise otherwise, lets the listed commands run with a note.
+ */
+export function approvalAsksEach(
+  plan: Pick<AgentPlan, "askEach">,
+  decision: { note?: string; askEach?: boolean },
+): AgentPlan["askEach"] {
+  if (decision.askEach === true) return "person";
+  if (plan.askEach === "plan") return "plan";
+  if (decision.askEach === undefined && decision.note?.trim()) return "note";
+  return undefined;
 }
 
 export function renderPlan(plan: Pick<AgentPlan, "goal" | "steps" | "assumptions">): string {
@@ -297,6 +340,8 @@ export function planCoversCommand(
   now = Date.now(),
 ): boolean {
   if (task.plan?.status !== "approved" || !commandHash) return false;
+  // The plan, or the person approving it, said that every change is asked about.
+  if (task.plan.askEach) return false;
   if (riskLevel === "destructive") return false;
   // Matched on the exact command, never on how it looks once its secrets are masked.
   const step = task.plan.steps.find((s) => !s.ranAt && s.commandHash === commandHash);
@@ -317,11 +362,19 @@ export function todosFromPlan(plan: AgentPlan): AgentTodo[] {
   }));
 }
 
+const ASKS_EACH_WHY: Record<NonNullable<AgentPlan["askEach"]>, string> = {
+  plan: "the plan said so",
+  person: "the user chose that when approving",
+  note: "the user approved with a note, and the note is theirs to have followed",
+};
+
 export function approvalMessage(plan: AgentPlan, note?: string): string {
   return [
     "[sshs3] The user approved your plan. Carry it out now, step by step, in order.",
     "Your task list has been set to the plan's steps. Run each step's check before the next step; if a check fails, stop, do not continue with later steps, and report (roll the step back if the plan says how and it is safe to).",
-    "Commands exactly as the plan lists them run without asking the user again. Anything else you find you need is a deviation: say so, and it will be asked about as usual.",
+    plan.askEach
+      ? `Every command that changes something is asked about before it runs, also the ones the plan lists: ${ASKS_EACH_WHY[plan.askEach]}. Run them one at a time and wait for each answer; read-only checks run as usual. Anything the plan does not list is a deviation: say so.`
+      : "Commands exactly as the plan lists them run without asking the user again; a destructive one still asks. Do not tell the user that each change will be approved separately: it will not. Anything else you find you need is a deviation: say so, and it will be asked about as usual.",
     ...(note ? [`The user added: ${boundedContext(note, 1000)}`] : []),
     "",
     renderPlan(plan),

@@ -137,7 +137,13 @@ explicitly enabled presentation on top of the same terminal authority.
   - *What approval covers* (`planCoversCommand`, in `ToolBroker.authorize`):
     the exact command of a step that has not run yet is not asked about
     again. Anything else, a second run of the same command, and any
-    destructive command are asked about as usual.
+    destructive command are asked about as usual. A plan can instead have
+    every changing command ask (`plan.askEach`): when the plan's own text
+    promises separate approvals or the agent set `askBeforeEachChange`
+    (`"plan"`), when the person ticked "Ask me before each command" on the
+    card (`"person"`), or when they approved with a note and made no choice
+    (`"note"`: only the agent reads a note, so it is never taken to mean
+    less asking). The card and the message to the agent say which holds.
 - **`KnowledgeBaseService`** — lexical search with `@orama/orama` (BM25, typo
   tolerance and a hand-written Swedish/English synonym table) and, when the
   provider is an OpenAI-compatible endpoint with `embeddingModel` set, ranking

@@ -103,8 +103,16 @@ export interface AgentPlan {
   };
   createdAt: number;
   decidedAt?: number;
-  /** What the user said when asking for changes. */
+  /** What the user said when asking for changes, or added when approving. */
   decisionNote?: string;
+  /**
+   * Every command that changes something asks the person before it runs, also
+   * the ones the plan lists: the plan's own text promised it ("plan"), the
+   * person chose it when approving ("person"), or they approved with a note
+   * and did not say that the listed commands may run ("note"). Absent: the
+   * approval covers the listed commands, as the plan card says.
+   */
+  askEach?: "plan" | "person" | "note";
 }
 /** One tool call an agent made, with what it got back (both masked and shortened). */
 export interface AgentToolRecord {
@@ -1406,7 +1414,18 @@ export type HubRequest =
    * asking again (destructive ones still ask). Not approved: with a note the
    * agent revises the plan, without one the plan is simply dropped.
    */
-  | { action: "plan-decide"; taskId: string; approved: boolean; note?: string }
+  | {
+      action: "plan-decide";
+      taskId: string;
+      approved: boolean;
+      note?: string;
+      /**
+       * With an approval: true has every changing command ask again, false lets the plan's listed
+       * commands run on this approval. Left out, an approval with a note asks again (the note may say
+       * so, and nothing reads it but the agent), and one without a note covers the listed commands.
+       */
+      askEach?: boolean;
+    }
   | {
       action: "memory-save";
       entry: Omit<MemoryEntry, "id" | "updatedAt"> & { id?: string };
