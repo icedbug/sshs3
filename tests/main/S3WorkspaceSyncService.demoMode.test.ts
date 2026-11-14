@@ -436,8 +436,11 @@ describe('HubService and the S3 team workspace: outside demo mode against demo m
     await vi.waitFor(() => expect(writesOf(bucket.log, WORKSPACE_OBJECT)).toBe(2), { timeout: 5_000 });
     await waitUntilSynced(hub.s3Workspace);
 
+    // "Sync now" reads the bucket; with nothing changed it has nothing to write.
+    const reads = bucket.log.filter((l) => l === `readFile ${WORKSPACE_OBJECT}`).length;
     await hub.request({ action: 'workspace-s3-sync-now' });
-    expect(writesOf(bucket.log, WORKSPACE_OBJECT)).toBe(3);
+    expect(bucket.log.filter((l) => l === `readFile ${WORKSPACE_OBJECT}`).length).toBe(reads + 1);
+    expect(writesOf(bucket.log, WORKSPACE_OBJECT)).toBe(2);
   });
 
   it('demo mode: the hub never reaches the team bucket, at start-up, after recorded activity or on "Sync now"', async () => {
