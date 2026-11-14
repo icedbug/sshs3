@@ -364,6 +364,45 @@ describe("whose name is on a memory and a vote, on a server with accounts", () =
     await hub.request({ action: "memory-save", entry: { id: "m1", kind: "memory", scope: "workspace", title: "Backups", text: "Backups of db-01 run at 02:00.", author: "Imported runbook" } } as never);
     expect(hub.store.data.memories.find((m) => m.id === "m1")!.author).toBe("Imported runbook");
   });
+
+  it("stays its author's when a teammate changes it, and is forgotten by its author or an administrator only", async () => {
+    const annas = { id: "m-anna", kind: "memory" as const, scope: "workspace", title: "Backups", text: "Backups of db-01 run at 02:00.", author: "Anna Lind", updatedAt: Date.now() - 1000 };
+    const { hub } = await makeHub(member);
+    hub.store.data.memories.push({ ...annas });
+    await hub.request({ action: "memory-save", entry: { id: "m-anna", kind: "memory", scope: "workspace", title: "Backups", text: "Backups of db-01 run at 03:00 since the move." } } as never);
+    const changed = hub.store.data.memories.find((m) => m.id === "m-anna")!;
+    expect(changed).toMatchObject({ author: "Anna Lind", editedBy: "Erik Holm", text: "Backups of db-01 run at 03:00 since the move." });
+    expect(JSON.stringify(hub.store.data.activityLog)).toContain("Changed Anna Lind's memory");
+    await expect(hub.request({ action: "memory-delete", id: "m-anna" })).rejects.toThrow(/Only Anna Lind, who wrote it, or an administrator/);
+    expect(hub.store.data.memories.some((m) => m.id === "m-anna")).toBe(true);
+    // His own he forgets; his own personal ones too; and the card of a server that is gone.
+    await hub.request({ action: "memory-save", entry: { id: "m-erik", kind: "memory", scope: "workspace", title: "Cache", text: "The cache is warmed at 06:00." } } as never);
+    await hub.request({ action: "memory-delete", id: "m-erik" });
+    hub.store.data.memories.push({ id: "auto-node:gone-server", kind: "memory", scope: "workspace", title: "Server card: gone", text: "Server: gone", author: "Auto-Memory", updatedAt: Date.now() });
+    await hub.request({ action: "memory-delete", id: "auto-node:gone-server" });
+    expect(hub.store.data.memories.map((m) => m.id)).not.toContain("m-erik");
+    expect(hub.store.data.memories.map((m) => m.id)).not.toContain("auto-node:gone-server");
+
+    const anna = await makeHub(admin);
+    anna.hub.store.data.memories.push({ ...annas, author: "Erik Holm" });
+    await anna.hub.request({ action: "memory-delete", id: "m-anna" });
+    expect(anna.hub.store.data.memories.some((m) => m.id === "m-anna")).toBe(false);
+  });
+});
+
+describe("the server's shared folder", () => {
+  it("is cleared of temporary files left by writes that never finished when the server starts", async () => {
+    const { WebTenantManager } = await import("../../src/main/web/WebTenantManager");
+    const base = await fs.mkdtemp(path.join(os.tmpdir(), "sshs3-tmpclean-"));
+    disposals.push(() => fs.rm(base, { recursive: true, force: true }));
+    const dir = path.join(base, "shared-workspace");
+    await fs.mkdir(dir, { recursive: true });
+    const left = ["shared-workspace.json.tmp-1234-0b9c2f1e-1111-4222-8333-944455556666", "s3-workspace.json.tmp-99-abc", ".shared-workspace.json.1234.deadbeef.tmp"];
+    const kept = ["shared-workspace.json", "s3-workspace.json", "shared-profiles.json", "notes.tmp-file.txt"];
+    for (const name of [...left, ...kept]) await fs.writeFile(path.join(dir, name), "{}");
+    await new WebTenantManager(base).initialize();
+    expect((await fs.readdir(dir)).sort()).toEqual([...kept].sort());
+  });
 });
 
 describe("the safety policy", () => {

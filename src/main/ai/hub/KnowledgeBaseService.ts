@@ -907,6 +907,9 @@ export class KnowledgeBaseService {
         ...prev,
         ...incoming,
         id: prev.id,
+        // Whoever wrote it stays its author; a teammate who changes it is named beside them.
+        author: prev.author ?? incoming.author,
+        editedBy: prev.author && incoming.author && incoming.author !== prev.author ? incoming.author : undefined,
         title: incoming.title.trim() || prev.title,
         text: mergedText.slice(0, MAX_MEMORY_TEXT),
         tier: incoming.tier ?? prev.tier ?? "archival",
@@ -933,6 +936,9 @@ export class KnowledgeBaseService {
         const replacement: MemoryEntry = {
           ...updated,
           id: crypto.randomUUID(),
+          // A new entry that says it now is the new writer's own.
+          author: incoming.author ?? updated.author,
+          editedBy: undefined,
           text: incoming.text.trim().slice(0, MAX_MEMORY_TEXT),
           // What the old text earned is not the new text's.
           successCount: incoming.successCount ?? 0,

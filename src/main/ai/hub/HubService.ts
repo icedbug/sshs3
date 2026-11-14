@@ -2316,7 +2316,7 @@ export class HubService {
           !scope.startsWith("cluster:")
         )
           throw new Error("Invalid memory scope");
-        await this.saveMemoryInternal({
+        const savedMemory = await this.saveMemoryInternal({
           id: entry.id,
           kind: entry.kind,
           tier: entry.tier,
@@ -2329,13 +2329,35 @@ export class HubService {
           sourceCommand: entry.sourceCommand,
           confidence: entry.confidence,
         });
+        // A teammate's memory changed by somebody else keeps its author, and the change is in the team's activity.
+        if (savedMemory.editedBy && savedMemory.scope !== "personal") {
+          const event: WorkspaceActivityEvent = {
+            id: crypto.randomUUID(),
+            at: Date.now(),
+            actor: savedMemory.editedBy,
+            targetLabel: savedMemory.title,
+            kind: "note",
+            summary: `Changed ${savedMemory.author}'s memory "${clip(savedMemory.title, 120)}"`,
+          };
+          this.appendActivityEvent(event);
+          await this.host.recordWorkspaceActivity?.(event).catch(() => {});
+        }
         break;
       }
       case "memory-delete": {
         // A server card is written again from the server list every time the memories are read:
-        // answering "deleted" would not be true.
-        if (request.id.startsWith("auto-node:") || request.id.startsWith("auto-cluster:"))
-          throw new Error("This card is written by sshs3 from the server list, so it cannot be forgotten: it would be written again. Remove the server, or correct what it says with a memory of your own.");
+        // answering "deleted" would not be true. The card of a server that is gone is not written again.
+        if (request.id.startsWith("auto-node:") || request.id.startsWith("auto-cluster:")) {
+          const servers = (await this.collectExtraContext().catch(() => undefined))?.workspaceServers ?? [];
+          const [kind, rest] = [request.id.slice(0, request.id.indexOf(":")), request.id.slice(request.id.indexOf(":") + 1)];
+          const stillThere = kind === "auto-node" ? servers.some((s) => s.id === rest) : servers.some((s) => s.cluster && rest.includes(s.cluster));
+          if (stillThere || !this.store.data.memories.some((m) => m.id === request.id))
+            throw new Error("This card is written by sshs3 from the server list, so it cannot be forgotten: it would be written again. Remove the server, or correct what it says with a memory of your own.");
+        }
+        // On a shared server a team memory is forgotten by the person who wrote it or by an administrator.
+        const target = this.store.data.memories.find((m) => m.id === request.id);
+        if (target && target.scope !== "personal" && target.author && !target.id.startsWith("auto-") && this.sharedServer() && !this.host.teamAdmin?.() && target.author !== (await this.resolveActorName()))
+          throw new Error(`Only ${target.author}, who wrote it, or an administrator of this server forgets a memory the team shares. Correct it instead: the change is saved with your name.`);
         // Forgetting a memory forgets the history it replaced too.
         const gone = new Set([request.id]);
         for (let grew = true; grew; ) {

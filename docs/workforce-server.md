@@ -188,7 +188,12 @@ recordings are sealed into it. See "The audit log and terminal recordings" in
   and folder ingestion from the server's own disk are not offered: a signed-in
   person works in their own folder only. Who did something is the signed-in
   person, never a name sent with the request: that holds for the activity
-  log, for who wrote a memory and for who voted on one.
+  log, for who wrote a memory and for who voted on one. A team memory stays
+  its author's when a teammate corrects it (the change is saved with the
+  teammate's name and noted in the activity log), and only its author or an
+  administrator forgets it. The card of a server that was removed can be
+  forgotten. Temporary files of writes to the server's shared folder that
+  never finished are removed, and cleared when the server starts.
 - **A server with one account is that person's own.** While the administrator
   is the only account, folder ingestion and addresses on the machine itself
   are allowed as in the desktop app. With a second account the rules for a
