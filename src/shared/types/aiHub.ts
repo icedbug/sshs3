@@ -365,6 +365,8 @@ export interface MemoryEntry {
   title: string;
   text: string;
   author?: string;
+  /** Who changed it last, when that was not its author (the author stays who wrote it). */
+  editedBy?: string;
   updatedCount?: number;
   confidence?: number;
   successCount?: number;

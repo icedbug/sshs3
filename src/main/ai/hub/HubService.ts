@@ -852,7 +852,7 @@ export class HubService {
           new Set(matchedServers.flatMap((s) => s.tags ?? [])),
         );
         return {
-          policy: this.store.data.safetyPolicy ?? DEFAULT_SAFETY_POLICY,
+          policy: this.safetyPolicy(),
           targetTags: aggregatedTags.length > 0 ? aggregatedTags : undefined,
         };
       },
@@ -1262,6 +1262,15 @@ export class HubService {
       throw new Error("An MCP server that runs as a program runs on the shared server itself. Only an administrator of this server adds or starts one. Use one with an address (HTTP) instead.");
   }
 
+  /**
+   * An external agent's runner is a program started on this machine as the app's own account, like a
+   * stdio MCP server: on a shared server only an administrator adds or starts one. Asked on save and on every start.
+   */
+  private assertRunnerAllowed(): void {
+    if (this.sharedServer() && !this.host.teamAdmin?.())
+      throw new Error("An external agent runs as a program on the shared server itself. Only an administrator of this server adds or starts one.");
+  }
+
   /** Asked each time an MCP server is about to be started or called: see McpClientManager. */
   private async assertMcpReach(server: McpServerConfig): Promise<void> {
     this.assertMcpProgramAllowed(server);
@@ -1333,6 +1342,45 @@ export class HubService {
       );
     const lifted = (known.tags ?? []).filter(isProdTag).filter((t) => !(next.tags ?? known.tags ?? []).some((x) => x.trim().toLowerCase() === t.toLowerCase()));
     if (lifted.length) throw new Error(`${who} takes the tag "${lifted[0]}" off a server the team shares: it is what makes changes there wait for a person.`);
+  }
+
+  /**
+   * The safety rules a run is held to. On a shared server a member's own rules may be stricter than
+   * the team's, never looser: one stored before that rule (switched off by a member) counts as on.
+   */
+  private safetyPolicy(): SafetyPolicyConfig {
+    const own = this.store.data.safetyPolicy ?? DEFAULT_SAFETY_POLICY;
+    if (!this.sharedServer() || this.host.teamAdmin?.()) return own;
+    return { ...own, requireApprovalOnProdTags: true, blockDestructiveWithoutConfirm: true };
+  }
+
+  /**
+   * The model's address is called on every run with the person's prompt and key. On a shared server it
+   * is held to the same rule as any other address a user gives: not the server itself, not its private
+   * network (unless the administrator allows it). Asked when it is set and again when a run starts.
+   */
+  private async assertModelEndpointReach(baseUrl: string | undefined): Promise<void> {
+    if (!baseUrl || !this.sharedServer()) return;
+    await guardUrl(baseUrl, { ...this.outboundGuard(), allowPlainHttp: true, ...(this.kbNetwork ? { lookup: this.kbNetwork.lookup } : {}) });
+  }
+
+  private assertMayRemoveTeamServer(known: WorkspaceServerSummary | undefined): void {
+    if (known && this.sharedServer() && !this.host.teamAdmin?.())
+      throw new Error("Only an administrator of this server removes a server the team shares.");
+  }
+
+  /**
+   * The ordinary connection editor (`profiles:save-ssh`, `profiles:delete-ssh`, a folder removed with
+   * its servers) is held to the same rule as the hub's own server actions: one rule for both doors.
+   */
+  async assertMayChangeServerProfile(next: { id: string; name?: string; host?: string; port?: number; username?: string; shared?: boolean; tags?: string[] }): Promise<void> {
+    if (!this.sharedServer() || this.host.teamAdmin?.()) return;
+    this.assertMayChangeTeamServer(await this.teamServerCopy(next.id), { ...next, port: next.port || 22, username: next.username?.trim() || "root", tags: next.tags ?? [] });
+  }
+
+  async assertMayRemoveServerProfile(id: string): Promise<void> {
+    if (!this.sharedServer() || this.host.teamAdmin?.()) return;
+    this.assertMayRemoveTeamServer(await this.teamServerCopy(id));
   }
 
   /** On a shared server, the team's bucket is the administrator's to set up, change or disconnect: one member's change is everyone's. */
@@ -2049,7 +2097,7 @@ export class HubService {
       },
       workforceRuns: this.getWorkforceRunsList(),
       infraEdges: allInfraEdges,
-      safetyPolicy: this.store.data.safetyPolicy ?? DEFAULT_SAFETY_POLICY,
+      safetyPolicy: this.safetyPolicy(),
       safetyPolicyChanged: this.store.data.safetyPolicyChanged,
       pendingLayoutEvent: this.pendingLayoutEvent,
       selfLearning: this.selfLearning.getStatus({
@@ -2188,6 +2236,7 @@ export class HubService {
             throw new Error("Autostart requires background mode");
         }
         // Preferences can be changed on their own: the AI settings are touched only when they were sent.
+        if (request.config?.baseUrl?.trim()) await this.assertModelEndpointReach(request.config.baseUrl.trim());
         if (request.config) await this.config.update(request.config);
         if (request.preferences) {
           if (!("sharedWorkspacePath" in next)) delete this.store.data.preferences.sharedWorkspacePath;
@@ -2327,7 +2376,7 @@ export class HubService {
           !scope.startsWith("cluster:")
         )
           throw new Error("Invalid memory scope");
-        await this.saveMemoryInternal({
+        const savedMemory = await this.saveMemoryInternal({
           id: entry.id,
           kind: entry.kind,
           tier: entry.tier,
@@ -2340,13 +2389,35 @@ export class HubService {
           sourceCommand: entry.sourceCommand,
           confidence: entry.confidence,
         });
+        // A teammate's memory changed by somebody else keeps its author, and the change is in the team's activity.
+        if (savedMemory.editedBy && savedMemory.scope !== "personal") {
+          const event: WorkspaceActivityEvent = {
+            id: crypto.randomUUID(),
+            at: Date.now(),
+            actor: savedMemory.editedBy,
+            targetLabel: savedMemory.title,
+            kind: "note",
+            summary: `Changed ${savedMemory.author}'s memory "${clip(savedMemory.title, 120)}"`,
+          };
+          this.appendActivityEvent(event);
+          await this.host.recordWorkspaceActivity?.(event).catch(() => {});
+        }
         break;
       }
       case "memory-delete": {
         // A server card is written again from the server list every time the memories are read:
-        // answering "deleted" would not be true.
-        if (request.id.startsWith("auto-node:") || request.id.startsWith("auto-cluster:"))
-          throw new Error("This card is written by sshs3 from the server list, so it cannot be forgotten: it would be written again. Remove the server, or correct what it says with a memory of your own.");
+        // answering "deleted" would not be true. The card of a server that is gone is not written again.
+        if (request.id.startsWith("auto-node:") || request.id.startsWith("auto-cluster:")) {
+          const servers = (await this.collectExtraContext().catch(() => undefined))?.workspaceServers ?? [];
+          const [kind, rest] = [request.id.slice(0, request.id.indexOf(":")), request.id.slice(request.id.indexOf(":") + 1)];
+          const stillThere = kind === "auto-node" ? servers.some((s) => s.id === rest) : servers.some((s) => s.cluster && rest.includes(s.cluster));
+          if (stillThere || !this.store.data.memories.some((m) => m.id === request.id))
+            throw new Error("This card is written by sshs3 from the server list, so it cannot be forgotten: it would be written again. Remove the server, or correct what it says with a memory of your own.");
+        }
+        // On a shared server a team memory is forgotten by the person who wrote it or by an administrator.
+        const target = this.store.data.memories.find((m) => m.id === request.id);
+        if (target && target.scope !== "personal" && target.author && !target.id.startsWith("auto-") && this.sharedServer() && !this.host.teamAdmin?.() && target.author !== (await this.resolveActorName()))
+          throw new Error(`Only ${target.author}, who wrote it, or an administrator of this server forgets a memory the team shares. Correct it instead: the change is saved with your name.`);
         // Forgetting a memory forgets the history it replaced too.
         const gone = new Set([request.id]);
         for (let grew = true; grew; ) {
@@ -2643,6 +2714,8 @@ export class HubService {
       }
       case "server-describe": {
         const pid = requiredText(request.profileId);
+        // An id nobody here has describes nothing (and writes nothing into the team's activity).
+        if (this.sharedServer() && !(await this.knownServer(pid))) throw new Error("Server not found");
         this.assertMayChangeTeamServer(await this.teamServerCopy(pid), { shared: request.shared, tags: request.tags });
         if (
           request.localUsername !== undefined ||
@@ -2736,6 +2809,10 @@ export class HubService {
         const host = requiredText(s.host);
         const actor = await this.resolveActorName();
         const nowIso = new Date().toISOString();
+        // On a shared server an id names a server this person has, or none: a teammate's own server
+        // is not taken over by sending its id (nobody is shown it, but an id can be learnt elsewhere).
+        if (s.id?.trim() && this.sharedServer() && !this.host.teamAdmin?.() && !(await this.knownServer(s.id.trim())))
+          throw new Error("Server not found. Leave the id out to add a new server.");
         // What the request leaves out is saved as its default (port 22, root, no tags), so that is what is compared.
         this.assertMayChangeTeamServer(await this.teamServerCopy(s.id), {
           name,
@@ -2866,6 +2943,7 @@ export class HubService {
       }
       case "server-local-override": {
         const pid = requiredText(request.override.profileId);
+        if (this.sharedServer() && !(await this.knownServer(pid))) throw new Error("Server not found");
         this.applyLocalOverride({
           profileId: pid,
           username: request.override.username,
@@ -2880,8 +2958,7 @@ export class HubService {
         // Only a server this person has can be removed by them: an id alone (a teammate's own server, a guess) removes nothing.
         const mine = await this.knownServer(pid);
         if (!mine) throw new Error("Server not found");
-        if (mine.shared !== false && !mine.fromVault && this.sharedServer() && !this.host.teamAdmin?.())
-          throw new Error("Only an administrator of this server removes a server the team shares.");
+        this.assertMayRemoveTeamServer(await this.teamServerCopy(pid));
         if (mine.shared === false) {
           // A person's own server: gone here, and nothing about it goes to the team (no removal mark, no log entry).
           await this.host.deleteServer?.(pid).catch(() => {});
@@ -3178,6 +3255,7 @@ export class HubService {
         break;
       }
       case "runner-save": {
+        this.assertRunnerAllowed();
         const r = request.runner;
         const asked = requiredText(r.id);
         const id = asked.toLowerCase().replace(/[^a-z0-9-]+/g, "-").slice(0, 40);
@@ -3583,6 +3661,12 @@ export class HubService {
         for (const key of Object.keys(POLICY_NAMES) as (keyof SafetyPolicyConfig)[])
           if (asked[key] !== undefined && typeof asked[key] !== "boolean")
             throw new Error(`"${POLICY_NAMES[key]}" is either on (true) or off (false).`);
+        // On a shared server the team's rules are a floor: a member switches on what makes changes wait
+        // for a person, never off. Only an administrator loosens them.
+        if (this.sharedServer() && !this.host.teamAdmin?.())
+          for (const key of ["requireApprovalOnProdTags", "blockDestructiveWithoutConfirm"] as const)
+            if (asked[key] === false)
+              throw new Error(`Only an administrator of this server switches off "${POLICY_NAMES[key]}": on a shared server it is the team's rule.`);
         // What an earlier version stored as something else counts as what it did: anything but an explicit off kept the rule on.
         const current: SafetyPolicyConfig = {
           autoApproveSafeReadOnly: Boolean(stored.autoApproveSafeReadOnly),
@@ -3733,6 +3817,7 @@ export class HubService {
           (d) => d.id !== request.id,
         );
         this.markSharedRemoved("kb", request.id);
+        this.forgetKbSource(request.id);
         void this.removeKbOriginal(request.id);
         // Before deleteDemoKbDocument: in demo mode the built-ins are the demo store's documents.
         this.markBuiltinDismissed(request.id, getBuiltinKbDocuments());
@@ -4343,6 +4428,8 @@ export class HubService {
     if (!config.enabled)
       throw new Error("Enable AI and configure a model in Hub settings first");
     // An agent that is an external coding agent runs there, not on the configured model.
+    const viaRunner = !isBackgroundRun(task) && this.getAgentsList().some((a) => a.id === task.agentId && a.runnerId);
+    if (!viaRunner) await this.assertModelEndpointReach(config.baseUrl);
     const external = isBackgroundRun(task)
       ? undefined
       : this.getAgentsList().find((a) => a.id === task.agentId && a.runnerId);
@@ -5003,6 +5090,7 @@ export class HubService {
     agent: MissionAgent,
     assertLaunching: () => void,
   ): Promise<void> {
+    this.assertRunnerAllowed();
     const runner = (this.store.data.externalRunners ?? []).find((r) => r.id === agent.runnerId);
     if (!runner)
       throw new Error(
@@ -5082,7 +5170,7 @@ export class HubService {
           shouldRequireCommandApproval({
             analysis,
             mode: task.mode,
-            policy: this.store.data.safetyPolicy ?? DEFAULT_SAFETY_POLICY,
+            policy: this.safetyPolicy(),
           });
         if (!needsApproval) {
           change.status = "approved";
@@ -6594,6 +6682,27 @@ export class HubService {
   }
 
   /**
+   * A removed document's pages: one written from it alone goes with it (a person may have removed the
+   * document for what it says, and the page says the same); one that rests on other sources too
+   * no longer names it. A page a person edited is kept, without the source.
+   */
+  private forgetKbSource(docId: string): void {
+    const pages = this.store.data.kbPages ?? [];
+    if (!pages.some((p) => p.sources.some((s) => s.docId === docId))) return;
+    const now = Date.now();
+    this.store.data.kbPages = pages.flatMap((p) => {
+      if (!p.sources.some((s) => s.docId === docId)) return [p];
+      const rest = p.sources.filter((s) => s.docId !== docId);
+      if (!rest.length && !p.editedByPerson) {
+        this.markSharedRemoved("pages", p.id);
+        return [];
+      }
+      return [{ ...p, sources: rest, updatedAt: Math.max(now, p.updatedAt + 1) }];
+    });
+    this.changed();
+  }
+
+  /**
    * The team's setup beside the board: agents, shared runbooks and
    * dependencies. Each is merged per item with the bucket's copy. MCP servers
    * are left out on purpose (a server is a command that runs with the user's
@@ -6628,6 +6737,14 @@ export class HubService {
         docs.filter((d) => d.shared !== false).map((d) => maskStrings({ ...d, chunks: [] })),
         removed.kb,
       ),
+      // A document is never added back under its id (a new one gets a new id), so its removal is final:
+      // a copy written later (a teammate's computer that finished reading it after it was removed) does
+      // not bring it back. The removal is stamped newer than that copy, so the bucket keeps the removal.
+      (local, remote) => {
+        if (Boolean(local.deleted) === Boolean(remote.deleted)) return remote.updatedAt > local.updatedAt ? remote : local;
+        const [gone, kept] = local.deleted ? [local, remote] : [remote, local];
+        return gone.updatedAt > kept.updatedAt ? gone : { ...gone, updatedAt: kept.updatedAt + 1 };
+      },
     );
     const k = splitRemovals(kb.items);
     removed.kb = k.removed;
@@ -6645,6 +6762,9 @@ export class HubService {
       ];
       changed = true;
     }
+
+    // A document that is gone takes the pages written only from it along, here as on the computer that removed it.
+    for (const d of docs) if (d.id in k.removed) this.forgetKbSource(d.id);
 
     const pages = await sync.reconcile("pages", withRemovals(this.store.data.kbPages ?? [], removed.pages), mergePageCopies);
     // Merged into the pages as they are now: one that was compiled here while the bucket was read stays.
@@ -8394,6 +8514,12 @@ export class HubService {
     for (const s of sharedFileSync.servers) {
       if (!s?.id || !s.host) continue;
       const prev = srvMap.get(s.id);
+      // A person's own server stays theirs: a team copy under the same id (sent by somebody who
+      // learnt the id) neither re-points it nor makes it shared.
+      if (s.shared === false) {
+        srvMap.set(s.id, s);
+        continue;
+      }
       if (!prev) {
         srvMap.set(s.id, s);
       } else {

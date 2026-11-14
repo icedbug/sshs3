@@ -121,6 +121,65 @@ describe("an MCP server that runs as a program, on a shared server", () => {
   });
 });
 
+describe("an external agent's runner, on a shared server", () => {
+  const runner = (marker: string) => ({
+    id: "stand-in",
+    name: "Stand-in",
+    command: process.execPath,
+    args: ["-e", `require("fs").writeFileSync(${JSON.stringify(marker)}, "ran")`],
+    cwd: os.tmpdir(),
+  });
+
+  it("is not saved by a member", async () => {
+    const { hub } = await makeHub(member);
+    await expect(hub.request({ action: "runner-save", runner: runner("unused") } as never)).rejects.toThrow(/Only an administrator/);
+    expect(hub.store.data.externalRunners ?? []).toHaveLength(0);
+  });
+
+  it("is not started for a member, even when one was saved before the rule existed", async () => {
+    const { hub, dir } = await makeHub(member);
+    await hub.request({ action: "configure", config: { enabled: true } });
+    const marker = path.join(dir, "ran.txt");
+    hub.store.data.externalRunners = [{ ...runner(marker), updatedAt: Date.now() }];
+    await hub.request({ action: "agent-save", agent: { name: "Stand-in agent", role: "x", mission: "x", defaultMode: "assisted", runnerId: "stand-in" } } as never);
+    const agent = hub.store.data.agents!.find((a) => a.name === "Stand-in agent")!;
+    await expect(hub.request({ action: "start", task: { prompt: "do nothing", mode: "assisted", agentId: agent.id, agentName: agent.name } } as never)).rejects.toThrow(/Only an administrator/);
+    await settle(300);
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it("is an administrator's to save, and anybody's on their own computer", async () => {
+    for (const host of [admin, {}]) {
+      const { hub } = await makeHub(host);
+      await hub.request({ action: "runner-save", runner: runner("unused") } as never);
+      expect(hub.store.data.externalRunners).toHaveLength(1);
+    }
+  });
+});
+
+describe("how a runner's program is started on Windows", () => {
+  it("runs a program directly, and a .cmd through cmd.exe with every word quoted for it", async () => {
+    const { runnerSpawn } = await import("../../src/main/ai/hub/AcpRuntime");
+    const env = { PATH: "C:\\Program Files\\nodejs;C:\\Windows", PATHEXT: ".com;.exe;.bat;.cmd", ComSpec: "C:\\Windows\\system32\\cmd.exe" };
+    const files = new Set(["C:\\Program Files\\nodejs\\node.exe", "C:\\Program Files\\nodejs\\npx.cmd"]);
+    const exists = (f: string): boolean => files.has(f);
+    // An .exe: no shell, so a space in its path or an & in an argument is nothing special.
+    expect(runnerSpawn("node", ["x & calc"], "win32", env, exists)).toEqual({ file: "C:\\Program Files\\nodejs\\node.exe", args: ["x & calc"], verbatim: false });
+    expect(runnerSpawn("C:\\Program Files\\nodejs\\node.exe", ["a"], "win32", env, exists).file).toBe("C:\\Program Files\\nodejs\\node.exe");
+    // A .cmd: cmd.exe, and what would be an operator to it is escaped.
+    const npx = runnerSpawn("npx", ["-y", "pkg & calc", 'say "hi"'], "win32", env, exists);
+    expect(npx.file).toBe("C:\\Windows\\system32\\cmd.exe");
+    expect(npx.verbatim).toBe(true);
+    expect(npx.args.slice(0, 3)).toEqual(["/d", "/s", "/c"]);
+    const line = npx.args[3];
+    expect(line).toContain("C:\\Program^ Files\\nodejs\\npx.cmd");
+    expect(line).not.toMatch(/[^^]&/);
+    expect(line).toContain("^^^&");
+    // Elsewhere nothing changes.
+    expect(runnerSpawn("npx", ["-y", "a b"], "linux")).toEqual({ file: "npx", args: ["-y", "a b"], verbatim: false });
+  });
+});
+
 describe("an MCP server with an address", () => {
   const http = (over: Partial<McpServerConfig> = {}): McpServerConfig =>
     ({ id: "h", name: "h", transport: "http", url: "https://mcp.example.com/mcp", enabled: true, status: "unknown", discoveredTools: [], ...over }) as McpServerConfig;
@@ -249,6 +308,43 @@ describe("the original file of a knowledge base document", () => {
     expect((b.hub.store.data.kbDocuments ?? []).some((d) => d.id === doc.id)).toBe(false);
     expect(existsSync(kept)).toBe(false);
   });
+
+  it("stays removed when a teammate's computer writes it again after the removal, and takes its pages along", async () => {
+    const bucket = memoryBucket();
+    const a = await makeHub({ defaultActorName: "Sara Nyberg" });
+    const b = await makeHub({ defaultActorName: "Erik Holm" });
+    const c = await makeHub({ defaultActorName: "Anna Lind" });
+    for (const { inner } of [a, b, c]) {
+      inner.s3Workspace.canUseBucket = () => true;
+      Object.assign(inner.s3Workspace.objects, bucket);
+    }
+    await a.hub.request(upload("orders-api.md", "# Orders API\n\nThe orders API listens on 8443 and reads its settings from /etc/orders.\n"));
+    await settle();
+    const doc = a.hub.store.data.kbDocuments!.at(-1)!;
+    await a.inner.syncSharedSetup(new WorkSync(bucket));
+    await b.inner.syncSharedSetup(new WorkSync(bucket));
+    // Erik's computer is reading the document, and writes a page from it.
+    const page = { id: "p-orders", kind: "runbook", title: "Orders API", when: "orders", body: "listens on 8443", targets: [], sources: [{ docId: doc.id, title: doc.title }], revision: 1, createdAt: Date.now(), updatedAt: Date.now(), updatedBy: "Knowledge base", history: [] };
+    b.hub.store.data.kbPages = [page as never];
+    await b.inner.syncSharedSetup(new WorkSync(bucket));
+    await a.inner.syncSharedSetup(new WorkSync(bucket));
+    expect(a.hub.store.data.kbPages?.map((p) => p.id)).toEqual(["p-orders"]);
+
+    // Sara removes it; Erik's reading finishes after that, stamping his copy newer than the removal.
+    await settle(5);
+    await a.hub.request({ action: "kb-delete", id: doc.id });
+    await a.inner.syncSharedSetup(new WorkSync(bucket));
+    await settle(5);
+    const late = b.hub.store.data.kbDocuments!.find((d) => d.id === doc.id)!;
+    late.summary = "Read after it was removed";
+    late.updatedAt = Date.now();
+    for (let round = 0; round < 2; round++)
+      for (const x of [b, a, c]) await x.inner.syncSharedSetup(new WorkSync(bucket));
+    for (const x of [a, b, c]) {
+      expect((x.hub.store.data.kbDocuments ?? []).some((d) => d.id === doc.id)).toBe(false);
+      expect((x.hub.store.data.kbPages ?? []).some((p) => p.id === "p-orders")).toBe(false);
+    }
+  });
 });
 
 describe("whose name is on a memory and a vote, on a server with accounts", () => {
@@ -267,6 +363,45 @@ describe("whose name is on a memory and a vote, on a server with accounts", () =
     const { hub } = await makeHub({ defaultActorName: "Sara Nyberg" });
     await hub.request({ action: "memory-save", entry: { id: "m1", kind: "memory", scope: "workspace", title: "Backups", text: "Backups of db-01 run at 02:00.", author: "Imported runbook" } } as never);
     expect(hub.store.data.memories.find((m) => m.id === "m1")!.author).toBe("Imported runbook");
+  });
+
+  it("stays its author's when a teammate changes it, and is forgotten by its author or an administrator only", async () => {
+    const annas = { id: "m-anna", kind: "memory" as const, scope: "workspace", title: "Backups", text: "Backups of db-01 run at 02:00.", author: "Anna Lind", updatedAt: Date.now() - 1000 };
+    const { hub } = await makeHub(member);
+    hub.store.data.memories.push({ ...annas });
+    await hub.request({ action: "memory-save", entry: { id: "m-anna", kind: "memory", scope: "workspace", title: "Backups", text: "Backups of db-01 run at 03:00 since the move." } } as never);
+    const changed = hub.store.data.memories.find((m) => m.id === "m-anna")!;
+    expect(changed).toMatchObject({ author: "Anna Lind", editedBy: "Erik Holm", text: "Backups of db-01 run at 03:00 since the move." });
+    expect(JSON.stringify(hub.store.data.activityLog)).toContain("Changed Anna Lind's memory");
+    await expect(hub.request({ action: "memory-delete", id: "m-anna" })).rejects.toThrow(/Only Anna Lind, who wrote it, or an administrator/);
+    expect(hub.store.data.memories.some((m) => m.id === "m-anna")).toBe(true);
+    // His own he forgets; his own personal ones too; and the card of a server that is gone.
+    await hub.request({ action: "memory-save", entry: { id: "m-erik", kind: "memory", scope: "workspace", title: "Cache", text: "The cache is warmed at 06:00." } } as never);
+    await hub.request({ action: "memory-delete", id: "m-erik" });
+    hub.store.data.memories.push({ id: "auto-node:gone-server", kind: "memory", scope: "workspace", title: "Server card: gone", text: "Server: gone", author: "Auto-Memory", updatedAt: Date.now() });
+    await hub.request({ action: "memory-delete", id: "auto-node:gone-server" });
+    expect(hub.store.data.memories.map((m) => m.id)).not.toContain("m-erik");
+    expect(hub.store.data.memories.map((m) => m.id)).not.toContain("auto-node:gone-server");
+
+    const anna = await makeHub(admin);
+    anna.hub.store.data.memories.push({ ...annas, author: "Erik Holm" });
+    await anna.hub.request({ action: "memory-delete", id: "m-anna" });
+    expect(anna.hub.store.data.memories.some((m) => m.id === "m-anna")).toBe(false);
+  });
+});
+
+describe("the server's shared folder", () => {
+  it("is cleared of temporary files left by writes that never finished when the server starts", async () => {
+    const { WebTenantManager } = await import("../../src/main/web/WebTenantManager");
+    const base = await fs.mkdtemp(path.join(os.tmpdir(), "sshs3-tmpclean-"));
+    disposals.push(() => fs.rm(base, { recursive: true, force: true }));
+    const dir = path.join(base, "shared-workspace");
+    await fs.mkdir(dir, { recursive: true });
+    const left = ["shared-workspace.json.tmp-1234-0b9c2f1e-1111-4222-8333-944455556666", "s3-workspace.json.tmp-99-abc", ".shared-workspace.json.1234.deadbeef.tmp"];
+    const kept = ["shared-workspace.json", "s3-workspace.json", "shared-profiles.json", "notes.tmp-file.txt"];
+    for (const name of [...left, ...kept]) await fs.writeFile(path.join(dir, name), "{}");
+    await new WebTenantManager(base).initialize();
+    expect((await fs.readdir(dir)).sort()).toEqual([...kept].sort());
   });
 });
 
@@ -288,6 +423,46 @@ describe("the safety policy", () => {
     hub.store.data.safetyPolicy = { autoApproveSafeReadOnly: true, requireApprovalOnProdTags: true, blockDestructiveWithoutConfirm: "no" as never };
     const snap = await hub.request({ action: "safety-policy-save", policy: { autoApproveSafeReadOnly: false } });
     expect(snap.safetyPolicy).toEqual({ autoApproveSafeReadOnly: false, requireApprovalOnProdTags: true, blockDestructiveWithoutConfirm: true });
+  });
+
+  it("on a shared server is a floor: a member tightens their own rules, only an administrator loosens them", async () => {
+    const { hub } = await makeHub(member);
+    for (const policy of [{ requireApprovalOnProdTags: false }, { blockDestructiveWithoutConfirm: false }, { requireApprovalOnProdTags: false, blockDestructiveWithoutConfirm: false }])
+      await expect(hub.request({ action: "safety-policy-save", policy })).rejects.toThrow(/Only an administrator/);
+    // Asking for every read-only command is stricter, and a member's own choice.
+    let snap = await hub.request({ action: "safety-policy-save", policy: { autoApproveSafeReadOnly: false } });
+    expect(snap.safetyPolicy).toEqual({ autoApproveSafeReadOnly: false, requireApprovalOnProdTags: true, blockDestructiveWithoutConfirm: true });
+    snap = await hub.request({ action: "safety-policy-save", policy: { autoApproveSafeReadOnly: true } });
+    expect(snap.safetyPolicy?.autoApproveSafeReadOnly).toBe(true);
+    // Rules a member switched off before this held count as on.
+    hub.store.data.safetyPolicy = { autoApproveSafeReadOnly: true, requireApprovalOnProdTags: false, blockDestructiveWithoutConfirm: false };
+    expect((await hub.snapshot()).safetyPolicy).toEqual({ autoApproveSafeReadOnly: true, requireApprovalOnProdTags: true, blockDestructiveWithoutConfirm: true });
+
+    const anna = await makeHub(admin);
+    snap = await anna.hub.request({ action: "safety-policy-save", policy: { requireApprovalOnProdTags: false } });
+    expect(snap.safetyPolicy?.requireApprovalOnProdTags).toBe(false);
+  });
+});
+
+describe("the AI endpoint's address", () => {
+  it("on a shared server is not the server itself or its private network, when set or when a run starts", async () => {
+    const { hub } = await makeHub(member);
+    for (const baseUrl of ["http://127.0.0.1:2299/v1", "http://localhost:8080/v1", "http://169.254.169.254/latest", "http://10.0.0.5:11434/v1"])
+      await expect(hub.request({ action: "configure", config: { baseUrl } } as never)).rejects.toThrow(/does not call itself|never calls|private/);
+    expect((await hub.snapshot()).config?.baseUrl ?? "").toBe("");
+    // One saved before the rule existed is not called either.
+    await (hub as unknown as { config: { update: (c: object) => Promise<void> } }).config.update({ enabled: true, baseUrl: "http://127.0.0.1:2299/v1" });
+    const fetchSpy = vi.fn(async () => new Response("{}"));
+    vi.stubGlobal("fetch", fetchSpy);
+    await expect(hub.request({ action: "start", task: { prompt: "hello", mode: "advice" } } as never)).rejects.toThrow(/does not call itself/);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it("on a person's own computer may be one on that computer", async () => {
+    const { hub } = await makeHub();
+    const snap = await hub.request({ action: "configure", config: { baseUrl: "http://127.0.0.1:11434/v1" } } as never);
+    expect(snap.config?.baseUrl).toBe("http://127.0.0.1:11434/v1");
   });
 });
 
@@ -398,6 +573,65 @@ describe("the servers a team shares, on a shared server", () => {
     expect(merged.servers.map((s) => s.id)).toEqual(["mine"]);
     expect(JSON.parse(await fs.readFile(file, "utf8")).deletedServerIds).toMatchObject({ mine: expect.any(String), db: expect.any(String) });
     expect(await fs.readFile(file, "utf8")).not.toContain("annas-laptop-vm");
+  });
+
+  it("cannot take over a teammate's own server by its id, and an unknown id changes nothing", async () => {
+    const erik = await makeHub({ ...member, ...hostWith([team()]).host });
+    await expect(erik.hub.request({ action: "server-upsert", server: { id: "mine", name: "x", host: "192.0.2.66", username: "erik", shared: true } } as never)).rejects.toThrow("Server not found");
+    await expect(erik.hub.request({ action: "server-describe", profileId: "no-such-server", shared: true, description: "x" })).rejects.toThrow("Server not found");
+    await expect(erik.hub.request({ action: "server-local-override", override: { profileId: "no-such-server", username: "erik" } } as never)).rejects.toThrow("Server not found");
+    expect(JSON.stringify(erik.hub.store.data.activityLog ?? [])).not.toContain("no-such-server");
+
+    // A team copy under the id of Anna's own server (sent before this rule, or by an administrator) does not re-point it for her.
+    const anna = await makeHub({ ...member, ...hostWith([team(), own()]).host });
+    anna.hub.store.data.s3SyncedServers = [{ ...own(), host: "192.0.2.66", username: "erik", shared: true, updatedAt: iso(60_000) }];
+    const mine = ((await anna.hub.snapshot()).workspaceServers ?? []).find((s) => s.id === "mine");
+    expect(mine).toMatchObject({ host: "192.0.2.15", username: "anna", shared: false });
+  });
+
+  it("are held to the same rule through the ordinary connection editor", async () => {
+    const { registerProfileHandlers } = await import("../../src/main/ipc/profileHandlers");
+    const servers = [team(), own()];
+    const { host } = hostWith(servers);
+    for (const who of [member, admin]) {
+      const { hub } = await makeHub({ ...who, ...host });
+      const handlers = new Map<string, (...args: unknown[]) => Promise<unknown>>();
+      const store = { saveSSH: vi.fn(async () => {}), deleteSSH: vi.fn(async () => {}), deleteFolder: vi.fn(async () => {}), getProfiles: async () => ({ ssh: [{ id: "db", group: "Databases" }], s3: [] }) };
+      registerProfileHandlers({
+        aiHub: hub,
+        profileStore: store,
+        profileSyncService: { autoSyncLocalSshConfig: async () => {} },
+        registerHandler: (channel: string, fn: (...args: unknown[]) => Promise<unknown>) => void handlers.set(channel, fn),
+        scheduleAutoSync: () => {},
+        storageRegistry: { disconnect: async () => {} },
+      } as never);
+      const call = (channel: string, ...args: unknown[]): Promise<unknown> => handlers.get(channel)!({}, ...args);
+      const { IPC_CHANNELS } = await import("../../src/shared/types/ipc");
+      const db = { id: "db", name: "db-01", host: "10.20.0.31", port: 22, username: "ops", authType: "agent", tags: ["prod", "postgres"] };
+      const refused = [
+        () => call(IPC_CHANNELS.PROFILES_SAVE_SSH, { ...db, host: "192.0.2.88" }),
+        () => call(IPC_CHANNELS.PROFILES_SAVE_SSH, { ...db, shared: false }),
+        () => call(IPC_CHANNELS.PROFILES_SAVE_SSH, { ...db, tags: ["postgres"] }),
+        () => call(IPC_CHANNELS.PROFILES_DELETE_SSH, "db"),
+        () => call(IPC_CHANNELS.PROFILES_DELETE_FOLDER, "Databases", true),
+      ];
+      if (who === member) {
+        for (const r of refused) await expect(r()).rejects.toThrow(/Only an administrator/);
+        expect(store.saveSSH).not.toHaveBeenCalled();
+        expect(store.deleteSSH).not.toHaveBeenCalled();
+        expect(store.deleteFolder).not.toHaveBeenCalled();
+        // One's own key for it, one's own server, and a folder removed without its servers stay free.
+        await call(IPC_CHANNELS.PROFILES_SAVE_SSH, { ...db, privateKeyPath: "/home/erik/.ssh/id_ed25519" });
+        await call(IPC_CHANNELS.PROFILES_SAVE_SSH, { ...own(), host: "192.0.2.16" });
+        await call(IPC_CHANNELS.PROFILES_DELETE_SSH, "mine");
+        await call(IPC_CHANNELS.PROFILES_DELETE_FOLDER, "Databases", false);
+        expect(store.saveSSH).toHaveBeenCalledTimes(2);
+        expect(store.deleteSSH).toHaveBeenCalledWith("mine");
+      } else {
+        for (const r of refused) await r();
+        expect(store.saveSSH).toHaveBeenCalledTimes(3);
+      }
+    }
   });
 });
 

@@ -967,6 +967,8 @@ export function createHub(
       return id;
     },
     execOnServer: async (profileId, script, timeoutMs = 60_000) => {
+      // On a shared server "local" is the server itself, as its own account: a server named "local" is not read there.
+      if (profileId === "local" && bridge.tenantHomeDir) throw new Error("This is a shared sshs3 server: the server itself is not read as one of your servers.");
       if (profileId === "local") return { ...(await runWithStdin("sh", ["-s"], script, process.env, timeoutMs)), via: "local" as const };
       const sshBinary = process.platform === "win32" ? "ssh.exe" : "ssh";
       // An open tab to this server already has a connection: the script goes over it, beside the terminal, not into it.

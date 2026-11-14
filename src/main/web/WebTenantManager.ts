@@ -269,6 +269,11 @@ export class WebTenantManager {
 
   async initialize(): Promise<void> {
     await fsp.mkdir(this.sharedDir, { recursive: true, mode: 0o700 });
+    // Temporary files of writes that never finished (a rename Windows refused, a crash): nothing else
+    // writes here before the server has started, so whatever is left is left over.
+    for (const name of await fsp.readdir(this.sharedDir).catch(() => [] as string[]))
+      if (/\.json\.tmp-\d/.test(name) || (name.startsWith(".") && name.endsWith(".tmp")))
+        await fsp.rm(path.join(this.sharedDir, name), { force: true }).catch(() => {});
   }
 
   getSharedWorkspaceFilePath(): string {

@@ -2,6 +2,7 @@ import { sanitizeServerForS3 } from "./S3WorkspaceSyncService";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { writeFileAtomic } from "../../storage/atomicFile";
 import type {
   AgentSchedule,
   AgentTask,
@@ -334,7 +335,10 @@ export class HubStore {
       await fs.mkdir(path.dirname(this.file), { recursive: true, mode: 0o700 });
       const temporary = `${this.file}.tmp-${process.pid}-${crypto.randomUUID()}`;
       await fs.writeFile(temporary, content, { mode: 0o600 });
-      await fs.rename(temporary, this.file);
+      await fs.rename(temporary, this.file).catch(async (error: unknown) => {
+        await fs.rm(temporary, { force: true }).catch(() => {});
+        throw error;
+      });
     };
     this.writes = this.writes.then(write, write);
     return this.writes;
@@ -513,12 +517,9 @@ export class HubStore {
       const content = clean(payload) as SharedWorkspaceFilePayload;
       const same = (a: Partial<SharedWorkspaceFilePayload>, b: Partial<SharedWorkspaceFilePayload>): boolean =>
         JSON.stringify({ ...a, updatedAt: 0 }) === JSON.stringify({ ...b, updatedAt: 0 });
-      if (!same(content, remote)) {
-        await fs.mkdir(path.dirname(targetPath), { recursive: true });
-        const tmp = `${targetPath}.tmp-${process.pid}-${crypto.randomUUID()}`;
-        await fs.writeFile(tmp, JSON.stringify(content, null, 2), "utf8");
-        await fs.rename(tmp, targetPath);
-      }
+      // Several accounts' hubs write this one file: a rename that fails (Windows holds a file a reader
+      // has open) is tried again, and its temporary file never stays behind.
+      if (!same(content, remote)) await writeFileAtomic(targetPath, JSON.stringify(content, null, 2), { mode: 0o600 });
     } catch {
       // Non-fatal if shared path is temporarily read-only or unavailable
     }

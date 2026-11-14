@@ -1,4 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { statSync } from "node:fs";
+import path from "node:path";
 import type { AgentTask, AgentTodo, ExternalRunner, ExternalRunnerPreset } from "../../../shared/types/aiHub";
 import type { HermesModelConfig } from "../HermesManager";
 import type { AgentRuntime, RunEvent } from "./AgentRuntime";
@@ -17,6 +19,50 @@ import { boundedContext, boundedPrompt, safeError } from "./privacy";
  */
 
 export const ACP_PROTOCOL_VERSION = 1;
+
+/** The characters cmd.exe gives a meaning of its own. */
+const CMD_META = /([()\][%!^"`<>&|;, *?])/g;
+
+/**
+ * How a runner's program is started. Directly, with its words as they are, wherever that works;
+ * on Windows a .cmd or .bat file (npx, for one) can only be run through cmd.exe, and there every
+ * word is quoted and each of cmd's own characters escaped, so a path with a space is one word and
+ * an argument such as `x & calc` is text, not a second command. The way cross-spawn does it.
+ */
+export function runnerSpawn(
+  command: string,
+  args: string[],
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+  exists: (file: string) => boolean = (file) => {
+    try {
+      return statSync(file).isFile();
+    } catch {
+      return false;
+    }
+  },
+): { file: string; args: string[]; verbatim: boolean } {
+  if (platform !== "win32") return { file: command, args, verbatim: false };
+  const resolved = resolveOnWindows(command, env, exists) ?? command;
+  if (!/\.(cmd|bat)$/i.test(resolved)) return { file: resolved, args, verbatim: false };
+  const quote = (word: string): string =>
+    `"${word.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\*)$/, "$1$1")}"`.replace(CMD_META, "^$1").replace(CMD_META, "^$1");
+  const line = [path.win32.normalize(resolved).replace(CMD_META, "^$1"), ...args.map(quote)].join(" ");
+  return { file: env.ComSpec || env.COMSPEC || "cmd.exe", args: ["/d", "/s", "/c", `"${line}"`], verbatim: true };
+}
+
+/** Where Windows finds a program named without its extension or folder: PATH, tried with each of PATHEXT. */
+function resolveOnWindows(command: string, env: NodeJS.ProcessEnv, exists: (file: string) => boolean): string | undefined {
+  const exts = (env.PATHEXT || ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean);
+  const withExts = (base: string): string[] => (path.win32.extname(base) ? [base] : exts.map((e) => base + e));
+  if (/[\\/:]/.test(command)) return withExts(command).find(exists);
+  const dirs = (env.Path || env.PATH || "").split(";").filter(Boolean);
+  for (const dir of dirs) {
+    const hit = withExts(path.win32.join(dir, command)).find(exists);
+    if (hit) return hit;
+  }
+  return undefined;
+}
 
 /**
  * Agents known to speak ACP. The npm names are the official adapters; a
@@ -127,14 +173,16 @@ export class AcpRuntime implements AgentRuntime {
     if (!cwd) throw new Error(`"${this.runner.name}" has no working folder set on this computer.`);
     let text = "";
     try {
-      this.child = spawn(this.runner.command, this.runner.args ?? [], {
+      const plan = runnerSpawn(this.runner.command, this.runner.args ?? []);
+      this.child = spawn(plan.file, plan.args, {
         cwd,
         // The agent gets what a program needs to run, not this app's own credentials: no SSH agent
         // socket, no cloud keys, no tokens it was never given.
         env: childEnv(process.env),
         stdio: ["pipe", "pipe", "pipe"],
-        // npx and friends are .cmd files on Windows.
-        shell: process.platform === "win32",
+        // npx and friends are .cmd files on Windows: cmd.exe runs them, with the line quoted for it.
+        windowsVerbatimArguments: plan.verbatim,
+        windowsHide: true,
       });
     } catch (error) {
       throw new Error(`Could not start "${this.runner.command}": ${safeError(error)}`, { cause: error });

@@ -170,7 +170,9 @@ recordings are sealed into it. See "The audit log and terminal recordings" in
 - **External coding agents** (Claude Code, Codex) run where their runner is
   set up. To run them on the server, install the agent in the image, sign it
   in, and add the runner on the server with the folder of the checkout. The
-  provided image does not include them.
+  provided image does not include them. On a server with more than one
+  account a runner is a program on the server's host, so only an
+  administrator adds one, and a run on one starts only for an administrator.
 - **A key is per person, and only for this server.** It is not shared through
   the team bucket, and it gives no more than the person could do themselves.
 - **MCP servers and schedules are per installation.** An MCP server an agent
@@ -186,7 +188,12 @@ recordings are sealed into it. See "The audit log and terminal recordings" in
   and folder ingestion from the server's own disk are not offered: a signed-in
   person works in their own folder only. Who did something is the signed-in
   person, never a name sent with the request: that holds for the activity
-  log, for who wrote a memory and for who voted on one.
+  log, for who wrote a memory and for who voted on one. A team memory stays
+  its author's when a teammate corrects it (the change is saved with the
+  teammate's name and noted in the activity log), and only its author or an
+  administrator forgets it. The card of a server that was removed can be
+  forgotten. Temporary files of writes to the server's shared folder that
+  never finished are removed, and cleared when the server starts.
 - **A server with one account is that person's own.** While the administrator
   is the only account, folder ingestion and addresses on the machine itself
   are allowed as in the desktop app. With a second account the rules for a
@@ -196,15 +203,21 @@ recordings are sealed into it. See "The audit log and terminal recordings" in
   and key for them, and adds new ones. Changing a shared server's name,
   address, port or user name, taking it out of the team's list, removing it,
   or taking off the tag that makes changes wait for a person (`prod`,
-  `production`, `critical`) needs a team admin. This is enforced for the
-  AI workspace's own requests on the server (its server list, agents, outside
-  agents). It is not a boundary yet: a member's own copy of a shared profile,
-  edited in the connection editor, and any installation that was given the
-  team bucket's invite code are still trusted with the list (the newest copy
-  wins).
+  `production`, `critical`) needs a team admin. The same rule holds for the
+  AI workspace's own requests (its server list, agents, outside agents) and
+  for the connection editor (saving or removing a profile, removing a folder
+  with its servers). A member cannot take a teammate's own server by sending
+  its id, and a person's own server stays theirs even when a team copy with
+  the same id arrives. Any installation that was given the team bucket's
+  invite code is still trusted with the list (the newest copy wins).
 - **Team settings are an admin's.** Changing the shared workspace, the team
   bucket or other team-wide settings needs a team admin (set with the host
-  option for admins). Changing a password signs out the account's other
+  option for admins). The safety rules are a floor on a server with more
+  than one account: a member makes their own stricter (asks before every
+  read-only command), but only an administrator switches off approval on
+  `prod` servers or the confirmation of destructive commands. The AI
+  endpoint's address is held to the same rule as any other address a member
+  gives: not the server itself or its private network. Changing a password signs out the account's other
   sessions; sign-in attempts are limited per account as well as per address.
 - **One server per team is enough.** Two would work (claims decide who runs a
   ticket) but gain nothing.
