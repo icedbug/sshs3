@@ -1027,7 +1027,10 @@ because there is no server to run one on.
   newer text, and the other one as an entry in its history with the text it
   would have had (`mergePageCopies`). A memory's votes are kept per person
   (`mergeMemoryCopies`). A removal is carried as a marker (`sharedRemoved`,
-  `withRemovals`) so it reaches everyone instead of the item coming back. It
+  `withRemovals`) so it reaches everyone instead of the item coming back. A
+  knowledge base document's removal is final: a copy written later (a
+  teammate's computer that finished reading it afterwards) does not bring it
+  back, and the pages written only from it go with it. It
   is read every 40 seconds, and at once after a change. Spending is one
   object per installation (`work/usage/<client>.json`) and added up
   (`sumUsage`), so a budget holds for the team. Not shared, on purpose: MCP

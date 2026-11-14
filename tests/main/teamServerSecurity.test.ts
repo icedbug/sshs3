@@ -308,6 +308,43 @@ describe("the original file of a knowledge base document", () => {
     expect((b.hub.store.data.kbDocuments ?? []).some((d) => d.id === doc.id)).toBe(false);
     expect(existsSync(kept)).toBe(false);
   });
+
+  it("stays removed when a teammate's computer writes it again after the removal, and takes its pages along", async () => {
+    const bucket = memoryBucket();
+    const a = await makeHub({ defaultActorName: "Sara Nyberg" });
+    const b = await makeHub({ defaultActorName: "Erik Holm" });
+    const c = await makeHub({ defaultActorName: "Anna Lind" });
+    for (const { inner } of [a, b, c]) {
+      inner.s3Workspace.canUseBucket = () => true;
+      Object.assign(inner.s3Workspace.objects, bucket);
+    }
+    await a.hub.request(upload("orders-api.md", "# Orders API\n\nThe orders API listens on 8443 and reads its settings from /etc/orders.\n"));
+    await settle();
+    const doc = a.hub.store.data.kbDocuments!.at(-1)!;
+    await a.inner.syncSharedSetup(new WorkSync(bucket));
+    await b.inner.syncSharedSetup(new WorkSync(bucket));
+    // Erik's computer is reading the document, and writes a page from it.
+    const page = { id: "p-orders", kind: "runbook", title: "Orders API", when: "orders", body: "listens on 8443", targets: [], sources: [{ docId: doc.id, title: doc.title }], revision: 1, createdAt: Date.now(), updatedAt: Date.now(), updatedBy: "Knowledge base", history: [] };
+    b.hub.store.data.kbPages = [page as never];
+    await b.inner.syncSharedSetup(new WorkSync(bucket));
+    await a.inner.syncSharedSetup(new WorkSync(bucket));
+    expect(a.hub.store.data.kbPages?.map((p) => p.id)).toEqual(["p-orders"]);
+
+    // Sara removes it; Erik's reading finishes after that, stamping his copy newer than the removal.
+    await settle(5);
+    await a.hub.request({ action: "kb-delete", id: doc.id });
+    await a.inner.syncSharedSetup(new WorkSync(bucket));
+    await settle(5);
+    const late = b.hub.store.data.kbDocuments!.find((d) => d.id === doc.id)!;
+    late.summary = "Read after it was removed";
+    late.updatedAt = Date.now();
+    for (let round = 0; round < 2; round++)
+      for (const x of [b, a, c]) await x.inner.syncSharedSetup(new WorkSync(bucket));
+    for (const x of [a, b, c]) {
+      expect((x.hub.store.data.kbDocuments ?? []).some((d) => d.id === doc.id)).toBe(false);
+      expect((x.hub.store.data.kbPages ?? []).some((p) => p.id === "p-orders")).toBe(false);
+    }
+  });
 });
 
 describe("whose name is on a memory and a vote, on a server with accounts", () => {

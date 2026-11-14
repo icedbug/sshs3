@@ -3717,6 +3717,7 @@ export class HubService {
           (d) => d.id !== request.id,
         );
         this.markSharedRemoved("kb", request.id);
+        this.forgetKbSource(request.id);
         void this.removeKbOriginal(request.id);
         // Before deleteDemoKbDocument: in demo mode the built-ins are the demo store's documents.
         this.markBuiltinDismissed(request.id, getBuiltinKbDocuments());
@@ -6547,6 +6548,27 @@ export class HubService {
   }
 
   /**
+   * A removed document's pages: one written from it alone goes with it (a person may have removed the
+   * document for what it says, and the page says the same); one that rests on other sources too
+   * no longer names it. A page a person edited is kept, without the source.
+   */
+  private forgetKbSource(docId: string): void {
+    const pages = this.store.data.kbPages ?? [];
+    if (!pages.some((p) => p.sources.some((s) => s.docId === docId))) return;
+    const now = Date.now();
+    this.store.data.kbPages = pages.flatMap((p) => {
+      if (!p.sources.some((s) => s.docId === docId)) return [p];
+      const rest = p.sources.filter((s) => s.docId !== docId);
+      if (!rest.length && !p.editedByPerson) {
+        this.markSharedRemoved("pages", p.id);
+        return [];
+      }
+      return [{ ...p, sources: rest, updatedAt: Math.max(now, p.updatedAt + 1) }];
+    });
+    this.changed();
+  }
+
+  /**
    * The team's setup beside the board: agents, shared runbooks and
    * dependencies. Each is merged per item with the bucket's copy. MCP servers
    * are left out on purpose (a server is a command that runs with the user's
@@ -6581,6 +6603,14 @@ export class HubService {
         docs.filter((d) => d.shared !== false).map((d) => maskStrings({ ...d, chunks: [] })),
         removed.kb,
       ),
+      // A document is never added back under its id (a new one gets a new id), so its removal is final:
+      // a copy written later (a teammate's computer that finished reading it after it was removed) does
+      // not bring it back. The removal is stamped newer than that copy, so the bucket keeps the removal.
+      (local, remote) => {
+        if (Boolean(local.deleted) === Boolean(remote.deleted)) return remote.updatedAt > local.updatedAt ? remote : local;
+        const [gone, kept] = local.deleted ? [local, remote] : [remote, local];
+        return gone.updatedAt > kept.updatedAt ? gone : { ...gone, updatedAt: kept.updatedAt + 1 };
+      },
     );
     const k = splitRemovals(kb.items);
     removed.kb = k.removed;
@@ -6598,6 +6628,9 @@ export class HubService {
       ];
       changed = true;
     }
+
+    // A document that is gone takes the pages written only from it along, here as on the computer that removed it.
+    for (const d of docs) if (d.id in k.removed) this.forgetKbSource(d.id);
 
     const pages = await sync.reconcile("pages", withRemovals(this.store.data.kbPages ?? [], removed.pages), mergePageCopies);
     // Merged into the pages as they are now: one that was compiled here while the bucket was read stays.
