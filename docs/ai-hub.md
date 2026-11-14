@@ -137,7 +137,13 @@ explicitly enabled presentation on top of the same terminal authority.
   - *What approval covers* (`planCoversCommand`, in `ToolBroker.authorize`):
     the exact command of a step that has not run yet is not asked about
     again. Anything else, a second run of the same command, and any
-    destructive command are asked about as usual.
+    destructive command are asked about as usual. A plan can instead have
+    every changing command ask (`plan.askEach`): when the plan's own text
+    promises separate approvals or the agent set `askBeforeEachChange`
+    (`"plan"`), when the person ticked "Ask me before each command" on the
+    card (`"person"`), or when they approved with a note and made no choice
+    (`"note"`: only the agent reads a note, so it is never taken to mean
+    less asking). The card and the message to the agent say which holds.
 - **`KnowledgeBaseService`** — lexical search with `@orama/orama` (BM25, typo
   tolerance and a hand-written Swedish/English synonym table) and, when the
   provider is an OpenAI-compatible endpoint with `embeddingModel` set, ranking
@@ -995,7 +1001,34 @@ because there is no server to run one on.
   unless its agent only advises. It is closed when the run ends and opened
   again when the conversation goes on (`ownTerminal`). Where none can be
   opened (the server needs a person to sign in, or is down), the run is told
-  so and says it in its report.
+  so and says it in its report. A terminal the hub opened for itself (a
+  ticket's, a schedule's, an investigator's, one for a command on another
+  server) is taken out of the terminal list once closed, not left there as
+  "disconnected"; a person's own terminal stays until they close the tab. A
+  terminal whose process is gone without an exit having been reported is set
+  to "disconnected" on the next timer tick (`sessionAlive`).
+- **What a ticket's or a schedule's run is sent** (`worksOnItsOwn`). It is
+  not offered the tools that manage sshs3 itself (settings, servers, agents
+  and MCP, buckets, layout, schedules, folders), and its snapshot
+  (`contextForModel`) leaves out what only those tools act on, the output of
+  other terminals and closed ones, and the earlier workforce runs' full
+  reports (their conclusions stay). Every snapshot gives the target's output
+  once, under `target`. A `workspace_context` call names the parts that read
+  as in the run's starting snapshot instead of sending them again
+  (`withoutUnchanged`). Measured on the evaluation's workspace, a ticket run
+  went from about 27,700 to 20,100 tokens sent with every call before the
+  conversation itself. The tokens of a run in progress show in the
+  conversation as it goes (`runUsage`), not only once it has ended.
+- **One ticket, one run.** A ticket is taken (claimed and shown In progress)
+  before anything is awaited, also before its run's terminal is opened, which
+  can take half a minute; a second start, the next heartbeat pass or a person
+  going on with its conversation finds it taken (`ticketStarts`). A ticket
+  whose conversation is running here is not started again.
+- **An approval nobody answers.** A run nobody sits at that starts to wait
+  for an approval tells the inbox at once (a desktop notification names the
+  command). When the wait runs out the agent is told that nobody answered and
+  which command did not run, and the ticket's result lists those commands
+  under the report (`withUnanswered`).
 - **Handing out work.** `sshs3_tickets` lets an agent list the board, read a
   ticket, add a note and create a ticket for another agent (at most 10 an
   hour). A created ticket hangs on the ticket being worked. What an agent

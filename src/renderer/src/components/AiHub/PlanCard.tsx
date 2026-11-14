@@ -12,7 +12,9 @@ const RISK_CLASS: Record<AgentPlan["steps"][number]["risk"], string> = {
 /**
  * The plan an agent proposed, with its review, for the user to decide on.
  * Until it is approved the agent cannot change anything; once approved, the
- * commands it lists run without asking again (destructive ones still ask).
+ * commands it lists run without asking again (destructive ones still ask),
+ * unless the plan or the person approving it says that each change asks.
+ * The card says which of the two this approval is.
  */
 export function PlanCard({
   taskId,
@@ -28,7 +30,15 @@ export function PlanCard({
 }): JSX.Element | null {
   const [note, setNote] = useState("");
   const [sending, setSending] = useState(false);
+  /** The person's own choice of what the approval covers; undefined until they make one. */
+  const [askChoice, setAskChoice] = useState<boolean | undefined>(undefined);
   if (!plan) return null;
+  const waiting = plan.status === "proposed";
+  const listed = plan.steps.filter((s) => s.command).length;
+  // A plan that says its changes are asked about one by one is held to it. A note may ask for the
+  // same, and only the agent reads it: with a note, each change asks unless the person says otherwise.
+  const promised = plan.askEach === "plan";
+  const asksEach = waiting ? promised || (askChoice ?? note.trim() !== "") : Boolean(plan.askEach);
   const decide = (approved: boolean): void => {
     setSending(true);
     void act({
@@ -36,10 +46,9 @@ export function PlanCard({
       taskId,
       approved,
       ...(note.trim() ? { note: note.trim() } : {}),
+      ...(approved && askChoice !== undefined && !promised ? { askEach: askChoice } : {}),
     }).finally(() => setSending(false));
   };
-  const waiting = plan.status === "proposed";
-  const listed = plan.steps.filter((s) => s.command).length;
   const body = (
     <>
       <ol className="ai-plan-steps">
@@ -60,6 +69,13 @@ export function PlanCard({
 
       {plan.assumptions && plan.assumptions.length > 0 && (
         <small>Not checked: {plan.assumptions.join("; ")}</small>
+      )}
+      {!waiting && plan.status === "approved" && listed > 0 && (
+        <small data-testid="plan-covers">
+          {plan.askEach
+            ? "Approved with every changing command asking first, also the ones listed."
+            : "Approved: the listed commands run without asking again; destructive ones still ask."}
+        </small>
       )}
 
       <div
@@ -135,12 +151,26 @@ export function PlanCard({
             placeholder="Optional note, or what to change…"
             disabled={sending || busy}
           />
-          <small>
+          {listed > 0 && (
+            <label className="ai-plan-ask-each">
+              <input
+                type="checkbox"
+                data-testid="plan-ask-each"
+                checked={asksEach}
+                disabled={sending || busy || promised}
+                onChange={(e) => setAskChoice(e.target.checked)}
+              />
+              Ask me before each command that changes something
+            </label>
+          )}
+          <small data-testid="plan-covers">
             {busy
               ? "The agent is still working; you can decide when it has stopped."
-              : listed > 0
-                ? `Approving lets the agent carry the plan out. The ${listed} command(s) listed above run without asking you again; anything else, and anything destructive, still asks.`
-                : "Approving lets the agent carry the plan out; commands that change something still ask."}
+              : listed === 0
+                ? "Approving lets the agent carry the plan out; commands that change something still ask."
+                : asksEach
+                  ? `Approving lets the agent carry the plan out. Every command that changes something asks you before it runs, also the ${listed} listed above${promised ? " (the plan says so)" : askChoice === undefined ? " (you wrote a note; untick the box if the listed commands may run on this approval)" : ""}.`
+                  : `Approving lets the agent carry the plan out. The ${listed} command(s) listed above run without asking you again; anything else, and anything destructive, still asks.`}
           </small>
           <div className="ai-plan-actions">
             <button

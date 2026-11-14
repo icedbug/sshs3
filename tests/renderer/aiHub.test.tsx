@@ -466,6 +466,31 @@ describe("the agent's plan", () => {
     expect(act).toHaveBeenLastCalledWith({ action: "plan-decide", taskId: "t1", approved: true });
   });
 
+  it("says what an approval covers as it will be: a note or the box has each change ask, a plan's promise cannot be unticked", async () => {
+    const { PlanCard } = await import("../../src/renderer/src/components/AiHub/PlanCard");
+    const act = vi.fn().mockResolvedValue(undefined);
+    const { rerender } = render(<PlanCard taskId="t1" plan={plan} busy={false} act={act} />);
+    const box = screen.getByTestId("plan-ask-each");
+    expect(box).not.toBeChecked();
+    // A note may say "ask me before each change", and only the agent reads it: with one, each change asks.
+    fireEvent.change(screen.getByLabelText("Note to the agent"), { target: { value: "ask before each change" } });
+    expect(box).toBeChecked();
+    expect(screen.getByTestId("plan-card")).toHaveTextContent("Every command that changes something asks you before it runs, also the 1 listed above");
+    // The person may say otherwise, in as many words.
+    fireEvent.click(box);
+    expect(box).not.toBeChecked();
+    fireEvent.click(screen.getByTestId("plan-approve-btn"));
+    expect(act).toHaveBeenLastCalledWith({ action: "plan-decide", taskId: "t1", approved: true, note: "ask before each change", askEach: false });
+
+    rerender(<PlanCard taskId="t1" plan={{ ...plan, id: "p2", askEach: "plan" }} busy={false} act={act} />);
+    expect(screen.getByTestId("plan-ask-each")).toBeChecked();
+    expect(screen.getByTestId("plan-ask-each")).toBeDisabled();
+    expect(screen.getByTestId("plan-card")).toHaveTextContent("(the plan says so)");
+
+    rerender(<PlanCard taskId="t1" plan={{ ...plan, status: "approved", askEach: "note" }} busy={false} act={act} />);
+    expect(screen.getAllByTestId("plan-covers").at(-1)).toHaveTextContent("Approved with every changing command asking first");
+  });
+
   it("cannot be decided while the agent is working, and offers no decision once it is made", async () => {
     const { PlanCard } = await import("../../src/renderer/src/components/AiHub/PlanCard");
     const { rerender } = render(<PlanCard taskId="t1" plan={plan} busy act={vi.fn()} />);

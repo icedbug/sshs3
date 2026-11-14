@@ -216,6 +216,7 @@ import {
   wouldCycle,
 } from "./WorkBoard";
 import {
+  approvalAsksEach,
   approvalMessage,
   parseReview,
   rejectionMessage,
@@ -251,6 +252,7 @@ import {
   parseInlineCommandJson,
   buildInstantCommandSuggestion,
 } from "./hubHelpers";
+import { worksOnItsOwn } from "./DirectAgentRuntime";
 import { handleAppAction } from "./AppActions";
 
 const log = createLogger("ai-hub");
@@ -339,6 +341,22 @@ const DECIDED_HOW: Record<NonNullable<AgentChange["decidedHow"]>, string> = {
 };
 const active = (t: AgentTask): boolean =>
   ["queued", "running", "waiting"].includes(t.status);
+/**
+ * A ticket's result with the commands of its run that waited for a person's
+ * approval and got no answer (`since`: when the run took the ticket). Said by
+ * sshs3 itself, with each command, whatever the agent's report says: the
+ * person reading the ticket has to know what still waits for them.
+ */
+export function withUnanswered(ticket: WorkTicket, task: AgentTask, since: number): WorkTicket {
+  const waited = task.changes.filter((c) => c.decidedHow === "timeout" && (c.at ?? 0) >= since);
+  if (waited.length === 0) return ticket;
+  const note = [
+    `Waited for approval and nobody answered, so ${waited.length === 1 ? "this did" : "these did"} not run:`,
+    ...waited.map((c) => `- ${c.ref ? `${c.ref} ` : ""}on ${c.target}: ${clip(c.command ?? c.description, 600)}`),
+  ].join("\n");
+  return { ...ticket, result: `${clip(ticket.result ?? "", Math.max(1000, 8000 - note.length - 2))}\n\n${note}`.trim() };
+}
+
 /** The line a conversation ends with when its run used its command or time budget. */
 export function budgetStopLine(stop: NonNullable<AgentTask["budgetStop"]>): string {
   const n = stop.limit;
@@ -368,6 +386,12 @@ export interface HubHost {
   openSchedule(target: Pick<AgentSchedule, "profileId" | "shell">, label: string): Promise<string>;
   /** Closes a terminal the hub opened for itself (an investigator's). */
   closeSession?(sessionId: string): void;
+  /**
+   * Whether the process behind a terminal is still there. False: it is gone
+   * and the terminal was not told (no exit was reported for it). Undefined
+   * when the host cannot say; such a terminal is left as it is.
+   */
+  sessionAlive?(sessionId: string): boolean | undefined;
   backgroundChanged(background: boolean, autoStart: boolean): Promise<void>;
   show(): void;
   /**
@@ -617,12 +641,42 @@ export class HubService {
   closeWhenRunEnds(taskId: string, sessionId: string): void {
     const task = this.store.data.tasks.find((t) => t.id === taskId);
     if (!task || (!active(task) && !this.runtimes.has(taskId) && !this.launches.has(taskId))) {
-      this.host.closeSession?.(sessionId);
+      this.closeOwnTerminal(sessionId);
       return;
     }
     const set = this.runTerminals.get(taskId) ?? new Set<string>();
     set.add(sessionId);
     this.runTerminals.set(taskId, set);
+  }
+
+  /**
+   * Closes a terminal the hub opened for itself, and takes it out of the list
+   * of terminals: closed, it is nothing anybody can use or needs to see. Six
+   * "disconnected" sessions after one ticket and one schedule is what leaving
+   * them there looked like.
+   */
+  private closeOwnTerminal(sessionId: string): void {
+    this.host.closeSession?.(sessionId);
+    this.terminals.forget(sessionId);
+  }
+
+  /**
+   * A terminal whose process is gone without the terminal having been told
+   * (it was killed from outside, its session was cleaned up) is not "ready".
+   * Asked of the host on the timer; a host that cannot say is not asked.
+   */
+  private sweepDeadTerminals(): void {
+    if (!this.host.sessionAlive) return;
+    for (const session of this.terminals.list()) {
+      if (session.state === "disconnected" || session.kind === "k8s") continue;
+      let alive: boolean | undefined;
+      try {
+        alive = this.host.sessionAlive(session.id);
+      } catch {
+        alive = undefined;
+      }
+      if (alive === false) this.terminals.invalidate(session.id, "Terminal exited", true);
+    }
   }
 
   /**
@@ -633,9 +687,9 @@ export class HubService {
     const sessionId = this.scheduleSessions.get(taskId);
     if (sessionId) {
       this.scheduleSessions.delete(taskId);
-      this.host.closeSession?.(sessionId);
+      this.closeOwnTerminal(sessionId);
     }
-    for (const opened of this.runTerminals.get(taskId) ?? []) this.host.closeSession?.(opened);
+    for (const opened of this.runTerminals.get(taskId) ?? []) this.closeOwnTerminal(opened);
     this.runTerminals.delete(taskId);
     const schedule = this.store.data.schedules.find((s) => s.lastTaskId === taskId);
     const task = this.store.data.tasks.find((t) => t.id === taskId);
@@ -743,6 +797,10 @@ export class HubService {
       },
       approvalWaitMs: () => this.approvalWaitMinutes() * 60_000,
       // Time spent waiting for a person is not the run's: its budget moves by as much.
+      // Nobody sits at a ticket's or a schedule's run: what it waits for is told at once, not on the next look.
+      asking: (task) => {
+        if (worksOnItsOwn(task)) void this.flushInbox().catch((e) => log.warn("Notifications failed", safeError(e)));
+      },
       waited: (task, ms) => {
         const armed = this.runTimers.get(task.id);
         if (armed) this.armRunTimer(task, armed.endsAt + ms);
@@ -1599,7 +1657,7 @@ export class HubService {
             agentName: `Investigator ${index + 1}`,
             sessionId,
           }).finally(() => {
-            if (sessionId) this.host.closeSession?.(sessionId);
+            if (sessionId) this.closeOwnTerminal(sessionId);
           });
           results[index] =
             result.status === "completed" && result.text.trim()
@@ -1651,7 +1709,7 @@ export class HubService {
     try {
       await this.terminals.armAtPrompt(id, target.shell);
     } catch (error) {
-      this.host.closeSession?.(id);
+      this.closeOwnTerminal(id);
       throw error;
     }
     return id;
@@ -2469,6 +2527,11 @@ export class HubService {
         plan.decidedAt = Date.now();
         if (request.approved) {
           plan.status = "approved";
+          // What this approval covers is settled here, where the person decided, and written on the plan.
+          const asks = approvalAsksEach(plan, { note, askEach: request.askEach });
+          if (asks) plan.askEach = asks;
+          else delete plan.askEach;
+          if (note) plan.decisionNote = boundedContext(note, 2000);
           // The agent is held to the plan: its steps become its task list.
           task.todos = todosFromPlan(plan);
           this.changed();
@@ -4103,6 +4166,8 @@ export class HubService {
     },
     /** For a test-case run: what answers its tool calls. */
     replay?: Replay,
+    /** The ticket the run works, known before it starts: what it is offered depends on it. */
+    ticketId?: string,
   ): Promise<AgentTask> {
     if (!["advice", "assisted", "autonomous"].includes(input.mode))
       throw new Error("Invalid autonomy mode");
@@ -4145,6 +4210,8 @@ export class HubService {
       ...(readOnly?.mainModel ? { mainModelOnly: true } : {}),
       ...(readOnly?.investigator ? { investigator: true } : {}),
       ...(readOnly?.evalCaseId ? { evalCaseId: readOnly.evalCaseId } : {}),
+      ...(ticketId ? { ticketId } : {}),
+      ...(schedule ? { scheduleId: schedule.id } : {}),
       mode: input.mode,
       agentId: matchedAgent?.id ?? input.agentId,
       agentName: matchedAgent?.name ?? input.agentName,
@@ -4232,6 +4299,7 @@ export class HubService {
     // Every run has the conversation's whole budget: what the last one used is not carried over.
     task.budgetStop = undefined;
     task.commandsUsed = 0;
+    task.runUsage = undefined;
     // What this run spends is its own to be counted: the earlier runs' share stays as it was put down.
     task.usageCountedTokens = this.usagePutDown(task, (task.usage?.inputTokens ?? 0) + (task.usage?.outputTokens ?? 0));
     task.usageCounted = undefined;
@@ -4427,6 +4495,7 @@ export class HubService {
   private event(task: AgentTask, event: RunEvent): void {
     if (!active(task)) {
       // A run that was already stopped still says what it spent when it ends: that counts too.
+      if (/^run\./.test(event.type)) task.runUsage = undefined;
       if (/^run\./.test(event.type) && event.usage && !task.usageCounted) {
         task.usage = {
           inputTokens: (task.usage?.inputTokens ?? 0) + (event.usage.input_tokens ?? 0),
@@ -4452,6 +4521,8 @@ export class HubService {
       message.text = boundedContext(message.text + event.delta, 128_000);
     }
     if (event.type === "todos.updated" && event.todos) task.todos = event.todos;
+    if (event.type === "usage.updated" && event.usage)
+      task.runUsage = { inputTokens: event.usage.input_tokens ?? 0, outputTokens: event.usage.output_tokens ?? 0 };
     if (event.type === "hypotheses.updated" && event.hypotheses) task.hypotheses = event.hypotheses;
     if (event.type === "tool.result" && event.tool) {
       task.toolLog = [
@@ -4472,6 +4543,7 @@ export class HubService {
       });
     if (/^run\.(completed|failed|cancelled|interrupted)$/.test(event.type)) {
       task.status = event.type.slice(4) as AgentTask["status"];
+      task.runUsage = undefined;
       if (event.usage?.context_tokens) task.contextTokens = event.usage.context_tokens;
       if (event.usage)
         task.usage = {
@@ -6170,11 +6242,22 @@ export class HubService {
       data.reminded = Object.fromEntries(Object.entries(data.reminded).filter(([id]) => seen[id] !== undefined));
       for (const item of reminders) data.reminded[item.id] = now;
       const blocking = fresh.filter((i) => ["approval", "plan", "question"].includes(i.kind));
-      if (blocking.length)
+      if (blocking.length) {
+        const first = blocking[0];
+        const run = first.taskId ? this.store.data.tasks.find((t) => t.id === first.taskId) : undefined;
+        // The command itself, not only what the agent called it: on this computer's own screen, for the person to decide on.
+        const command = first.kind === "approval" ? run?.changes.find((c) => c.id === first.changeId)?.command : undefined;
         this.notify(
-          blocking.length === 1 ? (blocking[0].kind === "approval" ? "Approval needed" : "An agent is waiting for you") : `${blocking.length} things are waiting for you`,
-          `${blocking[0].from ?? "Assistant"}: ${blocking[0].title}`,
+          blocking.length === 1
+            ? first.kind === "approval"
+              ? run && worksOnItsOwn(run)
+                ? "A run nobody is watching waits for your approval"
+                : "Approval needed"
+              : "An agent is waiting for you"
+            : `${blocking.length} things are waiting for you`,
+          `${first.from ?? "Assistant"}: ${command && command !== first.title ? `${command} (${first.title})` : first.title}`,
         );
+      }
       out = [...fresh.map((i) => this.notifyItem(i)), ...reminders.map((i) => ({ ...this.notifyItem(i), reminder: true }))];
       since = new Map(items.map((i) => [i.id, i.since ?? i.at]));
       if (before !== JSON.stringify([data.seen, data.reminded])) await this.notifyStore.save();
@@ -6394,7 +6477,16 @@ export class HubService {
    * its open ticket instead of making another; a resolved one is noted. A
    * closed ticket is not reopened: the alert firing again later is new work.
    */
-  private async takeAlerts(alerts: IncomingAlert[]): Promise<{ created: string[]; updated: string[] }> {
+  private takeAlerts(alerts: IncomingAlert[]): Promise<{ created: string[]; updated: string[] }> {
+    // One post at a time: two posts of one alert that arrive together (a retry, two hooks) would each
+    // look for its open ticket before the other had made it, and make two.
+    const run = this.alertIntake.then(() => this.takeAlertsNow(alerts));
+    this.alertIntake = run.catch(() => undefined);
+    return run;
+  }
+  private alertIntake: Promise<unknown> = Promise.resolve();
+
+  private async takeAlertsNow(alerts: IncomingAlert[]): Promise<{ created: string[]; updated: string[] }> {
     const servers = (await this.collectExtraContext()).workspaceServers ?? [];
     const agents = this.getAgentsList();
     const created: string[] = [];
@@ -6741,9 +6833,28 @@ export class HubService {
    * ticket finds it taken.
    */
   private async startTicket(id: string, sessionId?: string): Promise<AgentTask> {
-    const ticket = this.ticket(id);
-    const agents = this.getAgentsList();
+    // Decided before anything is awaited: opening the run's terminal can take half a minute, and the
+    // next heartbeat pass (or a second click) in that time must find the ticket taken.
+    if (this.ticketStarts.has(id)) throw new Error("This ticket is already being started.");
     const client = this.clientId();
+    const before = this.ticket(id);
+    // Its conversation is running here (a person went on with it, or its run has not handed the
+    // ticket back yet): a second run of the same ticket would be two agents on one piece of work.
+    if (this.store.data.tasks.some((t) => t.id === before.taskId && active(t)))
+      throw new Error("An agent is already running this ticket. Stop the run first.");
+    this.ticketStarts.add(id);
+    try {
+      return await this.startTicketOnce(before, client, sessionId);
+    } finally {
+      this.ticketStarts.delete(id);
+    }
+  }
+
+  /** Tickets whose run is being started right now (claim, terminal): no second start, and not the heartbeat's to free. */
+  private readonly ticketStarts = new Set<string>();
+
+  private async startTicketOnce(ticket: WorkTicket, client: string, sessionId?: string): Promise<AgentTask> {
+    const agents = this.getAgentsList();
     const reason = whyNotRunnable(ticket, {
       tickets: live(this.store.data.workTickets),
       agents,
@@ -6765,11 +6876,20 @@ export class HubService {
       });
       if (held.client !== client) throw new Error(`${held.by} is already running this ticket.`);
     }
+    // The board shows the ticket taken from here on, also while the terminal is being opened.
+    this.putTicket({ ...ticket, status: "in_progress", claim: { by, client, at: now, seenAt: now }, taskId: undefined, updatedAt: now });
+    const giveBack = (): void => {
+      const current = live(this.store.data.workTickets).find((t) => t.id === ticket.id);
+      // Only what this start put there: an edit made meanwhile stays.
+      if (current?.status === "in_progress" && current.claim?.client === client && current.claim.at === now && !current.taskId)
+        this.putTicket({ ...current, status: ticket.status, claim: undefined, taskId: ticket.taskId, updatedAt: Date.now() });
+    };
     // Nobody sits at a terminal for a ticket the heartbeat takes (or one started without naming a
     // terminal): where the ticket names one of the workspace's servers, the run gets a terminal of its own there.
-    const own = sessionId ? undefined : await this.openTicketTerminal(ticket, agent);
+    let own: Awaited<ReturnType<HubService["openTicketTerminal"]>>;
     let task: AgentTask;
     try {
+      own = sessionId ? undefined : await this.openTicketTerminal(ticket, agent);
       task = await this.start({
         prompt:
           ticketPrompt(
@@ -6781,9 +6901,10 @@ export class HubService {
         mode: agent.defaultMode,
         agentId: agent.id,
         agentName: agent.name,
-      });
+      }, undefined, undefined, undefined, ticket.id);
     } catch (e) {
-      if (own?.sessionId) this.host.closeSession?.(own.sessionId);
+      if (own?.sessionId) this.closeOwnTerminal(own.sessionId);
+      giveBack();
       await sync?.release(ticket.id, client).catch(() => undefined);
       throw e;
     }
@@ -6794,7 +6915,8 @@ export class HubService {
     task.ticketId = ticket.id;
     task.title = clip(`Ticket: ${ticket.title}`, 100);
     this.putTicket({
-      ...ticket,
+      // What was written on the ticket while the terminal opened (a comment, an alert firing again) stays.
+      ...(live(this.store.data.workTickets).find((t) => t.id === ticket.id) ?? ticket),
       status: "in_progress",
       claim: { by, client, at: now, seenAt: now },
       taskId: task.id,
@@ -6843,6 +6965,18 @@ export class HubService {
     const ticket = live(this.store.data.workTickets).find((t) => t.id === task.ticketId);
     // Only the ticket's latest conversation, and not one a person has already closed.
     if (!ticket || ticket.taskId !== task.id || ticket.status === "in_progress" || ticket.status === "done") return;
+    // The heartbeat is starting this ticket right now: that start has it. Otherwise this one holds it
+    // until it is written, so the heartbeat does not start a second run while the claim is being taken.
+    if (this.ticketStarts.has(ticket.id)) return;
+    this.ticketStarts.add(ticket.id);
+    try {
+      await this.reattachTicketNow(task, ticket);
+    } finally {
+      this.ticketStarts.delete(ticket.id);
+    }
+  }
+
+  private async reattachTicketNow(task: AgentTask, ticket: WorkTicket): Promise<void> {
     const client = this.clientId();
     const by = await this.resolveActorName();
     const now = Date.now();
@@ -6924,7 +7058,7 @@ export class HubService {
   private settleTickets(): void {
     const client = this.clientId();
     for (const ticket of live(this.store.data.workTickets)) {
-      if (ticket.status !== "in_progress" || ticket.claim?.client !== client) continue;
+      if (ticket.status !== "in_progress" || ticket.claim?.client !== client || this.ticketStarts.has(ticket.id)) continue;
       const task = this.store.data.tasks.find((t) => t.id === ticket.taskId);
       if (task && active(task)) continue;
       if (!task) {
@@ -6933,7 +7067,7 @@ export class HubService {
       } else {
         // Only what was not counted when the run ended (a run that carries the agent has been).
         this.countAgentUsage(task, ticket.assigneeAgentId ?? task.agentId);
-        this.putTicket(ticketAfterRun(ticket, task));
+        this.putTicket(withUnanswered(ticketAfterRun(ticket, task), task, ticket.claim?.at ?? 0));
       }
       void this.work()
         ?.release(ticket.id, client)
@@ -6983,7 +7117,7 @@ export class HubService {
           !t.deleted &&
           t.status === "in_progress" &&
           t.claim?.client === client &&
-          this.store.data.tasks.some((x) => x.id === t.taskId);
+          (this.ticketStarts.has(t.id) || this.store.data.tasks.some((x) => x.id === t.taskId));
         const keepRun = (l: WorkTicket, r: WorkTicket): WorkTicket => mergeTicketCopies(l, r, runningHere);
         const tickets = await sync.reconcile("tickets", this.store.data.workTickets ?? [], keepRun);
         // Merged into the board as it is now, not over it: what changed here while the bucket was read stays.
@@ -7027,7 +7161,7 @@ export class HubService {
     for (const t of live(this.store.data.workTickets)) {
       if (t.status !== "in_progress") continue;
       if (t.claim?.client === client) {
-        if (this.store.data.tasks.some((x) => x.id === t.taskId && active(x))) continue;
+        if (this.ticketStarts.has(t.id) || this.store.data.tasks.some((x) => x.id === t.taskId && active(x))) continue;
       } else if (t.claim && (sync ? this.claimAlive(t.id, t.claim.seenAt, now) : claimIsFresh(t, now))) continue;
       this.putTicket({
         ...withComment(t, "sshS3", `The run by ${t.claim?.by ?? "somebody"} stopped reporting; the ticket is free again.`),
@@ -7037,7 +7171,8 @@ export class HubService {
     }
     if (this.store.data.preferences.workforceAutopilot !== true) return;
     const tickets = live(this.store.data.workTickets);
-    if (tickets.some((t) => t.status === "in_progress" && t.claim?.client === client)) return;
+    // One at a time, and a start that is still opening its terminal counts as one.
+    if (this.ticketStarts.size > 0 || tickets.some((t) => t.status === "in_progress" && t.claim?.client === client)) return;
     const next = nextForHeartbeat({
       tickets,
       agents: this.getAgentsList(),
@@ -7046,7 +7181,8 @@ export class HubService {
       client,
       now,
     });
-    if (next)
+    // A ticket whose conversation a person is going on with is theirs for now, not the heartbeat's.
+    if (next && !this.store.data.tasks.some((t) => t.id === next.taskId && active(t)))
       await this.startTicket(next.id).catch((e) =>
         log.warn("Heartbeat could not start a ticket", safeError(e)),
       );
@@ -7156,6 +7292,7 @@ export class HubService {
       void this.nightly(now).catch((e) => log.warn("Nightly upkeep failed", safeError(e)));
       void this.flushInbox(now).catch((e) => log.warn("Notifications failed", safeError(e)));
       void this.factsTick(now).catch((e) => log.warn("Reading server facts failed", safeError(e)));
+      this.sweepDeadTerminals();
       let historyChanged = false;
       for (const session of this.terminals.list()) {
         const text = this.terminals.context(session.id);
@@ -7249,7 +7386,7 @@ export class HubService {
           schedule.lastStatus = `Blocked: ${safeError(e)}`;
           this.notify("Scheduled task blocked", schedule.title);
           // A run that never started leaves no terminal behind.
-          if (opened) this.host.closeSession?.(opened);
+          if (opened) this.closeOwnTerminal(opened);
         }
         this.changed();
       }

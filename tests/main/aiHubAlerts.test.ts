@@ -141,4 +141,15 @@ describe("alerts through the hub", () => {
     const pasted = await hub.request({ action: "alert-paste", text: "Replication lag on pg-01\\nlag is 40 s" });
     expect(pasted.reply!.alerts!.created).toHaveLength(1);
   });
+
+  it("makes one ticket of one alert posted twice at the same moment (a retry, two hooks)", async () => {
+    const hub = await makeHub();
+    await hub.request({ action: "agent-save", agent: { id: "dba", name: "DBA", role: "r", mission: "m", systemPrompt: "", defaultMode: "advice", targetCluster: "DB-Prod" } as never });
+    const created = await hub.request({ action: "alert-hook-create" });
+    const secret = created.reply!.alertHook!.path.split(".").pop()!;
+    // Each post looks for its open ticket before making one: both looked before either had made it.
+    const [a, b] = await Promise.all([hub.receiveAlert(secret, ALERTMANAGER), hub.receiveAlert(secret, ALERTMANAGER)]);
+    expect([...a!.created, ...b!.created]).toHaveLength(1);
+    expect(hub.store.data.workTickets!.filter((t) => t.alert?.fingerprint === "abc123")).toHaveLength(1);
+  });
 });

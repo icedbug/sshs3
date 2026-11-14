@@ -127,6 +127,26 @@ export function lastVisibleLine(text: string): string {
   return "";
 }
 
+/**
+ * A prompt that names something (`ops@app-01:~$`, `[root@db-01 ~]#`) and is
+ * not just a sign: a bare `$`, `#` or `>` ends many lines of ordinary output,
+ * so where the output ends before such a prompt is not known from it.
+ */
+const distinctivePrompt = (prompt: string): boolean => prompt.length >= 6 && /[A-Za-z0-9]{2}/.test(prompt) && /[$#%>❯]$/.test(prompt);
+
+/**
+ * Where in `raw` (one line as the terminal sent it; `line` is what a person
+ * sees of it) the known prompt begins, when the line is output with the
+ * prompt right after it. Undefined when it is not, or cannot be told.
+ */
+function promptGluedAt(raw: string, line: string, prompt: string): number | undefined {
+  if (!distinctivePrompt(prompt) || line.length <= prompt.length || !line.endsWith(prompt)) return undefined;
+  const got = seen(raw);
+  const want = seen(prompt).chars;
+  if (!want || got.chars.length <= want.length || !got.chars.endsWith(want)) return undefined;
+  return got.ends[got.chars.length - want.length - 1];
+}
+
 /** How much of the typed line holds the frame's random id: `printf '\033]777;SSHS3;` and the 32 characters after it. */
 const ECHO_HEAD = 54;
 
@@ -280,19 +300,30 @@ export class CommandFrames {
   }
 
   private promptIsBack(): boolean {
-    const prompt = this.options.lateOutput?.prompt;
-    return Boolean(prompt) && lastVisibleLine(this.trailing) === prompt;
+    return this.splitAtPrompt(this.trailing) !== undefined;
   }
 
-  /** Where the known prompt begins at the end of `text`; undefined when the text does not end with it. */
+  /**
+   * Where the known prompt begins at the end of `text`; undefined when the
+   * text does not end with it. The prompt is a line of its own, or it stands
+   * right after output that did not end in a line break (`curl` printing
+   * JSON, `printf` without `\n`): the shell prints its prompt wherever the
+   * cursor is. The second is only taken for a prompt that cannot be mistaken
+   * for the end of a line of output.
+   */
   private splitAtPrompt(text: string): number | undefined {
     const prompt = this.options.lateOutput?.prompt;
     if (!prompt) return undefined;
     let end = text.length;
     for (;;) {
       const nl = text.lastIndexOf("\n", end - 1);
-      const line = visibleLine(text.slice(nl + 1, end));
-      if (line) return line === prompt ? nl + 1 : undefined;
+      const raw = text.slice(nl + 1, end);
+      const line = visibleLine(raw);
+      if (line) {
+        if (line === prompt) return nl + 1;
+        const glued = promptGluedAt(raw, line, prompt);
+        return glued === undefined ? undefined : nl + 1 + glued;
+      }
       if (nl < 0) return undefined;
       end = nl;
     }

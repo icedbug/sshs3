@@ -5,6 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import {
   MAX_PLAN_REVISIONS,
+  approvalAsksEach,
+  approvalMessage,
+  promisesToAskEach,
   newPlan,
   parsePlan,
   parseReview,
@@ -182,6 +185,48 @@ describe("what an approved plan covers", () => {
   });
 });
 
+describe("a plan that says each change is asked about", () => {
+  // The third round: both plans said "separate approval before EACH modifying command; plan approval
+  // must not substitute", the person's note said "ask before each change", and the listed sed -i ran
+  // on the plan's approval alone. What the plan and the person say now holds.
+  const h = (c: string): string => exactHash(c.trim());
+  it("is read from the plan's own words, or from the agent's flag; a plain plan is not", () => {
+    for (const said of [
+      "Separate approval before EACH modifying command; plan approval must not substitute.",
+      "Each change is approved separately by the operator.",
+      "Ask for confirmation before every change on db-01.",
+      "Plan approval does not cover the deletion.",
+    ])
+      expect(promisesToAskEach({ goal: "Free /var on db-01", steps: [], assumptions: [said] }), said).toBe(true);
+    const plain = parsePlan(planInput) as { goal: string; steps: AgentPlan["steps"]; assumptions: string[] };
+    expect(promisesToAskEach(plain)).toBe(false);
+    expect(plain).not.toHaveProperty("askEach");
+    expect(parsePlan({ ...planInput, askBeforeEachChange: true })).toMatchObject({ askEach: true });
+    const promised = parsePlan({ ...planInput, goal: "Fix it; separate approval before each modifying command" });
+    expect(newPlan(promised as never, undefined, { verdict: "approve", findings: [] }).askEach).toBe("plan");
+  });
+
+  it("is settled when the person approves: asking again wins wherever anything asks for it", () => {
+    expect(approvalAsksEach({}, {})).toBeUndefined();
+    expect(approvalAsksEach({}, { askEach: false })).toBeUndefined();
+    expect(approvalAsksEach({}, { askEach: true })).toBe("person");
+    // A note is read by the agent only, and may well say "ask me before each change".
+    expect(approvalAsksEach({}, { note: "ask before each change" })).toBe("note");
+    expect(approvalAsksEach({}, { note: "after 18:00", askEach: false })).toBeUndefined();
+    // What the plan promised, the person cannot approve away by unticking a box.
+    expect(approvalAsksEach({ askEach: "plan" }, { askEach: false })).toBe("plan");
+  });
+
+  it("covers none of its commands then, and the agent is told so; otherwise it is told not to promise it", () => {
+    const asks = task({ plan: plan({ status: "approved", askEach: "note" }) });
+    expect(planCoversCommand(asks, h("sudo systemctl reload nginx"), "modify")).toBe(false);
+    expect(approvalMessage(asks.plan!)).toContain("Every command that changes something is asked about before it runs, also the ones the plan lists");
+    const covered = plan({ status: "approved" });
+    expect(approvalMessage(covered)).toContain("Commands exactly as the plan lists them run without asking the user again");
+    expect(approvalMessage(covered)).toContain("Do not tell the user that each change will be approved separately");
+  });
+});
+
 // ------------------------------------------------------------------ in the run loop
 
 function sse(events: Array<Record<string, unknown>>): Response {
@@ -345,13 +390,15 @@ describe("a plan through the hub", () => {
     const t = mainTask(hub);
 
     await hub.request({ action: "plan-decide", taskId: t.id, approved: true, note: "after 18:00 only" });
-    expect(t.plan).toMatchObject({ status: "approved" });
+    // With a note and no choice made, each change asks: only the agent reads the note.
+    expect(t.plan).toMatchObject({ status: "approved", askEach: "note", decisionNote: "after 18:00 only" });
     expect(t.plan!.decidedAt).toBeTypeOf("number");
     expect(t.todos!.map((x) => x.id)).toEqual(["p1", "p2"]);
     await waitFor(() => seen.filter((s) => s.kind === "main").length >= 3);
     const told = seen.filter((s) => s.kind === "main")[2].lastUser;
     expect(told).toContain("The user approved your plan");
     expect(told).toContain("after 18:00 only");
+    expect(told).toContain("Every command that changes something is asked about before it runs");
     expect(told).toContain("sudo systemctl reload nginx");
     await waitFor(() => settled(hub));
     // Decided once: there is no plan left to decide.
