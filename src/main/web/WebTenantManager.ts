@@ -156,7 +156,7 @@ export class HybridTenantProfileStore extends ProfileStore {
     return data.ssh;
   }
 
-  override async saveSSH(profile: SSHConnectionConfig): Promise<void> {
+  override async saveSSH(profile: SSHConnectionConfig, options: { keepUpdatedAt?: boolean } = {}): Promise<void> {
     if (profile.shared !== false) {
       // Strip personal key paths/passwords before saving to shared team profile store
       const sanitizedForTeam: SSHConnectionConfig = {
@@ -176,8 +176,8 @@ export class HybridTenantProfileStore extends ProfileStore {
         updatedAt: profile.updatedAt || new Date().toISOString(),
         updatedBy: profile.updatedBy,
       };
-      await this.sharedStore.saveSSH(sanitizedForTeam);
-      await super.saveSSH({ ...profile, shared: true });
+      await this.sharedStore.saveSSH(sanitizedForTeam, options);
+      await super.saveSSH({ ...profile, shared: true }, options);
       this.onSharedChanged();
     } else {
       const shared = await this.sharedStore.getProfiles();
@@ -185,7 +185,7 @@ export class HybridTenantProfileStore extends ProfileStore {
         await this.sharedStore.deleteSSH(profile.id).catch(() => {});
         this.onSharedChanged();
       }
-      await super.saveSSH({ ...profile, shared: false });
+      await super.saveSSH({ ...profile, shared: false }, options);
     }
   }
 

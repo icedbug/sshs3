@@ -7,6 +7,7 @@ import { FileTools } from "./FileTools";
 import { SmartcardDetector } from "../../smartcard/SmartcardDetector";
 import type { IpcBridge } from "../../IpcBridge";
 import { HubService, type HubHost } from "./HubService";
+import { mergeMemoryCopies } from "./S3WorkspaceSyncService";
 import {
   HUB_CHANGED,
   type WorkspaceServerSummary,
@@ -591,9 +592,10 @@ export function createHub(
               input.nodeRole !== undefined
                 ? input.nodeRole.trim() || undefined
                 : existing.nodeRole,
-            description: input.description?.trim() || undefined,
-            role: input.role?.trim() || undefined,
-            tags: cleanTags?.length ? cleanTags : undefined,
+            // Only what was sent changes: describing a server by its tags does not wipe its description.
+            description: input.description !== undefined ? input.description.trim() || undefined : existing.description,
+            role: input.role !== undefined ? input.role.trim() || undefined : existing.role,
+            tags: cleanTags !== undefined ? (cleanTags.length ? cleanTags : undefined) : existing.tags,
             updatedAt: new Date().toISOString(),
             updatedBy:
               bridge.teamVaultService.getUnlockedRecipientId(team.vaultId) ??
@@ -617,10 +619,12 @@ export function createHub(
           input.nodeRole !== undefined
             ? input.nodeRole.trim() || undefined
             : existing.nodeRole,
-        description: input.description?.trim() || undefined,
-        role: input.role?.trim() || undefined,
-        tags: cleanTags?.length ? cleanTags : undefined,
+        description: input.description !== undefined ? input.description.trim() || undefined : existing.description,
+        role: input.role !== undefined ? input.role.trim() || undefined : existing.role,
+        tags: cleanTags !== undefined ? (cleanTags.length ? cleanTags : undefined) : existing.tags,
         updatedAt: new Date().toISOString(),
+        // Who made this change, not whoever changed the server before.
+        updatedBy: input.updatedBy ?? undefined,
       });
       bridge.scheduleAutoSync?.();
     },
@@ -724,6 +728,8 @@ export function createHub(
         tags: cleanTags?.length ? cleanTags : existing?.tags,
         shared: isShared,
         updatedAt: nowIso,
+        // Who made this change: the spread above would keep the name of whoever saved it last.
+        updatedBy: input.updatedBy ?? undefined,
       };
       await bridge.profileStore.saveSSH(savedProfile);
       bridge.scheduleAutoSync?.();
@@ -823,7 +829,8 @@ export function createHub(
               shared: true,
               updatedAt: s.updatedAt || new Date().toISOString(),
               updatedBy: s.updatedBy,
-            });
+              // The team's time of the change, not the time it arrived here.
+            }, { keepUpdatedAt: true });
           }
         }
       } catch {
@@ -1441,7 +1448,8 @@ export function createHub(
         for (const rm of remote.workspaceMemories ?? []) {
           const prev = memMap.get(rm.id);
           if (!prev || rm.updatedAt > prev.updatedAt) {
-            memMap.set(rm.id, prev ? { ...prev, ...rm } : rm);
+            // The newer copy decides, also about what it no longer has (an undone "replaced by").
+            memMap.set(rm.id, prev ? mergeMemoryCopies(prev, rm) : rm);
             changed = true;
           }
         }

@@ -45,8 +45,9 @@ export function caseFromTask(
     id: `e-${crypto.randomUUID().slice(0, 8)}`,
     title: clip(input.title?.trim() || task.title, 160),
     prompt: boundedContext(prompt, 12_000),
-    mode: task.mode,
-    agentId: task.agentId,
+    // The agent that answered the question, not the one the conversation was handed to afterwards.
+    mode: task.startedAs?.mode ?? task.mode,
+    agentId: task.startedAs ? task.startedAs.agentId : task.agentId,
     fromTaskId: task.id,
     recorded: (task.toolLog ?? [])
       .filter((r) => !LOCAL_TOOLS.has(r.name) && !LIVE_TOOLS.has(r.name))
@@ -183,6 +184,20 @@ export function evalRun(input: {
 }): EvalRun {
   const answer = [...input.task.messages].reverse().find((m) => m.role === "assistant" && m.text.trim())?.text ?? "";
   const ran = input.task.status === "completed" && Boolean(answer);
+  // The run failed (the model or its API refused, the sign-in ran out): nothing was tested. Counting it
+  // as a failed test would make an outage look like the agent getting worse.
+  if (input.task.status === "failed" && !answer)
+    return {
+      at: input.now ?? Date.now(),
+      model: input.task.model,
+      passed: false,
+      inconclusive: boundedContext(input.task.error ?? "The run failed before it gave an answer.", 600),
+      checks: [],
+      answer: "",
+      calls: (input.task.toolLog ?? []).map((r) => ({ name: r.name, input: boundedContext(r.input, 300) })),
+      unrecorded: input.unrecorded,
+      tokens: (input.task.usage?.inputTokens ?? 0) + (input.task.usage?.outputTokens ?? 0),
+    };
   const checks: EvalCheck[] = [
     { name: "ran to an answer", passed: ran, detail: ran ? undefined : (input.task.error ?? `ended as ${input.task.status}`) },
     ...input.checks,
@@ -202,7 +217,10 @@ export function evalRun(input: {
 
 /** How the newest runs of the cases compare with the ones before: what got better, what got worse. */
 export function compareRuns(cases: Pick<EvalCase, "title" | "runs">[]): { passing: number; total: number; better: string[]; worse: string[] } {
-  const ran = cases.filter((c) => c.runs.length > 0);
+  // A run that could not take place says nothing either way: the comparison is between runs that did.
+  const ran = cases
+    .map((c) => ({ title: c.title, runs: c.runs.filter((r) => !r.inconclusive) }))
+    .filter((c) => c.runs.length > 0);
   return {
     passing: ran.filter((c) => c.runs[0].passed).length,
     total: ran.length,

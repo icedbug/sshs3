@@ -1188,7 +1188,8 @@ export async function handleAppAction(
             })),
           };
         }
-        const author = task.agentName || "Assistant";
+        // The agent, for the person it works for: on a shared board, whose assistant opened or closed a ticket.
+        const author = `${task.agentName || "Assistant"} (agent, for ${await hub.resolveActorName()})`;
         if (op === "comment") {
           const id = str("id");
           const text = str("text");

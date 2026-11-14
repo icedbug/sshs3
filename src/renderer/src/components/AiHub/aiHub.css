@@ -1207,6 +1207,10 @@
   background: #ef44440b;
   overflow-wrap: anywhere;
 }
+.ai-error.ai-notice {
+  color: #fcd34d;
+  background: #f59e0b0b;
+}
 .ai-form {
   display: flex;
   flex-direction: column;

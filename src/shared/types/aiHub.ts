@@ -134,6 +134,11 @@ export interface EvalRun {
   at: number;
   model?: string;
   passed: boolean;
+  /**
+   * The run could not take place (the model or its API failed, the run could not start), and why.
+   * Nothing was tested: it is neither a pass nor a regression, and is left out of comparisons.
+   */
+  inconclusive?: string;
   checks: EvalCheck[];
   answer: string;
   calls: { name: string; input: string }[];
@@ -324,6 +329,8 @@ export interface AgentTask {
   evalCaseId?: string;
   /** Set on a run that works a ticket from the board: that ticket's id. */
   ticketId?: string;
+  /** Set when the conversation was handed over: the agent and mode it began with, which answered its first question. */
+  startedAs?: { agentId?: string; mode: AgentMode };
   /** The model the task's latest run was started on. */
   model?: string;
   /** Set on a background run that is the second attempt, on the main model, after the fast model failed. */
@@ -897,6 +904,8 @@ export interface WorkTicket {
     firingSince?: number;
     /** The sender's own start of the current firing: a re-send carries the same one. */
     startsAt?: string;
+    /** It resolved before anybody started on it and was moved to Backlog for that reason: a new firing brings it back. */
+    parked?: boolean;
   };
   /** When it came to the status it has now. Comments move `updatedAt`; this stays. */
   statusAt?: number;
@@ -908,6 +917,8 @@ export interface WorkTicket {
   result?: string;
   /** Tokens the runs of this ticket have used. */
   tokens?: number;
+  /** What the latest conversation had spent when it was last put on the ticket: its later runs add only the difference. */
+  settledRun?: { taskId: string; tokens: number };
   comments?: WorkTicketComment[];
   createdBy: string;
   createdAt: number;
@@ -1205,6 +1216,12 @@ export interface HubReply {
   ingest?: { added: string[]; duplicates: string[]; failed: { name: string; error: string }[]; updated?: string[] };
   /** A page that an undo took away altogether: what was undone was its creation. */
   kbPageRemoved?: { id: string; title: string };
+  /**
+   * What was saved differently from what was asked, in plain words: a value
+   * that was left out because what it points to does not exist, an id that was
+   * rewritten. Absent when the request was saved as it was sent.
+   */
+  notes?: string[];
 }
 export interface TerminalCommandFailure {
   sessionId: string;

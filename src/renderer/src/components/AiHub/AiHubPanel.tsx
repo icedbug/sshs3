@@ -130,6 +130,8 @@ export function AiHubPanel({
   const [selectedAgentId, setSelectedAgentId] = useState<string>("");
   const [shell, setShell] = useState<ShellKind>("bash");
   const [error, setError] = useState("");
+  // What a request saved differently from what was asked (a value left out, an id rewritten).
+  const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
   /** What the person wants to say with an answer, per pending action; the agent is given it. */
   const [approvalNotes, setApprovalNotes] = useState<Record<string, string>>({});
@@ -571,9 +573,12 @@ export function AiHubPanel({
 
   async function act(request: HubRequest): Promise<HubSnapshot | undefined> {
     setError("");
+    setNotice("");
     setBusy(true);
     try {
-      return await hubRequest(request);
+      const snap = await hubRequest(request);
+      setNotice(snap?.reply?.notes?.join(" ") ?? "");
+      return snap;
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -950,6 +955,18 @@ export function AiHubPanel({
             className="ai-icon-button"
             aria-label="Dismiss error"
             onClick={() => setError("")}
+          >
+            <X size={13} />
+          </button>
+        </div>
+      )}
+      {notice && (
+        <div className="ai-error ai-notice" role="status">
+          {notice}
+          <button
+            className="ai-icon-button"
+            aria-label="Dismiss note"
+            onClick={() => setNotice("")}
           >
             <X size={13} />
           </button>

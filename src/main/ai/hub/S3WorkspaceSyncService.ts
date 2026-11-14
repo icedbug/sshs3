@@ -166,6 +166,56 @@ function parseTimeMs(value?: string | number): number {
 }
 
 /**
+ * Fields a newer copy of a memory takes away by no longer having them. Laying the newer copy over
+ * the older one would bring them back: undoing a learned update (which removes `supersededBy` from
+ * the memory it replaced) then never reached a teammate, and their original stayed hidden.
+ */
+const CLEARED_BY_NEWER = ["supersededBy", "supersededAt"] as const;
+
+type Votes = Record<string, 1 | -1>;
+const cleanVotes = (votes: unknown): Votes | undefined => {
+  if (!votes || typeof votes !== "object") return undefined;
+  const out: Votes = {};
+  for (const [who, v] of Object.entries(votes as Record<string, unknown>).slice(0, 500))
+    if (who && (v === 1 || v === -1)) out[who] = v;
+  return Object.keys(out).length ? out : undefined;
+};
+const sameVotes = (a: Votes | undefined, b: Votes | undefined): boolean => {
+  const [ka, kb] = [Object.keys(a ?? {}), Object.keys(b ?? {})];
+  return ka.length === kb.length && ka.every((k) => a![k] === b?.[k]);
+};
+/**
+ * Votes are one per person, so two copies' votes are put together per person instead of one copy's
+ * replacing the other's: two people who vote at about the same time both keep their vote. Where both
+ * copies have the same person's vote, the newer copy's counts (equally new: the lower one, so that
+ * both sides pick the same).
+ */
+function mergeVotes(older: Votes | undefined, newer: Votes | undefined, tie: boolean): Votes | undefined {
+  if (!older && !newer) return undefined;
+  const out: Votes = { ...(older ?? {}), ...(newer ?? {}) };
+  if (tie) for (const [who, v] of Object.entries(older ?? {})) if (out[who] !== v) out[who] = -1;
+  return out;
+}
+const score = (votes: Votes): number => Object.values(votes).reduce((sum: number, v) => sum + v, 0);
+
+/**
+ * Two copies of one shared memory. The newer one decides its text and everything else, including
+ * what it no longer has; votes are kept from both.
+ */
+export function mergeMemoryCopies(local: MemoryEntry, remote: MemoryEntry): MemoryEntry {
+  const [lt, rt] = [local.updatedAt ?? 0, remote.updatedAt ?? 0];
+  const [newer, older] = rt > lt ? [remote, local] : [local, remote];
+  const out: MemoryEntry = { ...older, ...newer };
+  for (const key of CLEARED_BY_NEWER) if (newer[key] === undefined) delete out[key];
+  const votes = mergeVotes(cleanVotes(older.votes), cleanVotes(newer.votes), lt === rt);
+  if (votes) {
+    out.votes = votes;
+    out.feedbackScore = score(votes);
+  }
+  return out;
+}
+
+/**
  * Deterministic CRDT-style merge of two S3 workspace payloads (local & remote).
  * Supports per-item `updatedAt` timestamps and tombstone maps (`deletedServerIds`, `deletedMemoryIds`).
  */
@@ -316,6 +366,20 @@ export function mergeS3WorkspacePayload(
         updatedAt: rTime,
       });
       changed = true;
+    }
+    const kept = memMap.get(rm.id);
+    if (prev && kept) {
+      const pTime = prev.updatedAt ?? 0;
+      // What the newer copy no longer has is gone, not kept from the older one.
+      if (rTime > pTime) for (const key of CLEARED_BY_NEWER) if (rm[key] === undefined) delete kept[key];
+      const theirs = cleanVotes(rm.votes);
+      const votes = rTime > pTime ? mergeVotes(prev.votes, theirs, false) : mergeVotes(theirs, prev.votes, rTime === pTime);
+      if (votes) {
+        kept.votes = votes;
+        kept.feedbackScore = score(votes);
+      } else delete kept.votes;
+      // Either side is missing a vote the other has: it is applied here and written back.
+      if (!sameVotes(votes, prev.votes) || !sameVotes(votes, theirs)) changed = true;
     }
   }
   // Remove any local memory that was tombstoned by remote

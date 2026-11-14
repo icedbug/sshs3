@@ -53,7 +53,7 @@ import { AiConfigStore } from "../AiConfigStore";
 import { CodexAuthProvider } from "../CodexAuthProvider";
 import { HermesManager, type HermesModelConfig } from "../HermesManager";
 import { HubStore } from "./HubStore";
-import { S3WorkspaceSyncService } from "./S3WorkspaceSyncService";
+import { S3WorkspaceSyncService, mergeMemoryCopies } from "./S3WorkspaceSyncService";
 import { McpClientManager } from "./McpClientManager";
 import { MAX_MEMORY_TEXT, KnowledgeBaseService } from "./KnowledgeBaseService";
 import { SelfLearningService } from "./SelfLearningService";
@@ -91,6 +91,7 @@ import {
   withUse,
   MAX_NEW_PAGES_PER_SOURCE,
   PAGE_KINDS,
+  mergePageCopies,
 } from "./KbCompile";
 import { buildDailyReport } from "./DailyReport";
 import { lowerMode } from "./AppGuard";
@@ -195,6 +196,7 @@ import {
   TICKET_STATUSES,
   WORKFORCE_TEMPLATES,
   mergeItems,
+  mergeTicketCopies,
   addUsage,
   withComment,
   claimIsFresh,
@@ -376,6 +378,8 @@ export interface HubHost {
     description?: string;
     role?: string;
     tags?: string[];
+    /** Who makes the change: stored with the server as "updated by". */
+    updatedBy?: string;
   }): Promise<void>;
   upsertServer?(input: {
     id?: string;
@@ -409,6 +413,8 @@ export interface HubHost {
     description?: string;
     tags?: string[];
     shared?: boolean;
+    /** Who makes the change: stored with the server as "updated by". */
+    updatedBy?: string;
   }): Promise<WorkspaceServerSummary>;
   deleteServer?(profileId: string): Promise<void>;
   syncSharedServersFromS3?(
@@ -639,7 +645,7 @@ export class HubService {
     this.broker = new ToolBroker(this.terminals, {
       context: async (task, query, sessionId) => {
         const extra = await this.collectExtraContext();
-        return this.context.read(task, query, sessionId, extra);
+        return this.context.read(task, query, sessionId, this.asOfEvalCase(task, extra));
       },
       memory: async (task, request) => {
         if (request.action === "memory-save") {
@@ -827,13 +833,8 @@ export class HubService {
             if ((state.deletedMemoryIds[m.id] ?? 0) >= (m.updatedAt ?? 0))
               continue;
             const prev = sharedMemMap.get(m.id);
-            if (!prev) {
-              sharedMemMap.set(m.id, m);
-            } else if ((m.updatedAt ?? 0) > (prev.updatedAt ?? 0)) {
-              sharedMemMap.set(m.id, { ...prev, ...m });
-            } else {
-              sharedMemMap.set(m.id, { ...m, ...prev });
-            }
+            // The newer copy decides, also about what it no longer has; votes are kept from both.
+            sharedMemMap.set(m.id, prev ? mergeMemoryCopies(prev, m) : m);
           }
           this.store.data.memories = [
             ...personalMemories,
@@ -1122,6 +1123,8 @@ export class HubService {
   /** The conversation changes hands. A notice, not an answer: it is never written over by a run's text. */
   private applyHandoff(task: AgentTask, toAgent: MissionAgent, reason?: string): void {
     const prevAgentName = task.agentName || "Default Assistant";
+    // Who answered the first question: a test case made of this conversation replays that agent.
+    task.startedAs ??= { agentId: task.agentId, mode: task.mode };
     task.agentId = toAgent.id;
     task.agentName = toAgent.name;
     task.handoffTo = undefined;
@@ -1149,6 +1152,27 @@ export class HubService {
   private teamBucketView(): ReturnType<S3WorkspaceSyncService["getStatus"]> {
     const status = this.s3Workspace.getStatus();
     return this.sharedServer() && !this.host.teamAdmin?.() ? { ...status, inviteCode: undefined } : status;
+  }
+
+  /**
+   * A test case is replayed against the question as it was asked. What tells about the present
+   * moment is left out of what the replay is given: activity after the case was made, how the
+   * servers stand now, what changed on them lately and what the open terminals show. Otherwise a
+   * case made before a fix fails after it, whatever the agent does: it is told the fault is over.
+   * Memory and the pages stay: they are what a test is run to try.
+   */
+  private asOfEvalCase(task: AgentTask, extra: ExtraWorkspaceContext): ExtraWorkspaceContext {
+    if (!task.evalCaseId) return extra;
+    const found = (this.store.data.evalCases ?? []).find((c) => c.id === task.evalCaseId);
+    const asOf = found?.createdAt ?? 0;
+    return {
+      ...extra,
+      asOf,
+      activityLog: (extra.activityLog ?? this.store.data.activityLog ?? []).filter((a) => a.at <= asOf),
+      recentServerChanges: [],
+      serverFactsNow: [],
+      workforceRuns: [],
+    };
   }
 
   /** Paused means paused, and a spent budget is spent: however an agent is started. */
@@ -1906,43 +1930,51 @@ export class HubService {
         break;
       }
       case "configure": {
-        await this.config.update(request.config);
+        // The preferences are worked out on a copy and checked first: a request that is refused
+        // changes nothing, neither the preferences nor the AI settings sent with them.
+        const next = { ...this.store.data.preferences };
         if (request.preferences) {
           const p = request.preferences;
           if (p.retentionDays !== undefined)
-            this.store.data.preferences.retentionDays = integer(
+            next.retentionDays = integer(
               p.retentionDays,
               1,
               365,
             );
           for (const key of ["background", "autoStart", "inventory"] as const)
             if (p[key] !== undefined)
-              this.store.data.preferences[key] = p[key] === true;
+              next[key] = p[key] === true;
           if (p.proposeMemories !== undefined)
-            this.store.data.preferences.proposeMemories =
+            next.proposeMemories =
               p.proposeMemories === true;
           if (p.autoSaveMemories !== undefined)
-            this.store.data.preferences.autoSaveMemories =
+            next.autoSaveMemories =
               p.autoSaveMemories === true;
           if (p.workforceAutopilot !== undefined)
-            this.store.data.preferences.workforceAutopilot =
+            next.workforceAutopilot =
               p.workforceAutopilot === true;
           if (p.approvalWaitMinutes !== undefined)
-            this.store.data.preferences.approvalWaitMinutes = integer(p.approvalWaitMinutes, 1, 60);
+            next.approvalWaitMinutes = integer(p.approvalWaitMinutes, 1, 60);
           // On a shared server the path is the server's own and set by its administrator: not by whoever is signed in.
           if (p.sharedWorkspacePath !== undefined && !this.sharedServer()) {
             const cleanedPath = p.sharedWorkspacePath.trim();
             if (cleanedPath) {
-              this.store.data.preferences.sharedWorkspacePath = cleanedPath;
+              next.sharedWorkspacePath = cleanedPath;
             } else {
-              delete this.store.data.preferences.sharedWorkspacePath;
+              delete next.sharedWorkspacePath;
             }
           }
           if (
-            this.store.data.preferences.autoStart &&
-            !this.store.data.preferences.background
+            next.autoStart &&
+            !next.background
           )
             throw new Error("Autostart requires background mode");
+        }
+        // Preferences can be changed on their own: the AI settings are touched only when they were sent.
+        if (request.config) await this.config.update(request.config);
+        if (request.preferences) {
+          if (!("sharedWorkspacePath" in next)) delete this.store.data.preferences.sharedWorkspacePath;
+          Object.assign(this.store.data.preferences, next);
           await this.host.backgroundChanged(
             this.background,
             this.store.data.preferences.autoStart,
@@ -2406,6 +2438,7 @@ export class HubService {
           description: request.description,
           role: request.role,
           tags: request.tags,
+          updatedBy: await this.resolveActorName(),
         });
         const actor = await this.resolveActorName();
         const nowIso = new Date().toISOString();
@@ -2506,6 +2539,7 @@ export class HubService {
           description: s.description,
           tags: s.tags,
           shared: s.shared ?? true,
+          updatedBy: actor,
         });
         const targetId = saved?.id ?? s.id ?? crypto.randomUUID();
         if (this.store.data.deletedServerIds?.[targetId]) {
@@ -2732,6 +2766,18 @@ export class HubService {
         );
         if (clash) throw new Error(`There is already an agent called "${clash.name}". Give this one another name.`);
         const actor = a.author?.trim() || (await this.resolveActorName());
+        const boss = a.reportsTo && a.reportsTo !== id ? this.getAgentsList().find((x) => x.id === a.reportsTo) : undefined;
+        const circle = Boolean(boss) && wouldCycle(this.getAgentsList(), id, boss!.id);
+        if (a.reportsTo && (!boss || circle))
+          reply = {
+            notes: [
+              a.reportsTo === id
+                ? "An agent cannot report to itself, so no reporting line was saved."
+                : !boss
+                  ? "The agent this one should report to does not exist, so no reporting line was saved."
+                  : `${boss.name} already reports to this agent, directly or through others. The reporting line was not saved, because it would close a circle.`,
+            ],
+          };
         const saved: MissionAgent = {
           id,
           name: clip(requiredText(a.name), 120),
@@ -2754,10 +2800,7 @@ export class HubService {
             : undefined,
           enabled: a.enabled ?? true,
           runnerId: a.runnerId?.trim() || undefined,
-          reportsTo:
-            a.reportsTo && a.reportsTo !== id && !wouldCycle(this.getAgentsList(), id, a.reportsTo)
-              ? a.reportsTo
-              : undefined,
+          reportsTo: boss && !circle ? boss.id : undefined,
           monthlyTokenBudget:
             a.monthlyTokenBudget && a.monthlyTokenBudget > 0
               ? integer(a.monthlyTokenBudget, 1000, 2_000_000_000)
@@ -2827,7 +2870,8 @@ export class HubService {
         const existing = cases.find((c) => c.id === request.id);
         if (existing) {
           existing.title = boundedContext(request.title?.trim() || existing.title, 160);
-          if (request.expect) existing.expect = normalizeExpectation(request.expect);
+          // Only the parts that were sent: the others stay as they are.
+          if (request.expect) existing.expect = normalizeExpectation({ ...existing.expect, ...request.expect });
           existing.updatedAt = Date.now();
         } else {
           const from = this.store.data.tasks.find((t) => t.id === request.fromTaskId);
@@ -2858,12 +2902,24 @@ export class HubService {
       case "alert-hook-disable":
         this.store.data.alertHook = undefined;
         break;
-      case "alert-rules-save":
-        this.store.data.alertRules = (request.rules ?? [])
-          .map((r) => ({ match: boundedContext(String(r.match ?? "").trim(), 80), agentId: String(r.agentId ?? "") }))
-          .filter((r) => r.match && this.getAgentsList().some((a) => a.id === r.agentId))
-          .slice(0, 40);
+      case "alert-rules-save": {
+        const asked = (request.rules ?? []).map((r) => ({
+          match: boundedContext(String(r.match ?? "").trim(), 80),
+          agentId: String(r.agentId ?? ""),
+        }));
+        const known = (r: { agentId: string }): boolean => this.getAgentsList().some((a) => a.id === r.agentId);
+        const kept = asked.filter((r) => r.match && known(r));
+        this.store.data.alertRules = kept.slice(0, 40);
+        const notes: string[] = [];
+        const noAgent = asked.filter((r) => r.match && !known(r));
+        if (noAgent.length)
+          notes.push(`Not saved, because the agent does not exist: ${noAgent.map((r) => `"${r.match}"`).join(", ")}.`);
+        const empty = asked.filter((r) => !r.match).length;
+        if (empty) notes.push(`${empty} rule${empty === 1 ? "" : "s"} with no text to match ${empty === 1 ? "was" : "were"} left out.`);
+        if (kept.length > 40) notes.push("Only the first 40 rules were saved.");
+        if (notes.length) reply = { notes };
         break;
+      }
       case "alert-paste": {
         const alerts = parsePastedAlert(requiredText(request.text));
         if (alerts.length === 0) throw new Error("No alert could be made of that.");
@@ -2872,7 +2928,15 @@ export class HubService {
       }
       case "runner-save": {
         const r = request.runner;
-        const id = requiredText(r.id).toLowerCase().replace(/[^a-z0-9-]+/g, "-").slice(0, 40);
+        const asked = requiredText(r.id);
+        const id = asked.toLowerCase().replace(/[^a-z0-9-]+/g, "-").slice(0, 40);
+        // An agent names its runner by this id: one that was typed differently would never match.
+        if (id !== asked)
+          reply = {
+            notes: [
+              `The id was saved as "${id}": an id is lowercase letters, digits and "-", at most 40 characters. An agent that uses this runner has to name it "${id}".`,
+            ],
+          };
         const saved: ExternalRunner = {
           id,
           name: clip(requiredText(r.name), 80),
@@ -2912,22 +2976,27 @@ export class HubService {
         if (goal) this.putGoal({ ...goal, deleted: true, updatedAt: Date.now() });
         break;
       }
-      case "ticket-save":
-        await this.saveTicketFrom(request.ticket);
+      case "ticket-save": {
+        const notes: string[] = [];
+        await this.saveTicketFrom(request.ticket, undefined, false, notes);
+        if (notes.length) reply = { notes };
         break;
+      }
       case "ticket-move": {
-        const ticket = this.ticket(request.id);
         if (!TICKET_STATUSES.includes(request.status)) throw new Error("Unknown ticket status");
         if (request.status === "in_progress")
           throw new Error("A ticket is in progress while an agent runs it: start it instead.");
-        if (ticket.status === "in_progress" && claimIsFresh(ticket))
-          throw new Error("An agent is running this ticket. Stop the run first.");
-        this.putTicket({ ...ticket, status: request.status, claim: undefined, updatedAt: Date.now() });
+        const running = await this.ticketRunsNow(this.ticket(request.id));
+        if (running) throw new Error(running);
+        // Read again: the check asked the bucket, and the board may have moved meanwhile.
+        this.putTicket({ ...this.ticket(request.id), status: request.status, claim: undefined, updatedAt: Date.now() });
         break;
       }
       case "ticket-delete": {
-        const ticket = this.ticket(request.id);
-        this.putTicket({ ...ticket, deleted: true, claim: undefined, updatedAt: Date.now() });
+        // Removing a ticket from under its run would leave the run's result with nowhere to go.
+        const running = await this.ticketRunsNow(this.ticket(request.id));
+        if (running) throw new Error(running);
+        this.putTicket({ ...this.ticket(request.id), deleted: true, claim: undefined, updatedAt: Date.now() });
         break;
       }
       case "ticket-comment": {
@@ -2944,6 +3013,13 @@ export class HubService {
         const ticket = this.ticket(request.id);
         if (ticket.status !== "review" && ticket.status !== "blocked")
           throw new Error("Only a ticket in review or blocked can be decided.");
+        const running = await this.ticketRunsNow(ticket);
+        if (running) throw new Error(running);
+        // "Done" would be said of work that has not started: the agent's plan still waits for its answer.
+        if (request.approve && this.store.data.tasks.find((t) => t.id === ticket.taskId)?.plan?.status === "proposed")
+          throw new Error(
+            "The agent proposed a plan and has not carried it out. Approve or reject the plan in the conversation first, or send the ticket back.",
+          );
         const who = await this.resolveActorName();
         const note = request.note?.trim();
         const decided = note
@@ -2957,9 +3033,16 @@ export class HubService {
         });
         break;
       }
-      case "workforce-template-apply":
-        await this.applyWorkforceTemplate(request.templateId, request.goalTitle);
+      case "workforce-template-apply": {
+        const kept = await this.applyWorkforceTemplate(request.templateId, request.goalTitle);
+        if (kept.length)
+          reply = {
+            notes: [
+              `${kept.join(", ")} already existed and ${kept.length === 1 ? "was" : "were"} kept as ${kept.length === 1 ? "it is" : "they are"}: the new goal and tickets use ${kept.length === 1 ? "it" : "them"}.`,
+            ],
+          };
         break;
+      }
       case "agent-run-mission": {
         const targetAgentId = request.agentId || request.id;
         const agent = this.getAgentsList().find((a) => a.id === targetAgentId);
@@ -3900,6 +3983,7 @@ export class HubService {
     task.budgetStop = undefined;
     task.commandsUsed = 0;
     try {
+      await this.reattachTicket(task);
       await this.launchReserved(task, launchMarker, schedule);
     } catch (error) {
       this.broker.revoke(task.id);
@@ -3908,6 +3992,7 @@ export class HubService {
         task.status = "failed";
         task.error = safeError(error);
       }
+      if (task.ticketId) this.settleTickets();
       this.changed();
       throw error;
     } finally {
@@ -5442,9 +5527,14 @@ export class HubService {
     return now - last >= wait + jitter;
   }
 
-  /** Takes over what another installation read since last time, so that no server is read twice. */
-  private async pullSharedFacts(): Promise<void> {
-    if (!this.s3Workspace.canUseBucket() || isDemoMode()) return;
+  /**
+   * Takes over what another installation read since last time, so that no server is read twice.
+   * True when a reading was taken over. This is the team's knowledge, not this person's schedule:
+   * it runs with the board's sync whether or not readings are switched on here.
+   */
+  private async pullSharedFacts(): Promise<boolean> {
+    if (!this.s3Workspace.canUseBucket() || isDemoMode()) return false;
+    let taken = false;
     const objects = this.s3Workspace.objects;
     const names = (await objects.list("work/facts/heads")).filter((n) => n.endsWith(".json")).slice(0, 1000);
     // Only readings of servers this installation knows as shared: a teammate's personal server is not ours to see.
@@ -5458,12 +5548,15 @@ export class HubService {
         if ((mine?.collectedAt ?? 0) >= head.collectedAt) continue;
         const data = JSON.parse((await objects.read(`work/facts/data/${name}`))?.toString("utf8") ?? "null") as FactsRecord | null;
         // Stamped with the head's time: the data is written only when it changed, so it can be older than the reading.
-        if (data?.serverId === head.serverId && data.facts)
+        if (data?.serverId === head.serverId && data.facts) {
           await this.factsStore.put({ ...data, collectedAt: Math.max(data.collectedAt ?? 0, head.collectedAt), dismissed: mine?.dismissed, changes: data.changes ?? [] });
+          taken = true;
+        }
       } catch {
         // One unreadable object does not stop the rest.
       }
     }
+    return taken;
   }
 
   private factsRound?: Promise<void>;
@@ -5912,7 +6005,9 @@ export class HubService {
           run = {
             at: Date.now(),
             passed: false,
-            checks: [{ name: "ran to an answer", passed: false, detail: safeError(error) }],
+            // It never started: that says nothing about the agent.
+            inconclusive: safeError(error),
+            checks: [],
             answer: "",
             calls: [],
             unrecorded: replay.unrecorded,
@@ -6018,7 +6113,15 @@ export class HubService {
           ...(refired && was.resolvedAt ? { firingSince: now } : {}),
           ...(alert.startsAt ? { startsAt: alert.startsAt } : {}),
         };
-        this.putTicket({ ...(note ? withComment(open, alert.source, note, now) : { ...open, updatedAt: now }), alert: alertNow });
+        // Over before anybody started on it: out of the heartbeat's way, and back when it fires again.
+        const park = resolved && !was.resolvedAt && open.status === "todo";
+        const unpark = refired && was.parked === true && open.status === "backlog";
+        const text = park ? `${note} Moved to Backlog: nothing is firing. Move it back if it should still be looked at.` : note;
+        this.putTicket({
+          ...(text ? withComment(open, alert.source, text, now) : { ...open, updatedAt: now }),
+          ...(park ? { status: "backlog" as const } : unpark ? { status: "todo" as const } : {}),
+          alert: { ...alertNow, parked: park ? true : unpark || !resolved ? undefined : was.parked },
+        });
         updated.push(open.id);
         continue;
       }
@@ -6133,10 +6236,12 @@ export class HubService {
       changed = true;
     }
 
-    const pages = await sync.reconcile("pages", withRemovals(this.store.data.kbPages ?? [], removed.pages));
-    const pg = splitRemovals(pages.items);
+    const pages = await sync.reconcile("pages", withRemovals(this.store.data.kbPages ?? [], removed.pages), mergePageCopies);
+    // Merged into the pages as they are now: one that was compiled here while the bucket was read stays.
+    const pagesNow = mergeItems(withRemovals(this.store.data.kbPages ?? [], removed.pages), pages.items, mergePageCopies);
+    const pg = splitRemovals(pagesNow.items);
     removed.pages = pg.removed;
-    if (pages.changed) {
+    if (pages.changed || pagesNow.changed) {
       this.store.data.kbPages = pg.alive as KbPage[];
       changed = true;
     }
@@ -6208,10 +6313,17 @@ export class HubService {
     createdBy?: string,
     /** Made by an agent's run, not by a person. */
     byAgent = false,
+    /** Filled with what was saved differently from what was asked, for the reply. */
+    notes: string[] = [],
   ): Promise<WorkTicket> {
-    const existing = input.id
+    const known = input.id
       ? live(this.store.data.workTickets).find((t) => t.id === input.id)
       : undefined;
+    // A ticket that an agent is running keeps its place on the board: its text can be changed, its status
+    // belongs to the run. Asked of the bucket too, because this board can be behind another installation's.
+    const running = known ? await this.ticketRunsNow(known) : undefined;
+    // Read again after the question: the board may have moved while the bucket answered.
+    const existing = known ? live(this.store.data.workTickets).find((t) => t.id === known.id) : undefined;
     const now = Date.now();
     const agent = input.assigneeAgentId
       ? this.getAgentsList().find((a) => a.id === input.assigneeAgentId)
@@ -6226,8 +6338,23 @@ export class HubService {
         ? input.status
         : (existing?.status ?? (agent ? "todo" : "backlog"));
     // An agent cannot put work that started outside the team in front of another agent: a person moves it.
-    const status = byAgent && outside && !existing && wanted === "todo" ? "backlog" : wanted;
+    const status =
+      running && existing ? existing.status : byAgent && outside && !existing && wanted === "todo" ? "backlog" : wanted;
+    if (running && existing && input.status && input.status !== existing.status)
+      notes.push(`The status was not changed. ${running}`);
+    else if (input.status === "in_progress" && existing?.status !== "in_progress")
+      notes.push("The status was not changed: a ticket is in progress while an agent runs it. Start it instead.");
+    if (input.goalId && !goals.some((g) => g.id === input.goalId))
+      notes.push("The goal does not exist, so the ticket was saved without one.");
     const id = existing?.id ?? `t-${crypto.randomUUID().slice(0, 8)}`;
+    const blockers = (input.blockedBy ?? existing?.blockedBy ?? []).filter(
+      (b) => b !== id && live(this.store.data.workTickets).some((t) => t.id === b),
+    );
+    const dropped = (input.blockedBy ?? []).filter((b) => !blockers.includes(b));
+    if (dropped.length)
+      notes.push(
+        `Left out of "waits for", because ${dropped.length === 1 ? "it is" : "they are"} not on the board${dropped.includes(id) ? " (a ticket cannot wait for itself)" : ""}: ${dropped.join(", ")}.`,
+      );
     const ticket: WorkTicket = {
       ...existing,
       id,
@@ -6238,9 +6365,7 @@ export class HubService {
       assigneeAgentId: agent?.id,
       assigneeName: agent?.name,
       target: input.target?.trim() ? boundedContext(input.target.trim(), 200) : undefined,
-      blockedBy: (input.blockedBy ?? existing?.blockedBy ?? []).filter(
-        (b) => b !== id && live(this.store.data.workTickets).some((t) => t.id === b),
-      ),
+      blockedBy: blockers,
       parentId: input.parentId ?? existing?.parentId,
       ...(outside ? { outside } : {}),
       createdBy: existing?.createdBy ?? createdBy ?? (await this.resolveActorName()),
@@ -6312,6 +6437,56 @@ export class HubService {
   }
 
   /**
+   * Why the ticket cannot be moved, removed or decided right now: somebody's agent is running it. Asked
+   * of the claim in the bucket, not only of this installation's copy of the ticket. The board here can
+   * be most of a minute behind, and an edit made on that old view would take the ticket from under a
+   * teammate's run. Undefined when nobody runs it.
+   */
+  private async ticketRunsNow(ticket: WorkTicket): Promise<string | undefined> {
+    const client = this.clientId();
+    const here = "An agent is running this ticket. Stop the run first.";
+    if (
+      ticket.status === "in_progress" &&
+      ticket.claim?.client === client &&
+      this.store.data.tasks.some((t) => t.id === ticket.taskId && active(t))
+    )
+      return here;
+    const claim = await this.work()
+      ?.readClaim(ticket.id)
+      .catch(() => undefined);
+    if (claim && claim.client !== client && this.claimAlive(ticket.id, claim.seenAt, Date.now()))
+      return `${claim.by} is running this ticket on another computer. Stop the run there first.`;
+    return ticket.status === "in_progress" && claimIsFresh(ticket) ? here : undefined;
+  }
+
+  /**
+   * A ticket's conversation that goes on after its run ended (the agent's plan was approved, a person
+   * answered it, "Continue") is the ticket's run again. The ticket is checked out once more, so that
+   * what this run does and reports ends up on the ticket. Without this the ticket kept the report of
+   * the run that only proposed the plan, also after the work was done.
+   */
+  private async reattachTicket(task: AgentTask): Promise<void> {
+    if (!task.ticketId) return;
+    const ticket = live(this.store.data.workTickets).find((t) => t.id === task.ticketId);
+    // Only the ticket's latest conversation, and not one a person has already closed.
+    if (!ticket || ticket.taskId !== task.id || ticket.status === "in_progress" || ticket.status === "done") return;
+    const client = this.clientId();
+    const by = await this.resolveActorName();
+    const now = Date.now();
+    const sync = this.work();
+    if (sync) {
+      const held = await sync
+        .claim(ticket.id, { by, client }, now, { fresh: (c) => this.claimAlive(ticket.id, c.seenAt, Date.now()) })
+        .catch(() => undefined);
+      // Somebody else's app has taken the ticket meanwhile: the conversation goes on, the ticket is theirs.
+      if (held && held.client !== client) return;
+    }
+    const current = live(this.store.data.workTickets).find((t) => t.id === ticket.id);
+    if (!current || current.taskId !== task.id || current.status === "done") return;
+    this.putTicket({ ...current, status: "in_progress", claim: { by, client, at: now, seenAt: now }, updatedAt: now });
+  }
+
+  /**
    * Tickets this app is running whose run has ended: the report goes on the
    * ticket, the tokens on the agent's budget, and the ticket to review.
    */
@@ -6375,10 +6550,18 @@ export class HubService {
             if (!still && run && active(run)) void this.stop(run, "Another installation took this ticket over; this run stops so that only one works on it.");
           }
         const goals = await sync.reconcile("goals", this.store.data.workGoals ?? []);
-        const tickets = await sync.reconcile("tickets", this.store.data.workTickets ?? []);
+        // A ticket this installation is running stays its own to settle: a teammate's edit on a view
+        // that did not show the run yet must not take the ticket from under it.
+        const runningHere = (t: WorkTicket): boolean =>
+          !t.deleted &&
+          t.status === "in_progress" &&
+          t.claim?.client === client &&
+          this.store.data.tasks.some((x) => x.id === t.taskId);
+        const keepRun = (l: WorkTicket, r: WorkTicket): WorkTicket => mergeTicketCopies(l, r, runningHere);
+        const tickets = await sync.reconcile("tickets", this.store.data.workTickets ?? [], keepRun);
         // Merged into the board as it is now, not over it: what changed here while the bucket was read stays.
         this.store.data.workGoals = mergeItems(this.store.data.workGoals ?? [], goals.items).items;
-        this.store.data.workTickets = mergeItems(this.store.data.workTickets ?? [], tickets.items).items;
+        this.store.data.workTickets = mergeItems(this.store.data.workTickets ?? [], tickets.items, keepRun).items;
         // Another installation's run is judged alive by its claim file, and by this machine's own clock:
         // a claim whose seenAt has not moved for the claim's lifetime, as seen from here, has lapsed.
         for (const t of live(this.store.data.workTickets))
@@ -6387,6 +6570,11 @@ export class HubService {
             if (c) this.observeClaim(t.id, c.seenAt, now);
           }
         const shared = await this.syncSharedSetup(sync);
+        // A teammate's reading of a shared server, also for somebody who has not switched readings on.
+        const facts = await this.pullSharedFacts().catch((e) => {
+          log.warn("Reading shared server facts failed", safeError(e));
+          return false;
+        });
         const mine = JSON.stringify(this.store.data.agentUsage ?? {});
         if (mine !== this.uploadedUsage && mine !== "{}") {
           await sync.putUsage(client, this.store.data.agentUsage ?? {});
@@ -6401,7 +6589,7 @@ export class HubService {
         this.othersPageUse = await sync.readOtherPageUse<Record<string, KbPageUse>>(client);
         this.workSyncAt = Date.now();
         this.workSyncError = undefined;
-        if (goals.changed || tickets.changed || shared) this.changed();
+        if (goals.changed || tickets.changed || shared || facts) this.changed();
       } catch (e) {
         this.workSyncError = safeError(e);
       } finally {
@@ -6437,14 +6625,24 @@ export class HubService {
       );
   }
 
-  /** Creates a template's team (with its reporting lines), goal and first tickets. */
-  private async applyWorkforceTemplate(templateId: string, goalTitle?: string): Promise<void> {
+  /**
+   * Creates a template's team (with its reporting lines), goal and first tickets. An agent of the
+   * same name that is already there is used as it is and not made a second time: agents are looked
+   * up by name, and two of one name would make which one is found a matter of order. Returns the
+   * names of the agents that were kept.
+   */
+  private async applyWorkforceTemplate(templateId: string, goalTitle?: string): Promise<string[]> {
     const template = WORKFORCE_TEMPLATES.find((t) => t.id === templateId);
     if (!template) throw new Error("Unknown workforce template");
     const now = Date.now();
     const actor = await this.resolveActorName();
-    const ids = new Map(template.team.map((r) => [r.key, `wf-${template.id}-${r.key}-${crypto.randomUUID().slice(0, 6)}`]));
-    const agents: MissionAgent[] = template.team.map((r) => ({
+    const sameName = (name: string): MissionAgent | undefined =>
+      this.getAgentsList().find((x) => x.name.trim().toLowerCase() === name.trim().toLowerCase());
+    const there = new Map(template.team.flatMap((r) => (sameName(r.name) ? [[r.key, sameName(r.name)!] as const] : [])));
+    const ids = new Map(
+      template.team.map((r) => [r.key, there.get(r.key)?.id ?? `wf-${template.id}-${r.key}-${crypto.randomUUID().slice(0, 6)}`]),
+    );
+    const agents: MissionAgent[] = template.team.filter((r) => !there.has(r.key)).map((r) => ({
       id: ids.get(r.key)!,
       name: r.name,
       role: r.role,
@@ -6471,7 +6669,7 @@ export class HubService {
       updatedAt: now,
     });
     template.tickets.forEach((t, i) => {
-      const agent = agents.find((a) => a.id === ids.get(t.role));
+      const agent = agents.find((a) => a.id === ids.get(t.role)) ?? there.get(t.role);
       this.putTicket({
         id: `t-${crypto.randomUUID().slice(0, 8)}`,
         title: t.title,
@@ -6485,6 +6683,8 @@ export class HubService {
         updatedAt: now + i,
       });
     });
+    if (agents.length) this.lastWorkSync = 0;
+    return [...there.values()].map((a) => a.name);
   }
 
   private notify(title: string, body: string): void {
@@ -7945,10 +8145,9 @@ function investigatorPrompt(
 }
 
 /** The workforce conversation's message: per-specialist status, then the combined result. */
-function renderWorkforceProgress(run: WorkforceRun): string {
-  const done = run.steps.filter(
-    (s) => s.status === "completed" || s.status === "failed",
-  ).length;
+export function renderWorkforceProgress(run: WorkforceRun): string {
+  const done = run.steps.filter((s) => s.status === "completed").length;
+  const failed = run.steps.filter((s) => s.status === "failed").length;
   const lines = run.steps.map((s) => {
     // Words, as everywhere else in the hub: a mark means nothing to a screen reader or a log.
     const mark = s.status === "completed" ? "done" : s.status === "failed" ? "failed" : s.status === "running" ? "running" : "waiting";
@@ -7959,7 +8158,7 @@ function renderWorkforceProgress(run: WorkforceRun): string {
     return `- **${s.agentName}**${where}: ${mark}${time}${problem}`;
   });
   const status = [
-    `**Workforce** — ${done}/${run.steps.length} specialists finished`,
+    `**Workforce** — ${done}/${run.steps.length} specialists finished${failed ? `, ${failed} failed` : ""}`,
     ...lines,
   ].join("\n");
   if (run.status === "running") return status;

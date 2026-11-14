@@ -345,7 +345,7 @@ describe("working a ticket", () => {
     // The agent was told the goal, and the ticket it handed out hangs on this one.
     expect(bodies[0]).toContain("Ship the next version");
     const child = snap.workTickets!.find((t) => t.title === "Build the login form")!;
-    expect(child).toMatchObject({ parentId: first.id, goalId: first.goalId, assigneeName: "Builder", status: "todo", createdBy: "Product lead" });
+    expect(child).toMatchObject({ parentId: first.id, goalId: first.goalId, assigneeName: "Builder", status: "todo", createdBy: expect.stringMatching(/^Product lead \(agent, for .+\)$/) });
 
     // Sent back with a note: the ticket is to do again and the note is on it.
     snap = await hub.request({ action: "ticket-review", id: first.id, approve: false, note: "Split it further." });
