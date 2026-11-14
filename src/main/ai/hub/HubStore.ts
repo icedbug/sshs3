@@ -126,6 +126,8 @@ export interface HubData {
   agentUsage?: Record<string, AgentUsage>;
   /** Removals of shared agents, runbooks and dependencies (id → when), so they reach teammates. */
   sharedRemoved?: Partial<Record<"agents" | "kb" | "edges" | "pages" | "evals", Record<string, number>>>;
+  /** Who removed a shared agent, by id: what a teammate who edits it is told. */
+  sharedRemovedBy?: { agents?: Record<string, string> };
   /** The secret alerts are posted with (only its hash), and what came in. */
   alertHook?: { hash: string; createdAt: number; lastAt?: number; received: number };
   alertRules?: { match: string; agentId: string }[];
@@ -159,6 +161,11 @@ export interface HubData {
   localOverrides?: Record<string, LocalServerAuthOverride>;
   deletedServerIds?: Record<string, string>;
   deletedMemoryIds?: Record<string, number>;
+  /** Who removed a team server or memory, by id (with deletedServerIds / deletedMemoryIds). */
+  deletedServerBy?: Record<string, string>;
+  deletedMemoryBy?: Record<string, string>;
+  /** Per team server: the `updatedAt` of the team's copy the last edit here started from (see WorkspaceServerSummary.baseAt). */
+  serverEditBase?: Record<string, string>;
   s3SyncedServers?: WorkspaceServerSummary[];
 }
 export const defaultHubData = (): HubData => ({

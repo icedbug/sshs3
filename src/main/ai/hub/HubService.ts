@@ -196,10 +196,12 @@ import {
   TICKET_CLAIM_TTL_MS,
   TICKET_STATUSES,
   WORKFORCE_TEMPLATES,
+  mergeCopies,
   mergeItems,
   mergeTicketCopies,
   stampChange,
   ticketRemovedMessage,
+  removedMessage,
   addUsage,
   withComment,
   claimIsFresh,
@@ -281,6 +283,9 @@ const READ_ONLY_ACTIONS: ReadonlySet<HubRequest["action"]> = new Set<HubRequest[
  * and its texts are bounded as a person's save would bound them.
  */
 export const incomingAgentForTesting = (remote: MissionAgent, local: MissionAgent | undefined): MissionAgent => incomingAgent(remote, local);
+
+/** An agent's fields that only make sense together: of two people's edits, one copy gives them all. */
+const AGENT_FIELD_GROUPS = [["modelOverride", "modelProvider"]] as const;
 
 function incomingAgent(remote: MissionAgent, local: MissionAgent | undefined, now = Date.now()): MissionAgent {
   const modes: AgentMode[] = ["advice", "assisted", "autonomous"];
@@ -890,6 +895,11 @@ export class HubService {
               }
             }
           }
+          // Which version of the team's copy an edit here started from: a removal made after it wins over the edit.
+          for (const [id, base] of Object.entries(this.store.data.serverEditBase ?? {})) {
+            const s = srvMap.get(id);
+            if (s) srvMap.set(id, { ...s, baseAt: base });
+          }
           const activeTerminals: WorkspacePresenceTerminal[] = this.terminals
             .list()
             .filter((t) => t.state !== "disconnected" && t.kind === "ssh")
@@ -909,12 +919,16 @@ export class HubService {
             activityLog: this.store.data.activityLog ?? [],
             deletedServerIds,
             deletedMemoryIds: { ...(this.store.data.deletedMemoryIds ?? {}) },
+            deletedServerBy: { ...(this.store.data.deletedServerBy ?? {}) },
+            deletedMemoryBy: { ...(this.store.data.deletedMemoryBy ?? {}) },
             activeTerminals,
           };
         },
         applyMergedState: async (state) => {
           this.store.data.deletedServerIds = state.deletedServerIds;
           this.store.data.deletedMemoryIds = state.deletedMemoryIds;
+          if (state.deletedServerBy) this.store.data.deletedServerBy = state.deletedServerBy;
+          if (state.deletedMemoryBy) this.store.data.deletedMemoryBy = state.deletedMemoryBy;
           this.store.data.s3SyncedServers = state.activeServers;
 
           const personalMemories = this.store.data.memories.filter(
@@ -1374,8 +1388,53 @@ export class HubService {
    * its servers) is held to the same rule as the hub's own server actions: one rule for both doors.
    */
   async assertMayChangeServerProfile(next: { id: string; name?: string; host?: string; port?: number; username?: string; shared?: boolean; tags?: string[] }): Promise<void> {
+    // A server a teammate removed is not brought back by the connection editor's view of it either.
+    if (next.id?.trim() && next.shared !== false) {
+      await this.pullTeamWorkspace();
+      const removed = await this.serverRemovedMessage(next.id.trim());
+      if (removed) throw new Error(removed);
+    }
+    const teamCopy = await this.teamServerCopy(next.id);
+    // The save follows this check: the version it starts from is noted now (see noteServerEditBase).
+    if (next.id?.trim()) this.noteServerEditBase(next.id.trim(), teamCopy);
     if (!this.sharedServer() || this.host.teamAdmin?.()) return;
-    this.assertMayChangeTeamServer(await this.teamServerCopy(next.id), { ...next, port: next.port || 22, username: next.username?.trim() || "root", tags: next.tags ?? [] });
+    this.assertMayChangeTeamServer(teamCopy, { ...next, port: next.port || 22, username: next.username?.trim() || "root", tags: next.tags ?? [] });
+  }
+
+  /**
+   * The team's servers and memories as the bucket has them, before an edit of one of them: the edit is
+   * not made on a view the team has moved past, and a teammate's removal is told at once. Without a
+   * bucket, or when it cannot be reached, the edit goes on and the next sync decides (a removal made
+   * after the version the edit started from stands there too).
+   */
+  private async pullTeamWorkspace(): Promise<void> {
+    if (!this.s3Workspace.canUseBucket()) return;
+    await this.s3Workspace.syncNow().catch(() => undefined);
+  }
+
+  /** Remembers which version of the team's copy of a server an edit here started from (see WorkspaceServerSummary.baseAt). */
+  private noteServerEditBase(id: string, teamCopy: WorkspaceServerSummary | undefined): void {
+    const base = { ...this.store.data.serverEditBase };
+    if (teamCopy?.updatedAt) base[id] = teamCopy.updatedAt;
+    else delete base[id];
+    this.store.data.serverEditBase = base;
+  }
+
+  /** What to tell somebody who saves a team server that was removed (and not added again since), or undefined. */
+  private async serverRemovedMessage(id: string): Promise<string | undefined> {
+    const raw = this.store.data.deletedServerIds?.[id];
+    const at = typeof raw === "number" ? raw : Date.parse(String(raw ?? "")) || Number(raw) || 0;
+    if (!at) return undefined;
+    const known = await this.knownServer(id);
+    if (known && (Date.parse(known.updatedAt ?? "") || 0) > at) return undefined;
+    return removedMessage("This server", this.store.data.deletedServerBy?.[id], at, "so the change was not saved. Add it as a new server to keep it.");
+  }
+
+  /** What to tell somebody who saves a team memory that was removed (and not saved again since), or undefined. */
+  private memoryRemovedMessage(id: string): string | undefined {
+    const at = this.store.data.deletedMemoryIds?.[id];
+    if (!at || this.store.data.memories.some((m) => m.id === id && (m.updatedAt ?? 0) > at)) return undefined;
+    return removedMessage("This memory", this.store.data.deletedMemoryBy?.[id], at, "so the change was not saved. Save it as a new memory to keep the text.");
   }
 
   async assertMayRemoveServerProfile(id: string): Promise<void> {
@@ -2376,6 +2435,12 @@ export class HubService {
           !scope.startsWith("cluster:")
         )
           throw new Error("Invalid memory scope");
+        if (entry.id && scope !== "personal") {
+          // The team's memories as they are now: a memory a teammate removed is not saved back from an old view.
+          await this.pullTeamWorkspace();
+          const removed = this.memoryRemovedMessage(entry.id);
+          if (removed) throw new Error(removed);
+        }
         const savedMemory = await this.saveMemoryInternal({
           id: entry.id,
           kind: entry.kind,
@@ -2433,8 +2498,11 @@ export class HubService {
         );
         this.markBuiltinDismissed(request.id, getBuiltinSkillsAndMemories());
         this.store.data.deletedMemoryIds ??= {};
+        this.store.data.deletedMemoryBy ??= {};
+        const remover = await this.resolveActorName();
         for (const id of gone) {
           this.store.data.deletedMemoryIds[id] = Date.now();
+          this.store.data.deletedMemoryBy[id] = remover;
           await this.host.deleteWorkspaceMemory?.(id).catch(() => {});
         }
         this.s3Workspace.schedulePush(400);
@@ -2813,8 +2881,15 @@ export class HubService {
         // is not taken over by sending its id (nobody is shown it, but an id can be learnt elsewhere).
         if (s.id?.trim() && this.sharedServer() && !this.host.teamAdmin?.() && !(await this.knownServer(s.id.trim())))
           throw new Error("Server not found. Leave the id out to add a new server.");
+        // A server a teammate removed is not brought back by a save from a view that still showed it.
+        if (s.id?.trim() && s.shared !== false) {
+          await this.pullTeamWorkspace();
+          const removed = await this.serverRemovedMessage(s.id.trim());
+          if (removed) throw new Error(removed);
+        }
+        const teamCopy = await this.teamServerCopy(s.id);
         // What the request leaves out is saved as its default (port 22, root, no tags), so that is what is compared.
-        this.assertMayChangeTeamServer(await this.teamServerCopy(s.id), {
+        this.assertMayChangeTeamServer(teamCopy, {
           name,
           host,
           port: s.port || 22,
@@ -2857,6 +2932,7 @@ export class HubService {
           updatedBy: actor,
         });
         const targetId = saved?.id ?? s.id ?? crypto.randomUUID();
+        this.noteServerEditBase(targetId, teamCopy);
         if (this.store.data.deletedServerIds?.[targetId]) {
           const nextDeleted = { ...this.store.data.deletedServerIds };
           delete nextDeleted[targetId];
@@ -2970,6 +3046,7 @@ export class HubService {
         const delIso = new Date().toISOString();
         this.store.data.deletedServerIds ??= {};
         this.store.data.deletedServerIds[pid] = delIso;
+        this.store.data.deletedServerBy = { ...this.store.data.deletedServerBy, [pid]: actor };
         this.store.data.s3SyncedServers = (
           this.store.data.s3SyncedServers ?? []
         ).filter((s) => s.id !== pid);
@@ -3093,6 +3170,13 @@ export class HubService {
           (x) => x.id !== id && x.name.trim().toLowerCase() === (a.name ?? "").trim().toLowerCase(),
         );
         if (clash) throw new Error(`There is already an agent called "${clash.name}". Give this one another name.`);
+        const had = (this.store.data.agents ?? []).find((x) => x.id === id);
+        // Removed (here, or by a teammate and synced): a save from a view that still showed it does not bring it back.
+        const removedAt = this.store.data.sharedRemoved?.agents?.[id];
+        if (a.id?.trim() && !had && removedAt)
+          throw new Error(
+            removedMessage("This agent", this.store.data.sharedRemovedBy?.agents?.[id], removedAt, "so the change was not saved. Create a new agent to keep it."),
+          );
         const actor = a.author?.trim() || (await this.resolveActorName());
         const boss = a.reportsTo && a.reportsTo !== id ? this.getAgentsList().find((x) => x.id === a.reportsTo) : undefined;
         const circle = Boolean(boss) && wouldCycle(this.getAgentsList(), id, boss!.id);
@@ -3106,7 +3190,7 @@ export class HubService {
                   : `${boss.name} already reports to this agent, directly or through others. The reporting line was not saved, because it would close a circle.`,
             ],
           };
-        const saved: MissionAgent = {
+        const fresh: MissionAgent = {
           id,
           name: clip(requiredText(a.name), 120),
           role: clip(a.role?.trim() || "Infrastructure Specialist", 160),
@@ -3136,6 +3220,9 @@ export class HubService {
           updatedAt: Date.now(),
           author: actor,
         };
+        // Which fields changed, and from which version: a teammate's change of another field stays,
+        // and a removal made meanwhile stands (the same rule as tickets and goals).
+        const saved = stampChange(had, fresh);
         this.store.data.agents = [
           ...(this.store.data.agents ?? []).filter((x) => x.id !== id),
           saved,
@@ -3150,6 +3237,10 @@ export class HubService {
           (a) => a.id !== request.id,
         );
         this.markSharedRemoved("agents", request.id);
+        this.store.data.sharedRemovedBy = {
+          ...this.store.data.sharedRemovedBy,
+          agents: { ...this.store.data.sharedRemovedBy?.agents, [request.id]: await this.resolveActorName() },
+        };
         // A ticket that was this agent's is free again, and says so. Left as it was it
         // would sit for ever: nothing would run it, and the board would say it has no assignee.
         for (const ticket of live(this.store.data.workTickets))
@@ -3165,7 +3256,7 @@ export class HubService {
             });
         // An agent that reported to it reports to nobody now, rather than to a gap.
         this.store.data.agents = (this.store.data.agents ?? []).map((a) =>
-          a.reportsTo === request.id ? { ...a, reportsTo: undefined, updatedAt: Date.now() } : a,
+          a.reportsTo === request.id ? stampChange(a, { ...a, reportsTo: undefined, updatedAt: Date.now() }) : a,
         );
         this.store.data.alertRules = (this.store.data.alertRules ?? []).filter((r) => r.agentId !== request.id);
         // Before deleteDemoAgent: in demo mode the built-ins are the demo store's agents.
@@ -3176,7 +3267,7 @@ export class HubService {
       case "agent-pause": {
         const agent = this.getAgentsList().find((a) => a.id === request.id);
         if (!agent) throw new Error("Agent not found");
-        const saved = { ...agent, enabled: !request.paused, updatedAt: Date.now() };
+        const saved = stampChange(agent, { ...agent, enabled: !request.paused, updatedAt: Date.now() });
         this.store.data.agents = [
           ...(this.store.data.agents ?? []).filter((x) => x.id !== saved.id),
           saved,
@@ -6715,9 +6806,16 @@ export class HubService {
     let changed = false;
 
     // What goes to the bucket is masked: a teammate (and every model their agents use) reads it.
-    const agents = await sync.reconcile("agents", withRemovals(maskStrings(this.store.data.agents ?? []), removed.agents));
+    const agents = await sync.reconcile(
+      "agents",
+      withRemovals(maskStrings(this.store.data.agents ?? []), removed.agents, this.store.data.sharedRemovedBy?.agents),
+      // Field by field, a model and the provider it was chosen for together; a removal made after the
+      // version an edit started from stands (mergeCopies).
+      (l, r) => mergeCopies(l, r, AGENT_FIELD_GROUPS),
+    );
     const a = splitRemovals(agents.items);
     removed.agents = a.removed;
+    this.store.data.sharedRemovedBy = { ...this.store.data.sharedRemovedBy, agents: a.removedBy };
     if (agents.changed) {
       // The masked copy went to the bucket; an agent that did not change there stays as it is here.
       const ownAgents = new Map((this.store.data.agents ?? []).map((x) => [x.id, x]));
@@ -8437,7 +8535,8 @@ export class HubService {
     supersede?: boolean;
   }): Promise<MemoryEntry> {
     const author = input.author?.trim() || (await this.resolveActorName());
-    const { memories, saved, superseded } = this.kb.deduplicateOrMergeMemory(
+    const before = new Map(this.store.data.memories.map((m) => [m.id, m.updatedAt]));
+    const { memories, saved: merged, superseded } = this.kb.deduplicateOrMergeMemory(
       this.store.data.memories,
       {
         id: input.id,
@@ -8459,7 +8558,10 @@ export class HubService {
         supersede: input.supersede,
       },
     );
-    this.store.data.memories = memories;
+    // The version this edit started from: a teammate's removal made after it wins over the edit.
+    const base = before.get(merged.id);
+    const saved: MemoryEntry = base !== undefined && base !== merged.updatedAt ? { ...merged, baseAt: base } : merged;
+    this.store.data.memories = memories.map((m) => (m.id === saved.id ? saved : m));
     if (superseded && superseded.scope !== "personal")
       await this.host.saveWorkspaceMemory?.(superseded).catch(() => {});
     if (this.store.data.deletedMemoryIds?.[saved.id]) {
@@ -8773,6 +8875,7 @@ export class HubService {
       ...(this.store.data.deletedServerIds ?? {}),
       [trimmed]: nowIso,
     };
+    this.store.data.deletedServerBy = { ...this.store.data.deletedServerBy, [trimmed]: await this.resolveActorName() };
     this.store.data.s3SyncedServers = (
       this.store.data.s3SyncedServers ?? []
     ).filter((s) => s.id !== trimmed);

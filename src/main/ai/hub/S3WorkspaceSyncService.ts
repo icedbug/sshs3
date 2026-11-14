@@ -16,7 +16,7 @@ import {
   encryptSecretValue,
 } from "../../crypto/SecretFieldCrypto";
 import { maskContext, safeError } from "./privacy";
-import { canonicalJson } from "./WorkBoard";
+import { canonicalJson, removalStandsAt } from "./WorkBoard";
 import { createLogger } from "../../log";
 import {
   assertOutwardSyncAllowed,
@@ -40,6 +40,9 @@ export interface S3WorkspaceRemotePayload {
   activityLog: WorkspaceActivityEvent[];
   deletedServerIds?: Record<string, string>;
   deletedMemoryIds?: Record<string, number>;
+  /** Who removed a server or memory, by id: what a teammate who edits it is told. */
+  deletedServerBy?: Record<string, string>;
+  deletedMemoryBy?: Record<string, string>;
 }
 
 interface StoredS3WorkspaceConfig {
@@ -154,6 +157,8 @@ export function sanitizeServerForS3(
     updatedAt: s.updatedAt || new Date().toISOString(),
     ...(s.updatedBy ? { updatedBy: String(s.updatedBy).trim() } : {}),
     ...(s.deletedAt ? { deletedAt: String(s.deletedAt).trim() } : {}),
+    // The version this edit started from: a teammate's removal made after it wins over the edit.
+    ...(s.baseAt ? { baseAt: String(s.baseAt).trim() } : {}),
   };
 }
 
@@ -228,7 +233,29 @@ function workspaceContent(payload: Partial<S3WorkspaceRemotePayload>): string {
     activityLog: payload.activityLog ?? [],
     deletedServerIds: payload.deletedServerIds ?? {},
     deletedMemoryIds: payload.deletedMemoryIds ?? {},
+    deletedServerBy: payload.deletedServerBy ?? {},
+    deletedMemoryBy: payload.deletedMemoryBy ?? {},
   });
+}
+
+/**
+ * Who removed each item that is removed after a merge (`kept`): the name that goes with the newer of
+ * the two removals, and of two equally new ones the same name on both sides.
+ */
+function mergeRemovedBy(
+  kept: Record<string, unknown>,
+  local: { at?: Record<string, string | number>; by?: Record<string, string> },
+  remote: { at?: Record<string, string | number>; by?: Record<string, string> },
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  const name = (v: unknown): string | undefined => (typeof v === "string" && v.trim() ? v.trim().slice(0, 80) : undefined);
+  for (const id of Object.keys(kept)) {
+    const [l, r] = [name(local.by?.[id]), name(remote.by?.[id])];
+    const [lt, rt] = [parseTimeMs(local.at?.[id]), parseTimeMs(remote.at?.[id])];
+    const pick = !l ? r : !r ? l : rt > lt ? r : lt > rt ? l : r > l ? r : l;
+    if (pick) out[id] = pick;
+  }
+  return out;
 }
 
 /**
@@ -332,9 +359,18 @@ export function mergeS3WorkspacePayload(
   const allMergedServers: WorkspaceServerSummary[] = [];
   const activeServers: WorkspaceServerSummary[] = [];
   for (const srv of serverMap.values()) {
-    const delIso = deletedServerIds[srv.id] || srv.deletedAt;
-    const delMs = parseTimeMs(delIso);
+    let delIso = deletedServerIds[srv.id] || srv.deletedAt;
+    let delMs = parseTimeMs(delIso);
     const updMs = parseTimeMs(srv.updatedAt);
+    // Edited on a view from before a teammate removed it: the removal stands, one step above the edit.
+    const standing = delMs > 0 && delMs < updMs && srv.baseAt
+      ? removalStandsAt(delMs, { id: srv.id, updatedAt: updMs, baseAt: parseTimeMs(srv.baseAt) || undefined })
+      : undefined;
+    if (standing !== undefined) {
+      delIso = new Date(standing).toISOString();
+      deletedServerIds[srv.id] = delIso;
+      delMs = standing;
+    }
     if (delMs > 0 && delMs >= updMs) {
       allMergedServers.push({ ...srv, deletedAt: String(delIso) });
     } else {
@@ -364,10 +400,23 @@ export function mergeS3WorkspacePayload(
   }
 
   // 4. Merge shared memories by id + updatedAt, respecting tombstones
+  /**
+   * Whether a removal stands over this copy: a removal at or after it, or one made after the version
+   * its edit started from (moved one step above the edit, so that every installation drops it).
+   */
+  const memoryRemoved = (m: MemoryEntry): boolean => {
+    const removedAt = deletedMemoryIds[m.id] ?? 0;
+    if (removedAt >= (m.updatedAt ?? 0)) return true;
+    const at = removalStandsAt(removedAt, { id: m.id, updatedAt: m.updatedAt ?? 0, baseAt: m.baseAt });
+    if (at === undefined) return false;
+    deletedMemoryIds[m.id] = at;
+    changed = true;
+    return true;
+  };
   const memMap = new Map<string, MemoryEntry>();
   for (const lm of local.memories ?? []) {
     if (!lm?.id || lm.scope === "personal") continue;
-    if ((deletedMemoryIds[lm.id] ?? 0) >= (lm.updatedAt ?? 0)) continue;
+    if (memoryRemoved(lm)) continue;
     memMap.set(lm.id, {
       ...lm,
       title: maskContext(lm.title),
@@ -378,7 +427,7 @@ export function mergeS3WorkspacePayload(
   for (const rm of Array.isArray(remote.memories) ? remote.memories : []) {
     if (!rm || typeof rm.id !== "string" || rm.scope === "personal") continue;
     const rTime = rm.updatedAt ?? 0;
-    if ((deletedMemoryIds[rm.id] ?? 0) >= rTime) continue;
+    if (memoryRemoved(rm)) continue;
     const prev = memMap.get(rm.id);
     const tie = Boolean(prev) && rTime === (prev!.updatedAt ?? 0);
     if (!prev || rTime > (prev.updatedAt ?? 0) || tie) {
@@ -443,7 +492,7 @@ export function mergeS3WorkspacePayload(
   }
   // Remove any local memory that was tombstoned by remote
   for (const [id, m] of memMap.entries()) {
-    if ((deletedMemoryIds[id] ?? 0) >= (m.updatedAt ?? 0)) {
+    if (memoryRemoved(m)) {
       memMap.delete(id);
       changed = true;
     }
@@ -484,6 +533,16 @@ export function mergeS3WorkspacePayload(
     activityLog: mergedActivity,
     deletedServerIds,
     deletedMemoryIds,
+    deletedServerBy: mergeRemovedBy(
+      deletedServerIds,
+      { at: local.deletedServerIds, by: local.deletedServerBy },
+      { at: remote.deletedServerIds, by: remote.deletedServerBy },
+    ),
+    deletedMemoryBy: mergeRemovedBy(
+      deletedMemoryIds,
+      { at: local.deletedMemoryIds, by: local.deletedMemoryBy },
+      { at: remote.deletedMemoryIds, by: remote.deletedMemoryBy },
+    ),
   };
   // Compared by what it holds, not by when it was made: an idle team's sync then finds the bucket
   // as it would write it, and writes nothing.
@@ -500,6 +559,8 @@ export interface S3WorkspaceSyncCallbacks {
     activityLog: WorkspaceActivityEvent[];
     deletedServerIds: Record<string, string>;
     deletedMemoryIds: Record<string, number>;
+    deletedServerBy?: Record<string, string>;
+    deletedMemoryBy?: Record<string, string>;
     activeTerminals: WorkspacePresenceTerminal[];
   }>;
   applyMergedState(state: {
@@ -508,6 +569,8 @@ export interface S3WorkspaceSyncCallbacks {
     activityLog: WorkspaceActivityEvent[];
     deletedServerIds: Record<string, string>;
     deletedMemoryIds: Record<string, number>;
+    deletedServerBy?: Record<string, string>;
+    deletedMemoryBy?: Record<string, string>;
     changed: boolean;
   }): Promise<void>;
   onStateChanged(): void;
@@ -836,6 +899,8 @@ export class S3WorkspaceSyncService {
           activityLog: local.activityLog,
           deletedServerIds: local.deletedServerIds,
           deletedMemoryIds: local.deletedMemoryIds,
+          deletedServerBy: local.deletedServerBy,
+          deletedMemoryBy: local.deletedMemoryBy,
         };
 
         const { merged, activeServers, changed, remoteChanged } = mergeS3WorkspacePayload(
@@ -849,6 +914,8 @@ export class S3WorkspaceSyncService {
           activityLog: merged.activityLog,
           deletedServerIds: merged.deletedServerIds ?? {},
           deletedMemoryIds: merged.deletedMemoryIds ?? {},
+          deletedServerBy: merged.deletedServerBy ?? {},
+          deletedMemoryBy: merged.deletedMemoryBy ?? {},
           changed,
         });
 

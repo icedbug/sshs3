@@ -386,6 +386,8 @@ export interface MemoryEntry {
   /** When it was replaced. */
   supersededAt?: number;
   updatedAt: number;
+  /** The `updatedAt` of the version this edit started from: a teammate's removal after it wins over the edit. */
+  baseAt?: number;
 }
 
 /**
@@ -625,6 +627,8 @@ export interface WorkspaceServerSummary {
   updatedAt?: string;
   updatedBy?: string;
   deletedAt?: string;
+  /** The `updatedAt` of the team's copy this edit started from: a teammate's removal after it wins over the edit. */
+  baseAt?: string;
   localUsername?: string;
   localPrivateKeyPath?: string;
   localAuthType?: "agent" | "privateKey";
@@ -835,6 +839,10 @@ export interface MissionAgent {
   monthlyTokenBudget?: number;
   author?: string;
   updatedAt: number;
+  /** The `updatedAt` of the copy this one was edited from (see WorkBoard `stampChange`). */
+  baseAt?: number;
+  /** When each field was last changed: a merge keeps two people's changes of different fields. */
+  fieldAt?: Record<string, number>;
 }
 /**
  * An external coding agent as it is started on this computer. Kept per

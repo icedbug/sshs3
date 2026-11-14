@@ -1054,14 +1054,20 @@ because there is no server to run one on.
 - **Sharing.** `WorkSync` keeps one object per item under `work/` in the team
   bucket: goals, tickets, agents, shared runbooks and dependencies. Per item
   the newer copy wins, with these exceptions where that would lose something.
-  Tickets and goals remember when each field changed (`stampChange`) and are
-  merged field by field (`mergeFields`): a title changed in one place and a
-  comment added in another both stay. A ticket's comments are kept from both
+  Tickets, goals and agents remember when each field changed (`stampChange`)
+  and are merged field by field (`mergeFields`; an agent's model and its
+  provider together): a title changed in one place and a comment added in
+  another both stay. A ticket's comments are kept from both
   copies, and the installation that runs a ticket keeps the run when a
   teammate's older view moved or removed it (`mergeTicketCopies`). An edit
   made on a view from before a removal does not bring the item back
-  (`removalWins`, tickets and pages): the removal stands, and an edit of a
-  ticket somebody removed is refused with who removed it. Before an edit, and
+  (`removalWins`, tickets, pages and agents; `removalStandsAt` for the team
+  memories and shared servers of the workspace object, whose removals are
+  kept as a time per id with who made them in `deletedMemoryBy` /
+  `deletedServerBy`): the removal stands, and an edit of a ticket, agent,
+  team memory or shared server somebody removed is refused with who removed
+  it. A save of a team memory or shared server reads the workspace object
+  first, so a removal already in the bucket is told at once. Before an edit, and
   after an action a teammate's run refused, the ticket is read from the bucket
   at once. A page changed in two places at once keeps the
   newer text, and the other one as an entry in its history with the text it

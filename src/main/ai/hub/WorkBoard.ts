@@ -100,6 +100,28 @@ export function removalWins<T extends Mergeable>(a: T, b: T): T | undefined {
 }
 
 /**
+ * The same rule where a removal is kept as a time per id (team memories and servers) rather than as a
+ * copy: the time the removal stands at over `item`, or undefined where the item stays. A removal at or
+ * after the item's time stands as it is; one made after the version the item's edit started from
+ * stands one step above the edit (removalWins), so that it also reaches the installation that made it.
+ */
+export function removalStandsAt(
+  removedAt: number | undefined,
+  item: { id: string; updatedAt: number; baseAt?: number },
+): number | undefined {
+  if (!removedAt) return undefined;
+  if (removedAt >= item.updatedAt) return removedAt;
+  return removalWins<Mergeable>({ id: item.id, updatedAt: removedAt, deleted: true }, { id: item.id, updatedAt: item.updatedAt, baseAt: item.baseAt })
+    ?.updatedAt;
+}
+
+/** What to tell somebody whose change was not saved because what they changed was removed: by whom and when, where known. */
+export function removedMessage(what: string, by: string | undefined, at: number | undefined, then = "so nothing was changed."): string {
+  const when = at ? ` at ${new Date(at).toISOString().slice(0, 16).replace("T", " ")} UTC` : "";
+  return `${what} was removed${by ? ` by ${by}` : ""}${when}, ${then}`;
+}
+
+/**
  * Two live copies with different times, put together field by field: of each field (or group of
  * fields that only make sense together) the copy that changed it last gives the value; where neither
  * says when it changed it, the newer copy does. The result is the newer copy itself when nothing of
@@ -145,13 +167,13 @@ const sameContent = (a: object, b: object): boolean =>
  * two live copies that say when their fields changed are put together field by field; otherwise the
  * newer copy wins.
  */
-export function mergeCopies<T extends Mergeable>(local: T, remote: T): T {
+export function mergeCopies<T extends Mergeable>(local: T, remote: T, groups: readonly (readonly string[])[] = []): T {
   if (local.updatedAt === remote.updatedAt) return local;
   const removal = removalWins(local, remote);
   if (removal) return removal;
   const newer = remote.updatedAt > local.updatedAt ? remote : local;
   if (local.deleted || remote.deleted || (!local.fieldAt && !remote.fieldAt)) return newer;
-  const merged = mergeFields(local, remote);
+  const merged = mergeFields(local, remote, groups);
   return sameContent(merged, newer) ? newer : { ...merged, updatedAt: newer.updatedAt + 1, baseAt: newer.updatedAt };
 }
 
@@ -254,8 +276,7 @@ function allComments(a: WorkTicket, b: WorkTicket): WorkTicketComment[] {
 export function ticketRemovedMessage(tickets: WorkTicket[] | undefined, id: string): string | undefined {
   const gone = (tickets ?? []).find((t) => t.id === id && t.deleted);
   if (!gone) return undefined;
-  const when = gone.updatedAt ? ` at ${new Date(gone.updatedAt).toISOString().slice(0, 16).replace("T", " ")} UTC` : "";
-  return `This ticket was removed${gone.deletedBy ? ` by ${gone.deletedBy}` : ""}${when}, so nothing was changed.`;
+  return removedMessage("This ticket", gone.deletedBy, gone.updatedAt);
 }
 
 /** What is shown and worked: removals are kept in the data only so they travel. */
@@ -453,6 +474,8 @@ export function sumUsage(
 export function withRemovals<T extends { id: string; updatedAt?: number }>(
   items: T[],
   removed: Record<string, number> | undefined,
+  /** Who removed what, where that is known: it travels on the marker. */
+  removedBy?: Record<string, string>,
 ): Array<T & Mergeable> {
   const dead = removed ?? {};
   const alive = items
@@ -460,19 +483,25 @@ export function withRemovals<T extends { id: string; updatedAt?: number }>(
     .filter((x) => (dead[x.id] ?? -1) < x.updatedAt);
   const markers = Object.entries(dead)
     .filter(([id, at]) => !alive.some((x) => x.id === id && x.updatedAt > at))
-    .map(([id, at]) => ({ id, updatedAt: at, deleted: true }) as unknown as T & Mergeable);
+    .map(([id, at]) => ({ id, updatedAt: at, deleted: true, ...(removedBy?.[id] ? { deletedBy: removedBy[id] } : {}) }) as unknown as T & Mergeable);
   return [...alive, ...markers];
 }
 
 /** The reverse of withRemovals, after merging with the team's copy. */
-export function splitRemovals<T extends Mergeable>(items: T[]): { alive: T[]; removed: Record<string, number> } {
+export function splitRemovals<T extends Mergeable>(
+  items: T[],
+): { alive: T[]; removed: Record<string, number>; removedBy: Record<string, string> } {
   const removed: Record<string, number> = {};
+  const removedBy: Record<string, string> = {};
   const alive: T[] = [];
   for (const item of items) {
-    if (item.deleted) removed[item.id] = item.updatedAt;
-    else alive.push(item);
+    if (item.deleted) {
+      removed[item.id] = item.updatedAt;
+      const by = (item as { deletedBy?: unknown }).deletedBy;
+      if (typeof by === "string" && by) removedBy[item.id] = by.slice(0, 80);
+    } else alive.push(item);
   }
-  return { alive, removed };
+  return { alive, removed, removedBy };
 }
 
 /** Whether making `agentId` report to `bossId` would close a circle. */
