@@ -30,7 +30,10 @@ export function AgentTestsView({ hub, act }: { hub: HubSnapshot; act: Act }): JS
   const [draft, setDraft] = useState<Draft | undefined>();
   const [openId, setOpenId] = useState("");
   const cases = hub.evalCases ?? [];
-  const ran = cases.filter((c) => c.runs.length > 0);
+  // A run that could not take place (the model was not reachable) is neither a pass nor a regression.
+  const ran = cases
+    .map((c) => ({ title: c.title, runs: c.runs.filter((r) => !r.inconclusive) }))
+    .filter((c) => c.runs.length > 0);
   const passing = ran.filter((c) => c.runs[0].passed).length;
   const better = ran.filter((c) => c.runs[1] && !c.runs[1].passed && c.runs[0].passed).map((c) => c.title);
   const worse = ran.filter((c) => c.runs[1] && c.runs[1].passed && !c.runs[0].passed).map((c) => c.title);
@@ -168,8 +171,8 @@ export function AgentTestsView({ hub, act }: { hub: HubSnapshot; act: Act }): JS
                   {run ? ` · last run ${new Date(run.at).toLocaleString()}${run.model ? ` on ${run.model}` : ""} · ${tokens(run.tokens)} tokens` : " · never run"}
                 </small>
               </div>
-              <span className={`ai-badge ${hub.evalRunning === c.id ? "" : run ? (run.passed ? "ai-badge-success" : "ai-badge-danger") : ""}`}>
-                {hub.evalRunning === c.id ? "running" : run ? (run.passed ? "passed" : "failed") : "not run"}
+              <span className={`ai-badge ${hub.evalRunning === c.id || run?.inconclusive ? "" : run ? (run.passed ? "ai-badge-success" : "ai-badge-danger") : ""}`}>
+                {hub.evalRunning === c.id ? "running" : run ? (run.inconclusive ? "could not run" : run.passed ? "passed" : "failed") : "not run"}
               </span>
             </div>
             {expectations === 0 && (
@@ -177,6 +180,11 @@ export function AgentTestsView({ hub, act }: { hub: HubSnapshot; act: Act }): JS
             )}
             {run && (
               <ul className="ai-eval-checks">
+                {run.inconclusive && (
+                  <li data-passed="note">
+                    The run could not take place, so nothing was tested: {run.inconclusive}
+                  </li>
+                )}
                 {run.checks.map((check, i) => (
                   <li key={i} data-passed={check.passed ? "yes" : "no"}>
                     {check.name}

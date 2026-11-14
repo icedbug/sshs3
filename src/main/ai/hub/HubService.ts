@@ -643,7 +643,7 @@ export class HubService {
     this.broker = new ToolBroker(this.terminals, {
       context: async (task, query, sessionId) => {
         const extra = await this.collectExtraContext();
-        return this.context.read(task, query, sessionId, extra);
+        return this.context.read(task, query, sessionId, this.asOfEvalCase(task, extra));
       },
       memory: async (task, request) => {
         if (request.action === "memory-save") {
@@ -1121,6 +1121,8 @@ export class HubService {
   /** The conversation changes hands. A notice, not an answer: it is never written over by a run's text. */
   private applyHandoff(task: AgentTask, toAgent: MissionAgent, reason?: string): void {
     const prevAgentName = task.agentName || "Default Assistant";
+    // Who answered the first question: a test case made of this conversation replays that agent.
+    task.startedAs ??= { agentId: task.agentId, mode: task.mode };
     task.agentId = toAgent.id;
     task.agentName = toAgent.name;
     task.handoffTo = undefined;
@@ -1148,6 +1150,27 @@ export class HubService {
   private teamBucketView(): ReturnType<S3WorkspaceSyncService["getStatus"]> {
     const status = this.s3Workspace.getStatus();
     return this.sharedServer() && !this.host.teamAdmin?.() ? { ...status, inviteCode: undefined } : status;
+  }
+
+  /**
+   * A test case is replayed against the question as it was asked. What tells about the present
+   * moment is left out of what the replay is given: activity after the case was made, how the
+   * servers stand now, what changed on them lately and what the open terminals show. Otherwise a
+   * case made before a fix fails after it, whatever the agent does: it is told the fault is over.
+   * Memory and the pages stay: they are what a test is run to try.
+   */
+  private asOfEvalCase(task: AgentTask, extra: ExtraWorkspaceContext): ExtraWorkspaceContext {
+    if (!task.evalCaseId) return extra;
+    const found = (this.store.data.evalCases ?? []).find((c) => c.id === task.evalCaseId);
+    const asOf = found?.createdAt ?? 0;
+    return {
+      ...extra,
+      asOf,
+      activityLog: (extra.activityLog ?? this.store.data.activityLog ?? []).filter((a) => a.at <= asOf),
+      recentServerChanges: [],
+      serverFactsNow: [],
+      workforceRuns: [],
+    };
   }
 
   /** Paused means paused, and a spent budget is spent: however an agent is started. */
@@ -1905,43 +1928,51 @@ export class HubService {
         break;
       }
       case "configure": {
-        await this.config.update(request.config);
+        // The preferences are worked out on a copy and checked first: a request that is refused
+        // changes nothing, neither the preferences nor the AI settings sent with them.
+        const next = { ...this.store.data.preferences };
         if (request.preferences) {
           const p = request.preferences;
           if (p.retentionDays !== undefined)
-            this.store.data.preferences.retentionDays = integer(
+            next.retentionDays = integer(
               p.retentionDays,
               1,
               365,
             );
           for (const key of ["background", "autoStart", "inventory"] as const)
             if (p[key] !== undefined)
-              this.store.data.preferences[key] = p[key] === true;
+              next[key] = p[key] === true;
           if (p.proposeMemories !== undefined)
-            this.store.data.preferences.proposeMemories =
+            next.proposeMemories =
               p.proposeMemories === true;
           if (p.autoSaveMemories !== undefined)
-            this.store.data.preferences.autoSaveMemories =
+            next.autoSaveMemories =
               p.autoSaveMemories === true;
           if (p.workforceAutopilot !== undefined)
-            this.store.data.preferences.workforceAutopilot =
+            next.workforceAutopilot =
               p.workforceAutopilot === true;
           if (p.approvalWaitMinutes !== undefined)
-            this.store.data.preferences.approvalWaitMinutes = integer(p.approvalWaitMinutes, 1, 60);
+            next.approvalWaitMinutes = integer(p.approvalWaitMinutes, 1, 60);
           // On a shared server the path is the server's own and set by its administrator: not by whoever is signed in.
           if (p.sharedWorkspacePath !== undefined && !this.sharedServer()) {
             const cleanedPath = p.sharedWorkspacePath.trim();
             if (cleanedPath) {
-              this.store.data.preferences.sharedWorkspacePath = cleanedPath;
+              next.sharedWorkspacePath = cleanedPath;
             } else {
-              delete this.store.data.preferences.sharedWorkspacePath;
+              delete next.sharedWorkspacePath;
             }
           }
           if (
-            this.store.data.preferences.autoStart &&
-            !this.store.data.preferences.background
+            next.autoStart &&
+            !next.background
           )
             throw new Error("Autostart requires background mode");
+        }
+        // Preferences can be changed on their own: the AI settings are touched only when they were sent.
+        if (request.config) await this.config.update(request.config);
+        if (request.preferences) {
+          if (!("sharedWorkspacePath" in next)) delete this.store.data.preferences.sharedWorkspacePath;
+          Object.assign(this.store.data.preferences, next);
           await this.host.backgroundChanged(
             this.background,
             this.store.data.preferences.autoStart,
@@ -2726,6 +2757,18 @@ export class HubService {
         );
         if (clash) throw new Error(`There is already an agent called "${clash.name}". Give this one another name.`);
         const actor = a.author?.trim() || (await this.resolveActorName());
+        const boss = a.reportsTo && a.reportsTo !== id ? this.getAgentsList().find((x) => x.id === a.reportsTo) : undefined;
+        const circle = Boolean(boss) && wouldCycle(this.getAgentsList(), id, boss!.id);
+        if (a.reportsTo && (!boss || circle))
+          reply = {
+            notes: [
+              a.reportsTo === id
+                ? "An agent cannot report to itself, so no reporting line was saved."
+                : !boss
+                  ? "The agent this one should report to does not exist, so no reporting line was saved."
+                  : `${boss.name} already reports to this agent, directly or through others. The reporting line was not saved, because it would close a circle.`,
+            ],
+          };
         const saved: MissionAgent = {
           id,
           name: clip(requiredText(a.name), 120),
@@ -2748,10 +2791,7 @@ export class HubService {
             : undefined,
           enabled: a.enabled ?? true,
           runnerId: a.runnerId?.trim() || undefined,
-          reportsTo:
-            a.reportsTo && a.reportsTo !== id && !wouldCycle(this.getAgentsList(), id, a.reportsTo)
-              ? a.reportsTo
-              : undefined,
+          reportsTo: boss && !circle ? boss.id : undefined,
           monthlyTokenBudget:
             a.monthlyTokenBudget && a.monthlyTokenBudget > 0
               ? integer(a.monthlyTokenBudget, 1000, 2_000_000_000)
@@ -2821,7 +2861,8 @@ export class HubService {
         const existing = cases.find((c) => c.id === request.id);
         if (existing) {
           existing.title = boundedContext(request.title?.trim() || existing.title, 160);
-          if (request.expect) existing.expect = normalizeExpectation(request.expect);
+          // Only the parts that were sent: the others stay as they are.
+          if (request.expect) existing.expect = normalizeExpectation({ ...existing.expect, ...request.expect });
           existing.updatedAt = Date.now();
         } else {
           const from = this.store.data.tasks.find((t) => t.id === request.fromTaskId);
@@ -2852,12 +2893,24 @@ export class HubService {
       case "alert-hook-disable":
         this.store.data.alertHook = undefined;
         break;
-      case "alert-rules-save":
-        this.store.data.alertRules = (request.rules ?? [])
-          .map((r) => ({ match: boundedContext(String(r.match ?? "").trim(), 80), agentId: String(r.agentId ?? "") }))
-          .filter((r) => r.match && this.getAgentsList().some((a) => a.id === r.agentId))
-          .slice(0, 40);
+      case "alert-rules-save": {
+        const asked = (request.rules ?? []).map((r) => ({
+          match: boundedContext(String(r.match ?? "").trim(), 80),
+          agentId: String(r.agentId ?? ""),
+        }));
+        const known = (r: { agentId: string }): boolean => this.getAgentsList().some((a) => a.id === r.agentId);
+        const kept = asked.filter((r) => r.match && known(r));
+        this.store.data.alertRules = kept.slice(0, 40);
+        const notes: string[] = [];
+        const noAgent = asked.filter((r) => r.match && !known(r));
+        if (noAgent.length)
+          notes.push(`Not saved, because the agent does not exist: ${noAgent.map((r) => `"${r.match}"`).join(", ")}.`);
+        const empty = asked.filter((r) => !r.match).length;
+        if (empty) notes.push(`${empty} rule${empty === 1 ? "" : "s"} with no text to match ${empty === 1 ? "was" : "were"} left out.`);
+        if (kept.length > 40) notes.push("Only the first 40 rules were saved.");
+        if (notes.length) reply = { notes };
         break;
+      }
       case "alert-paste": {
         const alerts = parsePastedAlert(requiredText(request.text));
         if (alerts.length === 0) throw new Error("No alert could be made of that.");
@@ -2866,7 +2919,15 @@ export class HubService {
       }
       case "runner-save": {
         const r = request.runner;
-        const id = requiredText(r.id).toLowerCase().replace(/[^a-z0-9-]+/g, "-").slice(0, 40);
+        const asked = requiredText(r.id);
+        const id = asked.toLowerCase().replace(/[^a-z0-9-]+/g, "-").slice(0, 40);
+        // An agent names its runner by this id: one that was typed differently would never match.
+        if (id !== asked)
+          reply = {
+            notes: [
+              `The id was saved as "${id}": an id is lowercase letters, digits and "-", at most 40 characters. An agent that uses this runner has to name it "${id}".`,
+            ],
+          };
         const saved: ExternalRunner = {
           id,
           name: clip(requiredText(r.name), 80),
@@ -2963,9 +3024,16 @@ export class HubService {
         });
         break;
       }
-      case "workforce-template-apply":
-        await this.applyWorkforceTemplate(request.templateId, request.goalTitle);
+      case "workforce-template-apply": {
+        const kept = await this.applyWorkforceTemplate(request.templateId, request.goalTitle);
+        if (kept.length)
+          reply = {
+            notes: [
+              `${kept.join(", ")} already existed and ${kept.length === 1 ? "was" : "were"} kept as ${kept.length === 1 ? "it is" : "they are"}: the new goal and tickets use ${kept.length === 1 ? "it" : "them"}.`,
+            ],
+          };
         break;
+      }
       case "agent-run-mission": {
         const targetAgentId = request.agentId || request.id;
         const agent = this.getAgentsList().find((a) => a.id === targetAgentId);
@@ -5887,7 +5955,9 @@ export class HubService {
           run = {
             at: Date.now(),
             passed: false,
-            checks: [{ name: "ran to an answer", passed: false, detail: safeError(error) }],
+            // It never started: that says nothing about the agent.
+            inconclusive: safeError(error),
+            checks: [],
             answer: "",
             calls: [],
             unrecorded: replay.unrecorded,
@@ -6505,14 +6575,24 @@ export class HubService {
       );
   }
 
-  /** Creates a template's team (with its reporting lines), goal and first tickets. */
-  private async applyWorkforceTemplate(templateId: string, goalTitle?: string): Promise<void> {
+  /**
+   * Creates a template's team (with its reporting lines), goal and first tickets. An agent of the
+   * same name that is already there is used as it is and not made a second time: agents are looked
+   * up by name, and two of one name would make which one is found a matter of order. Returns the
+   * names of the agents that were kept.
+   */
+  private async applyWorkforceTemplate(templateId: string, goalTitle?: string): Promise<string[]> {
     const template = WORKFORCE_TEMPLATES.find((t) => t.id === templateId);
     if (!template) throw new Error("Unknown workforce template");
     const now = Date.now();
     const actor = await this.resolveActorName();
-    const ids = new Map(template.team.map((r) => [r.key, `wf-${template.id}-${r.key}-${crypto.randomUUID().slice(0, 6)}`]));
-    const agents: MissionAgent[] = template.team.map((r) => ({
+    const sameName = (name: string): MissionAgent | undefined =>
+      this.getAgentsList().find((x) => x.name.trim().toLowerCase() === name.trim().toLowerCase());
+    const there = new Map(template.team.flatMap((r) => (sameName(r.name) ? [[r.key, sameName(r.name)!] as const] : [])));
+    const ids = new Map(
+      template.team.map((r) => [r.key, there.get(r.key)?.id ?? `wf-${template.id}-${r.key}-${crypto.randomUUID().slice(0, 6)}`]),
+    );
+    const agents: MissionAgent[] = template.team.filter((r) => !there.has(r.key)).map((r) => ({
       id: ids.get(r.key)!,
       name: r.name,
       role: r.role,
@@ -6539,7 +6619,7 @@ export class HubService {
       updatedAt: now,
     });
     template.tickets.forEach((t, i) => {
-      const agent = agents.find((a) => a.id === ids.get(t.role));
+      const agent = agents.find((a) => a.id === ids.get(t.role)) ?? there.get(t.role);
       this.putTicket({
         id: `t-${crypto.randomUUID().slice(0, 8)}`,
         title: t.title,
@@ -6553,6 +6633,8 @@ export class HubService {
         updatedAt: now + i,
       });
     });
+    if (agents.length) this.lastWorkSync = 0;
+    return [...there.values()].map((a) => a.name);
   }
 
   private notify(title: string, body: string): void {
@@ -8007,10 +8089,9 @@ function investigatorPrompt(
 }
 
 /** The workforce conversation's message: per-specialist status, then the combined result. */
-function renderWorkforceProgress(run: WorkforceRun): string {
-  const done = run.steps.filter(
-    (s) => s.status === "completed" || s.status === "failed",
-  ).length;
+export function renderWorkforceProgress(run: WorkforceRun): string {
+  const done = run.steps.filter((s) => s.status === "completed").length;
+  const failed = run.steps.filter((s) => s.status === "failed").length;
   const lines = run.steps.map((s) => {
     // Words, as everywhere else in the hub: a mark means nothing to a screen reader or a log.
     const mark = s.status === "completed" ? "done" : s.status === "failed" ? "failed" : s.status === "running" ? "running" : "waiting";
@@ -8021,7 +8102,7 @@ function renderWorkforceProgress(run: WorkforceRun): string {
     return `- **${s.agentName}**${where}: ${mark}${time}${problem}`;
   });
   const status = [
-    `**Workforce** — ${done}/${run.steps.length} specialists finished`,
+    `**Workforce** — ${done}/${run.steps.length} specialists finished${failed ? `, ${failed} failed` : ""}`,
     ...lines,
   ].join("\n");
   if (run.status === "running") return status;

@@ -402,6 +402,10 @@ export class SelfLearningService {
           to,
           relation,
           label,
+          // Read out of command output, and nobody has looked at it: a proposal until a person confirms it.
+          proposed: true,
+          proposedBy: "Command output",
+          evidence: label,
           updatedAt: Date.now(),
         };
         nextEdges.unshift(edge);

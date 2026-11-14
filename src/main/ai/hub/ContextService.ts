@@ -91,6 +91,11 @@ export function scopedMemory(
 }
 
 export interface ExtraWorkspaceContext {
+  /**
+   * Set for the replay of a test case: the moment the case was made. What the open terminals show
+   * now is left out, and so is activity after that moment.
+   */
+  asOf?: number;
   /** What changed on the servers lately (collected facts), by server: lines that start with the time. */
   recentServerChanges?: { name: string; cluster?: string; lines: string[] }[];
   /** How each server stood at its last reading, and how old that reading is. */
@@ -180,12 +185,16 @@ export class ContextService {
       1000,
       Math.min(64_000, extra?.terminalContextChars ?? 8000),
     );
-    const allTerminals = this.terminals.list().map((t) => ({
-      ...t,
-      recentOutput: this.terminals.context(t.id).slice(-Math.min(termChars, 12_000)),
-    }));
-    const activitySource =
-      extra?.activityLog ?? this.store.data.activityLog ?? [];
+    const allTerminals =
+      extra?.asOf !== undefined
+        ? []
+        : this.terminals.list().map((t) => ({
+            ...t,
+            recentOutput: this.terminals.context(t.id).slice(-Math.min(termChars, 12_000)),
+          }));
+    const activitySource = (extra?.activityLog ?? this.store.data.activityLog ?? []).filter(
+      (a) => extra?.asOf === undefined || a.at <= extra.asOf,
+    );
     const memorySource = extra?.memories ?? this.store.data.memories;
     const servers = extra?.workspaceServers ?? [];
     const clusterMap = new Map<string, string[]>();
