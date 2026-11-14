@@ -25,6 +25,8 @@ vi.mock("../../src/renderer/src/lib/aiHub", () => ({
 }));
 beforeEach(() => {
   request.mockReset();
+  // Every test is a fresh browser tab: no conversation is remembered from the one before.
+  window.sessionStorage.clear();
   selected = "one";
   fixture = {
     config: {
@@ -136,6 +138,35 @@ describe("persistent AI chat", () => {
     fireEvent.click(screen.getByRole("button", { name: "Collapse chat" }));
     expect(screen.getByText("Inspect the service log.")).toBeVisible();
     expect(request).not.toHaveBeenCalled();
+  });
+  it("opens the same conversation again after a reload, and says whether a message starts a new one", () => {
+    const first = render(<Harness />);
+    expect(screen.getByLabelText("Message to agent")).toHaveAttribute("placeholder", expect.stringContaining("new conversation"));
+    openPreviousChat();
+    expect(screen.getByLabelText("Message to agent")).toHaveAttribute("placeholder", expect.stringContaining("Reply in this conversation"));
+    first.unmount();
+    // A reload of the page: the same tab, a new panel.
+    render(<Harness />);
+    expect(screen.getByText("Inspect the service log.")).toBeVisible();
+    expect(screen.getByLabelText("Message to agent")).toHaveAttribute("placeholder", expect.stringContaining("Reply in this conversation"));
+    // "New chat" is a clear choice: it is not remembered over a reload either.
+    fireEvent.click(screen.getByRole("button", { name: "New chat" }));
+    cleanup();
+    render(<Harness />);
+    expect(screen.queryByText("Inspect the service log.")).not.toBeInTheDocument();
+  });
+  it("empties the field and shows the message as sent at once, and gives the text back when the request fails", async () => {
+    let fail: (e: Error) => void = () => {};
+    request.mockImplementation(() => new Promise((_, reject) => { fail = reject; }));
+    render(<Harness />);
+    const input = screen.getByLabelText("Message to agent");
+    fireEvent.change(input, { target: { value: "Inspect nginx" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(screen.getByTestId("message-sending")).toHaveTextContent("Inspect nginx"));
+    expect(input).toHaveValue("");
+    fail(new Error("The server is busy"));
+    await waitFor(() => expect(screen.queryByTestId("message-sending")).not.toBeInTheDocument());
+    expect(input).toHaveValue("Inspect nginx");
   });
   it("keeps a running task bound to its terminal after switching tabs", () => {
     const view = render(<AiHubPanel mode="panel" setMode={() => {}} />);

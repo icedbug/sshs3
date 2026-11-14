@@ -60,6 +60,8 @@ type View =
   | "Changes"
   | "Memory & skills"
   | "Schedules";
+/** Where this tab remembers which conversation is open (sessionStorage: kept over a reload, not shared between tabs or people). */
+const OPEN_TASK_KEY = "sshs3.aiHub.openTask";
 const VIEWS: View[] = ["Work", "Inbox", "Workforce", "Agents & MCP", "Knowledge Base", "Infrastructure", "Changes", "Memory & skills", "Schedules"];
 type Menu = "history" | "target" | "control" | "mention" | "agent" | null;
 
@@ -124,8 +126,18 @@ export function AiHubPanel({
   const selectedTerminal = useSelectedTerminal();
   const [view, setView] = useState<View>("Work");
   const [focusInboxItem, setFocusInboxItem] = useState<string | undefined>();
-  const [taskId, setTaskId] = useState("");
+  // The conversation that is open is remembered for this tab: a reload or a reconnect (the server
+  // restarted, the connection dropped) opens the same conversation again, not an empty "new chat".
+  const [taskId, setTaskId] = useState<string>(() => {
+    try {
+      return window.sessionStorage.getItem(OPEN_TASK_KEY) ?? "";
+    } catch {
+      return "";
+    }
+  });
   const [prompt, setPrompt] = useState("");
+  /** What was just sent and has not come back in the conversation yet (the answer to the request can take a while). */
+  const [sending, setSending] = useState("");
   const [autonomy, setAutonomy] = useState<AgentMode>("assisted");
   const [selectedAgentId, setSelectedAgentId] = useState<string>("");
   const [shell, setShell] = useState<ShellKind>("bash");
@@ -455,6 +467,12 @@ export function AiHubPanel({
   useEffect(() => {
     follow.current = true;
     end.current?.scrollIntoView?.({ block: "end" });
+    try {
+      if (taskId) window.sessionStorage.setItem(OPEN_TASK_KEY, taskId);
+      else window.sessionStorage.removeItem(OPEN_TASK_KEY);
+    } catch {
+      // Storage may be blocked: the conversation then simply is not remembered.
+    }
   }, [taskId]);
   useEffect(() => {
     const element = composer.current;
@@ -658,6 +676,12 @@ export function AiHubPanel({
     if (busy || (!prompt.trim() && !hasImages)) return;
     const textToSend =
       prompt.trim() || "Look at the attached image and say what it shows.";
+    // The field is emptied at once and the message shown as sent: the answer to the request can take
+    // a while on a busy server, and a message that stays in the field looks as if nothing happened.
+    const sentAttachments = attachments;
+    setSending(textToSend);
+    setPrompt("");
+    setAttachments([]);
     const result = task
       ? await act({
           action: "reply",
@@ -677,12 +701,15 @@ export function AiHubPanel({
             attachments,
           },
         });
+    setSending("");
     if (result) {
       // The conversation this request started: "the newest in the list" may be a background run that began meanwhile.
       if (!task) setTaskId(result.reply?.started?.taskId ?? result.tasks.at(-1)?.id ?? "");
-      setPrompt("");
-      setAttachments([]);
       setConnection(undefined);
+    } else {
+      // It did not go: what was written is given back, unless something new has been typed meanwhile.
+      setPrompt((now) => now || prompt);
+      setAttachments((now) => (now.length ? now : sentAttachments));
     }
   }
   async function submit(): Promise<void> {
@@ -1148,7 +1175,7 @@ export function AiHubPanel({
                     el.scrollHeight - el.scrollTop - el.clientHeight < 80;
                 }}
               >
-                {!task && !connection && (
+                {!task && !connection && !sending && (
                   <div className="ai-welcome">
                     <h2>What can I help with?</h2>
                     <p>
@@ -1865,6 +1892,18 @@ export function AiHubPanel({
                   />
                 )}
                 {task?.error && <p className="ai-task-error">{task.error}</p>}
+                {sending && (
+                  <article className="ai-message ai-message-user ai-message-sending" data-testid="message-sending">
+                    <div className="ai-message-header">
+                      <small className="ai-message-author">
+                        <span className="ai-avatar-badge">Y</span>
+                        <span>You</span>
+                      </small>
+                      <span className="ai-message-meta">Sending…</span>
+                    </div>
+                    <RichMarkdownContent text={sending} />
+                  </article>
+                )}
                 {running && (
                   <p className="ai-activity" aria-live="polite">
                     <span className="ai-activity-dot" />
@@ -2297,9 +2336,9 @@ export function AiHubPanel({
                     ref={composer}
                     aria-label="Message to agent"
                     placeholder={
-                      running
-                        ? "Send a follow-up… (type / for commands, @ for clusters/nodes, paste images)"
-                        : "Ask anything… (type / for commands, @ for clusters/nodes, or paste images)"
+                      task
+                        ? "Reply in this conversation… (type / for commands, @ for clusters/nodes, paste images)"
+                        : "Ask anything to start a new conversation… (type / for commands, @ for clusters/nodes, or paste images)"
                     }
                     value={prompt}
                     onChange={(e) => {
