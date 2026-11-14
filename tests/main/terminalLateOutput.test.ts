@@ -119,6 +119,29 @@ describe("a command's frame where the terminal delivers text after the marker it
     }
   });
 
+  it("takes the known prompt off output that did not end in a line break, and adds no note: the text is all accounted for", () => {
+    // As seen on app-01 in the third round: JSON from curl, and the shell's prompt right after it.
+    const frames = new CommandFrames(nonce, 128_000, late("ops@app-01:~$"));
+    expect(frames.feed(`${typed("curl -s localhost/health")}\r\n${BEGIN}${END()}`)).toBeUndefined();
+    const result = frames.feed(`{"status":"UP","components":{"db":{"status":"UP"}}}\x1b]0;ops@app-01: ~\x07\x1b[01;32mops@app-01\x1b[00m:\x1b[01;34m~\x1b[00m$ `);
+    expect(result).toEqual({ output: '{"status":"UP","components":{"db":{"status":"UP"}}}', exitCode: 0, cwd: "/home/ops" });
+    expect(result!.output).not.toContain("[sshs3:");
+    // Settled later, by the caller, it reads the same.
+    const settled = new CommandFrames(nonce, 128_000, late("ops@app-01:~$"));
+    settled.feed(`${BEGIN}${END()}`);
+    settled.feed(`printed without a newline ops@app-01:~$ `);
+    expect(settled.settle().output).toBe("printed without a newline");
+  });
+
+  it("does not take a bare sign for a prompt glued to the output: a line may end in $ or #", () => {
+    const frames = new CommandFrames(nonce, 128_000, late("$"));
+    expect(frames.feed(`${BEGIN}${END()}`)).toBeUndefined();
+    expect(frames.feed(`PATH contains $`)).toBeUndefined();
+    const result = frames.settle();
+    expect(result.output).toContain("PATH contains $");
+    expect(result.output).toContain("[sshs3: late text begins here]");
+  });
+
   it("adds no note when nothing came after the marker", () => {
     const frames = new CommandFrames(nonce, 128_000, late(undefined));
     expect(frames.feed(`${BEGIN}done\r\n${END()}`)).toBeUndefined();
