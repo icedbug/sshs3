@@ -1,7 +1,13 @@
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { FactChange, ServerFacts } from "../../../shared/types/aiHub";
+import {
+  parseMemoryScope,
+  type FactChange,
+  type MemoryEntry,
+  type ServerFacts,
+} from "../../../shared/types/aiHub";
+import { diffFacts } from "./ServerFacts";
 
 /** What is kept about one server: the latest facts, what they were collected over, and the log of what changed. */
 export interface FactsRecord {
@@ -71,4 +77,104 @@ export class FactsStore {
     this.records.delete(serverId);
     await fs.rm(path.join(this.dir, `${safeName(serverId)}.json`), { force: true });
   }
+}
+
+export const STALE_DRIFT_KINDS = new Set<FactChange["kind"]>([
+  "os",
+  "kernel",
+  "service",
+  "port",
+  "file",
+]);
+
+export interface FlagStaleMemoriesOptions {
+  /** Prior server facts snapshot to diff against `factsRecord.facts` via `diffFacts`. */
+  prevFacts?: ServerFacts;
+  /** Cluster name(s) that this server belongs to, for matching `cluster:<name>` scopes. */
+  cluster?: string | string[];
+  /** Explicit drift changes instead of deriving from `prevFacts`/`factsRecord.changes`. */
+  changes?: FactChange[];
+  /** When true, ignore drift changes older than `memory.updatedAt`. */
+  onlyNewerChanges?: boolean;
+}
+
+function scopeMatchesFactsRecord(
+  scope: string,
+  factsRecord: FactsRecord,
+  cluster?: string | string[],
+): boolean {
+  const parsed = parseMemoryScope(scope);
+  if (!parsed.value) return false;
+  const target = parsed.value.trim().toLowerCase();
+  if (!target) return false;
+  if (parsed.kind === "server") {
+    return (
+      target === factsRecord.name.trim().toLowerCase() ||
+      target === factsRecord.serverId.trim().toLowerCase()
+    );
+  }
+  if (parsed.kind === "cluster") {
+    const clusterList = Array.isArray(cluster) ? cluster : cluster ? [cluster] : [];
+    const recordCluster = (factsRecord as FactsRecord & { cluster?: string }).cluster;
+    if (recordCluster) clusterList.push(recordCluster);
+    return clusterList.some((c) => c.trim().toLowerCase() === target);
+  }
+  return false;
+}
+
+function formatStaleReason(changes: FactChange[]): string {
+  const uniqueTexts: string[] = [];
+  const seen = new Set<string>();
+  for (const ch of changes) {
+    const line = `${ch.kind}: ${ch.text}`.trim();
+    if (!seen.has(line)) {
+      seen.add(line);
+      uniqueTexts.push(line);
+    }
+  }
+  const summary = `Drift detected (${uniqueTexts.slice(0, 3).join("; ")}${uniqueTexts.length > 3 ? `; +${uniqueTexts.length - 3} more` : ""})`;
+  return summary.length > 260 ? `${summary.slice(0, 257)}...` : summary;
+}
+
+/**
+ * Mark `server:<name>` and `cluster:<name>` memories with `staleReason` when OS, kernel,
+ * service, listening port, or watched-file drift is detected.
+ * Never deletes any entry (human-authored memories are preserved with `staleReason` flagged).
+ */
+export function flagStaleMemories(
+  memories: readonly MemoryEntry[],
+  factsRecord: FactsRecord,
+  options?: FlagStaleMemoriesOptions,
+): MemoryEntry[] {
+  const rawChanges: FactChange[] = options?.changes
+    ? options.changes
+    : options?.prevFacts && factsRecord.facts && !options.prevFacts.unsupported && !factsRecord.facts.unsupported
+      ? diffFacts(options.prevFacts, factsRecord.facts)
+      : (factsRecord.changes ?? []);
+
+  const driftChanges = rawChanges.filter((c) => STALE_DRIFT_KINDS.has(c.kind));
+  if (driftChanges.length === 0) {
+    return memories.map((m) => ({ ...m }));
+  }
+
+  return memories.map((memory) => {
+    if (memory.supersededBy) return { ...memory };
+    if (!scopeMatchesFactsRecord(memory.scope, factsRecord, options?.cluster)) {
+      return { ...memory };
+    }
+    const relevant = driftChanges.filter((change) => {
+      if (memory.lastVerifiedAt !== undefined && change.at <= memory.lastVerifiedAt) {
+        return false;
+      }
+      if (options?.onlyNewerChanges && change.at < memory.updatedAt) {
+        return false;
+      }
+      return true;
+    });
+    if (relevant.length === 0) return { ...memory };
+    return {
+      ...memory,
+      staleReason: formatStaleReason(relevant),
+    };
+  });
 }

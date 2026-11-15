@@ -162,6 +162,26 @@ export interface LastCommandResult {
   exitCode?: number;
 }
 
+export interface CommandBlockInfo {
+  id: string;
+  /** 0-based buffer row where the command/prompt began. */
+  startRow: number;
+  /** 0-based buffer row immediately after the block's output. */
+  endRow: number;
+  /** Command text with prompt stripped, when available. */
+  command: string;
+  /** Output text of this block (trailing prompt stripped). */
+  output: string;
+  /** Exit code when reported via OSC 133 `D`, otherwise undefined. */
+  exitCode?: number;
+  /** Whether the block was captured via OSC 133 marks or Enter-marker heuristic. */
+  source: 'osc' | 'enter-marker';
+  /** Number of non-empty output lines (0 when output is empty). */
+  lineCount: number;
+  /** True when the block has not finished yet. */
+  running: boolean;
+}
+
 interface OscRegion {
   start: IMarker;
   end?: IMarker;
@@ -194,6 +214,8 @@ export class CommandOutputTracker {
   private readonly promptAnchors: PromptAnchorTracker;
   /** Where each Enter's command began on its row, when the cursor told (see `promptAnchor.ts`). */
   private anchors = new Map<IMarker, PromptAnchor>();
+  private blockIds = new WeakMap<object, string>();
+  private nextBlockSeq = 1;
   private readonly oscHandler: { dispose(): void };
 
   constructor(private readonly term: Terminal) {
@@ -574,6 +596,105 @@ export class CommandOutputTracker {
       bounds,
       rows: describe(Math.min(bounds.start, newest.line) - 1, Math.max(bounds.end, newest.line) + 2),
     };
+  }
+
+  private stableBlockId(key: object): string {
+    let id = this.blockIds.get(key);
+    if (!id) {
+      id = `cmd-block-${this.nextBlockSeq++}`;
+      this.blockIds.set(key, id);
+    }
+    return id;
+  }
+
+  /**
+   * Returns tracked command blocks in chronological order (oldest first) for gutter/bookmark
+   * indicators. Returns an empty array when the terminal is in the alternate screen buffer
+   * (e.g. `vim`, `htop`).
+   */
+  public getCommandBlocks(options: { limit?: number; includeEmpty?: boolean } = {}): CommandBlockInfo[] {
+    const buf = this.term.buffer.active;
+    if (buf.type !== 'normal') return [];
+
+    const blocks: CommandBlockInfo[] = [];
+    const cursorLine = buf.baseY + buf.cursorY;
+    let lastOscStartLine = -1;
+
+    for (let i = 0; i < this.regions.length; i++) {
+      const region = this.regions[i];
+      const { start, end, commandMarker } = region;
+      if (start.isDisposed || start.line < 0) continue;
+
+      const hasValidCommandMarker = Boolean(commandMarker && !commandMarker.isDisposed && commandMarker.line >= 0);
+      const startRow = hasValidCommandMarker ? (commandMarker as IMarker).line : start.line;
+      lastOscStartLine = Math.max(lastOscStartLine, start.line);
+
+      const hasEnd = Boolean(end && !end.isDisposed && end.line >= 0);
+      const endRow = hasEnd ? this.outputEndRow(region) : cursorLine;
+
+      let command: string;
+      if (hasValidCommandMarker) {
+        command = stripPromptLoose(
+          this.readCommandRows((commandMarker as IMarker).line, this.commandRowsEnd((commandMarker as IMarker).line, start.line)).trim()
+        );
+      } else {
+        command = stripPromptLoose(this.readLogicalLine(start.line).trim());
+      }
+
+      const fromLine = hasValidCommandMarker && start.line === (commandMarker as IMarker).line ? start.line + 1 : start.line;
+      const output = stripTrailingPrompt(this.readLines(fromLine, endRow));
+      if (!options.includeEmpty && !command && !output.trim()) continue;
+
+      const isLastRegion = i === this.regions.length - 1;
+      const running = !hasEnd && !(this.cOnly && isLastRegion && isAtEmptyPrompt(this.term));
+      const trimmedOutput = output.trim();
+      blocks.push({
+        id: this.stableBlockId(region),
+        startRow,
+        endRow: Math.max(startRow + 1, endRow),
+        command,
+        output,
+        exitCode: region.exitCode,
+        source: 'osc',
+        lineCount: trimmedOutput ? output.split('\n').length : 0,
+        running,
+      });
+    }
+
+    const live = this.markers.filter((m) => !m.isDisposed && m.line >= 0 && m.line > lastOscStartLine);
+    for (let i = 0; i < live.length; i++) {
+      const marker = live[i];
+      const bounds = this.logicalLineBounds(marker.line);
+      const anchored = this.readAnchoredCommand(marker);
+      const rawLine = this.readLogicalLine(marker.line).trim();
+      const command = anchored ?? stripPromptLoose(rawLine);
+      if (!command || (anchored === null && command === rawLine)) continue;
+
+      const nextRow = i + 1 < live.length ? this.logicalLineBounds(live[i + 1].line).start : cursorLine;
+      const output = stripTrailingPrompt(this.readLines(bounds.end + 1, nextRow));
+      if (!options.includeEmpty && !command && !output.trim()) continue;
+
+      const running = i === live.length - 1 && !isAtEmptyPrompt(this.term);
+      const trimmedOutput = output.trim();
+      blocks.push({
+        id: this.stableBlockId(marker),
+        startRow: bounds.start,
+        endRow: Math.max(bounds.end + 1, nextRow),
+        command,
+        output,
+        source: 'enter-marker',
+        lineCount: trimmedOutput ? output.split('\n').length : 0,
+        running,
+      });
+    }
+
+    const limit = options.limit ?? 30;
+    return limit > 0 && blocks.length > limit ? blocks.slice(blocks.length - limit) : blocks;
+  }
+
+  /** Finds a specific command block by its stable id. */
+  public getBlockById(id: string): CommandBlockInfo | null {
+    return this.getCommandBlocks({ limit: 100, includeEmpty: true }).find((b) => b.id === id) ?? null;
   }
 
   /** Details of the most recent command output, or null when there is none. */

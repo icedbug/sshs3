@@ -1,27 +1,124 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  type HubPreferences,
   type HubSnapshot,
 } from "@shared/types/aiHub";
 import {
   DEFAULT_AI_MODELS,
   DEFAULT_PROVIDER_MODELS,
+  type AiActiveProfileByRole,
+  type AiEgressPolicy,
+  type AiPiiScrubbingMode,
+  type AiProfileRole,
+  type AiProvider,
   type AiReasoningEffort,
+  type ProviderProfile,
 } from "@shared/types/ai";
 import { isWebBrowserMode } from "../../lib/webClientBridge";
 import { ConfirmButton } from "./ConfirmButton";
-import { dataDestination } from "./dataDestination";
+import {
+  dataDestination,
+  describeActiveDataFlow,
+  formatEgressPolicyLabel,
+  formatPiiScrubbingLabel,
+} from "./dataDestination";
 import { DEMO_MODE_SET_BY_SERVER, type Act } from "./panelShared";
 import { McpKeysPanel } from "../McpKeysPanel";
 import { NotificationsCard } from "./NotificationsCard";
 import { SafetyPolicyCard } from "./SafetyPolicyCard";
 
-export function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Element {
+export const LABS_ENABLED_STORAGE_KEY = "sshs3.aiHub.labsEnabled";
+
+export interface SettingsProps {
+  hub: HubSnapshot;
+  act: Act;
+  labsEnabled?: boolean;
+  onToggleLabs?: (enabled: boolean) => void;
+}
+
+const PROFILE_ROLES: { role: AiProfileRole; label: string; hint: string }[] = [
+  {
+    role: "primary",
+    label: "Reasoning & Coding (primary)",
+    hint: "Main interactive chat, planning, and code/config edits.",
+  },
+  {
+    role: "fastTriage",
+    label: "Fast Triage (fast)",
+    hint: "Quick read-only checks, inline suggestions, and alert triage.",
+  },
+  {
+    role: "backgroundDistill",
+    label: "Summary & Distill (summary)",
+    hint: "Background session distillation, daily digests, and KB page compilation.",
+  },
+  {
+    role: "embedding",
+    label: "Embeddings (KB search)",
+    hint: "Semantic vector indexing for Knowledge Base documents and pages.",
+  },
+];
+
+interface ProfileDraft {
+  id?: string;
+  name: string;
+  provider: AiProvider;
+  model: string;
+  baseUrl: string;
+  apiKey: string;
+  egressPolicy: AiEgressPolicy;
+  zdrConfirmed: boolean;
+  reasoningEffort: AiReasoningEffort;
+  activeRole: "" | AiProfileRole;
+}
+
+function readStoredLabsEnabled(): boolean {
+  try {
+    if (typeof window === "undefined" || !window.localStorage) return false;
+    return window.localStorage.getItem(LABS_ENABLED_STORAGE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function writeStoredLabsEnabled(enabled: boolean): void {
+  try {
+    if (typeof window !== "undefined" && window.localStorage) {
+      window.localStorage.setItem(LABS_ENABLED_STORAGE_KEY, String(enabled));
+    }
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("sshs3:labs-changed", { detail: { enabled } }));
+    }
+  } catch {
+    // Ignore storage errors in restricted environments.
+  }
+}
+
+export function Settings({
+  hub,
+  act,
+  labsEnabled: controlledLabs,
+  onToggleLabs,
+}: SettingsProps): JSX.Element {
   // The keys panel is written against the team server's HTTP API; on this app the same
   // calls are the hub's own requests.
   const localKeysApi = async <T,>(path: string, options?: RequestInit): Promise<T> => {
     if (options?.method === "POST") {
-      const body = JSON.parse(String(options.body)) as { name: string; scopes: string[]; serverId?: string; expiresInDays?: number; tools?: string[] };
-      const next = await act({ action: "mcp-key-create", name: body.name, scopes: body.scopes, serverId: body.serverId, expiresInDays: body.expiresInDays, tools: body.tools });
+      const body = JSON.parse(String(options.body)) as {
+        name: string;
+        scopes: string[];
+        serverId?: string;
+        expiresInDays?: number;
+        tools?: string[];
+      };
+      const next = await act({
+        action: "mcp-key-create",
+        name: body.name,
+        scopes: body.scopes,
+        serverId: body.serverId,
+        expiresInDays: body.expiresInDays,
+        tools: body.tools,
+      });
       const made = next?.reply?.mcpKey;
       if (!made) throw new Error("The key could not be made.");
       return made as T;
@@ -33,38 +130,40 @@ export function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Elem
     const next = await act({ action: "mcp-key-list" });
     return { keys: next?.localMcp?.keys ?? [] } as T;
   };
+
   const [provider, setProvider] = useState(hub.config.provider);
   const [model, setModel] = useState(hub.config.model);
   const [customModelMode, setCustomModelMode] = useState(false);
   const [url, setUrl] = useState(hub.config.baseUrl ?? "");
-  const [embeddingModel, setEmbeddingModel] = useState(
-    hub.config.embeddingModel ?? "",
-  );
+  const [embeddingModel, setEmbeddingModel] = useState(hub.config.embeddingModel ?? "");
   const [fastModel, setFastModel] = useState(hub.config.fastModel ?? "");
   const [key, setKey] = useState("");
   const [actorName, setActorName] = useState(hub.config.actorName ?? "");
   const [enabled, setEnabled] = useState(hub.config.enabled);
-  const [contextWindowTokens, setContextWindowTokens] = useState(
-    hub.config.contextWindowTokens ?? 128000,
+  const [egressPolicy, setEgressPolicy] = useState<AiEgressPolicy>(hub.config.egressPolicy ?? "standard");
+  const [zdrConfirmed, setZdrConfirmed] = useState<boolean>(Boolean(hub.config.zdrConfirmed));
+  const [piiScrubbing, setPiiScrubbing] = useState<AiPiiScrubbingMode>(hub.config.piiScrubbing ?? "standard");
+  const [activeProfileByRole, setActiveProfileByRole] = useState<AiActiveProfileByRole>(
+    hub.config.activeProfileByRole ?? {},
   );
-  const [terminalContextChars, setTerminalContextChars] = useState(
-    hub.config.terminalContextChars ?? 8000,
-  );
-  const [maxOutputTokens, setMaxOutputTokens] = useState(
-    hub.config.maxOutputTokens ?? 8192,
-  );
-  const [maxToolTurns, setMaxToolTurns] = useState(
-    hub.config.maxToolTurns ?? 20,
-  );
-  const [reasoningEffort, setReasoningEffort] = useState<AiReasoningEffort>(
-    hub.config.reasoningEffort ?? "medium",
-  );
-  const [temperature, setTemperature] = useState(
-    hub.config.temperature ?? 0.2,
-  );
-  const [prefs, setPrefs] = useState(hub.preferences);
+  const [profileDraft, setProfileDraft] = useState<ProfileDraft | undefined>();
+  const [contextWindowTokens, setContextWindowTokens] = useState(hub.config.contextWindowTokens ?? 128000);
+  const [terminalContextChars, setTerminalContextChars] = useState(hub.config.terminalContextChars ?? 8000);
+  const [maxOutputTokens, setMaxOutputTokens] = useState(hub.config.maxOutputTokens ?? 8192);
+  const [maxToolTurns, setMaxToolTurns] = useState(hub.config.maxToolTurns ?? 20);
+  const [reasoningEffort, setReasoningEffort] = useState<AiReasoningEffort>(hub.config.reasoningEffort ?? "medium");
+  const [temperature, setTemperature] = useState(hub.config.temperature ?? 0.2);
+  const [prefs, setPrefs] = useState<HubPreferences>(hub.preferences);
+  const [internalLabs, setInternalLabs] = useState<boolean>(() => readStoredLabsEnabled());
   const [savedNotice, setSavedNotice] = useState(false);
   const modelInputRef = useRef<HTMLInputElement>(null);
+
+  const labsEnabled = controlledLabs ?? internalLabs;
+  const setLabsEnabled = (next: boolean): void => {
+    setInternalLabs(next);
+    writeStoredLabsEnabled(next);
+    onToggleLabs?.(next);
+  };
 
   useEffect(() => {
     setProvider(hub.config.provider);
@@ -75,6 +174,10 @@ export function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Elem
     setFastModel(hub.config.fastModel ?? "");
     setActorName(hub.config.actorName ?? "");
     setEnabled(hub.config.enabled);
+    setEgressPolicy(hub.config.egressPolicy ?? "standard");
+    setZdrConfirmed(Boolean(hub.config.zdrConfirmed));
+    setPiiScrubbing(hub.config.piiScrubbing ?? "standard");
+    setActiveProfileByRole(hub.config.activeProfileByRole ?? {});
     setContextWindowTokens(hub.config.contextWindowTokens ?? 128000);
     setTerminalContextChars(hub.config.terminalContextChars ?? 8000);
     setMaxOutputTokens(hub.config.maxOutputTokens ?? 8192);
@@ -89,6 +192,10 @@ export function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Elem
     hub.config.fastModel,
     hub.config.actorName,
     hub.config.enabled,
+    hub.config.egressPolicy,
+    hub.config.zdrConfirmed,
+    hub.config.piiScrubbing,
+    hub.config.activeProfileByRole,
     hub.config.contextWindowTokens,
     hub.config.terminalContextChars,
     hub.config.maxOutputTokens,
@@ -108,6 +215,24 @@ export function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Elem
         : DEFAULT_PROVIDER_MODELS["openai-codex"]
       : DEFAULT_PROVIDER_MODELS[provider] ?? [];
 
+  const profiles: ProviderProfile[] = hub.config.profiles ?? [];
+
+  const dataFlow = useMemo(
+    () =>
+      describeActiveDataFlow(
+        {
+          provider,
+          baseUrl: provider === "openai-codex" ? "" : url,
+          model,
+          egressPolicy,
+          zdrConfirmed,
+          piiScrubbing,
+        },
+        hub.s3Workspace,
+      ),
+    [provider, url, model, egressPolicy, zdrConfirmed, piiScrubbing, hub.s3Workspace],
+  );
+
   return (
     <form
       className="ai-scroll ai-form"
@@ -121,11 +246,14 @@ export function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Elem
             provider,
             model: model.trim(),
             baseUrl: provider === "openai-codex" ? "" : url.trim(),
-            embeddingModel:
-              provider === "openai-compatible" ? embeddingModel.trim() : "",
+            embeddingModel: provider === "openai-compatible" ? embeddingModel.trim() : "",
             fastModel: fastModel.trim(),
             actorName,
             useHermes: false,
+            egressPolicy,
+            zdrConfirmed,
+            piiScrubbing,
+            activeProfileByRole,
             contextWindowTokens,
             terminalContextChars,
             maxOutputTokens,
@@ -161,47 +289,43 @@ export function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Elem
         </label>
         <label>
           Provider
-        <select
-          value={provider}
-          onChange={(e) => {
-            const next = e.target.value as typeof provider;
-            // Another provider starts from its own address: a key typed next must not go to the old gateway.
-            if (next !== provider) setUrl("");
-            setProvider(next);
-            setCustomModelMode(false);
-            setSavedNotice(false);
-            if (next === "openai-codex") {
-              const codexDefault =
-                hub.config.codexDefaultModel || DEFAULT_AI_MODELS["openai-codex"];
-              const validCodex =
-                hub.config.codexModels ?? DEFAULT_PROVIDER_MODELS["openai-codex"];
-              if (
-                !model ||
-                model === "local" ||
-                model === "gpt-sol-latest" ||
-                model.startsWith("claude-") ||
-                !validCodex.includes(model)
-              ) {
-                setModel(codexDefault);
+          <select
+            value={provider}
+            onChange={(e) => {
+              const next = e.target.value as typeof provider;
+              // Another provider starts from its own address: a key typed next must not go to the old gateway.
+              if (next !== provider) setUrl("");
+              setProvider(next);
+              setCustomModelMode(false);
+              setSavedNotice(false);
+              if (next === "openai-codex") {
+                const codexDefault = hub.config.codexDefaultModel || DEFAULT_AI_MODELS["openai-codex"];
+                const validCodex = hub.config.codexModels ?? DEFAULT_PROVIDER_MODELS["openai-codex"];
+                if (
+                  !model ||
+                  model === "local" ||
+                  model === "gpt-sol-latest" ||
+                  model.startsWith("claude-") ||
+                  !validCodex.includes(model)
+                ) {
+                  setModel(codexDefault);
+                }
+                if (url.includes("openrouter.ai")) {
+                  setUrl("");
+                }
+              } else if (next === "anthropic") {
+                if (!model || !model.startsWith("claude-")) {
+                  setModel(DEFAULT_AI_MODELS.anthropic);
+                }
               }
-              if (url.includes("openrouter.ai")) {
-                setUrl("");
-              }
-            } else if (next === "anthropic") {
-              if (!model || !model.startsWith("claude-")) {
-                setModel(DEFAULT_AI_MODELS.anthropic);
-              }
-            }
-          }}
-        >
-          <option value="openai-codex">
-            ChatGPT / Codex (OAuth — {hub.config.codexDefaultModel || "gpt-6.1-sol"})
-          </option>
-          <option value="anthropic">Anthropic</option>
-          <option value="openai-compatible">
-            OpenAI-compatible / local / enterprise
-          </option>
-        </select>
+            }}
+          >
+            <option value="openai-codex">
+              ChatGPT / Codex (OAuth — {hub.config.codexDefaultModel || "gpt-6.1-sol"})
+            </option>
+            <option value="anthropic">Anthropic</option>
+            <option value="openai-compatible">OpenAI-compatible / local / enterprise</option>
+          </select>
         </label>
         <small data-testid="ai-data-destination">{dataDestination(provider, url)}</small>
         {provider === "openai-codex" && (
@@ -265,7 +389,9 @@ export function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Elem
               <input
                 value={url}
                 onChange={(e) => setUrl(e.target.value)}
-                placeholder={provider === "anthropic" ? "https://api.anthropic.com (default)" : "http://localhost:11434/v1"}
+                placeholder={
+                  provider === "anthropic" ? "https://api.anthropic.com (default)" : "http://localhost:11434/v1"
+                }
               />
             </label>
             <label>
@@ -324,6 +450,384 @@ export function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Elem
         )}
       </section>
 
+      <section className="ai-set" data-testid="provider-profiles-section">
+        <div className="ai-section-head">
+          <div>
+            <h3>
+              Provider profiles &amp; role routing <span className="ai-count">{profiles.length}</span>
+            </h3>
+            <small>
+              Save multiple model endpoints (e.g. Anthropic cloud, local Ollama, internal vLLM) and route each role
+              independently.
+            </small>
+          </div>
+          <button
+            type="button"
+            data-testid="add-profile-btn"
+            onClick={() =>
+              setProfileDraft(
+                profileDraft
+                  ? undefined
+                  : {
+                      name: "",
+                      provider: "openai-compatible",
+                      model: "",
+                      baseUrl: "http://localhost:11434/v1",
+                      apiKey: "",
+                      egressPolicy: "local-only",
+                      zdrConfirmed: false,
+                      reasoningEffort: "medium",
+                      activeRole: "",
+                    },
+              )
+            }
+          >
+            {profileDraft ? "Close" : "Add profile"}
+          </button>
+        </div>
+
+        {profileDraft && (
+          <div className="ai-card ai-form" data-testid="profile-form">
+            <strong>{profileDraft.id ? "Edit provider profile" : "New provider profile"}</strong>
+            <div className="ai-form-row">
+              <label>
+                Profile name
+                <input
+                  aria-label="Profile name"
+                  placeholder="ollama-local / anthropic-eu"
+                  value={profileDraft.name}
+                  onChange={(e) => setProfileDraft({ ...profileDraft, name: e.target.value })}
+                />
+              </label>
+              <label>
+                Provider
+                <select
+                  aria-label="Profile provider"
+                  value={profileDraft.provider}
+                  onChange={(e) =>
+                    setProfileDraft({ ...profileDraft, provider: e.target.value as AiProvider })
+                  }
+                >
+                  <option value="openai-codex">ChatGPT / Codex (OAuth)</option>
+                  <option value="anthropic">Anthropic</option>
+                  <option value="openai-compatible">OpenAI-compatible / local</option>
+                </select>
+              </label>
+            </div>
+            <div className="ai-form-row">
+              <label>
+                Model ID
+                <input
+                  aria-label="Profile model"
+                  placeholder="qwen3:32b / claude-sonnet-5-5"
+                  value={profileDraft.model}
+                  onChange={(e) => setProfileDraft({ ...profileDraft, model: e.target.value })}
+                />
+              </label>
+              <label>
+                Endpoint URL (optional)
+                <input
+                  aria-label="Profile base URL"
+                  placeholder="http://localhost:11434/v1"
+                  value={profileDraft.baseUrl}
+                  onChange={(e) => setProfileDraft({ ...profileDraft, baseUrl: e.target.value })}
+                />
+              </label>
+            </div>
+            <div className="ai-form-row">
+              <label>
+                Egress policy
+                <select
+                  aria-label="Profile egress policy"
+                  value={profileDraft.egressPolicy}
+                  onChange={(e) =>
+                    setProfileDraft({ ...profileDraft, egressPolicy: e.target.value as AiEgressPolicy })
+                  }
+                >
+                  <option value="standard">Standard</option>
+                  <option value="eu-pinned">EU-pinned</option>
+                  <option value="local-only">Local-only</option>
+                </select>
+              </label>
+              <label>
+                Assign to role (optional)
+                <select
+                  aria-label="Profile role"
+                  value={profileDraft.activeRole}
+                  onChange={(e) =>
+                    setProfileDraft({ ...profileDraft, activeRole: e.target.value as "" | AiProfileRole })
+                  }
+                >
+                  <option value="">Do not assign</option>
+                  {PROFILE_ROLES.map((r) => (
+                    <option key={r.role} value={r.role}>
+                      {r.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            {profileDraft.provider !== "openai-codex" && (
+              <label>
+                API key (optional)
+                <input
+                  type="password"
+                  autoComplete="off"
+                  aria-label="Profile API key"
+                  placeholder="Leave blank to keep existing or omit for local"
+                  value={profileDraft.apiKey}
+                  onChange={(e) => setProfileDraft({ ...profileDraft, apiKey: e.target.value })}
+                />
+              </label>
+            )}
+            <label className="ai-check">
+              <input
+                type="checkbox"
+                checked={profileDraft.zdrConfirmed}
+                onChange={(e) => setProfileDraft({ ...profileDraft, zdrConfirmed: e.target.checked })}
+              />
+              <span>Zero Data Retention (ZDR) confirmed for this profile</span>
+            </label>
+            <div className="ai-card-actions">
+              <button
+                type="button"
+                className="ai-btn-emerald"
+                onClick={() => {
+                  const name = profileDraft.name.trim();
+                  const pModel = profileDraft.model.trim();
+                  if (!name || !pModel) return;
+                  void act({
+                    action: "profile-save",
+                    profile: {
+                      id: profileDraft.id,
+                      name,
+                      provider: profileDraft.provider,
+                      model: pModel,
+                      baseUrl: profileDraft.baseUrl.trim() || undefined,
+                      egressPolicy: profileDraft.egressPolicy,
+                      zdrConfirmed: profileDraft.zdrConfirmed,
+                      reasoningEffort: profileDraft.reasoningEffort,
+                    },
+                    ...(profileDraft.apiKey ? { apiKey: profileDraft.apiKey } : {}),
+                    ...(profileDraft.activeRole ? { activeRole: profileDraft.activeRole } : {}),
+                  }).then((next) => {
+                    if (next) setProfileDraft(undefined);
+                  });
+                }}
+              >
+                Save profile
+              </button>
+              <button type="button" onClick={() => setProfileDraft(undefined)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+
+        {profiles.length > 0 && (
+          <div className="ai-grid" data-testid="provider-profiles-list">
+            {profiles.map((p) => {
+              const assignedRoles = PROFILE_ROLES.filter((r) => activeProfileByRole[r.role] === p.id).map(
+                (r) => r.role,
+              );
+              return (
+                <article className="ai-card" key={p.id} data-testid={`profile-card-${p.id}`}>
+                  <div className="ai-card-head">
+                    <div>
+                      <strong>{p.name}</strong>
+                      <small className="ai-mono">
+                        {p.provider} · {p.model}
+                        {p.baseUrl ? ` · ${p.baseUrl}` : ""}
+                      </small>
+                    </div>
+                    <div className="ai-tags">
+                      {p.egressPolicy && <span className="ai-badge">{p.egressPolicy}</span>}
+                      {p.zdrConfirmed && <span className="ai-badge ai-badge-success">ZDR</span>}
+                      {p.hasApiKey && <span className="ai-badge">key saved</span>}
+                      {assignedRoles.map((role) => (
+                        <span key={role} className="ai-badge ai-badge-purple">
+                          {role}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="ai-card-actions">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setProfileDraft({
+                          id: p.id,
+                          name: p.name,
+                          provider: p.provider,
+                          model: p.model,
+                          baseUrl: p.baseUrl ?? "",
+                          apiKey: "",
+                          egressPolicy: p.egressPolicy ?? "standard",
+                          zdrConfirmed: Boolean(p.zdrConfirmed),
+                          reasoningEffort: p.reasoningEffort ?? "medium",
+                          activeRole: "",
+                        })
+                      }
+                    >
+                      Edit
+                    </button>
+                    <span className="ai-spacer" />
+                    <ConfirmButton
+                      label="Delete"
+                      confirmLabel="Remove this profile?"
+                      onConfirm={() => void act({ action: "profile-delete", id: p.id })}
+                    />
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        )}
+
+        <div className="ai-form-row" data-testid="role-routing-grid">
+          {PROFILE_ROLES.map(({ role, label, hint }) => (
+            <label key={role}>
+              {label}
+              <select
+                aria-label={label}
+                data-testid={`role-select-${role}`}
+                value={activeProfileByRole[role] ?? ""}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setActiveProfileByRole((prev) => {
+                    const next = { ...prev };
+                    if (value) next[role] = value;
+                    else delete next[role];
+                    return next;
+                  });
+                  setSavedNotice(false);
+                }}
+              >
+                <option value="">Default ({model || "configured model"})</option>
+                {profiles.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name} ({p.model})
+                  </option>
+                ))}
+              </select>
+              <small>{hint}</small>
+            </label>
+          ))}
+        </div>
+      </section>
+
+      <section className="ai-set" data-testid="privacy-residency-section">
+        <h3>Privacy, Data Residency &amp; Zero Data Retention</h3>
+        <div className="ai-form-row">
+          <label>
+            Egress policy
+            <select
+              aria-label="Egress policy"
+              data-testid="ai-egress-policy"
+              value={egressPolicy}
+              onChange={(e) => {
+                setEgressPolicy(e.target.value as AiEgressPolicy);
+                setSavedNotice(false);
+              }}
+            >
+              <option value="standard">Standard — all HTTPS &amp; local endpoints</option>
+              <option value="eu-pinned">EU-pinned — EU residency endpoints only</option>
+              <option value="local-only">Local-only — loopback &amp; private network only</option>
+            </select>
+            <small>{formatEgressPolicyLabel(egressPolicy)}</small>
+          </label>
+          <label>
+            PII scrubbing before egress
+            <select
+              aria-label="PII scrubbing"
+              data-testid="ai-pii-scrubbing"
+              value={piiScrubbing}
+              onChange={(e) => {
+                setPiiScrubbing(e.target.value as AiPiiScrubbingMode);
+                setSavedNotice(false);
+              }}
+            >
+              <option value="off">Off — recognised secrets only</option>
+              <option value="standard">Standard — secrets + emails, IPs, phones</option>
+              <option value="strict">Strict — aggressive PII, hostnames &amp; high-entropy</option>
+            </select>
+            <small>{formatPiiScrubbingLabel(piiScrubbing)}</small>
+          </label>
+        </div>
+
+        <label className="ai-check">
+          <input
+            type="checkbox"
+            data-testid="ai-zdr-confirmed"
+            checked={zdrConfirmed}
+            onChange={(e) => {
+              setZdrConfirmed(e.target.checked);
+              setSavedNotice(false);
+            }}
+          />
+          <span>
+            Zero Data Retention (ZDR) confirmed
+            <small>
+              Acknowledge that your external provider agreement guarantees zero prompt/response training or retention
+              before sending context off-device.
+            </small>
+          </span>
+        </label>
+
+        <article className="ai-card" data-testid="ai-data-flow-card">
+          <div className="ai-card-head">
+            <div>
+              <strong>What leaves this machine</strong>
+              <small>{dataFlow.summary}</small>
+            </div>
+            <span
+              className={`ai-badge ${dataFlow.egressValidation.allowed ? "ai-badge-success" : "ai-badge-danger"}`}
+              data-testid="data-flow-status-badge"
+            >
+              {dataFlow.egressValidation.allowed ? "Policy allowed" : "Blocked by policy"}
+            </span>
+          </div>
+
+          {dataFlow.egressValidation.errors.length > 0 && (
+            <ul className="ai-eval-checks" data-testid="data-flow-errors">
+              {dataFlow.egressValidation.errors.map((err, i) => (
+                <li key={i} data-passed="no">
+                  {err}
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {dataFlow.egressValidation.warnings.length > 0 && (
+            <ul className="ai-eval-checks" data-testid="data-flow-warnings">
+              {dataFlow.egressValidation.warnings.map((warn, i) => (
+                <li key={i} data-passed="note">
+                  {warn}
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <div className="ai-tags">
+            {dataFlow.channels.map((ch) => (
+              <span key={ch.channel} className="ai-tool-tag" title={ch.destination}>
+                {ch.channel}: <strong>{ch.locality}</strong>
+                {ch.enabled ? (ch.encryptedInTransit ? " · TLS" : " · plaintext") : ""}
+                {ch.piiScrubbing ? ` · PII:${ch.piiScrubbing}` : ""}
+              </span>
+            ))}
+          </div>
+
+          <small data-testid="data-flow-subprocessors">
+            {dataFlow.subprocessors.length > 0
+              ? `External subprocessors: ${dataFlow.subprocessors
+                  .map((s) => `${s.name} (${s.locality}, ${s.zdrConfirmed ? "ZDR confirmed" : "ZDR unconfirmed"})`)
+                  .join("; ")}`
+              : "No external subprocessors — prompts and workspace data remain on this machine or private network."}
+          </small>
+        </article>
+      </section>
+
       <section className="ai-set">
         <h3>You and the team</h3>
         <label>
@@ -367,7 +871,11 @@ export function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Elem
             aria-label="Approval wait"
             value={hub.preferences.approvalWaitMinutes ?? 10}
             onChange={(e) =>
-              void act({ action: "configure", config: {}, preferences: { ...hub.preferences, approvalWaitMinutes: Number(e.target.value) } })
+              void act({
+                action: "configure",
+                config: {},
+                preferences: { ...hub.preferences, approvalWaitMinutes: Number(e.target.value) },
+              })
             }
           >
             {[10, 20, 30, 45, 60].map((m) => (
@@ -377,10 +885,77 @@ export function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Elem
             ))}
           </select>
           <small>
-            After that the action counts as denied and the agent goes on without it. The wait does not use up the run's
+            After that the action counts as denied and the agent goes on without it. The wait does not use up the run&apos;s
             time budget. Longer suits approvals that are answered from a phone.
           </small>
         </label>
+      </section>
+
+      <section className="ai-set" data-testid="labs-features-section">
+        <h3>Labs Features (Autonomous Ops &amp; Evaluation)</h3>
+        <label className="ai-check">
+          <input
+            type="checkbox"
+            data-testid="labs-features-toggle"
+            checked={labsEnabled}
+            onChange={(e) => setLabsEnabled(e.target.checked)}
+          />
+          <span>
+            Show Labs views &amp; autonomous ops (Workforce, Agent Evals, KB Compile, Memory &amp; Schedules)
+            <small>
+              Progressive disclosure: keeps the daily workspace focused on Terminal Chat, Approvals, and Runbooks until
+              enabled.
+            </small>
+          </span>
+        </label>
+        {labsEnabled && (
+          <div className="ai-switches" data-testid="labs-features-controls">
+            <label className="ai-check">
+              <input
+                type="checkbox"
+                checked={Boolean(prefs.workforceAutopilot)}
+                onChange={(e) => setPrefs({ ...prefs, workforceAutopilot: e.target.checked })}
+              />
+              <span>
+                Workforce Autopilot
+                <small>Allow background heartbeat to claim and execute queued &ldquo;todo&rdquo; tickets.</small>
+              </span>
+            </label>
+            <label className="ai-check">
+              <input
+                type="checkbox"
+                checked={prefs.proposeMemories !== false}
+                onChange={(e) => setPrefs({ ...prefs, proposeMemories: e.target.checked })}
+              />
+              <span>
+                KB Compile &amp; Memory Distillation
+                <small>After finished tasks, propose team memories and compile verified findings into KB pages.</small>
+              </span>
+            </label>
+            <label className="ai-check">
+              <input
+                type="checkbox"
+                checked={prefs.autoSaveMemories !== false}
+                onChange={(e) => setPrefs({ ...prefs, autoSaveMemories: e.target.checked })}
+              />
+              <span>
+                Auto-save verified low-risk memories
+                <small>Off: hold all proposed memories in the review queue until explicitly accepted.</small>
+              </span>
+            </label>
+            <label className="ai-check">
+              <input
+                type="checkbox"
+                checked={prefs.recordSessions !== false}
+                onChange={(e) => setPrefs({ ...prefs, recordSessions: e.target.checked })}
+              />
+              <span>
+                Record agent-owned terminal sessions
+                <small>Save masked asciicast v2 recordings for replay and eval promotion.</small>
+              </span>
+            </label>
+          </div>
+        )}
       </section>
 
       <section className="ai-set">
@@ -391,40 +966,40 @@ export function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Elem
       {/* The app answering this person's own agent. In a browser the team server already
           has its endpoint and the keys live with the account, so this is not shown there. */}
       {!isWebBrowserMode() && (
-      <section className="ai-set" data-testid="local-mcp">
-        <h3>Your own agents (MCP)</h3>
-        <label className="ai-check">
-          <input
-            type="checkbox"
-            checked={Boolean(hub.localMcp?.enabled)}
-            aria-label="Let your own agents reach this app"
-            onChange={(e) => void act({ action: "mcp-local-set", enabled: e.target.checked })}
-          />
-          <span>
-            Let your own agents reach this app
-            <small>
-              Claude Code, Cursor or anything else that speaks MCP can then ask this sshs3 about your servers, what
-              changed on them and what you have written down. It listens on this computer only (127.0.0.1), it is off
-              until you switch it on, and it answers nothing without one of your keys.
-            </small>
-          </span>
-        </label>
-        {hub.localMcp?.error && <p className="ai-error">It could not start: {hub.localMcp.error}</p>}
-        {hub.localMcp?.enabled && hub.localMcp.address && (
-          <>
-            <p className="ai-hint">
-              It answers at <code>{hub.localMcp.address}</code>.
-            </p>
-            <McpKeysPanel
-              api={localKeysApi}
-              origin=""
-              endpoint={hub.localMcp.address}
-              title="Your keys"
-              intro="A key is shown once, when you make it. It acts as you and sees what you see; take it back at any time."
+        <section className="ai-set" data-testid="local-mcp">
+          <h3>Your own agents (MCP)</h3>
+          <label className="ai-check">
+            <input
+              type="checkbox"
+              checked={Boolean(hub.localMcp?.enabled)}
+              aria-label="Let your own agents reach this app"
+              onChange={(e) => void act({ action: "mcp-local-set", enabled: e.target.checked })}
             />
-          </>
-        )}
-      </section>
+            <span>
+              Let your own agents reach this app
+              <small>
+                Claude Code, Cursor or anything else that speaks MCP can then ask this sshs3 about your servers, what
+                changed on them and what you have written down. It listens on this computer only (127.0.0.1), it is off
+                until you switch it on, and it answers nothing without one of your keys.
+              </small>
+            </span>
+          </label>
+          {hub.localMcp?.error && <p className="ai-error">It could not start: {hub.localMcp.error}</p>}
+          {hub.localMcp?.enabled && hub.localMcp.address && (
+            <>
+              <p className="ai-hint">
+                It answers at <code>{hub.localMcp.address}</code>.
+              </p>
+              <McpKeysPanel
+                api={localKeysApi}
+                origin=""
+                endpoint={hub.localMcp.address}
+                title="Your keys"
+                intro="A key is shown once, when you make it. It acts as you and sees what you see; take it back at any time."
+              />
+            </>
+          )}
+        </section>
       )}
 
       <details className="ai-fold ai-set-fold">
@@ -523,7 +1098,11 @@ export function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Elem
                 type="checkbox"
                 checked={prefs.background}
                 onChange={(e) =>
-                  setPrefs({ ...prefs, background: e.target.checked, autoStart: e.target.checked && prefs.autoStart })
+                  setPrefs({
+                    ...prefs,
+                    background: e.target.checked,
+                    autoStart: e.target.checked && prefs.autoStart,
+                  })
                 }
               />
               <span>
@@ -609,3 +1188,5 @@ export function Settings({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Elem
     </form>
   );
 }
+
+export { Settings as SettingsView };

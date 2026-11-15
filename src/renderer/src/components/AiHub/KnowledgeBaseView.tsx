@@ -5,13 +5,17 @@ import {
   type KbDocument,
   type KbPage,
   type KbSearchHit,
+  type RunbookStep,
+  type RunbookTemplate,
 } from "@shared/types/aiHub";
 import { hubRequest } from "../../lib/aiHub";
 import { isWebBrowserMode } from "../../lib/webClientBridge";
 import { ConfirmButton } from "./ConfirmButton";
+import { HighlightedCode } from "./DiffViewer";
 import { KbPages, KbReview } from "./KbPagesView";
 import { emptyPage, type PageDraft } from "./kbPageDraft";
 import { type Act } from "./panelShared";
+import { decodeFileRefHref, extractFileRefs, linkFileRefs, type FileRef } from "./reportRefs";
 import { RichMarkdownContent } from "./RichMarkdownContent";
 
 interface DocDraft {
@@ -32,6 +36,130 @@ interface InboxItem {
   state: "reading" | "added" | "updated" | "duplicate" | "failed";
   note?: string;
 }
+
+export interface KbStarterTemplate {
+  id: string;
+  label: string;
+  description: string;
+  title: string;
+  collection: string;
+  kind: NonNullable<KbDocument["kind"]>;
+  tags: string[];
+  content: string;
+}
+
+export const KB_STARTER_TEMPLATES: KbStarterTemplate[] = [
+  {
+    id: "linux-incident-runbook",
+    label: "Linux Incident Runbook",
+    description: "Triage CPU spikes, OOM kills, disk saturation, and failed systemd units.",
+    title: "Linux Incident Runbook",
+    collection: "Runbooks",
+    kind: "runbook",
+    tags: ["linux", "incident", "triage", "systemd"],
+    content: [
+      "# Linux Incident Runbook",
+      "",
+      "## Initial Read-Only Triage",
+      "1. Check failed services: `systemctl --failed`",
+      "2. Inspect recent critical errors: `journalctl -p err -n 100 --no-pager`",
+      "3. Check kernel OOM and I/O warnings: `dmesg -T | tail -n 80`",
+      "4. Check disk space and inodes: `df -hT && df -Pi`",
+      "",
+      "## Key Files",
+      "- `/var/log/syslog:1`",
+      "- `/etc/systemd/system`",
+    ].join("\n"),
+  },
+  {
+    id: "postgres-failover-sop",
+    label: "PostgreSQL Failover SOP",
+    description: "Pre-flight replication checks, Patroni switchover, and split-brain prevention.",
+    title: "PostgreSQL Failover SOP",
+    collection: "Databases",
+    kind: "runbook",
+    tags: ["postgresql", "failover", "patroni", "sop"],
+    content: [
+      "# PostgreSQL Failover SOP",
+      "",
+      "## Pre-Flight Checks",
+      "1. Verify primary status: `pg_isready -h pg-primary -p 5432`",
+      "2. Check cluster topology: `patronictl list`",
+      "3. Inspect `/etc/postgresql/16/main/postgresql.conf:1`",
+      "",
+      "## Failover Procedure",
+      "1. Confirm fencing of the unhealthy primary before promoting a standby.",
+      "2. Execute controlled switchover: `patronictl switchover`",
+      "3. Verify read/write connectivity on the new primary.",
+    ].join("\n"),
+  },
+  {
+    id: "cluster-architecture-map",
+    label: "Cluster Architecture Map",
+    description: "Document node roles, VIPs, storage mounts, and critical dependencies.",
+    title: "Cluster Architecture Map",
+    collection: "Architecture",
+    kind: "architecture",
+    tags: ["cluster", "architecture", "topology"],
+    content: [
+      "# Cluster Architecture Map",
+      "",
+      "## Topology Overview",
+      "- Edge / Ingress: `/etc/nginx/nginx.conf:1`",
+      "- App tier: stateless workers connected to PostgreSQL primary + Redis",
+      "- Storage tier: shared NFS/S3 backups mounted on backup nodes",
+      "",
+      "## Critical Dependencies",
+      "- DNS / VIP health checks must pass before routing traffic.",
+    ].join("\n"),
+  },
+];
+
+export const STARTER_RUNBOOK_TEMPLATES: Omit<RunbookTemplate, "id" | "createdAt" | "updatedAt">[] = [
+  {
+    name: "Linux Service & Resource Triage",
+    description: "Deterministic read-only checks followed by AI root-cause synthesis.",
+    dispatchStrategy: "sequential",
+    inputs: [
+      {
+        name: "service",
+        label: "Systemd service",
+        type: "string",
+        required: true,
+        defaultValue: "nginx",
+        description: "Target systemd unit to inspect",
+      },
+      {
+        name: "since",
+        label: "Journal lookback",
+        type: "enum",
+        options: ["15m", "1h", "6h"],
+        defaultValue: "1h",
+      },
+    ],
+    steps: [
+      {
+        id: "step-status",
+        title: "Check unit status",
+        kind: "check",
+        command: "systemctl status {{service}} --no-pager",
+        expected: "Active: active (running)",
+      },
+      {
+        id: "step-logs",
+        title: "Read recent error logs",
+        kind: "command",
+        command: "journalctl -u {{service}} -p err --since '-{{since}}' --no-pager",
+      },
+      {
+        id: "step-diagnose",
+        title: "Synthesize root cause",
+        kind: "ai_diagnose",
+        prompt: "Analyze service {{service}} status and logs from the last {{since}} and propose safe remediation.",
+      },
+    ],
+  },
+];
 
 const emptyDoc: DocDraft = { title: "", collection: "", cluster: "", tags: "", content: "" };
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
@@ -54,6 +182,88 @@ function excerpt(content: string): string {
     .slice(1, 4)
     .join(" · ");
   return text.length > 220 ? `${text.slice(0, 220)}…` : text;
+}
+
+/** Splits a search snippet into highlighted segments using linear case-insensitive matching (ReDoS-free). */
+export function highlightSearchSnippet(
+  snippet: string,
+  query: string,
+  maxLength = 260,
+): Array<{ text: string; match: boolean }> {
+  const normalized = snippet.replace(/\s+/g, " ").trim();
+  if (!normalized) return [];
+
+  const rawTerms = query
+    .trim()
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean);
+  const longTerms = rawTerms.filter((t) => t.length >= 2);
+  const terms = Array.from(new Set(longTerms.length > 0 ? longTerms : rawTerms)).sort((a, b) => b.length - a.length);
+
+  if (terms.length === 0) {
+    return [{ text: normalized.length > maxLength ? `${normalized.slice(0, maxLength)}…` : normalized, match: false }];
+  }
+
+  const lowerFull = normalized.toLowerCase();
+  let firstIdx = -1;
+  for (const term of terms) {
+    const idx = lowerFull.indexOf(term);
+    if (idx !== -1 && (firstIdx === -1 || idx < firstIdx)) firstIdx = idx;
+  }
+
+  let windowText = normalized;
+  if (normalized.length > maxLength) {
+    if (firstIdx > Math.floor(maxLength * 0.45)) {
+      const start = Math.max(0, firstIdx - Math.floor(maxLength * 0.3));
+      const slice = normalized.slice(start, start + maxLength);
+      windowText = `${start > 0 ? "…" : ""}${slice}${start + maxLength < normalized.length ? "…" : ""}`;
+    } else {
+      windowText = `${normalized.slice(0, maxLength)}…`;
+    }
+  }
+
+  const lower = windowText.toLowerCase();
+  const ranges: Array<{ start: number; end: number }> = [];
+  let cursor = 0;
+  while (cursor < lower.length) {
+    let bestStart = -1;
+    let bestLen = 0;
+    for (const term of terms) {
+      const idx = lower.indexOf(term, cursor);
+      if (idx !== -1 && (bestStart === -1 || idx < bestStart || (idx === bestStart && term.length > bestLen))) {
+        bestStart = idx;
+        bestLen = term.length;
+      }
+    }
+    if (bestStart === -1) break;
+    ranges.push({ start: bestStart, end: bestStart + bestLen });
+    cursor = bestStart + bestLen;
+  }
+
+  if (ranges.length === 0) return [{ text: windowText, match: false }];
+
+  const segments: Array<{ text: string; match: boolean }> = [];
+  let pos = 0;
+  for (const r of ranges) {
+    if (r.start > pos) segments.push({ text: windowText.slice(pos, r.start), match: false });
+    segments.push({ text: windowText.slice(r.start, r.end), match: true });
+    pos = r.end;
+  }
+  if (pos < windowText.length) segments.push({ text: windowText.slice(pos), match: false });
+  return segments;
+}
+
+/** Replaces `{{varName}}` placeholders in runbook step commands/prompts with user input values. */
+export function interpolateRunbookText(
+  template: string,
+  values: Record<string, string | number | boolean>,
+): string {
+  return template.replace(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g, (whole, key: string) => {
+    if (!Object.prototype.hasOwnProperty.call(values, key)) return whole;
+    const v = values[key];
+    return v === undefined || v === "" ? whole : String(v);
+  });
 }
 
 async function toBase64(file: File): Promise<string> {
@@ -96,17 +306,283 @@ async function filesOfDrop(data: DataTransfer): Promise<File[]> {
   return out;
 }
 
+type StepStatus = "pending" | "active" | "done" | "skipped";
+
+/** Interactive step-by-step executor for deterministic + AI-assisted `RunbookTemplate` workflows. */
+export function RunbookExecutor({
+  runbook,
+  act,
+  onRunStepInTerminal,
+  onAskAiStep,
+}: {
+  runbook: RunbookTemplate;
+  act: Act;
+  onRunStepInTerminal?: (command: string, step: RunbookStep, runbook: RunbookTemplate) => void;
+  onAskAiStep?: (prompt: string, step: RunbookStep, runbook: RunbookTemplate) => void;
+}): JSX.Element {
+  const [values, setValues] = useState<Record<string, string | number | boolean>>(() => {
+    const initial: Record<string, string | number | boolean> = {};
+    for (const field of runbook.inputs) {
+      if (field.defaultValue !== undefined) initial[field.name] = field.defaultValue;
+      else if (field.type === "boolean") initial[field.name] = false;
+      else if (field.type === "enum" && field.options?.length) initial[field.name] = field.options[0];
+      else initial[field.name] = "";
+    }
+    return initial;
+  });
+  const [stepStates, setStepStates] = useState<Record<string, StepStatus>>({});
+  const [runningAll, setRunningAll] = useState(false);
+  const [statusMsg, setStatusMsg] = useState("");
+
+  const missingRequired = runbook.inputs.some((f) => {
+    if (!f.required) return false;
+    const v = values[f.name];
+    return v === undefined || String(v).trim() === "";
+  });
+
+  const markStep = (stepId: string, state: StepStatus): void => {
+    setStepStates((prev) => ({ ...prev, [stepId]: state }));
+  };
+
+  const runHub = (dryRun: boolean): void => {
+    setRunningAll(true);
+    setStatusMsg("");
+    void act({
+      action: "runbook-run",
+      id: runbook.id,
+      inputs: values,
+      dryRun,
+    })
+      .then((next) => {
+        if (next) setStatusMsg(dryRun ? "Dry run queued." : "Runbook execution started.");
+      })
+      .finally(() => setRunningAll(false));
+  };
+
+  return (
+    <section className="ai-card" data-testid={`runbook-executor-${runbook.id}`}>
+      <div className="ai-card-head">
+        <div>
+          <strong>{runbook.name}</strong>
+          {runbook.description && <small>{runbook.description}</small>}
+        </div>
+        <div className="ai-tags">
+          {runbook.dispatchStrategy && <span className="ai-badge ai-badge-mode">{runbook.dispatchStrategy}</span>}
+          <span className="ai-badge">{runbook.steps.length} steps</span>
+        </div>
+      </div>
+
+      {runbook.inputs.length > 0 && (
+        <div className="ai-form" data-testid={`runbook-inputs-${runbook.id}`}>
+          <strong>Variables</strong>
+          <div className="ai-form-row">
+            {runbook.inputs.map((field) => {
+              const val = values[field.name];
+              if (field.type === "boolean") {
+                return (
+                  <label key={field.name} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <input
+                      type="checkbox"
+                      aria-label={field.label ?? field.name}
+                      checked={Boolean(val)}
+                      onChange={(e) => setValues((old) => ({ ...old, [field.name]: e.target.checked }))}
+                    />
+                    <span>{field.label ?? field.name}</span>
+                  </label>
+                );
+              }
+              if (field.type === "enum" && field.options?.length) {
+                return (
+                  <label key={field.name}>
+                    {field.label ?? field.name}
+                    {field.required ? " *" : ""}
+                    <select
+                      aria-label={field.label ?? field.name}
+                      value={String(val ?? "")}
+                      onChange={(e) => setValues((old) => ({ ...old, [field.name]: e.target.value }))}
+                    >
+                      {field.options.map((opt) => (
+                        <option key={opt} value={opt}>
+                          {opt}
+                        </option>
+                      ))}
+                    </select>
+                    {field.description && <small>{field.description}</small>}
+                  </label>
+                );
+              }
+              return (
+                <label key={field.name}>
+                  {field.label ?? field.name}
+                  {field.required ? " *" : ""}
+                  <input
+                    type={field.type === "number" ? "number" : "text"}
+                    aria-label={field.label ?? field.name}
+                    required={field.required}
+                    value={String(val ?? "")}
+                    onChange={(e) =>
+                      setValues((old) => ({
+                        ...old,
+                        [field.name]: field.type === "number" ? Number(e.target.value) : e.target.value,
+                      }))
+                    }
+                  />
+                  {field.description && <small>{field.description}</small>}
+                </label>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      <div className="ai-rows" data-testid={`runbook-steps-${runbook.id}`}>
+        {runbook.steps.map((step, idx) => {
+          const state = stepStates[step.id] ?? "pending";
+          const resolvedCmd = step.command ? interpolateRunbookText(step.command, values) : undefined;
+          const resolvedPrompt = step.prompt
+            ? interpolateRunbookText(step.prompt, values)
+            : resolvedCmd
+              ? `Run and analyze step "${step.title ?? step.id}": ${resolvedCmd}`
+              : `Assist with runbook step "${step.title ?? step.id}"`;
+
+          return (
+            <div
+              key={step.id}
+              className="ai-row"
+              data-testid={`runbook-step-${step.id}`}
+              data-step-state={state}
+              style={{ alignItems: "flex-start" }}
+            >
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div className="ai-tags" style={{ marginBottom: 4 }}>
+                  <strong>
+                    {idx + 1}. {step.title || step.id}
+                  </strong>
+                  <span className="ai-badge">{step.kind}</span>
+                  <span
+                    className={`ai-badge ${
+                      state === "done"
+                        ? "ai-badge-success"
+                        : state === "active"
+                          ? "ai-badge-mode"
+                          : ""
+                    }`}
+                  >
+                    {state}
+                  </span>
+                </div>
+                {resolvedCmd && (
+                  <pre className="ai-mono" style={{ margin: "4px 0", whiteSpace: "pre-wrap" }}>
+                    <HighlightedCode code={resolvedCmd} lang="bash" />
+                  </pre>
+                )}
+                {step.expected && (
+                  <small className="ai-muted">Expected: {interpolateRunbookText(step.expected, values)}</small>
+                )}
+                {step.prompt && (
+                  <p className="ai-hint" style={{ margin: "4px 0 0" }}>
+                    {interpolateRunbookText(step.prompt, values)}
+                  </p>
+                )}
+              </div>
+              <div className="ai-card-actions">
+                {resolvedCmd && (
+                  <button
+                    type="button"
+                    className="ai-btn-accent"
+                    data-testid={`runbook-step-terminal-${step.id}`}
+                    disabled={missingRequired}
+                    onClick={() => {
+                      markStep(step.id, "active");
+                      if (onRunStepInTerminal) {
+                        onRunStepInTerminal(resolvedCmd, step, runbook);
+                      } else {
+                        setStatusMsg(`Staged command: ${resolvedCmd}`);
+                      }
+                    }}
+                  >
+                    Run in terminal
+                  </button>
+                )}
+                {(step.kind === "ai_diagnose" || step.prompt || onAskAiStep) && (
+                  <button
+                    type="button"
+                    className="ai-btn-emerald"
+                    data-testid={`runbook-step-ai-${step.id}`}
+                    disabled={missingRequired}
+                    onClick={() => {
+                      markStep(step.id, "active");
+                      if (onAskAiStep) {
+                        onAskAiStep(resolvedPrompt, step, runbook);
+                      } else {
+                        setStatusMsg(`Sent step to AI: ${resolvedPrompt}`);
+                      }
+                    }}
+                  >
+                    Run with AI
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => markStep(step.id, state === "done" ? "pending" : "done")}
+                >
+                  {state === "done" ? "Reset" : "Mark done"}
+                </button>
+                <button type="button" onClick={() => markStep(step.id, "skipped")}>
+                  Skip
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {statusMsg && (
+        <p className="ai-hint" role="status" data-testid={`runbook-status-${runbook.id}`}>
+          {statusMsg}
+        </p>
+      )}
+
+      <div className="ai-card-actions">
+        <button
+          type="button"
+          className="ai-btn-emerald"
+          data-testid={`runbook-run-all-${runbook.id}`}
+          disabled={runningAll || missingRequired}
+          onClick={() => runHub(false)}
+        >
+          {runningAll ? "Running…" : "Run all"}
+        </button>
+        <button
+          type="button"
+          data-testid={`runbook-dry-run-${runbook.id}`}
+          disabled={runningAll || missingRequired}
+          onClick={() => runHub(true)}
+        >
+          Dry run
+        </button>
+      </div>
+    </section>
+  );
+}
+
 export function KnowledgeBaseView({
   hub,
   act,
   onAttachDoc,
   onRunRunbook,
+  onOpenFileRef,
+  onRunStepInTerminal,
+  onAskAiStep,
   request = hubRequest,
 }: {
   hub: HubSnapshot;
   act: Act;
   onAttachDoc: (doc: KbDocument) => void;
   onRunRunbook?: (doc: KbDocument) => void;
+  onOpenFileRef?: (ref: FileRef) => void;
+  onRunStepInTerminal?: (command: string, step: RunbookStep, runbook: RunbookTemplate) => void;
+  onAskAiStep?: (prompt: string, step: RunbookStep, runbook: RunbookTemplate) => void;
   /** Requests whose own answer or error this view shows itself. */
   request?: (r: HubRequest) => Promise<HubSnapshot>;
 }): JSX.Element {
@@ -123,15 +599,18 @@ export function KnowledgeBaseView({
   const [open, setOpen] = useState<KbDocument | undefined>();
   const [problem, setProblem] = useState("");
   const [limit, setLimit] = useState(40);
-  const [tab, setTab] = useState<"pages" | "sources" | "review">(
+  const [tab, setTab] = useState<"pages" | "sources" | "runbooks" | "review">(
     (hub.kbPages ?? []).length > 0 ? "pages" : "sources",
   );
   const [pageDraft, setPageDraft] = useState<PageDraft | undefined>();
   const [openPage, setOpenPage] = useState<KbPage | undefined>();
+  const [activeRunbookId, setActiveRunbookId] = useState<string>("");
+  const [openedRefNotice, setOpenedRefNotice] = useState<string>("");
   const picker = useRef<HTMLInputElement>(null);
   const searchSeq = useRef(0);
 
   const all = hub.kbDocuments ?? [];
+  const runbooks = hub.runbooks ?? [];
   const collections = Array.from(new Set(all.map((d) => d.collection).filter((c): c is string => Boolean(c)))).sort();
   const clusters = Array.from(
     new Set((hub.workspaceServers ?? []).map((s) => s.cluster).filter((c): c is string => Boolean(c))),
@@ -253,9 +732,15 @@ export function KnowledgeBaseView({
       .then((snap) => setOpenPage(snap.reply?.kbPage))
       .catch((error) => setProblem(error instanceof Error ? error.message : String(error)));
   };
-  const findings = hub.kbFindings ?? [];
 
+  const handleOpenFileRef = (ref: FileRef): void => {
+    setOpenedRefNotice(ref.raw);
+    onOpenFileRef?.(ref);
+  };
+
+  const findings = hub.kbFindings ?? [];
   const busy = inbox.filter((x) => x.state === "reading").length;
+  const activeRunbook = runbooks.find((r) => r.id === activeRunbookId) ?? runbooks[0];
 
   return (
     <div
@@ -293,8 +778,18 @@ export function KnowledgeBaseView({
             <button type="button" className="ai-btn-accent" onClick={() => picker.current?.click()}>
               Choose files
             </button>
-            <button type="button" onClick={() => setDraft(draft ? undefined : { ...emptyDoc })}>
-              {draft && !draft.id ? "Close" : "Write one"}
+            <button
+              type="button"
+              onClick={() => {
+                if (draft && !draft.id && tab === "sources") {
+                  setDraft(undefined);
+                  return;
+                }
+                if (!draft || draft.id) setDraft({ ...emptyDoc });
+                setTab("sources");
+              }}
+            >
+              {draft && !draft.id && tab === "sources" ? "Close" : "Write one"}
             </button>
           </div>
           <input
@@ -385,20 +880,37 @@ export function KnowledgeBaseView({
               ? `Nothing found for “${hits.query}”. An agent would not find anything either: this is a gap.`
               : `What an agent finds for “${hits.query}”, pages first${hits.byMeaning || embeddings ? "" : " (matched by wording)"}:`}
           </small>
-          {hits.hits.map((h, i) => (
-            <button
-              key={`${h.docId}-${i}`}
-              type="button"
-              className={`ai-hit ${h.pageId ? "ai-hit-page" : ""}`}
-              onClick={() => (h.pageId ? showPage(h.pageId) : showSource(h.docId))}
-            >
-              <strong>
-                {h.pageId ? <em>page</em> : <em>source</em>} {h.title}
-                {h.heading && h.heading !== h.title ? <span> › {h.heading.replace(`${h.title} › `, "")}</span> : null}
-              </strong>
-              <span>{h.snippet.replace(/\s+/g, " ").slice(0, 260)}</span>
-            </button>
-          ))}
+          {hits.hits.map((h, i) => {
+            const snippetSegments = highlightSearchSnippet(h.snippet, hits.query);
+            return (
+              <button
+                key={`${h.docId}-${i}`}
+                type="button"
+                className={`ai-hit ${h.pageId ? "ai-hit-page" : ""}`}
+                onClick={() => (h.pageId ? showPage(h.pageId) : showSource(h.docId))}
+              >
+                <strong>
+                  {h.pageId ? <em>page</em> : <em>source</em>} {h.title}
+                  {h.heading && h.heading !== h.title ? <span> › {h.heading.replace(`${h.title} › `, "")}</span> : null}
+                </strong>
+                <span className="ai-hit-snippet">
+                  {snippetSegments.map((seg, segIdx) =>
+                    seg.match ? (
+                      <mark key={segIdx} className="ai-search-mark">
+                        {seg.text}
+                      </mark>
+                    ) : (
+                      seg.text
+                    ),
+                  )}
+                </span>
+                <small className="ai-muted">
+                  {h.collection || "General"} · {hits.byMeaning || embeddings ? "semantic" : "keyword"} · score{" "}
+                  {Number.isFinite(h.score) ? h.score.toFixed(2) : "—"}
+                </small>
+              </button>
+            );
+          })}
         </section>
       )}
 
@@ -407,6 +919,7 @@ export function KnowledgeBaseView({
           [
             ["pages", `Pages · ${(hub.kbPages ?? []).length}`],
             ["sources", `Sources · ${all.length}`],
+            ["runbooks", `Runbooks · ${runbooks.length}`],
             ["review", `To review · ${findings.length}`],
           ] as const
         ).map(([key, label]) => (
@@ -423,6 +936,11 @@ export function KnowledgeBaseView({
         ))}
       </div>
 
+      {openedRefNotice && (
+        <p className="ai-hint" role="status" data-testid="kb-doc-ref-status">
+          Opened reference: <code className="ai-mono">{openedRefNotice}</code>
+        </p>
+      )}
       {problem && <p className="ai-error">{problem}</p>}
 
       {tab === "pages" && (
@@ -435,7 +953,67 @@ export function KnowledgeBaseView({
           open={openPage}
           setOpen={setOpenPage}
           onOpenSource={showSource}
+          onOpenFileRef={handleOpenFileRef}
+          onImportMarkdown={() => picker.current?.click()}
         />
+      )}
+      {tab === "runbooks" && (
+        <section data-testid="kb-runbooks-tab">
+          <div className="ai-section-head">
+            <h3>
+              Executable Runbooks <span className="ai-count">{runbooks.length}</span>
+            </h3>
+          </div>
+          <p className="ai-hint">
+            Step-by-step operational workflows with typed variables. Run deterministic checks directly in the terminal
+            or hand off diagnosis steps to AI.
+          </p>
+          {runbooks.length === 0 ? (
+            <div className="ai-card" data-testid="kb-runbooks-starter">
+              <strong>No executable runbooks yet</strong>
+              <p className="ai-hint">Create a starter executable runbook in one click:</p>
+              <div className="ai-card-actions">
+                {STARTER_RUNBOOK_TEMPLATES.map((tpl) => (
+                  <button
+                    key={tpl.name}
+                    type="button"
+                    className="ai-btn-accent"
+                    data-testid="kb-create-starter-runbook"
+                    onClick={() => void act({ action: "runbook-save", runbook: tpl })}
+                  >
+                    + {tpl.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <>
+              {runbooks.length > 1 && (
+                <div className="ai-tags" style={{ marginBottom: 8 }}>
+                  {runbooks.map((rb) => (
+                    <button
+                      key={rb.id}
+                      type="button"
+                      className={`ai-chip ${activeRunbook?.id === rb.id ? "ai-chip-on" : ""}`}
+                      onClick={() => setActiveRunbookId(rb.id)}
+                    >
+                      {rb.name} ({rb.steps.length})
+                    </button>
+                  ))}
+                </div>
+              )}
+              {activeRunbook && (
+                <RunbookExecutor
+                  key={activeRunbook.id}
+                  runbook={activeRunbook}
+                  act={act}
+                  onRunStepInTerminal={onRunStepInTerminal}
+                  onAskAiStep={onAskAiStep}
+                />
+              )}
+            </>
+          )}
+        </section>
       )}
       {tab === "review" && (
         <KbReview
@@ -636,15 +1214,90 @@ export function KnowledgeBaseView({
       )}
 
       {all.length === 0 && !draft && (
-        <p className="ai-empty">
-          Nothing here yet. Drop in the folder where your team keeps its runbooks, the vendor manuals you keep
-          opening, or the notes from the last incident.
-        </p>
+        <section className="ai-card" data-testid="kb-starter-templates" aria-label="Onboarding starter templates">
+          <strong>Get started with 1-click starter templates</strong>
+          <p className="ai-hint">
+            Drop in the folder where your team keeps its runbooks, or start immediately from a template below.
+          </p>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))",
+              gap: 8,
+              marginTop: 8,
+            }}
+          >
+            {KB_STARTER_TEMPLATES.map((tpl) => (
+              <div
+                key={tpl.id}
+                style={{
+                  padding: 10,
+                  borderRadius: 8,
+                  border: "1px solid var(--ai-line, rgba(148, 163, 184, 0.2))",
+                  display: "grid",
+                  gap: 6,
+                }}
+              >
+                <div>
+                  <strong>{tpl.label}</strong>
+                  <p className="ai-hint" style={{ margin: "4px 0 0" }}>
+                    {tpl.description}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="ai-btn-accent"
+                  data-testid={`kb-starter-${tpl.id}`}
+                  onClick={() =>
+                    void act({
+                      action: "kb-save",
+                      doc: {
+                        title: tpl.title,
+                        collection: tpl.collection,
+                        kind: tpl.kind,
+                        tags: tpl.tags,
+                        content: tpl.content,
+                        sourceType: "manual",
+                      },
+                    })
+                  }
+                >
+                  Use {tpl.label}
+                </button>
+              </div>
+            ))}
+            <div
+              style={{
+                padding: 10,
+                borderRadius: 8,
+                border: "1px dashed var(--ai-line-strong, rgba(148, 163, 184, 0.35))",
+                display: "grid",
+                gap: 6,
+              }}
+            >
+              <div>
+                <strong>Import Markdown</strong>
+                <p className="ai-hint" style={{ margin: "4px 0 0" }}>
+                  Choose `.md` files or runbooks from disk to index immediately.
+                </p>
+              </div>
+              <button
+                type="button"
+                data-testid="kb-starter-import-markdown"
+                onClick={() => picker.current?.click()}
+              >
+                Import Markdown
+              </button>
+            </div>
+          </div>
+        </section>
       )}
 
       {docs.slice(0, limit).map((doc: KbDocument) => {
         const isOpen = open?.id === doc.id;
         const state = doc.reading?.state;
+        const docFindings = findings.filter((f) => f.docId === doc.id);
+        const docFileRefs = isOpen ? extractFileRefs(open.content) : [];
         return (
           <article className="ai-card" key={doc.id} data-testid={`kb-doc-${doc.id}`}>
             <div className="ai-card-head">
@@ -670,6 +1323,31 @@ export function KnowledgeBaseView({
                     not described
                   </span>
                 )}
+                {doc.compiled ? (
+                  <span
+                    className={`ai-badge ${doc.compiled.pages > 0 ? "ai-badge-success" : "ai-badge-mode"}`}
+                    data-testid={`kb-doc-compile-${doc.id}`}
+                    title={doc.compiled.pages > 0 ? `Compiled into ${doc.compiled.pages} page(s)` : "Compiled with 0 pages"}
+                  >
+                    compiled · {doc.compiled.pages}p
+                  </span>
+                ) : (
+                  state === "done" && (
+                    <span className="ai-badge" data-testid={`kb-doc-compile-${doc.id}`}>
+                      not compiled
+                    </span>
+                  )
+                )}
+                {doc.sourceCheck?.error && (
+                  <span className="ai-badge ai-badge-danger" title={doc.sourceCheck.error}>
+                    source error
+                  </span>
+                )}
+                {docFindings.map((f) => (
+                  <span key={f.id} className="ai-badge ai-badge-mode" title={f.text}>
+                    lint: {f.kind}
+                  </span>
+                ))}
                 {(doc.tags ?? []).slice(0, 4).map((t) => (
                   <button key={t} type="button" className="ai-chip" onClick={() => setQuery(t)}>
                     {t}
@@ -678,9 +1356,36 @@ export function KnowledgeBaseView({
               </div>
             </div>
             {isOpen ? (
-              <div className="ai-doc-body">
+              <div
+                className="ai-doc-body"
+                onClick={(e) => {
+                  const target = e.target as HTMLElement | null;
+                  const anchor = target?.closest?.('a[href^="#file-"]');
+                  if (!anchor) return;
+                  const decoded = decodeFileRefHref(anchor.getAttribute("href") ?? undefined);
+                  if (!decoded) return;
+                  e.preventDefault();
+                  handleOpenFileRef(decoded);
+                }}
+              >
                 {open.summary && <p className="ai-doc-summary">{open.summary}</p>}
-                <RichMarkdownContent text={open.content} />
+                <RichMarkdownContent text={linkFileRefs(open.content)} />
+                {docFileRefs.length > 0 && (
+                  <div className="ai-tags" data-testid={`kb-doc-refs-${doc.id}`} style={{ marginTop: 8 }}>
+                    <small className="ai-muted">Refs:</small>
+                    {docFileRefs.map((ref) => (
+                      <button
+                        key={ref.raw}
+                        type="button"
+                        className="ai-chip ai-mono"
+                        title={ref.host ? `Open ${ref.path} on ${ref.host}` : `Open ${ref.path}`}
+                        onClick={() => handleOpenFileRef(ref)}
+                      >
+                        {ref.raw}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             ) : (
               <p className="ai-doc-excerpt">{doc.summary || excerpt(doc.content)}</p>

@@ -19,6 +19,9 @@ import {
   type NavigationDirection,
 } from './spatialNavigation';
 
+export const FOCUS_AI_COMPOSER_EVENT = 'sshs3:focus-ai-composer';
+export const FOCUS_TERMINAL_EVENT = 'sshs3:focus-terminal';
+
 export interface AppKeyboardContext {
   tabs: AppTab[];
   activeTabId: string;
@@ -43,6 +46,10 @@ export interface AppKeyboardContext {
   /** Opens Settings on the keyboard shortcuts overview. */
   openShortcutsHelp: () => void;
   focusActiveTabContent: () => void;
+  /** Optional callback invoked when toggling focus into the AI composer. */
+  onFocusAiComposer?: () => void;
+  /** Optional callback invoked when toggling focus back to the active terminal. */
+  onFocusTerminal?: () => void;
 }
 
 /**
@@ -72,6 +79,8 @@ export function useAppKeyboard(ctx: AppKeyboardContext): void {
     handleSelectPane,
     openShortcutsHelp,
     focusActiveTabContent,
+    onFocusAiComposer,
+    onFocusTerminal,
   } = ctx;
 
   useEffect(() => {
@@ -124,6 +133,15 @@ export function useAppKeyboard(ctx: AppKeyboardContext): void {
       }
 
       const target = e.target as HTMLElement | null;
+      const isTerminalTarget = Boolean(
+        target?.classList?.contains('xterm-helper-textarea') ||
+          target?.closest?.('[data-testid="terminal-view"]')
+      );
+      // Terminal keybindings must never swallow bare Ctrl+L (shell clear-screen).
+      if (isTerminalTarget && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'l') {
+        return;
+      }
+
       // xterm.js captures keyboard input via a hidden <textarea class="xterm-helper-textarea">
       // inside every terminal pane. Treating it as a real input field would swallow every
       // app-level shortcut (tab switching, split, etc.) whenever a terminal has focus, which
@@ -138,7 +156,9 @@ export function useAppKeyboard(ctx: AppKeyboardContext): void {
 
       if (isInput) {
         // If an overlay (modal, menu) is open, allow spatial navigation shortcuts
-        // so the user can navigate out of inputs (e.g. search box) with Ctrl+Shift+Arrows
+        // so the user can navigate out of inputs (e.g. search box) with Ctrl+Shift+Arrows.
+        // Also allow the AI/Terminal focus-bounce shortcut (Ctrl+Shift+A by default) when no
+        // modal overlay is open so focus can bounce out of the AI composer back to the terminal.
         const rawCombo = comboFromKeyboardEvent(e);
         if (rawCombo) {
           const combo = rawCombo.toLowerCase().replace(/^cmd\+/, 'ctrl+');
@@ -147,8 +167,12 @@ export function useAppKeyboard(ctx: AppKeyboardContext): void {
             combo === (settings.shortcuts?.navigateRight || DEFAULT_SHORTCUTS.navigateRight).toLowerCase() ||
             combo === (settings.shortcuts?.navigateUp || DEFAULT_SHORTCUTS.navigateUp).toLowerCase() ||
             combo === (settings.shortcuts?.navigateDown || DEFAULT_SHORTCUTS.navigateDown).toLowerCase();
+          const isFocusBounce =
+            !anyTopLevelModalOpen &&
+            !getTopmostOverlay() &&
+            combo === (settings.shortcuts?.focusAiBounce || DEFAULT_SHORTCUTS.focusAiBounce).toLowerCase();
 
-          if (!isNav) return;
+          if (!isNav && !isFocusBounce) return;
         } else {
           return;
         }
@@ -164,6 +188,20 @@ export function useAppKeyboard(ctx: AppKeyboardContext): void {
           e.preventDefault();
           e.stopPropagation();
           inlineAiBtn.click();
+          return;
+        }
+        // Cmd+K (macOS) opens the unified Command & AI palette when no inline terminal bar is active;
+        // bare Ctrl+K is left free for shell kill-line.
+        if (
+          e.metaKey &&
+          !e.ctrlKey &&
+          settings.enableGlobalSearch !== false &&
+          !anyTopLevelModalOpen &&
+          !getTopmostOverlay()
+        ) {
+          e.preventDefault();
+          e.stopPropagation();
+          openTopLevelModal(() => setGlobalSearchOpen(true));
           return;
         }
       }
@@ -241,6 +279,49 @@ export function useAppKeyboard(ctx: AppKeyboardContext): void {
             case 'globalSearch':
               openTopLevelModal(() => setGlobalSearchOpen(true));
               break;
+            case 'focusAiBounce': {
+              const activeEl = document.activeElement as HTMLElement | null;
+              const isAiFocused = Boolean(
+                target?.closest?.('.ai-composer, .ai-hub, [data-testid="ai-composer"], [data-ai-composer="true"]') ||
+                  activeEl?.closest?.('.ai-composer, .ai-hub, [data-testid="ai-composer"], [data-ai-composer="true"]')
+              );
+              if (isAiFocused) {
+                onFocusTerminal?.();
+                window.dispatchEvent(new CustomEvent(FOCUS_TERMINAL_EVENT));
+                const activeTab = tabs.find((t) => t.id === activeTabId);
+                const paneSelector = activeTab?.activePaneId
+                  ? `[data-testid="terminal-pane-${activeTab.activePaneId}"] .xterm-helper-textarea`
+                  : '[data-testid="terminal-view"] .xterm-helper-textarea';
+                const xterm =
+                  document.querySelector<HTMLElement>(paneSelector) ??
+                  document.querySelector<HTMLElement>('[data-testid="terminal-view"] .xterm-helper-textarea');
+                if (xterm) {
+                  xterm.focus();
+                } else if (activeTab?.type === 'terminal') {
+                  focusActiveTabContent();
+                }
+              } else {
+                onFocusAiComposer?.();
+                window.dispatchEvent(new CustomEvent(FOCUS_AI_COMPOSER_EVENT));
+                const composerEl = document.querySelector<HTMLElement>(
+                  '.ai-composer textarea, [data-testid="ai-composer"]'
+                );
+                if (composerEl) {
+                  composerEl.focus();
+                } else {
+                  window.dispatchEvent(
+                    new CustomEvent('sshs3:ai-open', { detail: { mode: 'panel', view: 'Work' } })
+                  );
+                  setTimeout(() => {
+                    const nextComposer = document.querySelector<HTMLElement>(
+                      '.ai-composer textarea, [data-testid="ai-composer"]'
+                    );
+                    nextComposer?.focus();
+                  }, 30);
+                }
+              }
+              break;
+            }
             case 'splitVertical':
               if (activeTabId) handleSplitPane(activeTabId, 'row');
               break;
@@ -469,5 +550,7 @@ export function useAppKeyboard(ctx: AppKeyboardContext): void {
     handleSelectPane,
     openShortcutsHelp,
     focusActiveTabContent,
+    onFocusAiComposer,
+    onFocusTerminal,
   ]);
 }

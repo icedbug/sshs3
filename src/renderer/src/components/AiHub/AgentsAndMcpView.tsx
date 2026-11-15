@@ -3,9 +3,14 @@ import {
   type AgentMode,
   type HubSnapshot,
   type McpCatalogPreset,
+  type McpOAuthConfig,
   type McpServerConfig,
+  type McpToolPolicy,
   type MissionAgent,
   type WorkforceRun,
+  type WorkspaceRule,
+  type WorkspaceRuleActivation,
+  type WorkspaceRuleScope,
 } from "@shared/types/aiHub";
 import { AgentTestsView } from "./AgentTestsView";
 import { ConfirmButton } from "./ConfirmButton";
@@ -26,12 +31,44 @@ interface AgentDraft {
   runnerId: string;
 }
 
-/**
- * What an agent may be held to. A list here narrows what its runs are offered;
- * it never widens anything, and what a run may actually do is still decided by
- * its mode and by the approvals. Reading the workspace, the knowledge base, its
- * own task list and its own hypotheses are always there and are not listed.
- */
+interface McpDraft {
+  id?: string;
+  name: string;
+  transport: "stdio" | "http";
+  command: string;
+  args: string;
+  url: string;
+  needs?: string;
+  /** Environment variables (stdio) or headers (http). A stored value is never sent here: `kept` rows keep theirs unless retyped. */
+  secrets?: { name: string; value: string; kept: boolean }[];
+  enabled?: boolean;
+  trustReadOnlyHint?: boolean;
+  oauthEnabled?: boolean;
+  oauthClientId?: string;
+  oauthScopes?: string;
+  oauthConnectedAt?: number;
+}
+
+interface RuleDraft {
+  id?: string;
+  name: string;
+  scope: WorkspaceRuleScope;
+  scopeValue: string;
+  activation: WorkspaceRuleActivation;
+  description: string;
+  body: string;
+  priority: number;
+  applyToReadOnly: boolean;
+  enabled: boolean;
+}
+
+type McpServerWithCapabilities = McpServerConfig & {
+  discoveredPrompts?: unknown[];
+  discoveredResources?: unknown[];
+  promptCount?: number;
+  resourceCount?: number;
+};
+
 const NARROWABLE: { name: string; label: string }[] = [
   { name: "terminal_command", label: "Run commands in the terminal" },
   { name: "sshs3_change", label: "Make a change that carries its check and its rollback" },
@@ -70,6 +107,21 @@ const emptyAgent: AgentDraft = {
   runnerId: "",
 };
 
+const emptyRule: RuleDraft = {
+  name: "",
+  scope: "global",
+  scopeValue: "",
+  activation: "always",
+  description: "",
+  body: "",
+  priority: 100,
+  applyToReadOnly: true,
+  enabled: true,
+};
+
+const RULE_SCOPES: readonly WorkspaceRuleScope[] = ["global", "env", "tag", "cluster", "server"];
+const RULE_ACTIVATIONS: readonly WorkspaceRuleActivation[] = ["always", "auto", "agent-requested", "manual"];
+
 const toggled = (list: string[], id: string): string[] =>
   list.includes(id) ? list.filter((x) => x !== id) : [...list, id];
 
@@ -77,6 +129,23 @@ const commandLine = (srv: { transport: string; command?: string; args?: string[]
   srv.transport === "stdio"
     ? `${srv.command ?? ""} ${(srv.args ?? []).join(" ")}`.trim()
     : (srv.url ?? "");
+
+function effectiveToolPolicy(
+  srv: McpServerConfig,
+  toolName: string,
+  readOnly?: boolean,
+): McpToolPolicy {
+  const explicit = srv.toolPolicies?.[toolName];
+  if (explicit) return explicit;
+  if (readOnly && srv.trustReadOnlyHint) return "allow";
+  return "ask";
+}
+
+function mcpOAuthStatus(oauth?: McpOAuthConfig): { label: string; badgeClass: string } {
+  if (!oauth?.enabled) return { label: "OAuth 2.1 off", badgeClass: "" };
+  if (oauth.connectedAt) return { label: "OAuth 2.1 connected", badgeClass: "ai-badge-success" };
+  return { label: "OAuth 2.1 disconnected", badgeClass: "ai-badge-danger" };
+}
 
 export function AgentsAndMcpView({
   hub,
@@ -95,33 +164,29 @@ export function AgentsAndMcpView({
   const [objective, setObjective] = useState("");
   const [runningWorkforce, setRunningWorkforce] = useState(false);
 
-  const [mcpDraft, setMcpDraft] = useState<
-    | {
-        id?: string;
-        name: string;
-        transport: "stdio" | "http";
-        command: string;
-        args: string;
-        url: string;
-        needs?: string;
-        /** Environment variables (stdio) or headers (http). A stored value is never sent here: `kept` rows keep theirs unless retyped. */
-        secrets?: { name: string; value: string; kept: boolean }[];
-        enabled?: boolean;
-      }
-    | undefined
-  >();
+  const [mcpDraft, setMcpDraft] = useState<McpDraft | undefined>();
   const [testingMcpId, setTestingMcpId] = useState("");
   const [runnerDraft, setRunnerDraft] = useState<
     { id: string; name: string; command: string; args: string; cwd: string; note?: string; existing?: boolean } | undefined
   >();
+  const [ruleDraft, setRuleDraft] = useState<RuleDraft | undefined>();
+  const [ruleScopeFilter, setRuleScopeFilter] = useState<"all" | WorkspaceRuleScope>("all");
+
   const runners = hub.externalRunners ?? [];
   const runnerPresets = (hub.externalRunnerPresets ?? []).filter((p) => !runners.some((r) => r.id === p.id));
   const runnerName = (id: string): string =>
     runners.find((r) => r.id === id)?.name ?? hub.externalRunnerPresets?.find((p) => p.id === id)?.name ?? id;
 
   const agents = hub.agents ?? [];
-  const servers = hub.mcpServers ?? [];
+  const servers = (hub.mcpServers ?? []) as McpServerWithCapabilities[];
   const docs = hub.kbDocuments ?? [];
+  const rules = hub.rules ?? [];
+  const filteredRules =
+    ruleScopeFilter === "all" ? rules : rules.filter((r) => r.scope === ruleScopeFilter);
+  const localResourcesCount = (hub.kbPages?.length ?? 0) + (hub.runbooks?.length ?? 0);
+  const localPromptsCount =
+    hub.memories.filter((m) => m.kind === "skill").length + (hub.runbooks?.length ?? 0);
+
   const clusters = Array.from(
     new Set(
       (hub.workspaceServers ?? [])
@@ -283,6 +348,7 @@ export function AgentsAndMcpView({
                 onChange={(e) => setDraft({ ...draft, defaultMode: e.target.value as AgentMode })}
               >
                 <option value="advice">Never runs commands — advises only</option>
+                <option value="plan">Proposes a plan for approval first</option>
                 <option value="assisted">Asks before each command</option>
                 <option value="autonomous">Runs commands on its own</option>
               </select>
@@ -290,7 +356,9 @@ export function AgentsAndMcpView({
           </div>
           {(hub.kbPages ?? []).length > 0 && (
             <fieldset className="ai-checks" data-testid="agent-pages">
-              <legend>Knowledge base pages it always has at hand (every agent can open any page; these are given in full)</legend>
+              <legend>
+                Knowledge base pages it always has at hand (every agent can open any page; these are given in full)
+              </legend>
               {(hub.kbPages ?? []).map((p) => (
                 <label key={p.id}>
                   <input
@@ -518,7 +586,9 @@ export function AgentsAndMcpView({
           <details key={run.id} className="ai-fold ai-run">
             <summary>
               {run.title}
-              <span className={`ai-badge ${run.status === "completed" ? "ai-badge-success" : run.status === "failed" ? "ai-badge-danger" : ""}`}>
+              <span
+                className={`ai-badge ${run.status === "completed" ? "ai-badge-success" : run.status === "failed" ? "ai-badge-danger" : ""}`}
+              >
                 {run.status}
               </span>
               {run.simulated && <span className="ai-badge">demo — no model was called</span>}
@@ -552,6 +622,264 @@ export function AgentsAndMcpView({
           </details>
         ))}
       </article>
+
+      <section className="ai-set" data-testid="workspace-rules-section">
+        <div className="ai-section-head">
+          <div>
+            <h3>
+              Workspace Rules (.sshs3/rules) <span className="ai-count">{rules.length}</span>
+            </h3>
+            <small>
+              Cascading instructions scoped by global, env, tag, cluster, or server glob pattern. Applied across chat,
+              mission agents, and external ACP runners.
+            </small>
+          </div>
+          <button
+            type="button"
+            data-testid="new-rule-btn"
+            onClick={() => setRuleDraft(ruleDraft ? undefined : { ...emptyRule })}
+          >
+            {ruleDraft ? "Close" : "New rule"}
+          </button>
+        </div>
+
+        <div className="ai-tags" data-testid="workspace-rules-scope-filters">
+          <button
+            type="button"
+            className={`ai-chip ${ruleScopeFilter === "all" ? "ai-chip-active" : ""}`}
+            onClick={() => setRuleScopeFilter("all")}
+          >
+            All ({rules.length})
+          </button>
+          {RULE_SCOPES.map((scope) => (
+            <button
+              key={scope}
+              type="button"
+              className={`ai-chip ${ruleScopeFilter === scope ? "ai-chip-active" : ""}`}
+              onClick={() => setRuleScopeFilter(ruleScopeFilter === scope ? "all" : scope)}
+            >
+              {scope} ({rules.filter((r) => r.scope === scope).length})
+            </button>
+          ))}
+        </div>
+
+        {ruleDraft && (
+          <form
+            className="ai-form ai-card"
+            data-testid="workspace-rule-form"
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (!ruleDraft.name.trim() || !ruleDraft.body.trim()) return;
+              void act({
+                action: "rule-save",
+                rule: {
+                  id: ruleDraft.id,
+                  name: ruleDraft.name.trim(),
+                  scope: ruleDraft.scope,
+                  scopeValue: ruleDraft.scope === "global" ? undefined : ruleDraft.scopeValue.trim() || undefined,
+                  activation: ruleDraft.activation,
+                  description: ruleDraft.description.trim() || undefined,
+                  body: ruleDraft.body.trim(),
+                  priority: ruleDraft.priority,
+                  applyToReadOnly: ruleDraft.applyToReadOnly,
+                  enabled: ruleDraft.enabled,
+                },
+              }).then((next) => {
+                if (next) setRuleDraft(undefined);
+              });
+            }}
+          >
+            <strong>{ruleDraft.id ? "Edit workspace rule" : "New workspace rule"}</strong>
+            <div className="ai-form-row">
+              <label>
+                Rule name
+                <input
+                  required
+                  aria-label="Rule name"
+                  placeholder="Production change guardrails"
+                  value={ruleDraft.name}
+                  onChange={(e) => setRuleDraft({ ...ruleDraft, name: e.target.value })}
+                />
+              </label>
+              <label>
+                Scope
+                <select
+                  aria-label="Rule scope"
+                  value={ruleDraft.scope}
+                  onChange={(e) =>
+                    setRuleDraft({ ...ruleDraft, scope: e.target.value as WorkspaceRuleScope })
+                  }
+                >
+                  {RULE_SCOPES.map((s) => (
+                    <option key={s} value={s}>
+                      {s}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <div className="ai-form-row">
+              {ruleDraft.scope !== "global" && (
+                <label>
+                  Scope value / glob
+                  <input
+                    aria-label="Scope value or glob"
+                    className="ai-mono"
+                    placeholder="prod* or k8s-prod-*"
+                    value={ruleDraft.scopeValue}
+                    onChange={(e) => setRuleDraft({ ...ruleDraft, scopeValue: e.target.value })}
+                  />
+                </label>
+              )}
+              <label>
+                Activation
+                <select
+                  aria-label="Rule activation"
+                  value={ruleDraft.activation}
+                  onChange={(e) =>
+                    setRuleDraft({ ...ruleDraft, activation: e.target.value as WorkspaceRuleActivation })
+                  }
+                >
+                  {RULE_ACTIVATIONS.map((a) => (
+                    <option key={a} value={a}>
+                      {a}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Priority
+                <input
+                  type="number"
+                  aria-label="Rule priority"
+                  value={ruleDraft.priority}
+                  onChange={(e) => setRuleDraft({ ...ruleDraft, priority: Number(e.target.value) })}
+                />
+              </label>
+            </div>
+            <label>
+              Description (optional)
+              <input
+                aria-label="Rule description"
+                placeholder="When and why this rule applies"
+                value={ruleDraft.description}
+                onChange={(e) => setRuleDraft({ ...ruleDraft, description: e.target.value })}
+              />
+            </label>
+            <label>
+              Rule instructions (.sshs3/rules)
+              <textarea
+                required
+                rows={4}
+                aria-label="Rule body"
+                placeholder="Always run read-only diagnostics before proposing configuration changes on prod*."
+                value={ruleDraft.body}
+                onChange={(e) => setRuleDraft({ ...ruleDraft, body: e.target.value })}
+              />
+            </label>
+            <div className="ai-form-row">
+              <label className="ai-check">
+                <input
+                  type="checkbox"
+                  checked={ruleDraft.enabled}
+                  onChange={(e) => setRuleDraft({ ...ruleDraft, enabled: e.target.checked })}
+                />
+                <span>Rule enabled</span>
+              </label>
+              <label className="ai-check">
+                <input
+                  type="checkbox"
+                  checked={ruleDraft.applyToReadOnly}
+                  onChange={(e) => setRuleDraft({ ...ruleDraft, applyToReadOnly: e.target.checked })}
+                />
+                <span>Apply to read-only runs</span>
+              </label>
+            </div>
+            <div className="ai-card-actions">
+              <button type="submit" className="ai-btn-emerald">
+                Save rule
+              </button>
+              <button type="button" onClick={() => setRuleDraft(undefined)}>
+                Cancel
+              </button>
+            </div>
+          </form>
+        )}
+
+        {filteredRules.length === 0 && !ruleDraft && (
+          <p className="ai-empty">
+            No workspace rules defined in <code>.sshs3/rules</code>. Add scoped rules to cascade instructions by
+            environment, tag, cluster, or host glob.
+          </p>
+        )}
+
+        {filteredRules.map((rule: WorkspaceRule) => {
+          const isEnabled = rule.enabled !== false;
+          return (
+            <article
+              key={rule.id}
+              className={`ai-card ${isEnabled ? "" : "ai-card-off"}`}
+              data-testid={`workspace-rule-${rule.id}`}
+            >
+              <div className="ai-card-head">
+                <div>
+                  <strong>{rule.name}</strong>
+                  {rule.description && <small>{rule.description}</small>}
+                </div>
+                <div className="ai-tags">
+                  <span className="ai-badge ai-badge-cluster">
+                    {rule.scope === "global" ? "global" : `${rule.scope}:${rule.scopeValue || "*"}`}
+                  </span>
+                  <span className="ai-badge ai-badge-mode">{rule.activation}</span>
+                  {rule.priority !== undefined && <span className="ai-badge">p:{rule.priority}</span>}
+                  <span className={`ai-badge ${isEnabled ? "ai-badge-success" : ""}`}>
+                    {isEnabled ? "enabled" : "disabled"}
+                  </span>
+                </div>
+              </div>
+              <p className="ai-memory-text">{rule.body}</p>
+              <div className="ai-card-actions">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setRuleDraft({
+                      id: rule.id,
+                      name: rule.name,
+                      scope: rule.scope,
+                      scopeValue: rule.scopeValue ?? "",
+                      activation: rule.activation,
+                      description: rule.description ?? "",
+                      body: rule.body,
+                      priority: rule.priority ?? 100,
+                      applyToReadOnly: rule.applyToReadOnly !== false,
+                      enabled: isEnabled,
+                    })
+                  }
+                >
+                  Edit
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    void act({
+                      action: "rule-save",
+                      rule: { ...rule, enabled: !isEnabled },
+                    })
+                  }
+                >
+                  {isEnabled ? "Disable" : "Enable"}
+                </button>
+                <span className="ai-spacer" />
+                <ConfirmButton
+                  label="Delete"
+                  confirmLabel="Delete this rule?"
+                  onConfirm={() => void act({ action: "rule-delete", id: rule.id })}
+                />
+              </div>
+            </article>
+          );
+        })}
+      </section>
 
       <AgentTestsView hub={hub} act={act} />
 
@@ -713,9 +1041,14 @@ export function AgentsAndMcpView({
       )}
 
       <div className="ai-section-head">
-        <h3>
-          MCP servers <span className="ai-count">{servers.length}</span>
-        </h3>
+        <div>
+          <h3>
+            MCP servers <span className="ai-count">{servers.length}</span>
+          </h3>
+          <small data-testid="local-mcp-capabilities">
+            Local sshS3 MCP exposure: {localResourcesCount} resources · {localPromptsCount} prompts
+          </small>
+        </div>
         <button
           type="button"
           onClick={() =>
@@ -740,6 +1073,19 @@ export function AgentsAndMcpView({
             e.preventDefault();
             if (!mcpDraft.name.trim()) return;
             const stdio = mcpDraft.transport === "stdio";
+            const oauth: McpOAuthConfig | undefined =
+              !stdio && mcpDraft.oauthEnabled
+                ? {
+                    enabled: true,
+                    clientId: mcpDraft.oauthClientId?.trim() || undefined,
+                    scopes: (mcpDraft.oauthScopes ?? "")
+                      .split(/[,\s]+/)
+                      .map((s) => s.trim())
+                      .filter(Boolean),
+                    connectedAt: mcpDraft.oauthConnectedAt,
+                  }
+                : undefined;
+
             void act({
               action: "mcp-save",
               server: {
@@ -749,12 +1095,17 @@ export function AgentsAndMcpView({
                 command: stdio ? mcpDraft.command.trim() : undefined,
                 args: stdio ? mcpDraft.args.split(/\s+/).filter(Boolean) : undefined,
                 url: stdio ? undefined : mcpDraft.url.trim(),
-                // An empty value keeps what is stored under that name; a row that was removed is removed.
                 ...(() => {
-                  const values = Object.fromEntries((mcpDraft.secrets ?? []).filter((r) => r.name.trim()).map((r) => [r.name.trim(), r.value]));
+                  const values = Object.fromEntries(
+                    (mcpDraft.secrets ?? [])
+                      .filter((r) => r.name.trim())
+                      .map((r) => [r.name.trim(), r.value]),
+                  );
                   return stdio ? { env: values, headers: {} } : { headers: values, env: {} };
                 })(),
                 enabled: mcpDraft.enabled ?? true,
+                trustReadOnlyHint: mcpDraft.trustReadOnlyHint ?? false,
+                oauth,
               },
             }).then((next) => {
               if (!next) return;
@@ -811,17 +1162,55 @@ export function AgentsAndMcpView({
               </label>
             </div>
           ) : (
-            <label>
-              URL
-              <input
-                required
-                type="url"
-                placeholder="https://mcp.example.internal/mcp"
-                value={mcpDraft.url}
-                onChange={(e) => setMcpDraft({ ...mcpDraft, url: e.target.value })}
-              />
-            </label>
+            <>
+              <label>
+                URL
+                <input
+                  required
+                  type="url"
+                  placeholder="https://mcp.example.internal/mcp"
+                  value={mcpDraft.url}
+                  onChange={(e) => setMcpDraft({ ...mcpDraft, url: e.target.value })}
+                />
+              </label>
+              <label className="ai-check">
+                <input
+                  type="checkbox"
+                  checked={Boolean(mcpDraft.oauthEnabled)}
+                  onChange={(e) => setMcpDraft({ ...mcpDraft, oauthEnabled: e.target.checked })}
+                />
+                <span>Use OAuth 2.1 (RFC 9728 / PKCE) authentication</span>
+              </label>
+              {mcpDraft.oauthEnabled && (
+                <div className="ai-form-row">
+                  <label>
+                    OAuth Client ID (optional)
+                    <input
+                      placeholder="Dynamic registration or client_id"
+                      value={mcpDraft.oauthClientId ?? ""}
+                      onChange={(e) => setMcpDraft({ ...mcpDraft, oauthClientId: e.target.value })}
+                    />
+                  </label>
+                  <label>
+                    OAuth Scopes
+                    <input
+                      placeholder="mcp:read, mcp:tools"
+                      value={mcpDraft.oauthScopes ?? ""}
+                      onChange={(e) => setMcpDraft({ ...mcpDraft, oauthScopes: e.target.value })}
+                    />
+                  </label>
+                </div>
+              )}
+            </>
           )}
+          <label className="ai-check">
+            <input
+              type="checkbox"
+              checked={Boolean(mcpDraft.trustReadOnlyHint)}
+              onChange={(e) => setMcpDraft({ ...mcpDraft, trustReadOnlyHint: e.target.checked })}
+            />
+            <span>Trust server&apos;s readOnlyHint annotation without asking (not recommended on prod)</span>
+          </label>
           <fieldset className="ai-secret-rows" data-testid="mcp-secrets">
             <legend>{mcpDraft.transport === "stdio" ? "Environment variables" : "Headers"} (tokens and keys go here)</legend>
             {(mcpDraft.secrets ?? []).map((row, i) => (
@@ -832,7 +1221,10 @@ export function AgentsAndMcpView({
                   value={row.name}
                   disabled={row.kept}
                   onChange={(e) =>
-                    setMcpDraft({ ...mcpDraft, secrets: mcpDraft.secrets!.map((r, j) => (j === i ? { ...r, name: e.target.value } : r)) })
+                    setMcpDraft({
+                      ...mcpDraft,
+                      secrets: mcpDraft.secrets!.map((r, j) => (j === i ? { ...r, name: e.target.value } : r)),
+                    })
                   }
                 />
                 <input
@@ -842,13 +1234,21 @@ export function AgentsAndMcpView({
                   placeholder={row.kept ? "Kept. Type a new value to change it." : "Value"}
                   value={row.value}
                   onChange={(e) =>
-                    setMcpDraft({ ...mcpDraft, secrets: mcpDraft.secrets!.map((r, j) => (j === i ? { ...r, value: e.target.value } : r)) })
+                    setMcpDraft({
+                      ...mcpDraft,
+                      secrets: mcpDraft.secrets!.map((r, j) => (j === i ? { ...r, value: e.target.value } : r)),
+                    })
                   }
                 />
                 <button
                   type="button"
                   aria-label={`Remove ${row.name || "this row"}`}
-                  onClick={() => setMcpDraft({ ...mcpDraft, secrets: mcpDraft.secrets!.filter((_, j) => j !== i) })}
+                  onClick={() =>
+                    setMcpDraft({
+                      ...mcpDraft,
+                      secrets: mcpDraft.secrets!.filter((_, j) => j !== i),
+                    })
+                  }
                 >
                   Remove
                 </button>
@@ -856,7 +1256,12 @@ export function AgentsAndMcpView({
             ))}
             <button
               type="button"
-              onClick={() => setMcpDraft({ ...mcpDraft, secrets: [...(mcpDraft.secrets ?? []), { name: "", value: "", kept: false }] })}
+              onClick={() =>
+                setMcpDraft({
+                  ...mcpDraft,
+                  secrets: [...(mcpDraft.secrets ?? []), { name: "", value: "", kept: false }],
+                })
+              }
             >
               Add one
             </button>
@@ -881,7 +1286,7 @@ export function AgentsAndMcpView({
         <p className="ai-empty">No MCP servers yet. The assistant&apos;s built-in tools work without any.</p>
       )}
 
-      {servers.map((srv: McpServerConfig) => {
+      {servers.map((srv) => {
         const state = !srv.enabled
           ? "disabled"
           : srv.status === "connected"
@@ -889,29 +1294,94 @@ export function AgentsAndMcpView({
             : srv.status === "error"
               ? "failed"
               : "not tested";
+        const toolCount = srv.discoveredTools?.length ?? 0;
+        const promptCount = srv.discoveredPrompts?.length ?? srv.promptCount ?? 0;
+        const resourceCount = srv.discoveredResources?.length ?? srv.resourceCount ?? 0;
+        const oauthInfo = mcpOAuthStatus(srv.oauth);
+
         return (
           <article className="ai-card" key={srv.id} data-testid={`mcp-server-${srv.id}`}>
             <div className="ai-card-head">
               <div>
                 <strong>{srv.name}</strong>
                 <small className="ai-mono">{commandLine(srv)}</small>
+                <small data-testid={`mcp-counts-${srv.id}`}>
+                  {toolCount} tool{toolCount === 1 ? "" : "s"} · {promptCount} prompt{promptCount === 1 ? "" : "s"} ·{" "}
+                  {resourceCount} resource{resourceCount === 1 ? "" : "s"}
+                </small>
               </div>
-              <span
-                className={`ai-badge ${state === "connected" ? "ai-badge-success" : state === "failed" ? "ai-badge-danger" : ""}`}
-              >
-                {state}
-              </span>
-            </div>
-            {srv.lastError && srv.enabled && <p className="ai-error">{srv.lastError}</p>}
-            {(srv.discoveredTools ?? []).length > 0 && (
               <div className="ai-tags">
-                {srv.discoveredTools!.map((t) => (
-                  <span key={t.name} className="ai-tool-tag" title={t.description}>
-                    {t.name}
+                {(srv.transport === "http" || srv.oauth?.enabled) && (
+                  <span
+                    className={`ai-badge ${oauthInfo.badgeClass}`}
+                    data-testid={`mcp-oauth-badge-${srv.id}`}
+                    title={
+                      srv.oauth?.scopes?.length
+                        ? `Scopes: ${srv.oauth.scopes.join(", ")}`
+                        : "OAuth 2.1 connection status"
+                    }
+                  >
+                    {oauthInfo.label}
                   </span>
-                ))}
+                )}
+                <span
+                  className={`ai-badge ${state === "connected" ? "ai-badge-success" : state === "failed" ? "ai-badge-danger" : ""}`}
+                >
+                  {state}
+                </span>
+              </div>
+            </div>
+
+            {srv.lastError && srv.enabled && <p className="ai-error">{srv.lastError}</p>}
+
+            <label className="ai-check">
+              <input
+                type="checkbox"
+                checked={Boolean(srv.trustReadOnlyHint)}
+                onChange={(e) =>
+                  void act({
+                    action: "mcp-save",
+                    server: { ...srv, trustReadOnlyHint: e.target.checked },
+                  })
+                }
+              />
+              <span>Trust server readOnlyHint without prompting</span>
+            </label>
+
+            {(srv.discoveredTools ?? []).length > 0 && (
+              <div className="ai-form" data-testid={`mcp-tool-matrix-${srv.id}`}>
+                <small>Per-tool execution policy (allow / ask / deny):</small>
+                {srv.discoveredTools!.map((t) => {
+                  const policy = effectiveToolPolicy(srv, t.name, t.readOnly);
+                  return (
+                    <div className="ai-inline-form" key={t.name}>
+                      <span className="ai-tool-tag" title={t.description}>
+                        {t.name}
+                        {t.readOnly ? " · readOnlyHint" : ""}
+                      </span>
+                      <select
+                        aria-label={`Policy for ${srv.name} ${t.name}`}
+                        data-testid={`mcp-tool-policy-${srv.id}-${t.name}`}
+                        value={policy}
+                        onChange={(e) =>
+                          void act({
+                            action: "mcp-tool-policy",
+                            serverId: srv.id,
+                            toolName: t.name,
+                            policy: e.target.value as McpToolPolicy,
+                          })
+                        }
+                      >
+                        <option value="allow">allow</option>
+                        <option value="ask">ask</option>
+                        <option value="deny">deny</option>
+                      </select>
+                    </div>
+                  );
+                })}
               </div>
             )}
+
             <div className="ai-card-actions">
               <button
                 type="button"
@@ -924,6 +1394,26 @@ export function AgentsAndMcpView({
               >
                 {testingMcpId === srv.id ? "Testing…" : "Test"}
               </button>
+              {srv.transport === "http" && (
+                <button
+                  type="button"
+                  data-testid={`mcp-oauth-connect-${srv.id}`}
+                  onClick={() => {
+                    const nextOAuth: McpOAuthConfig = {
+                      ...(srv.oauth ?? {}),
+                      enabled: true,
+                    };
+                    void act({
+                      action: "mcp-save",
+                      server: { ...srv, oauth: nextOAuth },
+                    }).then((saved) => {
+                      if (saved) void act({ action: "mcp-test", id: srv.id });
+                    });
+                  }}
+                >
+                  {srv.oauth?.connectedAt ? "Reconnect OAuth 2.1" : "Connect OAuth 2.1"}
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() =>
@@ -934,8 +1424,17 @@ export function AgentsAndMcpView({
                     command: srv.command ?? "",
                     args: (srv.args ?? []).join(" "),
                     url: srv.url ?? "",
-                    secrets: Object.keys((srv.transport === "http" ? srv.headers : srv.env) ?? {}).map((name) => ({ name, value: "", kept: true })),
+                    secrets: Object.keys((srv.transport === "http" ? srv.headers : srv.env) ?? {}).map((name) => ({
+                      name,
+                      value: "",
+                      kept: true,
+                    })),
                     enabled: srv.enabled,
+                    trustReadOnlyHint: srv.trustReadOnlyHint,
+                    oauthEnabled: srv.oauth?.enabled,
+                    oauthClientId: srv.oauth?.clientId,
+                    oauthScopes: srv.oauth?.scopes?.join(", "),
+                    oauthConnectedAt: srv.oauth?.connectedAt,
                   })
                 }
               >

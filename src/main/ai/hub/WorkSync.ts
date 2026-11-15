@@ -1,6 +1,18 @@
 import type { QueueStore } from "./LearningQueue";
 import type { AgentUsage } from "../../../shared/types/aiHub";
 import { TICKET_CLAIM_TTL_MS, mergeItems, type Mergeable } from "./WorkBoard";
+import { isPreconditionFailedError } from "./S3WorkspaceSyncService";
+
+export interface ConditionalQueueStore extends QueueStore {
+  /** True when `write(path, buf, { ifMatch, ifNoneMatch })` enforces S3 conditional preconditions atomically. */
+  supportsConditionalWrite?: boolean;
+  readWithMeta?(path: string): Promise<{ buffer: Buffer; etag?: string } | undefined>;
+  write(
+    path: string,
+    content: Buffer,
+    options?: { ifMatch?: string; ifNoneMatch?: string },
+  ): Promise<void>;
+}
 
 /**
  * The board in the team's bucket. There is no server: every app reads and
@@ -74,13 +86,16 @@ export class WorkSync {
     return { items: merged.items, changed: merged.changed };
   }
 
+  private get conditionalStore(): ConditionalQueueStore {
+    return this.store as ConditionalQueueStore;
+  }
+
   /**
    * For something that must happen once however many installations see it
-   * (telling a channel about a shared ticket). A mark that already exists means
-   * someone did it. Otherwise this installation writes its mark, lets the
-   * bucket settle, and does it only if the mark is still its own: of two that
-   * write at the same moment, both read the same winner. Marks do not expire;
-   * `pruneMarks` removes old ones.
+   * (telling a channel about a shared ticket). Uses `If-None-Match: "*"` when
+   * the store supports conditional writes so concurrent callers never race;
+   * falls back to `settle()` + read-back on plain mock stores. Marks do not
+   * expire; `pruneMarks` removes old ones.
    */
   async markOnce(key: string, client: string, settle: () => Promise<void>, now = Date.now()): Promise<boolean> {
     const at = `work/notified/${safeId(key)}.json`;
@@ -93,7 +108,17 @@ export class WorkSync {
       }
     };
     if (await mark()) return false;
-    await this.store.write(at, Buffer.from(JSON.stringify({ client, at: now }), "utf8"));
+    try {
+      await this.conditionalStore.write(
+        at,
+        Buffer.from(JSON.stringify({ client, at: now }), "utf8"),
+        { ifNoneMatch: "*" },
+      );
+    } catch (err) {
+      if (isPreconditionFailedError(err)) return false;
+      throw err;
+    }
+    if (this.conditionalStore.supportsConditionalWrite) return true;
     await settle();
     return (await mark())?.client === client;
   }
@@ -180,6 +205,28 @@ export class WorkSync {
     return `work/claims/${safeId(ticketId)}.json`;
   }
 
+  private async readClaimWithMeta(
+    ticketId: string,
+  ): Promise<{ claim?: TicketClaim; etag?: string }> {
+    const target = this.claimPath(ticketId);
+    const meta =
+      typeof this.conditionalStore.readWithMeta === "function"
+        ? await this.conditionalStore.readWithMeta(target)
+        : undefined;
+    const buffer = meta ? meta.buffer : await this.store.read(target);
+    if (!buffer) return {};
+    try {
+      const value = JSON.parse(buffer.toString("utf8")) as TicketClaim;
+      const claim =
+        typeof value.client === "string" && typeof value.seenAt === "number"
+          ? value
+          : undefined;
+      return { claim, etag: meta?.etag };
+    } catch {
+      return { etag: meta?.etag };
+    }
+  }
+
   async readClaim(ticketId: string): Promise<TicketClaim | undefined> {
     const buffer = await this.store.read(this.claimPath(ticketId));
     if (!buffer) return undefined;
@@ -192,10 +239,11 @@ export class WorkSync {
   }
 
   /**
-   * Checks a ticket out. The claim is written and then read back: only the
-   * app that still finds its own claim proceeds, so two apps that reach for
-   * the same ticket at the same moment normally do not both run it.
-   * Returns the claim that holds, which is somebody else's when this failed.
+   * Checks a ticket out. Uses `If-None-Match: "*"` on unclaimed tickets (and
+   * `If-Match` when taking over a lapsed claim with an ETag) when the store
+   * supports conditional writes; falls back to `settle()` + read-back on plain
+   * mock stores. Returns the claim that holds, which is somebody else's when
+   * this failed.
    */
   async claim(
     ticketId: string,
@@ -209,24 +257,45 @@ export class WorkSync {
     } = {},
   ): Promise<TicketClaim> {
     const fresh = options.fresh ?? ((c: TicketClaim) => now - c.seenAt < TICKET_CLAIM_TTL_MS);
-    const existing = await this.readClaim(ticketId);
+    const { claim: existing, etag } = await this.readClaimWithMeta(ticketId);
     if (existing && existing.client !== who.client && fresh(existing)) return existing;
     const mine: TicketClaim = { ...who, at: existing?.client === who.client ? existing.at : now, seenAt: now };
-    await this.store.write(this.claimPath(ticketId), Buffer.from(JSON.stringify(mine), "utf8"));
+    const payload = Buffer.from(JSON.stringify(mine), "utf8");
+    const writeOpts = !existing
+      ? { ifNoneMatch: "*" }
+      : etag
+        ? { ifMatch: etag }
+        : undefined;
+    try {
+      await this.conditionalStore.write(this.claimPath(ticketId), payload, writeOpts);
+    } catch (err) {
+      if (isPreconditionFailedError(err)) {
+        return (await this.readClaim(ticketId)) ?? existing ?? mine;
+      }
+      throw err;
+    }
+    if (this.conditionalStore.supportsConditionalWrite) {
+      return mine;
+    }
     await options.settle?.();
     return (await this.readClaim(ticketId)) ?? mine;
   }
 
-  /** Says the run is still alive. Without this the claim lapses and the ticket is free again. */
   /** Says the run is still alive. False: the claim is not this installation's any more, and the run should stop. */
   async refresh(ticketId: string, client: string, now = Date.now()): Promise<boolean> {
-    const existing = await this.readClaim(ticketId);
+    const { claim: existing, etag } = await this.readClaimWithMeta(ticketId);
     if (!existing || existing.client !== client) return false;
-    await this.store.write(
-      this.claimPath(ticketId),
-      Buffer.from(JSON.stringify({ ...existing, seenAt: now }), "utf8"),
-    );
-    return true;
+    try {
+      await this.conditionalStore.write(
+        this.claimPath(ticketId),
+        Buffer.from(JSON.stringify({ ...existing, seenAt: now }), "utf8"),
+        etag ? { ifMatch: etag } : undefined,
+      );
+      return true;
+    } catch (err) {
+      if (isPreconditionFailedError(err)) return false;
+      throw err;
+    }
   }
 
   async release(ticketId: string, client: string): Promise<void> {

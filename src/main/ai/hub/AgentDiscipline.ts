@@ -1,10 +1,16 @@
+import crypto from "node:crypto";
 import type {
+  AgentHypothesis,
   AgentMode,
+  AgentTask,
   AgentTodo,
   MemoryEntry,
-  AgentHypothesis,
+  MissionAgent,
+  WorkspaceRule,
 } from "../../../shared/types/aiHub";
+import { CONTEXT_NOTE_PREFIX } from "../../../shared/types/aiHub";
 import { analyzeCommandSafety } from "./CommandSafetyService";
+import { extractErrorSignature } from "./SelfLearningService";
 import { boundedContext } from "./privacy";
 
 /**
@@ -127,6 +133,24 @@ export const TODO_TOOL = {
 
 // ------------------------------------------------------------ being held to it
 
+export interface HypothesisEvidence {
+  supports: boolean;
+  text: string;
+  at?: number;
+  toolCallId?: string;
+  author?: string;
+}
+
+export interface EnrichedAgentHypothesis extends AgentHypothesis {
+  evidence: HypothesisEvidence[];
+}
+
+export interface HypothesisParseContext {
+  at?: number;
+  toolCallId?: string;
+  author?: string;
+}
+
 export const HYPOTHESIS_TOOL = {
   name: "sshs3_hypotheses",
   description:
@@ -150,6 +174,9 @@ export const HYPOTHESIS_TOOL = {
                 properties: {
                   supports: { type: "boolean", description: "true: speaks for it; false: speaks against it." },
                   text: { type: "string", description: "What was observed and where (the command, the page, the log line)." },
+                  at: { type: "number", description: "Optional epoch-ms timestamp when the observation occurred." },
+                  toolCallId: { type: "string", description: "Optional tool call id or ref that produced the evidence." },
+                  author: { type: "string", description: "Optional agent or user identifier that recorded the evidence." },
                 },
                 required: ["supports", "text"],
               },
@@ -167,12 +194,26 @@ export const HYPOTHESIS_TOOL = {
 /**
  * The model's hypothesis list, validated. A hypothesis cannot be confirmed or
  * ruled out without evidence pointing that way: that is the whole point.
+ * Breaks 1-node and 2+-node parent cycles so cyclic hypotheses promote cleanly
+ * to roots instead of vanishing.
  */
 export function parseHypotheses(
   args: Record<string, unknown>,
-): { hypotheses: AgentHypothesis[] } | { error: string } {
+  context?: HypothesisParseContext,
+): { hypotheses: EnrichedAgentHypothesis[] } | { error: string } {
   if (!Array.isArray(args.hypotheses)) return { error: "`hypotheses` must be a list." };
-  const out: AgentHypothesis[] = [];
+  const defaultAt =
+    typeof context?.at === "number" && Number.isFinite(context.at) ? context.at : Date.now();
+  const defaultToolCallId =
+    typeof context?.toolCallId === "string" && context.toolCallId.trim()
+      ? context.toolCallId.trim().slice(0, 64)
+      : undefined;
+  const defaultAuthor =
+    typeof context?.author === "string" && context.author.trim()
+      ? context.author.trim().slice(0, 80)
+      : undefined;
+
+  const out: EnrichedAgentHypothesis[] = [];
   for (const raw of args.hypotheses.slice(0, 24)) {
     if (!raw || typeof raw !== "object") continue;
     const h = raw as Record<string, unknown>;
@@ -181,9 +222,28 @@ export function parseHypotheses(
     if (!id || !text) return { error: "Each hypothesis needs an id and a text." };
     if (out.some((x) => x.id === id)) return { error: `Two hypotheses share the id ${id}.` };
     const status = h.status === "confirmed" || h.status === "ruled-out" ? h.status : "open";
-    const evidence = (Array.isArray(h.evidence) ? h.evidence : [])
-      .filter((e): e is { supports: unknown; text: unknown } => Boolean(e) && typeof e === "object")
-      .map((e) => ({ supports: e.supports === true, text: typeof e.text === "string" ? boundedContext(e.text.trim(), 400) : "" }))
+    const evidence: HypothesisEvidence[] = (Array.isArray(h.evidence) ? h.evidence : [])
+      .filter((e): e is Record<string, unknown> => Boolean(e) && typeof e === "object")
+      .map((e) => {
+        const cleanText = typeof e.text === "string" ? boundedContext(e.text.trim(), 400) : "";
+        const at =
+          typeof e.at === "number" && Number.isFinite(e.at) ? e.at : defaultAt;
+        const toolCallId =
+          typeof e.toolCallId === "string" && e.toolCallId.trim()
+            ? e.toolCallId.trim().slice(0, 64)
+            : defaultToolCallId;
+        const author =
+          typeof e.author === "string" && e.author.trim()
+            ? e.author.trim().slice(0, 80)
+            : defaultAuthor;
+        return {
+          supports: e.supports === true,
+          text: cleanText,
+          at,
+          ...(toolCallId ? { toolCallId } : {}),
+          ...(author ? { author } : {}),
+        };
+      })
       .filter((e) => e.text)
       .slice(0, 8);
     if (status === "confirmed" && !evidence.some((e) => e.supports))
@@ -198,8 +258,37 @@ export function parseHypotheses(
       evidence,
     });
   }
-  const ids = new Set(out.map((h) => h.id));
-  for (const h of out) if (h.parentId && (!ids.has(h.parentId) || h.parentId === h.id)) h.parentId = undefined;
+
+  const byId = new Map(out.map((h) => [h.id, h]));
+  for (const h of out) {
+    if (h.parentId && (!byId.has(h.parentId) || h.parentId === h.id)) {
+      h.parentId = undefined;
+    }
+  }
+
+  // Detect and break 2+-node cycles (e.g. h1 -> h2 -> h1, h0 -> h1 -> h2 -> h1)
+  // so cyclic hypotheses promote cleanly to roots instead of vanishing.
+  const verifiedAcyclic = new Set<string>();
+  for (const start of out) {
+    if (verifiedAcyclic.has(start.id)) continue;
+    const path: EnrichedAgentHypothesis[] = [];
+    const onPath = new Set<string>();
+    let cur: EnrichedAgentHypothesis | undefined = start;
+    while (cur && !verifiedAcyclic.has(cur.id)) {
+      if (onPath.has(cur.id)) {
+        // `cur` is the cycle entry point; clear its parentId to break the cycle and promote it to a root.
+        cur.parentId = undefined;
+        break;
+      }
+      onPath.add(cur.id);
+      path.push(cur);
+      cur = cur.parentId ? byId.get(cur.parentId) : undefined;
+    }
+    for (const node of path) {
+      verifiedAcyclic.add(node.id);
+    }
+  }
+
   return { hypotheses: out };
 }
 
@@ -411,11 +500,14 @@ const STOP = new Set([
 const words = (text: string): Set<string> =>
   new Set((text.toLowerCase().match(WORD) ?? []).filter((w) => !STOP.has(w)));
 
+/** Minimum confidence required before a team memory or learned skill is surfaced as a failure hint. */
+export const MIN_FAILURE_HINT_CONFIDENCE = 0.65;
+
 /**
  * Team memories and skills that bear on a command that just failed: ranked by
  * how many distinctive words they share with the command and its output, with
- * an exact error-signature match first. At most `limit`, and only real
- * matches: no hint is better than a misleading one.
+ * a normalized `extractErrorSignature` or exact error-signature match first.
+ * Filters out superseded entries and entries below 0.65 confidence.
  */
 export function failureHints(
   command: string,
@@ -423,20 +515,49 @@ export function failureHints(
   memories: MemoryEntry[],
   limit = 2,
 ): MemoryEntry[] {
+  const outputTail = output.slice(-2000);
   const outputLower = output.toLowerCase();
-  const wanted = words(`${command} ${output.slice(-2000)}`);
-  if (wanted.size === 0) return [];
+  const observedSig =
+    command.trim() || outputTail.trim()
+      ? extractErrorSignature(command, outputTail).toLowerCase()
+      : "";
+  const wanted = words(`${command} ${outputTail}`);
+  if (wanted.size === 0 && !observedSig) return [];
+
   return memories
+    .filter((m) => {
+      if (m.supersededBy) return false;
+      const confidence = typeof m.confidence === "number" ? m.confidence : 0.8;
+      if (confidence < MIN_FAILURE_HINT_CONFIDENCE) return false;
+      return true;
+    })
     .map((m) => {
-      const signature = m.errorSignature?.trim().toLowerCase();
-      const exact = Boolean(signature && signature.length >= 6 && outputLower.includes(signature));
+      const signature = m.errorSignature?.trim().toLowerCase() ?? "";
+      const normalizedMatch = Boolean(
+        signature &&
+          !signature.startsWith("seen|") &&
+          observedSig &&
+          signature === observedSig,
+      );
+      const substringMatch = Boolean(
+        signature &&
+          !signature.startsWith("seen|") &&
+          signature.length >= 6 &&
+          outputLower.includes(signature),
+      );
+      const exact = normalizedMatch || substringMatch;
       const have = words(`${m.title} ${m.text} ${m.sourceCommand ?? ""} ${m.errorSignature ?? ""}`);
       let shared = 0;
       for (const w of have) if (wanted.has(w)) shared++;
       return { m, score: (exact ? 100 : 0) + shared, exact, shared };
     })
     .filter((x) => x.exact || x.shared >= 3)
-    .sort((a, b) => b.score - a.score)
+    .sort(
+      (a, b) =>
+        b.score - a.score ||
+        (b.m.confidence ?? 0.8) - (a.m.confidence ?? 0.8) ||
+        b.m.updatedAt - a.m.updatedAt,
+    )
     .slice(0, limit)
     .map((x) => x.m);
 }
@@ -450,7 +571,281 @@ export function renderFailureHints(hints: MemoryEntry[]): string {
     .join("\n");
 }
 
+// --------------------------------------------------- autonomous handoff guards
+
+/** Maximum number of agent-to-agent handoff hops allowed on a single task. */
+export const MAX_HANDOFF_HOPS = 3;
+
+export interface HandoffCheckResult {
+  allowed: boolean;
+  reason?: "max-hops" | "cycle" | "missing-target";
+  message?: string;
+  hopsUsed: number;
+  nextChain: string[];
+}
+
+export interface HandoffPacket {
+  fromAgentId?: string;
+  fromAgentName: string;
+  toAgentId: string;
+  toAgentName: string;
+  reason?: string;
+  mission?: string;
+  goal: string;
+  target?: { sessionId: string; label: string };
+  handoffChain: string[];
+  hopsUsed: number;
+  maxHops: number;
+  todos: AgentTodo[];
+  hypotheses: AgentHypothesis[];
+  evidenceRefs: string[];
+  summaryText: string;
+  createdAt: number;
+}
+
+const MODE_RANK: Record<AgentMode, number> = {
+  advice: 0,
+  plan: 1,
+  assisted: 2,
+  autonomous: 3,
+};
+
+function lowerMode(a: AgentMode, b: AgentMode): AgentMode {
+  return MODE_RANK[a] <= MODE_RANK[b] ? a : b;
+}
+
+/**
+ * Checks whether handing a task to `toAgentId` is permitted under
+ * `MAX_HANDOFF_HOPS = 3` and cycle detection (`A -> B -> A`).
+ */
+export function checkHandoffAllowed(params: {
+  handoffChain?: string[];
+  currentAgentId?: string;
+  currentAgentName?: string;
+  toAgentId: string;
+  toAgentName?: string;
+  maxHops?: number;
+  allowCycle?: boolean;
+}): HandoffCheckResult {
+  const maxHops = params.maxHops ?? MAX_HANDOFF_HOPS;
+  const toId = params.toAgentId.trim();
+  const toName = (params.toAgentName ?? "").trim();
+  if (!toId) {
+    const base = [...(params.handoffChain ?? [])];
+    return {
+      allowed: false,
+      reason: "missing-target",
+      message: "Handoff refused: target agent id is missing.",
+      hopsUsed: Math.max(0, base.length - 1),
+      nextChain: base,
+    };
+  }
+
+  const origin =
+    params.currentAgentId?.trim() ||
+    params.currentAgentName?.trim() ||
+    "default";
+  const baseChain =
+    params.handoffChain && params.handoffChain.length > 0
+      ? params.handoffChain.map((s) => s.trim()).filter(Boolean)
+      : [origin];
+  const hopsUsed = Math.max(0, baseChain.length - 1);
+
+  if (!params.allowCycle) {
+    const visited = new Set(baseChain.map((s) => s.toLowerCase()));
+    if (visited.has(toId.toLowerCase()) || (toName && visited.has(toName.toLowerCase()))) {
+      return {
+        allowed: false,
+        reason: "cycle",
+        message: `Handoff cycle detected: "${toName || toId}" already appeared in handoff chain [${baseChain.join(" -> ")}].`,
+        hopsUsed,
+        nextChain: baseChain,
+      };
+    }
+  }
+
+  const nextChain = [...baseChain, toId];
+  const nextHops = nextChain.length - 1;
+  if (nextHops > maxHops) {
+    return {
+      allowed: false,
+      reason: "max-hops",
+      message: `Handoff hop limit reached (${hopsUsed}/${maxHops}): cannot hand off from [${baseChain.join(" -> ")}] to "${toName || toId}".`,
+      hopsUsed,
+      nextChain: baseChain,
+    };
+  }
+
+  return {
+    allowed: true,
+    hopsUsed: nextHops,
+    nextChain,
+  };
+}
+
+/**
+ * Builds a structured `HandoffPacket` for autonomous/manual handoffs, enforcing
+ * hop limits and cycle detection while carrying goal, open todos, hypotheses,
+ * and recent tool evidence forward cleanly.
+ */
+export function buildHandoffPacket(params: {
+  task: Pick<
+    AgentTask,
+    | "id"
+    | "title"
+    | "agentId"
+    | "agentName"
+    | "target"
+    | "messages"
+    | "todos"
+    | "hypotheses"
+    | "toolLog"
+    | "handoffChain"
+  >;
+  toAgent: Pick<MissionAgent, "id" | "name" | "mission">;
+  reason?: string;
+  now?: number;
+  allowCycle?: boolean;
+}):
+  | { ok: true; packet: HandoffPacket }
+  | { ok: false; error: string; reason: "max-hops" | "cycle" | "missing-target" } {
+  const { task, toAgent, reason } = params;
+  const check = checkHandoffAllowed({
+    handoffChain: task.handoffChain,
+    currentAgentId: task.agentId,
+    currentAgentName: task.agentName,
+    toAgentId: toAgent.id,
+    toAgentName: toAgent.name,
+    allowCycle: params.allowCycle,
+  });
+  if (!check.allowed) {
+    return {
+      ok: false,
+      error: check.message ?? "Handoff not allowed.",
+      reason: check.reason ?? "cycle",
+    };
+  }
+
+  const fromAgentName = task.agentName || "Default Assistant";
+  const firstUserMsg = task.messages.find((m) => m.role === "user")?.text ?? "";
+  const goal = boundedContext(task.title || firstUserMsg || "Continue task", 300);
+  const todos = (task.todos ?? []).slice(0, MAX_TODOS);
+  const hypotheses = (task.hypotheses ?? []).slice(0, 24);
+  const evidenceRefs = (task.toolLog ?? [])
+    .slice(-6)
+    .map((r) => `${r.name}: ${boundedContext(r.output, 160)}`);
+  const cleanReason = reason ? boundedContext(reason.trim(), 400) : undefined;
+  const open = openTodos(todos);
+
+  const summaryLines = [
+    `**Handed over: ${fromAgentName} → ${toAgent.name}** (hop ${check.hopsUsed}/${MAX_HANDOFF_HOPS})`,
+    `Chain: ${check.nextChain.join(" → ")}`,
+    ...(cleanReason ? [`Reason: *${cleanReason}*`] : []),
+    `Mission: ${toAgent.mission}`,
+    `Goal: ${goal}`,
+    ...(open.length
+      ? [`Open tasks (${open.length}): ${open.map((t) => `(${t.status}) ${t.content}`).join("; ")}`]
+      : []),
+    ...(hypotheses.length
+      ? [
+          `Hypotheses (${hypotheses.length}): ${hypotheses
+            .map((h) => `[${h.status}] ${h.text}`)
+            .join("; ")}`,
+        ]
+      : []),
+    ...(evidenceRefs.length
+      ? [`Recent evidence: ${evidenceRefs.join(" | ")}`]
+      : []),
+  ];
+
+  return {
+    ok: true,
+    packet: {
+      fromAgentId: task.agentId,
+      fromAgentName,
+      toAgentId: toAgent.id,
+      toAgentName: toAgent.name,
+      ...(cleanReason ? { reason: cleanReason } : {}),
+      mission: toAgent.mission,
+      goal,
+      ...(task.target
+        ? { target: { sessionId: task.target.sessionId, label: task.target.label } }
+        : {}),
+      handoffChain: check.nextChain,
+      hopsUsed: check.hopsUsed,
+      maxHops: MAX_HANDOFF_HOPS,
+      todos,
+      hypotheses,
+      evidenceRefs,
+      summaryText: summaryLines.join("\n"),
+      createdAt: params.now ?? Date.now(),
+    },
+  };
+}
+
+/**
+ * Applies a validated handoff onto `task`, enforcing `MAX_HANDOFF_HOPS = 3`
+ * and cycle detection (`A -> B -> A`) and recording the `HandoffPacket` on `task`.
+ */
+export function applyHandoff(
+  task: AgentTask,
+  toAgent: Pick<MissionAgent, "id" | "name" | "mission" | "defaultMode">,
+  reason?: string,
+  now = Date.now(),
+  options?: { allowCycle?: boolean },
+):
+  | { ok: true; packet: HandoffPacket }
+  | { ok: false; error: string; reason: "max-hops" | "cycle" | "missing-target" } {
+  const built = buildHandoffPacket({
+    task,
+    toAgent,
+    reason,
+    now,
+    allowCycle: options?.allowCycle,
+  });
+  if (!built.ok) return built;
+
+  task.startedAs ??= { agentId: task.agentId, mode: task.mode };
+  task.agentId = toAgent.id;
+  task.agentName = toAgent.name;
+  task.handoffTo = undefined;
+  task.handoffChain = built.packet.handoffChain;
+  task.mode = lowerMode(task.mode, toAgent.defaultMode);
+  task.updatedAt = now;
+  task.messages.push({
+    id: crypto.randomUUID(),
+    role: "system",
+    text: CONTEXT_NOTE_PREFIX + built.packet.summaryText,
+    at: now,
+  });
+
+  return { ok: true, packet: built.packet };
+}
+
 // ------------------------------------------------------------ how it is told to work
+
+export type ActiveInstructionRule = Pick<
+  WorkspaceRule,
+  "id" | "name" | "scope" | "scopeValue" | "body"
+>;
+
+export function formatActiveWorkspaceRules(
+  rules: ActiveInstructionRule[],
+): string[] {
+  if (!rules || rules.length === 0) return [];
+  const lines = [
+    "",
+    "## Active workspace rules",
+    "Follow these active scoped workspace rules (ordered from broad to specific; higher-specificity rules override earlier conflicts):",
+  ];
+  for (const r of rules) {
+    const scopeLabel = r.scopeValue ? `${r.scope}:${r.scopeValue}` : r.scope;
+    const body = boundedContext((r.body ?? "").trim(), 2000);
+    if (!body) continue;
+    lines.push(`- **[${scopeLabel}] ${boundedContext(r.name, 120)}**: ${body}`);
+  }
+  return lines.length > 3 ? lines : [];
+}
 
 /**
  * The operating instructions of a normal agent run. They describe a way of
@@ -462,9 +857,11 @@ export function operatingInstructions(options: {
   thorough: boolean;
   planFirst?: boolean;
   agentSection: string[];
+  activeRules?: ActiveInstructionRule[];
 }): string {
-  const { mode, target, thorough, planFirst, agentSection } = options;
+  const { mode, target, thorough, planFirst, agentSection, activeRules } = options;
   const canAct = mode !== "advice" && Boolean(target);
+  const rulesSection = activeRules?.length ? formatActiveWorkspaceRules(activeRules) : [];
   return [
     "You are the operations assistant of an sshs3 workspace: a team's shared SSH, SFTP, S3 and Kubernetes environment. You work for the person in this conversation and on behalf of their team, on real systems.",
     `Autonomy mode: ${mode}. Terminal target: ${JSON.stringify(target ?? null)}.`,
@@ -472,6 +869,7 @@ export function operatingInstructions(options: {
       ? "You can run commands and write files on the target. In assisted mode a command that changes something waits for the user's approval; that is the tool's job, not yours to ask about in text."
       : "In this run you cannot run commands or write files on a server. You can read the workspace, search the knowledge base, inspect remote files, and use the sshs3 management tools.",
     ...agentSection,
+    ...rulesSection,
     "",
     "## First: what is being asked",
     "Decide which of these the request is, and act accordingly:",

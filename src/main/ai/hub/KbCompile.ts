@@ -8,7 +8,9 @@ import type {
   KbPageUse,
   KbPageVersion,
 } from "../../../shared/types/aiHub";
-import { checkPageText, stillUnverified } from "./KbCheck";
+import { checkPageText, stillUnverified, type CheckPageSourceInfo } from "./KbCheck";
+import { cosine, embedTextLocal, sparseCosine, sparseTermVector } from "./EmbeddingIndex";
+import { extractMarkdownHeadings, extractSemanticConcepts, tokenize } from "./KnowledgeBaseService";
 import { clip } from "./privacy";
 import { removalWins } from "./WorkBoard";
 
@@ -90,26 +92,123 @@ function finder(text: string): (word: string) => boolean {
   return (word) => (word.length <= 3 ? words.has(word) : lower.includes(word));
 }
 
-const headOf = (p: KbPage): string => `${p.title} ${p.when} ${(p.keys ?? []).join(" ")}`;
+const headOf = (p: KbPage): string => {
+  const headings = extractMarkdownHeadings(p.body).join(" ");
+  return `${p.title} ${p.when} ${(p.keys ?? []).join(" ")} ${headings}`.trim();
+};
+
+export interface PageRelevanceContext {
+  restingOn?: string;
+  textLower: string;
+  textWords: Set<string>;
+  textConcepts: string[];
+  textVec: number[];
+  textSparse: Map<string, number>;
+}
+
+/** Builds precomputed lexical + local-semantic signals for ranking candidate pages. */
+export function buildPageRelevanceContext(text: string, restingOn?: string): PageRelevanceContext {
+  const sample = text.slice(0, 20_000);
+  const tokens = tokenize(sample);
+  return {
+    restingOn,
+    textLower: norm(text.slice(0, 40_000)),
+    textWords: terms(sample),
+    textConcepts: extractSemanticConcepts(tokens),
+    textVec: embedTextLocal(sample),
+    textSparse: sparseTermVector(sample),
+  };
+}
 
 /**
- * The pages most likely to be touched by a text: the ones resting on the
- * source at hand first, then same targets, then shared words. One shared word
- * is not enough. Pages are shown to a model whole, so the list stops when
- * their text would be too much for one run.
+ * Semantic + lexical hybrid relevance score for matching a KbPage against a
+ * source document, run record, or search query.
+ */
+export function scorePageHybrid(
+  page: KbPage,
+  textOrCtx: string | PageRelevanceContext,
+  restingOn?: string,
+): { score: number; qualified: boolean; vectorSim: number; conceptHits: number } {
+  const ctx =
+    typeof textOrCtx === "string" ? buildPageRelevanceContext(textOrCtx, restingOn) : textOrCtx;
+  const effectiveRestingOn = restingOn ?? ctx.restingOn;
+  const restsOnSource = Boolean(
+    effectiveRestingOn && page.sources.some((s) => s.docId === effectiveRestingOn),
+  );
+
+  let score = restsOnSource ? 100 : 0;
+  let targetHits = 0;
+  for (const t of page.targets) {
+    if (ctx.textLower.includes(norm(t))) {
+      score += 6;
+      targetHits++;
+    }
+  }
+
+  let keyHit = false;
+  for (const k of page.keys ?? []) {
+    const key = norm(k);
+    if (key.length >= 3 && ctx.textLower.includes(key)) {
+      score += 8;
+      keyHit = true;
+    }
+  }
+
+  const descriptor = headOf(page);
+  const headWords = terms(descriptor);
+  let sharedHeadWords = 0;
+  for (const w of headWords) {
+    if (ctx.textWords.has(w)) sharedHeadWords++;
+  }
+  score += sharedHeadWords * 2;
+
+  const pageTokens = tokenize(`${descriptor} ${page.body.slice(0, 800)}`);
+  const pageConcepts = extractSemanticConcepts(pageTokens);
+  const conceptHits = ctx.textConcepts.filter((c) => pageConcepts.includes(c)).length;
+  if (conceptHits > 0) score += conceptHits * 2.5;
+
+  const pageSemanticText = `${descriptor}\n${page.targets.join(" ")}\n${page.body.slice(0, 800)}`;
+  const denseSim = Math.max(0, cosine(ctx.textVec, embedTextLocal(pageSemanticText)));
+  const lexSparseSim = sparseCosine(ctx.textSparse, sparseTermVector(pageSemanticText));
+  const vectorSim = Math.max(denseSim, lexSparseSim * 0.9);
+  if (vectorSim >= 0.16) {
+    score += vectorSim * 12;
+  }
+
+  if ((page.proven ?? 0) > 0) {
+    score += Math.min(2.5, Math.log1p(page.proven!) * 0.9);
+  }
+  if (page.unverified && (page.unverified.commands.length > 0 || page.unverified.citations.length > 0)) {
+    score *= 0.9;
+  }
+
+  const qualified =
+    restsOnSource ||
+    targetHits > 0 ||
+    keyHit ||
+    sharedHeadWords >= 2 ||
+    (conceptHits >= 1 && (sharedHeadWords >= 1 || vectorSim >= 0.16)) ||
+    vectorSim >= 0.25;
+
+  return {
+    score: qualified ? Math.round(score * 1000) / 1000 : 0,
+    qualified,
+    vectorSim,
+    conceptHits,
+  };
+}
+
+/**
+ * The pages most likely to be touched by a text: scored by a hybrid of
+ * source lineage, target match, key phrases, heading/title overlap, semantic
+ * concept clusters, and local n-gram vector similarity. Pages are shown to a
+ * model whole, so the list stops when their text would be too much for one run.
  */
 export function candidatePages(pages: KbPage[], text: string, limit = 6, restingOn?: string): KbPage[] {
-  const words = terms(text.slice(0, 20_000));
-  const lower = norm(text.slice(0, 40_000));
+  const ctx = buildPageRelevanceContext(text, restingOn);
   const ranked = pages
-    .map((page) => {
-      let score = 0;
-      if (restingOn && page.sources.some((s) => s.docId === restingOn)) score += 100;
-      for (const t of page.targets) if (lower.includes(norm(t))) score += 6;
-      for (const w of terms(headOf(page))) if (words.has(w)) score += 2;
-      return { page, score };
-    })
-    .filter((x) => x.score >= 4)
+    .map((page) => ({ page, ...scorePageHybrid(page, ctx, restingOn) }))
+    .filter((x) => x.qualified && x.score >= 4)
     .sort((a, b) => b.score - a.score)
     .slice(0, limit)
     .map((x) => x.page);
@@ -182,9 +281,12 @@ export function searchPages(
   const words = [...terms(query)];
   const lower = norm(query);
   if (words.length === 0) return [];
+  const qVec = embedTextLocal(query);
+  const qConcepts = extractSemanticConcepts(tokenize(query));
   return pages
     .map((page) => {
-      const inHead = finder(headOf(page));
+      const descriptor = headOf(page);
+      const inHead = finder(descriptor);
       const inBody = finder(page.body);
       let score = 0;
       for (const t of page.targets) if (lower.includes(norm(t))) score += 4;
@@ -198,15 +300,24 @@ export function searchPages(
         return key.length >= 3 && (lower.includes(key) || (lower.length >= 4 && key.includes(lower)));
       });
       if (keyed) score += 8;
+
+      const pageTokens = tokenize(`${descriptor} ${page.body.slice(0, 800)}`);
+      const pageConcepts = extractSemanticConcepts(pageTokens);
+      const conceptHits = qConcepts.filter((c) => pageConcepts.includes(c)).length;
+      const vecSim = Math.max(0, cosine(qVec, embedTextLocal(`${descriptor}\n${page.body.slice(0, 600)}`)));
+      if (conceptHits > 0 && vecSim >= 0.14) score += conceptHits * 2.0 + vecSim * 4.0;
+      else if (vecSim >= 0.34) score += vecSim * 6.0;
+
       const paragraphs = page.body.split(/\n{2,}/);
       const best = paragraphs
         .map((p) => ({ p, hits: words.filter(finder(p)).length }))
         .sort((a, b) => b.hits - a.hits)[0];
-      // A page counts when most of the question's words are in it, not one stray word.
+      // A page counts when most of the question's words are in it, not one stray word (unless keyed or strongly matched semantically).
       const covered = words.filter((w) => inHead(w) || inBody(w)).length;
+      const qualified = keyed || covered >= Math.max(1, Math.ceil(words.length * 0.5)) || vecSim >= 0.34;
       return {
         page,
-        score: keyed || covered >= Math.max(1, Math.ceil(words.length * 0.5)) ? score : 0,
+        score: qualified ? Math.round(score * 1000) / 1000 : 0,
         snippet: clip(best?.hits ? best.p : page.when, 500),
       };
     })
@@ -574,6 +685,8 @@ export function applyPageOps(
     by: string;
     source: KbPageSource;
     sourceText?: string;
+    sources?: CheckPageSourceInfo[];
+    sourceHeadings?: string[] | Record<string, string[]>;
     now?: number;
     /** A rebuild a person asked for: a statement on a page they edited that the source contradicts may be corrected in place. */
     correctPersonText?: boolean;
@@ -612,6 +725,8 @@ export function applyPageOps(
                 body,
                 sourceText: ctx.sourceText,
                 sourceTitles: sources.map((s) => s.title),
+                sources: ctx.sources,
+                sourceHeadings: ctx.sourceHeadings,
                 previous: { body: page.body, unverified: page.unverified },
               }),
         revision: page.revision + 1,
@@ -635,7 +750,13 @@ export function applyPageOps(
         unverified:
           ctx.sourceText === undefined
             ? undefined
-            : checkPageText({ body: op.body, sourceText: ctx.sourceText, sourceTitles: [source.title] }),
+            : checkPageText({
+                body: op.body,
+                sourceText: ctx.sourceText,
+                sourceTitles: [source.title],
+                sources: ctx.sources,
+                sourceHeadings: ctx.sourceHeadings,
+              }),
         revision: 1,
         createdAt: now,
         updatedAt: now,

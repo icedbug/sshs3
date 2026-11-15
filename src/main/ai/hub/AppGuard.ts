@@ -12,14 +12,16 @@ import type { AgentMode, AgentSchedule, MissionAgent } from "../../../shared/typ
  * person is there to answer.
  */
 
-const RANK: Record<AgentMode, number> = { advice: 0, assisted: 1, autonomous: 2 };
+export const MODE_ORDER: Record<AgentMode, number> = { advice: 0, plan: 1, assisted: 2, autonomous: 3 };
+const RANK: Record<AgentMode, number> = MODE_ORDER;
 /**
- * More freedom than the run that asks has, of the kind that matters: acting
- * without a person. An agent or a schedule that asks before each command is
- * not that, whoever makes it.
+ * Autonomous agents and schedules act without a human in the loop, so
+ * creating, modifying, or launching one always requires HITL approval — even
+ * when requested from an already-autonomous run.
  */
-const actsAlone = (mode: AgentMode, run: { mode: AgentMode }): boolean => mode === "autonomous" && run.mode !== "autonomous";
-const isMode = (value: unknown): value is AgentMode => value === "advice" || value === "assisted" || value === "autonomous";
+const actsAlone = (mode: AgentMode, _run?: { mode: AgentMode }): boolean => mode === "autonomous";
+const isMode = (value: unknown): value is AgentMode =>
+  value === "advice" || value === "plan" || value === "assisted" || value === "autonomous";
 
 /** The more careful of two modes. */
 export const lowerMode = (a: AgentMode, b: AgentMode | undefined): AgentMode => (b && RANK[b] < RANK[a] ? b : a);
@@ -27,10 +29,10 @@ export const lowerMode = (a: AgentMode, b: AgentMode | undefined): AgentMode => 
 /** What each operation of the management tools is, for the one test that keeps this list whole. */
 export type AppOpClass = "read" | "change" | "guard" | "guard-if";
 export const APP_OPS: Record<string, { fallback: string; ops: Record<string, AppOpClass> }> = {
-  sshs3_manage_server: { fallback: "upsert", ops: { upsert: "change", update_metadata: "change", delete: "change", set_local_override: "change", list_tunnels: "read", save_tunnel: "change", delete_tunnel: "change" } },
+  sshs3_manage_server: { fallback: "upsert", ops: { upsert: "guard-if", update_metadata: "change", delete: "change", set_local_override: "change", list_tunnels: "read", save_tunnel: "guard-if", delete_tunnel: "change" } },
   sshs3_manage_cluster_and_folders: { fallback: "assign_cluster", ops: { assign_cluster: "change", create_folder: "change", rename_folder: "change", delete_folder: "change" } },
-  sshs3_manage_memory_and_activity: { fallback: "save", ops: { save: "change", list: "read", delete: "change", feedback: "change", self_reflect: "change", log_activity: "change", core_append: "change", core_replace: "change" } },
-  // A schedule runs later with nobody there: it may not be given more freedom than the run that makes it.
+  sshs3_manage_memory_and_activity: { fallback: "save", ops: { save: "guard-if", list: "read", delete: "change", feedback: "change", self_reflect: "change", log_activity: "change", core_append: "guard-if", core_replace: "guard-if" } },
+  // A schedule runs later with nobody there: it always requires approval if autonomous (or when tainted).
   sshs3_manage_schedule: { fallback: "list", ops: { list: "read", save: "guard-if", delete: "change", toggle: "guard-if" } },
   sshs3_manage_s3_and_sync: {
     fallback: "status",
@@ -38,20 +40,22 @@ export const APP_OPS: Record<string, { fallback: string; ops: Record<string, App
   },
   sshs3_manage_app_and_settings: {
     fallback: "get_state",
-    ops: { get_state: "read", update_settings: "guard-if", configure_ai: "guard-if", update_shortcuts: "guard-if", update_safety_policy: "guard", list_dotfiles: "read", save_dotfile: "change", delete_dotfile: "change", list_snippets: "read", save_snippet: "change", delete_snippet: "change", open_local_terminal: "change" },
+    ops: { get_state: "read", update_settings: "guard-if", configure_ai: "guard-if", update_shortcuts: "guard-if", update_safety_policy: "guard", list_dotfiles: "read", save_dotfile: "guard-if", delete_dotfile: "change", list_snippets: "read", save_snippet: "change", delete_snippet: "change", open_local_terminal: "change" },
   },
-  sshs3_kb_manage: { fallback: "list", ops: { list: "read", add_document: "change", delete_document: "change", ingest_local_folder: "guard", ingest_s3_prefix: "guard" } },
+  sshs3_kb_manage: { fallback: "list", ops: { list: "read", add_document: "guard-if", delete_document: "change", ingest_local_folder: "guard", ingest_s3_prefix: "guard" } },
   sshs3_tickets: { fallback: "list", ops: { list: "read", read: "read", create: "change", comment: "change" } },
   sshs3_workspace_layout: { fallback: "open_terminal", ops: { open_terminal: "change", open_cluster_split: "change", open_dual_pane_explorer: "change" } },
   sshs3_storage_ops: { fallback: "list_files", ops: { list_files: "read", read_remote_file: "read", diff_paths: "read" } },
+  sshs3_investigate: { fallback: "investigate", ops: { investigate: "read" } },
   sshs3_agent_and_mcp_manage: {
     fallback: "list",
-    ops: { list: "read", run_workforce: "change", delegate_to_agent: "change", handoff_agent: "change", install_mcp_preset: "guard", save_infra_edge: "change", delete_infra_edge: "change", save_agent: "guard-if", delete_agent: "change", run_agent_mission: "guard-if", save_mcp_server: "guard", delete_mcp_server: "change", test_mcp_server: "change" },
+    ops: { list: "read", run_workforce: "read", delegate_to_agent: "change", handoff_agent: "change", install_mcp_preset: "guard", save_infra_edge: "change", delete_infra_edge: "change", save_agent: "guard-if", delete_agent: "change", run_agent_mission: "guard-if", save_mcp_server: "guard", delete_mcp_server: "change", test_mcp_server: "change" },
   },
 };
 
 const SAFETY_FIELDS = ["safetyPolicy", "autoApproveSafeReadOnly", "requireApprovalOnProdTags", "blockDestructiveWithoutConfirm"];
 const ENDPOINT_FIELDS = ["aiProvider", "aiBaseUrl", "aiEnabled"];
+const SERVER_HOST_PROXY_FIELDS = ["host", "port", "username", "proxyJump", "proxyJumpProfileId", "extraOptions", "privateKeyPath", "pkcs11LibPath", "forwardAgent"];
 /**
  * App settings an agent may change on its own: how things look. Everything
  * else (which image a debug pod runs, which PKCS#11 library ssh loads, the X11
@@ -136,12 +140,13 @@ const REMOVES: Record<string, string> = {
 export function guardAsk(
   tool: string,
   payload: Record<string, unknown>,
-  run: { mode: AgentMode },
+  run: { mode: AgentMode; tainted?: boolean },
   known: { agents: Pick<MissionAgent, "id" | "name" | "defaultMode">[]; schedules: Pick<AgentSchedule, "id" | "title" | "mode">[] },
 ): GuardAsk | undefined {
   const spec = APP_OPS[tool];
   if (!spec) return undefined;
   const op = text(payload, "operation") || spec.fallback;
+  const tainted = Boolean(run.tainted);
 
   // Taking something the team has out of the workspace — a server, an agent, a
   // source, a profile — is a person's decision in every mode. An agent that is
@@ -153,6 +158,35 @@ export function guardAsk(
       title: `Remove ${REMOVES[tool] ?? "something"} from this workspace`,
       detail: show(payload, ["idOrName", "idOrTitle", "id", "name", "title", "folderName", "cluster", "s3ProfileId", "edgeId"]),
     };
+
+  if (tool === "sshs3_manage_server" && tainted) {
+    if (op === "save_tunnel")
+      return {
+        title: "Create or change an SSH tunnel from a tainted run",
+        detail: show(payload, ["serverIdOrName", "tunnelIdOrName", "tunnelName", "tunnelType", "localPort", "remoteHost", "remotePort"]) || op,
+      };
+    if (op === "upsert" && SERVER_HOST_PROXY_FIELDS.some((k) => has(payload, k)))
+      return {
+        title: "Create or change server host or proxy settings from a tainted run",
+        detail: show(payload, ["serverIdOrName", "name", ...SERVER_HOST_PROXY_FIELDS]) || op,
+      };
+  }
+
+  if (tool === "sshs3_manage_memory_and_activity" && tainted) {
+    if (op === "core_append" || op === "core_replace")
+      return {
+        title: "Modify core pinned workspace memory from a tainted run",
+        detail: show(payload, ["idOrTitle", "title", "scope", "tier", "text"]) || op,
+      };
+    if (op === "save") {
+      const scope = (text(payload, "scope") || "workspace").toLowerCase();
+      if (scope !== "personal")
+        return {
+          title: "Save shared workspace memory from a tainted run",
+          detail: show(payload, ["title", "idOrTitle", "scope", "kind", "tier", "text"]) || op,
+        };
+    }
+  }
 
   if (tool === "sshs3_manage_app_and_settings") {
     // The fields decide, not the operation's name: the same handler takes them under any of its names.
@@ -168,6 +202,11 @@ export function guardAsk(
       return {
         title: "Change app settings that reach beyond the screen",
         detail: show(payload, reaching),
+      };
+    if (op === "save_dotfile" && tainted)
+      return {
+        title: "Save a synced dotfile from a tainted run",
+        detail: show(payload, ["poolId", "poolName", "remotePath", "mode"]) || op,
       };
     return undefined;
   }
@@ -185,11 +224,18 @@ export function guardAsk(
 What is in the folder is copied to the bucket.`,
     };
 
-  if (tool === "sshs3_kb_manage" && (op === "ingest_local_folder" || op === "ingest_s3_prefix"))
-    return {
-      title: op === "ingest_local_folder" ? "Read a folder on this computer into the shared knowledge base" : "Read a bucket prefix into the shared knowledge base",
-      detail: `${show(payload, ["folderPath", "path", "s3ProfileId", "idOrName", "profileId", "prefix", "cluster"])}\nWhat is read is shared with the team and given to agents.`,
-    };
+  if (tool === "sshs3_kb_manage") {
+    if (op === "ingest_local_folder" || op === "ingest_s3_prefix")
+      return {
+        title: op === "ingest_local_folder" ? "Read a folder on this computer into the shared knowledge base" : "Read a bucket prefix into the shared knowledge base",
+        detail: `${show(payload, ["folderPath", "path", "s3ProfileId", "idOrName", "profileId", "prefix", "cluster"])}\nWhat is read is shared with the team and given to agents.`,
+      };
+    if (op === "add_document" && tainted)
+      return {
+        title: "Add a document to the shared knowledge base from a tainted run",
+        detail: show(payload, ["title", "cluster", "tags", "content"]) || op,
+      };
+  }
 
   if (tool === "sshs3_agent_and_mcp_manage") {
     if (op === "save_mcp_server")
@@ -211,6 +257,13 @@ What is in the folder is copied to the bucket.`,
             : "Create an agent that acts on its own, without asking",
           detail: show(payload, ["name", "role", "defaultMode", "targetCluster", "mission"]),
         };
+      if (has(payload, "systemPrompt") || has(payload, "allowedTools") || tainted)
+        return {
+          title: named
+            ? `Change ${named.name}'s prompt or tool permissions`
+            : "Create an agent with custom prompt or tool permissions",
+          detail: show(payload, ["idOrName", "name", "role", "defaultMode", "systemPrompt", "allowedTools", "targetCluster", "mission"]) || op,
+        };
     }
     if (op === "run_agent_mission") {
       const agent = agentNamed(known.agents, payload, ["idOrName", "id", "name"]);
@@ -226,9 +279,9 @@ What is in the folder is copied to the bucket.`,
     // What the schedule will run as: asked for, else as it is, else the default of a new one.
     const mode: AgentMode = op === "toggle" ? (existing?.mode ?? "assisted") : isMode(payload.mode) ? payload.mode : (existing?.mode ?? "assisted");
     const switchesOn = op !== "toggle" || payload.enabled !== false;
-    if (switchesOn && actsAlone(mode, run))
+    if (switchesOn && (actsAlone(mode, run) || tainted))
       return {
-        title: `${op === "toggle" ? "Switch on" : "Save"} a schedule that acts on its own, without asking`,
+        title: `${op === "toggle" ? "Switch on" : "Save"} a schedule that ${actsAlone(mode, run) ? "acts on its own, without asking" : "was requested by a tainted run"}`,
         detail: `${show(payload, ["title", "idOrTitle", "prompt", "mode", "serverIdOrName", "intervalMinutes"])}\nA schedule runs on its own, with nobody there to answer.`,
       };
   }

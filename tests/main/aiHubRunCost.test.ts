@@ -175,8 +175,29 @@ describe("a ticket run on the ChatGPT backend", () => {
 
     // Usage while the run goes on, added up, before the run's end says the total.
     const live = events.filter((e) => e.type === "usage.updated").map((e) => e.usage);
-    expect(live[0]).toEqual({ input_tokens: 1000, output_tokens: 20 });
-    expect(live.at(-1)).toEqual({ input_tokens: 2500, output_tokens: 50 });
-    expect(events.find((e) => e.type === "run.completed")?.usage).toMatchObject({ input_tokens: 2500, output_tokens: 50 });
+    expect(live[0]).toEqual({
+      input_tokens: 1000,
+      output_tokens: 20,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+      cost_usd: 0.0027,
+      context_tokens: 1000,
+    });
+    expect(live.at(-1)).toEqual({
+      input_tokens: 2500,
+      output_tokens: 50,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+      cost_usd: 0.00675,
+      context_tokens: 1500,
+    });
+    expect(events.find((e) => e.type === "run.completed")?.usage).toMatchObject({
+      input_tokens: 2500,
+      output_tokens: 50,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+      cost_usd: 0.00675,
+      context_tokens: 1500,
+    });
   });
 });

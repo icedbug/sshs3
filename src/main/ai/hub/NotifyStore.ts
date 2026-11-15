@@ -2,9 +2,15 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { decryptSecretValue, encryptSecretValue } from "../../crypto/SecretFieldCrypto";
-import type { NotifyChannel } from "./Notifier";
+import type {
+  AutoPauseEntry,
+  EscalationEntry,
+  FlapState,
+  NotifyChannel,
+  QuietHoursConfig,
+} from "./Notifier";
 
-interface NotifyData {
+export interface NotifyData {
   version: 1;
   channels: NotifyChannel[];
   /** Inbox items already handled, by id, with when they were first seen. */
@@ -13,9 +19,38 @@ interface NotifyData {
   reminded: Record<string, number>;
   publicUrl: string;
   reminderMinutes: number;
+  /** Per-fingerprint flap cooldown tracking state. */
+  flapCooldown?: Record<string, FlapState>;
+  /** Non-critical transient items buffered during the Auto-Pause cushion window. */
+  autoPausePending?: Record<string, AutoPauseEntry>;
+  /** Recent push timestamps (ms) used to enforce hourly noise budget. */
+  pushHistory?: number[];
+  /** Multi-step acknowledgement-aware escalation state per item id. */
+  escalations?: Record<string, EscalationEntry>;
+  /** Optional quiet-hours suppression schedule. */
+  quietHours?: QuietHoursConfig;
+  /** Maximum pushes allowed per rolling hour (0 or undefined = unlimited). */
+  noiseBudgetPerHour?: number;
+  /** Auto-Pause cushion duration in seconds (clamped 60-120s when active). */
+  autoPauseSeconds?: number;
+  /** Per-fingerprint flap suppression duration in ms. */
+  flapCooldownMs?: number;
+  /** Multi-step escalation intervals in minutes. */
+  escalationMinutes?: number[];
 }
 
-const empty = (): NotifyData => ({ version: 1, channels: [], seen: {}, reminded: {}, publicUrl: "", reminderMinutes: 5 });
+const empty = (): NotifyData => ({
+  version: 1,
+  channels: [],
+  seen: {},
+  reminded: {},
+  publicUrl: "",
+  reminderMinutes: 5,
+  flapCooldown: {},
+  autoPausePending: {},
+  pushHistory: [],
+  escalations: {},
+});
 
 /**
  * Where notification channels are kept: a file of its own beside the hub's
@@ -40,6 +75,12 @@ export class NotifyStore {
         ...empty(),
         ...raw,
         version: 1,
+        seen: raw.seen && typeof raw.seen === "object" ? raw.seen : {},
+        reminded: raw.reminded && typeof raw.reminded === "object" ? raw.reminded : {},
+        flapCooldown: raw.flapCooldown && typeof raw.flapCooldown === "object" ? raw.flapCooldown : {},
+        autoPausePending: raw.autoPausePending && typeof raw.autoPausePending === "object" ? raw.autoPausePending : {},
+        pushHistory: Array.isArray(raw.pushHistory) ? raw.pushHistory.filter((n) => typeof n === "number") : [],
+        escalations: raw.escalations && typeof raw.escalations === "object" ? raw.escalations : {},
         channels: (raw.channels ?? []).map((c) => ({
           ...c,
           url: decryptSecretValue(c.url ?? ""),
@@ -48,6 +89,49 @@ export class NotifyStore {
       };
     } catch {
       this.data = empty();
+    }
+  }
+
+  /** Marks an inbox item acknowledged so further multi-step escalation tiers stop. */
+  acknowledge(itemId: string, by?: string, now = Date.now()): void {
+    this.data.seen[itemId] ??= now;
+    this.data.escalations ??= {};
+    const prev = this.data.escalations[itemId];
+    this.data.escalations[itemId] = {
+      tier: prev?.tier ?? 0,
+      lastTierAt: prev?.lastTierAt ?? now,
+      ackedAt: now,
+      ...(by ? { ackedBy: by } : {}),
+    };
+  }
+
+  /** Records an outbound notification push timestamp for hourly noise-budget accounting. */
+  recordPush(now = Date.now()): void {
+    const oneHourAgo = now - 3600_000;
+    const prev = this.data.pushHistory ?? [];
+    this.data.pushHistory = [...prev.filter((ts) => ts >= oneHourAgo && ts <= now), now];
+  }
+
+  /** Prunes stale policy tracking state for items no longer active. */
+  prunePolicyState(activeItemIds: Set<string>, now = Date.now()): void {
+    const oneHourAgo = now - 3600_000;
+    this.data.pushHistory = (this.data.pushHistory ?? []).filter((ts) => ts >= oneHourAgo && ts <= now);
+    if (this.data.autoPausePending) {
+      this.data.autoPausePending = Object.fromEntries(
+        Object.entries(this.data.autoPausePending).filter(([id]) => activeItemIds.has(id)),
+      );
+    }
+    if (this.data.escalations) {
+      this.data.escalations = Object.fromEntries(
+        Object.entries(this.data.escalations).filter(([id]) => activeItemIds.has(id)),
+      );
+    }
+    if (this.data.flapCooldown) {
+      this.data.flapCooldown = Object.fromEntries(
+        Object.entries(this.data.flapCooldown).filter(
+          ([, v]) => (v.suppressedUntil !== undefined && v.suppressedUntil > now) || now - v.lastAt <= 3600_000,
+        ),
+      );
     }
   }
 

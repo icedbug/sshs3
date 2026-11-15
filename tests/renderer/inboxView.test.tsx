@@ -81,4 +81,24 @@ describe("what is waiting for a person", () => {
     fireEvent.click(screen.getByText(/^Alerts in/));
     expect(screen.getByText(/The desktop app has no address/)).toBeVisible();
   });
+
+  it("renders markdown formatting in blocked and review excerpts instead of raw asterisks", () => {
+    const mdHub = hub({
+      workTickets: [
+        { id: "k1", title: "Morning check", status: "review", result: "**All fine** on `web-01`.", assigneeName: "Watch", updatedAt: 20 },
+        { id: "k2", title: "Backup", status: "blocked", result: "**Timeout** running `pg_dump`.", assigneeName: "Operator", updatedAt: 25 },
+      ] as unknown as HubSnapshot["workTickets"],
+    });
+    render(<InboxView hub={mdHub} act={vi.fn(async () => hub())} onOpenTask={() => {}} onOpenView={() => {}} />);
+
+    const review = screen.getByTestId("inbox-review");
+    expect(within(review).getByText("All fine").tagName).toBe("STRONG");
+    expect(within(review).getByText("web-01").tagName).toBe("CODE");
+    expect(review.textContent).not.toContain("**");
+
+    const blocked = screen.getByTestId("inbox-blocked");
+    expect(within(blocked).getByText("Timeout").tagName).toBe("STRONG");
+    expect(within(blocked).getByText("pg_dump").tagName).toBe("CODE");
+    expect(blocked.textContent).not.toContain("**");
+  });
 });

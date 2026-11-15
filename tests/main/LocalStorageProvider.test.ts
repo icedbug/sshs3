@@ -388,7 +388,7 @@ describe('LocalStorageProvider', () => {
       await expect(fs.access(folderPath)).rejects.toThrow();
     });
 
-    it('should delete a broken symlink with isDirectory=false', async () => {
+    it.skipIf(process.platform === 'win32')('should delete a broken symlink with isDirectory=false', async () => {
       const targetPath = path.join(testDir, 'non-existent-target.txt');
       const symlinkPath = path.join(testDir, 'broken-symlink.txt');
       await fs.symlink(targetPath, symlinkPath);

@@ -1,5 +1,186 @@
 import type { ShellKind } from "../../../shared/types/aiHub";
 
+export type Osc133Phase = "A" | "B" | "C" | "D";
+
+export interface Osc133Marker {
+  phase: Osc133Phase;
+  exitCode?: number;
+  index: number;
+  endIndex: number;
+}
+
+export interface ParsedOscMarkers {
+  osc133: Osc133Marker[];
+  lastPhase?: Osc133Phase;
+  lastExitCode?: number;
+  promptActive?: boolean;
+  cwd?: string;
+}
+
+export interface ShellAdapterCapabilities {
+  shell: ShellKind;
+  family: "posix" | "fish" | "powershell" | "cmd";
+  supportsOsc133: boolean;
+  usesStructuredDataFrames: boolean;
+  supportsSubshellIsolation: boolean;
+  handshakeCommand: string;
+}
+
+export function buildHandshakeCommand(shell: ShellKind): string {
+  if (shell === "cmd") return "ver >nul";
+  if (shell === "powershell" || shell === "pwsh") return "$null";
+  if (shell === "fish") return "true";
+  return ":";
+}
+
+export function getShellAdapterCapabilities(shell: ShellKind): ShellAdapterCapabilities {
+  if (shell === "powershell" || shell === "pwsh") {
+    return {
+      shell,
+      family: "powershell",
+      supportsOsc133: true,
+      usesStructuredDataFrames: true,
+      supportsSubshellIsolation: false,
+      handshakeCommand: buildHandshakeCommand(shell),
+    };
+  }
+  if (shell === "cmd") {
+    return {
+      shell,
+      family: "cmd",
+      supportsOsc133: false,
+      usesStructuredDataFrames: false,
+      supportsSubshellIsolation: false,
+      handshakeCommand: buildHandshakeCommand(shell),
+    };
+  }
+  if (shell === "fish") {
+    return {
+      shell,
+      family: "fish",
+      supportsOsc133: true,
+      usesStructuredDataFrames: false,
+      supportsSubshellIsolation: false,
+      handshakeCommand: buildHandshakeCommand(shell),
+    };
+  }
+  return {
+    shell,
+    family: "posix",
+    supportsOsc133: shell === "bash" || shell === "zsh",
+    usesStructuredDataFrames: false,
+    supportsSubshellIsolation: true,
+    handshakeCommand: buildHandshakeCommand(shell),
+  };
+}
+
+export function detectShellFromHint(hint: {
+  shell?: ShellKind;
+  label?: string;
+  output?: string;
+  shellBinary?: string;
+  kind?: "local" | "ssh" | "k8s";
+  platform?: NodeJS.Platform;
+  fallback?: ShellKind;
+}): ShellKind {
+  if (hint.shell) return hint.shell;
+  if (hint.fallback) return hint.fallback;
+  const bin = (hint.shellBinary ?? "").toLowerCase();
+  const label = (hint.label ?? "").toLowerCase();
+  const out = hint.output ?? "";
+  const outLower = out.toLowerCase();
+  const platform = hint.platform ?? process.platform;
+
+  if (bin.includes("pwsh") || label.includes("pwsh")) return "pwsh";
+  if (
+    bin.includes("powershell") ||
+    label.includes("powershell") ||
+    outLower.includes("windows powershell") ||
+    /^ps [a-z]:\\/im.test(out)
+  ) {
+    return "powershell";
+  }
+  if (bin.includes("cmd.exe") || /\bcmd\b/.test(label) || /^[a-z]:\\[^>]*>/im.test(out)) {
+    return "cmd";
+  }
+  if (bin.includes("zsh") || /\bzsh\b/.test(label)) return "zsh";
+  if (bin.includes("fish") || /\bfish\b/.test(label)) return "fish";
+  if (bin.includes("dash") || /\bdash\b/.test(label)) return "dash";
+  if (/\b(?:wsl|ubuntu|debian|alpine|fedora)\b/.test(label) || label.includes("bash") || bin.includes("bash")) {
+    return "bash";
+  }
+  if (hint.kind === "local" && platform === "win32") {
+    return "cmd";
+  }
+  return "bash";
+}
+
+/**
+ * Extracts OSC 133 shell-integration markers (A/B/C/D) and OSC 7 / OSC 9;9 CWD updates.
+ */
+export function parseOscMarkers(text: string): ParsedOscMarkers {
+  const osc133: Osc133Marker[] = [];
+  let lastPhase: Osc133Phase | undefined;
+  let lastExitCode: number | undefined;
+  let cwd: string | undefined;
+
+  if (!text) return { osc133 };
+
+  // eslint-disable-next-line no-control-regex -- matching terminal OSC sequences is the point
+  const osc133Re = /\x1b\]133;([ABCD])([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
+  let m: RegExpExecArray | null;
+  while ((m = osc133Re.exec(text)) !== null) {
+    const phase = m[1] as Osc133Phase;
+    let exitCode: number | undefined;
+    if (phase === "D" && m[2].startsWith(";")) {
+      const codeMatch = /^(-?\d+)/.exec(m[2].slice(1).trim());
+      if (codeMatch) {
+        exitCode = Number(codeMatch[1]);
+        lastExitCode = exitCode;
+      }
+    }
+    osc133.push({
+      phase,
+      ...(exitCode !== undefined ? { exitCode } : {}),
+      index: m.index,
+      endIndex: m.index + m[0].length,
+    });
+    lastPhase = phase;
+  }
+
+  // OSC 7: file://host/path
+  // eslint-disable-next-line no-control-regex -- matching terminal OSC sequences is the point
+  const osc7Re = /\x1b\]7;file:\/\/[^/\x07\x1b]*(\/[^\x07\x1b]*)(?:\x07|\x1b\\)/g;
+  while ((m = osc7Re.exec(text)) !== null) {
+    try {
+      cwd = decodeURIComponent(m[1]);
+    } catch {
+      cwd = m[1];
+    }
+  }
+
+  // OSC 9;9: Windows Terminal / PowerShell CWD notification
+  // eslint-disable-next-line no-control-regex -- matching terminal OSC sequences is the point
+  const osc99Re = /\x1b\]9;9;([^\x07\x1b]+)(?:\x07|\x1b\\)/g;
+  while ((m = osc99Re.exec(text)) !== null) {
+    const next = m[1].trim();
+    if (next) cwd = next;
+  }
+
+  const promptActive =
+    lastPhase === undefined
+      ? undefined
+      : lastPhase === "A" || lastPhase === "B" || lastPhase === "D";
+
+  return {
+    osc133,
+    ...(lastPhase !== undefined ? { lastPhase } : {}),
+    ...(lastExitCode !== undefined ? { lastExitCode } : {}),
+    ...(promptActive !== undefined ? { promptActive } : {}),
+    ...(cwd !== undefined ? { cwd } : {}),
+  };
+}
+
 function quote(text: string): string {
   return `'${text.replace(/'/g, `'"'"'`)}'`;
 }
@@ -22,7 +203,7 @@ export function commandEnvelope(
   const prefix = `SSHS3;${nonce}`;
   if (shell === "powershell" || shell === "pwsh") {
     const body = Buffer.from(command, "utf8").toString("base64");
-    return `[Console]::Write(([char]27)+']777;${prefix};BEGIN'+[char]7); $__sshs3_cmd=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${body}')); Write-Host $__sshs3_cmd; $global:LASTEXITCODE=0; try { . { . ([scriptblock]::Create($__sshs3_cmd)); $__sshs3_ok=$?; $__sshs3_rc=0; if (-not $__sshs3_ok) { $__sshs3_rc=1 }; if ($LASTEXITCODE -ne 0) { $__sshs3_rc=$LASTEXITCODE } } *>&1 | ForEach-Object { $__sshs3_line=($_ | Out-String); [Console]::Write($__sshs3_line); for ($__sshs3_i=0; $__sshs3_i -lt $__sshs3_line.Length; $__sshs3_i+=2000) { $__sshs3_piece=$__sshs3_line.Substring($__sshs3_i,[Math]::Min(2000,$__sshs3_line.Length-$__sshs3_i)); [Console]::Write(([char]27)+']777;${prefix};DATA;'+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($__sshs3_piece))+[char]7) } } } catch { Write-Error $_; $__sshs3_rc=1 }; [Console]::Write(([char]27)+']777;${prefix};END;'+$__sshs3_rc+';'+$PWD.Path+[char]7)\r`;
+    return `[Console]::Write(([char]27)+']777;${prefix};BEGIN'+[char]7); $__sshs3_cmd=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${body}')); Write-Host $__sshs3_cmd; $global:LASTEXITCODE=0; try { . { . ([scriptblock]::Create($__sshs3_cmd)); $__sshs3_ok=$?; $__sshs3_rc=0; if (-not $__sshs3_ok) { $__sshs3_rc=1 }; if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { $__sshs3_rc=$LASTEXITCODE } } *>&1 | ForEach-Object { $__sshs3_line=($_ | Out-String); [Console]::Write($__sshs3_line); for ($__sshs3_i=0; $__sshs3_i -lt $__sshs3_line.Length; $__sshs3_i+=2000) { $__sshs3_piece=$__sshs3_line.Substring($__sshs3_i,[Math]::Min(2000,$__sshs3_line.Length-$__sshs3_i)); [Console]::Write(([char]27)+']777;${prefix};DATA;'+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($__sshs3_piece))+[char]7) } } } catch { Write-Error $_; $__sshs3_rc=1 }; [Console]::Write(([char]27)+']777;${prefix};END;'+$__sshs3_rc+';'+$PWD.Path+[char]7)\r`;
   }
   if (shell === "cmd") {
     const content = Buffer.from(
@@ -30,7 +211,7 @@ export function commandEnvelope(
       "utf8",
     ).toString("base64");
     const stage = `$t=$env:TEMP; [IO.File]::WriteAllText("$t\\sshs3-${nonce}.cmd",[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${content}')),[Text.Encoding]::Default); [IO.File]::WriteAllText("$t\\sshs3-${nonce}-end.cmd",'@set "_sshs3_rc='+([char]37)+'errorlevel'+([char]37)+'"'+"\`r\`n",[Text.Encoding]::Default); [Console]::Write(([char]27)+']777;${prefix};BEGIN'+[char]7)`;
-    const envelope = `powershell -NoLogo -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(stage, "utf16le").toString("base64")} && (call "%TEMP%\\sshs3-${nonce}.cmd" & call "%TEMP%\\sshs3-${nonce}-end.cmd" & del /q "%TEMP%\\sshs3-${nonce}.cmd" "%TEMP%\\sshs3-${nonce}-end.cmd" 2>nul & powershell -NoLogo -NoProfile -NonInteractive -Command "[Console]::Write(([char]27)+']777;${prefix};END;'+$env:_sshs3_rc+';'+$PWD.Path+[char]7)")\r`;
+    const envelope = `powershell -NoLogo -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(stage, "utf16le").toString("base64")} && (call "%TEMP%\\sshs3-${nonce}.cmd" & call "%TEMP%\\sshs3-${nonce}-end.cmd" & del /q "%TEMP%\\sshs3-${nonce}.cmd" "%TEMP%\\sshs3-${nonce}-end.cmd" 2>nul & powershell -NoLogo -NoProfile -NonInteractive -Command "$rc=if ($env:_sshs3_rc -match '^-?\\d+$') { $env:_sshs3_rc } else { 1 }; [Console]::Write(([char]27)+']777;${prefix};END;'+$rc+';'+$PWD.Path+[char]7)")\r`;
     if (envelope.length > 8000)
       throw new Error(
         "Command exceeds cmd's input limit. Split it into smaller approved steps.",
@@ -312,6 +493,12 @@ export class CommandFrames {
    * for the end of a line of output.
    */
   private splitAtPrompt(text: string): number | undefined {
+    const osc = parseOscMarkers(text);
+    const lastA = [...osc.osc133].reverse().find((m) => m.phase === "A");
+    const lastB = [...osc.osc133].reverse().find((m) => m.phase === "B");
+    if (lastA && lastB && lastB.index > lastA.index && osc.lastPhase !== "C") {
+      return lastA.index;
+    }
     const prompt = this.options.lateOutput?.prompt;
     if (!prompt) return undefined;
     let end = text.length;

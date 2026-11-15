@@ -308,8 +308,10 @@ describe("notifications from the hub", () => {
     expect(await fs.readFile(path.join(dir, "hub.json"), "utf8")).not.toContain("very-secret-path");
     // The address is kept, and comes back after a restart, without being in what the interface gets.
     expect(await fs.readFile(path.join(dir, "notify.json"), "utf8")).toContain("ops");
-    const mode = (await fs.stat(path.join(dir, "notify.json"))).mode & 0o777;
-    expect(mode).toBe(0o600);
+    if (process.platform !== "win32") {
+      const mode = (await fs.stat(path.join(dir, "notify.json"))).mode & 0o777;
+      expect(mode).toBe(0o600);
+    }
   });
 
   it("does not push what already waited when a channel is added, and tests a channel on request", async () => {

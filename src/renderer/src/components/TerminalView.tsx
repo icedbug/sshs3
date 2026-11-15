@@ -3,13 +3,13 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { SearchAddon } from '@xterm/addon-search';
 import '@xterm/xterm/css/xterm.css';
-import { ChevronDown, ChevronUp, RotateCcw, Search, Sparkles, X } from 'lucide-react';
+import { ArrowDown, Bookmark, ChevronDown, ChevronUp, Copy, CornerDownLeft, Layers, MessageSquarePlus, RotateCcw, Search, Sparkles, X } from 'lucide-react';
 import type { SSHConnectionConfig, SSHPtyExitEvent, LocalShellType } from '@shared/types/ssh';
 import type { SessionExitAction, AppSettings } from '@shared/types/settings';
 import type { K8sTerminalTarget } from '@shared/types/kubernetes';
 import { registerTerminalLinks } from '../lib/terminalLinks';
 import { useTerminalPathHover } from '../lib/useTerminalPathHover';
-import { CommandOutputTracker, isAtEmptyPrompt } from '../lib/terminalOutput';
+import { CommandOutputTracker, isAtEmptyPrompt, type CommandBlockInfo } from '../lib/terminalOutput';
 import { useSudoRetry } from '../lib/useSudoRetry';
 import { isTerminalReply, printableInput } from '../lib/terminalInput';
 import { hasControlChars } from '../lib/shellSafety';
@@ -39,6 +39,8 @@ import {
   takeAttach,
   unregisterLiveSession,
 } from '../lib/liveSessions';
+import { persistLiveSession } from '../lib/useSessionPersistence';
+import { isWebBrowserMode } from '../lib/webClientBridge';
 import { isTerminalZoomShortcut } from '../lib/terminalZoomKey';
 
 import { TerminalControl } from './AiHub/TerminalControl';
@@ -91,6 +93,10 @@ export interface TerminalViewProps {
   onCloseTab?: () => void;
   /** Emitted when an OSC 0 or OSC 2 title sequence is received from the shell. */
   onTitleChange?: (title: string) => void;
+  /** Optional callback for selection "Ask AI" / "Explain" actions (also dispatches `sshs3:ask-ai`). */
+  onAskAi?: (payload: { text: string; prompt?: string; sessionId?: string; action: 'ask' | 'explain' }) => void;
+  /** Debounce delay (ms) for PTY resize IPC notifications on container resize (default 100). */
+  resizeDebounceMs?: number;
 }
 
 // Every ANSI foreground is >= 7:1 on the #f8fafc background, so `minimumContrastRatio` 7 never has to
@@ -216,8 +222,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   perfMetrics,
   onCloseTab,
   onTitleChange,
+  onAskAi,
+  resizeDebounceMs = 100,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
+  const viewportRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const sessionIdRef = useRef<string | null>(null);
@@ -228,6 +237,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   onExitRef.current = onExit;
   const onTitleChangeRef = useRef(onTitleChange);
   onTitleChangeRef.current = onTitleChange;
+  const onAskAiRef = useRef(onAskAi);
+  onAskAiRef.current = onAskAi;
+  const resizeDebounceMsRef = useRef(resizeDebounceMs);
+  resizeDebounceMsRef.current = resizeDebounceMs;
   const configRef = useRef(config);
   configRef.current = config;
   const initialCwdRef = useRef(initialCwd);
@@ -332,7 +345,64 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   };
   const [inlineLoading, setInlineLoading] = useState(false);
   const [terminalErrorHint, setTerminalErrorHint] = useState<string | null>(null);
+  const [selectionPopover, setSelectionPopover] = useState<{ text: string; top: number; left: number } | null>(null);
+  const [isScrolledUp, setIsScrolledUp] = useState(false);
+  const [commandBlocks, setCommandBlocks] = useState<CommandBlockInfo[]>([]);
+  const [bookmarkedBlockIds, setBookmarkedBlockIds] = useState<string[]>([]);
+  const [blocksDrawerOpen, setBlocksDrawerOpen] = useState(false);
+  const [selectedBlockId, setSelectedBlockId] = useState<string | null>(null);
+  const [viewportRange, setViewportRange] = useState<{ viewportY: number; rows: number }>({ viewportY: 0, rows: 24 });
+  const isPageUnloadingRef = useRef(false);
   const inlineAiInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!isWebBrowserMode()) return;
+    const markUnloading = () => {
+      isPageUnloadingRef.current = true;
+    };
+    window.addEventListener('beforeunload', markUnloading);
+    window.addEventListener('pagehide', markUnloading);
+    return () => {
+      window.removeEventListener('beforeunload', markUnloading);
+      window.removeEventListener('pagehide', markUnloading);
+    };
+  }, []);
+
+  const dispatchAskAi = useCallback(
+    (action: 'ask' | 'explain', text: string, customPrompt?: string) => {
+      const trimmed = text.trim();
+      if (!trimmed) return;
+      const prompt =
+        action === 'explain'
+          ? customPrompt ??
+            'Explain this terminal output or command clearly, including any errors or recommended next steps.'
+          : customPrompt;
+      const sid = sessionIdRef.current ?? undefined;
+      const label = `${hostLabelRef.current || 'Terminal'} selection`;
+      onAskAiRef.current?.({ text: trimmed, prompt, sessionId: sid, action });
+      const askEvent = new CustomEvent('sshs3:ask-ai', {
+        cancelable: true,
+        detail: { sessionId: sid, text: trimmed, label, prompt, action },
+      });
+      const notPrevented = window.dispatchEvent(askEvent);
+      if (notPrevented && !onAskAiRef.current) {
+        window.dispatchEvent(new CustomEvent('sshs3:ai-open'));
+        window.dispatchEvent(
+          new CustomEvent('sshs3:ai-attach', {
+            detail: { sessionId: sid, text: trimmed, label, prompt },
+          })
+        );
+      }
+      setSelectionPopover(null);
+    },
+    []
+  );
+
+  const toggleBlockBookmark = useCallback((blockId: string) => {
+    setBookmarkedBlockIds((prev) =>
+      prev.includes(blockId) ? prev.filter((id) => id !== blockId) : [...prev, blockId]
+    );
+  }, []);
   const notifyTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const notify = useCallback((message: string, durationMs = 2000) => {
     clearTimeout(notifyTimerRef.current);
@@ -418,6 +488,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   // "becomes active" effect so both can decide whether a SIGWINCH sync is actually needed.
   const lastColsRef = useRef(0);
   const lastRowsRef = useRef(0);
+  const resizeDebounceTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(resizeDebounceTimerRef.current), []);
 
   const [sessionKey, setSessionKey] = useState(0);
   const perfTitle = k8sTarget
@@ -453,6 +525,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   /**
    * Fits the xterm buffer to its container and synchronizes dimensions to the backend PTY.
    * While the container is hidden (display: none), fitting is skipped to prevent 0x0 degenerate sizes.
+   * Debounces PTY SIGWINCH IPC calls when `force` is false so continuous drags don't flood the backend.
    */
   const syncPtySize = useCallback((force = false) => {
     if (!termRef.current || !fitAddonRef.current) return;
@@ -467,18 +540,37 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         // Safe to ignore if charSizeService is not accessible
       }
       fitAddonRef.current.fit();
-      const newCols = termRef.current.cols;
-      const newRows = termRef.current.rows;
-      if (
-        sessionIdRef.current &&
-        (force || newCols !== lastColsRef.current || newRows !== lastRowsRef.current) &&
-        newCols >= 10 &&
-        newRows >= 3
-      ) {
-        lastColsRef.current = newCols;
-        lastRowsRef.current = newRows;
-        const resize = k8sTargetRef.current ? window.multissh?.k8sTerminalResize : window.multissh?.terminalResize;
-        resize?.(sessionIdRef.current, newCols, newRows);
+      const sendResizeIfNeeded = (isForced: boolean) => {
+        const term = termRef.current;
+        if (!term || !isActiveRef.current) return;
+        const newCols = term.cols;
+        const newRows = term.rows;
+        if (
+          sessionIdRef.current &&
+          (isForced || newCols !== lastColsRef.current || newRows !== lastRowsRef.current) &&
+          newCols >= 10 &&
+          newRows >= 3
+        ) {
+          lastColsRef.current = newCols;
+          lastRowsRef.current = newRows;
+          const resize = k8sTargetRef.current ? window.multissh?.k8sTerminalResize : window.multissh?.terminalResize;
+          resize?.(sessionIdRef.current, newCols, newRows);
+        }
+      };
+
+      if (force) {
+        clearTimeout(resizeDebounceTimerRef.current);
+        sendResizeIfNeeded(true);
+      } else {
+        const delay = Math.max(0, resizeDebounceMsRef.current ?? 100);
+        if (delay === 0) {
+          sendResizeIfNeeded(false);
+        } else {
+          clearTimeout(resizeDebounceTimerRef.current);
+          resizeDebounceTimerRef.current = setTimeout(() => {
+            sendResizeIfNeeded(false);
+          }, delay);
+        }
       }
     } catch {
       // Safe to ignore resize on hidden element
@@ -618,12 +710,72 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     const historyScope = (): string | undefined => (clipboardScopeRef.current === 'host' ? hostKeyRef.current : undefined);
     let settleTimer: ReturnType<typeof setTimeout> | undefined;
     let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+    let blocksRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+    const refreshCommandBlocks = () => {
+      if (isDisposed) return;
+      const buf = term.buffer.active;
+      setViewportRange({ viewportY: buf.viewportY, rows: term.rows || 24 });
+      setIsScrolledUp(buf.baseY - buf.viewportY > 0);
+      setCommandBlocks(outputTracker.getCommandBlocks({ limit: 30 }));
+    };
+    const scheduleBlocksRefresh = (immediate = false) => {
+      if (immediate) {
+        clearTimeout(blocksRefreshTimer);
+        refreshCommandBlocks();
+        return;
+      }
+      if (blocksRefreshTimer) return;
+      blocksRefreshTimer = setTimeout(() => {
+        blocksRefreshTimer = undefined;
+        refreshCommandBlocks();
+      }, 120);
+    };
+
+    const scrollSub = term.onScroll(() => {
+      if (isDisposed) return;
+      const buf = term.buffer.active;
+      setIsScrolledUp(buf.baseY - buf.viewportY > 0);
+      setViewportRange({ viewportY: buf.viewportY, rows: term.rows || 24 });
+    });
+
+    const computeSelectionPopoverCoords = (): { top: number; left: number } => {
+      const vp = viewportRef.current;
+      const rect = vp?.getBoundingClientRect();
+      if (!rect || rect.width <= 0 || rect.height <= 0) {
+        return { top: 8, left: 16 };
+      }
+      const pos = (term as Terminal & {
+        getSelectionPosition?: () => { start: { x: number; y: number }; end: { x: number; y: number } } | undefined;
+      }).getSelectionPosition?.();
+      if (pos) {
+        const cellW = rect.width / Math.max(1, term.cols || 80);
+        const cellH = rect.height / Math.max(1, term.rows || 24);
+        const viewportRow = Math.max(0, pos.start.y - term.buffer.active.viewportY);
+        const rawTop = viewportRow * cellH - 34;
+        const top = rawTop >= 8 ? rawTop : Math.min(rect.height - 40, (viewportRow + 1) * cellH + 6);
+        const left = Math.min(Math.max(8, pos.start.x * cellW), Math.max(8, rect.width - 190));
+        return { top: Math.max(8, top), left };
+      }
+      return { top: 8, left: Math.max(8, Math.min(rect.width - 190, 16)) };
+    };
+
     const selectionSub = term.onSelectionChange(() => {
-      if (!copyOnSelectRef.current) return;
       clearTimeout(settleTimer);
       const selection = term.getSelection();
-      if (!selection) return;
-      if (searchOpenRef.current && selection.toLowerCase() === searchQueryRef.current.toLowerCase()) return;
+      const isSearchHighlight =
+        Boolean(selection) &&
+        searchOpenRef.current &&
+        selection.toLowerCase() === searchQueryRef.current.toLowerCase();
+
+      if (!selection || !selection.trim() || isSearchHighlight) {
+        setSelectionPopover(null);
+      } else {
+        const coords = computeSelectionPopoverCoords();
+        setSelectionPopover({ text: selection, top: coords.top, left: coords.left });
+      }
+
+      if (!copyOnSelectRef.current) return;
+      if (!selection || isSearchHighlight) return;
       navigator.clipboard?.writeText(selection).catch(() => {
         // Ignore: clipboard access can be denied (no focus, permissions, etc.)
       });
@@ -808,25 +960,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           setTimeout(() => inlineAiInputRef.current?.focus(), 20);
           return false;
         }
-        // Ctrl+L (with selection): Send selection to AI Chat (Ctrl+Shift+L is reserved for Snippets)
-        if (!e.shiftKey && keyLower === 'l' && Boolean(term.getSelection())) {
-          e.preventDefault();
-          const selectedText = term.getSelection();
-          if (selectedText) {
-            window.dispatchEvent(
-              new CustomEvent('sshs3:ai-attach', {
-                detail: {
-                  sessionId: sessionIdRef.current ?? undefined,
-                  text: selectedText,
-                  label: 'Terminal selection',
-                },
-              })
-            );
-          } else {
-            window.dispatchEvent(new CustomEvent('sshs3:ai-open'));
-          }
-          return false;
-        }
+        // Note: Ctrl+L is intentionally NOT intercepted here so the shell clears the screen normally.
       }
       if (
         (e.type === 'keydown' && e.shiftKey && (e.key === 'Insert' || e.code === 'Insert')) ||
@@ -876,30 +1010,54 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     // A tab moved here from another window brings its running session: attach to it (and redraw
     // its output so far) instead of starting a new one.
     const attachTo = paneId ? takeAttach(paneId) : undefined;
+    let attachedToExisting = Boolean(attachTo);
     if (local || activeConfig || k8sTarget) {
       const killSession = k8sTarget ? window.multissh?.k8sTerminalKill : window.multissh?.terminalKill;
-      const createPromise = attachTo
-        ? window.multissh?.terminalAttach?.(attachTo.sessionId, attachTo.kind).then(({ scrollback: output }) => {
-            if (output && !isDisposed) term.write(output);
-            return { sessionId: attachTo.sessionId };
-          })
-        : k8sTarget
-        ? window.multissh?.k8sTerminalCreate?.(k8sTarget, { cols, rows })
-        : window.multissh?.terminalCreate?.(
-            local
-              ? { local: true as const, ptyOptions: { cols, rows, shellType, wslDistro } }
-              : { config: { ...(activeConfig as SSHConnectionConfig), id: crypto.randomUUID() }, profileId: activeConfig?.id, ptyOptions: { cols, rows } }
-          );
+      const spawnNewSession = () =>
+        k8sTarget
+          ? window.multissh?.k8sTerminalCreate?.(k8sTarget, { cols, rows })
+          : window.multissh?.terminalCreate?.(
+              local
+                ? { local: true as const, ptyOptions: { cols, rows, shellType, wslDistro } }
+                : {
+                    config: { ...(activeConfig as SSHConnectionConfig), id: crypto.randomUUID() },
+                    profileId: activeConfig?.id,
+                    ptyOptions: { cols, rows },
+                  }
+            );
+      const createPromise =
+        attachTo && window.multissh?.terminalAttach
+          ? window.multissh
+              .terminalAttach(attachTo.sessionId, attachTo.kind)
+              .then(({ scrollback: output }) => {
+                if (output && !isDisposed) {
+                  term.write(output, () => scheduleBlocksRefresh(true));
+                }
+                return { sessionId: attachTo.sessionId };
+              })
+              .catch(() => {
+                attachedToExisting = false;
+                if (paneId) persistLiveSession(paneId, null);
+                if (isDisposed) throw new Error('Disposed');
+                return spawnNewSession();
+              })
+          : spawnNewSession();
       createPromise
-        ?.then(({ sessionId }) => {
+        ?.then((created) => {
+          if (!created?.sessionId) return;
+          const { sessionId } = created;
           if (isDisposed) {
             // Already unmounted while waiting for session creation
-            if (attachTo) killUnlessReclaimed(sessionId, (id) => killSession?.(id));
+            if (attachedToExisting) killUnlessReclaimed(sessionId, (id) => killSession?.(id));
             else killSession?.(sessionId);
             return;
           }
           sessionIdRef.current = sessionId;
-          if (paneId) registerLiveSession(paneId, { sessionId, kind: k8sTarget ? 'k8s' : 'ssh' });
+          const sessionKind: 'ssh' | 'k8s' = k8sTarget ? 'k8s' : 'ssh';
+          if (paneId) {
+            registerLiveSession(paneId, { sessionId, kind: sessionKind });
+            persistLiveSession(paneId, sessionId, sessionKind);
+          }
           setPerfSessionId(sessionId);
           pathHoverRef.current.onSessionStarted(sessionId, () => isDisposed);
 
@@ -918,7 +1076,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           // prompt" signal from the PTY, so we send it shortly after the
           // first data arrives from the remote side.
           // An attached session is long past its first prompt: never `cd` again.
-          let cwdSent = !!attachTo;
+          let cwdSent = attachedToExisting;
           const sendInitialCwd = () => {
             if (cwdSent) return;
             cwdSent = true;
@@ -947,6 +1105,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               // The terminal answering a query from the program (fish asks before every prompt), not typing.
             } else if (data.includes('\r') || data.includes('\n')) {
               outputTracker.recordEnter();
+              scheduleBlocksRefresh();
               lastEnterAt = Date.now();
               // A new command: the last one's error chip is stale.
               setTerminalErrorHint(null);
@@ -980,7 +1139,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           if (onData) {
             unsubData = onData((sessId, data) => {
               if (sessId === sessionIdRef.current) {
-                term.write(data);
+                term.write(data, () => {
+                  // eslint-disable-next-line no-control-regex
+                  const hasPromptMark = /\x1b\]133;[ACD]/.test(data);
+                  scheduleBlocksRefresh(hasPromptMark);
+                });
                 outputTracker.noteOutput();
                 sudoRetryRef.current.notifyOutput();
                 sendInitialCwd();
@@ -1021,6 +1184,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             if (window.multissh?.onK8sTerminalExit) {
               unsubExit = window.multissh.onK8sTerminalExit((sessId, event) => {
                 if (sessId === sessionIdRef.current) {
+                  if (paneId) persistLiveSession(paneId, null);
                   term.write(`\r\n\x1b[33m[Session terminated: ${event.status}]\x1b[0m\r\n`);
                   const mapped: SSHPtyExitEvent = { exitCode: event.status === 'Success' ? 0 : 1 };
                   onExitRef.current?.(mapped);
@@ -1037,6 +1201,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           } else if (window.multissh?.onTerminalExit) {
             unsubExit = window.multissh.onTerminalExit((sessId, event) => {
               if (sessId === sessionIdRef.current) {
+                if (paneId) persistLiveSession(paneId, null);
                 term.write(
                   `\r\n\x1b[33m[Session terminated (code: ${event.exitCode})]\x1b[0m\r\n`
                 );
@@ -1084,6 +1249,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       }
       titleSub.dispose();
       selectionSub.dispose();
+      scrollSub.dispose();
       resultsSub.dispose();
       outputTracker.dispose();
       osc7Handler.dispose();
@@ -1091,13 +1257,20 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       searchAddonRef.current = null;
       clearTimeout(settleTimer);
       clearTimeout(noticeTimer);
+      clearTimeout(blocksRefreshTimer);
+      clearTimeout(resizeDebounceTimerRef.current);
       const sid = sessionIdRef.current;
       const killSession = k8sTarget ? window.multissh?.k8sTerminalKill : window.multissh?.terminalKill;
-      if (sid && paneId) unregisterLiveSession(paneId, sid);
+      if (sid && paneId) {
+        unregisterLiveSession(paneId, sid);
+        if (!isPageUnloadingRef.current) {
+          persistLiveSession(paneId, null);
+        }
+      }
       if (sid && killSession) {
-        if (consumeDetached(sid)) {
-          // The tab moved to another window and takes the running session along: leave it alone.
-        } else if (attachTo) {
+        if (consumeDetached(sid) || (isWebBrowserMode() && isPageUnloadingRef.current)) {
+          // The tab moved to another window, or the web browser tab is reloading: keep backend PTY alive.
+        } else if (attachedToExisting) {
           killUnlessReclaimed(sid, killSession);
         } else {
           killSession(sid);
@@ -1201,81 +1374,94 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           border-box height and only subtracts the xterm element's own padding, so padding on the
           container made the terminal ~16px too tall and clipped the last row (worse on Windows). */}
       <TerminalControl sessionId={perfSessionId} />
-      {perfSessionId && (
-        <div className="absolute bottom-1 right-3 z-10 flex items-center gap-1.5">
-          {terminalErrorHint && (
-            <div className="flex items-center gap-1 rounded-md border border-rose-500/40 bg-rose-500/15 px-2 py-0.5 text-[10px] font-medium text-rose-200 shadow-lg animate-fade-in">
-              <button
-                type="button"
-                data-testid="terminal-fix-error-btn"
-                className="inline-flex items-center gap-1 hover:text-white"
-                onClick={() => {
-                  // What raised the chip, not whatever was printed since.
-                  const latest = terminalErrorHint;
-                  window.dispatchEvent(new CustomEvent('sshs3:ai-open'));
-                  window.dispatchEvent(
-                    new CustomEvent('sshs3:ai-attach', {
-                      detail: {
-                        sessionId: perfSessionId,
-                        text: latest,
-                        label: `${hostLabel || 'Terminal'} error output`,
-                        prompt:
-                          'Explain why this error came up in the terminal and suggest the right command to fix it.',
-                      },
-                    })
-                  );
-                  setTerminalErrorHint(null);
-                }}
-              >
-                <Sparkles className="h-3 w-3 text-rose-400" />
-                <span>✨ Explain &amp; fix the error</span>
-              </button>
-              <button
-                type="button"
-                aria-label="Dismiss error hint"
-                onClick={() => setTerminalErrorHint(null)}
-                className="ml-0.5 text-rose-300/70 hover:text-white"
-              >
-                <X className="h-2.5 w-2.5" />
-              </button>
-            </div>
-          )}
-          <button
-            type="button"
-            data-testid="terminal-inline-ai-btn"
-            className="rounded border border-border-subtle bg-app-surface px-2 py-0.5 text-[10px] text-sky-400 hover:bg-app-surface-hover"
-            onClick={() => {
-              setInlineAiOpen((prev) => !prev);
-              setInlineSuggestion(null);
-              setTimeout(() => inlineAiInputRef.current?.focus(), 20);
-            }}
+
+      <div ref={viewportRef} className="relative flex min-h-0 w-full flex-1 flex-col">
+        {commandBlocks.length > 0 && (
+          <div
+            data-testid="terminal-command-gutter"
+            aria-label="Command block indicators"
+            className="pointer-events-none absolute bottom-1 left-0.5 top-1 z-10 w-2"
           >
-            Inline AI (Ctrl+K)
-          </button>
-          <button
-            type="button"
-            className="rounded bg-app-surface px-2 py-0.5 text-[10px] text-txt-muted hover:text-txt-primary"
-            onClick={() => {
-              const text = termRef.current?.getSelection() || outputTrackerRef.current?.lastOutput();
-              window.dispatchEvent(new CustomEvent('sshs3:ai-open'));
-              if (text) {
-                window.dispatchEvent(
-                  new CustomEvent('sshs3:ai-attach', {
-                    detail: {
-                      sessionId: perfSessionId,
-                      text,
-                      label: termRef.current?.getSelection() ? 'Terminal selection' : 'Last command output',
-                    },
-                  })
+            {commandBlocks
+              .filter(
+                (b) =>
+                  b.startRow >= viewportRange.viewportY &&
+                  b.startRow < viewportRange.viewportY + Math.max(1, viewportRange.rows)
+              )
+              .map((block) => {
+                const isBookmarked = bookmarkedBlockIds.includes(block.id);
+                const topPct =
+                  ((block.startRow - viewportRange.viewportY) / Math.max(1, viewportRange.rows)) * 100;
+                const toneClass = block.running
+                  ? 'bg-sky-400 animate-pulse'
+                  : block.exitCode === undefined
+                    ? 'bg-slate-400/75'
+                    : block.exitCode === 0
+                      ? 'bg-emerald-400'
+                      : 'bg-rose-400';
+                return (
+                  <button
+                    key={block.id}
+                    type="button"
+                    data-testid={`command-block-marker-${block.id}`}
+                    title={`${block.command || 'Command'}${block.exitCode !== undefined ? ` (exit ${block.exitCode})` : ''}${isBookmarked ? ' · Bookmarked' : ''}`}
+                    aria-label={`Command block: ${block.command || 'command'}${isBookmarked ? ', bookmarked' : ''}`}
+                    style={{ top: `${Math.min(96, Math.max(0, topPct))}%` }}
+                    onClick={() => {
+                      setSelectedBlockId(block.id);
+                      setBlocksDrawerOpen(true);
+                    }}
+                    className={`pointer-events-auto absolute left-0 flex h-2.5 w-2 items-center justify-center rounded-full transition-transform hover:scale-125 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-400 ${
+                      isBookmarked ? 'ring-1 ring-amber-400 bg-amber-400' : toneClass
+                    }`}
+                  />
                 );
-              }
-            }}
+              })}
+          </div>
+        )}
+
+        {selectionPopover && (
+          <div
+            data-testid="terminal-selection-popover"
+            role="toolbar"
+            aria-label="Selection AI actions"
+            style={{ top: selectionPopover.top, left: selectionPopover.left }}
+            className="terminal-selection-popover absolute z-30 flex items-center gap-1 rounded-lg border border-sky-500/40 bg-app-card/95 px-1.5 py-1 text-[11px] text-txt-primary shadow-xl backdrop-blur"
           >
-            Attach selection to AI
-          </button>
-        </div>
-      )}
-      {inlineAiOpen && (
+            <button
+              type="button"
+              data-testid="selection-ask-ai-btn"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => dispatchAskAi('ask', selectionPopover.text)}
+              className="inline-flex items-center gap-1 rounded px-2 py-0.5 font-medium text-sky-300 hover:bg-sky-500/20 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 cursor-pointer"
+            >
+              <MessageSquarePlus className="h-3 w-3" />
+              <span>Ask AI</span>
+            </button>
+            <span className="h-3 w-px bg-border-subtle" aria-hidden="true" />
+            <button
+              type="button"
+              data-testid="selection-explain-btn"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => dispatchAskAi('explain', selectionPopover.text)}
+              className="inline-flex items-center gap-1 rounded px-2 py-0.5 font-medium text-emerald-300 hover:bg-emerald-500/20 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400 cursor-pointer"
+            >
+              <Sparkles className="h-3 w-3" />
+              <span>Explain</span>
+            </button>
+            <button
+              type="button"
+              aria-label="Dismiss selection actions"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => setSelectionPopover(null)}
+              className="rounded p-0.5 text-txt-muted hover:text-txt-primary"
+            >
+              <X className="h-3 w-3" />
+            </button>
+          </div>
+        )}
+
+        {inlineAiOpen && (
         <div
           data-testid="terminal-inline-ai"
           className="absolute left-4 right-4 top-9 z-20 flex flex-col gap-2 rounded-xl border border-sky-500/40 bg-app-surface/95 px-3 py-2.5 text-xs text-txt-primary shadow-2xl backdrop-blur"
@@ -1503,7 +1689,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           )}
         </div>
       )}
-      <div className="min-h-0 w-full flex-1 px-1.5 py-1">
+      <div className="min-h-0 w-full flex-1 px-1.5 py-1 pl-3">
         <div
           ref={containerRef}
           data-testid="terminal-container"
@@ -1512,7 +1698,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           className="h-full w-full overflow-hidden focus:outline-none"
         />
       </div>
-      {sudoRetry.suggestion && !exitEvent && <SudoRetryPrompt command={sudoRetry.suggestion.sudoCommand} />}
 
       {searchOpen && (
         <div
@@ -1573,16 +1758,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           >
             <X className="h-3.5 w-3.5" />
           </button>
-        </div>
-      )}
-
-      {copyNotice && (
-        <div
-          data-testid="copy-notice"
-          role="status"
-          className="dark-surface pointer-events-none absolute bottom-3 right-4 z-20 rounded-lg bg-slate-900/90 px-3 py-1.5 text-xs text-slate-200 shadow-lg animate-fade-in"
-        >
-          {copyNotice}
         </div>
       )}
 
@@ -1714,6 +1889,256 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         onForwardAndOpen={portDetection.handleForwardAndOpen}
         onDismiss={portDetection.dismissPort}
       />
+
+      {blocksDrawerOpen && commandBlocks.length > 0 && (
+        <div
+          data-testid="terminal-blocks-drawer"
+          role="dialog"
+          aria-label="Command blocks and bookmarks"
+          className="absolute bottom-2 left-2 z-30 flex max-h-64 w-80 flex-col overflow-hidden rounded-xl border border-border-subtle bg-app-card/95 text-xs text-txt-primary shadow-2xl backdrop-blur"
+        >
+          <div className="flex items-center justify-between border-b border-border-subtle px-3 py-1.5">
+            <span className="font-semibold text-txt-primary flex items-center gap-1.5">
+              <Layers className="h-3.5 w-3.5 text-sky-400" />
+              Command Blocks ({commandBlocks.length})
+            </span>
+            <button
+              type="button"
+              aria-label="Close command blocks"
+              onClick={() => setBlocksDrawerOpen(false)}
+              className="rounded p-0.5 text-txt-muted hover:text-txt-primary"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+          <div className="overflow-y-auto divide-y divide-border-subtle">
+            {[...commandBlocks].reverse().map((block) => {
+              const isBookmarked = bookmarkedBlockIds.includes(block.id);
+              const isSelected = selectedBlockId === block.id;
+              return (
+                <div
+                  key={block.id}
+                  data-testid={`command-block-row-${block.id}`}
+                  className={`flex flex-col gap-1 px-3 py-2 transition-colors ${
+                    isSelected ? 'bg-sky-500/10' : 'hover:bg-app-surface-hover/50'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedBlockId(block.id);
+                        termRef.current?.scrollToLine?.(block.startRow);
+                        termRef.current?.focus();
+                      }}
+                      className="min-w-0 flex-1 truncate text-left font-mono text-[11px] font-medium text-txt-primary hover:text-sky-300"
+                      title={block.command}
+                    >
+                      $ {block.command || '(command)'}
+                    </button>
+                    {block.exitCode !== undefined && (
+                      <span
+                        className={`shrink-0 rounded px-1 py-0.5 text-[10px] font-mono ${
+                          block.exitCode === 0
+                            ? 'bg-emerald-500/15 text-emerald-300'
+                            : 'bg-rose-500/15 text-rose-300'
+                        }`}
+                      >
+                        {block.exitCode}
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      aria-label={isBookmarked ? 'Remove bookmark' : 'Bookmark block'}
+                      data-testid={`bookmark-block-${block.id}`}
+                      onClick={() => toggleBlockBookmark(block.id)}
+                      className={`rounded p-0.5 ${
+                        isBookmarked ? 'text-amber-400' : 'text-txt-muted hover:text-amber-300'
+                      }`}
+                    >
+                      <Bookmark className="h-3 w-3" />
+                    </button>
+                  </div>
+                  <div className="flex items-center justify-between gap-1 text-[10px] text-txt-muted">
+                    <span>{block.lineCount} line{block.lineCount === 1 ? '' : 's'}</span>
+                    <div className="flex items-center gap-1">
+                      {block.output && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            void navigator.clipboard?.writeText(block.output).catch(() => {});
+                            notify('Block output copied');
+                          }}
+                          className="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 hover:bg-app-surface-hover hover:text-txt-primary"
+                        >
+                          <Copy className="h-2.5 w-2.5" />
+                          <span>Copy</span>
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (block.command) {
+                            termRef.current?.paste(block.command);
+                            termRef.current?.focus();
+                            setBlocksDrawerOpen(false);
+                          }
+                        }}
+                        className="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 hover:bg-app-surface-hover hover:text-txt-primary"
+                      >
+                        <CornerDownLeft className="h-2.5 w-2.5" />
+                        <span>Re-input</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const payload = block.output
+                            ? `$ ${block.command}\n${block.output}`
+                            : block.command;
+                          dispatchAskAi('ask', payload);
+                          setBlocksDrawerOpen(false);
+                        }}
+                        className="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-sky-400 hover:bg-sky-500/15"
+                      >
+                        <Sparkles className="h-2.5 w-2.5" />
+                        <span>Ask AI</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+      </div>
+
+      {sudoRetry.suggestion && !exitEvent && <SudoRetryPrompt command={sudoRetry.suggestion.sudoCommand} />}
+
+      {(perfSessionId || copyNotice || isScrolledUp || commandBlocks.length > 0) && (
+        <div
+          data-testid="terminal-status-bar"
+          className="terminal-status-bar flex shrink-0 items-center justify-between gap-2 border-t border-border-subtle bg-app-surface/95 px-2.5 py-1 text-[11px] text-txt-secondary"
+        >
+          <div className="flex min-w-0 items-center gap-1.5">
+            {commandBlocks.length > 0 && (
+              <button
+                type="button"
+                data-testid="terminal-blocks-btn"
+                onClick={() => setBlocksDrawerOpen((prev) => !prev)}
+                className="inline-flex items-center gap-1 rounded border border-border-subtle bg-app px-1.5 py-0.5 text-[10px] font-medium text-txt-secondary hover:bg-app-surface-hover hover:text-txt-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+              >
+                <Layers className="h-3 w-3 text-sky-400" />
+                <span>{commandBlocks.length} cmd{commandBlocks.length === 1 ? '' : 's'}</span>
+                {bookmarkedBlockIds.length > 0 && (
+                  <span className="ml-0.5 text-amber-400">★ {bookmarkedBlockIds.length}</span>
+                )}
+              </button>
+            )}
+            {terminalErrorHint && perfSessionId && (
+              <div className="flex items-center gap-1 rounded-md border border-rose-500/40 bg-rose-500/15 px-2 py-0.5 text-[10px] font-medium text-rose-200">
+                <button
+                  type="button"
+                  data-testid="terminal-fix-error-btn"
+                  className="inline-flex items-center gap-1 hover:text-white"
+                  onClick={() => {
+                    const latest = terminalErrorHint;
+                    window.dispatchEvent(new CustomEvent('sshs3:ai-open'));
+                    window.dispatchEvent(
+                      new CustomEvent('sshs3:ai-attach', {
+                        detail: {
+                          sessionId: perfSessionId,
+                          text: latest,
+                          label: `${hostLabel || 'Terminal'} error output`,
+                          prompt:
+                            'Explain why this error came up in the terminal and suggest the right command to fix it.',
+                        },
+                      })
+                    );
+                    setTerminalErrorHint(null);
+                  }}
+                >
+                  <Sparkles className="h-3 w-3 text-rose-400" />
+                  <span>✨ Explain &amp; fix the error</span>
+                </button>
+                <button
+                  type="button"
+                  aria-label="Dismiss error hint"
+                  onClick={() => setTerminalErrorHint(null)}
+                  className="ml-0.5 text-rose-300/70 hover:text-white"
+                >
+                  <X className="h-2.5 w-2.5" />
+                </button>
+              </div>
+            )}
+            {copyNotice && (
+              <div
+                data-testid="copy-notice"
+                role="status"
+                className="truncate rounded bg-app px-2 py-0.5 text-[10px] font-medium text-txt-primary border border-border-subtle"
+              >
+                {copyNotice}
+              </div>
+            )}
+          </div>
+
+          <div className="flex shrink-0 items-center gap-1.5">
+            {isScrolledUp && (
+              <button
+                type="button"
+                data-testid="terminal-scroll-bottom-btn"
+                onClick={() => {
+                  termRef.current?.scrollToBottom();
+                  termRef.current?.focus();
+                  setIsScrolledUp(false);
+                }}
+                className="inline-flex items-center gap-1 rounded border border-sky-500/40 bg-sky-500/15 px-2 py-0.5 text-[10px] font-medium text-sky-300 hover:bg-sky-500/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+              >
+                <ArrowDown className="h-3 w-3" />
+                <span>Jump to bottom</span>
+              </button>
+            )}
+            {perfSessionId && (
+              <>
+                <button
+                  type="button"
+                  data-testid="terminal-inline-ai-btn"
+                  className="rounded border border-border-subtle bg-app px-2 py-0.5 text-[10px] text-sky-400 hover:bg-app-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+                  onClick={() => {
+                    setInlineAiOpen((prev) => !prev);
+                    setInlineSuggestion(null);
+                    setTimeout(() => inlineAiInputRef.current?.focus(), 20);
+                  }}
+                >
+                  Inline AI (Ctrl+K)
+                </button>
+                <button
+                  type="button"
+                  data-testid="terminal-attach-ai-btn"
+                  className="rounded border border-border-subtle bg-app px-2 py-0.5 text-[10px] text-txt-muted hover:text-txt-primary hover:bg-app-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+                  onClick={() => {
+                    const text = termRef.current?.getSelection() || outputTrackerRef.current?.lastOutput();
+                    window.dispatchEvent(new CustomEvent('sshs3:ai-open'));
+                    if (text) {
+                      window.dispatchEvent(
+                        new CustomEvent('sshs3:ai-attach', {
+                          detail: {
+                            sessionId: perfSessionId,
+                            text,
+                            label: termRef.current?.getSelection() ? 'Terminal selection' : 'Last command output',
+                          },
+                        })
+                      );
+                    }
+                  }}
+                >
+                  Attach selection to AI
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 };

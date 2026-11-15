@@ -11,15 +11,132 @@ import type {
   WorkspaceActivityEvent,
   WorkspaceServerSummary,
 } from "../../../shared/types/aiHub";
+import { analyzeCommandSafety } from "./CommandSafetyService";
 import { KnowledgeBaseService, tokenize } from "./KnowledgeBaseService";
 import type { HubStore } from "./HubStore";
+import {
+  MAX_STORED_PROPOSALS,
+  buildGovernedProposal,
+  evaluateMemoryGovernance,
+  inspectMemoryCandidate,
+  parameterizeCommandTemplate,
+  type GovernedMemoryProposal,
+  type MemorySourceTrust,
+} from "./MemoryDistiller";
 import { maskContext } from "./privacy";
+
+export interface FailureCritique {
+  taskId: string;
+  title: string;
+  scope: string;
+  cluster?: string;
+  errorSignature: string;
+  failedCommands: string[];
+  refutedHypotheses: string[];
+  unresolvedHypotheses: string[];
+  nextChecks: string[];
+  critiqueText: string;
+  confidence: number;
+  tier: "episodic";
+  sourceTrust: MemorySourceTrust;
+}
+
+/**
+ * Strips `seen|` / `guess|` namespaces and normalizes an error signature key.
+ */
+export function normalizeErrorSignature(signature: string): string {
+  return signature
+    .trim()
+    .toLowerCase()
+    .replace(/^(?:seen|guess)\|/, "");
+}
+
+/**
+ * Normalizes a command string for structural template matching (collapses whitespace,
+ * strips leading `sudo`, removes benign redirection noise).
+ */
+export function normalizeCommandForMatch(command: string): string {
+  const tokens = maskContext(command)
+    .trim()
+    .replace(/\s+2>\/dev\/null\b/g, "")
+    .split(/\s+/)
+    .filter(Boolean);
+  if (tokens[0] === "sudo") {
+    let idx = 1;
+    while (idx < tokens.length && /^-[A-Za-z]+$/.test(tokens[idx])) idx++;
+    return tokens.slice(idx).join(" ");
+  }
+  return tokens.join(" ");
+}
+
+const PLACEHOLDER_RE = /<([a-z][a-z0-9_-]{0,24})>/gi;
+
+function escapeRegexLiteral(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Matches a concrete executed command against a skill's `commandTemplate` or `sourceCommand`.
+ * Supports parameterized placeholders like `<pod>`, `<host>`, `<path>`, `<namespace>`, `<id>`,
+ * as well as structural equivalence after normalization (e.g. optional `sudo`).
+ */
+export function commandsMatchTemplate(
+  actualCommand: string,
+  templateOrSource: string,
+): boolean {
+  const actual = normalizeCommandForMatch(actualCommand);
+  const template = normalizeCommandForMatch(templateOrSource);
+  if (!actual || !template) return false;
+  if (actual === template) return true;
+
+  // Parameterized equivalence (e.g. two concrete pod names collapse to <pod>)
+  if (parameterizeCommandTemplate(actual) === parameterizeCommandTemplate(template)) {
+    return true;
+  }
+
+  PLACEHOLDER_RE.lastIndex = 0;
+  if (!PLACEHOLDER_RE.test(template)) return false;
+
+  PLACEHOLDER_RE.lastIndex = 0;
+  let pattern = "^";
+  let lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = PLACEHOLDER_RE.exec(template)) !== null) {
+    pattern += escapeRegexLiteral(template.slice(lastIndex, m.index));
+    const kind = m[1].toLowerCase();
+    pattern += kind === "path" ? "[^\\s;|&\"']+" : "[^\\s;|&\"']+";
+    lastIndex = m.index + m[0].length;
+  }
+  pattern += `${escapeRegexLiteral(template.slice(lastIndex))}$`;
+
+  try {
+    // eslint-disable-next-line security/detect-non-literal-regexp -- bounded escaped template literals with [^\\s;|&"']+ placeholders
+    return new RegExp(pattern).test(actual);
+  } catch {
+    return false;
+  }
+}
+
+function matchesSkillCommand(actualCommand: string | undefined, mem: MemoryEntry): boolean {
+  if (!actualCommand?.trim()) return false;
+  if (mem.commandTemplate && commandsMatchTemplate(actualCommand, mem.commandTemplate)) {
+    return true;
+  }
+  if (mem.sourceCommand && commandsMatchTemplate(actualCommand, mem.sourceCommand)) {
+    return true;
+  }
+  return false;
+}
 
 export function extractErrorSignature(
   command: string,
   snippet: string,
 ): string {
-  const combined = `${command}\n${snippet}`.toLowerCase();
+  const normalizedSnippet = maskContext(snippet)
+    .replace(/\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}[.\d]*Z?\b/g, " ")
+    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, " ")
+    .replace(/\s+/g, " ");
+  const combined = `${normalizeCommandForMatch(command)}\n${normalizedSnippet}`.toLowerCase();
   const patterns: Array<[RegExp, string]> = [
     [/enospc|no space left on device|disk full|9[5-9]%/i, "err:storage_enospc"],
     [/broken-off|snapmirror.*lag|resync/i, "err:snapmirror_broken_off"],
@@ -39,9 +156,25 @@ export function extractErrorSignature(
   for (const [regex, sig] of patterns) {
     if (regex.test(combined)) return sig;
   }
-  const cmdBase = command.trim().split(/\s+/)[0] || "cmd";
-  const errTokens = tokenize(snippet).slice(0, 4).join("_");
+  const cmdBase = normalizeCommandForMatch(command).split(/\s+/)[0] || "cmd";
+  const errTokens = tokenize(normalizedSnippet).slice(0, 4).join("_");
   return `err:${cmdBase}:${errTokens || "nonzero_exit"}`;
+}
+
+/**
+ * Checks whether a skill's normalized `errorSignature` matches an observed failure.
+ */
+export function matchesErrorSignature(
+  skill: Pick<MemoryEntry, "errorSignature">,
+  failedCommand: string,
+  outputSnippet: string,
+): boolean {
+  if (!skill.errorSignature) return false;
+  const skillSig = normalizeErrorSignature(skill.errorSignature);
+  const observedSig = normalizeErrorSignature(
+    extractErrorSignature(failedCommand, outputSnippet),
+  );
+  return Boolean(skillSig && observedSig && skillSig === observedSig);
 }
 
 /**
@@ -64,11 +197,147 @@ export function isOneOffCommand(command: string): boolean {
   );
 }
 
+function diagnosticForSignature(signature: string, failedCommand: string): string {
+  switch (normalizeErrorSignature(signature)) {
+    case "err:storage_enospc":
+      return "df -hT && du -xhd1 /var/log 2>/dev/null | sort -hr | head -n 10";
+    case "err:snapmirror_broken_off":
+      return "snapmirror show -fields state,status,lag-time,last-transfer-error";
+    case "err:multipath_degraded":
+      return "multipath -ll && iscsiadm -m session -P 3";
+    case "err:k8s_pod_crashloop":
+      return "kubectl get pods -A --field-selector=status.phase!=Running && kubectl get events -A --sort-by=.lastTimestamp | tail -n 15";
+    case "err:k8s_csi_mount_failed":
+      return "kubectl get pvc,pv -A && kubectl -n trident get pods -o wide";
+    case "err:ceph_zfs_degraded":
+      return "ceph health detail || zpool status -xv";
+    case "err:systemd_service_failed":
+      return "systemctl --failed && journalctl -xe -n 25 --no-pager";
+    case "err:network_unreachable":
+      return "ss -tulpn && ip -br addr";
+    default: {
+      const base = normalizeCommandForMatch(failedCommand).split(/\s+/)[0] || "journalctl";
+      return base === "journalctl"
+        ? "journalctl -n 20 --no-pager"
+        : `${base} --help || journalctl -n 20 --no-pager`;
+    }
+  }
+}
+
+/**
+ * Reflexion Failure Critique Builder:
+ * Extracts structured episodic failure critiques from failed tasks and/or tasks
+ * with refuted (`ruled-out`) hypotheses so future runs avoid repeating red herrings
+ * and check the right invariants first.
+ */
+export function buildFailureCritique(
+  task: AgentTask,
+  cluster?: string,
+): FailureCritique | undefined {
+  const failedChanges = task.changes.filter(
+    (c) =>
+      c.kind === "command" &&
+      (c.status === "failed" || (c.exitCode !== undefined && c.exitCode !== 0)),
+  );
+  const refutedHypotheses = (task.hypotheses ?? [])
+    .filter((h) => h.status === "ruled-out")
+    .map((h) => {
+      const against = h.evidence
+        .filter((e) => !e.supports)
+        .map((e) => maskContext(e.text).replace(/\s+/g, " ").trim().slice(0, 140))
+        .filter(Boolean);
+      const hText = maskContext(h.text).replace(/\s+/g, " ").trim().slice(0, 180);
+      return against.length > 0
+        ? `${hText} (ruled out by: ${against.join("; ")})`
+        : hText;
+    })
+    .filter(Boolean);
+
+  const unresolvedHypotheses = (task.hypotheses ?? [])
+    .filter((h) => h.status === "open")
+    .map((h) => maskContext(h.text).replace(/\s+/g, " ").trim().slice(0, 160))
+    .filter(Boolean);
+
+  if (
+    refutedHypotheses.length === 0 &&
+    failedChanges.length === 0 &&
+    (task.status !== "failed" || task.mode === "advice" || !task.error?.trim())
+  ) {
+    return undefined;
+  }
+
+  const failedCommands = failedChanges
+    .map((c) => maskContext((c.command ?? "").trim()))
+    .filter(Boolean)
+    .slice(0, 5);
+  const primaryFail = failedChanges[0];
+  const primaryCmd = primaryFail?.command ? maskContext(primaryFail.command) : task.title;
+  const primaryOut = maskContext(
+    primaryFail?.output || task.error || "Task ended without confirmed fix",
+  );
+  const errorSignature = extractErrorSignature(primaryCmd, primaryOut);
+  const targetLabel = primaryFail?.target || task.target?.label || "workspace";
+  const scope = cluster ? `cluster:${cluster}` : `server:${targetLabel}`;
+  const cleanTitle = maskContext(task.title)
+    .replace(/^(AI|Run|Task):\s*/i, "")
+    .trim()
+    .slice(0, 72);
+
+  const nextChecks = [diagnosticForSignature(errorSignature, primaryCmd)].filter(
+    (cmd) => analyzeCommandSafety(cmd).riskLevel === "safe",
+  );
+
+  const parts: string[] = [];
+  if (task.status === "failed") {
+    const reason = task.error ? maskContext(task.error).slice(0, 200) : "ended in failed status";
+    parts.push(`Task "${cleanTitle || task.id}" failed on ${targetLabel}: ${reason}.`);
+  } else {
+    parts.push(`Investigation "${cleanTitle || task.id}" on ${targetLabel} ruled out dead ends.`);
+  }
+  if (failedCommands.length > 0) {
+    parts.push(
+      `Failed command(s): ${failedCommands.map((c) => `\`${parameterizeCommandTemplate(c)}\``).join(", ")}.`,
+    );
+  }
+  if (refutedHypotheses.length > 0) {
+    parts.push(`Refuted hypotheses (avoid repeating): ${refutedHypotheses.join(" | ")}.`);
+  }
+  if (unresolvedHypotheses.length > 0) {
+    parts.push(`Unresolved hypotheses: ${unresolvedHypotheses.join(" | ")}.`);
+  }
+  if (nextChecks.length > 0) {
+    parts.push(`Verify invariant next with: \`${nextChecks[0]}\`.`);
+  }
+
+  return {
+    taskId: task.id,
+    title: `Failure critique: ${cleanTitle || errorSignature.replace(/^err:/, "").replace(/_/g, " ")}`,
+    scope,
+    ...(cluster ? { cluster } : {}),
+    errorSignature,
+    failedCommands,
+    refutedHypotheses,
+    unresolvedHypotheses,
+    nextChecks,
+    critiqueText: parts.join(" "),
+    confidence: 0.72,
+    tier: "episodic",
+    sourceTrust: failedChanges.length > 0 || refutedHypotheses.length > 0 ? "trusted" : "untrusted",
+  };
+}
+
 /** Words that say nothing about what a request is about. */
 const REQUEST_FILLER = new Set([
   "the", "for", "and", "when", "what", "how", "why", "with", "from", "this", "that", "are", "was", "all", "any", "its",
   "show", "list", "get", "give", "tell", "find", "check", "see", "look", "please", "can", "you", "out", "into", "does", "has", "have", "not", "now", "then", "there", "which", "much", "many",
 ]);
+
+export interface GovernanceExecutionOptions {
+  /** Explicitly opt into unified HITL governance (or inferred when autoSaveMemories / store preference is set). */
+  governed?: boolean;
+  autoSaveMemories?: boolean;
+  sourceTrust?: MemorySourceTrust;
+}
 
 export class SelfLearningService {
   private recentEvents: SelfLearningEvent[] = [];
@@ -118,6 +387,35 @@ export class SelfLearningService {
     };
   }
 
+  private isGovernanceActive(opts?: GovernanceExecutionOptions): boolean {
+    if (opts?.governed !== undefined) return opts.governed;
+    if (opts?.autoSaveMemories !== undefined) return true;
+    return this.store?.data.preferences.autoSaveMemories !== undefined;
+  }
+
+  private effectiveAutoSave(opts?: GovernanceExecutionOptions): boolean {
+    if (opts?.autoSaveMemories !== undefined) return opts.autoSaveMemories;
+    return this.store?.data.preferences.autoSaveMemories !== false;
+  }
+
+  private queueProposalToStore(proposal: GovernedMemoryProposal): void {
+    if (!this.store) return;
+    const existing = this.store.data.memoryProposals ?? [];
+    const duplicate = existing.some(
+      (q) =>
+        q.text === proposal.text ||
+        (proposal.op === "update" &&
+          q.op === "update" &&
+          !q.appliedMemoryId &&
+          q.targetId === proposal.targetId &&
+          q.title === proposal.title),
+    );
+    if (duplicate) return;
+    this.store.data.memoryProposals = [...existing, proposal].slice(
+      -MAX_STORED_PROPOSALS,
+    );
+  }
+
   private recordEvent(
     event: Omit<SelfLearningEvent, "id" | "createdAt">,
   ): SelfLearningEvent {
@@ -139,7 +437,9 @@ export class SelfLearningService {
   /**
    * Voyager / Reflexion Failure-to-Fix Learner:
    * When a terminal command fails and a subsequent command on the same target succeeds,
-   * automatically synthesizes or upgrades a reusable troubleshooting skill.
+   * synthesizes a parameterized reusable skill — routing through HITL `MemoryProposal`
+   * governance whenever `autoSaveMemories === false`, confidence < 0.85, tier is `"core"`,
+   * or a command-bearing skill is added.
    */
   learnFromCommandResolution(params: {
     memories: MemoryEntry[];
@@ -160,7 +460,18 @@ export class SelfLearningService {
      * never takes the place of a proven fix.
      */
     proven?: boolean;
-  }): { memories: MemoryEntry[]; learnedSkill?: MemoryEntry } {
+    verifyCommand?: string;
+    preconditions?: string[];
+    commandTemplate?: string;
+    governed?: boolean;
+    autoSaveMemories?: boolean;
+    sourceTrust?: MemorySourceTrust;
+  }): {
+    memories: MemoryEntry[];
+    learnedSkill?: MemoryEntry;
+    proposal?: GovernedMemoryProposal;
+    proposals?: GovernedMemoryProposal[];
+  } {
     const { memories, failure, fixCommand, fixOutput, cluster, scope } = params;
     const proven = params.proven === true;
     const cleanFix = maskContext(fixCommand.trim());
@@ -174,9 +485,17 @@ export class SelfLearningService {
     }
 
     const maskedSnippet = maskContext(failure.snippet);
+    const quarantine = inspectMemoryCandidate({
+      text: `${cleanFail}\n${maskedSnippet}\n${cleanFix}\n${fixOutput ?? ""}`,
+      commandTemplate: params.commandTemplate ?? cleanFix,
+      verifyCommand: params.verifyCommand,
+    });
+    if (quarantine.quarantined) {
+      return { memories };
+    }
+
     const errorSignature = extractErrorSignature(cleanFail, maskedSnippet);
     const shortTarget = failure.label || scope || "workspace";
-    // Named for what it is: the command that succeeded next, which may or may not be the fix.
     const title = `${proven ? "Fixed a failure" : "Seen after a failure"} (${shortTarget}): ${errorSignature.replace(/^err:/, "").replace(/_/g, " ")}`;
     const snippetClean = maskedSnippet.replace(/\s+/g, " ").trim().slice(0, 220);
     const fixOutClean = maskContext(fixOutput ?? "")
@@ -194,16 +513,97 @@ export class SelfLearningService {
       .filter(Boolean)
       .join(" ");
 
+    const tier: MemoryEntry["tier"] = proven ? "core" : "archival";
+    const confidence = proven ? 0.89 : 0.5;
+    const resolvedScope = scope || `server:${shortTarget}`;
+    const commandTemplate = parameterizeCommandTemplate(
+      params.commandTemplate ?? cleanFix,
+    );
+    const safeVerify =
+      params.verifyCommand &&
+      analyzeCommandSafety(maskContext(params.verifyCommand)).riskLevel === "safe"
+        ? parameterizeCommandTemplate(params.verifyCommand)
+        : undefined;
+    const sourceTrust: MemorySourceTrust =
+      params.sourceTrust ?? (proven ? "trusted" : "untrusted");
+
+    const proposal = buildGovernedProposal(
+      {
+        op: "add",
+        kind: "skill",
+        tier,
+        scope: resolvedScope,
+        title,
+        text,
+        confidence,
+        sourceCommand: cleanFix,
+        commandTemplate,
+        ...(safeVerify ? { verifyCommand: safeVerify } : {}),
+        ...(params.preconditions ? { preconditions: params.preconditions } : {}),
+        errorSignature: proven ? errorSignature : `seen|${errorSignature}`,
+        cluster,
+        proven,
+        sourceTrust,
+        evidence: `Command "${cleanFail}" failed (${failure.exitCode ?? "non-zero"}); "${cleanFix}" exited 0 on ${shortTarget}.`,
+        sourceId: `failure:${errorSignature}`,
+        sourceTitle: `Terminal resolution on ${shortTarget}`,
+      },
+      {
+        autoSaveMemories: this.effectiveAutoSave(params),
+        existingMemories: memories,
+        sourceTrust,
+      },
+    );
+
+    const decision = evaluateMemoryGovernance(
+      {
+        op: "add",
+        kind: "skill",
+        tier,
+        scope: resolvedScope,
+        title,
+        text,
+        confidence,
+        sourceCommand: cleanFix,
+        commandTemplate,
+        verifyCommand: safeVerify,
+        sourceTrust,
+        proven,
+      },
+      {
+        autoSaveMemories: this.effectiveAutoSave(params),
+        existingMemories: memories,
+        sourceTrust,
+      },
+    );
+
+    if (this.isGovernanceActive(params) && decision.requiresApproval) {
+      this.queueProposalToStore(proposal);
+      this.failureToFixCount += 1;
+      this.recordEvent({
+        kind: "failure_to_fix",
+        title: `Proposed fix after failure: ${errorSignature.replace(/^err:/, "")}`,
+        summary: `Queued HITL proposal (${decision.reasons.join(", ")}) for \`${cleanFix}\` on ${shortTarget}.`,
+        targetCluster: cluster,
+        confidence,
+      });
+      return {
+        memories,
+        proposal,
+        proposals: [proposal],
+      };
+    }
+
     const merged = this.kb.deduplicateOrMergeMemory(memories, {
       kind: "skill",
-      tier: proven ? "core" : "archival",
+      tier,
       cluster,
-      scope: scope || `server:${shortTarget}`,
+      scope: resolvedScope,
       title,
       text,
       author: "Voyager Self-Learning Engine",
       // Below what Ctrl+K and failure hints suggest (0.65), unless it was shown to be the fix.
-      confidence: proven ? 0.89 : 0.5,
+      confidence,
       autoLearned: true,
       sourceCommand: cleanFix,
       // A note of what was seen never merges into (and so never overwrites) a proven fix for the same error.
@@ -213,27 +613,41 @@ export class SelfLearningService {
       supersede: proven,
     });
 
+    const enrichedSaved: MemoryEntry = {
+      ...merged.saved,
+      commandTemplate,
+      ...(safeVerify ? { verifyCommand: safeVerify } : {}),
+      ...(params.preconditions ? { preconditions: params.preconditions } : {}),
+      ...(proven ? { proven: true } : {}),
+      sourceTrust,
+    };
+    const nextMemories = merged.memories.map((m) =>
+      m.id === merged.saved.id ? enrichedSaved : m,
+    );
+
     this.failureToFixCount += 1;
     this.recordEvent({
       kind: "failure_to_fix",
       title: `Noted what worked after a failure: ${errorSignature.replace(/^err:/, "")}`,
       summary: `After \`${cleanFail}\` failed on ${shortTarget}, \`${cleanFix}\` succeeded.`,
       targetCluster: cluster,
-      confidence: merged.saved.confidence ?? 0.89,
-      memoryId: merged.saved.id,
+      confidence: enrichedSaved.confidence ?? 0.89,
+      memoryId: enrichedSaved.id,
     });
 
     return {
-      memories: merged.memories,
-      learnedSkill: merged.saved,
+      memories: nextMemories,
+      learnedSkill: enrichedSaved,
+      proposal,
+      proposals: [proposal],
     };
   }
 
   /**
    * Post-Task Reflexion Loop:
-   * Inspects a completed or failed AgentTask, updates confidence/success metrics on used skills,
-   * extracts failure->fix pairs within the task's command chain, and synthesizes new playbooks
-   * when a multi-step task is verified.
+   * Inspects a completed or failed AgentTask, updates confidence/success metrics on used skills
+   * via parameterized template matching, extracts failure->fix pairs, emits Reflexion failure
+   * critiques for failed runs or refuted hypotheses, and synthesizes/proposes playbooks.
    */
   reflectOnCompletedTask(params: {
     task: AgentTask;
@@ -241,24 +655,131 @@ export class SelfLearningService {
     infraEdges: InfraGraphEdge[];
     servers: WorkspaceServerSummary[];
     cluster?: string;
+    governed?: boolean;
+    autoSaveMemories?: boolean;
+    sourceTrust?: MemorySourceTrust;
   }): {
     memories: MemoryEntry[];
     infraEdges: InfraGraphEdge[];
     events: SelfLearningEvent[];
+    proposals: GovernedMemoryProposal[];
+    critique?: FailureCritique;
   } {
     let currentMemories = [...params.memories];
     let currentEdges = [...params.infraEdges];
     const createdEvents: SelfLearningEvent[] = [];
+    const proposals: GovernedMemoryProposal[] = [];
     const { task, cluster, servers } = params;
+    const governed = this.isGovernanceActive(params);
+    const autoSave = this.effectiveAutoSave(params);
 
     const commandChanges = task.changes.filter(
       (c) => c.kind === "command" && c.command,
     );
+
+    // 0. Reflexion failure critique for failed tasks or runs with refuted hypotheses
+    const critique = buildFailureCritique(task, cluster);
+    if (critique) {
+      const quarantine = inspectMemoryCandidate({
+        title: critique.title,
+        text: critique.critiqueText,
+      });
+      if (!quarantine.quarantined) {
+        const decision = evaluateMemoryGovernance(
+          {
+            op: "add",
+            kind: "memory",
+            tier: critique.tier,
+            scope: critique.scope,
+            title: critique.title,
+            text: critique.critiqueText,
+            confidence: critique.confidence,
+            sourceTrust: critique.sourceTrust,
+          },
+          {
+            autoSaveMemories: autoSave,
+            existingMemories: currentMemories,
+            sourceTrust: critique.sourceTrust,
+          },
+        );
+        const critiqueProposal = buildGovernedProposal(
+          {
+            op: "add",
+            kind: "memory",
+            tier: critique.tier,
+            scope: critique.scope,
+            title: critique.title,
+            text: critique.critiqueText,
+            confidence: critique.confidence,
+            errorSignature: critique.errorSignature,
+            cluster,
+            sourceTrust: critique.sourceTrust,
+            evidence: `Task ${task.id} (${task.status}) failure/hypothesis critique.`,
+            sourceId: `task:${task.id}`,
+            sourceTitle: `Reflexion critique: ${task.title}`,
+          },
+          {
+            autoSaveMemories: autoSave,
+            existingMemories: currentMemories,
+            sourceTrust: critique.sourceTrust,
+          },
+        );
+        proposals.push(critiqueProposal);
+
+        if (governed && decision.requiresApproval) {
+          this.queueProposalToStore(critiqueProposal);
+          createdEvents.push(
+            this.recordEvent({
+              kind: "task_reflexion",
+              title: `Proposed failure critique: ${critique.title.slice(0, 42)}`,
+              summary: `Queued Reflexion failure critique (${decision.reasons.join(", ")}).`,
+              targetCluster: cluster,
+              confidence: critique.confidence,
+            }),
+          );
+        } else {
+          const mergedCritique = this.kb.deduplicateOrMergeMemory(currentMemories, {
+            kind: "memory",
+            tier: "episodic",
+            cluster,
+            scope: critique.scope,
+            title: critique.title,
+            text: critique.critiqueText,
+            author: "Reflexion Failure Critic",
+            confidence: critique.confidence,
+            autoLearned: true,
+            errorSignature: critique.errorSignature,
+          });
+          const savedCritique: MemoryEntry = {
+            ...mergedCritique.saved,
+            sourceTrust: critique.sourceTrust,
+          };
+          currentMemories = mergedCritique.memories.map((m) =>
+            m.id === mergedCritique.saved.id ? savedCritique : m,
+          );
+          createdEvents.push(
+            this.recordEvent({
+              kind: "task_reflexion",
+              title: `Recorded failure critique: ${critique.title.slice(0, 42)}`,
+              summary: critique.critiqueText.slice(0, 180),
+              targetCluster: cluster,
+              confidence: critique.confidence,
+              memoryId: savedCritique.id,
+            }),
+          );
+        }
+      }
+    }
+
     if (commandChanges.length === 0) {
+      this.lastReflectionAt = Date.now();
+      this.syncToStore();
       return {
         memories: currentMemories,
         infraEdges: currentEdges,
         events: createdEvents,
+        proposals,
+        ...(critique ? { critique } : {}),
       };
     }
 
@@ -285,13 +806,17 @@ export class SelfLearningService {
           cluster,
           scope: change.target ? `server:${change.target}` : "workspace",
           proven: change.check?.after === true && change.check.before === false,
+          governed: params.governed,
+          autoSaveMemories: params.autoSaveMemories,
+          sourceTrust: params.sourceTrust,
         });
         currentMemories = res.memories;
+        if (res.proposals?.length) proposals.push(...res.proposals);
         lastFailedChange = undefined;
       }
     }
 
-    // 2. Reinforce existing skills whose sourceCommand was successfully executed
+    // 2. Reinforce existing skills whose commandTemplate / sourceCommand matches executed commands
     const succeededCommands = commandChanges.filter(
       (c) => c.status === "completed" && c.exitCode === 0 && c.command,
     );
@@ -301,14 +826,11 @@ export class SelfLearningService {
 
     if (succeededCommands.length > 0 || failedCommands.length > 0) {
       currentMemories = currentMemories.map((mem) => {
-        // The same command, exactly; and it counts as having worked only in a run that was verified.
         const matchedSuccess =
           task.verification === "verified" &&
-          succeededCommands.some((c) => mem.sourceCommand && c.command?.trim() === mem.sourceCommand.trim());
-        const matchedFail = failedCommands.some(
-          (c) =>
-            mem.sourceCommand &&
-            c.command?.trim() === mem.sourceCommand.trim(),
+          succeededCommands.some((c) => matchesSkillCommand(c.command, mem));
+        const matchedFail = failedCommands.some((c) =>
+          matchesSkillCommand(c.command, mem),
         );
         if (!matchedSuccess && !matchedFail) return mem;
 
@@ -322,12 +844,13 @@ export class SelfLearningService {
           successCount: (mem.successCount ?? 0) + (matchedSuccess ? 1 : 0),
           failureCount: (mem.failureCount ?? 0) + (matchedFail ? 1 : 0),
           usageCount: (mem.usageCount ?? 1) + 1,
+          ...(matchedSuccess ? { lastVerifiedAt: Date.now() } : {}),
           updatedAt: Date.now(),
         };
       });
     }
 
-    // 3. Synthesize a verified Playbook Skill if the task was verified or completed with successful commands
+    // 3. Synthesize a Playbook Skill if the task was verified or completed with successful commands
     if (
       (task.verification === "verified" || task.status === "completed") &&
       succeededCommands.some((c) => !isOneOffCommand(maskContext(c.command!.trim())))
@@ -345,30 +868,115 @@ export class SelfLearningService {
         .replace(/^(AI|Run|Task):\s*/i, "")
         .trim()
         .slice(0, 72);
+      const playbookTitle = `Playbook: ${cleanTitle || primaryCmd}`;
+      const playbookScope = cluster ? `cluster:${cluster}` : `server:${targetLabel}`;
+      const playbookText = `Commands that completed on ${targetLabel} (${task.verification === "verified" ? "the task was verified" : "each exited 0; the result was not checked"}): ${uniqueCmds.map((cmd) => `\`${cmd}\``).join(" → ")}.`;
+      const playbookTier: MemoryEntry["tier"] =
+        task.verification === "verified" ? "core" : "archival";
+      const playbookConfidence = task.verification === "verified" ? 0.92 : 0.6;
+      const commandTemplate = parameterizeCommandTemplate(primaryCmd);
+      const playbookTrust: MemorySourceTrust =
+        params.sourceTrust ??
+        (task.tainted ? "untrusted" : task.verification === "verified" ? "trusted" : "untrusted");
 
-      const merged = this.kb.deduplicateOrMergeMemory(currentMemories, {
-        kind: "skill",
-        tier: task.verification === "verified" ? "core" : "archival",
-        cluster,
-        scope: cluster ? `cluster:${cluster}` : `server:${targetLabel}`,
-        title: `Playbook: ${cleanTitle || primaryCmd}`,
-        text: `Commands that completed on ${targetLabel} (${task.verification === "verified" ? "the task was verified" : "each exited 0; the result was not checked"}): ${uniqueCmds.map((cmd) => `\`${cmd}\``).join(" → ")}.`,
-        author: "Reflexion Post-Task Learner",
-        // Unverified steps are a record, not a recipe: below what is suggested as a command.
-        confidence: task.verification === "verified" ? 0.92 : 0.6,
-        autoLearned: true,
-        sourceCommand: primaryCmd,
+      const quarantine = inspectMemoryCandidate({
+        title: playbookTitle,
+        text: playbookText,
+        commandTemplate,
       });
-      currentMemories = merged.memories;
-      const ev = this.recordEvent({
-        kind: "task_reflexion",
-        title: `Wrote down the steps of a finished task: ${cleanTitle.slice(0, 40)}`,
-        summary: `Kept ${uniqueCmds.length} commands that completed (${uniqueCmds.map((c) => `\`${c}\``).join(", ")}).`,
-        targetCluster: cluster,
-        confidence: merged.saved.confidence ?? 0.88,
-        memoryId: merged.saved.id,
-      });
-      createdEvents.push(ev);
+      if (!quarantine.quarantined) {
+        const playbookProposal = buildGovernedProposal(
+          {
+            op: "add",
+            kind: "skill",
+            tier: playbookTier,
+            scope: playbookScope,
+            title: playbookTitle,
+            text: playbookText,
+            confidence: playbookConfidence,
+            sourceCommand: primaryCmd,
+            commandTemplate,
+            cluster,
+            proven: task.verification === "verified",
+            sourceTrust: playbookTrust,
+            evidence: `Task "${cleanTitle}" (${task.verification}) ran ${uniqueCmds.length} command(s).`,
+            sourceId: `task:${task.id}`,
+            sourceTitle: `Session: ${cleanTitle || task.id}`,
+          },
+          {
+            autoSaveMemories: autoSave,
+            existingMemories: currentMemories,
+            sourceTrust: playbookTrust,
+          },
+        );
+        proposals.push(playbookProposal);
+
+        const decision = evaluateMemoryGovernance(
+          {
+            op: "add",
+            kind: "skill",
+            tier: playbookTier,
+            scope: playbookScope,
+            title: playbookTitle,
+            text: playbookText,
+            confidence: playbookConfidence,
+            sourceCommand: primaryCmd,
+            commandTemplate,
+            sourceTrust: playbookTrust,
+            proven: task.verification === "verified",
+          },
+          {
+            autoSaveMemories: autoSave,
+            existingMemories: currentMemories,
+            sourceTrust: playbookTrust,
+          },
+        );
+
+        if (governed && decision.requiresApproval) {
+          this.queueProposalToStore(playbookProposal);
+          createdEvents.push(
+            this.recordEvent({
+              kind: "task_reflexion",
+              title: `Proposed playbook: ${cleanTitle.slice(0, 40)}`,
+              summary: `Queued HITL proposal (${decision.reasons.join(", ")}) for ${uniqueCmds.length} command(s).`,
+              targetCluster: cluster,
+              confidence: playbookConfidence,
+            }),
+          );
+        } else {
+          const merged = this.kb.deduplicateOrMergeMemory(currentMemories, {
+            kind: "skill",
+            tier: playbookTier,
+            cluster,
+            scope: playbookScope,
+            title: playbookTitle,
+            text: playbookText,
+            author: "Reflexion Post-Task Learner",
+            // Unverified steps are a record, not a recipe: below what is suggested as a command.
+            confidence: playbookConfidence,
+            autoLearned: true,
+            sourceCommand: primaryCmd,
+          });
+          const enriched: MemoryEntry = {
+            ...merged.saved,
+            commandTemplate,
+            ...(task.verification === "verified" ? { proven: true } : {}),
+            sourceTrust: playbookTrust,
+          };
+          currentMemories = merged.memories.map((m) =>
+            m.id === merged.saved.id ? enriched : m,
+          );
+          const ev = this.recordEvent({
+            kind: "task_reflexion",
+            title: `Wrote down the steps of a finished task: ${cleanTitle.slice(0, 40)}`,
+            summary: `Kept ${uniqueCmds.length} commands that completed (${uniqueCmds.map((c) => `\`${c}\``).join(", ")}).`,
+            targetCluster: cluster,
+            confidence: enriched.confidence ?? 0.88,
+            memoryId: enriched.id,
+          });
+          createdEvents.push(ev);
+        }
+      }
     }
 
     // 4. Auto-discover topology edges from command outputs and server relationships
@@ -392,6 +1000,8 @@ export class SelfLearningService {
       memories: currentMemories,
       infraEdges: currentEdges,
       events: createdEvents,
+      proposals,
+      ...(critique ? { critique } : {}),
     };
   }
 
@@ -511,9 +1121,10 @@ export class SelfLearningService {
 
   /**
    * Runs a full Self-Reflection & Memory Consolidation cycle across the workspace:
-   * 1. Consolidates episodic server logs into high-signal Core/Archival Skills.
-   * 2. Scans completed tasks to ensure all verified command sequences are saved as Playbooks.
-   * 3. Auto-discovers infrastructure graph edges from server profiles & tunnels.
+   * 1. Reflects on finished AND failed tasks (building failure critiques & playbooks).
+   * 2. Consolidates repeatedly updated episodic memories (never blindly promoting >=120 chars to core).
+   * 3. Synthesizes diagnostic proposals/notes for active unresolved terminal failures.
+   * 4. Auto-discovers infrastructure graph edges from server profiles.
    */
   runReflectionCycle(params: {
     memories: MemoryEntry[];
@@ -521,21 +1132,35 @@ export class SelfLearningService {
     activityLog: WorkspaceActivityEvent[];
     infraEdges: InfraGraphEdge[];
     servers: WorkspaceServerSummary[];
-    lastFailures: Record<string, TerminalCommandFailure>;
+    lastFailures?: Record<string, TerminalCommandFailure>;
     targetCluster?: string;
+    governed?: boolean;
+    autoSaveMemories?: boolean;
+    sourceTrust?: MemorySourceTrust;
   }): {
     memories: MemoryEntry[];
     infraEdges: InfraGraphEdge[];
     events: SelfLearningEvent[];
+    proposals: GovernedMemoryProposal[];
   } {
     let currentMemories = [...params.memories];
     let currentEdges = [...params.infraEdges];
     const events: SelfLearningEvent[] = [];
+    const proposals: GovernedMemoryProposal[] = [];
+    const governed = this.isGovernanceActive(params);
+    const autoSave = this.effectiveAutoSave(params);
 
-    // 1. Reflect on finished tasks not reflected on yet, newest first. A task is reflected on once:
-    // doing it again every night raised confidence and "worked ×N" with no new evidence.
+    // 1. Reflect on finished/failed tasks not reflected on yet, newest first.
     for (const task of [...params.tasks].reverse().filter((t) => !t.reflectedAt).slice(0, 12)) {
-      if (task.status === "completed" || task.verification === "verified") {
+      const hasRefutedHypothesis = Boolean(
+        task.hypotheses?.some((h) => h.status === "ruled-out"),
+      );
+      if (
+        task.status === "completed" ||
+        task.status === "failed" ||
+        task.verification === "verified" ||
+        hasRefutedHypothesis
+      ) {
         task.reflectedAt = Date.now();
         const res = this.reflectOnCompletedTask({
           task,
@@ -543,78 +1168,210 @@ export class SelfLearningService {
           infraEdges: currentEdges,
           servers: params.servers,
           cluster: params.targetCluster,
+          governed: params.governed,
+          autoSaveMemories: params.autoSaveMemories,
+          sourceTrust: params.sourceTrust,
         });
         currentMemories = res.memories;
         currentEdges = res.infraEdges;
         events.push(...res.events);
+        proposals.push(...res.proposals);
       }
     }
 
-    // 2. Consolidate episodic memories that have been updated multiple times into Core/Archival Skills
+    // 2. Consolidate episodic memories that have actually recurred (updatedCount >= 2).
+    // Never blindly promote episodic >= 120 chars to core! Keep auto-consolidated memories
+    // in archival unless explicitly approved for core via HITL MemoryProposal.
     const episodicEntries = currentMemories.filter(
-      (m) => m.tier === "episodic",
+      (m) => m.tier === "episodic" && !m.supersededBy,
     );
     for (const ep of episodicEntries) {
-      if ((ep.updatedCount ?? 1) >= 2 || ep.text.length >= 120) {
+      if ((ep.updatedCount ?? 1) >= 2) {
         const maskedEpText = maskContext(ep.text);
+        const quarantine = inspectMemoryCandidate({
+          title: ep.title,
+          text: maskedEpText,
+          commandTemplate: ep.commandTemplate ?? ep.sourceCommand,
+        });
+        if (quarantine.quarantined) continue;
+
         const cmdMatches = [...maskedEpText.matchAll(/`([^`]{3,80})`/g)].map(
           (m) => m[1],
         );
         const primaryCmd = cmdMatches[0];
-        const maskedSourceCmd = primaryCmd ?? (ep.sourceCommand ? maskContext(ep.sourceCommand) : undefined);
-        const merged = this.kb.deduplicateOrMergeMemory(currentMemories, {
-          id: ep.id,
-          kind: primaryCmd ? "skill" : "memory",
-          tier: "core",
-          cluster: ep.cluster || params.targetCluster,
-          scope: ep.scope,
-          title: maskContext(ep.title).replace(/^(Senaste aktivitet p\u00e5|Recent activity on)/i, "Operating profile:"), // also the title older versions wrote, in Swedish
-          text: `${maskedEpText} [Merged from repeated notes into a core memory.]`,
-          author: "Letta/Mem0 Memory Consolidator",
-          confidence: Math.min(0.95, (ep.confidence ?? 0.78) + 0.08),
-          autoLearned: true,
-          sourceCommand: maskedSourceCmd,
-        });
-        currentMemories = merged.memories;
-        this.consolidatedCount += 1;
-        events.push(
-          this.recordEvent({
-            kind: "memory_consolidation",
-            title: `Promoted an episodic memory to core: ${merged.saved.title.slice(0, 42)}`,
-            summary: `Merged what kept recurring in ${ep.scope} into a core memory.`,
-            targetCluster: ep.cluster || params.targetCluster,
-            confidence: merged.saved.confidence ?? 0.86,
-            memoryId: merged.saved.id,
-          }),
+        const maskedSourceCmd =
+          primaryCmd ?? (ep.sourceCommand ? maskContext(ep.sourceCommand) : undefined);
+        const commandTemplate = maskedSourceCmd
+          ? parameterizeCommandTemplate(maskedSourceCmd)
+          : undefined;
+        const consolidatedTitle = maskContext(ep.title).replace(
+          /^(Senaste aktivitet p\u00e5|Recent activity on)/i,
+          "Operating profile:",
         );
+        const consolidatedText = `${maskedEpText} [Consolidated from repeated episodic notes.]`;
+        const consolidatedConf = Math.min(0.95, (ep.confidence ?? 0.78) + 0.08);
+        const targetTier: MemoryEntry["tier"] = "archival";
+        const trust: MemorySourceTrust =
+          params.sourceTrust ?? ep.sourceTrust ?? (ep.autoLearned ? "untrusted" : "human");
+
+        const consolidationProposal = buildGovernedProposal(
+          {
+            op: "update",
+            targetId: ep.id,
+            kind: primaryCmd ? "skill" : "memory",
+            tier: targetTier,
+            scope: ep.scope,
+            title: consolidatedTitle,
+            text: consolidatedText,
+            previousText: ep.text,
+            confidence: consolidatedConf,
+            sourceCommand: maskedSourceCmd,
+            commandTemplate,
+            cluster: ep.cluster || params.targetCluster,
+            sourceTrust: trust,
+            evidence: `Episodic memory updated ${ep.updatedCount} times in ${ep.scope}.`,
+            sourceId: `consolidate:${ep.id}`,
+            sourceTitle: `Consolidation: ${consolidatedTitle}`,
+          },
+          {
+            autoSaveMemories: autoSave,
+            existingMemories: currentMemories,
+            sourceTrust: trust,
+          },
+        );
+        proposals.push(consolidationProposal);
+
+        const decision = evaluateMemoryGovernance(
+          {
+            op: "update",
+            targetId: ep.id,
+            kind: primaryCmd ? "skill" : "memory",
+            tier: targetTier,
+            scope: ep.scope,
+            title: consolidatedTitle,
+            text: consolidatedText,
+            previousText: ep.text,
+            confidence: consolidatedConf,
+            sourceCommand: maskedSourceCmd,
+            commandTemplate,
+            sourceTrust: trust,
+          },
+          {
+            autoSaveMemories: autoSave,
+            existingMemories: currentMemories,
+            sourceTrust: trust,
+          },
+        );
+
+        if (governed && decision.requiresApproval) {
+          this.queueProposalToStore(consolidationProposal);
+          this.consolidatedCount += 1;
+          events.push(
+            this.recordEvent({
+              kind: "memory_consolidation",
+              title: `Proposed episodic consolidation: ${consolidatedTitle.slice(0, 42)}`,
+              summary: `Queued archival consolidation proposal (${decision.reasons.join(", ")}) for ${ep.scope}.`,
+              targetCluster: ep.cluster || params.targetCluster,
+              confidence: consolidatedConf,
+            }),
+          );
+        } else {
+          const merged = this.kb.deduplicateOrMergeMemory(currentMemories, {
+            id: ep.id,
+            kind: primaryCmd ? "skill" : "memory",
+            tier: targetTier,
+            cluster: ep.cluster || params.targetCluster,
+            scope: ep.scope,
+            title: consolidatedTitle,
+            text: consolidatedText,
+            author: "Letta/Mem0 Memory Consolidator",
+            confidence: consolidatedConf,
+            autoLearned: true,
+            sourceCommand: maskedSourceCmd,
+          });
+          currentMemories = merged.memories;
+          this.consolidatedCount += 1;
+          events.push(
+            this.recordEvent({
+              kind: "memory_consolidation",
+              title: `Consolidated episodic memory to archival: ${merged.saved.title.slice(0, 42)}`,
+              summary: `Merged what kept recurring in ${ep.scope} into archival memory.`,
+              targetCluster: ep.cluster || params.targetCluster,
+              confidence: merged.saved.confidence ?? 0.86,
+              memoryId: merged.saved.id,
+            }),
+          );
+        }
       }
     }
 
     // 3. Synthesize proactive diagnostic skills for any active unresolved terminal failures
-    for (const failure of Object.values(params.lastFailures)) {
+    for (const failure of Object.values(params.lastFailures ?? {})) {
       const cleanFailCmd = maskContext(failure.command);
       const cleanFailSnippet = maskContext(failure.snippet);
       const sig = extractErrorSignature(cleanFailCmd, cleanFailSnippet);
       const recommendedFix = maskContext(
         this.suggestDiagnosticCommandForSignature(sig, cleanFailCmd),
       );
-      const merged = this.kb.deduplicateOrMergeMemory(currentMemories, {
-        kind: "skill",
-        // A suggestion from the kind of error, never tried: not something to put in front of every run.
-        tier: "archival",
-        cluster: params.targetCluster,
-        scope: `server:${failure.label}`,
-        title: `Check after a failure (${failure.label}): ${sig.replace(/^err:/, "").replace(/_/g, " ")}`,
-        text: `When \`${cleanFailCmd}\` fails (${cleanFailSnippet.slice(0, 120)}): a read-only check to narrow it down is \`${recommendedFix}\`. A suggestion from the kind of error, not something that was tried.`,
-        author: "Voyager Self-Learning Engine",
-        // Never tried: below what is suggested as a command, and in a namespace of its own, so it never
-        // merges into (and overwrites) what was learned about the same error from a real fix.
-        confidence: 0.5,
-        autoLearned: true,
-        sourceCommand: recommendedFix,
-        errorSignature: `guess|${sig}`,
+      const quarantine = inspectMemoryCandidate({
+        text: `${cleanFailCmd}\n${cleanFailSnippet}\n${recommendedFix}`,
+        commandTemplate: recommendedFix,
       });
-      currentMemories = merged.memories;
+      if (quarantine.quarantined) continue;
+
+      const title = `Check after a failure (${failure.label}): ${sig.replace(/^err:/, "").replace(/_/g, " ")}`;
+      const text = `When \`${cleanFailCmd}\` fails (${cleanFailSnippet.slice(0, 120)}): a read-only check to narrow it down is \`${recommendedFix}\`. A suggestion from the kind of error, not something that was tried.`;
+      const scope = `server:${failure.label}`;
+      const commandTemplate = parameterizeCommandTemplate(recommendedFix);
+      const diagProposal = buildGovernedProposal(
+        {
+          op: "add",
+          kind: "skill",
+          tier: "archival",
+          scope,
+          title,
+          text,
+          confidence: 0.5,
+          sourceCommand: recommendedFix,
+          commandTemplate,
+          verifyCommand:
+            analyzeCommandSafety(recommendedFix).riskLevel === "safe"
+              ? commandTemplate
+              : undefined,
+          errorSignature: `guess|${sig}`,
+          cluster: params.targetCluster,
+          sourceTrust: "untrusted",
+          evidence: `Active terminal failure for "${cleanFailCmd}" on ${failure.label}.`,
+          sourceId: `failure:${failure.label}:${sig}`,
+          sourceTitle: `Unresolved failure on ${failure.label}`,
+        },
+        {
+          autoSaveMemories: autoSave,
+          existingMemories: currentMemories,
+          sourceTrust: "untrusted",
+        },
+      );
+      proposals.push(diagProposal);
+
+      if (governed) {
+        this.queueProposalToStore(diagProposal);
+      } else {
+        const merged = this.kb.deduplicateOrMergeMemory(currentMemories, {
+          kind: "skill",
+          // A suggestion from the kind of error, never tried: not something to put in front of every run.
+          tier: "archival",
+          cluster: params.targetCluster,
+          scope,
+          title,
+          text,
+          author: "Voyager Self-Learning Engine",
+          confidence: 0.5,
+          autoLearned: true,
+          sourceCommand: recommendedFix,
+          errorSignature: `guess|${sig}`,
+        });
+        currentMemories = merged.memories;
+      }
     }
 
     // 4. Discover topology edges from server profiles
@@ -646,6 +1403,7 @@ export class SelfLearningService {
       memories: currentMemories,
       infraEdges: currentEdges,
       events,
+      proposals,
     };
   }
 
@@ -653,31 +1411,9 @@ export class SelfLearningService {
     signature: string,
     failedCommand: string,
   ): string {
-    switch (signature) {
-      case "err:storage_enospc":
-        return "df -hT && du -xhd1 /var/log 2>/dev/null | sort -hr | head -n 10";
-      case "err:snapmirror_broken_off":
-        return "snapmirror show -fields state,status,lag-time,last-transfer-error";
-      case "err:multipath_degraded":
-        return "multipath -ll && iscsiadm -m session -P 3";
-      case "err:k8s_pod_crashloop":
-        return "kubectl get pods -A --field-selector=status.phase!=Running && kubectl get events -A --sort-by=.lastTimestamp | tail -n 15";
-      case "err:k8s_csi_mount_failed":
-        return "kubectl get pvc,pv -A && kubectl -n trident get pods -o wide";
-      case "err:ceph_zfs_degraded":
-        return "ceph health detail || zpool status -xv";
-      case "err:systemd_service_failed":
-        return "systemctl --failed && journalctl -xe -n 25 --no-pager";
-      case "err:network_unreachable":
-        return "ss -tulpn && ip -br addr";
-      default:
-        return `${failedCommand.split(/\s+/)[0]} --help || journalctl -n 20 --no-pager`;
-    }
+    return diagnosticForSignature(signature, failedCommand);
   }
 
-  /**
-   * Applies user thumbs-up (+1) or thumbs-down (-1) reinforcement feedback to a MemoryEntry.
-   */
   /**
    * Somebody says a memory was useful, or not. One vote per person (a second
    * click changes their vote, it does not add one); the score is the sum of
@@ -737,7 +1473,8 @@ export class SelfLearningService {
 
     const candidateSkills = memories.filter(
       (m) =>
-        (m.kind === "skill" || m.sourceCommand) &&
+        !m.supersededBy &&
+        (m.kind === "skill" || m.sourceCommand || m.commandTemplate) &&
         (m.confidence ?? 0.8) >= 0.65 &&
         // Saved before one-off edits were kept out: never offered as a command to run again.
         !(m.sourceCommand && isOneOffCommand(m.sourceCommand)),
@@ -747,18 +1484,15 @@ export class SelfLearningService {
     const ranked = this.kb.rankMemories(candidateSkills, prompt, cluster, 3);
     for (const top of ranked) {
       const sTokens = tokenize(
-        `${top.title} ${top.text} ${top.sourceCommand ?? ""}`,
+        `${top.title} ${top.text} ${top.sourceCommand ?? ""} ${top.commandTemplate ?? ""}`,
       );
-      // Whole words, or a longer word inside another: "is" is not a match because "disk" contains it.
-      // The words that say what is asked for: "show … for the …" is shared by every request.
       const asked = qTokens.filter((q) => q.length > 2 && !REQUEST_FILLER.has(q));
       const overlap = asked.filter((q) => sTokens.some((t) => t === q || (q.length >= 4 && t.includes(q)))).length;
-      // More than one shared word: "disk" alone does not make a command about purging WAL files an answer.
-      // And at least half of what was asked: two words out of a long request are a coincidence.
       if (asked.length === 0 || overlap < Math.min(asked.length, Math.max(2, Math.ceil(asked.length / 2)))) continue;
 
       const cmd =
         top.sourceCommand ||
+        top.commandTemplate ||
         /`([^`]{3,120})`/.exec(top.text)?.[1];
       if (cmd) {
         return {

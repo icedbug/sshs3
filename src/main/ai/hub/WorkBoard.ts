@@ -1,6 +1,9 @@
 import type {
+  AgentHypothesis,
   AgentTask,
   AgentUsage,
+  CorrelatedAlertRef,
+  InfraGraphEdge,
   MissionAgent,
   WorkGoal,
   WorkTicket,
@@ -35,14 +38,97 @@ export const TICKET_CLAIM_TTL_MS = 4 * 60_000;
 
 export const monthKey = (now = Date.now()): string => new Date(now).toISOString().slice(0, 7);
 
+export interface HybridLogicalClock {
+  ts: number;
+  counter: number;
+  clientId: string;
+}
+
 export interface Mergeable {
   id: string;
   updatedAt: number;
+  hlc?: HybridLogicalClock;
   deleted?: boolean;
   /** The `updatedAt` of the copy this one was edited from: what its author had seen. */
   baseAt?: number;
   /** When each field was last changed, where that is kept: two edits of different fields both stay. */
   fieldAt?: Record<string, number>;
+}
+
+/**
+ * Advances a Hybrid Logical Clock for a local event on `clientId`.
+ * Guarantees monotonicity even when wall-clock `now` stalls or skews backward.
+ */
+export function tickHlc(
+  prev: HybridLogicalClock | undefined,
+  clientId: string,
+  now = Date.now(),
+): HybridLogicalClock {
+  if (!prev || now > prev.ts) {
+    return { ts: now, counter: 0, clientId };
+  }
+  return { ts: prev.ts, counter: prev.counter + 1, clientId };
+}
+
+/**
+ * Merges local and remote HLCs upon receiving a remote update.
+ */
+export function receiveHlc(
+  local: HybridLogicalClock | undefined,
+  remote: HybridLogicalClock | undefined,
+  clientId: string,
+  now = Date.now(),
+): HybridLogicalClock {
+  const lTs = local?.ts ?? 0;
+  const rTs = remote?.ts ?? 0;
+  const ts = Math.max(now, lTs, rTs);
+  let counter = 0;
+  if (ts === lTs && ts === rTs) {
+    counter = Math.max(local?.counter ?? 0, remote?.counter ?? 0) + 1;
+  } else if (ts === lTs) {
+    counter = (local?.counter ?? 0) + 1;
+  } else if (ts === rTs) {
+    counter = (remote?.counter ?? 0) + 1;
+  }
+  return { ts, counter, clientId };
+}
+
+/**
+ * Deterministic total-order comparison of two Hybrid Logical Clocks.
+ */
+export function compareHlc(
+  a: HybridLogicalClock | undefined,
+  b: HybridLogicalClock | undefined,
+): number {
+  if (!a && !b) return 0;
+  if (!a) return -1;
+  if (!b) return 1;
+  if (a.ts !== b.ts) return a.ts - b.ts;
+  if (a.counter !== b.counter) return a.counter - b.counter;
+  return a.clientId.localeCompare(b.clientId);
+}
+
+/**
+ * Compares two mergeable versions by `updatedAt`, breaking ties with Hybrid Logical Clock (`hlc`).
+ */
+export function compareVersion(
+  a: { updatedAt: number; hlc?: HybridLogicalClock },
+  b: { updatedAt: number; hlc?: HybridLogicalClock },
+): number {
+  if (a.updatedAt !== b.updatedAt) return a.updatedAt - b.updatedAt;
+  return compareHlc(a.hlc, b.hlc);
+}
+
+function mergeSymmetricHlc(
+  a: HybridLogicalClock | undefined,
+  b: HybridLogicalClock | undefined,
+  at: number,
+): HybridLogicalClock | undefined {
+  if (!a && !b) return undefined;
+  const winner = compareHlc(a, b) >= 0 ? a! : b!;
+  const ts = Math.max(at, winner.ts);
+  const counter = ts === winner.ts ? winner.counter + 1 : 0;
+  return { ts, counter, clientId: winner.clientId };
 }
 
 /**
@@ -67,7 +153,7 @@ export function canonicalJson(value: unknown): string {
 }
 
 /** What says when and from what a copy was made, not what it holds. */
-const META = new Set(["id", "updatedAt", "baseAt", "fieldAt"]);
+const META = new Set(["id", "updatedAt", "baseAt", "fieldAt", "hlc"]);
 
 /**
  * A copy as it is saved here: each field that differs from the copy it was made from (`had`) is
@@ -94,9 +180,10 @@ export function stampChange<T extends Mergeable>(had: T | undefined, next: T): T
  */
 export function removalWins<T extends Mergeable>(a: T, b: T): T | undefined {
   const [removal, edit] = a.deleted && !b.deleted ? [a, b] : b.deleted && !a.deleted ? [b, a] : [undefined, undefined];
-  if (!removal || !edit || edit.updatedAt <= removal.updatedAt) return undefined;
+  if (!removal || !edit || compareVersion(edit, removal) <= 0) return undefined;
   if (edit.baseAt === undefined || edit.baseAt >= removal.updatedAt) return undefined;
-  return { ...removal, updatedAt: edit.updatedAt + 1, baseAt: edit.updatedAt };
+  const hlc = mergeSymmetricHlc(a.hlc, b.hlc, edit.updatedAt + 1);
+  return { ...removal, updatedAt: edit.updatedAt + 1, baseAt: edit.updatedAt, ...(hlc ? { hlc } : {}) };
 }
 
 /**
@@ -133,7 +220,7 @@ export function mergeFields<T extends Mergeable>(
   groups: readonly (readonly string[])[] = [],
   skip: readonly string[] = [],
 ): T {
-  const [newer, older] = remote.updatedAt > local.updatedAt ? [remote, local] : [local, remote];
+  const [newer, older] = compareVersion(remote, local) > 0 ? [remote, local] : [local, remote];
   const n = newer as unknown as Record<string, unknown>;
   const o = older as unknown as Record<string, unknown>;
   const out: Record<string, unknown> = { ...n };
@@ -160,7 +247,8 @@ export function mergeFields<T extends Mergeable>(
 
 /** Whether two copies hold the same, apart from when they were made. */
 const sameContent = (a: object, b: object): boolean =>
-  canonicalJson({ ...a, updatedAt: 0, baseAt: 0 }) === canonicalJson({ ...b, updatedAt: 0, baseAt: 0 });
+  canonicalJson({ ...a, updatedAt: 0, baseAt: 0, hlc: undefined }) ===
+  canonicalJson({ ...b, updatedAt: 0, baseAt: 0, hlc: undefined });
 
 /**
  * The default for two copies of an item: a removal made after the edit's view stands (removalWins);
@@ -168,13 +256,15 @@ const sameContent = (a: object, b: object): boolean =>
  * newer copy wins.
  */
 export function mergeCopies<T extends Mergeable>(local: T, remote: T, groups: readonly (readonly string[])[] = []): T {
-  if (local.updatedAt === remote.updatedAt) return local;
+  if (compareVersion(local, remote) === 0) return local;
   const removal = removalWins(local, remote);
   if (removal) return removal;
-  const newer = remote.updatedAt > local.updatedAt ? remote : local;
+  const newer = compareVersion(remote, local) > 0 ? remote : local;
   if (local.deleted || remote.deleted || (!local.fieldAt && !remote.fieldAt)) return newer;
   const merged = mergeFields(local, remote, groups);
-  return sameContent(merged, newer) ? newer : { ...merged, updatedAt: newer.updatedAt + 1, baseAt: newer.updatedAt };
+  if (sameContent(merged, newer)) return newer;
+  const hlc = mergeSymmetricHlc(local.hlc, remote.hlc, newer.updatedAt + 1);
+  return { ...merged, updatedAt: newer.updatedAt + 1, baseAt: newer.updatedAt, ...(hlc ? { hlc } : {}) };
 }
 
 /**
@@ -207,18 +297,19 @@ export function mergeItems<T extends Mergeable>(
   const items = [...byId.values()];
   const newerLocally = items.filter((l) => {
     const r = remoteById.get(l.id);
-    return !r || l.updatedAt > r.updatedAt;
+    return !r || compareVersion(l, r) > 0;
   });
   return { items, changed, newerLocally };
 }
+
+export type MergeableTicket = WorkTicket & { hlc?: HybridLogicalClock };
 
 /**
  * Two copies of one ticket, put together field by field (mergeFields), with
  * the cases "newer wins" used to get wrong:
  *
- * - Comments are kept from both: two people who comment at the same time
- *   both keep their comment, and a comment does not take back a teammate's
- *   edit of the title made at the same time.
+ * - Comments, hypotheses, and correlatedAlerts are merged cleanly from both
+ *   copies so concurrent work never loses observations or grouped symptoms.
  * - A removal made after the view an edit was made on stands (removalWins).
  * - The installation that is running the ticket decides about the run. A
  *   teammate who moved, edited or removed the ticket on a view that did not
@@ -227,18 +318,29 @@ export function mergeItems<T extends Mergeable>(
  *   run's result has somewhere to go.
  */
 export function mergeTicketCopies(
-  local: WorkTicket,
-  remote: WorkTicket,
+  local: MergeableTicket,
+  remote: MergeableTicket,
   runningHere: (ticket: WorkTicket) => boolean = () => false,
 ): WorkTicket {
-  if (local.updatedAt === remote.updatedAt) return local;
-  const [newer, older] = remote.updatedAt > local.updatedAt ? [remote, local] : [local, remote];
+  if (compareVersion(local, remote) === 0) return local;
+  const [newer, older] = compareVersion(remote, local) > 0 ? [remote, local] : [local, remote];
+  const mergedHypotheses = allHypotheses(local, remote, newer === remote);
+  const mergedAlerts = allCorrelatedAlerts(local, remote);
   if (newer === remote && runningHere(local)) {
     const sameRun = remote.status === "in_progress" && remote.claim?.client === local.claim?.client && !remote.deleted;
     if (!sameRun) {
       const at = remote.updatedAt + 1;
+      const hlc = mergeSymmetricHlc(local.hlc, remote.hlc, at);
       // Made knowing the teammate's copy: its base is that copy, so the teammate's side takes it.
-      const run = { status: local.status, statusAt: local.statusAt, claim: local.claim, taskId: local.taskId, result: local.result, baseAt: remote.updatedAt };
+      const run = {
+        status: local.status,
+        statusAt: local.statusAt,
+        claim: local.claim,
+        taskId: local.taskId,
+        result: local.result,
+        baseAt: remote.updatedAt,
+        ...(hlc ? { hlc } : {}),
+      };
       if (remote.deleted)
         return {
           ...withComment(
@@ -249,18 +351,32 @@ export function mergeTicketCopies(
           ),
           ...run,
         };
-      return { ...remote, ...run, comments: allComments(local, remote), updatedAt: at };
+      return {
+        ...remote,
+        ...run,
+        comments: allComments(local, remote),
+        ...(mergedHypotheses ? { hypotheses: mergedHypotheses } : {}),
+        ...(mergedAlerts ? { correlatedAlerts: mergedAlerts } : {}),
+        updatedAt: at,
+      };
     }
   }
   // Removed after the view the edit was made on: the removal stands.
   const removal = removalWins(local, remote);
   if (removal) return removal;
   if (newer.deleted || older.deleted) return newer;
-  // Field by field: a teammate's comment on an older copy does not take back this copy's new title.
-  const merged = { ...mergeFields(local, remote, TICKET_RUN_FIELDS, ["comments"]), comments: allComments(local, remote) };
+  // Field by field: a teammate's comment/hypothesis/alert on an older copy does not take back this copy's new title.
+  const merged: MergeableTicket = {
+    ...mergeFields(local, remote, TICKET_RUN_FIELDS, ["comments", "hypotheses", "correlatedAlerts"]),
+    comments: allComments(local, remote),
+    ...(mergedHypotheses ? { hypotheses: mergedHypotheses } : {}),
+    ...(mergedAlerts ? { correlatedAlerts: mergedAlerts } : {}),
+  };
   if (sameContent(merged, newer)) return newer;
+  const at = newer.updatedAt + 1;
+  const hlc = mergeSymmetricHlc(local.hlc, remote.hlc, at);
   // One above the newer copy: the same on both sides, so the two installations agree at once.
-  return { ...merged, updatedAt: newer.updatedAt + 1, baseAt: newer.updatedAt };
+  return { ...merged, updatedAt: at, baseAt: newer.updatedAt, ...(hlc ? { hlc } : {}) };
 }
 
 /** A ticket's run: these change together, and come from the same copy. */
@@ -270,6 +386,103 @@ function allComments(a: WorkTicket, b: WorkTicket): WorkTicketComment[] {
   const byId = new Map<string, WorkTicketComment>();
   for (const c of [...(a.comments ?? []), ...(b.comments ?? [])]) if (c?.id) byId.set(c.id, c);
   return [...byId.values()].sort((x, y) => x.at - y.at || x.id.localeCompare(y.id)).slice(-40);
+}
+
+function mergeHypothesisStatus(
+  x: AgentHypothesis["status"],
+  y: AgentHypothesis["status"],
+  newerIsY: boolean,
+): AgentHypothesis["status"] {
+  if (x === y) return x;
+  if (x === "open" && y !== "open") return y;
+  if (y === "open" && x !== "open") return x;
+  return newerIsY ? y : x;
+}
+
+function mergeHypothesisPair(
+  x: AgentHypothesis,
+  y: AgentHypothesis,
+  newerIsY: boolean,
+): AgentHypothesis {
+  const evMap = new Map<string, { supports: boolean; text: string }>();
+  for (const ev of [...(x.evidence ?? []), ...(y.evidence ?? [])]) {
+    if (!ev || typeof ev.text !== "string") continue;
+    evMap.set(`${ev.supports ? 1 : 0}:${ev.text}`, { supports: Boolean(ev.supports), text: ev.text });
+  }
+  const evidence = [...evMap.values()].sort(
+    (a, b) => a.text.localeCompare(b.text) || Number(b.supports) - Number(a.supports),
+  );
+  const newer = newerIsY ? y : x;
+  const older = newerIsY ? x : y;
+  return {
+    id: x.id,
+    text: newer.text || older.text,
+    status: mergeHypothesisStatus(x.status, y.status, newerIsY),
+    ...(newer.parentId ?? older.parentId ? { parentId: newer.parentId ?? older.parentId } : {}),
+    evidence,
+  };
+}
+
+function allHypotheses(
+  local: WorkTicket,
+  remote: WorkTicket,
+  newerIsRemote: boolean,
+): AgentHypothesis[] | undefined {
+  if (!local.hypotheses?.length && !remote.hypotheses?.length) return undefined;
+  const byId = new Map<string, AgentHypothesis>();
+  const seed = (list: AgentHypothesis[] | undefined, fromRemote: boolean) => {
+    for (const h of list ?? []) {
+      if (!h?.id) continue;
+      const prev = byId.get(h.id);
+      if (!prev) {
+        byId.set(h.id, {
+          ...h,
+          evidence: [...(h.evidence ?? [])].sort(
+            (a, b) => a.text.localeCompare(b.text) || Number(b.supports) - Number(a.supports),
+          ),
+        });
+      } else {
+        byId.set(h.id, mergeHypothesisPair(prev, h, fromRemote ? newerIsRemote : !newerIsRemote));
+      }
+    }
+  };
+  seed(local.hypotheses, false);
+  seed(remote.hypotheses, true);
+  return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id)).slice(0, 50);
+}
+
+const alertSeverityRank = (sev?: string): number =>
+  sev === "critical" ? 0 : sev === "warning" ? 1 : sev === "info" ? 2 : 3;
+
+function allCorrelatedAlerts(a: WorkTicket, b: WorkTicket): CorrelatedAlertRef[] | undefined {
+  if (!a.correlatedAlerts?.length && !b.correlatedAlerts?.length) return undefined;
+  const byKey = new Map<string, CorrelatedAlertRef>();
+  for (const ref of [...(a.correlatedAlerts ?? []), ...(b.correlatedAlerts ?? [])]) {
+    if (!ref || typeof ref.summary !== "string") continue;
+    const key = ref.fingerprint ? `fp:${ref.fingerprint}` : `at:${ref.at}:${ref.summary}`;
+    const prev = byKey.get(key);
+    if (!prev) {
+      byKey.set(key, { ...ref });
+    } else {
+      const winnerSev =
+        alertSeverityRank(ref.severity) <= alertSeverityRank(prev.severity)
+          ? ref.severity ?? prev.severity
+          : prev.severity;
+      const summary =
+        ref.at > prev.at || (ref.at === prev.at && ref.summary > prev.summary)
+          ? ref.summary
+          : prev.summary;
+      byKey.set(key, {
+        ...(prev.fingerprint ?? ref.fingerprint ? { fingerprint: prev.fingerprint ?? ref.fingerprint } : {}),
+        summary,
+        at: Math.max(prev.at, ref.at),
+        ...(winnerSev ? { severity: winnerSev } : {}),
+      });
+    }
+  }
+  return [...byKey.values()]
+    .sort((x, y) => x.at - y.at || (x.fingerprint ?? x.summary).localeCompare(y.fingerprint ?? y.summary))
+    .slice(-50);
 }
 
 /** What to tell somebody who acts on a ticket that was removed, or undefined when it was not. */
@@ -340,7 +553,132 @@ function urgency(t: WorkTicket): number {
   return t.alert.severity === "critical" ? 0 : t.alert.severity === "warning" ? 1 : 2;
 }
 
-/** The ticket the heartbeat should start next: alerts first (critical before the rest), then the oldest "todo" that can run. */
+function normTarget(target?: string): string {
+  return (target ?? "").trim().toLowerCase();
+}
+
+interface UpstreamScores {
+  activeUpstreamCount: number;
+  downstreamFanout: number;
+}
+
+function buildUpstreamScores(
+  activeTargets: Set<string>,
+  infraEdges: InfraGraphEdge[] | undefined,
+): Map<string, UpstreamScores> {
+  const scores = new Map<string, UpstreamScores>();
+  if (!infraEdges?.length || activeTargets.size === 0) return scores;
+
+  const upstreamOf = new Map<string, Set<string>>();
+  const downstreamOf = new Map<string, Set<string>>();
+  const addEdge = (downstream: string, upstream: string) => {
+    if (!downstream || !upstream || downstream === upstream) return;
+    let u = upstreamOf.get(downstream);
+    if (!u) {
+      u = new Set();
+      upstreamOf.set(downstream, u);
+    }
+    u.add(upstream);
+    let d = downstreamOf.get(upstream);
+    if (!d) {
+      d = new Set();
+      downstreamOf.set(upstream, d);
+    }
+    d.add(downstream);
+  };
+
+  for (const edge of infraEdges) {
+    if (!edge || edge.proposed) continue;
+    const from = normTarget(edge.from);
+    const to = normTarget(edge.to);
+    if (
+      edge.relation === "depends_on" ||
+      edge.relation === "mounts_storage" ||
+      edge.relation === "routes_to" ||
+      edge.relation === "ssh_tunnel"
+    ) {
+      addEdge(from, to);
+    } else if (edge.relation === "replicates_to") {
+      addEdge(to, from);
+    }
+  }
+
+  const reachableCount = (start: string, adj: Map<string, Set<string>>, onlyIn?: Set<string>): number => {
+    const visited = new Set<string>([start]);
+    const queue = [start];
+    let count = 0;
+    while (queue.length > 0) {
+      const cur = queue.shift()!;
+      for (const nxt of adj.get(cur) ?? []) {
+        if (visited.has(nxt)) continue;
+        visited.add(nxt);
+        if (!onlyIn || onlyIn.has(nxt)) count += 1;
+        queue.push(nxt);
+      }
+    }
+    return count;
+  };
+
+  for (const target of activeTargets) {
+    scores.set(target, {
+      activeUpstreamCount: reachableCount(target, upstreamOf, activeTargets),
+      downstreamFanout: reachableCount(target, downstreamOf),
+    });
+  }
+  return scores;
+}
+
+/**
+ * Sorts tickets by urgency (critical firing alerts first) and, within the same
+ * urgency tier, prioritizes upstream `infraEdges` dependencies ahead of
+ * downstream symptoms (root causes before cascading failures).
+ */
+export function sortTicketsByPriority(
+  tickets: WorkTicket[],
+  infraEdges?: InfraGraphEdge[],
+): WorkTicket[] {
+  const activeTargets = new Set(
+    tickets.map((t) => normTarget(t.target || t.targetSelector?.cluster)).filter(Boolean),
+  );
+  const scores = buildUpstreamScores(activeTargets, infraEdges);
+  return [...tickets].sort((a, b) => {
+    const urgDiff = urgency(a) - urgency(b);
+    if (urgDiff !== 0) return urgDiff;
+    const sa = scores.get(normTarget(a.target || a.targetSelector?.cluster));
+    const sb = scores.get(normTarget(b.target || b.targetSelector?.cluster));
+    const upA = sa?.activeUpstreamCount ?? 0;
+    const upB = sb?.activeUpstreamCount ?? 0;
+    if (upA !== upB) return upA - upB;
+    const fanA = sa?.downstreamFanout ?? 0;
+    const fanB = sb?.downstreamFanout ?? 0;
+    if (fanA !== fanB) return fanB - fanA;
+    return a.createdAt - b.createdAt || a.id.localeCompare(b.id);
+  });
+}
+
+/**
+ * Sorts arbitrary alerts/incidents with upstream `infraEdges` dependencies
+ * prioritized first within the same severity tier.
+ */
+export function sortAlertsByUpstream<
+  T extends { target?: string; severity?: string; at?: number },
+>(alerts: readonly T[], infraEdges?: InfraGraphEdge[]): T[] {
+  const activeTargets = new Set(alerts.map((a) => normTarget(a.target)).filter(Boolean));
+  const scores = buildUpstreamScores(activeTargets, infraEdges);
+  return [...alerts].sort((a, b) => {
+    const sevDiff = alertSeverityRank(a.severity) - alertSeverityRank(b.severity);
+    if (sevDiff !== 0) return sevDiff;
+    const sa = scores.get(normTarget(a.target));
+    const sb = scores.get(normTarget(b.target));
+    const upDiff = (sa?.activeUpstreamCount ?? 0) - (sb?.activeUpstreamCount ?? 0);
+    if (upDiff !== 0) return upDiff;
+    const fanDiff = (sb?.downstreamFanout ?? 0) - (sa?.downstreamFanout ?? 0);
+    if (fanDiff !== 0) return fanDiff;
+    return (a.at ?? 0) - (b.at ?? 0);
+  });
+}
+
+/** The ticket the heartbeat should start next: alerts first (critical before the rest, upstream infra dependencies first), then the oldest "todo" that can run. */
 export function nextForHeartbeat(ctx: {
   tickets: WorkTicket[];
   agents: MissionAgent[];
@@ -348,11 +686,12 @@ export function nextForHeartbeat(ctx: {
   runners?: string[];
   client: string;
   now?: number;
+  infraEdges?: InfraGraphEdge[];
 }): WorkTicket | undefined {
-  return live(ctx.tickets)
-    .filter((t) => t.status === "todo")
-    .sort((a, b) => urgency(a) - urgency(b) || a.createdAt - b.createdAt)
-    .find((t) => whyNotRunnable(t, ctx) === undefined);
+  return sortTicketsByPriority(
+    live(ctx.tickets).filter((t) => t.status === "todo"),
+    ctx.infraEdges,
+  ).find((t) => whyNotRunnable(t, ctx) === undefined);
 }
 
 /** What the agent is told when it is woken for a ticket. */

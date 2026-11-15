@@ -118,7 +118,13 @@ describe('DotfilePoolStore with Master Files', () => {
     const imported = await store.importLocalFiles([text, bin, path.join(tempDir, 'nope'), 'relative/path']);
     expect(imported).toHaveLength(1);
     expect(imported[0].size).toBe(14);
-    expect(imported[0].suggestedRemotePath).toBe('~/.config');
+    // On Windows os.tmpdir() lives inside os.homedir(), so the file is genuinely home-relative.
+    const relFromHome = path.relative(os.homedir(), text);
+    const expectedRemotePath =
+      relFromHome && !relFromHome.startsWith('..') && !path.isAbsolute(relFromHome)
+        ? `~/${relFromHome.replace(/\\/g, '/')}`
+        : '~/.config';
+    expect(imported[0].suggestedRemotePath).toBe(expectedRemotePath);
   });
 
   it('stores sourcePath when adding a file to a pool', async () => {

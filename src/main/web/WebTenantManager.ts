@@ -3,7 +3,9 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import type { IpcMain, WebContents } from 'electron';
+import type { Duplex } from 'node:stream';
 import { IpcBridge } from '../IpcBridge';
+import type { WindowRouter } from '../windows/WindowManager';
 import { createHub } from '../ai/hub/createHub';
 import type { HubService } from '../ai/hub/HubService';
 import {
@@ -23,7 +25,11 @@ import { DirectorySyncProfileStore } from '../dirsync/DirectorySyncProfileStore'
 import { SyncConfigStore } from '../services/SyncConfigStore';
 import { TeamVaultConfigStore } from '../services/TeamVaultConfigStore';
 import { TeamVaultService } from '../services/TeamVaultService';
-import type { WebUserPublic } from './WebAuthService';
+import {
+  evaluatePeerApproval,
+  type PeerApprovalDecision,
+  type WebUserPublic,
+} from './WebAuthService';
 
 type RpcHandler = (event: unknown, ...args: unknown[]) => unknown;
 
@@ -39,11 +45,15 @@ export class VirtualIpcMain extends EventEmitter {
   }
 
   async invoke(channel: string, ...args: unknown[]): Promise<unknown> {
+    return await this.invokeWithSender(null, channel, ...args);
+  }
+
+  async invokeWithSender(sender: unknown, channel: string, ...args: unknown[]): Promise<unknown> {
     const handler = this.handlers.get(channel);
     if (!handler) {
       throw new Error(`No handler registered for IPC channel: ${channel}`);
     }
-    return await handler({ sender: null }, ...args);
+    return await handler({ sender }, ...args);
   }
 }
 
@@ -250,6 +260,13 @@ export interface UserTenant {
   clients: Set<(payload: string) => void>;
   sockets: Set<import('node:stream').Duplex>;
   broadcast: (channel: string, ...args: unknown[]) => void;
+  registerClient: (socket: Duplex, send: (payload: string) => void) => number;
+  unregisterClient: (clientId: number) => void;
+  subscribeSession: (clientId: number, sessionId: string) => void;
+  unsubscribeSession: (clientId: number, sessionId: string) => void;
+  getSessionSubscribers: (sessionId: string) => number[];
+  sendToSession: (sessionId: string, channel: string, ...args: unknown[]) => boolean;
+  invokeFromClient: (clientId: number, channel: string, ...args: unknown[]) => Promise<unknown>;
 }
 
 export class WebTenantManager {
@@ -379,6 +396,13 @@ export class WebTenantManager {
     const virtualIpcMain = new VirtualIpcMain();
     const clients = new Set<(payload: string) => void>();
     const sockets = new Set<import('node:stream').Duplex>();
+    let nextClientId = 1;
+    const clientMap = new Map<
+      number,
+      { send: (payload: string) => void; socket: Duplex; sender: { id: number } }
+    >();
+    const sessionOwners = new Map<string, number>();
+    const sessionObservers = new Map<string, Set<number>>();
 
     const broadcast = (channel: string, ...args: unknown[]): void => {
       if (clients.size === 0) return;
@@ -394,6 +418,128 @@ export class WebTenantManager {
           // Ignore disconnected client socket
         }
       }
+    };
+
+    const getSessionSubscribers = (sessionId: string): number[] => {
+      const targets = new Set<number>();
+      const owner = sessionOwners.get(sessionId);
+      if (owner !== undefined && clientMap.has(owner)) {
+        targets.add(owner);
+      }
+      const observers = sessionObservers.get(sessionId);
+      if (observers) {
+        for (const cid of observers) {
+          if (clientMap.has(cid)) targets.add(cid);
+        }
+      }
+      return Array.from(targets);
+    };
+
+    const sendToSession = (sessionId: string, channel: string, ...args: unknown[]): boolean => {
+      const targets = getSessionSubscribers(sessionId);
+      if (targets.length === 0) return false;
+      const msg = JSON.stringify({
+        type: 'event',
+        channel,
+        args,
+      });
+      let delivered = false;
+      for (const cid of targets) {
+        const entry = clientMap.get(cid);
+        if (!entry) continue;
+        try {
+          entry.send(msg);
+          delivered = true;
+        } catch {
+          // Ignore disconnected client socket
+        }
+      }
+      return delivered;
+    };
+
+    const registerClient = (socket: Duplex, send: (payload: string) => void): number => {
+      const id = nextClientId++;
+      clients.add(send);
+      sockets.add(socket);
+      clientMap.set(id, { send, socket, sender: { id } });
+      return id;
+    };
+
+    const unregisterClient = (clientId: number): void => {
+      const entry = clientMap.get(clientId);
+      if (!entry) return;
+      clientMap.delete(clientId);
+      clients.delete(entry.send);
+      sockets.delete(entry.socket);
+      for (const [sid, owner] of sessionOwners.entries()) {
+        if (owner === clientId) sessionOwners.delete(sid);
+      }
+      for (const [sid, set] of sessionObservers.entries()) {
+        set.delete(clientId);
+        if (set.size === 0) sessionObservers.delete(sid);
+      }
+    };
+
+    const subscribeSession = (clientId: number, sessionId: string): void => {
+      if (!sessionId || !clientMap.has(clientId)) return;
+      let set = sessionObservers.get(sessionId);
+      if (!set) {
+        set = new Set();
+        sessionObservers.set(sessionId, set);
+      }
+      set.add(clientId);
+    };
+
+    const unsubscribeSession = (clientId: number, sessionId: string): void => {
+      if (!sessionId) return;
+      const set = sessionObservers.get(sessionId);
+      if (set) {
+        set.delete(clientId);
+        if (set.size === 0) sessionObservers.delete(sessionId);
+      }
+      if (sessionOwners.get(sessionId) === clientId) {
+        sessionOwners.delete(sessionId);
+      }
+    };
+
+    const clearSessionRouting = (sessionId: string): void => {
+      if (!sessionId) return;
+      sessionOwners.delete(sessionId);
+      sessionObservers.delete(sessionId);
+    };
+
+    const windowRouter: WindowRouter = {
+      sendToSession,
+      broadcast,
+      broadcastExcept: (windowId, channel, ...args) => {
+        if (clientMap.size === 0) return;
+        const msg = JSON.stringify({ type: 'event', channel, args });
+        for (const [cid, entry] of clientMap.entries()) {
+          if (cid === windowId) continue;
+          try {
+            entry.send(msg);
+          } catch {
+            // Ignore disconnected client socket
+          }
+        }
+      },
+      assign: (sessionId, windowId) => {
+        if (sessionId && clientMap.has(windowId)) {
+          sessionOwners.set(sessionId, windowId);
+        }
+      },
+      windowIdOfSender: (sender) => {
+        if (sender && typeof sender.id === 'number' && clientMap.has(sender.id)) {
+          return sender.id;
+        }
+        return undefined;
+      },
+      keyOfSender: (sender) => {
+        if (sender && typeof sender.id === 'number' && clientMap.has(sender.id)) {
+          return `web:${sender.id}`;
+        }
+        return null;
+      },
     };
 
     const virtualWebContents = {
@@ -464,6 +610,7 @@ export class WebTenantManager {
 
     const bridge: IpcBridge = new IpcBridge({
       ipcMain: virtualIpcMain as unknown as IpcMain,
+      windows: windowRouter,
       profileStore,
       sessionStore,
       clipboardHistoryStore,
@@ -481,6 +628,8 @@ export class WebTenantManager {
       tenantSshPrivateKeyPath: userPrivateKeyPath,
     });
 
+    const tenantState: { current?: UserTenant } = {};
+
     const hub = createHub(
       bridge,
       // No relaunchForDemoMode: demo mode is fixed for the whole server when it starts (serverEntry.ts),
@@ -495,8 +644,8 @@ export class WebTenantManager {
         s3ConfigFilePath: this.getSharedS3ConfigPath(),
         defaultActorName: user.displayName || user.username,
         alertHookOwner: user.id,
-        teamAdmin: () => user.role === 'admin',
-        soleUser: () => user.role === 'admin' && this.accountCount?.() === 1,
+        teamAdmin: () => (tenantState.current?.user ?? user).role === 'admin',
+        soleUser: () => (tenantState.current?.user ?? user).role === 'admin' && this.accountCount?.() === 1,
         peerPresenceProvider: () => this.getAllLocalTenantsPresence(),
         onSharedWorkspaceChanged: () =>
           this.notifyCrossTenantChanged(user.id),
@@ -515,7 +664,38 @@ export class WebTenantManager {
       await hub.store.save().catch(() => {});
     }
 
-    return {
+    const invokeFromClient = async (
+      clientId: number,
+      channel: string,
+      ...args: unknown[]
+    ): Promise<unknown> => {
+      const sender = clientMap.get(clientId)?.sender ?? null;
+      const result = await virtualIpcMain.invokeWithSender(sender, channel, ...args);
+      if (
+        (channel === 'terminal:create' || channel === 'k8s-terminal:create') &&
+        result &&
+        typeof result === 'object' &&
+        typeof (result as { sessionId?: unknown }).sessionId === 'string'
+      ) {
+        const sid = (result as { sessionId: string }).sessionId;
+        windowRouter.assign(sid, clientId);
+      } else if (
+        (channel === 'terminal:attach' || channel === 'k8s-log:start') &&
+        typeof args[0] === 'string' &&
+        args[0]
+      ) {
+        windowRouter.assign(args[0], clientId);
+      } else if (
+        (channel === 'terminal:kill' || channel === 'k8s-terminal:kill') &&
+        typeof args[0] === 'string' &&
+        args[0]
+      ) {
+        clearSessionRouting(args[0]);
+      }
+      return result;
+    };
+
+    tenantState.current = {
       user,
       userDir,
       ipcMain: virtualIpcMain,
@@ -524,7 +704,78 @@ export class WebTenantManager {
       clients,
       sockets,
       broadcast,
+      registerClient,
+      unregisterClient,
+      subscribeSession,
+      unsubscribeSession,
+      getSessionSubscribers,
+      sendToSession,
+      invokeFromClient,
     };
+    return tenantState.current;
+  }
+
+  /**
+   * Closes all active WebSocket connections for a user without deleting their tenant files
+   * (e.g. on SCIM deprovision, session revocation, or password change).
+   */
+  disconnectUserSockets(userId: string): number {
+    const tenant = this.resolvedTenants.get(userId);
+    if (!tenant) return 0;
+    let closed = 0;
+    for (const sock of Array.from(tenant.sockets)) {
+      try {
+        sock.destroy();
+        closed++;
+      } catch {
+        // Ignore socket destroy error
+      }
+    }
+    tenant.sockets.clear();
+    tenant.clients.clear();
+    return closed;
+  }
+
+  isSoleUser(): boolean {
+    return this.accountCount?.() === 1;
+  }
+
+  canManageSharedWorkspace(user: Pick<WebUserPublic, 'role' | 'disabled'>): boolean {
+    return !user.disabled && user.role === 'admin';
+  }
+
+  canManageClusterPolicy(
+    user: Pick<WebUserPublic, 'role' | 'disabled' | 'ssoGroups'>,
+    approverGroups: string[] = ['sre-lead', 'platform-admin'],
+  ): boolean {
+    if (user.disabled) return false;
+    if (user.role === 'admin') return true;
+    const allowed = new Set(approverGroups.map((g) => g.trim().toLowerCase()));
+    return (user.ssoGroups ?? []).some((g) => allowed.has(g.trim().toLowerCase()));
+  }
+
+  authorizePeerApproval(input: {
+    requesterUserId: string;
+    requesterUsername?: string;
+    approver: Pick<WebUserPublic, 'id' | 'username' | 'role' | 'ssoGroups' | 'disabled'>;
+    targetEnv?: string;
+    targetTags?: string[];
+    requireAdminForProd?: boolean;
+    requiredApprovals?: number;
+    existingApprovals?: Array<{ actorId?: string; actor?: string; allowed: boolean }>;
+    approverGroups?: string[];
+  }): PeerApprovalDecision {
+    return evaluatePeerApproval({
+      requesterId: input.requesterUserId,
+      requesterUsername: input.requesterUsername,
+      approver: input.approver,
+      targetEnv: input.targetEnv,
+      targetTags: input.targetTags,
+      requireAdminForProd: input.requireAdminForProd,
+      requiredApprovals: input.requiredApprovals,
+      existingApprovals: input.existingApprovals,
+      approverGroups: input.approverGroups,
+    });
   }
 
   async disposeTenant(userId: string): Promise<void> {

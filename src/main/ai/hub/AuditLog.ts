@@ -1,7 +1,9 @@
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import type { QueueStore } from "./LearningQueue";
+import { guardUrl, post, standardWebhookHeaders, type GuardOptions } from "./Notifier";
 import { maskContext } from "./privacy";
 
 /**
@@ -51,6 +53,14 @@ export interface AuditInput {
   changeId?: string;
   /** Anything else worth having, short. Masked before it is kept. */
   detail?: string;
+  /** Structured event schema version for downstream log consumers. */
+  schemaVersion?: number;
+  /** Authenticated human user id, when applicable. */
+  userId?: string;
+  /** Autonomous agent id, when applicable. */
+  agentId?: string;
+  /** Source IP address for remote/web-triggered actions, when applicable. */
+  sourceIp?: string;
 }
 
 export interface AuditEntry extends AuditInput {
@@ -82,8 +92,8 @@ function anchoredSeq(bytes: string): number | undefined {
     return undefined;
   }
 }
-/** How many of the newest anchors a verification reads. */
-const ANCHORS_READ = 2000;
+/** Page size when reading anchors from the bucket during verification. */
+export const ANCHORS_READ = 2000;
 
 export interface AuditVerification {
   ok: boolean;
@@ -97,7 +107,14 @@ export interface AuditVerification {
    * waited for an anchor, when the installation was off or anchors were
    * removed. A quiet stretch with nothing to anchor is not a gap.
    */
-  anchors?: { checked: number; held: number; coveredSeq?: number; lastAt?: number; gaps?: { from: number; to: number }[] };
+  anchors?: {
+    checked: number;
+    held: number;
+    coveredSeq?: number;
+    lastAt?: number;
+    pagesChecked?: number;
+    gaps?: { from: number; to: number }[];
+  };
   lastAt?: number;
 }
 
@@ -113,6 +130,10 @@ const FIELDS: (keyof AuditInput)[] = [
   "taskId",
   "changeId",
   "detail",
+  "schemaVersion",
+  "userId",
+  "agentId",
+  "sourceIp",
 ];
 
 /** What is kept of a text: masked, then cut from the end. Masking comes first, before any hash sees it. */
@@ -136,6 +157,192 @@ export function entryBytes(entry: Omit<AuditEntry, "hash">): string {
 export const hashEntry = (entry: Omit<AuditEntry, "hash">): string =>
   crypto.createHash("sha256").update(entryBytes(entry)).digest("hex");
 
+export type AuditShipperFormat = "otlp" | "cef" | "syslog" | "webhook";
+
+export type AuditSubscriber = (entry: AuditEntry) => void | Promise<void>;
+
+export interface AuditShipperOptions {
+  format: AuditShipperFormat;
+  url?: string;
+  secret?: string;
+  headers?: Record<string, string>;
+  serviceName?: string;
+  appName?: string;
+  hostname?: string;
+  facility?: number;
+  guard?: GuardOptions;
+  maxQueueSize?: number;
+  send?: (payload: { format: AuditShipperFormat; body: string; contentType: string; entry: AuditEntry }) => Promise<void> | void;
+  onError?: (error: unknown, entry: AuditEntry) => void;
+}
+
+const cefEscapeHeader = (value: string): string => value.replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/[\r\n]+/g, " ");
+const cefEscapeExt = (value: string): string =>
+  value.replace(/\\/g, "\\\\").replace(/=/g, "\\=").replace(/\r/g, "\\r").replace(/\n/g, "\\n");
+
+/** Formats an audit entry as OpenTelemetry Logs OTLP/JSON (`ExportLogsServiceRequest`). */
+export function formatAuditOtlpJson(entry: AuditEntry, serviceName = "sshs3"): Record<string, unknown> {
+  const attrs: Array<{ key: string; value: { stringValue?: string; intValue?: string } }> = [
+    { key: "audit.seq", value: { intValue: String(entry.seq) } },
+    { key: "audit.kind", value: { stringValue: entry.kind } },
+    { key: "audit.actor", value: { stringValue: entry.actor } },
+    { key: "audit.hash", value: { stringValue: entry.hash } },
+    { key: "audit.schema_version", value: { intValue: String(entry.schemaVersion ?? 1) } },
+  ];
+  if (entry.target) attrs.push({ key: "audit.target", value: { stringValue: entry.target } });
+  if (entry.outcome) attrs.push({ key: "audit.outcome", value: { stringValue: entry.outcome } });
+  if (entry.exitCode !== undefined) attrs.push({ key: "audit.exit_code", value: { intValue: String(entry.exitCode) } });
+  if (entry.approvedBy) attrs.push({ key: "audit.approved_by", value: { stringValue: entry.approvedBy } });
+  if (entry.userId) attrs.push({ key: "enduser.id", value: { stringValue: entry.userId } });
+  if (entry.agentId) attrs.push({ key: "agent.id", value: { stringValue: entry.agentId } });
+  if (entry.sourceIp) attrs.push({ key: "client.address", value: { stringValue: entry.sourceIp } });
+  if (entry.taskId) attrs.push({ key: "audit.task_id", value: { stringValue: entry.taskId } });
+  if (entry.changeId) attrs.push({ key: "audit.change_id", value: { stringValue: entry.changeId } });
+
+  return {
+    resourceLogs: [
+      {
+        resource: {
+          attributes: [{ key: "service.name", value: { stringValue: serviceName } }],
+        },
+        scopeLogs: [
+          {
+            scope: { name: "sshs3.audit", version: String(entry.schemaVersion ?? 1) },
+            logRecords: [
+              {
+                timeUnixNano: String(BigInt(entry.at) * 1_000_000n),
+                severityNumber: entry.outcome === "failed" || entry.outcome === "denied" ? 13 : 9,
+                severityText: entry.outcome === "failed" || entry.outcome === "denied" ? "WARN" : "INFO",
+                body: { stringValue: entry.what },
+                attributes: attrs,
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+}
+
+/** Formats an audit entry as RFC 5424 Syslog carrying a CEF payload. */
+export function formatAuditRfc5424Cef(
+  entry: AuditEntry,
+  options: { hostname?: string; appName?: string; facility?: number } = {},
+): string {
+  const facility = options.facility ?? 13; // log audit
+  const syslogSeverity = entry.outcome === "failed" || entry.outcome === "denied" ? 4 : 6;
+  const pri = facility * 8 + syslogSeverity;
+  const timestamp = new Date(entry.at).toISOString();
+  const hostname = (options.hostname ?? os.hostname() ?? "localhost").replace(/\s+/g, "-") || "-";
+  const appName = (options.appName ?? "sshs3").replace(/\s+/g, "-") || "sshs3";
+  const cefSeverity = entry.outcome === "failed" || entry.outcome === "denied" ? 7 : 3;
+  const ext: string[] = [
+    `rt=${entry.at}`,
+    `seq=${entry.seq}`,
+    `act=${cefEscapeExt(entry.actor)}`,
+    `schemaVersion=${entry.schemaVersion ?? 1}`,
+    `hash=${entry.hash}`,
+  ];
+  if (entry.target) ext.push(`dst=${cefEscapeExt(entry.target)}`);
+  if (entry.outcome) ext.push(`outcome=${cefEscapeExt(entry.outcome)}`);
+  if (entry.userId) ext.push(`suser=${cefEscapeExt(entry.userId)}`);
+  if (entry.agentId) ext.push(`cs1=${cefEscapeExt(entry.agentId)} cs1Label=agentId`);
+  if (entry.sourceIp) ext.push(`src=${cefEscapeExt(entry.sourceIp)}`);
+  if (entry.approvedBy) ext.push(`cs2=${cefEscapeExt(entry.approvedBy)} cs2Label=approvedBy`);
+  const cef = `CEF:0|Sshs3|AuditLog|${entry.schemaVersion ?? 1}|${cefEscapeHeader(entry.kind)}|${cefEscapeHeader(entry.what || entry.kind)}|${cefSeverity}|${ext.join(" ")}`;
+  return `<${pri}>1 ${timestamp} ${hostname} ${appName} - ${entry.kind} - ${cef}`;
+}
+
+/** Formats an audit entry as a structured JSON webhook payload. */
+export function formatAuditWebhookPayload(entry: AuditEntry): Record<string, unknown> {
+  return {
+    version: entry.schemaVersion ?? 1,
+    event: "audit",
+    at: entry.at,
+    entry,
+  };
+}
+
+/**
+ * Non-blocking out-of-band subscriber for `AuditLog.append` supporting
+ * OTLP/JSON, RFC 5424 CEF/Syslog, or webhook delivery.
+ */
+export class AuditShipper {
+  private chain: Promise<void> = Promise.resolve();
+  private queued = 0;
+
+  constructor(private readonly options: AuditShipperOptions) {}
+
+  emit(entry: AuditEntry): void {
+    const maxQueue = this.options.maxQueueSize ?? 1000;
+    if (this.queued >= maxQueue) {
+      this.options.onError?.(new Error("AuditShipper queue full; dropping entry"), entry);
+      return;
+    }
+    this.queued++;
+    this.chain = this.chain
+      .then(() => this.deliverEntry(entry))
+      .catch((error) => {
+        this.options.onError?.(error, entry);
+      })
+      .finally(() => {
+        this.queued = Math.max(0, this.queued - 1);
+      });
+  }
+
+  async flush(): Promise<void> {
+    await this.chain;
+  }
+
+  private format(entry: AuditEntry): { body: string; contentType: string } {
+    if (this.options.format === "otlp") {
+      return {
+        body: JSON.stringify(formatAuditOtlpJson(entry, this.options.serviceName)),
+        contentType: "application/json",
+      };
+    }
+    if (this.options.format === "cef" || this.options.format === "syslog") {
+      return {
+        body: formatAuditRfc5424Cef(entry, {
+          hostname: this.options.hostname,
+          appName: this.options.appName,
+          facility: this.options.facility,
+        }),
+        contentType: "text/plain; charset=utf-8",
+      };
+    }
+    return {
+      body: JSON.stringify(formatAuditWebhookPayload(entry)),
+      contentType: "application/json",
+    };
+  }
+
+  private async deliverEntry(entry: AuditEntry): Promise<void> {
+    const { body, contentType } = this.format(entry);
+    if (this.options.send) {
+      await this.options.send({ format: this.options.format, body, contentType, entry });
+      return;
+    }
+    if (!this.options.url) return;
+    const guard = this.options.guard ?? { server: false, allowPrivate: true, allowPlainHttp: true };
+    const target = await guardUrl(this.options.url, guard);
+    const headers: Record<string, string> = {
+      "Content-Type": contentType,
+      ...(this.options.headers ?? {}),
+      ...(this.options.secret
+        ? {
+            "X-Sshs3-Signature": `sha256=${crypto.createHmac("sha256", this.options.secret).update(body).digest("hex")}`,
+            ...standardWebhookHeaders(this.options.secret, body),
+          }
+        : {}),
+    };
+    const status = await post(target, { url: this.options.url, headers, body });
+    if (status < 200 || status >= 300) {
+      throw new Error(`AuditShipper received HTTP ${status}`);
+    }
+  }
+}
+
 export class AuditLog {
   readonly file: string;
   private head: { seq: number; hash: string } = { seq: 0, hash: "" };
@@ -144,6 +351,7 @@ export class AuditLog {
   /** The newest anchor this installation wrote, read back from the bucket once. */
   private lastAnchor?: { n: number; bytes: string };
   private anchorRead = false;
+  private readonly subscribers = new Set<AuditSubscriber>();
 
   constructor(
     private readonly dir: string,
@@ -152,6 +360,15 @@ export class AuditLog {
     private readonly bucket?: () => QueueStore | undefined,
   ) {
     this.file = path.join(dir, `audit-${client.replace(/[^A-Za-z0-9_-]/g, "_")}.jsonl`);
+  }
+
+  /** Registers a non-blocking out-of-band subscriber notified on every appended entry. */
+  subscribe(listener: AuditSubscriber | AuditShipper): () => void {
+    const fn: AuditSubscriber = listener instanceof AuditShipper ? (e) => listener.emit(e) : listener;
+    this.subscribers.add(fn);
+    return () => {
+      this.subscribers.delete(fn);
+    };
   }
 
   /** Reads where the chain stands. A file that does not exist yet is an empty chain. */
@@ -203,10 +420,23 @@ export class AuditLog {
         taskId: input.taskId,
         changeId: input.changeId,
         detail: keep(input.detail),
+        schemaVersion: input.schemaVersion ?? 1,
+        userId: keep(input.userId),
+        agentId: keep(input.agentId),
+        sourceIp: keep(input.sourceIp),
       };
       const entry: AuditEntry = { ...base, hash: hashEntry(base) };
       await fs.appendFile(this.file, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
       this.head = { seq: entry.seq, hash: entry.hash };
+      if (this.subscribers.size > 0) {
+        for (const listener of this.subscribers) {
+          queueMicrotask(() => {
+            Promise.resolve()
+              .then(() => listener(entry))
+              .catch(() => undefined);
+          });
+        }
+      }
       return entry;
     };
     const next = this.writes.then(run, run);
@@ -247,7 +477,8 @@ export class AuditLog {
     if (!bucket || this.head.seq === 0) return undefined;
     // Where the anchors stand, read back from the bucket, so a restart continues the chain.
     if (!this.anchorRead) {
-      const newest = (await this.anchorFiles()).at(-1);
+      const { files } = await this.anchorFiles({ tailOnly: true });
+      const newest = files.at(-1);
       if (newest) this.lastAnchor = { n: newest.anchor.n ?? 0, bytes: newest.bytes };
       this.anchorRead = true;
     }
@@ -271,37 +502,58 @@ export class AuditLog {
     return anchor;
   }
 
-  /** The anchors in the bucket as written, oldest first: numbered ones by number, older ones before them. */
-  private async anchorFiles(): Promise<{ anchor: AuditAnchor; bytes: string }[]> {
+  /**
+   * The anchors in the bucket as written, oldest first, paginated in chunks of
+   * `pageSize` (default `ANCHORS_READ = 2000`) so verification walks beyond 2000 anchors.
+   */
+  private async anchorFiles(options: { pageSize?: number; maxPages?: number; tailOnly?: boolean } = {}): Promise<{
+    files: { anchor: AuditAnchor; bytes: string }[];
+    pagesChecked: number;
+  }> {
     const bucket = this.bucket?.();
-    if (!bucket) return [];
+    if (!bucket) return { files: [], pagesChecked: 0 };
+    const pageSize = Math.max(1, options.pageSize ?? ANCHORS_READ);
     const dir = `audit/${this.client}/anchors`;
     const names = (await bucket.list(dir).catch(() => [] as string[])).filter((n) => n.endsWith(".json")).sort();
+    if (!names.length) return { files: [], pagesChecked: 0 };
+
+    const targetNames = options.tailOnly ? names.slice(-pageSize) : names;
     const out: { anchor: AuditAnchor; bytes: string }[] = [];
-    for (const name of names.slice(-ANCHORS_READ)) {
-      try {
-        const raw = await bucket.read(`${dir}/${name}`);
-        if (raw) out.push({ anchor: JSON.parse(raw.toString("utf8")) as AuditAnchor, bytes: raw.toString("utf8") });
-      } catch {
-        // An anchor that cannot be read proves nothing either way.
+    let pagesChecked = 0;
+
+    for (let offset = 0; offset < targetNames.length; offset += pageSize) {
+      if (options.maxPages !== undefined && pagesChecked >= options.maxPages) break;
+      const page = targetNames.slice(offset, offset + pageSize);
+      pagesChecked++;
+      for (const name of page) {
+        try {
+          const raw = await bucket.read(`${dir}/${name}`);
+          if (raw) out.push({ anchor: JSON.parse(raw.toString("utf8")) as AuditAnchor, bytes: raw.toString("utf8") });
+        } catch {
+          // An anchor that cannot be read proves nothing either way.
+        }
       }
     }
-    return out.sort((a, b) => (a.anchor.n ?? 0) - (b.anchor.n ?? 0) || a.anchor.seq - b.anchor.seq);
+
+    return {
+      files: out.sort((a, b) => (a.anchor.n ?? 0) - (b.anchor.n ?? 0) || a.anchor.seq - b.anchor.seq),
+      pagesChecked,
+    };
   }
 
   /** The anchors this installation left in the bucket. */
   async anchors(): Promise<AuditAnchor[]> {
-    return (await this.anchorFiles()).map((f) => f.anchor);
+    return (await this.anchorFiles()).files.map((f) => f.anchor);
   }
 
   /**
    * Walks the whole chain and says whether it holds. Every entry must hash
    * to what it says it hashes to, carry the hash of the one before it, and
-   * follow it by one. Then every anchor must match the chain where it points:
-   * an anchor past the end means the end was cut off; an anchor whose hash
-   * differs means what came before it was rewritten.
+   * follow it by one. Then every anchor (paginated beyond `ANCHORS_READ`) must
+   * match the chain where it points: an anchor past the end means the end was
+   * cut off; an anchor whose hash differs means what came before it was rewritten.
    */
-  async verify(): Promise<AuditVerification> {
+  async verify(options: { anchorPageSize?: number; maxAnchorPages?: number } = {}): Promise<AuditVerification> {
     await this.writes;
     const all = await this.entries();
     let prev = "";
@@ -332,7 +584,10 @@ export class AuditLog {
       expected++;
       lastAt = item.at;
     }
-    const files = await this.anchorFiles();
+    const { files, pagesChecked } = await this.anchorFiles({
+      pageSize: options.anchorPageSize,
+      maxPages: options.maxAnchorPages,
+    });
     const anchors = files.map((f) => f.anchor);
     let held = 0;
     // The anchors' own chain: each numbered anchor carries the hash of the one before it.
@@ -344,7 +599,7 @@ export class AuditLog {
         return {
           ok: false,
           entries: bySeq.size,
-          anchors: { checked: anchors.length, held },
+          anchors: { checked: anchors.length, held, pagesChecked },
           problem: {
             seq: anchor.seq,
             text: `Anchor ${anchor.n} in the team bucket does not follow anchor ${before.anchor.n}: anchors were removed or replaced there.`,
@@ -369,7 +624,7 @@ export class AuditLog {
         return {
           ok: false,
           entries: bySeq.size,
-          anchors: { checked: anchors.length, held },
+          anchors: { checked: anchors.length, held, pagesChecked },
           problem: {
             seq: anchor.seq,
             text: `The team bucket holds an anchor at entry ${anchor.seq}, but this log ends at ${bySeq.size}: entries were removed from its end.`,
@@ -379,7 +634,7 @@ export class AuditLog {
         return {
           ok: false,
           entries: bySeq.size,
-          anchors: { checked: anchors.length, held },
+          anchors: { checked: anchors.length, held, pagesChecked },
           problem: { seq: anchor.seq, text: `Entry ${anchor.seq} is not what it was when it was anchored: the log was rewritten up to there.` },
         };
       held++;
@@ -388,7 +643,7 @@ export class AuditLog {
     return {
       ok: true,
       entries: bySeq.size,
-      anchors: { checked: anchors.length, held, coveredSeq: newest?.seq, lastAt: newest?.at, gaps: gaps.slice(-20) },
+      anchors: { checked: anchors.length, held, coveredSeq: newest?.seq, lastAt: newest?.at, pagesChecked, gaps: gaps.slice(-20) },
       lastAt,
     };
   }

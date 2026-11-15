@@ -5,13 +5,20 @@ import { app } from "electron";
 import {
   DEFAULT_AI_CONFIG,
   DEFAULT_AI_MODELS,
+  type AiActiveProfileByRole,
   type AiConfig,
   type AiConfigUpdate,
   type AiConfigView,
+  type AiEgressPolicy,
+  type AiPiiScrubbingMode,
+  type AiProfileRole,
   type AiProvider,
+  type AiReasoningEffort,
+  type ProviderProfile,
 } from "../../shared/types/ai";
 import { CodexAuthProvider } from "./CodexAuthProvider";
 import { isDemoMode } from "../demo/demoMode";
+import { writeFileAtomic } from "../storage/atomicFile";
 import {
   decryptSecretValue,
   encryptSecretValue,
@@ -19,12 +26,113 @@ import {
   isEncryptionAvailable,
 } from "../crypto/SecretFieldCrypto";
 
+export type AiProfileRoleAlias = "reasoning" | "fast" | "coding" | "summary";
+export type AiProfileRoleInput = AiProfileRole | AiProfileRoleAlias;
+
 interface StoredAiConfig extends AiConfig {
   /** OS-keyring ciphertext. New keys remain session-only if encryption is unavailable. */
   apiKey?: string;
+  /** OS-keyring ciphertext keyed by ProviderProfile.id. */
+  profileApiKeys?: Record<string, string>;
 }
 
 const PROVIDERS: AiProvider[] = ["openai-codex", "anthropic", "openai-compatible"];
+const EGRESS_POLICIES: AiEgressPolicy[] = ["standard", "local-only", "eu-pinned"];
+const PII_SCRUBBING_MODES: AiPiiScrubbingMode[] = ["off", "standard", "strict"];
+const REASONING_EFFORTS: AiReasoningEffort[] = ["low", "medium", "high"];
+const CANONICAL_ROLES: AiProfileRole[] = ["primary", "fastTriage", "backgroundDistill", "embedding"];
+
+const ROLE_ALIAS_MAP: Record<AiProfileRoleInput, AiProfileRole> = {
+  primary: "primary",
+  reasoning: "primary",
+  coding: "primary",
+  fastTriage: "fastTriage",
+  fast: "fastTriage",
+  backgroundDistill: "backgroundDistill",
+  summary: "backgroundDistill",
+  embedding: "embedding",
+};
+
+/** Maps canonical roles and legacy/friendly aliases (`reasoning|fast|coding|summary`) to `AiProfileRole`. */
+export function normalizeAiProfileRole(role: string): AiProfileRole {
+  if (Object.prototype.hasOwnProperty.call(ROLE_ALIAS_MAP, role)) {
+    return ROLE_ALIAS_MAP[role as AiProfileRoleInput];
+  }
+  throw new Error(`Unknown AI profile role: ${role}`);
+}
+
+function originOf(url?: string): string {
+  try {
+    return url ? new URL(url).origin : "";
+  } catch {
+    return "";
+  }
+}
+
+function clampContextWindow(val: unknown): number {
+  return Math.max(4000, Math.min(1_000_000, Math.round(Number(val) || 128000)));
+}
+
+function clampMaxOutput(val: unknown): number {
+  return Math.max(512, Math.min(65536, Math.round(Number(val) || 8192)));
+}
+
+function clampTemperature(val: unknown): number | undefined {
+  if (val === undefined || val === null) return undefined;
+  const n = Number(val);
+  if (!Number.isFinite(n)) return undefined;
+  return Math.max(0, Math.min(1.5, Math.round(n * 100) / 100));
+}
+
+function sanitizeProfile(input: ProviderProfile): ProviderProfile {
+  const id = typeof input.id === "string" ? input.id.trim().slice(0, 80) : "";
+  if (!id) {
+    throw new Error("Provider profile id is required");
+  }
+  const name = typeof input.name === "string" ? input.name.trim().slice(0, 120) : "";
+  if (!name) {
+    throw new Error(`Provider profile "${id}" requires a name`);
+  }
+  if (!PROVIDERS.includes(input.provider)) {
+    throw new Error(`Unknown AI provider in profile "${id}"`);
+  }
+  const model = typeof input.model === "string" ? input.model.trim().slice(0, 200) : "";
+  const baseUrl = typeof input.baseUrl === "string" ? input.baseUrl.trim() : undefined;
+  if (baseUrl) {
+    assertHttpUrl(baseUrl);
+  }
+  if (input.egressPolicy !== undefined && !EGRESS_POLICIES.includes(input.egressPolicy)) {
+    throw new Error(`Invalid egressPolicy in profile "${id}"`);
+  }
+
+  const sanitized: ProviderProfile = {
+    id,
+    name,
+    provider: input.provider,
+    model,
+    updatedAt: typeof input.updatedAt === "number" && Number.isFinite(input.updatedAt) ? input.updatedAt : Date.now(),
+  };
+  if (baseUrl) sanitized.baseUrl = baseUrl;
+  if (input.reasoningEffort && REASONING_EFFORTS.includes(input.reasoningEffort)) {
+    sanitized.reasoningEffort = input.reasoningEffort;
+  }
+  const temp = clampTemperature(input.temperature);
+  if (temp !== undefined) sanitized.temperature = temp;
+  if (input.maxOutputTokens !== undefined) sanitized.maxOutputTokens = clampMaxOutput(input.maxOutputTokens);
+  if (input.contextWindowTokens !== undefined) {
+    sanitized.contextWindowTokens = clampContextWindow(input.contextWindowTokens);
+  }
+  if (typeof input.embeddingModel === "string" && input.embeddingModel.trim()) {
+    sanitized.embeddingModel = input.embeddingModel.trim().slice(0, 200);
+  }
+  if (input.egressPolicy !== undefined) sanitized.egressPolicy = input.egressPolicy;
+  if (input.zdrConfirmed !== undefined) sanitized.zdrConfirmed = Boolean(input.zdrConfirmed);
+  if (Array.isArray(input.fallbackProfileIds)) {
+    const fallbacks = [...new Set(input.fallbackProfileIds.map((x) => String(x).trim()).filter((x) => x && x !== id))];
+    if (fallbacks.length > 0) sanitized.fallbackProfileIds = fallbacks;
+  }
+  return sanitized;
+}
 
 /**
  * Persists the AI assistant's configuration in its own file (ai-config.json), not in
@@ -35,6 +143,7 @@ export class AiConfigStore {
   private filePath: string;
   private writeQueue: Promise<void> = Promise.resolve();
   private sessionKey = "";
+  private sessionProfileKeys = new Map<string, string>();
   /** A workspace with a folder of its own (a tenant on a shared server, a test): its sign-in is looked for there only. */
   private readonly ownFolderOnly: boolean;
 
@@ -67,28 +176,141 @@ export class AiConfigStore {
     return this.ownFolderOnly || isDemoMode() ? path.dirname(this.filePath) : undefined;
   }
 
+  private decryptStoredProfileKey(stored: StoredAiConfig, profileId: string): string {
+    const mem = this.sessionProfileKeys.get(profileId);
+    if (mem) return mem;
+    const cipher = stored.profileApiKeys?.[profileId];
+    return cipher ? decryptSecretValue(cipher) : "";
+  }
+
+  private resolvePrimaryProfile(stored: StoredAiConfig): ProviderProfile | undefined {
+    const primaryId = stored.activeProfileByRole?.primary;
+    if (!primaryId || !Array.isArray(stored.profiles)) return undefined;
+    return stored.profiles.find((p) => p.id === primaryId);
+  }
+
+  /** Returns the decrypted API key for a named provider profile. Main process only. */
+  public async getProfileSecret(profileId: string): Promise<string> {
+    const stored = await this.readWithCodexAutoDetect();
+    return this.decryptStoredProfileKey(stored, profileId);
+  }
+
+  /**
+   * Resolves the active `ProviderProfile` and decrypted `apiKey` for a role (supporting canonical
+   * `AiProfileRole` names and `reasoning|fast|coding|summary` aliases). Falls back to `primary`,
+   * or synthesizes a profile from legacy single-profile fields when no `profiles` are configured.
+   */
+  public async resolveProfileForRole(
+    role: AiProfileRoleInput,
+  ): Promise<(ProviderProfile & { apiKey: string }) | null> {
+    const canonicalRole = normalizeAiProfileRole(role);
+    const stored = await this.readWithCodexAutoDetect();
+    const pub = this.publicFields(stored);
+    const profiles = pub.profiles ?? [];
+
+    const assignedId =
+      pub.activeProfileByRole?.[canonicalRole] ??
+      (canonicalRole !== "primary" ? pub.activeProfileByRole?.primary : undefined);
+
+    if (assignedId) {
+      const matched = profiles.find((p) => p.id === assignedId);
+      if (matched) {
+        const key = this.decryptStoredProfileKey(stored, matched.id) ||
+          (matched.id === pub.activeProfileByRole?.primary ? this.resolveLegacyOrPrimaryKey(stored) : "");
+        return { ...matched, apiKey: key };
+      }
+    }
+
+    if (profiles.length > 0 && canonicalRole === "primary") {
+      const first = profiles[0];
+      return { ...first, apiKey: this.decryptStoredProfileKey(stored, first.id) };
+    }
+
+    // Legacy single-profile fallback
+    const legacyKey = this.sessionKey || (stored.apiKey ? decryptSecretValue(stored.apiKey) : "");
+    const fallbackModel =
+      canonicalRole === "fastTriage" && pub.fastModel
+        ? pub.fastModel
+        : canonicalRole === "embedding" && pub.embeddingModel
+          ? pub.embeddingModel
+          : pub.model;
+    return {
+      id: "default",
+      name: "Default",
+      provider: pub.provider,
+      model: fallbackModel,
+      baseUrl: pub.baseUrl,
+      reasoningEffort: pub.reasoningEffort,
+      temperature: pub.temperature,
+      maxOutputTokens: pub.maxOutputTokens,
+      contextWindowTokens: pub.contextWindowTokens,
+      embeddingModel: pub.embeddingModel,
+      egressPolicy: pub.egressPolicy,
+      zdrConfirmed: pub.zdrConfirmed,
+      hasApiKey: Boolean(legacyKey),
+      keyStorage: this.sessionKey ? "session" : stored.apiKey ? "encrypted" : undefined,
+      apiKey: legacyKey,
+    };
+  }
+
+  private resolveLegacyOrPrimaryKey(stored: StoredAiConfig): string {
+    const primaryId = stored.activeProfileByRole?.primary;
+    if (primaryId) {
+      const profileKey = this.decryptStoredProfileKey(stored, primaryId);
+      if (profileKey) return profileKey;
+    }
+    return this.sessionKey || (stored.apiKey ? decryptSecretValue(stored.apiKey) : "");
+  }
+
   /** The configuration including the decrypted API key. Main process only. */
   public async getConfig(): Promise<AiConfig & { apiKey: string }> {
     const stored = await this.readWithCodexAutoDetect();
     return {
       ...this.publicFields(stored),
-      apiKey:
-        this.sessionKey ||
-        (stored.apiKey ? decryptSecretValue(stored.apiKey) : ""),
+      apiKey: this.resolveLegacyOrPrimaryKey(stored),
     };
   }
 
   public async getView(): Promise<AiConfigView> {
-    const config = await this.getConfig();
-    const { apiKey, ...rest } = config;
+    const stored = await this.readWithCodexAutoDetect();
+    const rest = this.publicFields(stored);
+    const apiKey = this.resolveLegacyOrPrimaryKey(stored);
     const codexProvider = new CodexAuthProvider(this.codexAuthDir());
     const codex = await codexProvider.getStatus();
     const codexModels = await codexProvider.getAvailableModels();
     const hasOAuth = rest.provider === "openai-codex" && codex.connected;
+
+    // Annotate profile key metadata without ever returning secret values
+    const profiles = rest.profiles?.map((p) => {
+      const mem = this.sessionProfileKeys.get(p.id);
+      const cipher = stored.profileApiKeys?.[p.id];
+      const profileOAuth = p.provider === "openai-codex" && codex.connected;
+      const hasProfileKey = Boolean(mem || cipher) || profileOAuth;
+      const keyStorage: ProviderProfile["keyStorage"] = mem
+        ? "session"
+        : profileOAuth && !cipher
+          ? "oauth"
+          : cipher
+            ? "encrypted"
+            : undefined;
+      return {
+        ...p,
+        hasApiKey: hasProfileKey,
+        ...(keyStorage ? { keyStorage } : {}),
+      };
+    });
+
+    const primaryId = rest.activeProfileByRole?.primary;
+    const primaryProfile = primaryId ? profiles?.find((p) => p.id === primaryId) : undefined;
+    const activeSessionKey = primaryId
+      ? Boolean(this.sessionProfileKeys.get(primaryId) || this.sessionKey)
+      : Boolean(this.sessionKey);
+
     return {
       ...rest,
-      hasApiKey: Boolean(apiKey) || hasOAuth,
-      keyStorage: this.sessionKey ? "session" : hasOAuth && !apiKey ? "oauth" : "encrypted",
+      ...(profiles ? { profiles } : {}),
+      hasApiKey: Boolean(apiKey) || hasOAuth || Boolean(primaryProfile?.hasApiKey),
+      keyStorage: activeSessionKey ? "session" : hasOAuth && !apiKey ? "oauth" : "encrypted",
       codexConnected: codex.connected,
       codexAccountEmail: codex.email,
       codexDefaultModel: codex.defaultModel || DEFAULT_AI_MODELS["openai-codex"],
@@ -96,10 +318,70 @@ export class AiConfigStore {
     };
   }
 
+  /** Creates or updates a single named provider profile (and optionally its API key). */
+  public async upsertProfile(
+    profile: Omit<ProviderProfile, "hasApiKey" | "keyStorage"> & { apiKey?: string | null },
+  ): Promise<AiConfigView> {
+    const { apiKey: nextKey, ...profileFields } = profile;
+    const current = await this.read();
+    const existing = Array.isArray(current.profiles) ? [...current.profiles] : [];
+    const idx = existing.findIndex((p) => p.id === profileFields.id.trim());
+    if (idx >= 0) {
+      existing[idx] = profileFields;
+    } else {
+      existing.push(profileFields);
+    }
+    const updatePayload: AiConfigUpdate = { profiles: existing };
+    if (typeof nextKey === "string" || nextKey === null) {
+      updatePayload.profileApiKeys = { [profileFields.id.trim()]: nextKey };
+    }
+    return this.update(updatePayload);
+  }
+
+  /** Deletes a named provider profile, its encrypted key, and any role bindings referencing it. */
+  public async deleteProfile(profileId: string): Promise<AiConfigView> {
+    const id = profileId.trim();
+    const current = await this.read();
+    const nextProfiles = (current.profiles ?? []).filter((p) => p.id !== id);
+    const nextRoles: AiActiveProfileByRole = { ...(current.activeProfileByRole ?? {}) };
+    for (const role of CANONICAL_ROLES) {
+      if (nextRoles[role] === id) {
+        delete nextRoles[role];
+      }
+    }
+    return this.update({
+      profiles: nextProfiles,
+      activeProfileByRole: nextRoles,
+      profileApiKeys: { [id]: null },
+    });
+  }
+
+  /** Assigns or clears the active profile ID for a given role (supports canonical names and aliases). */
+  public async setActiveProfileForRole(
+    role: AiProfileRoleInput,
+    profileId: string | null,
+  ): Promise<AiConfigView> {
+    const canonical = normalizeAiProfileRole(role);
+    const current = await this.read();
+    const nextRoles: AiActiveProfileByRole = { ...(current.activeProfileByRole ?? {}) };
+    if (profileId === null || profileId.trim() === "") {
+      delete nextRoles[canonical];
+    } else {
+      nextRoles[canonical] = profileId.trim();
+    }
+    return this.update({ activeProfileByRole: nextRoles });
+  }
+
   public async update(update: AiConfigUpdate): Promise<AiConfigView> {
     await this.queueMutation(async () => {
       const current = await this.read();
-      const next: StoredAiConfig = { ...current };
+      const next: StoredAiConfig = {
+        ...current,
+        ...(current.profiles ? { profiles: [...current.profiles] } : {}),
+        ...(current.activeProfileByRole ? { activeProfileByRole: { ...current.activeProfileByRole } } : {}),
+        ...(current.profileApiKeys ? { profileApiKeys: { ...current.profileApiKeys } } : {}),
+      };
+
       if (update.enabled !== undefined) next.enabled = Boolean(update.enabled);
       if (update.provider !== undefined) {
         if (!PROVIDERS.includes(update.provider))
@@ -113,10 +395,7 @@ export class AiConfigStore {
         else delete next.actorName;
       }
       if (update.contextWindowTokens !== undefined) {
-        next.contextWindowTokens = Math.max(
-          4000,
-          Math.min(1_000_000, Math.round(Number(update.contextWindowTokens) || 128000)),
-        );
+        next.contextWindowTokens = clampContextWindow(update.contextWindowTokens);
       }
       if (update.fastModel !== undefined) {
         const name = String(update.fastModel).trim().slice(0, 200);
@@ -135,10 +414,7 @@ export class AiConfigStore {
         );
       }
       if (update.maxOutputTokens !== undefined) {
-        next.maxOutputTokens = Math.max(
-          512,
-          Math.min(65536, Math.round(Number(update.maxOutputTokens) || 8192)),
-        );
+        next.maxOutputTokens = clampMaxOutput(update.maxOutputTokens);
       }
       if (update.maxToolTurns !== undefined) {
         next.maxToolTurns = Math.max(
@@ -147,15 +423,13 @@ export class AiConfigStore {
         );
       }
       if (update.reasoningEffort !== undefined) {
-        if (["low", "medium", "high"].includes(update.reasoningEffort)) {
+        if (REASONING_EFFORTS.includes(update.reasoningEffort)) {
           next.reasoningEffort = update.reasoningEffort;
         }
       }
       if (update.temperature !== undefined) {
-        const t = Number(update.temperature);
-        if (Number.isFinite(t)) {
-          next.temperature = Math.max(0, Math.min(1.5, Math.round(t * 100) / 100));
-        }
+        const clamped = clampTemperature(update.temperature);
+        if (clamped !== undefined) next.temperature = clamped;
       }
       if (update.useHermes !== undefined)
         next.useHermes = Boolean(update.useHermes);
@@ -164,6 +438,136 @@ export class AiConfigStore {
         if (baseUrl) assertHttpUrl(baseUrl);
         next.baseUrl = baseUrl || undefined;
       }
+
+      if (update.egressPolicy !== undefined) {
+        if (!EGRESS_POLICIES.includes(update.egressPolicy)) {
+          throw new Error(`Invalid egressPolicy: ${String(update.egressPolicy)}`);
+        }
+        next.egressPolicy = update.egressPolicy;
+      }
+      if (update.zdrConfirmed !== undefined) {
+        next.zdrConfirmed = Boolean(update.zdrConfirmed);
+      }
+      if (update.piiScrubbing !== undefined) {
+        if (!PII_SCRUBBING_MODES.includes(update.piiScrubbing)) {
+          throw new Error(`Invalid piiScrubbing mode: ${String(update.piiScrubbing)}`);
+        }
+        next.piiScrubbing = update.piiScrubbing;
+      }
+
+      // Multi-profile persistence & endpoint-bound secret invalidation
+      if (update.profiles !== undefined) {
+        const prevById = new Map((current.profiles ?? []).map((p) => [p.id, p]));
+        const seenIds = new Set<string>();
+        const sanitizedList: ProviderProfile[] = [];
+        for (const rawProfile of update.profiles) {
+          const clean = sanitizeProfile(rawProfile);
+          if (seenIds.has(clean.id)) {
+            throw new Error(`Duplicate provider profile id "${clean.id}"`);
+          }
+          seenIds.add(clean.id);
+          sanitizedList.push(clean);
+
+          const prev = prevById.get(clean.id);
+          const explicitKeyProvided =
+            update.profileApiKeys !== undefined &&
+            Object.prototype.hasOwnProperty.call(update.profileApiKeys, clean.id);
+          if (
+            prev &&
+            !explicitKeyProvided &&
+            (prev.provider !== clean.provider || originOf(prev.baseUrl) !== originOf(clean.baseUrl))
+          ) {
+            if (next.profileApiKeys) delete next.profileApiKeys[clean.id];
+            this.sessionProfileKeys.delete(clean.id);
+          }
+        }
+        next.profiles = sanitizedList;
+
+        // Clean up keys for deleted profiles
+        if (next.profileApiKeys) {
+          for (const storedId of Object.keys(next.profileApiKeys)) {
+            if (!seenIds.has(storedId)) delete next.profileApiKeys[storedId];
+          }
+        }
+        for (const memId of [...this.sessionProfileKeys.keys()]) {
+          if (!seenIds.has(memId)) this.sessionProfileKeys.delete(memId);
+        }
+        if (next.activeProfileByRole) {
+          for (const role of CANONICAL_ROLES) {
+            const boundId = next.activeProfileByRole[role];
+            if (boundId && !seenIds.has(boundId)) {
+              delete next.activeProfileByRole[role];
+            }
+          }
+        }
+      }
+
+      if (update.profileApiKeys !== undefined) {
+        const keyMap: Record<string, string> = { ...(next.profileApiKeys ?? {}) };
+        for (const [rawId, rawSecret] of Object.entries(update.profileApiKeys)) {
+          const profileId = rawId.trim();
+          if (!profileId) continue;
+          if (rawSecret === null || rawSecret === "") {
+            delete keyMap[profileId];
+            this.sessionProfileKeys.delete(profileId);
+          } else if (typeof rawSecret === "string") {
+            const trimmedSecret = rawSecret.trim();
+            const encrypted = isEncryptionAvailable() ? encryptSecretValue(trimmedSecret) : "";
+            if (isEncryptedSecret(encrypted)) {
+              keyMap[profileId] = encrypted;
+              this.sessionProfileKeys.delete(profileId);
+            } else {
+              this.sessionProfileKeys.set(profileId, trimmedSecret);
+              delete keyMap[profileId];
+            }
+          }
+        }
+        if (Object.keys(keyMap).length > 0) next.profileApiKeys = keyMap;
+        else delete next.profileApiKeys;
+      }
+
+      if (update.activeProfileByRole !== undefined) {
+        const normalizedRoles: AiActiveProfileByRole = {};
+        const validIds = new Set((next.profiles ?? []).map((p) => p.id));
+        for (const [rawRole, rawProfileId] of Object.entries(update.activeProfileByRole)) {
+          const canonical = normalizeAiProfileRole(rawRole);
+          if (typeof rawProfileId !== "string" || !rawProfileId.trim()) continue;
+          const pid = rawProfileId.trim();
+          if (next.profiles && next.profiles.length > 0 && !validIds.has(pid)) {
+            throw new Error(`Active profile "${pid}" for role "${canonical}" does not exist`);
+          }
+          normalizedRoles[canonical] = pid;
+        }
+        if (Object.keys(normalizedRoles).length > 0) next.activeProfileByRole = normalizedRoles;
+        else delete next.activeProfileByRole;
+      }
+
+      // Sync top-level legacy fields when a primary profile is activated without explicit top-level overrides
+      const primaryProfile = this.resolvePrimaryProfile(next);
+      if (
+        primaryProfile &&
+        update.provider === undefined &&
+        update.model === undefined &&
+        (update.activeProfileByRole !== undefined || update.profiles !== undefined)
+      ) {
+        next.provider = primaryProfile.provider;
+        if (primaryProfile.model) next.model = primaryProfile.model;
+        next.baseUrl = primaryProfile.baseUrl;
+        if (primaryProfile.reasoningEffort) next.reasoningEffort = primaryProfile.reasoningEffort;
+        if (primaryProfile.temperature !== undefined) next.temperature = primaryProfile.temperature;
+        if (primaryProfile.maxOutputTokens !== undefined) next.maxOutputTokens = primaryProfile.maxOutputTokens;
+        if (primaryProfile.contextWindowTokens !== undefined) {
+          next.contextWindowTokens = primaryProfile.contextWindowTokens;
+        }
+        if (primaryProfile.embeddingModel !== undefined) next.embeddingModel = primaryProfile.embeddingModel;
+        if (primaryProfile.egressPolicy !== undefined && update.egressPolicy === undefined) {
+          next.egressPolicy = primaryProfile.egressPolicy;
+        }
+        if (primaryProfile.zdrConfirmed !== undefined && update.zdrConfirmed === undefined) {
+          next.zdrConfirmed = primaryProfile.zdrConfirmed;
+        }
+      }
+
       if (next.provider === "openai-codex") {
         if (next.baseUrl && next.baseUrl.includes("openrouter.ai")) {
           delete next.baseUrl;
@@ -173,17 +577,14 @@ export class AiConfigStore {
           next.model = codex.defaultModel || DEFAULT_AI_MODELS["openai-codex"];
         }
       }
+
       // A key belongs to the endpoint it was given for. When the provider or
       // the address (its origin) changes and no new key comes with the change,
       // the old key is forgotten rather than sent somewhere new.
-      const origin = (url?: string): string => {
-        try {
-          return url ? new URL(url).origin : "";
-        } catch {
-          return "";
-        }
-      };
-      if (update.apiKey === undefined && (next.provider !== current.provider || origin(next.baseUrl) !== origin(current.baseUrl))) {
+      if (
+        update.apiKey === undefined &&
+        (next.provider !== current.provider || originOf(next.baseUrl) !== originOf(current.baseUrl))
+      ) {
         delete next.apiKey;
         this.sessionKey = "";
       }
@@ -202,18 +603,8 @@ export class AiConfigStore {
           delete next.apiKey;
         }
       }
-      await fs.mkdir(path.dirname(this.filePath), { recursive: true });
-      await fs.writeFile(
-        this.filePath + ".tmp",
-        JSON.stringify(next, null, 2),
-        { encoding: "utf-8", mode: 0o600 },
-      );
-      await fs.rename(this.filePath + ".tmp", this.filePath);
-      try {
-        await fs.chmod(this.filePath, 0o600);
-      } catch {
-        // Ignore chmod failures on non-POSIX filesystems
-      }
+
+      await writeFileAtomic(this.filePath, JSON.stringify(next, null, 2), { mode: 0o600 });
     });
     return this.getView();
   }
@@ -278,6 +669,55 @@ export class AiConfigStore {
   }
 
   private publicFields(stored: StoredAiConfig): AiConfig {
+    const profiles: ProviderProfile[] | undefined = Array.isArray(stored.profiles)
+      ? stored.profiles.map((p) => {
+          const mem = this.sessionProfileKeys.get(p.id);
+          const cipher = stored.profileApiKeys?.[p.id];
+          const clean: ProviderProfile = {
+            id: p.id,
+            name: p.name,
+            provider: PROVIDERS.includes(p.provider) ? p.provider : DEFAULT_AI_CONFIG.provider,
+            model: typeof p.model === "string" ? p.model : "",
+            ...(typeof p.baseUrl === "string" && p.baseUrl ? { baseUrl: p.baseUrl } : {}),
+            ...(p.reasoningEffort && REASONING_EFFORTS.includes(p.reasoningEffort)
+              ? { reasoningEffort: p.reasoningEffort }
+              : {}),
+            ...(typeof p.temperature === "number" && Number.isFinite(p.temperature)
+              ? { temperature: p.temperature }
+              : {}),
+            ...(typeof p.maxOutputTokens === "number" && p.maxOutputTokens >= 512
+              ? { maxOutputTokens: p.maxOutputTokens }
+              : {}),
+            ...(typeof p.contextWindowTokens === "number" && p.contextWindowTokens >= 4000
+              ? { contextWindowTokens: p.contextWindowTokens }
+              : {}),
+            ...(typeof p.embeddingModel === "string" && p.embeddingModel
+              ? { embeddingModel: p.embeddingModel }
+              : {}),
+            ...(p.egressPolicy && EGRESS_POLICIES.includes(p.egressPolicy)
+              ? { egressPolicy: p.egressPolicy }
+              : {}),
+            ...(p.zdrConfirmed !== undefined ? { zdrConfirmed: Boolean(p.zdrConfirmed) } : {}),
+            ...(Array.isArray(p.fallbackProfileIds) && p.fallbackProfileIds.length > 0
+              ? { fallbackProfileIds: [...p.fallbackProfileIds] }
+              : {}),
+            ...(typeof p.updatedAt === "number" ? { updatedAt: p.updatedAt } : {}),
+            hasApiKey: Boolean(mem || cipher),
+            ...(mem ? { keyStorage: "session" as const } : cipher ? { keyStorage: "encrypted" as const } : {}),
+          };
+          return clean;
+        })
+      : undefined;
+
+    const activeProfileByRole: AiActiveProfileByRole | undefined =
+      stored.activeProfileByRole && typeof stored.activeProfileByRole === "object"
+        ? Object.fromEntries(
+            Object.entries(stored.activeProfileByRole).filter(
+              ([k, v]) => CANONICAL_ROLES.includes(k as AiProfileRole) && typeof v === "string" && v.length > 0,
+            ),
+          )
+        : undefined;
+
     return {
       enabled: stored.enabled === true,
       provider: PROVIDERS.includes(stored.provider)
@@ -316,7 +756,7 @@ export class AiConfigStore {
           ? stored.maxToolTurns
           : 20,
       reasoningEffort:
-        stored.reasoningEffort && ["low", "medium", "high"].includes(stored.reasoningEffort)
+        stored.reasoningEffort && REASONING_EFFORTS.includes(stored.reasoningEffort)
           ? stored.reasoningEffort
           : "medium",
       temperature:
@@ -324,6 +764,19 @@ export class AiConfigStore {
           ? stored.temperature
           : 0.2,
       useHermes: stored.useHermes === true,
+      ...(profiles ? { profiles } : {}),
+      ...(activeProfileByRole && Object.keys(activeProfileByRole).length > 0
+        ? { activeProfileByRole }
+        : {}),
+      egressPolicy:
+        stored.egressPolicy && EGRESS_POLICIES.includes(stored.egressPolicy)
+          ? stored.egressPolicy
+          : "standard",
+      zdrConfirmed: stored.zdrConfirmed === true,
+      piiScrubbing:
+        stored.piiScrubbing && PII_SCRUBBING_MODES.includes(stored.piiScrubbing)
+          ? stored.piiScrubbing
+          : "standard",
     };
   }
 

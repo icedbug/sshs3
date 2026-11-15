@@ -1,13 +1,15 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Terminal } from 'lucide-react';
+import { ShieldCheck, Terminal } from 'lucide-react';
 import { UnsplitButton } from './components/UnsplitButton';
 import { TabBar } from './components/TabBar';
 import { AiHubPanel } from './components/AiHub/AiHubPanel';
+import type { HubViewId } from './components/AiHub/panelShared';
 import type { AppTab } from './lib/tabs';
-import { useAppKeyboard } from './lib/useAppKeyboard';
+import { FOCUS_AI_COMPOSER_EVENT, useAppKeyboard } from './lib/useAppKeyboard';
 import { useTabActions } from './lib/useTabActions';
 import { useSessionPersistence } from './lib/useSessionPersistence';
 import { useTabTransfer } from './lib/useTabTransfer';
+import { useSshCa } from './lib/useSshCa';
 import { BrandLogo } from './components/BrandLogo';
 import { GlobalOverlays } from './components/GlobalOverlays';
 import { LandingView } from './components/LandingView';
@@ -33,31 +35,53 @@ import { hubRequest } from './lib/aiHub';
 import { LocalPerfBar } from './components/LocalPerfBar';
 import { DEFAULT_PERF_ITEMS } from '@shared/types/perf';
 import { installSpatialNavPointerReset } from './lib/spatialNavigation';
-import { FILEMANAGER_FOCUS_SIDE_EVENT } from './components/FileManager/types';
+import { FILEMANAGER_FOCUS_SIDE_EVENT, type SourceType } from './components/FileManager/types';
 import { FileEditorModal } from './components/FileManager/FileEditorModal';
-import { OPEN_EDITOR_TAB_EVENT, type OpenEditorTabDetail } from './lib/editorTabEvents';
+import { openEditorTab, OPEN_EDITOR_TAB_EVENT, type OpenEditorTabDetail } from './lib/editorTabEvents';
 import { createRendererLogger } from './lib/log';
 import { mergeSavedSettings, settingsPatchFromForm } from './lib/settingsSave';
 
 const log = createRendererLogger('App');
 
+interface TabAiDockState {
+  mode: 'closed' | 'panel' | 'hub';
+  width: number;
+  taskId?: string;
+  aiBoundPaneId?: string;
+}
+
+const LANDING_DOCK_KEY = '__landing__';
+
+function readSavedAiPanelWidth(): number {
+  try {
+    const saved = Number(localStorage.getItem('sshs3:ai-panel-width'));
+    if (Number.isFinite(saved) && saved >= 300 && saved <= 900) return saved;
+  } catch {
+    // Ignore storage errors
+  }
+  return 420;
+}
+
+function collectLeafIds(node?: PaneNode): string[] {
+  if (!node) return [];
+  if (node.type === 'leaf') return [node.id];
+  return node.children.flatMap((child) => collectLeafIds(child));
+}
+
 const AppContent: React.FC = () => {
   const confirm = useConfirm();
+  const sshCa = useSshCa();
   const isDemoQuery =
     typeof window !== "undefined" &&
     new URLSearchParams(window.location.search).get("demo") === "1";
-  const [aiMode, setAiMode] = useState<"closed" | "panel" | "hub">(
-    isDemoQuery ? "panel" : "closed",
-  );
-  const [aiPanelWidth, setAiPanelWidth] = useState<number>(() => {
-    try {
-      const saved = Number(localStorage.getItem("sshs3:ai-panel-width"));
-      if (Number.isFinite(saved) && saved >= 300 && saved <= 900) return saved;
-    } catch {
-      // Ignore storage errors
-    }
-    return 420;
-  });
+  const [defaultAiWidth, setDefaultAiWidth] = useState<number>(() => readSavedAiPanelWidth());
+  const [aiDockByTab, setAiDockByTab] = useState<Record<string, TabAiDockState>>(() => ({
+    [LANDING_DOCK_KEY]: {
+      mode: isDemoQuery ? 'panel' : 'closed',
+      width: readSavedAiPanelWidth(),
+    },
+  }));
+  const [broadcastTabs, setBroadcastTabs] = useState<Record<string, boolean>>({});
   const nativeHermes = window.multissh?.nativeHermes;
   const [nativeMode, setNativeMode] = useState<"closed" | "panel" | "full">("panel");
   useEffect(() => {
@@ -73,6 +97,58 @@ const AppContent: React.FC = () => {
   // review, section 7). Real saved sessions overwrite this once loaded.
   const [tabs, setTabs] = useState<AppTab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string>('');
+  const currentDockKey = activeTabId || LANDING_DOCK_KEY;
+  const currentAiDock: TabAiDockState = aiDockByTab[currentDockKey] ?? {
+    mode: isDemoQuery ? 'panel' : 'closed',
+    width: defaultAiWidth,
+  };
+  const aiMode = currentAiDock.mode;
+  const aiPanelWidth = currentAiDock.width;
+  const aiTaskId = currentAiDock.taskId ?? '';
+  const aiBoundPaneId = currentAiDock.aiBoundPaneId;
+
+  const updateTabAiDock = useCallback(
+    (tabKey: string, updater: (prev: TabAiDockState) => TabAiDockState) => {
+      setAiDockByTab((prev) => {
+        const existing = prev[tabKey] ?? {
+          mode: 'closed',
+          width: defaultAiWidth,
+        };
+        return {
+          ...prev,
+          [tabKey]: updater(existing),
+        };
+      });
+    },
+    [defaultAiWidth],
+  );
+
+  const setAiMode = useCallback(
+    (nextMode: 'closed' | 'panel' | 'hub') => {
+      updateTabAiDock(currentDockKey, (prev) => ({ ...prev, mode: nextMode }));
+    },
+    [currentDockKey, updateTabAiDock],
+  );
+
+  const setAiPanelWidth = useCallback(
+    (nextWidth: number) => {
+      setDefaultAiWidth(nextWidth);
+      updateTabAiDock(currentDockKey, (prev) => ({ ...prev, width: nextWidth }));
+      try {
+        localStorage.setItem('sshs3:ai-panel-width', String(nextWidth));
+      } catch {
+        // Ignore storage errors
+      }
+    },
+    [currentDockKey, updateTabAiDock],
+  );
+
+  const setAiTaskId = useCallback(
+    (nextTaskId: string) => {
+      updateTabAiDock(currentDockKey, (prev) => ({ ...prev, taskId: nextTaskId }));
+    },
+    [currentDockKey, updateTabAiDock],
+  );
   const [profilesModalOpen, setProfilesModalOpen] = useState(false);
   const [profilesModalTab, setProfilesModalTab] = useState<ConnectionManagerTab>('ssh');
   /** Opens the profile manager straight into the empty "new SSH profile" form (welcome screen shortcut). */
@@ -493,9 +569,10 @@ const AppContent: React.FC = () => {
     openTopLevelModal(() => setProfilesModalOpen(true));
   };
 
-  const handleOpenSettings = () => {
+  const handleOpenSettings = useCallback((category?: SettingsCategory) => {
+    if (category) setSettingsCategory(category);
     openTopLevelModal(() => setSettingsModalOpen(true));
-  };
+  }, [openTopLevelModal]);
 
   const handleRunGlobalAction = (id: GlobalActionId) =>
     runGlobalAction(id, {
@@ -600,6 +677,23 @@ const AppContent: React.FC = () => {
     prevModalOpenRef.current = anyTopLevelModalOpen;
   }, [anyTopLevelModalOpen, focusActiveTabContent]);
 
+  const handleFocusAiComposer = useCallback(() => {
+    if (nativeHermes) {
+      if (nativeMode === 'closed') {
+        void nativeHermes.set({ mode: 'panel' });
+      }
+    } else if (aiMode === 'closed') {
+      setAiMode('panel');
+    }
+    window.dispatchEvent(new CustomEvent(FOCUS_AI_COMPOSER_EVENT));
+    setTimeout(() => {
+      const el = document.querySelector<HTMLElement>(
+        '[data-testid="ai-composer"], .ai-composer textarea, [data-ai-composer="true"]'
+      );
+      el?.focus();
+    }, 30);
+  }, [aiMode, nativeHermes, nativeMode, setAiMode]);
+
   useAppKeyboard({
     tabs,
     activeTabId,
@@ -622,7 +716,47 @@ const AppContent: React.FC = () => {
     handleSelectPane,
     openShortcutsHelp,
     focusActiveTabContent,
+    onFocusAiComposer: handleFocusAiComposer,
+    onFocusTerminal: focusActiveTabContent,
   });
+
+  useEffect(() => {
+    const onOpenSettingsEvent = (e: Event) => {
+      const cat = (e as CustomEvent<{ category?: SettingsCategory }>).detail?.category;
+      handleOpenSettings(cat ?? 'security');
+    };
+    const onSettingsUpdatedEvent = (e: Event) => {
+      const detail = (e as CustomEvent<{ labsEnabled?: boolean; compactMode?: boolean }>).detail;
+      if (!detail) return;
+      setSettings((prev) => ({
+        ...prev,
+        ...(detail.labsEnabled !== undefined ? { labsEnabled: detail.labsEnabled } : {}),
+        ...(detail.compactMode !== undefined ? { compactMode: detail.compactMode } : {}),
+      }));
+    };
+    const onAiOpenDockSync = (e: Event) => {
+      const detail = (
+        e as CustomEvent<{ mode?: 'closed' | 'panel' | 'hub'; taskId?: string; sessionId?: string }>
+      ).detail;
+      if (!detail) return;
+      updateTabAiDock(currentDockKey, (prev) => ({
+        ...prev,
+        mode: detail.mode ?? (prev.mode === 'closed' ? 'panel' : prev.mode),
+        ...(detail.taskId ? { taskId: detail.taskId } : {}),
+        ...(detail.sessionId ? { aiBoundPaneId: detail.sessionId } : {}),
+      }));
+    };
+    window.addEventListener('sshs3:open-settings', onOpenSettingsEvent);
+    window.addEventListener('sshs3:settings-updated', onSettingsUpdatedEvent);
+    window.addEventListener('sshs3:ai-open', onAiOpenDockSync);
+    window.addEventListener('sshs3:ask-ai', onAiOpenDockSync);
+    return () => {
+      window.removeEventListener('sshs3:open-settings', onOpenSettingsEvent);
+      window.removeEventListener('sshs3:settings-updated', onSettingsUpdatedEvent);
+      window.removeEventListener('sshs3:ai-open', onAiOpenDockSync);
+      window.removeEventListener('sshs3:ask-ai', onAiOpenDockSync);
+    };
+  }, [currentDockKey, handleOpenSettings, updateTabAiDock]);
 
   // Forget the requested category once Settings closes so the next plain open starts on General.
   useEffect(() => {
@@ -683,6 +817,26 @@ const AppContent: React.FC = () => {
           />
         </div>
         <button
+          type="button"
+          data-testid="app-ssh-ca-indicator"
+          onClick={() => handleOpenSettings('security')}
+          title={
+            sshCa.status?.active
+              ? `SSH CA active (${sshCa.status.username || 'signed'})`
+              : 'Configure SSH CA authentication in Security settings'
+          }
+          className={`h-full shrink-0 px-2.5 text-xs font-medium border-l border-divider/40 transition-colors flex items-center gap-1.5 ${
+            sshCa.status?.active
+              ? 'text-emerald-400 bg-emerald-500/10 hover:bg-emerald-500/15'
+              : 'text-txt-muted hover:text-txt-primary hover:bg-app-surface-hover'
+          }`}
+        >
+          <ShieldCheck className="h-3.5 w-3.5" />
+          <span>{sshCa.status?.active ? `CA: ${sshCa.status.username || 'Active'}` : 'SSH CA'}</span>
+        </button>
+        <button
+          type="button"
+          data-testid="topbar-chat-toggle-btn"
           className={`h-full shrink-0 px-3 text-xs font-medium border-l border-divider/40 transition-colors flex items-center gap-1.5 ${
             (nativeHermes ? nativeMode !== "closed" : aiMode !== "closed")
               ? "bg-sky-500/15 text-sky-300"
@@ -766,6 +920,8 @@ const AppContent: React.FC = () => {
               setActiveTabId(newId);
             }}
             shortcuts={settings.shortcuts}
+            sshCaStatus={sshCa.status}
+            onOpenSettings={() => handleOpenSettings('security')}
           />
         )}
         {tabs.map((tab) => {
@@ -833,6 +989,24 @@ const AppContent: React.FC = () => {
                         <div className="flex items-center gap-1">
                           <button
                             type="button"
+                            data-testid={`broadcast-toggle-${tab.id}`}
+                            onClick={() =>
+                              setBroadcastTabs((prev) => ({
+                                ...prev,
+                                [tab.id]: !prev[tab.id],
+                              }))
+                            }
+                            className={`inline-flex items-center rounded border px-2 py-0.5 text-[10px] font-semibold transition-colors mr-1 cursor-pointer ${
+                              broadcastTabs[tab.id]
+                                ? 'border-amber-500/40 bg-amber-500/20 text-amber-300'
+                                : 'border-divider bg-app-surface text-txt-muted hover:text-txt-primary'
+                            }`}
+                            title="Broadcast keyboard input across panes in this tab"
+                          >
+                            {broadcastTabs[tab.id] ? 'Broadcast: ON' : 'Broadcast'}
+                          </button>
+                          <button
+                            type="button"
                             data-testid="split-view-ask-ai-btn"
                             title="Ask the assistant to compare the split terminal panes in this tab"
                             onClick={() =>
@@ -863,32 +1037,53 @@ const AppContent: React.FC = () => {
 
                     {/* Pane content */}
                     <div className="flex-1 min-h-0 relative">
-                      <PaneTreeView
-                        node={tab.paneTree}
-                        isActive={isActive}
-                        activePaneId={tab.activePaneId}
-                        totalPanes={totalPanes}
-                        settings={settings}
-                        platform={platform}
-                        onSelectPane={(paneId) => handleSelectPane(tab.id, paneId)}
-                        onSplitPane={(paneId, orientation) => handleSplitPane(tab.id, orientation, paneId)}
-                        onResizeSplit={(splitId, weights) => handleResizeSplit(tab.id, splitId, weights)}
-                        onClosePane={(paneId) => handleClosePane(tab.id, paneId)}
-                        zoomedPaneId={tab.zoomedPaneId}
-                        onToggleZoom={(paneId) => handleToggleZoom(tab.id, paneId)}
-                        onChangeConnection={(paneId) => setConnectTarget({ tabId: tab.id, paneId })}
-                        onOpenLocalTerminal={(paneId, shellType, wslDistro) =>
-                          handleOpenLocalTerminal({ tabId: tab.id, paneId }, shellType, wslDistro)
-                        }
-                        onCloseTab={() => handleCloseTab(tab.id)}
-                        onTitleChange={(paneId, title) => handlePaneTitleChange(tab.id, paneId, title)}
-                        onOpenRemotePath={handleOpenRemotePath}
-                        onOpenLocalPath={handleOpenLocalPath}
-                        onNavigateToTabBar={() => setTabBarFocused(true)}
-                        hoistLocalPerf={hoistLocalPerf}
-                        initialCwdPaneId={rootLeaf?.id}
-                        initialCwd={tab.initialCwd}
-                      />
+                      {(() => {
+                        const tabDock = aiDockByTab[tab.id];
+                        const tabBroadcast = Boolean(broadcastTabs[tab.id]);
+                        const tabLeafIds = collectLeafIds(tab.paneTree);
+                        const tabAiBoundPaneId =
+                          tabDock?.aiBoundPaneId ??
+                          (tabDock && tabDock.mode !== 'closed'
+                            ? (tab.activePaneId ?? rootLeaf?.id)
+                            : undefined);
+                        const tabPaneRoles: Record<string, 'observer' | 'peer' | 'broadcast'> | undefined = tabBroadcast
+                          ? Object.fromEntries(tabLeafIds.map((id) => [id, 'broadcast' as const]))
+                          : undefined;
+                        return (
+                          <PaneTreeView
+                            node={tab.paneTree}
+                            isActive={isActive}
+                            activePaneId={tab.activePaneId}
+                            totalPanes={totalPanes}
+                            settings={settings}
+                            platform={platform}
+                            onSelectPane={(paneId) => handleSelectPane(tab.id, paneId)}
+                            onSplitPane={(paneId, orientation) => handleSplitPane(tab.id, orientation, paneId)}
+                            onResizeSplit={(splitId, weights) => handleResizeSplit(tab.id, splitId, weights)}
+                            onClosePane={(paneId) => handleClosePane(tab.id, paneId)}
+                            zoomedPaneId={tab.zoomedPaneId}
+                            onToggleZoom={(paneId) => handleToggleZoom(tab.id, paneId)}
+                            onChangeConnection={(paneId) => setConnectTarget({ tabId: tab.id, paneId })}
+                            onOpenLocalTerminal={(paneId, shellType, wslDistro) =>
+                              handleOpenLocalTerminal({ tabId: tab.id, paneId }, shellType, wslDistro)
+                            }
+                            onCloseTab={() => handleCloseTab(tab.id)}
+                            onTitleChange={(paneId, title) => handlePaneTitleChange(tab.id, paneId, title)}
+                            onOpenRemotePath={handleOpenRemotePath}
+                            onOpenLocalPath={handleOpenLocalPath}
+                            onNavigateToTabBar={() => setTabBarFocused(true)}
+                            hoistLocalPerf={hoistLocalPerf}
+                            initialCwdPaneId={rootLeaf?.id}
+                            initialCwd={tab.initialCwd}
+                            broadcastEnabled={tabBroadcast}
+                            broadcastPaneIds={tabBroadcast ? tabLeafIds : undefined}
+                            observerMode={false}
+                            observerCount={0}
+                            paneRoles={tabPaneRoles}
+                            aiBoundPaneId={tabAiBoundPaneId}
+                          />
+                        );
+                      })()}
                     </div>
                   </div>
                 ) : tab.type === 'editor' ? (
@@ -990,6 +1185,31 @@ const AppContent: React.FC = () => {
           shortcuts={settings.shortcuts}
           onRunAction={handleRunGlobalAction}
           onConnectSystem={(members, source) => void handleConnectSystem(members, source)}
+          labsEnabled={Boolean(settings.labsEnabled)}
+          compactMode={Boolean(settings.compactMode)}
+          onSelectAiView={(view: HubViewId) => {
+            setAiMode('hub');
+            window.dispatchEvent(new CustomEvent('sshs3:ai-open', { detail: { mode: 'hub', view } }));
+          }}
+          onSelectAiTask={(taskId: string) => {
+            setAiTaskId(taskId);
+            setAiMode('panel');
+          }}
+          onSelectAgent={() => setAiMode('panel')}
+          onSelectKbPage={() => setAiMode('hub')}
+          onNewAiTask={() => {
+            setAiTaskId('');
+            setAiMode('panel');
+          }}
+          onToggleLabs={(next) => {
+            setSettings((prev) => ({ ...prev, labsEnabled: next }));
+            void saveSettingsPatch({ labsEnabled: next });
+            window.dispatchEvent(new CustomEvent('sshs3:labs-changed', { detail: { labsEnabled: next } }));
+          }}
+          onToggleCompactMode={(next) => {
+            setSettings((prev) => ({ ...prev, compactMode: next }));
+            void saveSettingsPatch({ compactMode: next });
+          }}
         />
       )}
 
@@ -1030,13 +1250,22 @@ const AppContent: React.FC = () => {
           mode={aiMode}
           setMode={setAiMode}
           width={aiPanelWidth}
-          onResizeWidth={(w) => {
-            setAiPanelWidth(w);
-            try {
-              localStorage.setItem("sshs3:ai-panel-width", String(w));
-            } catch {
-              // Ignore storage errors
-            }
+          onResizeWidth={setAiPanelWidth}
+          initialTaskId={aiTaskId}
+          onTaskChange={setAiTaskId}
+          boundTerminalId={aiBoundPaneId}
+          compactMode={Boolean(settings.compactMode)}
+          onOpenFileRef={(ref) => {
+            openEditorTab({
+              providerId: 'local',
+              sourceType: 'local' as SourceType,
+              entry: {
+                name: ref.path.split('/').pop() || ref.path,
+                path: ref.path,
+                isDirectory: false,
+                size: 0,
+              },
+            });
           }}
         />
       )}

@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { Columns2, Maximize2, Minimize2, RefreshCw, Rows2, X } from 'lucide-react';
+import { Columns2, Eye, Maximize2, Minimize2, Radio, RefreshCw, Rows2, Sparkles, X } from 'lucide-react';
 import { TerminalView } from './TerminalView';
 import { K8sLogView } from './K8sLogView';
 import { collectLeaves, findLeaf } from '../lib/paneTree';
@@ -39,6 +39,13 @@ export interface PaneTreeViewProps {
   onNavigateToTabBar?: () => void;
   /** Local shells share one perf bar in the tab header, so they skip their own bar and sampling. */
   hoistLocalPerf?: boolean;
+  /** Optional broadcast/observer/AI HUD state rendered as compact badges in the pane strip. */
+  broadcastEnabled?: boolean;
+  broadcastPaneIds?: ReadonlySet<string> | string[];
+  observerMode?: boolean | 'observer' | 'peer';
+  observerCount?: number;
+  paneRoles?: Record<string, 'observer' | 'peer' | 'broadcast'>;
+  aiBoundPaneId?: string;
 }
 
 interface PaneTreeLayoutProps extends PaneTreeViewProps {
@@ -126,29 +133,59 @@ const PaneTreeLayout: React.FC<PaneTreeLayoutProps> = (props) => {
   const { activePaneId, totalPanes } = props;
   const isSole = totalPanes === 1;
   const isFocused = activePaneId === node.id;
+  const leafMeta = node as PaneLeaf & {
+    broadcast?: boolean;
+    observer?: boolean;
+    sessionMode?: string;
+    observerCount?: number;
+  };
+  const paneRole = props.paneRoles?.[node.id];
+  const isBroadcast =
+    Boolean(leafMeta.broadcast) ||
+    paneRole === 'broadcast' ||
+    Boolean(
+      props.broadcastEnabled &&
+        (!props.broadcastPaneIds ||
+          (Array.isArray(props.broadcastPaneIds)
+            ? props.broadcastPaneIds.includes(node.id)
+            : props.broadcastPaneIds.has(node.id)))
+    );
+  const isObserver =
+    Boolean(leafMeta.observer) ||
+    leafMeta.sessionMode === 'observer' ||
+    paneRole === 'observer' ||
+    props.observerMode === true ||
+    props.observerMode === 'observer';
+  const effectiveObserverCount = leafMeta.observerCount ?? props.observerCount;
+  const isAiBound = props.aiBoundPaneId === node.id;
 
   return (
     <div
       data-testid={`terminal-pane-${node.id}`}
+      data-active={isFocused ? 'true' : 'false'}
       onMouseDownCapture={() => props.onSelectPane(node.id)}
-      className={`relative flex h-full w-full flex-col overflow-hidden transition-all duration-150 ${
+      className={`pane-leaf group/pane relative flex h-full w-full flex-col overflow-hidden transition-colors duration-150 ${
         isFocused && !isSole
-          ? 'ring-1 ring-inset ring-sky-500/60 shadow-[inset_0_0_12px_rgba(14,165,233,0.06)]'
-          : ''
+          ? 'pane-leaf-active border-l-2 border-l-sky-500 ring-1 ring-inset ring-sky-500/65 shadow-[inset_0_0_12px_rgba(14,165,233,0.06)]'
+          : isFocused
+            ? 'pane-leaf-active'
+            : ''
       }`}
     >
       <div
-        className={`flex h-6 shrink-0 items-center justify-between border-b px-2 text-xs transition-colors ${
+        data-testid={`pane-header-${node.id}`}
+        className={`pane-header flex h-6 shrink-0 items-center justify-between gap-1.5 border-b px-1.5 text-[11px] leading-none transition-colors ${
           isFocused && !isSole
-            ? 'border-sky-500/50 bg-sky-500/5 text-txt-primary font-medium'
+            ? 'border-sky-500/50 bg-sky-500/10 text-txt-primary font-medium'
             : 'border-border-subtle bg-app-surface text-txt-muted'
         }`}
       >
-        <div className="flex items-center min-w-0 mr-2">
+        <div className="flex min-w-0 flex-1 items-center gap-1.5">
           {isFocused && !isSole && (
-            <span className="relative flex h-2 w-2 mr-1.5 shrink-0">
-              <span className="relative inline-flex rounded-full h-2 w-2 bg-sky-500" />
-            </span>
+            <span
+              className="relative inline-flex h-1.5 w-1.5 shrink-0 rounded-full bg-sky-500"
+              aria-hidden="true"
+            />
           )}
           <span className="truncate font-mono">
             {(() => {
@@ -166,15 +203,51 @@ const PaneTreeLayout: React.FC<PaneTreeLayoutProps> = (props) => {
               return node.dynamicHost ? `${baseName} → ${node.dynamicHost}` : baseName;
             })()}
           </span>
+          {isBroadcast && (
+            <span
+              data-testid={`pane-broadcast-badge-${node.id}`}
+              className="pane-badge-broadcast inline-flex shrink-0 items-center gap-0.5 rounded bg-amber-500/15 px-1 py-0.5 text-[10px] font-medium text-amber-300 border border-amber-500/30"
+              title="Broadcast input enabled"
+            >
+              <Radio className="h-2.5 w-2.5" />
+              <span>Broadcast</span>
+            </span>
+          )}
+          {isObserver && (
+            <span
+              data-testid={`pane-observer-badge-${node.id}`}
+              className="pane-badge-observer inline-flex shrink-0 items-center gap-0.5 rounded bg-purple-500/15 px-1 py-0.5 text-[10px] font-medium text-purple-300 border border-purple-500/30"
+              title="Observer mode"
+            >
+              <Eye className="h-2.5 w-2.5" />
+              <span>Observer{effectiveObserverCount && effectiveObserverCount > 1 ? ` · ${effectiveObserverCount}` : ''}</span>
+            </span>
+          )}
+          {isAiBound && (
+            <span
+              data-testid={`pane-ai-badge-${node.id}`}
+              className="pane-badge-ai inline-flex shrink-0 items-center gap-0.5 rounded bg-emerald-500/15 px-1 py-0.5 text-[10px] font-medium text-emerald-300 border border-emerald-500/30"
+              title="AI assistant bound to this pane"
+            >
+              <Sparkles className="h-2.5 w-2.5" />
+              <span>AI</span>
+            </span>
+          )}
         </div>
-        <div className="flex items-center gap-0.5">
+        <div
+          className={`flex shrink-0 items-center gap-0.5 transition-opacity ${
+            isFocused || isSole
+              ? 'opacity-100'
+              : 'opacity-70 group-hover/pane:opacity-100 focus-within:opacity-100'
+          }`}
+        >
           <button
             aria-label="Change connection"
             type="button"
             title="Change connection"
             data-testid={`change-pane-${node.id}`}
             onClick={() => props.onChangeConnection(node.id)}
-            className="rounded p-1.5 hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
+            className="rounded p-1 hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
           >
             <RefreshCw className="h-3 w-3" />
           </button>
@@ -184,7 +257,7 @@ const PaneTreeLayout: React.FC<PaneTreeLayoutProps> = (props) => {
               title={`${props.zoomedPaneId === node.id ? 'Restore' : 'Zoom'} pane (${getShortcutKeys('zoomPane', props.settings.shortcuts)})`}
               data-testid={`zoom-pane-${node.id}`}
               onClick={() => props.onToggleZoom?.(node.id)}
-              className="rounded p-1.5 hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
+              className="rounded p-1 hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
             >
               {props.zoomedPaneId === node.id ? <Minimize2 className="h-3 w-3" /> : <Maximize2 className="h-3 w-3" />}
             </button>
@@ -195,7 +268,7 @@ const PaneTreeLayout: React.FC<PaneTreeLayoutProps> = (props) => {
             title="Split right"
             data-testid={`split-row-${node.id}`}
             onClick={() => props.onSplitPane(node.id, 'row')}
-            className="rounded p-1.5 hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
+            className="rounded p-1 hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
           >
             <Columns2 className="h-3 w-3" />
           </button>
@@ -205,7 +278,7 @@ const PaneTreeLayout: React.FC<PaneTreeLayoutProps> = (props) => {
             title="Split down"
             data-testid={`split-column-${node.id}`}
             onClick={() => props.onSplitPane(node.id, 'column')}
-            className="rounded p-1.5 hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
+            className="rounded p-1 hover:bg-app-surface-hover hover:text-txt-primary transition-colors"
           >
             <Rows2 className="h-3 w-3" />
           </button>
@@ -216,7 +289,7 @@ const PaneTreeLayout: React.FC<PaneTreeLayoutProps> = (props) => {
               title="Close this pane"
               data-testid={`close-pane-${node.id}`}
               onClick={() => props.onClosePane(node.id)}
-              className="rounded p-1.5 hover:bg-red-500/20 hover:text-red-400 transition-colors"
+              className="rounded p-1 hover:bg-red-500/20 hover:text-red-400 transition-colors"
             >
               <X className="h-3 w-3" />
             </button>

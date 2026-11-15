@@ -3,7 +3,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import os from 'node:os';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import {
   BaseStorageProvider,
@@ -73,6 +73,121 @@ async function spaceOf(dir: string): Promise<SpaceInfo | undefined> {
 /** /proc/self/mounts escapes space, tab, newline and backslash as octal (\040). */
 function unescapeMount(s: string): string {
   return s.replace(/\\([0-7]{3})/g, (_, oct: string) => String.fromCharCode(parseInt(oct, 8)));
+}
+
+/**
+ * Probes Windows drive roots in an isolated child process so offline network
+ * shares cannot block the main process's 4-thread libuv pool inside `statfs`.
+ */
+const WIN_STATFS_PROBE_SCRIPT = [
+  "const fs = require('node:fs/promises');",
+  'Promise.all(process.argv.slice(1).map(async (p) => {',
+  '  try {',
+  '    const st = await fs.statfs(p);',
+  '    if (st.blocks) process.stdout.write(JSON.stringify({ path: p, totalBytes: st.blocks * st.bsize, freeBytes: st.bavail * st.bsize }) + "\\n");',
+  '  } catch {',
+  '    // Offline or unreadable drive',
+  '  }',
+  '}));',
+].join('\n');
+
+async function getWindowsDriveCandidates(): Promise<Array<{ path: string; label: string }>> {
+  try {
+    const { stdout } = await execFileAsync('fsutil', ['fsinfo', 'drives'], {
+      timeout: STATFS_TIMEOUT_MS,
+      windowsHide: true,
+    });
+    const matches = stdout.match(/[A-Za-z]:\\/g);
+    if (matches && matches.length > 0) {
+      const seen = new Set<string>();
+      const drives: Array<{ path: string; label: string }> = [];
+      for (const m of matches) {
+        const upper = `${m[0].toUpperCase()}:\\`;
+        if (seen.has(upper)) continue;
+        seen.add(upper);
+        drives.push({ path: upper, label: `${upper[0]}:` });
+      }
+      return drives;
+    }
+  } catch {
+    // Fall back to probing all drive letters if fsutil is unavailable.
+  }
+  return Array.from({ length: 26 }, (_, i) => {
+    const letter = String.fromCharCode(65 + i);
+    return { path: `${letter}:\\`, label: `${letter}:` };
+  });
+}
+
+async function listWindowsVolumes(): Promise<VolumeInfo[]> {
+  const candidates = await getWindowsDriveCandidates();
+  if (candidates.length === 0) return [];
+  const labelByPath = new Map(candidates.map((c) => [c.path, c.label]));
+  const found = new Map<string, VolumeInfo>();
+
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    let buf = '';
+    const child = spawn(
+      process.execPath,
+      ['-e', WIN_STATFS_PROBE_SCRIPT, ...candidates.map((c) => c.path)],
+      {
+        env: {
+          ...process.env,
+          ELECTRON_RUN_AS_NODE: '1',
+          UV_THREADPOOL_SIZE: String(Math.max(4, candidates.length)),
+        },
+        stdio: ['ignore', 'pipe', 'ignore'],
+        windowsHide: true,
+      }
+    );
+
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    };
+
+    const timer = setTimeout(() => {
+      try {
+        child.kill();
+      } catch {
+        // Ignore if already exited.
+      }
+      finish();
+    }, STATFS_TIMEOUT_MS);
+
+    child.stdout?.on('data', (chunk: Buffer | string) => {
+      buf += chunk.toString();
+      const lines = buf.split(/\r?\n/);
+      buf = lines.pop() ?? '';
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const parsed = JSON.parse(line) as { path?: string; totalBytes?: number; freeBytes?: number };
+          if (parsed.path && typeof parsed.totalBytes === 'number' && typeof parsed.freeBytes === 'number') {
+            const label = labelByPath.get(parsed.path) ?? parsed.path.slice(0, 2);
+            found.set(parsed.path, {
+              path: parsed.path,
+              label,
+              totalBytes: parsed.totalBytes,
+              freeBytes: parsed.freeBytes,
+            });
+          }
+        } catch {
+          // Ignore malformed probe output.
+        }
+      }
+    });
+
+    child.on('error', finish);
+    child.on('close', finish);
+  });
+
+  return candidates.flatMap((c) => {
+    const info = found.get(c.path);
+    return info ? [info] : [];
+  });
 }
 
 /** Max concurrent stat() calls while listing a directory (bounded to stay clear of EMFILE). */
@@ -380,13 +495,11 @@ export class LocalStorageProvider extends BaseStorageProvider {
 
   /** Windows drive letters, or real mounted filesystems on Linux/macOS, each with free/total space. */
   async listVolumes(): Promise<VolumeInfo[]> {
-    let candidates: Array<{ path: string; label: string }> = [];
     if (process.platform === 'win32') {
-      candidates = Array.from({ length: 26 }, (_, i) => {
-        const letter = String.fromCharCode(65 + i);
-        return { path: `${letter}:\\`, label: `${letter}:` };
-      });
-    } else if (process.platform === 'darwin') {
+      return listWindowsVolumes();
+    }
+    let candidates: Array<{ path: string; label: string }> = [];
+    if (process.platform === 'darwin') {
       candidates = [{ path: '/', label: '/' }];
       try {
         for (const name of await fsp.readdir('/Volumes')) {

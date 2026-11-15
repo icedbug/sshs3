@@ -6,21 +6,88 @@ import type {
   TerminalSession,
 } from "../../../shared/types/aiHub";
 import {
+  buildHandshakeCommand,
   CommandFrames,
   commandEnvelope,
+  detectShellFromHint,
+  getShellAdapterCapabilities,
   lastVisibleLine,
+  parseOscMarkers,
   type CommandResult,
+  type Osc133Phase,
+  type ShellAdapterCapabilities,
 } from "./shellAdapters";
 import { boundedContext } from "./privacy";
+
+export interface ReconnectGraceMetadata {
+  reconnecting: boolean;
+  attempt: number;
+  maxAttempts: number;
+  startedAt: number;
+  graceUntil?: number;
+  previousState?: TerminalSession["state"];
+  previousShell?: ShellKind;
+  previousCwd?: string;
+  reason?: string;
+}
+
+export type TerminalObserverRole = "owner" | "peer" | "observer";
+
+export interface TerminalObserverParticipant {
+  clientId: string;
+  actor: string;
+  role: TerminalObserverRole;
+  joinedAt: number;
+}
+
+export interface TerminalObserverStatus {
+  sessionId: string;
+  active: boolean;
+  observerCount: number;
+  peerCount: number;
+  participants: TerminalObserverParticipant[];
+}
+
+export interface ActiveShellInfo {
+  sessionId: string;
+  label: string;
+  kind: TerminalSession["kind"];
+  state: TerminalSession["state"];
+  shell?: ShellKind;
+  adapter?: ShellAdapterCapabilities;
+  cwd?: string;
+  owner?: string;
+  reconnecting: boolean;
+  reconnect?: ReconnectGraceMetadata;
+  osc133: {
+    promptActive: boolean;
+    lastPhase?: Osc133Phase;
+    lastExitCode?: number;
+    lastSeenAt?: number;
+  };
+  observers: TerminalObserverStatus;
+  cols?: number;
+  rows?: number;
+  updatedAt: number;
+}
 
 /**
  * Whether what the terminal last showed looks like a shell waiting for a
  * command: a line ending in $, #, %, > or ❯, and not the prompt of a database
  * client, a REPL or a pager. Nothing shown yet counts as a prompt: a terminal
- * that was just opened.
+ * that was just opened. OSC 133 shell integration markers (A/B/D vs C) are
+ * honored when present.
  */
 export function atShellPrompt(tail: string | undefined): boolean {
   if (!tail) return true;
+  if (atSecretPrompt(tail)) return false;
+  const osc = parseOscMarkers(tail);
+  if (osc.osc133.length > 0) {
+    if (osc.lastPhase === "C") return false;
+    if (osc.lastPhase === "A" || osc.lastPhase === "B" || osc.lastPhase === "D") {
+      return true;
+    }
+  }
   // eslint-disable-next-line no-control-regex -- matching terminal escape sequences is the point
   const text = tail.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[()][A-Z0-9]/g, "");
   const last = text.split(/\r?\n|\r/).filter((l) => l.trim()).at(-1) ?? "";
@@ -28,7 +95,8 @@ export function atShellPrompt(tail: string | undefined): boolean {
   if (/^(mysql|mariadb|sqlite|redis|irb|pry|mongo|cqlsh|ftp|sftp|telnet|\(gdb\)|>>>|\.\.\.|In \[\d+\])/i.test(last.trim())) return false;
   if (/^[\w-]+=[#>]\s*$/.test(last.trim())) return false; // psql: postgres=#
   if (/(--More--|\(END\)|^:)\s*$/.test(last)) return false;
-  return /[$#%>❯»]\s*$/.test(last) || /^PS [A-Za-z]:\\.*>\s*$/.test(last.trim());
+  const trimmed = last.trim();
+  return /[$#%>❯»]\s*$/.test(last) || (trimmed.endsWith(">") && /PS [A-Za-z]:\\/.test(trimmed));
 }
 
 /** Whether the terminal is asking for a password, passphrase or token (and so not echoing what is typed). */
@@ -58,6 +126,15 @@ interface LiveTerminal {
   trimPostHandshakeNewline?: boolean;
   /** The last line of the shell's prompt, as the latest handshake saw it (only where output can arrive late). */
   promptLine?: string;
+  /** Latest OSC 133 shell integration prompt state. */
+  oscPromptActive?: boolean;
+  lastOscPhase?: Osc133Phase;
+  lastOscExitCode?: number;
+  lastOscAt?: number;
+  /** Reconnecting grace period metadata preserved across transient drops. */
+  reconnectGrace?: ReconnectGraceMetadata;
+  /** Active shared session participants (read-only observers vs interactive peers). */
+  observers: TerminalObserverParticipant[];
   pending?: {
     frames: CommandFrames;
     handshake: boolean;
@@ -272,6 +349,7 @@ export class TerminalRegistry extends EventEmitter {
       write,
       output: "",
       inputBuffer: "",
+      observers: [],
     });
     this.emit("changed");
   }
@@ -331,6 +409,19 @@ export class TerminalRegistry extends EventEmitter {
     if (clean) {
       s.tail = ((s.tail ?? "") + clean).slice(-240);
       s.fedAt = Date.now();
+      const osc = parseOscMarkers(clean);
+      if (osc.osc133.length > 0) {
+        s.lastOscPhase = osc.lastPhase;
+        s.oscPromptActive = osc.promptActive;
+        s.lastOscAt = Date.now();
+        if (osc.lastExitCode !== undefined) {
+          s.lastOscExitCode = osc.lastExitCode;
+        }
+      }
+      if (osc.cwd) {
+        s.view.cwd = osc.cwd;
+        s.view.updatedAt = Date.now();
+      }
     }
     this.detectHumanOutputFailure(id, s, clean);
     return clean;
@@ -450,11 +541,14 @@ export class TerminalRegistry extends EventEmitter {
       }
       return;
     }
-    // 1. Check OSC 133;D;<exitCode> shell integration marker
+    // 1. Check OSC 133;D[;<exitCode>] shell integration marker
     // eslint-disable-next-line no-control-regex -- matching terminal escape sequences is the point
-    const oscMatch = /\x1b\]133;D;([0-9]+)(?:\x07|\x1b\\)/.exec(chunk);
+    const oscMatch = /\x1b\]133;D([^\x07\x1b]*)(?:\x07|\x1b\\)/.exec(chunk);
     if (oscMatch) {
-      const code = Number(oscMatch[1]);
+      const rawParam = oscMatch[1].startsWith(";") ? oscMatch[1].slice(1).trim() : "";
+      const codeMatch = /^(-?[0-9]+)/.exec(rawParam);
+      const code = codeMatch ? Number(codeMatch[1]) : 0;
+      s.lastOscExitCode = code;
       if (code !== 0) {
         this.lastResolvedFailures.delete(id);
         this.lastFailures.set(id, {
@@ -571,22 +665,16 @@ export class TerminalRegistry extends EventEmitter {
     if (s.armFailedAt && Date.now() - s.armFailedAt < 5 * 60_000)
       throw new Error(s.armFailure ?? "This terminal did not answer like a shell a moment ago. Connect it at a prompt by hand.");
     // The handshake is typed into the terminal: only where a shell is waiting, never into a running program.
-    if (!atShellPrompt(s.tail))
+    const oscPromptReady = s.oscPromptActive === true && !atSecretPrompt(s.tail ?? "");
+    if (!oscPromptReady && !atShellPrompt(s.tail))
       throw new Error("This terminal is not at a shell prompt (a program is running in it, or it is waiting for input). Leave it at a prompt, or connect it by hand.");
-    const labelLower = s.view.label.toLowerCase();
-    const outLower = s.output.toLowerCase();
-    const inferredShell: ShellKind =
-      s.view.shell ??
-      fallbackShell ??
-      (s.view.kind === "local" && process.platform === "win32"
-        ? labelLower.includes("pwsh")
-          ? "pwsh"
-          : labelLower.includes("powershell") || outLower.includes("windows powershell") || /^ps [a-z]:\\/im.test(s.output)
-            ? "powershell"
-            : labelLower.includes("bash") || labelLower.includes("wsl")
-              ? "bash"
-              : "cmd"
-        : "bash");
+    const inferredShell = detectShellFromHint({
+      shell: s.view.shell,
+      fallback: fallbackShell,
+      label: s.view.label,
+      output: s.output,
+      kind: s.view.kind,
+    });
     const prevOwner = s.view.owner;
     s.view.owner = undefined;
     try {
@@ -651,13 +739,7 @@ export class TerminalRegistry extends EventEmitter {
       id,
       s.view.generation,
       "__handshake__",
-      shell === "cmd"
-        ? "ver >nul"
-        : shell === "powershell" || shell === "pwsh"
-          ? "$null"
-          : shell === "fish"
-            ? "true"
-            : ":",
+      buildHandshakeCommand(shell),
       10_000,
       true,
     );
@@ -807,9 +889,153 @@ export class TerminalRegistry extends EventEmitter {
     if (owner) this.emit("released", { ...s.view }, owner);
     s.view.owner = undefined;
     s.view.state = disconnected ? "disconnected" : "unknown";
+    if (disconnected) {
+      s.reconnectGrace = undefined;
+    }
     s.view.updatedAt = Date.now();
     if (owner) this.emit("invalidated", owner, reason);
     this.emit("changed");
+  }
+
+  /**
+   * Marks a terminal session as entering a transient "reconnecting" grace period,
+   * preserving shell/cwd metadata while aborting any in-flight command so callers
+   * never assume an interrupted command completed.
+   */
+  markReconnecting(
+    id: string,
+    meta: Partial<Omit<ReconnectGraceMetadata, "reconnecting">> = {},
+  ): ReconnectGraceMetadata {
+    const s = this.sessions.get(id);
+    if (!s) throw new Error("No such terminal. It may have been closed; pick one that is open.");
+    const previousState = s.reconnectGrace?.previousState ?? s.view.state;
+    const previousShell = s.reconnectGrace?.previousShell ?? s.view.shell;
+    const previousCwd = s.reconnectGrace?.previousCwd ?? s.view.cwd;
+    if (s.pending) {
+      this.invalidate(
+        id,
+        "Connection dropped; entering reconnect grace period. Inspect terminal state before resuming.",
+        false,
+      );
+    } else {
+      s.view.state = "unknown";
+      s.view.generation = crypto.randomUUID();
+      s.view.updatedAt = Date.now();
+    }
+    if (previousShell && !s.view.shell) s.view.shell = previousShell;
+    if (previousCwd && !s.view.cwd) s.view.cwd = previousCwd;
+    const grace: ReconnectGraceMetadata = {
+      reconnecting: true,
+      attempt: meta.attempt ?? (s.reconnectGrace ? s.reconnectGrace.attempt + 1 : 1),
+      maxAttempts: meta.maxAttempts ?? s.reconnectGrace?.maxAttempts ?? 3,
+      startedAt: meta.startedAt ?? s.reconnectGrace?.startedAt ?? Date.now(),
+      graceUntil: meta.graceUntil,
+      previousState,
+      previousShell,
+      previousCwd,
+      reason: meta.reason,
+    };
+    s.reconnectGrace = grace;
+    this.emit("reconnecting", id, { ...grace });
+    this.emit("changed");
+    return { ...grace };
+  }
+
+  /**
+   * Clears the reconnecting grace state once the underlying transport is restored,
+   * preserving shell/cwd metadata while requiring a fresh prompt verification before execution.
+   */
+  markReconnected(id: string): TerminalSession {
+    const s = this.sessions.get(id);
+    if (!s) throw new Error("No such terminal. It may have been closed; pick one that is open.");
+    const grace = s.reconnectGrace;
+    if (grace?.previousShell && !s.view.shell) s.view.shell = grace.previousShell;
+    if (grace?.previousCwd && !s.view.cwd) s.view.cwd = grace.previousCwd;
+    s.reconnectGrace = undefined;
+    s.view.state = "unknown";
+    s.view.generation = crypto.randomUUID();
+    s.view.updatedAt = Date.now();
+    this.emit("reconnected", id);
+    this.emit("changed");
+    return { ...s.view };
+  }
+
+  getReconnectMetadata(id: string): ReconnectGraceMetadata | undefined {
+    const grace = this.sessions.get(id)?.reconnectGrace;
+    return grace ? { ...grace } : undefined;
+  }
+
+  isReconnecting(id: string): boolean {
+    return Boolean(this.sessions.get(id)?.reconnectGrace?.reconnecting);
+  }
+
+  /**
+   * Updates the active observer/peer participant list for a shared terminal session.
+   */
+  setObserverStatus(
+    id: string,
+    participants: TerminalObserverParticipant[],
+  ): TerminalObserverStatus {
+    const s = this.sessions.get(id);
+    if (!s) throw new Error("No such terminal. It may have been closed; pick one that is open.");
+    s.observers = participants.map((p) => ({ ...p }));
+    const status = this.getObserverStatus(id);
+    this.emit("observersChanged", id, status);
+    this.emit("changed");
+    return status;
+  }
+
+  getObserverStatus(id: string): TerminalObserverStatus {
+    const s = this.sessions.get(id);
+    const participants = s ? s.observers.map((p) => ({ ...p })) : [];
+    const observerCount = participants.filter((p) => p.role === "observer").length;
+    const peerCount = participants.filter((p) => p.role === "peer").length;
+    return {
+      sessionId: id,
+      active: participants.length > 0,
+      observerCount,
+      peerCount,
+      participants,
+    };
+  }
+
+  /**
+   * Returns active shell capabilities, OSC 133 prompt state, reconnect grace status,
+   * and observer/peer sharing status for a terminal session.
+   */
+  getActiveShellInfo(id: string): ActiveShellInfo | undefined {
+    const s = this.sessions.get(id);
+    if (!s) return undefined;
+    return {
+      sessionId: id,
+      label: s.view.label,
+      kind: s.view.kind,
+      state: s.view.state,
+      ...(s.view.shell ? { shell: s.view.shell, adapter: getShellAdapterCapabilities(s.view.shell) } : {}),
+      ...(s.view.cwd ? { cwd: s.view.cwd } : {}),
+      ...(s.view.owner ? { owner: s.view.owner } : {}),
+      reconnecting: Boolean(s.reconnectGrace?.reconnecting),
+      ...(s.reconnectGrace ? { reconnect: { ...s.reconnectGrace } } : {}),
+      osc133: {
+        promptActive: Boolean(s.oscPromptActive),
+        ...(s.lastOscPhase !== undefined ? { lastPhase: s.lastOscPhase } : {}),
+        ...(s.lastOscExitCode !== undefined ? { lastExitCode: s.lastOscExitCode } : {}),
+        ...(s.lastOscAt !== undefined ? { lastSeenAt: s.lastOscAt } : {}),
+      },
+      observers: this.getObserverStatus(id),
+      ...(s.cols !== undefined ? { cols: s.cols } : {}),
+      ...(s.rows !== undefined ? { rows: s.rows } : {}),
+      updatedAt: s.view.updatedAt,
+    };
+  }
+
+  listActiveShellInfo(): ActiveShellInfo[] {
+    const out: ActiveShellInfo[] = [];
+    for (const id of this.sessions.keys()) {
+      const info = this.getActiveShellInfo(id);
+      if (info) out.push(info);
+    }
+    return out;
   }
 
   /**

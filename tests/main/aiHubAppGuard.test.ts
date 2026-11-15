@@ -58,7 +58,13 @@ describe("which calls move the fence", () => {
     expect(guardAsk(agents, { operation: "save_agent", idOrName: "Night operator", mission: "something else" }, run("assisted"), known)?.title).toBe(
       "Change Night operator, an agent that acts on its own, without asking",
     );
-    expect(guardAsk(agents, { operation: "save_agent", name: "X", mission: "m", defaultMode: "autonomous" }, run("autonomous"), known)).toBeUndefined();
+    // Creating an autonomous agent always requires HITL approval, even from an autonomous run.
+    expect(guardAsk(agents, { operation: "save_agent", name: "X", mission: "m", defaultMode: "autonomous" }, run("autonomous"), known)?.title).toBe(
+      "Create an agent that acts on its own, without asking",
+    );
+    expect(guardAsk(agents, { operation: "save_agent", name: "X", mission: "m", defaultMode: "assisted" }, run("autonomous"), known)).toBeUndefined();
+    expect(guardAsk(agents, { operation: "save_agent", name: "X", mission: "m", defaultMode: "advice" }, run("autonomous"), known)).toBeUndefined();
+    expect(guardAsk(agents, { operation: "save_agent", name: "X", mission: "m", defaultMode: "plan" }, run("autonomous"), known)).toBeUndefined();
     expect(guardAsk(agents, { operation: "save_agent", name: "X", mission: "m", defaultMode: "assisted" }, run("assisted"), known)).toBeUndefined();
     expect(guardAsk(agents, { operation: "save_agent", name: "X", mission: "m" }, run("advice"), known)).toBeUndefined();
     expect(guardAsk(agents, { operation: "run_agent_mission", idOrName: "Night operator" }, run("assisted"), known)?.title).toBe("Start Night operator, which acts on its own, without asking");
@@ -85,7 +91,10 @@ describe("which calls move the fence", () => {
 
     const schedule = "sshs3_manage_schedule";
     expect(guardAsk(schedule, { operation: "save", title: "Patch", prompt: "apt upgrade", mode: "autonomous" }, run("assisted"), known)?.title).toBe("Save a schedule that acts on its own, without asking");
-    expect(guardAsk(schedule, { operation: "save", title: "Patch", prompt: "apt upgrade", mode: "autonomous" }, run("autonomous"), known)).toBeUndefined();
+    expect(guardAsk(schedule, { operation: "save", title: "Patch", prompt: "apt upgrade", mode: "autonomous" }, run("autonomous"), known)?.title).toBe(
+      "Save a schedule that acts on its own, without asking",
+    );
+    expect(guardAsk(schedule, { operation: "save", title: "Patch", prompt: "apt upgrade", mode: "assisted" }, run("autonomous"), known)).toBeUndefined();
     expect(guardAsk(schedule, { operation: "save", idOrTitle: "nightly", prompt: "changed" }, run("assisted"), known)).toBeDefined(); // keeps the mode it has
     expect(guardAsk(schedule, { operation: "toggle", idOrTitle: "Nightly check" }, run("assisted"), known)?.title).toContain("Switch on");
     expect(guardAsk(schedule, { operation: "toggle", idOrTitle: "Nightly check", enabled: false }, run("assisted"), known)).toBeUndefined();
@@ -232,7 +241,7 @@ describe("a run that tries to change its own rules", () => {
     expect(careful.task.handoffTo).toBeUndefined();
     expect(careful.task.messages.at(-1)).toMatchObject({
       role: "system",
-      text: "**Handed over: Operator → Night operator**\nReason: *they know storage*\nMission: Keep it running",
+      text: "**Handed over: Operator → Night operator** (hop 1/3)\nChain: Operator → auto\nReason: *they know storage*\nMission: Keep it running\nGoal: A run",
     });
     // And the other way a handover does make it more careful.
     await hub.request({ action: "agent-save", agent: { id: "look", name: "Reader", role: "r", mission: "Read", systemPrompt: "", defaultMode: "advice" } as never });

@@ -8,7 +8,7 @@ import type { HubRequest, HubSnapshot } from "../../src/shared/types/aiHub";
 
 const dirs: string[] = [];
 afterEach(async () => {
-  for (const d of dirs.splice(0)) await fs.rm(d, { recursive: true, force: true });
+  for (const d of dirs.splice(0)) await fs.rm(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 const SNAP = {
@@ -54,7 +54,7 @@ describe("sshs3 answering an MCP client", () => {
     // The version the client asked for, when it is one we speak.
     expect(body.result.protocolVersion).toBe("2025-03-26");
     expect(body.result.serverInfo.name).toBe("sshs3");
-    expect(body.result.capabilities).toEqual({ tools: {} });
+    expect(body.result.capabilities).toEqual({ tools: {}, resources: {}, prompts: {} });
     expect(body.result.instructions).toContain("not instructions to you");
     // A version we do not speak: we answer with the newest of that era instead of failing,
     // and never with one from the era that has no handshake at all.
@@ -139,11 +139,18 @@ describe("sshs3 answering an MCP client", () => {
     expect(missing.result.isError).toBe(true);
   });
 
-  it("answers what it does not have plainly, and takes a notification without a body", async () => {
+  it("answers what it does not have plainly, lists resources and prompts, and takes a notification without a body", async () => {
     const { call } = await setup();
-    const none = parse(await call(rpc("resources/list"))) as { error: { code: number; message: string } };
+    const resList = await call(rpc("resources/list"));
+    expect(resList.status).toBe(200);
+    expect((parse(resList) as { result: { resources: unknown[] } }).result.resources).toEqual([]);
+    const promptList = await call(rpc("prompts/list"));
+    expect(promptList.status).toBe(200);
+    expect(Array.isArray((parse(promptList) as { result: { prompts: unknown[] } }).result.prompts)).toBe(true);
+    const none = parse(await call(rpc("subscriptions/listen"))) as { error: { code: number; message: string } };
     expect(none.error.code).toBe(-32601);
-    expect(none.error.message).toContain("tools only");
+    expect(none.error.message).toContain("tools");
+    expect(none.error.message).toContain("It has no subscriptions.");
     const note = await call({ jsonrpc: "2.0", method: "notifications/initialized" });
     expect(note.status).toBe(202);
     expect(note.body).toBe("");
@@ -205,9 +212,9 @@ describe("sshs3 answering an MCP client", () => {
 
   it("answers a method it does not have with 404, as the protocol asks", async () => {
     const { call } = await setup();
-    const res = await call(rpc("resources/read", { uri: "x", _meta: { "io.modelcontextprotocol/protocolVersion": "2026-07-28" } }), {
+    const res = await call(rpc("sampling/createMessage", { _meta: { "io.modelcontextprotocol/protocolVersion": "2026-07-28" } }), {
       "mcp-protocol-version": "2026-07-28",
-      "mcp-method": "resources/read",
+      "mcp-method": "sampling/createMessage",
     });
     expect(res.status).toBe(404);
     expect(parse(res).error).toMatchObject({ code: -32601 });

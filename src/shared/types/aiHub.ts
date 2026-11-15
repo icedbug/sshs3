@@ -1,9 +1,10 @@
-import type { AiConfigView, AiConfigUpdate, AiProvider } from "./ai";
+import type { AiConfigView, AiConfigUpdate, AiProfileRole, AiProvider, ProviderProfile } from "./ai";
 import type { WorkspaceActivityEvent } from "./teamVault";
 
 export type { WorkspaceActivityEvent };
 
-export type AgentMode = "advice" | "assisted" | "autonomous";
+export type AgentMode = "advice" | "plan" | "assisted" | "autonomous";
+export const AGENT_MODES: readonly AgentMode[] = ["advice", "plan", "assisted", "autonomous"];
 export type ShellKind =
   | "bash"
   | "zsh"
@@ -40,6 +41,8 @@ export interface ContextSource {
   imageDataUrl?: string;
   mimeType?: string;
   observedAt: number;
+  kind?: "terminal" | "file" | "kb" | "ticket" | "image" | "other";
+  tokenEstimate?: number;
 }
 export interface AgentMessage {
   id: string;
@@ -120,6 +123,10 @@ export interface AgentToolRecord {
   input: string;
   output: string;
   at: number;
+  durationMs?: number;
+  exitCode?: number;
+  target?: string;
+  ok?: boolean;
 }
 /** What a person says should happen when a test case is run. */
 export interface EvalExpectation {
@@ -176,10 +183,34 @@ export interface EvalCase {
 
 export type CommandRiskLevel = "safe" | "modify" | "destructive";
 
+export interface ClusterSafetyPolicy {
+  maxMode?: AgentMode;
+  requiredApprovals?: number;
+  requireCheckAndRollback?: boolean;
+  frozenUntil?: number;
+}
+
 export interface SafetyPolicyConfig {
   autoApproveSafeReadOnly: boolean;
   requireApprovalOnProdTags: boolean;
   blockDestructiveWithoutConfirm: boolean;
+  requirePeerApprovalOnProd?: boolean;
+  commandAllowPrefixes?: string[];
+  clusterPolicies?: Record<string, ClusterSafetyPolicy>;
+}
+
+export interface AgentChangeApproval {
+  actor: string;
+  actorId?: string;
+  at: number;
+  allowed: boolean;
+  note?: string;
+}
+
+export interface AgentChangeStructuredCheck {
+  regex?: string;
+  maxNumber?: number;
+  equals?: string;
 }
 
 export interface AgentChange {
@@ -250,6 +281,24 @@ export interface AgentChange {
   hiddenValues?: boolean;
   /** sha256 of the exact command that runs, so that what was approved can be matched exactly. */
   commandHash?: string;
+  /** Hash of the file contents before the change, for safe checkpoint restoration. */
+  beforeHash?: string;
+  /** Preview output from a dry-run / preflight execution (e.g., kubectl diff, terraform plan, EXPLAIN). */
+  dryRunOutput?: string;
+  /** Human-readable blast radius summary (affected resources, nodes, row estimates). */
+  blastRadius?: string;
+  /** Conversation turn index in which this change was proposed. */
+  turnIndex?: number;
+  /** Individual approval/denial votes when multi-party / peer approval is required. */
+  approvals?: AgentChangeApproval[];
+  /** Number of distinct approvals required before execution. */
+  requiredApprovals?: number;
+  /** Read-only preflight snapshot captured immediately prior to execution. */
+  preflightSnapshot?: string;
+  /** Idempotency key to prevent duplicate execution across retries/reconnects. */
+  idempotencyKey?: string;
+  /** Structured assertion for verifying post-change command output. */
+  structuredCheck?: AgentChangeStructuredCheck;
   at: number;
 }
 export interface AgentTask {
@@ -316,9 +365,21 @@ export interface AgentTask {
    * gives it the same budget again; cleared when the next run starts.
    */
   budgetStop?: { kind: "commands" | "minutes"; limit: number; at: number };
-  usage?: { inputTokens: number; outputTokens: number; costUsd?: number };
+  usage?: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens?: number;
+    cacheCreationTokens?: number;
+    costUsd?: number;
+  };
   /** What the run in progress has spent so far, not yet in `usage` (added there when it ends). */
-  runUsage?: { inputTokens: number; outputTokens: number };
+  runUsage?: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens?: number;
+    cacheCreationTokens?: number;
+    costUsd?: number;
+  };
   /** How much the model was sent at its last call in this conversation: how full its window was. Absent before the first run. */
   contextTokens?: number;
   verification: "not-verified" | "verified" | "incomplete";
@@ -355,7 +416,67 @@ export interface AgentTask {
   model?: string;
   /** Set on a background run that is the second attempt, on the main model, after the fast model failed. */
   mainModelOnly?: boolean;
+  /** Parent task id when this task was spawned as a subagent/investigator or forked from another task. */
+  parentTaskId?: string;
+  /** Message id in the parent task from which this conversation was forked. */
+  forkedFromMessageId?: string;
+  /** All terminal recording ids associated with this conversation across reconnects/resumes. */
+  recordingIds?: string[];
+  /** True when untrusted external input or unverified KB/MCP output has entered this task's context. */
+  tainted?: boolean;
+  /** Session-scoped normalized command prefixes explicitly allowed by the user for this task. */
+  sessionAllowPrefixes?: string[];
+  /** Ordered list of agent ids/names that handled this task across handoffs (for loop & hop guards). */
+  handoffChain?: string[];
 }
+
+export type MemoryScope =
+  | "workspace"
+  | "workspace:all"
+  | "personal"
+  | `server:${string}`
+  | `cluster:${string}`
+  | `target:${string}`
+  | `tag:${string}`
+  | `env:${string}`;
+
+export type MemoryScopeKind =
+  | "workspace"
+  | "workspace:all"
+  | "personal"
+  | "server"
+  | "cluster"
+  | "target"
+  | "tag"
+  | "env"
+  | "unknown";
+
+/** Parse a memory scope string (`workspace`, `personal`, `server:...`, `cluster:...`, `target:...`, `tag:...`, `env:...`). */
+export function parseMemoryScope(scope: string): { kind: MemoryScopeKind; value?: string } {
+  const trimmed = scope.trim();
+  const lower = trimmed.toLowerCase();
+  if (lower === "workspace" || lower === "workspace:all" || lower === "personal") {
+    return { kind: lower };
+  }
+  const colon = trimmed.indexOf(":");
+  if (colon > 0) {
+    const prefix = lower.slice(0, colon);
+    const value = trimmed.slice(colon + 1).trim();
+    if (prefix === "server" || prefix === "cluster" || prefix === "target" || prefix === "tag" || prefix === "env") {
+      return { kind: prefix, value };
+    }
+  }
+  return { kind: "unknown", value: trimmed || undefined };
+}
+
+/** Build a canonical prefixed memory scope string. */
+export function formatMemoryScope(
+  kind: "server" | "cluster" | "target" | "tag" | "env",
+  value: string,
+): MemoryScope {
+  return `${kind}:${value.trim()}`;
+}
+
 export interface MemoryEntry {
   id: string;
   kind: "memory" | "skill";
@@ -388,6 +509,22 @@ export interface MemoryEntry {
   updatedAt: number;
   /** The `updatedAt` of the version this edit started from: a teammate's removal after it wins over the edit. */
   baseAt?: number;
+  /** Timestamp when this memory/skill was last verified against live telemetry or execution. */
+  lastVerifiedAt?: number;
+  /** Reason this memory was flagged as potentially stale (e.g. facts drift). */
+  staleReason?: string;
+  /** Optional expiration timestamp after which the memory should be re-verified. */
+  validUntil?: number;
+  /** Parameterized command template for Voyager-style executable skills. */
+  commandTemplate?: string;
+  /** Preconditions that should hold before running `commandTemplate`. */
+  preconditions?: string[];
+  /** Read-only command used to verify the skill's outcome. */
+  verifyCommand?: string;
+  /** True when the procedure has been proven in a verified run. */
+  proven?: boolean;
+  /** Trust provenance of this entry. */
+  sourceTrust?: "trusted" | "untrusted" | "human";
 }
 
 /**
@@ -661,6 +798,11 @@ export interface InventoryEntry {
   detail: string;
   observedAt: number;
 }
+export interface ScheduleEventTrigger {
+  kind: "facts_drift" | "unreachable" | "alert";
+  cooldownMinutes?: number;
+}
+
 export interface AgentSchedule {
   id: string;
   title: string;
@@ -678,6 +820,20 @@ export interface AgentSchedule {
   maxMinutes: number;
   lastStatus?: string;
   lastTaskId?: string;
+  /** Optional 5-field cron expression (takes precedence over `intervalMinutes` when set). */
+  cron?: string;
+  /** IANA timezone name for evaluating `cron` (e.g. `Europe/Stockholm`, `UTC`). */
+  timezone?: string;
+  /** Suppress notifications/history noise when the run answers with the quiet sentinel (`HEARTBEAT_OK`). */
+  quietSentinel?: boolean;
+  /** What to do when scheduled runs were missed while offline. */
+  missedPolicy?: "skip" | "run_once";
+  /** Optional event-driven trigger in addition to or instead of polling. */
+  eventTrigger?: ScheduleEventTrigger;
+  /** Optional deterministic runbook id invoked by this schedule. */
+  runbookId?: string;
+  /** Short summary of the latest schedule execution. */
+  lastRunSummary?: string;
 }
 export interface HubPreferences {
   background: boolean;
@@ -898,6 +1054,20 @@ export interface WorkTicketComment {
   text: string;
 }
 
+export interface TargetSelector {
+  tags?: string[];
+  cluster?: string;
+  glob?: string;
+  serverIds?: string[];
+}
+
+export interface CorrelatedAlertRef {
+  fingerprint?: string;
+  summary: string;
+  at: number;
+  severity?: string;
+}
+
 /**
  * One piece of work on the team's board. With a team bucket the board is
  * shared; whoever's app is running takes a ticket by claiming it.
@@ -966,6 +1136,14 @@ export interface WorkTicket {
   baseAt?: number;
   /** When each field was last changed: a merge keeps two people's changes of different fields. */
   fieldAt?: Record<string, number>;
+  /** Synced investigation hypotheses recorded while working this ticket. */
+  hypotheses?: AgentHypothesis[];
+  /** Correlated alerts grouped into this incident ticket. */
+  correlatedAlerts?: CorrelatedAlertRef[];
+  /** Optional deterministic runbook id attached to this ticket. */
+  runbookId?: string;
+  /** Optional fleet target selector for multi-server execution. */
+  targetSelector?: TargetSelector;
 }
 
 /** Tokens an agent has spent on tickets in one calendar month (`YYYY-MM`). */
@@ -973,6 +1151,7 @@ export interface AgentUsage {
   month: string;
   tokens: number;
   runs: number;
+  costUsd?: number;
 }
 
 export interface WorkforceTemplateSummary {
@@ -993,6 +1172,21 @@ export interface McpToolSummary {
    */
   readOnly?: boolean;
 }
+export type McpToolPolicy = "allow" | "ask" | "deny";
+
+export interface McpOAuthConfig {
+  enabled?: boolean;
+  clientId?: string;
+  scopes?: string[];
+  connectedAt?: number;
+}
+
+/**
+ * A system message that is part of what the model is given (a summary of a compacted conversation, a
+ * handoff packet). Other system messages are notes for the person and are never sent to the model.
+ */
+export const CONTEXT_NOTE_PREFIX = "[sshs3 context] ";
+
 export interface McpServerConfig {
   id: string;
   name: string;
@@ -1007,6 +1201,70 @@ export interface McpServerConfig {
   lastError?: string;
   lastTestedAt?: number;
   discoveredTools?: McpToolSummary[];
+  updatedAt?: number;
+  /** Per-tool execution policy overrides (`allow`, `ask`, `deny`). */
+  toolPolicies?: Record<string, McpToolPolicy>;
+  /** Whether to honor the server's `readOnlyHint` annotation without prompting. */
+  trustReadOnlyHint?: boolean;
+  /** OAuth 2.1 client connection metadata for HTTP MCP servers. */
+  oauth?: McpOAuthConfig;
+}
+
+export interface RunbookInputField {
+  name: string;
+  label?: string;
+  type: "string" | "number" | "boolean" | "enum";
+  required?: boolean;
+  defaultValue?: string | number | boolean;
+  options?: string[];
+  description?: string;
+}
+
+export interface RunbookStep {
+  id: string;
+  title?: string;
+  kind: "command" | "check" | "ai_diagnose" | "approval_gate";
+  command?: string;
+  expected?: string;
+  prompt?: string;
+  onSuccess?: string;
+  onFailure?: string;
+  continueOnError?: boolean;
+  timeoutSeconds?: number;
+}
+
+/** Deterministic + AI-assisted operational runbook template. */
+export interface RunbookTemplate {
+  id: string;
+  name: string;
+  description?: string;
+  inputs: RunbookInputField[];
+  steps: RunbookStep[];
+  targetSelector?: TargetSelector;
+  dispatchStrategy?: "sequential" | "parallel" | "canary_then_rolling";
+  maxConcurrency?: number;
+  author?: string;
+  createdAt?: number;
+  updatedAt?: number;
+}
+
+export type WorkspaceRuleScope = "global" | "env" | "tag" | "cluster" | "server";
+export type WorkspaceRuleActivation = "always" | "auto" | "agent-requested" | "manual";
+
+/** Cascading scoped workspace instruction rule (`AGENTS.md` / scoped policy rule). */
+export interface WorkspaceRule {
+  id: string;
+  name: string;
+  scope: WorkspaceRuleScope;
+  scopeValue?: string;
+  activation: WorkspaceRuleActivation;
+  description?: string;
+  body: string;
+  applyToReadOnly?: boolean;
+  enabled?: boolean;
+  priority?: number;
+  author?: string;
+  createdAt?: number;
   updatedAt?: number;
 }
 export interface KbChunk {
@@ -1393,6 +1651,14 @@ export interface HubSnapshot {
   safetyPolicyChanged?: { by: string; at: number };
   pendingLayoutEvent?: WorkspaceLayoutEvent;
   selfLearning?: SelfLearningStatus;
+  /** Per-inbox-item snooze/acknowledge metadata keyed by `InboxItem.id`. */
+  inboxState?: Record<string, { snoozedUntil?: number; acknowledgedAt?: number }>;
+  /** True when autonomous workforce ticket execution is paused globally. */
+  workforcePaused?: boolean;
+  /** Saved deterministic + AI runbook templates. */
+  runbooks?: RunbookTemplate[];
+  /** Cascading workspace instruction rules. */
+  rules?: WorkspaceRule[];
   contextBudget?: {
     contextWindowTokens: number;
     terminalContextChars: number;
@@ -1746,6 +2012,33 @@ export type HubRequest =
    * desktop app confirms with the user and relaunches itself; the web server refuses (set at server start).
    */
   | { action: "demo-mode-toggle"; enabled: boolean }
+  | { action: "restore-checkpoint"; taskId: string; changeId: string; force?: boolean }
+  | { action: "rollback-change"; taskId: string; changeId: string; verify?: boolean }
+  | { action: "task-fork"; taskId: string; fromMessageId?: string; title?: string; mode?: AgentMode }
+  | { action: "compact-task"; taskId: string; focus?: string }
+  | { action: "snooze-inbox"; itemId: string; until?: number; durationMinutes?: number }
+  | { action: "ack-inbox"; itemId: string; acknowledged?: boolean }
+  | { action: "promote-eval"; taskId: string; title?: string; fromMessageId?: string }
+  | { action: "rule-save"; rule: Omit<WorkspaceRule, "id" | "updatedAt"> & { id?: string } }
+  | { action: "rule-delete"; id: string }
+  | { action: "runbook-save"; runbook: Omit<RunbookTemplate, "id" | "updatedAt"> & { id?: string } }
+  | { action: "runbook-delete"; id: string }
+  | {
+      action: "runbook-run";
+      id: string;
+      inputs?: Record<string, string | number | boolean>;
+      targetSelector?: TargetSelector;
+      dryRun?: boolean;
+    }
+  | {
+      action: "profile-save";
+      profile: Omit<ProviderProfile, "id" | "updatedAt"> & { id?: string };
+      apiKey?: string | null;
+      activeRole?: AiProfileRole;
+    }
+  | { action: "profile-delete"; id: string }
+  | { action: "mcp-tool-policy"; serverId: string; toolName: string; policy: McpToolPolicy }
+  | { action: "workforce-pause"; paused: boolean; reason?: string }
   | { action: "restore-builtins" }
   | { action: "inventory-refresh" }
   | { action: "forget-history" }

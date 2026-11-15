@@ -2,6 +2,7 @@ import type {
   AgentMode,
   CommandRiskLevel,
   SafetyPolicyConfig,
+  ShellKind,
 } from "../../../shared/types/aiHub";
 
 /**
@@ -37,6 +38,20 @@ export interface CommandRiskAnalysis {
   riskLevel: CommandRiskLevel;
   riskReason: string;
   parsedSubcommands: string[];
+  /** True when a command reads sensitive credential/key/secret paths and must not auto-approve silently. */
+  sensitiveRead?: boolean;
+  /** Sensitive paths detected in read/inspect arguments or input redirections. */
+  sensitivePaths?: string[];
+}
+
+export interface AnalyzeCommandOptions {
+  shellKind?: ShellKind;
+}
+
+export interface DryRunPreview {
+  tool: string;
+  command: string;
+  description: string;
 }
 
 export const DEFAULT_SAFETY_POLICY: SafetyPolicyConfig = {
@@ -48,6 +63,10 @@ export const DEFAULT_SAFETY_POLICY: SafetyPolicyConfig = {
 /** Nested deeper than this, a command is not read further: it is treated as unknown, never as safe. */
 const MAX_DEPTH = 6;
 const TOO_DEEP = "\u0000too-deep";
+
+const isPowerShellKind = (kind?: ShellKind): boolean =>
+  kind === "powershell" || kind === "pwsh";
+const isCmdKind = (kind?: ShellKind): boolean => kind === "cmd";
 
 /** Reads to the bracket that closes the one at `start` (which is just past an opening `(`). Quotes are followed. */
 function closeParen(text: string, start: number): number {
@@ -70,6 +89,33 @@ function closeParen(text: string, start: number): number {
   return text.length;
 }
 
+/** Closes `(` or `{` in PowerShell, respecting backtick escapes and PowerShell single/double quotes. */
+function closePowerShellDelim(text: string, start: number, open: "(" | "{", close: ")" | "}"): number {
+  let depth = 1;
+  let single = false;
+  let double = false;
+  for (let j = start; j < text.length; j++) {
+    const c = text[j];
+    if (c === "`" && !single) {
+      j++;
+      continue;
+    }
+    if (c === "'" && !double) {
+      if (single && text[j + 1] === "'") {
+        j++;
+        continue;
+      }
+      single = !single;
+    } else if (c === '"' && !single) {
+      double = !double;
+    } else if (!single && !double) {
+      if (c === open) depth++;
+      else if (c === close && --depth === 0) return j;
+    }
+  }
+  return text.length;
+}
+
 /** Which of a line's commands read from the command before them (`a | b`), and which are also written without one. */
 interface PipeUse {
   fed: Set<string>;
@@ -80,10 +126,21 @@ interface PipeUse {
  * The simple commands a command line is made of, as written, plus everything
  * that runs inside them (substitutions), each as a command of its own.
  */
-export function splitShellAstSegments(command: string, depth = 0, pipes?: PipeUse): string[] {
+export function splitShellAstSegments(
+  command: string,
+  depth = 0,
+  pipes?: PipeUse,
+  shellKind?: ShellKind,
+): string[] {
   const text = (command ?? "").trim();
   if (!text) return [];
   if (depth > MAX_DEPTH) return [TOO_DEEP];
+  if (isPowerShellKind(shellKind)) {
+    return splitPowerShell(text, depth, pipes, shellKind);
+  }
+  if (isCmdKind(shellKind)) {
+    return splitCmd(text, depth, pipes);
+  }
   const bash = splitAs(text, depth, true, pipes);
   // Shells differ on two things: whether `#` starts a comment (not in an interactive zsh) and whether
   // $'…' is a quoting of its own (not in dash). Where a line has either, it is read both ways and
@@ -92,6 +149,250 @@ export function splitShellAstSegments(command: string, depth = 0, pipes?: PipeUs
   if (!/#|\$'/.test(text)) return bash;
   for (const other of splitAs(text, depth, false)) if (!bash.includes(other)) bash.push(other);
   return bash;
+}
+
+function splitPowerShell(
+  text: string,
+  depth: number,
+  pipes?: PipeUse,
+  shellKind: ShellKind = "powershell",
+): string[] {
+  const segments: string[] = [];
+  const inner: string[] = [];
+  let current = "";
+  let single = false;
+  let double = false;
+  let afterPipe = false;
+
+  const cut = (): void => {
+    const trimmed = current.trim();
+    if (trimmed) {
+      segments.push(trimmed);
+      (afterPipe ? pipes?.fed : pipes?.bare)?.add(trimmed);
+    }
+    current = "";
+  };
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    const next = text[i + 1];
+
+    // PowerShell backtick escape outside single quotes
+    if (ch === "`" && !single) {
+      current += ch + (next ?? "");
+      i++;
+      continue;
+    }
+
+    if (single) {
+      if (ch === "'") {
+        if (next === "'") {
+          current += "''";
+          i++;
+          continue;
+        }
+        single = false;
+      }
+      current += ch;
+      continue;
+    }
+
+    // PowerShell block comment <# ... #>
+    if (!double && ch === "<" && next === "#") {
+      const end = text.indexOf("#>", i + 2);
+      i = end < 0 ? text.length : end + 1;
+      continue;
+    }
+
+    // PowerShell line comment # ...
+    if (!double && ch === "#" && (i === 0 || /[\s;|&({]/.test(text[i - 1]))) {
+      while (i + 1 < text.length && text[i + 1] !== "\n") i++;
+      continue;
+    }
+
+    // PowerShell here-strings: @' ... '@ and @" ... "@
+    if (!double && ch === "@" && (next === "'" || next === '"')) {
+      const quoteChar = next;
+      const lineEnd = text.indexOf("\n", i + 2);
+      if (lineEnd >= 0 && /^[ \t\r]*$/.test(text.slice(i + 2, lineEnd))) {
+        const closeNeedle = `\n${quoteChar}@`;
+        const closeIdx = text.indexOf(closeNeedle, lineEnd);
+        const endPos = closeIdx >= 0 ? closeIdx + closeNeedle.length : text.length;
+        const body = text.slice(lineEnd + 1, closeIdx >= 0 ? closeIdx : text.length);
+        if (quoteChar === '"') {
+          // Expandable here-string: extract $(...) subexpressions
+          for (let k = 0; k < body.length; k++) {
+            if (body[k] === "`") {
+              k++;
+              continue;
+            }
+            if (body[k] === "$" && body[k + 1] === "(") {
+              const subEnd = closePowerShellDelim(body, k + 2, "(", ")");
+              inner.push(body.slice(k + 2, subEnd));
+              k = subEnd;
+            }
+          }
+        }
+        current += text.slice(i, endPos);
+        i = endPos - 1;
+        continue;
+      }
+    }
+
+    if (ch === "'" && !double) {
+      single = true;
+      current += ch;
+      continue;
+    }
+
+    if (ch === '"') {
+      double = !double;
+      current += ch;
+      continue;
+    }
+
+    // Subexpressions $( ... ) inside or outside double quotes, and @( ... ) outside quotes
+    if ((ch === "$" || (!double && ch === "@")) && next === "(") {
+      const end = closePowerShellDelim(text, i + 2, "(", ")");
+      inner.push(text.slice(i + 2, end));
+      current += text.slice(i, end + 1);
+      i = end;
+      continue;
+    }
+
+    // Scriptblock { ... } outside double quotes (not ${var})
+    if (!double && ch === "{" && text[i - 1] !== "$") {
+      const end = closePowerShellDelim(text, i + 1, "{", "}");
+      inner.push(text.slice(i + 1, end));
+      current += text.slice(i, end + 1);
+      i = end;
+      continue;
+    }
+
+    if (!double) {
+      if ((ch === "&" && next === "&") || (ch === "|" && next === "|")) {
+        cut();
+        afterPipe = false;
+        i++;
+        continue;
+      }
+      if (ch === ";" || ch === "|" || ch === "\n" || ch === "\r") {
+        cut();
+        afterPipe = ch === "|";
+        continue;
+      }
+      // Single & in PowerShell: call operator when starting a command, background operator at tail,
+      // or part of redirection (*>&1, 2>&1).
+      if (ch === "&") {
+        if (text[i - 1] === ">" || next === ">") {
+          current += ch;
+          continue;
+        }
+        const trimmedSoFar = current.trim();
+        if (!trimmedSoFar) {
+          // Call operator at start of command: keep with the segment so judgePowerShell inspects it.
+          current += ch;
+          continue;
+        }
+        // Trailing background & or separator
+        cut();
+        afterPipe = false;
+        continue;
+      }
+    }
+
+    current += ch;
+  }
+
+  cut();
+  for (const sub of inner) {
+    for (const child of splitShellAstSegments(sub, depth + 1, undefined, shellKind)) {
+      if (!segments.includes(child)) segments.push(child);
+    }
+  }
+  return segments;
+}
+
+function splitCmd(text: string, depth: number, pipes?: PipeUse): string[] {
+  const segments: string[] = [];
+  const inner: string[] = [];
+  let current = "";
+  let double = false;
+  let afterPipe = false;
+
+  const cut = (): void => {
+    const trimmed = current.trim();
+    if (trimmed) {
+      // Ignore REM and :: comments
+      if (!/^(?:rem(?:\s|$)|::)/i.test(trimmed)) {
+        segments.push(trimmed);
+        (afterPipe ? pipes?.fed : pipes?.bare)?.add(trimmed);
+      }
+    }
+    current = "";
+  };
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    const next = text[i + 1];
+
+    // Caret escape outside double quotes
+    if (ch === "^" && !double) {
+      if (next === "\r" && text[i + 2] === "\n") {
+        i += 2;
+        continue;
+      }
+      if (next === "\n") {
+        i += 1;
+        continue;
+      }
+      current += ch + (next ?? "");
+      i++;
+      continue;
+    }
+
+    if (ch === '"') {
+      double = !double;
+      current += ch;
+      continue;
+    }
+
+    if (!double) {
+      if ((ch === "&" && next === "&") || (ch === "|" && next === "|")) {
+        cut();
+        afterPipe = false;
+        i++;
+        continue;
+      }
+      if (ch === "|" || ch === "\n" || ch === "\r") {
+        cut();
+        afterPipe = ch === "|";
+        continue;
+      }
+      if (ch === "&" && text[i - 1] !== ">" && text[i - 1] !== "<" && next !== ">") {
+        cut();
+        afterPipe = false;
+        continue;
+      }
+      // `for /f ... in ('command') do ...` command substitution
+      if (ch === "(" && next === "'") {
+        const closeQuote = text.indexOf("'", i + 2);
+        if (closeQuote > i + 2 && text[closeQuote + 1] === ")") {
+          inner.push(text.slice(i + 2, closeQuote));
+        }
+      }
+    }
+
+    current += ch;
+  }
+
+  cut();
+  for (const sub of inner) {
+    for (const child of splitShellAstSegments(sub, depth + 1, undefined, "cmd")) {
+      if (!segments.includes(child)) segments.push(child);
+    }
+  }
+  return segments;
 }
 
 function splitAs(text: string, depth: number, asBash: boolean, pipes?: PipeUse): string[] {
@@ -210,7 +511,7 @@ interface Word {
   quoted: boolean;
   /** A redirection operator (`>`, `2>>`, `&>`, `>&`, `<` …). Its target is the word after it. */
   redirect?: string;
-  /** Holds a `$…`, a backtick or a brace expansion outside single quotes: the shell decides what it becomes. */
+  /** Holds a `$…`, a backtick, `%VAR%` or a brace expansion outside single quotes: the shell decides what it becomes. */
   expands?: boolean;
   /** Where the word starts and ends in the command, to tell `>2h` from `> 2h`. */
   start: number;
@@ -219,12 +520,176 @@ interface Word {
 
 /** A redirection operator at the start of the text. */
 const REDIRECT_OP = /^(&>>|&>|>>|>\||>&|>|<<<|<<-|<<|<>|<&|<)/;
+const PS_REDIRECT_OP = /^(\*>>|\*>|\*>&1|&>>|&>|>>|>&|>|<)/;
+
+function powerShellWords(segment: string): Word[] {
+  const out: Word[] = [];
+  let text = "";
+  let quoted = false;
+  let expands = false;
+  let started = false;
+  let start = 0;
+
+  const begin = (i: number): void => {
+    if (!started) start = i;
+    started = true;
+  };
+  const push = (end: number): void => {
+    if (started) out.push({ text, quoted, expands, start, end });
+    text = "";
+    quoted = false;
+    expands = false;
+    started = false;
+  };
+
+  for (let i = 0; i < segment.length; i++) {
+    const ch = segment[i];
+    const next = segment[i + 1];
+    if (/\s/.test(ch)) {
+      push(i);
+      continue;
+    }
+    if (ch === "`") {
+      begin(i);
+      text += next ?? "";
+      i++;
+    } else if (ch === "'" && segment[i - 1] !== "@") {
+      begin(i);
+      let j = i + 1;
+      while (j < segment.length) {
+        if (segment[j] === "'") {
+          if (segment[j + 1] === "'") {
+            text += "'";
+            j += 2;
+            continue;
+          }
+          break;
+        }
+        text += segment[j++];
+      }
+      quoted = true;
+      i = j;
+    } else if (ch === '"' && segment[i - 1] !== "@") {
+      begin(i);
+      let j = i + 1;
+      for (; j < segment.length && segment[j] !== '"'; j++) {
+        if (segment[j] === "`" && j + 1 < segment.length) {
+          text += segment[++j];
+        } else {
+          if (segment[j] === "$" && /[A-Za-z0-9_{(@*#?!$-]/.test(segment[j + 1] ?? "")) expands = true;
+          text += segment[j];
+        }
+      }
+      quoted = true;
+      i = j;
+    } else if ((ch === "$" || ch === "@") && next === "(") {
+      begin(i);
+      const end = closePowerShellDelim(segment, i + 2, "(", ")");
+      text += segment.slice(i, end + 1);
+      expands = true;
+      i = end;
+    } else if (ch === ">" || ch === "<" || ((ch === "*" || ch === "&") && next === ">")) {
+      let fd = "";
+      if (started && !quoted && !expands && /^\d+$/.test(text)) {
+        fd = text;
+        text = "";
+        started = false;
+      } else push(i);
+      const op = PS_REDIRECT_OP.exec(segment.slice(i))?.[1] ?? ch;
+      out.push({ text: fd + op, quoted: false, redirect: fd + op, start: i - fd.length, end: i + op.length });
+      i += op.length - 1;
+    } else {
+      begin(i);
+      if (ch === "$" && /[A-Za-z0-9_{@*#?!$-]/.test(next ?? "")) expands = true;
+      text += ch;
+    }
+  }
+  push(segment.length);
+  return out;
+}
+
+function cmdWords(segment: string): Word[] {
+  const out: Word[] = [];
+  let text = "";
+  let quoted = false;
+  let expands = false;
+  let started = false;
+  let start = 0;
+
+  const begin = (i: number): void => {
+    if (!started) start = i;
+    started = true;
+  };
+  const push = (end: number): void => {
+    if (started) out.push({ text, quoted, expands, start, end });
+    text = "";
+    quoted = false;
+    expands = false;
+    started = false;
+  };
+
+  for (let i = 0; i < segment.length; i++) {
+    const ch = segment[i];
+    const next = segment[i + 1];
+    if (/\s/.test(ch)) {
+      push(i);
+      continue;
+    }
+    if (ch === "^") {
+      begin(i);
+      text += next ?? "";
+      i++;
+    } else if (ch === '"') {
+      begin(i);
+      let j = i + 1;
+      for (; j < segment.length && segment[j] !== '"'; j++) {
+        if (segment[j] === "%") {
+          const endVar = segment.indexOf("%", j + 1);
+          if (endVar > j + 1 && !/\s/.test(segment.slice(j + 1, endVar))) expands = true;
+        }
+        if (segment[j] === "!") {
+          const endDelayed = segment.indexOf("!", j + 1);
+          if (endDelayed > j + 1 && !/\s/.test(segment.slice(j + 1, endDelayed))) expands = true;
+        }
+        text += segment[j];
+      }
+      quoted = true;
+      i = j;
+    } else if (ch === ">" || ch === "<") {
+      let fd = "";
+      if (started && !quoted && !expands && /^\d+$/.test(text)) {
+        fd = text;
+        text = "";
+        started = false;
+      } else push(i);
+      const op = REDIRECT_OP.exec(segment.slice(i))?.[1] ?? ch;
+      out.push({ text: fd + op, quoted: false, redirect: fd + op, start: i - fd.length, end: i + op.length });
+      i += op.length - 1;
+    } else {
+      begin(i);
+      if (ch === "%") {
+        const endVar = segment.indexOf("%", i + 1);
+        if (endVar > i + 1 && !/\s/.test(segment.slice(i + 1, endVar))) expands = true;
+        else if (/^~[a-zA-Z]*\d$/.test(segment.slice(i + 1, i + 4))) expands = true;
+      }
+      if (ch === "!") {
+        const endDelayed = segment.indexOf("!", i + 1);
+        if (endDelayed > i + 1 && !/\s/.test(segment.slice(i + 1, endDelayed))) expands = true;
+      }
+      text += ch;
+    }
+  }
+  push(segment.length);
+  return out;
+}
 
 /**
  * The words of one simple command, quotes resolved. A redirection operator is a word of its own
  * wherever it is written: `echo x>/etc/y` is `echo`, `x`, `>`, `/etc/y`, as the shell reads it.
  */
-function shellWords(segment: string): Word[] {
+function shellWords(segment: string, shellKind?: ShellKind): Word[] {
+  if (isPowerShellKind(shellKind)) return powerShellWords(segment);
+  if (isCmdKind(shellKind)) return cmdWords(segment);
   const out: Word[] = [];
   let text = "";
   let quoted = false;
@@ -320,15 +785,21 @@ function shellWords(segment: string): Word[] {
 
 /** Where a redirected stream may go without anything being written. */
 const QUIET_TARGET = /^\/dev\/(null|stdout|stderr|tty)$/;
+const WINDOWS_QUIET_TARGET = /^(?:nul|\$null|\/dev\/null)$/i;
 
 /**
  * Takes the redirections out of a command's words, and says whether any of them writes a file.
  * Only /dev/null (and the terminal's own streams) and a copy of stdin, stdout or stderr write nothing:
  * `2>&1` and `>&-` are harmless, `>&3` writes wherever stream 3 was opened, `>& f` is `&> f`.
  */
-function withoutRedirections(words: Word[]): { words: Word[]; writes?: string } {
+function withoutRedirections(
+  words: Word[],
+  shellKind?: ShellKind,
+): { words: Word[]; writes?: string; readsFrom: string[] } {
   const out: Word[] = [];
+  const readsFrom: string[] = [];
   let writes: string | undefined;
+  const win = isPowerShellKind(shellKind) || isCmdKind(shellKind);
   for (let i = 0; i < words.length; i++) {
     const w = words[i];
     if (!w.redirect) {
@@ -337,14 +808,23 @@ function withoutRedirections(words: Word[]): { words: Word[]; writes?: string } 
     }
     const target = words[i + 1];
     if (target && !target.redirect) i++;
-    const op = w.redirect.replace(/^\d+/, "");
+    const op = w.redirect.replace(/^[\d*]+/, "");
     // Input: <, <&, here-documents and here-strings. <> opens the file for writing too.
-    if (op.startsWith("<") && op !== "<>") continue;
+    if (op.startsWith("<") && op !== "<>") {
+      if (op === "<" && target && !target.redirect) readsFrom.push(target.text);
+      continue;
+    }
     const name = target && !target.redirect ? target.text : "";
-    const quiet = target && !target.redirect && !target.expands && (op === ">&" ? /^([012]|-|[012]-)$/.test(name) || QUIET_TARGET.test(name) : QUIET_TARGET.test(name));
+    const quiet =
+      target &&
+      !target.redirect &&
+      !target.expands &&
+      (op === ">&"
+        ? /^([012]|-|[012]-)$/.test(name) || QUIET_TARGET.test(name) || (win && WINDOWS_QUIET_TARGET.test(name))
+        : QUIET_TARGET.test(name) || (win && WINDOWS_QUIET_TARGET.test(name)));
     if (!quiet) writes = name || "a file";
   }
-  return { words: out, writes };
+  return { words: out, writes, readsFrom };
 }
 
 const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "ash", "mksh", "fish"]);
@@ -454,6 +934,169 @@ const positional = (args: string[]): string[] => args.filter((a) => !a.startsWit
 
 const NEVER_ENDS = "Never ends by itself (follows or waits for a person)";
 
+/** PowerShell `-EncodedCommand` abbreviations: `-e`, `-en`, `-enc`, ..., `-encodedcommand`. */
+const PS_ENCODED_FLAG_RE =
+  /^-(?:e|en|enc|enco|encod|encode|encoded|encodedc|encodedco|encodedcom|encodedcomm|encodedcomma|encodedcomman|encodedcommand)$/i;
+
+/** PowerShell `-Command` abbreviations: `-c`, `-co`, ..., `-command`. */
+const PS_COMMAND_FLAG_RE = /^-(?:c|co|com|comm|comma|comman|command)$/i;
+
+function judgePowerShellExecutable(
+  args: string[],
+  depth: number,
+  found: string[],
+  ctx?: JudgeContext,
+): Judgement {
+  if (args.some((x) => PS_ENCODED_FLAG_RE.test(x))) {
+    return DESTROY("Runs base64-encoded PowerShell command (-EncodedCommand)");
+  }
+  const cmdIdx = args.findIndex((x) => PS_COMMAND_FLAG_RE.test(x));
+  if (cmdIdx >= 0 && args[cmdIdx + 1] !== undefined) {
+    const inner = analyze(args.slice(cmdIdx + 1).join(" "), depth + 1, found, "powershell");
+    if (ctx && inner.sensitivePaths.length) ctx.sensitivePaths.push(...inner.sensitivePaths);
+    return inner.judgement;
+  }
+  return MODIFY("Starts PowerShell or runs a script");
+}
+
+function judgeCmdExecutable(
+  args: string[],
+  depth: number,
+  found: string[],
+  ctx?: JudgeContext,
+): Judgement {
+  const cIdx = args.findIndex((x) => /^\/[ck]$/i.test(x));
+  if (cIdx >= 0 && args[cIdx + 1] !== undefined) {
+    const inner = analyze(args.slice(cIdx + 1).join(" "), depth + 1, found, "cmd");
+    if (ctx && inner.sensitivePaths.length) ctx.sensitivePaths.push(...inner.sensitivePaths);
+    return inner.judgement;
+  }
+  return MODIFY("Starts Windows cmd.exe");
+}
+
+/** Sensitive credential, key, and secret paths that should never auto-approve silently on read. */
+const FILE_READER_VERBS = new Set([
+  "cat",
+  "head",
+  "tail",
+  "tac",
+  "nl",
+  "less",
+  "more",
+  "grep",
+  "egrep",
+  "fgrep",
+  "zgrep",
+  "zcat",
+  "rg",
+  "sed",
+  "awk",
+  "gawk",
+  "mawk",
+  "cut",
+  "tr",
+  "jq",
+  "yq",
+  "diff",
+  "cmp",
+  "strings",
+  "xxd",
+  "hexdump",
+  "od",
+  "base64",
+  "sort",
+  "uniq",
+  "wc",
+  "read",
+  "source",
+  ".",
+  "curl",
+  "scp",
+  "rsync",
+  "tar",
+  "zip",
+  // PowerShell / cmd readers (compared case-insensitively)
+  "get-content",
+  "gc",
+  "type",
+  "select-string",
+  "sls",
+  "findstr",
+  "find",
+  "fc",
+  "comp",
+]);
+
+function isSensitivePathToken(raw: string): boolean {
+  const cleaned = raw.trim().replace(/^file:\/\//i, "");
+  if (!cleaned || cleaned === "-") return false;
+  // Normalize Windows backslashes to forward slashes for uniform matching
+  const norm = cleaned.replace(/\\/g, "/");
+  const lower = norm.toLowerCase();
+
+  // PowerShell env: drive
+  if (/^env:/i.test(norm)) return true;
+
+  // SSH private keys and config/auth files (allow explicit *.pub public keys)
+  if (/(?:^|\/)\.ssh\/id_[^/\s]*$/i.test(lower) && !lower.endsWith(".pub")) return true;
+  if (/(?:^|\/)\.ssh\/(?:authorized_keys|config|.*_(?:rsa|ed25519|ecdsa|dsa))$/i.test(lower)) return true;
+  if (/(?:^|\/)(?:id_rsa|id_ed25519|id_ecdsa|id_dsa)$/i.test(lower)) return true;
+
+  // Cloud / container / DB / package manager credential stores
+  if (/(?:^|\/)\.aws\/(?:credentials|config)$/i.test(lower)) return true;
+  if (/(?:^|\/)\.kube\/config$/i.test(lower)) return true;
+  if (/(?:^|\/)\.docker\/config\.json$/i.test(lower)) return true;
+  if (/(?:^|\/)\.config\/gcloud\/application_default_credentials\.json$/i.test(lower)) return true;
+  if (/(?:^|\/)(?:\.netrc|\.git-credentials|\.npmrc|\.pypirc|\.pgpass|\.my\.cnf)$/i.test(lower)) return true;
+
+  // .env and .env.* files (including globs like .env*)
+  const baseName = lower.split("/").pop() ?? "";
+  if (baseName === ".env" || baseName.startsWith(".env.") || baseName === ".env*") return true;
+
+  // Private key / certificate / keystore extensions
+  if (/\.(?:pem|key|p12|pfx|jks|keystore|kdbx)$/i.test(lower)) return true;
+
+  // Sensitive OS authentication/privilege files
+  if (
+    lower === "/etc/shadow" ||
+    lower === "/etc/gshadow" ||
+    lower === "/etc/sudoers" ||
+    lower === "/etc/master.passwd" ||
+    lower === "/etc/security/opasswd" ||
+    lower.startsWith("/etc/sudoers.d/") ||
+    lower === "/etc/sudoers.d"
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+function collectSensitivePaths(
+  verb: string,
+  args: string[],
+  readsFrom: string[],
+  shellKind?: ShellKind,
+): string[] {
+  const found = new Set<string>();
+  for (const r of readsFrom) {
+    if (isSensitivePathToken(r)) found.add(r);
+  }
+  const verbKey = isPowerShellKind(shellKind) || isCmdKind(shellKind) ? verb.toLowerCase() : verb;
+  if (FILE_READER_VERBS.has(verbKey) || FILE_READER_VERBS.has(verb.toLowerCase())) {
+    for (const arg of args) {
+      if (!arg || arg === "-") continue;
+      // Inspect flag=path values (e.g. -Path=..., --file=...) as well as positional tokens
+      const eq = arg.indexOf("=");
+      const candidate = arg.startsWith("-") && eq > 0 ? arg.slice(eq + 1) : arg;
+      if (!candidate.startsWith("-") && isSensitivePathToken(candidate)) {
+        found.add(candidate);
+      }
+    }
+  }
+  return [...found];
+}
+
 /** The rules for one program, given its arguments. Undefined: not known, so "modify". */
 const RULES: Record<string, (args: string[], all: string) => Judgement | undefined> = {
   rm: (a) =>
@@ -478,8 +1121,22 @@ const RULES: Record<string, (args: string[], all: string) => Judgement | undefin
   },
   cryptsetup: (a) => (a.some((x) => /^(luksErase|erase|luksKillSlot|luksFormat)$/.test(x)) ? DESTROY("Erases encryption keys or formats a device") : a[0] && /^(status|luksDump|isLuks)$/.test(a[0]) ? SAFE() : MODIFY("Changes disk encryption")),
   lvremove: () => DESTROY("Removes a logical volume"),
+  lvreduce: () => DESTROY("Shrinks a logical volume (lvreduce)"),
   vgremove: () => DESTROY("Removes a volume group"),
   pvremove: () => DESTROY("Removes a physical volume"),
+  resize2fs: (a) => (flag(a, "P") ? SAFE() : DESTROY("Resizes an ext2/ext3/ext4 filesystem (resize2fs)")),
+  btrfs: (_a, all) =>
+    /\bsubvolume\s+delete\b/.test(all)
+      ? DESTROY("Deletes a Btrfs subvolume (btrfs subvolume delete)")
+      : /^(subvolume\s+(list|show)|filesystem\s+(show|df|usage)|device\s+(stats|usage)|scrub\s+status|balance\s+status)\b/.test(all)
+        ? SAFE()
+        : MODIFY("Changes a Btrfs filesystem"),
+  nvme: (a) =>
+    a[0] === "format" || a[0] === "sanitize"
+      ? DESTROY("Formats or sanitizes an NVMe namespace (nvme format)")
+      : ["list", "smart-log", "id-ctrl", "id-ns", "error-log", "fw-log"].includes(a[0] ?? "")
+        ? SAFE()
+        : MODIFY("Runs NVMe management command"),
   mdadm: (a) =>
     has(a, /^--zero-superblock$/, /^--stop$/, /^-S$/)
       ? DESTROY("Stops or erases a RAID array")
@@ -558,11 +1215,11 @@ const RULES: Record<string, (args: string[], all: string) => Judgement | undefin
   postgres: (a) => postgres(a),
   python3: (a) => python(a),
   python: (a) => python(a),
-  mysql: (_a, all) => sql(all),
-  mariadb: (_a, all) => sql(all),
-  sqlite3: (_a, all) => sql(all),
-  "clickhouse-client": (_a, all) => sql(all),
-  cqlsh: (_a, all) => sql(all),
+  mysql: (a, all) => sqlClient(a, all, ["-e", "--execute"]),
+  mariadb: (a, all) => sqlClient(a, all, ["-e", "--execute"]),
+  sqlite3: (a, all) => sqlClient(a, all, []),
+  "clickhouse-client": (a, all) => sqlClient(a, all, ["-q", "--query"]),
+  cqlsh: (a, all) => sqlClient(a, all, ["-e", "--execute"]),
   mongosh: (_a, all) => (/\.(drop|dropDatabase|deleteMany|remove)\(/.test(all) ? DESTROY("Drops or deletes data") : MODIFY("Runs database commands")),
 
   // Read-only programs, with the forms that would make them write excluded.
@@ -677,8 +1334,18 @@ const RULES: Record<string, (args: string[], all: string) => Judgement | undefin
   host: () => SAFE(),
   whois: () => SAFE(),
   ethtool: (a) => (a.length <= 1 || /^-(i|S|k|g|a|c|l|m|P|T|d|e|n|u|t|-show|-driver|-statistics|-module-info)/.test(a[0]) && !/^-[sKGACLEf]$/.test(a[0]) ? SAFE() : MODIFY("Changes a network interface")),
-  multipath: (a) => (flag(a, "l") && a.every((x) => /^(-l|-ll|-v\d)$/.test(x) || !x.startsWith("-")) ? SAFE() : MODIFY("Changes multipath devices")),
-  iscsiadm: (a) => (a.includes("session") && !has(a, /^--(logout|login|op)/, /^-[uloU]$/) ? SAFE() : MODIFY("Changes iSCSI sessions")),
+  multipath: (a) =>
+    flag(a, "F") || has(a, /^-F$/)
+      ? DESTROY("Flushes multipath device maps (multipath -F)")
+      : flag(a, "l") && a.every((x) => /^(-l|-ll|-v\d)$/.test(x) || !x.startsWith("-"))
+        ? SAFE()
+        : MODIFY("Changes multipath devices"),
+  iscsiadm: (a) =>
+    has(a, /^--logout$/, /^-u$/) || flag(a, "u")
+      ? DESTROY("Logs out an iSCSI session (iscsiadm --logout)")
+      : a.includes("session") && !has(a, /^--(logout|login|op)/, /^-[uloU]$/)
+        ? SAFE()
+        : MODIFY("Changes iSCSI sessions"),
   openssl: (a) => (!has(a, /^-(engine|provider|provider-path)$/) && /^(x509|verify|version|s_client|req|crl|rsa|ec|pkey|asn1parse|ciphers)$/.test(a[0] ?? "") && !has(a, /^-out$/, /^-keyout$/, /^-new$/, /^-genkey/) ? SAFE() : MODIFY("Makes keys or certificates")),
   "pg_isready": () => SAFE(),
   mysqladmin: (a) => (["ping", "status", "version", "processlist", "variables", "extended-status"].includes(a.filter((x) => !x.startsWith("-"))[0] ?? "") ? SAFE() : MODIFY("Changes the MySQL server")),
@@ -709,6 +1376,154 @@ const RULES: Record<string, (args: string[], all: string) => Judgement | undefin
   else: () => SAFE("Condition body follows"),
   fi: () => SAFE("End of a condition"),
 };
+
+/** PowerShell cmdlet & alias rules (keyed in lowercase). */
+const PS_RECURSIVE_OR_FORCE_RE =
+  /^-(?:r|re|rec|recu|recur|recurs|recurse|fo|for|forc|force|rf)$/i;
+
+const POWERSHELL_RULES: Record<string, (args: string[], all: string) => Judgement | undefined> = {
+  "remove-item": (a) =>
+    a.some((x) => PS_RECURSIVE_OR_FORCE_RE.test(x))
+      ? DESTROY("Recursive or forced deletion in PowerShell (Remove-Item)")
+      : MODIFY("Deletes items in PowerShell"),
+  ri: (a) => POWERSHELL_RULES["remove-item"](a, a.join(" ")),
+  rm: (a) =>
+    a.some((x) => PS_RECURSIVE_OR_FORCE_RE.test(x) || /^-r/i.test(x))
+      ? DESTROY("Recursive or forced deletion in PowerShell (rm)")
+      : MODIFY("Deletes items in PowerShell"),
+  del: (a) => POWERSHELL_RULES["remove-item"](a, a.join(" ")),
+  erase: (a) => POWERSHELL_RULES["remove-item"](a, a.join(" ")),
+  rd: (a) => POWERSHELL_RULES["remove-item"](a, a.join(" ")),
+  rmdir: (a) => POWERSHELL_RULES["remove-item"](a, a.join(" ")),
+  "format-volume": () => DESTROY("Formats a volume (Format-Volume)"),
+  "clear-disk": () => DESTROY("Clears a disk and its partition data (Clear-Disk)"),
+  "stop-computer": () => DESTROY("Shuts down the computer (Stop-Computer)"),
+  "restart-computer": () => DESTROY("Reboots the computer (Restart-Computer)"),
+  "invoke-expression": () => DESTROY("Evaluates arbitrary PowerShell expression (Invoke-Expression)"),
+  iex: () => DESTROY("Evaluates arbitrary PowerShell expression (iex)"),
+  "clear-content": () => DESTROY("Clears file contents (Clear-Content)"),
+  "remove-partition": () => DESTROY("Deletes a disk partition (Remove-Partition)"),
+  "initialize-disk": () => DESTROY("Initializes a disk (Initialize-Disk)"),
+  // Read-only PowerShell cmdlets & aliases
+  "get-childitem": () => SAFE(),
+  gci: () => SAFE(),
+  dir: () => SAFE(),
+  ls: () => SAFE(),
+  "get-content": () => SAFE(),
+  gc: () => SAFE(),
+  cat: () => SAFE(),
+  type: () => SAFE(),
+  "get-process": () => SAFE(),
+  gps: () => SAFE(),
+  ps: () => SAFE(),
+  "get-service": () => SAFE(),
+  gsv: () => SAFE(),
+  "get-item": () => SAFE(),
+  gi: () => SAFE(),
+  "get-itemproperty": () => SAFE(),
+  gp: () => SAFE(),
+  "get-location": () => SAFE(),
+  gl: () => SAFE(),
+  pwd: () => SAFE(),
+  "get-date": () => SAFE(),
+  "get-host": () => SAFE(),
+  "get-help": () => SAFE(),
+  "get-command": () => SAFE(),
+  gcm: () => SAFE(),
+  "get-history": () => SAFE(),
+  "get-volume": () => SAFE(),
+  "get-disk": () => SAFE(),
+  "get-partition": () => SAFE(),
+  "get-netipaddress": () => SAFE(),
+  "get-nettcpconnection": () => SAFE(),
+  "get-netroute": () => SAFE(),
+  "get-eventlog": () => SAFE(),
+  "get-winevent": () => SAFE(),
+  "test-path": () => SAFE(),
+  "test-connection": () => SAFE(),
+  "select-string": () => SAFE(),
+  sls: () => SAFE(),
+  "select-object": () => SAFE(),
+  select: () => SAFE(),
+  "where-object": () => SAFE(),
+  where: () => SAFE(),
+  "?": () => SAFE(),
+  "sort-object": () => SAFE(),
+  sort: () => SAFE(),
+  "format-table": () => SAFE(),
+  ft: () => SAFE(),
+  "format-list": () => SAFE(),
+  fl: () => SAFE(),
+  "measure-object": () => SAFE(),
+  measure: () => SAFE(),
+  "write-output": () => SAFE(),
+  echo: () => SAFE(),
+  "write-host": () => SAFE(),
+  "out-string": () => SAFE(),
+  whoami: () => SAFE(),
+  hostname: () => SAFE(),
+};
+
+/** Windows cmd.exe rules (keyed in lowercase). */
+const hasCmdSwitch = (args: string[], letter: string): boolean =>
+  args.some((a) => {
+    if (!a.startsWith("/")) return false;
+    // Handle combined switches like /s/q or /f/s
+    return a
+      .slice(1)
+      .split("/")
+      .some((part) => part.toLowerCase() === letter.toLowerCase());
+  });
+
+const CMD_RULES: Record<string, (args: string[], all: string) => Judgement | undefined> = {
+  del: (a) =>
+    hasCmdSwitch(a, "s")
+      ? DESTROY("Recursive file deletion (del /s)")
+      : MODIFY("Deletes files (del)"),
+  erase: (a) =>
+    hasCmdSwitch(a, "s")
+      ? DESTROY("Recursive file deletion (erase /s)")
+      : MODIFY("Deletes files (erase)"),
+  rd: (a) =>
+    hasCmdSwitch(a, "s")
+      ? DESTROY("Recursive directory deletion (rd /s)")
+      : MODIFY("Removes a directory (rd)"),
+  rmdir: (a) =>
+    hasCmdSwitch(a, "s")
+      ? DESTROY("Recursive directory deletion (rmdir /s)")
+      : MODIFY("Removes a directory (rmdir)"),
+  format: () => DESTROY("Formats a disk volume (format)"),
+  diskpart: () => DESTROY("Runs DiskPart partition editor (diskpart)"),
+  shutdown: () => DESTROY("Shuts down or reboots the system (shutdown)"),
+  // Read-only cmd commands
+  dir: () => SAFE(),
+  type: () => SAFE(),
+  find: () => SAFE(),
+  findstr: () => SAFE(),
+  where: () => SAFE(),
+  whoami: () => SAFE(),
+  hostname: () => SAFE(),
+  ver: () => SAFE(),
+  vol: () => SAFE(),
+  echo: () => SAFE(),
+  set: (a) => (a.length === 0 ? SAFE() : MODIFY("Sets environment variables")),
+  tasklist: () => SAFE(),
+  systeminfo: () => SAFE(),
+  netstat: () => SAFE(),
+  fc: () => SAFE(),
+  comp: () => SAFE(),
+  tree: () => SAFE(),
+  ipconfig: (a) =>
+    a.some((x) => /^\/(release|renew|flushdns|registerdns|setclassid)/i.test(x))
+      ? MODIFY("Modifies network configuration (ipconfig)")
+      : SAFE(),
+  route: (a) => ((a[0] ?? "").toLowerCase() === "print" ? SAFE() : MODIFY("Modifies routing table")),
+  arp: (a) => (a.some((x) => /^[-/]a$/i.test(x)) ? SAFE() : MODIFY("Modifies ARP cache")),
+  ping: (a) => (a.some((x) => /^[-/]t$/i.test(x)) ? MODIFY(NEVER_ENDS) : SAFE()),
+  tracert: () => SAFE(),
+  nslookup: (a) => (a.some((x) => !x.startsWith("-") && !x.startsWith("/")) ? SAFE() : MODIFY(NEVER_ENDS)),
+};
+
 /**
  * `date` prints unless it is given a time to set: -s/--set, or a bare MMDDhhmm. A letter is read
  * for what it is in its group: the `s` of `-Is` belongs to -I (ISO format, to the second), and
@@ -748,6 +1563,14 @@ function ontap(verb: string, a: string[]): Judgement {
   const words = [verb, ...a.filter((x) => !x.startsWith("-"))];
   if (words.includes("delete") && /^(volume|vol|aggr|aggregate|lun|vserver|svm|snapshot|qtree)$/.test(words[0] === "storage" ? words[1] ?? "" : words[0]))
     return DESTROY("Deletes ONTAP storage (volume, aggregate, LUN, SVM, snapshot)");
+  if ((words[0] === "volume" || words[0] === "vol") && words[1] === "offline")
+    return DESTROY("Takes an ONTAP volume offline");
+  if (words[0] === "lun" && words[1] === "unmap")
+    return DESTROY("Unmaps an ONTAP LUN");
+  if (words[0] === "snapmirror" && words[1] === "break")
+    return DESTROY("Breaks an ONTAP SnapMirror relationship");
+  if (words[0] === "storage" && words[1] === "failover" && words[2] === "takeover")
+    return DESTROY("Triggers ONTAP storage failover takeover");
   // The command is the words before the first option. A value further on that happens to be "show"
   // (volume modify -volume show …) does not make it a reading one.
   const firstOption = a.findIndex((x) => x.startsWith("-"));
@@ -863,10 +1686,133 @@ function redis(a: string[]): Judgement {
   return MODIFY("Runs a Redis command");
 }
 
-function sql(all: string): Judgement {
-  // eslint-disable-next-line security/detect-unsafe-regex -- bounded by the text of one command, and each group is anchored on a keyword
-  if (/\b(drop\s+(database|table|schema|user|role)|truncate(\s+table)?\s+\w|delete\s+from\s+\w+\s*(;|$|")(?![\s\S]*\bwhere\b))/i.test(all)) return DESTROY("Drops or empties a database, table or schema");
+function stripSqlLiterals(text: string): string {
+  return text.replace(/'(?:[^']|'')*'/g, "''");
+}
+
+function splitSqlStatements(text: string): string[] {
+  const statements: string[] = [];
+  let cur = "";
+  let inSingle = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "'") {
+      if (inSingle && text[i + 1] === "'") {
+        cur += "''";
+        i++;
+        continue;
+      }
+      inSingle = !inSingle;
+      cur += ch;
+      continue;
+    }
+    if (!inSingle && ch === ";") {
+      if (cur.trim()) statements.push(cur.trim());
+      cur = "";
+      continue;
+    }
+    cur += ch;
+  }
+  if (cur.trim()) statements.push(cur.trim());
+  return statements;
+}
+
+function unwrapExplain(statement: string): { isExplain: boolean; analyze: boolean; inner: string } {
+  const trimmed = statement.trim();
+  const head = /^explain\b/i.exec(trimmed);
+  if (!head) return { isExplain: false, analyze: false, inner: trimmed };
+
+  let rest = trimmed.slice(head[0].length).trimStart();
+  let analyze = false;
+
+  // PostgreSQL parenthesized options: EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ...
+  if (rest.startsWith("(")) {
+    const close = rest.indexOf(")");
+    if (close < 0) return { isExplain: true, analyze: true, inner: "" };
+    const opts = rest.slice(1, close);
+    if (/\banalyze\b/i.test(opts)) analyze = true;
+    rest = rest.slice(close + 1).trimStart();
+  }
+
+  // Unparenthesized options: EXPLAIN [ANALYZE] [VERBOSE] [EXTENDED] [PARTITIONS] [FORMAT=...] <stmt>
+  for (;;) {
+    const opt = /^(analyze|verbose|costs|settings|buffers|wal|timing|summary|extended|partitions|format\s*=\s*\w+)\b/i.exec(rest);
+    if (!opt) break;
+    if (/^analyze$/i.test(opt[1])) analyze = true;
+    rest = rest.slice(opt[0].length).trimStart();
+  }
+
+  return { isExplain: true, analyze, inner: rest };
+}
+
+function judgeSqlStatement(statement: string): Judgement {
+  const explain = unwrapExplain(statement);
+  if (explain.isExplain) {
+    if (!explain.inner) return MODIFY("Incomplete EXPLAIN statement");
+    if (explain.analyze) {
+      const innerVerdict = judgeSqlStatement(explain.inner);
+      return innerVerdict.level === "destructive"
+        ? DESTROY(`EXPLAIN ANALYZE executes destructive SQL (${innerVerdict.reason})`)
+        : MODIFY("EXPLAIN ANALYZE executes the inner statement");
+    }
+    if (readOnlyStatement(explain.inner, false)) return SAFE();
+    const innerVerdict = judgeSqlStatement(explain.inner);
+    return worse(MODIFY("EXPLAIN wraps non-read-only SQL"), innerVerdict);
+  }
+
+  const code = stripSqlLiterals(statement).trim();
+  if (/^\s*drop\s+(?:database|table|schema|user|role|index|view|trigger|function|procedure|sequence|extension)\b/i.test(code)) {
+    return DESTROY("Drops a database, table or schema");
+  }
+  if (/\btruncate\s+table\s+[\w."`]+|\btruncate\s+[\w."`]+/i.test(code)) {
+    return DESTROY("Truncates table data");
+  }
+  if (/^\s*vacuum\s+(?:\([^)]*\bfull\b[^)]*\)|full)\b/i.test(code)) {
+    return DESTROY("Runs VACUUM FULL (locks table and rewrites storage)");
+  }
+  if (/^\s*delete\s+from\s+[\w."`]+(?:\s|$)/i.test(code) && !/\bwhere\b/i.test(code)) {
+    return DESTROY("Deletes all rows from a table without WHERE");
+  }
+  if (/^\s*update\s+[\w."`]+\s+set\b/i.test(code) && !/\bwhere\b/i.test(code)) {
+    return DESTROY("Updates all rows in a table without WHERE");
+  }
+  if (/^\s*alter\s+table\b/i.test(code)) {
+    if (/\bdrop\b/i.test(code)) return DESTROY("Destructive ALTER TABLE DDL");
+    return MODIFY("Blocking or schema-changing ALTER TABLE DDL");
+  }
   return MODIFY("Runs database commands");
+}
+
+function sql(all: string): Judgement {
+  const statements = splitSqlStatements(all);
+  if (statements.length === 0) return MODIFY("Runs database commands");
+  let verdict: Judgement = MODIFY("Runs database commands");
+  for (const st of statements) {
+    const j = judgeSqlStatement(st);
+    if (j.level !== "safe") verdict = verdict.level === "safe" ? j : worse(verdict, j);
+  }
+  return verdict;
+}
+
+function sqlClient(a: string[], all: string, queryFlags: string[]): Judgement {
+  const queries: string[] = [];
+  for (let i = 0; i < a.length; i++) {
+    const w = a[i];
+    if (queryFlags.includes(w)) {
+      queries.push(a[++i] ?? "");
+      continue;
+    }
+    const longEq = queryFlags.find((f) => f.startsWith("--") && w.startsWith(`${f}=`));
+    if (longEq) {
+      queries.push(w.slice(longEq.length + 1));
+    }
+  }
+  if (queries.length === 1) {
+    if (readOnlyStatement(queries[0])) return SAFE();
+    return sql(queries[0]);
+  }
+  if (queries.length > 1) return sql(queries.join(";"));
+  return sql(all);
 }
 
 /**
@@ -1160,9 +2106,9 @@ function rsync(a: string[]): Judgement {
 
 /**
  * psql: read-only when it runs exactly one statement given with -c that reads (SHOW; SELECT
- * without INTO, locking or a function that is not on the list), or one of the listing
- * meta-commands, or lists databases (-l). A script file, an output file, several statements,
- * anything else, or psql left to read from the terminal, is not read further.
+ * without INTO, locking or a function that is not on the list; or EXPLAIN <SELECT> without ANALYZE),
+ * or one of the listing meta-commands, or lists databases (-l). A script file, an output file,
+ * several statements, anything else, or psql left to read from the terminal, is not read further.
  */
 function psql(a: string[]): Judgement {
   const commands: string[] = [];
@@ -1208,18 +2154,36 @@ const READING_FUNCTIONS = new Set(
 /** Words that may stand before a bracket in a SELECT without being a function. */
 const SQL_KEYWORDS = new Set("select from where and or not in exists any all as on join over filter by having values when then else case between like ilike is lateral using with distinct union intersect except".split(" "));
 
-/** One statement that only reads: SHOW, a SELECT that writes nothing, or a listing meta-command (\l, \dt, \d …). */
-function readOnlyStatement(text: string): boolean {
+/** One statement that only reads: SHOW, a SELECT that writes nothing, plain EXPLAIN <SELECT>, or a listing meta-command (\l, \dt, \d …). */
+function readOnlyStatement(text: string, allowExplain = true): boolean {
   const t = text.trim().replace(/;\s*$/, "").trim();
   // eslint-disable-next-line security/detect-unsafe-regex -- anchored at both ends, one optional word after a fixed command
   if (/^\\(l|d|dt|di|dv|ds|dn|du|dg|df|dx|dm|db|dp|z)\+?( [\w.*"]+)?$/.test(t.replace(/\s+/g, " "))) return true;
-  if (/^show\s+[\w.]+$|^show\s+all$/i.test(t)) return true;
-  if (!/^select\b/i.test(t)) return false;
-  // Strings and quoted names say nothing about what runs: take them out. Comments and dollar quoting are not read.
   if (/--|\/\*|\$/.test(t)) return false;
+
+  if (allowExplain && /^explain\b/i.test(t)) {
+    const explain = unwrapExplain(t);
+    if (!explain.isExplain || explain.analyze || !explain.inner) return false;
+    return readOnlyStatement(explain.inner, false);
+  }
+
   const code = t.replace(/'(?:[^']|'')*'/g, "''").replace(/"(?:[^"]|"")*"/g, "x");
   if (/['";\\]/.test(code.replace(/''/g, ""))) return false;
   if (/\binto\b|\bfor\s+(update|share|no\s+key\s+update|key\s+share)\b/i.test(code)) return false;
+
+  const normalizedShow = code.replace(/\s+/g, " ").trim();
+  if (/^show\s+[\w.]+$/i.test(normalizedShow)) return true;
+  if (/^show\s+(?:all|full\s+processlist|processlist|tables|databases|schemas|variables|global\s+status|global\s+variables)$/i.test(normalizedShow)) {
+    return true;
+  }
+  if (/^show\s+(?:create\s+table|index\s+from)\s+[\w."`]+$/i.test(normalizedShow)) {
+    return true;
+  }
+  if (/^show\s+[\w.]+\s+(?:like|from|in|where)\s+[\w.''"%*`= ]+$/i.test(normalizedShow)) {
+    return true;
+  }
+
+  if (!/^select\b/i.test(t)) return false;
   for (let at = code.indexOf("("); at >= 0; at = code.indexOf("(", at + 1)) {
     // The word right before the bracket, if any: the name of a function, or a keyword.
     let j = at - 1;
@@ -1425,13 +2389,131 @@ function onlyParses(args: string[], fedByPipe: boolean): boolean {
   return noexec && (script || fedByPipe);
 }
 
+interface JudgeContext {
+  sensitivePaths: string[];
+}
+
+function judgePowerShellSegment(
+  segment: string,
+  depth: number,
+  found: string[],
+  ctx: JudgeContext,
+): Judgement {
+  const cleaned = segment.trim();
+  if (!cleaned) return SAFE();
+  const { words, writes, readsFrom } = withoutRedirections(powerShellWords(cleaned), "powershell");
+  let verdict: Judgement = writes ? MODIFY(`Writes to a file (> ${writes})`) : SAFE();
+
+  let tokens = words.map((w) => w.text);
+  // Strip PowerShell call operator `&` or dot-source `.`
+  let dotSourced = false;
+  if (tokens[0] === "&") {
+    tokens = tokens.slice(1);
+  } else if (tokens[0] === "." && tokens.length > 1) {
+    dotSourced = true;
+    tokens = tokens.slice(1);
+  }
+  if (tokens.length === 0) return verdict;
+
+  if (dotSourced) {
+    verdict = worse(verdict, MODIFY("Dot-sources a PowerShell script"));
+  }
+
+  // Flag -EncodedCommand / -enc anywhere in a PowerShell invocation
+  if (tokens.some((t) => PS_ENCODED_FLAG_RE.test(t))) {
+    return worse(verdict, DESTROY("Runs base64-encoded PowerShell command (-EncodedCommand)"));
+  }
+
+  const rawVerb = tokens[0] ?? "";
+  if (rawVerb.startsWith("$") || rawVerb.startsWith("{")) {
+    return worse(verdict, MODIFY("Invokes a dynamic PowerShell command or scriptblock"));
+  }
+  const verb = rawVerb.replace(/^.*[/\\]/, "").toLowerCase().replace(/\.exe$/, "");
+  const args = tokens.slice(1);
+
+  const sensitive = collectSensitivePaths(verb, args, readsFrom, "powershell");
+  if (sensitive.length > 0) {
+    ctx.sensitivePaths.push(...sensitive);
+    verdict = worse(verdict, MODIFY(`Reads sensitive credential or secret path (${sensitive.join(", ")})`));
+  }
+
+  if (verb === "powershell" || verb === "pwsh") {
+    return worse(verdict, judgePowerShellExecutable(args, depth, found, ctx));
+  }
+  if (verb === "cmd") {
+    return worse(verdict, judgeCmdExecutable(args, depth, found, ctx));
+  }
+
+  const filled = new Set(words.filter((w) => w.expands).map((w) => w.text));
+  const rule = POWERSHELL_RULES[verb] ?? RULES[verb];
+  if (rule && rule.length > 0 && args.some((x) => filled.has(x)) && verb !== "echo" && verb !== "write-output" && verb !== "write-host") {
+    return worse(verdict, MODIFY(`An argument of ${rawVerb} is expanded by PowerShell, so what it runs cannot be read`));
+  }
+
+  const own = rule?.(args, args.join(" "));
+  return worse(verdict, own ?? MODIFY(`Not on the read-only list (${rawVerb})`));
+}
+
+function judgeCmdSegment(
+  segment: string,
+  depth: number,
+  found: string[],
+  ctx: JudgeContext,
+): Judgement {
+  const cleaned = segment.trim().replace(/^[(\s]+/, "").replace(/[)\s]+$/, "");
+  if (!cleaned) return SAFE();
+  // Strip `@` echo-suppression prefix in cmd (`@echo off`, `@del /s ...`)
+  const withoutAt = cleaned.startsWith("@") ? cleaned.slice(1).trimStart() : cleaned;
+  const { words, writes, readsFrom } = withoutRedirections(cmdWords(withoutAt), "cmd");
+  let verdict: Judgement = writes ? MODIFY(`Writes to a file (> ${writes})`) : SAFE();
+
+  const tokens = words.map((w) => w.text);
+  if (tokens.length === 0) return verdict;
+
+  const rawVerb = tokens[0] ?? "";
+  const verb = rawVerb.replace(/^.*[/\\]/, "").toLowerCase().replace(/\.(exe|cmd|bat)$/, "");
+  const args = tokens.slice(1);
+
+  const sensitive = collectSensitivePaths(verb, args, readsFrom, "cmd");
+  if (sensitive.length > 0) {
+    ctx.sensitivePaths.push(...sensitive);
+    verdict = worse(verdict, MODIFY(`Reads sensitive credential or secret path (${sensitive.join(", ")})`));
+  }
+
+  if (verb === "cmd") {
+    return worse(verdict, judgeCmdExecutable(args, depth, found, ctx));
+  }
+  if (verb === "powershell" || verb === "pwsh") {
+    return worse(verdict, judgePowerShellExecutable(args, depth, found, ctx));
+  }
+
+  const filled = new Set(words.filter((w) => w.expands).map((w) => w.text));
+  const rule = CMD_RULES[verb] ?? RULES[verb];
+  if (rule && rule.length > 0 && args.some((x) => filled.has(x)) && verb !== "echo") {
+    return worse(verdict, MODIFY(`An argument of ${rawVerb} is expanded by cmd, so what it runs cannot be read`));
+  }
+
+  const own = rule?.(args, args.join(" "));
+  return worse(verdict, own ?? MODIFY(`Not on the read-only list (${rawVerb})`));
+}
+
 /** One simple command, judged: what runs, after its wrappers, with its own arguments. */
-function judge(segment: string, depth: number, found: string[], fedByPipe = false): Judgement {
+function judge(
+  segment: string,
+  depth: number,
+  found: string[],
+  fedByPipe = false,
+  shellKind?: ShellKind,
+  ctx: JudgeContext = { sensitivePaths: [] },
+): Judgement {
   if (segment === TOO_DEEP) return MODIFY("Nested too deep to read");
+  if (isPowerShellKind(shellKind)) return judgePowerShellSegment(segment, depth, found, ctx);
+  if (isCmdKind(shellKind)) return judgeCmdSegment(segment, depth, found, ctx);
+
   // Grouping brackets and the words that only shape a script.
   const cleaned = segment.replace(/^[({\s]+/, "").replace(/[)}\s]+$/, "").replace(/^(!|if|while|until|elif|then|do|else)\s+/, "");
   if (!cleaned) return SAFE();
-  const { words, writes } = withoutRedirections(withOntapComparisons(shellWords(cleaned)));
+  const { words, writes, readsFrom } = withoutRedirections(withOntapComparisons(shellWords(cleaned)));
   let verdict: Judgement = writes ? MODIFY(`Writes to a file (> ${writes})`) : SAFE();
   const wrappers: string[] = [];
   const assigned: string[] = [];
@@ -1444,6 +2526,12 @@ function judge(segment: string, depth: number, found: string[], fedByPipe = fals
   const risky = assigned.map(riskyAssignment).find(Boolean);
   if (risky) verdict = worse(verdict, MODIFY(`Sets ${risky}, which changes what the command loads or runs`));
   if (run.length === 0) {
+    // Check if an input redirection alone reads a sensitive path (e.g. `< /etc/shadow`)
+    const redirSensitive = collectSensitivePaths("", [], readsFrom);
+    if (redirSensitive.length > 0) {
+      ctx.sensitivePaths.push(...redirSensitive);
+      return worse(verdict, MODIFY(`Reads sensitive credential or secret path (${redirSensitive.join(", ")})`));
+    }
     // sudo -i, sudo -s: nothing is run, a shell as root is what is left. Every later line would then run as root.
     const shell = wrappers.find((x) => x.startsWith(SHELL_AS));
     if (shell) return worse(verdict, MODIFY(`Starts a shell as another user (${shell.slice(SHELL_AS.length)})`));
@@ -1451,8 +2539,25 @@ function judge(segment: string, depth: number, found: string[], fedByPipe = fals
   }
   const verb = familyOf((run[0] ?? "").replace(/^.*\//, ""));
   const args = run.slice(1);
+
+  const sensitive = collectSensitivePaths(verb, args, readsFrom);
+  if (sensitive.length > 0) {
+    ctx.sensitivePaths.push(...sensitive);
+    verdict = worse(verdict, MODIFY(`Reads sensitive credential or secret path (${sensitive.join(", ")})`));
+  }
+
   // `./ls` and `$DIR/cat` are whatever program sits there; /usr/bin/ls is ls.
   if (run[0].includes("/") && !SYSTEM_PROGRAM.test(run[0])) return worse(verdict, MODIFY(`Runs a program by its path (${run[0]})`));
+
+  // Cross-shell invocations from POSIX (`powershell -enc ...`, `pwsh -c ...`, `cmd.exe /c ...`)
+  const bareExe = verb.toLowerCase().replace(/\.exe$/, "");
+  if (bareExe === "powershell" || bareExe === "pwsh") {
+    return worse(verdict, judgePowerShellExecutable(args, depth, found, ctx));
+  }
+  if (bareExe === "cmd") {
+    return worse(verdict, judgeCmdExecutable(args, depth, found, ctx));
+  }
+
   // A word the shell fills in ($X, $(…), {a,b}) may become a flag: `sed $X f` may be `sed -i f`.
   // Only programs whose verdict never depends on their arguments take one unread.
   const filled = new Set(words.filter((w) => w.expands).map((w) => w.text));
@@ -1463,50 +2568,310 @@ function judge(segment: string, depth: number, found: string[], fedByPipe = fals
   // Something that runs a script: judge the script.
   if (SHELLS.has(verb) || verb === "su" || verb === "runuser") {
     const at = args.findIndex((x) => /^-[a-zA-Z]*c$/.test(x) || x === "--command");
-    if (at >= 0 && args[at + 1] !== undefined) return worse(verdict, analyze(args[at + 1], depth + 1, found).judgement);
+    if (at >= 0 && args[at + 1] !== undefined) {
+      const inner = analyze(args[at + 1], depth + 1, found);
+      if (inner.sensitivePaths.length) ctx.sensitivePaths.push(...inner.sensitivePaths);
+      return worse(verdict, inner.judgement);
+    }
     if (verb === "su" || verb === "runuser") return worse(verdict, MODIFY("Runs as another user"));
     if (onlyParses(args, fedByPipe)) return worse(verdict, SAFE());
     if (positional(args).length === 0) return worse(verdict, DESTROY("Runs whatever it is fed as a script (… | sh)"));
     return worse(verdict, MODIFY("Runs a script"));
   }
-  if (verb === "eval") return worse(verdict, analyze(args.join(" "), depth + 1, found).judgement);
-  if (verb === "find") for (const exec of findExecs(args)) verdict = worse(verdict, judgeWords(exec, depth, found));
+  if (verb === "eval") {
+    const inner = analyze(args.join(" "), depth + 1, found);
+    if (inner.sensitivePaths.length) ctx.sensitivePaths.push(...inner.sensitivePaths);
+    return worse(verdict, inner.judgement);
+  }
+  if (verb === "find") for (const exec of findExecs(args)) verdict = worse(verdict, judgeWords(exec, depth, found, ctx));
 
   const own = rule?.(args, args.join(" "));
   return worse(verdict, own ?? MODIFY(`Not on the read-only list (${verb})`));
 }
 
 /** A command given as words (from find -exec): judged as if written out. */
-function judgeWords(words: string[], depth: number, found: string[]): Judgement {
+function judgeWords(words: string[], depth: number, found: string[], ctx?: JudgeContext): Judgement {
   const text = words.map((w) => (/[\s'"$`;&|<>()]/.test(w) ? `'${w.replace(/'/g, "'\\''")}'` : w)).join(" ");
-  return analyze(text, depth + 1, found).judgement;
+  const inner = analyze(text, depth + 1, found);
+  if (ctx && inner.sensitivePaths.length) ctx.sensitivePaths.push(...inner.sensitivePaths);
+  return inner.judgement;
 }
 
 /** `found` collects every command read, including those inside scripts and -exec, for the approval card. */
-function analyze(command: string, depth: number, found: string[] = []): { judgement: Judgement; segments: string[]; reasons: string[] } {
+function analyze(
+  command: string,
+  depth: number,
+  found: string[] = [],
+  shellKind?: ShellKind,
+): { judgement: Judgement; segments: string[]; reasons: string[]; sensitivePaths: string[] } {
   const pipes: PipeUse = { fed: new Set(), bare: new Set() };
-  const segments = splitShellAstSegments(command, depth, pipes);
+  const segments = splitShellAstSegments(command, depth, pipes, shellKind);
   for (const s of segments) if (!found.includes(s)) found.push(s);
   let judgement: Judgement = SAFE("Empty command");
   const reasons: string[] = [];
+  const ctx: JudgeContext = { sensitivePaths: [] };
   for (const segment of segments) {
     // The same words written once after a pipe and once without one are judged as the one without.
-    const j = judge(segment, depth, found, pipes.fed.has(segment) && !pipes.bare.has(segment));
+    const j = judge(
+      segment,
+      depth,
+      found,
+      pipes.fed.has(segment) && !pipes.bare.has(segment),
+      shellKind,
+      ctx,
+    );
     if (j.level !== "safe" && !reasons.includes(j.reason)) reasons.push(j.reason);
     judgement = worse(judgement, j);
   }
   if (segments.length && judgement.level === "safe") judgement = SAFE();
-  return { judgement: { level: judgement.level, reason: reasons.join(" · ") || judgement.reason }, segments, reasons };
+  return {
+    judgement: { level: judgement.level, reason: reasons.join(" · ") || judgement.reason },
+    segments,
+    reasons,
+    sensitivePaths: [...new Set(ctx.sensitivePaths)],
+  };
 }
 
-export function analyzeCommandSafety(command: string): CommandRiskAnalysis {
+export function analyzeCommandSafety(
+  command: string,
+  options?: ShellKind | AnalyzeCommandOptions,
+): CommandRiskAnalysis {
+  const shellKind = typeof options === "string" ? options : options?.shellKind;
   const found: string[] = [];
-  const { judgement } = analyze(command, 0, found);
-  return {
+  const { judgement, sensitivePaths } = analyze(command, 0, found, shellKind);
+  const result: CommandRiskAnalysis = {
     riskLevel: judgement.level,
     riskReason: judgement.reason,
     parsedSubcommands: found.filter((s) => s !== TOO_DEEP),
   };
+  if (sensitivePaths.length > 0) {
+    result.sensitiveRead = true;
+    result.sensitivePaths = sensitivePaths;
+  }
+  return result;
+}
+
+/**
+ * Normalizes one simple command segment into a token sequence for prefix allowlist matching.
+ * Returns `null` if the segment contains write redirections, expansions, or risky env assignments.
+ */
+function normalizeSegmentTokens(segment: string, shellKind?: ShellKind): string[] | null {
+  const trimmed = segment.trim();
+  if (!trimmed || trimmed === TOO_DEEP) return null;
+  const words = shellWords(trimmed, shellKind);
+  if (words.length === 0) return null;
+  const { words: cleanWords, writes } = withoutRedirections(
+    isPowerShellKind(shellKind) || isCmdKind(shellKind) ? words : withOntapComparisons(words),
+    shellKind,
+  );
+  if (writes) return null;
+  if (cleanWords.some((w) => w.expands)) return null;
+
+  const assigned: string[] = [];
+  const wrappers: string[] = [];
+  let tokens = cleanWords.map((w) => w.text);
+  if (isPowerShellKind(shellKind)) {
+    if (tokens[0] === "&") tokens = tokens.slice(1);
+  } else if (!isCmdKind(shellKind)) {
+    tokens = unwrap(tokens, wrappers, assigned);
+    if (assigned.some((a) => riskyAssignment(a) !== undefined)) return null;
+  }
+  if (tokens.length === 0) return null;
+  // Normalize system paths like /usr/bin/systemctl -> systemctl, leaving non-system paths untouched.
+  const verb = tokens[0];
+  if (verb.includes("/") && SYSTEM_PROGRAM.test(verb)) {
+    tokens[0] = verb.replace(/^.*\//, "");
+  }
+  return tokens;
+}
+
+/**
+ * Checks whether every parsed subcommand matches at least one normalized command prefix
+ * in `allowPrefixes`. Token-based matching prevents string-prefix confusion (e.g. `"ls"`
+ * will not match `"lsof"`), and rejects commands with write redirections, expansions, or
+ * risky environment overrides.
+ */
+export function matchesCommandAllowPrefix(
+  parsedSubcommands: string[],
+  allowPrefixes: string[],
+  options?: { shellKind?: ShellKind },
+): boolean {
+  if (!parsedSubcommands.length || !allowPrefixes.length) return false;
+  const shellKind = options?.shellKind;
+  const caseInsensitive = isPowerShellKind(shellKind) || isCmdKind(shellKind);
+
+  const normalizedPrefixes = allowPrefixes
+    .map((p) => normalizeSegmentTokens(p, shellKind))
+    .filter((p): p is string[] => p !== null && p.length > 0);
+  if (normalizedPrefixes.length === 0) return false;
+
+  const tokenEq = (a: string, b: string): boolean =>
+    caseInsensitive ? a.toLowerCase() === b.toLowerCase() : a === b;
+
+  return parsedSubcommands.every((sub) => {
+    const subTokens = normalizeSegmentTokens(sub, shellKind);
+    if (!subTokens || subTokens.length === 0) return false;
+    return normalizedPrefixes.some(
+      (prefixTokens) =>
+        subTokens.length >= prefixTokens.length &&
+        prefixTokens.every((p, idx) => tokenEq(subTokens[idx], p)),
+    );
+  });
+}
+
+/**
+ * Derives a normalized, flag/secret-free command prefix suggestion (e.g. `"systemctl status"`,
+ * `"kubectl get"`, `"git log"`) for session-level allowlist approval.
+ */
+export function normalizeCommandAllowPrefix(command: string, shellKind?: ShellKind): string {
+  const segments = splitShellAstSegments(command, 0, undefined, shellKind);
+  if (segments.length !== 1) return "";
+  const tokens = normalizeSegmentTokens(segments[0], shellKind);
+  if (!tokens || tokens.length === 0) return "";
+  const head = [tokens[0]];
+  if (tokens[1] && !tokens[1].startsWith("-") && !tokens[1].startsWith("/")) {
+    head.push(tokens[1]);
+  }
+  return head.join(" ");
+}
+
+/** Explicit dry-run capable tools and their non-mutating preview transformations. */
+const KUBECTL_DRY_RUN_VERBS = new Set([
+  "apply",
+  "create",
+  "delete",
+  "patch",
+  "replace",
+  "set",
+  "label",
+  "annotate",
+  "scale",
+  "rollout",
+]);
+
+const APT_DRY_RUN_VERBS = new Set([
+  "install",
+  "upgrade",
+  "dist-upgrade",
+  "full-upgrade",
+  "remove",
+  "purge",
+  "autoremove",
+]);
+
+const HELM_DRY_RUN_VERBS = new Set(["install", "upgrade", "uninstall", "delete", "rollback"]);
+
+/**
+ * Returns a verified dry-run preview command for an explicit table of tools (`kubectl`,
+ * `terraform`, `rsync`, `apt`/`apt-get`, `helm`), or `null` if no safe dry-run form exists.
+ * Never blindly appends `-n` to arbitrary commands or multi-command pipelines.
+ */
+export function getDryRunPreviewCommand(
+  command: string,
+  shellKind?: ShellKind,
+): DryRunPreview | null {
+  if (isPowerShellKind(shellKind) || isCmdKind(shellKind)) return null;
+  const segments = splitShellAstSegments(command, 0, undefined, shellKind);
+  if (segments.length !== 1) return null;
+
+  const words = shellWords(segments[0], shellKind);
+  const { words: cleanWords, writes } = withoutRedirections(words, shellKind);
+  if (writes || cleanWords.some((w) => w.expands)) return null;
+
+  const wrappers: string[] = [];
+  const assigned: string[] = [];
+  const tokens = unwrap(
+    cleanWords.map((w) => w.text),
+    wrappers,
+    assigned,
+  );
+  if (assigned.some((a) => riskyAssignment(a) !== undefined)) return null;
+  if (tokens.length === 0) return null;
+
+  const verb = tokens[0].replace(/^.*\//, "");
+  if (tokens[0].includes("/") && !SYSTEM_PROGRAM.test(tokens[0])) return null;
+  const args = tokens.slice(1);
+
+  if (verb === "kubectl") {
+    if (args.some((a) => /^--kubeconfig(=|$)/.test(a))) return null;
+    const pos = positional(args.filter((_x, i) => !/^-(n|-namespace|-context|-selector|l|-output|o)$/.test(args[i - 1] ?? "")));
+    const sub = pos[0] ?? "";
+    if (!KUBECTL_DRY_RUN_VERBS.has(sub)) return null;
+    const hasDryRun = args.some((a) => a.startsWith("--dry-run"));
+    const previewArgs = hasDryRun ? args : [...args, "--dry-run=server"];
+    return {
+      tool: "kubectl",
+      command: `kubectl ${previewArgs.join(" ")}`.trim(),
+      description: "Preview Kubernetes change with --dry-run=server",
+    };
+  }
+
+  if (verb === "terraform") {
+    const sub = args[0] ?? "";
+    if (sub === "plan") {
+      if (args.some((a) => /^-(out|state-out|backup)(=|$)/.test(a))) return null;
+      return {
+        tool: "terraform",
+        command: `terraform ${args.join(" ")}`.trim(),
+        description: "Preview Terraform execution plan",
+      };
+    }
+    if (sub === "apply" || sub === "destroy") {
+      const rest = args
+        .slice(1)
+        .filter((a) => a !== "-auto-approve" && !/^-(out|state-out|backup)(=|$)/.test(a));
+      const planArgs = sub === "destroy" && !rest.includes("-destroy")
+        ? ["plan", "-destroy", ...rest]
+        : ["plan", ...rest];
+      return {
+        tool: "terraform",
+        command: `terraform ${planArgs.join(" ")}`.trim(),
+        description: `Preview Terraform ${sub} using terraform plan`,
+      };
+    }
+    return null;
+  }
+
+  if (verb === "rsync") {
+    if (args.some((a) => /^--(rsh|rsync-path|write-batch|only-write-batch|log-file|daemon|config|temp-dir|backup-dir)/.test(a) || /^-[a-zA-Z]*e/.test(a))) {
+      return null;
+    }
+    const alreadyDry = has(args, /^--dry-run$/) || flag(args, "n");
+    const previewArgs = alreadyDry ? args : ["-n", ...args];
+    return {
+      tool: "rsync",
+      command: `rsync ${previewArgs.join(" ")}`.trim(),
+      description: "Preview rsync file transfers with -n",
+    };
+  }
+
+  if (verb === "apt-get" || verb === "apt") {
+    const sub = positional(args)[0] ?? "";
+    if (!APT_DRY_RUN_VERBS.has(sub)) return null;
+    const alreadySim = has(args, /^--simulate$/, /^--dry-run$/, /^--just-print$/) || flag(args, "s");
+    const filtered = args.filter((a) => a !== "-y" && a !== "--yes" && a !== "--assume-yes");
+    const previewArgs = alreadySim ? filtered : ["-s", ...filtered];
+    return {
+      tool: verb,
+      command: `${verb} ${previewArgs.join(" ")}`.trim(),
+      description: `Simulate ${verb} ${sub} with -s`,
+    };
+  }
+
+  if (verb === "helm") {
+    const sub = positional(args)[0] ?? "";
+    if (!HELM_DRY_RUN_VERBS.has(sub)) return null;
+    if (args.some((a) => /^--(post-renderer|output-dir|kubeconfig)/.test(a))) return null;
+    const alreadyDry = args.some((a) => a === "--dry-run" || a.startsWith("--dry-run="));
+    const previewArgs = alreadyDry ? args : [...args, "--dry-run"];
+    return {
+      tool: "helm",
+      command: `helm ${previewArgs.join(" ")}`.trim(),
+      description: `Preview Helm ${sub} with --dry-run`,
+    };
+  }
+
+  return null;
 }
 
 /** The tags that mark a server as one where a change waits for a person (see `requireApprovalOnProdTags`). */
@@ -1524,7 +2889,7 @@ export function shouldRequireCommandApproval(opts: {
   const policy = opts.policy ?? DEFAULT_SAFETY_POLICY;
   const isProdTarget = (opts.targetTags ?? []).some(isProdTag);
 
-  if (opts.mode === "advice") {
+  if (opts.mode === "advice" || opts.mode === "plan") {
     return true;
   }
 
@@ -1532,6 +2897,10 @@ export function shouldRequireCommandApproval(opts: {
     opts.analysis.riskLevel === "destructive" &&
     policy.blockDestructiveWithoutConfirm
   ) {
+    return true;
+  }
+
+  if (opts.analysis.sensitiveRead) {
     return true;
   }
 
@@ -1550,6 +2919,16 @@ export function shouldRequireCommandApproval(opts: {
   if (
     opts.analysis.riskLevel === "safe" &&
     policy.autoApproveSafeReadOnly
+  ) {
+    return false;
+  }
+
+  // Assisted mode: auto-approve commands matching configured normalized prefix allowlist
+  if (
+    opts.analysis.riskLevel !== "destructive" &&
+    policy.commandAllowPrefixes?.length &&
+    !(isProdTarget && policy.requireApprovalOnProdTags) &&
+    matchesCommandAllowPrefix(opts.analysis.parsedSubcommands, policy.commandAllowPrefixes)
   ) {
     return false;
   }

@@ -1,6 +1,16 @@
 import type { HubRequest, HubSnapshot } from '../../../shared/types/aiHub';
 import type { McpTokenRecord, McpTokenStore } from '../McpTokenStore';
-import { MCP_TOOLS, callMcpTool, toolsForScopes, type McpCallContext } from './mcpTools';
+import {
+  MCP_TOOLS,
+  McpResourceError,
+  callMcpTool,
+  getMcpPrompt,
+  listMcpPrompts,
+  listMcpResources,
+  readMcpResource,
+  toolsForScopes,
+  type McpCallContext,
+} from './mcpTools';
 
 /**
  * sshs3 as an MCP server: somebody's own agent — Claude Code, Cursor, Codex —
@@ -135,6 +145,7 @@ const ERR = {
   methodNotFound: -32601,
   invalidParams: -32602,
   internal: -32603,
+  resourceNotFound: -32002,
   /** The specification's code for a header that disagrees with the body. */
   headerMismatch: -32020,
 };
@@ -191,7 +202,7 @@ const toolsFor = (token: McpTokenRecord): Record<string, unknown>[] =>
 /** What this server is, however it was asked. */
 const describe = (token: McpTokenRecord): Record<string, unknown> => ({
   supportedVersions: SUPPORTED_PROTOCOL_VERSIONS,
-  capabilities: { tools: {} },
+  capabilities: { tools: {}, resources: {}, prompts: {} },
   instructions: SERVER_INSTRUCTIONS,
   // What this key may do, so an agent does not have to find out by being refused.
   _meta: { [META_SERVER_INFO]: SERVER_INFO, 'io.sshs3/scopes': token.scopes },
@@ -217,6 +228,7 @@ async function handleRpc(
     // The newer protocol marks a result as final; an older client is told to take an absent one as final.
     result: era === 'modern' ? { resultType: 'complete', ...result } : result,
   });
+  const cacheHints = era === 'modern' ? { ttlMs: LIST_TTL_MS, cacheScope: 'private' } : {};
 
   // A notification (no id) is acknowledged with no body of its own.
   if ((rpc.id === undefined || rpc.id === null) && method.startsWith('notifications/')) return undefined;
@@ -231,8 +243,8 @@ async function handleRpc(
     const version = legacy.includes(asked) ? asked : legacy[0];
     return complete({
       protocolVersion: version,
-      // Only tools. No resources, no prompts, and nothing that asks the client's model to work for us.
-      capabilities: { tools: {} },
+      // Tools, read-only KB/runbook resources, and starter/skill prompts. Never sampling.
+      capabilities: { tools: {}, resources: {}, prompts: {} },
       serverInfo: SERVER_INFO,
       instructions: SERVER_INSTRUCTIONS,
     });
@@ -241,7 +253,67 @@ async function handleRpc(
   if (method === 'ping') return complete({});
 
   if (method === 'tools/list')
-    return complete({ tools: toolsFor(token), ...(era === 'modern' ? { ttlMs: LIST_TTL_MS, cacheScope: 'private' } : {}) });
+    return complete({ tools: toolsFor(token), ...cacheHints });
+
+  if (method === 'resources/list' || method === 'resources/templates/list' || method === 'resources/read') {
+    const hub = await deps.hubFor(token.userId);
+    if (!hub) return rpcError(id, ERR.internal, 'The person this key belongs to is no longer on this server.');
+    try {
+      if (method === 'resources/list') {
+        const { resources } = await listMcpResources({ request: hub.request, scopes: token.scopes });
+        return complete({ resources, ...cacheHints });
+      }
+      if (method === 'resources/templates/list') {
+        const { resourceTemplates } = await listMcpResources({ request: hub.request, scopes: token.scopes });
+        return complete({ resourceTemplates, ...cacheHints });
+      }
+      const uri = typeof rpc.params?.uri === 'string' ? rpc.params.uri : '';
+      if (!uri) return rpcError(id, ERR.invalidParams, 'resources/read needs the uri of a resource.');
+      const res = await readMcpResource(uri, { request: hub.request, scopes: token.scopes });
+      void hub
+        .audit?.({
+          kind: 'mcp',
+          actor: `${token.name} (a key of ${hub.actor})`,
+          target: token.serverId,
+          what: `resources/read ${uri.slice(0, 400)}`,
+          outcome: 'completed',
+        })
+        .catch(() => undefined);
+      return complete(res);
+    } catch (error) {
+      if (error instanceof McpResourceError) {
+        const code =
+          error.kind === 'not_found'
+            ? ERR.resourceNotFound
+            : error.kind === 'forbidden'
+              ? ERR.invalidRequest
+              : ERR.invalidParams;
+        return rpcError(id, code, error.message);
+      }
+      return rpcError(id, ERR.internal, error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  if (method === 'prompts/list' || method === 'prompts/get') {
+    const hub = await deps.hubFor(token.userId);
+    if (!hub) return rpcError(id, ERR.internal, 'The person this key belongs to is no longer on this server.');
+    try {
+      if (method === 'prompts/list') {
+        const { prompts } = await listMcpPrompts({ request: hub.request, scopes: token.scopes });
+        return complete({ prompts, ...cacheHints });
+      }
+      const name = typeof rpc.params?.name === 'string' ? rpc.params.name : '';
+      if (!name) return rpcError(id, ERR.invalidParams, 'prompts/get needs the name of a prompt.');
+      const res = await getMcpPrompt(name, rpc.params?.arguments, { request: hub.request, scopes: token.scopes });
+      return complete(res as unknown as Record<string, unknown>);
+    } catch (error) {
+      if (error instanceof McpResourceError) {
+        const code = error.kind === 'forbidden' ? ERR.invalidRequest : ERR.invalidParams;
+        return rpcError(id, code, error.message);
+      }
+      return rpcError(id, ERR.internal, error instanceof Error ? error.message : String(error));
+    }
+  }
 
   if (method === 'tools/call') {
     const name = typeof rpc.params?.name === 'string' ? rpc.params.name : '';
@@ -286,8 +358,8 @@ async function handleRpc(
   }
 
   // Asked for something this server does not have. Said plainly, with what it does have.
-  if (method === 'resources/list' || method === 'prompts/list' || method === 'subscriptions/listen')
-    return rpcError(id, ERR.methodNotFound, `This server offers tools only (${MCP_TOOLS.length} of them). It has no ${method.split('/')[0]}.`);
+  if (method === 'subscriptions/listen')
+    return rpcError(id, ERR.methodNotFound, `This server offers tools (${MCP_TOOLS.length}), resources, and prompts. It has no ${method.split('/')[0]}.`);
 
   return rpcError(id, ERR.methodNotFound, `Unknown method ${method}.`);
 }

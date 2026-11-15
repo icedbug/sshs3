@@ -6,10 +6,30 @@ export const isConversation = (t: Pick<AgentTask, "workforceRunId" | "distillSou
 
 export type InboxKind = "approval" | "plan" | "question" | "review" | "blocked" | "alert" | "health" | "knowledge" | "report";
 
+export type InboxPriorityBucket = "blocking" | "incident" | "review";
+
+const BUCKET_BY_KIND: Record<InboxKind, InboxPriorityBucket> = {
+  approval: "blocking",
+  plan: "blocking",
+  question: "blocking",
+  alert: "incident",
+  blocked: "incident",
+  health: "incident",
+  review: "review",
+  report: "review",
+  knowledge: "review",
+};
+
+/** Maps an inbox item kind to its priority triage bucket (`blocking`, `incident`, or `review`). */
+export function inboxPriorityBucket(kind: InboxKind): InboxPriorityBucket {
+  return BUCKET_BY_KIND[kind];
+}
+
 /** One thing that is waiting for a person. */
 export interface InboxItem {
   id: string;
   kind: InboxKind;
+  bucket?: InboxPriorityBucket;
   title: string;
   detail?: string;
   /** Who is asking: an agent, a monitoring system. */
@@ -26,6 +46,12 @@ export interface InboxItem {
   /** A server with problems of its own (disk, certificate, failed service). */
   serverId?: string;
   risk?: string;
+  /** Epoch ms until which this item is snoozed from active triage. */
+  snoozedUntil?: number;
+  /** Epoch ms when this item was acknowledged by a person. */
+  acknowledgedAt?: number;
+  /** Convenience flag indicating the item is currently snoozed at evaluation time. */
+  snoozed?: boolean;
 }
 
 const KB_WORTH_A_LOOK = new Set(["gap", "contradiction", "dead-target", "lost-source"]);
@@ -38,11 +64,47 @@ const KB_WORTH_A_LOOK = new Set(["gap", "contradiction", "dead-target", "lost-so
  */
 /** What the inbox is built from: the same on screen and where notifications are sent from. */
 export type InboxInput = Pick<HubSnapshot, "tasks"> &
-  Partial<Pick<HubSnapshot, "workTickets" | "kbFindings" | "dailyReport">> & {
+  Partial<Pick<HubSnapshot, "workTickets" | "kbFindings" | "dailyReport" | "inboxState">> & {
     serverFacts?: Pick<NonNullable<HubSnapshot["serverFacts"]>, "servers">;
   };
 
-export function inboxItems(hub: InboxInput): InboxItem[] {
+export interface InboxFilterOptions {
+  /** Include items whose `snoozedUntil` is in the future. Ignored if `snoozeFilter` is specified. */
+  includeSnoozed?: boolean;
+  /** Filter by snooze state: `"active"` (default), `"snoozed"`, or `"all"`. */
+  snoozeFilter?: "active" | "snoozed" | "all";
+  /** Optional priority bucket filter. */
+  bucket?: InboxPriorityBucket;
+  /** Reference timestamp in epoch ms used to evaluate `snoozedUntil` (defaults to `Date.now()`). */
+  now?: number;
+}
+
+/** Returns true if an inbox item is currently snoozed as of `now`. */
+export function isInboxItemSnoozed(
+  item: Pick<InboxItem, "snoozedUntil" | "snoozed">,
+  now = Date.now(),
+): boolean {
+  if (typeof item.snoozedUntil === "number") return item.snoozedUntil > now;
+  return item.snoozed === true;
+}
+
+/** Filters inbox items by snooze state and optional priority bucket. */
+export function filterInboxItems(items: InboxItem[], options?: InboxFilterOptions): InboxItem[] {
+  const now = options?.now ?? Date.now();
+  const mode = options?.snoozeFilter ?? (options?.includeSnoozed ? "all" : "active");
+  return items.filter((item) => {
+    if (options?.bucket) {
+      const bucket = item.bucket ?? inboxPriorityBucket(item.kind);
+      if (bucket !== options.bucket) return false;
+    }
+    const snoozed = isInboxItemSnoozed(item, now);
+    if (mode === "active") return !snoozed;
+    if (mode === "snoozed") return snoozed;
+    return true;
+  });
+}
+
+export function inboxItems(hub: InboxInput, options?: InboxFilterOptions): InboxItem[] {
   const out: InboxItem[] = [];
   for (const task of hub.tasks) {
     if (!isConversation(task)) continue;
@@ -134,5 +196,42 @@ export function inboxItems(hub: InboxInput): InboxItem[] {
   if (hub.dailyReport && !hub.dailyReport.readAt)
     out.push({ id: `report:${hub.dailyReport.day}`, kind: "report", title: `What happened ${hub.dailyReport.day}`, detail: hub.dailyReport.text.slice(0, 240), at: hub.dailyReport.at, since: hub.dailyReport.at });
   const rank: Record<InboxKind, number> = { approval: 0, plan: 0, question: 0, alert: 1, blocked: 1, health: 2, review: 2, report: 3, knowledge: 4 };
-  return out.sort((a, b) => rank[a.kind] - rank[b.kind] || b.at - a.at);
+  const now = options?.now ?? Date.now();
+  const stateMap = hub.inboxState;
+  const enriched = out.map((item): InboxItem => {
+    const bucket = inboxPriorityBucket(item.kind);
+    const state = stateMap?.[item.id];
+    const snoozedUntil = state?.snoozedUntil ?? item.snoozedUntil;
+    const acknowledgedAt = state?.acknowledgedAt ?? item.acknowledgedAt;
+    const snoozed = typeof snoozedUntil === "number" && snoozedUntil > now;
+    return {
+      ...item,
+      bucket,
+      ...(snoozedUntil !== undefined ? { snoozedUntil } : {}),
+      ...(acknowledgedAt !== undefined ? { acknowledgedAt } : {}),
+      ...(snoozed ? { snoozed: true } : {}),
+    };
+  });
+  const sorted = enriched.sort((a, b) => rank[a.kind] - rank[b.kind] || b.at - a.at);
+  return filterInboxItems(sorted, { ...options, now });
+}
+
+/**
+ * Counts urgent, active inbox items (`blocking` and `incident` buckets) that are
+ * neither currently snoozed nor acknowledged. Used for unread/urgent inbox badges.
+ */
+export function countUrgentInboxItems(
+  hubOrItems: InboxInput | InboxItem[],
+  options?: { now?: number },
+): number {
+  const now = options?.now ?? Date.now();
+  const items = Array.isArray(hubOrItems) ? hubOrItems : inboxItems(hubOrItems, { now });
+  let count = 0;
+  for (const item of items) {
+    if (isInboxItemSnoozed(item, now)) continue;
+    if (item.acknowledgedAt !== undefined) continue;
+    const bucket = item.bucket ?? inboxPriorityBucket(item.kind);
+    if (bucket === "blocking" || bucket === "incident") count++;
+  }
+  return count;
 }

@@ -258,4 +258,33 @@ describe("the pages agents read", () => {
     rerender(view({ rebuilding: [], checkingContradictions: false, lastCheck: { at: 1, found: 0, error: "No model is connected" } }));
     expect(screen.getByTestId("kb-last-check")).toHaveTextContent("The last comparison did not finish: No model is connected");
   });
+
+  it("switches to Sources and shows the document form when Write one is clicked from Pages or To review", () => {
+    render(
+      <KnowledgeBaseView
+        hub={hub({
+          kbPages: [page("p1")],
+          kbFindings: [{ id: "gap:x", kind: "gap", text: "x", at: 1 }],
+        })}
+        act={vi.fn(async () => hub())}
+        onAttachDoc={() => {}}
+        request={vi.fn(async () => answer({}))}
+      />,
+    );
+
+    // Opens on Pages tab by default when pages exist.
+    expect(screen.getByRole("tab", { name: "Pages · 1" })).toHaveAttribute("aria-selected", "true");
+    fireEvent.click(screen.getByRole("button", { name: "Write one" }));
+    expect(screen.getByRole("tab", { name: "Sources · 0" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByTestId("kb-form")).toBeVisible();
+
+    // Closing hides the form; clicking Write one from To review also switches to Sources and shows it.
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(screen.queryByTestId("kb-form")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "To review · 1" }));
+    expect(screen.getByRole("tab", { name: "To review · 1" })).toHaveAttribute("aria-selected", "true");
+    fireEvent.click(screen.getByRole("button", { name: "Write one" }));
+    expect(screen.getByRole("tab", { name: "Sources · 0" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByTestId("kb-form")).toBeVisible();
+  });
 });

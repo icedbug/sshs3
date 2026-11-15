@@ -14,11 +14,20 @@ import crypto from "node:crypto";
  */
 
 /** The part of the bucket the queue uses; paths are relative to the workspace prefix. */
+export interface QueueWriteOptions {
+  /** Conditional create: succeed only when the target object does not exist. */
+  ifNoneMatch?: "*";
+  /** Conditional update: succeed only when the target matches this ETag/token. */
+  ifMatch?: string;
+}
+
 export interface QueueStore {
   list(dir: string): Promise<string[]>;
   /** undefined when the object does not exist. */
   read(path: string): Promise<Buffer | undefined>;
-  write(path: string, content: Buffer): Promise<void>;
+  write(path: string, content: Buffer, options?: QueueWriteOptions): Promise<void>;
+  /** Optional atomic create-if-absent helper returning false on conflict. */
+  writeIfNoneMatch?(path: string, content: Buffer): Promise<boolean>;
   /** Deleting what is already gone is not an error. */
   remove(path: string): Promise<void>;
 }
@@ -83,6 +92,22 @@ function parseRecord(buffer: Buffer | undefined): LearningRecord | undefined {
   }
 }
 
+function isPreconditionConflict(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as { statusCode?: unknown; status?: unknown; code?: unknown; message?: unknown };
+  if (e.statusCode === 412 || e.status === 412) return true;
+  if (typeof e.code === "string" && /^(PreconditionFailed|EEXIST|412)$/i.test(e.code)) return true;
+  if (typeof e.message === "string" && /precondition|if-none-match|already exists|\b412\b/i.test(e.message)) {
+    return true;
+  }
+  return false;
+}
+
+export interface ClaimNextOptions {
+  /** Pass conditional If-None-Match: "*" semantics when creating a fresh claim (default true). */
+  ifNoneMatch?: boolean;
+}
+
 export class LearningQueue {
   constructor(private readonly store: QueueStore) {}
 
@@ -107,22 +132,44 @@ export class LearningQueue {
    * comparison and merging absorb the repeat.) An unreadable record is
    * removed so it cannot block the queue.
    */
-  async claimNext(reader: string, now = Date.now()): Promise<ClaimedRecord | undefined> {
+  async claimNext(
+    reader: string,
+    now = Date.now(),
+    options?: ClaimNextOptions,
+  ): Promise<ClaimedRecord | undefined> {
     const names = (await this.store.list(PENDING))
       .filter((n) => n.endsWith(".json"))
       .sort();
+    const useIfNoneMatch = options?.ifNoneMatch !== false;
     for (const name of names) {
       const claim = await this.readClaim(name);
-      if (claim && claim.reader !== reader && now - claim.at < CLAIM_TTL_MS) continue;
+      const isStaleOther = Boolean(claim && claim.reader !== reader && now - claim.at >= CLAIM_TTL_MS);
+      if (claim && claim.reader !== reader && !isStaleOther) continue;
       const record = parseRecord(await this.store.read(`${PENDING}/${name}`));
       if (!record) {
         await this.complete(name);
         continue;
       }
-      await this.store.write(
-        `${CLAIMS}/${name}`,
-        Buffer.from(JSON.stringify({ reader, at: now }), "utf8"),
-      );
+      const claimPath = `${CLAIMS}/${name}`;
+      const payload = Buffer.from(JSON.stringify({ reader, at: now }), "utf8");
+      if (isStaleOther) {
+        // Clear expired lease before conditional create so racing workers contend cleanly.
+        await this.store.remove(claimPath);
+      }
+      const creatingFresh = !claim || isStaleOther;
+      if (creatingFresh && useIfNoneMatch && this.store.writeIfNoneMatch) {
+        const won = await this.store.writeIfNoneMatch(claimPath, payload);
+        if (!won) continue;
+      } else if (creatingFresh && useIfNoneMatch) {
+        try {
+          await this.store.write(claimPath, payload, { ifNoneMatch: "*" });
+        } catch (err) {
+          if (isPreconditionConflict(err)) continue;
+          throw err;
+        }
+      } else {
+        await this.store.write(claimPath, payload);
+      }
       const mine = await this.readClaim(name);
       if (mine?.reader !== reader) continue;
       return { name, record };

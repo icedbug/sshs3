@@ -14,6 +14,13 @@ export interface WebUserRecord {
   passwordHash: string;
   createdAt: number;
   lastLoginAt?: number;
+  authSource?: 'local' | 'oidc';
+  ssoIssuer?: string;
+  ssoSubject?: string;
+  ssoEmail?: string;
+  ssoGroups?: string[];
+  disabled?: boolean;
+  disabledAt?: number;
 }
 
 export interface WebUserPublic {
@@ -25,6 +32,72 @@ export interface WebUserPublic {
   lastLoginAt?: number;
   sshPublicKey?: string;
   sshPrivateKeyPath?: string;
+  authSource?: 'local' | 'oidc';
+  ssoIssuer?: string;
+  ssoSubject?: string;
+  ssoEmail?: string;
+  ssoGroups?: string[];
+  disabled?: boolean;
+  disabledAt?: number;
+}
+
+export interface OidcClaims {
+  sub: string;
+  iss?: string;
+  email?: string;
+  preferred_username?: string;
+  name?: string;
+  groups?: string[];
+  roles?: string[];
+  [key: string]: unknown;
+}
+
+export interface MappedOidcIdentity {
+  subject: string;
+  issuer?: string;
+  username: string;
+  displayName: string;
+  email?: string;
+  role: 'admin' | 'member';
+  groups: string[];
+}
+
+export interface OidcClaimMappingConfig {
+  /** Expected OIDC issuer URL (exact normalized match if configured). */
+  issuer?: string;
+  /** Claim key used for username (default: 'preferred_username'). */
+  usernameClaim?: string;
+  /** Claim key used for display name (default: 'name'). */
+  displayNameClaim?: string;
+  /** Claim key used for groups/roles (default: 'groups', also reads 'roles'). */
+  groupsClaim?: string;
+  /** Group or role names that grant 'admin' role. */
+  adminGroups?: string[];
+  /** Group or role names required to allow access (if non-empty). */
+  requiredGroups?: string[];
+  /** Custom mapping hook for IdP-specific claim shapes. */
+  customMapper?: (claims: OidcClaims) => Partial<MappedOidcIdentity>;
+}
+
+export interface PeerApprovalPolicyInput {
+  requesterId: string;
+  requesterUsername?: string;
+  approver: Pick<WebUserPublic, 'id' | 'username' | 'role' | 'ssoGroups' | 'disabled'>;
+  targetEnv?: string;
+  targetTags?: string[];
+  requireAdminForProd?: boolean;
+  requiredApprovals?: number;
+  existingApprovals?: Array<{ actorId?: string; actor?: string; allowed: boolean }>;
+  /** Additional SSO group names permitted to approve prod changes. */
+  approverGroups?: string[];
+}
+
+export interface PeerApprovalDecision {
+  authorized: boolean;
+  reason?: string;
+  satisfiedCount: number;
+  requiredCount: number;
+  remainingApprovals: number;
 }
 
 export interface WebInviteRecord {
@@ -187,6 +260,221 @@ export function restrictPrivateKeyFile(
     }
   }
   return false;
+}
+
+const PROD_ENV_PATTERN = /^(prod|production|critical)$/i;
+const DEFAULT_PROD_APPROVER_GROUPS = new Set(['approver', 'prod-approver', 'sre-lead', 'admin', 'admins']);
+
+function normalizeOidcIssuer(issuer: string): string {
+  return issuer.trim().replace(/\/+$/, '');
+}
+
+function sanitizeOidcUsername(raw: string, fallbackSub: string): string {
+  const localPart = raw.includes('@') ? raw.split('@')[0]! : raw;
+  const cleaned = localPart
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_.-]+/g, '-')
+    .replace(/^[.-]+|[.-]+$/g, '');
+  if (/^[a-z0-9_.-]{2,40}$/.test(cleaned)) {
+    return cleaned;
+  }
+  const digest = crypto.createHash('sha256').update(fallbackSub).digest('hex').slice(0, 12);
+  return `oidc_${digest}`;
+}
+
+function collectStringClaimList(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .filter((v): v is string => typeof v === 'string')
+      .map((v) => v.trim())
+      .filter(Boolean);
+  }
+  if (typeof value === 'string') {
+    return value
+      .split(/[,\s]+/)
+      .map((v) => v.trim())
+      .filter(Boolean);
+  }
+  return [];
+}
+
+/**
+ * Maps OIDC/SSO ID token or UserInfo claims into a normalized sshs3 user identity.
+ * Enforces issuer matching and required group membership when configured.
+ */
+export function mapOidcClaimsToIdentity(
+  claims: OidcClaims,
+  config: OidcClaimMappingConfig = {},
+): MappedOidcIdentity {
+  const subject = typeof claims.sub === 'string' ? claims.sub.trim() : '';
+  if (!subject) {
+    throw new Error('OIDC claims are missing a valid "sub" subject identifier');
+  }
+
+  const issuer = typeof claims.iss === 'string' && claims.iss.trim() ? normalizeOidcIssuer(claims.iss) : undefined;
+  if (config.issuer) {
+    const expected = normalizeOidcIssuer(config.issuer);
+    if (!issuer || issuer !== expected) {
+      throw new Error('OIDC issuer mismatch');
+    }
+  }
+
+  const groupsKey = config.groupsClaim || 'groups';
+  const groupSet = new Set<string>([
+    ...collectStringClaimList(claims[groupsKey]),
+    ...collectStringClaimList(claims.roles),
+  ]);
+  const groups = Array.from(groupSet);
+  const lowerGroups = new Set(groups.map((g) => g.toLowerCase()));
+
+  if (config.requiredGroups && config.requiredGroups.length > 0) {
+    const hasRequired = config.requiredGroups.some((g) => lowerGroups.has(g.trim().toLowerCase()));
+    if (!hasRequired) {
+      throw new Error('Missing required SSO group membership');
+    }
+  }
+
+  const adminGroups = (config.adminGroups && config.adminGroups.length > 0 ? config.adminGroups : ['admin', 'admins'])
+    .map((g) => g.trim().toLowerCase())
+    .filter(Boolean);
+  const isAdmin = adminGroups.some((g) => lowerGroups.has(g));
+
+  const usernameKey = config.usernameClaim || 'preferred_username';
+  const rawUsername =
+    (typeof claims[usernameKey] === 'string' && (claims[usernameKey] as string).trim()) ||
+    (typeof claims.email === 'string' && claims.email.trim()) ||
+    subject;
+
+  const displayNameKey = config.displayNameClaim || 'name';
+  const rawDisplayName =
+    (typeof claims[displayNameKey] === 'string' && (claims[displayNameKey] as string).trim()) ||
+    (typeof claims.email === 'string' && claims.email.trim()) ||
+    rawUsername;
+
+  const base: MappedOidcIdentity = {
+    subject,
+    ...(issuer ? { issuer } : {}),
+    username: sanitizeOidcUsername(rawUsername, subject),
+    displayName: rawDisplayName,
+    ...(typeof claims.email === 'string' && claims.email.trim() ? { email: claims.email.trim() } : {}),
+    role: isAdmin ? 'admin' : 'member',
+    groups,
+  };
+
+  if (config.customMapper) {
+    const override = config.customMapper(claims);
+    return {
+      ...base,
+      ...override,
+      subject: override.subject ?? base.subject,
+      username: override.username ? sanitizeOidcUsername(override.username, subject) : base.username,
+      displayName: override.displayName ?? base.displayName,
+      role: override.role === 'admin' ? 'admin' : override.role === 'member' ? 'member' : base.role,
+      groups: Array.isArray(override.groups) ? override.groups : base.groups,
+    };
+  }
+
+  return base;
+}
+
+/**
+ * Returns true if the target environment or tags represent production/critical infrastructure.
+ */
+export function isProdTargetContext(targetEnv?: string, targetTags?: string[]): boolean {
+  if (targetEnv && PROD_ENV_PATTERN.test(targetEnv.trim())) {
+    return true;
+  }
+  if (Array.isArray(targetTags)) {
+    return targetTags.some((t) => typeof t === 'string' && PROD_ENV_PATTERN.test(t.trim()));
+  }
+  return false;
+}
+
+/**
+ * Evaluates role-based peer approval authorization with strict Separation of Duties (SoD).
+ * Prevents self-approval and enforces admin/approver roles for production targets.
+ */
+export function evaluatePeerApproval(input: PeerApprovalPolicyInput): PeerApprovalDecision {
+  const requiredCount = Math.max(1, input.requiredApprovals ?? 1);
+  const distinctApprovers = new Set<string>();
+  for (const existing of input.existingApprovals ?? []) {
+    if (!existing.allowed) continue;
+    const key = existing.actorId?.trim() || existing.actor?.trim();
+    if (!key) continue;
+    if (key === input.requesterId || (input.requesterUsername && key.toLowerCase() === input.requesterUsername.toLowerCase())) {
+      continue;
+    }
+    distinctApprovers.add(key);
+  }
+
+  const satisfiedSoFar = distinctApprovers.size;
+
+  if (input.approver.disabled) {
+    return {
+      authorized: false,
+      reason: 'Approver account is disabled',
+      satisfiedCount: satisfiedSoFar,
+      requiredCount,
+      remainingApprovals: Math.max(0, requiredCount - satisfiedSoFar),
+    };
+  }
+
+  if (
+    input.approver.id === input.requesterId ||
+    (input.requesterUsername && input.approver.username.toLowerCase() === input.requesterUsername.trim().toLowerCase())
+  ) {
+    return {
+      authorized: false,
+      reason: 'Self-approval is not permitted (separation of duties)',
+      satisfiedCount: satisfiedSoFar,
+      requiredCount,
+      remainingApprovals: Math.max(0, requiredCount - satisfiedSoFar),
+    };
+  }
+
+  const isProd = isProdTargetContext(input.targetEnv, input.targetTags);
+  const requireAdminForProd = input.requireAdminForProd ?? true;
+  if (isProd && requireAdminForProd) {
+    const allowedGroupSet = new Set(
+      (input.approverGroups && input.approverGroups.length > 0
+        ? input.approverGroups
+        : Array.from(DEFAULT_PROD_APPROVER_GROUPS)
+      ).map((g) => g.trim().toLowerCase()),
+    );
+    const hasApproverGroup = (input.approver.ssoGroups ?? []).some((g) =>
+      allowedGroupSet.has(g.trim().toLowerCase()),
+    );
+    if (input.approver.role !== 'admin' && !hasApproverGroup) {
+      return {
+        authorized: false,
+        reason: 'Production peer approval requires an admin or authorized approver role',
+        satisfiedCount: satisfiedSoFar,
+        requiredCount,
+        remainingApprovals: Math.max(0, requiredCount - satisfiedSoFar),
+      };
+    }
+  }
+
+  const approverKey = input.approver.id || input.approver.username;
+  if (distinctApprovers.has(approverKey)) {
+    return {
+      authorized: false,
+      reason: 'This approver has already recorded an approval',
+      satisfiedCount: satisfiedSoFar,
+      requiredCount,
+      remainingApprovals: Math.max(0, requiredCount - satisfiedSoFar),
+    };
+  }
+
+  distinctApprovers.add(approverKey);
+  const satisfiedCount = distinctApprovers.size;
+  return {
+    authorized: true,
+    satisfiedCount,
+    requiredCount,
+    remainingApprovals: Math.max(0, requiredCount - satisfiedCount),
+  };
 }
 
 export class WebAuthService {
@@ -384,7 +672,20 @@ export class WebAuthService {
       lastLoginAt: user.lastLoginAt,
       sshPublicKey: publicKey,
       sshPrivateKeyPath: privateKeyPath,
+      ...(user.authSource ? { authSource: user.authSource } : {}),
+      ...(user.ssoIssuer ? { ssoIssuer: user.ssoIssuer } : {}),
+      ...(user.ssoSubject ? { ssoSubject: user.ssoSubject } : {}),
+      ...(user.ssoEmail ? { ssoEmail: user.ssoEmail } : {}),
+      ...(user.ssoGroups ? { ssoGroups: user.ssoGroups } : {}),
+      ...(user.disabled ? { disabled: user.disabled, disabledAt: user.disabledAt } : {}),
     };
+  }
+
+  async getUserById(userId: string): Promise<WebUserPublic | null> {
+    if (!userId) return null;
+    const user = this.data.users.find((u) => u.id === userId);
+    if (!user || user.disabled) return null;
+    return this.toPublicUser(user);
   }
 
   private normalizeUsername(username: string): string {
@@ -469,7 +770,7 @@ export class WebAuthService {
     }
 
     const user = this.data.users.find((u) => u.username === username);
-    if (!user) {
+    if (!user || !user.passwordHash || !user.passwordSalt) {
       this.recordFailedAttempt(clientIp, now);
       throw new Error('Wrong user name or password');
     }
@@ -479,6 +780,10 @@ export class WebAuthService {
       this.recordFailedAttempt(clientIp, now);
       this.recordFailedAttempt(accountKey, now);
       throw new Error('Wrong user name or password');
+    }
+
+    if (user.disabled) {
+      throw new Error('This account has been disabled');
     }
 
     this.loginAttempts.delete(clientIp);
@@ -525,8 +830,124 @@ export class WebAuthService {
     });
     if (!session) return null;
     const user = this.data.users.find((u) => u.id === session.userId);
-    if (!user) return null;
+    if (!user || user.disabled) return null;
     return this.toPublicUser(user);
+  }
+
+  async revokeAllSessionsForUser(userId: string): Promise<number> {
+    const before = this.data.sessions.length;
+    this.data.sessions = this.data.sessions.filter((s) => s.userId !== userId);
+    const removed = before - this.data.sessions.length;
+    if (removed > 0) {
+      await this.save();
+    }
+    return removed;
+  }
+
+  activeSessionCount(userId?: string): number {
+    const now = Date.now();
+    return this.data.sessions.filter(
+      (s) => s.expiresAt > now && (!userId || s.userId === userId),
+    ).length;
+  }
+
+  /**
+   * Provisions or updates an OIDC/SSO-authenticated user from verified IdP claims
+   * and issues a server session. Never silently merges with an unrelated local password account.
+   */
+  async upsertOidcUser(
+    claims: OidcClaims,
+    config: OidcClaimMappingConfig = {},
+  ): Promise<{ user: WebUserPublic; sessionToken: string; created: boolean }> {
+    const identity = mapOidcClaimsToIdentity(claims, config);
+    const now = Date.now();
+
+    let record = this.data.users.find(
+      (u) =>
+        u.authSource === 'oidc' &&
+        u.ssoSubject === identity.subject &&
+        (u.ssoIssuer || '') === (identity.issuer || ''),
+    );
+
+    if (record?.disabled) {
+      throw new Error('This account has been disabled');
+    }
+
+    let created = false;
+    if (!record) {
+      // Prevent silent takeover of an existing local or distinct-subject account
+      let candidateUsername = identity.username;
+      if (this.data.users.some((u) => u.username === candidateUsername)) {
+        const suffix = crypto
+          .createHash('sha256')
+          .update(`${identity.issuer || ''}:${identity.subject}`)
+          .digest('hex')
+          .slice(0, 6);
+        candidateUsername = `${candidateUsername.slice(0, 33)}_${suffix}`;
+      }
+      record = {
+        id: `usr_${crypto.randomBytes(8).toString('hex')}`,
+        username: this.normalizeUsername(candidateUsername),
+        displayName: identity.displayName || candidateUsername,
+        role: identity.role,
+        passwordSalt: '',
+        passwordHash: '',
+        createdAt: now,
+        lastLoginAt: now,
+        authSource: 'oidc',
+        ssoIssuer: identity.issuer,
+        ssoSubject: identity.subject,
+        ssoEmail: identity.email,
+        ssoGroups: identity.groups,
+      };
+      this.data.users.push(record);
+      await this.ensureUserSshKey(record.id, record.username);
+      created = true;
+    } else {
+      record.displayName = identity.displayName || record.displayName;
+      record.role = identity.role;
+      record.ssoEmail = identity.email ?? record.ssoEmail;
+      record.ssoGroups = identity.groups;
+      record.lastLoginAt = now;
+    }
+
+    await this.save();
+    const sessionToken = await this.createSession(record.id);
+    return {
+      user: await this.toPublicUser(record),
+      sessionToken,
+      created,
+    };
+  }
+
+  /**
+   * SCIM/SSO offboarding hook: marks the user disabled and immediately revokes all sessions.
+   */
+  async deprovisionUser(
+    userIdOrSubject: string,
+  ): Promise<{ deprovisioned: boolean; userId?: string; revokedSessions: number }> {
+    const clean = userIdOrSubject.trim();
+    if (!clean) return { deprovisioned: false, revokedSessions: 0 };
+    const user = this.data.users.find(
+      (u) => u.id === clean || u.ssoSubject === clean || u.username === clean.toLowerCase(),
+    );
+    if (!user) return { deprovisioned: false, revokedSessions: 0 };
+    user.disabled = true;
+    user.disabledAt = Date.now();
+    const before = this.data.sessions.length;
+    this.data.sessions = this.data.sessions.filter((s) => s.userId !== user.id);
+    const revokedSessions = before - this.data.sessions.length;
+    await this.save();
+    return { deprovisioned: true, userId: user.id, revokedSessions };
+  }
+
+  async reactivateUser(userId: string): Promise<boolean> {
+    const user = this.data.users.find((u) => u.id === userId);
+    if (!user) return false;
+    delete user.disabled;
+    delete user.disabledAt;
+    await this.save();
+    return true;
   }
 
   async revokeSession(token?: string | null): Promise<void> {

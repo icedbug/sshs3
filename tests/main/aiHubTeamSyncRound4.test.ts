@@ -317,7 +317,7 @@ async function boardHub(name: string, bucket: QueueStore) {
   return { hub, sync };
 }
 
-const agentInput = (extra: Partial<MissionAgent> = {}) => ({ id: "dba", name: "DBA", role: "Databases", mission: "Keep the databases healthy", systemPrompt: "", defaultMode: "assisted", ...extra });
+const agentInput = (extra: Partial<MissionAgent> = {}): MissionAgent => ({ id: "dba", name: "DBA", role: "Databases", mission: "Keep the databases healthy", systemPrompt: "", defaultMode: "assisted", updatedAt: 1, ...extra });
 const agentOf = (hub: { store: { data: { agents?: MissionAgent[] } } }) => (hub.store.data.agents ?? []).find((a) => a.id === "dba");
 
 describe("an agent", () => {
@@ -363,5 +363,85 @@ describe("an agent", () => {
     await anna.sync();
     await sara.sync();
     for (const side of [anna, sara]) expect(agentOf(side.hub)).toMatchObject({ name: "Database keeper", mission: "Keep the databases backed up" });
+  });
+
+  it("refuses a stale edit or pause at once when the removal is already in the bucket", async () => {
+    const bucket = memoryBucket();
+    const anna = await boardHub("Anna Lind", bucket);
+    const sara = await boardHub("Sara Nyberg", bucket);
+    await anna.hub.request({ action: "agent-save", agent: agentInput() } as never);
+    await anna.sync();
+    await sara.sync();
+    expect(agentOf(sara.hub)).toBeDefined();
+    await new Promise((r) => setTimeout(r, 5));
+
+    await anna.hub.request({ action: "agent-delete", id: "dba" } as never);
+    await anna.sync();
+    // Sara has not synced since: her view still shows the agent, yet her save/pause reads the bucket first.
+    expect(agentOf(sara.hub)).toBeDefined();
+    await expect(
+      sara.hub.request({ action: "agent-save", agent: agentInput({ mission: "Stale edit" }) } as never),
+    ).rejects.toThrow(/This agent was removed by Anna Lind at .* UTC, so the change was not saved/);
+    expect(agentOf(sara.hub)).toBeUndefined();
+
+    // Another teammate who still had it before polling cannot pause it either.
+    const erik = await boardHub("Erik Holm", bucket);
+    erik.hub.store.data.agents = [agentInput({ updatedAt: 1 })];
+    await expect(erik.hub.request({ action: "agent-pause", id: "dba", paused: true } as never)).rejects.toThrow(
+      /This agent was removed by Anna Lind at .* UTC, so it could not be paused/,
+    );
+    expect(agentOf(erik.hub)).toBeUndefined();
+  });
+
+  it("keeps a teammate's already-synced field edit when another person submits a stale form", async () => {
+    const bucket = memoryBucket();
+    const anna = await boardHub("Anna Lind", bucket);
+    const sara = await boardHub("Sara Nyberg", bucket);
+    await anna.hub.request({ action: "agent-save", agent: agentInput() } as never);
+    await anna.sync();
+    await sara.sync();
+    await new Promise((r) => setTimeout(r, 5));
+
+    // Sara renames and pushes to the bucket before Anna polls; Anna edits only the mission on her stale form.
+    await sara.hub.request({ action: "agent-save", agent: agentInput({ name: "Database keeper" }) } as never);
+    await sara.sync();
+    await new Promise((r) => setTimeout(r, 5));
+    await anna.hub.request({ action: "agent-save", agent: agentInput({ mission: "Keep the databases backed up" }) } as never);
+    expect(agentOf(anna.hub)).toMatchObject({ name: "Database keeper", mission: "Keep the databases backed up" });
+  });
+
+  it("pushes agent creates and deletes promptly without waiting for a 40s poll, and syncs on workspace-s3-sync-now", async () => {
+    const bucket = memoryBucket();
+    const anna = await boardHub("Anna Lind", bucket);
+    const sara = await boardHub("Sara Nyberg", bucket);
+    const saraInner = sara.hub as unknown as BoardInner & {
+      s3Workspace: { syncNow: () => Promise<void> };
+    };
+    saraInner.s3Workspace.syncNow = async () => {};
+
+    await anna.hub.request({ action: "agent-save", agent: agentInput() } as never);
+    // Debounced push uploads to the bucket within ~400ms without an explicit sync() call.
+    const deadline = Date.now() + 2500;
+    while (!bucket.files.has("work/agents/dba.json") && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    expect(bucket.files.has("work/agents/dba.json")).toBe(true);
+
+    // "Sync now" pulls agents alongside workspace.json, and background ticks poll on a 10s cadence (not 40s).
+    await sara.hub.request({ action: "workspace-s3-sync-now" } as never);
+    expect(agentOf(sara.hub)).toMatchObject({ id: "dba", name: "DBA" });
+
+    // Periodic workTick runs again within 10s (previously gated at 40s).
+    await new Promise((r) => setTimeout(r, 5));
+    await anna.hub.request({ action: "agent-delete", id: "dba" } as never);
+    const delDeadline = Date.now() + 2500;
+    while (Date.now() < delDeadline) {
+      const raw = bucket.files.get("work/agents/dba.json");
+      if (raw && (JSON.parse(raw.toString("utf8")) as { deleted?: boolean }).deleted) break;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    expect((JSON.parse(bucket.files.get("work/agents/dba.json")!.toString("utf8")) as { deleted?: boolean }).deleted).toBe(true);
+    await saraInner.workTick(saraInner.lastWorkSync + 10_000);
+    expect(agentOf(sara.hub)).toBeUndefined();
   });
 });

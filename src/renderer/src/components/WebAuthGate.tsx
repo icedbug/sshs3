@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { McpKeysPanel } from './McpKeysPanel';
 import {
   isWebBrowserMode,
@@ -9,6 +9,78 @@ import {
   setStoredWebSessionToken,
   onWebConnectionStateChange,
 } from '../lib/webClientBridge';
+
+const WEB_AUTH_COPY = {
+  workspaceBadge: 'sshs3 Multi-User Web Workspace',
+  vmServer: 'VM Server',
+  connecting: 'Connecting to the sshs3 web workspace…',
+  setupTitle: 'Create the admin account (first start)',
+  inviteTitle: 'Join the team workspace',
+  loginTitle: 'Sign in to sshs3',
+  setupDesc:
+    'Welcome. Create the administrator account for this server. You get a personal SSH key and can invite your team with a link.',
+  inviteDesc:
+    "Create your personal account. You get your own SSH key on the server and access to the team's shared VMs, clusters, S3 bucket and team memory.",
+  loginDesc: "Sign in to open your own terminal tabs and work in the team's shared workspace.",
+  stepAdmin: '1. Admin account',
+  stepAdminDesc: 'Create your account below',
+  stepKey: '2. Your own SSH key',
+  stepKeyDesc: 'Generated for you',
+  stepInvite: '3. Invite the team',
+  stepInviteDesc: 'Share an invite link',
+  usernameForSignIn: 'User name (for signing in)',
+  displayNameTeam: 'Display name in the team',
+  passwordMin6: 'Password (at least 6 characters)',
+  creatingAdminBtn: 'Creating admin and SSH key…',
+  createAdminBtn: 'Create the admin account and start sshs3',
+  inviteAcceptedTitle: '✓ Invite link accepted.',
+  inviteAcceptedBody: 'Choose your user name and password below.',
+  changeCode: 'Change code',
+  inviteCode: 'Invite code',
+  inviteCodePlaceholder: 'Paste the invite code…',
+  chooseUsername: 'Choose a user name',
+  yourDisplayName: 'Your display name in the team',
+  choosePassword: 'Choose a password (at least 6 characters)',
+  creatingMemberBtn: 'Creating account and SSH key…',
+  joinTeamBtn: 'Join the team and open the workspace',
+  alreadyAccount: 'Already have an account? Sign in here',
+  usernameLabel: 'User name',
+  passwordLabel: 'Password',
+  signingInBtn: 'Signing in…',
+  signInBtn: 'Sign in',
+  gotInviteLink: 'Got an invite code from a teammate? Join here',
+  ssoDivider: 'or',
+  signInWithSso: (provider: string) => `Sign in with ${provider}`,
+  liveUp: 'Live connection is up',
+  reconnecting: 'Reconnecting…',
+  sshKeyPill: '🔑 SSH key',
+  inviteTeamPill: '👥 Invite / team',
+  signedInServer: 'Signed in to the sshs3 web server',
+  signOut: 'Sign out',
+  close: 'Close',
+  tabSsh: '🔑 My SSH key on the server',
+  tabTeam: '👥 Invites and user accounts',
+  welcomePrefix: 'Welcome,',
+  onboardKeyDesc: 'has been created on the server.',
+  copySshKey: '🔑 Copy my public SSH key',
+  copiedSshKey: '✓ SSH key copied',
+  inviteTeammates: '👥 Invite teammates',
+  changePasswordHeading: 'Change password',
+  currentPasswordPlaceholder: 'Current password',
+  newPasswordPlaceholder: 'New password (at least 6 characters)',
+  updatePasswordBtn: 'Update password',
+  passwordUpdatedMsg: 'The password was updated',
+  revokeBtn: 'Revoke',
+  errSetup: 'Could not create the admin account',
+  errLogin: 'Wrong user name or password',
+  errInvite: 'The invite code could not be used',
+  errAdminLoad: 'Could not load the admin data',
+} as const;
+
+export interface WebAuthGateProps {
+  children: React.ReactNode;
+  onSsoLogin?: (url: string) => void;
+}
 
 interface WebUserPublic {
   id: string;
@@ -32,6 +104,25 @@ interface WebInvitePublic {
   note?: string;
 }
 
+interface AuthStatusResponse {
+  initialized: boolean;
+  authenticated: boolean;
+  user: WebUserPublic | null;
+  wsTicket?: string;
+  ssoConfigured?: boolean;
+  oidcConfigured?: boolean;
+  ssoUrl?: string;
+  ssoProviderName?: string;
+  sso?: boolean | { enabled?: boolean; loginUrl?: string; label?: string; providerName?: string };
+}
+
+interface AuthSuccessResponse {
+  token?: string;
+  sessionToken?: string;
+  wsTicket?: string;
+  user: WebUserPublic;
+}
+
 async function webApiFetch<T = any>(path: string, options: RequestInit = {}): Promise<T> {
   const token = getStoredWebSessionToken();
   const headers: Record<string, string> = {
@@ -53,14 +144,21 @@ async function webApiFetch<T = any>(path: string, options: RequestInit = {}): Pr
   return data as T;
 }
 
-export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+export const WebAuthGate: React.FC<WebAuthGateProps> = ({ children, onSsoLogin }) => {
   const inWebMode = isWebBrowserMode();
+
+  const t = WEB_AUTH_COPY;
 
   const [loading, setLoading] = useState<boolean>(inWebMode);
   const [initialized, setInitialized] = useState<boolean>(true);
   const [authenticated, setAuthenticated] = useState<boolean>(false);
   const [user, setUser] = useState<WebUserPublic | null>(null);
   const [wsConnected, setWsConnected] = useState<boolean>(false);
+  const [ssoConfig, setSsoConfig] = useState<{ enabled: boolean; url: string; label: string }>({
+    enabled: false,
+    url: '/api/auth/sso/login',
+    label: 'SSO',
+  });
 
   // Auth form states
   const [authMode, setAuthMode] = useState<'login' | 'invite'>('login');
@@ -84,6 +182,9 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
   const [currentPasswordInput, setCurrentPasswordInput] = useState('');
   const [newPasswordInput, setNewPasswordInput] = useState('');
   const [passwordStatusMsg, setPasswordStatusMsg] = useState<string | null>(null);
+  const modalRef = useRef<HTMLDivElement | null>(null);
+  const modalTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const wasModalOpenRef = useRef(false);
 
   // Admin states
   const [usersList, setUsersList] = useState<WebUserPublic[]>([]);
@@ -109,16 +210,30 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
       setInviteFromUrl(true);
       setAuthMode('invite');
     }
+    const ssoError = params.get('sso_error') || params.get('error');
+    if (ssoError) {
+      setAuthError(ssoError);
+    }
 
     const unsubWs = onWebConnectionStateChange((connected) => {
       setWsConnected(connected);
     });
 
-    webApiFetch<{ initialized: boolean; authenticated: boolean; user: WebUserPublic | null }>('/api/auth/status')
+    webApiFetch<AuthStatusResponse>('/api/auth/status')
       .then((status) => {
         setInitialized(status.initialized);
+        const ssoObj = typeof status.sso === 'object' && status.sso ? status.sso : null;
+        const ssoEnabled = Boolean(
+          status.ssoConfigured || status.oidcConfigured || status.ssoUrl || status.sso === true || ssoObj?.enabled
+        );
+        setSsoConfig({
+          enabled: ssoEnabled,
+          url: status.ssoUrl || ssoObj?.loginUrl || '/api/auth/sso/login',
+          label: status.ssoProviderName || ssoObj?.label || ssoObj?.providerName || 'SSO',
+        });
+
         if (status.authenticated && status.user && !urlInvite) {
-          connectWebClientBridge(getStoredWebSessionToken());
+          connectWebClientBridge(status.wsTicket || getStoredWebSessionToken() || null);
           setUser(status.user);
           setAuthenticated(true);
         } else {
@@ -148,15 +263,33 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
       setUsersList(uRes.users || []);
       setInvitesList(iRes.invites || []);
     } catch (err: any) {
-      setAdminMsg(err?.message || 'Could not load the admin data');
+      setAdminMsg(err?.message || t.errAdminLoad);
     }
-  }, [user]);
+  }, [user, t.errAdminLoad]);
 
   useEffect(() => {
     if (showModal && modalTab === 'team' && user?.role === 'admin') {
       loadAdminData();
     }
   }, [showModal, modalTab, user, loadAdminData]);
+
+  useEffect(() => {
+    if (showModal) {
+      wasModalOpenRef.current = true;
+      modalRef.current?.focus();
+      const onKeyDown = (e: KeyboardEvent) => {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          setShowModal(false);
+        }
+      };
+      window.addEventListener('keydown', onKeyDown);
+      return () => window.removeEventListener('keydown', onKeyDown);
+    } else if (wasModalOpenRef.current) {
+      wasModalOpenRef.current = false;
+      modalTriggerRef.current?.focus();
+    }
+  }, [showModal]);
 
   if (!inWebMode) {
     return <>{children}</>;
@@ -168,9 +301,18 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
     setTimeout(() => setCopiedText(null), 2400);
   };
 
-  const handleAuthSuccess = (token: string, loggedInUser: WebUserPublic, isFirstTime = false) => {
-    setStoredWebSessionToken(token);
-    connectWebClientBridge(token);
+  const handleAuthSuccess = (
+    token: string | undefined,
+    loggedInUser: WebUserPublic,
+    isFirstTime = false,
+    wsTicket?: string
+  ) => {
+    if (token) {
+      setStoredWebSessionToken(token);
+    } else {
+      setStoredWebSessionToken(null);
+    }
+    connectWebClientBridge(wsTicket || token || null);
     setUser(loggedInUser);
     setInitialized(true);
     setAuthenticated(true);
@@ -189,7 +331,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
     setAuthError(null);
     setSubmitting(true);
     try {
-      const res = await webApiFetch<{ token: string; sessionToken?: string; user: WebUserPublic }>('/api/auth/setup', {
+      const res = await webApiFetch<AuthSuccessResponse>('/api/auth/setup', {
         method: 'POST',
         body: JSON.stringify({
           username: username.trim(),
@@ -197,9 +339,9 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
           password,
         }),
       });
-      handleAuthSuccess(res.token || res.sessionToken || '', res.user, true);
+      handleAuthSuccess(res.token || res.sessionToken, res.user, true, res.wsTicket);
     } catch (err: any) {
-      setAuthError(err?.message || 'Could not create the admin account');
+      setAuthError(err?.message || t.errSetup);
     } finally {
       setSubmitting(false);
     }
@@ -210,19 +352,28 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
     setAuthError(null);
     setSubmitting(true);
     try {
-      const res = await webApiFetch<{ token: string; sessionToken?: string; user: WebUserPublic }>('/api/auth/login', {
+      const res = await webApiFetch<AuthSuccessResponse>('/api/auth/login', {
         method: 'POST',
         body: JSON.stringify({
           username: username.trim(),
           password,
         }),
       });
-      handleAuthSuccess(res.token || res.sessionToken || '', res.user, false);
+      handleAuthSuccess(res.token || res.sessionToken, res.user, false, res.wsTicket);
     } catch (err: any) {
-      setAuthError(err?.message || 'Wrong user name or password');
+      setAuthError(err?.message || t.errLogin);
     } finally {
       setSubmitting(false);
     }
+  };
+
+  const handleSsoLogin = () => {
+    setAuthError(null);
+    if (onSsoLogin) {
+      onSsoLogin(ssoConfig.url);
+      return;
+    }
+    window.location.assign(ssoConfig.url);
   };
 
   const handleRedeemInvite = async (e: React.FormEvent) => {
@@ -230,21 +381,18 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
     setAuthError(null);
     setSubmitting(true);
     try {
-      const res = await webApiFetch<{ token: string; sessionToken?: string; user: WebUserPublic }>(
-        '/api/auth/register-invite',
-        {
-          method: 'POST',
-          body: JSON.stringify({
-            inviteToken: inviteToken.trim(),
-            username: username.trim(),
-            displayName: displayName.trim() || username.trim(),
-            password,
-          }),
-        }
-      );
-      handleAuthSuccess(res.token || res.sessionToken || '', res.user, true);
+      const res = await webApiFetch<AuthSuccessResponse>('/api/auth/register-invite', {
+        method: 'POST',
+        body: JSON.stringify({
+          inviteToken: inviteToken.trim(),
+          username: username.trim(),
+          displayName: displayName.trim() || username.trim(),
+          password,
+        }),
+      });
+      handleAuthSuccess(res.token || res.sessionToken, res.user, true, res.wsTicket);
     } catch (err: any) {
-      setAuthError(err?.message || 'The invite code could not be used');
+      setAuthError(err?.message || t.errInvite);
     } finally {
       setSubmitting(false);
     }
@@ -382,7 +530,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
       });
       setCurrentPasswordInput('');
       setNewPasswordInput('');
-      setPasswordStatusMsg('The password was updated');
+      setPasswordStatusMsg(t.passwordUpdatedMsg);
     } catch (err: any) {
       setPasswordStatusMsg(`Error: ${err?.message || 'Could not change the password'}`);
     }
@@ -390,10 +538,14 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
 
   if (loading) {
     return (
-      <div className="min-h-screen w-full bg-[#090d16] text-slate-100 flex items-center justify-center">
+      <div
+        role="status"
+        aria-live="polite"
+        className="min-h-screen w-full bg-[#090d16] text-slate-100 flex items-center justify-center"
+      >
         <div className="flex flex-col items-center gap-3">
           <div className="w-9 h-9 rounded-full border-2 border-cyan-400 border-t-transparent animate-spin" />
-          <div className="text-sm text-slate-400 font-mono">Connecting to the sshs3 web workspace…</div>
+          <div className="text-sm text-slate-400 font-mono">{t.connecting}</div>
         </div>
       </div>
     );
@@ -407,49 +559,44 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
 
         <div className="w-full max-w-md rounded-2xl border border-slate-800/90 bg-[#0f1624]/95 shadow-2xl p-6 space-y-6 relative z-10">
           <div className="space-y-2">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-2">
               <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-full bg-cyan-500/10 border border-cyan-500/30 text-cyan-300 text-xs font-medium">
                 <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
-                sshs3 Multi-User Web Workspace
+                {t.workspaceBadge}
               </div>
-              <span className="text-[11px] font-mono text-slate-500">VM Server</span>
+              <span className="text-[11px] font-mono text-slate-500">{t.vmServer}</span>
             </div>
 
             <h1 className="text-xl font-bold text-white tracking-tight pt-1">
-              {!initialized
-                ? 'Create the admin account (first start)'
-                : authMode === 'invite'
-                  ? 'Join the team workspace'
-                  : 'Sign in to sshs3'}
+              {!initialized ? t.setupTitle : authMode === 'invite' ? t.inviteTitle : t.loginTitle}
             </h1>
             <p className="text-xs text-slate-400 leading-relaxed">
-              {!initialized
-                ? 'Welcome. Create the administrator account for this server. You get a personal SSH key and can invite your team with a link.'
-                : authMode === 'invite'
-                  ? 'Create your personal account. You get your own SSH key on the server and access to the team\'s shared VMs, clusters, S3 bucket and team memory.'
-                  : 'Sign in to open your own terminal tabs and work in the team\'s shared workspace.'}
+              {!initialized ? t.setupDesc : authMode === 'invite' ? t.inviteDesc : t.loginDesc}
             </p>
           </div>
 
           {!initialized && (
             <div className="grid grid-cols-3 gap-2 text-[11px]">
               <div className="rounded-lg bg-slate-900/90 border border-slate-800 p-2.5">
-                <div className="font-semibold text-cyan-300">1. Admin account</div>
-                <div className="text-slate-400 mt-0.5">Create your account below</div>
+                <div className="font-semibold text-cyan-300">{t.stepAdmin}</div>
+                <div className="text-slate-400 mt-0.5">{t.stepAdminDesc}</div>
               </div>
               <div className="rounded-lg bg-slate-900/90 border border-slate-800 p-2.5">
-                <div className="font-semibold text-emerald-300">2. Your own SSH key</div>
-                <div className="text-slate-400 mt-0.5">Generated for you</div>
+                <div className="font-semibold text-emerald-300">{t.stepKey}</div>
+                <div className="text-slate-400 mt-0.5">{t.stepKeyDesc}</div>
               </div>
               <div className="rounded-lg bg-slate-900/90 border border-slate-800 p-2.5">
-                <div className="font-semibold text-indigo-300">3. Invite the team</div>
-                <div className="text-slate-400 mt-0.5">Share an invite link</div>
+                <div className="font-semibold text-indigo-300">{t.stepInvite}</div>
+                <div className="text-slate-400 mt-0.5">{t.stepInviteDesc}</div>
               </div>
             </div>
           )}
 
           {authError && (
-            <div role="alert" className="rounded-lg bg-rose-500/10 border border-rose-500/30 px-3.5 py-2.5 text-xs text-rose-300">
+            <div
+              role="alert"
+              className="rounded-lg bg-rose-500/10 border border-rose-500/30 px-3.5 py-2.5 text-xs text-rose-300"
+            >
               {authError}
             </div>
           )}
@@ -457,45 +604,57 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
           {!initialized ? (
             <form onSubmit={handleInitialSetup} className="space-y-4">
               <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">User name (for signing in)</label>
+                <label htmlFor="web-auth-setup-username" className="block text-xs font-medium text-slate-300 mb-1">
+                  {t.usernameForSignIn}
+                </label>
                 <input
+                  id="web-auth-setup-username"
                   type="text"
                   required
                   autoFocus
+                  autoComplete="username"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
                   placeholder="e.g. jacob"
-                  className="w-full rounded-lg bg-slate-900/90 border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-400"
+                  className="w-full rounded-lg bg-slate-900/90 border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 focus:border-cyan-400"
                 />
               </div>
               <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">Display name in the team</label>
+                <label htmlFor="web-auth-setup-display" className="block text-xs font-medium text-slate-300 mb-1">
+                  {t.displayNameTeam}
+                </label>
                 <input
+                  id="web-auth-setup-display"
                   type="text"
+                  autoComplete="name"
                   value={displayName}
                   onChange={(e) => setDisplayName(e.target.value)}
                   placeholder="e.g. Jacob (Admin)"
-                  className="w-full rounded-lg bg-slate-900/90 border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-400"
+                  className="w-full rounded-lg bg-slate-900/90 border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 focus:border-cyan-400"
                 />
               </div>
               <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">Password (at least 6 characters)</label>
+                <label htmlFor="web-auth-setup-password" className="block text-xs font-medium text-slate-300 mb-1">
+                  {t.passwordMin6}
+                </label>
                 <input
+                  id="web-auth-setup-password"
                   type="password"
                   required
                   minLength={6}
+                  autoComplete="new-password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="••••••••"
-                  className="w-full rounded-lg bg-slate-900/90 border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-400"
+                  className="w-full rounded-lg bg-slate-900/90 border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 focus:border-cyan-400"
                 />
               </div>
               <button
                 type="submit"
                 disabled={submitting}
-                className="w-full rounded-lg bg-cyan-500 hover:bg-cyan-400 disabled:opacity-50 text-slate-950 font-semibold py-2.5 text-sm transition shadow-lg shadow-cyan-500/15"
+                className="w-full rounded-lg bg-cyan-500 hover:bg-cyan-400 disabled:opacity-50 text-slate-950 font-semibold py-2.5 text-sm transition shadow-lg shadow-cyan-500/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300"
               >
-                {submitting ? 'Creating admin and SSH key…' : 'Create the admin account and start sshs3'}
+                {submitting ? t.creatingAdminBtn : t.createAdminBtn}
               </button>
             </form>
           ) : authMode === 'invite' ? (
@@ -503,70 +662,84 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
               {inviteFromUrl && inviteToken && !showRawInviteInput ? (
                 <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/30 p-3 flex items-center justify-between gap-2">
                   <div className="text-xs text-emerald-200">
-                    <span className="font-semibold text-emerald-300">✓ Invite link accepted.</span> Choose your
-                    user name and password below.
+                    <span className="font-semibold text-emerald-300">{t.inviteAcceptedTitle}</span> {t.inviteAcceptedBody}
                   </div>
                   <button
                     type="button"
                     onClick={() => setShowRawInviteInput(true)}
-                    className="text-[11px] text-emerald-300 hover:underline shrink-0"
+                    className="text-[11px] text-emerald-300 hover:underline shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 rounded"
                   >
-                    Change code
+                    {t.changeCode}
                   </button>
                 </div>
               ) : (
                 <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1">Invite code</label>
+                  <label htmlFor="web-auth-invite-code" className="block text-xs font-medium text-slate-300 mb-1">
+                    {t.inviteCode}
+                  </label>
                   <input
+                    id="web-auth-invite-code"
                     type="text"
                     required
                     value={inviteToken}
                     onChange={(e) => setInviteToken(e.target.value)}
-                    placeholder="Paste the invite code…"
-                    className="w-full rounded-lg bg-slate-900/90 border border-slate-700 px-3 py-2 text-sm text-white font-mono focus:outline-none focus:border-cyan-400"
+                    placeholder={t.inviteCodePlaceholder}
+                    className="w-full rounded-lg bg-slate-900/90 border border-slate-700 px-3 py-2 text-sm text-white font-mono focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 focus:border-cyan-400"
                   />
                 </div>
               )}
               <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">Choose a user name</label>
+                <label htmlFor="web-auth-invite-username" className="block text-xs font-medium text-slate-300 mb-1">
+                  {t.chooseUsername}
+                </label>
                 <input
+                  id="web-auth-invite-username"
                   type="text"
                   required
                   autoFocus
+                  autoComplete="username"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
                   placeholder="e.g. erik"
-                  className="w-full rounded-lg bg-slate-900/90 border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-400"
+                  className="w-full rounded-lg bg-slate-900/90 border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 focus:border-cyan-400"
                 />
               </div>
               <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">Your display name in the team</label>
+                <label htmlFor="web-auth-invite-display" className="block text-xs font-medium text-slate-300 mb-1">
+                  {t.yourDisplayName}
+                </label>
                 <input
+                  id="web-auth-invite-display"
                   type="text"
+                  autoComplete="name"
                   value={displayName}
                   onChange={(e) => setDisplayName(e.target.value)}
                   placeholder="e.g. Erik"
-                  className="w-full rounded-lg bg-slate-900/90 border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-400"
+                  className="w-full rounded-lg bg-slate-900/90 border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 focus:border-cyan-400"
                 />
               </div>
               <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">Choose a password (at least 6 characters)</label>
+                <label htmlFor="web-auth-invite-password" className="block text-xs font-medium text-slate-300 mb-1">
+                  {t.choosePassword}
+                </label>
                 <input
+                  id="web-auth-invite-password"
                   type="password"
                   required
                   minLength={6}
+                  autoComplete="new-password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="••••••••"
-                  className="w-full rounded-lg bg-slate-900/90 border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-400"
+                  className="w-full rounded-lg bg-slate-900/90 border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 focus:border-cyan-400"
                 />
               </div>
               <button
                 type="submit"
                 disabled={submitting}
-                className="w-full rounded-lg bg-cyan-500 hover:bg-cyan-400 disabled:opacity-50 text-slate-950 font-semibold py-2.5 text-sm transition shadow-lg shadow-cyan-500/15"
+                className="w-full rounded-lg bg-cyan-500 hover:bg-cyan-400 disabled:opacity-50 text-slate-950 font-semibold py-2.5 text-sm transition shadow-lg shadow-cyan-500/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300"
               >
-                {submitting ? 'Creating account and SSH key…' : 'Join the team and open the workspace'}
+                {submitting ? t.creatingMemberBtn : t.joinTeamBtn}
               </button>
               <div className="text-center pt-1">
                 <button
@@ -575,44 +748,69 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                     setAuthMode('login');
                     setAuthError(null);
                   }}
-                  className="text-xs text-cyan-400 hover:underline"
+                  className="text-xs text-cyan-400 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 rounded"
                 >
-                  Already have an account? Sign in here
+                  {t.alreadyAccount}
                 </button>
               </div>
             </form>
           ) : (
             <form onSubmit={handleLogin} className="space-y-4">
               <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">User name</label>
+                <label htmlFor="web-auth-login-username" className="block text-xs font-medium text-slate-300 mb-1">
+                  {t.usernameLabel}
+                </label>
                 <input
+                  id="web-auth-login-username"
                   type="text"
                   required
                   autoFocus
+                  autoComplete="username"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
-                  placeholder="User name"
-                  className="w-full rounded-lg bg-slate-900/90 border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-400"
+                  placeholder={t.usernameLabel}
+                  className="w-full rounded-lg bg-slate-900/90 border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 focus:border-cyan-400"
                 />
               </div>
               <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">Password</label>
+                <label htmlFor="web-auth-login-password" className="block text-xs font-medium text-slate-300 mb-1">
+                  {t.passwordLabel}
+                </label>
                 <input
+                  id="web-auth-login-password"
                   type="password"
                   required
+                  autoComplete="current-password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="••••••••"
-                  className="w-full rounded-lg bg-slate-900/90 border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-400"
+                  className="w-full rounded-lg bg-slate-900/90 border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 focus:border-cyan-400"
                 />
               </div>
               <button
                 type="submit"
                 disabled={submitting}
-                className="w-full rounded-lg bg-cyan-500 hover:bg-cyan-400 disabled:opacity-50 text-slate-950 font-semibold py-2.5 text-sm transition shadow-lg shadow-cyan-500/15"
+                className="w-full rounded-lg bg-cyan-500 hover:bg-cyan-400 disabled:opacity-50 text-slate-950 font-semibold py-2.5 text-sm transition shadow-lg shadow-cyan-500/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300"
               >
-                {submitting ? 'Signing in…' : 'Sign in'}
+                {submitting ? t.signingInBtn : t.signInBtn}
               </button>
+              {ssoConfig.enabled && (
+                <div className="space-y-2.5 pt-1">
+                  <div className="flex items-center gap-2 text-[11px] text-slate-500">
+                    <span className="h-px flex-1 bg-slate-800" />
+                    <span>{t.ssoDivider}</span>
+                    <span className="h-px flex-1 bg-slate-800" />
+                  </div>
+                  <button
+                    type="button"
+                    data-testid="web-auth-sso-btn"
+                    onClick={handleSsoLogin}
+                    className="w-full rounded-lg border border-slate-700 bg-slate-900 hover:bg-slate-800 text-slate-100 font-medium py-2 text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
+                  >
+                    {t.signInWithSso(ssoConfig.label)}
+                  </button>
+                </div>
+              )}
               <div className="text-center pt-1">
                 <button
                   type="button"
@@ -620,9 +818,9 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                     setAuthMode('invite');
                     setAuthError(null);
                   }}
-                  className="text-xs text-cyan-400 hover:underline"
+                  className="text-xs text-cyan-400 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 rounded"
                 >
-                  Got an invite code from a teammate? Join here
+                  {t.gotInviteLink}
                 </button>
               </div>
             </form>
@@ -637,26 +835,73 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
     : '';
 
   return (
-    <>
-      {children}
+    <div className="web-auth-shell flex h-screen w-screen flex-col overflow-hidden">
+      {/* Compact docked web account & workspace bar (kept out of bottom-right terminal HUD) */}
+      <header
+        data-testid="web-auth-topbar"
+        className="web-auth-topbar flex h-8 shrink-0 items-center justify-between border-b border-slate-800/80 bg-slate-950/90 px-3 text-xs text-slate-200"
+      >
+        <div className="flex items-center gap-2 min-w-0">
+          <span
+            className={`w-2 h-2 shrink-0 rounded-full ${wsConnected ? 'bg-emerald-400' : 'bg-amber-400 animate-pulse'}`}
+            title={wsConnected ? t.liveUp : t.reconnecting}
+            aria-label={wsConnected ? t.liveUp : t.reconnecting}
+          />
+          <span className="truncate font-medium text-slate-200">{user?.displayName || user?.username}</span>
+          <span className="hidden sm:inline text-[11px] font-mono text-slate-400">(@{user?.username})</span>
+        </div>
+        <div className="flex items-center gap-1.5 shrink-0">
+          <button
+            ref={modalTriggerRef}
+            type="button"
+            onClick={() => {
+              setModalTab('ssh');
+              setShowModal(true);
+            }}
+            className="px-2.5 py-0.5 rounded-full bg-slate-800 hover:bg-slate-700 text-[11px] text-cyan-300 font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
+          >
+            {t.sshKeyPill}
+          </button>
+          {user?.role === 'admin' && (
+            <button
+              type="button"
+              onClick={() => {
+                setModalTab('team');
+                setShowModal(true);
+              }}
+              className="px-2.5 py-0.5 rounded-full bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/30 text-[11px] text-cyan-200 font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
+            >
+              {t.inviteTeamPill}
+            </button>
+          )}
+        </div>
+      </header>
+
+      <div className="min-h-0 flex-1 overflow-hidden [&>*]:!h-full">{children}</div>
 
       {/* Onboarding Quick-Start Banner right after creating account / joining team */}
       {justOnboarded && user && !showModal && (
-        <div className="fixed bottom-14 right-3 z-[9991] w-full max-w-md rounded-2xl border border-cyan-500/40 bg-[#0f1624]/95 p-4 shadow-2xl backdrop-blur space-y-3 text-xs text-slate-200">
+        <div
+          role="status"
+          aria-live="polite"
+          className="fixed top-10 right-3 z-[9991] w-full max-w-md rounded-2xl border border-cyan-500/40 bg-[#0f1624]/95 p-4 shadow-2xl backdrop-blur space-y-3 text-xs text-slate-200"
+        >
           <div className="flex items-start justify-between gap-2">
             <div>
               <div className="font-semibold text-white flex items-center gap-1.5">
-                <span>🎉 Welcome, {user.displayName}</span>
+                <span>
+                  🎉 {t.welcomePrefix} {user.displayName}
+                </span>
               </div>
               <p className="text-slate-400 mt-0.5 leading-relaxed">
-                Your personal <code className="text-cyan-300">ssh-ed25519</code> key has been created on the server.
+                <code className="text-cyan-300">ssh-ed25519</code> {t.onboardKeyDesc}
               </p>
             </div>
             <button
               type="button"
               onClick={() => setJustOnboarded(false)}
               aria-label="Dismiss"
-              className="text-slate-400 hover:text-white px-1.5 py-0.5"
+              className="text-slate-400 hover:text-white px-1.5 py-0.5 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
             >
               ✕
             </button>
@@ -665,9 +910,9 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
             <button
               type="button"
               onClick={() => copyToClipboard(user.sshPublicKey, 'onboard-key')}
-              className="px-3 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-semibold transition"
+              className="px-3 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300"
             >
-              {copiedText === 'onboard-key' ? '✓ SSH key copied' : '🔑 Copy my public SSH key'}
+              {copiedText === 'onboard-key' ? t.copiedSshKey : t.copySshKey}
             </button>
             {user.role === 'admin' && (
               <button
@@ -677,107 +922,90 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                   setShowModal(true);
                   setJustOnboarded(false);
                 }}
-                className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-cyan-300 font-medium transition"
+                className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-cyan-300 font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
               >
-                👥 Invite teammates
+                {t.inviteTeammates}
               </button>
             )}
           </div>
         </div>
       )}
 
-      {/* Floating Web User & Team Admin Pill */}
-      <div className="fixed bottom-3 right-3 z-[9990] flex items-center gap-1.5 rounded-full bg-slate-900/95 border border-slate-700/90 p-1 pl-3 shadow-xl backdrop-blur">
-        <span
-          className={`w-2 h-2 rounded-full ${wsConnected ? 'bg-emerald-400' : 'bg-amber-400 animate-pulse'}`}
-          title={wsConnected ? 'Live connection is up' : 'Reconnecting…'}
-        />
-        <span className="text-xs font-medium text-slate-200 mr-1">{user?.displayName || user?.username}</span>
-        <button
-          type="button"
-          onClick={() => {
-            setModalTab('ssh');
-            setShowModal(true);
-          }}
-          className="px-2.5 py-1 rounded-full bg-slate-800 hover:bg-slate-700 text-[11px] text-cyan-300 font-medium transition"
-        >
-          🔑 SSH key
-        </button>
-        {user?.role === 'admin' && (
-          <button
-            type="button"
-            onClick={() => {
-              setModalTab('team');
-              setShowModal(true);
-            }}
-            className="px-2.5 py-1 rounded-full bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/30 text-[11px] text-cyan-200 font-medium transition"
-          >
-            👥 Invite / team
-          </button>
-        )}
-      </div>
-
       {/* Web Account, SSH Key & Team Admin Modal */}
       {showModal && user && (
-        <div className="fixed inset-0 z-[9999] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="w-full max-w-2xl rounded-2xl border border-slate-800 bg-[#0f1624] text-slate-100 shadow-2xl overflow-hidden flex flex-col max-h-[88vh]">
+        <div
+          className="fixed inset-0 z-[9999] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setShowModal(false);
+          }}
+        >
+          <div
+            ref={modalRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="web-auth-modal-title"
+            tabIndex={-1}
+            className="w-full max-w-2xl rounded-2xl border border-slate-800 bg-[#0f1624] text-slate-100 shadow-2xl overflow-hidden flex flex-col max-h-[88vh] focus:outline-none"
+          >
             <div className="flex items-center justify-between px-5 py-4 border-b border-slate-800">
               <div className="flex items-center gap-3">
                 <div className="w-8 h-8 rounded-full bg-cyan-500/20 border border-cyan-500/40 flex items-center justify-center text-cyan-300 font-bold text-sm">
                   {(user.displayName || user.username).slice(0, 2).toUpperCase()}
                 </div>
                 <div>
-                  <div className="text-sm font-semibold text-white flex items-center gap-2">
+                  <div id="web-auth-modal-title" className="text-sm font-semibold text-white flex items-center gap-2">
                     {user.displayName}
                     <span className="text-[11px] font-mono text-slate-400">(@{user.username})</span>
                   </div>
-                  <div className="text-[11px] text-slate-400">
-                    Signed in to the sshs3 web server
-                  </div>
+                  <div className="text-[11px] text-slate-400">{t.signedInServer}</div>
                 </div>
               </div>
               <div className="flex items-center gap-2">
                 <button
                   type="button"
                   onClick={handleLogout}
-                  className="px-3 py-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-300 text-xs font-medium transition"
+                  className="px-3 py-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-300 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-400"
                 >
-                  Sign out
+                  {t.signOut}
                 </button>
                 <button
                   type="button"
                   onClick={() => setShowModal(false)}
-                  className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs"
+                  className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
                 >
-                  Close
+                  {t.close}
                 </button>
               </div>
             </div>
 
             {/* Tabs */}
-            <div className="flex border-b border-slate-800 px-5 bg-slate-950/40">
+            <div role="tablist" className="flex border-b border-slate-800 px-5 bg-slate-950/40">
               <button
                 type="button"
+                role="tab"
+                aria-selected={modalTab === 'ssh'}
                 onClick={() => setModalTab('ssh')}
-                className={`px-4 py-2.5 text-xs font-semibold border-b-2 transition ${
+                className={`px-4 py-2.5 text-xs font-semibold border-b-2 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 ${
                   modalTab === 'ssh'
                     ? 'border-cyan-400 text-cyan-300'
                     : 'border-transparent text-slate-400 hover:text-slate-200'
                 }`}
               >
-                🔑 My SSH key on the server
+                {t.tabSsh}
               </button>
               {user.role === 'admin' && (
                 <button
                   type="button"
+                  role="tab"
+                  aria-selected={modalTab === 'team'}
                   onClick={() => setModalTab('team')}
-                  className={`px-4 py-2.5 text-xs font-semibold border-b-2 transition ${
+                  className={`px-4 py-2.5 text-xs font-semibold border-b-2 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 ${
                     modalTab === 'team'
                       ? 'border-cyan-400 text-cyan-300'
                       : 'border-transparent text-slate-400 hover:text-slate-200'
                   }`}
                 >
-                  👥 Invites and user accounts
+                  {t.tabTeam}
                 </button>
               )}
             </div>
@@ -872,34 +1100,36 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
                     onSubmit={handleChangePassword}
                     className="rounded-xl bg-slate-900/80 border border-slate-800 p-4 space-y-3"
                   >
-                    <h3 className="text-sm font-semibold text-white">Change password</h3>
+                    <h3 className="text-sm font-semibold text-white">{t.changePasswordHeading}</h3>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                       <input
                         type="password"
                         required
+                        aria-label={t.currentPasswordPlaceholder}
                         value={currentPasswordInput}
                         onChange={(e) => setCurrentPasswordInput(e.target.value)}
-                        placeholder="Current password"
-                        className="rounded-lg bg-slate-950 border border-slate-700 px-2.5 py-1.5 text-white"
+                        placeholder={t.currentPasswordPlaceholder}
+                        className="rounded-lg bg-slate-950 border border-slate-700 px-2.5 py-1.5 text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
                       />
                       <input
                         type="password"
                         required
                         minLength={6}
+                        aria-label={t.newPasswordPlaceholder}
                         value={newPasswordInput}
                         onChange={(e) => setNewPasswordInput(e.target.value)}
-                        placeholder="New password (at least 6 characters)"
-                        className="rounded-lg bg-slate-950 border border-slate-700 px-2.5 py-1.5 text-white"
+                        placeholder={t.newPasswordPlaceholder}
+                        className="rounded-lg bg-slate-950 border border-slate-700 px-2.5 py-1.5 text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
                       />
                     </div>
                     <button
                       type="submit"
-                      className="px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white font-medium"
+                      className="px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
                     >
-                      Update password
+                      {t.updatePasswordBtn}
                     </button>
                     {passwordStatusMsg && (
-                      <div className="rounded-lg bg-cyan-500/10 border border-cyan-500/30 px-3 py-2 text-cyan-200">
+                      <div role="status" className="rounded-lg bg-cyan-500/10 border border-cyan-500/30 px-3 py-2 text-cyan-200">
                         {passwordStatusMsg}
                       </div>
                     )}
@@ -1105,6 +1335,6 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
           </div>
         </div>
       )}
-    </>
+    </div>
   );
 };

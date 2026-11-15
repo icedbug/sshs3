@@ -1,11 +1,24 @@
 import { useState } from "react";
-import { type HubSnapshot, type MemoryEntry } from "@shared/types/aiHub";
+import {
+  formatMemoryScope,
+  parseMemoryScope,
+  type HubRequest,
+  type HubSnapshot,
+  type MemoryEntry,
+} from "@shared/types/aiHub";
 import { ConfirmButton } from "./ConfirmButton";
 import { MemoryProposals } from "./MemoryProposals";
 import { type Act } from "./panelShared";
 
-type Show = "all" | "memory" | "skill" | "learned" | "personal";
+type Show = "all" | "memory" | "skill" | "learned" | "personal" | "needs-check";
+export type ScopeFilterCategory = "all" | "global" | "host" | "cluster" | "tag" | "env" | "personal";
 type Tier = NonNullable<MemoryEntry["tier"]>;
+
+export type MemoryEntryView = MemoryEntry & {
+  sourceTaskId?: string;
+  agentName?: string;
+  agentId?: string;
+};
 
 interface Draft {
   id?: string;
@@ -16,6 +29,18 @@ interface Draft {
   tier: Tier;
 }
 
+export const MEMORY_VERIFY_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+
+export const MEMORY_SCOPE_CATEGORIES: ReadonlyArray<{ id: ScopeFilterCategory; label: string }> = [
+  { id: "all", label: "All scopes" },
+  { id: "global", label: "global" },
+  { id: "host", label: "host:" },
+  { id: "cluster", label: "cluster:" },
+  { id: "tag", label: "tag:" },
+  { id: "env", label: "env:" },
+  { id: "personal", label: "personal" },
+];
+
 /** Entries generated from the server list on every snapshot: shown under Infrastructure, not kept here. */
 const generated = (m: MemoryEntry): boolean => m.id.startsWith("auto-node:") || m.id.startsWith("auto-cluster:");
 
@@ -25,32 +50,216 @@ const TIERS: Record<Tier, string> = {
   episodic: "A note about one incident",
 };
 
-function scopeLabel(scope: string, names: Map<string, string>): string {
-  if (scope === "personal") return "only you";
-  if (scope === "workspace" || scope === "workspace:all") return "team";
-  const [kind, ...rest] = scope.split(":");
-  const id = rest.join(":");
-  if (kind === "target" && id === "local") return "this computer";
-  return `${kind === "cluster" ? "cluster" : "server"} ${names.get(id) ?? id}`;
+/** Checks whether a memory/skill needs verification due to `staleReason`, expiry, or old verification age. */
+export function isMemoryStale(
+  entry: MemoryEntry,
+  now = Date.now(),
+): { stale: boolean; reason?: string } {
+  if (entry.staleReason?.trim()) {
+    return { stale: true, reason: entry.staleReason.trim() };
+  }
+  if (entry.validUntil !== undefined && entry.validUntil <= now) {
+    return { stale: true, reason: "Verification window expired" };
+  }
+  if (entry.lastVerifiedAt !== undefined && now - entry.lastVerifiedAt > MEMORY_VERIFY_MAX_AGE_MS) {
+    return { stale: true, reason: "Last verified over 30 days ago" };
+  }
+  return { stale: false };
+}
+
+/** Normalizes and formats a `MemoryScope` string using `parseMemoryScope` and `formatMemoryScope`. */
+export function describeMemoryScope(
+  scope: string,
+  names: Map<string, string> = new Map(),
+): {
+  category: Exclude<ScopeFilterCategory, "all">;
+  badgeText: string;
+  label: string;
+  canonicalScope: string;
+  value?: string;
+} {
+  const trimmed = scope.trim();
+  const parsed = parseMemoryScope(trimmed);
+
+  // Accept explicit `host:<name>` prefix as host scope alongside `server:` / `target:`.
+  if (parsed.kind === "unknown" && trimmed.toLowerCase().startsWith("host:")) {
+    const val = trimmed.slice(5).trim();
+    const display = names.get(val) ?? val;
+    return {
+      category: "host",
+      badgeText: `host:${display}`,
+      label: `host ${display}`,
+      canonicalScope: val ? formatMemoryScope("server", val) : trimmed,
+      value: val,
+    };
+  }
+
+  switch (parsed.kind) {
+    case "workspace":
+    case "workspace:all":
+      return {
+        category: "global",
+        badgeText: "global",
+        label: "team",
+        canonicalScope: parsed.kind,
+      };
+    case "personal":
+      return {
+        category: "personal",
+        badgeText: "personal",
+        label: "only you",
+        canonicalScope: "personal",
+      };
+    case "server":
+    case "target": {
+      const val = parsed.value ?? "";
+      if (parsed.kind === "target" && val === "local") {
+        return {
+          category: "host",
+          badgeText: "host:local",
+          label: "this computer",
+          canonicalScope: formatMemoryScope("target", "local"),
+          value: "local",
+        };
+      }
+      const display = names.get(val) ?? val;
+      return {
+        category: "host",
+        badgeText: `host:${display}`,
+        label: `server ${display}`,
+        canonicalScope: formatMemoryScope(parsed.kind, val),
+        value: val,
+      };
+    }
+    case "cluster": {
+      const val = parsed.value ?? "";
+      return {
+        category: "cluster",
+        badgeText: `cluster:${val}`,
+        label: `cluster ${val}`,
+        canonicalScope: formatMemoryScope("cluster", val),
+        value: val,
+      };
+    }
+    case "tag": {
+      const val = parsed.value ?? "";
+      return {
+        category: "tag",
+        badgeText: `tag:${val}`,
+        label: `tag ${val}`,
+        canonicalScope: formatMemoryScope("tag", val),
+        value: val,
+      };
+    }
+    case "env": {
+      const val = parsed.value ?? "";
+      return {
+        category: "env",
+        badgeText: `env:${val}`,
+        label: `env ${val}`,
+        canonicalScope: formatMemoryScope("env", val),
+        value: val,
+      };
+    }
+    default:
+      return {
+        category: "global",
+        badgeText: trimmed || "global",
+        label: trimmed || "team",
+        canonicalScope: trimmed || "workspace",
+      };
+  }
+}
+
+function scopeBadgeClass(category: Exclude<ScopeFilterCategory, "all">): string {
+  switch (category) {
+    case "cluster":
+      return "ai-badge ai-badge-cluster";
+    case "env":
+      return "ai-badge ai-badge-mode";
+    case "tag":
+      return "ai-badge ai-badge-purple";
+    case "host":
+      return "ai-badge ai-badge-success";
+    default:
+      return "ai-badge";
+  }
 }
 
 export function Memory({
   hub,
   act,
+  request,
   suggestion,
+  onOpenTask,
 }: {
   hub: HubSnapshot;
   act: Act;
+  request?: (request: HubRequest) => Promise<HubSnapshot>;
   suggestion: string;
+  onOpenTask?: (taskId: string) => void;
 }): JSX.Element {
   const [draft, setDraft] = useState<Draft | undefined>(
     suggestion ? { title: "", text: suggestion, scope: "workspace", kind: "skill", tier: "core" } : undefined,
   );
+  const [customScopeKind, setCustomScopeKind] = useState<"server" | "cluster" | "tag" | "env">("tag");
+  const [customScopeValue, setCustomScopeValue] = useState("");
   const [show, setShow] = useState<Show>("all");
+  const [scopeCategory, setScopeCategory] = useState<ScopeFilterCategory>("all");
+  const [scopeExact, setScopeExact] = useState<string>("");
   const [filter, setFilter] = useState("");
   const [openIds, setOpenIds] = useState<Set<string>>(new Set());
+  const [inlineEditId, setInlineEditId] = useState<string | null>(null);
+  const [inlineTitle, setInlineTitle] = useState("");
+  const [inlineText, setInlineText] = useState("");
   const [reflecting, setReflecting] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState("");
   const [limit, setLimit] = useState(30);
+
+  const missingEntry = Boolean(draft?.id && !hub.memories.some((m) => m.id === draft.id));
+
+  const saveDraft = async (asNew = false): Promise<void> => {
+    if (!draft || saving) return;
+    setSaveError("");
+    setSaving(true);
+    const entry = {
+      ...draft,
+      id: asNew ? undefined : draft.id,
+      title: draft.title.trim(),
+    };
+    try {
+      if (request) {
+        await request({ action: "memory-save", entry });
+        setDraft(undefined);
+      } else {
+        const next = await act({ action: "memory-save", entry });
+        if (next) setDraft(undefined);
+        else setSaveError("Could not save this entry.");
+      }
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const mutateEntry = async (m: MemoryEntry, patch: Partial<MemoryEntry>): Promise<void> => {
+    setBusyId(m.id);
+    try {
+      await act({
+        action: "memory-save",
+        entry: {
+          ...m,
+          ...patch,
+          id: m.id,
+        },
+      });
+    } finally {
+      setBusyId(null);
+    }
+  };
 
   const names = new Map<string, string>();
   for (const i of hub.inventory) names.set(i.id, i.label);
@@ -85,18 +294,37 @@ export function Memory({
     skill: (m) => m.kind === "skill",
     learned: (m) => Boolean(m.autoLearned),
     personal: (m) => m.scope === "personal",
+    "needs-check": (m) => isMemoryStale(m).stale,
   };
   const q = filter.trim().toLowerCase();
   const shown = all
     .filter(is[show])
-    .filter((m) => !q || m.title.toLowerCase().includes(q) || m.text.toLowerCase().includes(q));
+    .filter((m) => {
+      const desc = describeMemoryScope(m.scope, names);
+      if (scopeCategory !== "all" && desc.category !== scopeCategory) return false;
+      if (scopeExact && desc.badgeText !== scopeExact) return false;
+      return true;
+    })
+    .filter((m) => {
+      if (!q) return true;
+      const desc = describeMemoryScope(m.scope, names);
+      return (
+        m.title.toLowerCase().includes(q) ||
+        m.text.toLowerCase().includes(q) ||
+        desc.badgeText.toLowerCase().includes(q)
+      );
+    });
   const chips: [Show, string][] = [
     ["all", "Everything"],
     ["memory", "Facts"],
     ["skill", "Skills"],
     ["learned", "Learned by the assistant"],
     ["personal", "Only yours"],
+    ["needs-check", "Needs Check"],
   ];
+
+  const isPresetScope = (scope: string): boolean =>
+    scope === "workspace" || scope === "personal" || targets.some(([id]) => `target:${id}` === scope);
 
   return (
     <div className="ai-scroll">
@@ -132,9 +360,10 @@ export function Memory({
           <button
             type="button"
             className="ai-btn-accent"
-            onClick={() =>
-              setDraft(draft ? undefined : { title: "", text: "", scope: "workspace", kind: "memory", tier: "archival" })
-            }
+            onClick={() => {
+              setSaveError("");
+              setDraft(draft ? undefined : { title: "", text: "", scope: "workspace", kind: "memory", tier: "archival" });
+            }}
           >
             {draft ? "Close" : "Add by hand"}
           </button>
@@ -147,12 +376,16 @@ export function Memory({
           data-testid="memory-add-form"
           onSubmit={(e) => {
             e.preventDefault();
-            void act({ action: "memory-save", entry: { ...draft, title: draft.title.trim() } }).then((next) => {
-              if (next) setDraft(undefined);
-            });
+            void saveDraft(missingEntry);
           }}
         >
           <strong>{draft.id ? "Edit entry" : "Add by hand"}</strong>
+          {(saveError || missingEntry) && (
+            <p className="ai-error" role="alert" data-testid="memory-form-error">
+              {saveError ||
+                "This entry was removed while you were editing it. Save it as a new entry to keep your text, or cancel."}
+            </p>
+          )}
           <label>
             Title
             <input
@@ -191,17 +424,16 @@ export function Memory({
             <label>
               Who and where
               <select value={draft.scope} onChange={(e) => setDraft({ ...draft, scope: e.target.value })}>
-                <option value="workspace">The team, everywhere</option>
+                <option value="workspace">The team, everywhere (global)</option>
                 <option value="personal">Only me</option>
                 {targets.map(([id, label]) => (
                   <option key={id} value={`target:${id}`}>
                     The team, only on {label}
                   </option>
                 ))}
-                {!targets.some(([id]) => `target:${id}` === draft.scope) &&
-                  !["workspace", "personal"].includes(draft.scope) && (
-                    <option value={draft.scope}>{scopeLabel(draft.scope, names)}</option>
-                  )}
+                {!isPresetScope(draft.scope) && (
+                  <option value={draft.scope}>{describeMemoryScope(draft.scope, names).badgeText}</option>
+                )}
               </select>
             </label>
             <label>
@@ -215,15 +447,49 @@ export function Memory({
               </select>
             </label>
           </div>
+          <div className="ai-inline-form" data-testid="memory-scope-builder">
+            <select
+              aria-label="Scoped prefix"
+              value={customScopeKind}
+              onChange={(e) => setCustomScopeKind(e.target.value as "server" | "cluster" | "tag" | "env")}
+            >
+              <option value="tag">tag:</option>
+              <option value="env">env:</option>
+              <option value="cluster">cluster:</option>
+              <option value="server">host:</option>
+            </select>
+            <input
+              aria-label="Scope value"
+              placeholder="prod, postgres, k8s-eu, web-01…"
+              value={customScopeValue}
+              onChange={(e) => setCustomScopeValue(e.target.value)}
+            />
+            <button
+              type="button"
+              disabled={!customScopeValue.trim()}
+              onClick={() => {
+                setDraft({ ...draft, scope: formatMemoryScope(customScopeKind, customScopeValue) });
+                setCustomScopeValue("");
+              }}
+            >
+              Apply scope
+            </button>
+          </div>
           <p className="ai-hint">
             Never write passwords, keys or tokens here. An entry that closely resembles an existing one is merged into
             it.
           </p>
           <div className="ai-card-actions">
-            <button type="submit" className="ai-btn-emerald">
-              {draft.id ? "Save changes" : "Save"}
+            <button type="submit" className="ai-btn-emerald" disabled={saving}>
+              {saving ? "Saving…" : missingEntry ? "Save as new" : draft.id ? "Save changes" : "Save"}
             </button>
-            <button type="button" onClick={() => setDraft(undefined)}>
+            <button
+              type="button"
+              onClick={() => {
+                setSaveError("");
+                setDraft(undefined);
+              }}
+            >
               Cancel
             </button>
           </div>
@@ -235,7 +501,7 @@ export function Memory({
           <input
             type="search"
             aria-label="Filter entries"
-            placeholder="Filter by title or text…"
+            placeholder="Filter by title, text, or scope…"
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
           />
@@ -254,6 +520,40 @@ export function Memory({
                 </button>
               ))}
           </div>
+          <div className="ai-tags" data-testid="memory-scope-filters" aria-label="Filter by scope">
+            {MEMORY_SCOPE_CATEGORIES.map((cat) => {
+              const count =
+                cat.id === "all"
+                  ? all.length
+                  : all.filter((m) => describeMemoryScope(m.scope, names).category === cat.id).length;
+              return (
+                <button
+                  key={cat.id}
+                  type="button"
+                  className={`ai-chip ${scopeCategory === cat.id && !scopeExact ? "ai-chip-on" : ""}`}
+                  aria-pressed={scopeCategory === cat.id && !scopeExact}
+                  data-testid={`memory-scope-filter-${cat.id}`}
+                  onClick={() => {
+                    setScopeCategory(cat.id);
+                    setScopeExact("");
+                  }}
+                >
+                  {cat.label}
+                  {cat.id !== "all" ? ` · ${count}` : ""}
+                </button>
+              );
+            })}
+            {scopeExact && (
+              <button
+                type="button"
+                className="ai-chip ai-chip-on"
+                onClick={() => setScopeExact("")}
+                title="Clear exact scope filter"
+              >
+                {scopeExact} ×
+              </button>
+            )}
+          </div>
         </div>
       )}
 
@@ -265,28 +565,56 @@ export function Memory({
       )}
       {all.length > 0 && shown.length === 0 && <p className="ai-empty">Nothing matches.</p>}
 
-      {shown.slice(0, limit).map((m) => {
+      {shown.slice(0, limit).map((rawEntry) => {
+        const m = rawEntry as MemoryEntryView;
         const long = m.text.length > 320 || m.text.split("\n").length > 5;
         const open = openIds.has(m.id);
         const score = m.feedbackScore ?? 0;
+        const stale = isMemoryStale(m);
+        const scopeInfo = describeMemoryScope(m.scope, names);
+        const isPinned = (m.tier ?? (m.kind === "skill" ? "core" : "archival")) === "core";
+        const isInlineEditing = inlineEditId === m.id;
+        const agentLabel = m.agentName ?? m.author ?? (m.autoLearned ? "assistant" : undefined);
+
         return (
           <article className="ai-card" key={m.id} data-testid={`memory-${m.id}`}>
             <div className="ai-card-head">
               <div>
                 <strong>{m.title}</strong>
                 <small>
-                  {m.kind === "skill" ? "Skill" : "Fact"} · {scopeLabel(m.scope, names)}
+                  {m.kind === "skill" ? "Skill" : "Fact"} · {scopeInfo.label}
                   {m.author ? ` · ${m.author}` : ""} · {new Date(m.updatedAt).toLocaleDateString()}
                 </small>
               </div>
               <div className="ai-tags">
+                <button
+                  type="button"
+                  className={scopeBadgeClass(scopeInfo.category)}
+                  data-testid={`memory-scope-${m.id}`}
+                  title="Filter by this scope"
+                  onClick={() => {
+                    setScopeCategory(scopeInfo.category);
+                    setScopeExact((prev) => (prev === scopeInfo.badgeText ? "" : scopeInfo.badgeText));
+                  }}
+                >
+                  {scopeInfo.badgeText}
+                </button>
+                {stale.stale && (
+                  <span
+                    className="ai-badge ai-badge-mode"
+                    data-testid={`memory-stale-${m.id}`}
+                    title={stale.reason}
+                  >
+                    Needs Check
+                  </span>
+                )}
                 {m.autoLearned && (
                   <span className="ai-badge ai-badge-purple" title="Written by the assistant from what happened">
                     learned
                   </span>
                 )}
-                {(m.tier ?? (m.kind === "skill" ? "core" : "archival")) === "core" && (
-                  <span className="ai-badge ai-badge-mode" title={TIERS.core}>
+                {isPinned && (
+                  <span className="ai-badge ai-badge-mode" title={TIERS.core} data-testid={`memory-pinned-${m.id}`}>
                     pinned
                   </span>
                 )}
@@ -297,13 +625,82 @@ export function Memory({
                 )}
               </div>
             </div>
-            <p className={`ai-memory-text ${long && !open ? "ai-clamped" : ""}`}>{m.text}</p>
+
+            {stale.stale && stale.reason && (
+              <small className="ai-muted" data-testid={`memory-stale-reason-${m.id}`}>
+                Verification notice: {stale.reason}
+              </small>
+            )}
+
+            {isInlineEditing ? (
+              <form
+                className="ai-form"
+                data-testid={`memory-inline-form-${m.id}`}
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (!inlineTitle.trim() || !inlineText.trim()) return;
+                  void mutateEntry(m, {
+                    title: inlineTitle.trim(),
+                    text: inlineText.trim(),
+                  }).then(() => setInlineEditId(null));
+                }}
+              >
+                <input
+                  aria-label="Inline title"
+                  value={inlineTitle}
+                  onChange={(e) => setInlineTitle(e.target.value)}
+                />
+                <textarea
+                  aria-label="Inline text"
+                  rows={4}
+                  value={inlineText}
+                  onChange={(e) => setInlineText(e.target.value)}
+                />
+                <div className="ai-card-actions">
+                  <button type="submit" className="ai-btn-emerald" disabled={busyId === m.id}>
+                    {busyId === m.id ? "Saving…" : "Save inline"}
+                  </button>
+                  <button type="button" onClick={() => setInlineEditId(null)}>
+                    Cancel
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <p className={`ai-memory-text ${long && !open ? "ai-clamped" : ""}`}>{m.text}</p>
+            )}
+
+            <div className="ai-tags" data-testid={`memory-provenance-${m.id}`} style={{ marginTop: 4 }}>
+              {m.sourceTaskId && (
+                onOpenTask ? (
+                  <button
+                    type="button"
+                    className="ai-linklike"
+                    onClick={() => onOpenTask(m.sourceTaskId!)}
+                  >
+                    task:{m.sourceTaskId}
+                  </button>
+                ) : (
+                  <small className="ai-muted">task:{m.sourceTaskId}</small>
+                )
+              )}
+              {agentLabel && <small className="ai-muted">by {agentLabel}</small>}
+              {m.editedBy && m.editedBy !== agentLabel && (
+                <small className="ai-muted">· edited by {m.editedBy}</small>
+              )}
+              <small className="ai-muted">· updated {new Date(m.updatedAt).toLocaleString()}</small>
+              {m.lastVerifiedAt && (
+                <small className="ai-muted">· verified {new Date(m.lastVerifiedAt).toLocaleDateString()}</small>
+              )}
+              {m.sourceTrust && <span className="ai-badge">{m.sourceTrust}</span>}
+            </div>
+
             {historyOf(m.id).map((h) => (
               <div key={h.id} className="ai-hint" style={{ opacity: 0.6 }} data-testid={`memory-replaced-${h.id}`}>
                 <small>Replaced {new Date(h.supersededAt ?? h.updatedAt).toLocaleDateString()}</small>
                 <p className="ai-memory-text">{h.text}</p>
               </div>
             ))}
+
             <div className="ai-card-actions">
               {long && (
                 <button
@@ -319,6 +716,34 @@ export function Memory({
                   {open ? "Show less" : "Show all"}
                 </button>
               )}
+              {stale.stale && (
+                <button
+                  type="button"
+                  className="ai-btn-accent"
+                  data-testid={`memory-reverify-${m.id}`}
+                  disabled={busyId === m.id}
+                  onClick={() =>
+                    void mutateEntry(m, {
+                      staleReason: undefined,
+                      lastVerifiedAt: Date.now(),
+                    })
+                  }
+                >
+                  Re-verify
+                </button>
+              )}
+              <button
+                type="button"
+                data-testid={`memory-pin-${m.id}`}
+                disabled={busyId === m.id}
+                onClick={() =>
+                  void mutateEntry(m, {
+                    tier: isPinned ? "archival" : "core",
+                  })
+                }
+              >
+                {isPinned ? "Unpin" : "Pin"}
+              </button>
               <button
                 type="button"
                 title="It helped: rank it higher"
@@ -337,7 +762,23 @@ export function Memory({
               </button>
               <button
                 type="button"
-                onClick={() =>
+                data-testid={`memory-inline-edit-${m.id}`}
+                onClick={() => {
+                  if (isInlineEditing) {
+                    setInlineEditId(null);
+                  } else {
+                    setInlineEditId(m.id);
+                    setInlineTitle(m.title);
+                    setInlineText(m.text);
+                  }
+                }}
+              >
+                {isInlineEditing ? "Close inline" : "Quick edit"}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setSaveError("");
                   setDraft({
                     id: m.id,
                     title: m.title,
@@ -345,8 +786,8 @@ export function Memory({
                     scope: m.scope,
                     kind: m.kind,
                     tier: m.tier ?? (m.kind === "skill" ? "core" : "archival"),
-                  })
-                }
+                  });
+                }}
               >
                 Edit
               </button>

@@ -1,11 +1,16 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { RichMarkdownContent } from "../../src/renderer/src/components/AiHub/RichMarkdownContent";
 import { linkRefs } from "../../src/renderer/src/components/AiHub/reportRefs";
 
 describe("references from a report to its commands", () => {
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
   it("links only the names that exist, and leaves code alone", () => {
     const refs = new Set(["c1", "c3"]);
     expect(linkRefs("The pool is scrubbing [c3].", refs)).toBe("The pool is scrubbing [c3](#ref-c3).");
@@ -22,5 +27,25 @@ describe("references from a report to its commands", () => {
     fireEvent.click(screen.getByRole("button", { name: "c2" }));
     expect(open).toHaveBeenCalledWith("c2");
     expect(screen.getByRole("link", { name: "the docs" })).toHaveAttribute("href", "https://example.com");
+  });
+
+  it("handles rejected or unavailable clipboard writes without claiming Copied", async () => {
+    const writeText = vi.fn().mockRejectedValueOnce(new Error("Write permission denied."));
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    render(<RichMarkdownContent text={"```bash\necho hello\n```"} />);
+    const copyBtn = screen.getByRole("button", { name: "Copy" });
+    fireEvent.click(copyBtn);
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("echo hello"));
+    expect(screen.getByRole("button", { name: "Copy" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Copied" })).not.toBeInTheDocument();
+
+    writeText.mockResolvedValueOnce(undefined);
+    fireEvent.click(screen.getByRole("button", { name: "Copy" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Copied" })).toBeInTheDocument());
   });
 });

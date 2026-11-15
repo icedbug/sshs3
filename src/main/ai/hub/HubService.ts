@@ -6,8 +6,10 @@ import type {
   AgentMode,
   SafetyPolicyConfig,
   AgentChange,
+  AgentChangeApproval,
   AgentPlan,
   AgentUsage,
+  ClusterSafetyPolicy,
   EvalCase,
   EvalRun,
   ExternalRunner,
@@ -24,10 +26,12 @@ import type {
   KbDocument,
   LocalServerAuthOverride,
   McpServerConfig,
+  McpToolPolicy,
   MemoryDistillStatus,
   MemoryEntry,
   MemoryProposal,
   MissionAgent,
+  RunbookTemplate,
   S3WorkspaceConfig,
   StartAgentTask,
   TerminalSession,
@@ -39,6 +43,7 @@ import type {
   WorkspaceActivityEvent,
   WorkspaceLayoutEvent,
   WorkspacePresenceTerminal,
+  WorkspaceRule,
   WorkspaceServerSummary,
   NotifyEventKind,
   FactProblem,
@@ -46,9 +51,10 @@ import type {
   ServerFactsView,
   FactChange,
 } from "../../../shared/types/aiHub";
+import type { AiHubDeltaEvent } from "../../../shared/ipc/createMultiSSHApi";
 import type { IStorageProvider } from "../../../shared/types/storage";
-import { SHELL_KINDS } from "../../../shared/types/aiHub";
-import { DEFAULT_AI_MODELS } from "../../../shared/types/ai";
+import { CONTEXT_NOTE_PREFIX, SHELL_KINDS } from "../../../shared/types/aiHub";
+import { DEFAULT_AI_MODELS, type ProviderProfile } from "../../../shared/types/ai";
 import { AiConfigStore } from "../AiConfigStore";
 import { CodexAuthProvider } from "../CodexAuthProvider";
 import { HermesManager, type HermesModelConfig } from "../HermesManager";
@@ -110,7 +116,7 @@ import {
   type NotifyItem,
 } from "./Notifier";
 import { NotifyStore } from "./NotifyStore";
-import { FactsStore, type FactsRecord } from "./FactsStore";
+import { FactsStore, flagStaleMemories, type FactsRecord } from "./FactsStore";
 import { buildScript, diffFacts, factsHash, factsSummary, isWatchPath, parseFacts, problems } from "./ServerFacts";
 import { demoFactsOutput } from "./demoFacts";
 import {
@@ -120,6 +126,7 @@ import {
   judgePrompt,
   normalizeExpectation,
   parseJudgement,
+  promoteEvalFailureToIncident,
   ruleChecks,
 } from "./EvalSuite";
 import {
@@ -183,19 +190,20 @@ import {
   type ExtraWorkspaceContext,
   type InventoryTarget,
 } from "./ContextService";
-import { AuditLog } from "./AuditLog";
+import { AuditLog, AuditShipper, type AuditShipperOptions } from "./AuditLog";
 import { LocalMcpServer } from "./LocalMcpServer";
 import { SessionRecorder } from "./SessionRecorder";
 import { McpTokenStore } from "../../web/McpTokenStore";
 import { boundedContext, boundedPrompt, clip, HUB_PROMPT_MAX, maskContext, maskStrings, PERSON_PROMPT_MAX, safeError } from "./privacy";
 import { createLogger } from "../../log";
-import { runWorkforce } from "./WorkforceRunner";
+import { resolveTargetSelector, runWorkforce } from "./WorkforceRunner";
 import { LearningQueue } from "./LearningQueue";
 import { WorkSync } from "./WorkSync";
 import {
   TICKET_CLAIM_TTL_MS,
   TICKET_STATUSES,
   WORKFORCE_TEMPLATES,
+  type Mergeable,
   mergeCopies,
   mergeItems,
   mergeTicketCopies,
@@ -220,11 +228,17 @@ import {
 import {
   approvalAsksEach,
   approvalMessage,
+  checkPlanApprovals,
   parseReview,
   rejectionMessage,
   reviewerPrompt,
   todosFromPlan,
 } from "./PlanMode";
+import {
+  MAX_HANDOFF_HOPS,
+  applyHandoff as applyDisciplinedHandoff,
+  checkHandoffAllowed,
+} from "./AgentDiscipline";
 import { firstActivityCursor, nextActivityBatch } from "./ActivityBatcher";
 import {
   EmbeddingIndex,
@@ -288,7 +302,7 @@ export const incomingAgentForTesting = (remote: MissionAgent, local: MissionAgen
 const AGENT_FIELD_GROUPS = [["modelOverride", "modelProvider"]] as const;
 
 function incomingAgent(remote: MissionAgent, local: MissionAgent | undefined, now = Date.now()): MissionAgent {
-  const modes: AgentMode[] = ["advice", "assisted", "autonomous"];
+  const modes: AgentMode[] = ["advice", "plan", "assisted", "autonomous"];
   const mode = modes.includes(remote.defaultMode) ? remote.defaultMode : "assisted";
   const narrower = (mine: string[] | undefined, theirs: string[] | undefined): string[] | undefined =>
     mine === undefined ? (theirs ? theirs.slice(0, 40) : undefined) : (theirs ?? mine).filter((x) => mine.includes(x));
@@ -305,11 +319,18 @@ function incomingAgent(remote: MissionAgent, local: MissionAgent | undefined, no
   };
 }
 
-/** The safety policy's switches as the screen names them. */
-const POLICY_NAMES: Record<keyof SafetyPolicyConfig, string> = {
+/** The safety policy's boolean switches as the screen names them. */
+const BOOLEAN_POLICY_NAMES: Record<
+  | "autoApproveSafeReadOnly"
+  | "requireApprovalOnProdTags"
+  | "blockDestructiveWithoutConfirm"
+  | "requirePeerApprovalOnProd",
+  string
+> = {
   autoApproveSafeReadOnly: "run read-only commands without asking",
   requireApprovalOnProdTags: "always ask before a change on production",
   blockDestructiveWithoutConfirm: "stop destructive commands until a person says yes",
+  requirePeerApprovalOnProd: "require peer approval for changes on production",
 };
 /**
  * A suggested command made fit to put in a terminal. Text from a model is not
@@ -377,11 +398,28 @@ export function budgetStopLine(stop: NonNullable<AgentTask["budgetStop"]>): stri
 const INLINE_SUGGEST_TIMEOUT_MS = 15_000;
 /** How long a stopped run is given to end by itself before the hub lets go of it. */
 const RUN_STOP_GRACE_MS = 10_000;
+/**
+ * How often the board and shared setup (agents, runbooks, links) poll the team bucket on the
+ * 10s background tick, aligned with S3WorkspaceSyncService's 10s poll cadence.
+ */
+const WORK_SYNC_INTERVAL_MS = 8_000;
 /** A run the hub started itself (workforce specialist, memory proposals). */
 const isBackgroundRun = (t: AgentTask | undefined): boolean =>
   Boolean(t?.workforceRunId || t?.distillSourceId || t?.evalCaseId);
 export interface HubHost {
   changed(): void;
+  delta?(delta: AiHubDeltaEvent): void;
+  restoreCheckpoint?: (
+    change: AgentChange,
+    options?: { task?: AgentTask; path?: string; force?: boolean },
+  ) => Promise<{
+    restored: boolean;
+    alreadyAtCheckpoint?: boolean;
+    path: string;
+    hash: string;
+    beforeHash: string;
+  }>;
+  auditShipper?: AuditShipperOptions;
   inventoryTargets(): Promise<InventoryTarget[]>;
   /**
    * Opens a terminal of the hub's own on a saved target (or "local") and
@@ -604,6 +642,8 @@ export class HubService {
   private workSyncStore?: WorkSync;
   private lastWorkSync = 0;
   private workSyncing = false;
+  private workSyncInFlight?: Promise<void>;
+  private workSyncPushTimer?: NodeJS.Timeout;
   private workSyncAt?: number;
   private workSyncError?: string;
   /** What other installations' runs have spent, as last read from the bucket. */
@@ -812,55 +852,8 @@ export class HubService {
       },
       // Told its budget is spent, the agent asked for more anyway: the run ends here.
       budgetSpent: (task) => void this.stop(task, "Command budget exhausted"),
-      safetyContext: (task, targetLabel) => {
-        const rawLabel = (targetLabel || task.target?.label || "").trim();
-        const label = rawLabel.toLowerCase();
-        const session = task.target
-          ? this.terminals.get(task.target.sessionId)
-          : undefined;
-        const knownServers = this.getKnownServers();
-        const clusterMatch = /^cluster\s+([^\s(]+)/i
-          .exec(rawLabel)?.[1]
-          ?.toLowerCase();
-        const matchedServers = knownServers.filter((s) => {
-          const sName = s.name.toLowerCase();
-          const sId = s.id.toLowerCase();
-          const sCluster = s.cluster?.toLowerCase();
-          if (session?.profileId && s.id === session.profileId) return true;
-          if (!label) return false;
-          if (
-            sName === label ||
-            sId === label ||
-            s.host.toLowerCase() === label
-          ) {
-            return true;
-          }
-          if (
-            sCluster &&
-            (sCluster === label ||
-              (clusterMatch &&
-                (sCluster === clusterMatch ||
-                  sCluster.includes(clusterMatch))))
-          ) {
-            return true;
-          }
-          if (
-            (rawLabel.includes(",") || rawLabel.includes("(")) &&
-            sName.length >= 2 &&
-            label.includes(sName)
-          ) {
-            return true;
-          }
-          return false;
-        });
-        const aggregatedTags = Array.from(
-          new Set(matchedServers.flatMap((s) => s.tags ?? [])),
-        );
-        return {
-          policy: this.safetyPolicy(),
-          targetTags: aggregatedTags.length > 0 ? aggregatedTags : undefined,
-        };
-      },
+      safetyContext: (task, targetLabel) =>
+        this.resolveSafetyContext(task, targetLabel),
       changed: () => this.changed(),
     });
     this.s3Workspace = new S3WorkspaceSyncService(
@@ -912,6 +905,9 @@ export class HubService {
 
           return {
             actor,
+            // This installation's own, lasting id: presence is one file per person and installation,
+            // and an id made anew at every start would leave a file behind in the bucket each time.
+            clientId: this.clientId(),
             servers: Array.from(srvMap.values()),
             memories: this.store.data.memories.filter(
               (m) => m.scope !== "personal",
@@ -1001,17 +997,33 @@ export class HubService {
       const task = this.store.data.tasks.find((t) => t.id === owner);
       if (task && active(task)) void this.stop(task, reason);
     });
+    this.terminals.on(
+      "reconnecting",
+      (sessionId: string, grace: { attempt?: number; maxAttempts?: number; reason?: string }) => {
+        const reason =
+          grace?.reason ||
+          `SSH connection lost; reconnecting (attempt ${grace?.attempt ?? 1}/${grace?.maxAttempts ?? 3})`;
+        for (const task of this.store.data.tasks) {
+          if (active(task) && task.target?.sessionId === sessionId) {
+            void this.stop(task, reason);
+          }
+        }
+      },
+    );
     // A terminal an agent's run owns is recorded while it owns it: what the terminal
     // showed, masked, with a marker per command. What a person types is never recorded.
     this.terminals.on("claimed", (session: TerminalSession, owner: string) => {
       const task = this.store.data.tasks.find((t) => t.id === owner);
       if (!task || isBackgroundRun(task) || isDemoMode() || this.store.data.preferences.recordSessions === false) return;
-      void this.recordings()
+      const recorder = this.recordings();
+      recorder.setPolicy({ allowHumanOptIn: true });
+      void recorder
         .start({ sessionId: session.id, taskId: task.id, label: session.label, ...this.terminals.size(session.id) })
         .then((info) => {
           // Kept, so that a recording in which nothing ran can give the conversation its earlier one back.
           if (task.recordingId !== info.id) this.recordingBefore.set(info.id, task.recordingId);
           task.recordingId = info.id;
+          task.recordingIds = [...(task.recordingIds ?? []).filter((id) => id !== info.id), info.id];
         })
         .catch((e) => log.warn("Could not start recording a terminal", safeError(e)));
     });
@@ -1041,9 +1053,14 @@ export class HubService {
           // recording stays the one in which something happened.
           if (info.markers === 0) {
             await this.recordings().discard(info.id);
-            if (task?.recordingId === info.id) {
-              task.recordingId = before;
-              this.changed();
+            if (task) {
+              if (task.recordingIds) {
+                task.recordingIds = task.recordingIds.filter((id) => id !== info.id);
+              }
+              if (task.recordingId === info.id) {
+                task.recordingId = before;
+                this.changed();
+              }
             }
             return;
           }
@@ -1103,7 +1120,7 @@ export class HubService {
         void this.tick().catch((e) =>
           log.warn("Background tick failed", safeError(e)),
         );
-      }, 15_000);
+      }, 10_000);
       this.tickTimer.unref();
       powerMonitor?.on("suspend", this.suspend);
       powerMonitor?.on("resume", this.resume);
@@ -1248,23 +1265,113 @@ export class HubService {
     return allAgents.filter((a) => tokensLeft(a, this.usageTotal()) > 0);
   }
 
-  /** The conversation changes hands. A notice, not an answer: it is never written over by a run's text. */
-  private applyHandoff(task: AgentTask, toAgent: MissionAgent, reason?: string): void {
-    const prevAgentName = task.agentName || "Default Assistant";
-    // Who answered the first question: a test case made of this conversation replays that agent.
-    task.startedAs ??= { agentId: task.agentId, mode: task.mode };
-    task.agentId = toAgent.id;
-    task.agentName = toAgent.name;
-    task.handoffTo = undefined;
-    // Handing over never gives more freedom: the conversation keeps the more careful of the two modes.
-    task.mode = lowerMode(task.mode, toAgent.defaultMode);
-    task.updatedAt = Date.now();
-    task.messages.push({
-      id: crypto.randomUUID(),
-      role: "system",
-      text: `**Handed over: ${prevAgentName} → ${toAgent.name}**\n${reason ? `Reason: *${clip(reason, 400)}*\n` : ""}Mission: ${toAgent.mission}`,
-      at: Date.now(),
+  /** The conversation changes hands via a validated HandoffPacket (max 3 hops, cycle-checked). */
+  private applyHandoff(
+    task: AgentTask,
+    toAgent: MissionAgent,
+    reason?: string,
+    options?: { allowCycle?: boolean },
+  ): void {
+    const res = applyDisciplinedHandoff(task, toAgent, reason, undefined, options);
+    if (!res.ok) {
+      task.handoffTo = undefined;
+      task.updatedAt = Date.now();
+      task.messages.push({
+        id: crypto.randomUUID(),
+        role: "system",
+        text: res.error,
+        at: Date.now(),
+      });
+    }
+  }
+
+  private resolveSafetyContext(
+    task: Pick<AgentTask, "target" | "startedAs" | "agentId">,
+    targetLabel?: string,
+  ): {
+    policy: SafetyPolicyConfig;
+    targetTags?: string[];
+    clusterPolicy?: ClusterSafetyPolicy;
+    requesterId?: string;
+  } {
+    const policy = this.safetyPolicy();
+    const rawLabel = (targetLabel || task.target?.label || "").trim();
+    const label = rawLabel.toLowerCase();
+    const session = task.target ? this.terminals.get(task.target.sessionId) : undefined;
+    const knownServers = this.getKnownServers();
+    const clusterMatch = /^cluster\s+([^\s(]+)/i.exec(rawLabel)?.[1]?.toLowerCase();
+    const matchedServers = knownServers.filter((s) => {
+      const sName = s.name.toLowerCase();
+      const sId = s.id.toLowerCase();
+      const sCluster = s.cluster?.toLowerCase();
+      if (session?.profileId && s.id === session.profileId) return true;
+      if (!label) return false;
+      if (sName === label || sId === label || s.host.toLowerCase() === label) return true;
+      if (
+        sCluster &&
+        (sCluster === label ||
+          (clusterMatch && (sCluster === clusterMatch || sCluster.includes(clusterMatch))))
+      ) {
+        return true;
+      }
+      if ((rawLabel.includes(",") || rawLabel.includes("(")) && sName.length >= 2 && label.includes(sName)) {
+        return true;
+      }
+      return false;
     });
+    const aggregatedTags = Array.from(new Set(matchedServers.flatMap((s) => s.tags ?? [])));
+    const clusterPolicies = policy.clusterPolicies;
+    let clusterPolicy: ClusterSafetyPolicy | undefined;
+    if (clusterPolicies && typeof clusterPolicies === "object") {
+      const candidateClusterKeys = new Set<string>();
+      for (const s of matchedServers) {
+        if (s.cluster?.trim()) candidateClusterKeys.add(s.cluster.trim().toLowerCase());
+      }
+      if (clusterMatch) candidateClusterKeys.add(clusterMatch);
+      if (label) candidateClusterKeys.add(label);
+      const matchedPolicies: ClusterSafetyPolicy[] = [];
+      for (const [k, v] of Object.entries(clusterPolicies)) {
+        if (v && candidateClusterKeys.has(k.trim().toLowerCase())) {
+          matchedPolicies.push(v);
+        }
+      }
+      if (matchedPolicies.length > 0) {
+        clusterPolicy = matchedPolicies.reduce<ClusterSafetyPolicy>((acc, cur) => ({
+          ...(cur.maxMode || acc.maxMode
+            ? {
+                maxMode:
+                  cur.maxMode && acc.maxMode
+                    ? lowerMode(cur.maxMode, acc.maxMode)
+                    : (cur.maxMode ?? acc.maxMode),
+              }
+            : {}),
+          ...(cur.requiredApprovals !== undefined || acc.requiredApprovals !== undefined
+            ? {
+                requiredApprovals: Math.max(
+                  cur.requiredApprovals ?? 1,
+                  acc.requiredApprovals ?? 1,
+                ),
+              }
+            : {}),
+          ...(cur.requireCheckAndRollback || acc.requireCheckAndRollback
+            ? { requireCheckAndRollback: true }
+            : {}),
+          ...(cur.frozenUntil !== undefined || acc.frozenUntil !== undefined
+            ? { frozenUntil: Math.max(cur.frozenUntil ?? 0, acc.frozenUntil ?? 0) }
+            : {}),
+        }), {});
+      }
+    }
+    const requesterId =
+      (task as { requesterId?: string }).requesterId ??
+      task.startedAs?.agentId ??
+      task.agentId;
+    return {
+      policy,
+      targetTags: aggregatedTags.length > 0 ? aggregatedTags : undefined,
+      ...(clusterPolicy ? { clusterPolicy } : {}),
+      ...(requesterId ? { requesterId } : {}),
+    };
   }
 
   /**
@@ -1356,6 +1463,20 @@ export class HubService {
       );
     const lifted = (known.tags ?? []).filter(isProdTag).filter((t) => !(next.tags ?? known.tags ?? []).some((x) => x.trim().toLowerCase() === t.toLowerCase()));
     if (lifted.length) throw new Error(`${who} takes the tag "${lifted[0]}" off a server the team shares: it is what makes changes there wait for a person.`);
+  }
+
+  private storeDataExtra(): {
+    inboxState?: Record<string, { snoozedUntil?: number; acknowledgedAt?: number }>;
+    workforcePaused?: boolean;
+    runbooks?: RunbookTemplate[];
+    rules?: WorkspaceRule[];
+  } {
+    return this.store.data as unknown as {
+      inboxState?: Record<string, { snoozedUntil?: number; acknowledgedAt?: number }>;
+      workforcePaused?: boolean;
+      runbooks?: RunbookTemplate[];
+      rules?: WorkspaceRule[];
+    };
   }
 
   /**
@@ -2166,6 +2287,10 @@ export class HubService {
         infraEdges: allInfraEdges,
         mcpServerCount: allMcpServers.length,
       }),
+      inboxState: this.storeDataExtra().inboxState ?? {},
+      workforcePaused: Boolean(this.storeDataExtra().workforcePaused),
+      runbooks: this.storeDataExtra().runbooks ?? [],
+      rules: this.storeDataExtra().rules ?? [],
       contextBudget: {
         contextWindowTokens,
         terminalContextChars,
@@ -2268,6 +2393,10 @@ export class HubService {
           for (const key of ["background", "autoStart", "inventory"] as const)
             if (p[key] !== undefined)
               next[key] = p[key] === true;
+          if (p.recordSessions !== undefined) {
+            next.recordSessions = p.recordSessions === true;
+            this.recorder?.setPolicy({ allowHumanOptIn: next.recordSessions });
+          }
           if (p.proposeMemories !== undefined)
             next.proposeMemories =
               p.proposeMemories === true;
@@ -2406,19 +2535,22 @@ export class HubService {
         await this.terminals.arm(request.sessionId, request.shell);
         break;
       case "approve": {
-        // Who answered is written down where the answer is given, before anything runs on it.
-        const change = this.store.data.tasks
-          .find((t) => t.id === request.taskId)
-          ?.changes.find((c) => c.id === request.changeId);
-        if (change && change.status === "pending")
-          change.decidedBy = { name: await this.resolveActorName(), at: Date.now(), allowed: request.approved === true };
+        const actor = await this.resolveActorName();
         const approvalNote = typeof request.note === "string" && request.note.trim() ? clip(request.note.trim(), 1000) : undefined;
-        this.broker.approve(
+        const resolved = this.broker.approve(
           request.taskId,
           request.changeId,
           request.approved === true,
           approvalNote,
+          { actor, actorId: actor },
         );
+        // Who answered is written down once the broker resolves or records the final decision.
+        const change = this.store.data.tasks
+          .find((t) => t.id === request.taskId)
+          ?.changes.find((c) => c.id === request.changeId);
+        if (change && (resolved || change.status !== "pending")) {
+          change.decidedBy = { name: actor, at: Date.now(), allowed: request.approved === true };
+        }
         break;
       }
       case "memory-save": {
@@ -2657,14 +2789,65 @@ export class HubService {
       }
       case "plan-decide": {
         const task = this.task(request.taskId);
-        const plan = task.plan;
+        const plan = task.plan as
+          | (AgentPlan & { approvals?: AgentChangeApproval[]; requiredApprovals?: number })
+          | undefined;
         if (!plan || plan.status !== "proposed")
           throw new Error("There is no plan waiting for a decision in this conversation");
         if (active(task))
           throw new Error("The agent is still working; decide when it has stopped");
         const note = request.note?.trim();
-        plan.decidedAt = Date.now();
+        const actor = await this.resolveActorName();
+        if (this.getKnownServers().length === 0) {
+          await this.collectExtraContext().catch(() => undefined);
+        }
+        const planTargets = Array.from(
+          new Set(
+            [task.target?.label, ...plan.steps.map((s) => s.target)].filter(
+              (t): t is string => Boolean(t?.trim()),
+            ),
+          ),
+        );
+        const safetyCtx = this.resolveSafetyContext(task, task.target?.label ?? planTargets[0]);
         if (request.approved) {
+          for (const tgt of planTargets.length ? planTargets : [undefined]) {
+            const tgtCtx = tgt ? this.resolveSafetyContext(task, tgt) : safetyCtx;
+            if (tgtCtx.clusterPolicy?.frozenUntil && tgtCtx.clusterPolicy.frozenUntil > Date.now()) {
+              throw new Error(
+                `Cluster is in a change freeze until ${new Date(tgtCtx.clusterPolicy.frozenUntil).toISOString()}.`,
+              );
+            }
+          }
+          const prevApprovals = [...(plan.approvals ?? [])];
+          if (prevApprovals.some((a) => a.allowed && (a.actorId || a.actor).toLowerCase() === actor.toLowerCase())) {
+            throw new Error("You already approved this plan; a distinct peer approver is required.");
+          }
+          const nextApprovals: AgentChangeApproval[] = [
+            ...prevApprovals,
+            { actor, actorId: actor, at: Date.now(), allowed: true, ...(note ? { note: boundedContext(note, 1000) } : {}) },
+          ];
+          const approvalStatus = checkPlanApprovals(plan, {
+            approvals: nextApprovals,
+            proposer: task.agentName ?? task.agentId,
+            targetTags: safetyCtx.targetTags,
+            defaultTarget: task.target?.label,
+            policy: safetyCtx.policy,
+            clusterPolicy: safetyCtx.clusterPolicy,
+          });
+          plan.approvals = nextApprovals;
+          plan.requiredApprovals = approvalStatus.requiredApprovals;
+          if (!approvalStatus.satisfied) {
+            task.messages.push({
+              id: crypto.randomUUID(),
+              role: "system",
+              text: approvalStatus.reason || `Plan approval recorded (${approvalStatus.distinctApprovers.length}/${approvalStatus.requiredApprovals}); awaiting peer approval.`,
+              at: Date.now(),
+            });
+            task.updatedAt = Date.now();
+            this.changed();
+            break;
+          }
+          plan.decidedAt = Date.now();
           plan.status = "approved";
           // What this approval covers is settled here, where the person decided, and written on the plan.
           const asks = approvalAsksEach(plan, { note, askEach: request.askEach });
@@ -2680,6 +2863,11 @@ export class HubService {
             text: approvalMessage(plan, note),
           });
         }
+        plan.decidedAt = Date.now();
+        plan.approvals = [
+          ...(plan.approvals ?? []),
+          { actor, actorId: actor, at: Date.now(), allowed: false, ...(note ? { note: boundedContext(note, 1000) } : {}) },
+        ];
         plan.status = "rejected";
         if (note) {
           plan.decisionNote = boundedContext(note, 2000);
@@ -3075,11 +3263,13 @@ export class HubService {
         if (Object.values(asked).some((v) => v !== undefined) || request.inviteCode) {
           this.assertTeamAdmin();
           await this.s3Workspace.configure(request.config, request.inviteCode);
+          this.scheduleWorkSync(50);
         }
         break;
       }
       case "workspace-s3-sync-now": {
         await this.s3Workspace.syncNow({ forcePush: true });
+        await this.syncWorkNow();
         break;
       }
       case "workspace-s3-disconnect": {
@@ -3104,7 +3294,7 @@ export class HubService {
         const s = request.schedule;
         if (
           !SHELL_KINDS.includes(s.shell) ||
-          !["advice", "assisted", "autonomous"].includes(s.mode) ||
+          !["advice", "plan", "assisted", "autonomous"].includes(s.mode) ||
           !["anthropic", "openai-compatible", "openai-codex"].includes(
             s.provider,
           )
@@ -3164,19 +3354,22 @@ export class HubService {
       case "agent-save": {
         const a = request.agent;
         const id = a.id?.trim() || crypto.randomUUID();
+        const localHad = (this.store.data.agents ?? []).find((x) => x.id === id);
+        // The team's copy as it is now: an agent a teammate removed is not saved back from an old view.
+        if (a.id?.trim()) await this.pullAgent(id);
+        const current = (this.store.data.agents ?? []).find((x) => x.id === id);
+        // Removed (here, or by a teammate and synced): a save from a view that still showed it does not bring it back.
+        const removedAt = this.store.data.sharedRemoved?.agents?.[id];
+        if (a.id?.trim() && !current && removedAt)
+          throw new Error(
+            removedMessage("This agent", this.store.data.sharedRemovedBy?.agents?.[id], removedAt, "so the change was not saved. Create a new agent to keep it."),
+          );
         // Three code paths look an agent up by name. Two agents of one name would make
         // which one they find a matter of order.
         const clash = this.getAgentsList().find(
           (x) => x.id !== id && x.name.trim().toLowerCase() === (a.name ?? "").trim().toLowerCase(),
         );
         if (clash) throw new Error(`There is already an agent called "${clash.name}". Give this one another name.`);
-        const had = (this.store.data.agents ?? []).find((x) => x.id === id);
-        // Removed (here, or by a teammate and synced): a save from a view that still showed it does not bring it back.
-        const removedAt = this.store.data.sharedRemoved?.agents?.[id];
-        if (a.id?.trim() && !had && removedAt)
-          throw new Error(
-            removedMessage("This agent", this.store.data.sharedRemovedBy?.agents?.[id], removedAt, "so the change was not saved. Create a new agent to keep it."),
-          );
         const actor = a.author?.trim() || (await this.resolveActorName());
         const boss = a.reportsTo && a.reportsTo !== id ? this.getAgentsList().find((x) => x.id === a.reportsTo) : undefined;
         const circle = Boolean(boss) && wouldCycle(this.getAgentsList(), id, boss!.id);
@@ -3198,7 +3391,7 @@ export class HubService {
           mission: boundedContext(requiredText(a.mission), 2000),
           systemPrompt: boundedContext(a.systemPrompt?.trim() || a.mission, 8000),
           targetCluster: a.targetCluster?.trim() || undefined,
-          defaultMode: ["advice", "assisted", "autonomous"].includes(a.defaultMode)
+          defaultMode: ["advice", "plan", "assisted", "autonomous"].includes(a.defaultMode)
             ? a.defaultMode
             : "assisted",
           allowedTools: a.allowedTools?.length ? a.allowedTools : ["all"],
@@ -3217,18 +3410,21 @@ export class HubService {
             a.monthlyTokenBudget && a.monthlyTokenBudget > 0
               ? integer(a.monthlyTokenBudget, 1000, 2_000_000_000)
               : undefined,
-          updatedAt: Date.now(),
+          updatedAt: Math.max(Date.now(), (current?.updatedAt ?? 0) + 1),
           author: actor,
         };
         // Which fields changed, and from which version: a teammate's change of another field stays,
         // and a removal made meanwhile stands (the same rule as tickets and goals).
-        const saved = stampChange(had, fresh);
+        let saved = stampChange(localHad, fresh);
+        if (current && (!localHad || current.updatedAt !== localHad.updatedAt)) {
+          saved = mergeCopies(saved, current, AGENT_FIELD_GROUPS);
+        }
         this.store.data.agents = [
           ...(this.store.data.agents ?? []).filter((x) => x.id !== id),
           saved,
         ];
         if (isDemoMode()) saveDemoAgent(saved);
-        this.lastWorkSync = 0;
+        this.scheduleWorkSync();
         break;
       }
       case "agent-delete": {
@@ -3262,17 +3458,27 @@ export class HubService {
         // Before deleteDemoAgent: in demo mode the built-ins are the demo store's agents.
         this.markBuiltinDismissed(request.id, getBuiltinAgents());
         if (isDemoMode()) deleteDemoAgent(request.id);
+        this.scheduleWorkSync();
         break;
       }
       case "agent-pause": {
+        if (request.id?.trim()) await this.pullAgent(request.id);
         const agent = this.getAgentsList().find((a) => a.id === request.id);
-        if (!agent) throw new Error("Agent not found");
-        const saved = stampChange(agent, { ...agent, enabled: !request.paused, updatedAt: Date.now() });
+        if (!agent) {
+          const removedAt = this.store.data.sharedRemoved?.agents?.[request.id];
+          if (removedAt)
+            throw new Error(
+              removedMessage("This agent", this.store.data.sharedRemovedBy?.agents?.[request.id], removedAt, "so it could not be paused."),
+            );
+          throw new Error("Agent not found");
+        }
+        const saved = stampChange(agent, { ...agent, enabled: !request.paused, updatedAt: Math.max(Date.now(), (agent.updatedAt ?? 0) + 1) });
         this.store.data.agents = [
           ...(this.store.data.agents ?? []).filter((x) => x.id !== saved.id),
           saved,
         ];
         if (isDemoMode()) saveDemoAgent(saved);
+        this.scheduleWorkSync();
         break;
       }
       case "alert-hook-create": {
@@ -3525,6 +3731,19 @@ export class HubService {
         );
         if (!toAgent) throw new Error("Target Mission Agent not found for handoff");
         this.assertMayRun(toAgent);
+        // Automated handoffs during an active run block cycles (A -> B -> A); idle/manual
+        // handoffs on a finished conversation may return control while still capping hops.
+        const allowCycle = !active(task);
+        const hopCheck = checkHandoffAllowed({
+          handoffChain: task.handoffChain,
+          currentAgentId: task.agentId,
+          currentAgentName: task.agentName,
+          toAgentId: toAgent.id,
+          toAgentName: toAgent.name,
+          maxHops: MAX_HANDOFF_HOPS,
+          allowCycle,
+        });
+        if (!hopCheck.allowed) throw new Error(hopCheck.message ?? "Handoff limit reached");
         // During a run, the run finishes as the agent it started as (its instructions and tools were set
         // then, and what it spends is that agent's); the conversation changes hands when it ends.
         if (active(task)) {
@@ -3537,7 +3756,7 @@ export class HubService {
           });
           break;
         }
-        this.applyHandoff(task, toAgent, request.reason);
+        this.applyHandoff(task, toAgent, request.reason, { allowCycle });
         break;
       }
       case "mcp-install-preset": {
@@ -3747,23 +3966,63 @@ export class HubService {
         const stored = this.store.data.safetyPolicy ?? DEFAULT_SAFETY_POLICY;
         const asked: Partial<Record<keyof SafetyPolicyConfig, unknown>> =
           request.policy && typeof request.policy === "object" ? request.policy : {};
-        // A rule is on or off. "no", 0 or null is not an answer: stored as sent it would switch a rule
-        // off, or leave it on while looking like something else, so the whole request is refused.
-        for (const key of Object.keys(POLICY_NAMES) as (keyof SafetyPolicyConfig)[])
+        for (const key of Object.keys(BOOLEAN_POLICY_NAMES) as (keyof typeof BOOLEAN_POLICY_NAMES)[])
           if (asked[key] !== undefined && typeof asked[key] !== "boolean")
-            throw new Error(`"${POLICY_NAMES[key]}" is either on (true) or off (false).`);
-        // On a shared server the team's rules are a floor: a member switches on what makes changes wait
-        // for a person, never off. Only an administrator loosens them.
-        if (this.sharedServer() && !this.host.teamAdmin?.())
-          for (const key of ["requireApprovalOnProdTags", "blockDestructiveWithoutConfirm"] as const)
+            throw new Error(`"${BOOLEAN_POLICY_NAMES[key]}" is either on (true) or off (false).`);
+        if (asked.commandAllowPrefixes !== undefined && !Array.isArray(asked.commandAllowPrefixes))
+          throw new Error("Command allowlist prefixes must be an array of strings.");
+        if (
+          asked.clusterPolicies !== undefined &&
+          (typeof asked.clusterPolicies !== "object" || asked.clusterPolicies === null || Array.isArray(asked.clusterPolicies))
+        )
+          throw new Error("Cluster policies must be a map of cluster names to policy settings.");
+        if (this.sharedServer() && !this.host.teamAdmin?.()) {
+          for (const key of ["requireApprovalOnProdTags", "blockDestructiveWithoutConfirm", "requirePeerApprovalOnProd"] as const)
             if (asked[key] === false)
-              throw new Error(`Only an administrator of this server switches off "${POLICY_NAMES[key]}": on a shared server it is the team's rule.`);
-        // What an earlier version stored as something else counts as what it did: anything but an explicit off kept the rule on.
+              throw new Error(`Only an administrator of this server switches off "${BOOLEAN_POLICY_NAMES[key]}": on a shared server it is the team's rule.`);
+          if (asked.clusterPolicies !== undefined || asked.commandAllowPrefixes !== undefined)
+            throw new Error("Only an administrator of this server changes cluster policies or command allowlists on a shared server.");
+        }
         const current: SafetyPolicyConfig = {
           autoApproveSafeReadOnly: Boolean(stored.autoApproveSafeReadOnly),
           requireApprovalOnProdTags: Boolean(stored.requireApprovalOnProdTags),
           blockDestructiveWithoutConfirm: Boolean(stored.blockDestructiveWithoutConfirm),
+          ...(stored.requirePeerApprovalOnProd !== undefined ? { requirePeerApprovalOnProd: Boolean(stored.requirePeerApprovalOnProd) } : {}),
+          ...(stored.commandAllowPrefixes ? { commandAllowPrefixes: [...stored.commandAllowPrefixes] } : {}),
+          ...(stored.clusterPolicies ? { clusterPolicies: { ...stored.clusterPolicies } } : {}),
         };
+        const nextPrefixes =
+          asked.commandAllowPrefixes !== undefined
+            ? (asked.commandAllowPrefixes as unknown[])
+                .filter((x): x is string => typeof x === "string")
+                .map((x) => x.trim())
+                .filter(Boolean)
+                .slice(0, 100)
+            : current.commandAllowPrefixes;
+        let nextClusterPolicies = current.clusterPolicies;
+        if (asked.clusterPolicies !== undefined) {
+          const sanitized: Record<string, ClusterSafetyPolicy> = {};
+          for (const [clusterName, rawPolicy] of Object.entries(asked.clusterPolicies as Record<string, unknown>)) {
+            const key = clusterName.trim().slice(0, 120);
+            if (!key || !rawPolicy || typeof rawPolicy !== "object") continue;
+            const p = rawPolicy as Record<string, unknown>;
+            const entry: ClusterSafetyPolicy = {};
+            if (typeof p.maxMode === "string" && ["advice", "plan", "assisted", "autonomous"].includes(p.maxMode)) {
+              entry.maxMode = p.maxMode as AgentMode;
+            }
+            if (typeof p.requiredApprovals === "number" && Number.isFinite(p.requiredApprovals)) {
+              entry.requiredApprovals = integer(p.requiredApprovals, 1, 10);
+            }
+            if (typeof p.requireCheckAndRollback === "boolean") {
+              entry.requireCheckAndRollback = p.requireCheckAndRollback;
+            }
+            if (typeof p.frozenUntil === "number" && Number.isFinite(p.frozenUntil)) {
+              entry.frozenUntil = p.frozenUntil;
+            }
+            sanitized[key] = entry;
+          }
+          nextClusterPolicies = sanitized;
+        }
         this.store.data.safetyPolicy = {
           autoApproveSafeReadOnly:
             (asked.autoApproveSafeReadOnly as boolean | undefined) ?? current.autoApproveSafeReadOnly,
@@ -3772,12 +4031,25 @@ export class HubService {
           blockDestructiveWithoutConfirm:
             (asked.blockDestructiveWithoutConfirm as boolean | undefined) ??
             current.blockDestructiveWithoutConfirm,
+          ...(asked.requirePeerApprovalOnProd !== undefined || current.requirePeerApprovalOnProd !== undefined
+            ? {
+                requirePeerApprovalOnProd:
+                  (asked.requirePeerApprovalOnProd as boolean | undefined) ?? current.requirePeerApprovalOnProd,
+              }
+            : {}),
+          ...(nextPrefixes ? { commandAllowPrefixes: nextPrefixes } : {}),
+          ...(nextClusterPolicies ? { clusterPolicies: nextClusterPolicies } : {}),
         };
-        // Who loosened or tightened the rules, and from what to what, goes into the audit log.
         const next = this.store.data.safetyPolicy;
-        const moved = (Object.keys(next) as (keyof SafetyPolicyConfig)[])
-          .filter((k) => next[k] !== current[k])
-          .map((k) => `${POLICY_NAMES[k]}: ${current[k] ? "on" : "off"} → ${next[k] ? "on" : "off"}`);
+        const moved = (Object.keys(BOOLEAN_POLICY_NAMES) as (keyof typeof BOOLEAN_POLICY_NAMES)[])
+          .filter((k) => Boolean(next[k]) !== Boolean(current[k]))
+          .map((k) => `${BOOLEAN_POLICY_NAMES[k]}: ${current[k] ? "on" : "off"} → ${next[k] ? "on" : "off"}`);
+        if (JSON.stringify(next.commandAllowPrefixes ?? []) !== JSON.stringify(current.commandAllowPrefixes ?? [])) {
+          moved.push(`commandAllowPrefixes updated (${(next.commandAllowPrefixes ?? []).length} entries)`);
+        }
+        if (JSON.stringify(next.clusterPolicies ?? {}) !== JSON.stringify(current.clusterPolicies ?? {})) {
+          moved.push(`clusterPolicies updated (${Object.keys(next.clusterPolicies ?? {}).length} cluster(s))`);
+        }
         if (moved.length && !isDemoMode()) {
           this.store.data.safetyPolicyChanged = { by: await this.resolveActorName(), at: Date.now() };
           void this.audit()
@@ -3805,12 +4077,19 @@ export class HubService {
           status: existing?.status ?? "unknown",
           lastError: existing?.lastError,
           lastTestedAt: existing?.lastTestedAt,
+          // What a person decided about this server's tools is kept over an edit: a tool that was
+          // denied must not run again because the server's name or address was changed.
+          toolPolicies: existing?.toolPolicies,
+          trustReadOnlyHint: s.trustReadOnlyHint ?? existing?.trustReadOnlyHint,
+          oauth: s.oauth ?? existing?.oauth,
         };
         this.assertMcpProgramAllowed(saved);
         const reach = (x: McpServerConfig): string =>
           JSON.stringify([x.transport, x.command, x.args ?? [], x.url]);
         if (existing && reach(existing) !== reach(saved)) {
-          // It is a different server now: what the old one answered no longer holds.
+          // It is a different server now: what the old one answered no longer holds, and neither does
+          // trust in what it says about its own tools. A tool that was denied stays denied.
+          saved.trustReadOnlyHint = s.trustReadOnlyHint ?? false;
           saved.discoveredTools = [];
           saved.status = "unknown";
           saved.lastError = undefined;
@@ -4164,7 +4443,7 @@ export class HubService {
         if (!cast) {
           // "Not any more" only for one that is known to have been here: a run names it, or the audit log sealed it.
           const known =
-            this.store.data.tasks.some((t) => t.recordingId === request.id) ||
+            this.store.data.tasks.some((t) => t.recordingId === request.id || t.recordingIds?.includes(request.id)) ||
             (await this.audit().recent(5000)).some((e) => e.kind === "recording" && e.changeId === request.id);
           throw new Error(known ? "That recording is not on this computer any more." : "There is no recording with that id.");
         }
@@ -4311,6 +4590,516 @@ export class HubService {
         this.terminals.observe(false);
         this.terminals.observe((await this.config.getView()).enabled);
         break;
+      case "restore-checkpoint": {
+        const task = this.task(request.taskId);
+        const change = task.changes.find((c) => c.id === request.changeId);
+        if (!change) throw new Error("Change not found");
+        if (!this.host.restoreCheckpoint) {
+          throw new Error("Checkpoint restore is unavailable");
+        }
+        await this.host.restoreCheckpoint(change, { task, force: request.force });
+        task.updatedAt = Date.now();
+        if (!isDemoMode()) {
+          void this.audit()
+            .append({
+              kind: "file-write",
+              actor: await this.resolveActorName(),
+              target: change.target,
+              what: change.rollback?.command || `restoreCheckpoint(${change.description})`,
+              outcome: "rolled-back",
+              taskId: task.id,
+              changeId: change.id,
+            })
+            .catch((e) => log.warn("Could not write to the audit log", safeError(e)));
+        }
+        break;
+      }
+      case "rollback-change": {
+        const task = this.task(request.taskId);
+        const change = task.changes.find((c) => c.id === request.changeId);
+        if (!change) throw new Error("Change not found");
+        if (change.kind === "file" && this.host.restoreCheckpoint) {
+          await this.host.restoreCheckpoint(change, { task });
+          task.updatedAt = Date.now();
+          break;
+        }
+        const rollbackCmd = change.rollback?.command?.trim();
+        if (!rollbackCmd) throw new Error("This change has no rollback command");
+        // Only what actually ran can be taken back, and only once: the rollback of a change that was
+        // refused or never ran would be a new change that nobody approved.
+        if (!["completed", "failed", "uncertain"].includes(change.status))
+          throw new Error("This change did not run, so there is nothing to take back.");
+        if (change.rollback?.ran) throw new Error("This change has already been taken back.");
+        // The rollback is the model's own command. It was shown on the change the person approved; one
+        // that is destructive (or a check that is not read-only) is not run from a button: it goes
+        // through the agent, where it is asked about like any other command.
+        const rollbackRisk = analyzeCommandSafety(rollbackCmd);
+        if (rollbackRisk.riskLevel === "destructive")
+          throw new Error(
+            `The rollback command is destructive (${rollbackRisk.riskReason}). Ask the assistant to take the change back, so that the command is approved like any other.`,
+          );
+        const checkCmd = change.check?.command?.trim();
+        const checkIsReadOnly = !!checkCmd && analyzeCommandSafety(checkCmd).riskLevel === "safe";
+        const sessionId = task.target?.sessionId;
+        const session = sessionId ? this.terminals.get(sessionId) : undefined;
+        if (!session || session.state !== "ready" || !session.shell) {
+          throw new Error("No ready terminal is bound to this task for rollback");
+        }
+        if (session.owner && session.owner !== task.id) {
+          throw new Error("Terminal is currently busy with another task");
+        }
+        const alreadyOwned = session.owner === task.id;
+        if (!alreadyOwned) {
+          this.terminals.claim(session.id, session.generation, task.id);
+        }
+        let runRes: { output: string; exitCode: number };
+        let restored: boolean | undefined;
+        try {
+          runRes = await this.terminals.execute(session.id, session.generation, task.id, rollbackCmd, 120_000);
+          if (request.verify !== false && checkCmd && checkIsReadOnly) {
+            const checkRes = await this.terminals.execute(
+              session.id,
+              session.generation,
+              task.id,
+              checkCmd,
+              60_000,
+            );
+            restored = checkRes.exitCode === 0;
+          }
+        } finally {
+          if (!alreadyOwned) {
+            this.terminals.release(task.id);
+          }
+        }
+        change.rollback = {
+          ...change.rollback,
+          command: rollbackCmd,
+          ran: true,
+          exitCode: runRes.exitCode,
+          output: maskContext(runRes.output),
+          ...(restored !== undefined ? { restored } : {}),
+        };
+        task.updatedAt = Date.now();
+        if (!isDemoMode()) {
+          void this.audit()
+            .append({
+              kind: "change",
+              actor: await this.resolveActorName(),
+              target: change.target,
+              what: `Rollback: ${rollbackCmd}`,
+              outcome: runRes.exitCode === 0 ? "rolled-back" : "failed",
+              exitCode: runRes.exitCode,
+              taskId: task.id,
+              changeId: change.id,
+            })
+            .catch((e) => log.warn("Could not write to the audit log", safeError(e)));
+        }
+        break;
+      }
+      case "task-fork": {
+        const parent = this.task(request.taskId);
+        const mode: AgentMode = request.mode ?? parent.mode;
+        if (!["advice", "plan", "assisted", "autonomous"].includes(mode)) {
+          throw new Error("Invalid autonomy mode");
+        }
+        let sourceMessages = parent.messages;
+        if (request.fromMessageId) {
+          const cutIdx = parent.messages.findIndex((m) => m.id === request.fromMessageId);
+          if (cutIdx < 0) throw new Error("Fork message not found");
+          sourceMessages = parent.messages.slice(0, cutIdx + 1);
+        }
+        const now = Date.now();
+        const forked: AgentTask = {
+          id: crypto.randomUUID(),
+          title: clip(request.title?.trim() || `Fork: ${parent.title}`, 120),
+          mode,
+          agentId: parent.agentId,
+          agentName: parent.agentName,
+          status: sourceMessages.some((m) => m.role === "assistant") ? "completed" : "interrupted",
+          target: parent.target ? { ...parent.target } : undefined,
+          messages: sourceMessages.map((m) => ({
+            ...m,
+            id: crypto.randomUUID(),
+            ...(m.images ? { images: m.images.map((img) => ({ ...img })) } : {}),
+          })),
+          changes: [],
+          sources: parent.sources.map((s) => ({ ...s })),
+          ...(parent.todos ? { todos: parent.todos.map((td) => ({ ...td })) } : {}),
+          ...(parent.hypotheses ? { hypotheses: parent.hypotheses.map((h) => ({ ...h })) } : {}),
+          ...(parent.handoffChain ? { handoffChain: [...parent.handoffChain] } : {}),
+          parentTaskId: parent.id,
+          ...(request.fromMessageId ? { forkedFromMessageId: request.fromMessageId } : {}),
+          createdAt: now,
+          updatedAt: now,
+          maxCommands: parent.maxCommands,
+          maxMinutes: parent.maxMinutes,
+          verification: "not-verified",
+        };
+        this.store.data.tasks.push(forked);
+        reply = { started: { taskId: forked.id } };
+        break;
+      }
+      case "compact-task": {
+        const task = this.task(request.taskId);
+        if (active(task)) {
+          throw new Error("Stop the running task before compacting its conversation");
+        }
+        const keepRecent = 4;
+        if (task.messages.length > keepRecent) {
+          const older = task.messages.slice(0, task.messages.length - keepRecent);
+          const recent = task.messages.slice(-keepRecent);
+          // What was asked first is the task itself: it is kept whole (as far as a summary can hold it).
+          const asked = older.filter((m) => m.role === "user" && m.text.trim());
+          const firstAsk = asked[0] ? [`Asked first:\n${boundedPrompt(asked[0].text.trim(), 2000)}`] : [];
+          const userGoals = asked
+            .slice(1)
+            .slice(-3)
+            .map((m) => `- User: ${clip(m.text.trim(), 240)}`);
+          const keyFindings = older
+            .filter((m) => m.role === "assistant" && m.text.trim())
+            .slice(-3)
+            .map((m) => `- Assistant: ${clip(m.text.trim(), 320)}`);
+          const changeNotes = task.changes
+            .slice(-5)
+            .map((c) => `- Change [${c.status}]: ${clip(c.description, 160)}`);
+          const focusLine = request.focus?.trim()
+            ? `Focus: ${clip(request.focus.trim(), 200)}`
+            : "";
+          const summaryParts = [
+            `Summary of ${older.length} earlier message(s) of this conversation, which were compacted.`,
+            focusLine,
+            ...firstAsk,
+            ...userGoals,
+            ...keyFindings,
+            ...changeNotes,
+          ].filter(Boolean);
+          task.messages = [
+            {
+              id: crypto.randomUUID(),
+              role: "system",
+              // Marked as context: the model is given it. An ordinary system note is for the person only,
+              // and the earlier conversation would be gone from the model's view altogether.
+              text: CONTEXT_NOTE_PREFIX + clip(summaryParts.join("\n"), 6000),
+              at: Date.now(),
+            },
+            ...recent,
+          ];
+          task.updatedAt = Date.now();
+        }
+        break;
+      }
+      case "snooze-inbox": {
+        const itemId = requiredText(request.itemId);
+        const now = Date.now();
+        const durationMin = request.durationMinutes !== undefined
+          ? integer(request.durationMinutes, 1, 7 * 24 * 60)
+          : 60;
+        const snoozedUntil =
+          typeof request.until === "number" && Number.isFinite(request.until)
+            ? request.until
+            : now + durationMin * 60_000;
+        const extra = this.storeDataExtra();
+        const prev = extra.inboxState ?? {};
+        extra.inboxState = {
+          ...prev,
+          [itemId]: { ...prev[itemId], snoozedUntil },
+        };
+        break;
+      }
+      case "ack-inbox": {
+        const itemId = requiredText(request.itemId);
+        const extra = this.storeDataExtra();
+        const prev = extra.inboxState ?? {};
+        const entry = { ...prev[itemId] };
+        if (request.acknowledged === false) {
+          delete entry.acknowledgedAt;
+        } else {
+          entry.acknowledgedAt = Date.now();
+        }
+        if (entry.snoozedUntil === undefined && entry.acknowledgedAt === undefined) {
+          const next = { ...prev };
+          delete next[itemId];
+          extra.inboxState = next;
+        } else {
+          extra.inboxState = { ...prev, [itemId]: entry };
+        }
+        break;
+      }
+      case "promote-eval": {
+        const task = this.task(request.taskId);
+        const existingCase = (this.store.data.evalCases ?? []).find(
+          (c) => c.id === task.evalCaseId || c.fromTaskId === task.id,
+        );
+        const failedStoredRun = existingCase?.runs.find((r) => !r.passed && !r.inconclusive);
+        const promptText =
+          existingCase?.prompt ||
+          task.messages.find((m) => m.role === "user")?.text ||
+          task.title;
+        const targetRun = failedStoredRun ?? {
+          passed: task.status === "completed" && !task.error && !task.changes.some((c) => c.status === "failed"),
+          inconclusive: task.status === "interrupted" && !task.error ? "Interrupted before completion" : undefined,
+          checks: [
+            {
+              name: "task-execution",
+              passed: task.status === "completed" && !task.error,
+              detail: task.error || `Task ended with status "${task.status}"`,
+            },
+          ],
+          answer: [...task.messages].reverse().find((m) => m.role === "assistant")?.text ?? "",
+        };
+        const promotion = promoteEvalFailureToIncident(
+          {
+            id: existingCase?.id ?? task.id,
+            title: existingCase?.title ?? task.title,
+            prompt: promptText,
+            fromTaskId: existingCase?.fromTaskId ?? task.id,
+          },
+          targetRun,
+          { title: request.title },
+        );
+        const actor = await this.resolveActorName();
+        const now = Date.now();
+        const ticket: WorkTicket = {
+          id: `t-${crypto.randomUUID().slice(0, 8)}`,
+          title: promotion.title,
+          description: promotion.summary,
+          status: "todo",
+          ...(task.target?.label ? { target: task.target.label } : {}),
+          ...(task.agentId ? { assigneeAgentId: task.agentId, assigneeName: task.agentName } : {}),
+          taskId: task.id,
+          createdBy: actor,
+          createdAt: now,
+          updatedAt: now,
+        };
+        this.putTicket(ticket);
+        break;
+      }
+      case "rule-save": {
+        const r = request.rule;
+        const scope = r.scope;
+        if (!["global", "env", "tag", "cluster", "server"].includes(scope)) {
+          throw new Error("Invalid workspace rule scope");
+        }
+        const activation = r.activation;
+        if (!["always", "auto", "agent-requested", "manual"].includes(activation)) {
+          throw new Error("Invalid workspace rule activation");
+        }
+        const extra = this.storeDataExtra();
+        const list = extra.rules ?? [];
+        const id = r.id?.trim() || crypto.randomUUID();
+        const prev = list.find((x) => x.id === id);
+        const now = Date.now();
+        const saved: WorkspaceRule = {
+          id,
+          name: clip(requiredText(r.name), 120),
+          scope,
+          ...(r.scopeValue?.trim() ? { scopeValue: clip(r.scopeValue.trim(), 120) } : {}),
+          activation,
+          ...(r.description?.trim() ? { description: boundedContext(r.description.trim(), 500) } : {}),
+          body: boundedContext(requiredText(r.body), 8000),
+          applyToReadOnly: r.applyToReadOnly ?? true,
+          enabled: r.enabled ?? true,
+          ...(typeof r.priority === "number" && Number.isFinite(r.priority)
+            ? { priority: integer(r.priority, -1000, 1000) }
+            : {}),
+          author: r.author?.trim() || prev?.author || (await this.resolveActorName()),
+          createdAt: prev?.createdAt ?? r.createdAt ?? now,
+          updatedAt: now,
+        };
+        extra.rules = [saved, ...list.filter((x) => x.id !== id)];
+        break;
+      }
+      case "rule-delete": {
+        const extra = this.storeDataExtra();
+        extra.rules = (extra.rules ?? []).filter((x) => x.id !== request.id);
+        break;
+      }
+      case "runbook-save": {
+        const rb = request.runbook;
+        const extra = this.storeDataExtra();
+        const list = extra.runbooks ?? [];
+        const id = rb.id?.trim() || crypto.randomUUID();
+        const prev = list.find((x) => x.id === id);
+        const now = Date.now();
+        const saved: RunbookTemplate = {
+          id,
+          name: clip(requiredText(rb.name), 120),
+          ...(rb.description?.trim() ? { description: boundedContext(rb.description.trim(), 1000) } : {}),
+          inputs: Array.isArray(rb.inputs) ? rb.inputs.slice(0, 30) : [],
+          steps: Array.isArray(rb.steps) ? rb.steps.slice(0, 40) : [],
+          ...(rb.targetSelector ? { targetSelector: rb.targetSelector } : {}),
+          ...(rb.dispatchStrategy ? { dispatchStrategy: rb.dispatchStrategy } : {}),
+          ...(typeof rb.maxConcurrency === "number" && Number.isFinite(rb.maxConcurrency)
+            ? { maxConcurrency: integer(rb.maxConcurrency, 1, 20) }
+            : {}),
+          author: rb.author?.trim() || prev?.author || (await this.resolveActorName()),
+          createdAt: prev?.createdAt ?? rb.createdAt ?? now,
+          updatedAt: now,
+        };
+        extra.runbooks = [saved, ...list.filter((x) => x.id !== id)];
+        break;
+      }
+      case "runbook-delete": {
+        const extra = this.storeDataExtra();
+        extra.runbooks = (extra.runbooks ?? []).filter((x) => x.id !== request.id);
+        break;
+      }
+      case "runbook-run": {
+        const extra = this.storeDataExtra();
+        const rb = (extra.runbooks ?? []).find((x) => x.id === request.id);
+        if (!rb) throw new Error("Runbook not found");
+        const inputs = request.inputs ?? {};
+        for (const field of rb.inputs) {
+          const val = inputs[field.name] ?? field.defaultValue;
+          if (field.required && (val === undefined || val === "")) {
+            throw new Error(`Runbook input "${field.label || field.name}" is required`);
+          }
+        }
+        const substituteInputs = (raw: string): string =>
+          raw.replace(/\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}/g, (_m, key: string) => {
+            const found = inputs[key] ?? rb.inputs.find((f) => f.name === key)?.defaultValue;
+            return found === undefined ? "" : String(found);
+          });
+        const selector = request.targetSelector ?? rb.targetSelector;
+        const matchedTargets = resolveTargetSelector(this.getKnownServers(), selector);
+        const stepLines = rb.steps.map((s, idx) => {
+          const title = s.title || `Step ${idx + 1}`;
+          const cmd = s.command ? substituteInputs(s.command) : undefined;
+          const promptPart = s.prompt ? substituteInputs(s.prompt) : undefined;
+          return `${idx + 1}. [${s.kind}] ${title}${cmd ? `\n   command: \`${cmd}\`` : ""}${promptPart ? `\n   prompt: ${promptPart}` : ""}${s.expected ? `\n   expected: ${s.expected}` : ""}`;
+        });
+        const targetNames = matchedTargets.map((t) => `${t.name} (${t.host})`).join(", ") || "active session";
+        const promptText = [
+          `Runbook "${rb.name}"${request.dryRun ? " (DRY RUN)" : ""}`,
+          `Targets: ${targetNames}`,
+          ...stepLines,
+        ].join("\n");
+        if (request.dryRun) {
+          const now = Date.now();
+          const dryTask: AgentTask = {
+            id: crypto.randomUUID(),
+            title: `Dry run: ${rb.name}`,
+            mode: "advice",
+            status: "completed",
+            messages: [
+              { id: crypto.randomUUID(), role: "user", text: boundedPrompt(promptText, PERSON_PROMPT_MAX), at: now },
+              {
+                id: crypto.randomUUID(),
+                role: "assistant",
+                text: `Dry run validated ${rb.steps.length} step(s) across ${matchedTargets.length || 1} target(s). No commands executed.`,
+                at: now,
+              },
+            ],
+            changes: [],
+            sources: [],
+            createdAt: now,
+            updatedAt: now,
+            maxCommands: 1,
+            maxMinutes: 15,
+            verification: "not-verified",
+          };
+          this.store.data.tasks.push(dryTask);
+          reply = { started: { taskId: dryTask.id } };
+        } else {
+          // A runbook runs where it was aimed, or not at all: never on whatever terminal happens to be open.
+          const ready = this.terminals.list().filter((s) => s.state === "ready");
+          const hasSelector = !!selector && Object.values(selector).some((v) => (Array.isArray(v) ? v.length > 0 : !!v));
+          let readySession: (typeof ready)[number] | undefined;
+          let scopeNote = "";
+          if (hasSelector) {
+            if (matchedTargets.length === 0)
+              throw new Error("This runbook's target matches no server in the workspace, so it was not started.");
+            const candidates = ready.filter((s) => matchedTargets.some((t) => t.id === s.profileId));
+            if (candidates.length === 0)
+              throw new Error(
+                `No terminal is open and ready on ${matchedTargets.map((t) => t.name).join(", ")}. Open one there and run the runbook again.`,
+              );
+            readySession = candidates[0];
+            const rest = matchedTargets.filter((t) => t.id !== readySession!.profileId);
+            if (rest.length)
+              scopeNote = `This run works in the terminal on ${readySession.label} only. Not covered by it: ${rest.map((t) => t.name).join(", ")}. Say so in your report.`;
+          } else {
+            if (ready.length !== 1)
+              throw new Error(
+                ready.length === 0
+                  ? "This runbook names no target and no terminal is open and ready. Open the terminal it should run in."
+                  : "This runbook names no target and several terminals are open. Give it a target, so that it is clear where it runs.",
+              );
+            readySession = ready[0];
+          }
+          const task = await this.start({
+            prompt: scopeNote ? `${promptText}\n\n${scopeNote}` : promptText,
+            mode: "assisted",
+            sessionId: readySession?.id,
+            maxCommands: Math.max(10, Math.min(100, rb.steps.length * 3)),
+            maxMinutes: 30,
+          });
+          reply = { started: { taskId: task.id } };
+        }
+        break;
+      }
+      case "profile-save": {
+        const { hasApiKey: _hasApiKey, keyStorage: _keyStorage, ...profileInput } = request.profile;
+        const id = profileInput.id?.trim() || crypto.randomUUID();
+        const profilePayload: Omit<ProviderProfile, "hasApiKey" | "keyStorage"> & { apiKey?: string | null } = {
+          ...profileInput,
+          id,
+          name: clip(requiredText(profileInput.name), 120),
+          provider: profileInput.provider,
+          model: requiredText(profileInput.model),
+          updatedAt: Date.now(),
+          ...(request.apiKey !== undefined ? { apiKey: request.apiKey } : {}),
+        };
+        await this.config.upsertProfile(profilePayload);
+        if (request.activeRole) {
+          await this.config.setActiveProfileForRole(request.activeRole, id);
+        }
+        break;
+      }
+      case "profile-delete": {
+        await this.config.deleteProfile(requiredText(request.id));
+        break;
+      }
+      case "mcp-tool-policy": {
+        const policy: McpToolPolicy = request.policy;
+        if (!["allow", "ask", "deny"].includes(policy)) {
+          throw new Error("Invalid MCP tool policy");
+        }
+        const serverId = requiredText(request.serverId);
+        const toolName = requiredText(request.toolName);
+        const existing = this.getMcpServersList().find((s) => s.id === serverId);
+        if (!existing) throw new Error("MCP server not found");
+        const updated: McpServerConfig = {
+          ...existing,
+          toolPolicies: { ...(existing.toolPolicies ?? {}), [toolName]: policy },
+          updatedAt: Date.now(),
+        };
+        this.store.data.mcpServers = [
+          ...(this.store.data.mcpServers ?? []).filter((s) => s.id !== existing.id),
+          updated,
+        ];
+        if (isDemoMode()) saveDemoMcpServer(updated);
+        this.mcp.invalidate(existing.id);
+        break;
+      }
+      case "workforce-pause": {
+        const paused = Boolean(request.paused);
+        const extra = this.storeDataExtra();
+        const changedState = Boolean(extra.workforcePaused) !== paused;
+        extra.workforcePaused = paused;
+        if (changedState && !isDemoMode()) {
+          void this.audit()
+            .append({
+              kind: "setting",
+              actor: await this.resolveActorName(),
+              target: "workforce",
+              what: `Workforce autopilot ${paused ? "paused" : "resumed"}${request.reason?.trim() ? `: ${clip(request.reason.trim(), 200)}` : ""}`,
+              outcome: "completed",
+            })
+            .catch((e) => log.warn("Could not write to the audit log", safeError(e)));
+        }
+        break;
+      }
       case "quit":
         app.quit();
         break;
@@ -4345,7 +5134,7 @@ export class HubService {
     /** The ticket the run works, known before it starts: what it is offered depends on it. */
     ticketId?: string,
   ): Promise<AgentTask> {
-    if (!["advice", "assisted", "autonomous"].includes(input.mode))
+    if (!["advice", "plan", "assisted", "autonomous"].includes(input.mode))
       throw new Error("Invalid autonomy mode");
     const terminal = input.sessionId
       ? this.terminals.get(input.sessionId)
@@ -4519,6 +5308,14 @@ export class HubService {
     if (!config.enabled)
       throw new Error("Enable AI and configure a model in Hub settings first");
     // An agent that is an external coding agent runs there, not on the configured model.
+    const safetyCtx = this.resolveSafetyContext(task, task.target?.label);
+    if (safetyCtx.clusterPolicy?.maxMode) {
+      task.mode = lowerMode(task.mode, safetyCtx.clusterPolicy.maxMode);
+    }
+    const persistedRules = this.storeDataExtra().rules;
+    if (persistedRules?.length) {
+      (task as { rules?: WorkspaceRule[] }).rules = [...persistedRules];
+    }
     const viaRunner = !isBackgroundRun(task) && this.getAgentsList().some((a) => a.id === task.agentId && a.runnerId);
     if (!viaRunner) await this.assertModelEndpointReach(config.baseUrl);
     const external = isBackgroundRun(task)
@@ -4671,14 +5468,31 @@ export class HubService {
   }
 
   private event(task: AgentTask, event: RunEvent): void {
+    const now = Date.now();
+    const mapUsage = (u: Record<string, number>, prevCost?: number) => ({
+      inputTokens: u.input_tokens ?? 0,
+      outputTokens: u.output_tokens ?? 0,
+      ...(u.cache_read_input_tokens !== undefined ? { cacheReadTokens: u.cache_read_input_tokens } : {}),
+      ...(u.cache_creation_input_tokens !== undefined ? { cacheCreationTokens: u.cache_creation_input_tokens } : {}),
+      ...(u.cost_usd !== undefined || prevCost !== undefined
+        ? { costUsd: (prevCost ?? 0) + (u.cost_usd ?? 0) }
+        : {}),
+    });
     if (!active(task)) {
       // A run that was already stopped still says what it spent when it ends: that counts too.
       if (/^run\./.test(event.type)) task.runUsage = undefined;
       if (/^run\./.test(event.type) && event.usage && !task.usageCounted) {
+        const mapped = mapUsage(event.usage, task.usage?.costUsd);
         task.usage = {
-          inputTokens: (task.usage?.inputTokens ?? 0) + (event.usage.input_tokens ?? 0),
-          outputTokens: (task.usage?.outputTokens ?? 0) + (event.usage.output_tokens ?? 0),
-          costUsd: task.usage?.costUsd,
+          inputTokens: (task.usage?.inputTokens ?? 0) + mapped.inputTokens,
+          outputTokens: (task.usage?.outputTokens ?? 0) + mapped.outputTokens,
+          ...(mapped.cacheReadTokens !== undefined
+            ? { cacheReadTokens: (task.usage?.cacheReadTokens ?? 0) + mapped.cacheReadTokens }
+            : {}),
+          ...(mapped.cacheCreationTokens !== undefined
+            ? { cacheCreationTokens: (task.usage?.cacheCreationTokens ?? 0) + mapped.cacheCreationTokens }
+            : {}),
+          costUsd: mapped.costUsd,
         };
         this.countAgentUsage(task);
         this.changed();
@@ -4692,21 +5506,95 @@ export class HubService {
           id: crypto.randomUUID(),
           role: "assistant",
           text: "",
-          at: Date.now(),
+          at: now,
         };
         task.messages.push(message);
       }
       message.text = boundedContext(message.text + event.delta, 128_000);
+      this.host.delta?.({
+        taskId: task.id,
+        type: "message.delta",
+        at: now,
+        delta: event.delta,
+      });
     }
     if (event.type === "todos.updated" && event.todos) task.todos = event.todos;
-    if (event.type === "usage.updated" && event.usage)
-      task.runUsage = { inputTokens: event.usage.input_tokens ?? 0, outputTokens: event.usage.output_tokens ?? 0 };
+    if (event.type === "usage.updated" && event.usage) {
+      const mapped = mapUsage(event.usage);
+      task.runUsage = mapped;
+      if (event.usage.context_tokens) task.contextTokens = event.usage.context_tokens;
+      this.host.delta?.({
+        taskId: task.id,
+        type: "usage.updated",
+        at: now,
+        usage: {
+          ...mapped,
+          ...(event.usage.context_tokens ? { contextTokens: event.usage.context_tokens } : {}),
+        },
+      });
+    }
     if (event.type === "hypotheses.updated" && event.hypotheses) task.hypotheses = event.hypotheses;
     if (event.type === "tool.result" && event.tool) {
-      task.toolLog = [
-        ...(task.toolLog ?? []),
-        { ...event.tool, at: Date.now() },
-      ].slice(-60);
+      const entry = { ...event.tool, at: now };
+      task.toolLog = [...(task.toolLog ?? []), entry].slice(-60);
+      this.host.delta?.({
+        taskId: task.id,
+        type: "tool.result",
+        at: now,
+        tool: entry,
+      });
+    }
+    if (event.type === "run.retrying") {
+      const extraEv = event as RunEvent & {
+        attempt?: number;
+        maxAttempts?: number;
+        delayMs?: number;
+        endpoint?: string;
+        status?: number;
+      };
+      this.host.delta?.({
+        taskId: task.id,
+        type: "run.retrying",
+        at: now,
+        retry: {
+          text: event.text,
+          attempt: extraEv.attempt,
+          maxAttempts: extraEv.maxAttempts,
+          delayMs: extraEv.delayMs,
+          endpoint: extraEv.endpoint,
+          status: extraEv.status,
+        },
+      });
+    }
+    if (event.type === "run.degraded") {
+      const extraEv = event as RunEvent & {
+        fromProvider?: string;
+        fromModel?: string;
+        toProvider?: string;
+        toModel?: string;
+      };
+      if (extraEv.toModel) task.model = extraEv.toModel;
+      if (event.text) {
+        task.messages.push({
+          id: crypto.randomUUID(),
+          role: "system",
+          text: boundedContext(event.text, 600),
+          at: now,
+        });
+      }
+      this.host.delta?.({
+        taskId: task.id,
+        type: "run.degraded",
+        at: now,
+        degraded: {
+          text: event.text,
+          error: event.error,
+          fromProvider: extraEv.fromProvider,
+          fromModel: extraEv.fromModel,
+          toProvider: extraEv.toProvider,
+          toModel: extraEv.toModel,
+        },
+      });
     }
     if (
       event.type === "message.interim" &&
@@ -4717,23 +5605,26 @@ export class HubService {
         id: crypto.randomUUID(),
         role: "assistant",
         text: boundedContext(event.text),
-        at: Date.now(),
+        at: now,
       });
     if (/^run\.(completed|failed|cancelled|interrupted)$/.test(event.type)) {
       task.status = event.type.slice(4) as AgentTask["status"];
       task.runUsage = undefined;
       if (event.usage?.context_tokens) task.contextTokens = event.usage.context_tokens;
-      if (event.usage)
+      if (event.usage) {
+        const mapped = mapUsage(event.usage, task.usage?.costUsd);
         task.usage = {
-          inputTokens:
-            (task.usage?.inputTokens ?? 0) + (event.usage.input_tokens ?? 0),
-          outputTokens:
-            (task.usage?.outputTokens ?? 0) + (event.usage.output_tokens ?? 0),
-          costUsd:
-            event.usage.cost_usd === undefined
-              ? undefined
-              : (task.usage?.costUsd ?? 0) + event.usage.cost_usd,
+          inputTokens: (task.usage?.inputTokens ?? 0) + mapped.inputTokens,
+          outputTokens: (task.usage?.outputTokens ?? 0) + mapped.outputTokens,
+          ...(mapped.cacheReadTokens !== undefined
+            ? { cacheReadTokens: (task.usage?.cacheReadTokens ?? 0) + mapped.cacheReadTokens }
+            : {}),
+          ...(mapped.cacheCreationTokens !== undefined
+            ? { cacheCreationTokens: (task.usage?.cacheCreationTokens ?? 0) + mapped.cacheCreationTokens }
+            : {}),
+          costUsd: mapped.costUsd,
         };
+      }
       if (event.output) {
         const last = task.messages.at(-1);
         if (last?.role === "assistant")
@@ -4969,21 +5860,44 @@ export class HubService {
   }
 
   private auditLog?: AuditLog;
+  private auditShipper?: AuditShipper;
+  private auditShipperUnsub?: () => void;
   private lastAnchorAt = 0;
   private lastRecordingPruneAt = 0;
   private recorder?: SessionRecorder;
 
   /** This installation's audit log, kept beside the hub's other data, anchored in the team bucket. */
   audit(): AuditLog {
-    this.auditLog ??= new AuditLog(path.join(this.directory, "audit"), this.clientId(), () =>
-      this.s3Workspace.canUseBucket() && !isDemoMode() ? this.s3Workspace.objects : undefined,
-    );
+    if (!this.auditLog) {
+      this.auditLog = new AuditLog(path.join(this.directory, "audit"), this.clientId(), () =>
+        this.s3Workspace.canUseBucket() && !isDemoMode() ? this.s3Workspace.objects : undefined,
+      );
+      if (this.host.auditShipper) {
+        this.configureAuditShipper(this.host.auditShipper);
+      }
+    }
     return this.auditLog;
+  }
+
+  /** Attaches (or replaces) the out-of-band AuditShipper subscriber on the audit log. */
+  configureAuditShipper(options?: AuditShipperOptions): void {
+    this.auditShipperUnsub?.();
+    this.auditShipperUnsub = undefined;
+    this.auditShipper = undefined;
+    if (!options) return;
+    const shipper = new AuditShipper(options);
+    this.auditShipper = shipper;
+    this.auditShipperUnsub = this.audit().subscribe((entry) => shipper.emit(entry));
   }
 
   /** Where the terminals an agent owned are recorded. */
   recordings(): SessionRecorder {
-    this.recorder ??= new SessionRecorder(path.join(this.directory, "recordings"));
+    if (!this.recorder) {
+      this.recorder = new SessionRecorder(path.join(this.directory, "recordings"));
+      this.recorder.setPolicy({
+        allowHumanOptIn: this.store.data.preferences.recordSessions !== false,
+      });
+    }
     return this.recorder;
   }
 
@@ -5188,10 +6102,52 @@ export class HubService {
         `${agent.name} runs on the external agent "${agent.runnerId}", which is not set up on this computer. Add it under Agents & MCP.`,
       );
     const ticket = live(this.store.data.workTickets).find((t) => t.id === task.ticketId);
+    // Bridge local MCP server into ACP external agent when enabled, using an ephemeral scoped token.
+    let acpLocalMcp:
+      | {
+          server: LocalMcpServer;
+          token: string;
+          scopes: ("read" | "tickets" | "run")[];
+          tools?: string[];
+        }
+      | undefined;
+    let acpTokenId: string | undefined;
+    if (this.store.data.preferences.localMcp?.enabled && !this.localMcp?.address()) {
+      await this.applyLocalMcp().catch(() => undefined);
+    }
+    if (this.localMcp?.address()) {
+      await this.mcpTokens().initialize().catch(() => undefined);
+      const scopes: ("read" | "tickets" | "run")[] =
+        task.mode === "advice" ? ["read"] : ["read", "run"];
+      const tools =
+        agent.allowedTools?.length && !agent.allowedTools.includes("all")
+          ? [...agent.allowedTools]
+          : undefined;
+      const made = await this.mcpTokens()
+        .create({
+          userId: "local",
+          name: `acp-${task.id.slice(0, 8)}`,
+          createdBy: agent.name,
+          scopes,
+          expiresInDays: 1,
+          ...(tools ? { tools } : {}),
+        })
+        .catch(() => undefined);
+      if (made) {
+        acpTokenId = made.view.id;
+        acpLocalMcp = {
+          server: this.localMcp,
+          token: made.token,
+          scopes,
+          ...(tools ? { tools } : {}),
+        };
+      }
+    }
     // The change each of the agent's tool calls became, by the agent's id for the call: how it ended is written onto it.
     const changeOfCall = new Map<string, AgentChange>();
     let actions = 0;
     const runtime = new AcpRuntime(runner, {
+      ...(acpLocalMcp ? { localMcp: acpLocalMcp } : {}),
       preface: [
         `You are working as "${agent.name}" (${agent.role}) for a team that uses sshS3.`,
         task.mode === "advice"
@@ -5236,9 +6192,25 @@ export class HubService {
           at: Date.now(),
         };
         if (question.toolCallId) changeOfCall.set(question.toolCallId, change);
-        if (task.mode === "advice") {
+        const safetyCtx = this.resolveSafetyContext(task, change.target);
+        const effectiveMode = safetyCtx.clusterPolicy?.maxMode
+          ? lowerMode(task.mode, safetyCtx.clusterPolicy.maxMode)
+          : task.mode;
+        if (effectiveMode === "advice") {
           change.status = "denied";
           change.decidedHow = "policy";
+          task.changes.push(change);
+          this.changed();
+          return false;
+        }
+        if (
+          safetyCtx.clusterPolicy?.frozenUntil &&
+          safetyCtx.clusterPolicy.frozenUntil > Date.now() &&
+          analysis.riskLevel !== "safe"
+        ) {
+          change.status = "denied";
+          change.decidedHow = "policy";
+          change.output = "Cluster is in an active change freeze.";
           task.changes.push(change);
           this.changed();
           return false;
@@ -5255,13 +6227,21 @@ export class HubService {
           return false;
         }
         task.commandsUsed = actions;
+        let requiredApprovals = Math.max(1, safetyCtx.clusterPolicy?.requiredApprovals ?? 1);
+        const isProd = (safetyCtx.targetTags ?? []).some(isProdTag);
+        if (safetyCtx.policy.requirePeerApprovalOnProd && isProd && analysis.riskLevel !== "safe") {
+          requiredApprovals = Math.max(requiredApprovals, 2);
+        }
+        if (requiredApprovals > 1) change.requiredApprovals = requiredApprovals;
         const needsApproval =
+          requiredApprovals > 1 ||
           // Without a command to read, a change to files or a deletion is always put to a person.
           (!question.command && ["edit", "delete", "execute", "move"].includes(question.kind ?? "execute")) ||
           shouldRequireCommandApproval({
             analysis,
-            mode: task.mode,
-            policy: this.safetyPolicy(),
+            mode: effectiveMode,
+            targetTags: safetyCtx.targetTags,
+            policy: safetyCtx.policy,
           });
         if (!needsApproval) {
           change.status = "approved";
@@ -5297,6 +6277,7 @@ export class HubService {
           task.error = "The external agent ended without a final result.";
         }
         await runtime.stop();
+        if (acpTokenId) await this.mcpTokens().revoke("local", acpTokenId).catch(() => undefined);
         if (this.runtimes.get(task.id) === runtime) this.runtimes.delete(task.id);
         if (task.ticketId) this.settleTickets();
         this.settled(task.id);
@@ -6203,6 +7184,13 @@ export class HubService {
         problemsSince: Object.fromEntries(present.map((p) => [p.key, prev?.problemsSince?.[p.key] ?? now])),
       };
       await this.factsStore.put(record);
+      const flaggedMemories = flagStaleMemories(this.store.data.memories, record, {
+        prevFacts: prev?.facts,
+        cluster: server.cluster,
+      });
+      if (flaggedMemories.some((m, i) => m.staleReason !== this.store.data.memories[i]?.staleReason)) {
+        this.store.data.memories = flaggedMemories;
+      }
       if (!facts.unsupported) this.proposeEdgesFrom(server, facts, now);
       // A personal server's reading stays on this computer: only shared servers are read for the team.
       if (sync && server.shared) {
@@ -6769,7 +7757,71 @@ export class HubService {
   private markSharedRemoved(collection: "agents" | "kb" | "edges" | "pages" | "evals", id: string): void {
     const all = (this.store.data.sharedRemoved ??= {});
     all[collection] = { ...(all[collection] ?? {}), [id]: Date.now() };
+    this.scheduleWorkSync();
+  }
+
+  /**
+   * Marks the board and shared setup dirty and schedules a debounced sync to the team bucket
+   * (400ms, matching S3WorkspaceSyncService's push cadence) so creates, edits and removals
+   * reach teammates promptly without waiting for the next periodic poll.
+   */
+  private scheduleWorkSync(delayMs = 400): void {
     this.lastWorkSync = 0;
+    if (this.disposed || !this.work()) return;
+    if (this.workSyncPushTimer) clearTimeout(this.workSyncPushTimer);
+    this.workSyncPushTimer = setTimeout(() => {
+      this.workSyncPushTimer = undefined;
+      if (!this.disposed) {
+        void this.workTick().catch((e) => log.warn("Scheduled work sync failed", safeError(e)));
+      }
+    }, delayMs);
+    this.workSyncPushTimer.unref?.();
+  }
+
+  /** Syncs the board and shared setup (agents, KB, links) with the bucket immediately. */
+  private async syncWorkNow(): Promise<void> {
+    if (!this.work()) return;
+    await this.workSyncInFlight?.catch(() => undefined);
+    this.lastWorkSync = 0;
+    await this.workTick();
+  }
+
+  /** Applies merged agent items (including removals) to the local store. */
+  private applyMergedAgents(items: Array<MissionAgent & Mergeable>, updateAgents: boolean): void {
+    const removed = (this.store.data.sharedRemoved ??= {});
+    const a = splitRemovals(items);
+    removed.agents = a.removed;
+    this.store.data.sharedRemovedBy = { ...this.store.data.sharedRemovedBy, agents: a.removedBy };
+    for (const goneId of Object.keys(a.removed)) this.markBuiltinDismissed(goneId, getBuiltinAgents());
+    if (!updateAgents) return;
+    const ownAgents = new Map((this.store.data.agents ?? []).map((x) => [x.id, x]));
+    this.store.data.agents = (a.alive as MissionAgent[]).map((x) => {
+      const local = ownAgents.get(x.id);
+      return local && local.updatedAt === x.updatedAt ? local : incomingAgent(x, local);
+    });
+  }
+
+  /**
+   * Takes the bucket's copy of one agent into this installation now, before an edit or pause:
+   * a teammate's removal is seen at once instead of saving a stale edit back locally.
+   */
+  private async pullAgent(id: string): Promise<void> {
+    if (isDemoMode()) return;
+    const sync = this.work();
+    if (!sync) return;
+    const remote = await sync.readItem<MissionAgent & Mergeable>("agents", id).catch(() => undefined);
+    if (!remote) return;
+    const removed = (this.store.data.sharedRemoved ??= {});
+    const merged = mergeItems(
+      withRemovals(maskStrings(this.store.data.agents ?? []), removed.agents, this.store.data.sharedRemovedBy?.agents),
+      [remote],
+      (l, r) => mergeCopies(l, r, AGENT_FIELD_GROUPS),
+    );
+    if (!merged.changed) return;
+    this.applyMergedAgents(merged.items, true);
+    const mine = merged.newerLocally.find((x) => x.id === id);
+    if (mine) void sync.put("agents", mine).catch((e) => (this.workSyncError = safeError(e)));
+    this.changed();
   }
 
   /**
@@ -6813,18 +7865,8 @@ export class HubService {
       // version an edit started from stands (mergeCopies).
       (l, r) => mergeCopies(l, r, AGENT_FIELD_GROUPS),
     );
-    const a = splitRemovals(agents.items);
-    removed.agents = a.removed;
-    this.store.data.sharedRemovedBy = { ...this.store.data.sharedRemovedBy, agents: a.removedBy };
-    if (agents.changed) {
-      // The masked copy went to the bucket; an agent that did not change there stays as it is here.
-      const ownAgents = new Map((this.store.data.agents ?? []).map((x) => [x.id, x]));
-      this.store.data.agents = (a.alive as MissionAgent[]).map((x) => {
-        const local = ownAgents.get(x.id);
-        return local && local.updatedAt === x.updatedAt ? local : incomingAgent(x, local);
-      });
-      changed = true;
-    }
+    this.applyMergedAgents(agents.items, agents.changed);
+    if (agents.changed) changed = true;
 
     const docs = this.store.data.kbDocuments ?? [];
     const mine = new Map(docs.map((d) => [d.id, d]));
@@ -7312,67 +8354,79 @@ export class HubService {
     return now - this.claimSeen.get(ticketId)!.at < TICKET_CLAIM_TTL_MS;
   }
 
-  private async workTick(now = Date.now()): Promise<void> {
+  private async runWorkSync(sync: WorkSync, client: string, now: number): Promise<void> {
+    try {
+      // Liveness goes into the claim file only. Raising the ticket's own updatedAt would make this
+      // copy win every merge, and wipe out what teammates wrote on it meanwhile.
+      for (const t of live(this.store.data.workTickets))
+        if (t.status === "in_progress" && t.claim?.client === client) {
+          const still = await sync.refresh(t.id, client, now);
+          const run = this.store.data.tasks.find((x) => x.id === t.taskId);
+          if (!still && run && active(run)) void this.stop(run, "Another installation took this ticket over; this run stops so that only one works on it.");
+        }
+      const goals = await sync.reconcile("goals", this.store.data.workGoals ?? []);
+      // A ticket this installation is running stays its own to settle: a teammate's edit on a view
+      // that did not show the run yet must not take the ticket from under it.
+      const runningHere = (t: WorkTicket): boolean =>
+        !t.deleted &&
+        t.status === "in_progress" &&
+        t.claim?.client === client &&
+        (this.ticketStarts.has(t.id) || this.store.data.tasks.some((x) => x.id === t.taskId));
+      const keepRun = (l: WorkTicket, r: WorkTicket): WorkTicket => mergeTicketCopies(l, r, runningHere);
+      const tickets = await sync.reconcile("tickets", this.store.data.workTickets ?? [], keepRun);
+      // Merged into the board as it is now, not over it: what changed here while the bucket was read stays.
+      this.store.data.workGoals = mergeItems(this.store.data.workGoals ?? [], goals.items).items;
+      this.store.data.workTickets = mergeItems(this.store.data.workTickets ?? [], tickets.items, keepRun).items;
+      // Another installation's run is judged alive by its claim file, and by this machine's own clock:
+      // a claim whose seenAt has not moved for the claim's lifetime, as seen from here, has lapsed.
+      for (const t of live(this.store.data.workTickets))
+        if (t.status === "in_progress" && t.claim && t.claim.client !== client) {
+          const c = await sync.readClaim(t.id).catch(() => undefined);
+          if (c) this.observeClaim(t.id, c.seenAt, now);
+        }
+      const shared = await this.syncSharedSetup(sync);
+      // A teammate's reading of a shared server, also for somebody who has not switched readings on.
+      const facts = await this.pullSharedFacts().catch((e) => {
+        log.warn("Reading shared server facts failed", safeError(e));
+        return false;
+      });
+      const mine = JSON.stringify(this.store.data.agentUsage ?? {});
+      if (mine !== this.uploadedUsage && mine !== "{}") {
+        await sync.putUsage(client, this.store.data.agentUsage ?? {});
+        this.uploadedUsage = mine;
+      }
+      this.othersUsage = await sync.readOtherUsage(client);
+      const pageUse = JSON.stringify(this.myPageUse());
+      if (pageUse !== this.uploadedPageUse && pageUse !== "{}" && !isDemoMode()) {
+        await sync.putPageUse(client, this.myPageUse());
+        this.uploadedPageUse = pageUse;
+      }
+      this.othersPageUse = await sync.readOtherPageUse<Record<string, KbPageUse>>(client);
+      this.workSyncAt = Date.now();
+      this.workSyncError = undefined;
+      if (goals.changed || tickets.changed || shared || facts) this.changed();
+    } catch (e) {
+      this.workSyncError = safeError(e);
+    }
+  }
+
+  private async workTick(now = Date.now(), aiEnabled?: boolean): Promise<void> {
     this.settleTickets();
     const client = this.clientId();
     const sync = this.work();
-    if (sync && !this.workSyncing && now - this.lastWorkSync >= 40_000) {
+    if (sync && !this.workSyncing && now - this.lastWorkSync >= WORK_SYNC_INTERVAL_MS) {
       this.workSyncing = true;
       this.lastWorkSync = now;
+      const run = this.runWorkSync(sync, client, now);
+      this.workSyncInFlight = run;
       try {
-        // Liveness goes into the claim file only. Raising the ticket's own updatedAt would make this
-        // copy win every merge, and wipe out what teammates wrote on it meanwhile.
-        for (const t of live(this.store.data.workTickets))
-          if (t.status === "in_progress" && t.claim?.client === client) {
-            const still = await sync.refresh(t.id, client, now);
-            const run = this.store.data.tasks.find((x) => x.id === t.taskId);
-            if (!still && run && active(run)) void this.stop(run, "Another installation took this ticket over; this run stops so that only one works on it.");
-          }
-        const goals = await sync.reconcile("goals", this.store.data.workGoals ?? []);
-        // A ticket this installation is running stays its own to settle: a teammate's edit on a view
-        // that did not show the run yet must not take the ticket from under it.
-        const runningHere = (t: WorkTicket): boolean =>
-          !t.deleted &&
-          t.status === "in_progress" &&
-          t.claim?.client === client &&
-          (this.ticketStarts.has(t.id) || this.store.data.tasks.some((x) => x.id === t.taskId));
-        const keepRun = (l: WorkTicket, r: WorkTicket): WorkTicket => mergeTicketCopies(l, r, runningHere);
-        const tickets = await sync.reconcile("tickets", this.store.data.workTickets ?? [], keepRun);
-        // Merged into the board as it is now, not over it: what changed here while the bucket was read stays.
-        this.store.data.workGoals = mergeItems(this.store.data.workGoals ?? [], goals.items).items;
-        this.store.data.workTickets = mergeItems(this.store.data.workTickets ?? [], tickets.items, keepRun).items;
-        // Another installation's run is judged alive by its claim file, and by this machine's own clock:
-        // a claim whose seenAt has not moved for the claim's lifetime, as seen from here, has lapsed.
-        for (const t of live(this.store.data.workTickets))
-          if (t.status === "in_progress" && t.claim && t.claim.client !== client) {
-            const c = await sync.readClaim(t.id).catch(() => undefined);
-            if (c) this.observeClaim(t.id, c.seenAt, now);
-          }
-        const shared = await this.syncSharedSetup(sync);
-        // A teammate's reading of a shared server, also for somebody who has not switched readings on.
-        const facts = await this.pullSharedFacts().catch((e) => {
-          log.warn("Reading shared server facts failed", safeError(e));
-          return false;
-        });
-        const mine = JSON.stringify(this.store.data.agentUsage ?? {});
-        if (mine !== this.uploadedUsage && mine !== "{}") {
-          await sync.putUsage(client, this.store.data.agentUsage ?? {});
-          this.uploadedUsage = mine;
-        }
-        this.othersUsage = await sync.readOtherUsage(client);
-        const pageUse = JSON.stringify(this.myPageUse());
-        if (pageUse !== this.uploadedPageUse && pageUse !== "{}" && !isDemoMode()) {
-          await sync.putPageUse(client, this.myPageUse());
-          this.uploadedPageUse = pageUse;
-        }
-        this.othersPageUse = await sync.readOtherPageUse<Record<string, KbPageUse>>(client);
-        this.workSyncAt = Date.now();
-        this.workSyncError = undefined;
-        if (goals.changed || tickets.changed || shared || facts) this.changed();
-      } catch (e) {
-        this.workSyncError = safeError(e);
+        await run;
       } finally {
+        if (this.workSyncInFlight === run) this.workSyncInFlight = undefined;
         this.workSyncing = false;
+        if (!this.disposed && this.lastWorkSync === 0) {
+          this.scheduleWorkSync(50);
+        }
       }
     }
     // A run that stopped reporting (closed laptop, crash) frees its ticket.
@@ -7388,19 +8442,35 @@ export class HubService {
       });
     }
     if (this.store.data.preferences.workforceAutopilot !== true) return;
+    if (this.storeDataExtra().workforcePaused) return;
+    if (!(aiEnabled ?? (await this.config.getView().catch(() => ({ enabled: false }))).enabled)) return;
     const tickets = live(this.store.data.workTickets);
-    // One at a time, and a start that is still opening its terminal counts as one.
-    if (this.ticketStarts.size > 0 || tickets.some((t) => t.status === "in_progress" && t.claim?.client === client)) return;
+    const MAX_CONCURRENT_HEARTBEAT = 3;
+    const targetKey = (t: WorkTicket): string => t.target?.trim().toLowerCase() || "__untargeted__";
+    const inFlightTickets = tickets.filter((t) => t.status === "in_progress" && t.claim?.client === client);
+    const activeCount = this.ticketStarts.size + inFlightTickets.length;
+    if (activeCount >= MAX_CONCURRENT_HEARTBEAT) return;
+    const busyTargets = new Set<string>(inFlightTickets.map(targetKey));
+    for (const startId of this.ticketStarts) {
+      const startingTicket = tickets.find((t) => t.id === startId);
+      if (startingTicket) busyTargets.add(targetKey(startingTicket));
+    }
+    const availableTickets = tickets.filter(
+      (t) =>
+        t.status === "todo" &&
+        !busyTargets.has(targetKey(t)) &&
+        !this.store.data.tasks.some((task) => task.id === t.taskId && active(task)),
+    );
     const next = nextForHeartbeat({
-      tickets,
+      tickets: availableTickets,
       agents: this.getAgentsList(),
       usage: this.usageTotal(),
       runners: (this.store.data.externalRunners ?? []).map((r) => r.id),
       client,
       now,
+      infraEdges: this.getInfraEdgesList(),
     });
-    // A ticket whose conversation a person is going on with is theirs for now, not the heartbeat's.
-    if (next && !this.store.data.tasks.some((t) => t.id === next.taskId && active(t)))
+    if (next)
       await this.startTicket(next.id).catch((e) =>
         log.warn("Heartbeat could not start a ticket", safeError(e)),
       );
@@ -7464,7 +8534,7 @@ export class HubService {
         updatedAt: now + i,
       });
     });
-    if (agents.length) this.lastWorkSync = 0;
+    if (agents.length) this.scheduleWorkSync();
     return [...there.values()].map((a) => a.name);
   }
 
@@ -7483,15 +8553,16 @@ export class HubService {
     if (this.ticking || this.disposed) return;
     this.ticking = true;
     try {
-      if (!(await this.config.getView()).enabled) return;
+      const aiEnabled = (await this.config.getView()).enabled;
       const now = Date.now();
+      void this.workTick(now, aiEnabled).catch((e) => log.warn("Board tick failed", safeError(e)));
+      if (!aiEnabled) return;
       void (async () => {
         await this.recoverUnreadSessions(now);
         await this.maybeLearnFromOwnActivity(now);
         await this.queueTeamActivity(now);
         await this.readLearningQueue(now);
       })().catch((e) => log.warn("Learning failed", safeError(e)));
-      void this.workTick(now).catch((e) => log.warn("Board tick failed", safeError(e)));
       if (now - this.lastAnchorAt > 10 * 60_000) {
         this.lastAnchorAt = now;
         void this.audit()
@@ -8762,6 +9833,7 @@ export class HubService {
       kbDocuments: this.getKbDocumentsList(),
       kbPages: this.pagesWithUse(),
       infraEdges: this.getInfraEdgesList(),
+      rules: this.storeDataExtra().rules ?? [],
       recentServerChanges: this.recentServerChanges(48 * 3_600_000),
       serverFactsNow: this.serverFactsNow(),
       workforceRuns: this.getWorkforceRunsList(),
@@ -8911,6 +9983,7 @@ export class HubService {
     this.disposed = true;
     clearInterval(this.tickTimer);
     clearTimeout(this.saveTimer);
+    clearTimeout(this.workSyncPushTimer);
     powerMonitor?.removeListener("suspend", this.suspend);
     powerMonitor?.removeListener("resume", this.resume);
     await Promise.all(
@@ -8920,6 +9993,9 @@ export class HubService {
     );
     await this.localMcp?.stop();
     await this.recorder?.stopAll().catch(() => undefined);
+    this.auditShipperUnsub?.();
+    this.auditShipperUnsub = undefined;
+    await this.auditShipper?.flush().catch(() => undefined);
     await this.s3Workspace.dispose();
     await this.broker.dispose();
     this.terminals.dispose();

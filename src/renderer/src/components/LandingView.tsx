@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
+  BookOpen,
   Bot,
   Check,
   Clock,
@@ -10,11 +11,13 @@ import {
   Folder,
   Key,
   Layers,
+  Lock,
   Plus,
   RefreshCw,
   Search,
   Server,
   Shield,
+  ShieldCheck,
   Sparkles,
   Tag,
   Terminal,
@@ -31,6 +34,7 @@ import { Highlighted } from './ui/Highlighted';
 import { searchLandingProfiles, type LandingMatch } from '../lib/landingSearch';
 import { formatRelativeTime as formatRelativeIsoTime } from '../lib/relativeTime';
 import type { SSHConnectionConfig } from '@shared/types/ssh';
+import type { SshCaStatus } from '@shared/types/sshCa';
 import type { WorkspaceActivityEvent, WorkspaceServerSummary } from '@shared/types/aiHub';
 import type { TabType } from './TabBar';
 import {
@@ -40,6 +44,7 @@ import {
   type NavigationDirection,
 } from '../lib/spatialNavigation';
 import { hubRequest, useHub } from '../lib/aiHub';
+import { useSshCa } from '../lib/useSshCa';
 import { isWebBrowserMode } from '../lib/webClientBridge';
 import { MASKED } from './AiHub/dataDestination';
 
@@ -59,6 +64,20 @@ export interface LandingViewProps {
    * distinct from `onConnectRecentSSH`, which persists the profile's updated `lastUsedAt`. */
   onQuickConnectSSH: (config: SSHConnectionConfig) => void;
   shortcuts?: Record<string, string>;
+  /** Optional SSH CA certificate status override (defaults to `useSshCa()`). */
+  sshCaStatus?: SshCaStatus;
+  /** Optional callback to open Security/Settings when clicking the SSH CA pill. */
+  onOpenSettings?: () => void;
+}
+
+function formatCaValidRemaining(seconds?: number): string {
+  if (seconds === undefined || seconds <= 0) return '';
+  if (seconds < 60) return `${Math.round(seconds)}s left`;
+  const mins = Math.round(seconds / 60);
+  if (mins < 60) return `${mins}m left`;
+  const hours = Math.floor(mins / 60);
+  const rem = mins % 60;
+  return rem > 0 ? `${hours}h ${rem}m left` : `${hours}h left`;
 }
 
 const MAX_SEARCH_RESULTS = 8;
@@ -177,7 +196,11 @@ export const LandingView: React.FC<LandingViewProps> = ({
   onNavigateToTabBar,
   onQuickConnectSSH,
   shortcuts,
+  sshCaStatus: sshCaStatusProp,
+  onOpenSettings,
 }) => {
+  const sshCa = useSshCa();
+  const activeCaStatus = sshCaStatusProp ?? sshCa.status;
   const containerRef = useRef<HTMLDivElement>(null);
   const [quickConnect, setQuickConnect] = useState('');
   const quickConnectTarget = parseAdHocTarget(quickConnect);
@@ -938,6 +961,41 @@ export const LandingView: React.FC<LandingViewProps> = ({
 
   const showWorkspaceSection = true;
 
+  const renderSshCaPill = () => (
+    <button
+      type="button"
+      data-testid="landing-ssh-ca-pill"
+      onClick={() => {
+        if (onOpenSettings) {
+          onOpenSettings();
+        } else {
+          window.dispatchEvent(new CustomEvent('sshs3:open-settings', { detail: { category: 'security' } }));
+        }
+      }}
+      className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium transition-colors cursor-pointer ${
+        activeCaStatus?.active
+          ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20'
+          : 'border-border-subtle bg-app-card text-txt-muted hover:text-txt-primary hover:border-sky-500/40'
+      }`}
+      title={
+        activeCaStatus?.active
+          ? `SSH CA active (${activeCaStatus.username || 'signed'}${activeCaStatus.validSecondsRemaining ? `, ${formatCaValidRemaining(activeCaStatus.validSecondsRemaining)}` : ''})`
+          : 'Configure or sign in with short-lived SSH CA certificates'
+      }
+    >
+      <ShieldCheck className="h-3 w-3" />
+      <span>
+        {activeCaStatus?.active
+          ? `SSH CA active${activeCaStatus.username ? ` · ${activeCaStatus.username}` : ''}${
+              activeCaStatus.validSecondsRemaining
+                ? ` (${formatCaValidRemaining(activeCaStatus.validSecondsRemaining)})`
+                : ''
+            }`
+          : 'SSH CA inactive'}
+      </span>
+    </button>
+  );
+
   return (
     <div
       ref={containerRef}
@@ -973,7 +1031,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   : 'h-28 w-auto'
             }
           />
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap justify-center">
             <h1
               className={
                 recentSSH.length > 0 || showWorkspaceSection
@@ -987,6 +1045,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
             <span className="rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-sky-400">
               AI Workspace
             </span>
+            {renderSshCaPill()}
           </div>
           {recentSSH.length === 0 && !showWorkspaceSection && (
             <p className="text-xs text-txt-muted max-w-md">
@@ -1260,6 +1319,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   <h2 className="text-xs font-bold uppercase tracking-wider text-txt-primary">
                     Servers & clusters ({filteredServers.length})
                   </h2>
+                  {renderSshCaPill()}
                   {onlineNow.length > 0 && (
                     <span
                       data-testid="workspace-online-now"
@@ -3066,6 +3126,130 @@ export const LandingView: React.FC<LandingViewProps> = ({
               New Profile
             </button>
           </div>
+        )}
+
+        {/* Context-anchored starter workflow cards */}
+        {recentSSH.length === 0 && (
+          <section className="w-full space-y-3 text-left" data-testid="landing-starter-cards" aria-label="Starter workflows">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-txt-muted">
+                Start with a workflow
+              </span>
+              {activeCaStatus?.active && (
+                <span className="text-[11px] text-emerald-400">
+                  Signed in via SSH CA ({activeCaStatus.username || 'active'})
+                </span>
+              )}
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <button
+                type="button"
+                data-testid="starter-card-triage"
+                onClick={() =>
+                  window.dispatchEvent(
+                    new CustomEvent('sshs3:ai-open', {
+                      detail: {
+                        mode: 'panel',
+                        view: 'Work',
+                        prompt:
+                          'Run a read-only server triage check (uptime, failed systemd units, disk/inode usage, and recent kernel or OOM errors).',
+                      },
+                    })
+                  )
+                }
+                className="group flex items-start gap-3 rounded-xl border border-border-subtle bg-app-card p-3 hover:border-sky-500/40 hover:bg-app-surface-hover transition-all text-left cursor-pointer"
+              >
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-sky-500/15 text-sky-400">
+                  <Activity className="h-4 w-4" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-xs font-semibold text-txt-primary group-hover:text-sky-400 transition-colors">
+                    Quick Server Triage
+                  </div>
+                  <div className="text-[11px] text-txt-muted mt-0.5">
+                    Inspect CPU, memory, failed services, and disk saturation safely
+                  </div>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                data-testid="starter-card-k8s"
+                onClick={() =>
+                  window.dispatchEvent(
+                    new CustomEvent('sshs3:ai-open', {
+                      detail: {
+                        mode: 'panel',
+                        view: 'Work',
+                        prompt:
+                          'Inspect Kubernetes cluster health, unhealthy or CrashLoopBackOff pods, and recent error logs.',
+                      },
+                    })
+                  )
+                }
+                className="group flex items-start gap-3 rounded-xl border border-border-subtle bg-app-card p-3 hover:border-purple-500/40 hover:bg-app-surface-hover transition-all text-left cursor-pointer"
+              >
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-purple-500/15 text-purple-400">
+                  <Layers className="h-4 w-4" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-xs font-semibold text-txt-primary group-hover:text-purple-400 transition-colors">
+                    K8s & Log Investigation
+                  </div>
+                  <div className="text-[11px] text-txt-muted mt-0.5">
+                    Correlate pod restarts, journalctl errors, and cluster events
+                  </div>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                data-testid="starter-card-kb"
+                onClick={() =>
+                  window.dispatchEvent(
+                    new CustomEvent('sshs3:ai-open', {
+                      detail: {
+                        mode: 'hub',
+                        view: 'Knowledge Base',
+                      },
+                    })
+                  )
+                }
+                className="group flex items-start gap-3 rounded-xl border border-border-subtle bg-app-card p-3 hover:border-amber-500/40 hover:bg-app-surface-hover transition-all text-left cursor-pointer"
+              >
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-amber-500/15 text-amber-400">
+                  <BookOpen className="h-4 w-4" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-xs font-semibold text-txt-primary group-hover:text-amber-400 transition-colors">
+                    Import Runbook / KB
+                  </div>
+                  <div className="text-[11px] text-txt-muted mt-0.5">
+                    Turn markdown runbooks and SOPs into interactive checklists
+                  </div>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                data-testid="starter-card-privacy"
+                onClick={() => setQuickAiOpen((prev) => !prev)}
+                className="group flex items-start gap-3 rounded-xl border border-border-subtle bg-app-card p-3 hover:border-emerald-500/40 hover:bg-app-surface-hover transition-all text-left cursor-pointer"
+              >
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-emerald-500/15 text-emerald-400">
+                  <Lock className="h-4 w-4" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-xs font-semibold text-txt-primary group-hover:text-emerald-400 transition-colors">
+                    Privacy & AI Setup
+                  </div>
+                  <div className="text-[11px] text-txt-muted mt-0.5">
+                    Connect ChatGPT/Codex OAuth, OS-keyring API key, or local Ollama
+                  </div>
+                </div>
+              </button>
+            </div>
+          </section>
         )}
 
         {/* Keyboard hints footer */}

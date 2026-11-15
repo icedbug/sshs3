@@ -210,9 +210,10 @@ describe("a plan that says each change is asked about", () => {
     expect(approvalAsksEach({}, {})).toBeUndefined();
     expect(approvalAsksEach({}, { askEach: false })).toBeUndefined();
     expect(approvalAsksEach({}, { askEach: true })).toBe("person");
-    // A note is read by the agent only, and may well say "ask me before each change".
-    expect(approvalAsksEach({}, { note: "ask before each change" })).toBe("note");
+    // A note is read by the agent only and does not silently flip askEach.
+    expect(approvalAsksEach({}, { note: "ask before each change" })).toBeUndefined();
     expect(approvalAsksEach({}, { note: "after 18:00", askEach: false })).toBeUndefined();
+    expect(approvalAsksEach({}, { note: "after 18:00", askEach: true })).toBe("person");
     // What the plan promised, the person cannot approve away by unticking a box.
     expect(approvalAsksEach({ askEach: "plan" }, { askEach: false })).toBe("plan");
   });
@@ -390,19 +391,31 @@ describe("a plan through the hub", () => {
     const t = mainTask(hub);
 
     await hub.request({ action: "plan-decide", taskId: t.id, approved: true, note: "after 18:00 only" });
-    // With a note and no choice made, each change asks: only the agent reads the note.
-    expect(t.plan).toMatchObject({ status: "approved", askEach: "note", decisionNote: "after 18:00 only" });
+    // Typing a note does not silently flip askEach; without explicit askEach it stays unset.
+    expect(t.plan).toMatchObject({ status: "approved", decisionNote: "after 18:00 only" });
+    expect(t.plan!.askEach).toBeUndefined();
     expect(t.plan!.decidedAt).toBeTypeOf("number");
     expect(t.todos!.map((x) => x.id)).toEqual(["p1", "p2"]);
     await waitFor(() => seen.filter((s) => s.kind === "main").length >= 3);
     const told = seen.filter((s) => s.kind === "main")[2].lastUser;
     expect(told).toContain("The user approved your plan");
     expect(told).toContain("after 18:00 only");
-    expect(told).toContain("Every command that changes something is asked about before it runs");
+    expect(told).toContain("Commands exactly as the plan lists them run without asking the user again");
     expect(told).toContain("sudo systemctl reload nginx");
     await waitFor(() => settled(hub));
     // Decided once: there is no plan left to decide.
     await expect(hub.request({ action: "plan-decide", taskId: t.id, approved: true })).rejects.toThrow(/no plan waiting/);
+
+    // Explicit askEach: true sets askEach: "person" and tells the agent to ask before each change.
+    t.plan = plan();
+    const beforeExplicit = seen.filter((s) => s.kind === "main").length;
+    await hub.request({ action: "plan-decide", taskId: t.id, approved: true, note: "after 18:00 only", askEach: true });
+    expect(t.plan).toMatchObject({ status: "approved", askEach: "person", decisionNote: "after 18:00 only" });
+    await waitFor(() => seen.filter((s) => s.kind === "main").length > beforeExplicit);
+    expect(seen.filter((s) => s.kind === "main")[beforeExplicit].lastUser).toContain(
+      "Every command that changes something is asked about before it runs",
+    );
+    await waitFor(() => settled(hub));
   });
 
   it("sends a plan back with the user's note for revision, and simply drops it without one", async () => {

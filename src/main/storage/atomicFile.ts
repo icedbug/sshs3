@@ -3,7 +3,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 const RENAME_RETRY_CODES = new Set(['EPERM', 'EACCES', 'EBUSY']);
-const RENAME_ATTEMPTS = 5;
+const RENAME_IMMEDIATE_ATTEMPTS = 8;
+const RENAME_ATTEMPTS = 28;
 
 async function renameWithRetry(from: string, to: string): Promise<void> {
   for (let attempt = 1; ; attempt++) {
@@ -12,9 +13,15 @@ async function renameWithRetry(from: string, to: string): Promise<void> {
       return;
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
-      // On Windows a virus scanner or indexer can hold the target open for a moment; a short wait normally clears it.
+      // On Windows a concurrent reader, virus scanner, or indexer can hold the target open briefly.
       if (process.platform !== 'win32' || attempt >= RENAME_ATTEMPTS || !code || !RENAME_RETRY_CODES.has(code)) throw err;
-      await new Promise((resolve) => setTimeout(resolve, 25 * attempt));
+      if (attempt === 1 && (await fs.lstat(to).catch(() => null))?.isDirectory()) throw err;
+      if (attempt <= RENAME_IMMEDIATE_ATTEMPTS) {
+        await new Promise((resolve) => setImmediate(resolve));
+      } else {
+        const delay = Math.min(100, 5 * 2 ** (attempt - RENAME_IMMEDIATE_ATTEMPTS - 1)) + Math.floor(Math.random() * 5);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
     }
   }
 }

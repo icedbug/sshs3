@@ -50,8 +50,88 @@ function parseCookies(cookieHeader?: string): Record<string, string> {
   return out;
 }
 
-function buildSessionCookie(token: string, maxAgeSec = 30 * 24 * 3600): string {
-  return `${SESSION_COOKIE_NAME}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSec}`;
+function isSecureRequest(req: http.IncomingMessage): boolean {
+  const sock = req.socket as { encrypted?: boolean } | undefined;
+  if (sock?.encrypted === true) return true;
+  const proto = req.headers['x-forwarded-proto'];
+  if (typeof proto === 'string') {
+    return proto.split(',')[0]!.trim().toLowerCase() === 'https';
+  }
+  return false;
+}
+
+function buildSessionCookie(
+  token: string,
+  maxAgeSec = 30 * 24 * 3600,
+  secure = false,
+): string {
+  return `${SESSION_COOKIE_NAME}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSec}${secure ? '; Secure' : ''}`;
+}
+
+/**
+ * Strict CSWSH defense: verifies that a browser-supplied Origin matches the
+ * request Host on BOTH normalized hostname AND exact port (or matches an
+ * explicitly configured allowed origin).
+ */
+export function isAllowedWsOrigin(
+  originHeader: string | string[] | undefined,
+  hostHeader: string | string[] | undefined,
+  allowedOrigins?: string[],
+): boolean {
+  if (originHeader === undefined) {
+    // Non-browser clients (CLI / Node WebSocket) do not send an Origin header.
+    return true;
+  }
+  if (typeof originHeader !== 'string') return false;
+  const trimmedOrigin = originHeader.trim();
+  if (!trimmedOrigin || trimmedOrigin.toLowerCase() === 'null') return false;
+
+  let originUrl: URL;
+  try {
+    originUrl = new URL(trimmedOrigin);
+  } catch {
+    return false;
+  }
+  if (originUrl.protocol !== 'http:' && originUrl.protocol !== 'https:') {
+    return false;
+  }
+  if (originUrl.username || originUrl.password) {
+    return false;
+  }
+
+  const originHostname = originUrl.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  const originPort = originUrl.port || (originUrl.protocol === 'https:' ? '443' : '80');
+
+  if (Array.isArray(allowedOrigins) && allowedOrigins.length > 0) {
+    for (const entry of allowedOrigins) {
+      try {
+        const allowed = new URL(entry);
+        if (allowed.protocol !== originUrl.protocol) continue;
+        const allowedHost = allowed.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+        const allowedPort = allowed.port || (allowed.protocol === 'https:' ? '443' : '80');
+        if (allowedHost === originHostname && allowedPort === originPort) {
+          return true;
+        }
+      } catch {
+        // Ignore malformed configured origin
+      }
+    }
+  }
+
+  if (typeof hostHeader !== 'string') return false;
+  const trimmedHost = hostHeader.trim();
+  if (!trimmedHost || /[\s@/?#\\]/.test(trimmedHost)) return false;
+
+  let hostUrl: URL;
+  try {
+    hostUrl = new URL(`${originUrl.protocol}//${trimmedHost}`);
+  } catch {
+    return false;
+  }
+  const reqHostname = hostUrl.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  const reqPort = hostUrl.port || (originUrl.protocol === 'https:' ? '443' : '80');
+
+  return Boolean(reqHostname) && originHostname === reqHostname && originPort === reqPort;
 }
 
 async function readJsonBody(
@@ -136,6 +216,10 @@ function attachWsFrameParser(
   socket: Duplex,
   onMessage: (text: string) => void,
   onClose: () => void,
+  hooks?: {
+    onPong?: (payload: Buffer) => void;
+    onActivity?: () => void;
+  },
 ): void {
   let buffer = Buffer.alloc(0);
   let fragments: Buffer[] = [];
@@ -210,6 +294,8 @@ function attachWsFrameParser(
         }
       }
 
+      hooks?.onActivity?.();
+
       if (opcode === 0x8) {
         // Close frame
         try {
@@ -228,6 +314,7 @@ function attachWsFrameParser(
         }
       } else if (opcode === 0xa) {
         // Pong
+        hooks?.onPong?.(payload);
       } else if (opcode === 0x1 || opcode === 0x0) {
         fragmentsBytes += payload.length;
         if (fragmentsBytes > MAX_WS_MESSAGE_BYTES) {
@@ -246,6 +333,24 @@ function attachWsFrameParser(
   });
 }
 
+interface WsTicketRecord {
+  userId: string;
+  expiresAt: number;
+  origin?: string;
+}
+
+interface WsConnectionEntry {
+  socket: Duplex;
+  userId: string;
+  clientId: number;
+  isAlive: boolean;
+  awaitingPong: boolean;
+  pingSentAt: number;
+  pongTimer?: NodeJS.Timeout;
+  backpressureEvents: number;
+  droppedStreamFrames: number;
+}
+
 export interface Sshs3WebServerOptions {
   port?: number;
   host?: string;
@@ -257,6 +362,18 @@ export interface Sshs3WebServerOptions {
    * team's workforce needs this: after a restart nobody may log in for days.
    */
   wakeUsersAtStart?: boolean;
+  /** Explicit allowed Origin URLs (e.g. reverse proxy) in addition to exact Host match. */
+  allowedOrigins?: string[];
+  /** Single-use WS ticket TTL in milliseconds (default: 15000). */
+  wsTicketTtlMs?: number;
+  /** Server-side WS ping interval in milliseconds (default: 30000; 0 disables). */
+  wsHeartbeatIntervalMs?: number;
+  /** Max time to wait for a WS pong before reaping zombie socket (default: 10000). */
+  wsHeartbeatTimeoutMs?: number;
+  /** High-water threshold on socket.writableLength before queueing frames (default: 262144). */
+  wsHighWaterBytes?: number;
+  /** Hard cap on writableLength + queued bytes before dropping stream chunks or closing slow sockets (default: 16777216). */
+  wsMaxBufferedBytes?: number;
 }
 
 export class Sshs3WebServer {
@@ -274,6 +391,9 @@ export class Sshs3WebServer {
   private httpServer?: http.Server;
   private boundPort = 0;
   private activeSockets = new Set<Duplex>();
+  private activeWsEntries = new Map<Duplex, WsConnectionEntry>();
+  private wsTickets = new Map<string, WsTicketRecord>();
+  private heartbeatTimer?: NodeJS.Timeout;
 
   constructor(private readonly options: Sshs3WebServerOptions) {
     setWebDataDir(options.dataDir);
@@ -285,6 +405,135 @@ export class Sshs3WebServer {
 
   getPort(): number {
     return this.boundPort;
+  }
+
+  getWsStats(): {
+    activeConnections: number;
+    totalBackpressureEvents: number;
+    totalDroppedStreamFrames: number;
+    activeTickets: number;
+  } {
+    let totalBackpressureEvents = 0;
+    let totalDroppedStreamFrames = 0;
+    for (const entry of this.activeWsEntries.values()) {
+      totalBackpressureEvents += entry.backpressureEvents;
+      totalDroppedStreamFrames += entry.droppedStreamFrames;
+    }
+    return {
+      activeConnections: this.activeWsEntries.size,
+      totalBackpressureEvents,
+      totalDroppedStreamFrames,
+      activeTickets: this.wsTickets.size,
+    };
+  }
+
+  private getAllowedOrigins(): string[] {
+    if (this.options.allowedOrigins?.length) return this.options.allowedOrigins;
+    const raw = process.env.SSHS3_ALLOWED_ORIGINS || '';
+    return raw.split(',').map((s) => s.trim()).filter(Boolean);
+  }
+
+  private issueWsTicket(userId: string, originHeader?: string | string[]): {
+    ticket: string;
+    expiresAt: number;
+    expiresInMs: number;
+  } {
+    const now = Date.now();
+    for (const [k, rec] of this.wsTickets.entries()) {
+      if (rec.expiresAt <= now) this.wsTickets.delete(k);
+    }
+    if (this.wsTickets.size >= 10_000) {
+      const oldestKey = this.wsTickets.keys().next().value;
+      if (oldestKey) this.wsTickets.delete(oldestKey);
+    }
+    const ttlMs = Math.max(100, this.options.wsTicketTtlMs ?? 15_000);
+    const ticket = crypto.randomBytes(24).toString('base64url');
+    const expiresAt = now + ttlMs;
+    const origin =
+      typeof originHeader === 'string' && originHeader.trim()
+        ? originHeader.trim().toLowerCase()
+        : undefined;
+    this.wsTickets.set(ticket, { userId, expiresAt, ...(origin ? { origin } : {}) });
+    return { ticket, expiresAt, expiresInMs: ttlMs };
+  }
+
+  private consumeWsTicket(ticket: string, originHeader?: string | string[]): string | null {
+    const clean = ticket.trim();
+    if (!clean) return null;
+    const entry = this.wsTickets.get(clean);
+    // Single-use: consume immediately regardless of validity/expiry
+    this.wsTickets.delete(clean);
+    if (!entry || entry.expiresAt <= Date.now()) {
+      return null;
+    }
+    if (entry.origin && typeof originHeader === 'string' && originHeader.trim()) {
+      if (entry.origin !== originHeader.trim().toLowerCase()) {
+        return null;
+      }
+    }
+    return entry.userId;
+  }
+
+  private reapWsEntry(entry: WsConnectionEntry): void {
+    if (entry.pongTimer) {
+      clearTimeout(entry.pongTimer);
+      entry.pongTimer = undefined;
+    }
+    try {
+      if (!entry.socket.destroyed && entry.socket.writable) {
+        entry.socket.write(encodeWsControlFrame(0x8));
+      }
+    } catch {
+      // ignore
+    }
+    try {
+      entry.socket.destroy();
+    } catch {
+      // ignore
+    }
+  }
+
+  private startWsHeartbeat(): void {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = undefined;
+    }
+    const intervalMs = this.options.wsHeartbeatIntervalMs ?? 30_000;
+    if (intervalMs <= 0) return;
+    const timeoutMs = Math.max(20, this.options.wsHeartbeatTimeoutMs ?? 10_000);
+
+    this.heartbeatTimer = setInterval(() => {
+      for (const entry of Array.from(this.activeWsEntries.values())) {
+        if (entry.socket.destroyed || !entry.socket.writable) {
+          this.reapWsEntry(entry);
+          continue;
+        }
+        if (entry.awaitingPong) {
+          this.reapWsEntry(entry);
+          continue;
+        }
+        entry.awaitingPong = true;
+        entry.isAlive = false;
+        entry.pingSentAt = Date.now();
+        try {
+          entry.socket.write(encodeWsControlFrame(0x9, Buffer.from('hb')));
+        } catch {
+          this.reapWsEntry(entry);
+          continue;
+        }
+        if (timeoutMs < intervalMs) {
+          if (entry.pongTimer) clearTimeout(entry.pongTimer);
+          entry.pongTimer = setTimeout(() => {
+            entry.pongTimer = undefined;
+            if (entry.awaitingPong) {
+              this.reapWsEntry(entry);
+            }
+          }, timeoutMs);
+          entry.pongTimer.unref?.();
+        }
+      }
+    }, intervalMs);
+    this.heartbeatTimer.unref?.();
   }
 
   async start(): Promise<{ port: number; host: string }> {
@@ -325,6 +574,7 @@ export class Sshs3WebServer {
     });
 
     this.httpServer = server;
+    this.startWsHeartbeat();
     if (this.options.wakeUsersAtStart ?? process.env.SSHS3_WORKFORCE === '1')
       await this.wakeUsers();
     return { port: this.boundPort, host };
@@ -435,6 +685,18 @@ export class Sshs3WebServer {
   }
 
   async stop(): Promise<void> {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = undefined;
+    }
+    for (const entry of this.activeWsEntries.values()) {
+      if (entry.pongTimer) {
+        clearTimeout(entry.pongTimer);
+        entry.pongTimer = undefined;
+      }
+    }
+    this.activeWsEntries.clear();
+    this.wsTickets.clear();
     for (const sock of this.activeSockets) {
       try {
         sock.destroy();
@@ -554,13 +816,6 @@ export class Sshs3WebServer {
     if (cookies[SESSION_COOKIE_NAME]) {
       return cookies[SESSION_COOKIE_NAME]!;
     }
-    try {
-      const url = new URL(req.url || '/', 'http://localhost');
-      const qToken = url.searchParams.get('token');
-      if (qToken) return qToken;
-    } catch {
-      // ignore
-    }
     return null;
   }
 
@@ -623,8 +878,8 @@ export class Sshs3WebServer {
         sendJson(
           res,
           200,
-          { user, sessionToken, token: sessionToken },
-          { 'Set-Cookie': buildSessionCookie(sessionToken) },
+          { user },
+          { 'Set-Cookie': buildSessionCookie(sessionToken, undefined, isSecureRequest(req)) },
         );
       } catch (err) {
         sendJson(res, 400, {
@@ -656,8 +911,8 @@ export class Sshs3WebServer {
         sendJson(
           res,
           200,
-          { user, sessionToken, token: sessionToken },
-          { 'Set-Cookie': buildSessionCookie(sessionToken) },
+          { user },
+          { 'Set-Cookie': buildSessionCookie(sessionToken, undefined, isSecureRequest(req)) },
         );
       } catch (err) {
         sendJson(res, 401, {
@@ -680,8 +935,8 @@ export class Sshs3WebServer {
         sendJson(
           res,
           200,
-          { user, sessionToken, token: sessionToken },
-          { 'Set-Cookie': buildSessionCookie(sessionToken) },
+          { user },
+          { 'Set-Cookie': buildSessionCookie(sessionToken, undefined, isSecureRequest(req)) },
         );
       } catch (err) {
         sendJson(res, 400, {
@@ -702,7 +957,7 @@ export class Sshs3WebServer {
         res,
         200,
         { ok: true },
-        { 'Set-Cookie': buildSessionCookie('', 0) },
+        { 'Set-Cookie': buildSessionCookie('', 0, isSecureRequest(req)) },
       );
       return;
     }
@@ -712,6 +967,20 @@ export class Sshs3WebServer {
       const user = await this.authenticateRequest(req);
       if (!user) {
         sendJson(res, 401, { error: 'Not signed in' });
+        return;
+      }
+
+      // Single-use short-lived WebSocket upgrade ticket exchange (replaces ?token= session leakage)
+      if (pathname === '/api/ws-ticket' && method === 'POST') {
+        if (
+          req.headers.origin !== undefined &&
+          !isAllowedWsOrigin(req.headers.origin, req.headers.host, this.getAllowedOrigins())
+        ) {
+          sendJson(res, 403, { error: 'Origin not allowed' });
+          return;
+        }
+        const issued = this.issueWsTicket(user.id, req.headers.origin);
+        sendJson(res, 200, issued);
         return;
       }
 
@@ -857,7 +1126,7 @@ export class Sshs3WebServer {
             : '';
           const body = pathToken ? {} : await readJsonBody(req);
           const token = String(
-            pathToken || url.searchParams.get('token') || body.token || '',
+            pathToken || body.token || '',
           );
           await this.auth.revokeInvite(token);
           sendJson(res, 200, { ok: true, invites: this.auth.listInvites() });
@@ -912,32 +1181,33 @@ export class Sshs3WebServer {
       return;
     }
 
-    // CSWSH protection: validate Origin header if present
-    const originHeader = req.headers.origin;
-    if (typeof originHeader === 'string' && originHeader.trim()) {
-      let originUrl: URL;
-      try {
-        originUrl = new URL(originHeader);
-      } catch {
-        socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
-        socket.destroy();
-        return;
-      }
-      const reqHost = (req.headers.host || '').trim().toLowerCase();
-      const reqHostname = reqHost.split(':')[0] || '';
-      const originHost = originUrl.host.toLowerCase();
-      const originHostname = originUrl.hostname.toLowerCase();
-      const isLoopbackMatch =
-        (originHostname === 'localhost' || originHostname === '127.0.0.1') &&
-        (reqHostname === 'localhost' || reqHostname === '127.0.0.1' || !reqHostname);
-      if (originHost !== reqHost && !isLoopbackMatch) {
-        socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
-        socket.destroy();
-        return;
-      }
+    // CSWSH protection: strict hostname + port verification on Origin / Host
+    if (!isAllowedWsOrigin(req.headers.origin, req.headers.host, this.getAllowedOrigins())) {
+      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+      socket.destroy();
+      return;
     }
 
-    const user = await this.authenticateRequest(req);
+    // Reject ?token= query-string session auth to eliminate URL/log token leakage
+    if (url.searchParams.has('token')) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+
+    let user: WebUserPublic | null = null;
+    if (url.searchParams.has('ticket')) {
+      const ticketUserId = this.consumeWsTicket(
+        url.searchParams.get('ticket') || '',
+        req.headers.origin,
+      );
+      if (ticketUserId) {
+        user = await this.auth.getUserById(ticketUserId);
+      }
+    } else {
+      user = await this.authenticateRequest(req);
+    }
+
     if (!user) {
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
       socket.destroy();
@@ -957,33 +1227,136 @@ export class Sshs3WebServer {
       .digest('base64');
 
     const tenant = await this.tenants.getOrCreateTenant(user);
-    const sendFrame = (jsonText: string) => {
-      if (!socket.destroyed) {
-        socket.write(encodeWsTextFrame(jsonText));
+    const highWaterBytes = Math.max(1024, this.options.wsHighWaterBytes ?? 256 * 1024);
+    const maxBufferedBytes = Math.max(
+      highWaterBytes * 2,
+      this.options.wsMaxBufferedBytes ?? MAX_WS_MESSAGE_BYTES,
+    );
+
+    const queuedFrames: Array<{ buf: Buffer; bytes: number }> = [];
+    let queuedBytes = 0;
+    let draining = false;
+
+    const entry: WsConnectionEntry = {
+      socket,
+      userId: user.id,
+      clientId: 0,
+      isAlive: true,
+      awaitingPong: false,
+      pingSentAt: 0,
+      backpressureEvents: 0,
+      droppedStreamFrames: 0,
+    };
+
+    const flushQueued = (): void => {
+      draining = false;
+      while (queuedFrames.length > 0 && !socket.destroyed && socket.writable) {
+        if (socket.writableLength >= highWaterBytes) {
+          draining = true;
+          socket.once('drain', flushQueued);
+          return;
+        }
+        const next = queuedFrames.shift()!;
+        queuedBytes -= next.bytes;
+        const ok = socket.write(next.buf);
+        if (!ok) {
+          draining = true;
+          socket.once('drain', flushQueued);
+          return;
+        }
       }
     };
 
-    tenant.clients.add(sendFrame);
-    tenant.sockets.add(socket);
+    const sendFrame = (jsonText: string) => {
+      if (socket.destroyed || !socket.writable) return;
+      const frame = encodeWsTextFrame(jsonText);
+      const inFlight = socket.writableLength + queuedBytes;
+      const isStreamData =
+        jsonText.includes('"channel":"terminal:data"') ||
+        jsonText.includes('"channel":"k8s-terminal:data"') ||
+        jsonText.includes('"channel":"k8s-log:data"');
+
+      if (inFlight > 0 && inFlight + frame.length > maxBufferedBytes) {
+        entry.backpressureEvents += 1;
+        if (isStreamData) {
+          entry.droppedStreamFrames += 1;
+          return;
+        }
+        // Control/RPC frames cannot fit in an overwhelmed socket; reap slow consumer
+        this.reapWsEntry(entry);
+        return;
+      }
+
+      if (!draining && queuedFrames.length === 0 && socket.writableLength < highWaterBytes) {
+        const ok = socket.write(frame);
+        if (!ok) {
+          entry.backpressureEvents += 1;
+          draining = true;
+          socket.once('drain', flushQueued);
+        }
+        return;
+      }
+
+      if (!draining) {
+        entry.backpressureEvents += 1;
+        draining = true;
+        socket.once('drain', flushQueued);
+      }
+      queuedFrames.push({ buf: frame, bytes: frame.length });
+      queuedBytes += frame.length;
+    };
+
+    const clientId = tenant.registerClient(socket, sendFrame);
+    entry.clientId = clientId;
+    this.activeSockets.add(socket);
+    this.activeWsEntries.set(socket, entry);
+
+    const markAlive = () => {
+      entry.isAlive = true;
+      entry.awaitingPong = false;
+      if (entry.pongTimer) {
+        clearTimeout(entry.pongTimer);
+        entry.pongTimer = undefined;
+      }
+    };
 
     attachWsFrameParser(
       socket,
       (rawText) => {
+        markAlive();
         void (async () => {
           let parsed: {
             id?: string;
             type?: string;
             channel?: string;
             args?: unknown[];
+            sessionId?: string;
+            ts?: number;
           };
           try {
             parsed = JSON.parse(rawText);
           } catch {
             return;
           }
+          if (parsed.type === 'ping') {
+            sendFrame(JSON.stringify({ type: 'pong', ts: parsed.ts ?? Date.now() }));
+            return;
+          }
+          if (parsed.type === 'pong') {
+            return;
+          }
+          if (parsed.type === 'subscribe' && typeof parsed.sessionId === 'string') {
+            tenant.subscribeSession(clientId, parsed.sessionId);
+            return;
+          }
+          if (parsed.type === 'unsubscribe' && typeof parsed.sessionId === 'string') {
+            tenant.unsubscribeSession(clientId, parsed.sessionId);
+            return;
+          }
           if (parsed.type === 'invoke' && parsed.id && parsed.channel) {
             try {
-              const result = await tenant.ipcMain.invoke(
+              const result = await tenant.invokeFromClient(
+                clientId,
                 parsed.channel,
                 ...(Array.isArray(parsed.args) ? parsed.args : []),
               );
@@ -1009,13 +1382,21 @@ export class Sshs3WebServer {
         })();
       },
       () => {
-        tenant.clients.delete(sendFrame);
-        tenant.sockets.delete(socket);
+        if (entry.pongTimer) {
+          clearTimeout(entry.pongTimer);
+          entry.pongTimer = undefined;
+        }
+        queuedFrames.length = 0;
+        queuedBytes = 0;
+        tenant.unregisterClient(clientId);
         this.activeSockets.delete(socket);
+        this.activeWsEntries.delete(socket);
+      },
+      {
+        onPong: markAlive,
+        onActivity: markAlive,
       },
     );
-
-    this.activeSockets.add(socket);
 
     socket.write(
       [

@@ -12,6 +12,7 @@ import {
   HUB_CHANGED,
   type WorkspaceServerSummary,
 } from "../../../shared/types/aiHub";
+import { HUB_DELTA_CHANNEL } from "../../../shared/ipc/createMultiSSHApi";
 import { DEFAULT_SHORTCUTS } from "../../../shared/types/settings";
 import type {
   IStorageProvider,
@@ -50,6 +51,7 @@ export interface CreateHubOptions {
   soleUser?: () => boolean;
   peerPresenceProvider?: HubHost["peerPresenceProvider"];
   onSharedWorkspaceChanged?: () => void;
+  auditShipper?: HubHost["auditShipper"];
 }
 
 export function createHub(
@@ -376,7 +378,12 @@ export function createHub(
     soleUser: options?.soleUser,
     peerPresenceProvider: options?.peerPresenceProvider,
     onSharedWorkspaceChanged: options?.onSharedWorkspaceChanged,
+    auditShipper: options?.auditShipper,
     file: (...args) => files.invoke(...args),
+    restoreCheckpoint: (change, opts) => files.restoreCheckpoint(change, opts),
+    delta: (delta) => {
+      bridge.broadcast(HUB_DELTA_CHANNEL, delta);
+    },
     changed: () => {
       bridge.broadcast(HUB_CHANGED);
       if (process.env.SSHS3_NATIVE_HERMES === '1') nativeEvents.emit('toolsChanged');

@@ -18,6 +18,56 @@ export type PolicySettingId =
 /** Policy-only switches with no user setting behind them. Allowed unless the policy says `false`. */
 export type PolicyFeatureId = 'gitKeyFetch' | 'dotfileGitImport';
 
+/** Enterprise AI governance policy identifiers. */
+export type AiPolicyId =
+  | 'aiSafetyLocked'
+  | 'aiAllowedEndpoints'
+  | 'aiRequireZdr'
+  | 'aiMaxAutonomy';
+
+export type AiPolicyValueType =
+  | { type: 'boolean' }
+  | { type: 'string' }
+  | { type: 'stringList' }
+  | { type: 'enum'; values: readonly string[] };
+
+export type AiPolicyDefinition = AiPolicyValueType & {
+  id: AiPolicyId;
+  /** English description for policy documentation and admin templates. */
+  description: string;
+};
+
+export const AI_POLICY_DEFINITIONS: readonly AiPolicyDefinition[] = [
+  {
+    id: 'aiSafetyLocked',
+    type: 'boolean',
+    description: 'Lock AI safety policy controls so users and agents cannot weaken them.',
+  },
+  {
+    id: 'aiAllowedEndpoints',
+    type: 'stringList',
+    description: 'Allowlist of permitted AI provider base URLs or endpoint host patterns.',
+  },
+  {
+    id: 'aiRequireZdr',
+    type: 'boolean',
+    description: 'Require Zero Data Retention (ZDR) confirmation before sending prompts to external AI endpoints.',
+  },
+  {
+    id: 'aiMaxAutonomy',
+    type: 'enum',
+    values: ['advice', 'plan', 'assisted', 'autonomous'],
+    description: 'Maximum AI agent autonomy mode permitted by enterprise policy.',
+  },
+];
+
+export interface AiPolicyConfig {
+  aiSafetyLocked?: boolean;
+  aiAllowedEndpoints?: string[];
+  aiRequireZdr?: boolean;
+  aiMaxAutonomy?: 'advice' | 'plan' | 'assisted' | 'autonomous';
+}
+
 export type PolicyValueType =
   | { type: 'boolean' }
   | { type: 'string' }
@@ -89,6 +139,8 @@ export interface PolicyDocument {
   /** `Pick` fails to compile if a PolicySettingId is not an AppSettings key. */
   settings: Partial<Pick<AppSettings, PolicySettingId>>;
   features: Partial<Record<PolicyFeatureId, boolean>>;
+  /** Managed enterprise AI governance policy overrides. */
+  ai?: AiPolicyConfig;
 }
 
 export const EMPTY_POLICY: PolicyDocument = { settings: {}, features: {} };
@@ -98,6 +150,7 @@ export interface PolicyInfo {
   managed: PolicySettingId[];
   features: PolicyDocument['features'];
   warnings: string[];
+  ai?: AiPolicyConfig;
 }
 
 /** The registry value name for a policy id: the id with its first letter upper-cased (`AutoCheckUpdates`). */

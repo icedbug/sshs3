@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import type * as k8s from "@kubernetes/client-node";
 import type {
   AgentChange,
   AgentSchedule,
@@ -6,20 +7,31 @@ import type {
   InfraGraphEdge,
   KbPage,
   McpServerConfig,
+  McpToolPolicy,
   MemoryEntry,
   MissionAgent,
-  WorkspaceActivityEvent,
   WorkspaceLayoutEvent,
   WorkspaceServerSummary,
 } from "../../../shared/types/aiHub";
 import { DEFAULT_AI_MODELS } from "../../../shared/types/ai";
+import { K8sDiscoveryService } from "../../services/K8sDiscoveryService";
+import { loadK8sClient } from "../../services/k8sClient";
+import { loadKubeConfigForContext } from "../../services/k8sKubeConfig";
 import { agentNamed } from "./AppGuard";
 import { coverage, searchPages } from "./KbCompile";
-import { clip } from "./privacy";
+import {
+  boundedContext,
+  clip,
+  exactHash,
+  forApproval,
+  maskContext,
+  safeError,
+} from "./privacy";
 import { unverifiedNote } from "./KbCheck";
 import {
   analyzeCommandSafety,
   DEFAULT_SAFETY_POLICY,
+  isProdTag,
 } from "./CommandSafetyService";
 import {
   isDemoMode,
@@ -27,7 +39,6 @@ import {
 } from "./demoWorkspace";
 import { isDemoTarget } from "../../demo/demoMode";
 import { nextRef } from "./ToolBroker";
-import { boundedContext, exactHash, forApproval, safeError } from "./privacy";
 
 import {
   requiredText,
@@ -69,6 +80,450 @@ function only<T extends string>(value: string, allowed: T[]): T {
   const found = allowed.find((a) => a === value);
   if (!found) throw new Error(`There is no operation "${value}" on this tool. It has: ${allowed.join(", ")}.`);
   return found;
+}
+
+function rawOperation(p: Record<string, unknown>, fallback: string): string {
+  const v = p.operation;
+  if (v === undefined) return fallback;
+  if (typeof v !== "string") {
+    throw new Error(`Invalid "operation": expected a string, got ${typeof v}.`);
+  }
+  return v.trim();
+}
+
+function optStr(p: Record<string, unknown>, key: string): string | undefined {
+  const v = p[key];
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== "string") {
+    throw new Error(`Invalid "${key}": expected a string.`);
+  }
+  const trimmed = v.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function reqStr(p: Record<string, unknown>, key: string, opLabel: string): string {
+  const v = optStr(p, key);
+  if (!v) throw new Error(`${opLabel} requires "${key}".`);
+  return v;
+}
+
+function optBool(p: Record<string, unknown>, key: string): boolean | undefined {
+  const v = p[key];
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== "boolean") {
+    throw new Error(`Invalid "${key}": expected a boolean.`);
+  }
+  return v;
+}
+
+function optNum(
+  p: Record<string, unknown>,
+  key: string,
+  bounds?: { min?: number; max?: number },
+): number | undefined {
+  const v = p[key];
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== "number" || !Number.isFinite(v)) {
+    throw new Error(`Invalid "${key}": expected a finite number.`);
+  }
+  if (bounds?.min !== undefined && v < bounds.min) {
+    throw new Error(`Invalid "${key}": must be >= ${bounds.min}.`);
+  }
+  if (bounds?.max !== undefined && v > bounds.max) {
+    throw new Error(`Invalid "${key}": must be <= ${bounds.max}.`);
+  }
+  return v;
+}
+
+function optInt(
+  p: Record<string, unknown>,
+  key: string,
+  bounds?: { min?: number; max?: number },
+): number | undefined {
+  const v = p[key];
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== "number" || !Number.isFinite(v) || !Number.isInteger(v)) {
+    throw new Error(`Invalid "${key}": expected an integer.`);
+  }
+  if (bounds?.min !== undefined && v < bounds.min) {
+    throw new Error(`Invalid "${key}": must be >= ${bounds.min}.`);
+  }
+  if (bounds?.max !== undefined && v > bounds.max) {
+    throw new Error(`Invalid "${key}": must be <= ${bounds.max}.`);
+  }
+  return v;
+}
+
+function optPort(p: Record<string, unknown>, key: string): number | undefined {
+  const v = p[key];
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== "number" || !Number.isFinite(v) || !Number.isInteger(v) || v < 1 || v > 65535) {
+    throw new Error(`Invalid "${key}": must be an integer TCP port between 1 and 65535.`);
+  }
+  return v;
+}
+
+function optEnum<T extends string>(
+  p: Record<string, unknown>,
+  key: string,
+  allowed: readonly T[],
+): T | undefined {
+  const v = p[key];
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== "string") {
+    throw new Error(`Invalid "${key}": expected one of ${allowed.join(", ")}.`);
+  }
+  const trimmed = v.trim() as T;
+  if (!allowed.includes(trimmed)) {
+    throw new Error(`Invalid "${key}" "${v}": expected one of ${allowed.join(", ")}.`);
+  }
+  return trimmed;
+}
+
+function matchesSchemaType(value: unknown, expectedType: string): boolean {
+  switch (expectedType) {
+    case "string":
+      return typeof value === "string";
+    case "number":
+      return typeof value === "number" && Number.isFinite(value);
+    case "integer":
+      return typeof value === "number" && Number.isFinite(value) && Number.isInteger(value);
+    case "boolean":
+      return typeof value === "boolean";
+    case "array":
+      return Array.isArray(value);
+    case "object":
+      return typeof value === "object" && value !== null && !Array.isArray(value);
+    case "null":
+      return value === null;
+    default:
+      return true;
+  }
+}
+
+function validateMcpInputSchema(
+  toolName: string,
+  schema: Record<string, unknown>,
+  payload: Record<string, unknown>,
+): void {
+  const required = Array.isArray(schema.required)
+    ? schema.required.filter((item): item is string => typeof item === "string")
+    : [];
+  for (const reqKey of required) {
+    if (payload[reqKey] === undefined) {
+      throw new Error(`MCP tool "${toolName}" requires parameter "${reqKey}".`);
+    }
+  }
+  const properties =
+    schema.properties && typeof schema.properties === "object" && !Array.isArray(schema.properties)
+      ? (schema.properties as Record<string, unknown>)
+      : undefined;
+  if (schema.additionalProperties === false && properties) {
+    for (const key of Object.keys(payload)) {
+      if (!(key in properties)) {
+        throw new Error(`MCP tool "${toolName}" does not accept unknown parameter "${key}".`);
+      }
+    }
+  }
+  if (!properties) return;
+  for (const [key, propRaw] of Object.entries(properties)) {
+    const val = payload[key];
+    if (val === undefined) continue;
+    if (!propRaw || typeof propRaw !== "object" || Array.isArray(propRaw)) continue;
+    const prop = propRaw as Record<string, unknown>;
+    if (Array.isArray(prop.enum) && !prop.enum.includes(val)) {
+      throw new Error(
+        `Invalid parameter "${key}" for MCP tool "${toolName}": expected one of ${prop.enum.map(String).join(", ")}.`,
+      );
+    }
+    if (typeof prop.type === "string") {
+      if (!matchesSchemaType(val, prop.type)) {
+        throw new Error(
+          `Invalid parameter "${key}" for MCP tool "${toolName}": expected ${prop.type}.`,
+        );
+      }
+    } else if (Array.isArray(prop.type)) {
+      const types = prop.type.filter((t): t is string => typeof t === "string");
+      if (types.length > 0 && !types.some((t) => matchesSchemaType(val, t))) {
+        throw new Error(
+          `Invalid parameter "${key}" for MCP tool "${toolName}": expected ${types.join(" | ")}.`,
+        );
+      }
+    }
+    if (typeof val === "number") {
+      if (typeof prop.minimum === "number" && val < prop.minimum) {
+        throw new Error(
+          `Invalid parameter "${key}" for MCP tool "${toolName}": must be >= ${prop.minimum}.`,
+        );
+      }
+      if (typeof prop.maximum === "number" && val > prop.maximum) {
+        throw new Error(
+          `Invalid parameter "${key}" for MCP tool "${toolName}": must be <= ${prop.maximum}.`,
+        );
+      }
+    }
+    if (typeof val === "string") {
+      if (typeof prop.minLength === "number" && val.length < prop.minLength) {
+        throw new Error(
+          `Invalid parameter "${key}" for MCP tool "${toolName}": length must be >= ${prop.minLength}.`,
+        );
+      }
+      if (typeof prop.maxLength === "number" && val.length > prop.maxLength) {
+        throw new Error(
+          `Invalid parameter "${key}" for MCP tool "${toolName}": length must be <= ${prop.maxLength}.`,
+        );
+      }
+    }
+  }
+}
+
+function scrubK8sValue(value: unknown, depth = 0): unknown {
+  if (depth > 12) return "[truncated]";
+  if (typeof value === "string") {
+    return maskContext(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => scrubK8sValue(item, depth + 1));
+  }
+  if (value && typeof value === "object") {
+    if (value instanceof Date) return value.toISOString();
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) {
+      out[k] = scrubK8sValue(v, depth + 1);
+    }
+    return out;
+  }
+  return value;
+}
+
+async function handleK8sInspect(
+  p: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const op = only(rawOperation(p, "cluster_triage"), [
+    "cluster_triage",
+    "describe_pod",
+    "pod_logs",
+    "pod_metrics",
+  ]);
+  const kubeConfigPath = optStr(p, "kubeConfigPath");
+  const discovery = new K8sDiscoveryService(kubeConfigPath);
+  let requestedContext = optStr(p, "context") || optStr(p, "contextName");
+  if (!requestedContext) {
+    const contexts = await discovery.listContexts();
+    const current = contexts.find((c) => c.isCurrent) ?? contexts[0];
+    if (!current) {
+      throw new Error("No Kubernetes context specified and no contexts found in kubeconfig.");
+    }
+    requestedContext = current.contextName;
+  }
+  const contextName: string = requestedContext;
+  const namespace = optStr(p, "namespace");
+  const podName = optStr(p, "pod") || optStr(p, "podName") || optStr(p, "name");
+  const container = optStr(p, "container");
+
+  if (op === "describe_pod") {
+    if (!podName) throw new Error('describe_pod requires "pod" (or "podName").');
+    const ns = namespace ?? "default";
+    const desc = await discovery.describePod(contextName, ns, podName);
+    return {
+      ok: true,
+      operation: "describe_pod",
+      context: contextName,
+      namespace: ns,
+      pod: podName,
+      description: scrubK8sValue({
+        ...desc,
+        yaml: boundedContext(maskContext(desc.yaml), 24_000),
+      }),
+    };
+  }
+
+  const [kc, { CoreV1Api, CustomObjectsApi }] = await Promise.all([
+    loadKubeConfigForContext(contextName, kubeConfigPath),
+    loadK8sClient(),
+  ]);
+
+  if (op === "pod_logs") {
+    if (!podName) throw new Error('pod_logs requires "pod" (or "podName").');
+    const ns = namespace ?? "default";
+    const previous = optBool(p, "previous") ?? false;
+    const tailLines = optInt(p, "tailLines", { min: 1, max: 5000 }) ?? 200;
+    const sinceSeconds = optInt(p, "sinceSeconds", { min: 1 });
+    const core = kc.makeApiClient(CoreV1Api);
+    const rawLogs = await core.readNamespacedPodLog({
+      name: podName,
+      namespace: ns,
+      ...(container ? { container } : {}),
+      previous,
+      tailLines,
+      ...(sinceSeconds !== undefined ? { sinceSeconds } : {}),
+    });
+    const text = typeof rawLogs === "string" ? rawLogs : JSON.stringify(rawLogs ?? "");
+    return {
+      ok: true,
+      operation: "pod_logs",
+      context: contextName,
+      namespace: ns,
+      pod: podName,
+      ...(container ? { container } : {}),
+      previous,
+      tailLines,
+      logs: boundedContext(maskContext(text), 24_000),
+    };
+  }
+
+  if (op === "pod_metrics") {
+    const ns = namespace ?? "default";
+    const customApi = kc.makeApiClient(CustomObjectsApi);
+    if (podName) {
+      const core = kc.makeApiClient(CoreV1Api);
+      const [metricsRes, podRes] = await Promise.allSettled([
+        customApi.getNamespacedCustomObject({
+          group: "metrics.k8s.io",
+          version: "v1beta1",
+          namespace: ns,
+          plural: "pods",
+          name: podName,
+        }),
+        core.readNamespacedPod({ name: podName, namespace: ns }),
+      ]);
+      if (metricsRes.status === "rejected") {
+        throw new Error(`Failed to fetch pod metrics for ${ns}/${podName}: ${safeError(metricsRes.reason)}`);
+      }
+      const podSpec = podRes.status === "fulfilled" ? podRes.value.spec : undefined;
+      return {
+        ok: true,
+        operation: "pod_metrics",
+        context: contextName,
+        namespace: ns,
+        pod: podName,
+        metrics: scrubK8sValue(metricsRes.value),
+        ...(podSpec?.containers
+          ? {
+              resources: podSpec.containers.map((c) => ({
+                name: c.name,
+                requests: c.resources?.requests,
+                limits: c.resources?.limits,
+              })),
+            }
+          : {}),
+      };
+    }
+    const listRes = namespace
+      ? await customApi.listNamespacedCustomObject({
+          group: "metrics.k8s.io",
+          version: "v1beta1",
+          namespace,
+          plural: "pods",
+        })
+      : await customApi.listClusterCustomObject({
+          group: "metrics.k8s.io",
+          version: "v1beta1",
+          plural: "pods",
+        });
+    return {
+      ok: true,
+      operation: "pod_metrics",
+      context: contextName,
+      namespace: namespace ?? "*",
+      metrics: scrubK8sValue(listRes),
+    };
+  }
+
+  // cluster_triage (read-only cluster health overview)
+  const core = kc.makeApiClient(CoreV1Api);
+  const warnings: string[] = [];
+  const [nodesRes, podsRes, eventsRes] = await Promise.allSettled([
+    core.listNode(),
+    namespace
+      ? discovery.listPods(contextName, namespace).then((items) =>
+          items.map((pod) => ({
+            name: pod.name,
+            namespace: pod.namespace,
+            status: pod.phase || "Unknown",
+            ready: pod.containers.length > 0 && pod.containers.every((c) => c.ready),
+            restarts: 0,
+            nodeName: undefined as string | undefined,
+          })),
+        )
+      : core.listPodForAllNamespaces().then((res) =>
+          (res.items ?? []).map((pod: k8s.V1Pod) => {
+            const containerStatuses = pod.status?.containerStatuses ?? [];
+            const restarts = containerStatuses.reduce((sum, cs) => sum + (cs.restartCount ?? 0), 0);
+            const ready = containerStatuses.length > 0 && containerStatuses.every((cs) => cs.ready);
+            const waitingReason = containerStatuses.find((cs) => cs.state?.waiting?.reason)?.state?.waiting?.reason;
+            return {
+              name: pod.metadata?.name ?? "unknown",
+              namespace: pod.metadata?.namespace ?? "default",
+              status: waitingReason || pod.status?.phase || "Unknown",
+              ready,
+              restarts,
+              nodeName: pod.spec?.nodeName,
+            };
+          }),
+        ),
+    namespace
+      ? core.listNamespacedEvent({ namespace })
+      : core.listEventForAllNamespaces(),
+  ]);
+
+  const nodes =
+    nodesRes.status === "fulfilled"
+      ? (nodesRes.value.items ?? []).map((node) => {
+          const readyCond = node.status?.conditions?.find((c) => c.type === "Ready");
+          return {
+            name: node.metadata?.name ?? "unknown",
+            ready: readyCond?.status === "True",
+            unschedulable: Boolean(node.spec?.unschedulable),
+            reason: readyCond?.status === "True" ? undefined : readyCond?.reason || readyCond?.message,
+          };
+        })
+      : (warnings.push(`listNode: ${safeError(nodesRes.reason)}`), []);
+
+  const pods =
+    podsRes.status === "fulfilled"
+      ? podsRes.value
+      : (warnings.push(`listPods: ${safeError(podsRes.reason)}`), []);
+
+  const unhealthyPods = pods.filter(
+    (pod) => !pod.ready && pod.status !== "Succeeded",
+  );
+  const restartingPods = pods.filter((pod) => (pod.restarts ?? 0) > 0);
+
+  const warningEvents =
+    eventsRes.status === "fulfilled"
+      ? (eventsRes.value.items ?? [])
+          .filter((ev) => ev.type === "Warning")
+          .slice(-25)
+          .map((ev) => ({
+            namespace: ev.involvedObject?.namespace ?? ev.metadata?.namespace,
+            kind: ev.involvedObject?.kind,
+            name: ev.involvedObject?.name,
+            reason: ev.reason,
+            message: ev.message,
+            count: ev.count,
+          }))
+      : (warnings.push(`listEvents: ${safeError(eventsRes.reason)}`), []);
+
+  return scrubK8sValue({
+    ok: true,
+    operation: "cluster_triage",
+    context: contextName,
+    namespace: namespace ?? "*",
+    summary: {
+      nodeCount: nodes.length,
+      unreadyNodes: nodes.filter((n) => !n.ready).length,
+      totalPods: pods.length,
+      unhealthyPodCount: unhealthyPods.length,
+      restartingPodCount: restartingPods.length,
+      warningEventCount: warningEvents.length,
+    },
+    nodes,
+    unhealthyPods: unhealthyPods.slice(0, 50),
+    restartingPods: restartingPods.slice(0, 50),
+    warningEvents,
+    ...(warnings.length > 0 ? { warnings } : {}),
+  }) as Record<string, unknown>;
 }
 
 /**
@@ -115,8 +570,6 @@ export async function handleAppAction(
       typeof p[key] === "string" && (p[key] as string).trim()
         ? (p[key] as string).trim()
         : undefined;
-    const bool = (key: string): boolean | undefined =>
-      typeof p[key] === "boolean" ? (p[key] as boolean) : undefined;
     const num = (key: string): number | undefined =>
       typeof p[key] === "number" && Number.isFinite(p[key] as number)
         ? (p[key] as number)
@@ -143,6 +596,15 @@ export async function handleAppAction(
           `No MCP tool called ${request.action} is available to this run. It may belong to a server that is switched off, to one this agent was not given, or it may not be among the tools that server listed.`,
         );
       }
+      const toolPolicy: McpToolPolicy | undefined = resolved.server.toolPolicies?.[resolved.toolName];
+      if (toolPolicy === "deny") {
+        throw new Error(
+          `MCP tool "${resolved.toolName}" on server "${resolved.server.name}" is denied by tool policy.`,
+        );
+      }
+      if (resolved.tool.inputSchema) {
+        validateMcpInputSchema(resolved.toolName, resolved.tool.inputSchema, p);
+      }
       if (isDemoTarget(resolved.server.id)) {
         // A demo MCP fixture answers from its script; its command/URL is never started or contacted.
         return {
@@ -152,31 +614,47 @@ export async function handleAppAction(
           output: simulateDemoMcpTool(resolved.toolName, p),
         };
       }
-      // A tool the server itself marks read-only is a lookup and runs as one. Anything else may
-      // change a system outside sshs3, so it takes the same way as a command: refused in a
-      // conversation that only advises, and put to a person in assisted mode.
-      if (!resolved.tool.readOnly && authorize) {
-        const change: AgentChange = {
-          id: crypto.randomUUID(),
-          kind: "command",
-          target: `MCP · ${resolved.server.name}`,
-          description: clip(`Call ${resolved.toolName} on the MCP server “${resolved.server.name}”`, 300),
-          command: clip(`${resolved.toolName} ${JSON.stringify(p)}`, 4000),
-          status: "pending",
-          riskLevel: "modify",
-          riskReason: "A tool on another system, which did not say that it only looks.",
-          at: Date.now(),
-        };
-        task.changes.push(change);
-        await authorize(change);
-        change.status = "running";
-        hub.changed();
-        const res = await hub.mcp.callTool(resolved.server, resolved.toolName, p);
-        change.status = res.ok ? "completed" : "failed";
-        change.output = clip(res.ok ? JSON.stringify(res.output ?? "") : (res.error ?? ""), 4000);
-        hub.changed();
-        if (!res.ok) throw new Error(res.error || "The MCP tool did not do its work.");
-        return { ok: true, mcpServer: resolved.server.name, tool: resolved.toolName, output: res.output };
+      // Respect per-tool toolPolicies (allow | ask | deny) and trustReadOnlyHint instead of blindly
+      // trusting server-supplied annotations.readOnlyHint.
+      const trustReadOnly = resolved.server.trustReadOnlyHint !== false;
+      const treatAsReadOnly =
+        toolPolicy === "allow" ||
+        (toolPolicy !== "ask" && Boolean(resolved.tool.readOnly) && trustReadOnly);
+      if (!treatAsReadOnly) {
+        if (authorize) {
+          const change: AgentChange = {
+            id: crypto.randomUUID(),
+            kind: "command",
+            ...(toolPolicy === "ask" && task.mode !== "advice" ? { guard: true } : {}),
+            target: `MCP · ${resolved.server.name}`,
+            description: clip(`Call ${resolved.toolName} on the MCP server “${resolved.server.name}”`, 300),
+            command: clip(`${resolved.toolName} ${JSON.stringify(p)}`, 4000),
+            status: "pending",
+            riskLevel: "modify",
+            riskReason:
+              toolPolicy === "ask"
+                ? `Server tool policy requires confirmation for “${resolved.toolName}”.`
+                : resolved.tool.readOnly && !trustReadOnly
+                  ? `Server “${resolved.server.name}” does not trust readOnlyHint annotations.`
+                  : "A tool on another system, which did not say that it only looks.",
+            at: Date.now(),
+          };
+          task.changes.push(change);
+          await authorize(change);
+          change.status = "running";
+          hub.changed();
+          const res = await hub.mcp.callTool(resolved.server, resolved.toolName, p);
+          change.status = res.ok ? "completed" : "failed";
+          change.output = clip(res.ok ? JSON.stringify(res.output ?? "") : (res.error ?? ""), 4000);
+          hub.changed();
+          if (!res.ok) throw new Error(res.error || "The MCP tool did not do its work.");
+          return { ok: true, mcpServer: resolved.server.name, tool: resolved.toolName, output: res.output };
+        }
+        if (toolPolicy === "ask") {
+          throw new Error(
+            `MCP tool "${resolved.toolName}" on server "${resolved.server.name}" requires approval.`,
+          );
+        }
       }
       const res = await hub.mcp.callTool(resolved.server, resolved.toolName, p);
       if (!res.ok) {
@@ -232,7 +710,7 @@ export async function handleAppAction(
     async function dispatch(): Promise<unknown> {
     switch (request.action) {
       case "sshs3_manage_server": {
-        const op = only(str("operation") || "upsert", [
+        const op = only(rawOperation(p, "upsert"), [
           "upsert",
           "update_metadata",
           "delete",
@@ -241,7 +719,7 @@ export async function handleAppAction(
           "save_tunnel",
           "delete_tunnel",
         ]);
-        const query = str("serverIdOrName") || str("id") || str("name") || str("host");
+        const query = optStr(p, "serverIdOrName") || optStr(p, "id") || optStr(p, "name") || optStr(p, "host");
         const existing = await hub.resolveServerTarget(query);
         // Updating what is known about a server is not a way to create one: a name
         // that matches nothing is a mistake, and saying so is better than a new entry.
@@ -275,8 +753,11 @@ export async function handleAppAction(
             throw new Error(`Could not find server matching "${query ?? ""}" to manage SSH tunnels`);
           }
           const currentTunnels = [...(existing.tunnels ?? [])];
-          const tQuery = (str("tunnelIdOrName") || str("tunnelName") || "").toLowerCase();
+          const tQuery = (optStr(p, "tunnelIdOrName") || optStr(p, "tunnelName") || "").toLowerCase();
           if (op === "delete_tunnel") {
+            if (!tQuery) {
+              throw new Error('delete_tunnel requires "tunnelIdOrName" or "tunnelName".');
+            }
             const nextTunnels = currentTunnels.filter(
               (t) =>
                 t.id.toLowerCase() !== tQuery &&
@@ -298,24 +779,37 @@ export async function handleAppAction(
               tunnels: nextTunnels,
             };
           }
-          // save_tunnel
-          const tunnelTypeRaw = str("tunnelType") || "local";
-          const tunnelType: "local" | "remote" | "dynamic" =
-            tunnelTypeRaw === "remote" || tunnelTypeRaw === "dynamic"
-              ? tunnelTypeRaw
-              : "local";
-          const localPort = num("localPort") ?? 8080;
+          // save_tunnel: validate tunnelType and ports strictly instead of coercing to "local"/8080.
           const existingTunnelIdx = tQuery
             ? currentTunnels.findIndex(
                 (t) => t.id.toLowerCase() === tQuery || t.name.toLowerCase() === tQuery,
               )
             : -1;
           const prevTunnel = existingTunnelIdx >= 0 ? currentTunnels[existingTunnelIdx] : undefined;
+          const parsedTunnelType = optEnum(p, "tunnelType", ["local", "remote", "dynamic"]);
+          if (!prevTunnel && !parsedTunnelType) {
+            throw new Error('save_tunnel requires "tunnelType" ("local", "remote", or "dynamic").');
+          }
+          const tunnelType: "local" | "remote" | "dynamic" = parsedTunnelType ?? prevTunnel!.type;
+          const parsedLocalPort = optPort(p, "localPort");
+          if (!prevTunnel && parsedLocalPort === undefined) {
+            throw new Error('save_tunnel requires a valid "localPort" (1-65535).');
+          }
+          const localPort = parsedLocalPort ?? prevTunnel!.localPort;
+          const parsedRemotePort = optPort(p, "remotePort");
+          if (!prevTunnel && tunnelType !== "dynamic" && parsedRemotePort === undefined) {
+            throw new Error(
+              `save_tunnel with tunnelType "${tunnelType}" requires a valid "remotePort" (1-65535).`,
+            );
+          }
+          const remotePort =
+            tunnelType === "dynamic" ? undefined : parsedRemotePort ?? prevTunnel?.remotePort;
+          const tunnelEnabled = optBool(p, "tunnelEnabled");
           const newTunnel = {
             id: prevTunnel?.id || crypto.randomUUID(),
             name:
-              str("tunnelName") ||
-              str("tunnelIdOrName") ||
+              optStr(p, "tunnelName") ||
+              optStr(p, "tunnelIdOrName") ||
               prevTunnel?.name ||
               `${tunnelType.toUpperCase()} :${localPort}`,
             type: tunnelType,
@@ -323,13 +817,10 @@ export async function handleAppAction(
             remoteHost:
               tunnelType === "dynamic"
                 ? undefined
-                : str("remoteHost") || prevTunnel?.remoteHost || "127.0.0.1",
-            remotePort:
-              tunnelType === "dynamic"
-                ? undefined
-                : num("remotePort") ?? prevTunnel?.remotePort ?? localPort,
-            description: str("tunnelDescription") ?? prevTunnel?.description,
-            enabled: bool("tunnelEnabled") ?? prevTunnel?.enabled ?? true,
+                : optStr(p, "remoteHost") || prevTunnel?.remoteHost || "127.0.0.1",
+            remotePort,
+            description: optStr(p, "tunnelDescription") ?? prevTunnel?.description,
+            enabled: tunnelEnabled ?? prevTunnel?.enabled ?? true,
           };
           if (existingTunnelIdx >= 0) {
             currentTunnels[existingTunnelIdx] = newTunnel;
@@ -354,7 +845,7 @@ export async function handleAppAction(
         }
 
         if (op === "delete") {
-          const targetId = existing?.id || str("serverIdOrName") || str("id");
+          const targetId = existing?.id || optStr(p, "serverIdOrName") || optStr(p, "id");
           if (!targetId) {
             throw new Error(`Could not find server matching "${query ?? ""}" to delete`);
           }
@@ -367,7 +858,7 @@ export async function handleAppAction(
           };
         }
 
-        const rawLocalAuth = str("localAuthType");
+        const rawLocalAuth = optEnum(p, "localAuthType", ["agent", "key", "privateKey"]);
         const normalizedLocalAuth: "agent" | "privateKey" | undefined =
           rawLocalAuth === "agent"
             ? "agent"
@@ -376,7 +867,7 @@ export async function handleAppAction(
               : undefined;
 
         if (op === "set_local_override") {
-          const targetId = existing?.id || str("serverIdOrName") || str("id");
+          const targetId = existing?.id || optStr(p, "serverIdOrName") || optStr(p, "id");
           if (!targetId) {
             throw new Error(`Could not find server matching "${query ?? ""}"`);
           }
@@ -384,8 +875,8 @@ export async function handleAppAction(
             action: "server-local-override",
             override: {
               profileId: targetId,
-              username: str("localUsername") ?? str("username"),
-              privateKeyPath: str("localPrivateKeyPath"),
+              username: optStr(p, "localUsername") ?? optStr(p, "username"),
+              privateKeyPath: optStr(p, "localPrivateKeyPath"),
               authType: normalizedLocalAuth,
             },
           });
@@ -396,22 +887,15 @@ export async function handleAppAction(
           };
         }
 
-        if (
-          op === "update_metadata" &&
-          existing &&
-          !str("host") &&
-          !str("name") &&
-          num("port") === undefined &&
-          !str("username")
-        ) {
+        if (op === "update_metadata" && existing) {
           await hub.request({
             action: "server-describe",
             profileId: existing.id,
-            shared: bool("shared") ?? existing.shared,
-            cluster: str("cluster") ?? existing.cluster,
-            nodeRole: str("nodeRole") ?? existing.nodeRole,
-            role: str("role") ?? existing.role,
-            description: str("description") ?? existing.description,
+            shared: optBool(p, "shared") ?? existing.shared,
+            cluster: optStr(p, "cluster") ?? existing.cluster,
+            nodeRole: optStr(p, "nodeRole") ?? existing.nodeRole,
+            role: optStr(p, "role") ?? existing.role,
+            description: optStr(p, "description") ?? existing.description,
             tags: tags ?? existing.tags,
           });
           return {
@@ -422,22 +906,22 @@ export async function handleAppAction(
           };
         }
 
-        // Default: upsert (handles both creating a new server and updating any field on an existing server)
-        const name = str("name") || existing?.name || str("host") || str("serverIdOrName");
-        const host = str("host") || existing?.host || name;
+        // upsert (op is guaranteed to be "upsert" by only() above)
+        const name = optStr(p, "name") || existing?.name || optStr(p, "host") || optStr(p, "serverIdOrName");
+        const host = optStr(p, "host") || existing?.host || name;
         if (!name || !host) {
           throw new Error("Server 'name' and 'host' are required to create or update a server");
         }
-        const rawAuthType = str("authType");
+        const validatedPort = optPort(p, "port");
         const authType: WorkspaceServerSummary["authType"] =
-          rawAuthType === "password" ||
-          rawAuthType === "privateKey" ||
-          rawAuthType === "smartcard" ||
-          rawAuthType === "agent" ||
-          rawAuthType === "fido2"
-            ? rawAuthType
-            : existing?.authType;
-        const rawDotfilesPolicy = str("dotfilesSyncPolicy");
+          optEnum(p, "authType", ["password", "privateKey", "smartcard", "agent", "fido2"]) ??
+          existing?.authType;
+        const rawDotfilesPolicy = optEnum(p, "dotfilesSyncPolicy", [
+          "ask",
+          "always",
+          "push-only",
+          "always-push",
+        ]);
         const dotfilesSyncPolicy: "ask" | "always" | undefined =
           rawDotfilesPolicy === "ask" || rawDotfilesPolicy === "always"
             ? rawDotfilesPolicy
@@ -448,49 +932,50 @@ export async function handleAppAction(
           p.extraOptions && typeof p.extraOptions === "object" && !Array.isArray(p.extraOptions)
             ? (p.extraOptions as Record<string, string>)
             : existing?.extraOptions;
-        let resolvedJumpProfileId = str("proxyJumpProfileId") ?? existing?.proxyJumpProfileId;
-        if (str("proxyJumpProfileId")) {
-          const jumpTarget = await hub.resolveServerTarget(str("proxyJumpProfileId"));
+        const proxyJumpProfileIdInput = optStr(p, "proxyJumpProfileId");
+        let resolvedJumpProfileId = proxyJumpProfileIdInput ?? existing?.proxyJumpProfileId;
+        if (proxyJumpProfileIdInput) {
+          const jumpTarget = await hub.resolveServerTarget(proxyJumpProfileIdInput);
           if (jumpTarget) resolvedJumpProfileId = jumpTarget.id;
         }
         const snap = await hub.request({
           action: "server-upsert",
           server: {
-            id: existing?.id || str("id"),
+            id: existing?.id || optStr(p, "id"),
             name,
             host,
-            port: num("port") ?? existing?.port ?? 22,
-            username: str("username") || existing?.username || "root",
+            port: validatedPort ?? existing?.port ?? 22,
+            username: optStr(p, "username") || existing?.username || "root",
             authType,
-            privateKeyPath: str("privateKeyPath") ?? existing?.privateKeyPath,
-            pkcs11LibPath: str("pkcs11LibPath") ?? existing?.pkcs11LibPath,
-            fido2Resident: bool("fido2Resident") ?? existing?.fido2Resident,
-            proxyJump: str("proxyJump") ?? existing?.proxyJump,
+            privateKeyPath: optStr(p, "privateKeyPath") ?? existing?.privateKeyPath,
+            pkcs11LibPath: optStr(p, "pkcs11LibPath") ?? existing?.pkcs11LibPath,
+            fido2Resident: optBool(p, "fido2Resident") ?? existing?.fido2Resident,
+            proxyJump: optStr(p, "proxyJump") ?? existing?.proxyJump,
             proxyJumpProfileId: resolvedJumpProfileId,
-            forwardAgent: bool("forwardAgent") ?? existing?.forwardAgent,
-            x11Forwarding: bool("x11Forwarding") ?? existing?.x11Forwarding,
-            x11Display: str("x11Display") ?? existing?.x11Display,
-            compression: bool("compression") ?? existing?.compression,
-            serverAliveInterval: num("serverAliveInterval") ?? existing?.serverAliveInterval,
-            initialPath: str("initialPath") ?? existing?.initialPath,
-            poolId: str("poolId") ?? existing?.poolId,
+            forwardAgent: optBool(p, "forwardAgent") ?? existing?.forwardAgent,
+            x11Forwarding: optBool(p, "x11Forwarding") ?? existing?.x11Forwarding,
+            x11Display: optStr(p, "x11Display") ?? existing?.x11Display,
+            compression: optBool(p, "compression") ?? existing?.compression,
+            serverAliveInterval: optInt(p, "serverAliveInterval", { min: 0 }) ?? existing?.serverAliveInterval,
+            initialPath: optStr(p, "initialPath") ?? existing?.initialPath,
+            poolId: optStr(p, "poolId") ?? existing?.poolId,
             dotfilesSyncPolicy,
-            autoReconnect: bool("autoReconnect") ?? existing?.autoReconnect,
-            maxReconnectAttempts: num("maxReconnectAttempts") ?? existing?.maxReconnectAttempts,
-            reconnectDelayMs: num("reconnectDelayMs") ?? existing?.reconnectDelayMs,
+            autoReconnect: optBool(p, "autoReconnect") ?? existing?.autoReconnect,
+            maxReconnectAttempts: optInt(p, "maxReconnectAttempts", { min: 0 }) ?? existing?.maxReconnectAttempts,
+            reconnectDelayMs: optInt(p, "reconnectDelayMs", { min: 0 }) ?? existing?.reconnectDelayMs,
             extraOptions,
             tunnels: existing?.tunnels,
-            folder: str("folder") ?? existing?.folder ?? str("cluster") ?? existing?.cluster,
-            cluster: str("cluster") ?? existing?.cluster,
-            nodeRole: str("nodeRole") ?? existing?.nodeRole,
-            role: str("role") ?? existing?.role,
-            description: str("description") ?? existing?.description,
+            folder: optStr(p, "folder") ?? existing?.folder ?? optStr(p, "cluster") ?? existing?.cluster,
+            cluster: optStr(p, "cluster") ?? existing?.cluster,
+            nodeRole: optStr(p, "nodeRole") ?? existing?.nodeRole,
+            role: optStr(p, "role") ?? existing?.role,
+            description: optStr(p, "description") ?? existing?.description,
             tags: tags ?? existing?.tags,
-            shared: bool("shared") ?? existing?.shared ?? true,
+            shared: optBool(p, "shared") ?? existing?.shared ?? true,
             // Only what was given: the rest of what this computer knows about the server
             // stays. Sending these as undefined used to wipe the user name or the key.
-            localUsername: str("localUsername") ?? existing?.localUsername,
-            localPrivateKeyPath: str("localPrivateKeyPath") ?? existing?.localPrivateKeyPath,
+            localUsername: optStr(p, "localUsername") ?? existing?.localUsername,
+            localPrivateKeyPath: optStr(p, "localPrivateKeyPath") ?? existing?.localPrivateKeyPath,
             localAuthType: normalizedLocalAuth ?? existing?.localAuthType,
           },
         });
@@ -508,15 +993,23 @@ export async function handleAppAction(
       }
 
       case "sshs3_manage_cluster_and_folders": {
-        const op = only(str("operation") || "assign_cluster", ["assign_cluster", "create_folder", "rename_folder", "delete_folder"]);
+        const op = only(rawOperation(p, "assign_cluster"), [
+          "assign_cluster",
+          "create_folder",
+          "rename_folder",
+          "delete_folder",
+        ]);
         if (op === "assign_cluster") {
-          const cluster = str("cluster");
+          const cluster = optStr(p, "cluster");
           if (!cluster) throw new Error("Cluster name is required");
           const rawTargets = Array.isArray(p.serverIdsOrNames)
             ? (p.serverIdsOrNames as unknown[]).map((x) => String(x).trim()).filter(Boolean)
-            : str("serverIdOrName")
-              ? [str("serverIdOrName")!]
+            : optStr(p, "serverIdOrName")
+              ? [optStr(p, "serverIdOrName")!]
               : [];
+          if (rawTargets.length === 0) {
+            throw new Error('assign_cluster requires "serverIdsOrNames" or "serverIdOrName".');
+          }
           const updated: string[] = [];
           const notFound: string[] = [];
           for (const t of rawTargets) {
@@ -528,9 +1021,9 @@ export async function handleAppAction(
                 profileId: srv.id,
                 shared: srv.shared,
                 cluster,
-                nodeRole: str("nodeRole") ?? srv.nodeRole,
-                role: str("role") ?? srv.role,
-                description: str("description") ?? srv.description,
+                nodeRole: optStr(p, "nodeRole") ?? srv.nodeRole,
+                role: optStr(p, "role") ?? srv.role,
+                description: optStr(p, "description") ?? srv.description,
                 tags: tags ?? srv.tags,
               });
               updated.push(srv.name);
@@ -547,19 +1040,23 @@ export async function handleAppAction(
             ...(notFound.length ? { notFound, note: `${notFound.join(", ")} ${notFound.length === 1 ? "is" : "are"} not a server here and ${notFound.length === 1 ? "was" : "were"} left alone.` } : {}),
           };
         }
-        const folderName = str("folderName") || str("name") || str("cluster");
+        const folderName = optStr(p, "folderName") || optStr(p, "name") || optStr(p, "cluster");
         if (!folderName) throw new Error("folderName is required");
+        const newFolderName = optStr(p, "newFolderName");
+        if (op === "rename_folder" && !newFolderName) {
+          throw new Error('rename_folder requires "newFolderName".');
+        }
         const res = await hub.host.manageFolders?.({
-          operation: op as "create_folder" | "rename_folder" | "delete_folder",
+          operation: op,
           folderName,
-          newFolderName: str("newFolderName"),
+          newFolderName,
         });
         hub.changed();
         return { ok: true, operation: op, folderName, result: res };
       }
 
       case "sshs3_manage_memory_and_activity": {
-        const op = only(str("operation") || "save", [
+        const op = only(rawOperation(p, "save"), [
           "list",
           "save",
           "core_replace",
@@ -577,7 +1074,7 @@ export async function handleAppAction(
           };
         }
         if (op === "delete") {
-          const q = (str("idOrTitle") || str("id") || str("title") || "").toLowerCase();
+          const q = (optStr(p, "idOrTitle") || optStr(p, "id") || optStr(p, "title") || "").toLowerCase();
           if (!q) throw new Error("idOrTitle is required to delete a memory");
           // By its exact id or title only: removing a team memory because its title contains a word is not on.
           const match = (extra.memories ?? []).find((m) => m.id.toLowerCase() === q || m.title.toLowerCase() === q);
@@ -587,20 +1084,24 @@ export async function handleAppAction(
           return { ok: true, operation: "delete", deletedMemoryId: targetId, title: match?.title };
         }
         if (op === "feedback") {
-          const q = (str("idOrTitle") || str("id") || str("title") || "").toLowerCase();
+          const q = (optStr(p, "idOrTitle") || optStr(p, "id") || optStr(p, "title") || "").toLowerCase();
           if (!q) throw new Error("idOrTitle is required to give feedback on a memory or skill");
           const match = (extra.memories ?? []).find(
             (m) => m.id.toLowerCase() === q || m.title.toLowerCase() === q || m.title.toLowerCase().includes(q),
           );
-          const targetId = match?.id || str("idOrTitle") || str("id")!;
-          const delta: 1 | -1 = num("delta") === -1 ? -1 : 1;
+          const targetId = match?.id || optStr(p, "idOrTitle") || optStr(p, "id")!;
+          const deltaRaw = optInt(p, "delta");
+          if (deltaRaw !== undefined && deltaRaw !== 1 && deltaRaw !== -1) {
+            throw new Error('Invalid "delta": expected 1 or -1.');
+          }
+          const delta: 1 | -1 = deltaRaw === -1 ? -1 : 1;
           await hub.request({ action: "memory-feedback", id: targetId, delta, voter: `${task.agentName ?? "Assistant"} (agent)` });
           return { ok: true, operation: "feedback", id: targetId, delta };
         }
         if (op === "self_reflect") {
           const snap = await hub.request({
             action: "self-learn-reflect",
-            targetCluster: str("cluster") || str("targetCluster"),
+            targetCluster: optStr(p, "cluster") || optStr(p, "targetCluster"),
           });
           return {
             ok: true,
@@ -609,25 +1110,40 @@ export async function handleAppAction(
           };
         }
         if (op === "log_activity") {
-          const targetLabel = str("targetLabel") || str("title") || "Workspace";
-          const summary = str("summary") || str("text") || "Team note";
+          const targetLabel = optStr(p, "targetLabel") || optStr(p, "title") || "Workspace";
+          const summary = optStr(p, "summary") || optStr(p, "text") || "Team note";
+          const activityKind =
+            optEnum(p, "activityKind", [
+              "config-edit",
+              "service-action",
+              "service",
+              "package-change",
+              "deploy",
+              "command",
+              "ai-action",
+              "profile-update",
+              "note",
+            ]) ?? "note";
           await hub.request({
             action: "activity-record",
             event: {
               // The agent, for the person it works for: never a name the model chose.
               actor: `${task.agentName || "Assistant"} (agent, for ${await hub.resolveActorName()})`,
               targetLabel,
-              kind: (str("activityKind") as WorkspaceActivityEvent["kind"]) || "note",
+              kind: activityKind,
               summary,
-              detail: str("detail"),
+              detail: optStr(p, "detail"),
             },
           });
           return { ok: true, operation: "log_activity", targetLabel, summary };
         }
         // save / core_replace / core_append memory or skill
-        const title = str("title") || str("idOrTitle") || "Workspace note";
-        const rawText = str("text") || str("content") || "";
-        const q = (str("idOrTitle") || title).toLowerCase();
+        const title = optStr(p, "title") || optStr(p, "idOrTitle") || "Workspace note";
+        const rawText = optStr(p, "text") || optStr(p, "content") || "";
+        if (!rawText) {
+          throw new Error(`${op} requires "text" (or "content").`);
+        }
+        const q = (optStr(p, "idOrTitle") || title).toLowerCase();
         const existing = (extra.memories ?? []).find(
           (m) => !m.supersededBy && (m.id.toLowerCase() === q || m.title.toLowerCase() === q),
         );
@@ -635,22 +1151,23 @@ export async function handleAppAction(
           op === "core_append" && existing
             ? `${existing.text}\n${rawText}`.trim()
             : rawText;
-        const rawTier = str("tier");
+        const rawTier = optEnum(p, "tier", ["core", "episodic", "archival"]);
         const tier: MemoryEntry["tier"] =
           op === "core_replace" || op === "core_append" || rawTier === "core"
             ? "core"
             : rawTier === "episodic"
               ? "episodic"
               : "archival";
+        const kind = optEnum(p, "kind", ["memory", "skill"]) ?? "memory";
         const out = await hub.rememberFromRun(task, {
-          id: existing?.id || str("id"),
-          kind: str("kind") === "skill" ? "skill" : "memory",
+          id: existing?.id || optStr(p, "id"),
+          kind,
           tier,
-          cluster: str("cluster"),
-          scope: str("scope") || "workspace",
+          cluster: optStr(p, "cluster"),
+          scope: optStr(p, "scope") || "workspace",
           title,
           text,
-          sourceCommand: str("sourceCommand"),
+          sourceCommand: optStr(p, "sourceCommand"),
         });
         await hub.store.save();
         return out.proposal
@@ -659,29 +1176,38 @@ export async function handleAppAction(
       }
 
       case "sshs3_manage_schedule": {
-        const op = str("operation") || "list";
+        const op = only(rawOperation(p, "list"), ["list", "save", "toggle", "delete"]);
         if (op === "list") {
           return { schedules: hub.store.data.schedules };
         }
-        const q = (str("idOrTitle") || str("id") || str("title") || "").toLowerCase();
-        const existing = hub.store.data.schedules.find(
-          (s) => s.id.toLowerCase() === q || s.title.toLowerCase() === q || s.title.toLowerCase().includes(q),
-        );
+        const q = (optStr(p, "idOrTitle") || optStr(p, "id") || optStr(p, "title") || "").toLowerCase();
+        const existing = q
+          ? hub.store.data.schedules.find(
+              (s) => s.id.toLowerCase() === q || s.title.toLowerCase() === q || s.title.toLowerCase().includes(q),
+            )
+          : undefined;
         if (op === "delete") {
-          const targetId = existing?.id || str("idOrTitle") || str("id");
-          if (!targetId) throw new Error("Schedule not found");
+          const targetId = existing?.id || optStr(p, "idOrTitle") || optStr(p, "id");
+          if (!targetId) throw new Error('delete schedule requires "idOrTitle" or "id".');
           await hub.request({ action: "schedule-delete", id: targetId });
           return { ok: true, operation: "delete", deletedScheduleId: targetId };
         }
         if (op === "toggle") {
+          if (!q) throw new Error('toggle schedule requires "idOrTitle", "id", or "title".');
           if (!existing) throw new Error(`Schedule matching "${q}" not found`);
-          existing.enabled = bool("enabled") ?? !existing.enabled;
+          const explicitEnabled = optBool(p, "enabled");
+          existing.enabled = explicitEnabled ?? !existing.enabled;
           await hub.store.save();
           hub.changed();
           return { ok: true, operation: "toggle", schedule: existing };
         }
         // save / create schedule
-        const srvQuery = str("serverIdOrName") || str("profileId");
+        const titleInput = optStr(p, "title");
+        const promptInput = optStr(p, "prompt");
+        if (!existing && (!titleInput || !promptInput)) {
+          throw new Error('save schedule requires "title" and "prompt" when creating a new schedule.');
+        }
+        const srvQuery = optStr(p, "serverIdOrName") || optStr(p, "profileId");
         let profileId = "local";
         if (srvQuery && srvQuery.toLowerCase() !== "local") {
           const matchedSrv = await hub.resolveServerTarget(srvQuery);
@@ -690,23 +1216,31 @@ export async function handleAppAction(
           profileId = existing.profileId;
         }
         const cfg = await hub.config.getConfig();
-        const intervalMinutes = Math.max(1, Math.min(525600, Math.round(num("intervalMinutes") ?? existing?.intervalMinutes ?? 60)));
-        const defaultShell =
-          profileId === "local" && process.platform === "win32" ? "powershell" : "bash";
+        const intervalMinutesRaw = optInt(p, "intervalMinutes", { min: 1, max: 525600 });
+        const intervalMinutes = intervalMinutesRaw ?? existing?.intervalMinutes ?? 60;
+        const maxCommands = optInt(p, "maxCommands", { min: 1, max: 100 }) ?? existing?.maxCommands ?? 10;
+        const maxMinutes = optInt(p, "maxMinutes", { min: 1, max: 120 }) ?? existing?.maxMinutes ?? 10;
+        const shell =
+          optEnum(p, "shell", ["powershell", "bash", "zsh", "sh", "cmd"]) ??
+          existing?.shell ??
+          (profileId === "local" && process.platform === "win32" ? "powershell" : "bash");
+        const mode =
+          optEnum(p, "mode", ["advice", "assisted", "autonomous"]) ?? existing?.mode ?? "assisted";
+        const enabled = optBool(p, "enabled") ?? existing?.enabled ?? true;
         const schedule: AgentSchedule = {
           id: existing?.id || crypto.randomUUID(),
-          title: str("title") || existing?.title || "Scheduled check",
-          prompt: str("prompt") || existing?.prompt || "Check system health",
+          title: titleInput ?? existing!.title,
+          prompt: promptInput ?? existing!.prompt,
           profileId,
-          shell: (str("shell") as AgentSchedule["shell"]) || existing?.shell || defaultShell,
-          mode: (str("mode") as AgentSchedule["mode"]) || existing?.mode || "assisted",
+          shell,
+          mode,
           provider: cfg.provider || "openai-codex",
           model: cfg.model || DEFAULT_AI_MODELS["openai-codex"],
           baseUrl: cfg.baseUrl,
           intervalMinutes,
-          maxCommands: Math.max(1, Math.min(100, Math.round(num("maxCommands") ?? existing?.maxCommands ?? 10))),
-          maxMinutes: Math.max(1, Math.min(120, Math.round(num("maxMinutes") ?? existing?.maxMinutes ?? 10))),
-          enabled: bool("enabled") ?? existing?.enabled ?? true,
+          maxCommands,
+          maxMinutes,
+          enabled,
           nextRunAt: Date.now() + intervalMinutes * 60_000,
         };
         await hub.request({ action: "schedule-save", schedule });
@@ -714,7 +1248,17 @@ export async function handleAppAction(
       }
 
       case "sshs3_manage_s3_and_sync": {
-        const op = str("operation") || "status";
+        const op = only(rawOperation(p, "status"), [
+          "status",
+          "configure_s3_workspace",
+          "sync_now",
+          "disconnect_s3_workspace",
+          "upsert_s3_profile",
+          "delete_s3_profile",
+          "list_dir_sync_profiles",
+          "save_dir_sync_profile",
+          "delete_dir_sync_profile",
+        ]);
         const extra = await hub.collectExtraContext();
         if (op === "status") {
           return {
@@ -739,20 +1283,25 @@ export async function handleAppAction(
           };
         }
         if (op === "configure_s3_workspace") {
+          const inviteCode = optStr(p, "inviteCode");
+          const bucket = optStr(p, "bucket");
+          if (!inviteCode && !bucket) {
+            throw new Error('configure_s3_workspace requires "bucket" or "inviteCode".');
+          }
           await hub.request({
             action: "workspace-s3-configure",
             config: {
-              enabled: bool("enabled") ?? true,
-              endpoint: str("endpoint"),
-              region: str("region") || "eu-north-1",
-              bucket: str("bucket") || "",
-              prefix: str("prefix") || "sshs3-workspace",
-              accessKeyId: str("accessKeyId") || "",
-              secretAccessKey: str("secretAccessKey"),
-              forcePathStyle: bool("forcePathStyle") ?? true,
-              actorName: str("actorName"),
+              enabled: optBool(p, "enabled") ?? true,
+              endpoint: optStr(p, "endpoint"),
+              region: optStr(p, "region") || "eu-north-1",
+              bucket: bucket || "",
+              prefix: optStr(p, "prefix") || "sshs3-workspace",
+              accessKeyId: optStr(p, "accessKeyId") || "",
+              secretAccessKey: optStr(p, "secretAccessKey"),
+              forcePathStyle: optBool(p, "forcePathStyle") ?? true,
+              actorName: optStr(p, "actorName"),
             },
-            inviteCode: str("inviteCode"),
+            inviteCode,
           });
           return {
             ok: true,
@@ -768,43 +1317,57 @@ export async function handleAppAction(
             s3TeamWorkspace: hub.s3Workspace.getStatus(),
           };
         }
-        const rawAuthMethod = str("authMethod");
-        const authMethod: "accessKey" | "awsProfile" | "awsSso" | undefined =
-          rawAuthMethod === "accessKey" ||
-          rawAuthMethod === "awsProfile" ||
-          rawAuthMethod === "awsSso"
-            ? rawAuthMethod
-            : undefined;
+        const idOrName = optStr(p, "idOrName") || optStr(p, "id") || optStr(p, "name");
+        if ((op === "delete_s3_profile" || op === "delete_dir_sync_profile") && !idOrName) {
+          throw new Error(`${op} requires "idOrName", "id", or "name".`);
+        }
+        if (op === "upsert_s3_profile" && !optStr(p, "name") && !idOrName) {
+          throw new Error('upsert_s3_profile requires "name" (or "idOrName").');
+        }
+        if (op === "save_dir_sync_profile") {
+          if (!optStr(p, "sourcePath") || !optStr(p, "targetPath")) {
+            throw new Error('save_dir_sync_profile requires "sourcePath" and "targetPath".');
+          }
+        }
+        const authMethod = optEnum(p, "authMethod", ["accessKey", "awsProfile", "awsSso"]);
         const res = await hub.host.manageS3Profile?.({
-          operation: op as
-            | "upsert_s3_profile"
-            | "delete_s3_profile"
-            | "list_dir_sync_profiles"
-            | "save_dir_sync_profile"
-            | "delete_dir_sync_profile",
-          idOrName: str("idOrName") || str("id") || str("name"),
-          name: str("name"),
-          endpoint: str("endpoint"),
-          region: str("region"),
-          bucket: str("bucket"),
-          accessKeyId: str("accessKeyId"),
-          secretAccessKey: str("secretAccessKey"),
-          forcePathStyle: bool("forcePathStyle"),
-          group: str("group") || str("folder"),
+          operation: op,
+          idOrName,
+          name: optStr(p, "name"),
+          endpoint: optStr(p, "endpoint"),
+          region: optStr(p, "region"),
+          bucket: optStr(p, "bucket"),
+          accessKeyId: optStr(p, "accessKeyId"),
+          secretAccessKey: optStr(p, "secretAccessKey"),
+          forcePathStyle: optBool(p, "forcePathStyle"),
+          group: optStr(p, "group") || optStr(p, "folder"),
           authMethod,
-          awsProfile: str("awsProfile"),
-          sourceProviderId: str("sourceProviderId"),
-          sourcePath: str("sourcePath"),
-          targetProviderId: str("targetProviderId"),
-          targetPath: str("targetPath"),
-          deleteExtraneous: bool("deleteExtraneous"),
+          awsProfile: optStr(p, "awsProfile"),
+          sourceProviderId: optStr(p, "sourceProviderId"),
+          sourcePath: optStr(p, "sourcePath"),
+          targetProviderId: optStr(p, "targetProviderId"),
+          targetPath: optStr(p, "targetPath"),
+          deleteExtraneous: optBool(p, "deleteExtraneous"),
         });
         hub.changed();
         return { ok: true, operation: op, result: res };
       }
 
       case "sshs3_manage_app_and_settings": {
-        const op = str("operation") || "get_state";
+        const op = only(rawOperation(p, "get_state"), [
+          "get_state",
+          "update_settings",
+          "configure_ai",
+          "update_shortcuts",
+          "update_safety_policy",
+          "list_dotfiles",
+          "save_dotfile",
+          "delete_dotfile",
+          "list_snippets",
+          "save_snippet",
+          "delete_snippet",
+          "open_local_terminal",
+        ]);
         if (op === "get_state") {
           const extra = await hub.collectExtraContext();
           const aiConfig = await hub.config.getView();
@@ -836,25 +1399,22 @@ export async function handleAppAction(
         ) {
           // Demo mode is decided at launch and only the user can switch it (the Demo-Lab toggle restarts
           // sshs3 after a confirmation): a `demoMode` value from the model is never applied.
-          const demoModeRequested = bool("demoMode");
+          const demoModeRequested = optBool(p, "demoMode");
           const rawPolicy =
             p.safetyPolicy &&
             typeof p.safetyPolicy === "object" &&
             !Array.isArray(p.safetyPolicy)
               ? (p.safetyPolicy as Record<string, unknown>)
               : undefined;
-          const nextAutoApprove =
-            typeof rawPolicy?.autoApproveSafeReadOnly === "boolean"
-              ? rawPolicy.autoApproveSafeReadOnly
-              : bool("autoApproveSafeReadOnly");
-          const nextRequireProd =
-            typeof rawPolicy?.requireApprovalOnProdTags === "boolean"
-              ? rawPolicy.requireApprovalOnProdTags
-              : bool("requireApprovalOnProdTags");
-          const nextBlockDestructive =
-            typeof rawPolicy?.blockDestructiveWithoutConfirm === "boolean"
-              ? rawPolicy.blockDestructiveWithoutConfirm
-              : bool("blockDestructiveWithoutConfirm");
+          const nextAutoApprove = rawPolicy
+            ? optBool(rawPolicy, "autoApproveSafeReadOnly")
+            : optBool(p, "autoApproveSafeReadOnly");
+          const nextRequireProd = rawPolicy
+            ? optBool(rawPolicy, "requireApprovalOnProdTags")
+            : optBool(p, "requireApprovalOnProdTags");
+          const nextBlockDestructive = rawPolicy
+            ? optBool(rawPolicy, "blockDestructiveWithoutConfirm")
+            : optBool(p, "blockDestructiveWithoutConfirm");
           if (
             nextAutoApprove !== undefined ||
             nextRequireProd !== undefined ||
@@ -877,54 +1437,63 @@ export async function handleAppAction(
           }
 
           const aiConfigPatch: Record<string, unknown> = {};
-          if (bool("aiEnabled") !== undefined) aiConfigPatch.enabled = bool("aiEnabled");
-          if (str("aiProvider")) aiConfigPatch.provider = str("aiProvider");
-          if (str("aiModel")) aiConfigPatch.model = str("aiModel");
-          if (str("aiBaseUrl") !== undefined) aiConfigPatch.baseUrl = str("aiBaseUrl");
-          if (str("actorName")) aiConfigPatch.actorName = str("actorName");
-          if (num("contextWindowTokens") !== undefined) {
-            aiConfigPatch.contextWindowTokens = Math.max(
-              4000,
-              Math.min(1_000_000, Math.round(num("contextWindowTokens")!)),
-            );
+          const aiEnabled = optBool(p, "aiEnabled");
+          if (aiEnabled !== undefined) aiConfigPatch.enabled = aiEnabled;
+          const aiProvider = optStr(p, "aiProvider");
+          if (aiProvider) aiConfigPatch.provider = aiProvider;
+          const aiModel = optStr(p, "aiModel");
+          if (aiModel) aiConfigPatch.model = aiModel;
+          const aiBaseUrl = optStr(p, "aiBaseUrl");
+          if (aiBaseUrl !== undefined) aiConfigPatch.baseUrl = aiBaseUrl;
+          const actorName = optStr(p, "actorName");
+          if (actorName) aiConfigPatch.actorName = actorName;
+          const contextWindowTokens = optInt(p, "contextWindowTokens", {
+            min: 4000,
+            max: 1_000_000,
+          });
+          if (contextWindowTokens !== undefined) {
+            aiConfigPatch.contextWindowTokens = contextWindowTokens;
           }
-          if (num("terminalContextChars") !== undefined) {
-            aiConfigPatch.terminalContextChars = Math.max(
-              1000,
-              Math.min(64_000, Math.round(num("terminalContextChars")!)),
-            );
+          const terminalContextChars = optInt(p, "terminalContextChars", {
+            min: 1000,
+            max: 64_000,
+          });
+          if (terminalContextChars !== undefined) {
+            aiConfigPatch.terminalContextChars = terminalContextChars;
           }
-          if (num("maxOutputTokens") !== undefined) {
-            aiConfigPatch.maxOutputTokens = Math.max(
-              512,
-              Math.min(32_768, Math.round(num("maxOutputTokens")!)),
-            );
+          const maxOutputTokens = optInt(p, "maxOutputTokens", {
+            min: 512,
+            max: 32_768,
+          });
+          if (maxOutputTokens !== undefined) {
+            aiConfigPatch.maxOutputTokens = maxOutputTokens;
           }
-          if (num("maxToolTurns") !== undefined) {
-            aiConfigPatch.maxToolTurns = Math.max(
-              1,
-              Math.min(60, Math.round(num("maxToolTurns")!)),
-            );
+          const maxToolTurns = optInt(p, "maxToolTurns", { min: 1, max: 60 });
+          if (maxToolTurns !== undefined) {
+            aiConfigPatch.maxToolTurns = maxToolTurns;
           }
-          if (
-            str("reasoningEffort") === "low" ||
-            str("reasoningEffort") === "medium" ||
-            str("reasoningEffort") === "high"
-          ) {
-            aiConfigPatch.reasoningEffort = str("reasoningEffort");
+          const reasoningEffort = optEnum(p, "reasoningEffort", [
+            "low",
+            "medium",
+            "high",
+          ]);
+          if (reasoningEffort) {
+            aiConfigPatch.reasoningEffort = reasoningEffort;
           }
-          if (num("temperature") !== undefined) {
-            aiConfigPatch.temperature = Math.max(
-              0,
-              Math.min(1, Number(num("temperature"))),
-            );
+          const temperature = optNum(p, "temperature", { min: 0, max: 1 });
+          if (temperature !== undefined) {
+            aiConfigPatch.temperature = temperature;
           }
 
+          const prefBackground = optBool(p, "background");
+          const prefAutoStart = optBool(p, "autoStart");
+          const prefInventory = optBool(p, "inventory");
+          const prefRetentionDays = optInt(p, "retentionDays", { min: 1, max: 365 });
           const hasPrefUpdates =
-            bool("background") !== undefined ||
-            bool("autoStart") !== undefined ||
-            bool("inventory") !== undefined ||
-            num("retentionDays") !== undefined;
+            prefBackground !== undefined ||
+            prefAutoStart !== undefined ||
+            prefInventory !== undefined ||
+            prefRetentionDays !== undefined;
 
           if (Object.keys(aiConfigPatch).length > 0 || hasPrefUpdates) {
             await hub.request({
@@ -933,15 +1502,13 @@ export async function handleAppAction(
               preferences: hasPrefUpdates
                 ? {
                     background:
-                      bool("background") ?? hub.store.data.preferences.background,
+                      prefBackground ?? hub.store.data.preferences.background,
                     autoStart:
-                      bool("autoStart") ?? hub.store.data.preferences.autoStart,
+                      prefAutoStart ?? hub.store.data.preferences.autoStart,
                     inventory:
-                      bool("inventory") ?? hub.store.data.preferences.inventory,
+                      prefInventory ?? hub.store.data.preferences.inventory,
                     retentionDays:
-                      num("retentionDays") !== undefined
-                        ? Math.max(1, Math.min(365, Math.round(num("retentionDays")!)))
-                        : hub.store.data.preferences.retentionDays,
+                      prefRetentionDays ?? hub.store.data.preferences.retentionDays,
                   }
                 : undefined,
             });
@@ -1015,22 +1582,25 @@ export async function handleAppAction(
               }
             }
           }
-          if (str("shortcutId") && str("shortcutKeys")) {
-            shortcutsPatch[str("shortcutId")!] = str("shortcutKeys")!;
+          const shortcutId = optStr(p, "shortcutId");
+          const shortcutKeys = optStr(p, "shortcutKeys");
+          if (shortcutId && shortcutKeys) {
+            shortcutsPatch[shortcutId] = shortcutKeys;
           }
+          const resetShortcuts = optBool(p, "resetShortcuts");
 
           let updatedAppSettings: unknown;
           if (
             Object.keys(appSettingsPatch).length > 0 ||
             Object.keys(shortcutsPatch).length > 0 ||
-            bool("resetShortcuts")
+            resetShortcuts
           ) {
             updatedAppSettings = await hub.host.manageAppSettings?.({
               operation: op === "update_shortcuts" ? "update_shortcuts" : "update_settings",
               settings: appSettingsPatch,
               shortcuts:
                 Object.keys(shortcutsPatch).length > 0 ? shortcutsPatch : undefined,
-              resetShortcuts: bool("resetShortcuts"),
+              resetShortcuts,
             });
           }
           hub.changed();
@@ -1057,39 +1627,51 @@ export async function handleAppAction(
           op === "save_dotfile" ||
           op === "delete_dotfile"
         ) {
+          const remotePath = optStr(p, "remotePath") || optStr(p, "path");
+          const poolId = optStr(p, "poolId") || optStr(p, "id");
+          const poolName = optStr(p, "poolName") || optStr(p, "name");
+          const deletePool = optBool(p, "deletePool");
+          if (op === "save_dotfile" && !remotePath) {
+            throw new Error('save_dotfile requires "remotePath" (or "path").');
+          }
+          if (op === "delete_dotfile" && !remotePath && !poolId && !poolName) {
+            throw new Error('delete_dotfile requires "remotePath", "poolId", or "poolName".');
+          }
           const res = await hub.host.manageAppSettings?.({
             operation: op,
             dotfile: {
-              poolId: str("poolId") || str("id"),
-              poolName: str("poolName") || str("name"),
-              remotePath: str("remotePath") || str("path"),
-              content: typeof p.content === "string" ? p.content : str("text"),
-              mode: str("mode"),
-              deletePool: bool("deletePool"),
+              poolId,
+              poolName,
+              remotePath,
+              content: typeof p.content === "string" ? p.content : optStr(p, "text"),
+              mode: optStr(p, "mode"),
+              deletePool,
             },
           });
           hub.changed();
           return { ok: true, operation: op, result: res };
         }
-        if (
-          op === "list_snippets" ||
-          op === "save_snippet" ||
-          op === "delete_snippet" ||
-          op === "open_local_terminal"
-        ) {
-          const res = await hub.host.manageAppSettings?.({
-            operation: op,
-            snippet: {
-              id: str("snippetId") || str("id"),
-              name: str("snippetName") || str("name"),
-              command: str("snippetCommand") || str("command"),
-              category: str("snippetCategory") || str("category"),
-            },
-          });
-          hub.changed();
-          return { ok: true, operation: op, result: res };
+        // op is guaranteed to be list_snippets | save_snippet | delete_snippet | open_local_terminal
+        const snippetId = optStr(p, "snippetId") || optStr(p, "id");
+        const snippetName = optStr(p, "snippetName") || optStr(p, "name");
+        const snippetCommand = optStr(p, "snippetCommand") || optStr(p, "command");
+        if (op === "save_snippet" && (!snippetName || !snippetCommand)) {
+          throw new Error('save_snippet requires "snippetName" (or "name") and "snippetCommand" (or "command").');
         }
-        throw new Error(`Unsupported app settings operation: ${op}`);
+        if (op === "delete_snippet" && !snippetId && !snippetName) {
+          throw new Error('delete_snippet requires "snippetId", "id", or "snippetName".');
+        }
+        const res = await hub.host.manageAppSettings?.({
+          operation: op,
+          snippet: {
+            id: snippetId,
+            name: snippetName,
+            command: snippetCommand,
+            category: optStr(p, "snippetCategory") || optStr(p, "category"),
+          },
+        });
+        hub.changed();
+        return { ok: true, operation: op, result: res };
       }
 
       case PLAN_TOOL.name: {
@@ -1144,7 +1726,7 @@ export async function handleAppAction(
         const goals = (hub.store.data.workGoals ?? []).filter((g) => !g.deleted);
         const agents = hub.getAgentsList();
         const mine = tickets.find((t) => t.id === task.ticketId);
-        const op = str("operation") || "list";
+        const op = only(rawOperation(p, "list"), ["list", "read", "create", "comment"]);
         const brief = (t: (typeof tickets)[number]) => ({
           id: t.id,
           title: t.title,
@@ -1175,8 +1757,9 @@ export async function handleAppAction(
             })),
           };
         if (op === "read") {
-          const found = tickets.find((t) => t.id === str("id"));
-          if (!found) throw new Error(`No ticket with id ${str("id") ?? ""}`);
+          const ticketId = reqStr(p, "id", "read ticket");
+          const found = tickets.find((t) => t.id === ticketId);
+          if (!found) throw new Error(`No ticket with id ${ticketId}`);
           return {
             ...brief(found),
             description: found.description,
@@ -1191,50 +1774,48 @@ export async function handleAppAction(
         // The agent, for the person it works for: on a shared board, whose assistant opened or closed a ticket.
         const author = `${task.agentName || "Assistant"} (agent, for ${await hub.resolveActorName()})`;
         if (op === "comment") {
-          const id = str("id");
-          const text = str("text");
+          const id = optStr(p, "id");
+          const text = optStr(p, "text");
           if (!id || !text) throw new Error("comment needs id and text");
           if (!tickets.some((t) => t.id === id)) throw new Error(`No ticket with id ${id}`);
           hub.commentTicket(id, author, text);
           return { ok: true, id };
         }
-        if (op === "create") {
-          const title = str("title");
-          if (!title) throw new Error("create needs a title");
-          // One run hands out a handful of tickets, not a flood.
-          const handedOut = tickets.filter(
-            (t) => t.createdBy === author && Date.now() - t.createdAt < 60 * 60_000,
-          ).length;
-          if (handedOut >= 10)
-            throw new Error(
-              "This agent created 10 tickets in the last hour. Finish or review those before adding more.",
-            );
-          const wanted = str("assignee")?.toLowerCase();
-          const agent = wanted
-            ? agents.find((a) => a.id.toLowerCase() === wanted || a.name.toLowerCase() === wanted) ??
-              agents.find((a) => a.name.toLowerCase().includes(wanted))
-            : undefined;
-          if (wanted && !agent)
-            throw new Error(
-              `No agent called "${str("assignee")}". The team: ${agents.map((a) => a.name).join(", ")}`,
-            );
-          const created = await hub.saveTicketFrom(
-            {
-              title,
-              description: str("description"),
-              assigneeAgentId: agent?.id,
-              goalId: str("goal") || mine?.goalId,
-              target: str("target") || mine?.target,
-              parentId: mine?.id,
-              // Made while working a ticket from outside the team: the mark goes with it.
-              outside: mine?.outside ? `made while working "${mine.title}" (${mine.outside})` : undefined,
-            },
-            author,
-            true,
+        // create
+        const title = optStr(p, "title");
+        if (!title) throw new Error("create needs a title");
+        // One run hands out a handful of tickets, not a flood.
+        const handedOut = tickets.filter(
+          (t) => t.createdBy === author && Date.now() - t.createdAt < 60 * 60_000,
+        ).length;
+        if (handedOut >= 10)
+          throw new Error(
+            "This agent created 10 tickets in the last hour. Finish or review those before adding more.",
           );
-          return { ok: true, ticket: brief(created) };
-        }
-        throw new Error(`Unknown operation ${op}`);
+        const wanted = optStr(p, "assignee")?.toLowerCase();
+        const agent = wanted
+          ? agents.find((a) => a.id.toLowerCase() === wanted || a.name.toLowerCase() === wanted) ??
+            agents.find((a) => a.name.toLowerCase().includes(wanted))
+          : undefined;
+        if (wanted && !agent)
+          throw new Error(
+            `No agent called "${optStr(p, "assignee")}". The team: ${agents.map((a) => a.name).join(", ")}`,
+          );
+        const created = await hub.saveTicketFrom(
+          {
+            title,
+            description: optStr(p, "description"),
+            assigneeAgentId: agent?.id,
+            goalId: optStr(p, "goal") || mine?.goalId,
+            target: optStr(p, "target") || mine?.target,
+            parentId: mine?.id,
+            // Made while working a ticket from outside the team: the mark goes with it.
+            outside: mine?.outside ? `made while working "${mine.title}" (${mine.outside})` : undefined,
+          },
+          author,
+          true,
+        );
+        return { ok: true, ticket: brief(created) };
       }
 
       case "sshs3_session_search": {
@@ -1316,11 +1897,14 @@ export async function handleAppAction(
       }
 
       case "sshs3_cluster_exec": {
-        const command = str("command");
+        const command = optStr(p, "command");
         const description =
-          str("description") || "Run parallel command across cluster";
-        const clusterName = str("cluster")?.replace(/^@cluster:/i, "");
+          optStr(p, "description") || "Run staged command across cluster";
+        const clusterName = optStr(p, "cluster")?.replace(/^@cluster:/i, "");
         if (!command) throw new Error("command is required for sshs3_cluster_exec");
+        const canaryFirst = optBool(p, "canaryFirst") ?? true;
+        const batchSize = optInt(p, "batchSize", { min: 1, max: 50 }) ?? 5;
+        const stopOnFirstFailure = optBool(p, "stopOnFirstFailure") ?? true;
 
         const extra = await hub.collectExtraContext();
         const allServers = extra.workspaceServers ?? [];
@@ -1362,19 +1946,46 @@ export async function handleAppAction(
           );
         }
 
+        const roleCounts: Record<string, number> = {};
+        for (const srv of matchedServers) {
+          const role = srv.nodeRole || srv.role || "unspecified";
+          roleCounts[role] = (roleCounts[role] ?? 0) + 1;
+        }
+        const roleSummary = Object.entries(roleCounts)
+          .map(([role, count]) => `${role}:${count}`)
+          .join(", ");
+        const hasProdMarker = (values: Array<string | undefined>): boolean =>
+          values.some(
+            (v) =>
+              typeof v === "string" &&
+              v
+                .split(/[\s,_-]+/)
+                .filter(Boolean)
+                .some((tok) => isProdTag(tok)),
+          );
+        const isProdTarget =
+          hasProdMarker([clusterName]) ||
+          matchedServers.some((srv) =>
+            hasProdMarker([...(srv.tags ?? []), srv.cluster, srv.name]),
+          );
+        const planSummary = canaryFirst
+          ? `canary + batches of ${batchSize}`
+          : `batches of ${batchSize}`;
+
         const targetSummary = clusterName
           ? `Cluster ${clusterName} (${matchedServers.map((s) => s.name).join(", ")})`
           : matchedServers.map((s) => s.name).join(", ");
 
         const safety = analyzeCommandSafety(command);
-        // Shown in full for approval or refused: it runs on every node exactly as written.
+        // Shown in full for approval or refused: target node roles & count are reported before execution.
         const shown = forApproval(command, 8000, "command");
         const change: AgentChange = {
           id: crypto.randomUUID(),
           kind: "command",
           target: targetSummary,
+          blastRadius: `${matchedServers.length} nodes (${roleSummary})${isProdTarget ? " [PROD]" : ""}`,
           description: clip(
-            `[Parallel Cluster Exec · ${matchedServers.length} nodes] ${description}`,
+            `[${isProdTarget ? "PROD · " : ""}Staged Cluster Exec (${planSummary}) · ${matchedServers.length} nodes · roles: ${roleSummary}] ${description}`,
             400,
           ),
           command: shown.text,
@@ -1395,146 +2006,191 @@ export async function handleAppAction(
         change.status = "running";
         hub.changed();
 
-        const perNodeResults = await Promise.all(
-          matchedServers.map(async (srv) => {
-            const openSession = hub.terminals
-              .list()
-              .find(
-                (t) =>
-                  t.state !== "disconnected" &&
-                  // This node's own terminal and no other: "web-1" must not find "web-10".
-                  (t.profileId === srv.id || t.label.toLowerCase() === srv.name.toLowerCase()),
+        const executeClusterNode = async (srv: WorkspaceServerSummary) => {
+          const openSession = hub.terminals
+            .list()
+            .find(
+              (t) =>
+                t.state !== "disconnected" &&
+                // This node's own terminal and no other: "web-1" must not find "web-10".
+                (t.profileId === srv.id || t.label.toLowerCase() === srv.name.toLowerCase()),
+            );
+          if (openSession) {
+            try {
+              const ready = await hub.terminals.ensureReady(openSession.id);
+              hub.terminals.claim(ready.id, ready.generation, task.id);
+              const res = await hub.terminals.execute(
+                ready.id,
+                ready.generation,
+                task.id,
+                command,
               );
-            if (openSession) {
-              try {
-                const ready = await hub.terminals.ensureReady(openSession.id);
-                hub.terminals.claim(ready.id, ready.generation, task.id);
-                const res = await hub.terminals.execute(
-                  ready.id,
-                  ready.generation,
-                  task.id,
-                  command,
-                );
-                return {
-                  node: srv.name,
-                  host: srv.host,
-                  nodeRole: srv.nodeRole,
-                  exitCode: res.exitCode,
-                  output: res.output,
-                  source: `terminal:${ready.id}`,
-                };
-              } catch (err) {
-                // Not "failed": a timeout or a lost terminal leaves it unknown whether it ran.
-                return {
-                  node: srv.name,
-                  host: srv.host,
-                  nodeRole: srv.nodeRole,
-                  exitCode: -1,
-                  output: `Unknown whether it ran: ${safeError(err)}`,
-                  source: `terminal:${openSession.id}`,
-                };
-              }
-            }
-            if (isDemoTarget(srv.id)) {
               return {
                 node: srv.name,
                 host: srv.host,
                 nodeRole: srv.nodeRole,
-                exitCode: 0,
-                output: simulateDemoNodeCommand(srv, command),
-                source: `demo-cluster:${srv.id}`,
+                exitCode: res.exitCode,
+                output: res.output,
+                source: `terminal:${ready.id}`,
+              };
+            } catch (err) {
+              // Not "failed": a timeout or a lost terminal leaves it unknown whether it ran.
+              return {
+                node: srv.name,
+                host: srv.host,
+                nodeRole: srv.nodeRole,
+                exitCode: -1,
+                output: `Unknown whether it ran: ${safeError(err)}`,
+                source: `terminal:${openSession.id}`,
               };
             }
-            if (hub.host.openServerTerminal) {
-              let sessionId: string;
-              try {
-                // Comes back connected at its prompt, or throws having closed what it opened.
-                sessionId = await hub.host.openServerTerminal(srv.id);
-              } catch (err) {
-                // Nothing was typed anywhere: this is "did not run", not "unknown whether it ran".
-                return {
-                  node: srv.name,
-                  host: srv.host,
-                  nodeRole: srv.nodeRole,
-                  exitCode: 1,
-                  output: `Not run: ${safeError(err)}`,
-                  source: `unconnected:${srv.id}`,
-                };
-              }
-              // The run's own terminal on that node: closed when the run ends, not left as somebody's tab.
-              hub.closeWhenRunEnds(task.id, sessionId);
-              try {
-                const ready = await hub.terminals.ensureReady(sessionId);
-                hub.terminals.claim(ready.id, ready.generation, task.id);
-                const res = await hub.terminals.execute(
-                  ready.id,
-                  ready.generation,
-                  task.id,
-                  command,
-                );
-                return {
-                  node: srv.name,
-                  host: srv.host,
-                  nodeRole: srv.nodeRole,
-                  exitCode: res.exitCode,
-                  output: res.output,
-                  source: `terminal:${ready.id}`,
-                };
-              } catch (err) {
-                return {
-                  node: srv.name,
-                  host: srv.host,
-                  nodeRole: srv.nodeRole,
-                  exitCode: -1,
-                  output: `Unknown whether it ran: ${safeError(err)}`,
-                  source: `ssh:${srv.id}`,
-                };
-              }
-            }
+          }
+          if (isDemoTarget(srv.id)) {
             return {
               node: srv.name,
               host: srv.host,
               nodeRole: srv.nodeRole,
-              exitCode: 1,
-              output: "No open terminal for this node",
-              source: `unconnected:${srv.id}`,
+              exitCode: 0,
+              output: simulateDemoNodeCommand(srv, command),
+              source: `demo-cluster:${srv.id}`,
             };
-          }),
-        );
+          }
+          if (hub.host.openServerTerminal) {
+            let sessionId: string;
+            try {
+              // Comes back connected at its prompt, or throws having closed what it opened.
+              sessionId = await hub.host.openServerTerminal(srv.id);
+            } catch (err) {
+              // Nothing was typed anywhere: this is "did not run", not "unknown whether it ran".
+              return {
+                node: srv.name,
+                host: srv.host,
+                nodeRole: srv.nodeRole,
+                exitCode: 1,
+                output: `Not run: ${safeError(err)}`,
+                source: `unconnected:${srv.id}`,
+              };
+            }
+            // The run's own terminal on that node: closed when the run ends, not left as somebody's tab.
+            hub.closeWhenRunEnds(task.id, sessionId);
+            try {
+              const ready = await hub.terminals.ensureReady(sessionId);
+              hub.terminals.claim(ready.id, ready.generation, task.id);
+              const res = await hub.terminals.execute(
+                ready.id,
+                ready.generation,
+                task.id,
+                command,
+              );
+              return {
+                node: srv.name,
+                host: srv.host,
+                nodeRole: srv.nodeRole,
+                exitCode: res.exitCode,
+                output: res.output,
+                source: `terminal:${ready.id}`,
+              };
+            } catch (err) {
+              return {
+                node: srv.name,
+                host: srv.host,
+                nodeRole: srv.nodeRole,
+                exitCode: -1,
+                output: `Unknown whether it ran: ${safeError(err)}`,
+                source: `ssh:${srv.id}`,
+              };
+            }
+          }
+          return {
+            node: srv.name,
+            host: srv.host,
+            nodeRole: srv.nodeRole,
+            exitCode: 1,
+            output: "No open terminal for this node",
+            source: `unconnected:${srv.id}`,
+          };
+        };
 
-        const allOk = perNodeResults.every((r) => r.exitCode === 0);
+        const perNodeResults: Array<Awaited<ReturnType<typeof executeClusterNode>>> = [];
+        const remaining = [...matchedServers];
+        let stagesCompleted = 0;
+        let aborted = false;
+        let abortReason: string | undefined;
+
+        if (canaryFirst && remaining.length > 0) {
+          const canaryNode = remaining.shift()!;
+          const canaryResult = await executeClusterNode(canaryNode);
+          perNodeResults.push(canaryResult);
+          stagesCompleted += 1;
+          if (stopOnFirstFailure && canaryResult.exitCode !== 0 && remaining.length > 0) {
+            aborted = true;
+            abortReason = `Stopped after canary node "${canaryNode.name}" returned exitCode ${canaryResult.exitCode}.`;
+          }
+        }
+
+        while (!aborted && remaining.length > 0) {
+          const batch = remaining.splice(0, batchSize);
+          const batchResults = await Promise.all(batch.map((srv) => executeClusterNode(srv)));
+          perNodeResults.push(...batchResults);
+          stagesCompleted += 1;
+          const failed = batchResults.find((r) => r.exitCode !== 0);
+          if (stopOnFirstFailure && failed && remaining.length > 0) {
+            aborted = true;
+            abortReason = `Stopped after stage ${stagesCompleted} failure on "${failed.node}" (exitCode ${failed.exitCode}).`;
+          }
+        }
+
+        const allOk = !aborted && perNodeResults.every((r) => r.exitCode === 0);
         const unknown = perNodeResults.some((r) => r.exitCode === -1);
         change.status = allOk ? "completed" : unknown ? "uncertain" : "failed";
         change.exitCode = allOk ? 0 : 1;
-        change.output = perNodeResults
+        const resultBody = perNodeResults
           .map(
             (r) =>
               `=== ${r.node} (${r.host}${r.nodeRole ? ` · ${r.nodeRole}` : ""}) [exit ${r.exitCode}] ===\n${r.output}`,
           )
           .join("\n\n");
+        change.output = abortReason ? `${abortReason}\n\n${resultBody}` : resultBody;
         void hub.recordAgentChangeActivity(task, change);
         hub.changed();
         return {
           ok: allOk,
           ref: change.ref,
           cluster: clusterName,
-          nodeCount: perNodeResults.length,
+          nodeCount: matchedServers.length,
+          executedCount: perNodeResults.length,
+          roleCounts,
+          prodTarget: isProdTarget,
+          canaryFirst,
+          batchSize,
+          stopOnFirstFailure,
+          stagesCompleted,
+          aborted,
+          ...(abortReason
+            ? {
+                abortReason,
+                skippedNodes: remaining.map((s) => s.name),
+              }
+            : {}),
           results: perNodeResults,
         };
       }
 
       case "sshs3_workspace_layout": {
-        const op = (str("operation") ||
-          "open_cluster_split") as WorkspaceLayoutEvent["operation"];
-        const clusterName = str("cluster")?.replace(/^@cluster:/i, "");
+        const op = only(rawOperation(p, "open_cluster_split"), [
+          "open_terminal",
+          "open_cluster_split",
+          "open_dual_pane_explorer",
+        ]);
+        const clusterName = optStr(p, "cluster")?.replace(/^@cluster:/i, "");
         const extra = await hub.collectExtraContext();
         const allServers = extra.workspaceServers ?? [];
         const rawList = Array.isArray(p.serverIdsOrNames)
           ? (p.serverIdsOrNames as unknown[])
               .map((x) => String(x).trim())
               .filter(Boolean)
-          : str("serverIdOrName")
-            ? [str("serverIdOrName")!]
+          : optStr(p, "serverIdOrName")
+            ? [optStr(p, "serverIdOrName")!]
             : [];
 
         const matchedServers: WorkspaceServerSummary[] = [];
@@ -1564,11 +2220,8 @@ export async function handleAppAction(
           }
         }
 
-        const layoutRaw = str("layout");
         const layout: "grid" | "horizontal" | "vertical" =
-          layoutRaw === "horizontal" || layoutRaw === "vertical"
-            ? layoutRaw
-            : "grid";
+          optEnum(p, "layout", ["grid", "horizontal", "vertical"]) ?? "grid";
 
         const event: WorkspaceLayoutEvent = {
           id: crypto.randomUUID(),
@@ -1576,8 +2229,8 @@ export async function handleAppAction(
           cluster: clusterName,
           serverIds: matchedServers.map((s) => s.id),
           layout,
-          leftTargetId: str("leftTargetId") || matchedServers[0]?.id,
-          rightTargetId: str("rightTargetId") || matchedServers[1]?.id,
+          leftTargetId: optStr(p, "leftTargetId") || matchedServers[0]?.id,
+          rightTargetId: optStr(p, "rightTargetId") || matchedServers[1]?.id,
           createdAt: Date.now(),
         };
         hub.pendingLayoutEvent = event;
@@ -1595,14 +2248,25 @@ export async function handleAppAction(
       }
 
       case "sshs3_storage_ops": {
-        const op = (str("operation") || "list_files") as
-          | "list_files"
-          | "read_remote_file"
-          | "diff_paths";
-        const targetA = str("targetA") || str("serverIdOrName") || str("s3ProfileId") || "local";
-        const pathA = str("pathA") || str("path") || "/";
-        const targetB = str("targetB");
-        const pathB = str("pathB") || pathA;
+        const op = only(rawOperation(p, "list_files"), [
+          "list_files",
+          "read_remote_file",
+          "diff_paths",
+        ]);
+        const targetA = optStr(p, "targetA") || optStr(p, "serverIdOrName") || optStr(p, "s3ProfileId");
+        if (!targetA) {
+          throw new Error(`${op} requires "targetA" (or "serverIdOrName" / "s3ProfileId").`);
+        }
+        const pathAInput = optStr(p, "pathA") || optStr(p, "path");
+        if (op !== "list_files" && !pathAInput) {
+          throw new Error(`${op} requires "pathA" (or "path").`);
+        }
+        const pathA = pathAInput || "/";
+        const targetB = optStr(p, "targetB");
+        if (op === "diff_paths" && !targetB && !optStr(p, "pathB")) {
+          throw new Error('diff_paths requires "targetB" or "pathB".');
+        }
+        const pathB = optStr(p, "pathB") || pathA;
 
         // Scripted results only for the demo workspace's own fixtures (by identity, isDemoTargetRef):
         // in demo mode a real target still takes the real path.
@@ -1623,6 +2287,66 @@ export async function handleAppAction(
           targetB,
           pathB,
         });
+      }
+
+      case "sshs3_k8s_inspect": {
+        return await handleK8sInspect(p);
+      }
+
+      case "file_patch":
+      case "file-patch":
+      case "sshs3_file_patch": {
+        if (!hub.host.file) {
+          throw new Error("File patching is not configured on this host.");
+        }
+        const filePath = optStr(p, "path") || request.path;
+        if (!filePath) {
+          throw new Error('file_patch requires "path".');
+        }
+        const expectedHash =
+          optStr(p, "expectedHash") ||
+          optStr(p, "expected") ||
+          request.expectedHash ||
+          request.expected;
+        if (!expectedHash) {
+          throw new Error('file_patch requires "expectedHash" (or "expected").');
+        }
+        const rawEdits = Array.isArray(p.edits) ? p.edits : request.edits;
+        if (!Array.isArray(rawEdits) || rawEdits.length === 0) {
+          throw new Error('file_patch requires a non-empty "edits" array.');
+        }
+        const edits = rawEdits.map((item, i) => {
+          if (!item || typeof item !== "object" || Array.isArray(item)) {
+            throw new Error(`Invalid patch edit at index ${i}: expected an object with oldText and newText.`);
+          }
+          const rec = item as Record<string, unknown>;
+          if (typeof rec.oldText !== "string" || rec.oldText.length === 0 || typeof rec.newText !== "string") {
+            throw new Error(`Invalid patch edit at index ${i}: oldText must be a non-empty string and newText must be a string.`);
+          }
+          return { oldText: rec.oldText, newText: rec.newText };
+        });
+        const forwardedRequest: import("./ToolBroker").ToolRequest = {
+          ...request,
+          action: "file-patch",
+          path: filePath,
+          expectedHash,
+          expected: expectedHash,
+          edits,
+          description: optStr(p, "description") ?? request.description,
+        };
+        const priorChangeCount = task.changes.length;
+        const result = await hub.host.file(
+          task,
+          forwardedRequest,
+          authorize ?? (async () => {}),
+        );
+        if (task.changes.length > priorChangeCount) {
+          const newest = task.changes[task.changes.length - 1];
+          if (newest?.status === "completed") {
+            void hub.recordAgentChangeActivity(task, newest);
+          }
+        }
+        return result;
       }
 
       case "sshs3_kb_search": {
@@ -1719,7 +2443,13 @@ export async function handleAppAction(
       }
 
       case "sshs3_kb_manage": {
-        const op = only(str("operation") || "list", ["list", "add_document", "delete_document", "ingest_local_folder", "ingest_s3_prefix"]);
+        const op = only(rawOperation(p, "list"), [
+          "list",
+          "add_document",
+          "delete_document",
+          "ingest_local_folder",
+          "ingest_s3_prefix",
+        ]);
         if (op === "list") {
           return {
             documents: hub.getKbDocumentsList().map((d) => ({
@@ -1736,7 +2466,7 @@ export async function handleAppAction(
         }
         if (op === "delete_document") {
           // Deleting is for the whole team: it takes the document's id or its whole title, never a part of one.
-          const q = (str("idOrTitle") || str("id") || str("title") || "").trim().toLowerCase();
+          const q = (optStr(p, "idOrTitle") || optStr(p, "id") || optStr(p, "title") || "").toLowerCase();
           if (!q) throw new Error("delete_document needs the document's id or its exact title (see operation list).");
           const all = hub.getKbDocumentsList();
           const named = all.filter((d) => d.id.toLowerCase() === q);
@@ -1749,11 +2479,11 @@ export async function handleAppAction(
           return { ok: true, deletedId: existing.id, title: existing.title };
         }
         if (op === "ingest_local_folder") {
-          const folderPath = requiredText(str("folderPath") || str("path"));
+          const folderPath = requiredText(optStr(p, "folderPath") || optStr(p, "path"));
           await hub.request({
             action: "kb-ingest-folder",
             folderPath,
-            cluster: str("cluster"),
+            cluster: optStr(p, "cluster"),
             tags,
           });
           return {
@@ -1764,13 +2494,13 @@ export async function handleAppAction(
           };
         }
         if (op === "ingest_s3_prefix") {
-          const s3ProfileId = requiredText(str("s3ProfileId") || str("idOrName") || str("profileId"));
-          const prefix = str("prefix") || "";
+          const s3ProfileId = requiredText(optStr(p, "s3ProfileId") || optStr(p, "idOrName") || optStr(p, "profileId"));
+          const prefix = optStr(p, "prefix") || "";
           await hub.request({
             action: "kb-ingest-s3",
             s3ProfileId,
             prefix,
-            cluster: str("cluster"),
+            cluster: optStr(p, "cluster"),
           });
           return {
             ok: true,
@@ -1781,18 +2511,18 @@ export async function handleAppAction(
           };
         }
         // add_document
-        const title = requiredText(str("title") || "Runbook / KB Document");
-        const content = requiredText(str("content") || str("text") || "");
+        const title = requiredText(optStr(p, "title") || "Runbook / KB Document");
+        const content = requiredText(optStr(p, "content") || optStr(p, "text") || "");
         await hub.request({
           action: "kb-save",
           doc: {
-            id: str("id"),
+            id: optStr(p, "id"),
             title,
             sourceType: "note",
-            cluster: str("cluster"),
+            cluster: optStr(p, "cluster"),
             tags,
             content,
-            shared: bool("shared") ?? true,
+            shared: optBool(p, "shared") ?? true,
           },
         });
         return {
@@ -1803,7 +2533,21 @@ export async function handleAppAction(
       }
 
       case "sshs3_agent_and_mcp_manage": {
-        const op = str("operation") || "list";
+        const op = only(rawOperation(p, "list"), [
+          "list",
+          "run_workforce",
+          "delegate_to_agent",
+          "handoff_agent",
+          "install_mcp_preset",
+          "save_infra_edge",
+          "delete_infra_edge",
+          "save_agent",
+          "delete_agent",
+          "run_agent_mission",
+          "save_mcp_server",
+          "delete_mcp_server",
+          "test_mcp_server",
+        ]);
         if (op === "list") {
           return {
             agents: hub.getAgentsList(),
@@ -1815,21 +2559,21 @@ export async function handleAppAction(
         }
         if (op === "run_workforce" || op === "delegate_to_agent") {
           const wfPrompt =
-            str("prompt") ||
-            str("mission") ||
-            str("description") ||
+            optStr(p, "prompt") ||
+            optStr(p, "mission") ||
+            optStr(p, "description") ||
             "Look over the clusters and the infrastructure in parallel and report what stands out.";
           const rawIds = Array.isArray(p.agentIds)
             ? (p.agentIds as unknown[]).map(String)
-            : str("idOrName")
-              ? [str("idOrName")!]
+            : optStr(p, "idOrName")
+              ? [optStr(p, "idOrName")!]
               : undefined;
           // The calling agent waits for the specialists' reports.
           const run = await (
             await hub.beginWorkforceRun({
               prompt: wfPrompt,
               agentIds: rawIds,
-              targetCluster: str("targetCluster") || str("cluster"),
+              targetCluster: optStr(p, "targetCluster") || optStr(p, "cluster"),
               createTask: false,
             })
           ).done;
@@ -1846,7 +2590,7 @@ export async function handleAppAction(
             action: "agent-handoff",
             taskId: task.id,
             toAgentId: match.id,
-            reason: str("reason") || str("prompt"),
+            reason: optStr(p, "reason") || optStr(p, "prompt"),
           });
           return {
             ok: true,
@@ -1857,7 +2601,7 @@ export async function handleAppAction(
         }
         if (op === "install_mcp_preset") {
           const presetId =
-            str("presetId") || str("idOrName") || str("id") || str("name");
+            optStr(p, "presetId") || optStr(p, "idOrName") || optStr(p, "id") || optStr(p, "name");
           if (!presetId) throw new Error("presetId is required");
           await hub.request({
             action: "mcp-install-preset",
@@ -1867,17 +2611,24 @@ export async function handleAppAction(
             ok: true,
             operation: "install_mcp_preset",
             presetId,
-            mcpServers: hub.getMcpServersList(),
+            mcpServers: hub.getMcpServersList().map(withoutSecrets),
           };
         }
         if (op === "save_infra_edge") {
-          const fromNode = requiredText(str("fromNode") || str("from"));
-          const toNode = requiredText(str("toNode") || str("to"));
-          const relation =
-            (str("relation") as InfraGraphEdge["relation"]) || "depends_on";
+          const fromNode = requiredText(optStr(p, "fromNode") || optStr(p, "from"));
+          const toNode = requiredText(optStr(p, "toNode") || optStr(p, "to"));
+          const relation: InfraGraphEdge["relation"] =
+            optEnum(p, "relation", [
+              "depends_on",
+              "mounts_storage",
+              "routes_to",
+              "replicates_to",
+              "ssh_tunnel",
+              "monitors",
+            ]) ?? "depends_on";
           // An agent's suggestion is always a new link: it can never take over the id of one a person
           // confirmed (and so replace it). Its own earlier suggestion it may change.
-          const ownId = str("id");
+          const ownId = optStr(p, "id");
           const mine = ownId
             ? (hub.store.data.infraEdges ?? []).find((e) => e.id === ownId && e.proposed)
             : undefined;
@@ -1888,10 +2639,10 @@ export async function handleAppAction(
               from: fromNode,
               to: toNode,
               relation,
-              label: str("edgeLabel") || str("label"),
+              label: optStr(p, "edgeLabel") || optStr(p, "label"),
               // An agent's link is a suggestion from what it saw; a person confirms it.
               proposed: true,
-              evidence: str("evidence") || str("edgeLabel") || str("label"),
+              evidence: optStr(p, "evidence") || optStr(p, "edgeLabel") || optStr(p, "label"),
               proposedBy: task.agentName || "Assistant",
             },
           });
@@ -1904,7 +2655,7 @@ export async function handleAppAction(
           };
         }
         if (op === "delete_infra_edge") {
-          const edgeId = requiredText(str("idOrName") || str("id"));
+          const edgeId = requiredText(optStr(p, "idOrName") || optStr(p, "id"));
           // A link a person confirmed is a person's to remove: an agent may take back only a suggestion.
           const edge = (hub.store.data.infraEdges ?? []).find((e) => e.id === edgeId);
           if (!edge) throw new Error(`No dependency link has the id "${edgeId}".`);
@@ -1920,30 +2671,34 @@ export async function handleAppAction(
           // "Save" on an agent that exists changes that agent: only what is given, the rest stays
           // (its budget, its pause, where it runs, who it reports to). Without this an update made a
           // second agent of the same name, or wiped what the form had set.
-          const q = (str("idOrName") || str("id") || "").toLowerCase();
-          const wanted = (str("name") || "").toLowerCase();
+          const q = (optStr(p, "idOrName") || optStr(p, "id") || "").toLowerCase();
+          const wanted = (optStr(p, "name") || "").toLowerCase();
           const existing = hub
             .getAgentsList()
             .find((a) => (q ? a.id.toLowerCase() === q || a.name.toLowerCase() === q : Boolean(wanted) && a.name.toLowerCase() === wanted));
           if (q && !existing) throw new Error(`Agent "${q}" not found`);
-          const name = requiredText(str("name") || existing?.name);
-          const mission = requiredText(str("mission") || str("description") || existing?.mission);
+          const name = requiredText(optStr(p, "name") || existing?.name);
+          const mission = requiredText(optStr(p, "mission") || optStr(p, "description") || existing?.mission);
           const list = (key: string): string[] | undefined => (Array.isArray(p[key]) ? (p[key] as unknown[]).map(String) : undefined);
+          const defaultMode: MissionAgent["defaultMode"] =
+            optEnum(p, "defaultMode", ["advice", "assisted", "autonomous"]) ??
+            existing?.defaultMode ??
+            "assisted";
           await hub.request({
             action: "agent-save",
             agent: {
               ...(existing ?? {}),
               id: existing?.id,
               name,
-              role: str("role") || existing?.role || "Infrastructure specialist",
-              icon: str("icon") ?? existing?.icon ?? "",
+              role: optStr(p, "role") || existing?.role || "Infrastructure specialist",
+              icon: optStr(p, "icon") ?? existing?.icon ?? "",
               mission,
-              systemPrompt: str("systemPrompt") || existing?.systemPrompt || mission,
-              targetCluster: str("targetCluster") || str("cluster") || existing?.targetCluster,
-              defaultMode: (str("defaultMode") as MissionAgent["defaultMode"]) || existing?.defaultMode || "assisted",
+              systemPrompt: optStr(p, "systemPrompt") || existing?.systemPrompt || mission,
+              targetCluster: optStr(p, "targetCluster") || optStr(p, "cluster") || existing?.targetCluster,
+              defaultMode,
               // Narrows only: the names given, or what the agent already had.
               allowedTools: list("allowedTools") ?? existing?.allowedTools ?? ["all"],
-              modelOverride: p.modelOverride === undefined ? existing?.modelOverride : str("modelOverride") || undefined,
+              modelOverride: p.modelOverride === undefined ? existing?.modelOverride : optStr(p, "modelOverride") || undefined,
               kbDocIds: list("kbDocIds") ?? existing?.kbDocIds,
               mcpServerIds: list("mcpServerIds") ?? existing?.mcpServerIds,
             },
@@ -1960,49 +2715,67 @@ export async function handleAppAction(
           await hub.request({
             action: "agent-run-mission",
             agentId: match.id,
-            promptOverride: str("promptOverride"),
+            promptOverride: optStr(p, "promptOverride"),
           });
           return { ok: true, startedAgent: match.name };
         }
         if (op === "save_mcp_server") {
-          const name = requiredText(str("name"));
-          const transport = str("transport") === "http" ? "http" : "stdio";
+          const name = requiredText(optStr(p, "name"));
+          const transport = optEnum(p, "transport", ["stdio", "http"]);
+          if (!transport) {
+            throw new Error('save_mcp_server requires "transport" ("stdio" or "http").');
+          }
+          const command = optStr(p, "command");
+          const url = optStr(p, "url");
+          if (transport === "stdio" && !command) {
+            throw new Error('save_mcp_server with transport "stdio" requires "command".');
+          }
+          if (transport === "http" && !url) {
+            throw new Error('save_mcp_server with transport "http" requires "url".');
+          }
+          const trustReadOnlyHint = optBool(p, "trustReadOnlyHint");
+          const enabled = optBool(p, "enabled") ?? true;
           await hub.request({
             action: "mcp-save",
             server: {
-              id: str("id"),
+              id: optStr(p, "id"),
               name,
               transport,
-              command: str("command"),
+              command,
               args: Array.isArray(p.args)
                 ? (p.args as unknown[]).map(String)
                 : undefined,
-              url: str("url"),
-              enabled: bool("enabled") ?? true,
+              url,
+              ...(trustReadOnlyHint !== undefined ? { trustReadOnlyHint } : {}),
+              enabled,
             },
           });
           return { ok: true, operation: "save_mcp_server", name, transport };
         }
         if (op === "delete_mcp_server") {
-          const q = (str("idOrName") || str("id") || str("name") || "").toLowerCase();
+          const q = (optStr(p, "idOrName") || optStr(p, "id") || optStr(p, "name") || "").toLowerCase();
+          if (!q) {
+            throw new Error('delete_mcp_server requires "idOrName", "id", or "name".');
+          }
           const match = hub.getMcpServersList().find(
-            (s) => s.id.toLowerCase() === q || s.name.toLowerCase().includes(q),
+            (s) => s.id.toLowerCase() === q || s.name.toLowerCase() === q || s.name.toLowerCase().includes(q),
           );
           if (!match) throw new Error(`MCP server "${q}" not found`);
           await hub.request({ action: "mcp-delete", id: match.id });
           return { ok: true, deletedMcpServerId: match.id };
         }
-        if (op === "test_mcp_server") {
-          const q = (str("idOrName") || str("id") || str("name") || "").toLowerCase();
-          const match = hub.getMcpServersList().find(
-            (s) => s.id.toLowerCase() === q || s.name.toLowerCase().includes(q),
-          );
-          if (!match) throw new Error(`MCP server "${q}" not found`);
-          await hub.request({ action: "mcp-test", id: match.id });
-          const updated = hub.getMcpServersList().find((s) => s.id === match.id);
-          return { ok: true, server: updated ? withoutSecrets(updated) : undefined };
+        // test_mcp_server
+        const q = (optStr(p, "idOrName") || optStr(p, "id") || optStr(p, "name") || "").toLowerCase();
+        if (!q) {
+          throw new Error('test_mcp_server requires "idOrName", "id", or "name".');
         }
-        throw new Error(`Unsupported agent/MCP operation: ${op}`);
+        const match = hub.getMcpServersList().find(
+          (s) => s.id.toLowerCase() === q || s.name.toLowerCase() === q || s.name.toLowerCase().includes(q),
+        );
+        if (!match) throw new Error(`MCP server "${q}" not found`);
+        await hub.request({ action: "mcp-test", id: match.id });
+        const updated = hub.getMcpServersList().find((s) => s.id === match.id);
+        return { ok: true, server: updated ? withoutSecrets(updated) : undefined };
       }
 
       default:

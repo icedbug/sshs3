@@ -1,9 +1,49 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { CheckCheck, Clock, HelpCircle, Search } from "lucide-react";
+import {
+  filterInboxItems,
+  inboxItems,
+  inboxPriorityBucket,
+  isInboxItemSnoozed,
+  type InboxItem,
+  type InboxKind,
+  type InboxPriorityBucket,
+} from "@shared/aiHubInbox";
 import type { HubSnapshot } from "@shared/types/aiHub";
 import { ChangeProof } from "./ChangeProof";
-import { type Act } from "./panelShared";
+import { TABULAR_NUMS_CLASS, TABULAR_NUMS_STYLE, type Act } from "./panelShared";
 import { RichMarkdownContent } from "./RichMarkdownContent";
-import { inboxItems, type InboxItem, type InboxKind } from "./workforceModel";
+
+export interface InboxViewProps {
+  hub: HubSnapshot;
+  act: Act;
+  onOpenTask: (taskId: string) => void;
+  onOpenView: (view: "Workforce" | "Knowledge Base" | "Infrastructure") => void;
+  /** The item a notification's link pointed at: shown first, or said to be handled if it is gone. */
+  focusItemId?: string;
+  /** Optional request callback override (defaults to `act`). */
+  onRequest?: Act;
+}
+
+type InboxSectionFilter = "all" | InboxPriorityBucket | "snoozed";
+
+interface SectionSpec {
+  id: InboxPriorityBucket | "snoozed";
+  title: string;
+  testId: string;
+}
+
+const PRIORITY_SECTIONS: readonly SectionSpec[] = [
+  { id: "blocking", title: "Needs Decision", testId: "inbox-section-blocking" },
+  { id: "incident", title: "Urgent Alerts", testId: "inbox-section-incident" },
+  { id: "review", title: "Findings & Suggestions", testId: "inbox-section-review" },
+];
+
+const SNOOZED_SECTION: SectionSpec = {
+  id: "snoozed",
+  title: "Snoozed",
+  testId: "inbox-section-snoozed",
+};
 
 const KIND: Record<InboxKind, { label: string; tone: string }> = {
   approval: { label: "Wants to run", tone: "ai-inbox-now" },
@@ -25,37 +65,413 @@ const ago = (at: number): string => {
   return `${Math.round(mins / 1440)} d ago`;
 };
 
-/** Everything that is waiting for a person, in one place, each with what can be done about it right here. */
+/** Formats remaining snooze duration as a compact countdown string. */
+function formatSnoozeCountdown(snoozedUntil: number | undefined, now = Date.now()): string {
+  if (typeof snoozedUntil !== "number") return "Snoozed";
+  const remainingMs = Math.max(0, snoozedUntil - now);
+  const mins = Math.ceil(remainingMs / 60_000);
+  if (mins <= 1) return "Snoozed · <1m left";
+  if (mins < 60) return `Snoozed · ${mins}m left`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `Snoozed · ${hours}h left`;
+  const days = Math.round(hours / 24);
+  return `Snoozed · ${days}d left`;
+}
+
+function tomorrowMorningMs(now: number): number {
+  const next = new Date(now);
+  next.setDate(next.getDate() + 1);
+  next.setHours(9, 0, 0, 0);
+  return next.getTime();
+}
+
+function isTypingElement(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = target.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+  if (target.isContentEditable) return true;
+  return Boolean(target.closest("[contenteditable='true']"));
+}
+
+function matchesQuery(item: InboxItem, query: string): boolean {
+  const q = query.trim().toLowerCase();
+  if (!q) return true;
+  const hay = [item.title, item.detail, item.from, item.target, item.kind]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  return hay.includes(q);
+}
+
+/** Everything that is waiting for a person, grouped by priority with keyboard triage and snooze. */
 export function InboxView({
   hub,
   act,
   onOpenTask,
   onOpenView,
   focusItemId,
-}: {
-  hub: HubSnapshot;
-  act: Act;
-  onOpenTask: (taskId: string) => void;
-  onOpenView: (view: "Workforce" | "Knowledge Base" | "Infrastructure") => void;
-  /** The item a notification's link pointed at: shown first, or said to be handled if it is gone. */
-  focusItemId?: string;
-}): JSX.Element {
+  onRequest,
+}: InboxViewProps): JSX.Element {
+  const dispatch = onRequest ?? act;
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [address, setAddress] = useState("");
   const [pasted, setPasted] = useState("");
   const [rules, setRules] = useState<{ match: string; agentId: string }[] | undefined>();
-  const items = inboxItems(hub);
+  const [query, setQuery] = useState("");
+  const [sectionFilter, setSectionFilter] = useState<InboxSectionFilter>("all");
+  const [selectedId, setSelectedId] = useState<string | null>(focusItemId ?? null);
+  const [snoozeMenuId, setSnoozeMenuId] = useState<string | null>(null);
+  const [showShortcuts, setShowShortcuts] = useState(false);
+  const [armedDestructiveId, setArmedDestructiveId] = useState<string | null>(null);
+  const [batchBusy, setBatchBusy] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
+
   const focused = useRef<HTMLElement | null>(null);
-  const focusPresent = Boolean(focusItemId && items.some((i) => i.id === focusItemId));
+  const itemRefs = useRef<Record<string, HTMLElement | null>>({});
+
+  const allItems = useMemo(
+    () => inboxItems(hub, { snoozeFilter: "all", now }),
+    [hub, now],
+  );
+
+  const hasSnoozed = useMemo(
+    () => allItems.some((item) => typeof item.snoozedUntil === "number" && item.snoozedUntil > now),
+    [allItems, now],
+  );
+
+  useEffect(() => {
+    if (!hasSnoozed) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, [hasSnoozed]);
+
+  const activeItems = useMemo(
+    () => filterInboxItems(allItems, { snoozeFilter: "active", now }).filter((i) => matchesQuery(i, query)),
+    [allItems, now, query],
+  );
+
+  const snoozedItems = useMemo(
+    () => filterInboxItems(allItems, { snoozeFilter: "snoozed", now }).filter((i) => matchesQuery(i, query)),
+    [allItems, now, query],
+  );
+
+  const sectionsToRender = useMemo(() => {
+    const groups: Array<{ spec: SectionSpec; items: InboxItem[] }> = [];
+    if (sectionFilter === "all" || sectionFilter === "blocking" || sectionFilter === "incident" || sectionFilter === "review") {
+      for (const spec of PRIORITY_SECTIONS) {
+        if (sectionFilter !== "all" && sectionFilter !== spec.id) continue;
+        const bucketItems = filterInboxItems(activeItems, {
+          bucket: spec.id as InboxPriorityBucket,
+          snoozeFilter: "active",
+          now,
+        });
+        if (bucketItems.length > 0) {
+          groups.push({ spec, items: bucketItems });
+        }
+      }
+    }
+    if ((sectionFilter === "all" || sectionFilter === "snoozed") && snoozedItems.length > 0) {
+      groups.push({ spec: SNOOZED_SECTION, items: snoozedItems });
+    }
+    return groups;
+  }, [activeItems, snoozedItems, sectionFilter, now]);
+
+  const visibleItems = useMemo(
+    () => sectionsToRender.flatMap((group) => group.items),
+    [sectionsToRender],
+  );
+
+  const bucketCounts = useMemo(() => {
+    const activeAll = filterInboxItems(allItems, { snoozeFilter: "active", now });
+    const snoozedAll = filterInboxItems(allItems, { snoozeFilter: "snoozed", now });
+    return {
+      all: activeAll.length,
+      blocking: filterInboxItems(activeAll, { bucket: "blocking", snoozeFilter: "active", now }).length,
+      incident: filterInboxItems(activeAll, { bucket: "incident", snoozeFilter: "active", now }).length,
+      review: filterInboxItems(activeAll, { bucket: "review", snoozeFilter: "active", now }).length,
+      snoozed: snoozedAll.length,
+    };
+  }, [allItems, now]);
+
+  const safeLowRiskApprovals = useMemo(
+    () =>
+      activeItems.filter((item) => {
+        if (item.kind !== "approval" || item.risk !== "safe" || !item.taskId || !item.changeId) {
+          return false;
+        }
+        const change = hub.tasks
+          .find((t) => t.id === item.taskId)
+          ?.changes.find((c) => c.id === item.changeId);
+        return !change?.guard;
+      }),
+    [activeItems, hub.tasks],
+  );
+
+  const focusPresent = Boolean(focusItemId && allItems.some((i) => i.id === focusItemId));
+
   useEffect(() => {
     if (focusPresent) focused.current?.scrollIntoView?.({ block: "center" });
   }, [focusPresent, focusItemId]);
+
+  useEffect(() => {
+    if (selectedId && !visibleItems.some((i) => i.id === selectedId)) {
+      setSelectedId(visibleItems[0]?.id ?? null);
+    }
+  }, [visibleItems, selectedId]);
+
   const intake = hub.alertIntake;
   const agents = hub.agents ?? [];
   const shownRules = rules ?? intake?.rules ?? [];
-  const note = (id: string): string => notes[id] ?? "";
+  const note = useCallback((id: string): string => notes[id] ?? "", [notes]);
+
+  const openItem = useCallback(
+    (item: InboxItem): void => {
+      if (item.taskId) {
+        onOpenTask(item.taskId);
+      } else if (item.kind === "alert") {
+        onOpenView("Workforce");
+      } else if (item.kind === "health") {
+        onOpenView("Infrastructure");
+      } else if (item.kind === "knowledge") {
+        onOpenView("Knowledge Base");
+      }
+    },
+    [onOpenTask, onOpenView],
+  );
+
+  const resolveOrArchiveItem = useCallback(
+    (item: InboxItem): void => {
+      switch (item.kind) {
+        case "health":
+          void dispatch({ action: "facts-problem-dismiss", serverId: item.serverId! });
+          break;
+        case "knowledge":
+          void dispatch({ action: "kb-finding-dismiss", id: item.findingId! });
+          break;
+        case "report":
+          void dispatch({ action: "daily-report-read" });
+          break;
+        case "review":
+        case "blocked":
+          void dispatch({
+            action: "ticket-review",
+            id: item.ticketId!,
+            approve: true,
+            note: note(item.id),
+          });
+          break;
+        default:
+          void dispatch({ action: "ack-inbox", itemId: item.id, acknowledged: true });
+          break;
+      }
+    },
+    [dispatch, note],
+  );
+
+  const snoozeItem = useCallback(
+    (item: InboxItem, preset: "1h" | "4h" | "tomorrow"): void => {
+      const currentNow = Date.now();
+      if (preset === "1h") {
+        void dispatch({
+          action: "snooze-inbox",
+          itemId: item.id,
+          durationMinutes: 60,
+          until: currentNow + 60 * 60_000,
+        });
+      } else if (preset === "4h") {
+        void dispatch({
+          action: "snooze-inbox",
+          itemId: item.id,
+          durationMinutes: 240,
+          until: currentNow + 240 * 60_000,
+        });
+      } else {
+        const until = tomorrowMorningMs(currentNow);
+        const durationMinutes = Math.max(1, Math.round((until - currentNow) / 60_000));
+        void dispatch({
+          action: "snooze-inbox",
+          itemId: item.id,
+          durationMinutes,
+          until,
+        });
+      }
+      setSnoozeMenuId(null);
+    },
+    [dispatch],
+  );
+
+  const approveLowRiskBatch = useCallback((): void => {
+    if (safeLowRiskApprovals.length === 0) return;
+    setBatchBusy(true);
+    void Promise.all(
+      safeLowRiskApprovals.map((item) =>
+        dispatch({
+          action: "approve",
+          taskId: item.taskId!,
+          changeId: item.changeId!,
+          approved: true,
+        }),
+      ),
+    ).finally(() => setBatchBusy(false));
+  }, [dispatch, safeLowRiskApprovals]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
+      if (isTypingElement(event.target)) return;
+
+      if (event.key === "?") {
+        event.preventDefault();
+        setShowShortcuts((open) => !open);
+        return;
+      }
+
+      if (event.key === "Escape") {
+        if (showShortcuts || snoozeMenuId || armedDestructiveId) {
+          event.preventDefault();
+          setShowShortcuts(false);
+          setSnoozeMenuId(null);
+          setArmedDestructiveId(null);
+        }
+        return;
+      }
+
+      if (visibleItems.length === 0) return;
+
+      const currentIdx = selectedId ? visibleItems.findIndex((i) => i.id === selectedId) : -1;
+
+      if (event.key === "j") {
+        event.preventDefault();
+        const nextIdx = currentIdx < 0 ? 0 : Math.min(visibleItems.length - 1, currentIdx + 1);
+        const next = visibleItems[nextIdx];
+        if (next) {
+          setSelectedId(next.id);
+          setArmedDestructiveId(null);
+          itemRefs.current[next.id]?.scrollIntoView?.({ block: "nearest" });
+        }
+        return;
+      }
+
+      if (event.key === "k") {
+        event.preventDefault();
+        const prevIdx = currentIdx <= 0 ? 0 : currentIdx - 1;
+        const prev = visibleItems[prevIdx];
+        if (prev) {
+          setSelectedId(prev.id);
+          setArmedDestructiveId(null);
+          itemRefs.current[prev.id]?.scrollIntoView?.({ block: "nearest" });
+        }
+        return;
+      }
+
+      const active = (currentIdx >= 0 ? visibleItems[currentIdx] : visibleItems[0]) ?? null;
+      if (!active) return;
+
+      if (event.key === "o" || event.key === "Enter") {
+        if (
+          event.key === "Enter" &&
+          event.target instanceof HTMLElement &&
+          Boolean(event.target.closest("button, a, summary"))
+        ) {
+          return;
+        }
+        event.preventDefault();
+        openItem(active);
+        return;
+      }
+
+      if (event.key === "e") {
+        event.preventDefault();
+        resolveOrArchiveItem(active);
+        return;
+      }
+
+      if (event.key === "h") {
+        event.preventDefault();
+        setSelectedId(active.id);
+        setSnoozeMenuId((prev) => (prev === active.id ? null : active.id));
+        return;
+      }
+
+      if (event.key === "a") {
+        if (active.kind === "approval" && active.taskId && active.changeId) {
+          event.preventDefault();
+          const destructive = active.risk === "destructive" || active.risk === "critical";
+          if (destructive && armedDestructiveId !== active.id) {
+            setArmedDestructiveId(active.id);
+            return;
+          }
+          setArmedDestructiveId(null);
+          void dispatch({
+            action: "approve",
+            taskId: active.taskId,
+            changeId: active.changeId,
+            approved: true,
+          });
+        } else if (active.kind === "plan" && active.taskId) {
+          event.preventDefault();
+          void dispatch({ action: "plan-decide", taskId: active.taskId, approved: true });
+        }
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [
+    armedDestructiveId,
+    dispatch,
+    openItem,
+    resolveOrArchiveItem,
+    selectedId,
+    showShortcuts,
+    snoozeMenuId,
+    visibleItems,
+  ]);
 
   const actions = (item: InboxItem): JSX.Element => {
+    const snoozed = isInboxItemSnoozed(item, now);
+    const snoozeControls = (
+      <div className="ai-inbox-snooze-wrap" style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
+        {snoozed ? (
+          <button
+            type="button"
+            data-testid={`inbox-unsnooze-btn-${item.id}`}
+            onClick={() => void dispatch({ action: "snooze-inbox", itemId: item.id, until: 0 })}
+          >
+            Wake now
+          </button>
+        ) : (
+          <button
+            type="button"
+            aria-expanded={snoozeMenuId === item.id}
+            data-testid={`inbox-snooze-btn-${item.id}`}
+            onClick={() => setSnoozeMenuId((prev) => (prev === item.id ? null : item.id))}
+          >
+            <Clock size={12} aria-hidden="true" /> Snooze
+          </button>
+        )}
+        {snoozeMenuId === item.id && !snoozed && (
+          <span
+            className="ai-inbox-snooze-menu"
+            role="group"
+            aria-label="Snooze duration"
+            data-testid={`inbox-snooze-menu-${item.id}`}
+            style={{ display: "inline-flex", gap: 4 }}
+          >
+            <button type="button" onClick={() => snoozeItem(item, "1h")}>
+              1h
+            </button>
+            <button type="button" onClick={() => snoozeItem(item, "4h")}>
+              4h
+            </button>
+            <button type="button" onClick={() => snoozeItem(item, "tomorrow")}>
+              Tomorrow
+            </button>
+          </span>
+        )}
+      </div>
+    );
+
     switch (item.kind) {
       case "approval":
         return (
@@ -63,20 +479,35 @@ export function InboxView({
             <button
               type="button"
               className="ai-btn-emerald"
-              onClick={() => void act({ action: "approve", taskId: item.taskId!, changeId: item.changeId!, approved: true })}
+              onClick={() =>
+                void dispatch({
+                  action: "approve",
+                  taskId: item.taskId!,
+                  changeId: item.changeId!,
+                  approved: true,
+                })
+              }
             >
               Approve
             </button>
             <button
               type="button"
               className="ai-btn-danger"
-              onClick={() => void act({ action: "approve", taskId: item.taskId!, changeId: item.changeId!, approved: false })}
+              onClick={() =>
+                void dispatch({
+                  action: "approve",
+                  taskId: item.taskId!,
+                  changeId: item.changeId!,
+                  approved: false,
+                })
+              }
             >
               Deny
             </button>
             <button type="button" onClick={() => onOpenTask(item.taskId!)}>
               Open
             </button>
+            {snoozeControls}
           </>
         );
       case "plan":
@@ -85,20 +516,24 @@ export function InboxView({
             <button
               type="button"
               className="ai-btn-emerald"
-              onClick={() => void act({ action: "plan-decide", taskId: item.taskId!, approved: true })}
+              onClick={() => void dispatch({ action: "plan-decide", taskId: item.taskId!, approved: true })}
             >
               Approve the plan
             </button>
             <button type="button" onClick={() => onOpenTask(item.taskId!)}>
               Read it
             </button>
+            {snoozeControls}
           </>
         );
       case "question":
         return (
-          <button type="button" className="ai-btn-accent" onClick={() => onOpenTask(item.taskId!)}>
-            Answer
-          </button>
+          <>
+            <button type="button" className="ai-btn-accent" onClick={() => onOpenTask(item.taskId!)}>
+              Answer
+            </button>
+            {snoozeControls}
+          </>
         );
       case "review":
       case "blocked":
@@ -113,14 +548,28 @@ export function InboxView({
             <button
               type="button"
               className="ai-btn-emerald"
-              onClick={() => void act({ action: "ticket-review", id: item.ticketId!, approve: true, note: note(item.id) })}
+              onClick={() =>
+                void dispatch({
+                  action: "ticket-review",
+                  id: item.ticketId!,
+                  approve: true,
+                  note: note(item.id),
+                })
+              }
             >
               {item.kind === "review" ? "Approve: done" : "Mark done"}
             </button>
             <button
               type="button"
               disabled={item.kind === "review" && !note(item.id).trim()}
-              onClick={() => void act({ action: "ticket-review", id: item.ticketId!, approve: false, note: note(item.id) })}
+              onClick={() =>
+                void dispatch({
+                  action: "ticket-review",
+                  id: item.ticketId!,
+                  approve: false,
+                  note: note(item.id),
+                })
+              }
             >
               {item.kind === "review" ? "Send back" : "Try again"}
             </button>
@@ -129,13 +578,17 @@ export function InboxView({
                 Open
               </button>
             )}
+            {snoozeControls}
           </>
         );
       case "alert":
         return (
-          <button type="button" className="ai-btn-accent" onClick={() => onOpenView("Workforce")}>
-            Assign it
-          </button>
+          <>
+            <button type="button" className="ai-btn-accent" onClick={() => onOpenView("Workforce")}>
+              Assign it
+            </button>
+            {snoozeControls}
+          </>
         );
       case "health":
         return (
@@ -143,9 +596,13 @@ export function InboxView({
             <button type="button" onClick={() => onOpenView("Infrastructure")}>
               Look at the server
             </button>
-            <button type="button" onClick={() => void act({ action: "facts-problem-dismiss", serverId: item.serverId! })}>
+            <button
+              type="button"
+              onClick={() => void dispatch({ action: "facts-problem-dismiss", serverId: item.serverId! })}
+            >
               Dismiss
             </button>
+            {snoozeControls}
           </>
         );
       case "knowledge":
@@ -154,80 +611,246 @@ export function InboxView({
             <button type="button" onClick={() => onOpenView("Knowledge Base")}>
               Look at it
             </button>
-            <button type="button" onClick={() => void act({ action: "kb-finding-dismiss", id: item.findingId! })}>
+            <button
+              type="button"
+              onClick={() => void dispatch({ action: "kb-finding-dismiss", id: item.findingId! })}
+            >
               Dismiss
             </button>
+            {snoozeControls}
           </>
         );
       case "report":
         return (
-          <button type="button" onClick={() => void act({ action: "daily-report-read" })}>
-            Mark read
-          </button>
+          <>
+            <button type="button" onClick={() => void dispatch({ action: "daily-report-read" })}>
+              Mark read
+            </button>
+            {snoozeControls}
+          </>
         );
     }
   };
 
   return (
-    <div className="ai-scroll">
+    <div className="ai-scroll" data-testid="inbox-view">
       <header className="ai-view-head">
-        <h2>Inbox</h2>
+        <div className="ai-card-head">
+          <h2>Inbox</h2>
+          <button
+            type="button"
+            aria-expanded={showShortcuts}
+            data-testid="inbox-shortcuts-toggle"
+            onClick={() => setShowShortcuts((open) => !open)}
+          >
+            <HelpCircle size={13} aria-hidden="true" /> Shortcuts (?)
+          </button>
+        </div>
         <p className="ai-hint">
           Everything that is waiting for you: commands agents want to run, plans, questions, finished tickets, runs
           that stopped, alerts nobody has. What blocks a running agent comes first.
         </p>
       </header>
 
+      {showShortcuts && (
+        <section
+          className="ai-card ai-inbox-shortcuts"
+          data-testid="inbox-shortcuts"
+          aria-label="Inbox keyboard shortcuts"
+        >
+          <strong>Keyboard triage</strong>
+          <div className="ai-inbox-shortcut-grid" style={{ display: "flex", flexWrap: "wrap", gap: "8px 14px", marginTop: 6 }}>
+            <span><kbd>j</kbd> / <kbd>k</kbd> Navigate</span>
+            <span><kbd>o</kbd> / <kbd>Enter</kbd> Open</span>
+            <span><kbd>a</kbd> Approve</span>
+            <span><kbd>e</kbd> Archive / Resolve</span>
+            <span><kbd>h</kbd> Snooze</span>
+            <span><kbd>?</kbd> Toggle cheatsheet</span>
+          </div>
+        </section>
+      )}
+
+      {allItems.length > 0 && (
+        <div className="ai-inbox-toolbar" data-testid="inbox-toolbar" style={{ display: "grid", gap: 8, marginBottom: 12 }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+            <label style={{ display: "inline-flex", alignItems: "center", gap: 6, flex: "1 1 200px" }}>
+              <Search size={13} aria-hidden="true" />
+              <input
+                type="search"
+                aria-label="Filter inbox"
+                data-testid="inbox-search"
+                placeholder="Filter inbox…"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+              />
+            </label>
+            <div className="ai-filter-pills" role="group" aria-label="Filter by priority" style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {(
+                [
+                  { id: "all", label: "All", count: bucketCounts.all },
+                  { id: "blocking", label: "Needs Decision", count: bucketCounts.blocking },
+                  { id: "incident", label: "Urgent Alerts", count: bucketCounts.incident },
+                  { id: "review", label: "Findings & Suggestions", count: bucketCounts.review },
+                  ...(bucketCounts.snoozed > 0
+                    ? [{ id: "snoozed" as const, label: "Snoozed", count: bucketCounts.snoozed }]
+                    : []),
+                ] as Array<{ id: InboxSectionFilter; label: string; count: number }>
+              ).map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  aria-pressed={sectionFilter === tab.id}
+                  className={sectionFilter === tab.id ? "ai-btn-accent" : undefined}
+                  data-testid={`inbox-filter-${tab.id}`}
+                  onClick={() => setSectionFilter(tab.id)}
+                >
+                  {tab.label} <span className={TABULAR_NUMS_CLASS} style={TABULAR_NUMS_STYLE}>({tab.count})</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {safeLowRiskApprovals.length > 0 && (
+            <div
+              className="ai-card ai-inbox-batch"
+              data-testid="inbox-batch-bar"
+              style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "8px 12px" }}
+            >
+              <span>
+                <strong className={TABULAR_NUMS_CLASS} style={TABULAR_NUMS_STYLE}>
+                  {safeLowRiskApprovals.length}
+                </strong>{" "}
+                low-risk read-only {safeLowRiskApprovals.length === 1 ? "approval" : "approvals"} ready
+              </span>
+              <button
+                type="button"
+                className="ai-btn-emerald"
+                data-testid="inbox-approve-low-risk"
+                disabled={batchBusy}
+                onClick={approveLowRiskBatch}
+              >
+                <CheckCheck size={13} aria-hidden="true" /> Approve all low-risk
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
       {focusItemId && !focusPresent && (
         <p className="ai-note" role="status" data-testid="inbox-handled">
           What that notification was about no longer waits: it has been answered, or the agent stopped waiting.
         </p>
       )}
-      {items.length === 0 && (
+      {armedDestructiveId && (
+        <p className="ai-note" role="status" data-testid="inbox-destructive-arm">
+          Destructive change selected: press <kbd>a</kbd> again to confirm approval, or <kbd>Esc</kbd> to cancel.
+        </p>
+      )}
+      {allItems.length === 0 && (
         <p className="ai-empty" data-testid="inbox-empty">
           Nothing is waiting for you.
         </p>
       )}
-      <div className="ai-inbox-list" data-testid="inbox-list">
-        {items.map((item) => (
-          <article
-            key={item.id}
-            ref={item.id === focusItemId ? focused : undefined}
-            className={`ai-card ai-inbox-item ${KIND[item.kind].tone}${item.id === focusItemId ? " ai-inbox-focus" : ""}`}
-            data-testid={`inbox-${item.kind}`}
+      {allItems.length > 0 && visibleItems.length === 0 && (
+        <div className="ai-empty" data-testid="inbox-no-matches">
+          <p>No inbox items match your filter.</p>
+          <button
+            type="button"
+            onClick={() => {
+              setQuery("");
+              setSectionFilter("all");
+            }}
           >
-            <div className="ai-card-head">
-              <div>
-                <small className="ai-inbox-kind">
-                  {KIND[item.kind].label}
-                  {item.from ? ` · ${item.from}` : ""}
-                  {item.target && !item.from?.includes(item.target) ? ` · ${item.target}` : ""} · {ago(item.at)}
-                </small>
-                <strong>{item.title}</strong>
-              </div>
-              {item.risk && (
-                <span className={`ai-badge ${item.risk === "destructive" || item.risk === "critical" ? "ai-badge-danger" : item.risk === "safe" ? "ai-badge-success" : "ai-badge-mode"}`}>
-                  {item.risk === "safe" ? "read-only" : item.risk === "modify" ? "changes state" : item.risk}
-                </span>
-              )}
+            Clear filters
+          </button>
+        </div>
+      )}
+
+      <div className="ai-inbox-list" data-testid="inbox-list">
+        {sectionsToRender.map(({ spec, items }) => (
+          <section key={spec.id} className="ai-inbox-section" data-testid={spec.testId}>
+            <h3 className="ai-inbox-section-title" style={{ display: "flex", alignItems: "center", gap: 6, margin: "6px 0" }}>
+              <span>{spec.title}</span>
+              <span className={`ai-badge ${TABULAR_NUMS_CLASS}`} style={TABULAR_NUMS_STYLE}>
+                {items.length}
+              </span>
+            </h3>
+            <div className="ai-inbox-list">
+              {items.map((item) => {
+                const isSelected = selectedId === item.id;
+                const snoozed = isInboxItemSnoozed(item, now);
+                const bucket = item.bucket ?? inboxPriorityBucket(item.kind);
+                return (
+                  <article
+                    key={item.id}
+                    ref={(el) => {
+                      itemRefs.current[item.id] = el;
+                      if (item.id === focusItemId) focused.current = el;
+                    }}
+                    data-bucket={bucket}
+                    data-selected={isSelected ? "true" : undefined}
+                    className={`ai-card ai-inbox-item ${KIND[item.kind].tone}${item.id === focusItemId ? " ai-inbox-focus" : ""}${isSelected ? " ai-inbox-selected" : ""}`}
+                    data-testid={`inbox-${item.kind}`}
+                    onClick={() => setSelectedId(item.id)}
+                  >
+                    <div className="ai-card-head">
+                      <div>
+                        <small className="ai-inbox-kind">
+                          {KIND[item.kind].label}
+                          {item.from ? ` · ${item.from}` : ""}
+                          {item.target && !item.from?.includes(item.target) ? ` · ${item.target}` : ""} · {ago(item.at)}
+                        </small>
+                        <strong>{item.title}</strong>
+                      </div>
+                      <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                        {snoozed && (
+                          <span
+                            className={`ai-badge ai-badge-mode ${TABULAR_NUMS_CLASS}`}
+                            style={TABULAR_NUMS_STYLE}
+                            data-testid="inbox-snooze-countdown"
+                          >
+                            {formatSnoozeCountdown(item.snoozedUntil, now)}
+                          </span>
+                        )}
+                        {item.acknowledgedAt && !snoozed && (
+                          <span className="ai-badge" data-testid="inbox-ack-badge">
+                            Acknowledged
+                          </span>
+                        )}
+                        {item.risk && (
+                          <span
+                            className={`ai-badge ${item.risk === "destructive" || item.risk === "critical" ? "ai-badge-danger" : item.risk === "safe" ? "ai-badge-success" : "ai-badge-mode"}`}
+                          >
+                            {item.risk === "safe" ? "read-only" : item.risk === "modify" ? "changes state" : item.risk}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    {item.kind === "approval" && item.detail ? (
+                      <>
+                        <pre className="ai-terminal-peek">{item.detail}</pre>
+                        {(() => {
+                          const change = hub.tasks
+                            .find((t) => t.id === item.taskId)
+                            ?.changes.find((c) => c.id === item.changeId);
+                          return change ? <ChangeProof change={change} /> : null;
+                        })()}
+                      </>
+                    ) : item.kind === "report" && hub.dailyReport ? (
+                      <div className="ai-doc-body">
+                        <RichMarkdownContent text={hub.dailyReport.text} />
+                      </div>
+                    ) : item.detail ? (
+                      <div className="ai-doc-excerpt">
+                        <RichMarkdownContent text={item.detail} />
+                      </div>
+                    ) : null}
+                    <div className="ai-card-actions">{actions(item)}</div>
+                  </article>
+                );
+              })}
             </div>
-            {item.kind === "approval" && item.detail ? (
-              <>
-                <pre className="ai-terminal-peek">{item.detail}</pre>
-                {(() => {
-                  const change = hub.tasks.find((t) => t.id === item.taskId)?.changes.find((c) => c.id === item.changeId);
-                  return change ? <ChangeProof change={change} /> : null;
-                })()}
-              </>
-            ) : item.kind === "report" && hub.dailyReport ? (
-              <div className="ai-doc-body">
-                <RichMarkdownContent text={hub.dailyReport.text} />
-              </div>
-            ) : item.detail ? (
-              <p className="ai-doc-excerpt">{item.detail}</p>
-            ) : null}
-            <div className="ai-card-actions">{actions(item)}</div>
-          </article>
+          </section>
         ))}
       </div>
 
@@ -248,7 +871,7 @@ export function InboxView({
                   type="button"
                   className="ai-btn-accent"
                   onClick={() =>
-                    void act({ action: "alert-hook-create" }).then((snap) => {
+                    void dispatch({ action: "alert-hook-create" }).then((snap) => {
                       const path = snap?.reply?.alertHook?.path;
                       if (path) setAddress(`${window.location.origin}${path}`);
                     })
@@ -257,7 +880,10 @@ export function InboxView({
                   {intake.enabled ? "Replace the address" : "Create an address to post to"}
                 </button>
                 {intake.enabled && (
-                  <button type="button" onClick={() => void act({ action: "alert-hook-disable" }).then(() => setAddress(""))}>
+                  <button
+                    type="button"
+                    onClick={() => void dispatch({ action: "alert-hook-disable" }).then(() => setAddress(""))}
+                  >
                     Turn off
                   </button>
                 )}
@@ -266,7 +892,13 @@ export function InboxView({
                 <label>
                   Post alerts here (Alertmanager webhook, Grafana contact point, PagerDuty webhook, or any JSON). Shown
                   once: it is the key.
-                  <input readOnly className="ai-mono" data-testid="alert-address" value={address} onFocus={(e) => e.target.select()} />
+                  <input
+                    readOnly
+                    className="ai-mono"
+                    data-testid="alert-address"
+                    value={address}
+                    onFocus={(e) => e.target.select()}
+                  />
                 </label>
               )}
             </>
@@ -277,19 +909,25 @@ export function InboxView({
             </p>
           )}
           <fieldset className="ai-checks ai-alert-rules">
-            <legend>Who gets which alert (first match wins; otherwise the agent bound to the cluster, then a team&apos;s lead)</legend>
+            <legend>
+              Who gets which alert (first match wins; otherwise the agent bound to the cluster, then a team&apos;s lead)
+            </legend>
             {shownRules.map((rule, i) => (
               <div key={i} className="ai-inline-form">
                 <input
                   aria-label="Alert contains"
                   placeholder="disk, postgres, DB-Prod…"
                   value={rule.match}
-                  onChange={(e) => setRules(shownRules.map((r, j) => (j === i ? { ...r, match: e.target.value } : r)))}
+                  onChange={(e) =>
+                    setRules(shownRules.map((r, j) => (j === i ? { ...r, match: e.target.value } : r)))
+                  }
                 />
                 <select
                   aria-label="Goes to"
                   value={rule.agentId}
-                  onChange={(e) => setRules(shownRules.map((r, j) => (j === i ? { ...r, agentId: e.target.value } : r)))}
+                  onChange={(e) =>
+                    setRules(shownRules.map((r, j) => (j === i ? { ...r, agentId: e.target.value } : r)))
+                  }
                 >
                   <option value="">Choose an agent</option>
                   {agents.map((a) => (
@@ -311,7 +949,7 @@ export function InboxView({
                 <button
                   type="button"
                   className="ai-btn-emerald"
-                  onClick={() => void act({ action: "alert-rules-save", rules }).then(() => setRules(undefined))}
+                  onClick={() => void dispatch({ action: "alert-rules-save", rules }).then(() => setRules(undefined))}
                 >
                   Save rules
                 </button>
@@ -326,7 +964,7 @@ export function InboxView({
             <button
               type="button"
               disabled={!pasted.trim()}
-              onClick={() => void act({ action: "alert-paste", text: pasted }).then((snap) => snap && setPasted(""))}
+              onClick={() => void dispatch({ action: "alert-paste", text: pasted }).then((snap) => snap && setPasted(""))}
             >
               Make a ticket of it
             </button>

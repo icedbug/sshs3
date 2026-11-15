@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import {
   SHELL_KINDS,
   type AgentMode,
   type AgentSchedule,
   type HubSnapshot,
+  type ScheduleEventTrigger,
   type ShellKind,
 } from "@shared/types/aiHub";
 import { ConfirmButton } from "./ConfirmButton";
@@ -17,9 +18,57 @@ interface Draft {
   shell: ShellKind;
   minutes: number;
   mode: AgentMode;
+  timingMode: "interval" | "cron";
+  cron: string;
+  timezone: string;
+  missedPolicy: "skip" | "run_once";
+  quietSentinel: boolean;
+  eventKind: "" | ScheduleEventTrigger["kind"];
+  eventCooldownMinutes: number;
+  runbookId: string;
 }
 
-const emptyDraft: Draft = { title: "", prompt: "", profileId: "local", shell: "bash", minutes: 60, mode: "advice" };
+export const SCHEDULE_MODES: Record<AgentMode, string> = {
+  advice: "Reports only — runs no commands",
+  plan: "Plans first — proposes steps before running",
+  assisted: "Asks before each command (waits for you)",
+  autonomous: "Runs commands on its own",
+};
+
+export const QUIET_SENTINEL_PRESET = {
+  title: "Quiet sentinel (notify only on anomaly)",
+  prompt:
+    "Check disk space, failed services, memory pressure, and recent errors. If everything is healthy, reply strictly with HEARTBEAT_OK and nothing else. Notify only when an anomaly is found.",
+  minutes: 15,
+  mode: "advice" as AgentMode,
+  quietSentinel: true,
+  eventKind: "facts_drift" as ScheduleEventTrigger["kind"],
+  eventCooldownMinutes: 30,
+};
+
+/** Validates a standard 5-field cron expression (minute hour dom month dow). */
+export function isValidCronExpression(expr: string): boolean {
+  const fields = expr.trim().split(/\s+/);
+  if (fields.length !== 5) return false;
+  return fields.every((f) => /^[0-9*/,-]+$/.test(f));
+}
+
+const emptyDraft: Draft = {
+  title: "",
+  prompt: "",
+  profileId: "local",
+  shell: "bash",
+  minutes: 60,
+  mode: "advice",
+  timingMode: "interval",
+  cron: "0 7 * * *",
+  timezone: "UTC",
+  missedPolicy: "skip",
+  quietSentinel: false,
+  eventKind: "",
+  eventCooldownMinutes: 30,
+  runbookId: "",
+};
 
 const INTERVALS: [number, string][] = [
   [15, "Every 15 minutes"],
@@ -27,6 +76,22 @@ const INTERVALS: [number, string][] = [
   [360, "Every 6 hours"],
   [1440, "Every day"],
   [10080, "Every week"],
+];
+
+const TIMEZONES = [
+  "UTC",
+  "Europe/Stockholm",
+  "Europe/London",
+  "America/New_York",
+  "America/Los_Angeles",
+  "Asia/Tokyo",
+];
+
+const EVENT_TRIGGERS: { kind: "" | ScheduleEventTrigger["kind"]; label: string }[] = [
+  { kind: "", label: "Timer only (no event trigger)" },
+  { kind: "facts_drift", label: "On server facts drift (OS / service / port / file change)" },
+  { kind: "unreachable", label: "On host unreachable" },
+  { kind: "alert", label: "On incoming alert" },
 ];
 
 function every(minutes: number): string {
@@ -45,12 +110,6 @@ function until(at: number): string {
   return `in ${Math.round(mins / 1440)} days`;
 }
 
-const MODES: Record<AgentMode, string> = {
-  advice: "Reports only — runs no commands",
-  assisted: "Asks before each command (waits for you)",
-  autonomous: "Runs commands on its own",
-};
-
 export function Schedules({
   hub,
   act,
@@ -61,15 +120,64 @@ export function Schedules({
   onOpenTask?: (taskId: string) => void;
 }): JSX.Element {
   const [draft, setDraft] = useState<Draft | undefined>();
-  const targets = new Map<string, string>([["local", "This computer"]]);
-  for (const i of hub.inventory) if (i.kind === "ssh") targets.set(i.id, i.label);
-  for (const s of hub.workspaceServers ?? []) targets.set(s.id, s.name);
-  const targetName = (id: string): string => targets.get(id) ?? targets.get(id.replace(/^demo-/, "")) ?? id;
-  const custom = draft && !INTERVALS.some(([m]) => m === draft.minutes);
-  const schedules = [...hub.schedules].sort((a, b) => Number(b.enabled) - Number(a.enabled) || a.nextRunAt - b.nextRunAt);
+  const [targetFilter, setTargetFilter] = useState("");
 
-  const save = (existing: AgentSchedule | undefined, d: Draft): ReturnType<Act> =>
-    act({
+  const { targets, groupedTargets } = useMemo(() => {
+    const map = new Map<string, string>([["local", "This computer"]]);
+    const sshOptions: { id: string; label: string; meta?: string }[] = [];
+    const k8sOptions: { id: string; label: string; meta?: string }[] = [];
+    const workspaceOptions: { id: string; label: string; meta?: string }[] = [];
+    const seen = new Set<string>(["local"]);
+
+    for (const i of hub.inventory) {
+      map.set(i.id, i.label);
+      if (seen.has(i.id)) continue;
+      seen.add(i.id);
+      if (i.kind === "ssh") {
+        sshOptions.push({ id: i.id, label: i.label, meta: i.address });
+      } else if (i.kind === "k8s") {
+        k8sOptions.push({ id: i.id, label: i.label, meta: i.address });
+      }
+    }
+    for (const s of hub.workspaceServers ?? []) {
+      map.set(s.id, s.name);
+      if (seen.has(s.id)) continue;
+      seen.add(s.id);
+      const meta = [s.cluster, ...(s.tags ?? [])].filter(Boolean).join(" · ");
+      workspaceOptions.push({
+        id: s.id,
+        label: meta ? `${s.name} (${meta})` : s.name,
+        meta,
+      });
+    }
+    return {
+      targets: map,
+      groupedTargets: { sshOptions, k8sOptions, workspaceOptions },
+    };
+  }, [hub.inventory, hub.workspaceServers]);
+
+  const targetName = (id: string): string =>
+    targets.get(id) ?? targets.get(id.replace(/^demo-/, "")) ?? id;
+  const custom = draft && !INTERVALS.some(([m]) => m === draft.minutes);
+  const schedules = [...hub.schedules].sort(
+    (a, b) => Number(b.enabled) - Number(a.enabled) || a.nextRunAt - b.nextRunAt,
+  );
+
+  const cronInvalid = Boolean(
+    draft && draft.timingMode === "cron" && !isValidCronExpression(draft.cron),
+  );
+
+  const save = (existing: AgentSchedule | undefined, d: Draft): ReturnType<Act> => {
+    const cron = d.timingMode === "cron" ? d.cron.trim() : undefined;
+    const timezone = d.timingMode === "cron" ? d.timezone.trim() || "UTC" : undefined;
+    const eventTrigger: ScheduleEventTrigger | undefined = d.eventKind
+      ? {
+          kind: d.eventKind,
+          cooldownMinutes: Math.max(1, d.eventCooldownMinutes || 30),
+        }
+      : undefined;
+
+    return act({
       action: "schedule-save",
       schedule: {
         // A changed job keeps the model it was created with unless it is new.
@@ -86,18 +194,50 @@ export function Schedules({
         shell: d.shell,
         mode: d.mode,
         intervalMinutes: d.minutes,
+        cron,
+        timezone,
+        missedPolicy: d.missedPolicy,
+        quietSentinel: d.quietSentinel || undefined,
+        eventTrigger,
+        runbookId: d.runbookId || undefined,
         nextRunAt:
-          existing && existing.intervalMinutes === d.minutes ? existing.nextRunAt : Date.now() + d.minutes * 60_000,
+          existing &&
+          existing.intervalMinutes === d.minutes &&
+          existing.cron === cron
+            ? existing.nextRunAt
+            : Date.now() + d.minutes * 60_000,
       },
     });
+  };
+
+  const applyQuietSentinelPreset = (): void => {
+    setDraft((prev) => ({
+      ...(prev ?? emptyDraft),
+      title: prev?.title.trim() ? prev.title : QUIET_SENTINEL_PRESET.title,
+      prompt: prev?.prompt.trim() ? prev.prompt : QUIET_SENTINEL_PRESET.prompt,
+      minutes: QUIET_SENTINEL_PRESET.minutes,
+      mode: QUIET_SENTINEL_PRESET.mode,
+      quietSentinel: true,
+      eventKind: prev?.eventKind || QUIET_SENTINEL_PRESET.eventKind,
+      eventCooldownMinutes:
+        prev?.eventCooldownMinutes ?? QUIET_SENTINEL_PRESET.eventCooldownMinutes,
+    }));
+  };
+
+  const tf = targetFilter.trim().toLowerCase();
+  const matchesTargetFilter = (opt: { label: string; meta?: string }) =>
+    !tf ||
+    opt.label.toLowerCase().includes(tf) ||
+    Boolean(opt.meta?.toLowerCase().includes(tf));
 
   return (
     <div className="ai-scroll">
       <header className="ai-view-head">
         <h2>Schedules</h2>
         <p className="ai-hint">
-          Work the assistant does on a timer: a health check every morning, a capacity report every week. A job runs
-          only while sshS3 is running on this computer; a run that was missed is noted and not made up for.
+          Work the assistant does on a timer or event trigger: a health check
+          every morning, a capacity report every week, or a quiet sentinel that
+          notifies only on anomalies.
         </p>
       </header>
 
@@ -105,13 +245,24 @@ export function Schedules({
         <h3>
           Jobs <span className="ai-count">{hub.schedules.length}</span>
         </h3>
-        <button
-          type="button"
-          className="ai-btn-accent"
-          onClick={() => setDraft(draft ? undefined : { ...emptyDraft })}
-        >
-          {draft ? "Close" : "New job"}
-        </button>
+        <div className="ai-tags">
+          {!draft && (
+            <button
+              type="button"
+              data-testid="quiet-sentinel-preset-btn"
+              onClick={applyQuietSentinelPreset}
+            >
+              {QUIET_SENTINEL_PRESET.title}
+            </button>
+          )}
+          <button
+            type="button"
+            className="ai-btn-accent"
+            onClick={() => setDraft(draft ? undefined : { ...emptyDraft })}
+          >
+            {draft ? "Close" : "New job"}
+          </button>
+        </div>
       </div>
 
       {draft && (
@@ -120,7 +271,7 @@ export function Schedules({
           data-testid="schedule-form"
           onSubmit={(e) => {
             e.preventDefault();
-            if (!draft.title.trim() || !draft.prompt.trim()) return;
+            if (!draft.title.trim() || !draft.prompt.trim() || cronInvalid) return;
             void save(
               hub.schedules.find((s) => s.id === draft.id),
               draft,
@@ -129,7 +280,16 @@ export function Schedules({
             });
           }}
         >
-          <strong>{draft.id ? "Edit job" : "New job"}</strong>
+          <div className="ai-card-head">
+            <strong>{draft.id ? "Edit job" : "New job"}</strong>
+            <button
+              type="button"
+              data-testid="apply-quiet-sentinel-btn"
+              onClick={applyQuietSentinelPreset}
+            >
+              Apply quiet sentinel preset
+            </button>
+          </div>
           <label>
             Name
             <input
@@ -150,89 +310,307 @@ export function Schedules({
               onChange={(e) => setDraft({ ...draft, prompt: e.target.value })}
             />
           </label>
+
           <div className="ai-form-row">
             <label>
-              Where
-              <select value={draft.profileId} onChange={(e) => setDraft({ ...draft, profileId: e.target.value })}>
-                {!targets.has(draft.profileId) && <option value={draft.profileId}>{draft.profileId}</option>}
-                {[...targets.entries()].map(([id, label]) => (
-                  <option key={id} value={id}>
-                    {label}
-                  </option>
-                ))}
+              Target selector
+              <input
+                type="search"
+                aria-label="Filter targets"
+                placeholder="Filter targets by host, cluster, or tag…"
+                value={targetFilter}
+                onChange={(e) => setTargetFilter(e.target.value)}
+                style={{ marginBottom: 4 }}
+              />
+              <select
+                aria-label="Where"
+                value={draft.profileId}
+                onChange={(e) => setDraft({ ...draft, profileId: e.target.value })}
+              >
+                {!targets.has(draft.profileId) && (
+                  <option value={draft.profileId}>{draft.profileId}</option>
+                )}
+                <option value="local">This computer</option>
+                {groupedTargets.sshOptions.some(matchesTargetFilter) && (
+                  <optgroup label="SSH hosts">
+                    {groupedTargets.sshOptions
+                      .filter(matchesTargetFilter)
+                      .map((o) => (
+                        <option key={o.id} value={o.id}>
+                          {o.label}
+                        </option>
+                      ))}
+                  </optgroup>
+                )}
+                {groupedTargets.workspaceOptions.some(matchesTargetFilter) && (
+                  <optgroup label="Workspace servers">
+                    {groupedTargets.workspaceOptions
+                      .filter(matchesTargetFilter)
+                      .map((o) => (
+                        <option key={o.id} value={o.id}>
+                          {o.label}
+                        </option>
+                      ))}
+                  </optgroup>
+                )}
+                {groupedTargets.k8sOptions.some(matchesTargetFilter) && (
+                  <optgroup label="Kubernetes clusters">
+                    {groupedTargets.k8sOptions
+                      .filter(matchesTargetFilter)
+                      .map((o) => (
+                        <option key={o.id} value={o.id}>
+                          {o.label}
+                        </option>
+                      ))}
+                  </optgroup>
+                )}
               </select>
             </label>
             <label>
               Shell on that machine
-              <select value={draft.shell} onChange={(e) => setDraft({ ...draft, shell: e.target.value as ShellKind })}>
+              <select
+                value={draft.shell}
+                onChange={(e) =>
+                  setDraft({ ...draft, shell: e.target.value as ShellKind })
+                }
+              >
                 {SHELL_KINDS.map((s) => (
                   <option key={s}>{s}</option>
                 ))}
               </select>
             </label>
           </div>
+
           <div className="ai-form-row">
             <label>
-              How often
+              Schedule type
               <select
-                value={custom ? "custom" : String(draft.minutes)}
+                aria-label="Schedule type"
+                value={draft.timingMode}
                 onChange={(e) =>
-                  setDraft({ ...draft, minutes: e.target.value === "custom" ? 90 : Number(e.target.value) })
+                  setDraft({
+                    ...draft,
+                    timingMode: e.target.value as "interval" | "cron",
+                  })
                 }
               >
-                {INTERVALS.map(([m, label]) => (
-                  <option key={m} value={m}>
-                    {label}
-                  </option>
-                ))}
-                <option value="custom">Another interval…</option>
+                <option value="interval">Interval</option>
+                <option value="cron">Cron expression (5-field)</option>
               </select>
             </label>
-            {custom ? (
+            <label>
+              Commands
+              <select
+                value={draft.mode}
+                onChange={(e) =>
+                  setDraft({ ...draft, mode: e.target.value as AgentMode })
+                }
+              >
+                {(Object.keys(SCHEDULE_MODES) as AgentMode[]).map((m) => (
+                  <option key={m} value={m}>
+                    {SCHEDULE_MODES[m]}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          {draft.timingMode === "interval" ? (
+            <div className="ai-form-row">
               <label>
-                Minutes between runs
+                How often
+                <select
+                  value={custom ? "custom" : String(draft.minutes)}
+                  onChange={(e) =>
+                    setDraft({
+                      ...draft,
+                      minutes:
+                        e.target.value === "custom" ? 90 : Number(e.target.value),
+                    })
+                  }
+                >
+                  {INTERVALS.map(([m, label]) => (
+                    <option key={m} value={m}>
+                      {label}
+                    </option>
+                  ))}
+                  <option value="custom">Another interval…</option>
+                </select>
+              </label>
+              {custom && (
+                <label>
+                  Minutes between runs
+                  <input
+                    type="number"
+                    min={1}
+                    max={525600}
+                    value={draft.minutes}
+                    onChange={(e) =>
+                      setDraft({
+                        ...draft,
+                        minutes: Math.max(1, Number(e.target.value) || 1),
+                      })
+                    }
+                  />
+                </label>
+              )}
+            </div>
+          ) : (
+            <div className="ai-form-row">
+              <label>
+                Cron expression
+                <input
+                  aria-label="Cron expression"
+                  placeholder="30 7 * * 1-5"
+                  value={draft.cron}
+                  onChange={(e) => setDraft({ ...draft, cron: e.target.value })}
+                />
+                {cronInvalid && (
+                  <small className="ai-bad" role="alert">
+                    Enter 5 fields (minute hour day month weekday), e.g. 30 7 * * 1-5.
+                  </small>
+                )}
+              </label>
+              <label>
+                Timezone
+                <select
+                  aria-label="Timezone"
+                  value={
+                    TIMEZONES.includes(draft.timezone) ? draft.timezone : "custom"
+                  }
+                  onChange={(e) => {
+                    if (e.target.value !== "custom") {
+                      setDraft({ ...draft, timezone: e.target.value });
+                    }
+                  }}
+                >
+                  {TIMEZONES.map((tz) => (
+                    <option key={tz} value={tz}>
+                      {tz}
+                    </option>
+                  ))}
+                  {!TIMEZONES.includes(draft.timezone) && (
+                    <option value="custom">{draft.timezone}</option>
+                  )}
+                </select>
+              </label>
+            </div>
+          )}
+
+          <div className="ai-form-row">
+            <label>
+              Event trigger
+              <select
+                aria-label="Event trigger"
+                value={draft.eventKind}
+                onChange={(e) =>
+                  setDraft({
+                    ...draft,
+                    eventKind: e.target.value as Draft["eventKind"],
+                  })
+                }
+              >
+                {EVENT_TRIGGERS.map((ev) => (
+                  <option key={ev.kind || "none"} value={ev.kind}>
+                    {ev.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {draft.eventKind ? (
+              <label>
+                Event cooldown (minutes)
                 <input
                   type="number"
+                  aria-label="Event cooldown minutes"
                   min={1}
-                  max={525600}
-                  value={draft.minutes}
-                  onChange={(e) => setDraft({ ...draft, minutes: Math.max(1, Number(e.target.value) || 1) })}
+                  max={1440}
+                  value={draft.eventCooldownMinutes}
+                  onChange={(e) =>
+                    setDraft({
+                      ...draft,
+                      eventCooldownMinutes: Math.max(
+                        1,
+                        Number(e.target.value) || 30,
+                      ),
+                    })
+                  }
                 />
               </label>
             ) : (
               <label>
-                Commands
-                <select value={draft.mode} onChange={(e) => setDraft({ ...draft, mode: e.target.value as AgentMode })}>
-                  {(Object.keys(MODES) as AgentMode[]).map((m) => (
-                    <option key={m} value={m}>
-                      {MODES[m]}
-                    </option>
-                  ))}
+                Missed-run policy
+                <select
+                  aria-label="Missed-run policy"
+                  value={draft.missedPolicy}
+                  onChange={(e) =>
+                    setDraft({
+                      ...draft,
+                      missedPolicy: e.target.value as "skip" | "run_once",
+                    })
+                  }
+                >
+                  <option value="skip">Skip missed runs</option>
+                  <option value="run_once">Run once if missed while offline</option>
                 </select>
               </label>
             )}
           </div>
-          {custom && (
+
+          {(hub.runbooks?.length ?? 0) > 0 && (
             <label>
-              Commands
-              <select value={draft.mode} onChange={(e) => setDraft({ ...draft, mode: e.target.value as AgentMode })}>
-                {(Object.keys(MODES) as AgentMode[]).map((m) => (
-                  <option key={m} value={m}>
-                    {MODES[m]}
+              Deterministic runbook (optional)
+              <select
+                aria-label="Runbook"
+                value={draft.runbookId}
+                onChange={(e) =>
+                  setDraft({ ...draft, runbookId: e.target.value })
+                }
+              >
+                <option value="">None — AI prompt only</option>
+                {hub.runbooks!.map((rb) => (
+                  <option key={rb.id} value={rb.id}>
+                    {rb.name}
                   </option>
                 ))}
               </select>
             </label>
           )}
+
+          <label className="ai-check">
+            <input
+              type="checkbox"
+              checked={draft.quietSentinel}
+              onChange={(e) =>
+                setDraft({ ...draft, quietSentinel: e.target.checked })
+              }
+            />
+            <span>
+              Quiet sentinel (notify only on anomaly)
+              <small>
+                Suppresses notifications and history noise when the run replies
+                HEARTBEAT_OK.
+              </small>
+            </span>
+          </label>
+
           <p className="ai-hint">
-            Each run opens its own terminal, uses {hub.config.model || "the model set in Settings"}, and stops after 20
-            commands or 15 minutes.
+            Each run opens its own terminal, uses{" "}
+            {hub.config.model || "the model set in Settings"}, and stops after
+            20 commands or 15 minutes.
             {draft.mode === "autonomous" &&
               " On its own it still stops for destructive commands and, by default, for changes on production."}
-            {draft.mode === "assisted" && " If nobody is there to approve, the run waits until it times out."}
+            {draft.mode === "assisted" &&
+              " If nobody is there to approve, the run waits until it times out."}
+            {draft.mode === "plan" &&
+              " Proposes an executable plan and waits for review before changing anything."}
           </p>
           <div className="ai-card-actions">
-            <button type="submit" className="ai-btn-emerald">
+            <button
+              type="submit"
+              className="ai-btn-emerald"
+              disabled={cronInvalid}
+            >
               {draft.id ? "Save changes" : "Create job"}
             </button>
             <button type="button" onClick={() => setDraft(undefined)}>
@@ -244,36 +622,66 @@ export function Schedules({
 
       {hub.schedules.length === 0 && !draft && (
         <p className="ai-empty">
-          No jobs yet. A good first one only reports: let it look at something every morning and tell you what needs
-          attention.
+          No jobs yet. A good first one only reports: let it look at something
+          every morning and tell you what needs attention.
         </p>
       )}
 
       {schedules.map((s) => (
-        <article className={`ai-card ${s.enabled ? "" : "ai-card-off"}`} key={s.id} data-testid={`schedule-${s.id}`}>
+        <article
+          className={`ai-card ${s.enabled ? "" : "ai-card-off"}`}
+          key={s.id}
+          data-testid={`schedule-${s.id}`}
+        >
           <div className="ai-card-head">
             <div>
               <strong>{s.title}</strong>
               <small>
-                {targetName(s.profileId)} · {every(s.intervalMinutes)} · {MODES[s.mode].split(" — ")[0].split(" (")[0].toLowerCase()} ·{" "}
-                {s.model}
+                {targetName(s.profileId)} ·{" "}
+                {s.cron
+                  ? `cron "${s.cron}" (${s.timezone ?? "UTC"})`
+                  : every(s.intervalMinutes)}{" "}
+                ·{" "}
+                {SCHEDULE_MODES[s.mode].split(" — ")[0].split(" (")[0].toLowerCase()}{" "}
+                · {s.model}
               </small>
             </div>
-            <span className={`ai-badge ${s.enabled ? "ai-badge-success" : ""}`}>
-              {s.enabled ? `next ${until(s.nextRunAt)}` : "paused"}
-            </span>
+            <div className="ai-tags">
+              {s.quietSentinel && (
+                <span className="ai-badge ai-badge-mode">Quiet sentinel</span>
+              )}
+              {s.eventTrigger && (
+                <span className="ai-badge">
+                  trigger: {s.eventTrigger.kind}
+                </span>
+              )}
+              <span className={`ai-badge ${s.enabled ? "ai-badge-success" : ""}`}>
+                {s.enabled ? `next ${until(s.nextRunAt)}` : "paused"}
+              </span>
+            </div>
           </div>
-          <p className="ai-doc-excerpt">{s.prompt.length > 240 ? `${s.prompt.slice(0, 240)}…` : s.prompt}</p>
+          <p className="ai-doc-excerpt">
+            {s.prompt.length > 240 ? `${s.prompt.slice(0, 240)}…` : s.prompt}
+          </p>
+          {s.lastRunSummary && (
+            <small className="ai-last-run">Summary: {s.lastRunSummary}</small>
+          )}
           <small className="ai-last-run">
             {s.lastStatus ? `Last run: ${s.lastStatus}` : "Has not run yet"}
             {s.enabled ? ` · next ${new Date(s.nextRunAt).toLocaleString()}` : ""}
           </small>
           <div className="ai-card-actions">
-            {s.lastTaskId && onOpenTask && hub.tasks.some((t) => t.id === s.lastTaskId) && (
-              <button type="button" className="ai-btn-accent" onClick={() => onOpenTask(s.lastTaskId!)}>
-                Open last run
-              </button>
-            )}
+            {s.lastTaskId &&
+              onOpenTask &&
+              hub.tasks.some((t) => t.id === s.lastTaskId) && (
+                <button
+                  type="button"
+                  className="ai-btn-accent"
+                  onClick={() => onOpenTask(s.lastTaskId!)}
+                >
+                  Open last run
+                </button>
+              )}
             <button
               type="button"
               onClick={() =>
@@ -285,6 +693,14 @@ export function Schedules({
                   shell: s.shell,
                   minutes: s.intervalMinutes,
                   mode: s.mode,
+                  timingMode: s.cron ? "cron" : "interval",
+                  cron: s.cron ?? "0 7 * * *",
+                  timezone: s.timezone ?? "UTC",
+                  missedPolicy: s.missedPolicy ?? "skip",
+                  quietSentinel: Boolean(s.quietSentinel),
+                  eventKind: s.eventTrigger?.kind ?? "",
+                  eventCooldownMinutes: s.eventTrigger?.cooldownMinutes ?? 30,
+                  runbookId: s.runbookId ?? "",
                 })
               }
             >
@@ -299,7 +715,9 @@ export function Schedules({
                     ...s,
                     enabled: !s.enabled,
                     // Resuming starts a fresh interval instead of firing at once for the time it was paused.
-                    nextRunAt: s.enabled ? s.nextRunAt : Date.now() + s.intervalMinutes * 60_000,
+                    nextRunAt: s.enabled
+                      ? s.nextRunAt
+                      : Date.now() + s.intervalMinutes * 60_000,
                   },
                 })
               }

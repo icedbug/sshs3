@@ -3,6 +3,34 @@ export type AiProvider = "openai-codex" | "anthropic" | "openai-compatible";
 
 export type AiReasoningEffort = "low" | "medium" | "high";
 
+export type AiEgressPolicy = "standard" | "local-only" | "eu-pinned";
+
+export type AiPiiScrubbingMode = "off" | "standard" | "strict";
+
+export type AiProfileRole = "primary" | "fastTriage" | "backgroundDistill" | "embedding";
+
+export type AiActiveProfileByRole = Partial<Record<AiProfileRole, string>>;
+
+/** Named model + endpoint profile for multi-provider switching and role routing. */
+export interface ProviderProfile {
+  id: string;
+  name: string;
+  provider: AiProvider;
+  model: string;
+  baseUrl?: string;
+  reasoningEffort?: AiReasoningEffort;
+  temperature?: number;
+  maxOutputTokens?: number;
+  contextWindowTokens?: number;
+  embeddingModel?: string;
+  egressPolicy?: AiEgressPolicy;
+  zdrConfirmed?: boolean;
+  hasApiKey?: boolean;
+  keyStorage?: "session" | "encrypted" | "oauth";
+  fallbackProfileIds?: string[];
+  updatedAt?: number;
+}
+
 export interface AiConfig {
   /** Master switch. Off by default: an opt-in feature. */
   enabled: boolean;
@@ -41,6 +69,16 @@ export interface AiConfig {
    * run again on `model`.
    */
   fastModel?: string;
+  /** Named provider profiles (multi-provider auth & model pool). */
+  profiles?: ProviderProfile[];
+  /** Role-to-profile ID bindings (`primary`, `fastTriage`, `backgroundDistill`, `embedding`). */
+  activeProfileByRole?: AiActiveProfileByRole;
+  /** Network egress / data-residency policy for outbound AI calls. */
+  egressPolicy?: AiEgressPolicy;
+  /** Explicit Zero Data Retention confirmation for external endpoints. */
+  zdrConfirmed?: boolean;
+  /** PII scrubbing mode applied before context leaves the device. */
+  piiScrubbing?: AiPiiScrubbingMode;
 }
 
 /** What the renderer sees: the API key itself never leaves the main process. */
@@ -56,6 +94,7 @@ export interface AiConfigView extends AiConfig {
 /** `apiKey`: a string replaces the stored key, null removes it, undefined keeps it. */
 export interface AiConfigUpdate extends Partial<AiConfig> {
   apiKey?: string | null;
+  profileApiKeys?: Record<string, string | null>;
 }
 
 /** The bundled Hermes agent: whether this build includes it, and whether it is running now. */

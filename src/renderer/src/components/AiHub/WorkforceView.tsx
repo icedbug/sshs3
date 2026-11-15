@@ -1,15 +1,28 @@
-import { lazy, Suspense, useState } from "react";
+import { lazy, Suspense, useMemo, useState } from "react";
 import type {
+  AgentTask,
   HubSnapshot,
   MissionAgent,
   WorkGoal,
   WorkTicket,
   WorkTicketStatus,
+  WorkforceRun,
 } from "@shared/types/aiHub";
 import { ConfirmButton } from "./ConfirmButton";
-import { type Act, modes } from "./panelShared";
+import { HypothesisTree } from "./HypothesisTree";
+import { type Act, formatTokenUsage, modes, TABULAR_NUMS_STYLE } from "./panelShared";
 import { RichMarkdownContent } from "./RichMarkdownContent";
-import { COLUMNS, agentsLive, goalProgress, tokens, type AgentLive } from "./workforceModel";
+import {
+  COLUMNS,
+  agentsLive,
+  compareTicketsByPriority,
+  goalProgress,
+  groupCorrelatedAlerts,
+  ticketPriorityLevel,
+  ticketSlaInfo,
+  tokens,
+  type AgentLive,
+} from "./workforceModel";
 
 // The graph library is only loaded when the team tab is opened.
 const TeamGraph = lazy(() => import("./TeamGraph").then((m) => ({ default: m.TeamGraph })));
@@ -31,6 +44,45 @@ const ago = (at: number): string => {
   return `${Math.round(mins / 1440)} d ago`;
 };
 
+const SEVERITY_BADGE: Record<"critical" | "warning" | "info", string> = {
+  critical: "ai-badge ai-badge-danger",
+  warning: "ai-badge ai-badge-mode",
+  info: "ai-badge ai-badge-cluster",
+};
+
+const SLA_STYLE: Record<"normal" | "warn" | "breach", React.CSSProperties> = {
+  normal: TABULAR_NUMS_STYLE,
+  warn: { ...TABULAR_NUMS_STYLE, color: "#fbbf24", borderColor: "rgba(251, 191, 36, 0.45)" },
+  breach: { ...TABULAR_NUMS_STYLE, color: "#f87171", borderColor: "rgba(248, 113, 113, 0.55)" },
+};
+
+function matchesTicketFilter(
+  ticket: WorkTicket,
+  query: string,
+  severityFilter: "all" | "alerts" | "critical",
+  assigneeFilter: string,
+): boolean {
+  if (assigneeFilter && ticket.assigneeAgentId !== assigneeFilter) return false;
+  const prio = ticketPriorityLevel(ticket);
+  const hasAlerts = Boolean(ticket.alert || (ticket.correlatedAlerts && ticket.correlatedAlerts.length > 0));
+  if (severityFilter === "alerts" && !hasAlerts) return false;
+  if (severityFilter === "critical" && prio !== "critical") return false;
+  if (!query) return true;
+  const q = query.toLowerCase();
+  const fields = [
+    ticket.id,
+    ticket.title,
+    ticket.description,
+    ticket.target,
+    ticket.assigneeName,
+    ticket.alert?.name,
+    ticket.alert?.source,
+    ticket.alert?.fingerprint,
+    ...(ticket.correlatedAlerts ?? []).map((c) => c.summary),
+  ];
+  return fields.some((f) => Boolean(f && f.toLowerCase().includes(q)));
+}
+
 export function WorkforceView({
   hub,
   act,
@@ -42,6 +94,9 @@ export function WorkforceView({
 }): JSX.Element {
   const [tab, setTab] = useState<"board" | "team">("board");
   const [goalFilter, setGoalFilter] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [severityFilter, setSeverityFilter] = useState<"all" | "alerts" | "critical">("all");
+  const [assigneeFilter, setAssigneeFilter] = useState("");
   const [draft, setDraft] = useState<TicketDraft | undefined>();
   const [goalDraft, setGoalDraft] = useState<{ id?: string; title: string; description: string } | undefined>();
   const [openTicketId, setOpenTicketId] = useState("");
@@ -51,18 +106,69 @@ export function WorkforceView({
   const [sessionId, setSessionId] = useState("");
   const [dragId, setDragId] = useState("");
   const [busy, setBusy] = useState("");
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [inspectedTaskId, setInspectedTaskId] = useState<string | undefined>();
+  const [inspectedRunId, setInspectedRunId] = useState<string | undefined>();
 
   const goals = hub.workGoals ?? [];
-  const tickets = hub.workTickets ?? [];
+  const tickets = useMemo(() => hub.workTickets ?? [], [hub.workTickets]);
   const agents = hub.agents ?? [];
   const team = agentsLive(hub);
   const sessions = hub.sessions.filter((s) => s.state !== "disconnected");
-  const shown = tickets.filter((t) => !goalFilter || t.goalId === goalFilter);
-  const openTicket = tickets.find((t) => t.id === openTicketId);
-  const selectedAgent = team.find((t) => t.agent.id === agentId);
-  const empty = goals.length === 0 && tickets.length === 0;
+  const workforcePaused = hub.workforcePaused === true;
   const heartbeat = hub.preferences.workforceAutopilot === true;
   const sync = hub.workBoardSync;
+
+  const trimmedQuery = searchQuery.trim();
+  const hasBoardFilter = Boolean(trimmedQuery || severityFilter !== "all" || assigneeFilter || goalFilter);
+
+  const shown = useMemo(
+    () =>
+      tickets.filter(
+        (t) =>
+          (!goalFilter || t.goalId === goalFilter) &&
+          matchesTicketFilter(t, trimmedQuery, severityFilter, assigneeFilter),
+      ),
+    [tickets, goalFilter, trimmedQuery, severityFilter, assigneeFilter],
+  );
+
+  const openTicket = tickets.find((t) => t.id === openTicketId);
+  const openTicketTask = openTicket?.taskId ? hub.tasks.find((t) => t.id === openTicket.taskId) : undefined;
+  const openTicketHypotheses = openTicket
+    ? openTicket.hypotheses?.length
+      ? openTicket.hypotheses
+      : openTicketTask?.hypotheses
+    : undefined;
+  const openTicketAlertGroup = useMemo(
+    () => (openTicket ? groupCorrelatedAlerts(openTicket) : undefined),
+    [openTicket],
+  );
+  const openTicketCmdRefs = useMemo(() => {
+    const refs = new Set<string>();
+    for (const c of openTicketTask?.changes ?? []) {
+      if (c.ref) refs.add(c.ref);
+    }
+    return refs.size > 0 ? refs : undefined;
+  }, [openTicketTask]);
+
+  const selectedAgent = team.find((t) => t.agent.id === agentId);
+  const empty = goals.length === 0 && tickets.length === 0;
+
+  const activeTasks = useMemo(
+    () => hub.tasks.filter((t) => t.status === "running" || t.status === "waiting"),
+    [hub.tasks],
+  );
+  const activeRuns = useMemo(
+    () => (hub.workforceRuns ?? []).filter((r) => r.status === "running"),
+    [hub.workforceRuns],
+  );
+  const liveRunCount = activeTasks.length + activeRuns.length;
+
+  const openRunDrawerForTask = (taskId?: string): void => {
+    setInspectedRunId(undefined);
+    setInspectedTaskId(taskId);
+    setDrawerOpen(true);
+  };
 
   const run = (key: string, request: Parameters<Act>[0]): Promise<HubSnapshot | undefined> => {
     setBusy(key);
@@ -232,6 +338,24 @@ export function WorkforceView({
             />
             <span className={heartbeat ? "ai-heartbeat-on" : ""}>Heartbeat</span>
           </label>
+          <button
+            type="button"
+            className={workforcePaused ? "ai-btn-emerald" : "ai-btn-danger"}
+            data-testid="workforce-pause-all"
+            disabled={busy === "workforce-pause"}
+            onClick={() => void run("workforce-pause", { action: "workforce-pause", paused: !workforcePaused })}
+          >
+            {workforcePaused ? "Resume Workforce" : "Pause All"}
+          </button>
+          <button
+            type="button"
+            className={drawerOpen ? "ai-btn-accent" : ""}
+            data-testid="run-drawer-toggle"
+            aria-expanded={drawerOpen}
+            onClick={() => setDrawerOpen((v) => !v)}
+          >
+            Run inspector{liveRunCount > 0 ? ` (${liveRunCount})` : ""}
+          </button>
           <button type="button" onClick={() => setGoalDraft(goalDraft ? undefined : { title: "", description: "" })}>
             New goal
           </button>
@@ -250,12 +374,62 @@ export function WorkforceView({
           </button>
         </div>
       </div>
+
       <small className="ai-sync-note">
         {sync?.shared
           ? `Shared with the team${sync.lastSyncAt ? ` · read ${ago(sync.lastSyncAt)}` : ""}${sync.error ? ` · last sync failed: ${sync.error}` : ""}`
           : "Only on this computer. Connect a team bucket to share the board."}
         {heartbeat ? " · Heartbeat on: this app starts tickets by itself." : ""}
       </small>
+
+      {workforcePaused && (
+        <div
+          className="ai-card"
+          data-testid="workforce-paused-banner"
+          role="status"
+          style={{
+            marginTop: 8,
+            borderColor: "rgba(248, 113, 113, 0.55)",
+            background: "rgba(248, 113, 113, 0.08)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 10,
+            padding: "8px 12px",
+          }}
+        >
+          <span>
+            <strong>Workforce paused:</strong> autonomous heartbeat and queued ticket dispatch are halted.
+          </span>
+          <button
+            type="button"
+            className="ai-btn-emerald"
+            disabled={busy === "workforce-pause"}
+            onClick={() => void run("workforce-pause", { action: "workforce-pause", paused: false })}
+          >
+            Resume Workforce
+          </button>
+        </div>
+      )}
+
+      {drawerOpen && (
+        <RunInspectionDrawer
+          hub={hub}
+          act={act}
+          selectedTaskId={inspectedTaskId}
+          selectedRunId={inspectedRunId}
+          onSelectTask={(id) => {
+            setInspectedRunId(undefined);
+            setInspectedTaskId(id);
+          }}
+          onSelectRun={(id) => {
+            setInspectedRunId(id);
+            setInspectedTaskId(undefined);
+          }}
+          onOpenTask={onOpenTask}
+          onClose={() => setDrawerOpen(false)}
+        />
+      )}
 
       {goalDraft && (
         <form
@@ -350,12 +524,84 @@ export function WorkforceView({
         </div>
       )}
 
+      {tab === "board" && tickets.length > 0 && (
+        <div
+          className="ai-filter-bar"
+          data-testid="workforce-filter"
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            alignItems: "center",
+            gap: 8,
+            margin: "8px 0 10px",
+          }}
+        >
+          <input
+            type="search"
+            aria-label="Search tickets"
+            placeholder="Filter tickets by title, target, agent, or alert…"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            style={{ flex: "1 1 220px", minWidth: 180 }}
+          />
+          <div style={{ display: "inline-flex", gap: 4 }}>
+            {(
+              [
+                { id: "all", label: "All" },
+                { id: "alerts", label: "Alerts" },
+                { id: "critical", label: "Critical" },
+              ] as const
+            ).map((opt) => (
+              <button
+                key={opt.id}
+                type="button"
+                className={`ai-chip ${severityFilter === opt.id ? "ai-chip-on" : ""}`}
+                aria-pressed={severityFilter === opt.id}
+                onClick={() => setSeverityFilter(opt.id)}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+          {agents.length > 0 && (
+            <select
+              aria-label="Filter by agent"
+              value={assigneeFilter}
+              onChange={(e) => setAssigneeFilter(e.target.value)}
+            >
+              <option value="">All agents</option>
+              {agents.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.name}
+                </option>
+              ))}
+            </select>
+          )}
+          {hasBoardFilter && (
+            <button
+              type="button"
+              className="ai-chip"
+              onClick={() => {
+                setGoalFilter("");
+                setSearchQuery("");
+                setSeverityFilter("all");
+                setAssigneeFilter("");
+              }}
+            >
+              Clear ({shown.length}/{tickets.length})
+            </button>
+          )}
+        </div>
+      )}
+
       {tab === "board" && (
         <div className="ai-board" data-testid="workforce-board">
           {COLUMNS.map((col) => {
             const cards = shown
               .filter((t) => t.status === col.status)
-              .sort((a, b) => (col.status === "done" ? b.updatedAt - a.updatedAt : a.createdAt - b.createdAt));
+              .sort((a, b) =>
+                col.status === "done" ? b.updatedAt - a.updatedAt : compareTicketsByPriority(a, b),
+              );
             const droppable = col.status !== "in_progress";
             return (
               <section
@@ -377,49 +623,76 @@ export function WorkforceView({
                   <span>{col.title}</span>
                   <span className="ai-count">{cards.length}</span>
                 </header>
-                {cards.slice(0, col.status === "done" ? 12 : 60).map((t) => (
-                  <article
-                    key={t.id}
-                    className={`ai-ticket ${t.status === "in_progress" ? "ai-ticket-live" : ""} ${openTicketId === t.id ? "ai-ticket-open" : ""}`}
-                    data-testid={`ticket-${t.id}`}
-                    draggable={t.status !== "in_progress"}
-                    onDragStart={() => setDragId(t.id)}
-                    onDragEnd={() => setDragId("")}
-                    onClick={() => {
-                      setOpenTicketId(openTicketId === t.id ? "" : t.id);
-                      setNote("");
-                      setComment("");
-                    }}
-                  >
-                    <strong>{t.title}</strong>
-                    <div className="ai-ticket-meta">
-                      <span>{t.assigneeName ?? "Unassigned"}</span>
-                      {t.target && <span>{t.target}</span>}
-                      {(t.blockedBy ?? []).some((b) => tickets.some((x) => x.id === b && x.status !== "done")) && (
-                        <span className="ai-ticket-waits">waits</span>
+                {cards.slice(0, col.status === "done" ? 12 : 60).map((t) => {
+                  const prio = ticketPriorityLevel(t);
+                  const sla = ticketSlaInfo(t);
+                  const corr = groupCorrelatedAlerts(t);
+                  return (
+                    <article
+                      key={t.id}
+                      className={`ai-ticket ${t.status === "in_progress" ? "ai-ticket-live" : ""} ${openTicketId === t.id ? "ai-ticket-open" : ""}`}
+                      data-testid={`ticket-${t.id}`}
+                      data-priority={prio}
+                      draggable={t.status !== "in_progress"}
+                      onDragStart={() => setDragId(t.id)}
+                      onDragEnd={() => setDragId("")}
+                      onClick={() => {
+                        setOpenTicketId(openTicketId === t.id ? "" : t.id);
+                        setNote("");
+                        setComment("");
+                      }}
+                    >
+                      <strong>{t.title}</strong>
+                      <div className="ai-ticket-meta">
+                        <span>{t.assigneeName ?? "Unassigned"}</span>
+                        {t.target && <span>{t.target}</span>}
+                        {prio !== "normal" && (
+                          <span className={SEVERITY_BADGE[prio]} data-testid={`ticket-priority-${t.id}`}>
+                            {prio}
+                          </span>
+                        )}
+                        {corr.items.length > 1 && (
+                          <span className="ai-badge" title={`${corr.total} correlated alerts`}>
+                            {corr.items.length} alerts
+                          </span>
+                        )}
+                        {t.status !== "done" && (
+                          <span
+                            className="ai-badge"
+                            data-testid={`ticket-sla-${t.id}`}
+                            data-sla-level={sla.level}
+                            style={SLA_STYLE[sla.level]}
+                            title={`Open / firing age: ${sla.label}`}
+                          >
+                            {sla.label}
+                          </span>
+                        )}
+                        {(t.blockedBy ?? []).some((b) => tickets.some((x) => x.id === b && x.status !== "done")) && (
+                          <span className="ai-ticket-waits">waits</span>
+                        )}
+                      </div>
+                      {t.status === "in_progress" && (
+                        <small>
+                          <span className="ai-org-dot" /> {t.claim?.by ?? "somebody"} · started {ago(t.claim?.at ?? t.updatedAt)}
+                        </small>
                       )}
-                    </div>
-                    {t.status === "in_progress" && (
-                      <small>
-                        <span className="ai-org-dot" /> {t.claim?.by ?? "somebody"} · started {ago(t.claim?.at ?? t.updatedAt)}
-                      </small>
-                    )}
-                    {canStart(t) && (
-                      <button
-                        type="button"
-                        className="ai-btn-emerald"
-                        disabled={busy === t.id}
-                        data-testid={`ticket-start-${t.id}`}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void run(t.id, { action: "ticket-start", id: t.id });
-                        }}
-                      >
-                        {busy === t.id ? "Starting…" : t.status === "blocked" ? "Try again" : "Start"}
-                      </button>
-                    )}
-                  </article>
-                ))}
+                      {canStart(t) && (
+                        <button
+                          type="button"
+                          className="ai-btn-emerald"
+                          disabled={busy === t.id}
+                          data-testid={`ticket-start-${t.id}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void run(t.id, { action: "ticket-start", id: t.id });
+                          }}
+                        >
+                          {busy === t.id ? "Starting…" : t.status === "blocked" ? "Try again" : "Start"}
+                        </button>
+                      )}
+                    </article>
+                  );
+                })}
                 {cards.length === 0 && <p className="ai-column-empty">{col.hint || "Nothing yet"}</p>}
               </section>
             );
@@ -433,7 +706,12 @@ export function WorkforceView({
             <p className="ai-empty">No agents yet. Set up a team above, or add agents under Agents &amp; MCP.</p>
           ) : (
             <Suspense fallback={<p className="ai-empty">Loading the team…</p>}>
-              <TeamGraph team={team} selectedId={agentId} onSelect={setAgentId} />
+              <TeamGraph
+                team={team}
+                selectedId={agentId}
+                workforcePaused={workforcePaused}
+                onSelect={setAgentId}
+              />
             </Suspense>
           )}
           {selectedAgent && (
@@ -443,6 +721,7 @@ export function WorkforceView({
               tickets={tickets.filter((t) => t.assigneeAgentId === selectedAgent.agent.id)}
               act={act}
               onOpenTask={onOpenTask}
+              onInspectRun={openRunDrawerForTask}
               onOpenTicket={(id) => {
                 setTab("board");
                 setOpenTicketId(id);
@@ -461,7 +740,8 @@ export function WorkforceView({
                 {openTicket.id} · {COLUMNS.find((c) => c.status === openTicket.status)?.title} ·{" "}
                 {openTicket.assigneeName ?? "unassigned"}
                 {goals.find((g) => g.id === openTicket.goalId) ? ` · ${goals.find((g) => g.id === openTicket.goalId)!.title}` : ""}
-                {openTicket.tokens ? ` · ${tokens(openTicket.tokens)} tokens` : ""} · by {openTicket.createdBy}
+                {openTicket.tokens ? ` · ${tokens(openTicket.tokens)} tokens` : ""} · SLA{" "}
+                {ticketSlaInfo(openTicket).label} · by {openTicket.createdBy}
               </small>
             </div>
             <button type="button" aria-label="Close ticket" onClick={() => setOpenTicketId("")}>
@@ -469,6 +749,56 @@ export function WorkforceView({
             </button>
           </div>
           {openTicket.description && <p className="ai-memory-text">{openTicket.description}</p>}
+
+          {openTicketAlertGroup && openTicketAlertGroup.items.length > 0 && (
+            <div
+              className="ai-correlated-alerts"
+              data-testid="ticket-correlated-alerts"
+              style={{ display: "grid", gap: 6, margin: "8px 0" }}
+            >
+              <small className="ai-muted">
+                Correlated alerts ({openTicketAlertGroup.total} event
+                {openTicketAlertGroup.total === 1 ? "" : "s"} across {openTicketAlertGroup.items.length} group
+                {openTicketAlertGroup.items.length === 1 ? "" : "s"})
+              </small>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {openTicketAlertGroup.items.map((item, idx) => (
+                  <span
+                    key={item.key}
+                    className="ai-pill"
+                    data-testid={`correlated-alert-${idx}`}
+                    data-severity={item.severity}
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 6,
+                      padding: "3px 8px",
+                      borderRadius: 999,
+                      border: "1px solid var(--ai-line-strong, rgba(148,163,184,0.3))",
+                      fontSize: 11.5,
+                    }}
+                  >
+                    <span className={SEVERITY_BADGE[item.severity]}>{item.severity}</span>
+                    <span>{item.summary}</span>
+                    {item.count > 1 && <strong style={TABULAR_NUMS_STYLE}>×{item.count}</strong>}
+                    {item.source && <small style={{ opacity: 0.75 }}>{item.source}</small>}
+                    <small style={{ opacity: 0.7 }}>{ago(item.at)}</small>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {openTicketHypotheses && openTicketHypotheses.length > 0 && (
+            <HypothesisTree
+              hypotheses={openTicketHypotheses}
+              refs={openTicketCmdRefs}
+              onOpenRef={() => {
+                if (openTicketTask) openRunDrawerForTask(openTicketTask.id);
+              }}
+            />
+          )}
+
           {openTicket.result && (
             <div className="ai-doc-body">
               <small>{openTicket.status === "blocked" ? "Why it stopped" : "The agent's report"}</small>
@@ -547,9 +877,18 @@ export function WorkforceView({
               </>
             )}
             {openTicket.taskId && hub.tasks.some((t) => t.id === openTicket.taskId) && (
-              <button type="button" className="ai-btn-accent" onClick={() => onOpenTask(openTicket.taskId!)}>
-                {openTicket.status === "in_progress" ? "Watch the run" : "Open the conversation"}
-              </button>
+              <>
+                <button
+                  type="button"
+                  data-testid="inspect-ticket-run"
+                  onClick={() => openRunDrawerForTask(openTicket.taskId)}
+                >
+                  Inspect run
+                </button>
+                <button type="button" className="ai-btn-accent" onClick={() => onOpenTask(openTicket.taskId!)}>
+                  {openTicket.status === "in_progress" ? "Watch the run" : "Open the conversation"}
+                </button>
+              </>
             )}
             {openTicket.status !== "in_progress" && (
               <>
@@ -620,12 +959,378 @@ export function WorkforceView({
   );
 }
 
+function RunInspectionDrawer({
+  hub,
+  act,
+  selectedTaskId,
+  selectedRunId,
+  onSelectTask,
+  onSelectRun,
+  onOpenTask,
+  onClose,
+}: {
+  hub: HubSnapshot;
+  act: Act;
+  selectedTaskId?: string;
+  selectedRunId?: string;
+  onSelectTask: (id: string) => void;
+  onSelectRun: (id: string) => void;
+  onOpenTask: (taskId: string) => void;
+  onClose: () => void;
+}): JSX.Element {
+  const tasks = useMemo(() => {
+    const score = (t: AgentTask): number =>
+      t.status === "running" ? 0 : t.status === "waiting" ? 1 : t.ticketId || t.workforceRunId || t.parentTaskId ? 2 : 3;
+    return [...hub.tasks].sort((a, b) => score(a) - score(b) || b.updatedAt - a.updatedAt);
+  }, [hub.tasks]);
+
+  const runs: WorkforceRun[] = useMemo(() => hub.workforceRuns ?? [], [hub.workforceRuns]);
+
+  const activeRun = selectedRunId ? runs.find((r) => r.id === selectedRunId) : undefined;
+  const activeTask = activeRun
+    ? undefined
+    : (selectedTaskId ? tasks.find((t) => t.id === selectedTaskId) : undefined) ?? tasks[0];
+
+  const childSubagents = useMemo(
+    () => (activeTask ? tasks.filter((t) => t.parentTaskId === activeTask.id) : []),
+    [activeTask, tasks],
+  );
+
+  const taskUsage = activeTask?.runUsage ?? activeTask?.usage;
+  const toolSteps = activeTask?.toolLog ?? [];
+  const scratchpadTodos = activeTask?.todos ?? [];
+  const liveMessages = useMemo(
+    () => (activeTask?.messages ?? []).filter((m) => m.role === "assistant").slice(-3),
+    [activeTask],
+  );
+  const cmdRefs = useMemo(() => {
+    const refs = new Set<string>();
+    for (const c of activeTask?.changes ?? []) {
+      if (c.ref) refs.add(c.ref);
+    }
+    return refs.size > 0 ? refs : undefined;
+  }, [activeTask]);
+
+  return (
+    <aside
+      className="ai-card ai-run-drawer"
+      data-testid="run-inspection-drawer"
+      role="region"
+      aria-label="Subagent and run inspection drawer"
+      style={{
+        marginTop: 10,
+        marginBottom: 12,
+        padding: 12,
+        borderColor: "var(--ai-accent, #2dd4bf)",
+        display: "grid",
+        gap: 10,
+      }}
+    >
+      <div className="ai-card-head">
+        <div>
+          <strong>Subagent &amp; Run Inspector</strong>
+          <small>
+            Live tool steps, scratchpad todos, child subagents, and streaming output across active workforce runs.
+          </small>
+        </div>
+        <button type="button" aria-label="Close run drawer" onClick={onClose}>
+          Close
+        </button>
+      </div>
+
+      {tasks.length === 0 && runs.length === 0 ? (
+        <p className="ai-empty">No active or recent runs yet. Start a ticket or workforce run to inspect its steps.</p>
+      ) : (
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "minmax(200px, 260px) minmax(0, 1fr)",
+            gap: 12,
+            alignItems: "start",
+          }}
+        >
+          <div style={{ display: "grid", gap: 6 }} data-testid="run-drawer-list">
+            {tasks.slice(0, 12).map((t) => {
+              const isSelected = activeTask?.id === t.id && !activeRun;
+              return (
+                <button
+                  key={t.id}
+                  type="button"
+                  data-testid={`run-drawer-task-${t.id}`}
+                  aria-pressed={isSelected}
+                  className={`ai-chip ${isSelected ? "ai-chip-on" : ""}`}
+                  style={{
+                    display: "grid",
+                    textAlign: "left",
+                    gap: 2,
+                    padding: "6px 8px",
+                    borderRadius: 8,
+                  }}
+                  onClick={() => onSelectTask(t.id)}
+                >
+                  <span style={{ fontWeight: 600, fontSize: 12 }}>
+                    {t.parentTaskId ? "↳ " : ""}
+                    {t.title}
+                  </span>
+                  <small style={{ opacity: 0.8, fontSize: 11 }}>
+                    {t.status} · {t.agentName ?? "Assistant"}
+                    {t.investigator ? " · subagent" : ""}
+                    {t.toolLog?.length ? ` · ${t.toolLog.length} steps` : ""}
+                  </small>
+                </button>
+              );
+            })}
+            {runs.slice(0, 6).map((r) => {
+              const isSelected = activeRun?.id === r.id;
+              return (
+                <button
+                  key={r.id}
+                  type="button"
+                  data-testid={`run-drawer-workforce-${r.id}`}
+                  aria-pressed={isSelected}
+                  className={`ai-chip ${isSelected ? "ai-chip-on" : ""}`}
+                  style={{
+                    display: "grid",
+                    textAlign: "left",
+                    gap: 2,
+                    padding: "6px 8px",
+                    borderRadius: 8,
+                  }}
+                  onClick={() => onSelectRun(r.id)}
+                >
+                  <span style={{ fontWeight: 600, fontSize: 12 }}>⚡ {r.title}</span>
+                  <small style={{ opacity: 0.8, fontSize: 11 }}>
+                    {r.status} · {r.leadAgentName} · {r.steps.length} specialists
+                  </small>
+                </button>
+              );
+            })}
+          </div>
+
+          <div style={{ display: "grid", gap: 10, minWidth: 0 }}>
+            {activeTask && (
+              <>
+                <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
+                  <strong>{activeTask.title}</strong>
+                  <span
+                    className={`ai-badge ${activeTask.status === "running" ? "ai-badge-success" : activeTask.status === "waiting" ? "ai-badge-mode" : activeTask.status === "failed" ? "ai-badge-danger" : ""}`}
+                  >
+                    {activeTask.status}
+                  </span>
+                  {activeTask.investigator && <span className="ai-badge ai-badge-purple">subagent</span>}
+                  {activeTask.target?.label && <span className="ai-badge">{activeTask.target.label}</span>}
+                  {taskUsage && (
+                    <span className="ai-badge" style={TABULAR_NUMS_STYLE}>
+                      {formatTokenUsage(taskUsage.inputTokens, taskUsage.outputTokens, taskUsage.costUsd)}
+                    </span>
+                  )}
+                  <span className="ai-spacer" />
+                  {(activeTask.status === "running" || activeTask.status === "waiting") && (
+                    <button
+                      type="button"
+                      className="ai-btn-danger"
+                      onClick={() => void act({ action: "stop", taskId: activeTask.id })}
+                    >
+                      Stop run
+                    </button>
+                  )}
+                  <button type="button" className="ai-btn-accent" onClick={() => onOpenTask(activeTask.id)}>
+                    Open full chat
+                  </button>
+                </div>
+
+                {childSubagents.length > 0 && (
+                  <div data-testid="run-drawer-subagents" style={{ display: "grid", gap: 6 }}>
+                    <small className="ai-muted">Child subagents ({childSubagents.length})</small>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                      {childSubagents.map((sub) => (
+                        <button
+                          key={sub.id}
+                          type="button"
+                          className="ai-chip"
+                          onClick={() => onSelectTask(sub.id)}
+                        >
+                          {sub.agentName ?? sub.title} · {sub.status} ({sub.toolLog?.length ?? 0} steps)
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <div data-testid="run-drawer-scratchpad" style={{ display: "grid", gap: 6 }}>
+                  <small className="ai-muted">Scratchpad &amp; plan steps ({scratchpadTodos.length})</small>
+                  {scratchpadTodos.length === 0 ? (
+                    <small style={{ opacity: 0.7 }}>No scratchpad items recorded yet.</small>
+                  ) : (
+                    <ul style={{ margin: 0, paddingLeft: 18, display: "grid", gap: 3, fontSize: 12 }}>
+                      {scratchpadTodos.map((todo) => (
+                        <li key={todo.id}>
+                          <span className="ai-badge" style={{ marginRight: 6 }}>
+                            {todo.status}
+                          </span>
+                          <span>{todo.content}</span>
+                          {todo.note && <small style={{ marginLeft: 6, opacity: 0.75 }}>({todo.note})</small>}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {activeTask.hypotheses && activeTask.hypotheses.length > 0 && (
+                    <HypothesisTree
+                      hypotheses={activeTask.hypotheses}
+                      refs={cmdRefs}
+                    />
+                  )}
+                </div>
+
+                <div data-testid="run-drawer-tool-steps" style={{ display: "grid", gap: 6 }}>
+                  <small className="ai-muted">Tool steps ({toolSteps.length})</small>
+                  {toolSteps.length === 0 ? (
+                    <small style={{ opacity: 0.7 }}>No tool calls logged yet.</small>
+                  ) : (
+                    <div style={{ display: "grid", gap: 6, maxHeight: 220, overflowY: "auto" }}>
+                      {toolSteps.map((step, i) => (
+                        <div
+                          key={`${step.name}-${step.at}-${i}`}
+                          style={{
+                            padding: "6px 8px",
+                            borderRadius: 8,
+                            border: "1px solid var(--ai-line, rgba(148,163,184,0.22))",
+                            background: "rgba(0,0,0,0.16)",
+                            fontSize: 11.5,
+                            display: "grid",
+                            gap: 3,
+                          }}
+                        >
+                          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                            <strong>{step.name}</strong>
+                            {step.target && <span className="ai-badge">{step.target}</span>}
+                            {step.durationMs !== undefined && (
+                              <span className="ai-badge" style={TABULAR_NUMS_STYLE}>
+                                {step.durationMs}ms
+                              </span>
+                            )}
+                            {step.exitCode !== undefined && (
+                              <span className={`ai-badge ${step.exitCode === 0 ? "ai-badge-success" : "ai-badge-danger"}`}>
+                                exit {step.exitCode}
+                              </span>
+                            )}
+                            {step.ok === false && <span className="ai-badge ai-badge-danger">error</span>}
+                          </div>
+                          {step.input && (
+                            <code style={{ whiteSpace: "pre-wrap", wordBreak: "break-word", opacity: 0.85 }}>
+                              {step.input}
+                            </code>
+                          )}
+                          {step.output && (
+                            <pre
+                              style={{
+                                margin: 0,
+                                maxHeight: 90,
+                                overflow: "auto",
+                                whiteSpace: "pre-wrap",
+                                opacity: 0.8,
+                              }}
+                            >
+                              {step.output}
+                            </pre>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div data-testid="run-drawer-live-output" style={{ display: "grid", gap: 6 }}>
+                  <small className="ai-muted">Live output</small>
+                  {liveMessages.length === 0 && !activeTask.error ? (
+                    <small style={{ opacity: 0.7 }}>Waiting for agent output…</small>
+                  ) : (
+                    <div
+                      style={{
+                        maxHeight: 200,
+                        overflowY: "auto",
+                        padding: "8px 10px",
+                        borderRadius: 8,
+                        border: "1px solid var(--ai-line, rgba(148,163,184,0.22))",
+                        background: "rgba(0,0,0,0.14)",
+                      }}
+                    >
+                      {activeTask.error && (
+                        <p className="ai-badge ai-badge-danger" style={{ marginBottom: 6 }}>
+                          {activeTask.error}
+                        </p>
+                      )}
+                      {liveMessages.map((msg) => (
+                        <RichMarkdownContent key={msg.id} text={msg.text} refs={cmdRefs} />
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+
+            {activeRun && (
+              <div data-testid="run-drawer-workforce-detail" style={{ display: "grid", gap: 8 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <strong>{activeRun.title}</strong>
+                  <span className={`ai-badge ${activeRun.status === "running" ? "ai-badge-success" : activeRun.status === "failed" ? "ai-badge-danger" : ""}`}>
+                    {activeRun.status}
+                  </span>
+                  <small>Lead: {activeRun.leadAgentName}</small>
+                </div>
+                {activeRun.steps.map((step) => (
+                  <div
+                    key={step.id}
+                    style={{
+                      padding: "8px 10px",
+                      borderRadius: 8,
+                      border: "1px solid var(--ai-line, rgba(148,163,184,0.22))",
+                      display: "grid",
+                      gap: 4,
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <strong>{step.agentName}</strong>
+                      <small>{step.role}</small>
+                      <span className="ai-badge">{step.status}</span>
+                      {step.taskId && (
+                        <button
+                          type="button"
+                          className="ai-chip"
+                          style={{ marginLeft: "auto" }}
+                          onClick={() => onSelectTask(step.taskId!)}
+                        >
+                          Inspect task
+                        </button>
+                      )}
+                    </div>
+                    <small>{step.subTask}</small>
+                    {step.findings && <RichMarkdownContent text={step.findings} />}
+                    {step.error && <small className="ai-badge ai-badge-danger">{step.error}</small>}
+                  </div>
+                ))}
+                {activeRun.synthesis && (
+                  <div data-testid="run-drawer-live-output">
+                    <small className="ai-muted">Synthesis</small>
+                    <RichMarkdownContent text={activeRun.synthesis} />
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </aside>
+  );
+}
+
 function AgentPanel({
   live,
   agents,
   tickets,
   act,
   onOpenTask,
+  onInspectRun,
   onOpenTicket,
 }: {
   live: AgentLive;
@@ -633,6 +1338,7 @@ function AgentPanel({
   tickets: WorkTicket[];
   act: Act;
   onOpenTask: (taskId: string) => void;
+  onInspectRun: (taskId: string) => void;
   onOpenTicket: (ticketId: string) => void;
 }): JSX.Element {
   const { agent } = live;
@@ -714,6 +1420,9 @@ function AgentPanel({
       )}
       {live.task && (
         <div className="ai-card-actions">
+          <button type="button" onClick={() => onInspectRun(live.task!.id)}>
+            Inspect run
+          </button>
           <button type="button" className="ai-btn-accent" onClick={() => onOpenTask(live.task!.id)}>
             Watch it work
           </button>

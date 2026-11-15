@@ -7,11 +7,15 @@ import {
   search as searchOrama,
   type AnyOrama,
 } from "@orama/orama";
-import type { KbDocument, MemoryEntry } from "../../../shared/types/aiHub";
+import type { KbDocument, KbPage, KbPageUse, MemoryEntry } from "../../../shared/types/aiHub";
 import type { IStorageProvider } from "../../../shared/types/storage";
 import {
   cosine,
+  embedTextLocal,
   fuseRanks,
+  localFallbackEmbedder,
+  sparseCosine,
+  sparseTermVector,
   type Embedder,
   type EmbeddingIndex,
 } from "./EmbeddingIndex";
@@ -20,16 +24,46 @@ import { safeError } from "./privacy";
 
 export interface KbChunkResult {
   docId: string;
+  pageId?: string;
   title: string;
   collection: string;
   targetCluster?: string;
   sourceUri?: string;
+  heading?: string;
   chunkIndex: number;
   snippet: string;
   score: number;
   bm25Score?: number;
   semanticScore?: number;
+  rerankScore?: number;
+  proven?: number;
   matchedConcepts?: string[];
+}
+
+export interface KbSearchOptions {
+  query: string;
+  collectionIds?: string[];
+  targetCluster?: string;
+  cluster?: string;
+  limit?: number;
+  /** Optional KB pages to index and rank alongside document chunks. */
+  pages?: KbPage[];
+  /** Optional usage stats (proven counts, rollbacks) keyed by page/doc id. */
+  pageUse?: Record<string, KbPageUse>;
+  /** Optional explicit stale reasons keyed by page/doc id. */
+  staleReasons?: Record<string, string>;
+  /** Reference timestamp for recency and rollback decay (defaults to Date.now()). */
+  now?: number;
+  /** Cross-candidate rerank window over fused results (clamped to 30..50, default 40). */
+  rerankTopK?: number;
+}
+
+export interface KbHybridSearchResult {
+  matches: KbChunkResult[];
+  retrieval: "hybrid" | "lexical";
+  embeddingModel?: string;
+  embeddingError?: string;
+  usedLocalFallback?: boolean;
 }
 
 /**
@@ -396,13 +430,84 @@ export function tokenize(input: string): string[] {
     .filter((t) => t.length >= 2);
 }
 
+const DAY_MS = 24 * 60 * 60_000;
+const ROLLBACK_DECAY_DAYS = 60;
+const STALE_PAGE_DAYS = 180;
+const RERANK_MIN_K = 30;
+const RERANK_MAX_K = 50;
+
+/** Extracts markdown headings from a page or document body, stripped of syntax markers. */
+export function extractMarkdownHeadings(body: string): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const match of body.matchAll(/^#{1,6}\s+(.+?)\s*#*$/gm)) {
+    const clean = match[1].replace(/[*`]/g, "").trim();
+    if (!clean) continue;
+    const key = clean.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(clean);
+  }
+  return out;
+}
+
+/** Prepends heading, cluster, collection, and title context to a document chunk. */
+export function formatChunkContext(
+  doc: Pick<KbDocument, "title" | "collection" | "cluster" | "targetCluster" | "tags">,
+  heading: string | undefined,
+  text: string,
+): string {
+  const collection = doc.collection || doc.cluster || "General";
+  const cluster = doc.cluster || doc.targetCluster || "";
+  const tags = (doc.tags ?? []).join(", ");
+  const headerParts = [
+    heading ? `Section: ${heading}` : "",
+    cluster ? `Cluster: ${cluster}` : "",
+    collection ? `Collection: ${collection}` : "",
+    doc.title ? `Title: ${doc.title}` : "",
+    tags ? `Tags: ${tags}` : "",
+  ].filter(Boolean);
+  return headerParts.length > 0 ? `[${headerParts.join(" | ")}]\n${text}` : text;
+}
+
+/** Formats a KbPage for hybrid indexing using title, when, keys, targets, headings, and body. */
+export function formatPageContext(page: KbPage): string {
+  const headings = extractMarkdownHeadings(page.body);
+  const parts = [
+    `Title: ${page.title}`,
+    `Kind: ${page.kind}`,
+    page.when ? `When: ${page.when}` : "",
+    page.keys?.length ? `Keys: ${page.keys.join(", ")}` : "",
+    page.targets.length ? `Targets: ${page.targets.join(", ")}` : "",
+    headings.length ? `Headings: ${headings.join(" > ")}` : "",
+  ].filter(Boolean);
+  return `[${parts.join(" | ")}]\n${page.body}`;
+}
+
 interface IndexedChunkRecord {
   chunkId: string;
-  doc: KbDocument;
+  kind: "chunk" | "page";
+  doc?: KbDocument;
+  page?: KbPage;
+  docId: string;
+  pageId?: string;
+  title: string;
+  collection: string;
+  targetCluster?: string;
+  clusters: string[];
+  sourceUri?: string;
+  heading?: string;
+  keys?: string[];
+  when?: string;
   chunkIndex: number;
   text: string;
+  contextualText: string;
   tokens: string[];
   concepts: string[];
+  unverified: boolean;
+  staleReason?: string;
+  updatedAt: number;
+  provenCount: number;
 }
 
 /** A document's text as the pieces search returns, each knowing the headings it sits under. */
@@ -449,10 +554,14 @@ export class KnowledgeBaseService {
     return this.indexedChunks.size;
   }
 
-  private ensureOramaIndex(docs: KbDocument[]): void {
-    const sig = docs
-      .map((d) => `${d.id}:${d.updatedAt}:${d.chunks?.length ?? 0}`)
+  private ensureOramaIndex(docs: KbDocument[], pages: KbPage[] = []): void {
+    const docSig = docs
+      .map((d) => `${d.id}:${d.updatedAt}:${d.chunks?.length ?? 0}:${d.cluster ?? d.targetCluster ?? ""}:${d.collection ?? ""}`)
       .join("|");
+    const pageSig = pages
+      .map((p) => `${p.id}:${p.revision}:${p.updatedAt}:${p.proven ?? 0}:${p.unverified?.commands.length ?? 0}:${p.unverified?.citations.length ?? 0}`)
+      .join("|");
+    const sig = `${docSig}::${pageSig}`;
     if (this.oramaDb && this.oramaSignature === sig) {
       return;
     }
@@ -473,6 +582,14 @@ export class KnowledgeBaseService {
 
     const chunkMap = new Map<string, IndexedChunkRecord>();
     const oramaRecords: Array<Record<string, unknown>> = [];
+    const pageProvenByDoc = new Map<string, number>();
+    for (const p of pages) {
+      if ((p.proven ?? 0) > 0) {
+        for (const s of p.sources) {
+          pageProvenByDoc.set(s.docId, Math.max(pageProvenByDoc.get(s.docId) ?? 0, p.proven ?? 0));
+        }
+      }
+    }
 
     for (const doc of docs) {
       const parts =
@@ -482,19 +599,37 @@ export class KnowledgeBaseService {
       const col = doc.collection || doc.cluster || "General";
       const cl = doc.cluster || doc.targetCluster || "";
       const tagStr = (doc.tags ?? []).join(" ");
+      const clusters = [cl, doc.targetCluster ?? ""].filter(Boolean);
+      const docStaleReason = (doc as KbDocument & { staleReason?: string }).staleReason;
+      const docProven = pageProvenByDoc.get(doc.id) ?? 0;
+
       parts.forEach((part, idx) => {
         const chunkId = `${doc.id}#${idx}`;
-        // A piece is found by the headings it sits under too, not only by its own words.
-        const heading = doc.chunks?.[idx]?.heading ?? "";
-        const tokens = tokenize(`${doc.title} ${col} ${cl} ${tagStr} ${heading} ${part}`);
+        // A piece is found by the headings it sits under too, plus cluster & collection context.
+        const heading = doc.chunks?.[idx]?.heading;
+        const contextualText = formatChunkContext(doc, heading, part);
+        const tokens = tokenize(contextualText);
         const concepts = extractSemanticConcepts(tokens);
         chunkMap.set(chunkId, {
           chunkId,
+          kind: "chunk",
           doc,
+          docId: doc.id,
+          title: doc.title,
+          collection: col,
+          targetCluster: cl || undefined,
+          clusters,
+          sourceUri: doc.sourceRef || doc.sourceUri,
+          heading,
           chunkIndex: idx,
           text: part,
+          contextualText,
           tokens,
           concepts,
+          unverified: false,
+          staleReason: docStaleReason,
+          updatedAt: doc.updatedAt,
+          provenCount: docProven,
         });
         oramaRecords.push({
           chunkId,
@@ -503,10 +638,59 @@ export class KnowledgeBaseService {
           title: doc.title,
           collection: col,
           cluster: cl,
-          tags: `${tagStr} ${heading}`.trim(),
+          tags: `${tagStr} ${heading ?? ""}`.trim(),
           concepts: concepts.join(" "),
-          text: part,
+          text: contextualText,
         });
+      });
+    }
+
+    for (const page of pages) {
+      const chunkId = `page:${page.id}`;
+      const headings = extractMarkdownHeadings(page.body);
+      const heading = headings.join(" › ") || page.when;
+      const contextualText = formatPageContext(page);
+      const tokens = tokenize(contextualText);
+      const concepts = extractSemanticConcepts(tokens);
+      const unverified = Boolean(
+        page.unverified && (page.unverified.commands.length > 0 || page.unverified.citations.length > 0),
+      );
+      const pageStaleReason = (page as KbPage & { staleReason?: string }).staleReason;
+      const snippet = page.body.trim().slice(0, 500) || page.when;
+
+      chunkMap.set(chunkId, {
+        chunkId,
+        kind: "page",
+        page,
+        docId: page.id,
+        pageId: page.id,
+        title: page.title,
+        collection: page.kind,
+        targetCluster: page.targets[0],
+        clusters: [...page.targets],
+        heading,
+        keys: page.keys,
+        when: page.when,
+        chunkIndex: 0,
+        text: snippet,
+        contextualText,
+        tokens,
+        concepts,
+        unverified,
+        staleReason: pageStaleReason,
+        updatedAt: Math.max(page.updatedAt, page.lastProvenAt ?? 0),
+        provenCount: page.proven ?? 0,
+      });
+      oramaRecords.push({
+        chunkId,
+        docId: page.id,
+        chunkIndex: 0,
+        title: page.title,
+        collection: page.kind,
+        cluster: page.targets.join(" "),
+        tags: `${(page.keys ?? []).join(" ")} ${headings.join(" ")} ${page.when}`.trim(),
+        concepts: concepts.join(" "),
+        text: contextualText,
       });
     }
 
@@ -517,6 +701,150 @@ export class KnowledgeBaseService {
     this.oramaDb = db;
     this.oramaSignature = sig;
     this.indexedChunks = chunkMap;
+  }
+
+  private filterCandidates(
+    records: Iterable<IndexedChunkRecord>,
+    allowedCollections?: string[],
+  ): IndexedChunkRecord[] {
+    const out: IndexedChunkRecord[] = [];
+    for (const rec of records) {
+      if (allowedCollections && allowedCollections.length > 0) {
+        const col = rec.collection.toLowerCase();
+        const cl = (rec.targetCluster ?? "").toLowerCase();
+        const matchCol =
+          allowedCollections.includes(col) ||
+          (cl && allowedCollections.includes(cl)) ||
+          allowedCollections.includes(rec.docId.toLowerCase());
+        if (!matchCol) continue;
+      }
+      out.push(rec);
+    }
+    return out;
+  }
+
+  private qualityMultiplier(
+    rec: IndexedChunkRecord,
+    opts: {
+      clusterFilter?: string;
+      pageUse?: Record<string, KbPageUse>;
+      staleReasons?: Record<string, string>;
+      now: number;
+    },
+  ): number {
+    let factor = 1;
+    if (opts.clusterFilter) {
+      const hasMatch = rec.clusters.some((c) => c.toLowerCase() === opts.clusterFilter);
+      if (hasMatch) factor *= 1.35;
+      else if (rec.clusters.length > 0) factor *= 0.78;
+    }
+
+    const use = opts.pageUse?.[rec.docId];
+    const provenCount = Math.max(rec.provenCount, use?.proven ?? 0);
+    if (provenCount > 0) {
+      factor *= 1 + Math.min(0.35, Math.log1p(provenCount) * 0.12);
+    }
+
+    const rollbacks = use?.rolledBack ?? [];
+    if (rollbacks.length > 0) {
+      const recent = rollbacks.filter((r) => opts.now - r.at < ROLLBACK_DECAY_DAYS * DAY_MS);
+      const count = recent.length || rollbacks.length;
+      factor *= Math.max(0.4, 1 - count * 0.22);
+    }
+
+    if (rec.unverified) {
+      factor *= 0.76;
+    }
+
+    const staleReason = rec.staleReason || opts.staleReasons?.[rec.docId];
+    if (staleReason) {
+      factor *= 0.52;
+    } else if (rec.kind === "page" && provenCount === 0 && opts.now - rec.updatedAt > STALE_PAGE_DAYS * DAY_MS) {
+      factor *= 0.88;
+    }
+
+    return factor;
+  }
+
+  private toChunkResult(
+    rec: IndexedChunkRecord,
+    scores: {
+      score: number;
+      bm25Score?: number;
+      semanticScore?: number;
+      rerankScore?: number;
+      matchedConcepts?: string[];
+    },
+    opts?: { pageUse?: Record<string, KbPageUse> },
+  ): KbChunkResult {
+    const proven = Math.max(rec.provenCount, opts?.pageUse?.[rec.docId]?.proven ?? 0) || undefined;
+    return {
+      docId: rec.docId,
+      ...(rec.pageId ? { pageId: rec.pageId } : {}),
+      title: rec.title,
+      collection: rec.collection,
+      targetCluster: rec.targetCluster,
+      sourceUri: rec.sourceUri,
+      ...(rec.heading ? { heading: rec.heading } : {}),
+      chunkIndex: rec.chunkIndex,
+      snippet: rec.text,
+      score: scores.score,
+      ...(scores.bm25Score !== undefined ? { bm25Score: scores.bm25Score } : {}),
+      ...(scores.semanticScore !== undefined ? { semanticScore: scores.semanticScore } : {}),
+      ...(scores.rerankScore !== undefined ? { rerankScore: scores.rerankScore } : {}),
+      ...(proven !== undefined ? { proven } : {}),
+      ...(scores.matchedConcepts ? { matchedConcepts: scores.matchedConcepts } : {}),
+    };
+  }
+
+  private proximityAndFieldScore(query: string, qTokens: string[], rec: IndexedChunkRecord): {
+    coverage: number;
+    proximity: number;
+    fieldBoost: number;
+  } {
+    if (qTokens.length === 0) return { coverage: 0, proximity: 0, fieldBoost: 0 };
+    const matched = qTokens.filter((q) => rec.tokens.some((t) => t === q || t.includes(q)));
+    const coverage = matched.length / qTokens.length;
+
+    const cleanQuery = query.toLowerCase().trim();
+    const titleLower = rec.title.toLowerCase();
+    const headingLower = (rec.heading ?? "").toLowerCase();
+    const whenLower = (rec.when ?? "").toLowerCase();
+    const keysLower = (rec.keys ?? []).map((k) => k.toLowerCase());
+
+    let fieldBoost = 0;
+    if (cleanQuery.length >= 3) {
+      if (titleLower.includes(cleanQuery)) fieldBoost += 0.22;
+      if (headingLower.includes(cleanQuery)) fieldBoost += 0.16;
+      if (whenLower.includes(cleanQuery)) fieldBoost += 0.14;
+      if (keysLower.some((k) => k.includes(cleanQuery) || cleanQuery.includes(k))) fieldBoost += 0.25;
+    }
+    const titleTokens = tokenize(`${rec.title} ${rec.heading ?? ""} ${rec.when ?? ""} ${(rec.keys ?? []).join(" ")}`);
+    if (titleTokens.length > 0) {
+      const headHits = qTokens.filter((q) => titleTokens.some((t) => t === q || t.includes(q))).length;
+      fieldBoost += 0.18 * (headHits / qTokens.length);
+    }
+
+    let proximity = 0;
+    if (matched.length >= 2) {
+      const bodyLower = rec.contextualText.toLowerCase();
+      const positions: Array<{ pos: number; term: string }> = [];
+      for (const term of matched) {
+        const idx = bodyLower.indexOf(term);
+        if (idx >= 0) positions.push({ pos: idx, term });
+      }
+      if (positions.length >= 2) {
+        positions.sort((a, b) => a.pos - b.pos);
+        const span = positions[positions.length - 1].pos - positions[0].pos;
+        if (span <= 240) proximity = 0.16 * (1 - span / 280);
+      }
+    }
+
+    return {
+      coverage,
+      proximity,
+      fieldBoost: Math.min(0.45, fieldBoost),
+    };
   }
 
   createDocument(input: {
@@ -561,64 +889,42 @@ export class KnowledgeBaseService {
 
   search(
     docs: KbDocument[],
-    queryOrOpts:
-      | string
-      | {
-          query: string;
-          collectionIds?: string[];
-          targetCluster?: string;
-          cluster?: string;
-          limit?: number;
-        },
-    options?: {
-      collectionIds?: string[];
-      targetCluster?: string;
-      cluster?: string;
-      limit?: number;
-    },
+    queryOrOpts: string | KbSearchOptions,
+    options?: Omit<KbSearchOptions, "query">,
   ): KbChunkResult[] {
-    const query =
-      typeof queryOrOpts === "string" ? queryOrOpts : queryOrOpts.query;
-    const opts = typeof queryOrOpts === "string" ? options : queryOrOpts;
-    const limit = Math.max(1, Math.min(25, opts?.limit ?? 6));
+    const opts = typeof queryOrOpts === "string" ? { ...options, query: queryOrOpts } : queryOrOpts;
+    const limit = Math.max(1, Math.min(25, opts.limit ?? 6));
+    return this.searchInternal(docs, opts, limit);
+  }
+
+  private searchInternal(
+    docs: KbDocument[],
+    opts: KbSearchOptions,
+    limit: number,
+  ): KbChunkResult[] {
+    const query = opts.query;
+    const now = opts.now ?? Date.now();
     const qTokens = tokenize(query);
-    const allowedCollections = opts?.collectionIds
+    const allowedCollections = opts.collectionIds
       ?.map((c) => c.trim().toLowerCase())
       .filter(Boolean);
-    const clusterFilter = (opts?.cluster || opts?.targetCluster)
+    const clusterFilter = (opts.cluster || opts.targetCluster)
       ?.trim()
       .toLowerCase();
 
-    // Ensure the @orama/orama in-memory hybrid index is up to date
-    this.ensureOramaIndex(docs);
+    // Ensure the @orama/orama in-memory hybrid index is up to date (both docs & optional pages)
+    this.ensureOramaIndex(docs, opts.pages ?? []);
 
-    const candidateRecords = [...this.indexedChunks.values()].filter((rec) => {
-      if (allowedCollections && allowedCollections.length > 0) {
-        const col = (rec.doc.collection || rec.doc.cluster || "").toLowerCase();
-        const matchCol =
-          allowedCollections.includes(col) ||
-          allowedCollections.includes(rec.doc.id.toLowerCase());
-        if (!matchCol) return false;
-      }
-      return true;
-    });
-
+    const candidateRecords = this.filterCandidates(this.indexedChunks.values(), allowedCollections);
     if (candidateRecords.length === 0) return [];
 
     if (qTokens.length === 0) {
-      return candidateRecords.slice(0, limit).map((c) => ({
-        docId: c.doc.id,
-        title: c.doc.title,
-        collection: c.doc.collection || c.doc.cluster || "General",
-        targetCluster: c.doc.cluster || c.doc.targetCluster,
-        sourceUri: c.doc.sourceRef || c.doc.sourceUri,
-        chunkIndex: c.chunkIndex,
-        snippet: c.text,
-        score: 1,
-      }));
+      return candidateRecords.slice(0, limit).map((c) =>
+        this.toChunkResult(c, { score: 1 }, opts),
+      );
     }
 
-    // 1. Query @orama/orama full-text BM25 + typo-tolerant index AND hybrid vector index
+    // 1. Query @orama/orama full-text BM25 + typo-tolerant index
     const oramaScores = new Map<string, number>();
     const queryConcepts = extractSemanticConcepts(qTokens);
     if (this.oramaDb) {
@@ -642,7 +948,7 @@ export class KnowledgeBaseService {
             text: 1.0,
           },
           tolerance: 1,
-          limit: Math.max(25, limit * 4),
+          limit: Math.max(40, limit * 4),
         });
         if (ftResults && "hits" in ftResults && Array.isArray(ftResults.hits)) {
           for (const hit of ftResults.hits) {
@@ -697,7 +1003,7 @@ export class KnowledgeBaseService {
       const conceptBoost = matchedConcepts.length * 1.45;
       const trigramSim = computeTrigramSimilarity(
         query,
-        `${c.doc.title} ${c.text.slice(0, 400)}`,
+        `${c.title} ${c.heading ?? ""} ${c.text.slice(0, 400)}`,
       );
       const semanticScore =
         Math.round(
@@ -706,31 +1012,29 @@ export class KnowledgeBaseService {
 
       let totalScore = lexicalBm25 + semanticScore;
 
-      const docCluster = (
-        c.doc.cluster ||
-        c.doc.targetCluster ||
-        ""
-      ).toLowerCase();
-      if (clusterFilter && docCluster && docCluster === clusterFilter) {
-        totalScore *= 1.35;
-      }
-      if (c.doc.title.toLowerCase().includes(query.toLowerCase().trim())) {
+      if (c.title.toLowerCase().includes(query.toLowerCase().trim())) {
         totalScore += 2.0;
       }
+      totalScore *= this.qualityMultiplier(c, {
+        clusterFilter,
+        pageUse: opts.pageUse,
+        staleReasons: opts.staleReasons,
+        now,
+      });
+
       if (totalScore > 0) {
-        scored.push({
-          docId: c.doc.id,
-          title: c.doc.title,
-          collection: c.doc.collection || c.doc.cluster || "General",
-          targetCluster: c.doc.cluster || c.doc.targetCluster,
-          sourceUri: c.doc.sourceRef || c.doc.sourceUri,
-          chunkIndex: c.chunkIndex,
-          snippet: c.text,
-          score: Math.round(totalScore * 1000) / 1000,
-          bm25Score: Math.round(lexicalBm25 * 1000) / 1000,
-          semanticScore,
-          matchedConcepts,
-        });
+        scored.push(
+          this.toChunkResult(
+            c,
+            {
+              score: Math.round(totalScore * 1000) / 1000,
+              bm25Score: Math.round(lexicalBm25 * 1000) / 1000,
+              semanticScore,
+              matchedConcepts,
+            },
+            opts,
+          ),
+        );
       }
     }
 
@@ -738,97 +1042,176 @@ export class KnowledgeBaseService {
   }
 
   /**
-   * Lexical search fused with ranking by meaning. Every chunk of the allowed
-   * collections is compared with the query by the cosine of real embeddings;
-   * that ranking and the lexical one are combined by reciprocal rank fusion,
-   * so a chunk that says the same thing in other words is found although it
-   * shares no term with the query. `retrieval` says what was actually used:
-   * when the embeddings cannot be had, the lexical result is returned with
-   * the reason.
+   * Lexical search fused with ranking by meaning. Every chunk and page of the
+   * allowed collections is compared with the query by cosine similarity (using
+   * the configured embedder or the deterministic local n-gram fallback embedder
+   * when none is configured/available), fused with BM25 via reciprocal rank
+   * fusion, and cross-reranked over the top 30-50 fused candidates.
    */
   async searchHybrid(
     docs: KbDocument[],
-    opts: {
-      query: string;
-      collectionIds?: string[];
-      cluster?: string;
-      limit?: number;
-    },
+    opts: KbSearchOptions,
     embedder: Embedder | undefined,
     index: EmbeddingIndex,
-  ): Promise<{
-    matches: KbChunkResult[];
-    retrieval: "hybrid" | "lexical";
-    embeddingModel?: string;
-    embeddingError?: string;
-  }> {
+  ): Promise<KbHybridSearchResult> {
     const limit = Math.max(1, Math.min(25, opts.limit ?? 6));
-    const lexical = this.search(docs, { ...opts, limit: 25 });
-    if (!embedder || !opts.query.trim())
+    const rerankWindow = Math.max(RERANK_MIN_K, Math.min(RERANK_MAX_K, opts.rerankTopK ?? 40));
+    const now = opts.now ?? Date.now();
+    const clusterFilter = (opts.cluster || opts.targetCluster)?.trim().toLowerCase();
+    const lexical = this.searchInternal(docs, opts, rerankWindow);
+
+    if (!opts.query.trim()) {
       return { matches: lexical.slice(0, limit), retrieval: "lexical" };
+    }
 
     const allowed = opts.collectionIds
       ?.map((c) => c.trim().toLowerCase())
       .filter(Boolean);
-    const chunks = [...this.indexedChunks.values()].filter((rec) => {
-      if (!allowed || allowed.length === 0) return true;
-      const col = (rec.doc.collection || rec.doc.cluster || "").toLowerCase();
-      return allowed.includes(col) || allowed.includes(rec.doc.id.toLowerCase());
-    });
+    const chunks = this.filterCandidates(this.indexedChunks.values(), allowed);
     if (chunks.length === 0) return { matches: [], retrieval: "lexical" };
 
-    let similarities: Array<{ rec: IndexedChunkRecord; similarity: number }>;
-    try {
-      const [queryVector] = await embedder.embed([opts.query]);
-      const vectors = await index.vectorsFor(
-        chunks.map((c) => `${c.doc.title}\n${c.text}`),
-        embedder,
-      );
+    let usedExternalEmbedder = Boolean(embedder);
+    const embeddingModel: string | undefined = embedder?.model;
+    let embeddingError: string | undefined;
+    let usedLocalFallback = false;
+    let similarities: Array<{ rec: IndexedChunkRecord; similarity: number }> = [];
+
+    if (embedder) {
+      try {
+        const [queryVector] = await embedder.embed([opts.query]);
+        const vectors = await index.vectorsFor(
+          chunks.map((c) => c.contextualText),
+          embedder,
+        );
+        similarities = chunks
+          .map((rec, i) => ({ rec, similarity: cosine(queryVector, vectors[i]) }))
+          .sort((a, b) => b.similarity - a.similarity);
+      } catch (error) {
+        usedExternalEmbedder = false;
+        embeddingError = safeError(error);
+      }
+    }
+
+    if (!usedExternalEmbedder) {
+      usedLocalFallback = true;
+      const fallback = localFallbackEmbedder();
+      const queryVector = embedTextLocal(opts.query);
+      let vectors: number[][];
+      try {
+        vectors = await index.vectorsFor(
+          chunks.map((c) => c.contextualText),
+          fallback,
+        );
+      } catch {
+        vectors = chunks.map((c) => embedTextLocal(c.contextualText));
+      }
       similarities = chunks
         .map((rec, i) => ({ rec, similarity: cosine(queryVector, vectors[i]) }))
         .sort((a, b) => b.similarity - a.similarity);
-    } catch (error) {
+    }
+
+    const chunkIdOf = (m: KbChunkResult): string =>
+      m.pageId ? `page:${m.pageId}` : `${m.docId}#${m.chunkIndex}`;
+
+    const semanticTop = similarities.slice(0, rerankWindow);
+    const fused = fuseRanks([
+      lexical.map(chunkIdOf),
+      semanticTop.map((s) => s.rec.chunkId),
+    ]);
+    const lexicalById = new Map(lexical.map((m) => [chunkIdOf(m), m]));
+    const similarityById = new Map(similarities.map((s) => [s.rec.chunkId, s.similarity]));
+
+    const fusedTop = [...fused.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, rerankWindow);
+
+    const maxRrf = fusedTop[0]?.[1] || 1;
+    const maxBm25 = lexical.reduce((acc, m) => Math.max(acc, m.bm25Score ?? 0), 0) || 1;
+    const qTokens = tokenize(opts.query);
+    const queryLocalVec = embedTextLocal(opts.query);
+    const querySparse = sparseTermVector(opts.query);
+
+    const reranked: Array<{ rec: IndexedChunkRecord; result: KbChunkResult }> = [];
+    for (const [chunkId, rrfScore] of fusedTop) {
+      const rec = this.indexedChunks.get(chunkId);
+      if (!rec) continue;
+      const lex = lexicalById.get(chunkId);
+      const bm25Raw = lex?.bm25Score ?? 0;
+      const embedSim = Math.max(0, similarityById.get(chunkId) ?? 0);
+      const localSim = usedLocalFallback
+        ? embedSim
+        : Math.max(0, cosine(queryLocalVec, embedTextLocal(rec.contextualText)));
+      const sparseSim = sparseCosine(querySparse, sparseTermVector(rec.contextualText));
+      const { coverage, proximity, fieldBoost } = this.proximityAndFieldScore(
+        opts.query,
+        qTokens,
+        rec,
+      );
+
+      if (
+        usedLocalFallback &&
+        bm25Raw === 0 &&
+        coverage === 0 &&
+        embedSim < 0.14 &&
+        sparseSim < 0.12
+      ) {
+        continue;
+      }
+
+      const rrfNorm = rrfScore / maxRrf;
+      const bm25Norm = bm25Raw / maxBm25;
+      const rawRerank =
+        0.28 * rrfNorm +
+        0.22 * bm25Norm +
+        0.24 * embedSim +
+        0.12 * Math.max(localSim, sparseSim) +
+        0.14 * coverage +
+        proximity +
+        fieldBoost;
+      const quality = this.qualityMultiplier(rec, {
+        clusterFilter,
+        pageUse: opts.pageUse,
+        staleReasons: opts.staleReasons,
+        now,
+      });
+      const rerankScore = Math.round(rawRerank * quality * 100_000) / 100_000;
+
+      reranked.push({
+        rec,
+        result: this.toChunkResult(
+          rec,
+          {
+            score: rerankScore,
+            rerankScore,
+            bm25Score: bm25Raw,
+            semanticScore: Math.round((similarityById.get(chunkId) ?? 0) * 1000) / 1000,
+            matchedConcepts: lex?.matchedConcepts ?? [],
+          },
+          opts,
+        ),
+      });
+    }
+
+    const matches = reranked
+      .sort((a, b) => b.result.score - a.result.score)
+      .slice(0, limit)
+      .map((x) => x.result);
+
+    if (!usedExternalEmbedder) {
       return {
-        matches: lexical.slice(0, limit),
+        matches,
         retrieval: "lexical",
-        embeddingModel: embedder.model,
-        embeddingError: safeError(error),
+        ...(embeddingModel ? { embeddingModel } : {}),
+        ...(embeddingError ? { embeddingError } : {}),
+        usedLocalFallback,
       };
     }
 
-    const semanticTop = similarities.slice(0, 25);
-    const fused = fuseRanks([
-      lexical.map((m) => `${m.docId}#${m.chunkIndex}`),
-      semanticTop.map((s) => s.rec.chunkId),
-    ]);
-    const lexicalById = new Map(
-      lexical.map((m) => [`${m.docId}#${m.chunkIndex}`, m]),
-    );
-    const similarityById = new Map(
-      similarities.map((s) => [s.rec.chunkId, s.similarity]),
-    );
-    const matches = [...fused.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, limit)
-      .map(([chunkId, score]): KbChunkResult => {
-        const rec = this.indexedChunks.get(chunkId)!;
-        const lex = lexicalById.get(chunkId);
-        return {
-          docId: rec.doc.id,
-          title: rec.doc.title,
-          collection: rec.doc.collection || rec.doc.cluster || "General",
-          targetCluster: rec.doc.cluster || rec.doc.targetCluster,
-          sourceUri: rec.doc.sourceRef || rec.doc.sourceUri,
-          chunkIndex: rec.chunkIndex,
-          snippet: rec.text,
-          score: Math.round(score * 100_000) / 100_000,
-          bm25Score: lex?.bm25Score ?? 0,
-          semanticScore:
-            Math.round((similarityById.get(chunkId) ?? 0) * 1000) / 1000,
-          matchedConcepts: lex?.matchedConcepts ?? [],
-        };
-      });
-    return { matches, retrieval: "hybrid", embeddingModel: embedder.model };
+    return {
+      matches,
+      retrieval: "hybrid",
+      embeddingModel,
+    };
   }
 
   /**
@@ -983,6 +1366,14 @@ export class KnowledgeBaseService {
       autoLearned: incoming.autoLearned,
       sourceCommand: incoming.sourceCommand,
       errorSignature: incoming.errorSignature,
+      ...(incoming.lastVerifiedAt !== undefined ? { lastVerifiedAt: incoming.lastVerifiedAt } : {}),
+      ...(incoming.staleReason !== undefined ? { staleReason: incoming.staleReason } : {}),
+      ...(incoming.validUntil !== undefined ? { validUntil: incoming.validUntil } : {}),
+      ...(incoming.commandTemplate !== undefined ? { commandTemplate: incoming.commandTemplate } : {}),
+      ...(incoming.preconditions !== undefined ? { preconditions: incoming.preconditions } : {}),
+      ...(incoming.verifyCommand !== undefined ? { verifyCommand: incoming.verifyCommand } : {}),
+      ...(incoming.proven !== undefined ? { proven: incoming.proven } : {}),
+      ...(incoming.sourceTrust !== undefined ? { sourceTrust: incoming.sourceTrust } : {}),
       updatedAt: now,
     };
 
@@ -995,38 +1386,64 @@ export class KnowledgeBaseService {
 
   /**
    * Hybrid ranking of Memories & Skills against a prompt or cluster context.
-   * Combines Letta/MemGPT tier priority, Orama/BM25 lexical + semantic concept matching,
-   * and Voyager/Reflexion confidence & reinforcement feedback scores.
+   * Combines Letta/MemGPT tier priority, BM25/local-semantic matching,
+   * Voyager/Reflexion confidence & reinforcement feedback, staleReason decay,
+   * and recency half-life modulated by lastVerifiedAt & successCount while
+   * sparing human-pinned `core` invariants from recency decay.
    */
   rankMemories(
     memories: MemoryEntry[],
     query: string,
     cluster?: string,
     limit = 16,
+    now = Date.now(),
   ): MemoryEntry[] {
     memories = liveMemories(memories);
     if (memories.length === 0) return [];
     const qTokens = tokenize(query);
     const qConcepts = extractSemanticConcepts(qTokens);
+    const qVec = query.trim() ? embedTextLocal(query) : undefined;
     const clusterNorm = cluster?.trim().toLowerCase();
 
     return [...memories]
       .map((m) => {
-        let score = m.tier === "core" ? 10 : m.tier === "archival" ? 3.5 : 1;
+        const isCoreInvariant =
+          m.tier === "core" && (!m.autoLearned || m.sourceTrust === "human");
+        const baseTier = m.tier === "core" ? 10 : m.tier === "archival" ? 3.5 : 1;
+
+        // Reinforcement learning & confidence weighting
+        const confidence = m.confidence ?? (m.kind === "skill" ? 0.82 : 0.75);
+        const reinforcement =
+          (confidence - 0.5) * 4.0 +
+          Math.min(6, (m.successCount ?? 0) * 1.15) +
+          (m.feedbackScore ?? 0) * 2.5 -
+          Math.min(5, (m.failureCount ?? 0) * 1.5) +
+          (m.proven ? 2.0 : 0) +
+          (m.sourceTrust === "human" ? 1.0 : m.sourceTrust === "untrusted" ? -3.0 : 0);
+
+        // Recency half-life modulated by lastVerifiedAt and successCount (sparing core invariants)
+        const refAt = Math.max(m.lastVerifiedAt ?? 0, m.updatedAt || 0);
+        const ageDays = refAt > 0 ? Math.max(0, (now - refAt) / DAY_MS) : 0;
+        const baseHalfLife = m.tier === "episodic" ? 14 : 45;
+        const halfLifeDays =
+          baseHalfLife *
+          (1 +
+            Math.min(4, (m.successCount ?? 0) * 0.5) +
+            (m.proven ? 1.0 : 0) +
+            (m.lastVerifiedAt ? 0.5 : 0));
+        const decayFactor = isCoreInvariant ? 1 : Math.pow(0.5, ageDays / halfLifeDays);
+
+        let score =
+          (baseTier + reinforcement) * (isCoreInvariant ? 1 : 0.4 + 0.6 * decayFactor) +
+          3.0 * decayFactor;
+
         if (clusterNorm && m.cluster?.toLowerCase() === clusterNorm) {
           score += 6;
         }
-        // Reinforcement learning & confidence weighting
-        const confidence = m.confidence ?? (m.kind === "skill" ? 0.82 : 0.75);
-        score += (confidence - 0.5) * 4.0;
-        score += Math.min(6, (m.successCount ?? 0) * 1.15);
-        score += (m.feedbackScore ?? 0) * 2.5;
-        score -= Math.min(5, (m.failureCount ?? 0) * 1.5);
 
+        const entryText = `${m.title} ${m.text} ${m.scope} ${m.cluster ?? ""} ${m.sourceCommand ?? ""} ${m.errorSignature ?? ""}`;
         if (qTokens.length > 0) {
-          const mTokens = tokenize(
-            `${m.title} ${m.text} ${m.scope} ${m.cluster ?? ""} ${m.sourceCommand ?? ""} ${m.errorSignature ?? ""}`,
-          );
+          const mTokens = tokenize(entryText);
           for (const q of qTokens) {
             if (mTokens.some((t) => t === q || t.includes(q))) score += 2.5;
           }
@@ -1036,6 +1453,18 @@ export class KnowledgeBaseService {
           ).length;
           score += conceptHits * 2.0;
         }
+        if (qVec) {
+          const sim = cosine(qVec, embedTextLocal(entryText));
+          if (sim >= 0.16) score += sim * 4.5;
+        }
+
+        if (m.staleReason) {
+          score = score * 0.45 - 4.0;
+        }
+        if (m.validUntil && now > m.validUntil) {
+          score = score * 0.65 - 2.0;
+        }
+
         return { m, score };
       })
       .sort((a, b) => b.score - a.score || b.m.updatedAt - a.m.updatedAt)

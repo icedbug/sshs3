@@ -261,6 +261,12 @@ export class IpcBridge {
     callback: (pin: string) => void;
   }) => void;
   private onPtyPresence?: (event: { sessionId: string; prompt: string }) => void;
+  private onPtyReconnecting?: (event: {
+    sessionId: string;
+    attempt: number;
+    maxAttempts: number;
+  }) => void;
+  private onPtyReconnected?: (event: { sessionId: string }) => void;
   private onTransferProgress?: (progress: TransferProgress) => void;
   private onK8sTerminalData?: (event: { sessionId: string; data: string }) => void;
   private onK8sTerminalExit?: (event: { sessionId: string; status: string }) => void;
@@ -1738,10 +1744,24 @@ export class IpcBridge {
     };
     this.sshPtyManager.on('presence', this.onPtyPresence);
 
-    this.sshPtyManager.on('reconnecting', ({ sessionId, attempt, maxAttempts }) => {
-      this.aiHub?.terminals.invalidate(sessionId, 'Connection lost or reconnecting');
+    this.onPtyReconnecting = ({ sessionId, attempt, maxAttempts }) => {
+      if (this.aiHub?.terminals.get(sessionId)) {
+        this.aiHub.terminals.markReconnecting(sessionId, {
+          attempt,
+          maxAttempts,
+          reason: 'Connection lost or reconnecting',
+        });
+      }
       this.sendToSession(sessionId, IPC_CHANNELS.TERMINAL_RECONNECTING, sessionId, { attempt, maxAttempts });
-    });
+    };
+    this.sshPtyManager.on('reconnecting', this.onPtyReconnecting);
+
+    this.onPtyReconnected = ({ sessionId }) => {
+      if (this.aiHub?.terminals.get(sessionId)) {
+        this.aiHub.terminals.markReconnected(sessionId);
+      }
+    };
+    this.sshPtyManager.on('reconnected', this.onPtyReconnected);
 
     this.sshPtyManager.on('hostkey-changed', ({ sessionId, ...target }) => {
       handleHostKeyChanged(target, {
@@ -1856,6 +1876,12 @@ export class IpcBridge {
     }
     if (this.onPtyPresence) {
       this.sshPtyManager.off('presence', this.onPtyPresence);
+    }
+    if (this.onPtyReconnecting) {
+      this.sshPtyManager.off('reconnecting', this.onPtyReconnecting);
+    }
+    if (this.onPtyReconnected) {
+      this.sshPtyManager.off('reconnected', this.onPtyReconnected);
     }
     if (this.onTransferProgress) {
       this.transferQueue.off('progress', this.onTransferProgress);

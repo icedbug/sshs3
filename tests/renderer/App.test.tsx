@@ -368,8 +368,13 @@ describe('App Component', () => {
       .map((p) => p.getAttribute('data-testid')!.replace('terminal-pane-', ''))
       .find((id) => id !== rootPaneId)!;
 
-    const isPaneFocused = (paneId: string) =>
-      screen.getByTestId(`terminal-pane-${paneId}`).firstElementChild!.className.includes('bg-sky-500/5');
+    const isPaneFocused = (paneId: string) => {
+      const pane = screen.getByTestId(`terminal-pane-${paneId}`);
+      return (
+        pane.getAttribute('data-active') === 'true' &&
+        pane.firstElementChild!.className.includes('bg-sky-500/10')
+      );
+    };
 
     // The freshly-split pane becomes active.
     expect(isPaneFocused(otherPaneId)).toBe(true);

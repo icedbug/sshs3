@@ -22,6 +22,13 @@ import { maskSecrets, maskTerminalOutput } from "./privacy";
  * through by what was run instead of watched from the start.
  */
 
+export type RecordingMode = "agent" | "human";
+
+export interface SessionRecordingPolicy {
+  /** Whether human-session opt-in recording is allowed by policy (default true). */
+  allowHumanOptIn?: boolean;
+}
+
 export interface RecordingInfo {
   id: string;
   taskId: string;
@@ -31,6 +38,9 @@ export interface RecordingInfo {
   endedAt?: number;
   bytes: number;
   markers: number;
+  mode?: RecordingMode;
+  actor?: string;
+  optIn?: boolean;
 }
 
 interface Open {
@@ -54,7 +64,18 @@ const MAX_BYTES = 20 * 1024 * 1024;
 export class SessionRecorder {
   private readonly open = new Map<string, Open>();
 
-  constructor(private readonly dir: string) {}
+  constructor(
+    private readonly dir: string,
+    private policy: SessionRecordingPolicy = {},
+  ) {}
+
+  setPolicy(policy: SessionRecordingPolicy): void {
+    this.policy = { ...policy };
+  }
+
+  getPolicy(): SessionRecordingPolicy {
+    return { ...this.policy };
+  }
 
   /** Where a recording lives on disk. */
   fileOf(id: string): string {
@@ -65,23 +86,60 @@ export class SessionRecorder {
     return this.open.get(sessionId)?.info;
   }
 
-  /** Starts recording a terminal for a run. A terminal already being recorded keeps its recording. */
-  async start(input: { sessionId: string; taskId: string; label: string; cols?: number; rows?: number }, now = Date.now()): Promise<RecordingInfo> {
+  /**
+   * Starts recording a terminal for an agent run or an explicitly opted-in human
+   * session. A terminal already being recorded for the same task keeps its recording.
+   */
+  async start(
+    input: {
+      sessionId: string;
+      taskId?: string;
+      label: string;
+      cols?: number;
+      rows?: number;
+      mode?: RecordingMode;
+      humanOptIn?: boolean;
+      actor?: string;
+    },
+    now = Date.now(),
+  ): Promise<RecordingInfo> {
+    const mode: RecordingMode = input.mode ?? "agent";
+    if (mode === "human") {
+      if (this.policy.allowHumanOptIn === false) {
+        throw new Error("Human session recording is disabled by policy.");
+      }
+      if (input.humanOptIn !== true) {
+        throw new Error("Human session recording requires explicit opt-in.");
+      }
+    }
+    const taskId = input.taskId ?? (mode === "human" ? `human-${input.actor || input.sessionId}` : input.sessionId);
     const existing = this.open.get(input.sessionId);
-    if (existing?.info.taskId === input.taskId) return existing.info;
+    if (existing?.info.taskId === taskId) return existing.info;
     // A terminal still recorded for another run: that recording ends here, this run gets its own.
     if (existing) void this.stop(input.sessionId, now);
     // One file per time a run holds the terminal: a run that takes it again after a person had it
     // gets a second recording, and the first is never written over.
-    const id = `${input.taskId}-${input.sessionId}`.slice(0, 100) + `-${now.toString(36)}`;
-    const info: RecordingInfo = { id, taskId: input.taskId, sessionId: input.sessionId, label: input.label, startedAt: now, bytes: 0, markers: 0 };
+    const id = `${taskId}-${input.sessionId}`.slice(0, 100) + `-${now.toString(36)}`;
+    const info: RecordingInfo = {
+      id,
+      taskId,
+      sessionId: input.sessionId,
+      label: input.label,
+      startedAt: now,
+      bytes: 0,
+      markers: 0,
+      ...(mode === "human" ? { mode, optIn: true, ...(input.actor ? { actor: input.actor } : {}) } : {}),
+    };
     const file = this.fileOf(id);
     const header = {
       version: 2,
       width: input.cols ?? 120,
       height: input.rows ?? 32,
       timestamp: Math.floor(now / 1000),
-      title: `${input.label} — run ${input.taskId}`,
+      title:
+        mode === "human"
+          ? `${input.label} — human session${input.actor ? ` (${input.actor})` : ""}`
+          : `${input.label} — run ${taskId}`,
       env: { TERM: "xterm-256color" },
     };
     // Registered before anything is written, so the first output and marker are not lost while the file is made.
@@ -93,7 +151,18 @@ export class SessionRecorder {
     return info;
   }
 
-  /** What the terminal showed. Held back to the end of a line, masked, then written. */
+  /**
+   * Raw user keystrokes are never recorded (especially passwords/passphrases),
+   * even in opted-in human-session mode: recordings capture only masked `o`-stream output.
+   */
+  input(_sessionId: string, _keystrokes: string): void {
+    // Intentionally a no-op: raw keystrokes are never written to .cast files.
+  }
+
+  /**
+   * What the terminal showed. Held back to the end of a line, masked, then written.
+   * In human opt-in mode, strictly line-buffered on `\n` (no idle mid-line flush).
+   */
   output(sessionId: string, data: string, now = Date.now()): void {
     const rec = this.open.get(sessionId);
     if (!rec || !data) return;
@@ -105,8 +174,9 @@ export class SessionRecorder {
       rec.pending = cut >= 0 ? rec.pending.slice(cut + 1) : "";
       this.event(rec, "o", maskTerminalOutput(ready), now);
     }
-    // A prompt ("Are you sure? [y/N] ") has no newline after it: written once the terminal goes quiet.
-    if (rec.pending)
+    // Agent mode writes prompts without newlines after a short idle pause; human opt-in mode stays
+    // strictly line-buffered so partial prompts/keystroke echoes are masked as complete lines.
+    if (rec.pending && rec.info.mode !== "human")
       rec.flush = setTimeout(() => {
         rec.flush = undefined;
         if (!rec.pending || !this.open.has(sessionId)) return;

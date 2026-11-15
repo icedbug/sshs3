@@ -43,13 +43,30 @@ describe('Sshs3WebServer Multi-User Hybrid Mode', () => {
     await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
   });
 
-  async function apiJson(urlPath: string, options: RequestInit = {}, token?: string): Promise<any> {
+  async function apiJson(
+    urlPath: string,
+    options: RequestInit = {},
+    cookieOrBearer?: string,
+  ): Promise<any> {
+    const { body } = await apiJsonWithCookie(urlPath, options, cookieOrBearer);
+    return body;
+  }
+
+  async function apiJsonWithCookie(
+    urlPath: string,
+    options: RequestInit = {},
+    cookieOrBearer?: string,
+  ): Promise<{ body: any; cookie: string; setCookieHeader: string }> {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       ...((options.headers as Record<string, string>) || {}),
     };
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
+    if (cookieOrBearer) {
+      if (cookieOrBearer.startsWith('sshs3_session=')) {
+        headers['Cookie'] = cookieOrBearer;
+      } else {
+        headers['Authorization'] = `Bearer ${cookieOrBearer}`;
+      }
     }
     const res = await fetch(`${baseUrl}${urlPath}`, {
       ...options,
@@ -59,16 +76,19 @@ describe('Sshs3WebServer Multi-User Hybrid Mode', () => {
     if (!res.ok) {
       throw new Error(body?.error || `HTTP ${res.status}`);
     }
-    return body;
+    const setCookieHeader = res.headers.get('set-cookie') ?? '';
+    const cookie = setCookieHeader.split(';')[0] ?? '';
+    return { body, cookie, setCookieHeader };
   }
 
-  function createWsClient(token: string): Promise<{
+  async function createWsClient(cookieOrBearer: string): Promise<{
     invoke: (channel: string, ...args: any[]) => Promise<any>;
     onEvent: (channel: string, cb: (...args: any[]) => void) => void;
     close: () => void;
   }> {
-    return new Promise((resolve, reject) => {
-      const ws = new WebSocket(`${wsBaseUrl}/api/ws?token=${encodeURIComponent(token)}`);
+    const { ticket } = await apiJson('/api/ws-ticket', { method: 'POST' }, cookieOrBearer);
+    return await new Promise((resolve, reject) => {
+      const ws = new WebSocket(`${wsBaseUrl}/api/ws?ticket=${encodeURIComponent(ticket)}`);
       const pending = new Map<string, { resolve: (v: any) => void; reject: (e: any) => void }>();
       const listeners = new Map<string, Set<(...args: any[]) => void>>();
       let seq = 1;
@@ -173,8 +193,8 @@ describe('Sshs3WebServer Multi-User Hybrid Mode', () => {
     expect(initStatus.initialized).toBe(false);
     expect(initStatus.authenticated).toBe(false);
 
-    // 2. Setup initial admin (Jacob)
-    const jacobSetup = await apiJson('/api/auth/setup', {
+    // 2. Setup initial admin (Jacob) — session stays in HttpOnly cookie, never leaked in JSON body
+    const jacobSetupRes = await apiJsonWithCookie('/api/auth/setup', {
       method: 'POST',
       body: JSON.stringify({
         username: 'jacob',
@@ -182,7 +202,13 @@ describe('Sshs3WebServer Multi-User Hybrid Mode', () => {
         password: 'super-secret-password', // pragma: allowlist secret
       }),
     });
-    expect(jacobSetup.token).toBeTruthy();
+    const jacobSetup = jacobSetupRes.body;
+    const jacobCookie = jacobSetupRes.cookie;
+    const jacobSessionToken = decodeURIComponent(jacobCookie.split('=').slice(1).join('='));
+    expect(jacobSetup.token).toBeUndefined();
+    expect(jacobSetup.sessionToken).toBeUndefined();
+    expect(jacobSetupRes.setCookieHeader).toContain('HttpOnly');
+    expect(jacobCookie).toMatch(/^sshs3_session=/);
     expect(jacobSetup.user.username).toBe('jacob');
     expect(jacobSetup.user.role).toBe('admin');
     expect(jacobSetup.user.sshPublicKey).toContain('ssh-ed25519 ');
@@ -194,12 +220,12 @@ describe('Sshs3WebServer Multi-User Hybrid Mode', () => {
         method: 'POST',
         body: JSON.stringify({ role: 'member', maxUses: 3, note: 'Friend invite' }),
       },
-      jacobSetup.token
+      jacobCookie
     );
     expect(inviteRes.invite.token).toBeTruthy();
 
     // 4. Erik registers using the invite token
-    const erikReg = await apiJson('/api/auth/register-invite', {
+    const erikRegRes = await apiJsonWithCookie('/api/auth/register-invite', {
       method: 'POST',
       body: JSON.stringify({
         inviteToken: inviteRes.invite.token,
@@ -208,16 +234,20 @@ describe('Sshs3WebServer Multi-User Hybrid Mode', () => {
         password: 'erik-password-123', // pragma: allowlist secret
       }),
     });
-    expect(erikReg.token).toBeTruthy();
+    const erikReg = erikRegRes.body;
+    const erikCookie = erikRegRes.cookie;
+    expect(erikReg.token).toBeUndefined();
+    expect(erikReg.sessionToken).toBeUndefined();
+    expect(erikCookie).toMatch(/^sshs3_session=/);
     expect(erikReg.user.username).toBe('erik');
     expect(erikReg.user.role).toBe('member');
     expect(erikReg.user.sshPublicKey).toContain('ssh-ed25519 ');
     // Each user has their own distinct server-side SSH key!
     expect(erikReg.user.sshPublicKey).not.toBe(jacobSetup.user.sshPublicKey);
 
-    // 5. Both Jacob and Erik connect simultaneously over WebSocket
-    const jacobWs = await createWsClient(jacobSetup.token);
-    const erikWs = await createWsClient(erikReg.token);
+    // 5. Both Jacob and Erik connect simultaneously over WebSocket via single-use /api/ws-ticket
+    const jacobWs = await createWsClient(jacobCookie);
+    const erikWs = await createWsClient(erikCookie);
 
     try {
       let erikHubChangedCount = 0;
@@ -378,13 +408,15 @@ describe('Sshs3WebServer Multi-User Hybrid Mode', () => {
             newPassword: 'erik-new-password-456', // pragma: allowlist secret
           }),
         },
-        erikReg.token
+        erikCookie
       );
-      const erikReLogin = await apiJson('/api/auth/login', {
+      const erikReLoginRes = await apiJsonWithCookie('/api/auth/login', {
         method: 'POST',
         body: JSON.stringify({ username: 'erik', password: 'erik-new-password-456' }),
       });
-      expect(erikReLogin.user.username).toBe('erik');
+      expect(erikReLoginRes.body.token).toBeUndefined();
+      expect(erikReLoginRes.body.sessionToken).toBeUndefined();
+      expect(erikReLoginRes.body.user.username).toBe('erik');
 
       const inviteToRevoke = await apiJson(
         '/api/admin/invites',
@@ -392,12 +424,12 @@ describe('Sshs3WebServer Multi-User Hybrid Mode', () => {
           method: 'POST',
           body: JSON.stringify({ role: 'member', maxUses: 2, note: 'Temp invite' }),
         },
-        jacobSetup.token
+        jacobCookie
       );
       await apiJson(
         `/api/admin/invites/${encodeURIComponent(inviteToRevoke.invite.token)}`,
         { method: 'DELETE' },
-        jacobSetup.token
+        jacobCookie
       );
       await expect(
         apiJson('/api/auth/register-invite', {
@@ -410,43 +442,57 @@ describe('Sshs3WebServer Multi-User Hybrid Mode', () => {
         })
       ).rejects.toThrow();
 
-      // 15. CSWSH protection rejects WebSocket upgrade from untrusted Origin
+      // 15. CSWSH protection rejects WebSocket upgrade from untrusted Origin, and ?token= query auth is blocked
       const httpMod = await import('node:http');
-      const cswshStatus = await new Promise<number>((resolve, reject) => {
-        const u = new URL(`${baseUrl}/api/ws?token=${encodeURIComponent(jacobSetup.token)}`);
-        const req = httpMod.request({
-          hostname: u.hostname,
-          port: u.port,
-          path: u.pathname + u.search,
-          method: 'GET',
-          headers: {
-            Connection: 'Upgrade',
-            Upgrade: 'websocket',
-            'Sec-WebSocket-Key': Buffer.from('1234567890123456').toString('base64'),
-            'Sec-WebSocket-Version': '13',
-            Origin: 'https://evil.example.com',
-          },
+      const wsUpgradeStatus = (urlPath: string, headers: Record<string, string>) =>
+        new Promise<number>((resolve, reject) => {
+          const u = new URL(`${baseUrl}${urlPath}`);
+          const req = httpMod.request({
+            hostname: u.hostname,
+            port: u.port,
+            path: u.pathname + u.search,
+            method: 'GET',
+            headers: {
+              Connection: 'Upgrade',
+              Upgrade: 'websocket',
+              'Sec-WebSocket-Key': Buffer.from('1234567890123456').toString('base64'),
+              'Sec-WebSocket-Version': '13',
+              ...headers,
+            },
+          });
+          req.on('response', (res) => {
+            resolve(res.statusCode || 0);
+            res.resume();
+          });
+          req.on('upgrade', (_res, sock) => {
+            sock.destroy();
+            resolve(101);
+          });
+          req.on('error', reject);
+          req.end();
         });
-        req.on('response', (res) => {
-          resolve(res.statusCode || 0);
-          res.resume();
-        });
-        req.on('upgrade', (_res, sock) => {
-          sock.destroy();
-          resolve(101);
-        });
-        req.on('error', reject);
-        req.end();
+
+      const { ticket: validTicket } = await apiJson('/api/ws-ticket', { method: 'POST' }, jacobCookie);
+      const cswshStatus = await wsUpgradeStatus(`/api/ws?ticket=${encodeURIComponent(validTicket)}`, {
+        Origin: 'https://evil.example.com',
       });
       expect(cswshStatus).toBe(403);
+
+      // ?token= query-string auth is blocked even with a valid session token
+      const queryTokenStatus = await wsUpgradeStatus(`/api/ws?token=${encodeURIComponent(jacobSessionToken)}`, {});
+      expect(queryTokenStatus).toBe(401);
+
+      // Explicit Authorization: Bearer header still works for non-browser API clients
+      const bearerStatus = await apiJson('/api/auth/status', {}, jacobSessionToken);
+      expect(bearerStatus.authenticated).toBe(true);
 
       // 16. Deleting a user via Admin API disposes their active tenant, closes their WebSocket, and removes their data directory
       await apiJson(
         `/api/admin/users/${encodeURIComponent(erikReg.user.id)}`,
         { method: 'DELETE' },
-        jacobSetup.token
+        jacobCookie
       );
-      const erikAuthCheck = await apiJson('/api/auth/status', {}, erikReg.token);
+      const erikAuthCheck = await apiJson('/api/auth/status', {}, erikCookie);
       expect(erikAuthCheck.authenticated).toBe(false);
       await expect(fs.stat(erikHome)).rejects.toThrow();
     } finally {

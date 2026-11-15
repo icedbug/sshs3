@@ -58,6 +58,28 @@ import type {
 } from '../../shared/types/storage';
 import { defineTargetTouched } from './targetTouched';
 
+export interface S3WriteFileOptions extends WriteStreamOptions {
+  ifMatch?: string;
+  ifNoneMatch?: string;
+  signal?: AbortSignal;
+}
+
+export interface S3ReadFileOptions {
+  ifMatch?: string;
+  ifNoneMatch?: string;
+  signal?: AbortSignal;
+}
+
+export interface S3RequestOptions {
+  signal?: AbortSignal;
+}
+
+function isAbortError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as { name?: string; code?: string };
+  return e.name === 'AbortError' || e.code === 'ABORT_ERR';
+}
+
 /**
  * Parses a remote S3 path into bucket and key components.
  * Examples:
@@ -162,6 +184,16 @@ export class S3StorageProvider extends BaseStorageProvider implements IStoragePr
     this.listCache.clear();
   }
 
+  private sendWithSignal<TOutput>(command: unknown, signal?: AbortSignal): Promise<TOutput> {
+    const sender = this.client as unknown as {
+      send(cmd: unknown, opts?: { abortSignal?: AbortSignal }): Promise<TOutput>;
+    };
+    if (signal) {
+      return sender.send(command, { abortSignal: signal });
+    }
+    return sender.send(command);
+  }
+
   /** Server-side encryption params to apply to every PutObject/Upload call, per the profile's config. */
   private sseParams(): { ServerSideEncryption?: 'AES256' | 'aws:kms'; SSEKMSKeyId?: string } {
     const sse = this.config.serverSideEncryption;
@@ -174,7 +206,7 @@ export class S3StorageProvider extends BaseStorageProvider implements IStoragePr
     };
   }
 
-  async list(remotePath: string, options?: { force?: boolean }): Promise<FileEntry[]> {
+  async list(remotePath: string, options?: { force?: boolean; signal?: AbortSignal }): Promise<FileEntry[]> {
     const normalizedPath = remotePath.replace(/\\/g, '/');
     if (!options?.force) {
       const cached = this.listCache.get(normalizedPath);
@@ -186,7 +218,10 @@ export class S3StorageProvider extends BaseStorageProvider implements IStoragePr
     const { bucket, key } = parseS3Path(remotePath);
 
     if (!bucket) {
-      const output = await this.client.send(new ListBucketsCommand({}));
+      const output = await this.sendWithSignal<{ Buckets?: Array<{ Name?: string; CreationDate?: Date }> }>(
+        new ListBucketsCommand({}),
+        options?.signal,
+      );
       const buckets = output.Buckets ?? [];
       const results: FileEntry[] = buckets.map((b) => ({
         name: b.Name ?? '',
@@ -212,7 +247,7 @@ export class S3StorageProvider extends BaseStorageProvider implements IStoragePr
         Delimiter: '/',
         ContinuationToken: continuationToken,
       });
-      const output = await this.client.send(command);
+      const output = await this.sendWithSignal<ListObjectsV2CommandOutput>(command, options?.signal);
 
       // Virtual directories (CommonPrefixes)
       for (const cp of output.CommonPrefixes ?? []) {
@@ -275,7 +310,7 @@ export class S3StorageProvider extends BaseStorageProvider implements IStoragePr
     return results;
   }
 
-  async stat(remotePath: string): Promise<FileEntry> {
+  async stat(remotePath: string, options?: S3RequestOptions): Promise<FileEntry> {
     const { bucket, key } = parseS3Path(remotePath);
 
     if (!bucket) {
@@ -288,7 +323,7 @@ export class S3StorageProvider extends BaseStorageProvider implements IStoragePr
     }
 
     if (!key) {
-      await this.client.send(new HeadBucketCommand({ Bucket: bucket }));
+      await this.sendWithSignal(new HeadBucketCommand({ Bucket: bucket }), options?.signal);
       return {
         name: bucket,
         path: `/${bucket}`,
@@ -303,9 +338,12 @@ export class S3StorageProvider extends BaseStorageProvider implements IStoragePr
     // 1. If not explicitly ending with '/', check if it's an object file
     if (!isExplicitDir) {
       try {
-        const head = await this.client.send(
-          new HeadObjectCommand({ Bucket: bucket, Key: cleanKey })
-        );
+        const head = await this.sendWithSignal<{
+          ContentLength?: number;
+          LastModified?: Date;
+          ContentType?: string;
+          ETag?: string;
+        }>(new HeadObjectCommand({ Bucket: bucket, Key: cleanKey }), options?.signal);
         const name = path.posix.basename(cleanKey);
         return {
           name,
@@ -317,15 +355,17 @@ export class S3StorageProvider extends BaseStorageProvider implements IStoragePr
           mimeType: head.ContentType || getMimeType(name),
           etag: head.ETag ? head.ETag.replace(/["']/g, '') : undefined,
         };
-      } catch {
+      } catch (err) {
+        if (options?.signal?.aborted || isAbortError(err)) throw err;
         // Fall through to directory checks
       }
     }
 
     // 2. Check if explicit folder marker object exists (${cleanKey}/)
     try {
-      const headDir = await this.client.send(
-        new HeadObjectCommand({ Bucket: bucket, Key: `${cleanKey}/` })
+      const headDir = await this.sendWithSignal<{ LastModified?: Date }>(
+        new HeadObjectCommand({ Bucket: bucket, Key: `${cleanKey}/` }),
+        options?.signal,
       );
       const name = path.posix.basename(cleanKey);
       return {
@@ -336,17 +376,19 @@ export class S3StorageProvider extends BaseStorageProvider implements IStoragePr
         mtime: headDir.LastModified ? formatDate(headDir.LastModified) : undefined,
         mtimeMs: headDir.LastModified ? headDir.LastModified.getTime() : undefined,
       };
-    } catch {
+    } catch (err) {
+      if (options?.signal?.aborted || isAbortError(err)) throw err;
       // Fall through to prefix check
     }
 
     // 3. Check if virtual prefix exists (contains any objects or sub-prefixes)
-    const list = await this.client.send(
+    const list = await this.sendWithSignal<ListObjectsV2CommandOutput>(
       new ListObjectsV2Command({
         Bucket: bucket,
         Prefix: `${cleanKey}/`,
         MaxKeys: 1,
-      })
+      }),
+      options?.signal,
     );
 
     const hasChildren =
@@ -403,7 +445,7 @@ export class S3StorageProvider extends BaseStorageProvider implements IStoragePr
     this.clearCache();
   }
 
-  async delete(remotePath: string, isDirectory: boolean): Promise<void> {
+  async delete(remotePath: string, isDirectory: boolean, options?: S3RequestOptions): Promise<void> {
     const { bucket, key } = parseS3Path(remotePath);
 
     if (!bucket) {
@@ -414,17 +456,18 @@ export class S3StorageProvider extends BaseStorageProvider implements IStoragePr
       if (!isDirectory) {
         throw new Error(`Expected file but found bucket: ${remotePath}`);
       }
-      await this.client.send(new DeleteBucketCommand({ Bucket: bucket }));
+      await this.sendWithSignal(new DeleteBucketCommand({ Bucket: bucket }), options?.signal);
       this.clearCache();
       return;
     }
 
     if (!isDirectory) {
-      await this.client.send(
+      await this.sendWithSignal(
         new DeleteObjectCommand({
           Bucket: bucket,
           Key: key,
-        })
+        }),
+        options?.signal,
       );
       this.clearCache();
       return;
@@ -747,7 +790,7 @@ export class S3StorageProvider extends BaseStorageProvider implements IStoragePr
   async writeFile(
     remotePath: string,
     data: Buffer | Uint8Array,
-    _options?: WriteStreamOptions,
+    options?: S3WriteFileOptions,
   ): Promise<void> {
     const { bucket, key } = parseS3Path(remotePath);
 
@@ -755,27 +798,40 @@ export class S3StorageProvider extends BaseStorageProvider implements IStoragePr
       throw new Error(`Cannot write to root or bucket: ${remotePath}`);
     }
 
-    await this.client.send(
+    await this.sendWithSignal(
       new PutObjectCommand({
         Bucket: bucket,
         Key: key,
         Body: data,
         ContentType: getMimeType(key),
         ContentLength: data.byteLength,
+        ...(options?.ifMatch !== undefined ? { IfMatch: options.ifMatch } : {}),
+        ...(options?.ifNoneMatch !== undefined ? { IfNoneMatch: options.ifNoneMatch } : {}),
         ...this.sseParams(),
-      })
+      }),
+      options?.signal,
     );
     this.clearCache();
   }
 
-  async readFile(remotePath: string): Promise<Buffer> {
+  async readFile(remotePath: string, options?: S3ReadFileOptions): Promise<Buffer> {
     const { bucket, key } = parseS3Path(remotePath);
 
     if (!bucket || !key) {
       throw new Error(`Cannot read root or bucket as file: ${remotePath}`);
     }
 
-    const res = await this.client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+    const params: GetObjectCommandInput = {
+      Bucket: bucket,
+      Key: key,
+      ...(options?.ifMatch !== undefined ? { IfMatch: options.ifMatch } : {}),
+      ...(options?.ifNoneMatch !== undefined ? { IfNoneMatch: options.ifNoneMatch } : {}),
+    };
+
+    const res = await this.sendWithSignal<{ Body?: unknown }>(
+      new GetObjectCommand(params),
+      options?.signal,
+    );
 
     if (!res.Body) {
       return Buffer.alloc(0);

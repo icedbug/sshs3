@@ -1,9 +1,11 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { statSync } from "node:fs";
+import { constants as fsConstants, accessSync, statSync } from "node:fs";
 import path from "node:path";
+import type { AiReasoningEffort } from "../../../shared/types/ai";
 import type { AgentTask, AgentTodo, ExternalRunner, ExternalRunnerPreset } from "../../../shared/types/aiHub";
 import type { HermesModelConfig } from "../HermesManager";
 import type { AgentRuntime, RunEvent } from "./AgentRuntime";
+import type { LocalMcpServer } from "./LocalMcpServer";
 import { boundedContext, boundedPrompt, safeError } from "./privacy";
 
 /**
@@ -90,8 +92,185 @@ export const EXTERNAL_RUNNER_PRESETS: ExternalRunnerPreset[] = [
     args: ["--experimental-acp"],
     note: "Needs the Gemini CLI installed and signed in. Check the flag against your version.",
   },
+  {
+    id: "opencode",
+    name: "OpenCode",
+    command: "opencode",
+    args: ["acp"],
+    note: "Needs OpenCode installed and configured on this computer.",
+  },
 ];
 const MAX_LINE_BYTES = 8_000_000;
+
+export interface OsSandboxOptions {
+  /** Opt-in OS sandbox wrapping. Defaults to false (pass-through). */
+  enabled?: boolean;
+  /** Working directory allowed for read/write inside the sandbox. */
+  cwd?: string;
+  /** Additional readable paths inside the sandbox. */
+  readPaths?: string[];
+  /** Additional writable paths inside the sandbox. */
+  writePaths?: string[];
+  /** Allowed outbound hostnames/domains (loopback-only or empty restricts network when supported). */
+  allowedDomains?: string[];
+  /** Whether outbound network is permitted when supported by the sandbox backend. */
+  allowNetwork?: boolean;
+  /** Throw instead of falling back to unsandboxed execution when no backend is available. */
+  failIfUnavailable?: boolean;
+  /** Injectable platform override for testing (defaults to process.platform). */
+  platform?: NodeJS.Platform;
+  /** Injectable binary availability check for testing. */
+  hasBinary?: (binary: string) => boolean;
+  /** Injectable environment for PATH lookups. */
+  env?: NodeJS.ProcessEnv;
+}
+
+export interface WrappedSpawn {
+  command: string;
+  args: string[];
+  sandboxed: boolean;
+  backend: "sandbox-exec" | "bwrap" | "none";
+  reason?: string;
+}
+
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+
+function isLoopbackOnlyList(domains: string[] | undefined): boolean {
+  if (!domains || domains.length === 0) return false;
+  return domains.every((d) => LOOPBACK_HOSTS.has(d.trim().toLowerCase()));
+}
+
+function defaultHasBinary(binary: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  const checkFile = (candidate: string): boolean => {
+    try {
+      if (!statSync(candidate).isFile()) return false;
+      if (process.platform !== "win32") accessSync(candidate, fsConstants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (/[\\/]/.test(binary)) return checkFile(binary);
+  const dirs = (env.PATH || env.Path || "").split(path.delimiter).filter(Boolean);
+  for (const dir of dirs) {
+    if (checkFile(path.join(dir, binary))) return true;
+  }
+  return false;
+}
+
+/**
+ * Wraps a child-process command and arguments with an OS-level sandbox
+ * (`sandbox-exec` on macOS, `bwrap` on Linux) when opted in. Falls back cleanly
+ * on Windows or when the sandbox binary is absent unless `failIfUnavailable` is set.
+ */
+export function wrapWithOsSandbox(
+  command: string,
+  args: string[],
+  options: OsSandboxOptions = {},
+): WrappedSpawn {
+  if (!options.enabled) {
+    return { command, args, sandboxed: false, backend: "none" };
+  }
+  const platform = options.platform ?? process.platform;
+  const hasBinary = options.hasBinary ?? ((bin: string) => defaultHasBinary(bin, options.env));
+  const uniquePaths = (items: Array<string | undefined>): string[] => [
+    ...new Set(items.map((p) => p?.trim()).filter((p): p is string => Boolean(p))),
+  ];
+  const writePaths = uniquePaths([options.cwd, ...(options.writePaths ?? [])]);
+  const readPaths = uniquePaths(options.readPaths ?? []);
+
+  if (platform === "darwin") {
+    const sandboxBin = hasBinary("sandbox-exec")
+      ? "sandbox-exec"
+      : hasBinary("/usr/bin/sandbox-exec")
+        ? "/usr/bin/sandbox-exec"
+        : undefined;
+    if (!sandboxBin) {
+      if (options.failIfUnavailable) {
+        throw new Error("OS sandbox unavailable: sandbox-exec was not found.");
+      }
+      return { command, args, sandboxed: false, backend: "none", reason: "sandbox-exec unavailable" };
+    }
+    const lines = [
+      "(version 1)",
+      "(allow default)",
+      '(deny file-write* (subpath "/"))',
+      '(allow file-write* (subpath "/dev"))',
+      '(allow file-write* (subpath "/tmp"))',
+      '(allow file-write* (subpath "/private/tmp"))',
+      ...writePaths.map((p) => `(allow file-write* (subpath ${JSON.stringify(p)}))`),
+    ];
+    if (options.allowNetwork === false || (options.allowedDomains !== undefined && options.allowedDomains.length === 0)) {
+      lines.push("(deny network-outbound)");
+    } else if (isLoopbackOnlyList(options.allowedDomains)) {
+      lines.push("(deny network-outbound)");
+      lines.push('(allow network-outbound (remote ip "localhost:*"))');
+      lines.push('(allow network-outbound (remote ip "127.0.0.1:*"))');
+    }
+    return {
+      command: sandboxBin,
+      args: ["-p", lines.join("\n"), command, ...args],
+      sandboxed: true,
+      backend: "sandbox-exec",
+    };
+  }
+
+  if (platform === "linux") {
+    const bwrapBin = hasBinary("bwrap")
+      ? "bwrap"
+      : hasBinary("/usr/bin/bwrap")
+        ? "/usr/bin/bwrap"
+        : undefined;
+    if (!bwrapBin) {
+      if (options.failIfUnavailable) {
+        throw new Error("OS sandbox unavailable: bwrap was not found.");
+      }
+      return { command, args, sandboxed: false, backend: "none", reason: "bwrap unavailable" };
+    }
+    const bwrapArgs: string[] = [
+      "--die-with-parent",
+      "--new-session",
+      "--ro-bind",
+      "/",
+      "/",
+      "--dev",
+      "/dev",
+      "--proc",
+      "/proc",
+      "--tmpfs",
+      "/tmp",
+    ];
+    for (const r of readPaths) {
+      bwrapArgs.push("--ro-bind", r, r);
+    }
+    for (const w of writePaths) {
+      bwrapArgs.push("--bind", w, w);
+    }
+    // Only unshare network when network is explicitly disabled; loopback-only
+    // bridges (such as LocalMcpServer) rely on the host loopback interface.
+    if (options.allowNetwork === false || (options.allowedDomains !== undefined && options.allowedDomains.length === 0)) {
+      bwrapArgs.push("--unshare-net");
+    }
+    bwrapArgs.push("--", command, ...args);
+    return {
+      command: bwrapBin,
+      args: bwrapArgs,
+      sandboxed: true,
+      backend: "bwrap",
+    };
+  }
+
+  if (options.failIfUnavailable) {
+    throw new Error(`OS sandbox unavailable on platform "${platform}".`);
+  }
+  return {
+    command,
+    args,
+    sandboxed: false,
+    backend: "none",
+    reason: `OS sandbox unsupported on ${platform}`,
+  };
+}
 
 /** What the agent wants to do, as far as it told us. */
 export interface PermissionQuestion {
@@ -141,6 +320,134 @@ function toolOutput(content: unknown, rawOutput: unknown): string {
   return rawOutput === undefined || rawOutput === null ? "" : JSON.stringify(rawOutput);
 }
 
+export type AcpModelConfig = (
+  | HermesModelConfig
+  | { model?: string; kind?: string; baseUrl?: string; apiKey?: string }
+) & {
+  reasoningEffort?: AiReasoningEffort;
+};
+
+export interface AcpMcpHttpServer {
+  type: "http" | "sse";
+  name: string;
+  url: string;
+  headers: Array<{ name: string; value: string }>;
+}
+
+export interface AcpMcpStdioServer {
+  name: string;
+  command: string;
+  args: string[];
+  env: Array<{ name: string; value: string }>;
+}
+
+export type AcpMcpServer = AcpMcpHttpServer | AcpMcpStdioServer;
+
+export interface AcpLocalMcpBridge {
+  /** Running LocalMcpServer instance or explicit loopback URL. */
+  server?: Pick<LocalMcpServer, "address">;
+  url?: string;
+  /** Scoped least-privilege token sent via Authorization header (never via child env). */
+  token?: string;
+  /** Server name exposed to the ACP agent (defaults to "sshs3"). */
+  name?: string;
+  transport?: "http" | "sse";
+  /** Optional least-privilege scope metadata (e.g. ["read"]). */
+  scopes?: string[];
+  /** Optional least-privilege tool allowlist metadata. */
+  tools?: string[];
+}
+
+export interface AcpSessionStore {
+  get(taskId: string): string | undefined;
+  set(taskId: string, sessionId: string): void;
+  delete?(taskId: string): void;
+}
+
+export interface AcpRuntimeOptions {
+  /** Put before the user's message: who the agent is here and what it is working towards. */
+  preface: string;
+  ask: PermissionAsk;
+  clientVersion?: string;
+  /** How a tool call the person was asked about ended, as the agent reported it. */
+  settled?: (toolCallId: string, outcome: { failed: boolean; output: string }) => void;
+  /** Optional model override when `start()` is invoked without an explicit model config. */
+  model?: string;
+  /** Optional reasoning effort level passed to session init/config. */
+  reasoningEffort?: AiReasoningEffort;
+  /** Persisted ACP session ID to resume via `session/load` before falling back to `session/new`. */
+  sessionId?: string;
+  /** Callback invoked when an ACP session ID is resumed or created. */
+  onSessionId?: (sessionId: string, taskId: string) => void | Promise<void>;
+  /** Optional external session store keyed by `task.id`. */
+  sessionStore?: AcpSessionStore;
+  /** Scoped least-privilege LocalMcpServer bridge exposed in `session/new` / `session/load` `mcpServers`. */
+  localMcp?: AcpLocalMcpBridge;
+  /** Additional ACP `mcpServers` entries to include alongside `localMcp`. */
+  mcpServers?: AcpMcpServer[];
+  /** Opt-in OS sandbox wrapper configuration for spawning the external runner. */
+  sandbox?: OsSandboxOptions;
+}
+
+interface AcpSessionResponse {
+  sessionId?: string;
+  models?: {
+    currentModelId?: string;
+    availableModels?: Array<{ modelId?: string; name?: string }>;
+  };
+  configOptions?: Array<{
+    id?: string;
+    category?: string;
+    currentValue?: unknown;
+  }>;
+}
+
+interface AcpInitResponse {
+  protocolVersion?: number;
+  agentCapabilities?: {
+    loadSession?: boolean;
+    models?: boolean;
+    configOptions?: boolean;
+    sessionCapabilities?: {
+      setModel?: boolean;
+      setConfigOption?: boolean;
+    };
+  };
+}
+
+/**
+ * Builds the `mcpServers` list for ACP `session/new` and `session/load`, bridging a
+ * scoped least-privilege `LocalMcpServer` over loopback HTTP without touching child env.
+ */
+export function buildAcpMcpServers(options: {
+  localMcp?: AcpLocalMcpBridge;
+  mcpServers?: AcpMcpServer[];
+}): AcpMcpServer[] {
+  const servers: AcpMcpServer[] = [...(options.mcpServers ?? [])];
+  const bridge = options.localMcp;
+  if (!bridge) return servers;
+  const rawUrl = bridge.url?.trim() || bridge.server?.address()?.trim();
+  if (!rawUrl) return servers;
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error("LocalMcpServer bridge URL is invalid.");
+  }
+  if (!LOOPBACK_HOSTS.has(parsed.hostname.toLowerCase())) {
+    throw new Error(`LocalMcpServer bridge must use a loopback host (got "${parsed.hostname}").`);
+  }
+  servers.push({
+    type: bridge.transport ?? "http",
+    name: bridge.name?.trim() || "sshs3",
+    url: parsed.toString(),
+    headers: bridge.token ? [{ name: "Authorization", value: `Bearer ${bridge.token}` }] : [],
+  });
+  return servers;
+}
+
+const persistedSessions = new Map<string, string>();
+
 export class AcpRuntime implements AgentRuntime {
   private child?: ChildProcessWithoutNullStreams;
   private nextId = 1;
@@ -152,28 +459,120 @@ export class AcpRuntime implements AgentRuntime {
   /** Each tool call the agent announced: its title, input (parsed and as text) and kind, by its id. */
   private tools = new Map<string, { title: string; input: string; raw?: unknown; kind?: string }>();
 
+  /** Clears the in-process ACP `task.id -> sessionId` cache (primarily for tests). */
+  static clearSessionCache(): void {
+    persistedSessions.clear();
+  }
+
   constructor(
     private readonly runner: ExternalRunner,
-    private readonly options: {
-      /** Put before the user's message: who the agent is here and what it is working towards. */
-      preface: string;
-      ask: PermissionAsk;
-      clientVersion?: string;
-      /** How a tool call the person was asked about ended, as the agent reported it. */
-      settled?: (toolCallId: string, outcome: { failed: boolean; output: string }) => void;
-    },
+    private readonly options: AcpRuntimeOptions,
   ) {}
+
+  private sessionCacheKey(taskId: string): string {
+    return `${this.runner.id}\0${taskId}`;
+  }
+
+  private resolvePersistedSessionId(task: AgentTask): string | undefined {
+    const taskField = (task as AgentTask & { acpSessionId?: string }).acpSessionId;
+    return (
+      this.options.sessionId?.trim() ||
+      taskField?.trim() ||
+      this.options.sessionStore?.get(task.id)?.trim() ||
+      persistedSessions.get(this.sessionCacheKey(task.id))
+    );
+  }
+
+  private async persistSessionId(task: AgentTask, sessionId: string): Promise<void> {
+    persistedSessions.set(this.sessionCacheKey(task.id), sessionId);
+    this.options.sessionStore?.set(task.id, sessionId);
+    await this.options.onSessionId?.(sessionId, task.id);
+  }
+
+  private async applySessionModelAndConfig(
+    sessionId: string,
+    session: AcpSessionResponse,
+    init: AcpInitResponse,
+    selectedModel: string | undefined,
+    selectedReasoningEffort: AiReasoningEffort | undefined,
+    gone: Promise<never>,
+  ): Promise<void> {
+    const caps = init.agentCapabilities;
+    const supportsSetModel = Boolean(session.models || caps?.models || caps?.sessionCapabilities?.setModel);
+    const supportsSetConfig = Boolean(
+      Array.isArray(session.configOptions) || caps?.configOptions || caps?.sessionCapabilities?.setConfigOption,
+    );
+
+    if (selectedModel && supportsSetModel && session.models?.currentModelId !== selectedModel) {
+      await Promise.race([
+        this.request("session/set_model", { sessionId, modelId: selectedModel }),
+        gone,
+      ]).catch((error: unknown) => {
+        if (this.exited || this.stopped) throw error;
+      });
+    }
+
+    if (selectedReasoningEffort && supportsSetConfig) {
+      const opt = session.configOptions?.find(
+        (c) =>
+          c.category === "thought_level" ||
+          c.id === "reasoning_effort" ||
+          c.id === "reasoningEffort" ||
+          c.id === "thought_level",
+      );
+      if (opt?.id ? opt.currentValue !== selectedReasoningEffort : Boolean(caps?.configOptions || caps?.sessionCapabilities?.setConfigOption)) {
+        await Promise.race([
+          this.request("session/set_config_option", {
+            sessionId,
+            configId: opt?.id ?? "reasoning_effort",
+            value: selectedReasoningEffort,
+          }),
+          gone,
+        ]).catch((error: unknown) => {
+          if (this.exited || this.stopped) throw error;
+        });
+      }
+    }
+
+    if (selectedModel && !supportsSetModel && Array.isArray(session.configOptions)) {
+      const modelOpt = session.configOptions.find((c) => c.category === "model" || c.id === "model");
+      if (modelOpt?.id && modelOpt.currentValue !== selectedModel) {
+        await Promise.race([
+          this.request("session/set_config_option", {
+            sessionId,
+            configId: modelOpt.id,
+            value: selectedModel,
+          }),
+          gone,
+        ]).catch((error: unknown) => {
+          if (this.exited || this.stopped) throw error;
+        });
+      }
+    }
+  }
 
   async start(
     task: AgentTask,
-    _model: HermesModelConfig | undefined,
+    model: AcpModelConfig | undefined,
     onEvent: (event: RunEvent) => void,
   ): Promise<void> {
     const cwd = this.runner.cwd?.trim();
     if (!cwd) throw new Error(`"${this.runner.name}" has no working folder set on this computer.`);
+    const selectedModel = model?.model?.trim() || this.options.model?.trim() || undefined;
+    const selectedReasoningEffort =
+      (model && "reasoningEffort" in model ? model.reasoningEffort : undefined) ??
+      this.options.reasoningEffort;
+    const mcpServers = buildAcpMcpServers({
+      localMcp: this.options.localMcp,
+      mcpServers: this.options.mcpServers,
+    });
+
     let text = "";
     try {
-      const plan = runnerSpawn(this.runner.command, this.runner.args ?? []);
+      const sandboxed = this.options.sandbox?.enabled
+        ? wrapWithOsSandbox(this.runner.command, this.runner.args ?? [], { cwd, ...this.options.sandbox })
+        : { command: this.runner.command, args: this.runner.args ?? [] };
+      const plan = runnerSpawn(sandboxed.command, sandboxed.args);
       this.child = spawn(plan.file, plan.args, {
         cwd,
         // The agent gets what a program needs to run, not this app's own credentials: no SSH agent
@@ -231,43 +630,99 @@ export class AcpRuntime implements AgentRuntime {
       }
     });
 
+    const sessionMeta =
+      selectedModel || selectedReasoningEffort
+        ? {
+            ...(selectedModel ? { model: selectedModel } : {}),
+            ...(selectedReasoningEffort ? { reasoningEffort: selectedReasoningEffort } : {}),
+          }
+        : undefined;
+
     const init = (await Promise.race([
       this.request("initialize", {
         protocolVersion: ACP_PROTOCOL_VERSION,
         clientInfo: { name: "sshs3", version: this.options.clientVersion ?? "0" },
         // The agent uses its own file access and its own shell; sshS3 offers neither.
         clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
+        ...(sessionMeta ? { _meta: sessionMeta } : {}),
       }),
       gone,
-    ])) as { protocolVersion?: number };
+    ])) as AcpInitResponse;
     if (init?.protocolVersion !== undefined && init.protocolVersion !== ACP_PROTOCOL_VERSION)
       throw new Error(
         `"${this.runner.name}" speaks protocol version ${init.protocolVersion}; sshS3 speaks ${ACP_PROTOCOL_VERSION}.`,
       );
 
-    let session: { sessionId?: string };
-    try {
-      session = (await Promise.race([
-        this.request("session/new", { cwd, mcpServers: [] }),
-        gone,
-      ])) as { sessionId?: string };
-    } catch (error) {
-      const reason = safeError(error);
-      throw new Error(
-        /auth/i.test(reason)
-          ? `"${this.runner.name}" is not signed in on this computer. Start it once in a terminal and sign in, then try again. (${reason})`
-          : reason,
-        { cause: error },
-      );
+    let session: AcpSessionResponse | undefined;
+    let resumed = false;
+    const candidateSessionId = this.resolvePersistedSessionId(task);
+    const shouldAttemptLoad =
+      Boolean(candidateSessionId) &&
+      (init?.agentCapabilities?.loadSession === true ||
+        (init?.agentCapabilities?.loadSession !== false &&
+          Boolean(this.options.sessionId || this.options.sessionStore)));
+
+    if (shouldAttemptLoad && candidateSessionId) {
+      try {
+        const loaded = (await Promise.race([
+          this.request("session/load", {
+            sessionId: candidateSessionId,
+            cwd,
+            mcpServers,
+            ...(sessionMeta ? { _meta: sessionMeta } : {}),
+          }),
+          gone,
+        ])) as AcpSessionResponse | undefined;
+        session = { ...loaded, sessionId: loaded?.sessionId ?? candidateSessionId };
+        resumed = true;
+      } catch (error) {
+        if (this.exited || this.stopped) throw error;
+        // Session could not be loaded (expired/unknown/unsupported); fall back to session/new.
+      }
+    }
+
+    if (!session) {
+      try {
+        session = (await Promise.race([
+          this.request("session/new", {
+            cwd,
+            mcpServers,
+            ...(sessionMeta ? { _meta: sessionMeta } : {}),
+          }),
+          gone,
+        ])) as AcpSessionResponse;
+      } catch (error) {
+        const reason = safeError(error);
+        throw new Error(
+          /auth/i.test(reason)
+            ? `"${this.runner.name}" is not signed in on this computer. Start it once in a terminal and sign in, then try again. (${reason})`
+            : reason,
+          { cause: error },
+        );
+      }
     }
     if (!session?.sessionId) throw new Error(`"${this.runner.name}" opened no session.`);
     this.sessionId = session.sessionId;
+    await this.persistSessionId(task, this.sessionId);
+
+    if (selectedModel || selectedReasoningEffort) {
+      await this.applySessionModelAndConfig(
+        this.sessionId,
+        session,
+        init ?? {},
+        selectedModel,
+        selectedReasoningEffort,
+        gone,
+      );
+    }
 
     const last = task.messages.filter((m) => m.role === "user").at(-1);
-    const earlier = task.messages
-      .filter((m) => m.id !== last?.id && m.role !== "system" && m.text.trim())
-      .slice(-6)
-      .map((m) => `${m.role === "user" ? "User" : "You"}: ${boundedContext(m.text, 1500)}`);
+    const earlier = resumed
+      ? []
+      : task.messages
+          .filter((m) => m.id !== last?.id && m.role !== "system" && m.text.trim())
+          .slice(-6)
+          .map((m) => `${m.role === "user" ? "User" : "You"}: ${boundedContext(m.text, 1500)}`);
     const prompt = [
       this.options.preface,
       earlier.length ? `Earlier in this conversation:\n${earlier.join("\n")}` : "",

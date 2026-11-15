@@ -67,11 +67,162 @@ import type { AskpassPromptRetryContext } from '../smartcard/AskpassServer';
 import { createLogger } from '../log';
 import { createMuxControlPath } from './muxControlPath';
 const sshLog = createLogger('ssh');
+
+export const CONPTY_WRITE_CHUNK_BYTES = 512;
+export const DEFAULT_SERVER_ALIVE_INTERVAL = 30;
+export const DEFAULT_SERVER_ALIVE_COUNT_MAX = 3;
+
+export interface WriteChunkedOptions {
+  /** Max UTF-8 bytes per chunk (default: 512 for Windows ConPTY). */
+  chunkBytes?: number;
+  /** Delay in ms between chunks when split across multiple writes (default: 2; 0 for synchronous writes). */
+  delayMs?: number;
+}
+
+/**
+ * Splits terminal input into chunks bounded by `maxBytes` UTF-8 bytes without
+ * breaking UTF-16 surrogate pairs.
+ */
+export function splitConPtyChunks(data: string, maxBytes = CONPTY_WRITE_CHUNK_BYTES): string[] {
+  if (!data) return [];
+  const limit = Math.max(1, Math.floor(maxBytes));
+  if (Buffer.byteLength(data, 'utf8') <= limit) {
+    return [data];
+  }
+  const chunks: string[] = [];
+  let start = 0;
+  let bytes = 0;
+  for (let i = 0; i < data.length; ) {
+    const cp = data.codePointAt(i) ?? 0;
+    const charLen = cp > 0xffff ? 2 : 1;
+    const charBytes = cp <= 0x7f ? 1 : cp <= 0x7ff ? 2 : cp <= 0xffff ? 3 : 4;
+    if (bytes > 0 && bytes + charBytes > limit) {
+      chunks.push(data.slice(start, i));
+      start = i;
+      bytes = 0;
+    }
+    bytes += charBytes;
+    i += charLen;
+  }
+  if (start < data.length) {
+    chunks.push(data.slice(start));
+  }
+  return chunks;
+}
+
+/**
+ * Writes data to a PTY or writer callback in 512-byte ConPTY-safe chunks so large
+ * pastes and escape sequences are not dropped on Windows pseudo-consoles.
+ */
+export async function writeChunked(
+  target: { write(chunk: string): void } | ((chunk: string) => void),
+  data: string,
+  options: WriteChunkedOptions = {}
+): Promise<void> {
+  if (!data) return;
+  const writeFn = typeof target === 'function' ? target : (chunk: string) => target.write(chunk);
+  const chunkBytes = options.chunkBytes ?? CONPTY_WRITE_CHUNK_BYTES;
+  const delayMs = options.delayMs ?? 2;
+  const chunks = splitConPtyChunks(data, chunkBytes);
+  for (let i = 0; i < chunks.length; i++) {
+    if (i > 0 && delayMs > 0) {
+      await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+    }
+    writeFn(chunks[i]);
+  }
+}
+
+function hasExtraOptionCaseInsensitive(
+  extraOptions: Record<string, string> | undefined,
+  key: string
+): boolean {
+  if (!extraOptions) return false;
+  const target = key.toLowerCase();
+  return Object.keys(extraOptions).some((k) => k.trim().toLowerCase() === target);
+}
+
+/**
+ * Applies default OpenSSH keepalive settings (`ServerAliveInterval=30` and
+ * `ServerAliveCountMax=3`) unless explicitly overridden in `config`.
+ */
+export function applySshKeepaliveDefaults(config: SSHConnectionConfig): SSHConnectionConfig {
+  const hasInterval =
+    config.serverAliveInterval !== undefined ||
+    hasExtraOptionCaseInsensitive(config.extraOptions, 'ServerAliveInterval');
+  const hasCountMax = hasExtraOptionCaseInsensitive(config.extraOptions, 'ServerAliveCountMax');
+  if (hasInterval && hasCountMax) {
+    return config;
+  }
+  return {
+    ...config,
+    ...(!hasInterval ? { serverAliveInterval: DEFAULT_SERVER_ALIVE_INTERVAL } : {}),
+    ...(!hasCountMax
+      ? {
+          extraOptions: {
+            ...(config.extraOptions ?? {}),
+            ServerAliveCountMax: String(DEFAULT_SERVER_ALIVE_COUNT_MAX),
+          },
+        }
+      : {}),
+  };
+}
+
+export type SessionConnectionState = 'connected' | 'reconnecting' | 'disconnected';
+
+export interface SessionReconnectGraceState {
+  state: SessionConnectionState;
+  attempt: number;
+  maxAttempts: number;
+  startedAt?: number;
+  graceUntil?: number;
+}
+
+export type SessionShareRole = 'owner' | 'peer' | 'observer';
+
+export interface SessionParticipant {
+  clientId: string;
+  actor: string;
+  role: SessionShareRole;
+  joinedAt: number;
+  lastActiveAt: number;
+}
+
+export interface SessionShareMetadata {
+  sessionId: string;
+  ownerClientId?: string;
+  participants: SessionParticipant[];
+  observerCount: number;
+  peerCount: number;
+  sharingEnabled: boolean;
+}
+
+export interface SessionShareAttachment {
+  clientId: string;
+  role: SessionShareRole;
+  write(data: string): boolean;
+  dispose(): void;
+}
+
 export interface SSHPtyManagerEvents {
   data: (event: { sessionId: string; data: string }) => void;
   exit: (event: { sessionId: string; exitCode: number; signal?: number }) => void;
-  reconnecting: (event: { sessionId: string; attempt: number; maxAttempts: number }) => void;
+  reconnecting: (event: {
+    sessionId: string;
+    attempt: number;
+    maxAttempts: number;
+  }) => void;
   reconnected: (event: { sessionId: string }) => void;
+  'share-changed': (event: { sessionId: string; metadata: SessionShareMetadata }) => void;
+  'fanout-data': (event: {
+    sessionId: string;
+    data: string;
+    participants: SessionParticipant[];
+  }) => void;
+  'observer-input-blocked': (event: {
+    sessionId: string;
+    clientId: string;
+    actor: string;
+  }) => void;
   'hostkey-changed': (event: {
     sessionId: string;
     host: string;
@@ -108,10 +259,15 @@ export class InternalSSHPtySession implements SSHPtySession {
   private cleanupPromise?: Promise<void>;
   private reconnecting: boolean = false;
   private reconnectAttempts: number = 0;
+  private reconnectStartedAt?: number;
+  private reconnectGraceUntil?: number;
   private reconnectTimer?: NodeJS.Timeout;
   private reconnectStableTimer?: NodeJS.Timeout;
   /** A reconnected session must stay up this long before its retry budget is restored. */
   private static readonly RECONNECT_STABLE_MS = 30_000;
+  private writeQueue: Promise<void> = Promise.resolve();
+  private participants: Map<string, SessionParticipant> = new Map();
+  private fanoutListeners: Map<string, (data: string) => void> = new Map();
 
   private scrollbackChunks: string[] = [];
   private scrollbackLength: number = 0;
@@ -162,6 +318,149 @@ export class InternalSSHPtySession implements SSHPtySession {
     return this.reconnecting;
   }
 
+  public getConnectionState(): SessionConnectionState {
+    if (this.disposed) return 'disconnected';
+    if (this.reconnecting) return 'reconnecting';
+    return 'connected';
+  }
+
+  public getReconnectState(): SessionReconnectGraceState {
+    return {
+      state: this.getConnectionState(),
+      attempt: this.reconnectAttempts,
+      maxAttempts: this.config.maxReconnectAttempts ?? 3,
+      ...(this.reconnectStartedAt !== undefined ? { startedAt: this.reconnectStartedAt } : {}),
+      ...(this.reconnectGraceUntil !== undefined ? { graceUntil: this.reconnectGraceUntil } : {}),
+    };
+  }
+
+  private emitOutputChunk(data: string): void {
+    for (const listener of this.dataListeners) {
+      listener(data);
+    }
+    for (const listener of this.fanoutListeners.values()) {
+      listener(data);
+    }
+    this.manager.emit('data', { sessionId: this.sessionId, data });
+    if (this.participants.size > 0) {
+      this.manager.emit('fanout-data', {
+        sessionId: this.sessionId,
+        data,
+        participants: this.listParticipants(),
+      });
+    }
+  }
+
+  public joinParticipant(input: {
+    clientId: string;
+    actor: string;
+    role: SessionShareRole;
+  }): SessionParticipant {
+    const now = Date.now();
+    const existing = this.participants.get(input.clientId);
+    const participant: SessionParticipant = {
+      clientId: input.clientId,
+      actor: input.actor,
+      role: input.role,
+      joinedAt: existing?.joinedAt ?? now,
+      lastActiveAt: now,
+    };
+    this.participants.set(input.clientId, participant);
+    this.manager.emit('share-changed', {
+      sessionId: this.sessionId,
+      metadata: this.getShareMetadata(),
+    });
+    return { ...participant };
+  }
+
+  public leaveParticipant(clientId: string): boolean {
+    const removed = this.participants.delete(clientId);
+    this.fanoutListeners.delete(clientId);
+    if (removed) {
+      this.manager.emit('share-changed', {
+        sessionId: this.sessionId,
+        metadata: this.getShareMetadata(),
+      });
+    }
+    return removed;
+  }
+
+  public setParticipantRole(clientId: string, role: SessionShareRole): SessionParticipant | undefined {
+    const existing = this.participants.get(clientId);
+    if (!existing) return undefined;
+    const updated: SessionParticipant = {
+      ...existing,
+      role,
+      lastActiveAt: Date.now(),
+    };
+    this.participants.set(clientId, updated);
+    this.manager.emit('share-changed', {
+      sessionId: this.sessionId,
+      metadata: this.getShareMetadata(),
+    });
+    return { ...updated };
+  }
+
+  public listParticipants(): SessionParticipant[] {
+    return Array.from(this.participants.values(), (p) => ({ ...p }));
+  }
+
+  public getShareMetadata(): SessionShareMetadata {
+    const participants = this.listParticipants();
+    const owner = participants.find((p) => p.role === 'owner');
+    const observerCount = participants.filter((p) => p.role === 'observer').length;
+    const peerCount = participants.filter((p) => p.role === 'peer').length;
+    return {
+      sessionId: this.sessionId,
+      ...(owner ? { ownerClientId: owner.clientId } : {}),
+      participants,
+      observerCount,
+      peerCount,
+      sharingEnabled: participants.length > 0,
+    };
+  }
+
+  public canClientWrite(clientId: string): boolean {
+    const participant = this.participants.get(clientId);
+    if (!participant) return this.participants.size === 0;
+    return participant.role !== 'observer';
+  }
+
+  public writeFromClient(clientId: string, data: string): boolean {
+    const participant = this.participants.get(clientId);
+    if (!this.canClientWrite(clientId)) {
+      if (participant) {
+        this.manager.emit('observer-input-blocked', {
+          sessionId: this.sessionId,
+          clientId,
+          actor: participant.actor,
+        });
+      }
+      return false;
+    }
+    if (participant) {
+      participant.lastActiveAt = Date.now();
+    }
+    this.write(data);
+    return true;
+  }
+
+  public attachShareClient(
+    participant: { clientId: string; actor: string; role: SessionShareRole },
+    onData: (data: string) => void
+  ): SessionShareAttachment {
+    const joined = this.joinParticipant(participant);
+    this.fanoutListeners.set(participant.clientId, onData);
+    return {
+      clientId: joined.clientId,
+      role: joined.role,
+      write: (data: string) => this.writeFromClient(joined.clientId, data),
+      dispose: () => {
+        this.leaveParticipant(joined.clientId);
+      },
+    };
+  }
+
   public bindPty(newPty: IPty): void {
     this.pty = newPty;
     this.pid = newPty.pid;
@@ -170,10 +469,7 @@ export class InternalSSHPtySession implements SSHPtySession {
     newPty.onData((data: string) => {
       this.recentOutput = (this.recentOutput + data).slice(-InternalSSHPtySession.RECENT_OUTPUT_CHARS);
       this.appendScrollback(data);
-      for (const listener of this.dataListeners) {
-        listener(data);
-      }
-      this.manager.emit('data', { sessionId: this.sessionId, data });
+      this.emitOutputChunk(data);
     });
 
     newPty.onExit((event: { exitCode: number; signal?: number }) => {
@@ -194,8 +490,7 @@ export class InternalSSHPtySession implements SSHPtySession {
         `\r\n\x1b[31m[sshs3: ssh reported that the host key for ${this.config.host} has changed. ` +
         `The server may have been reinstalled, or the connection is being intercepted. Checking...]\x1b[0m\r\n`;
       this.appendScrollback(msg);
-      for (const listener of this.dataListeners) listener(msg);
-      this.manager.emit('data', { sessionId: this.sessionId, data: msg });
+      this.emitOutputChunk(msg);
       this.manager.emit('hostkey-changed', {
         sessionId: this.sessionId,
         host: this.config.host,
@@ -219,12 +514,17 @@ export class InternalSSHPtySession implements SSHPtySession {
       const attempt = this.reconnectAttempts;
       const maxAttempts = this.config.maxReconnectAttempts ?? 3;
       const delay = this.config.reconnectDelayMs ?? 1000;
+      this.reconnectStartedAt ??= Date.now();
+      this.reconnectGraceUntil = Date.now() + delay;
 
-      this.manager.emit('reconnecting', { sessionId: this.sessionId, attempt, maxAttempts });
+      this.manager.emit('reconnecting', {
+        sessionId: this.sessionId,
+        attempt,
+        maxAttempts,
+      });
       const msg = `\r\n\x1b[33m[sshs3: connection dropped, reconnecting (${attempt}/${maxAttempts})...]\x1b[0m\r\n`;
       this.appendScrollback(msg);
-      for (const listener of this.dataListeners) listener(msg);
-      this.manager.emit('data', { sessionId: this.sessionId, data: msg });
+      this.emitOutputChunk(msg);
 
       this.reconnectTimer = setTimeout(async () => {
         this.reconnectTimer = undefined;
@@ -234,11 +534,15 @@ export class InternalSSHPtySession implements SSHPtySession {
           if (success && this.killedByUser) {
             // Closed while the new ssh was starting: end that one too (its exit then ends the session).
             this.reconnecting = false;
+            this.reconnectStartedAt = undefined;
+            this.reconnectGraceUntil = undefined;
             this.pty.kill();
             return;
           }
           if (success) {
             this.reconnecting = false;
+            this.reconnectStartedAt = undefined;
+            this.reconnectGraceUntil = undefined;
             // A successful spawn is not a successful connection: ssh may exit seconds later
             // (host still down). Only restore the retry budget once the session has stayed
             // up, otherwise maxReconnectAttempts would never be reached.
@@ -249,8 +553,7 @@ export class InternalSSHPtySession implements SSHPtySession {
             this.reconnectStableTimer.unref?.();
             const okMsg = `\r\n\x1b[32m[sshs3: reconnected successfully]\x1b[0m\r\n`;
             this.appendScrollback(okMsg);
-            for (const listener of this.dataListeners) listener(okMsg);
-            this.manager.emit('data', { sessionId: this.sessionId, data: okMsg });
+            this.emitOutputChunk(okMsg);
             this.manager.emit('reconnected', { sessionId: this.sessionId });
             return;
           }
@@ -265,6 +568,8 @@ export class InternalSSHPtySession implements SSHPtySession {
       return;
     }
 
+    this.reconnectStartedAt = undefined;
+    this.reconnectGraceUntil = undefined;
     this.emitFinalExit(event);
   }
 
@@ -285,9 +590,43 @@ export class InternalSSHPtySession implements SSHPtySession {
   }
 
   public write(data: string): void {
-    if (!this.disposed) {
-      this.pty.write(data);
+    if (this.disposed || this.reconnecting || !data) return;
+    if (process.platform === 'win32' && Buffer.byteLength(data, 'utf8') > CONPTY_WRITE_CHUNK_BYTES) {
+      void this.writeChunked(data);
+      return;
     }
+    this.pty.write(data);
+  }
+
+  public writeChunked(data: string, options?: WriteChunkedOptions): Promise<void> {
+    if (this.disposed || this.reconnecting || !data) return Promise.resolve();
+    const run = this.writeQueue.then(
+      () =>
+        writeChunked(
+          (chunk) => {
+            if (!this.disposed && !this.reconnecting) {
+              this.pty.write(chunk);
+            }
+          },
+          data,
+          options
+        ),
+      () =>
+        writeChunked(
+          (chunk) => {
+            if (!this.disposed && !this.reconnecting) {
+              this.pty.write(chunk);
+            }
+          },
+          data,
+          options
+        )
+    );
+    this.writeQueue = run.then(
+      () => {},
+      () => {}
+    );
+    return run;
   }
 
   public resize(cols: number, rows: number): void {
@@ -410,9 +749,14 @@ export class InternalSSHPtySession implements SSHPtySession {
 
   private async performCleanup(): Promise<void> {
     this.disposed = true;
+    this.reconnecting = false;
+    this.reconnectStartedAt = undefined;
+    this.reconnectGraceUntil = undefined;
     this.manager.removeSessionInternal(this.sessionId);
     this.dataListeners.clear();
     this.exitListeners.clear();
+    this.participants.clear();
+    this.fanoutListeners.clear();
 
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -628,7 +972,9 @@ export class SSHPtyManager extends EventEmitter {
         (process.platform === 'win32' ? '127.0.0.1:0.0' : ':0');
     }
 
-    const filteredConfig = this.withoutConflictingTunnels(config, session.sessionId);
+    const filteredConfig = applySshKeepaliveDefaults(
+      this.withoutConflictingTunnels(config, session.sessionId)
+    );
     // Same ControlPath as the original connection, so features using the mux socket
     // (`-S`: perf sampling, dotfiles sync) keep working after a reconnect.
     const sshArgs = SmartcardDetector.buildSSHArguments(filteredConfig, session.controlPath);
@@ -782,7 +1128,9 @@ export class SSHPtyManager extends EventEmitter {
         }
       }
 
-      filteredConfig = this.withoutConflictingTunnels(config, sessionId);
+      filteredConfig = applySshKeepaliveDefaults(
+        this.withoutConflictingTunnels(config, sessionId)
+      );
       const sshArgs = SmartcardDetector.buildSSHArguments(filteredConfig, controlPath);
       const sshBinary = process.platform === 'win32' ? 'ssh.exe' : 'ssh';
       sshLog.info(`spawning ${sshBinary} ${sshArgs.join(' ')}`);
@@ -983,6 +1331,87 @@ export class SSHPtyManager extends EventEmitter {
     if (session) {
       session.write(data);
     }
+  }
+
+  /**
+   * Writes data to an active session in ConPTY-safe 512-byte chunks.
+   */
+  public writeChunked(
+    sessionId: string,
+    data: string,
+    options?: WriteChunkedOptions
+  ): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session) return Promise.resolve();
+    if (session instanceof InternalSSHPtySession) {
+      return session.writeChunked(data, options);
+    }
+    return writeChunked((chunk) => session.write(chunk), data, options);
+  }
+
+  public getSessionState(sessionId: string): SessionConnectionState | undefined {
+    const session = this.sessions.get(sessionId);
+    if (!session) return undefined;
+    if (session instanceof InternalSSHPtySession) {
+      return session.getConnectionState();
+    }
+    return session.isReconnecting?.() ? 'reconnecting' : 'connected';
+  }
+
+  public getSessionReconnectState(sessionId: string): SessionReconnectGraceState | undefined {
+    const session = this.sessions.get(sessionId);
+    if (session instanceof InternalSSHPtySession) {
+      return session.getReconnectState();
+    }
+    return undefined;
+  }
+
+  public attachShareClient(
+    sessionId: string,
+    participant: { clientId: string; actor: string; role: SessionShareRole },
+    onData: (data: string) => void
+  ): SessionShareAttachment | undefined {
+    const session = this.sessions.get(sessionId);
+    if (session instanceof InternalSSHPtySession) {
+      return session.attachShareClient(participant, onData);
+    }
+    return undefined;
+  }
+
+  public detachShareClient(sessionId: string, clientId: string): boolean {
+    const session = this.sessions.get(sessionId);
+    if (session instanceof InternalSSHPtySession) {
+      return session.leaveParticipant(clientId);
+    }
+    return false;
+  }
+
+  public setShareParticipantRole(
+    sessionId: string,
+    clientId: string,
+    role: SessionShareRole
+  ): SessionParticipant | undefined {
+    const session = this.sessions.get(sessionId);
+    if (session instanceof InternalSSHPtySession) {
+      return session.setParticipantRole(clientId, role);
+    }
+    return undefined;
+  }
+
+  public writeFromClient(sessionId: string, clientId: string, data: string): boolean {
+    const session = this.sessions.get(sessionId);
+    if (session instanceof InternalSSHPtySession) {
+      return session.writeFromClient(clientId, data);
+    }
+    return false;
+  }
+
+  public getSessionShareMetadata(sessionId: string): SessionShareMetadata | undefined {
+    const session = this.sessions.get(sessionId);
+    if (session instanceof InternalSSHPtySession) {
+      return session.getShareMetadata();
+    }
+    return undefined;
   }
 
   /**

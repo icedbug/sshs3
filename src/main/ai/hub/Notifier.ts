@@ -24,6 +24,8 @@ export interface NotifyChannel {
   /** Whether the command text itself may leave the installation. */
   includeCommand: boolean;
   alertMinSeverity?: "info" | "warning" | "critical";
+  /** Attach signed ChatOps approve/deny action tokens on webhook payloads for actionable items. */
+  chatOpsActions?: boolean;
   last?: { at: number; ok: boolean; status?: number; error?: string };
 }
 
@@ -45,6 +47,10 @@ export interface NotifyItem {
   link?: string;
   /** Sent a second time because nobody answered. */
   reminder?: boolean;
+  /** Escalation step (>= 1) when multi-step escalation tiers are used. */
+  escalationTier?: number;
+  /** Optional fingerprint for per-fingerprint flap cooldown tracking. */
+  fingerprint?: string;
   /** Said instead of the kind's own headline (a test message). */
   headline?: string;
 }
@@ -53,6 +59,12 @@ export interface NotifyContext {
   /** The person whose installation this is: on a shared server, only they can approve. */
   owner?: string;
   inboxLink?: string;
+  /** Optional ChatOps signed approve/deny action token settings for webhook deliveries. */
+  chatOps?: {
+    enabled?: boolean;
+    ttlSeconds?: number;
+    callbackUrl?: string;
+  };
 }
 
 const SEVERITY = { info: 0, warning: 1, critical: 2 } as const;
@@ -91,6 +103,326 @@ export function diffInbox(
   return { fresh, seen: next };
 }
 
+// ---- alert noise control & escalation policies --------------------------------
+
+export interface FlapState {
+  lastAt: number;
+  count: number;
+  suppressedUntil?: number;
+}
+
+export interface FlapCooldownOptions {
+  /** Sliding window in which repeated transitions count toward flapping (default 10 min). */
+  windowMs?: number;
+  /** Number of transitions within windowMs before cooldown triggers (default 3). */
+  maxChangesBeforeFlap?: number;
+  /** How long notifications for a flapping fingerprint are suppressed (default 10 min). */
+  cooldownMs?: number;
+  /** Whether critical items bypass flap suppression (default false). */
+  allowCriticalBypass?: boolean;
+}
+
+/**
+ * Tracks per-fingerprint notification transitions and suppresses rapid flapping
+ * once a fingerprint recurs `maxChangesBeforeFlap` times within `windowMs`.
+ */
+export function evaluateFlapCooldown(
+  fingerprint: string,
+  state: Record<string, FlapState>,
+  now: number,
+  options: FlapCooldownOptions & { severity?: string } = {},
+): { allow: boolean; flapping: boolean; nextState: Record<string, FlapState>; suppressedUntil?: number } {
+  const windowMs = options.windowMs ?? 10 * 60_000;
+  const maxChanges = options.maxChangesBeforeFlap ?? 3;
+  const cooldownMs = options.cooldownMs ?? 10 * 60_000;
+  const nextState: Record<string, FlapState> = { ...state };
+  const prev = nextState[fingerprint];
+
+  if (options.allowCriticalBypass && options.severity === "critical") {
+    nextState[fingerprint] = { lastAt: now, count: (prev?.count ?? 0) + 1, suppressedUntil: prev?.suppressedUntil };
+    return { allow: true, flapping: false, nextState };
+  }
+
+  if (prev?.suppressedUntil !== undefined && now < prev.suppressedUntil) {
+    nextState[fingerprint] = { ...prev, lastAt: now, count: prev.count + 1 };
+    return { allow: false, flapping: true, nextState, suppressedUntil: prev.suppressedUntil };
+  }
+
+  const withinWindow = prev !== undefined && now - prev.lastAt <= windowMs;
+  const count = withinWindow ? prev.count + 1 : 1;
+  if (count >= maxChanges) {
+    const suppressedUntil = now + cooldownMs;
+    nextState[fingerprint] = { lastAt: now, count, suppressedUntil };
+    return { allow: false, flapping: true, nextState, suppressedUntil };
+  }
+
+  nextState[fingerprint] = { lastAt: now, count };
+  return { allow: true, flapping: false, nextState };
+}
+
+export const AUTO_PAUSE_MIN_SECONDS = 60;
+export const AUTO_PAUSE_MAX_SECONDS = 120;
+export const DEFAULT_AUTO_PAUSE_SECONDS = 90;
+
+export interface AutoPauseEntry {
+  firstAt: number;
+  releaseAt: number;
+  kind: string;
+  risk?: string;
+}
+
+/**
+ * Cushions non-critical transient alerts/health items for 60–120 seconds before
+ * pushing. If the item resolves/leaves the inbox before `releaseAt`, it is
+ * dropped without ever notifying; critical/blocking items bypass immediately.
+ */
+export function evaluateAutoPause(
+  items: InboxItem[],
+  pending: Record<string, AutoPauseEntry>,
+  now: number,
+  options: { cushionSeconds?: number; enabled?: boolean } = {},
+): { ready: InboxItem[]; held: InboxItem[]; pending: Record<string, AutoPauseEntry> } {
+  if (options.enabled === false) {
+    return { ready: items, held: [], pending: {} };
+  }
+  const rawSeconds = options.cushionSeconds ?? DEFAULT_AUTO_PAUSE_SECONDS;
+  const clampedSeconds = Math.min(AUTO_PAUSE_MAX_SECONDS, Math.max(AUTO_PAUSE_MIN_SECONDS, rawSeconds));
+  const cushionMs = clampedSeconds * 1000;
+  const nextPending: Record<string, AutoPauseEntry> = {};
+  const ready: InboxItem[] = [];
+  const held: InboxItem[] = [];
+
+  for (const item of items) {
+    const isCriticalOrBlocking =
+      item.risk === "critical" ||
+      item.risk === "destructive" ||
+      item.kind === "approval" ||
+      item.kind === "plan" ||
+      item.kind === "question";
+    if (isCriticalOrBlocking) {
+      ready.push(item);
+      continue;
+    }
+    const existing = pending[item.id];
+    const releaseAt = existing ? existing.releaseAt : (item.since ?? item.at ?? now) + cushionMs;
+    if (now >= releaseAt) {
+      ready.push(item);
+    } else {
+      nextPending[item.id] = existing ?? { firstAt: now, releaseAt, kind: item.kind, risk: item.risk };
+      held.push(item);
+    }
+  }
+  return { ready, held, pending: nextPending };
+}
+
+export interface QuietHoursConfig {
+  enabled: boolean;
+  /** Hour [0..23] when quiet hours begin. */
+  startHour: number;
+  /** Hour [0..23] when quiet hours end. */
+  endHour: number;
+  /** Optional UTC offset in minutes for deterministic evaluation (e.g. 60 for UTC+1). */
+  timezoneOffsetMinutes?: number;
+  /** Whether critical items bypass quiet hours (default true). */
+  allowCritical?: boolean;
+}
+
+/** Whether `now` falls inside the configured quiet-hours window. */
+export function isQuietHours(config: QuietHoursConfig | undefined, now: number): boolean {
+  if (!config?.enabled) return false;
+  const start = ((Math.trunc(config.startHour) % 24) + 24) % 24;
+  const end = ((Math.trunc(config.endHour) % 24) + 24) % 24;
+  if (start === end) return true;
+  const hour =
+    config.timezoneOffsetMinutes !== undefined
+      ? new Date(now + config.timezoneOffsetMinutes * 60_000).getUTCHours()
+      : new Date(now).getHours();
+  return start < end ? hour >= start && hour < end : hour >= start || hour < end;
+}
+
+/**
+ * Applies quiet hours and an hourly push budget (`maxPushesPerHour`) to outgoing
+ * notifications. Critical items bypass suppression unless `allowCritical` is false.
+ */
+export function evaluateNoiseBudget<T extends Pick<NotifyItem, "id" | "kind" | "risk">>(
+  items: T[],
+  pushHistory: number[],
+  now: number,
+  options: { maxPushesPerHour?: number; quietHours?: QuietHoursConfig; allowCriticalBypass?: boolean } = {},
+): { allowed: T[]; suppressed: T[]; reason?: "quiet-hours" | "noise-budget"; nextPushHistory: number[] } {
+  const oneHourAgo = now - 3600_000;
+  const recentPushes = pushHistory.filter((ts) => ts >= oneHourAgo && ts <= now);
+  const quiet = isQuietHours(options.quietHours, now);
+  const maxPerHour = options.maxPushesPerHour ?? 0;
+  const budgetExhausted = maxPerHour > 0 && recentPushes.length >= maxPerHour;
+  const allowCritical = (options.quietHours?.allowCritical ?? true) && (options.allowCriticalBypass ?? true);
+
+  if (!quiet && !budgetExhausted) {
+    return {
+      allowed: items,
+      suppressed: [],
+      nextPushHistory: items.length > 0 ? [...recentPushes, now] : recentPushes,
+    };
+  }
+
+  const allowed: T[] = [];
+  const suppressed: T[] = [];
+  for (const item of items) {
+    if (allowCritical && item.risk === "critical") {
+      allowed.push(item);
+    } else {
+      suppressed.push(item);
+    }
+  }
+  return {
+    allowed,
+    suppressed,
+    reason: quiet ? "quiet-hours" : "noise-budget",
+    nextPushHistory: allowed.length > 0 ? [...recentPushes, now] : recentPushes,
+  };
+}
+
+export interface EscalationEntry {
+  tier: number;
+  lastTierAt: number;
+  ackedAt?: number;
+  ackedBy?: string;
+}
+
+export interface EscalationConfig {
+  /** Minutes elapsed at each step before escalating to the next tier (default [5, 15, 30]). */
+  tierMinutes?: number[];
+  /** Maximum escalation tier (default tierMinutes.length). */
+  maxTier?: number;
+  /** Item kinds eligible for multi-step escalation (default ["approval", "plan", "question", "alert"]). */
+  kinds?: InboxKind[];
+}
+
+/**
+ * Evaluates multi-step, acknowledgement-aware escalation tiers for already-seen
+ * items. Once an item is acknowledged (`ackedAt` set), further escalation stops.
+ */
+export function evaluateEscalations(
+  items: InboxItem[],
+  seen: Record<string, number>,
+  escalations: Record<string, EscalationEntry>,
+  now: number,
+  config: EscalationConfig = {},
+): {
+  due: Array<{ item: InboxItem; tier: number }>;
+  escalations: Record<string, EscalationEntry>;
+  reminded: Record<string, number>;
+} {
+  const tierMinutes = config.tierMinutes?.length ? config.tierMinutes : [5, 15, 30];
+  const maxTier = config.maxTier ?? tierMinutes.length;
+  const kinds = new Set<InboxKind>(config.kinds ?? ["approval", "plan", "question", "alert"]);
+  const nextEscalations: Record<string, EscalationEntry> = {};
+  const reminded: Record<string, number> = {};
+  const due: Array<{ item: InboxItem; tier: number }> = [];
+
+  for (const item of items) {
+    const firstSeenAt = seen[item.id];
+    if (firstSeenAt === undefined) continue;
+    const prev = escalations[item.id];
+    if (prev) nextEscalations[item.id] = { ...prev };
+    if (!kinds.has(item.kind)) continue;
+    if (prev?.ackedAt !== undefined) continue;
+
+    const currentTier = prev?.tier ?? 0;
+    if (currentTier >= maxTier) continue;
+    const waitMinutes = tierMinutes[Math.min(currentTier, tierMinutes.length - 1)];
+    if (waitMinutes <= 0) continue;
+    const baselineAt = prev?.lastTierAt ?? firstSeenAt;
+    if (now - baselineAt >= waitMinutes * 60_000) {
+      const nextTier = currentTier + 1;
+      nextEscalations[item.id] = { tier: nextTier, lastTierAt: now };
+      reminded[item.id] = now;
+      due.push({ item, tier: nextTier });
+    }
+  }
+
+  return { due, escalations: nextEscalations, reminded };
+}
+
+export type ChatOpsAction = "approve" | "deny";
+
+export interface ChatOpsActionTokenPayload {
+  v: 1;
+  itemId: string;
+  action: ChatOpsAction;
+  target?: string;
+  iat: number;
+  exp: number;
+  nonce: string;
+}
+
+const DEFAULT_CHATOPS_TTL_SECONDS = 30 * 60;
+
+/**
+ * Signs an HMAC-SHA256 ChatOps action token (`approve` or `deny`) bound to
+ * an inbox item id and expiration timestamp.
+ */
+export function signChatOpsActionToken(
+  secret: string,
+  input: { itemId: string; action: ChatOpsAction; target?: string },
+  nowSeconds = Math.floor(Date.now() / 1000),
+  ttlSeconds = DEFAULT_CHATOPS_TTL_SECONDS,
+): string {
+  const payload: ChatOpsActionTokenPayload = {
+    v: 1,
+    itemId: input.itemId,
+    action: input.action,
+    ...(input.target ? { target: input.target } : {}),
+    iat: nowSeconds,
+    exp: nowSeconds + Math.max(1, ttlSeconds),
+    nonce: crypto.randomBytes(12).toString("base64url"),
+  };
+  const encoded = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+  const sig = crypto
+    .createHmac("sha256", webhookKey(secret))
+    .update(`sshs3-chatops-v1.${encoded}`)
+    .digest("base64url");
+  return `${encoded}.${sig}`;
+}
+
+/**
+ * Verifies a signed ChatOps action token, checking HMAC integrity and expiry.
+ */
+export function verifyChatOpsActionToken(
+  secret: string,
+  token: string,
+  nowSeconds = Math.floor(Date.now() / 1000),
+): { ok: true; payload: ChatOpsActionTokenPayload } | { ok: false; reason: string } {
+  const dot = token.indexOf(".");
+  if (dot <= 0 || dot === token.length - 1) {
+    return { ok: false, reason: "Malformed ChatOps action token." };
+  }
+  const encoded = token.slice(0, dot);
+  const sig = token.slice(dot + 1);
+  const expected = crypto
+    .createHmac("sha256", webhookKey(secret))
+    .update(`sshs3-chatops-v1.${encoded}`)
+    .digest("base64url");
+  const sigBuf = Buffer.from(sig, "utf8");
+  const expBuf = Buffer.from(expected, "utf8");
+  if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+    return { ok: false, reason: "Invalid ChatOps action token signature." };
+  }
+  let payload: ChatOpsActionTokenPayload;
+  try {
+    payload = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as ChatOpsActionTokenPayload;
+  } catch {
+    return { ok: false, reason: "Unreadable ChatOps action token payload." };
+  }
+  if (payload.v !== 1 || !payload.itemId || (payload.action !== "approve" && payload.action !== "deny")) {
+    return { ok: false, reason: "Unsupported ChatOps action token payload." };
+  }
+  if (nowSeconds > payload.exp) {
+    return { ok: false, reason: "ChatOps action token has expired." };
+  }
+  return { ok: true, payload };
+}
+
 const HEADLINE: Record<InboxKind, string> = {
   approval: "Approval needed",
   plan: "A plan to decide",
@@ -109,7 +441,12 @@ const shorten = (text: string | undefined, max: number): string => clip((text ??
 /** The lines of one item, plain: every channel builds on these. */
 function lines(item: NotifyItem, channel: Pick<NotifyChannel, "includeCommand">, context: NotifyContext): { head: string; body: string[]; command?: string } {
   const where = [item.from, item.target && !item.from?.includes(item.target) ? `on ${item.target}` : ""].filter(Boolean).join(" ");
-  const head = `${item.reminder ? "Still waiting: " : ""}${item.headline ?? HEADLINE[item.kind]}${where ? ` — ${shorten(where, 80)}` : ""}`;
+  const waitPrefix = item.escalationTier && item.escalationTier > 1
+    ? `Still waiting (tier ${item.escalationTier}): `
+    : item.reminder
+      ? "Still waiting: "
+      : "";
+  const head = `${waitPrefix}${item.headline ?? HEADLINE[item.kind]}${where ? ` — ${shorten(where, 80)}` : ""}`;
   const body: string[] = [];
   const command = channel.includeCommand && item.command ? shorten(item.command, 600) : undefined;
   if (item.title && item.title !== item.command) body.push(shorten(item.title, 200));
@@ -216,6 +553,11 @@ export function renderNotification(channel: NotifyChannel, items: NotifyItem[], 
     };
   }
 
+  const includeChatOps = Boolean(channel.secret && (context.chatOps?.enabled || channel.chatOpsActions));
+  const nowSec = Math.floor(Date.now() / 1000);
+  const ttlSec = context.chatOps?.ttlSeconds;
+  const callbackBase = context.chatOps?.callbackUrl;
+
   const body = JSON.stringify({
     version: 1,
     event: "inbox",
@@ -223,18 +565,37 @@ export function renderNotification(channel: NotifyChannel, items: NotifyItem[], 
     title,
     owner: context.owner,
     link,
-    items: items.map((item) => ({
-      id: item.id,
-      kind: item.kind,
-      title: shorten(item.title, 300),
-      detail: item.detail ? shorten(item.detail, 600) : undefined,
-      from: item.from,
-      target: item.target,
-      risk: item.risk,
-      command: channel.includeCommand && item.command ? shorten(item.command, 2000) : undefined,
-      link: item.link,
-      reminder: item.reminder || undefined,
-    })),
+    items: items.map((item) => {
+      const canAct = includeChatOps && (item.kind === "approval" || item.kind === "plan");
+      const actions = canAct && channel.secret
+        ? {
+            approve: {
+              action: "approve" as const,
+              token: signChatOpsActionToken(channel.secret, { itemId: item.id, action: "approve", target: item.target }, nowSec, ttlSec),
+              ...(callbackBase ? { url: callbackBase } : {}),
+            },
+            deny: {
+              action: "deny" as const,
+              token: signChatOpsActionToken(channel.secret, { itemId: item.id, action: "deny", target: item.target }, nowSec, ttlSec),
+              ...(callbackBase ? { url: callbackBase } : {}),
+            },
+          }
+        : undefined;
+      return {
+        id: item.id,
+        kind: item.kind,
+        title: shorten(item.title, 300),
+        detail: item.detail ? shorten(item.detail, 600) : undefined,
+        from: item.from,
+        target: item.target,
+        risk: item.risk,
+        command: channel.includeCommand && item.command ? shorten(item.command, 2000) : undefined,
+        link: item.link,
+        reminder: item.reminder || undefined,
+        ...(item.escalationTier !== undefined ? { escalationTier: item.escalationTier } : {}),
+        ...(actions ? { actions } : {}),
+      };
+    }),
   });
   return {
     url: channel.url,

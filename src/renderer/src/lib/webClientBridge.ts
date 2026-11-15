@@ -8,29 +8,52 @@ interface PendingRequest {
   timer: ReturnType<typeof setTimeout>;
 }
 
-const SESSION_TOKEN_STORAGE_KEY = 'sshs3_web_session_token';
+const LEGACY_SESSION_TOKEN_STORAGE_KEY = 'sshs3_web_session_token';
+const MAX_CLIENT_BUFFERED_BYTES = 1024 * 1024; // 1 MiB backpressure watermark
+const MAX_SEND_QUEUE_LENGTH = 500;
+const DEFAULT_RECONNECT_BASE_MS = 500;
+const DEFAULT_RECONNECT_MAX_MS = 30_000;
 
-export function getStoredWebSessionToken(): string | null {
-  try {
-    return window.localStorage.getItem(SESSION_TOKEN_STORAGE_KEY);
-  } catch {
-    return null;
-  }
+/**
+ * Computes jittered exponential reconnect delay (equal jitter in [cap/2, cap]).
+ */
+export function computeReconnectDelayMs(
+  attempt: number,
+  options: { baseMs?: number; maxMs?: number; random?: () => number } = {},
+): number {
+  const baseMs = Math.max(50, options.baseMs ?? DEFAULT_RECONNECT_BASE_MS);
+  const maxMs = Math.max(baseMs, options.maxMs ?? DEFAULT_RECONNECT_MAX_MS);
+  const rand = Math.max(0, Math.min(1, (options.random ?? Math.random)()));
+  const exp = Math.min(maxMs, baseMs * Math.pow(2, Math.max(0, Math.floor(attempt))));
+  return Math.max(50, Math.round(exp * 0.5 + rand * exp * 0.5));
 }
 
-export function setStoredWebSessionToken(token: string | null): void {
+function clearLegacyStoredToken(): void {
   try {
-    if (token) {
-      window.localStorage.setItem(SESSION_TOKEN_STORAGE_KEY, token);
-    } else {
-      window.localStorage.removeItem(SESSION_TOKEN_STORAGE_KEY);
-    }
+    window.localStorage.removeItem(LEGACY_SESSION_TOKEN_STORAGE_KEY);
   } catch {
     // ignore storage errors
   }
 }
 
-class BrowserWebSocketIpcTransport implements IpcRendererTransport {
+/**
+ * Legacy API preserved for WebAuthGate compatibility.
+ * Session tokens are stored exclusively in HttpOnly cookies, never in Web Storage.
+ */
+export function getStoredWebSessionToken(): string | null {
+  clearLegacyStoredToken();
+  return null;
+}
+
+/**
+ * Legacy API preserved for WebAuthGate compatibility.
+ * Purges any legacy localStorage token and never persists session tokens in JS storage.
+ */
+export function setStoredWebSessionToken(_token: string | null): void {
+  clearLegacyStoredToken();
+}
+
+export class BrowserWebSocketIpcTransport implements IpcRendererTransport {
   private ws: WebSocket | null = null;
   private listeners = new Map<string, Set<EventListener>>();
   private pending = new Map<string, PendingRequest>();
@@ -38,96 +61,295 @@ class BrowserWebSocketIpcTransport implements IpcRendererTransport {
   private nextId = 1;
   private shouldReconnect = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private drainTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectAttempt = 0;
+  private connectGeneration = 0;
+  private explicitToken: string | null = null;
+  private subscribedSessions = new Set<string>();
   private connectionStateListeners = new Set<(connected: boolean) => void>();
 
   public connect(explicitToken?: string | null): void {
+    if (explicitToken !== undefined) {
+      this.explicitToken = explicitToken || null;
+    }
     this.shouldReconnect = true;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
 
-    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+    if (
+      this.ws &&
+      (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)
+    ) {
       return;
     }
 
-    const token = explicitToken ?? getStoredWebSessionToken();
+    const generation = ++this.connectGeneration;
+    void this.openWithTicket(generation);
+  }
+
+  private async openWithTicket(generation: number): Promise<void> {
+    let ticket: string;
+    try {
+      const headers: Record<string, string> = {};
+      if (this.explicitToken) {
+        headers['Authorization'] = `Bearer ${this.explicitToken}`;
+      }
+      const res = await fetch('/api/ws-ticket', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers,
+      });
+
+      if (generation !== this.connectGeneration || !this.shouldReconnect) {
+        return;
+      }
+
+      if (res.status === 401 || res.status === 403) {
+        this.shouldReconnect = false;
+        this.notifyConnectionState(false);
+        this.rejectAllPending(new Error('WebSocket authentication expired'));
+        if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+          try {
+            window.dispatchEvent(new CustomEvent('sshs3:web-auth-expired'));
+          } catch {
+            // ignore
+          }
+        }
+        return;
+      }
+
+      if (!res.ok) {
+        throw new Error(`Ticket exchange failed (${res.status})`);
+      }
+
+      const data = (await res.json()) as { ticket?: string };
+      if (!data?.ticket || typeof data.ticket !== 'string') {
+        throw new Error('Ticket exchange response missing ticket');
+      }
+      ticket = data.ticket;
+    } catch (err) {
+      if (generation === this.connectGeneration && this.shouldReconnect) {
+        this.scheduleReconnect();
+      } else {
+        console.error('[WebClientBridge] WS ticket exchange failed:', err);
+      }
+      return;
+    }
+
+    if (generation !== this.connectGeneration || !this.shouldReconnect) {
+      return;
+    }
+
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const tokenParam = token ? `?token=${encodeURIComponent(token)}` : '';
-    const wsUrl = `${proto}//${window.location.host}/api/ws${tokenParam}`;
+    const wsUrl = `${proto}//${window.location.host}/api/ws?ticket=${encodeURIComponent(ticket)}`;
 
     try {
       const socket = new WebSocket(wsUrl);
       this.ws = socket;
 
       socket.onopen = () => {
+        if (this.ws !== socket) return;
+        this.reconnectAttempt = 0;
         this.notifyConnectionState(true);
-        while (this.sendQueue.length > 0 && socket.readyState === WebSocket.OPEN) {
-          const payload = this.sendQueue.shift()!;
-          socket.send(payload);
+        for (const sid of this.subscribedSessions) {
+          this.enqueueOrSend(JSON.stringify({ type: 'subscribe', sessionId: sid }));
         }
+        this.flushSendQueue();
       };
 
       socket.onmessage = (ev) => {
         try {
-          const msg = JSON.parse(typeof ev.data === 'string' ? ev.data : String(ev.data));
-          if (msg.type === 'response' && msg.id) {
-            const req = this.pending.get(msg.id);
-            if (req) {
-              clearTimeout(req.timer);
-              this.pending.delete(msg.id);
-              if (msg.ok) {
-                req.resolve(msg.result);
-              } else {
-                req.reject(new Error(msg.error || 'Web IPC request failed'));
-              }
-            }
-          } else if (msg.type === 'event' && msg.channel) {
-            const set = this.listeners.get(msg.channel);
-            if (set) {
-              const args = Array.isArray(msg.args) ? msg.args : [];
-              for (const fn of Array.from(set)) {
-                try {
-                  fn({}, ...args);
-                } catch (err) {
-                  console.error(`[WebClientBridge] Listener error on ${msg.channel}:`, err);
-                }
-              }
-            }
+          let rawText: string;
+          if (typeof ev.data === 'string') {
+            rawText = ev.data;
+          } else if (ev.data instanceof ArrayBuffer) {
+            rawText = new TextDecoder().decode(new Uint8Array(ev.data));
+          } else if (ArrayBuffer.isView(ev.data)) {
+            rawText = new TextDecoder().decode(ev.data);
+          } else {
+            rawText = String(ev.data);
           }
+
+          const msg = JSON.parse(rawText);
+          this.handleIncomingMessage(socket, msg);
         } catch (err) {
           console.error('[WebClientBridge] Failed to parse message:', err);
         }
       };
 
       socket.onclose = () => {
-        this.notifyConnectionState(false);
-        this.ws = null;
-        for (const [, req] of this.pending) {
-          clearTimeout(req.timer);
-          req.reject(new Error('WebSocket connection closed'));
+        if (this.ws === socket) {
+          this.ws = null;
         }
-        this.pending.clear();
-        if (this.shouldReconnect) {
-          this.reconnectTimer = setTimeout(() => {
-            this.connect();
-          }, 1500);
+        this.notifyConnectionState(false);
+        this.rejectAllPending(new Error('WebSocket connection closed'));
+        if (this.shouldReconnect && generation === this.connectGeneration) {
+          this.scheduleReconnect();
         }
       };
 
       socket.onerror = () => {
-        // onclose will handle reconnect
+        // onclose handles reconnect scheduling
       };
     } catch (err) {
       console.error('[WebClientBridge] WebSocket creation failed:', err);
+      if (this.shouldReconnect && generation === this.connectGeneration) {
+        this.scheduleReconnect();
+      }
+    }
+  }
+
+  private handleIncomingMessage(socket: WebSocket, msg: any): void {
+    if (!msg || typeof msg !== 'object') return;
+
+    if (msg.type === 'ping') {
+      if (socket.readyState === WebSocket.OPEN) {
+        this.enqueueOrSend(JSON.stringify({ type: 'pong', ts: msg.ts ?? Date.now() }));
+      }
+      return;
+    }
+
+    if (msg.type === 'pong') {
+      return;
+    }
+
+    if (msg.type === 'response' && msg.id) {
+      const req = this.pending.get(msg.id);
+      if (req) {
+        clearTimeout(req.timer);
+        this.pending.delete(msg.id);
+        if (msg.ok) {
+          req.resolve(msg.result);
+        } else {
+          req.reject(new Error(msg.error || 'Web IPC request failed'));
+        }
+      }
+      return;
+    }
+
+    if ((msg.type === 'event' || msg.type === 'delta') && msg.channel) {
+      this.dispatchEvent(msg.channel, Array.isArray(msg.args) ? msg.args : []);
+      return;
+    }
+
+    if (msg.type === 'batch' && Array.isArray(msg.events)) {
+      for (const ev of msg.events) {
+        if (ev && typeof ev.channel === 'string') {
+          this.dispatchEvent(ev.channel, Array.isArray(ev.args) ? ev.args : []);
+        }
+      }
+    }
+  }
+
+  private dispatchEvent(channel: string, args: any[]): void {
+    const set = this.listeners.get(channel);
+    if (!set) return;
+    for (const fn of Array.from(set)) {
+      try {
+        fn({}, ...args);
+      } catch (err) {
+        console.error(`[WebClientBridge] Listener error on ${channel}:`, err);
+      }
+    }
+  }
+
+  private scheduleReconnect(): void {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+    }
+    const delay = computeReconnectDelayMs(this.reconnectAttempt++);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.shouldReconnect) {
+        this.connect();
+      }
+    }, delay);
+  }
+
+  private rejectAllPending(err: Error): void {
+    for (const [, req] of this.pending) {
+      clearTimeout(req.timer);
+      req.reject(err);
+    }
+    this.pending.clear();
+  }
+
+  private enqueueOrSend(packet: string, isTelemetry = false): void {
+    if (
+      this.ws &&
+      this.ws.readyState === WebSocket.OPEN &&
+      this.sendQueue.length === 0 &&
+      (this.ws.bufferedAmount ?? 0) <= MAX_CLIENT_BUFFERED_BYTES
+    ) {
+      this.ws.send(packet);
+      return;
+    }
+
+    if (isTelemetry && this.sendQueue.length >= MAX_SEND_QUEUE_LENGTH / 2) {
+      return;
+    }
+
+    if (this.sendQueue.length >= MAX_SEND_QUEUE_LENGTH) {
+      // Evict oldest packet to bound client memory under prolonged disconnect/backpressure
+      this.sendQueue.shift();
+    }
+    this.sendQueue.push(packet);
+    this.scheduleDrain();
+  }
+
+  private scheduleDrain(): void {
+    if (this.drainTimer) return;
+    this.drainTimer = setTimeout(() => {
+      this.drainTimer = null;
+      this.flushSendQueue();
+    }, 40);
+  }
+
+  private flushSendQueue(): void {
+    while (
+      this.sendQueue.length > 0 &&
+      this.ws &&
+      this.ws.readyState === WebSocket.OPEN
+    ) {
+      if ((this.ws.bufferedAmount ?? 0) > MAX_CLIENT_BUFFERED_BYTES) {
+        this.scheduleDrain();
+        return;
+      }
+      const payload = this.sendQueue.shift()!;
+      this.ws.send(payload);
+    }
+  }
+
+  public subscribeSession(sessionId: string): void {
+    if (!sessionId) return;
+    this.subscribedSessions.add(sessionId);
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.enqueueOrSend(JSON.stringify({ type: 'subscribe', sessionId }));
+    }
+  }
+
+  public unsubscribeSession(sessionId: string): void {
+    if (!sessionId) return;
+    this.subscribedSessions.delete(sessionId);
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.enqueueOrSend(JSON.stringify({ type: 'unsubscribe', sessionId }));
     }
   }
 
   public disconnect(): void {
     this.shouldReconnect = false;
+    this.connectGeneration++;
+    this.reconnectAttempt = 0;
+    this.explicitToken = null;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
+    }
+    if (this.drainTimer) {
+      clearTimeout(this.drainTimer);
+      this.drainTimer = null;
     }
     if (this.ws) {
       try {
@@ -138,11 +360,8 @@ class BrowserWebSocketIpcTransport implements IpcRendererTransport {
       this.ws = null;
     }
     this.sendQueue = [];
-    for (const [, req] of this.pending) {
-      clearTimeout(req.timer);
-      req.reject(new Error('Disconnected from web server'));
-    }
-    this.pending.clear();
+    this.subscribedSessions.clear();
+    this.rejectAllPending(new Error('Disconnected from web server'));
     this.notifyConnectionState(false);
   }
 
@@ -168,6 +387,13 @@ class BrowserWebSocketIpcTransport implements IpcRendererTransport {
     if (channel === 'log:write' && (!this.ws || this.ws.readyState !== WebSocket.OPEN)) {
       return Promise.resolve();
     }
+    if (
+      channel === 'log:write' &&
+      this.ws &&
+      (this.ws.bufferedAmount ?? 0) > MAX_CLIENT_BUFFERED_BYTES
+    ) {
+      return Promise.resolve();
+    }
 
     return new Promise((resolve, reject) => {
       const id = `req_${this.nextId++}_${Date.now()}`;
@@ -186,13 +412,9 @@ class BrowserWebSocketIpcTransport implements IpcRendererTransport {
         args,
       });
 
-      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        this.ws.send(packet);
-      } else {
-        this.sendQueue.push(packet);
-        if (!this.ws && this.shouldReconnect) {
-          this.connect();
-        }
+      this.enqueueOrSend(packet, channel === 'log:write');
+      if (!this.ws && this.shouldReconnect && !this.reconnectTimer) {
+        this.connect();
       }
     });
   }

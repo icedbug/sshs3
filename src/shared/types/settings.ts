@@ -63,6 +63,7 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
   { id: 'snippets', name: 'Snippets', defaultKeys: 'Ctrl+Shift+L', category: 'Terminal' },
   { id: 'searchInFiles', name: 'Search in Files', defaultKeys: 'Ctrl+Shift+K', category: 'General' },
   { id: 'globalSearch', name: 'Search Profiles, Tabs and Hosts', defaultKeys: 'Ctrl+Shift+G', category: 'General' },
+  { id: 'focusAiBounce', name: 'Toggle Focus: Terminal / AI Composer', defaultKeys: 'Ctrl+Shift+A', category: 'General' },
 ];
 
 export const DEFAULT_SHORTCUTS: Record<string, string> = SHORTCUT_DEFINITIONS.reduce(
@@ -205,6 +206,10 @@ export interface AppSettings {
   sshCaConfigs?: SshCaConfig[];
   /** Default SSH CA configuration ID to use for login/renewal. */
   defaultSshCaConfigId?: string;
+  /** Show Labs / experimental views (Memory & skills, Agents & MCP, Schedules) in AI Hub navigation. Default false. */
+  labsEnabled?: boolean;
+  /** Use compact labels and denser chrome in AI Hub navigation. Default false. */
+  compactMode?: boolean;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -247,4 +252,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
   fileManagerGitIntegration: true,
   localTerminalAgentMode: 'auto',
   autoSyncLocalSshConfig: true,
+  labsEnabled: false,
+  compactMode: false,
 };

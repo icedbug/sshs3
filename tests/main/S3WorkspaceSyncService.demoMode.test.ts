@@ -42,7 +42,7 @@ const S3_DISABLED = /S3 team workspace sync is disabled in demo mode/;
 const BUCKET = 'team-bucket';
 const WORKSPACE_OBJECT = 'team-bucket/team/workspace.json';
 const PRESENCE_DIR = 'team-bucket/team/presence';
-const OWN_PRESENCE = 'team-bucket/team/presence/tester.json';
+const WRITE_OWN_PRESENCE = /^writeFile team-bucket\/team\/presence\/tester--[a-zA-Z0-9_.-]+\.json$/;
 const TEAM_BUCKET: S3WorkspaceConfig = {
   enabled: true,
   region: 'eu-north-1',
@@ -219,7 +219,7 @@ describe('S3 team workspace sync: outside demo mode against demo mode', () => {
         'connect',
         `stat ${WORKSPACE_OBJECT}`,
         `writeFile ${WORKSPACE_OBJECT}`,
-        `writeFile ${OWN_PRESENCE}`,
+        expect.stringMatching(WRITE_OWN_PRESENCE),
         `list ${PRESENCE_DIR}`,
       ])
     );
@@ -258,7 +258,7 @@ describe('S3 team workspace sync: outside demo mode against demo mode', () => {
       await vi.advanceTimersByTimeAsync(1_000);
       // The poll looks at the workspace object, the heartbeat publishes this user's presence.
       expect(bucket.log).toContain(`stat ${WORKSPACE_OBJECT}`);
-      expect(bucket.log).toContain(`writeFile ${OWN_PRESENCE}`);
+      expect(bucket.log).toContainEqual(expect.stringMatching(WRITE_OWN_PRESENCE));
     } finally {
       service.stopTimers();
       vi.useRealTimers();
@@ -289,7 +289,9 @@ describe('S3 team workspace sync: outside demo mode against demo mode', () => {
     await service.load();
 
     service.schedulePresenceUpdate();
-    await vi.waitFor(() => expect(bucket.log).toContain(`writeFile ${OWN_PRESENCE}`), { timeout: 5_000 });
+    await vi.waitFor(() => expect(bucket.log).toContainEqual(expect.stringMatching(WRITE_OWN_PRESENCE)), {
+      timeout: 5_000,
+    });
     await vi.waitFor(() => expect(service.getPresence().map((entry) => entry.actor)).toContain('tester'), {
       timeout: 5_000,
     });

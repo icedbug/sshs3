@@ -10,6 +10,45 @@ const smartcardLog = createLogger('smartcard');
 export interface DetectOptions {
   customPaths?: Array<{ name: string; path: string; platform: 'linux' | 'win32' }>;
   onlyExisting?: boolean;
+  /** Max milliseconds per filesystem probe before failing closed (default: 1500ms). */
+  timeoutMs?: number;
+  /** Cache TTL in milliseconds (default: 30000ms; 0 disables cache). */
+  cacheTtlMs?: number;
+  /** Bypass any cached result and probe again. */
+  forceRefresh?: boolean;
+  /**
+   * When true and a cached entry exists (even if stale), return the cached value
+   * immediately and trigger a background refresh if expired so session creation never stalls.
+   */
+  nonBlocking?: boolean;
+}
+
+export interface ValidateLibraryOptions {
+  timeoutMs?: number;
+  cacheTtlMs?: number;
+  forceRefresh?: boolean;
+}
+
+const DEFAULT_PROBE_TIMEOUT_MS = 1500;
+const DEFAULT_DETECT_CACHE_TTL_MS = 30_000;
+const DEFAULT_VALIDATE_CACHE_TTL_MS = 15_000;
+
+async function withProbeTimeout<T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
+  if (timeoutMs <= 0 || !Number.isFinite(timeoutMs)) {
+    return promise.catch(() => fallback);
+  }
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise.catch(() => fallback),
+      new Promise<T>((resolve) => {
+        timer = setTimeout(() => resolve(fallback), timeoutMs);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 /**
@@ -153,23 +192,69 @@ export class SmartcardDetector {
     return [...this.LINUX_LIBRARIES];
   }
 
+  private static pathValidationCache = new Map<string, { exists: boolean; expiresAt: number }>();
+  private static detectCache = new Map<string, { libs: DetectedSmartcardLib[]; expiresAt: number }>();
+  private static inFlightDetect = new Map<string, Promise<DetectedSmartcardLib[]>>();
+
   /**
-   * Validates whether a file exists at the given path and is a file.
+   * Clears cached smartcard library probe results.
    */
-  public static async validateLibraryPath(libraryPath: string): Promise<boolean> {
-    if (!libraryPath || typeof libraryPath !== 'string') {
-      return false;
-    }
-    try {
-      const stat = await fs.stat(libraryPath);
-      return stat.isFile();
-    } catch {
-      return false;
-    }
+  public static clearCache(): void {
+    this.pathValidationCache.clear();
+    this.detectCache.clear();
+    this.inFlightDetect.clear();
   }
 
   /**
-   * Detects available smartcard PKCS#11 libraries on the system.
+   * Synchronous, non-blocking read of cached smartcard libraries if available.
+   */
+  public static getCachedLibraries(
+    platform?: 'linux' | 'win32',
+    onlyExisting = false
+  ): DetectedSmartcardLib[] | undefined {
+    const targetPlatform = platform ?? (process.platform === 'win32' ? 'win32' : 'linux');
+    const cached = this.detectCache.get(`default:${targetPlatform}:${onlyExisting}`);
+    return cached ? cached.libs.map((lib) => ({ ...lib })) : undefined;
+  }
+
+  /**
+   * Validates whether a file exists at the given path and is a file, bounded by a safe timeout.
+   */
+  public static async validateLibraryPath(
+    libraryPath: string,
+    options?: ValidateLibraryOptions
+  ): Promise<boolean> {
+    if (!libraryPath || typeof libraryPath !== 'string') {
+      return false;
+    }
+    const cacheTtlMs = options?.cacheTtlMs ?? DEFAULT_VALIDATE_CACHE_TTL_MS;
+    const now = Date.now();
+    if (!options?.forceRefresh && cacheTtlMs > 0) {
+      const cached = this.pathValidationCache.get(libraryPath);
+      if (cached && now < cached.expiresAt) {
+        return cached.exists;
+      }
+    }
+
+    const timeoutMs = options?.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
+    const exists = await withProbeTimeout(
+      fs.stat(libraryPath).then((stat) => stat.isFile()),
+      timeoutMs,
+      false
+    );
+
+    if (cacheTtlMs > 0) {
+      this.pathValidationCache.set(libraryPath, {
+        exists,
+        expiresAt: Date.now() + cacheTtlMs,
+      });
+    }
+    return exists;
+  }
+
+  /**
+   * Detects available smartcard PKCS#11 libraries on the system with bounded probe
+   * timeouts, in-flight deduplication, and non-blocking TTL caching.
    */
   public static async detectAvailableLibraries(
     platform?: 'linux' | 'win32',
@@ -177,40 +262,112 @@ export class SmartcardDetector {
   ): Promise<DetectedSmartcardLib[]> {
     const targetPlatform = platform ?? (process.platform === 'win32' ? 'win32' : 'linux');
     const candidates = options?.customPaths ?? this.getKnownLibraryPaths(targetPlatform);
+    const onlyExisting = Boolean(options?.onlyExisting);
+    const timeoutMs = options?.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
+    const cacheTtlMs = options?.cacheTtlMs ?? DEFAULT_DETECT_CACHE_TTL_MS;
+    const cacheKey = options?.customPaths
+      ? `custom:${onlyExisting}:${candidates.map((c) => `${c.platform}:${c.name}:${c.path}`).join('|')}`
+      : `default:${targetPlatform}:${onlyExisting}`;
 
-    const results: DetectedSmartcardLib[] = await Promise.all(
-      candidates.map(async (candidate) => {
-        const exists = await this.validateLibraryPath(candidate.path);
-        return {
-          name: candidate.name,
-          path: candidate.path,
-          platform: candidate.platform,
-          exists,
-        };
-      })
-    );
-
-    if (options?.onlyExisting) {
-      const existing = results.filter((lib) => lib.exists);
-      const seen = new Set<string>();
-      const deduped: DetectedSmartcardLib[] = [];
-      for (const lib of existing) {
-        let key = `${lib.name}:${lib.path}`;
-        try {
-          const canonical = await fs.realpath(lib.path);
-          key = `${lib.name}:${canonical}`;
-        } catch {
-          // Fall back to original path if realpath fails
-        }
-        if (!seen.has(key)) {
-          seen.add(key);
-          deduped.push(lib);
-        }
+    const now = Date.now();
+    const cached = this.detectCache.get(cacheKey);
+    if (!options?.forceRefresh && cacheTtlMs > 0 && cached) {
+      if (now < cached.expiresAt) {
+        return cached.libs.map((lib) => ({ ...lib }));
       }
-      return deduped;
+      if (options?.nonBlocking) {
+        // Return stale cache immediately and refresh asynchronously in the background.
+        if (!this.inFlightDetect.has(cacheKey)) {
+          void this.runLibraryProbe(candidates, onlyExisting, timeoutMs, cacheTtlMs, cacheKey, true).catch(
+            () => {}
+          );
+        }
+        return cached.libs.map((lib) => ({ ...lib }));
+      }
     }
 
-    return results;
+    const existingFlight = !options?.forceRefresh ? this.inFlightDetect.get(cacheKey) : undefined;
+    if (existingFlight) {
+      const libs = await existingFlight;
+      return libs.map((lib) => ({ ...lib }));
+    }
+
+    const libs = await this.runLibraryProbe(
+      candidates,
+      onlyExisting,
+      timeoutMs,
+      cacheTtlMs,
+      cacheKey,
+      Boolean(options?.forceRefresh)
+    );
+    return libs.map((lib) => ({ ...lib }));
+  }
+
+  private static async runLibraryProbe(
+    candidates: Array<{ name: string; path: string; platform: 'linux' | 'win32' }>,
+    onlyExisting: boolean,
+    timeoutMs: number,
+    cacheTtlMs: number,
+    cacheKey: string,
+    forceRefresh: boolean
+  ): Promise<DetectedSmartcardLib[]> {
+    const probe = (async (): Promise<DetectedSmartcardLib[]> => {
+      const results: DetectedSmartcardLib[] = await Promise.all(
+        candidates.map(async (candidate) => {
+          const exists = await this.validateLibraryPath(candidate.path, {
+            timeoutMs,
+            cacheTtlMs,
+            forceRefresh,
+          });
+          return {
+            name: candidate.name,
+            path: candidate.path,
+            platform: candidate.platform,
+            exists,
+          };
+        })
+      );
+
+      let finalResults = results;
+      if (onlyExisting) {
+        const existing = results.filter((lib) => lib.exists);
+        const seen = new Set<string>();
+        const deduped: DetectedSmartcardLib[] = [];
+        for (const lib of existing) {
+          let key = `${lib.name}:${lib.path}`;
+          const canonical = await withProbeTimeout<string | null>(
+            fs.realpath(lib.path),
+            timeoutMs,
+            null
+          );
+          if (canonical) {
+            key = `${lib.name}:${canonical}`;
+          }
+          if (!seen.has(key)) {
+            seen.add(key);
+            deduped.push(lib);
+          }
+        }
+        finalResults = deduped;
+      }
+
+      if (cacheTtlMs > 0) {
+        this.detectCache.set(cacheKey, {
+          libs: finalResults.map((lib) => ({ ...lib })),
+          expiresAt: Date.now() + cacheTtlMs,
+        });
+      }
+      return finalResults;
+    })();
+
+    this.inFlightDetect.set(cacheKey, probe);
+    try {
+      return await probe;
+    } finally {
+      if (this.inFlightDetect.get(cacheKey) === probe) {
+        this.inFlightDetect.delete(cacheKey);
+      }
+    }
   }
 
   /**

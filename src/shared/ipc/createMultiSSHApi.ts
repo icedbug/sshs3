@@ -121,6 +121,45 @@ import type {
   SearchStartResult,
 } from '../types/search';
 
+export const HUB_DELTA_CHANNEL = 'ai-hub:delta';
+
+export interface AiHubDeltaEvent {
+  taskId: string;
+  type:
+    | 'message.delta'
+    | 'tool.result'
+    | 'usage.updated'
+    | 'run.retrying'
+    | 'run.degraded';
+  at: number;
+  delta?: string;
+  tool?: { name: string; input: string; output: string; at: number };
+  usage?: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens?: number;
+    cacheCreationTokens?: number;
+    costUsd?: number;
+    contextTokens?: number;
+  };
+  retry?: {
+    text?: string;
+    attempt?: number;
+    maxAttempts?: number;
+    delayMs?: number;
+    endpoint?: string;
+    status?: number;
+  };
+  degraded?: {
+    text?: string;
+    error?: string;
+    fromProvider?: string;
+    fromModel?: string;
+    toProvider?: string;
+    toModel?: string;
+  };
+}
+
 export interface IpcRendererTransport {
   invoke(channel: string, ...args: any[]): Promise<any>;
   on(channel: string, listener: (_event: any, ...args: any[]) => void): void;
@@ -129,7 +168,11 @@ export interface IpcRendererTransport {
   enableNativeHermes?: boolean;
 }
 
-export function createMultiSSHApi(ipcRenderer: IpcRendererTransport): MultiSSHApi {
+export type MultiSSHApiWithHubDelta = MultiSSHApi & {
+  onAiHubDelta: (callback: (delta: AiHubDeltaEvent) => void) => () => void;
+};
+
+export function createMultiSSHApi(ipcRenderer: IpcRendererTransport): MultiSSHApiWithHubDelta {
   return {
     nativeHermes: ipcRenderer.enableNativeHermes
       ? {
@@ -158,6 +201,11 @@ export function createMultiSSHApi(ipcRenderer: IpcRendererTransport): MultiSSHAp
       const listener = (): void => callback();
       ipcRenderer.on('ai-hub:changed', listener);
       return () => ipcRenderer.removeListener('ai-hub:changed', listener);
+    },
+    onAiHubDelta: (callback) => {
+      const listener = (_event: any, delta: AiHubDeltaEvent): void => callback(delta);
+      ipcRenderer.on(HUB_DELTA_CHANNEL, listener);
+      return () => ipcRenderer.removeListener(HUB_DELTA_CHANNEL, listener);
     },
     // Terminal
     terminalCreate: (options: {

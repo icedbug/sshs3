@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type {
@@ -27,10 +28,99 @@ const log = createLogger("s3-workspace");
 const SYNC = "S3 team workspace sync";
 
 export const S3_INVITE_PREFIX = "sshs3-s3://";
+export const DEFAULT_INVITE_TTL_MS = 24 * 60 * 60_000;
+export const DEFAULT_S3_REQUEST_TIMEOUT_MS = 15_000;
 const WORKSPACE_FILENAME = "workspace.json";
 const PRESENCE_DIRNAME = "presence";
 const MAX_WORKSPACE_BYTES = 25 * 1024 * 1024;
 const PRESENCE_TTL_MS = 45_000;
+/** A presence file nobody has refreshed for this long belongs to an installation that is gone. */
+const PRESENCE_REMOVE_AFTER_MS = 24 * 60 * 60_000;
+const MAX_CAS_ATTEMPTS = 4;
+const DEFAULT_MAX_POLL_BACKOFF_MS = 300_000;
+
+interface ConditionalStorageProvider extends IStorageProvider {
+  list(remotePath: string, options?: { force?: boolean; signal?: AbortSignal }): Promise<FileEntry[]>;
+  stat(remotePath: string, options?: { signal?: AbortSignal }): Promise<FileEntry>;
+  delete(remotePath: string, isDirectory: boolean, options?: { signal?: AbortSignal }): Promise<void>;
+  writeFile?(
+    remotePath: string,
+    data: Buffer | Uint8Array,
+    options?: {
+      size?: number;
+      mode?: number;
+      exclusive?: boolean;
+      ifMatch?: string;
+      ifNoneMatch?: string;
+      signal?: AbortSignal;
+    },
+  ): Promise<void>;
+  readFile?(
+    remotePath: string,
+    options?: { ifMatch?: string; ifNoneMatch?: string; signal?: AbortSignal },
+  ): Promise<Buffer>;
+}
+
+export interface ClientWorkspacePresenceEntry extends WorkspacePresenceEntry {
+  clientId?: string;
+}
+
+export interface S3WorkspaceInviteOptions {
+  /** Short-lived revocable token replacing a static raw secretAccessKey. */
+  token?: string;
+  tokenId?: string;
+  ttlMs?: number;
+  expiresAt?: number;
+  /** Set false to emit a tokenized invite without embedding secretAccessKey. */
+  includeSecret?: boolean;
+  /** Suppresses the raw secret warning log when explicitly intended. */
+  warnOnRawSecret?: boolean;
+}
+
+export interface S3WorkspaceInviteValidationResult {
+  valid: boolean;
+  version: 1 | 2;
+  expired?: boolean;
+  revoked?: boolean;
+  hasRawSecret?: boolean;
+  warning?: string;
+  tokenId?: string;
+  inviteToken?: string;
+  issuedAt?: number;
+  expiresAt?: number;
+  config?: Partial<S3WorkspaceConfig>;
+  error?: string;
+}
+
+export function isPreconditionFailedError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as {
+    code?: unknown;
+    Code?: unknown;
+    name?: unknown;
+    message?: unknown;
+    $metadata?: { httpStatusCode?: unknown };
+  };
+  const status = e.$metadata?.httpStatusCode;
+  if (status === 412 || status === 409) return true;
+  if (e.code === 412 || e.code === 409) return true;
+  const codeStr = String(e.code ?? e.Code ?? e.name ?? "");
+  if (
+    codeStr === "PreconditionFailed" ||
+    codeStr === "ConditionalRequestConflict" ||
+    codeStr === "EEXIST"
+  ) {
+    return true;
+  }
+  const msg = typeof e.message === "string" ? e.message.toLowerCase() : "";
+  return (
+    msg.includes("precondition failed") ||
+    msg.includes("412") ||
+    msg.includes("if-match") ||
+    msg.includes("if-none-match") ||
+    msg.includes("conditionalrequestconflict")
+  );
+}
 
 export interface S3WorkspaceRemotePayload {
   version: 1;
@@ -57,7 +147,45 @@ interface StoredS3WorkspaceConfig {
   lastSyncAt?: number;
 }
 
-export function encodeS3WorkspaceInvite(config: S3WorkspaceConfig): string {
+export function encodeS3WorkspaceInviteToken(
+  config: S3WorkspaceConfig,
+  options: Omit<S3WorkspaceInviteOptions, "includeSecret"> = {},
+): string {
+  const now = Date.now();
+  const ttlMs = Math.max(1_000, options.ttlMs ?? DEFAULT_INVITE_TTL_MS);
+  const expiresAt = typeof options.expiresAt === "number" ? options.expiresAt : now + ttlMs;
+  const tokenId = options.tokenId?.trim() || `inv-${crypto.randomUUID().slice(0, 12)}`;
+  const inviteToken = options.token?.trim() || crypto.randomBytes(24).toString("base64url");
+  const payload = {
+    v: 2 as const,
+    endpoint: config.endpoint?.trim() || undefined,
+    region: config.region.trim() || "eu-north-1",
+    bucket: config.bucket.trim(),
+    prefix: (config.prefix || "sshs3-workspace").trim(),
+    accessKeyId: config.accessKeyId.trim(),
+    forcePathStyle: config.forcePathStyle ?? true,
+    tokenId,
+    inviteToken,
+    issuedAt: now,
+    expiresAt,
+    revocable: true,
+  };
+  const encoded = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+  return `${S3_INVITE_PREFIX}${encoded}`;
+}
+
+export function encodeS3WorkspaceInvite(
+  config: S3WorkspaceConfig,
+  options: S3WorkspaceInviteOptions = {},
+): string {
+  if (options.token || options.includeSecret === false) {
+    return encodeS3WorkspaceInviteToken(config, options);
+  }
+  if (config.secretAccessKey && options.warnOnRawSecret !== false) {
+    log.warn(
+      "S3 workspace invite embeds a raw secretAccessKey; prefer short-lived revocable invite tokens via encodeS3WorkspaceInviteToken.",
+    );
+  }
   const payload = {
     v: 1,
     endpoint: config.endpoint?.trim() || undefined,
@@ -74,15 +202,19 @@ export function encodeS3WorkspaceInvite(config: S3WorkspaceConfig): string {
   return `${S3_INVITE_PREFIX}${encoded}`;
 }
 
-export function decodeS3WorkspaceInvite(
+export function validateS3WorkspaceInvite(
   inviteCode: string,
-): Partial<S3WorkspaceConfig> {
+  options: {
+    now?: number;
+    revokedTokenIds?: Set<string> | readonly string[];
+  } = {},
+): S3WorkspaceInviteValidationResult {
   const trimmed = inviteCode.trim();
   const rawBase64 = trimmed.startsWith(S3_INVITE_PREFIX)
     ? trimmed.slice(S3_INVITE_PREFIX.length).trim()
     : trimmed;
   if (!rawBase64) {
-    throw new Error("The S3 invite code is empty");
+    return { valid: false, version: 1, error: "The S3 invite code is empty" };
   }
   let parsed: Record<string, unknown>;
   try {
@@ -93,7 +225,7 @@ export function decodeS3WorkspaceInvite(
       const json = Buffer.from(rawBase64, "base64").toString("utf8");
       parsed = JSON.parse(json) as Record<string, unknown>;
     } catch {
-      throw new Error("The S3 invite code could not be decoded");
+      return { valid: false, version: 1, error: "The S3 invite code could not be decoded" };
     }
   }
   if (
@@ -102,9 +234,18 @@ export function decodeS3WorkspaceInvite(
     typeof parsed.accessKeyId !== "string" ||
     !parsed.accessKeyId.trim()
   ) {
-    throw new Error("The S3 invite code has no bucket or access key id");
+    return {
+      valid: false,
+      version: parsed.v === 2 ? 2 : 1,
+      error: "The S3 invite code has no bucket or access key id",
+    };
   }
-  return {
+  const hasRawSecret =
+    typeof parsed.secretAccessKey === "string" && parsed.secretAccessKey.length > 0;
+  const rawSecretWarning = hasRawSecret
+    ? "This S3 workspace invite embeds a raw secretAccessKey; replace it with a short-lived revocable invite token."
+    : undefined;
+  const config: Partial<S3WorkspaceConfig> = {
     enabled: true,
     endpoint:
       typeof parsed.endpoint === "string" && parsed.endpoint.trim()
@@ -120,15 +261,106 @@ export function decodeS3WorkspaceInvite(
         ? parsed.prefix.trim().replace(/^\/+|\/+$/g, "")
         : "sshs3-workspace",
     accessKeyId: parsed.accessKeyId.trim(),
-    secretAccessKey:
-      typeof parsed.secretAccessKey === "string" // pragma: allowlist secret
-        ? parsed.secretAccessKey
-        : undefined,
+    ...(typeof parsed.secretAccessKey === "string" // pragma: allowlist secret
+      ? { secretAccessKey: parsed.secretAccessKey }
+      : {}),
     forcePathStyle:
       typeof parsed.forcePathStyle === "boolean"
         ? parsed.forcePathStyle
         : true,
   };
+
+  const isV2 = parsed.v === 2 || typeof parsed.inviteToken === "string";
+  if (!isV2) {
+    return {
+      valid: true,
+      version: 1,
+      hasRawSecret,
+      warning: rawSecretWarning,
+      config,
+    };
+  }
+
+  const tokenId = typeof parsed.tokenId === "string" ? parsed.tokenId.trim() : "";
+  const inviteToken = typeof parsed.inviteToken === "string" ? parsed.inviteToken.trim() : "";
+  const expiresAt = typeof parsed.expiresAt === "number" ? parsed.expiresAt : Number.NaN;
+  const issuedAt = typeof parsed.issuedAt === "number" ? parsed.issuedAt : undefined;
+  if (!tokenId || !inviteToken || !Number.isFinite(expiresAt)) {
+    return {
+      valid: false,
+      version: 2,
+      hasRawSecret,
+      warning: rawSecretWarning,
+      error: "The S3 invite token is missing required token metadata",
+    };
+  }
+  const now = options.now ?? Date.now();
+  const expired = now >= expiresAt;
+  const revokedSet =
+    options.revokedTokenIds instanceof Set
+      ? options.revokedTokenIds
+      : new Set(options.revokedTokenIds ?? []);
+  const revoked = revokedSet.has(tokenId);
+  if (revoked) {
+    return {
+      valid: false,
+      version: 2,
+      expired,
+      revoked: true,
+      hasRawSecret,
+      warning: rawSecretWarning,
+      tokenId,
+      inviteToken,
+      issuedAt,
+      expiresAt,
+      error: "This S3 invite token has been revoked",
+    };
+  }
+  if (expired) {
+    return {
+      valid: false,
+      version: 2,
+      expired: true,
+      revoked: false,
+      hasRawSecret,
+      warning: rawSecretWarning,
+      tokenId,
+      inviteToken,
+      issuedAt,
+      expiresAt,
+      error: "This S3 invite token has expired",
+    };
+  }
+  return {
+    valid: true,
+    version: 2,
+    expired: false,
+    revoked: false,
+    hasRawSecret,
+    warning: rawSecretWarning,
+    tokenId,
+    inviteToken,
+    issuedAt,
+    expiresAt,
+    config,
+  };
+}
+
+export function decodeS3WorkspaceInvite(
+  inviteCode: string,
+  options?: {
+    now?: number;
+    revokedTokenIds?: Set<string> | readonly string[];
+  },
+): Partial<S3WorkspaceConfig> {
+  const validation = validateS3WorkspaceInvite(inviteCode, options);
+  if (!validation.valid || !validation.config) {
+    throw new Error(validation.error ?? "The S3 invite code could not be decoded");
+  }
+  if (validation.hasRawSecret && validation.warning) {
+    log.warn(validation.warning);
+  }
+  return validation.config;
 }
 
 /**
@@ -554,6 +786,7 @@ export function mergeS3WorkspacePayload(
 export interface S3WorkspaceSyncCallbacks {
   getLocalState(): Promise<{
     actor: string;
+    clientId?: string;
     servers: WorkspaceServerSummary[];
     memories: MemoryEntry[];
     activityLog: WorkspaceActivityEvent[];
@@ -588,24 +821,32 @@ export class S3WorkspaceSyncService {
   };
   private lastSyncAt?: number;
   private syncing = false;
+  private polling = false;
   private connected = false;
   private lastError?: string;
   private lastKnownRemoteStat?: { size: number; mtime?: string } | null;
-  private presenceList: WorkspacePresenceEntry[] = [];
+  private presenceList: ClientWorkspacePresenceEntry[] = [];
   private pollTimer?: NodeJS.Timeout;
   private presenceTimer?: NodeJS.Timeout;
   private pushDebounceTimer?: NodeJS.Timeout;
   private provider?: IStorageProvider;
   private syncQueue: Promise<void> = Promise.resolve();
   private disposed = false;
+  private consecutivePollErrors = 0;
+  private nextPollAllowedAt = 0;
+  private readonly fallbackClientId = crypto.randomUUID().slice(0, 12);
+  private readonly revokedInviteTokens = new Set<string>();
 
   constructor(
     private readonly configFilePath: string,
     private readonly callbacks: S3WorkspaceSyncCallbacks,
     private readonly options: {
       pollIntervalMs?: number;
+      maxPollBackoffMs?: number;
       presenceIntervalMs?: number;
       pushDebounceMs?: number;
+      requestTimeoutMs?: number;
+      clientId?: string;
       providerFactory?: (cfg: S3WorkspaceConfig) => IStorageProvider;
     } = {},
   ) {}
@@ -707,9 +948,41 @@ export class S3WorkspaceSyncService {
     };
   }
 
-  getPresence(): WorkspacePresenceEntry[] {
+  getPresence(): ClientWorkspacePresenceEntry[] {
     const cutoff = Date.now() - PRESENCE_TTL_MS;
     return this.presenceList.filter((p) => p.updatedAt >= cutoff);
+  }
+
+  getPollBackoffState(): { consecutiveErrors: number; nextPollAllowedAt: number } {
+    return {
+      consecutiveErrors: this.consecutivePollErrors,
+      nextPollAllowedAt: this.nextPollAllowedAt,
+    };
+  }
+
+  revokeInviteToken(tokenId: string): void {
+    const clean = tokenId.trim();
+    if (clean) this.revokedInviteTokens.add(clean);
+  }
+
+  isInviteTokenRevoked(tokenId: string): boolean {
+    return this.revokedInviteTokens.has(tokenId.trim());
+  }
+
+  createInviteToken(options: { ttlMs?: number; tokenId?: string; token?: string } = {}): {
+    inviteCode: string;
+    tokenId: string;
+    expiresAt: number;
+  } {
+    const tokenId = options.tokenId?.trim() || `inv-${crypto.randomUUID().slice(0, 12)}`;
+    const ttlMs = Math.max(1_000, options.ttlMs ?? DEFAULT_INVITE_TTL_MS);
+    const expiresAt = Date.now() + ttlMs;
+    const inviteCode = encodeS3WorkspaceInviteToken(this.config, {
+      tokenId,
+      token: options.token,
+      expiresAt,
+    });
+    return { inviteCode, tokenId, expiresAt };
   }
 
   async configure(
@@ -718,8 +991,10 @@ export class S3WorkspaceSyncService {
   ): Promise<void> {
     // Refused up front in demo mode (nothing is saved), so connecting a team bucket fails visibly.
     assertOutwardSyncAllowed(SYNC);
-    const decoded = inviteCode ? decodeS3WorkspaceInvite(inviteCode) : {};
-    const merged = { ...this.config, ... update, ...decoded };
+    const decoded = inviteCode
+      ? decodeS3WorkspaceInvite(inviteCode, { revokedTokenIds: this.revokedInviteTokens })
+      : {};
+    const merged = { ...this.config, ...update, ...decoded };
     const secret =
       decoded.secretAccessKey !== undefined
         ? decoded.secretAccessKey
@@ -743,6 +1018,8 @@ export class S3WorkspaceSyncService {
     await this.resetProvider();
     this.lastKnownRemoteStat = undefined;
     this.lastError = undefined;
+    this.consecutivePollErrors = 0;
+    this.nextPollAllowedAt = 0;
     await this.save();
 
     if (this.isConfigured()) {
@@ -761,6 +1038,8 @@ export class S3WorkspaceSyncService {
     this.config.enabled = false;
     this.connected = false;
     this.lastError = undefined;
+    this.consecutivePollErrors = 0;
+    this.nextPollAllowedAt = 0;
     this.presenceList = [];
     await this.save();
     this.callbacks.onStateChanged();
@@ -802,6 +1081,8 @@ export class S3WorkspaceSyncService {
       await this.resetProvider();
       this.lastKnownRemoteStat = undefined;
       this.lastError = undefined;
+      this.consecutivePollErrors = 0;
+      this.nextPollAllowedAt = 0;
       if (this.canReachBucket()) {
         this.startTimers();
         await this.syncNow().catch((err) =>
@@ -887,58 +1168,82 @@ export class S3WorkspaceSyncService {
       try {
         const provider = await this.getOrCreateProvider();
         const remotePath = this.workspaceObjectPath();
-        const remotePayload = await this.readRemoteWorkspace(provider, remotePath);
-        const local = await this.callbacks.getLocalState();
+        let lastLocal: Awaited<ReturnType<S3WorkspaceSyncCallbacks["getLocalState"]>> | undefined;
 
-        const localPayload: S3WorkspaceRemotePayload = {
-          version: 1,
-          updatedAt: Date.now(),
-          // Sanitized by the merge, which also gives a server without a time the team's time for it.
-          servers: local.servers,
-          memories: local.memories.filter((m) => m.scope !== "personal"),
-          activityLog: local.activityLog,
-          deletedServerIds: local.deletedServerIds,
-          deletedMemoryIds: local.deletedMemoryIds,
-          deletedServerBy: local.deletedServerBy,
-          deletedMemoryBy: local.deletedMemoryBy,
-        };
+        for (let attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt++) {
+          const remote = await this.readRemoteWorkspaceWithMeta(provider, remotePath);
+          const local = await this.callbacks.getLocalState();
+          lastLocal = local;
 
-        const { merged, activeServers, changed, remoteChanged } = mergeS3WorkspacePayload(
-          localPayload,
-          remotePayload ?? {},
-        );
+          const localPayload: S3WorkspaceRemotePayload = {
+            version: 1,
+            updatedAt: Date.now(),
+            // Sanitized by the merge, which also gives a server without a time the team's time for it.
+            servers: local.servers,
+            memories: local.memories.filter((m) => m.scope !== "personal"),
+            activityLog: local.activityLog,
+            deletedServerIds: local.deletedServerIds,
+            deletedMemoryIds: local.deletedMemoryIds,
+            deletedServerBy: local.deletedServerBy,
+            deletedMemoryBy: local.deletedMemoryBy,
+          };
 
-        await this.callbacks.applyMergedState({
-          activeServers,
-          memories: merged.memories,
-          activityLog: merged.activityLog,
-          deletedServerIds: merged.deletedServerIds ?? {},
-          deletedMemoryIds: merged.deletedMemoryIds ?? {},
-          deletedServerBy: merged.deletedServerBy ?? {},
-          deletedMemoryBy: merged.deletedMemoryBy ?? {},
-          changed,
-        });
+          const { merged, activeServers, changed, remoteChanged } = mergeS3WorkspacePayload(
+            localPayload,
+            remote.payload ?? {},
+          );
 
-        // The bucket is written when it does not hold what the merge came to, and only then. A push
-        // asked for after a change here (`forcePush`) finds that difference; one that finds none has
-        // nothing to send. Writing whenever the merge "changed" something made every installation
-        // rewrite the whole object every few seconds for ever, each one's write being the next
-        // one's reason to sync.
-        const shouldWriteRemote = !remotePayload || remoteChanged;
+          await this.callbacks.applyMergedState({
+            activeServers,
+            memories: merged.memories,
+            activityLog: merged.activityLog,
+            deletedServerIds: merged.deletedServerIds ?? {},
+            deletedMemoryIds: merged.deletedMemoryIds ?? {},
+            deletedServerBy: merged.deletedServerBy ?? {},
+            deletedMemoryBy: merged.deletedMemoryBy ?? {},
+            changed,
+          });
 
-        if (shouldWriteRemote) {
+          // The bucket is written when it does not hold what the merge came to, and only then. A push
+          // asked for after a change here (`forcePush`) finds that difference; one that finds none has
+          // nothing to send. Writing whenever the merge "changed" something made every installation
+          // rewrite the whole object every few seconds for ever, each one's write being the next
+          // one's reason to sync.
+          const shouldWriteRemote = !remote.payload || remoteChanged;
+          if (!shouldWriteRemote) break;
+
           const buf = Buffer.from(JSON.stringify(merged, null, 2), "utf8");
-          await this.writeProviderFile(provider, remotePath, buf);
-          const stat = await this.statOrNull(provider, remotePath);
-          this.lastKnownRemoteStat = stat
-            ? { size: stat.size, mtime: stat.mtime }
-            : null;
+          const casOptions = remote.etag
+            ? { ifMatch: remote.etag }
+            : !remote.payload
+              ? { ifNoneMatch: "*" }
+              : undefined;
+          try {
+            await this.writeProviderFile(provider, remotePath, buf, casOptions);
+            const stat = await this.statOrNull(provider, remotePath);
+            this.lastKnownRemoteStat = stat
+              ? { size: stat.size, mtime: stat.mtime }
+              : null;
+            break;
+          } catch (err) {
+            if (isPreconditionFailedError(err) && attempt + 1 < MAX_CAS_ATTEMPTS) {
+              log.warn(
+                `S3 workspace CAS conflict (412), retrying merge (attempt ${attempt + 1}/${MAX_CAS_ATTEMPTS})`,
+              );
+              continue;
+            }
+            throw err;
+          }
         }
 
-        await this.publishAndRefreshPresenceInternal(provider, local);
+        if (lastLocal) {
+          await this.publishAndRefreshPresenceInternal(provider, lastLocal);
+        }
 
         this.connected = true;
         this.lastError = undefined;
+        this.consecutivePollErrors = 0;
+        this.nextPollAllowedAt = 0;
         this.lastSyncAt = Date.now();
         await this.save().catch(() => {});
       } catch (err) {
@@ -953,7 +1258,9 @@ export class S3WorkspaceSyncService {
   }
 
   async pollOnce(): Promise<void> {
-    if (this.disposed || !this.canReachBucket() || this.syncing) return;
+    if (this.disposed || !this.canReachBucket() || this.syncing || this.polling) return;
+    if (this.nextPollAllowedAt > 0 && Date.now() < this.nextPollAllowedAt) return;
+    this.polling = true;
     try {
       const provider = await this.getOrCreateProvider();
       const remotePath = this.workspaceObjectPath();
@@ -977,10 +1284,19 @@ export class S3WorkspaceSyncService {
           this.callbacks.onStateChanged();
         }
       }
+      this.consecutivePollErrors = 0;
+      this.nextPollAllowedAt = 0;
     } catch (err) {
+      this.consecutivePollErrors += 1;
+      const baseMs = Math.max(50, this.options.pollIntervalMs ?? 10_000);
+      const maxBackoffMs = Math.max(baseMs, this.options.maxPollBackoffMs ?? DEFAULT_MAX_POLL_BACKOFF_MS);
+      const delayMs = Math.min(maxBackoffMs, baseMs * Math.pow(2, this.consecutivePollErrors - 1));
+      this.nextPollAllowedAt = Date.now() + delayMs;
       this.connected = false;
       this.lastError = safeError(err);
       this.callbacks.onStateChanged();
+    } finally {
+      this.polling = false;
     }
   }
 
@@ -995,19 +1311,24 @@ export class S3WorkspaceSyncService {
     provider: IStorageProvider,
     local: {
       actor: string;
+      clientId?: string;
       activeTerminals: WorkspacePresenceTerminal[];
     },
   ): Promise<void> {
     const actor = (local.actor || "teammate").trim();
+    const clientId = (local.clientId || this.options.clientId || this.fallbackClientId).trim();
     const safeActor = actor.replace(/[^a-zA-Z0-9_.-]/g, "_") || "teammate";
+    const safeClient = clientId.replace(/[^a-zA-Z0-9_.-]/g, "_") || "client";
+    const selfFileName = `${safeActor}--${safeClient}.json`;
     const now = Date.now();
-    const selfEntry: WorkspacePresenceEntry = {
+    const selfEntry: ClientWorkspacePresenceEntry = {
       actor,
+      clientId,
       updatedAt: now,
-      activeTerminals: local.activeTerminals,
+      activeTerminals: Array.isArray(local.activeTerminals) ? local.activeTerminals : [],
     };
 
-    const selfPath = `${this.presenceDirPath()}/${safeActor}.json`;
+    const selfPath = `${this.presenceDirPath()}/${selfFileName}`;
     try {
       await this.writeProviderFile(
         provider,
@@ -1019,19 +1340,21 @@ export class S3WorkspaceSyncService {
     }
 
     // List all presence files in S3
-    const entries: WorkspacePresenceEntry[] = [selfEntry];
+    const entries: ClientWorkspacePresenceEntry[] = [selfEntry];
     try {
-      const files = await provider.list(this.presenceDirPath());
+      const files = await this.withTimeout("S3 presence list", (signal) =>
+        (provider as ConditionalStorageProvider).list(this.presenceDirPath(), { signal }),
+      );
       const cutoff = now - PRESENCE_TTL_MS;
       for (const file of files) {
         if (file.isDirectory || !file.name.endsWith(".json")) continue;
-        if (file.name === `${safeActor}.json`) continue;
+        if (file.name === selfFileName) continue;
         const filePath = `${this.presenceDirPath()}/${file.name}`;
         try {
           const buf = await this.readProviderFile(provider, filePath, 64_000);
           const parsed = JSON.parse(
             buf.toString("utf8"),
-          ) as WorkspacePresenceEntry;
+          ) as ClientWorkspacePresenceEntry;
           if (
             parsed &&
             typeof parsed.actor === "string" &&
@@ -1040,11 +1363,22 @@ export class S3WorkspaceSyncService {
           ) {
             entries.push({
               actor: parsed.actor,
+              ...(typeof parsed.clientId === "string" && parsed.clientId.trim()
+                ? { clientId: parsed.clientId.trim() }
+                : {}),
               updatedAt: parsed.updatedAt,
               activeTerminals: Array.isArray(parsed.activeTerminals)
                 ? parsed.activeTerminals
                 : [],
             });
+          } else if (
+            parsed &&
+            typeof parsed.updatedAt === "number" &&
+            parsed.updatedAt < now - PRESENCE_REMOVE_AFTER_MS
+          ) {
+            // Nobody has been there for a day: an installation that is gone (or an id from before ids
+            // lasted) is taken away, so that the folder does not grow with every start there ever was.
+            await provider.delete(filePath, false).catch(() => undefined);
           }
         } catch {
           // Ignore unreadable peer presence file
@@ -1057,14 +1391,21 @@ export class S3WorkspaceSyncService {
     const prevJson = JSON.stringify(
       this.presenceList.map((p) => ({
         actor: p.actor,
-        terminals: p.activeTerminals.map((t) => `${t.targetLabel}:${t.state}`),
+        clientId: p.clientId,
+        terminals: (p.activeTerminals ?? []).map((t) => `${t.targetLabel}:${t.state}`),
       })),
     );
-    this.presenceList = entries.sort((a, b) => a.actor.localeCompare(b.actor));
+    this.presenceList = entries.sort(
+      (a, b) =>
+        a.actor.localeCompare(b.actor) ||
+        (a.clientId ?? "").localeCompare(b.clientId ?? "") ||
+        a.updatedAt - b.updatedAt,
+    );
     const nextJson = JSON.stringify(
       this.presenceList.map((p) => ({
         actor: p.actor,
-        terminals: p.activeTerminals.map((t) => `${t.targetLabel}:${t.state}`),
+        clientId: p.clientId,
+        terminals: (p.activeTerminals ?? []).map((t) => `${t.targetLabel}:${t.state}`),
       })),
     );
     if (prevJson !== nextJson) {
@@ -1092,10 +1433,14 @@ export class S3WorkspaceSyncService {
    * relative to the prefix.
    */
   readonly objects = {
+    supportsConditionalWrite: true,
     list: async (dir: string): Promise<string[]> => {
       const provider = await this.getOrCreateProvider();
       try {
-        return (await provider.list(this.objectPath(dir)))
+        const entries = await this.withTimeout("S3 objects list", (signal) =>
+          (provider as ConditionalStorageProvider).list(this.objectPath(dir), { signal }),
+        );
+        return entries
           .filter((entry) => !entry.isDirectory)
           .map((entry) => entry.name);
       } catch (err) {
@@ -1112,14 +1457,35 @@ export class S3WorkspaceSyncService {
         throw err;
       }
     },
-    write: async (relative: string, content: Buffer): Promise<void> => {
+    readWithMeta: async (
+      relative: string,
+    ): Promise<{ buffer: Buffer; etag?: string } | undefined> => {
       const provider = await this.getOrCreateProvider();
-      await this.writeProviderFile(provider, this.objectPath(relative), content);
+      const target = this.objectPath(relative);
+      try {
+        const stat = await this.statOrNull(provider, target);
+        if (!stat) return undefined;
+        const buffer = await this.readProviderFile(provider, target);
+        return { buffer, etag: stat.etag };
+      } catch (err) {
+        if (this.isNotFoundError(err)) return undefined;
+        throw err;
+      }
+    },
+    write: async (
+      relative: string,
+      content: Buffer,
+      options?: { ifMatch?: string; ifNoneMatch?: string },
+    ): Promise<void> => {
+      const provider = await this.getOrCreateProvider();
+      await this.writeProviderFile(provider, this.objectPath(relative), content, options);
     },
     remove: async (relative: string): Promise<void> => {
       const provider = await this.getOrCreateProvider();
       try {
-        await provider.delete(this.objectPath(relative), false);
+        await this.withTimeout("S3 objects delete", (signal) =>
+          (provider as ConditionalStorageProvider).delete(this.objectPath(relative), false, { signal }),
+        );
       } catch (err) {
         if (!this.isNotFoundError(err)) throw err;
       }
@@ -1146,15 +1512,63 @@ export class S3WorkspaceSyncService {
       : `${bucket}/${PRESENCE_DIRNAME}`;
   }
 
+  private requestTimeoutMs(): number {
+    return Math.max(50, this.options.requestTimeoutMs ?? DEFAULT_S3_REQUEST_TIMEOUT_MS);
+  }
+
+  private async withTimeout<T>(
+    label: string,
+    fn: (signal: AbortSignal) => Promise<T>,
+    timeoutMs = this.requestTimeoutMs(),
+  ): Promise<T> {
+    const signal = AbortSignal.timeout(timeoutMs);
+    if (signal.aborted) {
+      throw signal.reason instanceof Error
+        ? signal.reason
+        : new Error(`${label} timed out after ${timeoutMs}ms`);
+    }
+    return await new Promise<T>((resolve, reject) => {
+      let settled = false;
+      const onAbort = () => {
+        if (settled) return;
+        settled = true;
+        const reason = signal.reason;
+        reject(
+          reason instanceof Error
+            ? reason
+            : new Error(`${label} timed out after ${timeoutMs}ms`),
+        );
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      Promise.resolve()
+        .then(() => fn(signal))
+        .then(
+          (val) => {
+            if (settled) return;
+            settled = true;
+            signal.removeEventListener("abort", onAbort);
+            resolve(val);
+          },
+          (err) => {
+            if (settled) return;
+            settled = true;
+            signal.removeEventListener("abort", onAbort);
+            reject(err);
+          },
+        );
+    });
+  }
+
   private async getOrCreateProvider(): Promise<IStorageProvider> {
     // Every bucket connection is made here: never in demo mode, whichever path asked for it.
     assertOutwardSyncAllowed(SYNC);
     if (this.provider) return this.provider;
     if (this.options.providerFactory) {
-      this.provider = this.options.providerFactory(this.config);
-      await (
-        this.provider as { connect?: () => Promise<void> }
-      ).connect?.();
+      const candidate = this.options.providerFactory(this.config);
+      await this.withTimeout("S3 provider connect", async () => {
+        await (candidate as { connect?: () => Promise<void> }).connect?.();
+      });
+      this.provider = candidate;
       return this.provider;
     }
     const s3Provider = new S3StorageProvider({
@@ -1166,7 +1580,9 @@ export class S3WorkspaceSyncService {
       secretAccessKey: this.config.secretAccessKey || "",
       forcePathStyle: this.config.forcePathStyle ?? true,
     });
-    await (s3Provider as { connect?: () => Promise<void> }).connect?.();
+    await this.withTimeout("S3 provider connect", async () => {
+      await (s3Provider as { connect?: () => Promise<void> }).connect?.();
+    });
     this.provider = s3Provider;
     return this.provider;
   }
@@ -1179,14 +1595,18 @@ export class S3WorkspaceSyncService {
     }
   }
 
-  private async readRemoteWorkspace(
+  private async readRemoteWorkspaceWithMeta(
     provider: IStorageProvider,
     remotePath: string,
-  ): Promise<Partial<S3WorkspaceRemotePayload> | null> {
+  ): Promise<{
+    payload: Partial<S3WorkspaceRemotePayload> | null;
+    etag?: string;
+    stat: FileEntry | null;
+  }> {
     const stat = await this.statOrNull(provider, remotePath);
     if (!stat) {
       this.lastKnownRemoteStat = null;
-      return null;
+      return { payload: null, stat: null };
     }
     if (stat.size > MAX_WORKSPACE_BYTES) {
       throw new Error("Remote S3 workspace.json exceeds maximum size limit");
@@ -1198,8 +1618,12 @@ export class S3WorkspaceSyncService {
     );
     this.lastKnownRemoteStat = { size: stat.size, mtime: stat.mtime };
     const text = raw.toString("utf8").replace(/^\uFEFF/, "").trim();
-    if (!text) return null;
-    return JSON.parse(text) as Partial<S3WorkspaceRemotePayload>;
+    if (!text) return { payload: null, etag: stat.etag, stat };
+    return {
+      payload: JSON.parse(text) as Partial<S3WorkspaceRemotePayload>,
+      etag: stat.etag,
+      stat,
+    };
   }
 
   private async statOrNull(
@@ -1207,7 +1631,9 @@ export class S3WorkspaceSyncService {
     remotePath: string,
   ): Promise<FileEntry | null> {
     try {
-      return await provider.stat(remotePath);
+      return await this.withTimeout("S3 stat", (signal) =>
+        (provider as ConditionalStorageProvider).stat(remotePath, { signal }),
+      );
     } catch (err: any) {
       if (this.isNotFoundError(err)) return null;
       throw err;
@@ -1253,58 +1679,92 @@ export class S3WorkspaceSyncService {
     remotePath: string,
     maxBytes = MAX_WORKSPACE_BYTES,
   ): Promise<Buffer> {
-    if (typeof provider.readFile === "function") {
-      const data = await provider.readFile(remotePath);
-      if (data.length > maxBytes) {
-        throw new Error(`Remote file exceeds ${maxBytes} bytes`);
-      }
-      return data;
-    }
-    const stream = await provider.createReadStream(remotePath);
-    const chunks: Buffer[] = [];
-    let total = 0;
-    await new Promise<void>((resolve, reject) => {
-      let settled = false;
-      const finish = (fn: () => void) => {
-        if (settled) return;
-        settled = true;
-        fn();
-      };
-      stream.on("data", (chunk: Buffer) => {
-        if (settled) return;
-        total += chunk.length;
-        if (total > maxBytes) {
-          (stream as unknown as { destroy?: () => void }).destroy?.();
-          finish(() => reject(new Error(`Remote file exceeds ${maxBytes} bytes`)));
-          return;
+    return await this.withTimeout("S3 read", async (signal) => {
+      const conditional = provider as ConditionalStorageProvider;
+      if (typeof conditional.readFile === "function") {
+        const data = await conditional.readFile(remotePath, { signal });
+        if (data.length > maxBytes) {
+          throw new Error(`Remote file exceeds ${maxBytes} bytes`);
         }
-        chunks.push(chunk);
+        return data;
+      }
+      const stream = await provider.createReadStream(remotePath);
+      const chunks: Buffer[] = [];
+      let total = 0;
+      await new Promise<void>((resolve, reject) => {
+        let settled = false;
+        const finish = (fn: () => void) => {
+          if (settled) return;
+          settled = true;
+          signal.removeEventListener("abort", onAbort);
+          fn();
+        };
+        const onAbort = () => {
+          (stream as unknown as { destroy?: () => void }).destroy?.();
+          finish(() => reject(new Error(`S3 read aborted for ${remotePath}`)));
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+        stream.on("data", (chunk: Buffer) => {
+          if (settled) return;
+          total += chunk.length;
+          if (total > maxBytes) {
+            (stream as unknown as { destroy?: () => void }).destroy?.();
+            finish(() => reject(new Error(`Remote file exceeds ${maxBytes} bytes`)));
+            return;
+          }
+          chunks.push(chunk);
+        });
+        stream.on("end", () => finish(resolve));
+        stream.on("error", (err) => finish(() => reject(err)));
       });
-      stream.on("end", () => finish(resolve));
-      stream.on("error", (err) => finish(() => reject(err)));
+      return Buffer.concat(chunks);
     });
-    return Buffer.concat(chunks);
   }
 
   private async writeProviderFile(
     provider: IStorageProvider,
     remotePath: string,
     buffer: Buffer,
+    options?: { ifMatch?: string; ifNoneMatch?: string },
   ): Promise<void> {
-    if (typeof provider.writeFile === "function") {
-      await provider.writeFile(remotePath, buffer, {
+    await this.withTimeout("S3 write", async (signal) => {
+      const conditional = provider as ConditionalStorageProvider;
+      if (typeof conditional.writeFile === "function") {
+        await conditional.writeFile(remotePath, buffer, {
+          mode: 0o600,
+          size: buffer.length,
+          ...(options?.ifMatch !== undefined ? { ifMatch: options.ifMatch } : {}),
+          ...(options?.ifNoneMatch !== undefined ? { ifNoneMatch: options.ifNoneMatch } : {}),
+          signal,
+        });
+        return;
+      }
+      const stream = await provider.createWriteStream(remotePath, {
         mode: 0o600,
         size: buffer.length,
       });
-      return;
-    }
-    const stream = await provider.createWriteStream(remotePath, {
-      mode: 0o600,
-      size: buffer.length,
-    });
-    await new Promise<void>((resolve, reject) => {
-      stream.on("error", reject);
-      stream.end(buffer, () => resolve());
+      await new Promise<void>((resolve, reject) => {
+        let settled = false;
+        const onAbort = () => {
+          if (settled) return;
+          settled = true;
+          (stream as unknown as { destroy?: () => void }).destroy?.();
+          reject(new Error(`S3 write aborted for ${remotePath}`));
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+        stream.on("error", (err) => {
+          if (settled) return;
+          settled = true;
+          signal.removeEventListener("abort", onAbort);
+          reject(err);
+        });
+        stream.end(buffer, () => {
+          if (settled) return;
+          settled = true;
+          signal.removeEventListener("abort", onAbort);
+          resolve();
+        });
+      });
     });
   }
 

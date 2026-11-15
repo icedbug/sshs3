@@ -22,11 +22,13 @@ vi.mock("../../src/renderer/src/lib/aiHub", () => ({
     selected = id;
   },
   hubRequest: (...args: unknown[]) => request(...args),
+  onAiHubDelta: vi.fn(() => () => {}),
 }));
 beforeEach(() => {
   request.mockReset();
-  // Every test is a fresh browser tab: no conversation is remembered from the one before.
+  // Every test is a fresh browser tab: no conversation or local toggle is remembered from the one before.
   window.sessionStorage.clear();
+  window.localStorage.clear();
   selected = "one";
   fixture = {
     config: {
@@ -154,6 +156,37 @@ describe("persistent AI chat", () => {
     cleanup();
     render(<Harness />);
     expect(screen.queryByText("Inspect the service log.")).not.toBeInTheDocument();
+  });
+  it("opens the remembered conversation after a reload also when the app's dock passes an empty id, and tells the dock", () => {
+    // The app always passes the dock's id, which is "" after a reload (its state is in memory).
+    function Docked({ onTask }: { onTask: (id: string) => void }) {
+      const [id, setId] = useState("");
+      return (
+        <AiHubPanel
+          mode="panel"
+          setMode={() => {}}
+          initialTaskId={id}
+          onTaskChange={(next) => {
+            setId(next);
+            onTask(next);
+          }}
+        />
+      );
+    }
+    const seen: string[] = [];
+    const first = render(<Docked onTask={(id) => seen.push(id)} />);
+    openPreviousChat();
+    expect(seen.at(-1)).toBe("task");
+    first.unmount();
+    seen.length = 0;
+    render(<Docked onTask={(id) => seen.push(id)} />);
+    expect(screen.getByText("Inspect the service log.")).toBeVisible();
+    expect(seen).toEqual(["task"]);
+    expect(window.sessionStorage.getItem("sshs3.aiHub.openTask")).toBe("task");
+    // "New chat" still closes it, for the dock and for the next reload.
+    fireEvent.click(screen.getByRole("button", { name: "New chat" }));
+    expect(screen.queryByText("Inspect the service log.")).not.toBeInTheDocument();
+    expect(window.sessionStorage.getItem("sshs3.aiHub.openTask")).toBeNull();
   });
   it("empties the field and shows the message as sent at once, and gives the text back when the request fails", async () => {
     let fail: (e: Error) => void = () => {};
@@ -389,6 +422,7 @@ describe("persistent AI chat", () => {
     };
 
     render(<AiHubPanel mode="hub" setMode={() => {}} />);
+    fireEvent.click(screen.getByTestId("ai-hub-labs-toggle"));
     // The nav label is "Memory & skills" followed by the memory count badge.
     fireEvent.click(
       within(screen.getByRole("navigation", { name: "Hub views" })).getByRole(
@@ -482,32 +516,55 @@ describe("the agent's plan", () => {
     expect(card).toHaveTextContent("The 1 command(s) listed above run without asking you again");
   });
 
-  it("sends the decision with the note, and names the second button by what it will do", async () => {
+  it("opens Edit Plan to send a revision note or reject the plan, and approves directly", async () => {
     const { PlanCard } = await import("../../src/renderer/src/components/AiHub/PlanCard");
     const act = vi.fn().mockResolvedValue(undefined);
     render(<PlanCard taskId="t1" plan={plan} busy={false} act={act} />);
-    expect(screen.getByTestId("plan-reject-btn")).toHaveTextContent("Don't run it");
+    expect(screen.getByTestId("plan-approve-btn")).toHaveTextContent("Approve & Execute");
+    expect(screen.getByTestId("plan-edit-btn")).toHaveTextContent("Edit Plan");
+    expect(screen.queryByTestId("plan-feedback-panel")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("plan-edit-btn"));
+    expect(screen.getByTestId("plan-feedback-panel")).toBeVisible();
+    expect(screen.getByTestId("plan-reject-btn")).toHaveTextContent("Send Revision");
+    expect(screen.getByTestId("plan-reject-btn")).toBeDisabled();
+    expect(screen.getByTestId("plan-dismiss-btn")).toHaveTextContent("Reject Plan");
+
     fireEvent.change(screen.getByLabelText("Note to the agent"), { target: { value: " test through haproxy " } });
-    expect(screen.getByTestId("plan-reject-btn")).toHaveTextContent("Send back with this note");
+    expect(screen.getByTestId("plan-reject-btn")).not.toBeDisabled();
     fireEvent.click(screen.getByTestId("plan-reject-btn"));
     expect(act).toHaveBeenLastCalledWith({ action: "plan-decide", taskId: "t1", approved: false, note: "test through haproxy" });
+
     await waitFor(() => expect(screen.getByTestId("plan-approve-btn")).not.toBeDisabled());
+    fireEvent.click(screen.getByTestId("plan-edit-btn"));
+    fireEvent.click(screen.getByTestId("plan-dismiss-btn"));
+    expect(act).toHaveBeenLastCalledWith({ action: "plan-decide", taskId: "t1", approved: false });
+
+    await waitFor(() => expect(screen.getByTestId("plan-approve-btn")).not.toBeDisabled());
+    fireEvent.click(screen.getByTestId("plan-edit-btn"));
     fireEvent.change(screen.getByLabelText("Note to the agent"), { target: { value: "" } });
     fireEvent.click(screen.getByTestId("plan-approve-btn"));
     expect(act).toHaveBeenLastCalledWith({ action: "plan-decide", taskId: "t1", approved: true });
   });
 
-  it("says what an approval covers as it will be: a note or the box has each change ask, a plan's promise cannot be unticked", async () => {
+  it("uses the explicit checkbox for per-step approval without silently flipping from feedback text, and locks a plan's promise", async () => {
     const { PlanCard } = await import("../../src/renderer/src/components/AiHub/PlanCard");
     const act = vi.fn().mockResolvedValue(undefined);
     const { rerender } = render(<PlanCard taskId="t1" plan={plan} busy={false} act={act} />);
     const box = screen.getByTestId("plan-ask-each");
     expect(box).not.toBeChecked();
-    // A note may say "ask me before each change", and only the agent reads it: with one, each change asks.
+
+    fireEvent.click(screen.getByTestId("plan-edit-btn"));
     fireEvent.change(screen.getByLabelText("Note to the agent"), { target: { value: "ask before each change" } });
+    expect(box).not.toBeChecked();
+
+    fireEvent.click(box);
     expect(box).toBeChecked();
     expect(screen.getByTestId("plan-card")).toHaveTextContent("Every command that changes something asks you before it runs, also the 1 listed above");
-    // The person may say otherwise, in as many words.
+    fireEvent.click(screen.getByTestId("plan-approve-btn"));
+    expect(act).toHaveBeenLastCalledWith({ action: "plan-decide", taskId: "t1", approved: true, note: "ask before each change", askEach: true });
+
+    await waitFor(() => expect(screen.getByTestId("plan-approve-btn")).not.toBeDisabled());
     fireEvent.click(box);
     expect(box).not.toBeChecked();
     fireEvent.click(screen.getByTestId("plan-approve-btn"));

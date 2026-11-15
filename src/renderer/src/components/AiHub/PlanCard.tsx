@@ -1,7 +1,19 @@
 import { useState } from "react";
+import { Check, Pencil, Play } from "lucide-react";
 import type { AgentPlan, HubRequest, HubSnapshot } from "@shared/types/aiHub";
+import { HighlightedCode } from "./DiffViewer";
 
 type Act = (request: HubRequest) => Promise<HubSnapshot | undefined>;
+
+export interface PlanCardProps {
+  taskId: string;
+  plan?: AgentPlan;
+  /** The agent is still working: the decision waits until it has stopped. */
+  busy: boolean;
+  act: Act;
+  /** Optional callback invoked when the user saves an in-progress feedback draft locally. */
+  onSaveDraft?: (note: string) => void;
+}
 
 const RISK_CLASS: Record<AgentPlan["steps"][number]["risk"], string> = {
   low: "ai-badge ai-badge-success",
@@ -14,53 +26,72 @@ const RISK_CLASS: Record<AgentPlan["steps"][number]["risk"], string> = {
  * Until it is approved the agent cannot change anything; once approved, the
  * commands it lists run without asking again (destructive ones still ask),
  * unless the plan or the person approving it says that each change asks.
- * The card says which of the two this approval is.
  */
 export function PlanCard({
   taskId,
   plan,
   busy,
   act,
-}: {
-  taskId: string;
-  plan?: AgentPlan;
-  /** The agent is still working: the decision waits until it has stopped. */
-  busy: boolean;
-  act: Act;
-}): JSX.Element | null {
+  onSaveDraft,
+}: PlanCardProps): JSX.Element | null {
   const [note, setNote] = useState("");
+  const [editing, setEditing] = useState(false);
+  const [draftSaved, setDraftSaved] = useState(false);
   const [sending, setSending] = useState(false);
-  /** The person's own choice of what the approval covers; undefined until they make one. */
+  /** Explicit per-step approval toggle; never silently flipped by writing feedback. */
   const [askChoice, setAskChoice] = useState<boolean | undefined>(undefined);
+
   if (!plan) return null;
+
   const waiting = plan.status === "proposed";
   const listed = plan.steps.filter((s) => s.command).length;
-  // A plan that says its changes are asked about one by one is held to it. A note may ask for the
-  // same, and only the agent reads it: with a note, each change asks unless the person says otherwise.
   const promised = plan.askEach === "plan";
-  const asksEach = waiting ? promised || (askChoice ?? note.trim() !== "") : Boolean(plan.askEach);
-  const decide = (approved: boolean): void => {
+  const asksEach = waiting ? promised || Boolean(askChoice) : Boolean(plan.askEach);
+
+  const decide = (approved: boolean, overrideNote?: string): void => {
+    const trimmed = (overrideNote ?? note).trim();
     setSending(true);
     void act({
       action: "plan-decide",
       taskId,
       approved,
-      ...(note.trim() ? { note: note.trim() } : {}),
+      ...(trimmed ? { note: trimmed } : {}),
       ...(approved && askChoice !== undefined && !promised ? { askEach: askChoice } : {}),
-    }).finally(() => setSending(false));
+    })
+      .then(() => {
+        if (!approved) {
+          setEditing(false);
+          setDraftSaved(false);
+        }
+      })
+      .finally(() => setSending(false));
   };
+
+  const handleSaveDraft = (): void => {
+    setDraftSaved(true);
+    onSaveDraft?.(note);
+  };
+
   const body = (
     <>
       <ol className="ai-plan-steps">
         {plan.steps.map((step, index) => (
-          <li key={index} data-testid={`plan-step-${index + 1}`} data-risk={step.risk}>
+          <li
+            key={index}
+            data-testid={`plan-step-${index + 1}`}
+            data-risk={step.risk}
+            data-ran={step.ranAt ? "true" : undefined}
+          >
             <div className="ai-plan-step-head">
+              <span className="ai-plan-step-check" aria-hidden="true">
+                {step.ranAt ? <Check size={12} /> : null}
+              </span>
               <span className={RISK_CLASS[step.risk]}>{step.risk} risk</span>
               <span>{step.action}</span>
               {step.target && <small>· {step.target}</small>}
               {step.ranAt && <small>· ran</small>}
             </div>
-            {step.command && <code>$ {step.command}</code>}
+            {step.command && <HighlightedCode code={`$ ${step.command}`} lang="bash" />}
             <small>Check: {step.check}</small>
             {step.rollback && <small>Undo: {step.rollback}</small>}
           </li>
@@ -100,6 +131,7 @@ export function PlanCard({
       </div>
     </>
   );
+
   const status = (
     <span className="ai-badge" data-testid="plan-status">
       {waiting
@@ -109,13 +141,15 @@ export function PlanCard({
           : "not approved"}
     </span>
   );
+
   const title = (
     <strong>
       Plan{plan.revision > 1 ? ` (version ${plan.revision})` : ""}: {plan.goal}
     </strong>
   );
+
   // A decided plan folds away: the work is in the task list now.
-  if (!waiting)
+  if (!waiting) {
     return (
       <details
         className="ai-plan"
@@ -130,6 +164,8 @@ export function PlanCard({
         {body}
       </details>
     );
+  }
+
   return (
     <section
       className="ai-plan ai-plan-waiting"
@@ -144,53 +180,111 @@ export function PlanCard({
       {body}
 
       <div className="ai-plan-decision">
-          <input
-            aria-label="Note to the agent"
-            value={note}
-            onChange={(e) => setNote(e.target.value)}
-            placeholder="Optional note, or what to change…"
+        {listed > 0 && (
+          <label className="ai-plan-ask-each">
+            <input
+              type="checkbox"
+              data-testid="plan-ask-each"
+              checked={asksEach}
+              disabled={sending || busy || promised}
+              onChange={(e) => setAskChoice(e.target.checked)}
+            />
+            Ask me before each command that changes something
+          </label>
+        )}
+        <small data-testid="plan-covers">
+          {busy
+            ? "The agent is still working; you can decide when it has stopped."
+            : listed === 0
+              ? "Approving lets the agent carry the plan out; commands that change something still ask."
+              : asksEach
+                ? `Approving lets the agent carry the plan out. Every command that changes something asks you before it runs, also the ${listed} listed above${promised ? " (the plan says so)" : ""}.`
+                : `Approving lets the agent carry the plan out. The ${listed} command(s) listed above run without asking you again; anything else, and anything destructive, still asks.`}
+        </small>
+
+        <div className="ai-plan-actions">
+          <button
+            type="button"
+            className="ai-btn-emerald"
+            data-testid="plan-approve-btn"
             disabled={sending || busy}
-          />
-          {listed > 0 && (
-            <label className="ai-plan-ask-each">
-              <input
-                type="checkbox"
-                data-testid="plan-ask-each"
-                checked={asksEach}
-                disabled={sending || busy || promised}
-                onChange={(e) => setAskChoice(e.target.checked)}
-              />
-              Ask me before each command that changes something
-            </label>
+            onClick={() => decide(true)}
+          >
+            <Play size={13} aria-hidden="true" />
+            Approve &amp; Execute
+          </button>
+          <button
+            type="button"
+            data-testid="plan-edit-btn"
+            aria-expanded={editing}
+            disabled={sending || busy}
+            onClick={() => setEditing((open) => !open)}
+          >
+            <Pencil size={13} aria-hidden="true" />
+            Edit Plan
+          </button>
+          {draftSaved && !editing && (
+            <span className="ai-badge" data-testid="plan-draft-badge">
+              Draft saved
+            </span>
           )}
-          <small data-testid="plan-covers">
-            {busy
-              ? "The agent is still working; you can decide when it has stopped."
-              : listed === 0
-                ? "Approving lets the agent carry the plan out; commands that change something still ask."
-                : asksEach
-                  ? `Approving lets the agent carry the plan out. Every command that changes something asks you before it runs, also the ${listed} listed above${promised ? " (the plan says so)" : askChoice === undefined ? " (you wrote a note; untick the box if the listed commands may run on this approval)" : ""}.`
-                  : `Approving lets the agent carry the plan out. The ${listed} command(s) listed above run without asking you again; anything else, and anything destructive, still asks.`}
-          </small>
-          <div className="ai-plan-actions">
-            <button
-              type="button"
-              className="ai-btn-emerald"
-              data-testid="plan-approve-btn"
+        </div>
+
+        {editing && (
+          <div className="ai-plan-feedback" data-testid="plan-feedback-panel">
+            <textarea
+              rows={2}
+              aria-label="Note to the agent"
+              value={note}
+              onChange={(e) => {
+                setNote(e.target.value);
+                if (draftSaved) setDraftSaved(false);
+              }}
+              placeholder="Describe what to change in this plan…"
               disabled={sending || busy}
-              onClick={() => decide(true)}
-            >
-              Approve and run
-            </button>
-            <button
-              type="button"
-              data-testid="plan-reject-btn"
-              disabled={sending || busy}
-              onClick={() => decide(false)}
-            >
-              {note.trim() ? "Send back with this note" : "Don't run it"}
-            </button>
+            />
+            <div className="ai-plan-actions">
+              <button
+                type="button"
+                className="ai-btn-accent"
+                data-testid="plan-reject-btn"
+                disabled={sending || busy || !note.trim()}
+                onClick={() => decide(false)}
+              >
+                Send Revision
+              </button>
+              <button
+                type="button"
+                data-testid="plan-save-draft-btn"
+                disabled={sending || busy}
+                onClick={handleSaveDraft}
+              >
+                Save Draft
+              </button>
+              <button
+                type="button"
+                className="ai-btn-danger"
+                data-testid="plan-dismiss-btn"
+                disabled={sending || busy}
+                onClick={() => decide(false, "")}
+              >
+                Reject Plan
+              </button>
+              <button
+                type="button"
+                disabled={sending}
+                onClick={() => setEditing(false)}
+              >
+                Cancel
+              </button>
+              {draftSaved && (
+                <span className="ai-badge" role="status" data-testid="plan-draft-badge">
+                  Draft saved
+                </span>
+              )}
+            </div>
           </div>
+        )}
       </div>
     </section>
   );

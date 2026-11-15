@@ -1,29 +1,39 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  AlertTriangle,
   ArrowUp,
   Check,
   ChevronDown,
+  FlaskConical,
+  GitFork,
   History,
   Maximize2,
   MessageSquare,
   Minimize2,
   Paperclip,
+  Pencil,
   Plus,
+  RotateCcw,
   Settings as SettingsIcon,
   ShieldCheck,
+  Sparkles,
   Square,
   Terminal,
   X,
 } from "lucide-react";
 import {
+  AGENT_MODES,
   SHELL_KINDS,
   type AgentMode,
+  type AgentTask,
+  type AgentToolRecord,
   type ContextSource,
   type HubRequest,
   type HubSnapshot,
   type MissionAgent,
   type ShellKind,
 } from "@shared/types/aiHub";
+import * as aiHubModule from "../../lib/aiHub";
 import {
   hubRequest,
   selectAiTerminal,
@@ -34,9 +44,23 @@ import { isWebBrowserMode } from "../../lib/webClientBridge";
 import "./aiHub.css";
 import { TaskTodos } from "./TaskTodos";
 import { PlanCard } from "./PlanCard";
-import { DEMO_MODE_SET_BY_SERVER, modes, } from "./panelShared";
-import { RichMarkdownContent } from "./RichMarkdownContent";
-import { Settings } from "./SettingsView";
+import { TerminalControl } from "./TerminalControl";
+import { AnsiLogView, DiffViewer, HighlightedCode } from "./DiffViewer";
+import type { FileRef } from "./reportRefs";
+import {
+  ALL_HUB_VIEWS,
+  DEMO_MODE_SET_BY_SERVER,
+  formatCompactTokens,
+  formatUsdCost,
+  getHubViewLabel,
+  getVisibleHubViews,
+  isLabsView,
+  modes,
+  TABULAR_NUMS_STYLE,
+  type HubViewId,
+} from "./panelShared";
+import { copyToClipboard, RichMarkdownContent } from "./RichMarkdownContent";
+import { LABS_ENABLED_STORAGE_KEY, Settings } from "./SettingsView";
 import { Memory } from "./MemoryView";
 import { Schedules } from "./SchedulesView";
 import { ChangesView } from "./ChangesView";
@@ -49,21 +73,161 @@ import { InfrastructureView } from "./InfrastructureView";
 import { AgentsAndMcpView } from "./AgentsAndMcpView";
 import { KnowledgeBaseView } from "./KnowledgeBaseView";
 
-
-type View =
-  | "Work"
-  | "Inbox"
-  | "Workforce"
-  | "Agents & MCP"
-  | "Knowledge Base"
-  | "Infrastructure"
-  | "Changes"
-  | "Memory & skills"
-  | "Schedules";
+type View = HubViewId;
 /** Where this tab remembers which conversation is open (sessionStorage: kept over a reload, not shared between tabs or people). */
 const OPEN_TASK_KEY = "sshs3.aiHub.openTask";
-const VIEWS: View[] = ["Work", "Inbox", "Workforce", "Agents & MCP", "Knowledge Base", "Infrastructure", "Changes", "Memory & skills", "Schedules"];
-type Menu = "history" | "target" | "control" | "mention" | "agent" | null;
+const VIEWS: View[] = [...ALL_HUB_VIEWS];
+type Menu = "history" | "target" | "control" | "mention" | "agent" | "views" | null;
+
+const ESC_CSI = `${String.fromCharCode(27)}[`;
+
+interface AiHubDeltaEvent {
+  taskId: string;
+  messageId?: string;
+  delta?: string;
+  textDelta?: string;
+  text?: string;
+  done?: boolean;
+  toolRecord?: AgentToolRecord;
+  tool?: AgentToolRecord;
+}
+
+interface StreamingTaskState {
+  text: string;
+  messageId?: string;
+  tools: AgentToolRecord[];
+}
+
+interface DlpRule {
+  label: string;
+  pattern: RegExp;
+}
+
+const DLP_RULES: DlpRule[] = [
+  { label: "Private key", pattern: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g },
+  { label: "AWS access key", pattern: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g },
+  { label: "API secret key", pattern: /\bsk-(?:proj-|ant-|live-|test-)?[A-Za-z0-9_-]{16,}\b/g },
+  { label: "GitHub token", pattern: /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b|\bgithub_pat_[A-Za-z0-9_]{22,}\b/g },
+  { label: "GitLab/Slack/Cloud token", pattern: /\b(?:glpat-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{20,}|npm_[A-Za-z0-9]{20,}|hf_[A-Za-z0-9]{20,}|hv[bs]\.[A-Za-z0-9._-]{16,})\b/g },
+  { label: "JWT / Bearer token", pattern: /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b|\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{16,}/g },
+  { label: "Webhook URL", pattern: /https:\/\/(?:hooks\.slack\.com\/services|outlook\.office\.com\/webhook)\/[^\s"'<>]+/g },
+  { label: "Credential assignment", pattern: /\b(?:password|passwd|secret|token|api_?key)\s*[:=]\s*["']?[A-Za-z0-9_/+.-]{8,}["']?/gi },
+];
+
+function scanSecretsForDlp(text: string): string[] {
+  if (!text) return [];
+  const found: string[] = [];
+  for (const rule of DLP_RULES) {
+    rule.pattern.lastIndex = 0;
+    if (rule.pattern.test(text)) {
+      found.push(rule.label);
+    }
+  }
+  return found;
+}
+
+function maskSecretsForDlp(text: string): string {
+  let masked = text;
+  for (const rule of DLP_RULES) {
+    rule.pattern.lastIndex = 0;
+    masked = masked.replace(rule.pattern, "[REDACTED]");
+  }
+  return masked;
+}
+
+function readLabsEnabled(): boolean {
+  try {
+    return window.localStorage.getItem(LABS_ENABLED_STORAGE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function getActiveProfileSummary(hub?: HubSnapshot): {
+  label: string;
+  provider?: string;
+  isLocal: boolean;
+} {
+  const activeId = hub?.config.activeProfileByRole?.primary;
+  const profile = activeId
+    ? (hub?.config.profiles ?? []).find((p) => p.id === activeId)
+    : undefined;
+  const provider = profile?.provider;
+  const baseUrl = (profile?.baseUrl ?? hub?.config.baseUrl ?? "").toLowerCase();
+  const model = profile?.model ?? hub?.config.model ?? "";
+  const isLocal =
+    Boolean(hub?.demoMode) ||
+    String(provider ?? "") === "ollama" ||
+    model.toLowerCase().startsWith("ollama") ||
+    baseUrl.includes("localhost") ||
+    baseUrl.includes("127.0.0.1") ||
+    baseUrl.includes("::1");
+  return {
+    label: profile?.name || model || "Default profile",
+    provider,
+    isLocal,
+  };
+}
+
+function getTaskUsageSummary(task?: AgentTask): { totalTokens: number; costUsd: number } {
+  if (!task) return { totalTokens: 0, costUsd: 0 };
+  const isRunning = ["queued", "running", "waiting"].includes(task.status);
+  const run = isRunning ? task.runUsage : undefined;
+  const inputTokens = (task.usage?.inputTokens ?? 0) + (run?.inputTokens ?? 0);
+  const outputTokens = (task.usage?.outputTokens ?? 0) + (run?.outputTokens ?? 0);
+  const costUsd = (task.usage?.costUsd ?? 0) + (run?.costUsd ?? 0);
+  return {
+    totalTokens: inputTokens + outputTokens,
+    costUsd,
+  };
+}
+
+function subscribeAiHubDelta(cb: (delta: AiHubDeltaEvent) => void): () => void {
+  const modFn = (
+    aiHubModule as unknown as {
+      onAiHubDelta?: (listener: (ev: AiHubDeltaEvent) => void) => () => void;
+    }
+  ).onAiHubDelta;
+  if (typeof modFn === "function") {
+    return modFn(cb);
+  }
+  const winFn = (
+    window.multissh as unknown as {
+      onAiHubDelta?: (listener: (ev: AiHubDeltaEvent) => void) => () => void;
+    } | undefined
+  )?.onAiHubDelta;
+  if (typeof winFn === "function") {
+    return winFn(cb);
+  }
+  return () => {};
+}
+
+function normalizeViewTarget(raw?: string): View | undefined {
+  if (!raw) return undefined;
+  if (raw === "Assistant" || raw === "Workspace" || raw === "Chat") return "Work";
+  return VIEWS.find((v) => v === raw);
+}
+
+function formatDurationBadge(ms?: number): string {
+  if (ms === undefined || !Number.isFinite(ms)) return "";
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)}s`;
+}
+
+function isDiffToolRecord(rec: AgentToolRecord): boolean {
+  const name = rec.name.toLowerCase();
+  if (name.includes("patch") || name.includes("diff") || name.includes("edit") || name.includes("write_file")) {
+    return true;
+  }
+  const text = `${rec.output}\n${rec.input}`;
+  return (text.includes("--- ") && text.includes("+++ ")) || text.includes("\n@@ ");
+}
+
+function isAnsiToolRecord(rec: AgentToolRecord): boolean {
+  if (rec.output.includes(ESC_CSI)) return true;
+  const name = rec.name.toLowerCase();
+  return name.includes("exec") || name.includes("ssh") || name.includes("terminal") || name.includes("command") || name.includes("kubectl") || name.includes("log");
+}
 
 // The same incident as the demo lab's conversation (demoWorkspace.ts), at the point where it is found.
 const DEMO_SHOWCASE_RESPONSE = [
@@ -111,30 +275,55 @@ const DEMO_SHOWCASE_RESPONSE = [
   "```",
 ].join("\n");
 
+export interface AiHubPanelProps {
+  mode: "closed" | "panel" | "hub";
+  setMode: (value: "closed" | "panel" | "hub") => void;
+  width?: number;
+  onResizeWidth?: (width: number) => void;
+  /** Optional per-tab active task id. */
+  initialTaskId?: string;
+  /** Called whenever the active task id changes inside the panel. */
+  onTaskChange?: (taskId: string) => void;
+  /** Optional terminal session id bound to this tab's AI dock. */
+  boundTerminalId?: string;
+  /** Optional compact navigation label preference. */
+  compactMode?: boolean;
+  /** Optional handler invoked when clicking a `host:/path:line` or `/path:line` citation. */
+  onOpenFileRef?: (ref: FileRef) => void;
+}
+
 export function AiHubPanel({
   mode,
   setMode,
   width,
   onResizeWidth,
-}: {
-  mode: "closed" | "panel" | "hub";
-  setMode: (value: "closed" | "panel" | "hub") => void;
-  width?: number;
-  onResizeWidth?: (width: number) => void;
-}): JSX.Element {
+  initialTaskId,
+  onTaskChange,
+  boundTerminalId,
+  compactMode: compactModeProp = false,
+  onOpenFileRef,
+}: AiHubPanelProps): JSX.Element {
   const hub = useHub();
   const selectedTerminal = useSelectedTerminal();
   const [view, setView] = useState<View>("Work");
+  const [labsEnabled, setLabsEnabled] = useState<boolean>(() => readLabsEnabled());
   const [focusInboxItem, setFocusInboxItem] = useState<string | undefined>();
   // The conversation that is open is remembered for this tab: a reload or a reconnect (the server
   // restarted, the connection dropped) opens the same conversation again, not an empty "new chat".
-  const [taskId, setTaskId] = useState<string>(() => {
+  const [taskId, setTaskIdState] = useState<string>(() => {
+    // The dock's own state is in memory and empty after a reload: an empty id from it is "nothing
+    // chosen yet", not "new chat", so what this tab remembers is opened.
+    if (initialTaskId) return initialTaskId;
     try {
       return window.sessionStorage.getItem(OPEN_TASK_KEY) ?? "";
     } catch {
       return "";
     }
   });
+  const setTaskId = (next: string): void => {
+    setTaskIdState(next);
+    onTaskChange?.(next);
+  };
   const [prompt, setPrompt] = useState("");
   /** What was just sent and has not come back in the conversation yet (the answer to the request can take a while). */
   const [sending, setSending] = useState("");
@@ -154,6 +343,13 @@ export function AiHubPanel({
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [showDemoPreview, setShowDemoPreview] = useState(false);
   const [copiedMsgId, setCopiedMsgId] = useState<string | null>(null);
+  const [streamingByTask, setStreamingByTask] = useState<Record<string, StreamingTaskState>>({});
+  const [dlpWarning, setDlpWarning] = useState<{
+    labels: string[];
+    prompt: string;
+    attachments: ContextSource[];
+    sessionId?: string;
+  } | null>(null);
   const [connection, setConnection] = useState<{
     id: string;
     generation: string;
@@ -165,10 +361,14 @@ export function AiHubPanel({
   );
   const targetSessionId = task
     ? task.target?.sessionId
-    : (connection?.id ?? selectedTerminal);
+    : (connection?.id ?? boundTerminalId ?? selectedTerminal);
   const terminal = hub?.sessions.find(
     (s) => s.id === targetSessionId && (task || s.state !== "disconnected"),
   );
+  const activeProfile = getActiveProfileSummary(hub);
+  const taskUsage = getTaskUsageSummary(task);
+  const streamingState = task ? streamingByTask[task.id] : undefined;
+  const visibleHubViews = getVisibleHubViews(labsEnabled || isLabsView(view));
   const running =
     !!task && ["queued", "running", "waiting"].includes(task.status);
   const activeView = view;
@@ -178,6 +378,8 @@ export function AiHubPanel({
   const fileInput = useRef<HTMLInputElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
   const modal = useRef<HTMLDivElement>(null);
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
   const lastText = task?.messages.at(-1)?.text;
   const pending =
     task?.changes.filter((c) => c.status === "pending").length ?? 0;
@@ -482,19 +684,100 @@ export function AiHubPanel({
         Math.min(180, Math.max(64, element.scrollHeight)) + "px";
     }
   }, [prompt, mode]);
+  const handleToggleLabs = (next: boolean): void => {
+    setLabsEnabled(next);
+    try {
+      window.localStorage.setItem(LABS_ENABLED_STORAGE_KEY, String(next));
+    } catch {
+      // ignore storage errors
+    }
+    window.dispatchEvent(new CustomEvent("sshs3:labs-changed", { detail: { labsEnabled: next } }));
+    window.dispatchEvent(new CustomEvent("sshs3:settings-updated", { detail: { labsEnabled: next } }));
+  };
+
+  // The dock is followed when it changes (another tab's conversation is chosen), not on every render:
+  // otherwise its empty id after a reload would close the conversation this tab just opened again.
+  const followedTaskId = useRef(initialTaskId);
+  useEffect(() => {
+    if (initialTaskId === followedTaskId.current) return;
+    followedTaskId.current = initialTaskId;
+    if (initialTaskId !== undefined && initialTaskId !== taskId) setTaskIdState(initialTaskId);
+  }, [initialTaskId, taskId]);
+  // The conversation remembered over a reload is told to the dock once, so that both agree.
+  useEffect(() => {
+    if (taskId && taskId !== initialTaskId) onTaskChange?.(taskId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once, on mount
+  }, []);
+
+  useEffect(() => {
+    if (boundTerminalId) {
+      selectAiTerminal(boundTerminalId);
+    }
+  }, [boundTerminalId]);
+
+  useEffect(() => {
+    return subscribeAiHubDelta((ev) => {
+      if (!ev?.taskId) return;
+      const deltaChunk = ev.delta ?? ev.textDelta ?? "";
+      const incomingTool = ev.toolRecord ?? ev.tool;
+      setStreamingByTask((prev) => {
+        if (ev.done && !deltaChunk && !ev.text && !incomingTool) {
+          if (!(ev.taskId in prev)) return prev;
+          const copy = { ...prev };
+          delete copy[ev.taskId];
+          return copy;
+        }
+        const current = prev[ev.taskId] ?? { text: "", tools: [] };
+        const nextText = ev.text !== undefined ? ev.text : `${current.text}${deltaChunk}`;
+        const nextTools = incomingTool ? [...current.tools, incomingTool] : current.tools;
+        return {
+          ...prev,
+          [ev.taskId]: {
+            text: nextText,
+            messageId: ev.messageId ?? current.messageId,
+            tools: nextTools,
+          },
+        };
+      });
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!task || !streamingByTask[task.id]) return;
+    if (!["queued", "running", "waiting"].includes(task.status)) {
+      setStreamingByTask((prev) => {
+        if (!(task.id in prev)) return prev;
+        const copy = { ...prev };
+        delete copy[task.id];
+        return copy;
+      });
+    }
+  }, [task, streamingByTask]);
+
   useEffect(() => {
     const open = (event: Event): void => {
       const detail = (
         event as CustomEvent<{
-          view?: View;
+          view?: string;
           mode?: "closed" | "panel" | "hub";
           agentId?: string;
+          taskId?: string;
+          newTask?: boolean;
           prompt?: string;
         }>
       ).detail;
       setMode(detail?.mode ?? "panel");
-      if (detail?.view) {
-        setView(detail.view);
+      const targetView = normalizeViewTarget(detail?.view);
+      if (targetView) {
+        if (isLabsView(targetView)) setLabsEnabled(true);
+        setView(targetView);
+      }
+      if (detail?.newTask) {
+        setTaskIdState("");
+        onTaskChange?.("");
+      } else if (detail?.taskId) {
+        setTaskIdState(detail.taskId);
+        onTaskChange?.(detail.taskId);
       }
       if (detail?.agentId !== undefined) {
         setSelectedAgentId(detail.agentId);
@@ -503,6 +786,46 @@ export function AiHubPanel({
         setPrompt(detail.prompt);
         setTimeout(() => composer.current?.focus(), 30);
       }
+    };
+    const askAi = (event: Event): void => {
+      const custom = event as CustomEvent<{
+        sessionId?: string;
+        text?: string;
+        label?: string;
+        prompt?: string;
+        action?: string;
+      }>;
+      custom.preventDefault();
+      const detail = custom.detail;
+      if (detail?.sessionId) {
+        selectAiTerminal(detail.sessionId);
+      }
+      if (detail?.text && detail?.label) {
+        setAttachments((old) => [
+          ...old.slice(-9),
+          {
+            id: crypto.randomUUID(),
+            label: detail.label!,
+            text: detail.text!,
+            observedAt: Date.now(),
+          },
+        ]);
+      }
+      if (detail?.prompt) {
+        setPrompt(detail.prompt);
+      }
+      if (modeRef.current === "closed") {
+        setMode("panel");
+      }
+      setView("Work");
+      setTimeout(() => composer.current?.focus(), 30);
+    };
+    const focusComposer = (): void => {
+      if (modeRef.current === "closed") {
+        setMode("panel");
+      }
+      setView("Work");
+      setTimeout(() => composer.current?.focus(), 30);
     };
     const attach = (event: Event): void => {
       const detail = (
@@ -536,12 +859,25 @@ export function AiHubPanel({
         setTimeout(() => composer.current?.focus(), 30);
       }
     };
+    const onLabsChanged = (event: Event): void => {
+      const detail = (event as CustomEvent<{ labsEnabled?: boolean }>).detail;
+      if (typeof detail?.labsEnabled === "boolean") {
+        setLabsEnabled(detail.labsEnabled);
+      } else {
+        setLabsEnabled(readLabsEnabled());
+      }
+    };
     window.addEventListener("sshs3:ai-open", open);
+    window.addEventListener("sshs3:ask-ai", askAi);
+    window.addEventListener("sshs3:focus-ai-composer", focusComposer);
     window.addEventListener("sshs3:ai-attach", attach);
+    window.addEventListener("sshs3:labs-changed", onLabsChanged);
+    window.addEventListener("sshs3:settings-updated", onLabsChanged);
     // A link from a notification: ?view=Inbox&item=…  Opened once, then taken out of the address.
     const linked = new URLSearchParams(window.location.search);
     const linkedView = VIEWS.find((v) => v === linked.get("view"));
     if (linkedView) {
+      if (isLabsView(linkedView)) setLabsEnabled(true);
       setMode("hub");
       setView(linkedView);
       setFocusInboxItem(linked.get("item") ?? undefined);
@@ -552,9 +888,13 @@ export function AiHubPanel({
     }
     return () => {
       window.removeEventListener("sshs3:ai-open", open);
+      window.removeEventListener("sshs3:ask-ai", askAi);
+      window.removeEventListener("sshs3:focus-ai-composer", focusComposer);
       window.removeEventListener("sshs3:ai-attach", attach);
+      window.removeEventListener("sshs3:labs-changed", onLabsChanged);
+      window.removeEventListener("sshs3:settings-updated", onLabsChanged);
     };
-  }, [setMode]);
+  }, [onTaskChange, setMode]);
   useEffect(() => {
     if (!settingsOpen || mode === "closed") return;
     const previous = document.activeElement as HTMLElement | null;
@@ -601,6 +941,12 @@ export function AiHubPanel({
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
+    }
+  }
+  async function copyMessage(id: string, text: string): Promise<void> {
+    if (await copyToClipboard(text)) {
+      setCopiedMsgId(id);
+      setTimeout(() => setCopiedMsgId((prev) => (prev === id ? null : prev)), 1800);
     }
   }
   function newChat(): void {
@@ -671,24 +1017,155 @@ export function AiHubPanel({
       )
       .catch(() => setError("Could not read that file."));
   }
-  async function sendMessage(sessionId?: string): Promise<void> {
-    const hasImages = attachments.some((a) => !!a.imageDataUrl);
-    if (busy || (!prompt.trim() && !hasImages)) return;
+  function activeSessionForHandoff(): { id: string; label: string } | undefined {
+    const candidate =
+      (terminal && terminal.state !== "disconnected" ? terminal : undefined) ??
+      (boundTerminalId
+        ? hub?.sessions.find((s) => s.id === boundTerminalId && s.state !== "disconnected")
+        : undefined) ??
+      (selectedTerminal
+        ? hub?.sessions.find((s) => s.id === selectedTerminal && s.state !== "disconnected")
+        : undefined);
+    if (candidate) return { id: candidate.id, label: candidate.label };
+    const fallbackId = boundTerminalId || (selectedTerminal && selectedTerminal !== "" ? selectedTerminal : "");
+    if (fallbackId) return { id: fallbackId, label: fallbackId };
+    return undefined;
+  }
+
+  function stageCommandInTerminal(cmd: string): void {
+    const session = activeSessionForHandoff();
+    const write = window.multissh?.terminalWrite;
+    if (session && typeof write === "function") {
+      void write(session.id, cmd);
+      setNotice(`Staged in ${session.label}: ${cmd}`);
+      setError("");
+      return;
+    }
+    setPrompt(cmd);
+    setNotice("Staged in AI composer (connect a terminal to stage directly).");
+    setTimeout(() => composer.current?.focus(), 20);
+  }
+
+  function runCommandInTerminal(cmd: string): boolean {
+    const session = activeSessionForHandoff();
+    const write = window.multissh?.terminalWrite;
+    if (session && typeof write === "function") {
+      const payload = cmd.endsWith("\n") ? cmd : `${cmd}\n`;
+      void write(session.id, payload);
+      setNotice(`Ran in ${session.label}: ${cmd}`);
+      setError("");
+      return true;
+    }
+    setError("No active terminal session selected. Connect or choose a terminal target first.");
+    return false;
+  }
+
+  function handleOpenFileRef(fileRef: FileRef): void {
+    if (onOpenFileRef) {
+      onOpenFileRef(fileRef);
+      return;
+    }
+    const formatted = `${fileRef.host ? `${fileRef.host}:` : ""}${fileRef.path}${fileRef.line ? `:${fileRef.line}` : ""}`;
+    window.dispatchEvent(new CustomEvent("sshs3:open-file-ref", { detail: fileRef }));
+    void copyToClipboard(formatted);
+    setNotice(`Referenced ${formatted} (copied to clipboard).`);
+  }
+
+  function cycleMode(): void {
+    const idx = AGENT_MODES.indexOf(autonomy);
+    const next = AGENT_MODES[(idx + 1) % AGENT_MODES.length];
+    setAutonomy(next);
+    setConnection(undefined);
+    setNotice(`Mode switched to ${modes[next]}.`);
+  }
+
+  async function dispatchExtraHubRequest(payload: Record<string, unknown>): Promise<HubSnapshot | undefined> {
+    return act(payload as unknown as HubRequest);
+  }
+
+  async function handleForkTask(fromMessageId?: string): Promise<void> {
+    if (!task || busy) return;
+    const result = await dispatchExtraHubRequest({
+      action: "task-fork",
+      taskId: task.id,
+      ...(fromMessageId ? { messageId: fromMessageId } : {}),
+    });
+    const forkedId = result?.reply?.started?.taskId ?? result?.tasks.at(-1)?.id;
+    if (forkedId && forkedId !== task.id) {
+      setTaskId(forkedId);
+      setNotice(`Forked conversation into ${forkedId}.`);
+    }
+  }
+
+  async function handleCompactTask(): Promise<void> {
+    if (!task || busy) return;
+    const result = await dispatchExtraHubRequest({
+      action: "compact-task",
+      taskId: task.id,
+    });
+    if (result) {
+      setNotice("Compacted conversation context.");
+    }
+  }
+
+  async function handleRestoreCheckpoint(checkpointId: string): Promise<void> {
+    if (!task || busy || !checkpointId) return;
+    const result = await dispatchExtraHubRequest({
+      action: "restore-checkpoint",
+      taskId: task.id,
+      checkpointId,
+    });
+    if (result) {
+      setNotice("Restored checkpoint.");
+    }
+  }
+
+  async function sendMessage(
+    sessionId?: string,
+    opts?: {
+      overridePrompt?: string;
+      overrideAttachments?: ContextSource[];
+      bypassDlp?: boolean;
+    },
+  ): Promise<void> {
+    const candidateAttachments = opts?.overrideAttachments ?? attachments;
+    const hasImages = candidateAttachments.some((a) => !!a.imageDataUrl);
+    const rawPrompt = opts?.overridePrompt ?? prompt;
+    if (busy || (!rawPrompt.trim() && !hasImages)) return;
     const textToSend =
-      prompt.trim() || "Look at the attached image and say what it shows.";
+      rawPrompt.trim() || "Look at the attached image and say what it shows.";
+
+    if (!opts?.bypassDlp && !activeProfile.isLocal) {
+      const combinedText = [
+        textToSend,
+        ...candidateAttachments.map((a) => a.text || ""),
+      ].join("\n");
+      const detected = scanSecretsForDlp(combinedText);
+      if (detected.length > 0) {
+        setDlpWarning({
+          labels: detected,
+          prompt: textToSend,
+          attachments: candidateAttachments,
+          sessionId,
+        });
+        return;
+      }
+    }
+
     // The field is emptied at once and the message shown as sent: the answer to the request can take
     // a while on a busy server, and a message that stays in the field looks as if nothing happened.
-    const sentAttachments = attachments;
+    setDlpWarning(null);
+    const sentAttachments = candidateAttachments;
     setSending(textToSend);
-    setPrompt("");
-    setAttachments([]);
+    if (opts?.overridePrompt === undefined) setPrompt("");
+    if (opts?.overrideAttachments === undefined) setAttachments([]);
     const result = task
       ? await act({
           action: "reply",
           taskId: task.id,
           text: textToSend,
           sessionId,
-          attachments,
+          attachments: sentAttachments,
         })
       : await act({
           action: "start",
@@ -698,7 +1175,7 @@ export function AiHubPanel({
             mode: activeAgent?.defaultMode ?? autonomy,
             agentId: activeAgent?.id,
             agentName: activeAgent?.name,
-            attachments,
+            attachments: sentAttachments,
           },
         });
     setSending("");
@@ -706,15 +1183,24 @@ export function AiHubPanel({
       // The conversation this request started: "the newest in the list" may be a background run that began meanwhile.
       if (!task) setTaskId(result.reply?.started?.taskId ?? result.tasks.at(-1)?.id ?? "");
       setConnection(undefined);
-    } else {
+    } else if (opts?.overridePrompt === undefined) {
       // It did not go: what was written is given back, unless something new has been typed meanwhile.
-      setPrompt((now) => now || prompt);
+      setPrompt((now) => now || rawPrompt);
       setAttachments((now) => (now.length ? now : sentAttachments));
     }
   }
   async function submit(): Promise<void> {
+    const trimmed = prompt.trim();
+    if (trimmed.startsWith("!") && !busy) {
+      const quickCmd = trimmed.slice(1).trim();
+      if (!quickCmd) return;
+      if (runCommandInTerminal(quickCmd)) {
+        setPrompt("");
+      }
+      return;
+    }
     const hasImages = attachments.some((a) => !!a.imageDataUrl);
-    if (busy || (!prompt.trim() && !hasImages)) return;
+    if (busy || (!trimmed && !hasImages)) return;
     if (!hub?.config.enabled) {
       if (hub?.demoMode || hub?.config.codexConnected || hub?.config.hasApiKey) {
         await act({
@@ -795,9 +1281,80 @@ export function AiHubPanel({
       <header className="ai-hub-header">
         <span className="ai-chat-title">
           <MessageSquare size={16} />
-          <strong>Chat</strong>
+          <strong>{mode === "hub" ? "AI Hub" : "Assistant"}</strong>
+          {mode === "hub" && (
+            <span className="ai-pill" title="Active workspace hub">
+              Workspace
+            </span>
+          )}
         </span>
         <div className="ai-header-actions">
+          {hub && (
+            <button
+              type="button"
+              data-testid="ai-profile-badge"
+              className="ai-badge"
+              style={{ cursor: "pointer", fontSize: 10.5, padding: "3px 8px" }}
+              title={`Active primary profile: ${activeProfile.label}${activeProfile.provider ? ` (${activeProfile.provider})` : ""}`}
+              onClick={() => setSettingsOpen(true)}
+            >
+              <Sparkles size={11} style={{ marginRight: 4 }} />
+              {activeProfile.label}
+            </button>
+          )}
+          {task && (
+            <span
+              data-testid="ai-usage-pill"
+              className="ai-badge"
+              style={{ ...TABULAR_NUMS_STYLE, fontSize: 10.5, padding: "3px 8px" }}
+              title="Live token usage and estimated USD cost for this task"
+            >
+              {formatCompactTokens(taskUsage.totalTokens)} tok
+              {taskUsage.costUsd > 0 ? ` · ${formatUsdCost(taskUsage.costUsd)}` : " · $0.00"}
+            </span>
+          )}
+          {hub && (
+            <div className="ai-menu-anchor">
+              <button
+                type="button"
+                data-testid="ai-view-switcher"
+                className="ai-badge"
+                style={{ cursor: "pointer", fontSize: 10.5, padding: "3px 8px" }}
+                aria-label="Switch hub view"
+                aria-expanded={menu === "views"}
+                onClick={() => setMenu(menu === "views" ? null : "views")}
+              >
+                <span>{getHubViewLabel(activeView, { compact: compactModeProp || mode === "panel" })}</span>
+                <ChevronDown size={11} style={{ marginLeft: 3 }} />
+              </button>
+              {menu === "views" && (
+                <div className="ai-popover" aria-label="Switch view menu">
+                  <strong>Workspace views</strong>
+                  {visibleHubViews.map((v) => (
+                    <button
+                      key={v}
+                      type="button"
+                      aria-current={activeView === v ? "true" : undefined}
+                      onClick={() => {
+                        setView(v);
+                        setMenu(null);
+                      }}
+                    >
+                      {getHubViewLabel(v, { compact: compactModeProp })}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      handleToggleLabs(!labsEnabled);
+                    }}
+                  >
+                    {labsEnabled ? "Hide Labs views" : "Show Labs views"}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
           {hub && (
             <button
               type="button"
@@ -907,28 +1464,10 @@ export function AiHubPanel({
           ))}
         </div>
       )}
-      <nav aria-label="Hub views">
-        {(
-          mode === "hub"
-            ? ([
-                "Work",
-                "Inbox",
-                "Workforce",
-                "Agents & MCP",
-                "Knowledge Base",
-                "Infrastructure",
-                "Changes",
-                "Memory & skills",
-                "Schedules",
-              ] as View[])
-            : ([
-                "Work",
-                "Inbox",
-                "Workforce",
-                "Agents & MCP",
-                "Knowledge Base",
-                "Memory & skills",
-              ] as View[])
+      <nav aria-label="Hub views" className={mode === "hub" ? "ai-nav-rail" : undefined}>
+        {(mode === "hub"
+          ? visibleHubViews
+          : (["Work", "Inbox", "Workforce", "Knowledge Base"] as View[])
         ).map((name) => {
           const badgeCount =
             name === "Inbox"
@@ -953,27 +1492,26 @@ export function AiHubPanel({
                 setMenu(null);
               }}
             >
-              <span>
-                {name === "Work"
-                  ? "Chat"
-                    : name === "Agents & MCP"
-                    ? "Agents & MCP"
-                    : name === "Knowledge Base"
-                      ? mode === "panel"
-                        ? "Runbooks"
-                        : "Knowledge base"
-                      : name === "Memory & skills"
-                        ? mode === "panel"
-                          ? "Memory"
-                          : "Memory & skills"
-                        : name}
-              </span>
+              <span>{getHubViewLabel(name, { compact: compactModeProp || mode === "panel" })}</span>
               {badgeCount > 0 && (
                 <span className="ai-nav-badge">{badgeCount}</span>
               )}
             </button>
           );
         })}
+        {mode === "hub" && (
+          <button
+            type="button"
+            data-testid="ai-hub-labs-toggle"
+            className={`ai-labs-nav-toggle ${labsEnabled ? "active" : ""}`}
+            aria-pressed={labsEnabled}
+            title="Show or hide Labs views (Memory & skills, Agents & MCP, Schedules)"
+            onClick={() => handleToggleLabs(!labsEnabled)}
+          >
+            <FlaskConical size={12} />
+            <span>{labsEnabled ? "Labs: on" : "Labs Features"}</span>
+          </button>
+        )}
       </nav>
       {error && (
         <div className="ai-error" role="alert">
@@ -1464,11 +2002,7 @@ export function AiHubPanel({
                               <button
                                 type="button"
                                 className="ai-code-btn"
-                                onClick={() => {
-                                  void navigator.clipboard?.writeText(DEMO_SHOWCASE_RESPONSE);
-                                  setCopiedMsgId("demo-showcase");
-                                  setTimeout(() => setCopiedMsgId(null), 1800);
-                                }}
+                                onClick={() => void copyMessage("demo-showcase", DEMO_SHOWCASE_RESPONSE)}
                               >
                                 {copiedMsgId === "demo-showcase" ? "Copied" : "Copy answer"}
                               </button>
@@ -1476,7 +2010,9 @@ export function AiHubPanel({
                           </div>
                           <RichMarkdownContent
                             text={DEMO_SHOWCASE_RESPONSE}
-                            onUseCommand={(cmd) => setPrompt(cmd)}
+                            onUseCommand={stageCommandInTerminal}
+                            onRunCommand={runCommandInTerminal}
+                            onOpenFileRef={handleOpenFileRef}
                           />
                         </article>
                       </div>
@@ -1499,6 +2035,27 @@ export function AiHubPanel({
                       >
                         Safety checks on
                       </span>
+                      <button
+                        type="button"
+                        className="ai-mini-btn"
+                        data-testid="ai-task-fork-btn"
+                        disabled={busy}
+                        title="Fork this conversation into a new branch"
+                        onClick={() => void handleForkTask()}
+                      >
+                        <GitFork size={11} />
+                        Fork
+                      </button>
+                      <button
+                        type="button"
+                        className="ai-mini-btn"
+                        data-testid="ai-task-compact-btn"
+                        disabled={busy || task.messages.length === 0}
+                        title="Compact older messages to save context tokens"
+                        onClick={() => void handleCompactTask()}
+                      >
+                        Compact
+                      </button>
                       {task.changes.some(
                         (c) => c.status === "pending" && c.riskLevel === "safe",
                       ) && (
@@ -1605,18 +2162,50 @@ export function AiHubPanel({
                               })}
                             </span>
                           )}
+                          {item.message.role === "user" && !running && (
+                            <>
+                              <button
+                                type="button"
+                                className="ai-code-btn"
+                                title="Edit prompt in composer"
+                                onClick={() => {
+                                  setPrompt(item.message!.text);
+                                  setTimeout(() => composer.current?.focus(), 20);
+                                }}
+                              >
+                                <Pencil size={11} /> Edit
+                              </button>
+                              <button
+                                type="button"
+                                className="ai-code-btn"
+                                title="Retry this prompt"
+                                onClick={() =>
+                                  void sendMessage(
+                                    terminal && terminal.state !== "disconnected" ? terminal.id : undefined,
+                                    { overridePrompt: item.message!.text },
+                                  )
+                                }
+                              >
+                                <RotateCcw size={11} /> Retry
+                              </button>
+                            </>
+                          )}
+                          {task && (
+                            <button
+                              type="button"
+                              className="ai-code-btn"
+                              title="Fork conversation from this message"
+                              onClick={() => void handleForkTask(item.message!.id)}
+                            >
+                              <GitFork size={11} /> Fork
+                            </button>
+                          )}
                           {item.message.role === "assistant" && (
                             <button
                               type="button"
                               className="ai-code-btn"
                               title="Copy the whole answer"
-                              onClick={() => {
-                                void navigator.clipboard?.writeText(
-                                  item.message!.text,
-                                );
-                                setCopiedMsgId(item.message!.id);
-                                setTimeout(() => setCopiedMsgId(null), 1800);
-                              }}
+                              onClick={() => void copyMessage(item.message!.id, item.message!.text)}
                             >
                               {copiedMsgId === item.message.id
                                 ? "Copied"
@@ -1666,10 +2255,9 @@ export function AiHubPanel({
                           el.classList.add("ai-change-flash");
                           setTimeout(() => el.classList.remove("ai-change-flash"), 1600);
                         }}
-                        onUseCommand={(cmd) => {
-                          setPrompt(cmd);
-                          setTimeout(() => composer.current?.focus(), 20);
-                        }}
+                        onUseCommand={stageCommandInTerminal}
+                        onRunCommand={runCommandInTerminal}
+                        onOpenFileRef={handleOpenFileRef}
                       />
                       {item.message.role === "assistant" &&
                         idx === timeline.length - 1 &&
@@ -1678,13 +2266,7 @@ export function AiHubPanel({
                             <button
                               type="button"
                               className="ai-msg-action-btn"
-                              onClick={() => {
-                                void navigator.clipboard?.writeText(
-                                  item.message!.text,
-                                );
-                                setCopiedMsgId(item.message!.id);
-                                setTimeout(() => setCopiedMsgId(null), 1800);
-                              }}
+                              onClick={() => void copyMessage(item.message!.id, item.message!.text)}
                             >
                               {copiedMsgId === item.message.id
                                 ? "Copied"
@@ -1792,11 +2374,7 @@ export function AiHubPanel({
                             <button
                               type="button"
                               className="ai-code-btn"
-                              onClick={() =>
-                                void navigator.clipboard?.writeText(
-                                  item.change!.command!,
-                                )
-                              }
+                              onClick={() => void copyToClipboard(item.change!.command!)}
                             >
                               Copy
                             </button>
@@ -1807,18 +2385,21 @@ export function AiHubPanel({
                       {item.change.kind === "file" && item.change.diff && (
                         <div className="ai-diff">
                           <strong>What changes</strong>
-                          <pre>{item.change.diff}</pre>
+                          <DiffViewer diff={item.change.diff} filePath={item.change.target} />
                         </div>
                       )}
                       {item.change.kind === "file" && !item.change.diff && (
                         <div className="ai-diff">
-                          <strong>Before</strong>
-                          <pre>{item.change.before}</pre>
-                          <strong>Proposed</strong>
-                          <pre>{item.change.after}</pre>
+                          <DiffViewer
+                            before={item.change.before ?? ""}
+                            after={item.change.after ?? ""}
+                            filePath={item.change.target}
+                          />
                         </div>
                       )}
-                      {item.change.output && <pre>{item.change.output}</pre>}
+                      {item.change.output && (
+                        <AnsiLogView text={item.change.output} maxLines={40} />
+                      )}
                       <div className="ai-change-meta">
                         <span className="ai-tool-tag">
                           {item.change.target}
@@ -1834,6 +2415,34 @@ export function AiHubPanel({
                             {"exit " + item.change.exitCode}
                           </span>
                         )}
+                        {(() => {
+                          const checkpointId = (item.change as { checkpointId?: string }).checkpointId;
+                          if (!checkpointId && !(item.change.kind === "file" && item.change.status === "completed")) {
+                            return null;
+                          }
+                          return (
+                            <button
+                              type="button"
+                              className="ai-mini-btn"
+                              data-testid={`ai-restore-checkpoint-${item.change!.id}`}
+                              disabled={busy}
+                              onClick={() => {
+                                if (checkpointId) {
+                                  void handleRestoreCheckpoint(checkpointId);
+                                } else {
+                                  void act({
+                                    action: "rollback-change",
+                                    taskId: task.id,
+                                    changeId: item.change!.id,
+                                  });
+                                }
+                              }}
+                            >
+                              <RotateCcw size={11} />
+                              Restore Checkpoint
+                            </button>
+                          );
+                        })()}
                       </div>
                       {item.change.status === "pending" && (
                         <div className="ai-approval-actions">
@@ -1881,6 +2490,110 @@ export function AiHubPanel({
                       )}
                     </details>
                   ) : null,
+                )}
+                {(() => {
+                  const combinedTools = [
+                    ...(task?.toolLog ?? []),
+                    ...(streamingState?.tools ?? []),
+                  ];
+                  if (!task || combinedTools.length === 0) return null;
+                  return (
+                    <section className="ai-tool-log" data-testid="ai-tool-log-list" aria-label="Tool execution steps">
+                      {combinedTools.map((rec, toolIdx) => {
+                        const dur = formatDurationBadge(rec.durationMs);
+                        return (
+                          <details
+                            key={`${rec.name}-${rec.at}-${toolIdx}`}
+                            className="ai-change"
+                            open={toolIdx === combinedTools.length - 1 && running}
+                          >
+                            <summary>
+                              <span className="ai-change-summary">
+                                <strong>{rec.name}</strong>
+                                {rec.target && <span className="ai-tool-tag">{rec.target}</span>}
+                                {dur && (
+                                  <small className="ai-hint" style={TABULAR_NUMS_STYLE}>
+                                    {dur}
+                                  </small>
+                                )}
+                              </span>
+                              <span
+                                className={
+                                  rec.ok === false || (rec.exitCode !== undefined && rec.exitCode !== 0)
+                                    ? "ai-badge ai-badge-danger"
+                                    : "ai-badge ai-badge-success"
+                                }
+                              >
+                                {rec.exitCode !== undefined
+                                  ? `exit ${rec.exitCode}`
+                                  : rec.ok === false
+                                    ? "failed"
+                                    : "ok"}
+                              </span>
+                            </summary>
+                            {rec.input && (
+                              <pre className="ai-code-pre">
+                                <HighlightedCode code={rec.input} lang="shell" />
+                              </pre>
+                            )}
+                            {rec.output && (
+                              isDiffToolRecord(rec) ? (
+                                <DiffViewer diff={rec.output} filePath={rec.target} />
+                              ) : isAnsiToolRecord(rec) ? (
+                                <AnsiLogView text={rec.output} maxLines={36} />
+                              ) : (
+                                <pre className="ai-code-pre">
+                                  <HighlightedCode code={rec.output} lang="text" />
+                                </pre>
+                              )
+                            )}
+                          </details>
+                        );
+                      })}
+                    </section>
+                  );
+                })()}
+                {task?.sources && task.sources.length > 0 && (
+                  <div className="ai-sources-bar" data-testid="ai-task-sources" aria-label="Context sources">
+                    <small className="ai-hint">Sources:</small>
+                    {task.sources.map((src) => (
+                      <span
+                        key={src.id}
+                        className="ai-pill"
+                        title={src.text.slice(0, 200)}
+                      >
+                        {src.label}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                {streamingState &&
+                  streamingState.text &&
+                  !task?.messages.some(
+                    (m) => m.role === "assistant" && m.text === streamingState.text,
+                  ) && (
+                  <article className="ai-message ai-message-assistant" data-testid="ai-streaming-message">
+                    <div className="ai-message-header">
+                      <small className="ai-message-author">
+                        <span className="ai-avatar-badge">{activeAgent?.icon || "A"}</span>
+                        <span>Assistant</span>
+                        <span className="ai-pill">Streaming</span>
+                      </small>
+                    </div>
+                    <RichMarkdownContent
+                      text={streamingState.text}
+                      onUseCommand={stageCommandInTerminal}
+                      onRunCommand={runCommandInTerminal}
+                      onOpenFileRef={handleOpenFileRef}
+                    />
+                  </article>
+                )}
+                {targetSessionId && (
+                  <TerminalControl
+                    sessionId={targetSessionId}
+                    hub={hub}
+                    onRequest={act}
+                  />
                 )}
                 {/* The plan comes where it was proposed: after what was said, as the last thing to read. */}
                 {task?.plan && (
@@ -2012,7 +2725,61 @@ export function AiHubPanel({
               {task && ((task.todos?.length ?? 0) > 0 || (task.hypotheses?.length ?? 0) > 0) && (
                 <div className="ai-run-dock" data-testid="ai-run-dock">
                   <HypothesisTree hypotheses={task.hypotheses} />
-                  <TaskTodos todos={task.todos} />
+                  <TaskTodos todos={task.todos} startedAt={task.createdAt} />
+                </div>
+              )}
+              {dlpWarning && (
+                <div className="ai-error" role="alert" data-testid="ai-dlp-warning">
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", justifyContent: "space-between", width: "100%" }}>
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                      <AlertTriangle size={14} />
+                      <span>
+                        Potential secret detected before sending to cloud ({dlpWarning.labels.join(", ")}).
+                      </span>
+                    </span>
+                    <span style={{ display: "inline-flex", gap: 6 }}>
+                      <button
+                        type="button"
+                        className="ai-primary"
+                        onClick={() => {
+                          const maskedPrompt = maskSecretsForDlp(dlpWarning.prompt);
+                          const maskedAttachments = dlpWarning.attachments.map((a) => ({
+                            ...a,
+                            text: maskSecretsForDlp(a.text),
+                          }));
+                          setPrompt("");
+                          setAttachments([]);
+                          void sendMessage(dlpWarning.sessionId, {
+                            overridePrompt: maskedPrompt,
+                            overrideAttachments: maskedAttachments,
+                            bypassDlp: true,
+                          });
+                        }}
+                      >
+                        Mask & Send
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPrompt("");
+                          setAttachments([]);
+                          void sendMessage(dlpWarning.sessionId, {
+                            overridePrompt: dlpWarning.prompt,
+                            overrideAttachments: dlpWarning.attachments,
+                            bypassDlp: true,
+                          });
+                        }}
+                      >
+                        Send Anyway
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setDlpWarning(null)}
+                      >
+                        Cancel
+                      </button>
+                    </span>
+                  </div>
                 </div>
               )}
               <div className="ai-composer">
@@ -2334,11 +3101,12 @@ export function AiHubPanel({
                   )}
                   <textarea
                     ref={composer}
+                    data-testid="ai-composer"
                     aria-label="Message to agent"
                     placeholder={
                       task
-                        ? "Reply in this conversation… (type / for commands, @ for clusters/nodes, paste images)"
-                        : "Ask anything to start a new conversation… (type / for commands, @ for clusters/nodes, or paste images)"
+                        ? "Reply in this conversation… (type !cmd to run in terminal, / for commands, @ for context)"
+                        : "Ask anything to start a new conversation… (type !cmd to run in terminal, / for commands, Shift+Tab to cycle mode)"
                     }
                     value={prompt}
                     onChange={(e) => {
@@ -2361,6 +3129,11 @@ export function AiHubPanel({
                       }
                     }}
                     onKeyDown={(e) => {
+                      if (e.key === "Tab" && e.shiftKey && !e.nativeEvent.isComposing) {
+                        e.preventDefault();
+                        cycleMode();
+                        return;
+                      }
                       if (activeSlashSuggestions.length > 0) {
                         if (e.key === "ArrowDown") {
                           e.preventDefault();
@@ -2477,53 +3250,37 @@ export function AiHubPanel({
                   </div>
                 </div>
                 <div className="ai-composer-footer">
-                  <div className="ai-menu-anchor">
-                    <button
-                      className="ai-footer-chip"
-                      aria-label="Chat permissions"
-                      title="Permissions for this chat"
-                      disabled={!!task}
-                      aria-expanded={menu === "control"}
-                      onClick={() =>
-                        setMenu(menu === "control" ? null : "control")
-                      }
-                    >
-                      <ShieldCheck size={12} />
-                      {modes[task?.mode ?? autonomy]}
-                      {!task && <ChevronDown size={11} />}
-                    </button>
-                    {menu === "control" && (
-                      <div
-                        className="ai-popover"
-                        aria-label="Choose permissions"
-                      >
-                        <strong>How should I work?</strong>
-                        {(
-                          ["advice", "assisted", "autonomous"] as AgentMode[]
-                        ).map((value) => (
-                          <button
-                            key={value}
-                            aria-current={
-                              value === autonomy ? "true" : undefined
-                            }
-                            onClick={() => {
-                              setAutonomy(value);
-                              setConnection(undefined);
-                              setMenu(null);
-                            }}
-                          >
-                            {modes[value]}
-                            <small>
-                              {value === "advice"
-                                ? "Discuss without running commands"
+                  <div className="ai-mode-pills" role="group" aria-label="Agent mode">
+                    {AGENT_MODES.map((value) => {
+                      const activeMode = (task?.mode ?? autonomy) === value;
+                      return (
+                        <button
+                          key={value}
+                          type="button"
+                          data-testid={`ai-mode-pill-${value}`}
+                          className={`ai-footer-chip ${activeMode ? "ai-context-chip-active" : ""}`}
+                          aria-pressed={activeMode}
+                          disabled={!!task}
+                          title={
+                            value === "advice"
+                              ? "Advice: discuss without running commands"
+                              : value === "plan"
+                                ? "Plan: propose steps for approval before changing anything"
                                 : value === "assisted"
-                                  ? "Approve commands and changes first"
-                                  : "This terminal · 20 actions / 15 minutes"}
-                            </small>
-                          </button>
-                        ))}
-                      </div>
-                    )}
+                                  ? "Assisted: approve commands and changes first"
+                                  : "Auto: runs commands on this terminal automatically"
+                          }
+                          onClick={() => {
+                            setAutonomy(value);
+                            setConnection(undefined);
+                            setMenu(null);
+                          }}
+                        >
+                          {value === (task?.mode ?? autonomy) && <ShieldCheck size={11} />}
+                          <span>{modes[value]}</span>
+                        </button>
+                      );
+                    })}
                   </div>
                   <button
                     className="ai-footer-chip ai-model-chip"
@@ -2595,6 +3352,7 @@ export function AiHubPanel({
               }}
               onOpenView={(next) => setView(next)}
               focusItemId={focusInboxItem}
+              onRequest={act}
             />
           )}
           {activeView === "Workforce" && (
@@ -2628,6 +3386,16 @@ export function AiHubPanel({
             <KnowledgeBaseView
               hub={hub}
               act={act}
+              request={hubRequest}
+              onOpenFileRef={handleOpenFileRef}
+              onRunStepInTerminal={(command) => {
+                void runCommandInTerminal(command);
+              }}
+              onAskAiStep={(stepPrompt) => {
+                setPrompt(stepPrompt);
+                setView("Work");
+                setTimeout(() => composer.current?.focus(), 30);
+              }}
               onAttachDoc={(doc) => {
                 const slug = doc.title.toLowerCase().replace(/[^a-z0-9]+/g, "-");
                 setAttachments((old) => [
@@ -2686,6 +3454,7 @@ export function AiHubPanel({
           {activeView === "Changes" && (
             <ChangesView
               hub={hub}
+              request={hubRequest}
               onOpenTask={(id) => {
                 setTaskId(id);
                 setView("Work");
@@ -2696,6 +3465,11 @@ export function AiHubPanel({
             <Memory
               hub={hub}
               act={act}
+              request={hubRequest}
+              onOpenTask={(id) => {
+                setTaskId(id);
+                setView("Work");
+              }}
               suggestion={
                 task?.messages
                   .filter((m) => m.role === "assistant")
@@ -2745,7 +3519,12 @@ export function AiHubPanel({
                 {error}
               </p>
             )}
-            <Settings hub={hub} act={act} />
+            <Settings
+              hub={hub}
+              act={act}
+              labsEnabled={labsEnabled}
+              onToggleLabs={handleToggleLabs}
+            />
           </div>
         </div>
       )}

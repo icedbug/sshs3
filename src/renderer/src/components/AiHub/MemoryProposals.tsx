@@ -1,21 +1,90 @@
 import { useState } from "react";
-import type {
-  HubRequest,
-  HubSnapshot,
-  MemoryProposal,
+import {
+  parseMemoryScope,
+  type HubRequest,
+  type HubSnapshot,
+  type MemoryProposal,
 } from "@shared/types/aiHub";
+import { DiffViewer } from "./DiffViewer";
 
 /** The panel's request helper: it reports a failed request in the panel itself and resolves with nothing. */
 type Act = (request: HubRequest) => Promise<HubSnapshot | undefined>;
 
-const scopeLabel = (scope: string): string =>
-  scope === "workspace"
-    ? "the whole workspace"
-    : scope.startsWith("server:")
-      ? `server ${scope.slice("server:".length)}`
-      : scope.startsWith("cluster:")
-        ? `cluster ${scope.slice("cluster:".length)}`
-        : scope;
+export type ProposalRiskLevel = "safe" | "medium" | "high";
+
+export type MemoryProposalView = MemoryProposal & {
+  sourceTaskId?: string;
+  evidenceCount?: number;
+  risk?: ProposalRiskLevel | "low" | "critical" | "destructive";
+  previousValue?: string;
+  proposedValue?: string;
+};
+
+const HIGH_RISK_RE =
+  /\b(rm\s+-rf|mkfs|dd\s+if=|drop\s+(table|database)|chmod\s+777|kill\s+-9|shutdown|reboot|format-volume|clear-disk)\b|--force\b/i;
+
+/** Classifies a proposal's operational risk for batch-approval and badge display. */
+export function assessProposalRisk(proposal: MemoryProposalView): ProposalRiskLevel {
+  if (proposal.risk === "critical" || proposal.risk === "destructive" || proposal.risk === "high") {
+    return "high";
+  }
+  if (proposal.risk === "medium") return "medium";
+  if (proposal.risk === "safe" || proposal.risk === "low") return "safe";
+
+  const content = `${proposal.title}\n${proposal.proposedValue ?? proposal.text}`;
+  if (HIGH_RISK_RE.test(content)) return "high";
+  if (proposal.op === "update" || proposal.kind === "skill") return "medium";
+  return "safe";
+}
+
+/** True when a proposal is safe for one-click batch approval. */
+export function isProposalSafe(proposal: MemoryProposalView): boolean {
+  return assessProposalRisk(proposal) === "safe";
+}
+
+function deriveSourceTaskId(proposal: MemoryProposalView): string | undefined {
+  if (proposal.sourceTaskId?.trim()) return proposal.sourceTaskId.trim();
+  if (proposal.sourceId.startsWith("task:")) {
+    const id = proposal.sourceId.slice("task:".length).trim();
+    return id || undefined;
+  }
+  return undefined;
+}
+
+function deriveEvidenceCount(proposal: MemoryProposalView): number {
+  if (typeof proposal.evidenceCount === "number" && Number.isFinite(proposal.evidenceCount)) {
+    return Math.max(0, proposal.evidenceCount);
+  }
+  const raw = proposal.evidence?.trim();
+  if (!raw) return 0;
+  return raw
+    .split(/[;\n]+/)
+    .map((s) => s.trim())
+    .filter(Boolean).length;
+}
+
+const scopeLabel = (scope: string): string => {
+  const trimmed = scope.trim();
+  if (trimmed === "workspace" || trimmed === "workspace:all") return "the whole workspace";
+  if (trimmed.toLowerCase().startsWith("host:")) return `host ${trimmed.slice(5).trim()}`;
+  const parsed = parseMemoryScope(trimmed);
+  switch (parsed.kind) {
+    case "server":
+      return `server ${parsed.value ?? ""}`;
+    case "cluster":
+      return `cluster ${parsed.value ?? ""}`;
+    case "target":
+      return `target ${parsed.value ?? ""}`;
+    case "tag":
+      return `tag ${parsed.value ?? ""}`;
+    case "env":
+      return `env ${parsed.value ?? ""}`;
+    case "personal":
+      return "personal";
+    default:
+      return trimmed;
+  }
+};
 
 /**
  * Memories the assistant suggests after reading a finished session or the
@@ -29,17 +98,53 @@ export function MemoryProposals({
   hub: HubSnapshot;
   act: Act;
 }): JSX.Element {
-  const proposals = hub.memoryProposals ?? [];
+  const proposals = (hub.memoryProposals ?? []) as MemoryProposalView[];
   const autoSave = hub.preferences?.autoSaveMemories !== false;
   const last = hub.lastMemoryDistill;
   const [reading, setReading] = useState(false);
+  const [batchBusy, setBatchBusy] = useState(false);
   const busy = reading || hub.memoryDistillRunning === true;
+
+  const pending = proposals.filter((p) => !p.appliedMemoryId);
+  const safePending = pending.filter((p) => {
+    const proposedText = (p.proposedValue ?? p.text).trim();
+    return isProposalSafe(p) && Boolean(p.title.trim()) && Boolean(proposedText);
+  });
 
   const readActivity = (): void => {
     setReading(true);
     void act({ action: "memory-distill-activity" }).finally(() =>
       setReading(false),
     );
+  };
+
+  const approveSafeBatch = async (): Promise<void> => {
+    if (safePending.length === 0 || batchBusy) return;
+    setBatchBusy(true);
+    try {
+      for (const p of safePending) {
+        await act({
+          action: "memory-proposal-accept",
+          id: p.id,
+          title: p.title.trim(),
+          text: (p.proposedValue ?? p.text).trim(),
+        });
+      }
+    } finally {
+      setBatchBusy(false);
+    }
+  };
+
+  const rejectAllPending = async (): Promise<void> => {
+    if (pending.length === 0 || batchBusy) return;
+    setBatchBusy(true);
+    try {
+      for (const p of pending) {
+        await act({ action: "memory-proposal-reject", id: p.id });
+      }
+    } finally {
+      setBatchBusy(false);
+    }
   };
 
   return (
@@ -94,6 +199,32 @@ export function MemoryProposals({
         </button>
       </div>
 
+      {pending.length > 0 && (
+        <div
+          className="ai-card-actions"
+          data-testid="memory-proposals-batch"
+          style={{ marginTop: 8 }}
+        >
+          <button
+            type="button"
+            className="ai-btn-emerald"
+            data-testid="memory-approve-safe-btn"
+            disabled={batchBusy || safePending.length === 0}
+            onClick={() => void approveSafeBatch()}
+          >
+            Approve safe ({safePending.length})
+          </button>
+          <button
+            type="button"
+            data-testid="memory-reject-all-btn"
+            disabled={batchBusy}
+            onClick={() => void rejectAllPending()}
+          >
+            Reject all ({pending.length})
+          </button>
+        </div>
+      )}
+
       {last && proposals.length === 0 && (
         <p className="ai-hint" data-testid="memory-distill-status">
           {last.error
@@ -109,7 +240,7 @@ export function MemoryProposals({
       )}
 
       {proposals.map((proposal) => (
-        <ProposalRow key={proposal.id} proposal={proposal} act={act} />
+        <ProposalRow key={proposal.id} proposal={proposal} act={act} batchBusy={batchBusy} />
       ))}
     </article>
   );
@@ -118,15 +249,23 @@ export function MemoryProposals({
 function ProposalRow({
   proposal,
   act,
+  batchBusy,
 }: {
-  proposal: MemoryProposal;
+  proposal: MemoryProposalView;
   act: Act;
+  batchBusy: boolean;
 }): JSX.Element {
-  const [text, setText] = useState(proposal.text);
+  const initialProposed = proposal.proposedValue ?? proposal.text;
+  const previousValue = proposal.previousValue ?? proposal.previousText;
+  const [text, setText] = useState(initialProposed);
   const [title, setTitle] = useState(proposal.title);
   const [busy, setBusy] = useState(false);
   // Already saved by the assistant: a record of what was learned, which can be undone.
   const applied = Boolean(proposal.appliedMemoryId);
+  const risk = assessProposalRisk(proposal);
+  const sourceTaskId = deriveSourceTaskId(proposal);
+  const evidenceCount = deriveEvidenceCount(proposal);
+  const disabled = busy || batchBusy;
 
   const decide = (request: HubRequest): void => {
     setBusy(true);
@@ -160,27 +299,62 @@ function ProposalRow({
                 ? "New skill"
                 : "New memory"}
         </span>
+        <span
+          className={`ai-badge ${
+            risk === "high"
+              ? "ai-badge-danger"
+              : risk === "medium"
+                ? "ai-badge-mode"
+                : "ai-badge-success"
+          }`}
+          data-testid={`memory-proposal-risk-${proposal.id}`}
+        >
+          risk: {risk}
+        </span>
         <small>Applies to {scopeLabel(proposal.scope)}</small>
         <small style={{ opacity: 0.75 }}>· from {proposal.sourceTitle}</small>
+      </div>
+      <div
+        className="ai-tags"
+        data-testid={`memory-proposal-provenance-${proposal.id}`}
+      >
+        {sourceTaskId && (
+          <span className="ai-badge">task:{sourceTaskId}</span>
+        )}
+        <span className="ai-badge">
+          {evidenceCount} evidence
+        </span>
+        <small className="ai-muted">
+          {new Date(proposal.createdAt).toLocaleString()}
+        </small>
       </div>
       <input
         aria-label="Title"
         value={title}
         onChange={(e) => setTitle(e.target.value)}
-        disabled={busy || applied}
+        disabled={disabled || applied}
       />
       <textarea
         aria-label="Text"
         value={text}
         onChange={(e) => setText(e.target.value)}
         rows={3}
-        disabled={busy || applied}
+        disabled={disabled || applied}
       />
-      {proposal.previousText && (
-        <small data-testid="memory-proposal-previous">
-          {applied ? "Replaced" : "Replaces"}: <span style={{ opacity: 0.8 }}>{proposal.previousText}</span>
-        </small>
-      )}
+      <div data-testid={`memory-proposal-diff-${proposal.id}`}>
+        {previousValue !== undefined && (
+          <small data-testid="memory-proposal-previous">
+            {applied ? "Replaced" : "Replaces"}:{" "}
+            <span className="sr-only">{previousValue}</span>
+          </small>
+        )}
+        <DiffViewer
+          before={previousValue ?? ""}
+          after={text}
+          filePath={title || proposal.title}
+          defaultMode="unified"
+        />
+      </div>
       <small>
         Evidence: <span style={{ opacity: 0.8 }}>{proposal.evidence}</span>
       </small>
@@ -188,7 +362,7 @@ function ProposalRow({
         <div style={{ display: "flex", gap: 6 }}>
           <button
             type="button"
-            disabled={busy}
+            disabled={disabled}
             onClick={() =>
               decide({ action: "memory-proposal-undo", id: proposal.id })
             }
@@ -197,7 +371,7 @@ function ProposalRow({
           </button>
           <button
             type="button"
-            disabled={busy}
+            disabled={disabled}
             title="Keep the memory and remove this entry from the list"
             onClick={() =>
               decide({ action: "memory-proposal-reject", id: proposal.id })
@@ -211,7 +385,7 @@ function ProposalRow({
           <button
             type="button"
             className="ai-btn-emerald"
-            disabled={busy || !text.trim() || !title.trim()}
+            disabled={disabled || !text.trim() || !title.trim()}
             onClick={() =>
               decide({
                 action: "memory-proposal-accept",
@@ -225,7 +399,7 @@ function ProposalRow({
           </button>
           <button
             type="button"
-            disabled={busy}
+            disabled={disabled}
             onClick={() =>
               decide({ action: "memory-proposal-reject", id: proposal.id })
             }

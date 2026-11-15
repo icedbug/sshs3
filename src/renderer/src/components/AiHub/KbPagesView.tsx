@@ -9,7 +9,96 @@ import type {
 import { ConfirmButton } from "./ConfirmButton";
 import { KINDS, emptyPage, type PageDraft } from "./kbPageDraft";
 import { type Act } from "./panelShared";
+import { decodeFileRefHref, extractFileRefs, linkFileRefs, type FileRef } from "./reportRefs";
 import { RichMarkdownContent } from "./RichMarkdownContent";
+
+export interface KbPageStarterTemplate {
+  id: string;
+  label: string;
+  description: string;
+  kind: KbPageKind;
+  title: string;
+  when: string;
+  keys: string[];
+  body: string;
+}
+
+export const KB_PAGE_STARTER_TEMPLATES: KbPageStarterTemplate[] = [
+  {
+    id: "linux-incident-runbook",
+    label: "Linux Incident Runbook",
+    description: "Triage CPU, RAM/OOM, disk saturation, and failing systemd units.",
+    kind: "procedure",
+    title: "Linux Incident Triage Runbook",
+    when: "When a Linux host shows high load, OOM kills, disk saturation, or failed systemd units",
+    keys: ["oom-killer", "journalctl -p err", "ENOSPC", "systemctl --failed"],
+    body: [
+      "## When to use this",
+      "Use when an alert fires for CPU saturation, memory pressure, disk full, or a crashed service.",
+      "",
+      "## Steps",
+      "1. Check failed services and recent errors: `systemctl --failed` and `journalctl -p err -n 100 --no-pager`",
+      "2. Inspect kernel OOM and hardware events: `dmesg -T | grep -i -E 'oom|error|warn' | tail -n 50`",
+      "3. Check filesystem and inode usage: `df -hT && df -Pi`",
+      "4. Inspect listening sockets and logs in `/var/log/syslog:1`",
+      "",
+      "## Verify",
+      "- `systemctl is-active <service>` reports `active`",
+      "- PSI pressure in `/proc/pressure/memory:1` stabilizes below threshold",
+      "",
+      "## Do not",
+      "- Do not restart stateful databases without checking replication lag first.",
+    ].join("\n"),
+  },
+  {
+    id: "postgres-failover-sop",
+    label: "PostgreSQL Failover SOP",
+    description: "Verify primary health, check replication lag, and safely promote a standby.",
+    kind: "procedure",
+    title: "PostgreSQL Failover SOP",
+    when: "When the PostgreSQL primary is unreachable or failover/promotion is required",
+    keys: ["pg_isready", "pg_stat_replication", "patroni", "failover"],
+    body: [
+      "## When to use this",
+      "Follow this procedure before promoting a standby or failing over PostgreSQL traffic.",
+      "",
+      "## Steps",
+      "1. Check primary reachability: `pg_isready -h pg-primary -p 5432`",
+      "2. Inspect Patroni / cluster state and `/etc/postgresql/16/main/postgresql.conf:1`",
+      "3. Verify replica replay lag before promotion: `SELECT now() - pg_last_xact_replay_timestamp();`",
+      "4. Promote healthy replica or run `patronictl switchover` after confirming fencing.",
+      "",
+      "## Verify",
+      "- Confirm read/write queries succeed on the new primary and old primary is fenced.",
+      "",
+      "## Do not",
+      "- Never force-promote without fencing the old primary (split-brain risk).",
+    ].join("\n"),
+  },
+  {
+    id: "cluster-architecture-map",
+    label: "Cluster Architecture Map",
+    description: "Document hosts, VIPs, storage mounts, and upstream service dependencies.",
+    kind: "system",
+    title: "Cluster Architecture Map",
+    when: "When orienting on cluster topology, ingress VIPs, databases, and storage dependencies",
+    keys: ["topology", "vip", "ingress", "dependencies"],
+    body: [
+      "## What it is",
+      "Reference map of cluster nodes, network ingress, and stateful backends.",
+      "",
+      "## Where it runs",
+      "- Ingress / Reverse proxy: `/etc/nginx/nginx.conf:1`",
+      "- Application tier: systemd units under `/etc/systemd/system`",
+      "",
+      "## What depends on it",
+      "- Upstream APIs -> PostgreSQL primary/replica -> Shared block/S3 storage",
+      "",
+      "## What normal looks like",
+      "- All VIPs bound, zero failed systemd units, replication lag < 1s.",
+    ].join("\n"),
+  },
+];
 
 const ago = (at: number): string => {
   const mins = Math.max(0, Math.round((Date.now() - at) / 60_000));
@@ -18,6 +107,15 @@ const ago = (at: number): string => {
   if (mins < 1440) return `${Math.round(mins / 60)} h ago`;
   return `${Math.round(mins / 1440)} d ago`;
 };
+
+const LINT_FINDING_KINDS = new Set<KbFinding["kind"]>([
+  "stale",
+  "dead-target",
+  "lost-source",
+  "source-changed",
+  "source-unreachable",
+  "unused",
+]);
 
 /** The pages agents read: what the assistant wrote from the sources and from finished work, and what people wrote. */
 export function KbPages({
@@ -29,6 +127,8 @@ export function KbPages({
   open,
   setOpen,
   onOpenSource,
+  onOpenFileRef,
+  onImportMarkdown,
 }: {
   hub: HubSnapshot;
   act: Act;
@@ -38,10 +138,14 @@ export function KbPages({
   open: KbPage | undefined;
   setOpen: (p: KbPage | undefined) => void;
   onOpenSource: (docId: string) => void;
+  onOpenFileRef?: (ref: FileRef) => void;
+  onImportMarkdown?: () => void;
 }): JSX.Element {
   const [problem, setProblem] = useState("");
   const [busy, setBusy] = useState("");
+  const [openedRefNotice, setOpenedRefNotice] = useState<string>("");
   const pages = hub.kbPages ?? [];
+  const findings = hub.kbFindings ?? [];
   const names = Array.from(
     new Set((hub.workspaceServers ?? []).flatMap((s) => [s.cluster, s.name]).filter((x): x is string => Boolean(x))),
   );
@@ -54,6 +158,24 @@ export function KbPages({
       return undefined;
     }
   };
+
+  const handleFileRefClick = (ref: FileRef): void => {
+    setOpenedRefNotice(ref.raw);
+    onOpenFileRef?.(ref);
+  };
+
+  const pageHealthSummary = (() => {
+    let healthy = 0;
+    let unverified = 0;
+    let lintWarnings = 0;
+    for (const p of pages) {
+      const pFindings = findings.filter((f) => f.pageId === p.id || f.otherPageId === p.id);
+      if (p.unverified) unverified++;
+      if (pFindings.length > 0) lintWarnings++;
+      if (!p.unverified && pFindings.length === 0) healthy++;
+    }
+    return { healthy, unverified, lintWarnings };
+  })();
 
   return (
     <>
@@ -70,6 +192,28 @@ export function KbPages({
         to do. The assistant writes them from the sources you drop in and from what was confirmed in finished work;
         a page you edit yourself is added to from then on, never rewritten.
       </p>
+      {pages.length > 0 && (
+        <div className="ai-tags" data-testid="kb-pages-health" style={{ marginBottom: 8 }}>
+          <span className="ai-badge ai-badge-success">
+            {pageHealthSummary.healthy} healthy
+          </span>
+          {pageHealthSummary.unverified > 0 && (
+            <span className="ai-badge ai-badge-danger">
+              {pageHealthSummary.unverified} unverified
+            </span>
+          )}
+          {pageHealthSummary.lintWarnings > 0 && (
+            <span className="ai-badge ai-badge-mode">
+              {pageHealthSummary.lintWarnings} lint notice{pageHealthSummary.lintWarnings === 1 ? "" : "s"}
+            </span>
+          )}
+        </div>
+      )}
+      {openedRefNotice && (
+        <p className="ai-hint" role="status" data-testid="kb-page-ref-status">
+          Opened reference: <code className="ai-mono">{openedRefNotice}</code>
+        </p>
+      )}
       {problem && <p className="ai-error">{problem}</p>}
 
       {draft && (
@@ -193,10 +337,84 @@ export function KbPages({
       )}
 
       {pages.length === 0 && !draft && (
-        <p className="ai-empty">
-          No pages yet. Drop in what your team already has and the assistant writes the first ones: how a system is
-          set up, a procedure, how to troubleshoot a symptom. Or write one yourself.
-        </p>
+        <section className="ai-card" data-testid="kb-pages-starters" aria-label="Knowledge base page starter templates">
+          <strong>Start with a 1-click knowledge page</strong>
+          <p className="ai-hint">
+            Agents read these pages before acting. Pick a starter template to create your first page immediately, or
+            import existing Markdown runbooks.
+          </p>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))",
+              gap: 8,
+              marginTop: 8,
+            }}
+          >
+            {KB_PAGE_STARTER_TEMPLATES.map((tpl) => (
+              <div
+                key={tpl.id}
+                style={{
+                  padding: 10,
+                  borderRadius: 8,
+                  border: "1px solid var(--ai-line, rgba(148, 163, 184, 0.2))",
+                  display: "grid",
+                  gap: 6,
+                }}
+              >
+                <div>
+                  <strong>{tpl.label}</strong>
+                  <p className="ai-hint" style={{ margin: "4px 0 0" }}>
+                    {tpl.description}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="ai-btn-accent"
+                  data-testid={`kb-page-starter-${tpl.id}`}
+                  onClick={() =>
+                    void act({
+                      action: "kb-page-save",
+                      page: {
+                        kind: tpl.kind,
+                        title: tpl.title,
+                        when: tpl.when,
+                        body: tpl.body,
+                        targets: [],
+                        keys: tpl.keys,
+                      },
+                    })
+                  }
+                >
+                  Use {tpl.label}
+                </button>
+              </div>
+            ))}
+            <div
+              style={{
+                padding: 10,
+                borderRadius: 8,
+                border: "1px dashed var(--ai-line-strong, rgba(148, 163, 184, 0.35))",
+                display: "grid",
+                gap: 6,
+              }}
+            >
+              <div>
+                <strong>Import Markdown</strong>
+                <p className="ai-hint" style={{ margin: "4px 0 0" }}>
+                  Upload local `.md` runbooks or start a blank page from a template.
+                </p>
+              </div>
+              <button
+                type="button"
+                data-testid="kb-page-starter-import-markdown"
+                onClick={() => (onImportMarkdown ? onImportMarkdown() : setDraft(emptyPage()))}
+              >
+                Import Markdown
+              </button>
+            </div>
+          </div>
+        </section>
       )}
 
       {KINDS.map((group) => {
@@ -212,6 +430,11 @@ export function KbPages({
               const last = p.history[0];
               const canUndo = last && (Boolean(last.previous) || (p.revision === 1 && p.history.length === 1));
               const docSources = p.sources.filter((s) => !s.docId.startsWith("task:"));
+              const pageFindings = findings.filter((f) => f.pageId === p.id || f.otherPageId === p.id);
+              const hasContradiction = pageFindings.some((f) => f.kind === "contradiction");
+              const hasRollback = pageFindings.some((f) => f.kind === "rolled-back");
+              const lintFinding = pageFindings.find((f) => LINT_FINDING_KINDS.has(f.kind));
+              const openFileRefs = isOpen ? extractFileRefs(open.body) : [];
               return (
                 <article className="ai-card ai-page" key={p.id} data-testid={`kb-page-${p.id}`}>
                   <div className="ai-card-head">
@@ -251,6 +474,30 @@ export function KbPages({
                           unverified
                         </span>
                       ) : null}
+                      {hasContradiction && (
+                        <span className="ai-badge ai-badge-danger" title="Another page states something incompatible">
+                          contradiction
+                        </span>
+                      )}
+                      {hasRollback && (
+                        <span className="ai-badge ai-badge-danger" title="A run using this page had to be rolled back">
+                          rolled back
+                        </span>
+                      )}
+                      {lintFinding && (
+                        <span className="ai-badge ai-badge-mode" title={lintFinding.text}>
+                          lint: {lintFinding.kind}
+                        </span>
+                      )}
+                      {!p.unverified && pageFindings.length === 0 && (
+                        <span
+                          className="ai-badge ai-badge-success"
+                          data-testid={`kb-page-health-${p.id}`}
+                          title="No lint or verification issues found"
+                        >
+                          healthy
+                        </span>
+                      )}
                       {(p.alerts ?? []).map((a) => (
                         <span key={a} className="ai-badge" title="The page a run worked from on a ticket for this alert">
                           alert: {a}
@@ -259,7 +506,18 @@ export function KbPages({
                     </div>
                   </div>
                   {isOpen ? (
-                    <div className="ai-doc-body">
+                    <div
+                      className="ai-doc-body"
+                      onClick={(e) => {
+                        const target = e.target as HTMLElement | null;
+                        const anchor = target?.closest?.('a[href^="#file-"]');
+                        if (!anchor) return;
+                        const decoded = decodeFileRefHref(anchor.getAttribute("href") ?? undefined);
+                        if (!decoded) return;
+                        e.preventDefault();
+                        handleFileRefClick(decoded);
+                      }}
+                    >
                       {open.unverified && (
                         <p className="ai-error" data-testid={`kb-unverified-${p.id}`}>
                           {open.unverified.commands.length > 0 && (
@@ -277,7 +535,23 @@ export function KbPages({
                           Check them against the system; agents are told about this when they open the page.
                         </p>
                       )}
-                      <RichMarkdownContent text={open.body} />
+                      <RichMarkdownContent text={linkFileRefs(open.body)} />
+                      {openFileRefs.length > 0 && (
+                        <div className="ai-tags" data-testid={`kb-page-refs-${p.id}`} style={{ marginTop: 8 }}>
+                          <small className="ai-muted">Refs:</small>
+                          {openFileRefs.map((ref) => (
+                            <button
+                              key={ref.raw}
+                              type="button"
+                              className="ai-chip ai-mono"
+                              title={ref.host ? `Open ${ref.path} on ${ref.host}` : `Open ${ref.path}`}
+                              onClick={() => handleFileRefClick(ref)}
+                            >
+                              {ref.raw}
+                            </button>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   ) : null}
                   {(p.keys ?? []).length > 0 && (
@@ -442,7 +716,14 @@ export function KbReview({
         What agents asked and found nothing on, pages about systems that are gone, pages nothing backs any more.
         Agents act on the pages, so what is wrong here goes wrong there.
       </p>
-      {findings.length === 0 && <p className="ai-empty">Nothing to look at right now.</p>}
+      {findings.length === 0 && (
+        <div className="ai-card" data-testid="kb-review-healthy">
+          <div className="ai-tags">
+            <span className="ai-badge ai-badge-success">All checks passing</span>
+            <small className="ai-muted">No gaps, contradictions, stale pages, or broken sources to review right now.</small>
+          </div>
+        </div>
+      )}
       <div className="ai-rows" data-testid="kb-findings" hidden={findings.length === 0}>
         {findings.map((f) => (
           <div className="ai-row ai-finding" key={f.id} data-testid={`kb-finding-${f.kind}`}>

@@ -1,25 +1,33 @@
 import crypto from "node:crypto";
 import type {
+  AgentChangeApproval,
+  AgentMode,
   AgentPlan,
   AgentPlanStep,
   AgentTask,
   AgentTodo,
+  ClusterSafetyPolicy,
+  SafetyPolicyConfig,
+  WorkspaceActivityEvent,
 } from "../../../shared/types/aiHub";
 import { APP_OPS, type AppOpClass } from "./AppGuard";
-import { analyzeCommandSafety } from "./CommandSafetyService";
+import { analyzeCommandSafety, isProdTag } from "./CommandSafetyService";
 import { boundedContext, clip, exactHash, maskContext } from "./privacy";
 
 /**
  * Plan first, then act. For a change that is risky or that the user asked to
- * see planned, the agent proposes a structured plan, a second read-only run
- * looks for what is wrong with it, and the user decides. While a plan waits,
- * and in a conversation where a plan was asked for and none is approved yet,
- * nothing that changes a system runs. None of this calls a model itself.
+ * see planned (via `mode === "plan"` or `/plan`), the agent proposes a
+ * structured plan, a second read-only run looks for what is wrong with it, and
+ * the user decides. While a plan waits, and in a conversation where a plan was
+ * asked for and none is approved yet, nothing that changes a system runs. None
+ * of this calls a model itself.
  */
 
 /** `/plan` as a word of its own in the request asks for a plan before any change. */
 const PLAN_FIRST = /(?:^|\s)\/plan\b/i;
-export const wantsPlanFirst = (text: string): boolean => PLAN_FIRST.test(text);
+export const isPlanMode = (mode?: AgentMode): boolean => mode === "plan";
+export const wantsPlanFirst = (text: string, mode?: AgentMode): boolean =>
+  isPlanMode(mode) || PLAN_FIRST.test(text);
 
 const REJECTED_PREFIX = "[sshs3] The user did not approve the plan";
 
@@ -180,22 +188,36 @@ export function newPlan(
   };
 }
 
+export interface PlanApprovalDecision {
+  note?: string;
+  /** Explicit user choice to require confirmation before every modifying step/command. */
+  askPerStep?: boolean;
+  /** Legacy alias for `askPerStep`. */
+  askEach?: boolean;
+}
+
 /**
  * What an approval of this plan covers, decided when the person approves and
- * written on the plan. Asking again wins wherever anything asks for it: the
- * plan's own words, the person's choice, or a note with no choice made (the
- * note is read by the agent only, and may well say "ask me before each
- * change"). Only an approval that says so in as many words, on a plan that
- * did not promise otherwise, lets the listed commands run with a note.
+ * written on the plan. Only an explicit `askPerStep` / `askEach` choice or the
+ * plan's own promise sets per-step confirmation: typing a review/revision note
+ * never silently flips `askEach` to `true` behind the user's back.
  */
 export function approvalAsksEach(
   plan: Pick<AgentPlan, "askEach">,
-  decision: { note?: string; askEach?: boolean },
+  decision: PlanApprovalDecision,
 ): AgentPlan["askEach"] {
-  if (decision.askEach === true) return "person";
+  const explicit = decision.askPerStep !== undefined ? decision.askPerStep : decision.askEach;
+  if (explicit === true) return "person";
   if (plan.askEach === "plan") return "plan";
-  if (decision.askEach === undefined && decision.note?.trim()) return "note";
   return undefined;
+}
+
+/** Explicit boolean view of whether per-step approval is required on approval. */
+export function resolveAskPerStep(
+  plan: Pick<AgentPlan, "askEach">,
+  decision: PlanApprovalDecision = {},
+): boolean {
+  return Boolean(approvalAsksEach(plan, decision));
 }
 
 export function renderPlan(plan: Pick<AgentPlan, "goal" | "steps" | "assumptions">): string {
@@ -274,17 +296,17 @@ export function parseReview(answer: string): AgentPlan["review"] {
 
 // ----------------------------------------------------------------------- gate
 
-const lastUserText = (task: AgentTask): string =>
+const lastUserText = (task: Pick<AgentTask, "messages">): string =>
   task.messages.filter((m) => m.role === "user").at(-1)?.text ?? "";
 
 /** Whether the conversation is waiting for, or has been asked for, a plan that is not approved. */
-export function planPending(task: AgentTask): boolean {
+export function planPending(task: Pick<AgentTask, "mode" | "plan" | "messages">): boolean {
   if (task.plan?.status === "proposed") return true;
   const last = lastUserText(task);
   // The run that revises a plan the user sent back is still planning.
   if (task.plan?.status === "rejected" && last.startsWith(REJECTED_PREFIX))
     return true;
-  return wantsPlanFirst(last) && task.plan?.status !== "approved";
+  return wantsPlanFirst(last, task.mode) && task.plan?.status !== "approved";
 }
 
 /**
@@ -301,7 +323,7 @@ function appOpClass(tool: string, args: Record<string, unknown>): AppOpClass | u
 }
 
 export function planGate(
-  task: AgentTask,
+  task: Pick<AgentTask, "mode" | "plan" | "messages">,
   tool: string,
   args: Record<string, unknown>,
 ): string | undefined {
@@ -323,9 +345,13 @@ export function planGate(
     appOpClass(tool, args) === "guard" ||
     appOpClass(tool, args) === "guard-if";
   if (!changes) return undefined;
-  return task.plan?.status === "proposed"
-    ? "A plan is waiting for the user's approval. Nothing that changes a system runs until they approve it. Tell the user the plan and stop; read-only checks are still allowed."
-    : "The user asked for a plan first. Propose it with sshs3_plan_propose and wait for their approval before changing anything; read-only checks are allowed.";
+  if (task.plan?.status === "proposed") {
+    return "A plan is waiting for the user's approval. Nothing that changes a system runs until they approve it. Tell the user the plan and stop; read-only checks are still allowed.";
+  }
+  if (isPlanMode(task.mode) && !PLAN_FIRST.test(lastUserText(task))) {
+    return "This conversation is in Plan mode. Propose a plan with sshs3_plan_propose and wait for the user's approval before changing anything; read-only checks are allowed.";
+  }
+  return "The user asked for a plan first. Propose it with sshs3_plan_propose and wait for their approval before changing anything; read-only checks are allowed.";
 }
 
 /**
@@ -383,4 +409,221 @@ export function approvalMessage(plan: AgentPlan, note?: string): string {
 
 export function rejectionMessage(note: string): string {
   return `${REJECTED_PREFIX} and asks for changes: ${boundedContext(note, 2000)}\nRevise the plan and propose it again with sshs3_plan_propose. Change nothing until a plan is approved.`;
+}
+
+// ------------------------------------------------ collision & peer-approval checks
+
+export const PLAN_COLLISION_WINDOW_MS = 15 * 60_000;
+
+export interface CollidingChangeWarning {
+  target: string;
+  actor: string;
+  kind: WorkspaceActivityEvent["kind"];
+  summary: string;
+  at: number;
+  ageMinutes: number;
+  stepIndexes: number[];
+  message: string;
+}
+
+const normTarget = (value: string | undefined): string =>
+  typeof value === "string" ? value.trim().toLowerCase() : "";
+
+/**
+ * Checks recent teammate activity (last 15 minutes by default) on the same
+ * target(s) touched by a plan's steps, returning collision warnings.
+ */
+export function detectCollidingPlanChanges(
+  plan: Pick<AgentPlan, "steps">,
+  activity: ReadonlyArray<WorkspaceActivityEvent>,
+  options?: {
+    defaultTarget?: string;
+    currentActor?: string;
+    includeSelf?: boolean;
+    includeNotes?: boolean;
+    windowMs?: number;
+    now?: number;
+  },
+): CollidingChangeWarning[] {
+  const now = options?.now ?? Date.now();
+  const windowMs = Math.max(0, options?.windowMs ?? PLAN_COLLISION_WINDOW_MS);
+  const currentActor = normTarget(options?.currentActor);
+  const stepsByTarget = new Map<string, { display: string; indexes: number[] }>();
+
+  plan.steps.forEach((step, idx) => {
+    const rawTarget = (step.target ?? options?.defaultTarget ?? "").trim();
+    const key = normTarget(rawTarget);
+    if (!key) return;
+    const entry = stepsByTarget.get(key) ?? { display: rawTarget, indexes: [] };
+    entry.indexes.push(idx);
+    stepsByTarget.set(key, entry);
+  });
+
+  if (stepsByTarget.size === 0 || activity.length === 0) return [];
+
+  const warnings: CollidingChangeWarning[] = [];
+  for (const event of activity) {
+    if (!options?.includeNotes && event.kind === "note") continue;
+    if (!options?.includeSelf && currentActor && normTarget(event.actor) === currentActor) continue;
+    if (event.at > now + 60_000 || now - event.at > windowMs) continue;
+
+    const labelKey = normTarget(event.targetLabel);
+    const profileKey = normTarget(event.profileId);
+    const matched = stepsByTarget.get(labelKey) ?? (profileKey ? stepsByTarget.get(profileKey) : undefined);
+    if (!matched) continue;
+
+    const ageMinutes = Math.max(0, Math.round((now - event.at) / 60_000));
+    const stepNumbers = matched.indexes.map((i) => i + 1);
+    const summary = boundedContext(event.summary, 140);
+    const actor = boundedContext(event.actor || "A teammate", 80);
+    const ageLabel = ageMinutes === 0 ? "just now" : `${ageMinutes}m ago`;
+    warnings.push({
+      target: matched.display,
+      actor,
+      kind: event.kind,
+      summary,
+      at: event.at,
+      ageMinutes,
+      stepIndexes: matched.indexes,
+      message: `Colliding change warning: ${actor} recorded ${event.kind} on ${matched.display} ${ageLabel} ("${summary}") affecting step(s) ${stepNumbers.join(", ")}.`,
+    });
+  }
+
+  return warnings.sort((a, b) => b.at - a.at);
+}
+
+const PROD_NAME_TOKEN = /(?:^|[-_.:/\s])(prod|production|critical)(?:$|[-_.:/\s])/i;
+
+/** Whether a plan targets production/critical infrastructure based on tags or target names. */
+export function isProdPlan(
+  plan: Pick<AgentPlan, "steps">,
+  options?: { targetTags?: readonly string[]; defaultTarget?: string },
+): boolean {
+  if ((options?.targetTags ?? []).some(isProdTag)) return true;
+  if (options?.defaultTarget && PROD_NAME_TOKEN.test(options.defaultTarget)) return true;
+  return plan.steps.some((step) => Boolean(step.target && PROD_NAME_TOKEN.test(step.target)));
+}
+
+/** Number of distinct approvals required before executing a plan. */
+export function requiredPlanApprovals(
+  plan: Pick<AgentPlan, "steps">,
+  options?: {
+    targetTags?: readonly string[];
+    defaultTarget?: string;
+    requirePeerApprovalOnProd?: boolean;
+    policy?: SafetyPolicyConfig;
+    clusterPolicy?: ClusterSafetyPolicy;
+  },
+): number {
+  const prod = isProdPlan(plan, options);
+  const peerRequired =
+    options?.requirePeerApprovalOnProd ??
+    options?.policy?.requirePeerApprovalOnProd ??
+    (options?.policy ? false : true);
+  let required = prod && peerRequired ? 2 : 1;
+  const clusterReq = options?.clusterPolicy?.requiredApprovals;
+  if (typeof clusterReq === "number" && Number.isFinite(clusterReq) && clusterReq > 0) {
+    required = Math.max(required, Math.floor(clusterReq));
+  }
+  return required;
+}
+
+export interface PlanApprovalStatus {
+  isProd: boolean;
+  requiredApprovals: number;
+  validApprovals: AgentChangeApproval[];
+  deniedBy?: AgentChangeApproval;
+  distinctApprovers: string[];
+  satisfied: boolean;
+  remainingApprovals: number;
+  reason?: string;
+}
+
+const approverKey = (a: Pick<AgentChangeApproval, "actor" | "actorId">): string =>
+  (a.actorId?.trim() || a.actor.trim()).toLowerCase();
+
+/**
+ * Evaluate single or two-person / multi-party peer approval on a plan.
+ * Rejects self-only approval when `requiredApprovals >= 2` and optionally
+ * excludes the proposer completely when `requireIndependentApprovers` is set.
+ */
+export function checkPlanApprovals(
+  plan: Pick<AgentPlan, "steps">,
+  options?: {
+    approvals?: ReadonlyArray<AgentChangeApproval>;
+    proposer?: string;
+    requireIndependentApprovers?: boolean;
+    targetTags?: readonly string[];
+    defaultTarget?: string;
+    requirePeerApprovalOnProd?: boolean;
+    policy?: SafetyPolicyConfig;
+    clusterPolicy?: ClusterSafetyPolicy;
+  },
+): PlanApprovalStatus {
+  const isProd = isProdPlan(plan, options);
+  const requiredApprovals = requiredPlanApprovals(plan, options);
+  const approvals = options?.approvals ?? [];
+  const deniedBy = approvals.find((a) => !a.allowed);
+  const proposerKey = options?.proposer?.trim().toLowerCase() || "";
+
+  const seen = new Set<string>();
+  const validApprovals: AgentChangeApproval[] = [];
+  const distinctApprovers: string[] = [];
+  let sawProposerOnly = false;
+
+  for (const vote of approvals) {
+    if (!vote.allowed) continue;
+    const key = approverKey(vote);
+    if (!key) continue;
+    if (options?.requireIndependentApprovers && proposerKey && key === proposerKey) {
+      sawProposerOnly = true;
+      continue;
+    }
+    if (seen.has(key)) continue;
+    seen.add(key);
+    validApprovals.push(vote);
+    distinctApprovers.push(vote.actorId?.trim() || vote.actor.trim());
+  }
+
+  if (deniedBy) {
+    return {
+      isProd,
+      requiredApprovals,
+      validApprovals,
+      deniedBy,
+      distinctApprovers,
+      satisfied: false,
+      remainingApprovals: Math.max(0, requiredApprovals - distinctApprovers.length),
+      reason: `Plan approval denied by ${deniedBy.actor}.`,
+    };
+  }
+
+  const hasNonProposer =
+    !proposerKey ||
+    validApprovals.some((v) => approverKey(v) !== proposerKey);
+  const countMet = distinctApprovers.length >= requiredApprovals;
+  const peerMet = requiredApprovals < 2 || hasNonProposer;
+  const satisfied = countMet && peerMet;
+  const remainingApprovals = Math.max(0, requiredApprovals - distinctApprovers.length);
+
+  let reason: string | undefined;
+  if (!satisfied) {
+    if (sawProposerOnly && distinctApprovers.length === 0) {
+      reason = `Two-person approval requires ${requiredApprovals} independent peer approval(s); proposer cannot self-approve.`;
+    } else if (!peerMet) {
+      reason = `Production plan requires peer approval from another operator (${remainingApprovals} more needed).`;
+    } else {
+      reason = `${isProd ? "Production plan" : "Plan"} requires ${requiredApprovals} distinct approval(s); ${remainingApprovals} more needed.`;
+    }
+  }
+
+  return {
+    isProd,
+    requiredApprovals,
+    validApprovals,
+    distinctApprovers,
+    satisfied,
+    remainingApprovals,
+    ...(reason ? { reason } : {}),
+  };
 }

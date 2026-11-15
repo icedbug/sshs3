@@ -1,5 +1,11 @@
 import crypto from "node:crypto";
-import type { MissionAgent, WorkspaceServerSummary } from "../../../shared/types/aiHub";
+import type {
+  CorrelatedAlertRef,
+  InfraGraphEdge,
+  MissionAgent,
+  WorkTicket,
+  WorkspaceServerSummary,
+} from "../../../shared/types/aiHub";
 import { clip } from "./privacy";
 
 /**
@@ -183,9 +189,75 @@ export function alertTarget(alert: IncomingAlert, servers: WorkspaceServerSummar
   return servers.find((s) => s.cluster && s.cluster.length > 3 && hay.includes(s.cluster.toLowerCase()))?.cluster;
 }
 
+const OPS_ROLE_RE = /\b(ops|sre|on[- ]?call|infra(?:structure)?|platform|incident|triage)\b/i;
+
+function matchGlob(pattern: string, value: string): boolean {
+  if (!pattern.includes("*")) return pattern === value;
+  const parts = pattern.split("*");
+  let pos = 0;
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
+    if (!part) continue;
+    if (i === 0) {
+      if (!value.startsWith(part)) return false;
+      pos = part.length;
+    } else if (i === parts.length - 1) {
+      if (!value.endsWith(part) || value.length - part.length < pos) return false;
+      pos = value.length;
+    } else {
+      const idx = value.indexOf(part, pos);
+      if (idx < 0) return false;
+      pos = idx + part.length;
+    }
+  }
+  return true;
+}
+
+function labelLookup(alert: IncomingAlert, target: string | undefined, key: string): string[] {
+  const k = key.toLowerCase();
+  const out: string[] = [];
+  for (const [lk, lv] of Object.entries(alert.labels)) {
+    if (lk.toLowerCase() === k) out.push(lv.toLowerCase());
+  }
+  if (k === "severity") out.push(alert.severity.toLowerCase());
+  else if (k === "source") out.push(alert.source.toLowerCase());
+  else if (k === "target" && target) out.push(target.toLowerCase());
+  else if (k === "title") out.push(alert.title.toLowerCase());
+  else if (k === "subject" || k === "subjects") out.push(...alert.subjects.map((s) => s.toLowerCase()));
+  return out;
+}
+
 /**
- * Who gets the alert: the first rule that matches, else an agent bound to the
- * cluster it is about, else the lead of a team (an agent others report to).
+ * Evaluates an `AlertRule.match` expression against an incoming alert.
+ * Supports structured `label=value` (and `!=`, comma/whitespace-separated AND clauses,
+ * and `*` wildcards) as well as plain case-insensitive substring matching.
+ */
+export function matchesAlertRule(alert: IncomingAlert, target: string | undefined, matchExpr: string): boolean {
+  const trimmed = matchExpr.trim();
+  if (!trimmed) return false;
+  const parts = trimmed.split(/[\s,]+/).filter(Boolean);
+  const isStructured = parts.length > 0 && parts.every((p) => /^[A-Za-z0-9_.-]+(?:!=|=).+$/.test(p));
+  if (isStructured) {
+    return parts.every((clause) => {
+      const neqIdx = clause.indexOf("!=");
+      const isNegated = neqIdx > 0;
+      const sepIdx = isNegated ? neqIdx : clause.indexOf("=");
+      const key = clause.slice(0, sepIdx).trim();
+      const expected = clause.slice(sepIdx + (isNegated ? 2 : 1)).trim().toLowerCase();
+      if (!key || !expected) return false;
+      const values = labelLookup(alert, target, key);
+      const matched = values.some((v) => matchGlob(expected, v));
+      return isNegated ? !matched : matched;
+    });
+  }
+  const hay = [alert.title, target ?? "", ...alert.subjects, ...Object.values(alert.labels)].join(" ").toLowerCase();
+  return hay.includes(trimmed.toLowerCase());
+}
+
+/**
+ * Who gets the alert: the first rule that matches (structured `label=value` or
+ * substring), else an agent bound to the cluster it is about, else the lead of
+ * a team (an agent others report to), else an active ops/SRE role agent.
  * Undefined: nobody, and the ticket waits in the backlog for a person.
  */
 export function routeAlert(
@@ -195,16 +267,270 @@ export function routeAlert(
   agents: MissionAgent[],
 ): MissionAgent | undefined {
   const active = agents.filter((a) => a.enabled !== false);
-  const hay = [alert.title, target ?? "", ...alert.subjects, ...Object.values(alert.labels)].join(" ").toLowerCase();
   for (const rule of rules) {
-    const m = rule.match.trim().toLowerCase();
-    if (!m || !hay.includes(m)) continue;
+    if (!matchesAlertRule(alert, target, rule.match)) continue;
     const agent = active.find((a) => a.id === rule.agentId);
     if (agent) return agent;
   }
   const bound = target && active.find((a) => a.targetCluster && a.targetCluster.toLowerCase() === target.toLowerCase());
   if (bound) return bound;
-  return active.find((a) => agents.some((b) => b.reportsTo === a.id));
+  const lead = active.find((a) => agents.some((b) => b.reportsTo === a.id));
+  if (lead) return lead;
+  return active.find((a) => OPS_ROLE_RE.test(a.role));
+}
+
+export const DEFAULT_CORRELATION_WINDOW_MS = 10 * 60_000;
+
+export interface CorrelateAlertOptions {
+  servers?: WorkspaceServerSummary[];
+  edges?: InfraGraphEdge[];
+  windowMs?: number;
+  now?: number;
+}
+
+export interface CorrelationMatch {
+  ticket: WorkTicket;
+  reason: "fingerprint" | "same-target" | "same-cluster" | "topology";
+  via?: string;
+}
+
+function clusterFor(
+  target: string | undefined,
+  subjects: string[],
+  servers: WorkspaceServerSummary[],
+): string | undefined {
+  const keys = new Set([target, ...subjects].filter((v): v is string => Boolean(v)).map((s) => s.toLowerCase()));
+  for (const s of servers) {
+    if (keys.has(s.name.toLowerCase()) || keys.has(s.host.toLowerCase()) || (s.cluster && keys.has(s.cluster.toLowerCase()))) {
+      if (s.cluster) return s.cluster;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Returns normalized lower-case topology neighbor identifiers connected to any
+ * of `seeds` through confirmed dependency/storage/routing/replication/tunnel edges.
+ */
+export function topologyNeighbors(seeds: string[], edges: InfraGraphEdge[]): Map<string, string> {
+  const seedSet = new Set(seeds.map((s) => s.trim().toLowerCase()).filter(Boolean));
+  const neighbors = new Map<string, string>();
+  if (seedSet.size === 0 || edges.length === 0) return neighbors;
+  for (const edge of edges) {
+    if (edge.proposed || edge.relation === "monitors") continue;
+    const from = edge.from.trim().toLowerCase();
+    const to = edge.to.trim().toLowerCase();
+    if (seedSet.has(from) && !seedSet.has(to) && !neighbors.has(to)) {
+      neighbors.set(to, `${edge.from} ${edge.relation} ${edge.to}`);
+    } else if (seedSet.has(to) && !seedSet.has(from) && !neighbors.has(from)) {
+      neighbors.set(from, `${edge.from} ${edge.relation} ${edge.to}`);
+    }
+  }
+  return neighbors;
+}
+
+/**
+ * Correlates an incoming alert against active incident tickets by:
+ * 1) exact alert fingerprint, 2) same target within window, 3) same cluster
+ * within window, or 4) confirmed topology edge within window.
+ */
+export function correlateAlert(
+  alert: IncomingAlert,
+  tickets: WorkTicket[],
+  options: CorrelateAlertOptions = {},
+): CorrelationMatch | undefined {
+  const servers = options.servers ?? [];
+  const edges = options.edges ?? [];
+  const windowMs = options.windowMs ?? DEFAULT_CORRELATION_WINDOW_MS;
+  const now = options.now ?? Date.now();
+  const openAlerts = tickets.filter((t) => !t.deleted && t.status !== "done" && Boolean(t.alert));
+
+  const exact = openAlerts.find((t) => t.alert!.fingerprint === alert.fingerprint);
+  if (exact) return { ticket: exact, reason: "fingerprint" };
+  if (alert.status === "resolved") return undefined;
+
+  const target = alertTarget(alert, servers);
+  const cluster = clusterFor(target, alert.subjects, servers);
+  const inWindow = openAlerts.filter((t) => !t.alert!.resolvedAt && now - (t.alert!.lastAt ?? t.updatedAt) <= windowMs);
+  if (!inWindow.length) return undefined;
+
+  if (target) {
+    const targetLower = target.toLowerCase();
+    const sameTarget = inWindow.find((t) => t.target?.toLowerCase() === targetLower);
+    if (sameTarget) return { ticket: sameTarget, reason: "same-target", via: target };
+  }
+
+  if (cluster) {
+    const clusterLower = cluster.toLowerCase();
+    const sameCluster = inWindow.find((t) => {
+      if (!t.target) return false;
+      if (t.target.toLowerCase() === clusterLower) return true;
+      const tCluster = clusterFor(t.target, [], servers);
+      return tCluster?.toLowerCase() === clusterLower;
+    });
+    if (sameCluster) return { ticket: sameCluster, reason: "same-cluster", via: cluster };
+  }
+
+  const incomingSeeds = [target, cluster, ...alert.subjects].filter((v): v is string => Boolean(v));
+  const neighbors = topologyNeighbors(incomingSeeds, edges);
+  if (neighbors.size > 0) {
+    for (const t of inWindow) {
+      const tCluster = clusterFor(t.target, [], servers);
+      for (const candidate of [t.target, tCluster]) {
+        if (!candidate) continue;
+        const via = neighbors.get(candidate.toLowerCase());
+        if (via) return { ticket: t, reason: "topology", via };
+      }
+    }
+  }
+  return undefined;
+}
+
+const SEVERITY_RANK: Record<IncomingAlert["severity"], number> = { info: 0, warning: 1, critical: 2 };
+
+/**
+ * Bundles a correlated cascading symptom alert onto an existing active incident
+ * ticket's `correlatedAlerts` list rather than opening a separate ticket.
+ */
+export function appendCorrelatedAlert(
+  ticket: WorkTicket,
+  alert: IncomingAlert,
+  reason: CorrelationMatch["reason"],
+  now = Date.now(),
+  maxCorrelated = 50,
+): WorkTicket {
+  const existing = ticket.correlatedAlerts ?? [];
+  const summary = clip(
+    `${alertName(alert)}${alert.subjects[0] ? ` (${alert.subjects[0]})` : ""}: ${alert.title} [${reason}]`,
+    240,
+  );
+  const entry: CorrelatedAlertRef = {
+    fingerprint: alert.fingerprint,
+    summary,
+    at: now,
+    severity: alert.severity,
+  };
+  const idx = existing.findIndex((c) => c.fingerprint && c.fingerprint === alert.fingerprint);
+  const nextList =
+    idx >= 0
+      ? existing.map((c, i) => (i === idx ? entry : c))
+      : [...existing, entry].slice(-Math.max(1, maxCorrelated));
+
+  const nextSeverity =
+    ticket.alert && SEVERITY_RANK[alert.severity] > SEVERITY_RANK[ticket.alert.severity]
+      ? alert.severity
+      : ticket.alert?.severity;
+
+  return {
+    ...ticket,
+    updatedAt: now,
+    correlatedAlerts: nextList,
+    ...(ticket.alert ? { alert: { ...ticket.alert, lastAt: Math.max(ticket.alert.lastAt, now), severity: nextSeverity ?? ticket.alert.severity } } : {}),
+  };
+}
+
+export interface TriageBurstEvent {
+  at: number;
+  reason: "critical-alert" | "burst-threshold" | "correlation-cascade";
+  target?: string;
+  cluster?: string;
+  alerts: IncomingAlert[];
+  countInWindow: number;
+  windowMs: number;
+}
+
+export interface TriageBurstOptions {
+  windowMs?: number;
+  threshold?: number;
+  cooldownMs?: number;
+  triggerOnCritical?: boolean;
+  cascadeThreshold?: number;
+}
+
+export type TriageBurstHook = (event: TriageBurstEvent) => void | Promise<void>;
+
+/**
+ * Pure predicate deciding whether incoming firing alerts warrant a fast-triage
+ * telemetry burst collection.
+ */
+export function shouldTriggerFastTriage(
+  alerts: IncomingAlert[],
+  recentAlertAts: number[],
+  options: TriageBurstOptions & { now?: number; correlatedCount?: number } = {},
+): { trigger: boolean; reason?: TriageBurstEvent["reason"]; countInWindow: number } {
+  const now = options.now ?? Date.now();
+  const windowMs = options.windowMs ?? 60_000;
+  const threshold = options.threshold ?? 3;
+  const triggerOnCritical = options.triggerOnCritical ?? true;
+  const cascadeThreshold = options.cascadeThreshold ?? 2;
+  const firing = alerts.filter((a) => a.status === "firing" && !a.update);
+  const inWindow = recentAlertAts.filter((ts) => now - ts <= windowMs).length + firing.length;
+  if (!firing.length) return { trigger: false, countInWindow: inWindow };
+  if (triggerOnCritical && firing.some((a) => a.severity === "critical")) {
+    return { trigger: true, reason: "critical-alert", countInWindow: inWindow };
+  }
+  if ((options.correlatedCount ?? 0) >= cascadeThreshold) {
+    return { trigger: true, reason: "correlation-cascade", countInWindow: inWindow };
+  }
+  if (inWindow >= threshold) {
+    return { trigger: true, reason: "burst-threshold", countInWindow: inWindow };
+  }
+  return { trigger: false, countInWindow: inWindow };
+}
+
+/**
+ * Stateful sliding-window burst monitor that invokes registered fast-triage
+ * telemetry hooks with per-scope cooldown protection.
+ */
+export class AlertBurstTrigger {
+  private readonly hooks = new Set<TriageBurstHook>();
+  private readonly history = new Map<string, number[]>();
+  private readonly lastTriggered = new Map<string, number>();
+
+  constructor(private readonly options: TriageBurstOptions = {}) {}
+
+  onBurst(hook: TriageBurstHook): () => void {
+    this.hooks.add(hook);
+    return () => {
+      this.hooks.delete(hook);
+    };
+  }
+
+  record(
+    alerts: IncomingAlert[],
+    context: { target?: string; cluster?: string; correlatedCount?: number; now?: number } = {},
+  ): TriageBurstEvent | undefined {
+    const now = context.now ?? Date.now();
+    const windowMs = this.options.windowMs ?? 60_000;
+    const cooldownMs = this.options.cooldownMs ?? 30_000;
+    const scope = context.target ?? context.cluster ?? "__global__";
+    const prior = (this.history.get(scope) ?? []).filter((ts) => now - ts <= windowMs);
+    const firing = alerts.filter((a) => a.status === "firing" && !a.update);
+    const verdict = shouldTriggerFastTriage(firing, prior, { ...this.options, now, correlatedCount: context.correlatedCount });
+    const nextHistory = [...prior, ...firing.map(() => now)].slice(-200);
+    this.history.set(scope, nextHistory);
+    if (!verdict.trigger || !verdict.reason) return undefined;
+
+    const prevTrigger = this.lastTriggered.get(scope);
+    if (prevTrigger !== undefined && now - prevTrigger < cooldownMs) return undefined;
+    this.lastTriggered.set(scope, now);
+
+    const event: TriageBurstEvent = {
+      at: now,
+      reason: verdict.reason,
+      target: context.target,
+      cluster: context.cluster,
+      alerts: firing,
+      countInWindow: verdict.countInWindow,
+      windowMs,
+    };
+    for (const hook of this.hooks) {
+      Promise.resolve()
+        .then(() => hook(event))
+        .catch(() => undefined);
+    }
+    return event;
+  }
 }
 
 /**

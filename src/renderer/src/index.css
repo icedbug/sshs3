@@ -8,6 +8,7 @@
   --color-app-surface: var(--bg-surface);
   --color-app-surface-subtle: var(--bg-surface-subtle);
   --color-app-surface-hover: var(--bg-surface-hover);
+  --color-app-surface-raised: var(--surface-3);
   --color-app-card: var(--bg-card);
   --color-app-input: var(--bg-input);
 
@@ -17,9 +18,11 @@
   --color-border-subtle: var(--border-subtle);
   --color-border-strong: var(--border-strong);
 
-  --color-txt-primary: var(--text-primary);
-  --color-txt-secondary: var(--text-secondary);
-  --color-txt-muted: var(--text-muted);
+  --color-txt-primary: var(--fg-primary);
+  --color-txt-secondary: var(--fg-secondary);
+  --color-txt-muted: var(--fg-muted);
+  --color-app-ink-soft: var(--fg-secondary);
+  --color-app-ink-faint: var(--fg-muted);
 
   --color-accent: var(--accent-primary);
   --color-accent-hover: var(--accent-hover);
@@ -50,7 +53,10 @@
 }
 
 :root {
-  /* Dark Theme (Default) */
+  /* ========================================================================
+     Unified Design Token System — Dark Theme (Default)
+     All tokens hold >= 4.5:1 text contrast on their target surfaces.
+     ======================================================================== */
   --bg-app: #0b0f19;
   --bg-surface: #111726;
   --bg-surface-subtle: #161e31;
@@ -58,28 +64,142 @@
   --bg-card: #141b2d;
   --bg-input: #0c101c;
 
-  --border-subtle: #1e283d;
-  /* Hairlines between rows / sections: decorative, so deliberately softer than control borders. */
-  --border-divider: #1e283d;
-  --border-strong: #2e3c59;
+  --surface-1: #111726;
+  --surface-2: #161e31;
+  --surface-3: #1e293f;
+  --surface-elevated: rgba(16, 22, 36, 0.96);
+  --surface-overlay: rgba(2, 6, 23, 0.72);
 
-  /* Muted was 3.2-4.2:1 on hover rows and tinted (selected) cards; raised so it holds >= 4.5:1 there,
-     with secondary lifted by the same step to keep the hierarchy. */
-  --text-primary: #f8fafc;
-  --text-secondary: #b8c4d6;
-  --text-muted: #99a6bb;
+  --border-subtle: #1e283d;
+  --border-divider: #1e283d;
+  --border-strong: #324261;
+  --border-card: rgba(148, 163, 184, 0.2);
+
+  --fg-primary: #f8fafc;
+  --fg-secondary: #c4d0e0;
+  --fg-muted: #99a6bb;
+  --muted-fg: #99a6bb;
+  --muted-bg: rgba(148, 163, 184, 0.12);
+
+  /* Legacy aliases retained for existing callers */
+  --text-primary: var(--fg-primary);
+  --text-secondary: var(--fg-secondary);
+  --text-muted: var(--fg-muted);
 
   --accent-primary: #0284c7;
   --accent-hover: #0369a1;
-  --accent-subtle: rgba(2, 132, 199, 0.15);
+  --accent-subtle: rgba(2, 132, 199, 0.16);
+  --accent-fg: #5eead4;
+  --accent-fg-strong: #99f6e4;
+  --accent-bg: rgba(94, 234, 212, 0.13);
+  --accent-border: rgba(94, 234, 212, 0.38);
+  --accent-ring: #38bdf8;
+
+  --ok-fg: #6ee7b7;
+  --ok-bg: rgba(16, 185, 129, 0.14);
+  --ok-border: rgba(16, 185, 129, 0.38);
+  --ok-solid: #10b981;
+
+  --warn-fg: #fcd34d;
+  --warn-bg: rgba(245, 158, 11, 0.14);
+  --warn-border: rgba(245, 158, 11, 0.38);
+  --warn-solid: #f59e0b;
+
+  --danger-fg: #fca5a5;
+  --danger-bg: rgba(244, 63, 94, 0.14);
+  --danger-border: rgba(244, 63, 94, 0.42);
+  --danger-solid: #f43f5e;
+
+  --purple-fg: #d8b4fe;
+  --purple-bg: rgba(168, 85, 247, 0.14);
+  --purple-border: rgba(168, 85, 247, 0.42);
+
+  --indigo-fg: #a5b4fc;
+  --indigo-bg: rgba(99, 102, 241, 0.14);
+  --indigo-border: rgba(99, 102, 241, 0.4);
 
   --brand-s3: #eab308;
+
+  /* Code, inline code, and diff surfaces */
+  --code-bg: #0d111a;
+  --code-header-bg: rgba(30, 41, 59, 0.72);
+  --code-fg: #e2e8f0;
+  --code-border: rgba(148, 163, 184, 0.22);
+
+  --inline-code-bg: rgba(56, 189, 248, 0.12);
+  --inline-code-border: rgba(56, 189, 248, 0.28);
+  --inline-code-fg: #7dd3fc;
+
+  --diff-add-bg: rgba(16, 185, 129, 0.15);
+  --diff-add-fg: #a7f3d0;
+  --diff-add-border: rgba(16, 185, 129, 0.35);
+  --diff-add-word-bg: rgba(16, 185, 129, 0.36);
+
+  --diff-del-bg: rgba(244, 63, 94, 0.16);
+  --diff-del-fg: #fecdd3;
+  --diff-del-border: rgba(244, 63, 94, 0.38);
+  --diff-del-word-bg: rgba(244, 63, 94, 0.4);
+
+  --diff-hunk-bg: rgba(56, 189, 248, 0.1);
+  --diff-hunk-fg: #7dd3fc;
+  --diff-gutter-bg: rgba(15, 23, 42, 0.55);
+  --diff-gutter-fg: #94a3b8;
+
+  /* Syntax highlighting tokens (Dark / Breeze) */
+  --md-tok-keyword: #ff7b72;
+  --md-tok-literal: #79c0ff;
+  --md-tok-string: #a5d6ff;
+  --md-tok-comment: #9aa4af;
+  --md-tok-name: #ffa657;
+  --md-tok-type: #7ee787;
+  --md-tok-meta: #d2a8ff;
+
+  /* Shared AI Hub token bridge for components & inline styles */
+  --ai-accent: var(--accent-fg);
+  --ai-accent-strong: #2dd4bf;
+  --ai-accent-soft: var(--accent-bg);
+  --ai-accent-line: var(--accent-border);
+  --ai-ink: var(--fg-primary);
+  --ai-ink-soft: var(--fg-secondary);
+  --ai-ink-faint: var(--fg-muted);
+  --ai-surface: rgba(255, 255, 255, 0.03);
+  --ai-surface-2: rgba(148, 163, 184, 0.1);
+  --ai-surface-raised: rgba(255, 255, 255, 0.06);
+  --ai-line: var(--border-card);
+  --ai-line-strong: var(--border-strong);
+  --ai-ok: var(--ok-fg);
+  --ai-warn: var(--warn-fg);
+  --ai-danger: var(--danger-fg);
+  --ai-emerald: var(--ok-solid);
+  --ai-bg: var(--bg-surface);
+  --ai-radius: 12px;
+  --ai-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+
+  /* ANSI SGR palette (dark terminal log surface) */
+  --ai-ansi-bg: #0b1120;
+  --ai-ansi-fg: #e2e8f0;
+  --ai-ansi-black: #64748b;
+  --ai-ansi-red: #f87171;
+  --ai-ansi-green: #4ade80;
+  --ai-ansi-yellow: #facc15;
+  --ai-ansi-blue: #60a5fa;
+  --ai-ansi-magenta: #c084fc;
+  --ai-ansi-cyan: #22d3ee;
+  --ai-ansi-white: #e2e8f0;
+  --ai-ansi-gray: #94a3b8;
+  --ai-ansi-bright-red: #fca5a5;
+  --ai-ansi-bright-green: #86efac;
+  --ai-ansi-bright-yellow: #fde047;
+  --ai-ansi-bright-blue: #93c5fd;
+  --ai-ansi-bright-magenta: #d8b4fe;
+  --ai-ansi-bright-cyan: #67e8f9;
+  --ai-ansi-bright-white: #f8fafc;
 }
 
 .light {
   color-scheme: light;
-  /* Tuned for low-contrast / washed-out displays: surfaces step down visibly from white cards,
-     control borders reach >= 3:1 on white (strong 4.7:1), and text is 7.6:1 or better on every surface. */
+  /* Tuned for low-contrast displays: white cards step clearly above app/surface chrome,
+     borders hold >= 3:1, and all text/badges hold >= 4.5:1 WCAG AA contrast. */
   --bg-app: #e6ebf2;
   --bg-surface: #f2f5f9;
   --bg-surface-subtle: #e9eef4;
@@ -87,93 +207,103 @@
   --bg-card: #ffffff;
   --bg-input: #ffffff;
 
+  --surface-1: #ffffff;
+  --surface-2: #eef2f7;
+  --surface-3: #e2e8f0;
+  --surface-elevated: rgba(255, 255, 255, 0.98);
+  --surface-overlay: rgba(15, 23, 42, 0.45);
+
   --border-subtle: #8090a6;
   --border-divider: #c3cedb;
   --border-strong: #64748b;
+  --border-card: #cbd5e1;
 
-  --text-primary: #0f172a;
-  --text-secondary: #334155;
-  --text-muted: #475569;
+  --fg-primary: #0f172a;
+  --fg-secondary: #334155;
+  --fg-muted: #475569;
+  --muted-fg: #475569;
+  --muted-bg: rgba(15, 23, 42, 0.06);
 
   --accent-primary: #0369a1;
   --accent-hover: #075985;
-  --accent-subtle: rgba(3, 105, 161, 0.14);
+  --accent-subtle: rgba(3, 105, 161, 0.12);
+  --accent-fg: #0369a1;
+  --accent-fg-strong: #075985;
+  --accent-bg: #e0f2fe;
+  --accent-border: rgba(3, 105, 161, 0.38);
+  --accent-ring: #0369a1;
+
+  --ok-fg: #065f46;
+  --ok-bg: #d1fae5;
+  --ok-border: rgba(6, 95, 70, 0.36);
+  --ok-solid: #047857;
+
+  --warn-fg: #92400e;
+  --warn-bg: #fef3c7;
+  --warn-border: rgba(146, 64, 14, 0.36);
+  --warn-solid: #b45309;
+
+  --danger-fg: #991b1b;
+  --danger-bg: #fee2e2;
+  --danger-border: rgba(153, 27, 27, 0.36);
+  --danger-solid: #b91c1c;
+
+  --purple-fg: #6b21a8;
+  --purple-bg: #f3e8ff;
+  --purple-border: rgba(107, 33, 168, 0.35);
+
+  --indigo-fg: #3730a3;
+  --indigo-bg: #e0e7ff;
+  --indigo-border: rgba(55, 48, 163, 0.35);
 
   --brand-s3: #854d0e;
-}
 
-.breeze {
-  color-scheme: dark;
-  --bg-app: #232627;
-  --bg-surface: #31363b;
-  --bg-surface-subtle: #2a2e32;
-  --bg-surface-hover: #41474d;
-  --bg-card: #31363b;
-  --bg-input: #232627;
+  /* Light code & diff surfaces with high WCAG AA contrast */
+  --code-bg: #f8fafc;
+  --code-header-bg: #e9eef4;
+  --code-fg: #0f172a;
+  --code-border: #cbd5e1;
 
-  /* One soft line colour for everything in Breeze (cards, rows, fields, dividers): a stronger
-     subtle border (3.3:1) made the profile cards and file rows look boxed-in. Fields still stand out
-     through their darker fill; use border-strong (3.9:1 on cards) where a firm edge is needed. */
-  --border-subtle: #454c52;
-  --border-divider: #454c52;
-  --border-strong: #8a9397;
+  --inline-code-bg: #e0f2fe;
+  --inline-code-border: #7dd3fc;
+  --inline-code-fg: #075985;
 
-  /* Secondary used to be almost the same colour as primary (no hierarchy); muted gained headroom so
-     it stays >= 4.8:1 even on hover surfaces and tinted selections. */
-  --text-primary: #fcfcfc;
-  --text-secondary: #dce0e1;
-  --text-muted: #b2bbbc;
+  --diff-add-bg: #dcfce7;
+  --diff-add-fg: #14532d;
+  --diff-add-border: #86efac;
+  --diff-add-word-bg: #86efac;
 
-  --accent-primary: #3daee9;
-  --accent-hover: #1d9bf3;
-  --accent-subtle: rgba(61, 174, 233, 0.15);
+  --diff-del-bg: #fee2e2;
+  --diff-del-fg: #7f1d1d;
+  --diff-del-border: #fca5a5;
+  --diff-del-word-bg: #fca5a5;
 
-  /* The 400 text shades are tuned for the navy dark theme; on Breeze's lighter grey surfaces (and on
-     tinted chips) they fall to ~3.4-4.2:1, so use the 300 shade there. */
-  --color-sky-400: #7dd3fc;
-  --color-indigo-400: #a5b4fc;
-  --color-emerald-400: #6ee7b7;
-  --color-red-400: #fca5a5;
-  --color-rose-400: #fda4af;
-  --color-amber-400: #fcd34d;
-  --color-purple-400: #d8b4fe;
-}
+  --diff-hunk-bg: #e0f2fe;
+  --diff-hunk-fg: #075985;
+  --diff-gutter-bg: #f1f5f9;
+  --diff-gutter-fg: #475569;
 
-/*
- * Dark and Breeze: solid fills that carry white text. White on sky-600 is 4.1:1 and on emerald-600
- * 3.8:1 (hover shades are lower still), so the primary / connect / delete buttons use slightly deeper
- * fills here. Only the fill utilities are overridden (not the palette variables), so sky-500 borders,
- * rings and tints keep their brighter look. Light has its own palette remap below.
- */
-html:not(.light) .bg-sky-600 {
-  background-color: #0369a1;
-}
-html:not(.light) .hover\:bg-sky-500:hover {
-  background-color: #0374b0;
-}
-html:not(.light) .bg-emerald-600 {
-  background-color: #047857;
-}
-html:not(.light) .hover\:bg-emerald-500:hover {
-  background-color: #05805f;
-}
-html:not(.light) .bg-red-600 {
-  background-color: #b91c1c;
-}
-html:not(.light) .hover\:bg-red-500:hover {
-  background-color: #dc2626;
-}
+  /* Light syntax tokens */
+  --md-tok-keyword: #cf222e;
+  --md-tok-literal: #0550ae;
+  --md-tok-string: #0a3069;
+  --md-tok-comment: #57606a;
+  --md-tok-name: #953800;
+  --md-tok-type: #116329;
+  --md-tok-meta: #6639ba;
 
-/*
- * Light theme: the UI uses Tailwind's 100-400 shades for text/icons and 800-950 for tinted
- * surfaces, which are designed for dark backgrounds (e.g. text-sky-400 on white is ~2.8:1,
- * bg-red-950/40 turns into a muddy dark overlay). Re-point those palette variables to their
- * light-theme counterparts so every utility, variant (hover:, /opacity) and ring/border built on
- * them stays legible. Pairs stay consistent: light-on-dark-tint becomes dark-on-light-tint.
- * The 500/600 fills behind white text (primary/connect/delete buttons) are darkened as well, since
- * white on sky-600 is only 4.1:1 and on emerald-600 3.8:1.
- */
-.light {
+  /* Light AI Hub bridge */
+  --ai-accent-strong: #075985;
+  --ai-surface: #ffffff;
+  --ai-surface-2: #eef2f7;
+  --ai-surface-raised: #e9eef4;
+  --ai-line: #cbd5e1;
+  --ai-line-strong: #64748b;
+
+  /*
+   * Light theme Tailwind palette remap: UI components use 100-400 shades for text/icons
+   * and 800-950 for tinted surfaces. Remapping keeps every Tailwind utility legible.
+   */
   /* sky */
   --color-sky-100: #0c4a6e;
   --color-sky-200: #0c4a6e;
@@ -184,6 +314,36 @@ html:not(.light) .hover\:bg-red-500:hover {
   --color-sky-950: #e0f2fe;
   --color-sky-500: #0369a1;
   --color-sky-600: #075985;
+  /* cyan */
+  --color-cyan-100: #164e63;
+  --color-cyan-200: #164e63;
+  --color-cyan-300: #155e75;
+  --color-cyan-400: #0e7490;
+  --color-cyan-800: #a5f3fc;
+  --color-cyan-900: #cffafe;
+  --color-cyan-950: #ecfeff;
+  --color-cyan-500: #0e7490;
+  --color-cyan-600: #155e75;
+  /* teal */
+  --color-teal-100: #134e4a;
+  --color-teal-200: #134e4a;
+  --color-teal-300: #115e59;
+  --color-teal-400: #0f766e;
+  --color-teal-800: #99f6e4;
+  --color-teal-900: #ccfbf1;
+  --color-teal-950: #f0fdfa;
+  --color-teal-500: #0f766e;
+  --color-teal-600: #115e59;
+  /* blue */
+  --color-blue-100: #1e3a8a;
+  --color-blue-200: #1e3a8a;
+  --color-blue-300: #1d4ed8;
+  --color-blue-400: #1d4ed8;
+  --color-blue-800: #bfdbfe;
+  --color-blue-900: #dbeafe;
+  --color-blue-950: #eff6ff;
+  --color-blue-500: #1d4ed8;
+  --color-blue-600: #1e40af;
   /* amber */
   --color-amber-100: #78350f;
   --color-amber-200: #78350f;
@@ -239,9 +399,143 @@ html:not(.light) .hover\:bg-red-500:hover {
   --color-purple-950: #f3e8ff;
 }
 
+.breeze {
+  color-scheme: dark;
+  --bg-app: #232627;
+  --bg-surface: #31363b;
+  --bg-surface-subtle: #2a2e32;
+  --bg-surface-hover: #41474d;
+  --bg-card: #31363b;
+  --bg-input: #232627;
+
+  --surface-1: #31363b;
+  --surface-2: #2a2e32;
+  --surface-3: #41474d;
+  --surface-elevated: rgba(42, 46, 50, 0.98);
+  --surface-overlay: rgba(18, 20, 22, 0.72);
+
+  --border-subtle: #454c52;
+  --border-divider: #454c52;
+  --border-strong: #8a9397;
+  --border-card: #4d545b;
+
+  --fg-primary: #fcfcfc;
+  --fg-secondary: #dce0e1;
+  --fg-muted: #b2bbbc;
+  --muted-fg: #b2bbbc;
+  --muted-bg: rgba(255, 255, 255, 0.08);
+
+  --accent-primary: #3daee9;
+  --accent-hover: #1d9bf3;
+  --accent-subtle: rgba(61, 174, 233, 0.18);
+  --accent-fg: #7dd3fc;
+  --accent-fg-strong: #bae6fd;
+  --accent-bg: rgba(61, 174, 233, 0.16);
+  --accent-border: rgba(125, 211, 252, 0.42);
+  --accent-ring: #3daee9;
+
+  --ok-fg: #6ee7b7;
+  --ok-bg: rgba(16, 185, 129, 0.18);
+  --ok-border: rgba(110, 231, 183, 0.42);
+  --ok-solid: #10b981;
+
+  --warn-fg: #fcd34d;
+  --warn-bg: rgba(245, 158, 11, 0.18);
+  --warn-border: rgba(252, 211, 77, 0.42);
+  --warn-solid: #f59e0b;
+
+  --danger-fg: #fca5a5;
+  --danger-bg: rgba(244, 63, 94, 0.2);
+  --danger-border: rgba(252, 165, 165, 0.45);
+  --danger-solid: #ef4444;
+
+  --purple-fg: #d8b4fe;
+  --purple-bg: rgba(168, 85, 247, 0.18);
+  --purple-border: rgba(216, 180, 254, 0.42);
+
+  --indigo-fg: #a5b4fc;
+  --indigo-bg: rgba(99, 102, 241, 0.18);
+  --indigo-border: rgba(165, 180, 252, 0.42);
+
+  --code-bg: #1e2124;
+  --code-header-bg: #272b2f;
+  --code-fg: #eff0f1;
+  --code-border: #4d545b;
+
+  --inline-code-bg: rgba(61, 174, 233, 0.16);
+  --inline-code-border: rgba(125, 211, 252, 0.34);
+  --inline-code-fg: #bae6fd;
+
+  --diff-add-bg: rgba(16, 185, 129, 0.18);
+  --diff-add-fg: #a7f3d0;
+  --diff-add-border: rgba(110, 231, 183, 0.4);
+  --diff-add-word-bg: rgba(16, 185, 129, 0.42);
+
+  --diff-del-bg: rgba(244, 63, 94, 0.2);
+  --diff-del-fg: #fecdd3;
+  --diff-del-border: rgba(252, 165, 165, 0.42);
+  --diff-del-word-bg: rgba(244, 63, 94, 0.44);
+
+  --diff-hunk-bg: rgba(61, 174, 233, 0.16);
+  --diff-hunk-fg: #bae6fd;
+  --diff-gutter-bg: #272b2f;
+  --diff-gutter-fg: #b2bbbc;
+
+  /* Breeze AI Hub bridge */
+  --ai-accent-strong: #3daee9;
+  --ai-surface: rgba(255, 255, 255, 0.04);
+  --ai-surface-2: rgba(255, 255, 255, 0.08);
+  --ai-surface-raised: rgba(255, 255, 255, 0.09);
+  --ai-line: #4d545b;
+  --ai-line-strong: #8a9397;
+
+  /* Raised 300/400 shades so colored labels stay >= 4.5:1 on Breeze grey surfaces */
+  --color-sky-400: #7dd3fc;
+  --color-cyan-400: #67e8f9;
+  --color-teal-400: #5eead4;
+  --color-blue-400: #93c5fd;
+  --color-indigo-400: #a5b4fc;
+  --color-emerald-400: #6ee7b7;
+  --color-red-400: #fca5a5;
+  --color-rose-400: #fda4af;
+  --color-amber-400: #fcd34d;
+  --color-purple-400: #d8b4fe;
+}
+
 /*
- * Surfaces that stay dark in every theme (log viewer, exit toast) opt out of the light-theme palette
- * remap above by restoring the original dark-background shades.
+ * Dark and Breeze: solid fills carrying white text need deeper shades for >= 4.5:1 contrast.
+ */
+html:not(.light) .bg-sky-600 {
+  background-color: #0369a1;
+}
+html:not(.light) .hover\:bg-sky-500:hover {
+  background-color: #0374b0;
+}
+html:not(.light) .bg-emerald-600 {
+  background-color: #047857;
+}
+html:not(.light) .hover\:bg-emerald-500:hover {
+  background-color: #05805f;
+}
+html:not(.light) .bg-red-600 {
+  background-color: #b91c1c;
+}
+html:not(.light) .hover\:bg-red-500:hover {
+  background-color: #dc2626;
+}
+
+/*
+ * Light theme overrides for hardcoded dark translucent utilities used in shared bars.
+ */
+.light [data-testid="terminal-approval-command"] {
+  background-color: var(--code-bg);
+  color: var(--code-fg);
+  border: 1px solid var(--code-border);
+}
+
+/*
+ * Surfaces that stay dark in every theme (log viewer, exit toast, ANSI logs) opt out
+ * of the light-theme palette remap by restoring dark-background shades.
  */
 .light .dark-surface {
   --color-sky-100: #e0f2fe;
@@ -253,6 +547,33 @@ html:not(.light) .hover\:bg-red-500:hover {
   --color-sky-950: #082f49;
   --color-sky-500: #0ea5e9;
   --color-sky-600: #0284c7;
+  --color-cyan-100: #cffafe;
+  --color-cyan-200: #a5f3fc;
+  --color-cyan-300: #67e8f9;
+  --color-cyan-400: #22d3ee;
+  --color-cyan-800: #155e75;
+  --color-cyan-900: #164e63;
+  --color-cyan-950: #083344;
+  --color-cyan-500: #06b6d4;
+  --color-cyan-600: #0891b2;
+  --color-teal-100: #ccfbf1;
+  --color-teal-200: #99f6e4;
+  --color-teal-300: #5eead4;
+  --color-teal-400: #2dd4bf;
+  --color-teal-800: #115e59;
+  --color-teal-900: #134e4a;
+  --color-teal-950: #042f2e;
+  --color-teal-500: #14b8a6;
+  --color-teal-600: #0d9488;
+  --color-blue-100: #dbeafe;
+  --color-blue-200: #bfdbfe;
+  --color-blue-300: #93c5fd;
+  --color-blue-400: #60a5fa;
+  --color-blue-800: #1e40af;
+  --color-blue-900: #1e3a8a;
+  --color-blue-950: #172554;
+  --color-blue-500: #3b82f6;
+  --color-blue-600: #2563eb;
   --color-amber-100: #fef3c7;
   --color-amber-200: #fde68a;
   --color-amber-300: #fcd34d;
@@ -311,50 +632,39 @@ body,
   padding: 0;
   overflow: hidden;
   background-color: var(--bg-app);
-  color: var(--text-primary);
+  color: var(--fg-primary);
 }
 
-/*
- * Semantic color rule (UX review #7), applies across all confirmation
- * dialogs and menus:
- *   - red    = destructive / irreversible (delete, overwrite, revoke)
- *   - amber  = warning / needs attention, but not destructive by itself
- *   - accent (sky) = neutral primary action
- * Keep confirmation buttons and icons consistent with this rule.
- */
-
-/* Global focus-visible ring (UX review #2). Applied at the base layer so
-   every button/link/input/tabbable element gets a visible keyboard-focus
-   indicator without having to touch every component's className. */
+/* ==========================================================================
+   Accessibility: Crisp 2px :focus-visible outline across all interactive elements
+   ========================================================================== */
 @layer base {
   button:focus-visible,
   a:focus-visible,
   input:focus-visible,
   select:focus-visible,
   textarea:focus-visible,
+  summary:focus-visible,
   [role='button']:focus-visible,
   [role='tab']:focus-visible,
   [role='menuitem']:focus-visible,
-  [tabindex]:focus-visible,
+  [tabindex]:not([tabindex='-1']):focus-visible,
   .spatial-nav-active {
-    outline: none !important;
-    box-shadow:
-      0 0 0 2px var(--bg-app),
-      0 0 0 4px var(--accent-primary) !important;
-    border-radius: 0.375rem;
+    outline: 2px solid var(--accent-ring);
+    outline-offset: 2px;
+    box-shadow: 0 0 0 3px var(--accent-subtle);
   }
 
-  /* Text fields already switch to an accent border on focus, so they only get a slim 2px halo:
-     the full 4px ring above overlapped the label sitting 4px above most inputs. */
+  /* Inputs sit close to field labels: keep focus ring tight without colliding */
   input:focus-visible,
   select:focus-visible,
   textarea:focus-visible {
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent-primary) 40%, transparent);
+    outline: 2px solid var(--accent-ring);
+    outline-offset: 0;
+    box-shadow: 0 0 0 3px var(--accent-subtle);
   }
 }
 
-/* Pointer cursor on enabled buttons, "not allowed" on disabled ones (utilities such as
-   cursor-grab / cursor-default still win because this lives in the base layer). */
 @layer base {
   button:not(:disabled),
   [role='button']:not([aria-disabled='true']),
@@ -368,24 +678,15 @@ body,
   }
 }
 
-/* Light theme: disabled controls stay noticeably "off" but remain readable (the 40-50% opacities used
-   across the app leave white-on-blue buttons at ~2.5:1, which vanishes on a washed-out display).
-   Only those two utilities are overridden; the deliberately fainter disabled:opacity-30 icon buttons keep
-   their own value. */
 .light .disabled\:opacity-40:disabled,
 .light .disabled\:opacity-50:disabled {
   opacity: 0.65;
 }
 
-/* Dark and Breeze: same idea for the faintest value (40%), slightly less opaque since light text on dark
-   loses less contrast. */
 html:not(.light) .disabled\:opacity-40:disabled {
   opacity: 0.55;
 }
 
-/* Respect the OS "reduce motion" setting: drop decorative motion (entrance, pulse, ping, bounce, slide)
-   and instant-ify transitions, but keep spinners turning - they are the only sign that work is in
-   progress, and a frozen one looks the same as a finished operation. */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -403,57 +704,216 @@ html:not(.light) .disabled\:opacity-40:disabled {
   }
 }
 
-/* Markdown preview: drive the typography plugin from the theme tokens instead of `prose-invert`
-   (which assumes a dark page and left headings white-on-white in the light theme). */
+/* ==========================================================================
+   Terminal HUD, Selection Popover, Command Gutter, Blocks Drawer & Pane Chrome
+   ========================================================================== */
+.terminal-status-bar {
+  background-color: var(--bg-surface);
+  border-top: 1px solid var(--border-divider);
+  color: var(--fg-secondary);
+  min-height: 28px;
+  flex-wrap: wrap;
+}
+
+.terminal-status-bar button {
+  color: var(--fg-secondary);
+  border-radius: 4px;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.terminal-status-bar button:hover:not(:disabled) {
+  background-color: var(--bg-surface-hover);
+  color: var(--fg-primary);
+}
+
+.terminal-selection-popover {
+  background-color: var(--surface-elevated);
+  border: 1px solid var(--accent-border);
+  color: var(--fg-primary);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+}
+
+.terminal-selection-popover button {
+  border-radius: 5px;
+  padding: 3px 8px;
+  font-weight: 500;
+  color: var(--fg-primary);
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.terminal-selection-popover button:hover:not(:disabled) {
+  background-color: var(--accent-bg);
+  color: var(--accent-fg-strong);
+}
+
+[data-testid='terminal-command-gutter'] {
+  pointer-events: none;
+}
+
+[data-testid='terminal-blocks-drawer'] {
+  background-color: var(--surface-elevated);
+  border: 1px solid var(--border-strong);
+  color: var(--fg-primary);
+}
+
+.pane-leaf-active {
+  --pane-active-accent: var(--accent-primary);
+}
+
+.pane-header {
+  min-height: 24px;
+  border-bottom: 1px solid var(--border-divider);
+}
+
+.pane-badge-broadcast {
+  background-color: var(--warn-bg);
+  border: 1px solid var(--warn-border);
+  color: var(--warn-fg);
+}
+
+.pane-badge-observer {
+  background-color: var(--purple-bg);
+  border: 1px solid var(--purple-border);
+  color: var(--purple-fg);
+}
+
+.pane-badge-ai {
+  background-color: var(--ok-bg);
+  border: 1px solid var(--ok-border);
+  color: var(--ok-fg);
+}
+
+/* Shared semantic buttons/chips/badges so components outside .ai-hub (e.g. TerminalControl) match */
+.ai-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border-card);
+  background: transparent;
+  color: var(--fg-secondary);
+  font-size: 11px;
+  line-height: 1.6;
+  transition: border-color 140ms ease, color 140ms ease, background-color 140ms ease;
+}
+.ai-chip:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  color: var(--fg-primary);
+  background: var(--muted-bg);
+}
+.ai-chip-on,
+.ai-chip-active {
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+  color: var(--accent-fg-strong);
+}
+
+.ai-pill,
+.ai-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  border: 1px solid var(--border-card);
+  background: var(--muted-bg);
+  color: var(--fg-secondary);
+  white-space: nowrap;
+}
+.ai-badge-success,
+.ai-badge-ok,
+.ai-badge-green {
+  border-color: var(--ok-border);
+  background: var(--ok-bg);
+  color: var(--ok-fg);
+}
+.ai-badge-mode,
+.ai-badge-warn {
+  border-color: var(--warn-border);
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+}
+.ai-badge-danger {
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+}
+.ai-badge-cluster {
+  border-color: var(--indigo-border);
+  background: var(--indigo-bg);
+  color: var(--indigo-fg);
+}
+.ai-badge-purple {
+  border-color: var(--purple-border);
+  background: var(--purple-bg);
+  color: var(--purple-fg);
+}
+
+.ai-btn-accent {
+  background: var(--accent-bg);
+  border: 1px solid var(--accent-border);
+  color: var(--accent-fg-strong);
+  font-weight: 600;
+}
+.ai-btn-accent:hover:not(:disabled) {
+  background: var(--accent-subtle);
+  border-color: var(--accent-primary);
+}
+.ai-btn-emerald {
+  background: var(--ok-bg);
+  border: 1px solid var(--ok-border);
+  color: var(--ok-fg);
+  font-weight: 600;
+}
+.ai-btn-emerald:hover:not(:disabled) {
+  border-color: var(--ok-solid);
+}
+.ai-btn-danger {
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  color: var(--danger-fg);
+  font-weight: 600;
+}
+.ai-btn-danger:hover:not(:disabled) {
+  border-color: var(--danger-solid);
+}
+
+/* ==========================================================================
+   Markdown Preview & Syntax Tokens (Lezer @lezer/highlight)
+   ========================================================================== */
 .markdown-preview {
-  --tw-prose-body: var(--text-primary);
-  --tw-prose-headings: var(--text-primary);
-  --tw-prose-lead: var(--text-secondary);
-  --tw-prose-links: var(--accent-primary);
-  --tw-prose-bold: var(--text-primary);
-  --tw-prose-counters: var(--text-muted);
-  --tw-prose-bullets: var(--text-muted);
+  --tw-prose-body: var(--fg-primary);
+  --tw-prose-headings: var(--fg-primary);
+  --tw-prose-lead: var(--fg-secondary);
+  --tw-prose-links: var(--accent-fg);
+  --tw-prose-bold: var(--fg-primary);
+  --tw-prose-counters: var(--fg-muted);
+  --tw-prose-bullets: var(--fg-muted);
   --tw-prose-hr: var(--border-subtle);
-  --tw-prose-quotes: var(--text-primary);
+  --tw-prose-quotes: var(--fg-primary);
   --tw-prose-quote-borders: var(--border-strong);
-  --tw-prose-captions: var(--text-muted);
-  --tw-prose-code: var(--text-primary);
-  --tw-prose-pre-code: var(--text-primary);
-  --tw-prose-pre-bg: var(--bg-surface);
+  --tw-prose-captions: var(--fg-muted);
+  --tw-prose-code: var(--fg-primary);
+  --tw-prose-pre-code: var(--code-fg);
+  --tw-prose-pre-bg: var(--code-bg);
   --tw-prose-th-borders: var(--border-strong);
   --tw-prose-td-borders: var(--border-subtle);
-
-  /* Syntax colours of fenced code (dark themes); the light theme overrides them below. */
-  --md-tok-keyword: #ff7b72;
-  --md-tok-literal: #79c0ff;
-  --md-tok-string: #a5d6ff;
-  --md-tok-comment: #9aa4af;
-  --md-tok-name: #ffa657;
-  --md-tok-type: #7ee787;
-  --md-tok-meta: #d2a8ff;
-}
-.light .markdown-preview {
-  --md-tok-keyword: #cf222e;
-  --md-tok-literal: #0550ae;
-  --md-tok-string: #0a3069;
-  --md-tok-comment: #57606a;
-  --md-tok-name: #953800;
-  --md-tok-type: #116329;
-  --md-tok-meta: #6639ba;
 }
 
-/* Like GitHub: no literal backticks around inline code, a quiet background instead. */
 .markdown-preview :where(code)::before,
 .markdown-preview :where(code)::after {
   content: none;
 }
 .markdown-preview :not(pre) > code {
-  background: var(--bg-surface);
+  background: var(--inline-code-bg);
+  color: var(--inline-code-fg);
   border-radius: 0.25rem;
   padding: 0.15em 0.35em;
 }
 
-/* Tables with a full grid. */
 .markdown-preview table {
   border-collapse: collapse;
 }
@@ -466,7 +926,6 @@ html:not(.light) .disabled\:opacity-40:disabled {
   background: var(--bg-surface);
 }
 
-/* Task lists (- [x]): the checkbox is the marker, no bullet as well. */
 .markdown-preview .contains-task-list {
   list-style: none;
   padding-inline-start: 0;
@@ -479,40 +938,40 @@ html:not(.light) .disabled\:opacity-40:disabled {
   vertical-align: middle;
 }
 
-/* Syntax tokens of fenced code (classes from @lezer/highlight's classHighlighter). */
-.markdown-preview .tok-keyword,
-.markdown-preview .tok-operator,
-.markdown-preview .tok-modifier {
+/* Syntax tokens used in MarkdownPreview and <HighlightedCode> across the app */
+.tok-keyword,
+.tok-operator,
+.tok-modifier {
   color: var(--md-tok-keyword);
 }
-.markdown-preview .tok-atom,
-.markdown-preview .tok-bool,
-.markdown-preview .tok-number,
-.markdown-preview .tok-literal {
+.tok-atom,
+.tok-bool,
+.tok-number,
+.tok-literal {
   color: var(--md-tok-literal);
 }
-.markdown-preview .tok-string,
-.markdown-preview .tok-string2,
-.markdown-preview .tok-url {
+.tok-string,
+.tok-string2,
+.tok-url {
   color: var(--md-tok-string);
 }
-.markdown-preview .tok-comment {
+.tok-comment {
   color: var(--md-tok-comment);
   font-style: italic;
 }
-.markdown-preview .tok-variableName,
-.markdown-preview .tok-propertyName,
-.markdown-preview .tok-attributeName,
-.markdown-preview .tok-labelName {
+.tok-variableName,
+.tok-propertyName,
+.tok-attributeName,
+.tok-labelName {
   color: var(--md-tok-name);
 }
-.markdown-preview .tok-typeName,
-.markdown-preview .tok-className,
-.markdown-preview .tok-namespace {
+.tok-typeName,
+.tok-className,
+.tok-namespace {
   color: var(--md-tok-type);
 }
-.markdown-preview .tok-meta,
-.markdown-preview .tok-macroName {
+.tok-meta,
+.tok-macroName {
   color: var(--md-tok-meta);
 }
 
@@ -529,10 +988,9 @@ html:not(.light) .disabled\:opacity-40:disabled {
   border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--text-muted);
+  background: var(--fg-muted);
 }
 
-/* Hide scrollbars on horizontally scrolling chrome (tabs, breadcrumbs) */
 .no-scrollbar {
   scrollbar-width: none;
 }
