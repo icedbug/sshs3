@@ -396,7 +396,7 @@ export class ToolBroker {
       requesterId?: string;
       requiredApprovals: number;
       resolve: (answer: Answer) => void;
-      timer: NodeJS.Timeout;
+      timer?: NodeJS.Timeout;
     }
   >();
   private idempotencyLedgers = new Map<string, Map<string, IdempotencyEntry>>();
@@ -818,10 +818,15 @@ export class ToolBroker {
   ): Promise<Answer> {
     const started = Date.now();
     const answer = await new Promise<Answer>((resolve) => {
-      const timer = setTimeout(() => {
-        this.approvals.delete(changeId);
-        resolve({ allowed: false, how: "timeout" });
-      }, this.deps.approvalWaitMs?.() ?? 10 * 60_000);
+      // No limit on the wait unless one is set (0 or none: for as long as it takes).
+      const waitMs = this.deps.approvalWaitMs?.() ?? 0;
+      const timer =
+        waitMs > 0
+          ? setTimeout(() => {
+              this.approvals.delete(changeId);
+              resolve({ allowed: false, how: "timeout" });
+            }, waitMs)
+          : undefined;
       this.approvals.set(changeId, {
         task,
         taskId: task.id,
@@ -1807,7 +1812,7 @@ export class ToolBroker {
             ? `Not approved. The person said: ${answer.note}`
             : answer.how === "timeout"
               ? // Said as it is, with the command: "not approved" read as a person's no, and the report then left out what waited.
-                `Nobody answered within ${minutes(this.deps.approvalWaitMs?.() ?? 10 * 60_000)}, so this did not run: ${change.command ?? change.description}. It was not refused; nobody was there. Do not ask for it again in this run. Go on with what does not need it, and name this command in your report as waiting for a person's approval.`
+                `Nobody answered within ${minutes(this.deps.approvalWaitMs?.() ?? 0)}, so this did not run: ${change.command ?? change.description}. It was not refused; nobody was there. Do not ask for it again in this run. Go on with what does not need it, and name this command in your report as waiting for a person's approval.`
               : "Action not approved or task stopped",
           { code: answer.how === "timeout" ? "approval_timeout" : "approval_denied" },
         );

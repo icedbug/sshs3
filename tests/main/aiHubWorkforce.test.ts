@@ -106,7 +106,7 @@ describe("runWorkforce", () => {
     expect(calls).toEqual(["Agent a", "Agent b"]); // no lead run
   });
 
-  it("does not run more specialists at once than its concurrency, and caps their number", async () => {
+  it("does not run more specialists at once than its concurrency, and runs every one of them", async () => {
     let running = 0;
     let peak = 0;
     const run = await runWorkforce(
@@ -125,7 +125,7 @@ describe("runWorkforce", () => {
         },
       },
     );
-    expect(run.steps).toHaveLength(4);
+    expect(run.steps).toHaveLength(6);
     expect(peak).toBe(2);
   });
 
@@ -498,7 +498,7 @@ describe("an agent's own investigators (sshs3_investigate)", () => {
     expect(hub.store.data.tasks.filter((t) => t.workforceRunId?.startsWith("inv-"))).toHaveLength(2);
   });
 
-  it("returns a failed investigator's error with its question instead of an invented report, and caps the questions at four", async () => {
+  it("returns a failed investigator's error with its question instead of an invented report, and looks into every question", async () => {
     const hub = await makeHub();
     await hub.request(configure);
     const { retryPolicy } = await import("../../src/main/ai/hub/DirectAgentRuntime");
@@ -519,10 +519,10 @@ describe("an agent's own investigators (sshs3_investigate)", () => {
       parent,
       ["question one", "question two", "question three", "question four", "question five"].map((question) => ({ question })),
     );
-    expect(reports).toHaveLength(4);
-    expect(reports.map((r) => r.status)).toEqual(["answered", "failed", "answered", "answered"]);
+    expect(reports).toHaveLength(5);
+    expect(reports.map((r) => r.status)).toEqual(["answered", "failed", "answered", "answered", "answered"]);
     expect(reports[1].report).toContain("401");
     expect(reports[1].question).toBe("question two");
-    expect(investigators).toBe(3);
+    expect(investigators).toBe(4);
   });
 });

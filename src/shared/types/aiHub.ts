@@ -870,8 +870,7 @@ export interface HubPreferences {
   workforceAutopilot?: boolean;
   /**
    * How long an agent waits for a person to approve before it gives up, in
-   * minutes (10 unless set; at most 60). The wait does not count against the
-   * run's time budget.
+   * minutes. 0 or unset: no limit, it waits for as long as it takes.
    */
   approvalWaitMinutes?: number;
 }

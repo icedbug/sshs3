@@ -869,7 +869,7 @@ export function Settings({
           How long an agent waits for your approval
           <select
             aria-label="Approval wait"
-            value={hub.preferences.approvalWaitMinutes ?? 10}
+            value={hub.preferences.approvalWaitMinutes ?? 0}
             onChange={(e) =>
               void act({
                 action: "configure",
@@ -878,9 +878,9 @@ export function Settings({
               })
             }
           >
-            {[10, 20, 30, 45, 60].map((m) => (
+            {[0, 10, 20, 30, 45, 60].map((m) => (
               <option key={m} value={m}>
-                {m} minutes{m === 10 ? " (default)" : ""}
+                {m === 0 ? "As long as it takes (default)" : `${m} minutes`}
               </option>
             ))}
           </select>

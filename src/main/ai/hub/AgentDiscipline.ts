@@ -572,8 +572,8 @@ export function renderFailureHints(hints: MemoryEntry[]): string {
 
 // --------------------------------------------------- autonomous handoff guards
 
-/** Maximum number of agent-to-agent handoff hops allowed on a single task. */
-export const MAX_HANDOFF_HOPS = 3;
+/** A task may be handed on any number of times; an agent that already had it is not given it again (see `cycle`). */
+export const MAX_HANDOFF_HOPS = Number.POSITIVE_INFINITY;
 
 export interface HandoffCheckResult {
   allowed: boolean;
@@ -594,6 +594,7 @@ export interface HandoffPacket {
   target?: { sessionId: string; label: string };
   handoffChain: string[];
   hopsUsed: number;
+  /** 0: no limit. */
   maxHops: number;
   todos: AgentTodo[];
   hypotheses: AgentHypothesis[];
@@ -614,8 +615,8 @@ function lowerMode(a: AgentMode, b: AgentMode): AgentMode {
 }
 
 /**
- * Checks whether handing a task to `toAgentId` is permitted under
- * `MAX_HANDOFF_HOPS = 3` and cycle detection (`A -> B -> A`).
+ * Checks whether handing a task to `toAgentId` is permitted: cycle detection
+ * (`A -> B -> A`), and a hop limit only where a caller names one.
  */
 export function checkHandoffAllowed(params: {
   handoffChain?: string[];
@@ -737,7 +738,7 @@ export function buildHandoffPacket(params: {
   const open = openTodos(todos);
 
   const summaryLines = [
-    `**Handed over: ${fromAgentName} → ${toAgent.name}** (hop ${check.hopsUsed}/${MAX_HANDOFF_HOPS})`,
+    `**Handed over: ${fromAgentName} → ${toAgent.name}** (hop ${check.hopsUsed})`,
     `Chain: ${check.nextChain.join(" → ")}`,
     ...(cleanReason ? [`Reason: *${cleanReason}*`] : []),
     `Mission: ${toAgent.mission}`,
@@ -772,7 +773,7 @@ export function buildHandoffPacket(params: {
         : {}),
       handoffChain: check.nextChain,
       hopsUsed: check.hopsUsed,
-      maxHops: MAX_HANDOFF_HOPS,
+      maxHops: 0,
       todos,
       hypotheses,
       evidenceRefs,
@@ -783,8 +784,8 @@ export function buildHandoffPacket(params: {
 }
 
 /**
- * Applies a validated handoff onto `task`, enforcing `MAX_HANDOFF_HOPS = 3`
- * and cycle detection (`A -> B -> A`) and recording the `HandoffPacket` on `task`.
+ * Applies a validated handoff onto `task`, enforcing
+ * cycle detection (`A -> B -> A`) and recording the `HandoffPacket` on `task`.
  */
 export function applyHandoff(
   task: AgentTask,
@@ -891,7 +892,7 @@ export function operatingInstructions(options: {
     "## Evidence before action",
     "Look before you change: the current state of the thing, its recent log lines, the configuration you are about to edit (read a file before writing it). Use bounded, non-interactive commands; never start an interactive or full-screen program, a nested shell or a nested SSH session.",
     "Independent read-only checks can be requested together in one turn.",
-    "When finding out needs a lot of reading (configuration and logs on several servers, runbooks, the team's history), hand it to investigators with `sshs3_investigate`: up to four precise questions, looked into in parallel, each in a context of its own. They see none of this conversation, so each question must stand on its own. Their reports are evidence to weigh, like any other.",
+    "When finding out needs a lot of reading (configuration and logs on several servers, runbooks, the team's history), hand it to investigators with `sshs3_investigate`: precise questions, looked into in parallel, each in a context of its own. They see none of this conversation, so each question must stand on its own. Their reports are evidence to weigh, like any other.",
     "State a cause only when the evidence shows it. Name what you assume and what you could not check.",
     "Every command result carries a short `ref` (c1, c2 …). In your report, put the ref in square brackets right after the statement it supports, like: the pool is scrubbing [c3]. The person can click it to see the command and its output. A statement about the system without a ref is read as your assumption.",
     "",

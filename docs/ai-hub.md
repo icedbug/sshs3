@@ -81,8 +81,8 @@ explicitly enabled presentation on top of the same terminal authority.
     result carries the team memories and skills that match it (exact error
     signature first, else at least three distinctive shared words).
   - *Investigators* (`sshs3_investigate`, `HubService.investigate`): the
-    agent hands one to four precise questions to read-only runs that look in
-    parallel (three at a time), each with a fresh context,
+    agent hands precise questions to read-only runs that look in
+    parallel (all at once), each with a fresh context,
     `workspace_context`, `sshs3_kb_search` and `sshs3_storage_ops`, and, when
     one can be opened, a terminal of its own on the asking run's target where
     only read-only commands run; it gets their reports back together, a
@@ -255,7 +255,7 @@ explicitly enabled presentation on top of the same terminal authority.
   `createTwoFilesPatch` from the `diff` package.
 - **`WorkforceRunner`** — a workforce run starts one read-only model run per
   selected Mission Agent (`workspace_context`, `sshs3_kb_search` and
-  `sshs3_storage_ops` only; bounded concurrency, at most four specialists) and
+  `sshs3_storage_ops` only; all at once unless a concurrency is named) and
   then one run that combines their reports. Every finding in the result is a
   model's own answer; a specialist that cannot run is recorded as failed with
   the provider's error, and without an enabled provider the run is refused.
@@ -769,9 +769,9 @@ placed before the early return for a pending save); three seconds later
   request's Host header. `?view=Inbox&item=<id>` is read once by
   `AiHubPanel` and removed from the address; `InboxView` marks the item or
   says that it no longer waits.
-- **The wait for a person** is `preferences.approvalWaitMinutes` (10, at most
-  60). `ToolBroker.waitForPerson` gives the waited time back to a run that has
-  a time limit (the hub's own background calls; a person's run has none).
+- **The wait for a person** has no limit unless `preferences.approvalWaitMinutes`
+  is set above 0. An unattended run that asks then waits until somebody answers
+  or stops it.
 - A desktop notification is now also shown when an approval, a plan or a
   question starts to wait, which nothing did before.
 
@@ -1237,8 +1237,7 @@ The application-owned `sshs3_terminal` backend plugin provides:
 - `sshs3_terminal_file_read`: target-provider reads of complete UTF-8 text under 64 KB.
 - `sshs3_terminal_file_write`: reviewed replacements with expected-hash checks and read-back.
 
-New assigned conversations default to **assisted** mode with 30 commands and
-15 minutes per native turn. Commands and file replacements require approval for
+New assigned conversations default to **assisted** mode. Commands and file replacements require approval for
 that exact task/change. An expiring private capability connects the native
 backend to a loopback broker; browser origins and missing capabilities are
 refused. Model arguments never supply a terminal, native profile/session ID,
@@ -1279,7 +1278,7 @@ and each has a test.
 **Chat and the agent loop.** Tokens are counted on every way a turn ends, also
 when it fails or is stopped. A handover note (compaction) is written from the
 transcript without dropping the person's latest steering. External agents
-(ACP) get the same command limit as built-in ones and never inherit the
+(ACP) have no command limit either and never inherit the
 app's SSH agent socket or its own `SSHS3_*` variables. Investigators started
 from a conversation are linked to it and their spending counts toward it. A
 handoff to another agent takes effect after the current turn, and never raises
@@ -1287,13 +1286,16 @@ the run's mode. A person can answer an approval with a note: a refusal tells
 the agent why and the run goes on; an approval with a note hands the note to
 the agent with the command's result. The agent is given its target's last
 facts reading, with how old it is, and is told to look again before acting on it.
-A person's run (a conversation, a ticket, a schedule) has no limit on commands,
-time or model turns, and any number of conversations can run at once: a run
-ends when the model answers or somebody stops it. An agent's pause and its
-monthly token budget still apply, and so does every approval. While a run
-works, the chat shows how many commands it has run. The hub's own background
-calls (reading a document, a review, an investigator) keep a time limit, so
-that one that hangs does not block its queue.
+No run has a limit on commands, time or model turns (a conversation, a ticket,
+a schedule, and the hub's own background calls alike), and any number can run
+at once: a run ends when the model answers or somebody stops it. The wait for
+a person's answer has no limit unless one is set, a task can be handed on any
+number of times (never back to an agent that had it), the heartbeat starts
+every ticket that is ready (one at a time on a target), and investigators are
+as many as the questions. What still applies: every approval, the safety
+policy, an agent's pause, and a monthly token budget where one is set for an
+agent (none by default). While a run works, the chat shows how many commands
+it has run.
 
 **Workforce.** A ticket is claimed in the bucket and the claim is read back
 after a pause, so two installations do not both run it. Pause and budget are

@@ -108,7 +108,28 @@ describe("a person's run has no limit on commands or time", () => {
     expect(timers.has(task.id)).toBe(false);
   });
 
-  it("still words a limit that is set (the hub's own background calls keep a time limit)", () => {
+  it("waits for a person's answer for as long as it takes, unless a wait is set", async () => {
+    const hub = await create();
+    const inner = hub as unknown as { approvalWaitMinutes(): number };
+    expect(inner.approvalWaitMinutes()).toBe(0);
+    const broker = hub.broker as unknown as {
+      approvals: Map<string, { timer?: unknown; resolve(answer: { allowed: boolean; how: string }): void }>;
+      waitForPerson(task: AgentTask, changeId: string): Promise<{ allowed: boolean; how: string }>;
+    };
+    const answer = broker.waitForPerson({ id: "t", status: "waiting" } as AgentTask, "c1");
+    // Nothing is set to give up on the person.
+    expect(broker.approvals.get("c1")!.timer).toBeUndefined();
+    broker.approvals.get("c1")!.resolve({ allowed: true, how: "person" });
+    expect(await answer).toEqual({ allowed: true, how: "person" });
+    broker.approvals.delete("c1");
+
+    await hub.request({ action: "configure", preferences: { approvalWaitMinutes: 30 } } as never);
+    expect(inner.approvalWaitMinutes()).toBe(30);
+    await hub.request({ action: "configure", preferences: { approvalWaitMinutes: 0 } } as never);
+    expect(inner.approvalWaitMinutes()).toBe(0);
+  });
+
+  it("still words a limit, for a conversation that was stopped by one before they were taken away", () => {
     expect(budgetStopLine({ kind: "minutes", limit: 15, at: 0 })).toBe(
       "Stopped after 15 minutes, the time limit for this conversation. Continue to give it 15 more.",
     );

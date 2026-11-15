@@ -241,7 +241,7 @@ describe("a run that tries to change its own rules", () => {
     expect(careful.task.handoffTo).toBeUndefined();
     expect(careful.task.messages.at(-1)).toMatchObject({
       role: "system",
-      text: "**Handed over: Operator → Night operator** (hop 1/3)\nChain: Operator → auto\nReason: *they know storage*\nMission: Keep it running\nGoal: A run",
+      text: "**Handed over: Operator → Night operator** (hop 1)\nChain: Operator → auto\nReason: *they know storage*\nMission: Keep it running\nGoal: A run",
     });
     // And the other way a handover does make it more careful.
     await hub.request({ action: "agent-save", agent: { id: "look", name: "Reader", role: "r", mission: "Read", systemPrompt: "", defaultMode: "advice" } as never });

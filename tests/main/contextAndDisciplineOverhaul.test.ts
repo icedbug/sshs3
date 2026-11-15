@@ -590,8 +590,8 @@ describe("AgentDiscipline handoff hop & cycle guards + active rules in instructi
     updatedAt: 1,
   });
 
-  it("enforces MAX_HANDOFF_HOPS = 3 and detects A -> B -> A cycles with HandoffPacket", () => {
-    expect(MAX_HANDOFF_HOPS).toBe(3);
+  it("hands a task on any number of times and detects A -> B -> A cycles with HandoffPacket", () => {
+    expect(MAX_HANDOFF_HOPS).toBe(Number.POSITIVE_INFINITY);
 
     const t = makeTask({
       agentId: "triage",
@@ -621,10 +621,10 @@ describe("AgentDiscipline handoff hop & cycle guards + active rules in instructi
     expect(t.mode).toBe("plan");
     expect(t.handoffChain).toEqual(["triage", "k8s-ops", "storage-ops", "net-ops"]);
 
-    // Hop 4 exceeds MAX_HANDOFF_HOPS = 3.
+    // A fourth hop is handed on like the others: there is no limit on how many.
     const hop4 = applyHandoff(t, agent("sec-ops"), "Still failing", 1400);
-    expect(hop4).toMatchObject({ ok: false, reason: "max-hops" });
-    expect(t.agentId).toBe("net-ops");
+    expect(hop4.ok).toBe(true);
+    expect(t.agentId).toBe("sec-ops");
 
     expect(
       checkHandoffAllowed({
@@ -638,7 +638,12 @@ describe("AgentDiscipline handoff hop & cycle guards + active rules in instructi
         task: makeTask({ agentId: "a", agentName: "a", handoffChain: ["a", "b", "c", "d"] }),
         toAgent: agent("e"),
       }),
-    ).toMatchObject({ ok: false, reason: "max-hops" });
+    ).toMatchObject({ ok: true });
+    // A limit holds only where a caller names one.
+    expect(checkHandoffAllowed({ handoffChain: ["a", "b", "c"], toAgentId: "d", maxHops: 2 })).toMatchObject({
+      allowed: false,
+      reason: "max-hops",
+    });
   });
 
   it("injects active workspace rules cleanly in operatingInstructions", () => {

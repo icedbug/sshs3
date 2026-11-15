@@ -558,7 +558,7 @@ describe("Wave 2 Hub integration overhaul", () => {
     expect(mem?.staleReason).toBeTruthy();
   });
 
-  it("enforces two-person peer approval & freeze in plan-decide and MAX_HANDOFF_HOPS=3", async () => {
+  it("enforces two-person peer approval & freeze in plan-decide, and hands a conversation on without a hop limit", async () => {
     const prodServer: WorkspaceServerSummary = {
       id: "srv-p",
       name: "prod-api-1",
@@ -652,7 +652,7 @@ describe("Wave 2 Hub integration overhaul", () => {
       hub.request({ action: "plan-decide", taskId: "task-frozen", approved: true }),
     ).rejects.toThrow("change freeze");
 
-    // MAX_HANDOFF_HOPS = 3 & cycle guard
+    // Handoffs: no limit on how many
     const mkAgent = (id: string, name: string): MissionAgent => ({
       id,
       name,
@@ -690,14 +690,9 @@ describe("Wave 2 Hub integration overhaul", () => {
     await hub.request({ action: "agent-handoff", taskId: "task-handoff", toAgentId: "a2" });
     await hub.request({ action: "agent-handoff", taskId: "task-handoff", toAgentId: "a3" });
     await hub.request({ action: "agent-handoff", taskId: "task-handoff", toAgentId: "a4" });
-    // Cycle a4 -> a2 blocked
-    await expect(
-      hub.request({ action: "agent-handoff", taskId: "task-handoff", toAgentId: "a2" }),
-    ).rejects.toThrow();
-    // 4th hop (> MAX_HANDOFF_HOPS=3) blocked
-    await expect(
-      hub.request({ action: "agent-handoff", taskId: "task-handoff", toAgentId: "a5" }),
-    ).rejects.toThrow();
+    // A fourth hop goes through like the others.
+    await hub.request({ action: "agent-handoff", taskId: "task-handoff", toAgentId: "a5" });
+    expect(hub.store.data.tasks.find((t) => t.id === "task-handoff")).toMatchObject({ agentId: "a5" });
   });
 
   it("streams live deltas via HubService -> createMultiSSHApi -> applyAiHubDelta", async () => {

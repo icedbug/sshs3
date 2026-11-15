@@ -372,8 +372,6 @@ export interface WorkforceRequest {
   requireStructuredOutput?: boolean;
 }
 
-export const MAX_WORKFORCE_SPECIALISTS = 4;
-
 const GENERAL_SPECIALIST: MissionAgent = {
   id: "default-sre-specialist",
   name: "General Infrastructure SRE",
@@ -478,7 +476,7 @@ export async function runWorkforce(
 ): Promise<WorkforceRun> {
   const agents = (
     request.agents.length > 0 ? request.agents : [GENERAL_SPECIALIST]
-  ).slice(0, MAX_WORKFORCE_SPECIALISTS);
+  );
   const now = Date.now();
   const runId = `wf-${crypto.randomUUID().slice(0, 8)}`;
   const scratchpad = new RunScratchpad(runId);
@@ -589,7 +587,7 @@ export async function runWorkforce(
   let next = 0;
   const workers = Math.max(
     1,
-    Math.min(request.concurrency ?? 2, steps.length),
+    Math.min(request.concurrency ?? steps.length, steps.length),
   );
   await Promise.all(
     Array.from({ length: workers }, async () => {

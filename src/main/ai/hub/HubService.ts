@@ -240,7 +240,6 @@ import {
   todosFromPlan,
 } from "./PlanMode";
 import {
-  MAX_HANDOFF_HOPS,
   applyHandoff as applyDisciplinedHandoff,
   checkHandoffAllowed,
 } from "./AgentDiscipline";
@@ -1913,7 +1912,7 @@ export class HubService {
 
   /**
    * An agent hands questions to read-only investigators that look in
-   * parallel (at most four questions, three at a time) and gets their reports
+   * parallel (as many as there are questions) and gets their reports
    * back together. Each investigator is a model run of its own with a fresh
    * context, so the asking agent's context is spent on the answers, not on the
    * reading. A question whose investigator fails comes back with the error.
@@ -1924,7 +1923,7 @@ export class HubService {
   ): Promise<
     Array<{ question: string; status: "answered" | "failed"; report: string }>
   > {
-    const asked = questions.slice(0, MAX_INVESTIGATIONS);
+    const asked = questions;
     const runId = `inv-${crypto.randomUUID().slice(0, 8)}`;
     const results = new Array<{
       question: string;
@@ -1981,7 +1980,7 @@ export class HubService {
     };
     try {
       await Promise.all(
-        Array.from({ length: Math.min(3, asked.length) }, () => worker()),
+        Array.from({ length: asked.length }, () => worker()),
       );
     } finally {
       this.workforceLeads.delete(runId);
@@ -2065,7 +2064,7 @@ export class HubService {
     const allMemories = extra.memories ?? this.store.data.memories;
     const allEdges = this.getInfraEdgesList();
 
-    const steps: WorkforceStep[] = selectedAgents.slice(0, 4).map((ag, idx) => {
+    const steps: WorkforceStep[] = selectedAgents.map((ag, idx) => {
       const cluster = ag.targetCluster || opts.targetCluster || "Workspace";
       const clusterNodes = allServers.filter(
         (s) =>
@@ -2482,7 +2481,7 @@ export class HubService {
             next.workforceAutopilot =
               p.workforceAutopilot === true;
           if (p.approvalWaitMinutes !== undefined)
-            next.approvalWaitMinutes = integer(p.approvalWaitMinutes, 1, 60);
+            next.approvalWaitMinutes = integer(p.approvalWaitMinutes, 0, 10_080);
           // On a shared server the path is the server's own and set by its administrator: not by whoever is signed in.
           if (p.sharedWorkspacePath !== undefined && !this.hosted()) {
             const cleanedPath = p.sharedWorkspacePath.trim();
@@ -3822,7 +3821,6 @@ export class HubService {
           currentAgentName: task.agentName,
           toAgentId: toAgent.id,
           toAgentName: toAgent.name,
-          maxHops: MAX_HANDOFF_HOPS,
           allowCycle,
         });
         if (!hopCheck.allowed) throw new Error(hopCheck.message ?? "Handoff limit reached");
@@ -5368,11 +5366,10 @@ export class HubService {
         })),
       createdAt: now,
       updatedAt: now,
-      // A person's conversation, a ticket, a schedule: no limit on commands, time or model turns. It
-      // runs until it is done or somebody stops it. The hub's own background calls (reading a document,
-      // a review, an investigator) keep a time limit, so that one that hangs does not block its queue.
+      // No run has a limit on commands, time or model turns: a person's conversation, a ticket, a
+      // schedule and the hub's own background calls alike. It runs until it is done or somebody stops it.
       maxCommands: 0,
-      maxMinutes: readOnly ? integer(input.maxMinutes ?? 15, 1, 120) : 0,
+      maxMinutes: 0,
       verification: "not-verified",
     };
     this.store.data.tasks.push(task);
@@ -5412,11 +5409,9 @@ export class HubService {
     const as = task.agentId && !isBackgroundRun(task) ? this.getAgentsList().find((a) => a.id === task.agentId) : undefined;
     if (as) this.assertMayRun(as);
     // There is no limit on how many conversations a person runs at once.
-    // A conversation from before the limits were taken away carries its old ones: they no longer hold.
-    if (!isBackgroundRun(task)) {
-      task.maxCommands = 0;
-      task.maxMinutes = 0;
-    }
+    // A run from before the limits were taken away, or one made with some, carries them: they do not hold.
+    task.maxCommands = 0;
+    task.maxMinutes = 0;
     const launchMarker = Symbol(task.id);
     this.launches.set(task.id, launchMarker);
     task.status = "queued";
@@ -5555,11 +5550,8 @@ export class HubService {
     }
     task.status = "running";
     task.error = undefined;
-    // A conversation from before the limits were taken away carries its old ones: they no longer hold.
-    if (!isBackgroundRun(task)) {
-      task.maxCommands = 0;
-      task.maxMinutes = 0;
-    }
+    task.maxCommands = 0;
+    task.maxMinutes = 0;
     const capability = await this.broker.issue(task);
     assertLaunching();
     const runtime = new HermesRuntime(
@@ -7426,8 +7418,9 @@ export class HubService {
   private notifySettle = (): Promise<void> => new Promise((r) => setTimeout(r, 1500 + Math.random() * 1500));
   private notifyWaits: number[] | undefined;
 
+  /** How long an agent waits for a person's answer. 0, the default, is for as long as it takes. */
   private approvalWaitMinutes(): number {
-    return integer(this.store.data.preferences.approvalWaitMinutes ?? 10, 1, 60);
+    return integer(this.store.data.preferences.approvalWaitMinutes ?? 0, 0, 10_080);
   }
 
   private armRunTimer(task: AgentTask, endsAt: number): void {
@@ -7586,7 +7579,7 @@ export class HubService {
       rollback: change?.rollback?.command,
       // What is left of the wait, not the whole of it: a reminder comes when part of it has gone.
       waitsMinutes:
-        item.kind === "approval"
+        item.kind === "approval" && this.approvalWaitMinutes() > 0
           ? Math.max(1, Math.round(this.approvalWaitMinutes() - (Date.now() - (item.since ?? item.at)) / 60_000))
           : undefined,
       link: this.inboxLink(item.id),
@@ -7626,7 +7619,8 @@ export class HubService {
       });
       data.flapCooldown = flaps;
       // A reminder comes before the agent stops waiting, or it would never come: at most a minute before the end.
-      const remindAfter = Math.min(data.reminderMinutes, Math.max(1, this.approvalWaitMinutes() - 1)) * 60_000;
+      const wait = this.approvalWaitMinutes();
+      const remindAfter = (wait > 0 ? Math.min(data.reminderMinutes, Math.max(1, wait - 1)) : data.reminderMinutes) * 60_000;
       const reminders =
         remindAfter > 0
           ? items.filter(
@@ -8724,11 +8718,9 @@ export class HubService {
     if (this.storeDataExtra().workforcePaused) return;
     if (!(aiEnabled ?? (await this.config.getView().catch(() => ({ enabled: false }))).enabled)) return;
     const tickets = live(this.store.data.workTickets);
-    const MAX_CONCURRENT_HEARTBEAT = 3;
     const targetKey = (t: WorkTicket): string => t.target?.trim().toLowerCase() || "__untargeted__";
     const inFlightTickets = tickets.filter((t) => t.status === "in_progress" && t.claim?.client === client);
-    const activeCount = this.ticketStarts.size + inFlightTickets.length;
-    if (activeCount >= MAX_CONCURRENT_HEARTBEAT) return;
+    // No limit on how many tickets run at once; one at a time on a target, so two runs do not work the same server.
     const busyTargets = new Set<string>(inFlightTickets.map(targetKey));
     for (const startId of this.ticketStarts) {
       const startingTicket = tickets.find((t) => t.id === startId);
@@ -10323,8 +10315,6 @@ export class HubService {
     if (this.initialized) await this.store.save();
   }
 }
-/** Whether `file` lies inside this process's data directory (userData: in demo mode, the demo workspace). */
-export const MAX_INVESTIGATIONS = 4;
 
 function investigatorPrompt(
   question: string,

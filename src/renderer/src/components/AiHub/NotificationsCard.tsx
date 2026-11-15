@@ -610,9 +610,9 @@ export function NotificationsCard({
             <option value={20}>Once, after 20 minutes</option>
           </select>
           <small>
-            An agent waits {hub.preferences?.approvalWaitMinutes ?? 10} min for
-            an answer; a reminder comes at the latest a minute before that, and
-            says how long is left.
+            {(hub.preferences?.approvalWaitMinutes ?? 0) > 0
+              ? `An agent waits ${hub.preferences?.approvalWaitMinutes} min for an answer; a reminder comes at the latest a minute before that, and says how long is left.`
+              : "An agent waits for an answer for as long as it takes."}
           </small>
         </label>
       </div>
