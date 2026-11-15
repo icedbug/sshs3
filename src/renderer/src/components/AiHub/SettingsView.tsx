@@ -1048,16 +1048,7 @@ export function Settings({
                 onChange={(e) => setMaxOutputTokens(Number(e.target.value))}
               />
             </label>
-            <label>
-              Most tool steps in one run
-              <input
-                type="number"
-                min="1"
-                max="100"
-                value={maxToolTurns}
-                onChange={(e) => setMaxToolTurns(Number(e.target.value))}
-              />
-            </label>
+
           </div>
           <div className="ai-form-row">
             <label>

@@ -5368,8 +5368,11 @@ export class HubService {
         })),
       createdAt: now,
       updatedAt: now,
-      maxCommands: integer(input.maxCommands ?? 20, 1, 100),
-      maxMinutes: integer(input.maxMinutes ?? 15, 1, 120),
+      // A person's conversation, a ticket, a schedule: no limit on commands, time or model turns. It
+      // runs until it is done or somebody stops it. The hub's own background calls (reading a document,
+      // a review, an investigator) keep a time limit, so that one that hangs does not block its queue.
+      maxCommands: 0,
+      maxMinutes: readOnly ? integer(input.maxMinutes ?? 15, 1, 120) : 0,
       verification: "not-verified",
     };
     this.store.data.tasks.push(task);
@@ -5408,16 +5411,12 @@ export class HubService {
     // The hub's own background work is bounded by the run that asked for it.
     const as = task.agentId && !isBackgroundRun(task) ? this.getAgentsList().find((a) => a.id === task.agentId) : undefined;
     if (as) this.assertMayRun(as);
-    // Workforce specialists are bounded by their run's own concurrency and do
-    // not take one of the user's three slots.
-    const ownRuns = [...this.runtimes.keys(), ...this.launches.keys()].filter(
-      (id) =>
-        !isBackgroundRun(this.store.data.tasks.find((t) => t.id === id)),
-    ).length;
-    if (!isBackgroundRun(task) && ownRuns >= 3)
-      throw new Error(
-        "Three tasks are already running; pause one before starting another",
-      );
+    // There is no limit on how many conversations a person runs at once.
+    // A conversation from before the limits were taken away carries its old ones: they no longer hold.
+    if (!isBackgroundRun(task)) {
+      task.maxCommands = 0;
+      task.maxMinutes = 0;
+    }
     const launchMarker = Symbol(task.id);
     this.launches.set(task.id, launchMarker);
     task.status = "queued";
@@ -5556,6 +5555,11 @@ export class HubService {
     }
     task.status = "running";
     task.error = undefined;
+    // A conversation from before the limits were taken away carries its old ones: they no longer hold.
+    if (!isBackgroundRun(task)) {
+      task.maxCommands = 0;
+      task.maxMinutes = 0;
+    }
     const capability = await this.broker.issue(task);
     assertLaunching();
     const runtime = new HermesRuntime(
@@ -5575,7 +5579,7 @@ export class HubService {
       isDemoMode() || this.hosted() ? configDir : undefined,
     );
     this.runtimes.set(task.id, runtime);
-    this.armRunTimer(task, Date.now() + task.maxMinutes * 60_000);
+    if (task.maxMinutes > 0) this.armRunTimer(task, Date.now() + task.maxMinutes * 60_000);
     this.changed();
     void runtime
       .start(task, modelConfig, (event) => this.event(task, event))
@@ -6375,8 +6379,9 @@ export class HubService {
           this.changed();
           return false;
         }
-        // The run's command budget holds for an external agent's actions too.
-        if (++actions > task.maxCommands) {
+        // Counted for the person to see. No limit unless one is set (maxCommands 0 is none).
+        actions++;
+        if (task.maxCommands > 0 && actions > task.maxCommands) {
           task.commandsUsed = task.maxCommands;
           task.budgetStop ??= { kind: "commands", limit: task.maxCommands, at: Date.now() };
           change.status = "denied";
@@ -6427,7 +6432,7 @@ export class HubService {
     task.error = undefined;
     assertLaunching();
     this.runtimes.set(task.id, runtime);
-    this.armRunTimer(task, Date.now() + task.maxMinutes * 60_000);
+    if (task.maxMinutes > 0) this.armRunTimer(task, Date.now() + task.maxMinutes * 60_000);
     this.changed();
     void runtime
       .start(task, undefined, (event) => this.event(task, event))

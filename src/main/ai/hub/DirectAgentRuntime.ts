@@ -2571,7 +2571,7 @@ export function toolsForTask(
 }
 
 function extractAiRuntimeTuning(
-  task: AgentTask,
+  _task: AgentTask,
   initialContext?: unknown,
 ): {
   snapshotMaxChars: number;
@@ -2592,10 +2592,8 @@ function extractAiRuntimeTuning(
       : 128_000;
   const maxOutputTokens =
     typeof cfg.maxOutputTokens === "number" ? cfg.maxOutputTokens : 8192;
-  const maxToolTurns =
-    typeof cfg.maxToolTurns === "number"
-      ? cfg.maxToolTurns
-      : Math.max(8, Math.min(35, (typeof task.maxCommands === "number" ? task.maxCommands : 10) + 6));
+  // No limit on how many times a run may go round: it ends when the model answers, when a person
+  // stops it, or (for the hub's own background calls) when its time is up.
   const reasoningEffort =
     cfg.reasoningEffort === "low" ||
     cfg.reasoningEffort === "medium" ||
@@ -2619,13 +2617,7 @@ function extractAiRuntimeTuning(
     ),
     maxOutputTokens,
     // Thorough mode reads more and verifies each step: it gets twice the turns.
-    maxTurns: Math.max(
-      4,
-      Math.min(
-        60,
-        wantsThoroughMode(lastUserText(task)) ? maxToolTurns * 2 : maxToolTurns,
-      ),
-    ),
+    maxTurns: Number.POSITIVE_INFINITY,
     reasoningEffort,
     temperature,
   };

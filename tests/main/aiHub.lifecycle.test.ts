@@ -89,32 +89,27 @@ describe("Hub startup cancellation", () => {
     expect(issue).not.toHaveBeenCalled();
     expect(mocks.runtime).not.toHaveBeenCalled();
   });
-  it("reserves capacity before asynchronous startup so concurrent requests cannot exceed the limit", async () => {
+  it("does not limit how many conversations start at once", async () => {
     const finish: Array<(value: unknown) => void> = [];
     mocks.config.mockImplementation(
       () => new Promise((resolve) => finish.push(resolve)),
     );
     const hub = await create();
-    const starts = Array.from({ length: 3 }, () =>
+    const starts = Array.from({ length: 5 }, (_, n) =>
       hub.request({
         action: "start",
-        task: { mode: "advice", prompt: "Inspect" },
+        task: { mode: "advice", prompt: `Inspect ${n}` },
       }),
     );
     const results = Promise.allSettled(starts);
-    await vi.waitFor(() => expect(finish).toHaveLength(3));
-    await expect(
-      hub.request({
-        action: "start",
-        task: { mode: "advice", prompt: "Fourth" },
-      }),
-    ).rejects.toThrow("Three tasks");
-    for (const task of hub.store.data.tasks.slice(0, 3))
+    // All five are let in: none is refused because others are running.
+    await vi.waitFor(() => expect(finish).toHaveLength(5));
+    expect(hub.store.data.tasks).toHaveLength(5);
+    for (const task of [...hub.store.data.tasks])
       await hub.request({ action: "stop", taskId: task.id });
     for (const resolve of finish) resolve({ enabled: true });
-    expect(
-      (await results).every((result) => result.status === "rejected"),
-    ).toBe(true);
+    const settled = await results;
+    expect(settled.every((r) => r.status === "rejected" && /stopped during startup/.test(String(r.reason)))).toBe(true);
     expect(mocks.runtime).not.toHaveBeenCalled();
   });
 });

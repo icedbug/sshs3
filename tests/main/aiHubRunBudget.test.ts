@@ -67,70 +67,50 @@ async function create(): Promise<HubService> {
 }
 const write = (invoke: Invoke) => invoke({ action: "file-write", path: "/tmp/x", content: "y" }).then(() => "ok", (e: Error) => e.message);
 
-describe("a run that uses its budget", () => {
-  it("is refused past the limit, ends with a status line, and Continue gives it the same budget again", async () => {
+describe("a person's run has no limit on commands or time", () => {
+  it("takes as many actions as it needs, whatever limit the request names, and is never stopped for it", async () => {
     const hub = await create();
     const answers: string[] = [];
     mocks.start.current = (async (_t, _m, onEvent, invoke) => {
-      for (let i = 0; i < 3; i++) answers.push(await write(invoke));
-      onEvent({ type: "run.completed", output: "Checked two files; the third is left." });
+      for (let i = 0; i < 30; i++) answers.push(await write(invoke));
+      onEvent({ type: "run.completed", output: "Checked thirty files." });
     }) as Start;
-    await hub.request({ action: "start", task: { mode: "advice", prompt: "Look", maxCommands: 2 } });
+    await hub.request({ action: "start", task: { mode: "advice", prompt: "Look", maxCommands: 2, maxMinutes: 1 } });
     const task = hub.store.data.tasks[0];
     await vi.waitFor(() => expect(task.status).toBe("completed"));
-    expect(answers.slice(0, 2)).toEqual(["ok", "ok"]);
-    expect(answers[2]).toMatch(/budget exhausted.*report what you found/);
-    expect(task.commandsUsed).toBe(2);
-    expect(task.budgetStop).toMatchObject({ kind: "commands", limit: 2 });
-    expect(task.messages.at(-2)?.text).toBe("Checked two files; the third is left.");
-    expect(task.messages.at(-1)).toMatchObject({
-      role: "system",
-      text: "Stopped after 2 commands, the limit for this conversation. Continue to give it 2 more.",
-    });
-
-    // Continue: the same conversation, a fresh budget of the same size.
-    let seen: Partial<AgentTask> = {};
-    mocks.start.current = (async (t, _m, onEvent, invoke) => {
-      seen = { budgetStop: t.budgetStop, commandsUsed: t.commandsUsed };
-      answers.push(await write(invoke), await write(invoke));
-      onEvent({ type: "run.completed", output: "Done." });
-    }) as Start;
-    await hub.request({ action: "resume", taskId: task.id });
-    await vi.waitFor(() => expect(task.status).toBe("completed"));
-    expect(seen).toEqual({ budgetStop: undefined, commandsUsed: 0 });
-    expect(answers.slice(3)).toEqual(["ok", "ok"]);
-    expect(task.messages.find((m) => m.role === "user" && /2 more commands/.test(m.text))).toBeTruthy();
+    expect(answers).toEqual(Array.from({ length: 30 }, () => "ok"));
+    // Counted for the person to see, with no limit beside it.
+    expect(task.commandsUsed).toBe(30);
+    expect(task).toMatchObject({ maxCommands: 0, maxMinutes: 0 });
     expect(task.budgetStop).toBeUndefined();
-    expect(task.messages.at(-1)).toMatchObject({ role: "assistant", text: "Done." });
+    expect(task.messages.at(-1)).toMatchObject({ role: "assistant", text: "Checked thirty files." });
   });
 
-  it("ends the run when the agent keeps asking after it was told the budget is spent", async () => {
-    const hub = await create();
-    mocks.start.current = (async (_t, _m, _onEvent, invoke) => {
-      for (let i = 0; i < 5; i++) await write(invoke);
-      await new Promise(() => {});
-    }) as Start;
-    await hub.request({ action: "start", task: { mode: "advice", prompt: "Look", maxCommands: 1 } });
-    const task = hub.store.data.tasks[0];
-    await vi.waitFor(() => expect(task.status).toBe("interrupted"));
-    expect(task.error).toBeUndefined();
-    expect(task.messages.filter((m) => m.role === "system").map((m) => m.text)).toEqual([
-      "Stopped after 1 command, the limit for this conversation. Continue to give it 1 more.",
-    ]);
-  });
-
-  it("says so when the run's time is up", async () => {
+  it("arms no timer for it, and frees a conversation from the limits it was stored with", async () => {
     const hub = await create();
     mocks.start.current = (async () => {
       await new Promise(() => {});
     }) as Start;
-    await hub.request({ action: "start", task: { mode: "advice", prompt: "Look", maxMinutes: 15 } });
+    await hub.request({ action: "start", task: { mode: "advice", prompt: "Look" } });
     const task = hub.store.data.tasks[0];
     await vi.waitFor(() => expect(task.status).toBe("running"));
-    (hub as unknown as { armRunTimer(t: AgentTask, at: number): void }).armRunTimer(task, Date.now());
+    const timers = (hub as unknown as { runTimers: Map<string, unknown> }).runTimers;
+    expect(timers.has(task.id)).toBe(false);
+    await hub.request({ action: "stop", taskId: task.id });
     await vi.waitFor(() => expect(task.status).toBe("interrupted"));
-    expect(task.error).toBeUndefined();
-    expect(task.messages.at(-1)?.text).toBe(budgetStopLine({ kind: "minutes", limit: 15, at: 0 }));
-    expect(task.messages.at(-1)?.text).toBe("Stopped after 15 minutes, the time limit for this conversation. Continue to give it 15 more.");
+
+    // A conversation saved before the limits were taken away: continuing it does not bring them back.
+    task.maxCommands = 20;
+    task.maxMinutes = 15;
+    await hub.request({ action: "resume", taskId: task.id });
+    await vi.waitFor(() => expect(task.status).toBe("running"));
+    expect(task).toMatchObject({ maxCommands: 0, maxMinutes: 0 });
+    expect(timers.has(task.id)).toBe(false);
+  });
+
+  it("still words a limit that is set (the hub's own background calls keep a time limit)", () => {
+    expect(budgetStopLine({ kind: "minutes", limit: 15, at: 0 })).toBe(
+      "Stopped after 15 minutes, the time limit for this conversation. Continue to give it 15 more.",
+    );
   });
 });

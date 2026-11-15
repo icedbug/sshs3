@@ -73,7 +73,7 @@ what, on which target, the risk, and a link to the item.
   has their own agents and inbox. A notification in a shared channel says
   whose answer is awaited; a teammate who opens the link sees their own inbox.
 - How long an agent waits is set under Settings → Safety (10 minutes unless
-  changed, at most 60). The wait does not use up the run's time budget.
+  changed, at most 60). A run has no time limit of its own.
 - A channel's address is a secret: it is stored encrypted in the user's own
   data directory, never in the team bucket, and the interface only ever shows
   its host.

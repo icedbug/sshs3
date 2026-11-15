@@ -770,9 +770,8 @@ placed before the early return for a pending save); three seconds later
   `AiHubPanel` and removed from the address; `InboxView` marks the item or
   says that it no longer waits.
 - **The wait for a person** is `preferences.approvalWaitMinutes` (10, at most
-  60). `ToolBroker.waitForPerson` gives the waited time back: the run's
-  capability and its time budget (`armRunTimer`) both move by as long as it
-  stood still.
+  60). `ToolBroker.waitForPerson` gives the waited time back to a run that has
+  a time limit (the hub's own background calls; a person's run has none).
 - A desktop notification is now also shown when an approval, a plan or a
   question starts to wait, which nothing did before.
 
@@ -1288,11 +1287,13 @@ the run's mode. A person can answer an approval with a note: a refusal tells
 the agent why and the run goes on; an approval with a note hands the note to
 the agent with the command's result. The agent is given its target's last
 facts reading, with how old it is, and is told to look again before acting on it.
-Each run has a command and time budget. When it is used up, the run stops with
-a line such as "Stopped after 20 commands, the limit for this conversation.
-Continue to give it 20 more." and a Continue button resumes the same
-conversation with the same budget again (pause and spending limits still
-apply). While a run works, the chat shows "7 of 20 commands".
+A person's run (a conversation, a ticket, a schedule) has no limit on commands,
+time or model turns, and any number of conversations can run at once: a run
+ends when the model answers or somebody stops it. An agent's pause and its
+monthly token budget still apply, and so does every approval. While a run
+works, the chat shows how many commands it has run. The hub's own background
+calls (reading a document, a review, an investigator) keep a time limit, so
+that one that hangs does not block its queue.
 
 **Workforce.** A ticket is claimed in the bucket and the claim is read back
 after a pause, so two installations do not both run it. Pause and budget are

@@ -665,7 +665,9 @@ export class ToolBroker {
     this.grants.set(key, {
       task,
       commands: 0,
-      expiresAt: Date.now() + task.maxMinutes * 60_000,
+      // A person's run has no time limit (maxMinutes 0). The hub's own background calls keep theirs,
+      // so that one that hangs does not hold its queue for ever.
+      expiresAt: task.maxMinutes > 0 ? Date.now() + task.maxMinutes * 60_000 : Number.POSITIVE_INFINITY,
       busy: false,
     });
     return { url: `http://127.0.0.1:${address.port}/tool`, key };
@@ -679,7 +681,9 @@ export class ToolBroker {
     grant: { commands: number; refused?: number },
     task: AgentTask,
   ): void {
-    if (grant.commands < task.maxCommands) {
+    // Actions are counted, for the person to see; there is no limit on how many a run may take
+    // (maxCommands 0). A limit is held only where one is set.
+    if (!(task.maxCommands > 0) || grant.commands < task.maxCommands) {
       task.commandsUsed = ++grant.commands;
       return;
     }

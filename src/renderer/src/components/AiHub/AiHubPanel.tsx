@@ -2628,7 +2628,7 @@ export function AiHubPanel({
                         : "Working…"}
                     {task && task.status !== "queued" && (
                       <small className="ai-hint" data-testid="run-budget">
-                        {" "}· {task.commandsUsed ?? 0} of {task.maxCommands} commands
+                        {" "}· {task.commandsUsed ?? 0}{task.maxCommands > 0 ? ` of ${task.maxCommands}` : ""} commands
                       </small>
                     )}
                   </p>

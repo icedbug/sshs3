@@ -596,8 +596,8 @@ export function Schedules({
 
           <p className="ai-hint">
             Each run opens its own terminal, uses{" "}
-            {hub.config.model || "the model set in Settings"}, and stops after
-            20 commands or 15 minutes.
+            {hub.config.model || "the model set in Settings"}, and runs until it
+            is done or somebody stops it.
             {draft.mode === "autonomous" &&
               " On its own it still stops for destructive commands and, by default, for changes on production."}
             {draft.mode === "assisted" &&
