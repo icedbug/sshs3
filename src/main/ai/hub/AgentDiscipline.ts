@@ -8,7 +8,6 @@ import type {
   MissionAgent,
   WorkspaceRule,
 } from "../../../shared/types/aiHub";
-import { CONTEXT_NOTE_PREFIX } from "../../../shared/types/aiHub";
 import { analyzeCommandSafety } from "./CommandSafetyService";
 import { extractErrorSignature } from "./SelfLearningService";
 import { boundedContext } from "./privacy";
@@ -815,7 +814,7 @@ export function applyHandoff(
   task.messages.push({
     id: crypto.randomUUID(),
     role: "system",
-    text: CONTEXT_NOTE_PREFIX + built.packet.summaryText,
+    text: built.packet.summaryText,
     at: now,
   });
 

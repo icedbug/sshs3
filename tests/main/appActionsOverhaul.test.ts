@@ -647,6 +647,35 @@ describe("AppActions overhaul", () => {
       expect(res.skippedNodes).toEqual(["db-replica-1", "db-replica-2"]);
     });
 
+    it("starts no further stage once the run is stopped", async () => {
+      const servers: WorkspaceServerSummary[] = [
+        makeServer({ id: "s1", name: "app-1", host: "10.0.3.1", cluster: "Stage", nodeRole: "worker" }),
+        makeServer({ id: "s2", name: "app-2", host: "10.0.3.2", cluster: "Stage", nodeRole: "worker" }),
+        makeServer({ id: "s3", name: "app-3", host: "10.0.3.3", cluster: "Stage", nodeRole: "worker" }),
+      ];
+      const terminals = servers.map((s) => ({ id: `term-${s.id}`, generation: "g1", label: s.name, profileId: s.id, state: "ready" }));
+      const execOrder: string[] = [];
+      const task = makeTask();
+      const { hub } = createHarness({
+        servers,
+        terminals,
+        execResult: async (sessionId) => {
+          execOrder.push(sessionId);
+          // The person stops the run while the canary runs.
+          task.status = "cancelled";
+          return { exitCode: 0, output: "ok" };
+        },
+      });
+      const res = (await handleAppAction(hub, task, {
+        action: "sshs3_cluster_exec",
+        payload: { cluster: "Stage", command: "systemctl reload app", batchSize: 1, stopOnFirstFailure: false },
+      })) as { aborted: boolean; executedCount: number; skippedNodes?: string[] };
+      expect(execOrder).toEqual(["term-s1"]);
+      expect(res.aborted).toBe(true);
+      expect(res.executedCount).toBe(1);
+      expect(res.skippedNodes).toEqual(["app-2", "app-3"]);
+    });
+
     it("supports batchSize + stopOnFirstFailure: false across all batches", async () => {
       const servers: WorkspaceServerSummary[] = [
         makeServer({ id: "a1", name: "app-1", host: "10.0.2.1", cluster: "App", nodeRole: "worker" }),

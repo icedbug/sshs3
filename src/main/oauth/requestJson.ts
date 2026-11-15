@@ -29,12 +29,14 @@ export interface SsrfPolicyOptions {
    */
   allowHttp?: boolean;
   /**
-   * Explicitly permits connecting to loopback addresses (`127.0.0.0/8`, `::1`, `localhost`).
-   * Defaults to `Boolean(allowHttp)` when `allowHttp` is true, and `false` otherwise.
+   * Permits connecting to loopback addresses (`127.0.0.0/8`, `::1`, `localhost`). For `validateResolvedIpForUrl`
+   * and `resolveAndValidateTarget` it defaults to `Boolean(allowHttp)`; `requestJson` allows it unless this is
+   * false, within what `userEndpointPolicy` permits.
    */
   allowLoopback?: boolean;
   /**
-   * Explicitly permits RFC1918 / ULA / CGNAT private network addresses.
+   * Permits RFC1918 / ULA / CGNAT private network addresses. `requestJson` allows them unless this is false,
+   * within what `userEndpointPolicy` permits; the lower-level checks need it set.
    * Link-local/metadata (`169.254.0.0/16`, `fe80::/10`, `fd00:ec2::254`) and unspecified/multicast
    * addresses are always blocked.
    */
@@ -236,6 +238,45 @@ function isLoopbackHostname(hostname: string): boolean {
   return host === 'localhost' || host.endsWith('.localhost');
 }
 
+/**
+ * The endpoints requestJson calls (an SSH CA, Vault, an OIDC issuer, an OpenShift cluster) are ones the person
+ * configured, and they normally live on the internal network. In the desktop app, and on a web server whose only
+ * account is its administrator's, that network is the person's own: private and loopback addresses are allowed.
+ * On a web server shared by several people a member's setting must not reach into the server's network, so
+ * there private and loopback addresses are blocked unless the administrator allows them
+ * (SSHS3_ALLOW_PRIVATE_ADDRESSES=1). Link-local and metadata addresses are blocked everywhere.
+ */
+let sharedServerCheck: () => boolean = () => false;
+
+/** The web server sets this to "more than one account": then the stricter policy above applies. */
+export function setSharedServerCheck(check: (() => boolean) | undefined): void {
+  sharedServerCheck = check ?? (() => false);
+}
+
+export function userEndpointPolicy(): { shared: boolean; allowPrivate: boolean; allowLoopback: boolean } {
+  let shared = true;
+  try {
+    shared = sharedServerCheck();
+  } catch {
+    // An unknown answer is treated as a shared server.
+  }
+  const allowed = !shared || process.env.SSHS3_ALLOW_PRIVATE_ADDRESSES === '1';
+  return { shared, allowPrivate: allowed, allowLoopback: allowed };
+}
+
+/**
+ * The policy a request runs under: what the caller asked for, with private and loopback addresses allowed unless
+ * the caller said otherwise, and never more than userEndpointPolicy permits.
+ */
+export function effectivePolicy<T extends SsrfPolicyOptions>(init: T): T {
+  const base = userEndpointPolicy();
+  return {
+    ...init,
+    allowPrivate: base.allowPrivate && (init.allowPrivate ?? true),
+    allowLoopback: base.allowLoopback && (init.allowLoopback ?? true),
+  };
+}
+
 export function validateResolvedIpForUrl(url: URL, address: string, policy: SsrfPolicyOptions = {}): void {
   const allowHttp = Boolean(policy.allowHttp);
   const allowLoopback = policy.allowLoopback ?? allowHttp;
@@ -313,7 +354,8 @@ export async function resolveAndValidateTarget(
   return { url, address: resolved[0].address, family: resolved[0].family };
 }
 
-export function requestJson(urlString: string, init: RequestJsonOptions): Promise<JsonResponse> {
+export function requestJson(urlString: string, options: RequestJsonOptions): Promise<JsonResponse> {
+  const init = effectivePolicy(options);
   return new Promise((resolve, reject) => {
     if (init.signal?.aborted) {
       reject(new Error('Request was cancelled'));

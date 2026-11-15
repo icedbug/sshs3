@@ -1795,17 +1795,18 @@ describe("Production multi-user workspace sync & auto-memory", () => {
     await new Promise((r) => setTimeout(r, 40));
 
     const afterFixSnap = await hub.snapshot();
-    const autoLearnedSkill = afterFixSnap.memories.find(
-      (m) => m.autoLearned && m.sourceCommand?.includes("multipath -r"),
-    );
     // Kept as a note of what was seen, not as a skill: nothing showed that this command was the fix.
+    // Unsure as it is, it waits for a person (the memory rules hold with the setting untouched, as when it is on).
+    expect(afterFixSnap.memories.some((m) => m.autoLearned && m.sourceCommand?.includes("multipath -r"))).toBe(false);
+    const autoLearnedSkill = (hub.store.data.memoryProposals ?? []).find(
+      (m) => (m as { sourceCommand?: string }).sourceCommand?.includes("multipath -r"),
+    ) as { title: string; confidence?: number; tier?: string } | undefined;
     expect(autoLearnedSkill).toBeDefined();
     expect(autoLearnedSkill?.title).toMatch(/^Seen after a failure/);
     expect(autoLearnedSkill?.confidence).toBeLessThan(0.65);
-    expect(autoLearnedSkill?.tier).toBe("archival");
-    expect(
-      afterFixSnap.selfLearning?.failureToFixPatterns,
-    ).toBeGreaterThanOrEqual(1);
+    expect(autoLearnedSkill?.tier ?? "archival").toBe("archival");
+    // Counted once saved: a proposal waiting for a person is not yet a learned pattern.
+    expect(afterFixSnap.selfLearning?.failureToFixPatterns).toBe(0);
 
     // 5. Ctrl+K does not offer an unproven note as a learned command.
     const inlineLearnedSnap = await hub.request({
@@ -1817,15 +1818,18 @@ describe("Production multi-user workspace sync & auto-memory", () => {
       "Auto-Learned Skill",
     );
 
-    // 6. Verify Memory Reinforcement Feedback (+1 / -1) and Self-Reflection cycle
-    const beforeConf = autoLearnedSkill!.confidence ?? 0.82;
+    // 6. Verify Memory Reinforcement Feedback (+1 / -1) and Self-Reflection cycle, once a person accepted it
+    const acceptedSnap = await hub.request({ action: "memory-proposal-accept", id: (autoLearnedSkill as unknown as { id: string }).id });
+    const accepted = acceptedSnap.memories.find((m) => m.sourceCommand?.includes("multipath -r"))!;
+    expect(accepted).toBeDefined();
+    const beforeConf = accepted.confidence ?? 0.82;
     const upvotedSnap = await hub.request({
       action: "memory-feedback",
-      id: autoLearnedSkill!.id,
+      id: accepted.id,
       delta: 1,
     });
     const upvotedSkill = upvotedSnap.memories.find(
-      (m) => m.id === autoLearnedSkill!.id,
+      (m) => m.id === accepted.id,
     );
     expect(upvotedSkill?.confidence).toBeGreaterThan(beforeConf);
     expect(upvotedSkill?.feedbackScore).toBe(1);
@@ -2170,8 +2174,11 @@ describe("Production multi-user workspace sync & auto-memory", () => {
       fixCommand: "curl -k https://admin:topsecret@10.10.1.10/api/health", // pragma: allowlist secret
       scope: "server:ontap-prod-01",
     });
-    expect(maskedLearn.learnedSkill?.text).not.toContain("topsecret");
-    expect(maskedLearn.learnedSkill?.sourceCommand).not.toContain("topsecret");
+    // Unproven, it is a proposal for a person, not a saved skill; masked either way.
+    const learnedOrProposed = maskedLearn.learnedSkill ?? maskedLearn.proposal;
+    expect(learnedOrProposed).toBeDefined();
+    expect(learnedOrProposed?.text).not.toContain("topsecret");
+    expect(learnedOrProposed?.sourceCommand ?? "").not.toContain("topsecret");
     expect(hub.store.data.selfLearningState?.failureToFixCount).toBeGreaterThanOrEqual(1);
 
     // F7: Ephemeral auto-node:* (from collectExtraContext) and builtin-* memories are never persisted into hub.store.data.memories on memory-feedback or self-learn-reflect
@@ -2206,11 +2213,10 @@ describe("Production multi-user workspace sync & auto-memory", () => {
     hub.terminals.feed("sess-osc133", "Restarted ok\r\n\x1b]133;D;0\x07");
     await new Promise((r) => setTimeout(r, 30));
     expect(hub.terminals.failures()["sess-osc133"]).toBeUndefined();
+    // Learned from it, as a proposal for a person: nothing showed the restart was the fix.
     expect(
-      hub.store.data.memories.some(
-        (m) =>
-          m.autoLearned &&
-          m.sourceCommand?.includes("sudo systemctl restart multipathd"),
+      (hub.store.data.memoryProposals ?? []).some((m) =>
+        (m as { sourceCommand?: string }).sourceCommand?.includes("sudo systemctl restart multipathd"),
       ),
     ).toBe(true);
 

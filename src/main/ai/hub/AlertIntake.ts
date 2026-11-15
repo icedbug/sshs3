@@ -451,7 +451,7 @@ export type TriageBurstHook = (event: TriageBurstEvent) => void | Promise<void>;
 
 /**
  * Pure predicate deciding whether incoming firing alerts warrant a fast-triage
- * telemetry burst collection.
+ * telemetry burst collection. Not used by the app yet: no fast-triage collection exists to start.
  */
 export function shouldTriggerFastTriage(
   alerts: IncomingAlert[],
@@ -480,7 +480,7 @@ export function shouldTriggerFastTriage(
 
 /**
  * Stateful sliding-window burst monitor that invokes registered fast-triage
- * telemetry hooks with per-scope cooldown protection.
+ * telemetry hooks with per-scope cooldown protection. Not used by the app yet (see shouldTriggerFastTriage).
  */
 export class AlertBurstTrigger {
   private readonly hooks = new Set<TriageBurstHook>();

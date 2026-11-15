@@ -1027,12 +1027,86 @@ const FILE_READER_VERBS = new Set([
   "comp",
 ]);
 
+/** Files that hold secrets, as globs are matched against them: `cat /etc/shad*` reads /etc/shadow. */
+const SENSITIVE_FILES = [
+  "/etc/shadow",
+  "/etc/gshadow",
+  "/etc/sudoers",
+  "/etc/master.passwd",
+  "/etc/security/opasswd",
+  "/proc/self/environ",
+  "/etc/kubernetes/admin.conf",
+  "/etc/kubernetes/super-admin.conf",
+  "/etc/rancher/k3s/k3s.yaml",
+  "~/.ssh/id_rsa",
+  "~/.ssh/id_ed25519",
+  "~/.ssh/id_ecdsa",
+  "~/.aws/credentials",
+  "~/.kube/config",
+  "~/.docker/config.json",
+  "~/.netrc",
+  "~/.pgpass",
+  "~/.my.cnf",
+  "~/.git-credentials",
+  ".env",
+];
+
+/** `a//b`, `a/./b` and `a/x/../b` are a/b. A relative path that climbs above its start keeps its leading `..`. */
+function normalizePathToken(norm: string): string {
+  const absolute = norm.startsWith("/");
+  const out: string[] = [];
+  for (const part of norm.split("/")) {
+    if (part === "" || part === ".") continue;
+    if (part === ".." && out.length > 0 && out[out.length - 1] !== "..") out.pop();
+    else if (part !== ".." || !absolute) out.push(part);
+  }
+  return `${absolute ? "/" : ""}${out.join("/")}` || (absolute ? "/" : ".");
+}
+
+/** A glob that could name a file that holds secrets. */
+function globReachesSensitiveFile(lower: string): boolean {
+  if (!/[*?[]/.test(lower) || lower.length > 300) return false;
+  let source = "";
+  for (let i = 0; i < lower.length; i++) {
+    const ch = lower[i];
+    // As in the shell, a wildcard at the start of a name does not match a leading dot.
+    if ((ch === "*" || ch === "?" || ch === "[") && (i === 0 || lower[i - 1] === "/")) source += "(?!\\.)";
+    if (ch === "*") source += "[^/]*";
+    else if (ch === "?") source += "[^/]";
+    else if (ch === "[" && lower.indexOf("]", i + 1) > i) {
+      // A bracket is any one character here: wider than the shell, never narrower.
+      source += "[^/]";
+      i = lower.indexOf("]", i + 1);
+    } else source += ch.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+  }
+  // A path from the root (or home) is matched whole. A relative one is matched against the end of a
+  // path, as the directory it is read in is not known, when its last name has some letters of its own:
+  // `shad*` may be /etc/shadow, but a bare `*` is any directory's listing.
+  const anchored = lower.startsWith("/") || lower.startsWith("~/");
+  const lastName = lower.slice(lower.lastIndexOf("/") + 1).replace(/\[[^\]]*\]|[*?]/g, "");
+  if (!anchored && lastName.length < 2) return false;
+  // eslint-disable-next-line security/detect-non-literal-regexp -- built from one bounded word with every metacharacter escaped
+  const re = new RegExp(anchored ? `^${source}$` : `(?:^|/)${source}$`);
+  if (SENSITIVE_FILES.some((f) => re.test(f))) return true;
+  // `/home/x/.ssh/id_*`: the part before a trailing wildcard already names a secret.
+  const stem = lower.replace(/[*?]+$/, "");
+  return !/[*?[]/.test(stem) && isSensitivePathToken(stem);
+}
+
 function isSensitivePathToken(raw: string): boolean {
   const cleaned = raw.trim().replace(/^file:\/\//i, "");
   if (!cleaned || cleaned === "-") return false;
-  // Normalize Windows backslashes to forward slashes for uniform matching
-  const norm = cleaned.replace(/\\/g, "/");
+  // Normalize Windows backslashes to forward slashes, and //, /./ and /../, for uniform matching
+  const norm = normalizePathToken(cleaned.replace(/\\/g, "/"));
   const lower = norm.toLowerCase();
+
+  if (globReachesSensitiveFile(lower)) return true;
+
+  // The environment of a process: every secret it was started with.
+  // eslint-disable-next-line security/detect-unsafe-regex -- anchored at both ends, fixed words between the optional parts
+  if (/^\/proc\/(?:self|thread-self|\d+)(?:\/task\/\d+)?\/environ$/.test(lower)) return true;
+  // A Kubernetes control plane's admin credentials.
+  if (/^\/etc\/kubernetes\/[^/]+\.conf$/.test(lower) || lower === "/etc/rancher/k3s/k3s.yaml") return true;
 
   // PowerShell env: drive
   if (/^env:/i.test(norm)) return true;
@@ -1070,6 +1144,42 @@ function isSensitivePathToken(raw: string): boolean {
   }
 
   return false;
+}
+
+/**
+ * Commands that print secrets without naming a file: the environment, a Kubernetes secret's data,
+ * a secret store's value, a Terraform state. Undefined when the command is not one of them.
+ */
+function secretPrintingCommand(verb: string, args: string[]): string | undefined {
+  const words = args.filter((x) => !x.startsWith("-"));
+  if (verb === "printenv") return "printenv";
+  if (verb === "kubectl" || verb === "oc") {
+    const at = args.indexOf("get");
+    if (at < 0) return undefined;
+    const kinds = args.slice(at + 1).find((x) => !x.startsWith("-"))?.toLowerCase() ?? "";
+    const secrets = kinds.split(",").some((k) => /^secrets?(?:\/|$)/.test(k));
+    const dumps = /^(?:yaml|json|jsonpath|go-template|template|custom-columns)/;
+    const output = args.some((x, i) =>
+      /^(?:-o|--output)$/.test(x) ? dumps.test(args[i + 1] ?? "") : /^(?:-o=?|--output=)/.test(x) && dumps.test(x.replace(/^(?:-o=?|--output=)/, "")),
+    );
+    return secrets && output ? `${verb} get secret` : undefined;
+  }
+  if (verb === "aws") {
+    const at = words.findIndex((x) => x === "secretsmanager" || x === "ssm");
+    const service = words[at] ?? "";
+    const op = words[at + 1] ?? "";
+    if (service === "secretsmanager" && op === "get-secret-value") return "aws secretsmanager get-secret-value";
+    if (service === "ssm" && /^get-parameters?(?:-by-path)?$/.test(op) && args.includes("--with-decryption")) return `aws ssm ${op} --with-decryption`;
+    return undefined;
+  }
+  if (verb === "terraform" || verb === "tofu") {
+    return words[0] === "state" && words[1] === "pull" ? `${verb} state pull` : undefined;
+  }
+  if (verb === "vault") {
+    if (words[0] === "kv" && words[1] === "get") return "vault kv get";
+    if (words[0] === "read") return "vault read";
+  }
+  return undefined;
 }
 
 function collectSensitivePaths(
@@ -1215,11 +1325,11 @@ const RULES: Record<string, (args: string[], all: string) => Judgement | undefin
   postgres: (a) => postgres(a),
   python3: (a) => python(a),
   python: (a) => python(a),
-  mysql: (a, all) => sqlClient(a, all, ["-e", "--execute"]),
-  mariadb: (a, all) => sqlClient(a, all, ["-e", "--execute"]),
-  sqlite3: (a, all) => sqlClient(a, all, []),
-  "clickhouse-client": (a, all) => sqlClient(a, all, ["-q", "--query"]),
-  cqlsh: (a, all) => sqlClient(a, all, ["-e", "--execute"]),
+  mysql: (a) => sqlClient(a, MYSQL_CLIENT),
+  mariadb: (a) => sqlClient(a, MYSQL_CLIENT),
+  sqlite3: (a) => sqlClient(a, SQLITE_CLIENT),
+  "clickhouse-client": (a) => sqlClient(a, CLICKHOUSE_CLIENT),
+  cqlsh: (a) => sqlClient(a, CQLSH_CLIENT),
   mongosh: (_a, all) => (/\.(drop|dropDatabase|deleteMany|remove)\(/.test(all) ? DESTROY("Drops or deletes data") : MODIFY("Runs database commands")),
 
   // Read-only programs, with the forms that would make them write excluded.
@@ -1348,7 +1458,7 @@ const RULES: Record<string, (args: string[], all: string) => Judgement | undefin
         : MODIFY("Changes iSCSI sessions"),
   openssl: (a) => (!has(a, /^-(engine|provider|provider-path)$/) && /^(x509|verify|version|s_client|req|crl|rsa|ec|pkey|asn1parse|ciphers)$/.test(a[0] ?? "") && !has(a, /^-out$/, /^-keyout$/, /^-new$/, /^-genkey/) ? SAFE() : MODIFY("Makes keys or certificates")),
   "pg_isready": () => SAFE(),
-  mysqladmin: (a) => (["ping", "status", "version", "processlist", "variables", "extended-status"].includes(a.filter((x) => !x.startsWith("-"))[0] ?? "") ? SAFE() : MODIFY("Changes the MySQL server")),
+  mysqladmin: (a) => mysqladmin(a),
   nginx: (a) => (a.length > 0 && a.every((x) => /^-[tTvV]+$/.test(x)) ? SAFE() : MODIFY("Starts or signals nginx")),
   apachectl: (a) => (["-t", "configtest", "-v", "-V", "-S", "-M"].includes(a[0] ?? "") ? SAFE() : MODIFY("Starts or signals Apache")),
   apache2ctl: (a) => (["-t", "configtest", "-v", "-V", "-S", "-M"].includes(a[0] ?? "") ? SAFE() : MODIFY("Starts or signals Apache")),
@@ -1761,7 +1871,7 @@ function judgeSqlStatement(statement: string): Judgement {
   }
 
   const code = stripSqlLiterals(statement).trim();
-  if (/^\s*drop\s+(?:database|table|schema|user|role|index|view|trigger|function|procedure|sequence|extension)\b/i.test(code)) {
+  if (/^\s*drop\s+(?:database|table|schema|user|role|index|view|trigger|function|procedure|sequence|extension|keyspace|materialized\s+view)\b/i.test(code)) {
     return DESTROY("Drops a database, table or schema");
   }
   if (/\btruncate\s+table\s+[\w."`]+|\btruncate\s+[\w."`]+/i.test(code)) {
@@ -1794,25 +1904,153 @@ function sql(all: string): Judgement {
   return verdict;
 }
 
-function sqlClient(a: string[], all: string, queryFlags: string[]): Judgement {
+/**
+ * How a database client takes its arguments: the options that carry the statement to run, and the
+ * short list of connection and output options that change nothing. Any other option (a pager, a tee
+ * file, an init command, another defaults file, LOCAL INFILE, a script file …) is a change.
+ */
+interface SqlClientSpec {
+  name: string;
+  /** Options whose value is the SQL to run. */
+  query: string[];
+  /** Options that take a value and only say where to connect or how to print. */
+  value: string[];
+  /** Options without a value that only change how it connects or prints. */
+  plain: string[];
+  /** Short letters that take a value (attached or as the next word), and letters without one. */
+  shortValue?: string;
+  shortPlain?: string;
+  /** A short letter whose value can only be attached (mysql -pSECRET; a bare -p asks for it). */
+  shortAttached?: string;
+  /** Options spelled with one dash and a whole word (sqlite3 -header). */
+  singleDashWords?: boolean;
+  /** The words after the first operand are statements (sqlite3 FILE "select …"). */
+  sqlOperands?: boolean;
+}
+
+const MYSQL_CLIENT: SqlClientSpec = {
+  name: "mysql",
+  query: ["--execute"],
+  value: ["--host", "--port", "--user", "--database", "--socket", "--protocol", "--connect-timeout", "--default-character-set", "--ssl-mode", "--ssl-ca", "--ssl-cert", "--ssl-key", "--login-path"],
+  plain: ["--password", "--batch", "--silent", "--raw", "--skip-column-names", "--column-names", "--table", "--vertical", "--xml", "--html", "--no-auto-rehash", "--skip-auto-rehash", "--compress", "--quick", "--unbuffered", "--verbose", "--no-beep", "--ssl", "--skip-ssl", "--show-warnings", "--safe-updates", "--skip-pager", "--no-pager"],
+  shortValue: "hPuDSe",
+  shortPlain: "BNsrtEXHAqvCn",
+  shortAttached: "p",
+};
+
+const SQLITE_CLIENT: SqlClientSpec = {
+  name: "sqlite3",
+  query: ["-cmd"],
+  value: ["-separator", "-newline", "-nullvalue"],
+  plain: ["-readonly", "-header", "-noheader", "-csv", "-json", "-line", "-list", "-column", "-box", "-table", "-markdown", "-html", "-batch", "-bail", "-echo", "-version", "-help"],
+  singleDashWords: true,
+  sqlOperands: true,
+};
+
+const CLICKHOUSE_CLIENT: SqlClientSpec = {
+  name: "clickhouse-client",
+  query: ["--query"],
+  value: ["--host", "--port", "--user", "--password", "--database", "--format", "--connect_timeout", "--receive_timeout", "--send_timeout"],
+  plain: ["--secure", "--multiline", "--multiquery", "--time", "--vertical", "--echo", "--verbose", "--progress", "--no-warnings"],
+  shortValue: "hudfq",
+  shortPlain: "nmtE",
+};
+
+const CQLSH_CLIENT: SqlClientSpec = {
+  name: "cqlsh",
+  query: ["--execute"],
+  value: ["--username", "--password", "--keyspace", "--connect-timeout", "--request-timeout", "--cqlversion", "--protocol-version", "--encoding"],
+  plain: ["--ssl", "--no-color", "--color", "--debug", "--version", "--help"],
+  shortValue: "upke",
+  shortPlain: "C",
+};
+
+/** The old whole-text reading: a DROP, TRUNCATE or unfiltered DELETE anywhere stays destructive. */
+function sqlAnywhere(text: string): Judgement | undefined {
+  // eslint-disable-next-line security/detect-unsafe-regex -- bounded by the text of one command, and each group is anchored on a keyword
+  if (/\b(drop\s+(database|table|schema|user|role|keyspace)|truncate(\s+table)?\s+\w|delete\s+from\s+\w+\s*(;|$|")(?![\s\S]*\bwhere\b))/i.test(text)) return DESTROY("Drops or empties a database, table or schema");
+  return undefined;
+}
+
+/**
+ * A database client is read-only when it runs exactly one statement that reads, given with its
+ * query option (or, for sqlite3, after the database file), and every other option is on its short
+ * list. What it runs is read for a destructive statement in any case.
+ */
+function sqlClient(a: string[], spec: SqlClientSpec): Judgement {
   const queries: string[] = [];
+  const operands: string[] = [];
+  let unknown: string | undefined;
   for (let i = 0; i < a.length; i++) {
     const w = a[i];
-    if (queryFlags.includes(w)) {
-      queries.push(a[++i] ?? "");
+    if (w === "--") {
+      operands.push(...a.slice(i + 1));
+      break;
+    }
+    if (!w.startsWith("-") || w === "-") {
+      operands.push(w);
       continue;
     }
-    const longEq = queryFlags.find((f) => f.startsWith("--") && w.startsWith(`${f}=`));
-    if (longEq) {
-      queries.push(w.slice(longEq.length + 1));
+    if (w.startsWith("--") || spec.singleDashWords) {
+      const at = w.indexOf("=");
+      const name = (at < 0 ? w : w.slice(0, at)).replace(/^--?/, spec.singleDashWords ? "-" : "--");
+      const value = at < 0 ? undefined : w.slice(at + 1);
+      if (spec.query.includes(name)) queries.push(value ?? a[++i] ?? "");
+      else if (spec.value.includes(name)) {
+        if (value === undefined) i++;
+      } else if (!spec.plain.includes(name) || (value !== undefined && name !== "--password")) unknown ??= name;
+      continue;
+    }
+    for (let j = 1; j < w.length; j++) {
+      const letter = w[j];
+      if (spec.shortPlain?.includes(letter)) continue;
+      if (spec.shortAttached?.includes(letter)) break;
+      if (spec.shortValue?.includes(letter)) {
+        const value = w.slice(j + 1) || a[++i] || "";
+        if (letter === "e" || letter === "q") queries.push(value);
+        break;
+      }
+      unknown ??= `-${letter}`;
+      break;
     }
   }
-  if (queries.length === 1) {
-    if (readOnlyStatement(queries[0])) return SAFE();
-    return sql(queries[0]);
+  if (spec.sqlOperands) queries.push(...operands.slice(1));
+  const text = queries.length > 0 ? queries.join(";") : operands.join(" ");
+  const verdict = queries.length === 0 ? MODIFY("Runs database commands") : queries.length === 1 && readOnlyStatement(queries[0]) ? SAFE() : sql(queries.join(";"));
+  const anywhere = sqlAnywhere(text);
+  if (anywhere || verdict.level === "destructive") return worse(verdict, anywhere ?? verdict);
+  if (unknown) return MODIFY(`${spec.name} ${unknown} is not on the read-only list`);
+  return verdict;
+}
+
+/** mysqladmin reads only when every command it is given is a report, with connection options only. */
+function mysqladmin(a: string[]): Judgement {
+  const commands: string[] = [];
+  for (let i = 0; i < a.length; i++) {
+    const w = a[i];
+    if (!w.startsWith("-")) {
+      commands.push(w.toLowerCase());
+      continue;
+    }
+    if (w.startsWith("--")) {
+      const at = w.indexOf("=");
+      const name = at < 0 ? w : w.slice(0, at);
+      if (/^--(host|port|user|socket|protocol|connect-timeout|sleep|count|ssl-mode|ssl-ca)$/.test(name)) {
+        if (at < 0) i++;
+      } else if (!/^--(password|silent|verbose|relative|vertical|ssl|skip-ssl|no-beep)$/.test(name) || (at >= 0 && name !== "--password")) {
+        return MODIFY(`mysqladmin ${name} is not on the read-only list`);
+      }
+      continue;
+    }
+    const letter = w[1];
+    if ("hPuSic".includes(letter)) {
+      if (w.length === 2) i++;
+    } else if (letter !== "p" && !/^-[svrE]+$/.test(w)) {
+      return MODIFY(`mysqladmin ${w} is not on the read-only list`);
+    }
   }
-  if (queries.length > 1) return sql(queries.join(";"));
-  return sql(all);
+  const reports = ["ping", "status", "version", "processlist", "variables", "extended-status"];
+  return commands.length > 0 && commands.every((c) => reports.includes(c)) ? SAFE() : MODIFY("Changes the MySQL server");
 }
 
 /**
@@ -2532,6 +2770,11 @@ function judge(
       ctx.sensitivePaths.push(...redirSensitive);
       return worse(verdict, MODIFY(`Reads sensitive credential or secret path (${redirSensitive.join(", ")})`));
     }
+    // A bare `env` prints the whole environment, secrets included.
+    if (wrappers.includes("env")) {
+      ctx.sensitivePaths.push("env");
+      return worse(verdict, MODIFY("Prints secrets (the environment)"));
+    }
     // sudo -i, sudo -s: nothing is run, a shell as root is what is left. Every later line would then run as root.
     const shell = wrappers.find((x) => x.startsWith(SHELL_AS));
     if (shell) return worse(verdict, MODIFY(`Starts a shell as another user (${shell.slice(SHELL_AS.length)})`));
@@ -2544,6 +2787,11 @@ function judge(
   if (sensitive.length > 0) {
     ctx.sensitivePaths.push(...sensitive);
     verdict = worse(verdict, MODIFY(`Reads sensitive credential or secret path (${sensitive.join(", ")})`));
+  }
+  const printsSecrets = secretPrintingCommand(verb, args);
+  if (printsSecrets) {
+    ctx.sensitivePaths.push(printsSecrets);
+    verdict = worse(verdict, MODIFY(`Prints secrets (${printsSecrets})`));
   }
 
   // `./ls` and `$DIR/cat` are whatever program sits there; /usr/bin/ls is ls.

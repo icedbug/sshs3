@@ -322,11 +322,14 @@ export interface ToolRequest {
   scope?: string;
   payload?: Record<string, unknown>;
   idempotencyKey?: string;
-  requesterId?: string;
   nonInteractive?: boolean;
   dryRun?: boolean;
   preflightCommand?: string;
 }
+/** Who an approval is from: the account id when there is one, the name otherwise. */
+const approverKey = (a: { actor?: string; actorId?: string }): string =>
+  (a.actorId?.trim() || a.actor?.trim() || "user").toLowerCase();
+
 /** The next short name for a command in this conversation: c1, c2, … */
 export const nextRef = (task: AgentTask): string =>
   `c${task.changes.reduce((max, c) => Math.max(max, Number(/^c(\d+)$/.exec(c.ref ?? "")?.[1] ?? 0)), 0) + 1}`;
@@ -353,7 +356,14 @@ export interface ToolDependencies {
     policy?: SafetyPolicyConfig;
     targetTags?: string[];
     clusterPolicy?: ClusterSafetyPolicy;
+    /** The person this run acts for: their own approval counts once, never twice. */
     requesterId?: string;
+    /**
+     * Whether a second person can be asked at all. False where only one identity exists (the
+     * desktop app, a server with one account): a change that needs two people is refused at once
+     * instead of waiting for an approval nobody can give.
+     */
+    peerApproval?: boolean;
   };
   /** How long a person is given to approve, in milliseconds. Ten minutes unless set. */
   approvalWaitMs?(): number;
@@ -700,46 +710,46 @@ export class ToolBroker {
         { code: "approval_not_found" },
       );
 
-    const approverId = approver?.actorId;
-    if (allowed && approverId && approval.requesterId && approverId === approval.requesterId) {
-      throw new ToolBrokerError(
-        "auth_denied",
-        "Self-approval is not allowed: approver must differ from requester",
-        { code: "self_approval_denied" },
-      );
-    }
-
+    const approverId = approver?.actorId?.trim() || undefined;
     const change = approval.task.changes.find((c) => c.id === changeId);
     if (change) {
       change.approvals ??= [];
+      const actor = approver?.actor ?? change.decidedBy?.name ?? "User";
       if (!allowed) {
         change.approvals.push({
-          actor: approver?.actor ?? change.decidedBy?.name ?? "User",
+          actor,
           ...(approverId ? { actorId: approverId } : {}),
           at: Date.now(),
           allowed: false,
           ...(note ? { note } : {}),
         });
       } else {
-        if (
-          approverId &&
-          change.approvals.some((a) => a.allowed && a.actorId === approverId)
-        ) {
+        // One person counts once, whether or not the caller gave an id: the name stands in for it.
+        const key = approverKey({ actor, actorId: approverId });
+        if (change.approvals.some((a) => a.allowed && approverKey(a) === key)) {
           throw new ToolBrokerError(
             "auth_denied",
-            "This approver has already approved this change; a distinct second approver is required",
+            "You have already approved this change; it needs the approval of another person",
             { code: "duplicate_approver" },
           );
         }
         change.approvals.push({
-          actor: approver?.actor ?? change.decidedBy?.name ?? "User",
+          actor,
           ...(approverId ? { actorId: approverId } : {}),
           at: Date.now(),
           allowed: true,
           ...(note ? { note } : {}),
         });
-        const approvedCount = change.approvals.filter((a) => a.allowed).length;
-        if (approvedCount < approval.requiredApprovals) {
+        const approvers = new Set(
+          change.approvals.filter((a) => a.allowed).map(approverKey),
+        );
+        // Two or more approvals: at least one from someone other than the person the run acts for.
+        const requester = approval.requesterId?.trim().toLowerCase();
+        const peer =
+          approval.requiredApprovals < 2 ||
+          !requester ||
+          [...approvers].some((k) => k !== requester);
+        if (approvers.size < approval.requiredApprovals || !peer) {
           this.deps.changed();
           return false;
         }
@@ -765,7 +775,11 @@ export class ToolBroker {
    * tools (an external agent's request). The action is listed on the task as
    * pending; the answer comes through approve() like any other.
    */
-  async askApproval(task: AgentTask, change: AgentChange): Promise<boolean> {
+  async askApproval(
+    task: AgentTask,
+    change: AgentChange,
+    requesterId?: string,
+  ): Promise<boolean> {
     task.changes.push(change);
     task.status = "waiting";
     this.deps.changed();
@@ -774,7 +788,7 @@ export class ToolBroker {
       task,
       change.id,
       Math.max(1, change.requiredApprovals ?? 1),
-      task.startedAs?.agentId ?? task.agentId,
+      requesterId,
     );
     // Stopped while it waited: no answer lets it through. Otherwise the run waits on while
     // another of its questions is still open (an external agent may ask several at once).
@@ -1631,6 +1645,7 @@ export class ToolBroker {
     let policy: SafetyPolicyConfig | undefined;
     let clusterPolicy: ClusterSafetyPolicy | undefined;
     let ctxRequesterId: string | undefined;
+    let peerApproval: boolean | undefined;
 
     if (
       (change.kind === "command" || change.kind === "file") &&
@@ -1640,6 +1655,7 @@ export class ToolBroker {
       policy = ctx.policy;
       clusterPolicy = ctx.clusterPolicy;
       ctxRequesterId = ctx.requesterId;
+      peerApproval = ctx.peerApproval;
       isProd = (ctx.targetTags ?? []).some(isProdTag);
 
       requiresApproval = shouldRequireCommandApproval({
@@ -1730,6 +1746,16 @@ export class ToolBroker {
     if (requiredApprovals > 1) {
       change.requiredApprovals = requiredApprovals;
       requiresApproval = true;
+      if (peerApproval === false) {
+        change.status = "denied";
+        change.decidedHow = "policy";
+        this.deps.changed();
+        throw new ToolBrokerError(
+          "auth_denied",
+          `This change needs the approval of ${requiredApprovals} different people, and nobody else can be asked here: only one person signs in to this app. Report that the change needs a second person's approval.`,
+          { code: "peer_approval_unavailable" },
+        );
+      }
     }
 
     if (requiresApproval) {
@@ -1742,8 +1768,8 @@ export class ToolBroker {
         throw new ApprovalRequiredSignal(change);
       }
 
+      // Never the model's own word: a run cannot name somebody else as the person it acts for.
       const requesterId =
-        request.requesterId ??
         ctxRequesterId ??
         task.startedAs?.agentId ??
         task.agentId;

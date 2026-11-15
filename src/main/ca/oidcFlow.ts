@@ -11,7 +11,7 @@ import {
   startCallbackServer,
   statesEqual,
 } from '../oauth/loopbackAuth';
-import { classifyIpAddress, requestJson, type SsrfPolicyOptions } from '../oauth/requestJson';
+import { classifyIpAddress, requestJson, userEndpointPolicy, type SsrfPolicyOptions } from '../oauth/requestJson';
 import { isLoopbackHttpUrl } from './loopbackUrl';
 import { rootCaBuffer } from './providers/common';
 
@@ -24,7 +24,10 @@ export interface OidcClient {
   issuerUrl: string;
   clientId: string;
   rootCa?: Buffer;
-  /** Explicit opt-in for trusted RFC1918/private-network OIDC issuers (e.g. corporate internal IdP). */
+  /**
+   * Private-network issuers (a corporate IdP) are allowed unless this is false; on a shared web server only with
+   * the administrator's opt-in (see userEndpointPolicy).
+   */
   allowPrivateIssuer?: boolean;
   /** Explicit opt-in for plain http on a private-network local dev OIDC issuer (requires `allowPrivateIssuer`). */
   allowHttpPrivateIssuer?: boolean;
@@ -104,8 +107,13 @@ function ssrfOptionsForClient(client: OidcClient): SsrfPolicyOptions {
   return {
     allowHttp: allowsHttp(client),
     allowLoopback: isLoopback,
-    allowPrivate: Boolean(client.allowPrivateIssuer),
+    allowPrivate: client.allowPrivateIssuer,
   };
+}
+
+/** Whether a private-network address may be used: the caller's word, within what this process allows. */
+function privateAllowed(optIn: boolean | undefined): boolean {
+  return userEndpointPolicy().allowPrivate && optIn !== false;
 }
 
 /**
@@ -113,7 +121,8 @@ function ssrfOptionsForClient(client: OidcClient): SsrfPolicyOptions {
  * - Rejects invalid URLs, embedded credentials, query strings, and fragments.
  * - Enforces `https://` except for loopback HTTP (`http://localhost`, `http://127.x.x.x`, `http://[::1]`)
  *   or an explicitly opted-in private dev issuer.
- * - Blocks link-local / cloud metadata / unspecified / multicast IP literals, and private IP literals unless opted in.
+ * - Blocks link-local / cloud metadata / unspecified / multicast IP literals, and private IP literals where
+ *   userEndpointPolicy does not allow them (a shared web server) or the caller said false.
  */
 export function validateOidcIssuerUrl(
   rawIssuerUrl: string,
@@ -148,8 +157,8 @@ export function validateOidcIssuerUrl(
     if (kind === 'never' || kind === 'link-local') {
       throw new Error(`OIDC issuer URL points to disallowed ${kind} IP address (${host})`);
     }
-    if (kind === 'private' && !options.allowPrivate) {
-      throw new Error(`OIDC issuer URL points to private IP address (${host}) without explicit opt-in`);
+    if (kind === 'private' && !privateAllowed(options.allowPrivate)) {
+      throw new Error(`OIDC issuer URL points to private IP address (${host}), which this server does not allow`);
     }
   }
 
@@ -180,7 +189,7 @@ function validateEndpointUrl(
     if (kind === 'never' || kind === 'link-local') {
       throw new Error(`Invalid ${field}: disallowed ${kind} IP address (${host})`);
     }
-    if (kind === 'private' && !client.allowPrivateIssuer) {
+    if (kind === 'private' && !privateAllowed(client.allowPrivateIssuer)) {
       throw new Error(`Invalid ${field}: private IP address (${host}) is not allowed`);
     }
     if (kind === 'loopback' && !isLoopbackHostOrIp(new URL(client.issuerUrl.trim()))) {

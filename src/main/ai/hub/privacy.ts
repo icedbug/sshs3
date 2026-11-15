@@ -283,8 +283,8 @@ export function maskSecrets(value: string): string {
       /\b(?:sk-[A-Za-z0-9_-]{12,}|sk_(?:live|test)_[A-Za-z0-9]{12,}|rk_(?:live|test)_[A-Za-z0-9]{12,}|gh[pousr]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{16,}|xox[abposr]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{30,}|npm_[A-Za-z0-9]{30,}|hf_[A-Za-z0-9]{16,})\b/g,
       "[redacted]",
     )
-    // HashiCorp Vault tokens (service and batch tokens)
-    .replace(/\bhv[sb]\.[A-Za-z0-9_-]{12,}\b/g, "[redacted]")
+    // HashiCorp Vault tokens (service, batch and recovery tokens)
+    .replace(/\bhv[sbr]\.[A-Za-z0-9_-]{12,}/g, "[redacted]")
     // Slack and Microsoft Teams incoming webhook URLs
     .replace(/https?:\/\/hooks\.slack\.com\/(?:services|workflows)\/[^\s"'<>]+|hooks\.slack\.com\/(?:services|workflows)\/[^\s"'<>]+/gi, "[redacted]")
     .replace(/https?:\/\/[A-Za-z0-9.-]*webhook\.office\.com\/[^\s"'<>]+|webhook\.office\.com\/[^\s"'<>]+/gi, "[redacted]")
@@ -293,25 +293,97 @@ export function maskSecrets(value: string): string {
     .replace(/([?&]X-Amz-(?:Signature|Security-Token)=)[^\s&"'<>]+/gi, "$1[redacted]")
     // A JSON Web Token: three base64url parts, the first two starting with {"…
     .replace(/\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, "[redacted]")
-    .replace(/\b(Bearer|Basic)\s+[^\s"']+/gi, "$1 [redacted]")
+    // A crypt(3)-style hash: Cisco type 5/8/9, /etc/shadow ($1$, $5$, $6$, $y$, bcrypt, argon2).
+    .replace(/\$(?:1|5|6|8|9|y|2[aby]?|apr1|argon2(?:id|i|d)?)\$[^\s$]{0,200}\$[^\s"',;]{8,200}/g, "[redacted]")
+    // Network devices: `enable secret 9 <hash>`, `username x secret 5 <hash>`,
+    // `password 7 <type 7>`, `enable password <plain>`.
+    // eslint-disable-next-line security/detect-unsafe-regex -- anchored on a keyword, each part bounded or separated by fixed words, so it cannot backtrack
+    .replace(/\b((?:enable\s+)?(?:secret|password)\s+[0-9]\s+)(?!\[redacted\])\S+/gi, "$1[redacted]")
+    .replace(/\b(enable\s+(?:secret|password)\s+)(?![0-9]\s)(?!\[redacted\])\S+/gi, "$1[redacted]")
+    // SNMP communities, in device config, net-snmp config and the snmp* tools.
+    .replace(/\b(snmp-server\s+community\s+)\S+/gi, "$1[redacted]")
+    // eslint-disable-next-line security/detect-unsafe-regex -- anchored on a keyword, each part bounded or separated by fixed words, so it cannot backtrack
+    .replace(/\b(snmp-server\s+host\s+\S+\s+(?:(?:informs|traps)\s+)?version\s+(?:1|2c)\s+)\S+/gi, "$1[redacted]")
+    .replace(/\b((?:ro|rw)community6?\s+)\S+/gi, "$1[redacted]")
+    .replace(/\b(snmp(?:walk|bulkwalk|get|getnext|bulkget|set|table|trap)\b[^\n;&|]{0,200}?\s-c\s*)[^\s;&|]+/g, "$1[redacted]")
+    // IPsec / VPN pre-shared keys written without `:` or `=`.
+    // eslint-disable-next-line security/detect-unsafe-regex -- anchored on a keyword, each part bounded or separated by fixed words, so it cannot backtrack
+    .replace(/\b((?:pre-?shared-?key|psk)(?:\s+(?:local|remote|ascii|hex|[0-9]))?\s+)(?!address\b|[:=])(?!\[redacted\])[^\s,;]+/gi, "$1[redacted]")
+    // eslint-disable-next-line security/detect-unsafe-regex -- anchored on a keyword, each part bounded or separated by fixed words, so it cannot backtrack
+    .replace(/\b(crypto\s+isakmp\s+key\s+(?:[0-9]\s+)?)\S+/gi, "$1[redacted]")
+    .replace(/\b(Bearer|Basic)\s+(?!(?:auth|authentication|token|tokens|scheme|realm|access|header|credentials?)\b)[^\s"']+/gi, "$1 [redacted]")
     // kubeconfig keys and certificates' private halves, and a docker config's auth.
     .replace(/\b((?:client-key|token)-data:\s*)\S+/g, "$1[redacted]")
     .replace(/("auth"\s*:\s*")[^"]+"/g, '$1[redacted]"')
     // A password given as a flag: --password x, --password=x, mysql -pSECRET.
     .replace(/(--pass(?:word)?[= ])(?!\$\(|`)[^\s;&|]+/gi, "$1[redacted]")
+    .replace(/\b(curl\b[^\n;&|]{0,200}?\s(?:-u|--user)\s*["']?[^\s:;&|"']{1,100}:)(?!\$\(|`)[^\s;&|"']+/g, "$1[redacted]")
     .replace(/\b((?:mysql|mysqldump|mariadb|mysqladmin)\b[^\n;&|]*?\s-p)(?!\s)[^\s;&|]+/g, "$1[redacted]")
     // The runs before `://` and around the keyword are bounded: unbounded, each
     // start position scans to the end of a long unbroken run (base64, a hex
     // dump, minified JSON) and masking 30,000 such characters takes a second.
-    // The password in a URL (including empty-username redis://:pass@host and passwords with @), up to the host.
+    // The password in a URL (including empty-username redis://:pass@host), up to the last @ before the
+    // host: a password may hold @ and /. A port followed by a path with an @ in it is not a password.
     .replace(
-      /([a-z][a-z0-9+.-]{0,30}:\/\/[^\s/:@]{0,255}:)[^\s/]{1,255}@(?=[^\s@/]+(?:[/:?#\s"'`,;]|$))/gi,
+      /([a-z][a-z0-9+.-]{0,30}:\/\/[^\s/:@]{0,255}:)(?!\d{1,5}\/)[^\s]{1,255}@(?=[^\s@/]+(?:[/:?#\s"'`,;]|$))/gi,
       "$1[redacted]@",
     )
     .replace(
-      /(["']?[\w-]{0,40}(?:password|passphrase|passwd|secret|token|api[_-]?key|credential|_pass|_pwd|^pwd|\bpwd)[\w-]{0,40}["']?\s*[:=]\s*)(?:"(?![^"\r\n]*(?:\$\(|`))[^"\r\n]*"|'[^'\r\n]*'|(?!\$\(|`)[^\s,;&|<>()`"']+)/gi,
-      "$1[redacted]",
+      /(["']?[\w-]{0,40}(?:password|passphrase|passwd|secret|token|api[_-]?key|credential|pre-?shared[-_]?key|psk|snmp[\w-]{0,20}community|community[_-]?string|_pass|_pwd|^pwd|\bpwd|\bpw\b)[\w-]{0,40}["']?\s*[:=]\s*)(?:"(?![^"\r\n]*(?:\$\(|`))[^"\r\n]*"|'[^'\r\n]*'|(?!\$\(|`)[^\s,;&|<>()`"']+)/gi,
+      (match: string, prefix: string, offset: number, whole: string) =>
+        isPolicyValue(prefix, match.slice(prefix.length), whole.slice(offset + match.length, offset + match.length + 24))
+          ? match
+          : `${prefix}[redacted]`,
+    )
+    // In prose: "the password is Hunter2-x", "admin pw was s3cr3t!". Only a value
+    // that looks like a secret: "the password is stored in the vault" stays.
+    .replace(
+      // eslint-disable-next-line security/detect-unsafe-regex -- anchored on a keyword, each part bounded or separated by fixed words, so it cannot backtrack
+      /\b((?:password|passphrase|passwd|pwd|pw|secret|token|api[ _-]?key|pin(?: ?code)?)\s+(?:is|was|=)\s+)("[^"\r\n]{1,200}"|'[^'\r\n]{1,200}'|[^\s,;]{1,200})/gi,
+      (match: string, prefix: string, value: string) => {
+        const quoted = /^["']/.test(value);
+        const bare = quoted ? value.slice(1, -1) : value.replace(/[.!?):]+$/, "");
+        if (!quoted && !looksLikeSecret(bare)) return match;
+        return `${prefix}${quoted ? `${value[0]}[redacted]${value[0]}` : `[redacted]${value.slice(bare.length)}`}`;
+      },
     );
+}
+
+/**
+ * Whether a text holds something maskSecrets would hide. Only secrets count: a byte-order mark,
+ * a zero-width character or a terminal colour code, which maskContext also strips, is not one.
+ */
+export function containsSecrets(value: string): boolean {
+  return maskSecrets(value) !== value;
+}
+
+/** Units that, after a number, make a policy ("90 days", "12 characters"), not a secret. */
+const POLICY_UNIT = /^\s*(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|h|days?|d|weeks?|w|months?|years?|y|characters?|chars?|times?|attempts?|tries|retries|versions?|%|percent)\b/i;
+/** Words that, as a value, say how secrets are handled ("secrets: weekly"), not what one is. */
+const POLICY_WORD = /^(?:never|always|required|optional|none|n\/a|daily|weekly|monthly|quarterly|yearly|annually|hourly|rotated|expired|disabled|enabled|yes|no|true|false|null|unset|empty|redacted|\[redacted\])$/i;
+
+/**
+ * A value after `password:` that is a fact about passwords, not a password:
+ * a number with a unit ("production passwords: 90 days"), a policy word, or
+ * an ordinary lowercase word after a plural heading ("secrets: weekly on Monday").
+ */
+function isPolicyValue(prefix: string, value: string, after: string): boolean {
+  const bare = value.replace(/^["']|["']$/g, "");
+  // eslint-disable-next-line security/detect-unsafe-regex -- anchored on a keyword, each part bounded or separated by fixed words, so it cannot backtrack
+  if (/^\d{1,4}(?:[.,]\d+)?$/.test(bare) && POLICY_UNIT.test(after)) return true;
+  if (POLICY_WORD.test(bare)) return true;
+  const plural = /(?:passwords|passphrases|secrets|tokens|credentials|keys)["']?\s*[:=]\s*$/i.test(prefix);
+  return plural && /^[a-z]{2,20}$/.test(bare) && /^\s+[a-z]/i.test(after);
+}
+
+/** A bare word in prose that has the look of a secret: letters mixed with digits or symbols, or odd casing. */
+function looksLikeSecret(value: string): boolean {
+  if (value.length < 6 || /^[/~]|^https?:/i.test(value)) return false;
+  if (/^\d+$/.test(value)) return false;
+  const letters = /[A-Za-z]/.test(value);
+  if (letters && /[0-9]/.test(value)) return true;
+  if (letters && /[^A-Za-z0-9]/.test(value) && !/^[A-Za-z]+[.-][A-Za-z]+$/.test(value)) return true;
+  return value.length >= 10 && /[a-z]/.test(value) && /[A-Z]/.test(value.slice(1));
 }
 
 export function boundedContext(value: string, max = 32_000): string {

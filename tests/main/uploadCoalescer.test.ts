@@ -24,14 +24,16 @@ describe('createUploadCoalescer', () => {
       uploads++;
       running++;
       maxRunning = Math.max(maxRunning, running);
-      await sleep(60);
+      // Long against the pauses below: on a busy machine timers run late, and every later change must
+      // still fall inside the first upload for the count to be two.
+      await sleep(400);
       running--;
     }, 10);
 
     c.trigger();
-    await sleep(30); // the first upload is now running
+    await sleep(60); // the first upload is now running
     c.trigger();
-    await sleep(30);
+    await sleep(60);
     c.trigger();
     c.trigger();
     await c.flush();

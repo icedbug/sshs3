@@ -468,7 +468,8 @@ export class IpcBridge {
 
   /** Replies to the window that issued an IPC request (search, dir-sync, AWS SSO ...). */
   public sendToSender(sender: Electron.WebContents | null | undefined, channel: string, ...args: unknown[]): boolean {
-    if (sender && !sender.isDestroyed?.()) {
+    // A sender that cannot be replied to (no `send`) gets the focused window, never a TypeError.
+    if (sender && typeof sender.send === 'function' && !sender.isDestroyed?.()) {
       sender.send(channel, ...args);
       return true;
     }

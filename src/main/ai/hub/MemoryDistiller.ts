@@ -99,6 +99,10 @@ export interface GovernedMemoryProposal extends MemoryProposal {
   sourceTrust: MemorySourceTrust;
   riskLevel: MemoryRiskLevel;
   diffSummary: string;
+  /** The memory rules put it to a person: it is not saved until somebody accepts it. */
+  requiresApproval?: boolean;
+  /** Why it waits for a person. */
+  approvalReasons?: string[];
 }
 
 export interface DistilledMemoryProposal
@@ -453,6 +457,8 @@ export function buildGovernedProposal(
     sourceTrust: decision.sourceTrust,
     riskLevel: decision.riskLevel,
     diffSummary: decision.diffSummary,
+    requiresApproval: decision.requiresApproval,
+    ...(decision.reasons.length ? { approvalReasons: decision.reasons } : {}),
   };
 }
 
@@ -644,8 +650,16 @@ function parseDistillProposalsInternal(
   if (!parsed || !Array.isArray(parsed.proposals)) return undefined;
   const byId = new Map(existing.map((m) => [m.id, m]));
   const out: DistilledMemoryProposal[] = [];
+  // The same rule as mayLearnUnreviewed: the team's activity, and a conversation in which something
+  // was run and shown, are records of what happened; the assistant's own words are not.
   const sourceTrust: MemorySourceTrust =
-    source.sourceTrust ?? (confirmedSomething(source.transcript) ? "trusted" : "untrusted");
+    source.sourceTrust ?? (mayLearnUnreviewed(source) ? "trusted" : "untrusted");
+  // A proposal from such a record, without a confidence of its own, is as sure as the record.
+  const proven = sourceTrust !== "untrusted";
+  const approval = (decision: MemoryGovernanceDecision) => ({
+    requiresApproval: decision.requiresApproval,
+    ...(decision.reasons.length ? { approvalReasons: decision.reasons } : {}),
+  });
 
   for (const raw of parsed.proposals) {
     if (out.length >= MAX_PROPOSALS_PER_RUN) break;
@@ -709,6 +723,7 @@ function parseDistillProposalsInternal(
         sourceTrust: decision.sourceTrust,
         riskLevel: decision.riskLevel,
         diffSummary: decision.diffSummary,
+        ...approval(decision),
       });
       continue;
     }
@@ -766,6 +781,7 @@ function parseDistillProposalsInternal(
           commandTemplate,
           verifyCommand,
           confidence,
+          proven,
           sourceTrust,
         },
         { existingMemories: existing, sourceTrust },
@@ -792,6 +808,7 @@ function parseDistillProposalsInternal(
         sourceTrust: decision.sourceTrust,
         riskLevel: decision.riskLevel,
         diffSummary: decision.diffSummary,
+        ...approval(decision),
       });
     } else if (p.op === "add") {
       const title = typeof p.title === "string" ? p.title.trim() : "";
@@ -809,6 +826,7 @@ function parseDistillProposalsInternal(
           commandTemplate,
           verifyCommand,
           confidence,
+          proven,
           sourceTrust,
         },
         { existingMemories: existing, sourceTrust },
@@ -833,6 +851,7 @@ function parseDistillProposalsInternal(
         sourceTrust: decision.sourceTrust,
         riskLevel: decision.riskLevel,
         diffSummary: decision.diffSummary,
+        ...approval(decision),
       });
     }
   }

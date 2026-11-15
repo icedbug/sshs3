@@ -6,7 +6,7 @@ import type { AgentChange, AgentTask } from "../../../shared/types/aiHub";
 import type { TerminalRegistry } from "./TerminalRegistry";
 type ManagedTerminal = NonNullable<ReturnType<TerminalRegistry["get"]>>;
 import { createTwoFilesPatch } from "diff";
-import { clip, maskContext, safeError } from "./privacy";
+import { clip, containsSecrets, safeError } from "./privacy";
 import type { ToolRequest } from "./ToolBroker";
 
 /** The longest file a model is shown whole, and so may rewrite whole: what fits in what a runtime passes on. */
@@ -274,12 +274,12 @@ export class FileTools {
       expectedHash = request.expected;
     }
 
-    if (maskContext(before) !== before)
+    if (containsSecrets(before))
       throw new Error(
         "This file contains redacted secrets. Edit it in the terminal without asking the model to reproduce secrets.",
       );
     // What is approved is what is written: new content that would be shown masked is refused like an old one.
-    if (maskContext(proposedContent) !== proposedContent)
+    if (containsSecrets(proposedContent))
       throw new Error(
         "The new content contains something that looks like a secret, and it would be shown masked to the person approving it. Write the secret on the server yourself, not through the model.",
       );

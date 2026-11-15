@@ -390,7 +390,9 @@ export class SelfLearningService {
   private isGovernanceActive(opts?: GovernanceExecutionOptions): boolean {
     if (opts?.governed !== undefined) return opts.governed;
     if (opts?.autoSaveMemories !== undefined) return true;
-    return this.store?.data.preferences.autoSaveMemories !== undefined;
+    // In the app (a store to queue proposals in is bound) the rules always hold: a setting never
+    // touched is the same as one switched on, and must behave the same.
+    return Boolean(this.store);
   }
 
   private effectiveAutoSave(opts?: GovernanceExecutionOptions): boolean {

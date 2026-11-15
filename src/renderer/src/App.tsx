@@ -4,6 +4,7 @@ import { UnsplitButton } from './components/UnsplitButton';
 import { TabBar } from './components/TabBar';
 import { AiHubPanel } from './components/AiHub/AiHubPanel';
 import type { HubViewId } from './components/AiHub/panelShared';
+import { openableLocalFileRef } from './components/AiHub/reportRefs';
 import type { AppTab } from './lib/tabs';
 import { FOCUS_AI_COMPOSER_EVENT, useAppKeyboard } from './lib/useAppKeyboard';
 import { useTabActions } from './lib/useTabActions';
@@ -1256,12 +1257,18 @@ const AppContent: React.FC = () => {
           boundTerminalId={aiBoundPaneId}
           compactMode={Boolean(settings.compactMode)}
           onOpenFileRef={(ref) => {
+            // Only a reference without a host is a file on this computer.
+            const local = openableLocalFileRef(ref);
+            if ('refused' in local) {
+              setNotice(local.refused);
+              return;
+            }
             openEditorTab({
               providerId: 'local',
               sourceType: 'local' as SourceType,
               entry: {
-                name: ref.path.split('/').pop() || ref.path,
-                path: ref.path,
+                name: local.path.split(/[\\/]/).pop() || local.path,
+                path: local.path,
                 isDirectory: false,
                 size: 0,
               },

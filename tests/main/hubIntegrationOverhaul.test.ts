@@ -449,19 +449,17 @@ describe("Wave 2 Hub integration overhaul", () => {
       shared: false,
     };
     const { hub } = await createTestHub({ servers: [prodServer] });
-    await hub.request({
-      action: "safety-policy-save",
-      policy: {
-        autoApproveSafeReadOnly: true,
-        requireApprovalOnProdTags: true,
-        blockDestructiveWithoutConfirm: true,
-        clusterPolicies: {
-          "db-prod": {
-            requiredApprovals: 2,
-          },
-        },
-      },
-    });
+    // Not offered on the desktop (only one person approves there)...
+    await expect(
+      hub.request({ action: "safety-policy-save", policy: { clusterPolicies: { "db-prod": { requiredApprovals: 2 } } } }),
+    ).rejects.toThrow(/second person/);
+    // ...but one that arrives anyway (stored before, synced) is held to: such a change is refused, not waved through.
+    hub.store.data.safetyPolicy = {
+      autoApproveSafeReadOnly: true,
+      requireApprovalOnProdTags: true,
+      blockDestructiveWithoutConfirm: true,
+      clusterPolicies: { "db-prod": { requiredApprovals: 2 } },
+    };
 
     // Save external runner + agent
     hub.store.data.externalRunners = [
@@ -501,12 +499,12 @@ describe("Wave 2 Hub integration overhaul", () => {
         kind: "execute",
         toolCallId: "tc-1",
       });
-      await new Promise((r) => setTimeout(r, 30));
-      const pending = task.changes.find((c) => c.status === "pending");
-      expect(pending).toBeDefined();
-      expect(pending?.requiredApprovals).toBe(2);
-      await hub.request({ action: "approve", taskId: task.id, changeId: pending!.id, approved: false, note: "Test deny" });
+      // Two people are needed and only one can approve here: refused at once, with the reason.
       expect(await askPromise).toBe(false);
+      const refused = task.changes.find((c) => c.command === "systemctl restart postgresql");
+      expect(refused?.requiredApprovals).toBe(2);
+      expect(refused?.status).toBe("denied");
+      expect(refused?.output).toMatch(/only one person/);
     });
     mocks.acpStop.mockResolvedValue(undefined);
 
@@ -572,15 +570,20 @@ describe("Wave 2 Hub integration overhaul", () => {
       shared: false,
     };
     const { hub, setActor } = await createTestHub({ actorName: "alice", servers: [prodServer] });
-    await hub.request({
-      action: "safety-policy-save",
-      policy: {
-        autoApproveSafeReadOnly: true,
-        requireApprovalOnProdTags: true,
-        blockDestructiveWithoutConfirm: true,
-        requirePeerApprovalOnProd: true,
-      },
-    });
+    // On the desktop only one person approves: a rule that needs a second one is not offered.
+    await expect(
+      hub.request({
+        action: "safety-policy-save",
+        policy: {
+          autoApproveSafeReadOnly: true,
+          requireApprovalOnProdTags: true,
+          blockDestructiveWithoutConfirm: true,
+          requirePeerApprovalOnProd: true,
+        },
+      }),
+    ).rejects.toThrow(/second person/);
+    // One stored before (or synced in) is not in force here: the plan is not left waiting for ever.
+    hub.store.data.safetyPolicy = { ...hub.store.data.safetyPolicy!, requirePeerApprovalOnProd: true };
 
     const planTask: AgentTask = {
       id: "task-plan",
@@ -619,20 +622,18 @@ describe("Wave 2 Hub integration overhaul", () => {
     };
     hub.store.data.tasks.push(planTask);
 
-    // 1st approval by alice leaves plan proposed awaiting peer
-    const snap1 = await hub.request({ action: "plan-decide", taskId: "task-plan", approved: true, note: "LGTM 1" });
-    expect(snap1.tasks.find((t) => t.id === "task-plan")?.plan?.status).toBe("proposed");
-
-    // Duplicate approval by alice rejected
-    await expect(
-      hub.request({ action: "plan-decide", taskId: "task-plan", approved: true }),
-    ).rejects.toThrow("peer approver");
-
-    // 2nd distinct approver bob satisfies peer approval
+    // Renaming the person does not make a second approver: approvals are by account, and the
+    // rule that wants two is not in force where only one can approve.
     mocks.runtimeStart.mockResolvedValue(undefined);
     setActor("bob");
-    const snap2 = await hub.request({ action: "plan-decide", taskId: "task-plan", approved: true, note: "LGTM 2" });
-    expect(snap2.tasks.find((t) => t.id === "task-plan")?.plan?.status).toBe("approved");
+    // Recent, or saving the store prunes it as an old conversation.
+    planTask.updatedAt = Date.now();
+    await hub.request({ action: "plan-decide", taskId: "task-plan", approved: true, note: "LGTM" });
+    const plan = hub.store.data.tasks.find((t) => t.id === "task-plan")?.plan as
+      | (NonNullable<AgentTask["plan"]> & { approvals?: Array<{ actorId?: string }> })
+      | undefined;
+    expect(plan?.status).toBe("approved");
+    expect(plan?.approvals?.[0]?.actorId).toBe("local");
 
     // Freeze blocks plan approval
     await hub.request({

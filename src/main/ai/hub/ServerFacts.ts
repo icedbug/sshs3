@@ -104,7 +104,13 @@ export function buildScript(watch: string[] = [], certs: string[] = []): string 
   return `${lines.join("\n")}\n`;
 }
 
-/** Build a read-only fast triage telemetry script for `sh -s`. */
+/**
+ * Build a read-only fast triage telemetry script for `sh -s`.
+ *
+ * Not used by the app yet: nothing runs this script, and its parsers
+ * (parseTriageTelemetry and the parse* helpers it calls, classifyFactsProfile)
+ * have no callers outside tests. Server facts come from buildScript/parseFacts.
+ */
 export function buildTriageScript(): string {
   const lines = ["export LC_ALL=C", `echo '${MARK}begin'`];
   for (const { section, command, only } of TRIAGE_COMMANDS) {
@@ -387,7 +393,7 @@ function hasAnyFactsData(facts: ServerFacts): boolean {
 
 export type FactsProfile = "full" | "partial" | "unsupported";
 
-/** Classify whether parsed facts are full, partial-profile fallback, or unsupported. */
+/** Classify whether parsed facts are full, partial-profile fallback, or unsupported. Not used by the app yet. */
 export function classifyFactsProfile(facts: ServerFacts): FactsProfile {
   if (facts.unsupported) return "unsupported";
   const hasCore = Boolean(facts.os && facts.kernel);
@@ -1167,7 +1173,7 @@ export function summarizeJournalWarnings(output: string): JournalSummary {
   };
 }
 
-/** Parse combined `buildTriageScript()` output into `TriageTelemetry`. */
+/** Parse combined `buildTriageScript()` output into `TriageTelemetry`. Not used by the app yet (see buildTriageScript). */
 export function parseTriageTelemetry(output: string, collectedAt = Date.now()): TriageTelemetry {
   const s = sections(output);
   const { load, psi } = parseLoadAndPsi({

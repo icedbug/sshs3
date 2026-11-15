@@ -644,8 +644,11 @@ export function KnowledgeBaseView({
 
   const ingest = async (key: string, r: HubRequest): Promise<void> => {
     try {
-      const result = (await request(r)).reply?.ingest;
-      if (result?.added.length) setItem(key, { state: "added", note: result.added.join(", ") });
+      const reply = (await request(r)).reply;
+      const result = reply?.ingest;
+      // How it was added, where that is not what was asked (a source name another document already had).
+      const notes = [...((result as { notes?: string[] } | undefined)?.notes ?? []), ...(reply?.notes ?? [])];
+      if (result?.added.length) setItem(key, { state: "added", note: [result.added.join(", "), ...notes].join(" · ") });
       // The same link, fetched again with a new text: the source we have is brought up to date,
       // and the pages resting on it are brought in line with it.
       else if (result?.updated?.length)

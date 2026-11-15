@@ -31,6 +31,20 @@ export interface FileRef {
   column?: number;
 }
 
+/**
+ * Where a citation may be opened from this computer: the local path for a
+ * reference without a host. A reference with a host names a file on that
+ * server (`prod-01:/etc/shadow`); opening its path here would show this
+ * computer's (or, in the web app, the web server's) own file of that name.
+ */
+export function openableLocalFileRef(ref: FileRef): { path: string } | { refused: string } {
+  if (ref.host)
+    return {
+      refused: `${ref.raw} is a file on ${ref.host}, not on this computer. Open it from a terminal or file pane connected to ${ref.host}.`,
+    };
+  return { path: ref.path };
+}
+
 /** A tokenized segment from `tokenizeReportRefs`. */
 export type ReportRefSegment =
   | { kind: "text"; text: string }

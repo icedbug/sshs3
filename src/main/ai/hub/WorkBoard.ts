@@ -56,45 +56,9 @@ export interface Mergeable {
 }
 
 /**
- * Advances a Hybrid Logical Clock for a local event on `clientId`.
- * Guarantees monotonicity even when wall-clock `now` stalls or skews backward.
- */
-export function tickHlc(
-  prev: HybridLogicalClock | undefined,
-  clientId: string,
-  now = Date.now(),
-): HybridLogicalClock {
-  if (!prev || now > prev.ts) {
-    return { ts: now, counter: 0, clientId };
-  }
-  return { ts: prev.ts, counter: prev.counter + 1, clientId };
-}
-
-/**
- * Merges local and remote HLCs upon receiving a remote update.
- */
-export function receiveHlc(
-  local: HybridLogicalClock | undefined,
-  remote: HybridLogicalClock | undefined,
-  clientId: string,
-  now = Date.now(),
-): HybridLogicalClock {
-  const lTs = local?.ts ?? 0;
-  const rTs = remote?.ts ?? 0;
-  const ts = Math.max(now, lTs, rTs);
-  let counter = 0;
-  if (ts === lTs && ts === rTs) {
-    counter = Math.max(local?.counter ?? 0, remote?.counter ?? 0) + 1;
-  } else if (ts === lTs) {
-    counter = (local?.counter ?? 0) + 1;
-  } else if (ts === rTs) {
-    counter = (remote?.counter ?? 0) + 1;
-  }
-  return { ts, counter, clientId };
-}
-
-/**
- * Deterministic total-order comparison of two Hybrid Logical Clocks.
+ * Deterministic total-order comparison of two Hybrid Logical Clocks. Nothing
+ * stamps a clock on a copy yet (the copies' `updatedAt` is the version); an
+ * `hlc` that arrives on a copy is still compared and carried through merges.
  */
 export function compareHlc(
   a: HybridLogicalClock | undefined,
@@ -109,14 +73,23 @@ export function compareHlc(
 }
 
 /**
- * Compares two mergeable versions by `updatedAt`, breaking ties with Hybrid Logical Clock (`hlc`).
+ * Compares two mergeable versions by `updatedAt`, then by `hlc` where copies
+ * carry one, then by their content: two copies made at the same millisecond
+ * with different content are put in the same order on every installation, so
+ * both keep the same one instead of each keeping its own. Zero only for the
+ * same content.
  */
 export function compareVersion(
   a: { updatedAt: number; hlc?: HybridLogicalClock },
   b: { updatedAt: number; hlc?: HybridLogicalClock },
 ): number {
   if (a.updatedAt !== b.updatedAt) return a.updatedAt - b.updatedAt;
-  return compareHlc(a.hlc, b.hlc);
+  const byClock = compareHlc(a.hlc, b.hlc);
+  if (byClock !== 0) return byClock;
+  if (a === b) return 0;
+  const ja = canonicalJson(a);
+  const jb = canonicalJson(b);
+  return ja === jb ? 0 : ja < jb ? -1 : 1;
 }
 
 function mergeSymmetricHlc(

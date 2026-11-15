@@ -2129,6 +2129,12 @@ export async function handleAppAction(
         }
 
         while (!aborted && remaining.length > 0) {
+          // A run stopped (or out of time) while a stage ran starts no further stage.
+          if (task.status !== "running" && task.status !== "waiting") {
+            aborted = true;
+            abortReason = `Stopped after stage ${stagesCompleted}: the run was stopped.`;
+            break;
+          }
           const batch = remaining.splice(0, batchSize);
           const batchResults = await Promise.all(batch.map((srv) => executeClusterNode(srv)));
           perNodeResults.push(...batchResults);

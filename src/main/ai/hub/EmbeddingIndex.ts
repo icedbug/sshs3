@@ -131,6 +131,35 @@ function addHashedFeature(vec: Float64Array, feature: string, weight: number, di
  * no external embedding endpoint.
  */
 export function embedTextLocal(text: string, dims = LOCAL_EMBEDDING_DIMS): number[] {
+  // The same texts (pages, memories, chunks) are ranked again on every
+  // question: their vectors are kept in memory, never on disk, where they
+  // would cost more to write than to compute.
+  const key = `${dims}:${crypto.createHash("sha1").update(text.slice(0, MAX_INPUT_CHARS)).digest("base64")}`;
+  const cached = localVectorMemo.get(key);
+  if (cached) {
+    localVectorMemo.delete(key);
+    localVectorMemo.set(key, cached);
+    return cached;
+  }
+  const vector = Object.freeze(computeLocalVector(text, dims)) as number[];
+  localVectorMemo.set(key, vector);
+  while (localVectorMemo.size > LOCAL_MEMO_MAX) {
+    const oldest = localVectorMemo.keys().next().value;
+    if (oldest === undefined) break;
+    localVectorMemo.delete(oldest);
+  }
+  return vector;
+}
+
+const LOCAL_MEMO_MAX = 6000;
+const localVectorMemo = new Map<string, number[]>();
+
+/** For tests: how many local vectors are held in memory. */
+export function localVectorMemoSize(): number {
+  return localVectorMemo.size;
+}
+
+function computeLocalVector(text: string, dims: number): number[] {
   const safeDims = Math.max(32, Math.floor(dims));
   const vec = new Float64Array(safeDims);
   const words = tokenizeLocalEmbedding(text.slice(0, MAX_INPUT_CHARS));
@@ -312,6 +341,9 @@ export class EmbeddingIndex {
 
   /** The vector of every text, embedding only those not seen before with this model. */
   async vectorsFor(texts: string[], embedder: Embedder): Promise<number[][]> {
+    // Local vectors are cheap to compute and held in memory by embedTextLocal:
+    // stored here they would grow the file and push out vectors an endpoint was paid for.
+    if (embedder.model === LOCAL_FALLBACK_MODEL) return embedder.embed(texts);
     await this.load();
     const keys = texts.map((t) => keyOf(embedder.model, t));
     const missing = [

@@ -4037,6 +4037,266 @@
 .ai-exit-bad { color: var(--danger-fg); }
 
 /* ==========================================================================
+   Classes the views still use (kept from the earlier stylesheet)
+   ========================================================================== */
+
+/* The web app: the browser's own bars cover the bottom of the page. */
+.ai-hub.ai-hub-web .ai-composer {
+  padding-bottom: 64px;
+}
+
+.ai-hub-web .ai-scroll {
+  padding-bottom: 84px;
+}
+
+.ai-model-chip {
+  min-width: 0;
+  max-width: 65%;
+}
+
+.ai-model-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-history .ai-history-new {
+  width: 100%;
+  justify-content: flex-start;
+  text-align: left;
+  padding: 7px 10px;
+  font-size: 12px;
+}
+
+.ai-view-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 12px;
+}
+
+.ai-timeline-text > span {
+  display: block;
+  margin-top: 2px;
+  color: var(--fg-secondary);
+  line-height: 1.5;
+}
+
+.ai-timeline-more {
+  display: grid;
+  gap: 6px;
+  padding: 6px 0 2px;
+  font-size: 12px;
+  animation: ai-rise 220ms var(--ai-ease) both;
+}
+
+.ai-timeline-more pre {
+  margin: 0;
+  max-height: 260px;
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--bg-surface-subtle);
+  font-size: 11.5px;
+  white-space: pre-wrap;
+}
+
+.ai-timeline-more p {
+  margin: 0;
+  color: var(--fg-secondary);
+}
+
+.ai-timeline-more small {
+  color: var(--fg-muted);
+}
+
+.ai-timeline-more button,
+.ai-more {
+  justify-self: start;
+  margin-top: 4px;
+}
+
+.ai-more {
+  margin: 14px 0 0;
+}
+
+.ai-audit-seq {
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+  font-size: 11.5px;
+}
+
+.ai-audit-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-audit-text code {
+  margin-left: 8px;
+  color: var(--fg-secondary);
+}
+
+.ai-audit-gaps {
+  color: var(--warn-fg);
+}
+
+.ai-recording-mark-past code {
+  color: var(--accent-primary);
+}
+
+.ai-link-proposed {
+  border-style: dashed;
+}
+
+.ai-set-fold {
+  margin-top: 22px;
+}
+
+.ai-set-fold > .ai-form {
+  display: grid;
+  gap: 12px;
+  padding: 4px 14px 14px;
+}
+
+.ai-alert-rules {
+  grid-template-columns: 1fr;
+}
+
+.ai-alert-rules .ai-inline-form {
+  margin-top: 0;
+}
+
+.ai-page {
+  border-left: 2px solid var(--accent-border);
+}
+
+.ai-page .ai-page-when {
+  color: var(--fg-secondary);
+  font-size: 12.5px;
+}
+
+/* The knowledge base's list of sources being read. */
+.ai-inbox ul {
+  margin: 0;
+  padding: 0 14px 10px;
+  list-style: none;
+  max-height: 240px;
+  overflow: auto;
+}
+
+.ai-inbox li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+  gap: 12px;
+  padding: 4px 0;
+  font-size: 12px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.ai-inbox li span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-primary);
+}
+
+.ai-inbox li small {
+  color: var(--fg-muted);
+}
+
+.ai-inbox-added small {
+  color: var(--accent-primary);
+}
+
+.ai-inbox-failed small {
+  color: var(--danger-fg);
+}
+
+.ai-hub .ai-inbox > .ai-chip {
+  margin: 0 14px 12px;
+}
+
+@media (max-width: 720px) {
+  .ai-inbox li {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Used by the views without a rule of their own until now. */
+.ai-muted,
+.ai-proof-hidden,
+.ai-usage {
+  color: var(--fg-muted);
+}
+
+.ai-usage {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.ai-proof-hidden {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 11.5px;
+}
+
+.ai-grid,
+.ai-timeline,
+.ai-tool-log,
+.ai-team {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.ai-tool-log {
+  gap: 6px;
+  margin: 6px 0;
+}
+
+.ai-change-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.ai-sources-bar,
+.ai-mode-pills {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.ai-sources-bar {
+  margin: 6px 0;
+}
+
+.ai-proof-verify-rollback,
+.ai-proof-verify-confirm {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.ai-hub nav.ai-nav-rail {
+  overflow-x: auto;
+}
+
+.ai-labs-nav-toggle {
+  white-space: nowrap;
+}
+
+.ai-hub nav .ai-labs-nav-toggle.active {
+  color: var(--accent-primary);
+}
+
+/* ==========================================================================
    Responsive Narrow-Panel & Small Viewport Wrapping
    ========================================================================== */
 

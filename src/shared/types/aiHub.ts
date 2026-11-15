@@ -1516,7 +1516,7 @@ export interface HubReply {
   kbSearch?: { query: string; hits: KbSearchHit[]; byMeaning: boolean };
   download?: { name: string; mime: string; dataBase64: string };
   /** `updated`: sources that were already there under the same address and got the new text. */
-  ingest?: { added: string[]; duplicates: string[]; failed: { name: string; error: string }[]; updated?: string[] };
+  ingest?: { added: string[]; duplicates: string[]; failed: { name: string; error: string }[]; updated?: string[]; notes?: string[] };
   /** A page that an undo took away altogether: what was undone was its creation. */
   kbPageRemoved?: { id: string; title: string };
   /**

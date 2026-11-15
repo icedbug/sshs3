@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import http from "node:http";
@@ -29,6 +29,7 @@ import {
   classifyIpAddress,
   requestJson,
   resolveAndValidateTarget,
+  setSharedServerCheck,
   SsrfBlockedError,
 } from "../../src/main/oauth/requestJson";
 import {
@@ -91,6 +92,9 @@ describe("requestJson SSRF protection & IP pinning", () => {
   });
 
   it("blocks loopback, link-local, metadata, private, embedded credentials, and plain-http public hosts", async () => {
+    // Loopback and private addresses are blocked on a shared web server; the desktop app allows them.
+    setSharedServerCheck(() => true);
+    onTestFinished(() => setSharedServerCheck(undefined));
     await expect(
       requestJson("https://127.0.0.1/token", { method: "GET", timeoutMs: 1000 }),
     ).rejects.toThrow(SsrfBlockedError);
@@ -172,7 +176,9 @@ describe("requestJson SSRF protection & IP pinning", () => {
       }),
     ).rejects.toThrow(SsrfBlockedError);
 
-    // Private DNS record rejected unless allowPrivate is opted in
+    // On a shared server a private DNS record is rejected
+    setSharedServerCheck(() => true);
+    onTestFinished(() => setSharedServerCheck(undefined));
     await expect(
       requestJson(`https://internal-idp.example.test:${port}/x`, {
         method: "GET",
@@ -180,6 +186,7 @@ describe("requestJson SSRF protection & IP pinning", () => {
         lookup: async () => [{ address: "10.20.30.40", family: 4 }],
       }),
     ).rejects.toThrow(SsrfBlockedError);
+    setSharedServerCheck(undefined);
 
     // Opted-in loopback DNS resolution pins 127.0.0.1 without touching real DNS
     const okRes = await requestJson(`http://local-dev.example.test:${port}/ok`, {
@@ -227,7 +234,13 @@ describe("oidcFlow issuer validation & web relay", () => {
     expect(() => validateOidcIssuerUrl("https://user:pw@idp.example.com")).toThrow(/credentials/);
     expect(() => validateOidcIssuerUrl("https://idp.example.com?foo=bar")).toThrow(/query/);
     expect(() => validateOidcIssuerUrl("https://169.254.169.254")).toThrow(/link-local/);
-    expect(() => validateOidcIssuerUrl("https://10.0.0.5")).toThrow(/private/);
+    expect(validateOidcIssuerUrl("https://10.0.0.5")).toBe("https://10.0.0.5");
+    setSharedServerCheck(() => true);
+    try {
+      expect(() => validateOidcIssuerUrl("https://10.0.0.5")).toThrow(/private/);
+    } finally {
+      setSharedServerCheck(undefined);
+    }
     expect(validateOidcIssuerUrl("https://10.0.0.5", { allowPrivate: true })).toBe("https://10.0.0.5");
   });
 

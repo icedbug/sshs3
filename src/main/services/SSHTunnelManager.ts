@@ -21,6 +21,22 @@ interface TunnelSession {
 }
 
 /**
+ * The managers whose `ssh -N` children are killed when the process exits. One process 'exit' listener
+ * serves them all: the team server makes a manager per signed-in person, and a listener each was a
+ * MaxListenersExceededWarning (and a manager kept for ever) from the eleventh person on.
+ */
+const liveManagers = new Set<SSHTunnelManager>();
+let exitHookInstalled = false;
+function watchForExit(manager: SSHTunnelManager): void {
+  liveManagers.add(manager);
+  if (exitHookInstalled) return;
+  exitHookInstalled = true;
+  process.once('exit', () => {
+    for (const m of liveManagers) m.killAllSync();
+  });
+}
+
+/**
  * Starts and stops standalone SSH port-forward tunnels (-L/-R/-D), each as its
  * own headless `ssh -N` process independent of any open terminal session, so a
  * tunnel's lifetime is controlled directly rather than riding along with a PTY.
@@ -37,10 +53,11 @@ export class SSHTunnelManager extends EventEmitter {
     // 'exit' fires synchronously right before the process actually dies, so a plain kill() (itself
     // synchronous — it only sends the signal) is all that's safe to do here. Mirrors
     // AgentLifecycleManager's installExitHandlers().
-    process.once('exit', () => this.killAllSync());
+    watchForExit(this);
   }
 
-  private killAllSync(): void {
+  /** @internal Called at process exit (see `watchForExit`). */
+  killAllSync(): void {
     for (const session of this.sessions.values()) {
       if (session.child && session.child.exitCode === null) {
         try {
@@ -140,6 +157,7 @@ export class SSHTunnelManager extends EventEmitter {
       status: 'active',
     };
     this.sessions.set(id, session);
+    watchForExit(this);
 
     let stderrTail = '';
     child.stderr?.on('data', (chunk) => {
@@ -248,6 +266,8 @@ export class SSHTunnelManager extends EventEmitter {
   public async stopAll(): Promise<void> {
     const ids = Array.from(this.sessions.keys());
     await Promise.all(ids.map((id) => this.stopTunnel(id)));
+    // Nothing left to kill at exit: the manager is let go of (a tunnel started later watches again).
+    if (this.sessions.size === 0) liveManagers.delete(this);
   }
 
   /**

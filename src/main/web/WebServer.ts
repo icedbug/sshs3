@@ -201,7 +201,31 @@ function encodeWsTextFrame(text: string): Buffer {
   return Buffer.concat([header, payload]);
 }
 
-function encodeWsControlFrame(opcode: number, payload = Buffer.alloc(0)): Buffer {
+/** A close frame's body: the status code, then a short reason. */
+function wsClosePayload(code: number, reason: string): Buffer {
+  const text = Buffer.from(reason, 'utf8').subarray(0, 120);
+  const body = Buffer.alloc(2 + text.length);
+  body.writeUInt16BE(code, 0);
+  text.copy(body, 2);
+  return body;
+}
+
+/**
+ * Terminal and log output events: under backpressure these may be dropped (the next chunk carries on).
+ * Classified by the start of the frame the tenant built (`{"type":"event","channel":...}`), never by
+ * text anywhere in it: an RPC response whose result mentions a channel name is still a response.
+ */
+const STREAM_EVENT_PREFIXES = [
+  '{"type":"event","channel":"terminal:data"',
+  '{"type":"event","channel":"k8s-terminal:data"',
+  '{"type":"event","channel":"k8s-log:data"',
+];
+
+export function isDroppableStreamFrame(jsonText: string): boolean {
+  return STREAM_EVENT_PREFIXES.some((prefix) => jsonText.startsWith(prefix));
+}
+
+function encodeWsControlFrame(opcode: number, payload: Buffer = Buffer.alloc(0)): Buffer {
   const len = Math.min(payload.length, 125);
   const header = Buffer.from([0x80 | (opcode & 0x0f), len]);
   return Buffer.concat([header, payload.subarray(0, len)]);
@@ -699,6 +723,9 @@ export class Sshs3WebServer {
     this.wsTickets.clear();
     for (const sock of this.activeSockets) {
       try {
+        // 1012 "service restart": a client tells its person the server went away on purpose and fails
+        // what it was waiting for at once, instead of a connection that simply drops.
+        if (!sock.destroyed) sock.write(encodeWsControlFrame(0x8, wsClosePayload(1012, 'The server is restarting')));
         sock.destroy();
       } catch {
         // ignore
@@ -1174,6 +1201,13 @@ export class Sshs3WebServer {
     socket: Duplex,
     _head: Buffer,
   ): Promise<void> {
+    // Node's HTTP server lets go of an upgraded socket's errors: from here on an 'error' with no listener
+    // (a client that gives up and resets while sign-in or its workspace is still being set up) would end
+    // the whole server. The connection is one person's: it is closed and nothing else.
+    socket.on('error', (err: NodeJS.ErrnoException) => {
+      log.debug(`WebSocket connection error (${err.code ?? err.message})`);
+      socket.destroy();
+    });
     const url = new URL(req.url || '/', 'http://localhost');
     if (url.pathname !== '/api/ws') {
       socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
@@ -1227,6 +1261,9 @@ export class Sshs3WebServer {
       .digest('base64');
 
     const tenant = await this.tenants.getOrCreateTenant(user);
+    // Gone while it was signed in and its workspace was set up: there is nobody to answer, and a client
+    // added now would never be removed (its 'close' has already been).
+    if (socket.destroyed) return;
     const highWaterBytes = Math.max(1024, this.options.wsHighWaterBytes ?? 256 * 1024);
     const maxBufferedBytes = Math.max(
       highWaterBytes * 2,
@@ -1267,24 +1304,26 @@ export class Sshs3WebServer {
       }
     };
 
-    const sendFrame = (jsonText: string) => {
+    // A response is never dropped: its request would wait for ever. Past this much queued it is the
+    // connection that goes (the client then fails what it was waiting for at once).
+    const maxQueuedResponseBytes = maxBufferedBytes + MAX_WS_MESSAGE_BYTES;
+
+    const sendFrame = (jsonText: string, kind: 'response' | 'other' = 'other') => {
       if (socket.destroyed || !socket.writable) return;
       const frame = encodeWsTextFrame(jsonText);
       const inFlight = socket.writableLength + queuedBytes;
-      const isStreamData =
-        jsonText.includes('"channel":"terminal:data"') ||
-        jsonText.includes('"channel":"k8s-terminal:data"') ||
-        jsonText.includes('"channel":"k8s-log:data"');
 
       if (inFlight > 0 && inFlight + frame.length > maxBufferedBytes) {
         entry.backpressureEvents += 1;
-        if (isStreamData) {
+        if (kind !== 'response' && isDroppableStreamFrame(jsonText)) {
           entry.droppedStreamFrames += 1;
           return;
         }
-        // Control/RPC frames cannot fit in an overwhelmed socket; reap slow consumer
-        this.reapWsEntry(entry);
-        return;
+        if (kind !== 'response' || inFlight + frame.length > maxQueuedResponseBytes) {
+          // Control frames cannot fit in an overwhelmed socket; reap slow consumer
+          this.reapWsEntry(entry);
+          return;
+        }
       }
 
       if (!draining && queuedFrames.length === 0 && socket.writableLength < highWaterBytes) {
@@ -1306,7 +1345,7 @@ export class Sshs3WebServer {
       queuedBytes += frame.length;
     };
 
-    const clientId = tenant.registerClient(socket, sendFrame);
+    const clientId = tenant.registerClient(socket, (payload) => sendFrame(payload));
     entry.clientId = clientId;
     this.activeSockets.add(socket);
     this.activeWsEntries.set(socket, entry);
@@ -1367,6 +1406,7 @@ export class Sshs3WebServer {
                   ok: true,
                   result,
                 }),
+                'response',
               );
             } catch (err) {
               sendFrame(
@@ -1376,6 +1416,7 @@ export class Sshs3WebServer {
                   ok: false,
                   error: err instanceof Error ? err.message : String(err),
                 }),
+                'response',
               );
             }
           }

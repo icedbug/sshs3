@@ -36,14 +36,11 @@ import {
 } from '../../src/main/ai/hub/S3WorkspaceSyncService';
 import { WorkSync, type ConditionalQueueStore } from '../../src/main/ai/hub/WorkSync';
 import {
-  compareHlc,
   compareVersion,
   mergeTicketCopies,
   nextForHeartbeat,
-  receiveHlc,
   sortAlertsByUpstream,
   sortTicketsByPriority,
-  tickHlc,
   type MergeableTicket,
 } from '../../src/main/ai/hub/WorkBoard';
 import {
@@ -655,14 +652,6 @@ describe('WorkSync CAS conditional claim & markOnce', () => {
 
 describe('WorkBoard HLC tie-breaking, hypothesis/correlatedAlert sync, and upstream dependency sorting', () => {
   it('breaks equal timestamp ties deterministically with Hybrid Logical Clocks', () => {
-    const c1 = tickHlc(undefined, 'client-a', 1_000);
-    const c2 = tickHlc(c1, 'client-a', 900); // wall clock backwards -> increments counter
-    expect(c2).toEqual({ ts: 1_000, counter: 1, clientId: 'client-a' });
-
-    const remote = receiveHlc(c2, { ts: 1_000, counter: 3, clientId: 'client-b' }, 'client-c', 1_000);
-    expect(remote).toEqual({ ts: 1_000, counter: 4, clientId: 'client-c' });
-    expect(compareHlc(remote, c2)).toBeGreaterThan(0);
-
     // Equal updatedAt falls back to HLC comparison.
     expect(
       compareVersion(

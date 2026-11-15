@@ -24,7 +24,7 @@ export interface NotifyChannel {
   /** Whether the command text itself may leave the installation. */
   includeCommand: boolean;
   alertMinSeverity?: "info" | "warning" | "critical";
-  /** Attach signed ChatOps approve/deny action tokens on webhook payloads for actionable items. */
+  /** Attach signed ChatOps approve/deny action tokens on webhook payloads. Never set by the app: nothing takes the tokens. */
   chatOpsActions?: boolean;
   last?: { at: number; ok: boolean; status?: number; error?: string };
 }
@@ -175,6 +175,8 @@ export interface AutoPauseEntry {
  * Cushions non-critical transient alerts/health items for 60–120 seconds before
  * pushing. If the item resolves/leaves the inbox before `releaseAt`, it is
  * dropped without ever notifying; critical/blocking items bypass immediately.
+ *
+ * Not used by the app yet: nothing calls it, and `autoPauseSeconds` has no setting.
  */
 export function evaluateAutoPause(
   items: InboxItem[],
@@ -221,8 +223,13 @@ export interface QuietHoursConfig {
   startHour: number;
   /** Hour [0..23] when quiet hours end. */
   endHour: number;
+  /** Minutes past `startHour` / `endHour` (0 unless set). */
+  startMinute?: number;
+  endMinute?: number;
   /** Optional UTC offset in minutes for deterministic evaluation (e.g. 60 for UTC+1). */
   timezoneOffsetMinutes?: number;
+  /** A time zone by name (e.g. "Europe/Berlin"), as the settings card sets it. Wins over the offset. */
+  timezone?: string;
   /** Whether critical items bypass quiet hours (default true). */
   allowCritical?: boolean;
 }
@@ -230,14 +237,28 @@ export interface QuietHoursConfig {
 /** Whether `now` falls inside the configured quiet-hours window. */
 export function isQuietHours(config: QuietHoursConfig | undefined, now: number): boolean {
   if (!config?.enabled) return false;
-  const start = ((Math.trunc(config.startHour) % 24) + 24) % 24;
-  const end = ((Math.trunc(config.endHour) % 24) + 24) % 24;
+  const minuteOf = (hour: number, minute = 0): number =>
+    ((((Math.trunc(hour) % 24) + 24) % 24) * 60 + Math.min(59, Math.max(0, Math.trunc(minute))));
+  const start = minuteOf(config.startHour, config.startMinute);
+  const end = minuteOf(config.endHour, config.endMinute);
   if (start === end) return true;
-  const hour =
-    config.timezoneOffsetMinutes !== undefined
-      ? new Date(now + config.timezoneOffsetMinutes * 60_000).getUTCHours()
-      : new Date(now).getHours();
-  return start < end ? hour >= start && hour < end : hour >= start || hour < end;
+  let current: number | undefined;
+  if (config.timezone) {
+    try {
+      const parts = new Intl.DateTimeFormat("en-GB", { timeZone: config.timezone, hour: "2-digit", minute: "2-digit", hour12: false }).formatToParts(new Date(now));
+      current = (Number(parts.find((p) => p.type === "hour")?.value ?? 0) % 24) * 60 + Number(parts.find((p) => p.type === "minute")?.value ?? 0);
+    } catch {
+      current = undefined;
+    }
+  }
+  if (current === undefined) {
+    const at = config.timezoneOffsetMinutes !== undefined ? new Date(now + config.timezoneOffsetMinutes * 60_000) : new Date(now);
+    current =
+      config.timezoneOffsetMinutes !== undefined
+        ? at.getUTCHours() * 60 + at.getUTCMinutes()
+        : at.getHours() * 60 + at.getMinutes();
+  }
+  return start < end ? current >= start && current < end : current >= start || current < end;
 }
 
 /**
@@ -301,6 +322,9 @@ export interface EscalationConfig {
 /**
  * Evaluates multi-step, acknowledgement-aware escalation tiers for already-seen
  * items. Once an item is acknowledged (`ackedAt` set), further escalation stops.
+ *
+ * Not used by the app yet: an unanswered approval is reminded about once (HubService.flushInbox),
+ * and an item acknowledged or snoozed in the inbox is not reminded about at all.
  */
 export function evaluateEscalations(
   items: InboxItem[],
@@ -361,6 +385,10 @@ const DEFAULT_CHATOPS_TTL_SECONDS = 30 * 60;
 /**
  * Signs an HMAC-SHA256 ChatOps action token (`approve` or `deny`) bound to
  * an inbox item id and expiration timestamp.
+ *
+ * Not used by the app: nothing sets a channel's `chatOpsActions` or passes `chatOps`, and no
+ * endpoint takes these tokens (the nonce is not recorded either). An approval needs a person
+ * signed in to sshs3; a link in a chat message is not that.
  */
 export function signChatOpsActionToken(
   secret: string,
@@ -387,6 +415,7 @@ export function signChatOpsActionToken(
 
 /**
  * Verifies a signed ChatOps action token, checking HMAC integrity and expiry.
+ * Not used by the app (see signChatOpsActionToken); it does not stop a token being used twice.
  */
 export function verifyChatOpsActionToken(
   secret: string,

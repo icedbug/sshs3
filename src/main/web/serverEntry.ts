@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import { setHeadlessUserDataPath } from './electronShim';
 import { Sshs3WebServer } from './WebServer';
 import { demoWorkspaceDir, isDemoMode } from '../demo/demoMode';
+import { installProcessGuards } from './processGuards';
 
 // This is a CLI entry point: the startup banner is meant for the operator's terminal,
 // so it goes straight to stdout/stderr rather than through the levelled main-process logger.
@@ -13,6 +14,21 @@ const out = (line: string): void => {
 const fail = (line: string, err: unknown): void => {
   process.stderr.write(`${line} ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);
 };
+
+let running: Sshs3WebServer | undefined;
+installProcessGuards({
+  write: (line) => process.stderr.write(`${line}\n`),
+  fatal: () => {
+    // Close what can be closed (connections get "the server is restarting"), but never hang on it.
+    const stopped = running ? running.stop().catch(() => undefined) : Promise.resolve();
+    void Promise.race([stopped, new Promise((resolve) => setTimeout(resolve, 5_000).unref())]).finally(() => {
+      process.stderr.write(
+        '[sshs3-web] Stopped after an unexpected error (exit code 1). Start it again; runs that were under way say so and can be continued.\n',
+      );
+      process.exit(1);
+    });
+  },
+});
 
 async function main(): Promise<void> {
   const port = Number(process.env.SSHS3_WEB_PORT || process.env.PORT || 8080);
@@ -44,6 +60,7 @@ async function main(): Promise<void> {
     dataDir,
     staticDir,
   });
+  running = server;
 
   const info = await server.start();
   const displayHost = info.host === '0.0.0.0' ? 'localhost' : info.host;

@@ -33,6 +33,7 @@ import {
   type MissionAgent,
   type ShellKind,
 } from "@shared/types/aiHub";
+import { CONTEXT_NOTE_PREFIX } from "@shared/types/aiHub";
 import * as aiHubModule from "../../lib/aiHub";
 import {
   hubRequest,
@@ -2241,7 +2242,7 @@ export function AiHubPanel({
                         </div>
                       )}
                       <RichMarkdownContent
-                        text={item.message.text}
+                        text={item.message.text.startsWith(CONTEXT_NOTE_PREFIX) ? item.message.text.slice(CONTEXT_NOTE_PREFIX.length) : item.message.text}
                         refs={
                           item.message.role === "assistant" && task
                             ? new Set(task.changes.flatMap((c) => (c.ref ? [c.ref] : [])))

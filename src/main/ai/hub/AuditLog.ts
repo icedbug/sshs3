@@ -324,7 +324,9 @@ export class AuditShipper {
       return;
     }
     if (!this.options.url) return;
-    const guard = this.options.guard ?? { server: false, allowPrivate: true, allowPlainHttp: true };
+    // Without a guard from the caller, the strict one: not this machine, not its private network.
+    // The hub passes its own outbound guard, which on the desktop allows the person's internal collector.
+    const guard = this.options.guard ?? { server: true, allowPrivate: false, allowPlainHttp: true };
     const target = await guardUrl(this.options.url, guard);
     const headers: Record<string, string> = {
       "Content-Type": contentType,

@@ -182,6 +182,17 @@ const toolFailed = (message: string): Record<string, unknown> => ({
 const allowedFor = (token: McpTokenRecord) =>
   toolsForScopes(token.scopes).filter((t) => !token.tools?.length || token.tools.includes(t.name));
 
+/**
+ * Resources and the runbook and skill prompts are the knowledge base's pages, runbooks and documents in full:
+ * what `kb_read_page` reads. A key with its own list of tools reaches them only when that list has
+ * `kb_read_page`; the built-in starter prompts are fixed text and open to every key with the read scope.
+ */
+const KB_READ_TOOL = 'kb_read_page';
+const mayReadKb = (token: McpTokenRecord): boolean => !token.tools?.length || token.tools.includes(KB_READ_TOOL);
+const kbRefusal = (token: McpTokenRecord): string =>
+  `This key may only use: ${(token.tools ?? []).join(', ')}. Reading the knowledge base needs ${KB_READ_TOOL}.`;
+const isStarterPrompt = (name: string): boolean => !name.startsWith('skill:') && !name.startsWith('runbook:');
+
 const toolsFor = (token: McpTokenRecord): Record<string, unknown>[] =>
   allowedFor(token).map((t) => ({
     name: t.name,
@@ -258,17 +269,33 @@ async function handleRpc(
   if (method === 'resources/list' || method === 'resources/templates/list' || method === 'resources/read') {
     const hub = await deps.hubFor(token.userId);
     if (!hub) return rpcError(id, ERR.internal, 'The person this key belongs to is no longer on this server.');
+    const allowed = mayReadKb(token);
     try {
       if (method === 'resources/list') {
+        if (!allowed) return complete({ resources: [], ...cacheHints });
         const { resources } = await listMcpResources({ request: hub.request, scopes: token.scopes });
         return complete({ resources, ...cacheHints });
       }
       if (method === 'resources/templates/list') {
+        if (!allowed) return complete({ resourceTemplates: [], ...cacheHints });
         const { resourceTemplates } = await listMcpResources({ request: hub.request, scopes: token.scopes });
         return complete({ resourceTemplates, ...cacheHints });
       }
       const uri = typeof rpc.params?.uri === 'string' ? rpc.params.uri : '';
       if (!uri) return rpcError(id, ERR.invalidParams, 'resources/read needs the uri of a resource.');
+      if (!allowed) {
+        void hub
+          .audit?.({
+            kind: 'mcp',
+            actor: `${token.name} (a key of ${hub.actor})`,
+            target: token.serverId,
+            what: `resources/read ${uri.slice(0, 400)}`,
+            outcome: 'denied',
+            detail: 'not one of the tools this key may use',
+          })
+          .catch(() => undefined);
+        return rpcError(id, ERR.invalidRequest, kbRefusal(token));
+      }
       const res = await readMcpResource(uri, { request: hub.request, scopes: token.scopes });
       void hub
         .audit?.({
@@ -300,10 +327,11 @@ async function handleRpc(
     try {
       if (method === 'prompts/list') {
         const { prompts } = await listMcpPrompts({ request: hub.request, scopes: token.scopes });
-        return complete({ prompts, ...cacheHints });
+        return complete({ prompts: mayReadKb(token) ? prompts : prompts.filter((p) => isStarterPrompt(p.name)), ...cacheHints });
       }
       const name = typeof rpc.params?.name === 'string' ? rpc.params.name : '';
       if (!name) return rpcError(id, ERR.invalidParams, 'prompts/get needs the name of a prompt.');
+      if (!mayReadKb(token) && !isStarterPrompt(name.trim())) return rpcError(id, ERR.invalidRequest, kbRefusal(token));
       const res = await getMcpPrompt(name, rpc.params?.arguments, { request: hub.request, scopes: token.scopes });
       return complete(res as unknown as Record<string, unknown>);
     } catch (error) {

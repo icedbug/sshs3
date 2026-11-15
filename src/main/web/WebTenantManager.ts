@@ -1,3 +1,4 @@
+import { setSharedServerCheck } from '../oauth/requestJson';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
@@ -32,6 +33,13 @@ import {
 } from './WebAuthService';
 
 type RpcHandler = (event: unknown, ...args: unknown[]) => unknown;
+
+/** What a web client is to IPC handlers: the `event.sender` they reply to (like a window's webContents). */
+export interface WebClientSender {
+  id: number;
+  isDestroyed(): boolean;
+  send(channel: string, ...args: unknown[]): void;
+}
 
 export class VirtualIpcMain extends EventEmitter {
   private handlers = new Map<string, RpcHandler>();
@@ -285,6 +293,10 @@ export class WebTenantManager {
   }
 
   async initialize(): Promise<void> {
+    // A server more than one person signs in to acts for its members: a CA, an identity provider or a
+    // cluster address a member gives must not make it call its own network. With one account it is that
+    // person's own machine, as the desktop app is.
+    setSharedServerCheck(() => (this.accountCount?.() ?? 0) > 1);
     await fsp.mkdir(this.sharedDir, { recursive: true, mode: 0o700 });
     // Temporary files of writes that never finished (a rename Windows refused, a crash): nothing else
     // writes here before the server has started, so whatever is left is left over.
@@ -399,7 +411,7 @@ export class WebTenantManager {
     let nextClientId = 1;
     const clientMap = new Map<
       number,
-      { send: (payload: string) => void; socket: Duplex; sender: { id: number } }
+      { send: (payload: string) => void; socket: Duplex; sender: WebClientSender }
     >();
     const sessionOwners = new Map<string, number>();
     const sessionObservers = new Map<string, Set<number>>();
@@ -436,8 +448,14 @@ export class WebTenantManager {
     };
 
     const sendToSession = (sessionId: string, channel: string, ...args: unknown[]): boolean => {
+      // A session nobody has claimed (a client that reconnected and has not subscribed again yet, a
+      // terminal the AI hub opened itself) goes to every connection of this person, never nowhere.
       const targets = getSessionSubscribers(sessionId);
-      if (targets.length === 0) return false;
+      if (targets.length === 0) {
+        if (clientMap.size === 0) return false;
+        broadcast(channel, ...args);
+        return true;
+      }
       const msg = JSON.stringify({
         type: 'event',
         channel,
@@ -461,7 +479,17 @@ export class WebTenantManager {
       const id = nextClientId++;
       clients.add(send);
       sockets.add(socket);
-      clientMap.set(id, { send, socket, sender: { id } });
+      // The `event.sender` of this client's requests: replies (search results, progress, prompts) go back
+      // to this connection only, and nothing is sent once it is gone.
+      const sender: WebClientSender = {
+        id,
+        isDestroyed: () => !clientMap.has(id),
+        send: (channel: string, ...args: unknown[]) => {
+          if (!clientMap.has(id)) return;
+          send(JSON.stringify({ type: 'event', channel, args }));
+        },
+      };
+      clientMap.set(id, { send, socket, sender });
       return id;
     };
 
@@ -534,12 +562,9 @@ export class WebTenantManager {
         }
         return undefined;
       },
-      keyOfSender: (sender) => {
-        if (sender && typeof sender.id === 'number' && clientMap.has(sender.id)) {
-          return `web:${sender.id}`;
-        }
-        return null;
-      },
+      // Every connection is this person's one main window: a connection id is new on every reload and
+      // reconnect, so keying saved tabs by it would lose them each time and add a window per connection.
+      keyOfSender: () => null,
     };
 
     const virtualWebContents = {
@@ -680,13 +705,16 @@ export class WebTenantManager {
         const sid = (result as { sessionId: string }).sessionId;
         windowRouter.assign(sid, clientId);
       } else if (
-        (channel === 'terminal:attach' || channel === 'k8s-log:start') &&
-        typeof args[0] === 'string' &&
-        args[0]
+        channel === 'k8s-log:start' &&
+        result &&
+        typeof result === 'object' &&
+        typeof (result as { sessionId?: unknown }).sessionId === 'string'
       ) {
+        windowRouter.assign((result as { sessionId: string }).sessionId, clientId);
+      } else if (channel === 'terminal:attach' && typeof args[0] === 'string' && args[0]) {
         windowRouter.assign(args[0], clientId);
       } else if (
-        (channel === 'terminal:kill' || channel === 'k8s-terminal:kill') &&
+        (channel === 'terminal:kill' || channel === 'k8s-terminal:kill' || channel === 'k8s-log:stop') &&
         typeof args[0] === 'string' &&
         args[0]
       ) {

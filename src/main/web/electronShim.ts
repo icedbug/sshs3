@@ -216,6 +216,9 @@ export class Notification extends EventEmitter {
 }
 
 export const powerMonitor = new EventEmitter();
+// One process serves every person on the team server, and each person's hub listens for suspend and
+// resume (and lets go when it is disposed): a listener per person is the design, not a leak.
+powerMonitor.setMaxListeners(0);
 
 export class BrowserWindow extends EventEmitter {
   static getAllWindows(): BrowserWindow[] {

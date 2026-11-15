@@ -768,6 +768,7 @@ function chunkTargets<T>(items: readonly T[], size: number): T[][] {
 
 /**
  * Plans target execution waves for `canary_then_rolling`, `rolling`, or `all_at_once`.
+ * Not used by the app yet: a run on several servers goes through the cluster-exec stages in AppActions.
  */
 export function planTargetDispatch<T extends TargetCandidate>(
   candidates: readonly T[],
@@ -812,6 +813,7 @@ export function planTargetDispatch<T extends TargetCandidate>(
 /**
  * Dispatches a runner across resolved `TargetSelector` waves with bounded concurrency,
  * canary verification before rolling waves, and optional `stopOnFailure` circuit breaking.
+ * Not used by the app yet (see planTargetDispatch).
  */
 export async function dispatchTargets<T extends TargetCandidate, R = unknown>(
   candidates: readonly T[],

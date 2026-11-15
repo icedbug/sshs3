@@ -19,6 +19,7 @@ import {
 import { maskContext, safeError } from "./privacy";
 import { canonicalJson, removalStandsAt } from "./WorkBoard";
 import { createLogger } from "../../log";
+import { writeFileAtomic } from "../../storage/atomicFile";
 import {
   assertOutwardSyncAllowed,
   outwardSyncDisabledReason,
@@ -112,14 +113,9 @@ export function isPreconditionFailedError(err: unknown): boolean {
   ) {
     return true;
   }
-  const msg = typeof e.message === "string" ? e.message.toLowerCase() : "";
-  return (
-    msg.includes("precondition failed") ||
-    msg.includes("412") ||
-    msg.includes("if-match") ||
-    msg.includes("if-none-match") ||
-    msg.includes("conditionalrequestconflict")
-  );
+  // Told by status and name only: a message that merely mentions 412 or If-Match is some other failure,
+  // and retrying it as a lost race would hide it.
+  return false;
 }
 
 export interface S3WorkspaceRemotePayload {
@@ -900,9 +896,9 @@ export class S3WorkspaceSyncService {
       recursive: true,
       mode: 0o700,
     });
-    const tmp = `${this.configFilePath}.tmp-${process.pid}-${crypto.randomUUID()}`;
-    await fs.writeFile(tmp, JSON.stringify(stored, null, 2), { mode: 0o600 });
-    await fs.rename(tmp, this.configFilePath);
+    // Every person's hub on the team server reads this file: on Windows a rename over it is refused while
+    // one of them has it open. Written atomically with retries, and never leaving its temporary file behind.
+    await writeFileAtomic(this.configFilePath, JSON.stringify(stored, null, 2), { mode: 0o600 });
   }
 
   isConfigured(): boolean {

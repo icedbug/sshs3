@@ -138,8 +138,13 @@ describe("alerts through the hub", () => {
     await hub.request({ action: "alert-hook-disable" });
     expect(await hub.receiveAlert(secret, ALERTMANAGER)).toBeUndefined();
     // A pasted alert goes the same way without any hook.
+    // On pg-01, while its disk alert is open: a symptom of that incident, put on its ticket.
     const pasted = await hub.request({ action: "alert-paste", text: "Replication lag on pg-01\\nlag is 40 s" });
-    expect(pasted.reply!.alerts!.created).toHaveLength(1);
+    expect(pasted.reply!.alerts).toMatchObject({ created: [], updated: [ticket.id] });
+    expect(hub.store.data.workTickets!.find((t) => t.id === ticket.id)!.correlatedAlerts).toHaveLength(1);
+    // About another server: a ticket of its own.
+    const other = await hub.request({ action: "alert-paste", text: "Certificate expires on mail-01\\nin 3 days" });
+    expect(other.reply!.alerts!.created).toHaveLength(1);
   });
 
   it("makes one ticket of one alert posted twice at the same moment (a retry, two hooks)", async () => {

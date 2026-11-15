@@ -21,7 +21,8 @@ describe("the classifier does not let a second command ride along", () => {
 
   it("judges what env, sudo, timeout, nice and xargs run, not the wrapper", () => {
     notSafe(["env userdel root", "env iptables -P INPUT DROP", "env kill -9 1", "env crontab -r", "env dd if=/dev/zero of=/etc/passwd", "env mv /etc /tmp", "env terraform destroy -auto-approve", "env -S 'userdel root'", "sudo env userdel root", "env X=1 rm -rf /srv", "timeout 5 userdel root", "nice -n 10 rm x", "xargs rm -rf"]);
-    expectAll("safe", ["env", "env X=1 ls", "FOO=bar ls", "sudo -u postgres ls", "sudo -n ls /root", "timeout 5 uptime", "xargs echo", "nohup ls"]);
+    // A bare `env` prints the environment, secrets included, like printenv: a sensitive read, not "safe".
+    expectAll("safe", ["env X=1 ls", "FOO=bar ls", "sudo -u postgres ls", "sudo -n ls /root", "timeout 5 uptime", "xargs echo", "nohup ls"]);
     expectAll("destructive", ["env X=1 rm -rf /srv", "sudo -u root rm -rf /var/lib/x", "ls | xargs rm -rf"]);
   });
 

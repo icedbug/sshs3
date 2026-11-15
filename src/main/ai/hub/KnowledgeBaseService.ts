@@ -13,7 +13,6 @@ import {
   cosine,
   embedTextLocal,
   fuseRanks,
-  localFallbackEmbedder,
   sparseCosine,
   sparseTermVector,
   type Embedder,
@@ -46,11 +45,16 @@ export interface KbSearchOptions {
   targetCluster?: string;
   cluster?: string;
   limit?: number;
-  /** Optional KB pages to index and rank alongside document chunks. */
+  /**
+   * Optional KB pages to index and rank alongside document chunks. Not passed
+   * by the app's own callers yet (kb-search, sshs3_kb_search): they rank pages
+   * apart with searchPages (KbCompile), so `pages`, `pageUse` and
+   * `staleReasons` only take effect for a caller that sets them.
+   */
   pages?: KbPage[];
-  /** Optional usage stats (proven counts, rollbacks) keyed by page/doc id. */
+  /** Optional usage stats (proven counts, rollbacks) keyed by page/doc id. Not passed by the app's callers yet. */
   pageUse?: Record<string, KbPageUse>;
-  /** Optional explicit stale reasons keyed by page/doc id. */
+  /** Optional explicit stale reasons keyed by page/doc id. Not passed by the app's callers yet. */
   staleReasons?: Record<string, string>;
   /** Reference timestamp for recency and rollback decay (defaults to Date.now()). */
   now?: number;
@@ -517,6 +521,40 @@ export function sectionsOf(docId: string, content: string): KbDocument["chunks"]
     heading: section.heading,
     text: section.text,
   }));
+}
+
+/**
+ * Which document a newly added text revises, if any. An address (`url`) names
+ * one thing: fetched again with a new text, it is the same source revised. A
+ * pasted text's source name is only a label a person chose, often the same for
+ * several texts: it is the same document only when the title is the same too.
+ * Otherwise the text becomes a new document, the one that had the name keeps
+ * its text (and the pages compiled from it), and `notes` says so. A text that
+ * is split into parts is always added as new documents.
+ */
+export function documentRevisedBy(
+  docs: readonly KbDocument[],
+  source: { sourceType: KbDocument["sourceType"]; sourceRef?: string },
+  title: string,
+  parts: number,
+): { earlier?: KbDocument; notes?: string[] } {
+  if (!source.sourceRef || (source.sourceType !== "url" && source.sourceType !== "paste")) return {};
+  const sameRef = docs.filter((d) => d.sourceRef === source.sourceRef && d.sourceType === source.sourceType);
+  if (sameRef.length === 0) return {};
+  const wanted = title.trim().toLowerCase();
+  const earlier =
+    parts !== 1
+      ? undefined
+      : source.sourceType === "url"
+        ? sameRef[0]
+        : sameRef.find((d) => d.title.trim().toLowerCase() === wanted);
+  if (earlier) return { earlier };
+  if (source.sourceType !== "paste") return {};
+  return {
+    notes: [
+      `"${title}" was added as a new document: "${sameRef[0].title}" already has the source "${source.sourceRef}" and was left as it was. Give each text its own source name, or the same title to revise it.`,
+    ],
+  };
 }
 
 /** How long a memory's text may be: what the distiller writes (4,000), not less. */
@@ -1094,17 +1132,10 @@ export class KnowledgeBaseService {
 
     if (!usedExternalEmbedder) {
       usedLocalFallback = true;
-      const fallback = localFallbackEmbedder();
+      // Local vectors stay in memory (embedTextLocal keeps them): the
+      // persisted index is for vectors an endpoint computed.
       const queryVector = embedTextLocal(opts.query);
-      let vectors: number[][];
-      try {
-        vectors = await index.vectorsFor(
-          chunks.map((c) => c.contextualText),
-          fallback,
-        );
-      } catch {
-        vectors = chunks.map((c) => embedTextLocal(c.contextualText));
-      }
+      const vectors = chunks.map((c) => embedTextLocal(c.contextualText));
       similarities = chunks
         .map((rec, i) => ({ rec, similarity: cosine(queryVector, vectors[i]) }))
         .sort((a, b) => b.similarity - a.similarity);

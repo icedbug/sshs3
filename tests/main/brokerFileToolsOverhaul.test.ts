@@ -601,33 +601,27 @@ describe("ToolBroker overhaul", () => {
     expect(change.requiredApprovals).toBe(2);
     expect(twoPaSetup.task.status).toBe("waiting");
 
-    // Self-approval by requester is rejected
-    expect(() =>
+    // The requester's own approval is one of the two, never both
+    expect(
       twoPaSetup.broker.approve(twoPaSetup.task.id, change.id, true, "self ok", {
         actor: "Alice",
         actorId: "user-alice",
       }),
-    ).toThrow(/Self-approval is not allowed/);
-
-    // First distinct approver succeeds, task remains waiting
-    twoPaSetup.broker.approve(twoPaSetup.task.id, change.id, true, "bob approves", {
-      actor: "Bob",
-      actorId: "user-bob",
-    });
+    ).toBe(false);
     expect(twoPaSetup.broker.waitingOnPerson(twoPaSetup.task.id)).toBe(true);
 
-    // Same approver again is rejected
+    // Same approver again is rejected, under another display name too
     expect(() =>
-      twoPaSetup.broker.approve(twoPaSetup.task.id, change.id, true, "bob again", {
-        actor: "Bob",
-        actorId: "user-bob",
+      twoPaSetup.broker.approve(twoPaSetup.task.id, change.id, true, "alice again", {
+        actor: "Alice Renamed",
+        actorId: "user-alice",
       }),
     ).toThrow(/already approved/);
 
-    // Second distinct approver completes two-person approval and executes
-    twoPaSetup.broker.approve(twoPaSetup.task.id, change.id, true, "carol approves", {
-      actor: "Carol",
-      actorId: "user-carol",
+    // A second person completes two-person approval and executes
+    twoPaSetup.broker.approve(twoPaSetup.task.id, change.id, true, "bob approves", {
+      actor: "Bob",
+      actorId: "user-bob",
     });
     await pendingPromise;
     expect(twoPaSetup.executedCommands).toContain("systemctl restart app");

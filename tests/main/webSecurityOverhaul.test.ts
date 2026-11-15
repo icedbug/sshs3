@@ -325,17 +325,21 @@ describe('Web Security Overhaul: Heartbeat, Per-Session Routing & Backpressure',
 
     expect(tenant.sendToSession('sess-alpha', 'terminal:data', 'sess-alpha', 'alpha-secret')).toBe(true);
     expect(tenant.sendToSession('sess-beta', 'terminal:data', 'sess-beta', 'beta-secret')).toBe(true);
-    expect(tenant.sendToSession('sess-orphan', 'terminal:data', 'sess-orphan', 'nobody-sees')).toBe(false);
+    // A session nobody subscribed to (an AI-opened terminal, a client that reconnected) reaches all of
+    // this person's connections rather than none.
+    expect(tenant.sendToSession('sess-orphan', 'terminal:data', 'sess-orphan', 'everyone-sees')).toBe(true);
 
     // Tenant-wide broadcast reaches both
     tenant.broadcast('ai-hub:changed');
     await new Promise((r) => setTimeout(r, 50));
 
     expect(c1.events.some((e) => e.channel === 'terminal:data' && e.args[1] === 'alpha-secret')).toBe(true);
-    expect(c1.events.some((e) => e.args[1] === 'beta-secret' || e.args[1] === 'nobody-sees')).toBe(false);
+    expect(c1.events.some((e) => e.args[1] === 'beta-secret')).toBe(false);
+    expect(c1.events.some((e) => e.args[1] === 'everyone-sees')).toBe(true);
 
     expect(c2.events.some((e) => e.channel === 'terminal:data' && e.args[1] === 'beta-secret')).toBe(true);
-    expect(c2.events.some((e) => e.args[1] === 'alpha-secret' || e.args[1] === 'nobody-sees')).toBe(false);
+    expect(c2.events.some((e) => e.args[1] === 'alpha-secret')).toBe(false);
+    expect(c2.events.some((e) => e.args[1] === 'everyone-sees')).toBe(true);
 
     expect(c1.events.some((e) => e.channel === 'ai-hub:changed')).toBe(true);
     expect(c2.events.some((e) => e.channel === 'ai-hub:changed')).toBe(true);

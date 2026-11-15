@@ -1,7 +1,28 @@
 import type { QueueStore } from "./LearningQueue";
 import type { AgentUsage } from "../../../shared/types/aiHub";
 import { TICKET_CLAIM_TTL_MS, mergeItems, type Mergeable } from "./WorkBoard";
-import { isPreconditionFailedError } from "./S3WorkspaceSyncService";
+
+/**
+ * A conditional write that lost: told by the error's status or name only.
+ * A message that merely mentions "412" or "if-match" (a timeout, a path, a
+ * proxy's page) is another failure and must not read as "someone else won".
+ */
+export function isPreconditionFailedError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as {
+    code?: unknown;
+    Code?: unknown;
+    name?: unknown;
+    status?: unknown;
+    statusCode?: unknown;
+    $metadata?: { httpStatusCode?: unknown };
+  };
+  for (const status of [e.$metadata?.httpStatusCode, e.statusCode, e.status, e.code])
+    if (status === 412 || status === 409) return true;
+  return [e.code, e.Code, e.name].some(
+    (v) => v === "PreconditionFailed" || v === "ConditionalRequestConflict" || v === "EEXIST",
+  );
+}
 
 export interface ConditionalQueueStore extends QueueStore {
   /** True when `write(path, buf, { ifMatch, ifNoneMatch })` enforces S3 conditional preconditions atomically. */
@@ -261,16 +282,27 @@ export class WorkSync {
     if (existing && existing.client !== who.client && fresh(existing)) return existing;
     const mine: TicketClaim = { ...who, at: existing?.client === who.client ? existing.at : now, seenAt: now };
     const payload = Buffer.from(JSON.stringify(mine), "utf8");
-    const writeOpts = !existing
-      ? { ifNoneMatch: "*" }
-      : etag
-        ? { ifMatch: etag }
+    // An object that is there, even one that cannot be read, is replaced only
+    // as the copy that was read (its etag); "*" is for no object at all.
+    const writeOpts = etag
+      ? { ifMatch: etag }
+      : !existing
+        ? { ifNoneMatch: "*" }
         : undefined;
     try {
       await this.conditionalStore.write(this.claimPath(ticketId), payload, writeOpts);
     } catch (err) {
       if (isPreconditionFailedError(err)) {
-        return (await this.readClaim(ticketId)) ?? existing ?? mine;
+        // Somebody else wrote first. Never answer with `mine`: the caller would run a ticket it does not hold.
+        return (
+          (await this.readClaim(ticketId)) ??
+          (existing && existing.client !== who.client ? existing : undefined) ?? {
+            by: "another installation",
+            client: "",
+            at: now,
+            seenAt: now,
+          }
+        );
       }
       throw err;
     }

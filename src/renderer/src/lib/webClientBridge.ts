@@ -13,6 +13,12 @@ const MAX_CLIENT_BUFFERED_BYTES = 1024 * 1024; // 1 MiB backpressure watermark
 const MAX_SEND_QUEUE_LENGTH = 500;
 const DEFAULT_RECONNECT_BASE_MS = 500;
 const DEFAULT_RECONNECT_MAX_MS = 30_000;
+export const CONNECTION_LOST_MESSAGE = 'The connection to the server was lost';
+
+/** Channels whose reply names a session this client now shows (its output must keep reaching it). */
+const SESSION_OPENING_CHANNELS = new Set(['terminal:create', 'k8s-terminal:create', 'k8s-log:start']);
+/** Channels whose first argument is a session this client stops showing. */
+const SESSION_CLOSING_CHANNELS = new Set(['terminal:kill', 'k8s-terminal:kill', 'k8s-log:stop']);
 
 /**
  * Computes jittered exponential reconnect delay (equal jitter in [cap/2, cap]).
@@ -57,7 +63,8 @@ export class BrowserWebSocketIpcTransport implements IpcRendererTransport {
   private ws: WebSocket | null = null;
   private listeners = new Map<string, Set<EventListener>>();
   private pending = new Map<string, PendingRequest>();
-  private sendQueue: string[] = [];
+  /** Packets waiting for the socket; `id` marks a request, so a failed one is never sent later. */
+  private sendQueue: Array<{ packet: string; id?: string }> = [];
   private nextId = 1;
   private shouldReconnect = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -179,12 +186,15 @@ export class BrowserWebSocketIpcTransport implements IpcRendererTransport {
         }
       };
 
-      socket.onclose = () => {
+      socket.onclose = (ev?: { code?: number; reason?: string }) => {
         if (this.ws === socket) {
           this.ws = null;
         }
         this.notifyConnectionState(false);
-        this.rejectAllPending(new Error('WebSocket connection closed'));
+        // What was waiting for an answer fails now with a clear message, instead of hanging until the
+        // timeout: the server cannot answer a request over a connection that is gone.
+        const reason = ev?.code === 1012 && ev.reason ? ` (${ev.reason})` : '';
+        this.rejectAllPending(new Error(`${CONNECTION_LOST_MESSAGE}${reason}`));
         if (this.shouldReconnect && generation === this.connectGeneration) {
           this.scheduleReconnect();
         }
@@ -274,9 +284,11 @@ export class BrowserWebSocketIpcTransport implements IpcRendererTransport {
       req.reject(err);
     }
     this.pending.clear();
+    // A request its caller was told failed must not run later, after a reconnect.
+    this.sendQueue = this.sendQueue.filter((entry) => entry.id === undefined);
   }
 
-  private enqueueOrSend(packet: string, isTelemetry = false): void {
+  private enqueueOrSend(packet: string, isTelemetry = false, id?: string): void {
     if (
       this.ws &&
       this.ws.readyState === WebSocket.OPEN &&
@@ -293,9 +305,15 @@ export class BrowserWebSocketIpcTransport implements IpcRendererTransport {
 
     if (this.sendQueue.length >= MAX_SEND_QUEUE_LENGTH) {
       // Evict oldest packet to bound client memory under prolonged disconnect/backpressure
-      this.sendQueue.shift();
+      const evicted = this.sendQueue.shift();
+      const req = evicted?.id !== undefined ? this.pending.get(evicted.id) : undefined;
+      if (req && evicted?.id !== undefined) {
+        clearTimeout(req.timer);
+        this.pending.delete(evicted.id);
+        req.reject(new Error('Too many requests are waiting for the server; this one was not sent'));
+      }
     }
-    this.sendQueue.push(packet);
+    this.sendQueue.push(id === undefined ? { packet } : { packet, id });
     this.scheduleDrain();
   }
 
@@ -317,8 +335,8 @@ export class BrowserWebSocketIpcTransport implements IpcRendererTransport {
         this.scheduleDrain();
         return;
       }
-      const payload = this.sendQueue.shift()!;
-      this.ws.send(payload);
+      const { packet } = this.sendQueue.shift()!;
+      this.ws.send(packet);
     }
   }
 
@@ -395,11 +413,12 @@ export class BrowserWebSocketIpcTransport implements IpcRendererTransport {
       return Promise.resolve();
     }
 
-    return new Promise((resolve, reject) => {
+    const request = new Promise<any>((resolve, reject) => {
       const id = `req_${this.nextId++}_${Date.now()}`;
       const timer = setTimeout(() => {
         if (this.pending.has(id)) {
           this.pending.delete(id);
+          this.sendQueue = this.sendQueue.filter((entry) => entry.id !== id);
           reject(new Error(`Timeout waiting for IPC channel: ${channel}`));
         }
       }, 60_000);
@@ -412,11 +431,26 @@ export class BrowserWebSocketIpcTransport implements IpcRendererTransport {
         args,
       });
 
-      this.enqueueOrSend(packet, channel === 'log:write');
+      this.enqueueOrSend(packet, channel === 'log:write', id);
       if (!this.ws && this.shouldReconnect && !this.reconnectTimer) {
         this.connect();
       }
     });
+    if (SESSION_CLOSING_CHANNELS.has(channel) && typeof args[0] === 'string') {
+      this.unsubscribeSession(args[0]);
+    } else if (SESSION_OPENING_CHANNELS.has(channel) || channel === 'terminal:attach') {
+      // The server routes a session's output to the connection that opened it; a new connection (after
+      // a reconnect) has to say again which sessions it shows, so they are remembered here.
+      void request.then(
+        (result) => {
+          const sid =
+            channel === 'terminal:attach' ? args[0] : (result as { sessionId?: unknown } | null)?.sessionId;
+          if (typeof sid === 'string' && sid) this.subscribeSession(sid);
+        },
+        () => {},
+      );
+    }
+    return request;
   }
 
   public on(channel: string, listener: EventListener): void {

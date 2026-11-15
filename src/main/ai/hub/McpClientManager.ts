@@ -80,7 +80,8 @@ export interface McpCallResult {
 
 export interface McpClientOptions {
   idleTtlMs?: number;
-  guardOptions?: Partial<GuardOptions>;
+  /** The rules an address must meet; a function when they change while the app runs (a server gains a second account). */
+  guardOptions?: Partial<GuardOptions> | (() => Partial<GuardOptions>);
   lookup?: GuardOptions["lookup"];
   onToolsListChanged?: (serverId: string) => void;
   onElicitation?: (request: McpElicitationRequest) => Promise<McpElicitationResponse | void> | McpElicitationResponse | void;
@@ -306,6 +307,8 @@ export async function discoverOAuthMetadata(
     guardOptions?: Partial<GuardOptions>;
     lookup?: GuardOptions["lookup"];
     timeoutMs?: number;
+    /** An address already checked for the server's host: calls to that host are pinned to it, not resolved again. */
+    pinned?: GuardedTarget;
   } = {},
 ): Promise<McpOAuthDiscoveryResult> {
   const fetchFn = options.fetchImpl ?? fetch;
@@ -320,7 +323,10 @@ export async function discoverOAuthMetadata(
   };
 
   const fetchJson = async (rawUrl: string): Promise<{ ok: boolean; status: number; data?: unknown }> => {
-    const target = shouldGuard ? await guardUrl(rawUrl, guardOpts) : undefined;
+    const asked = new URL(rawUrl);
+    const pinned =
+      options.pinned && options.pinned.url.protocol === asked.protocol && options.pinned.url.host === asked.host ? options.pinned : undefined;
+    const target = pinned ?? (shouldGuard ? await guardUrl(rawUrl, guardOpts) : undefined);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -474,9 +480,37 @@ export class McpClientManager {
    */
   constructor(
     private readonly fetchImpl: typeof fetch = fetch,
-    private readonly allow?: (server: McpServerConfig) => Promise<void> | void,
+    private readonly allow?: (server: McpServerConfig) => Promise<GuardedTarget | void> | GuardedTarget | void,
     private readonly options: McpClientOptions = {},
   ) {}
+
+  /**
+   * The address `allow` checked, by server id. When `allow` answers with the address it checked, that is
+   * the one the connection is pinned to: resolving the name a second time, under other rules, would let a
+   * name that changed in between (DNS rebinding) lead somewhere that was never checked.
+   */
+  private readonly checkedTargets = new Map<string, GuardedTarget>();
+
+  private async checkAllowed(server: McpServerConfig): Promise<void> {
+    const checked = await this.allow?.(server);
+    if (checked && typeof checked === "object" && "address" in checked && checked.url instanceof URL) this.checkedTargets.set(server.id, checked);
+    else this.checkedTargets.delete(server.id);
+  }
+
+  /** The address to pin to: the one `allow` checked for this very address, or one checked here under the same rules. */
+  private async pinTarget(server: McpServerConfig, url: string): Promise<GuardedTarget | undefined> {
+    const checked = this.checkedTargets.get(server.id);
+    if (checked) {
+      const asked = new URL(url);
+      if (checked.url.protocol === asked.protocol && checked.url.host === asked.host) return checked;
+    }
+    return this.shouldGuardHttp() ? await guardUrl(url, this.effectiveGuardOptions()) : undefined;
+  }
+
+  private guardOverrides(): Partial<GuardOptions> | undefined {
+    const g = this.options.guardOptions;
+    return typeof g === "function" ? g() : g;
+  }
 
   /** Every child this manager started and has not seen end. */
   private readonly children = new Set<ChildProcess>();
@@ -496,7 +530,7 @@ export class McpClientManager {
       server: false,
       allowPrivate: true,
       allowPlainHttp: true,
-      ...this.options.guardOptions,
+      ...this.guardOverrides(),
       ...(this.options.lookup ? { lookup: this.options.lookup } : {}),
     };
   }
@@ -510,7 +544,7 @@ export class McpClientManager {
     timeoutMs = DISCOVER_TIMEOUT_MS,
   ): Promise<{ ok: boolean; tools: McpToolWithHints[]; error?: string }> {
     try {
-      await this.allow?.(server);
+      await this.checkAllowed(server);
       const tools =
         server.transport === "http"
           ? await this.discoverHttp(server, timeoutMs)
@@ -534,7 +568,7 @@ export class McpClientManager {
   ): Promise<McpCallResult> {
     this.recentElicitations.delete(server.id);
     try {
-      await this.allow?.(server);
+      await this.checkAllowed(server);
       const output =
         server.transport === "http"
           ? await this.callHttp(server, toolName, args, timeoutMs)
@@ -594,19 +628,23 @@ export class McpClientManager {
   }
 
   /** Discovers OAuth 2.1 metadata (RFC 9728 + RFC 8414) for an HTTP MCP server. */
-  discoverOAuthMetadata(
+  async discoverOAuthMetadata(
     serverOrUrl: McpServerConfig | string,
     wwwAuthenticate?: string,
     timeoutMs = DISCOVER_TIMEOUT_MS,
   ): Promise<McpOAuthDiscoveryResult> {
     const url = typeof serverOrUrl === "string" ? serverOrUrl : serverOrUrl.url?.trim() ?? "";
     if (!url) throw new Error("This MCP server has no address.");
+    // A configured server is checked like a call to it, and its own host is pinned to what was checked.
+    if (typeof serverOrUrl !== "string") await this.checkAllowed(serverOrUrl);
+    const checked = typeof serverOrUrl !== "string" ? this.checkedTargets.get(serverOrUrl.id) : undefined;
     return discoverOAuthMetadata(url, {
       wwwAuthenticate,
       fetchImpl: this.fetchImpl,
-      guardOptions: this.options.guardOptions,
+      guardOptions: this.guardOverrides(),
       lookup: this.options.lookup,
       timeoutMs,
+      ...(checked ? { pinned: checked } : {}),
     });
   }
 
@@ -892,7 +930,7 @@ export class McpClientManager {
       ...(server.headers ?? {}),
     };
 
-    const target = this.shouldGuardHttp() ? await guardUrl(url, this.effectiveGuardOptions()) : undefined;
+    const target = await this.pinTarget(server, url);
 
     const session: PooledHttpSession = {
       kind: "http",

@@ -102,16 +102,19 @@ import {
 } from "./KbCompile";
 import { buildDailyReport } from "./DailyReport";
 import { lowerMode } from "./AppGuard";
-import { inboxItems, type InboxItem } from "../../../shared/aiHubInbox";
+import { inboxItems, type InboxFilterOptions, type InboxItem } from "../../../shared/aiHubInbox";
 import {
   NOTIFY_KINDS,
   channelWants,
   deliver,
   diffInbox,
+  evaluateFlapCooldown,
+  evaluateNoiseBudget,
   guardUrl,
   hostOf,
   renderNotification,
   type GuardOptions,
+  type GuardedTarget,
   type NotifyChannel,
   type NotifyItem,
 } from "./Notifier";
@@ -133,6 +136,8 @@ import {
   alertTarget,
   alertName,
   alertTicketText,
+  appendCorrelatedAlert,
+  correlateAlert,
   hookSecretMatches,
   newHookSecret,
   parseAlerts,
@@ -147,7 +152,7 @@ import {
   pairsToCompare,
   parseContradictions,
 } from "./KbLint";
-import { sectionsOf } from "./KnowledgeBaseService";
+import { documentRevisedBy, sectionsOf } from "./KnowledgeBaseService";
 import {
   deleteDemoAgent,
   deleteDemoInfraEdge,
@@ -256,6 +261,7 @@ import {
   taskTranscript,
   worthDistilling,
   type DistillSource,
+  type GovernedMemoryProposal,
 } from "./MemoryDistiller";
 
 import {
@@ -514,7 +520,13 @@ export interface HubHost {
   teamAdmin?: () => boolean;
   /** On the web server: whether this user's account is the only one there is, and administers it. */
   soleUser?: () => boolean;
-  peerPresenceProvider?: () => import("../../../shared/types/aiHub").WorkspacePresenceEntry[];
+  /**
+   * On the web server: whether a change that needs two people can be put to another signed-in member,
+   * who answers through approveAsPeer(). Absent (the desktop app, a server that does not route
+   * approvals between accounts): only one person can approve here, and nothing asks for two.
+   */
+  peerApproval?: () => boolean;
+  peerPresenceProvider?:() => import("../../../shared/types/aiHub").WorkspacePresenceEntry[];
   onSharedWorkspaceChanged?: () => void;
   extraAppContext?(): Promise<{
     folders: string[];
@@ -626,7 +638,9 @@ export class HubService {
   readonly context: ContextService;
   readonly broker: ToolBroker;
   readonly s3Workspace: S3WorkspaceSyncService;
-  readonly mcp = new McpClientManager(fetch, (server) => this.assertMcpReach(server));
+  readonly mcp = new McpClientManager(fetch, (server) => this.assertMcpReach(server), {
+    guardOptions: () => ({ ...this.outboundGuard(), allowPlainHttp: !this.sharedServer() }),
+  });
   readonly kb = new KnowledgeBaseService();
   readonly selfLearning = new SelfLearningService(this.kb);
   private runtimes = new Map<string, AgentRuntime>();
@@ -1293,6 +1307,7 @@ export class HubService {
     targetTags?: string[];
     clusterPolicy?: ClusterSafetyPolicy;
     requesterId?: string;
+    peerApproval?: boolean;
   } {
     const policy = this.safetyPolicy();
     const rawLabel = (targetLabel || task.target?.label || "").trim();
@@ -1362,16 +1377,69 @@ export class HubService {
         }), {});
       }
     }
-    const requesterId =
-      (task as { requesterId?: string }).requesterId ??
-      task.startedAs?.agentId ??
-      task.agentId;
     return {
       policy,
       targetTags: aggregatedTags.length > 0 ? aggregatedTags : undefined,
       ...(clusterPolicy ? { clusterPolicy } : {}),
-      ...(requesterId ? { requesterId } : {}),
+      // A run acts for the person whose app this is: their approval is one, a second must be someone else's.
+      requesterId: this.localApproverId(),
+      peerApproval: this.peerApprovalPossible(),
     };
+  }
+
+  /** Who approves from this app: the signed-in account on the web server, the one person on the desktop. */
+  private localApproverId(): string {
+    return this.host.alertHookOwner ? `user:${this.host.alertHookOwner}` : "local";
+  }
+
+  /** Whether a second person can be asked for an approval: only on a team server that routes it to them. */
+  private peerApprovalPossible(): boolean {
+    return this.sharedServer() && Boolean(this.host.peerApproval?.());
+  }
+
+  /**
+   * Another signed-in member of the team server answers a change waiting in this person's app.
+   * The web server calls this after it has checked that member may approve; their answer counts
+   * as theirs, never as a second one of this person's.
+   */
+  async approveAsPeer(
+    taskId: string,
+    changeId: string,
+    allowed: boolean,
+    peer: { id: string; name: string },
+    note?: string,
+  ): Promise<boolean> {
+    if (!this.peerApprovalPossible())
+      throw new Error("Approvals are not shared between people on this server.");
+    const actorId = `user:${requiredText(peer.id)}`;
+    if (actorId === this.localApproverId())
+      throw new Error("The person a change is made for answers it in their own app.");
+    const name = requiredText(peer.name);
+    const resolved = this.broker.approve(taskId, changeId, allowed, note?.trim() ? clip(note.trim(), 1000) : undefined, {
+      actor: name,
+      actorId,
+    });
+    const change = this.store.data.tasks.find((t) => t.id === taskId)?.changes.find((c) => c.id === changeId);
+    if (change && (resolved || change.status !== "pending")) change.decidedBy = { name, at: Date.now(), allowed };
+    this.changed();
+    return resolved;
+  }
+
+  /** Changes in this app waiting on a person's approval, for the web server to show to the other members. */
+  waitingForApproval(): Array<{ taskId: string; changeId: string; command?: string; target?: string; requiredApprovals: number; approvedBy: string[] }> {
+    if (!this.peerApprovalPossible()) return [];
+    return this.store.data.tasks.flatMap((task) =>
+      task.changes
+        .filter((c) => c.status === "pending" && (c.requiredApprovals ?? 1) > 1 && this.broker.waitingOnPerson(task.id))
+        .map((c) => ({
+          taskId: task.id,
+          changeId: c.id,
+          ...(c.command ? { command: c.command } : {}),
+          ...(c.target ? { target: c.target } : {}),
+          requiredApprovals: c.requiredApprovals ?? 1,
+          approvedBy: (c.approvals ?? []).filter((a) => a.allowed).map((a) => a.actor),
+        })),
+    );
   }
 
   /**
@@ -1393,13 +1461,14 @@ export class HubService {
   }
 
   /** Asked each time an MCP server is about to be started or called: see McpClientManager. */
-  private async assertMcpReach(server: McpServerConfig): Promise<void> {
+  private async assertMcpReach(server: McpServerConfig): Promise<GuardedTarget | void> {
     this.assertMcpProgramAllowed(server);
     if (server.transport !== "http") return;
     const url = server.url?.trim();
     if (!url) return;
     // The person's own machine may talk to a plain-http server on its own network; a shared server may not be sent anywhere.
-    await guardUrl(url, { ...this.outboundGuard(), allowPlainHttp: !this.sharedServer(), ...(this.kbNetwork ? { lookup: this.kbNetwork.lookup } : {}) });
+    // The address checked is the one connected to (McpClientManager pins it).
+    return await guardUrl(url, { ...this.outboundGuard(), allowPlainHttp: !this.sharedServer(), ...(this.kbNetwork ? { lookup: this.kbNetwork.lookup } : {}) });
   }
 
   /**
@@ -1484,7 +1553,13 @@ export class HubService {
    * the team's, never looser: one stored before that rule (switched off by a member) counts as on.
    */
   private safetyPolicy(): SafetyPolicyConfig {
-    const own = this.store.data.safetyPolicy ?? DEFAULT_SAFETY_POLICY;
+    const stored = this.store.data.safetyPolicy ?? DEFAULT_SAFETY_POLICY;
+    // Where only one person can approve, a second approval can never come: the rule is not in force
+    // (and cannot be switched on), rather than leaving every production change to time out.
+    const own =
+      stored.requirePeerApprovalOnProd && !this.peerApprovalPossible()
+        ? { ...stored, requirePeerApprovalOnProd: false }
+        : stored;
     if (!this.sharedServer() || this.host.teamAdmin?.()) return own;
     return { ...own, requireApprovalOnProdTags: true, blockDestructiveWithoutConfirm: true };
   }
@@ -2542,7 +2617,8 @@ export class HubService {
           request.changeId,
           request.approved === true,
           approvalNote,
-          { actor, actorId: actor },
+          // The account, not the name it shows: two people may share a name, one person may rename.
+          { actor, actorId: this.localApproverId() },
         );
         // Who answered is written down once the broker resolves or records the final decision.
         const change = this.store.data.tasks
@@ -2819,21 +2895,27 @@ export class HubService {
             }
           }
           const prevApprovals = [...(plan.approvals ?? [])];
-          if (prevApprovals.some((a) => a.allowed && (a.actorId || a.actor).toLowerCase() === actor.toLowerCase())) {
-            throw new Error("You already approved this plan; a distinct peer approver is required.");
+          const actorId = this.localApproverId();
+          if (prevApprovals.some((a) => a.allowed && (a.actorId || a.actor).toLowerCase() === actorId.toLowerCase())) {
+            throw new Error("You already approved this plan; it needs the approval of another person.");
           }
           const nextApprovals: AgentChangeApproval[] = [
             ...prevApprovals,
-            { actor, actorId: actor, at: Date.now(), allowed: true, ...(note ? { note: boundedContext(note, 1000) } : {}) },
+            { actor, actorId, at: Date.now(), allowed: true, ...(note ? { note: boundedContext(note, 1000) } : {}) },
           ];
           const approvalStatus = checkPlanApprovals(plan, {
             approvals: nextApprovals,
-            proposer: task.agentName ?? task.agentId,
+            proposer: actorId,
             targetTags: safetyCtx.targetTags,
             defaultTarget: task.target?.label,
             policy: safetyCtx.policy,
             clusterPolicy: safetyCtx.clusterPolicy,
           });
+          if (!approvalStatus.satisfied && approvalStatus.requiredApprovals > 1 && !this.peerApprovalPossible()) {
+            throw new Error(
+              `This plan needs the approval of ${approvalStatus.requiredApprovals} different people (the cluster's policy), and only one person can approve in this app.`,
+            );
+          }
           plan.approvals = nextApprovals;
           plan.requiredApprovals = approvalStatus.requiredApprovals;
           if (!approvalStatus.satisfied) {
@@ -2866,7 +2948,7 @@ export class HubService {
         plan.decidedAt = Date.now();
         plan.approvals = [
           ...(plan.approvals ?? []),
-          { actor, actorId: actor, at: Date.now(), allowed: false, ...(note ? { note: boundedContext(note, 1000) } : {}) },
+          { actor, actorId: this.localApproverId(), at: Date.now(), allowed: false, ...(note ? { note: boundedContext(note, 1000) } : {}) },
         ];
         plan.status = "rejected";
         if (note) {
@@ -3940,6 +4022,39 @@ export class HubService {
           } else this.notifyStore.data.publicUrl = "";
         }
         if (request.reminderMinutes !== undefined) this.notifyStore.data.reminderMinutes = integer(request.reminderMinutes, 0, 60);
+        // Quiet hours as the settings card sends them: "22:00" to "07:00" in a named time zone.
+        const policy = request as { quietHours?: unknown; noiseBudgetPerHour?: unknown };
+        if (policy.quietHours !== undefined) {
+          const q = policy.quietHours as { enabled?: unknown; start?: unknown; end?: unknown; timezone?: unknown; bypassCritical?: unknown } | null;
+          const time = (v: unknown): [number, number] | undefined => {
+            const m = typeof v === "string" ? /^(\d{1,2}):(\d{2})$/.exec(v.trim()) : null;
+            return m && Number(m[1]) < 24 && Number(m[2]) < 60 ? [Number(m[1]), Number(m[2])] : undefined;
+          };
+          if (!q || typeof q !== "object" || !q.enabled) {
+            delete this.notifyStore.data.quietHours;
+          } else {
+            const start = time(q.start);
+            const end = time(q.end);
+            if (!start || !end) throw new Error('Quiet hours are a start and an end time, like "22:00" and "07:00".');
+            const timezone = typeof q.timezone === "string" && q.timezone.trim() ? q.timezone.trim().slice(0, 64) : "UTC";
+            try {
+              new Intl.DateTimeFormat("en-GB", { timeZone: timezone });
+            } catch {
+              throw new Error(`"${timezone}" is not a time zone this computer knows.`);
+            }
+            this.notifyStore.data.quietHours = {
+              enabled: true,
+              startHour: start[0],
+              startMinute: start[1],
+              endHour: end[0],
+              endMinute: end[1],
+              timezone,
+              allowCritical: q.bypassCritical !== false,
+            };
+          }
+        }
+        if (policy.noiseBudgetPerHour !== undefined)
+          this.notifyStore.data.noiseBudgetPerHour = integer(policy.noiseBudgetPerHour as number, 0, 1000);
         await this.notifyStore.save();
         break;
       }
@@ -3982,6 +4097,22 @@ export class HubService {
               throw new Error(`Only an administrator of this server switches off "${BOOLEAN_POLICY_NAMES[key]}": on a shared server it is the team's rule.`);
           if (asked.clusterPolicies !== undefined || asked.commandAllowPrefixes !== undefined)
             throw new Error("Only an administrator of this server changes cluster policies or command allowlists on a shared server.");
+        }
+        if (!this.peerApprovalPossible()) {
+          const twoPeople =
+            asked.requirePeerApprovalOnProd === true ||
+            (asked.clusterPolicies !== undefined &&
+              Object.entries(asked.clusterPolicies as Record<string, unknown>).some(
+                ([name, p]) =>
+                  p &&
+                  typeof p === "object" &&
+                  Number((p as { requiredApprovals?: unknown }).requiredApprovals) > 1 &&
+                  (stored.clusterPolicies?.[name]?.requiredApprovals ?? 1) <= 1,
+              ));
+          if (twoPeople)
+            throw new Error(
+              "An approval by a second person needs a second person who can be asked: only a team server with several accounts has one. Here only you approve, so this rule is not offered.",
+            );
         }
         const current: SafetyPolicyConfig = {
           autoApproveSafeReadOnly: Boolean(stored.autoApproveSafeReadOnly),
@@ -4827,6 +4958,12 @@ export class HubService {
       }
       case "promote-eval": {
         const task = this.task(request.taskId);
+        // Promoted once: a second click (or a retried request) finds the ticket it already made.
+        const promoted = live(this.store.data.workTickets).find(
+          // The promotion's summary is how such a ticket begins (promoteEvalFailureToIncident).
+          (t) => t.taskId === task.id && t.status !== "done" && Boolean(t.description?.startsWith('Eval "')),
+        );
+        if (promoted) break;
         const existingCase = (this.store.data.evalCases ?? []).find(
           (c) => c.id === task.evalCaseId || c.fromTaskId === task.id,
         );
@@ -4876,6 +5013,7 @@ export class HubService {
       }
       case "rule-save": {
         const r = request.rule;
+        if (!r || typeof r !== "object" || Array.isArray(r)) throw new Error("A rule to save is missing");
         const scope = r.scope;
         if (!["global", "env", "tag", "cluster", "server"].includes(scope)) {
           throw new Error("Invalid workspace rule scope");
@@ -4916,6 +5054,17 @@ export class HubService {
       }
       case "runbook-save": {
         const rb = request.runbook;
+        if (!rb || typeof rb !== "object" || Array.isArray(rb)) throw new Error("A runbook to save is missing");
+        if (rb.inputs !== undefined && !Array.isArray(rb.inputs)) throw new Error("A runbook's inputs are a list");
+        if (rb.steps !== undefined && !Array.isArray(rb.steps)) throw new Error("A runbook's steps are a list");
+        for (const step of rb.steps ?? [])
+          if (!step || typeof step !== "object" || typeof step.kind !== "string")
+            throw new Error("Each runbook step needs a kind");
+        for (const field of rb.inputs ?? [])
+          if (!field || typeof field !== "object" || typeof field.name !== "string" || !field.name.trim())
+            throw new Error("Each runbook input needs a name");
+        if (rb.targetSelector !== undefined && (typeof rb.targetSelector !== "object" || rb.targetSelector === null || Array.isArray(rb.targetSelector)))
+          throw new Error("A runbook's target is a selector of servers");
         const extra = this.storeDataExtra();
         const list = extra.runbooks ?? [];
         const id = rb.id?.trim() || crypto.randomUUID();
@@ -4948,6 +5097,14 @@ export class HubService {
         const extra = this.storeDataExtra();
         const rb = (extra.runbooks ?? []).find((x) => x.id === request.id);
         if (!rb) throw new Error("Runbook not found");
+        if (request.inputs !== undefined && (typeof request.inputs !== "object" || request.inputs === null || Array.isArray(request.inputs)))
+          throw new Error("A runbook's inputs are given by name");
+        if (
+          request.targetSelector !== undefined &&
+          request.targetSelector !== null &&
+          (typeof request.targetSelector !== "object" || Array.isArray(request.targetSelector))
+        )
+          throw new Error("A runbook's target is a selector of servers");
         const inputs = request.inputs ?? {};
         for (const field of rb.inputs) {
           const val = inputs[field.name] ?? field.defaultValue;
@@ -5039,7 +5196,10 @@ export class HubService {
         break;
       }
       case "profile-save": {
+        if (!request.profile || typeof request.profile !== "object") throw new Error("A model profile to save is missing");
         const { hasApiKey: _hasApiKey, keyStorage: _keyStorage, ...profileInput } = request.profile;
+        // The same rule as the model's address in the settings: on a shared server not the server itself or its network.
+        if (profileInput.baseUrl?.trim()) await this.assertModelEndpointReach(profileInput.baseUrl.trim());
         const id = profileInput.id?.trim() || crypto.randomUUID();
         const profilePayload: Omit<ProviderProfile, "hasApiKey" | "keyStorage"> & { apiKey?: string | null } = {
           ...profileInput,
@@ -5312,10 +5472,8 @@ export class HubService {
     if (safetyCtx.clusterPolicy?.maxMode) {
       task.mode = lowerMode(task.mode, safetyCtx.clusterPolicy.maxMode);
     }
-    const persistedRules = this.storeDataExtra().rules;
-    if (persistedRules?.length) {
-      (task as { rules?: WorkspaceRule[] }).rules = [...persistedRules];
-    }
+    // The workspace rules reach the run through its context (ContextService: `workspaceRules`, the ones
+    // that apply to its target), not as a copy of every rule's text stored on every task.
     const viaRunner = !isBackgroundRun(task) && this.getAgentsList().some((a) => a.id === task.agentId && a.runnerId);
     if (!viaRunner) await this.assertModelEndpointReach(config.baseUrl);
     const external = isBackgroundRun(task)
@@ -5885,7 +6043,9 @@ export class HubService {
     this.auditShipperUnsub = undefined;
     this.auditShipper = undefined;
     if (!options) return;
-    const shipper = new AuditShipper(options);
+    // Where the log goes is held to the same rule as any other address sshs3 calls out to: on a shared
+    // server not the server itself or its private network, unless the administrator allows it.
+    const shipper = new AuditShipper({ ...options, guard: { ...this.outboundGuard(), allowPlainHttp: true } });
     this.auditShipper = shipper;
     this.auditShipperUnsub = this.audit().subscribe((entry) => shipper.emit(entry));
   }
@@ -6233,6 +6393,15 @@ export class HubService {
           requiredApprovals = Math.max(requiredApprovals, 2);
         }
         if (requiredApprovals > 1) change.requiredApprovals = requiredApprovals;
+        if (requiredApprovals > 1 && !safetyCtx.peerApproval) {
+          // Nobody else can be asked here: refused now, not after ten minutes of waiting.
+          change.status = "denied";
+          change.decidedHow = "policy";
+          change.output = `This change needs the approval of ${requiredApprovals} different people, and only one person can approve in this app.`;
+          task.changes.push(change);
+          this.changed();
+          return false;
+        }
         const needsApproval =
           requiredApprovals > 1 ||
           // Without a command to read, a change to files or a deletion is always put to a person.
@@ -6250,7 +6419,7 @@ export class HubService {
           this.changed();
           return true;
         }
-        return this.broker.askApproval(task, change);
+        return this.broker.askApproval(task, change, safetyCtx.requesterId);
       },
     });
     task.model = runner.name;
@@ -6353,10 +6522,8 @@ export class HubService {
     const now = Date.now();
     // An address names one thing: fetched again with a new text, it is the same source revised, not a
     // second source that the pages would then have to reconcile with the first. (A file's name names nothing.)
-    const earlier =
-      source.sourceRef && parts.length === 1 && (source.sourceType === "url" || source.sourceType === "paste")
-        ? (this.store.data.kbDocuments ?? []).find((d) => d.sourceRef === source.sourceRef && d.sourceType === source.sourceType)
-        : undefined;
+    // A pasted text is that document revised only under the same title too: otherwise a new one, said so.
+    const { earlier, notes } = documentRevisedBy(this.store.data.kbDocuments ?? [], source, baseTitle, parts.length);
     if (earlier) {
       earlier.content = parts[0];
       earlier.chunks = sectionsOf(earlier.id, parts[0]);
@@ -6403,7 +6570,7 @@ export class HubService {
     this.store.data.kbDocuments = [...(this.store.data.kbDocuments ?? []), ...added];
     this.lastWorkSync = 0;
     void this.readNextKb();
-    return { added: added.map((d) => d.title), duplicates: [], failed: [] };
+    return { added: added.map((d) => d.title), duplicates: [], failed: [], ...(notes ? { notes } : {}) };
   }
 
   // ---- knowledge base: the pages agents read --------------------------------
@@ -7312,7 +7479,25 @@ export class HubService {
   }
 
   private notificationsView(): NonNullable<HubSnapshot["notifications"]> {
+    const quiet = this.notifyStore.data.quietHours;
+    const hhmm = (h: number, m = 0): string => `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+    // What the settings card reads back (it is not in the shared type yet): quiet hours as it sends them.
+    const policy = {
+      ...(quiet
+        ? {
+            quietHours: {
+              enabled: quiet.enabled,
+              start: hhmm(quiet.startHour, quiet.startMinute),
+              end: hhmm(quiet.endHour, quiet.endMinute),
+              timezone: quiet.timezone ?? "UTC",
+              bypassCritical: quiet.allowCritical !== false,
+            },
+          }
+        : {}),
+      ...(this.notifyStore.data.noiseBudgetPerHour ? { noiseBudgetPerHour: this.notifyStore.data.noiseBudgetPerHour } : {}),
+    };
     return {
+      ...policy,
       channels: this.notifyStore.data.channels.map((c) => ({
         id: c.id,
         kind: c.kind,
@@ -7332,11 +7517,13 @@ export class HubService {
   }
 
   /** What waits for a person right now, from the store itself: no snapshot is built for this. */
-  private inboxNow(): InboxItem[] {
+  private inboxNow(options?: InboxFilterOptions): InboxItem[] {
     return inboxItems({
       tasks: this.store.data.tasks,
       workTickets: live(this.store.data.workTickets),
       dailyReport: this.store.data.dailyReport,
+      // A snoozed item is out of the inbox until its time: nobody is told about it, or reminded.
+      inboxState: this.storeDataExtra().inboxState,
       serverFacts: {
         // Only servers this installation still has and has not left alone: a deleted or excluded server reports nothing.
         servers: this.factsStore
@@ -7344,7 +7531,25 @@ export class HubService {
           .filter((r) => this.getKnownServers().some((s) => s.id === r.serverId) && !this.factsSettings().exclude.includes(r.serverId))
           .map((r) => ({ serverId: r.serverId, name: r.name, status: r.status, collectedAt: r.collectedAt, problems: this.factsProblems(r), changes: [] })),
       },
-    }).filter((item) => NOTIFY_KINDS.includes(item.kind));
+    }, options).filter((item) => NOTIFY_KINDS.includes(item.kind));
+  }
+
+  /**
+   * A snooze or an acknowledgement is about one item: once the item has left the inbox it is forgotten,
+   * so the list does not grow for ever and an item that comes back is news again. Knowledge-base items
+   * are not built here; theirs are kept for a month.
+   */
+  private pruneInboxState(now = Date.now()): void {
+    const extra = this.storeDataExtra();
+    const state = extra.inboxState;
+    if (!state || !Object.keys(state).length) return;
+    const present = new Set(this.inboxNow({ snoozeFilter: "all", now }).map((i) => i.id));
+    const kept = Object.entries(state).filter(
+      ([id, s]) =>
+        present.has(id) ||
+        (id.startsWith("knowledge:") && Math.max(s.snoozedUntil ?? 0, (s.acknowledgedAt ?? 0) + 30 * 86_400_000) > now),
+    );
+    if (kept.length !== Object.keys(state).length) extra.inboxState = Object.fromEntries(kept);
   }
 
   /** Something changed: look at the inbox shortly. Cheap, because every change in the hub comes through here. */
@@ -7397,17 +7602,43 @@ export class HubService {
     try {
       const data = this.notifyStore.data;
       const items = this.inboxNow();
-      const before = JSON.stringify([data.seen, data.reminded]);
-      const { fresh, seen } = diffInbox(items, data.seen, now);
+      const before = JSON.stringify([data.seen, data.reminded, data.flapCooldown, data.pushHistory]);
+      this.pruneInboxState(now);
+      const { fresh: arrived, seen } = diffInbox(items, data.seen, now);
       data.seen = seen;
+      // An alert that keeps resolving and firing again is told about until it flaps, then quiet for a while.
+      let flaps = data.flapCooldown ?? {};
+      const fresh = arrived.filter((i) => {
+        if (i.acknowledgedAt !== undefined) return false;
+        if (i.kind !== "alert" && i.kind !== "health") return true;
+        const verdict = evaluateFlapCooldown(i.id, flaps, now, {
+          ...(data.flapCooldownMs ? { cooldownMs: data.flapCooldownMs } : {}),
+          severity: i.risk,
+          allowCriticalBypass: true,
+        });
+        flaps = verdict.nextState;
+        return verdict.allow;
+      });
+      data.flapCooldown = flaps;
       // A reminder comes before the agent stops waiting, or it would never come: at most a minute before the end.
       const remindAfter = Math.min(data.reminderMinutes, Math.max(1, this.approvalWaitMinutes() - 1)) * 60_000;
       const reminders =
         remindAfter > 0
-          ? items.filter((i) => i.kind === "approval" && !fresh.includes(i) && !data.reminded[i.id] && now - (i.since ?? i.at) >= remindAfter)
+          ? items.filter(
+              (i) =>
+                i.kind === "approval" &&
+                !arrived.includes(i) &&
+                // Acknowledged in the inbox: somebody has it, nobody is reminded.
+                i.acknowledgedAt === undefined &&
+                !data.reminded[i.id] &&
+                now - (i.since ?? i.at) >= remindAfter,
+            )
           : [];
       data.reminded = Object.fromEntries(Object.entries(data.reminded).filter(([id]) => seen[id] !== undefined));
       for (const item of reminders) data.reminded[item.id] = now;
+      data.flapCooldown = Object.fromEntries(
+        Object.entries(data.flapCooldown).filter(([, v]) => (v.suppressedUntil ?? 0) > now || now - v.lastAt <= 3_600_000),
+      );
       const blocking = fresh.filter((i) => ["approval", "plan", "question"].includes(i.kind));
       if (blocking.length) {
         const first = blocking[0];
@@ -7426,8 +7657,18 @@ export class HubService {
         );
       }
       out = [...fresh.map((i) => this.notifyItem(i)), ...reminders.map((i) => ({ ...this.notifyItem(i), reminder: true }))];
+      // Quiet hours and the hourly limit hold back what goes to the channels (a critical alert still goes);
+      // what is held back stays in the inbox. This computer's own notification above is not held back.
+      if (out.length && (data.quietHours?.enabled || (data.noiseBudgetPerHour ?? 0) > 0)) {
+        const budget = evaluateNoiseBudget(out, data.pushHistory ?? [], now, {
+          maxPushesPerHour: data.noiseBudgetPerHour,
+          quietHours: data.quietHours,
+        });
+        out = budget.allowed;
+        data.pushHistory = budget.nextPushHistory;
+      }
       since = new Map(items.map((i) => [i.id, i.since ?? i.at]));
-      if (before !== JSON.stringify([data.seen, data.reminded])) await this.notifyStore.save();
+      if (before !== JSON.stringify([data.seen, data.reminded, data.flapCooldown, data.pushHistory])) await this.notifyStore.save();
     } finally {
       // Released before anything is sent: a channel that does not answer must not hold up what comes next.
       this.flushingInbox = false;
@@ -7702,6 +7943,39 @@ export class HubService {
       }
       // An alert that is already over when it arrives is nothing to work on.
       if (alert.status === "resolved") continue;
+      // A symptom of an incident already open (the same server, its cluster, or what it depends on,
+      // within ten minutes) goes on that incident's ticket instead of opening another.
+      // One already put on an incident is the same alert sent again: noted there, without another comment.
+      const bundled = live(this.store.data.workTickets).find(
+        (t) => t.status !== "done" && t.alert && t.correlatedAlerts?.some((c) => c.fingerprint === alert.fingerprint),
+      );
+      const related = bundled
+        ? undefined
+        : correlateAlert(alert, live(this.store.data.workTickets), {
+            servers,
+            edges: this.store.data.infraEdges ?? [],
+            now,
+          });
+      if (bundled) {
+        // The reason it was bundled for the first time, as its line says.
+        const reason = (/\[([a-z-]+)\]$/.exec(bundled.correlatedAlerts?.find((c) => c.fingerprint === alert.fingerprint)?.summary ?? "")?.[1] ??
+          "same-target") as Parameters<typeof appendCorrelatedAlert>[2];
+        this.putTicket(appendCorrelatedAlert(bundled, alert, reason, now));
+        updated.push(bundled.id);
+        continue;
+      }
+      if (related && related.reason !== "fingerprint") {
+        this.putTicket(
+          withComment(
+            appendCorrelatedAlert(related.ticket, alert, related.reason, now),
+            alert.source,
+            `Related alert${related.via ? ` (${related.via})` : ""}: ${clip(alert.title, 200)}`,
+            now,
+          ),
+        );
+        updated.push(related.ticket.id);
+        continue;
+      }
       const target = alertTarget(alert, servers);
       const agent = routeAlert(alert, target, this.store.data.alertRules ?? [], agents);
       const ticket = await this.saveTicketFrom(
@@ -8781,6 +9055,15 @@ export class HubService {
   ): Promise<MemoryEntry> {
     const title = edited.title?.trim() || proposal.title;
     const text = edited.text?.trim() || proposal.text;
+    // What the distiller worked out about it travels with it: dropped here, a skill lost its command.
+    const p = proposal as MemoryProposal & Partial<GovernedMemoryProposal>;
+    const extra = {
+      ...(p.commandTemplate ? { commandTemplate: p.commandTemplate } : {}),
+      ...(p.verifyCommand ? { verifyCommand: p.verifyCommand } : {}),
+      ...(p.preconditions?.length ? { preconditions: p.preconditions } : {}),
+      ...(p.sourceTrust ? { sourceTrust: p.sourceTrust } : {}),
+      ...(p.proven !== undefined ? { proven: p.proven } : {}),
+    };
     if (proposal.op === "update") {
       const target = this.store.data.memories.find(
         (m) => m.id === proposal.targetId,
@@ -8789,24 +9072,46 @@ export class HubService {
         throw new Error(
           "The memory this proposal updates no longer exists; reject the proposal or save it as a new memory",
         );
+      if (p.invalidate || p.intendedOp === "invalidate") {
+        // Said to be wrong or obsolete: it is marked so, with why, and keeps what it said.
+        return this.saveMemoryInternal({
+          id: target.id,
+          kind: target.kind,
+          tier: target.tier,
+          cluster: target.cluster,
+          scope: target.scope,
+          title: target.title,
+          text: target.text,
+          extra: { staleReason: clip(p.staleReason || edited.text?.trim() || "Contradicted by a later record", 240) },
+        });
+      }
       return this.saveMemoryInternal({
         id: target.id,
         kind: target.kind,
-        tier: target.tier,
-        cluster: target.cluster,
+        tier: p.tier ?? target.tier,
+        cluster: p.cluster ?? target.cluster,
         scope: target.scope,
         title,
         text,
+        confidence: p.confidence,
+        errorSignature: p.errorSignature,
+        sourceCommand: p.sourceCommand,
         supersede: true,
+        extra,
       });
     }
     return this.saveMemoryInternal({
       kind: proposal.kind,
-      tier: "archival",
+      tier: p.tier ?? "archival",
+      cluster: p.cluster,
       scope: proposal.scope,
       title,
       text,
+      confidence: p.confidence,
+      errorSignature: p.errorSignature,
+      sourceCommand: p.sourceCommand,
       autoLearned: true,
+      extra,
     });
   }
 
@@ -9091,8 +9396,11 @@ export class HubService {
       // Not everything: what would take the place of a memory a person wrote, and what comes from a
       // conversation in which nothing was run and shown (the assistant's own answer), waits in the
       // list for a person to accept.
+      // Nor what the memory rules put to a person: an invalidation, a "core" rule, a skill that
+      // carries a command, a note the model itself was unsure of.
       if (this.store.data.preferences.autoSaveMemories !== false && mayLearnUnreviewed(source))
         for (const proposal of fresh) {
+          if (proposal.requiresApproval || proposal.invalidate) continue;
           if (replacesPersonMemory(proposal, this.store.data.memories)) continue;
           const saved = await this.applyMemoryProposal(proposal).catch(
             (e) => {
@@ -9604,6 +9912,8 @@ export class HubService {
     errorSignature?: string;
     /** A newer memory replaces the one it matches; the old one is kept as history. */
     supersede?: boolean;
+    /** What a learned skill carries besides its text, and a memory marked as no longer right. */
+    extra?: Partial<Pick<MemoryEntry, "commandTemplate" | "verifyCommand" | "preconditions" | "staleReason" | "sourceTrust" | "proven">>;
   }): Promise<MemoryEntry> {
     const author = input.author?.trim() || (await this.resolveActorName());
     const before = new Map(this.store.data.memories.map((m) => [m.id, m.updatedAt]));
@@ -9626,6 +9936,7 @@ export class HubService {
         errorSignature: input.errorSignature
           ? boundedContext(input.errorSignature, 160)
           : undefined,
+        ...input.extra,
         supersede: input.supersede,
       },
     );
