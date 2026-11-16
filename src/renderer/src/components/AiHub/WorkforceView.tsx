@@ -9,6 +9,7 @@ import type {
   WorkforceRun,
 } from "@shared/types/aiHub";
 import { ConfirmButton } from "./ConfirmButton";
+import { AtlassianCard } from "./AtlassianCard";
 import { HypothesisTree } from "./HypothesisTree";
 import { type Act, formatTokenUsage, modes, TABULAR_NUMS_STYLE } from "./panelShared";
 import { RichMarkdownContent } from "./RichMarkdownContent";
@@ -78,6 +79,7 @@ function matchesTicketFilter(
     ticket.alert?.name,
     ticket.alert?.source,
     ticket.alert?.fingerprint,
+    ticket.external?.key,
     ...(ticket.correlatedAlerts ?? []).map((c) => c.summary),
   ];
   return fields.some((f) => Boolean(f && f.toLowerCase().includes(q)));
@@ -382,6 +384,8 @@ export function WorkforceView({
         {heartbeat ? " · Heartbeat on: this app starts tickets by itself." : ""}
       </small>
 
+      <AtlassianCard product="jira" hub={hub} act={act} />
+
       {workforcePaused && (
         <div
           className="ai-card"
@@ -656,6 +660,16 @@ export function WorkforceView({
                             {corr.items.length} alerts
                           </span>
                         )}
+                        {t.external && (
+                          <span
+                            className="ai-badge"
+                            data-testid={`ticket-jira-${t.id}`}
+                            title={`${t.external.key} in Jira: ${t.external.status}${t.external.error ? ` · ${t.external.error}` : ""}`}
+                            style={t.external.error ? { borderColor: "rgba(248, 113, 113, 0.6)" } : undefined}
+                          >
+                            {t.external.key} · {t.external.status}
+                          </span>
+                        )}
                         {t.status !== "done" && (
                           <span
                             className="ai-badge"
@@ -748,6 +762,22 @@ export function WorkforceView({
               Close
             </button>
           </div>
+          {openTicket.external && (
+            <p className="ai-hint" data-testid="ticket-jira">
+              Mirrors{" "}
+              <a href={openTicket.external.url} target="_blank" rel="noreferrer noopener">
+                {openTicket.external.key}
+              </a>{" "}
+              in Jira, where it is “{openTicket.external.status}”. Its text and comments follow the issue; your decision here
+              is written there.
+              {openTicket.external.error && (
+                <span role="alert" className="ai-error">
+                  {" "}
+                  {openTicket.external.error}
+                </span>
+              )}
+            </p>
+          )}
           {openTicket.description && <p className="ai-memory-text">{openTicket.description}</p>}
 
           {openTicketAlertGroup && openTicketAlertGroup.items.length > 0 && (

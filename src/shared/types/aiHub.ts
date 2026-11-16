@@ -1051,6 +1051,61 @@ export interface WorkTicketComment {
   at: number;
   author: string;
   text: string;
+  /** A decision a person made here that is also written on the issue the ticket mirrors. */
+  push?: "jira";
+}
+
+/** The Jira issue a ticket mirrors, and what has been read from and written to it. */
+export interface ExternalIssueRef {
+  system: "jira";
+  key: string;
+  url: string;
+  /** The issue's status there, by its name, and which of Jira's three kinds it is. */
+  status: string;
+  statusCategory: "new" | "indeterminate" | "done";
+  /** The issue's own time of last change, as last read. */
+  remoteUpdatedAt: number;
+  /** Comments this side wrote there: not read back as news. */
+  postedCommentIds?: string[];
+  /** The run whose result was written there as a comment. */
+  resultPostedFor?: string;
+  /** Comments of this ticket already written there, by id. */
+  pushedCommentIds?: string[];
+  /** When closing it there was tried, after it was done here. */
+  doneSentAt?: number;
+  /** Why the last write to it failed. */
+  error?: string;
+}
+
+/** A connection to Jira or Confluence as the interface sees it: never the token. */
+export interface AtlassianConnectionView {
+  product: "jira" | "confluence";
+  variant: "cloud" | "datacenter";
+  baseUrl: string;
+  email?: string;
+  hasToken: boolean;
+  /** Who it signed in as when it was last tested. */
+  account?: string;
+  enabled: boolean;
+  projects?: string[];
+  doneTransition?: string;
+  closeOnApprove?: boolean;
+  lastSyncAt?: number;
+  lastError?: string;
+  watched?: { kind: "space" | "tree"; ref: string; addedAt: number; by: string }[];
+}
+
+/** A connection as it is saved from the form. `token` is sent only when it is set or changed. */
+export interface AtlassianConnectionInput {
+  product: "jira" | "confluence";
+  variant: "cloud" | "datacenter";
+  baseUrl: string;
+  email?: string;
+  token?: string;
+  enabled: boolean;
+  projects?: string[];
+  doneTransition?: string;
+  closeOnApprove?: boolean;
 }
 
 export interface TargetSelector {
@@ -1143,6 +1198,8 @@ export interface WorkTicket {
   runbookId?: string;
   /** Optional fleet target selector for multi-server execution. */
   targetSelector?: TargetSelector;
+  /** The issue in another tracker this ticket mirrors. */
+  external?: ExternalIssueRef;
 }
 
 /** Tokens an agent has spent on tickets in one calendar month (`YYYY-MM`). */
@@ -1505,6 +1562,10 @@ export interface HubReply {
   serverFacts?: { serverId: string; facts?: ServerFacts; changes: FactChange[] };
   /** Whether a test notification arrived. */
   notifyTest?: { ok: boolean; status?: number; error?: string };
+  /** What a connection to Jira or Confluence could see when it was tried. */
+  atlassianTest?: { ok: boolean; account?: string; projects?: { key: string; name: string }[]; spaces?: { key: string; name: string }[]; error?: string };
+  /** What a read of Jira brought to the board. */
+  jiraSync?: { added: number; updated: number; written: number; more: boolean };
   kbDocument?: KbDocument;
   kbPage?: KbPage;
   /** A key as it is shown once, when it is made, and never again. */
@@ -1616,6 +1677,8 @@ export interface HubSnapshot {
     /** Server ids being read right now. */
     collecting: string[];
   };
+  /** The connections to Jira and Confluence, without their tokens. `canChange` is false for a member of a shared server. */
+  atlassian?: { jira?: AtlassianConnectionView; confluence?: AtlassianConnectionView; canChange: boolean };
   /** Where notifications go when something starts to wait for a person. */
   notifications?: {
     channels: NotifyChannelView[];
@@ -1829,6 +1892,10 @@ export type HubRequest =
   | { action: "notify-channel-delete"; id: string }
   /** Sends a test message to one channel and reports whether it arrived. */
   | { action: "notify-channel-test"; id: string }
+  | { action: "atlassian-save"; connection: AtlassianConnectionInput }
+  | { action: "atlassian-test"; product: "jira" | "confluence" }
+  | { action: "atlassian-disconnect"; product: "jira" | "confluence" }
+  | { action: "jira-sync-now" }
   | { action: "notify-settings-save"; publicUrl?: string; reminderMinutes?: number }
   /** An alert pasted by hand: JSON as a monitoring system posts it, or text. */
   | { action: "alert-paste"; text: string }

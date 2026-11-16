@@ -33,6 +33,7 @@ export type AuditKind =
   | "setting" // sshs3's own rules were changed
   | "mcp" // somebody's own agent asked for something over MCP
   | "sign-in" // a person signed in or out
+  | "integration" // something was written to another system (an issue tracker, a wiki)
   | "recording"; // a terminal recording was finished: its hash, so it can be shown not to have been changed
 
 export interface AuditInput {

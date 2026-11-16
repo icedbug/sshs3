@@ -21,6 +21,7 @@ const KIND_TEXT: Record<string, string> = {
   mcp: "MCP",
   "sign-in": "sign-in",
   recording: "recording",
+  integration: "written elsewhere",
 };
 
 const OUTCOME_TONE: Record<string, string> = {

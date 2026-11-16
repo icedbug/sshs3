@@ -119,6 +119,8 @@ import {
   type NotifyItem,
 } from "./Notifier";
 import { NotifyStore } from "./NotifyStore";
+import { AtlassianStore } from "./AtlassianStore";
+import { AtlassianBridge } from "./AtlassianBridge";
 import { FactsStore, flagStaleMemories, type FactsRecord } from "./FactsStore";
 import { buildScript, diffFacts, factsHash, factsSummary, isWatchPath, parseFacts, problems } from "./ServerFacts";
 import { demoFactsOutput } from "./demoFacts";
@@ -783,6 +785,21 @@ export class HubService {
   ) {
     this.store = new HubStore(path.join(directory, "hub.json"));
     this.notifyStore = new NotifyStore(path.join(directory, "notify.json"));
+    this.atlassian = new AtlassianBridge(new AtlassianStore(path.join(directory, "atlassian.json")), {
+      tickets: () => this.store.data.workTickets ?? [],
+      putTicket: (ticket) => this.putTicket(ticket),
+      ticketRuns: async (ticket) => Boolean(await this.ticketRunsNow(ticket)),
+      once: async (key) => {
+        const sync = this.work();
+        return sync ? sync.markOnce(key, this.clientId(), this.notifySettle) : true;
+      },
+      guard: () => ({ ...this.outboundGuard(), ...(this.kbNetwork ? { lookup: this.kbNetwork.lookup } : {}) }),
+      record: (entry) =>
+        void this.audit()
+          .append({ kind: "integration", ...entry })
+          .catch((e) => log.warn("Could not write the audit log", safeError(e))),
+      changed: () => this.changed(),
+    });
     this.factsStore = new FactsStore(path.join(directory, "facts"));
     this.embeddings = new EmbeddingIndex(
       path.join(directory, "kb-embeddings.json"),
@@ -1100,6 +1117,7 @@ export class HubService {
       );
       this.selfLearning.bindStore(this.store);
       await this.notifyStore.load();
+      await this.atlassian.store.load();
       await this.factsStore.load();
       const initServers = await this.host.workspaceServers?.().catch(() => []);
       if (Array.isArray(initServers) && initServers.length > 0) {
@@ -1635,6 +1653,12 @@ export class HubService {
   async assertMayRemoveServerProfile(id: string): Promise<void> {
     if (!this.sharedServer() || this.host.teamAdmin?.()) return;
     this.assertMayRemoveTeamServer(await this.teamServerCopy(id));
+  }
+
+  /** A connection to the team's tracker or wiki writes there in the team's name: on a shared server it is the administrator's to set up. */
+  private assertIntegrationAdmin(): void {
+    if (this.sharedServer() && !this.host.teamAdmin?.())
+      throw new Error("Only an administrator of this server connects Jira or Confluence.");
   }
 
   /** On a shared server, the team's bucket is the administrator's to set up, change or disconnect: one member's change is everyone's. */
@@ -2319,6 +2343,11 @@ export class HubService {
         rebuilt: Object.fromEntries(this.lastRebuilds),
       },
       notifications: this.notificationsView(),
+      atlassian: {
+        jira: this.atlassian.view("jira"),
+        confluence: this.atlassian.view("confluence"),
+        canChange: !this.sharedServer() || Boolean(this.host.teamAdmin?.()),
+      },
       serverFacts: this.factsView(),
       alertIntake: {
         canReceive: Boolean(this.host.alertHookOwner),
@@ -3742,9 +3771,16 @@ export class HubService {
           );
         const who = await this.resolveActorName();
         const note = request.note?.trim();
-        const decided = note
+        let decided = note
           ? withComment(ticket, who, `${request.approve ? "Approved" : "Sent back"}: ${note}`)
           : ticket;
+        // A ticket that mirrors an issue: the decision is written there too, with who made it.
+        if (ticket.external) {
+          if (!note && request.approve) decided = withComment(ticket, who, "Approved as done.");
+          const last = decided.comments?.[decided.comments.length - 1];
+          if (last && decided !== ticket)
+            decided = { ...decided, comments: decided.comments!.map((c) => (c.id === last.id ? { ...c, push: "jira" as const } : c)) };
+        }
         this.putTicket({
           ...decided,
           status: request.approve ? "done" : "todo",
@@ -3982,6 +4018,35 @@ export class HubService {
         await this.notifyStore.save();
         break;
       }
+      case "atlassian-save": {
+        this.assertIntegrationAdmin();
+        await this.atlassian.save(request.connection);
+        void this.audit()
+          .append({
+            kind: "setting",
+            actor: await this.resolveActorName(),
+            target: "sshs3 on this computer",
+            what: `Connection to ${request.connection.product === "jira" ? "Jira" : "Confluence"} saved: ${hostOf(request.connection.baseUrl)}${request.connection.product === "jira" && request.connection.projects?.length ? `, projects ${request.connection.projects.join(", ")}` : ""}`,
+            outcome: "completed",
+          })
+          .catch(() => undefined);
+        break;
+      }
+      case "atlassian-test":
+        this.assertIntegrationAdmin();
+        reply = { atlassianTest: await this.atlassian.test(request.product) };
+        break;
+      case "atlassian-disconnect": {
+        this.assertIntegrationAdmin();
+        await this.atlassian.disconnect(request.product);
+        void this.audit()
+          .append({ kind: "setting", actor: await this.resolveActorName(), target: "sshs3 on this computer", what: `Connection to ${request.product === "jira" ? "Jira" : "Confluence"} removed`, outcome: "completed" })
+          .catch(() => undefined);
+        break;
+      }
+      case "jira-sync-now":
+        reply = { jiraSync: await this.atlassian.syncJira(Date.now(), true) };
+        break;
       case "notify-channel-delete":
         this.notifyStore.data.channels = this.notifyStore.data.channels.filter((c) => c.id !== request.id);
         await this.notifyStore.save();
@@ -7410,6 +7475,7 @@ export class HubService {
   // ---- notifications out -----------------------------------------------------
 
   private readonly notifyStore: NotifyStore;
+  readonly atlassian: AtlassianBridge;
   private readonly runTimers = new Map<string, { timer: NodeJS.Timeout; endsAt: number }>();
   private inboxDirty = false;
   private inboxTimer?: NodeJS.Timeout;
@@ -8259,6 +8325,8 @@ export class HubService {
     void this.work()
       ?.put("tickets", ticket)
       .catch((e) => (this.workSyncError = safeError(e)));
+    // Its issue may be owed a result, a decision or a close: looked at on the next tick, not in two minutes.
+    if (ticket.external && had && had.status !== ticket.status) this.atlassian.kick();
     this.changed();
   }
 
@@ -8827,6 +8895,8 @@ export class HubService {
       const aiEnabled = (await this.config.getView()).enabled;
       const now = Date.now();
       void this.workTick(now, aiEnabled).catch((e) => log.warn("Board tick failed", safeError(e)));
+      // The board mirrors Jira whether or not a model is set up: it is the team's record either way.
+      void this.atlassian.syncJira(now).catch((e) => log.warn("Reading Jira failed", safeError(e)));
       if (!aiEnabled) return;
       void (async () => {
         await this.recoverUnreadSessions(now);
