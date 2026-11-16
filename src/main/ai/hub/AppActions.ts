@@ -37,6 +37,7 @@ import {
   isDemoMode,
   mcpCatalog,
 } from "./demoWorkspace";
+import { simWorld } from "../../sim/SimWorld";
 import { isDemoTarget } from "../../demo/demoMode";
 import { nextRef } from "./ToolBroker";
 
@@ -2102,6 +2103,12 @@ export async function handleAppAction(
                 source: `terminal:${openSession.id}`,
               };
             }
+          }
+          const simNode = isDemoTarget(srv.id) ? simWorld().host(srv.name, srv.host, srv.id) : undefined;
+          if (simNode) {
+            // A server of a running scenario: the command runs on its state, as in its terminal.
+            const ran = simWorld().shell(simNode).run(command);
+            return { node: srv.name, host: srv.host, nodeRole: srv.nodeRole, exitCode: ran.code, output: ran.output, source: `demo-cluster:${srv.id}` };
           }
           if (isDemoTarget(srv.id)) {
             return {

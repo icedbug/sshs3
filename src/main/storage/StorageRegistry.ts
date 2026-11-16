@@ -3,6 +3,8 @@ import { LocalStorageProvider } from './LocalStorageProvider';
 import { SFTPStorageProvider } from './SFTPStorageProvider';
 import { S3StorageProvider } from './S3StorageProvider';
 import { K8sPodStorageProvider } from './K8sPodStorageProvider';
+import { SimStorageProvider } from "../sim/SimStorageProvider";
+import { simWorld } from "../sim/SimWorld";
 import { DemoStorageProvider } from '../demo/DemoStorageProvider';
 import { isDemoTarget } from '../demo/demoMode';
 import type { IStorageProvider, SFTPConfig } from '../../shared/types/storage';
@@ -71,6 +73,12 @@ export class StorageRegistry {
           throw new Error(`SFTP config is required for provider "${config.id}"`);
         }
         if (isDemoTarget(config.id, config.sftpConfig.id, connection.profileId)) {
+          // A server of a running scenario: its files are the ones its terminal works on.
+          const simRefs = [config.sftpConfig.name, config.sftpConfig.host, config.sftpConfig.id, connection.profileId].filter((r): r is string => !!r);
+          if (simWorld().host(...simRefs)) {
+            provider = new SimStorageProvider(config.id, config.name || config.sftpConfig.name || config.sftpConfig.host, simRefs);
+            break;
+          }
           provider = new DemoStorageProvider({
             id: config.id,
             name: config.name || config.sftpConfig.name || config.sftpConfig.host,
