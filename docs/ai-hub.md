@@ -950,6 +950,94 @@ limits on reading history for some kinds of apps; an app made for your own
 workspace should not be affected, and the reader waits when Slack asks it to,
 but confirm it on the first real connection.
 
+## The demo lab's incidents (`src/main/sim/`)
+
+Demo mode has a lab of simulated servers that hold state, and incidents to
+play in it. It serves two things: showing an agent solve something, and
+finding out whether an agent solves it well. Nothing in it reaches a real
+machine or a real service.
+
+**Servers that remember.** A `SimHost` has files, folders, disks, services,
+processes, packages, certificates and a journal. A command reads and changes
+that state: `df` adds up the files that are there, `sed -i` changes the file
+`cat` then shows, `systemctl restart nginx` succeeds only if nginx accepts its
+configuration. What follows from a state follows by itself after every
+command (`host.laws`, `host.settle()`): once the WAL archive works again,
+PostgreSQL archives its backlog and the disk empties. There are no timers:
+the same state gives the same answer.
+
+**A command line, within limits.** `SimShell` reads pipes, `&&`, `||`, `;`,
+redirections, quotes, globs, `sudo` and `sh -c`. The commands are tables:
+
+| Module | Commands |
+|---|---|
+| `commands/files.ts` | `ls cat head tail grep wc sort uniq cut tr awk sed find du stat file touch mkdir rm mv cp tee chmod chown diff test` and the usual small ones |
+| `commands/system.ts` | `systemctl service journalctl df free uptime ps pgrep kill ss netstat ip hostname uname date id which dpkg apt crontab dmesg openssl x509` |
+| `commands/net.ts` | `curl getent host nslookup dig ping nc` against the lab's own names and ports |
+| `programs/postgres.ts` | `psql -c` (what a server says about itself), `pg_lsclusters pg_isready pg_ctlcluster` |
+| `programs/nginx.ts` | `nginx -t`, `-T`, `-s reload` |
+| a scenario's own | `aws s3`, `ufw`, `certbot`, ONTAP's `volume` and `qos`, `ceph` |
+
+A command the lab does not have answers `command not found`, and an option it
+does not have says it "is not part of this simulation". Both are written down
+(`world.unsupported()`) and shown on the card, so the list can grow where
+agents actually reach. This is the lab's main limit: an agent that tries
+something unusual gets less than a real machine would give it.
+
+**One state, every way in.** The terminal (`DemoVirtualPty`, which also
+understands the frame the agent engine wraps a command in, so
+`terminal_command`, approvals and recordings work as on a real server), the
+file manager (`SimStorageProvider`, signed in as the login user), a cluster
+run, and server facts (`sim/facts.ts` prints the real facts script's format,
+so the real parser and the real "what changed" are used) all work on the same
+`SimHost`.
+
+**An incident is a `SimScenario`** (`scenarios/*.ts`): `build(world)` puts the
+servers in the lab with the fault in them; `alert`, `chat` and `activity` are
+where the clues are; `checks` say what a good outcome is; `solutions` are a
+careful and a careless way through it, as lines to run. Starting one
+(`sim-start`, demo mode only) adds its servers to the inventory, puts its
+chat in the team's chat index as from a bot, writes its activity, and posts
+its alert through the normal alert intake, so a ticket appears on the board.
+`sim-reset` takes all of it away again.
+
+| Scenario | The fault | The trap |
+|---|---|---|
+| `pg-wal-full` | The WAL archive points at a gateway that was decommissioned; the disk fills | Deleting WAL by hand, or turning archiving off |
+| `nginx-bad-config` | A rate-limit zone defined under one name and used under another; nginx stayed down after a nightly restart | Copying the backup file back and losing the rate limit |
+| `cert-renewal` | Port 80 was closed in a hardening round, so the renewal's challenge fails | Switching the firewall off, or a self-signed certificate |
+| `ontap-noisy-neighbour` | A scratch volume without a QoS limit starves the database volume | Taking the scratch volume offline |
+| `ceph-nearfull` | The balancer was left off after an upgrade; one OSD is nearly full | Raising the nearfull ratio, or marking the OSD out |
+
+**Judged from the state, not by a model.** Every check is one of four kinds:
+the trouble is gone (`resolved`), its cause is fixed (`root-cause`), nothing
+was broken on the way (`no-damage`), and the report names the cause
+(`report`, a word match against a short list). The card "Scenarios" in the
+workforce view shows them turning while somebody works; the report is the
+last answer of the conversation about the scenario's server or ticket.
+
+**From the command line:** `npm run sim` lists the incidents;
+`npm run sim -- <id> --careful` (or `--careless`) runs a scripted solution;
+`--run <file>` runs the lines of a file; `--shell` lets a person work on it.
+The score is printed (`--json` for JSON) and the exit code is 0 when every
+check passes.
+
+What this does and does not show: the scripted solutions prove that the lab
+and its checks work (`tests/main/simScenarios.test.ts` runs both ways through
+every scenario). They say nothing about how good a model is. A run by a real
+agent goes through the app: start the scenario, start the alert's ticket, and
+read the card. The agent tests (`EvalSuite`) replay recorded tool answers and
+are not connected to the lab.
+
+**Writing a scenario.** Add a file under `scenarios/`, build the hosts with
+`world.addHost(init, "demo-ssh-<name>")` (the alias is the inventory id, and
+must start with `demo-`), register any commands of its own with
+`world.register`, give every check a `why` a person can act on, write both
+solutions, and add it to `SCENARIOS` in `lab.ts`. The shared tests then hold
+it to the rules: unsolved at the start with nothing broken, green by the
+careful way with no unsimulated command, and red on exactly
+`carelessFails` by the careless way.
+
 ## Knowledge base: what agents know (`KbCompile`, `KbLint`)
 
 The knowledge base is for the agents, not a document store for people. It has
