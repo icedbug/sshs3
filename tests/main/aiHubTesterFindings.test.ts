@@ -63,7 +63,7 @@ describe("a ticket a person works", () => {
     const agents = (await hub.snapshot()).agents;
     const id = (await hub.request({ action: "ticket-save", ticket: { title: "Check the certificates" } })).workTickets![0].id;
     expect((await hub.snapshot()).workTickets!.find((t) => t.id === id)!.status).toBe("backlog");
-    const given = await hub.request({ action: "ticket-save", ticket: { id, title: "Check the certificates", assigneeAgentId: agents[0].id } });
+    const given = await hub.request({ action: "ticket-save", ticket: { id, title: "Check the certificates", assigneeAgentId: agents![0].id } });
     expect(given.workTickets!.find((t) => t.id === id)!.status).toBe("todo");
   });
 });
