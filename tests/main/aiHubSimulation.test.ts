@@ -107,4 +107,21 @@ describe("the demo lab's scenarios", () => {
     expect((ended.workTickets ?? []).filter((t) => t.alert)).toEqual([]);
     expect(simWorld().host("pg-prod-db01")).toBeUndefined();
   });
+
+  it("can each be started, worked to green by their careful way, and ended", async () => {
+    const hub = await demoHub();
+    for (const scenario of SCENARIOS) {
+      const started = await hub.request({ action: "sim-start", scenarioId: scenario.id });
+      const running = started.simulation!.running!;
+      expect(running.id).toBe(scenario.id);
+      expect(started.workTickets!.find((t) => t.id === running.ticketId)?.title).toContain(scenario.alert!.summary);
+      expect(getDemoServers().filter((s) => scenario.servers.some((x) => x.id === s.id))).toHaveLength(scenario.servers.length);
+      runLines(simWorld(), scenario.solutions.careful);
+      const now = (await hub.snapshot()).simulation!.running!;
+      expect(now.checks.filter((c) => !c.pass).map((c) => c.id), scenario.id).toEqual(["report"]);
+    }
+    const ended = await hub.request({ action: "sim-reset" });
+    expect(ended.simulation!.running).toBeUndefined();
+    expect(getDemoServers().filter((s) => SCENARIOS.some((x) => x.servers.some((y) => y.id === s.id)))).toEqual([]);
+  });
 });

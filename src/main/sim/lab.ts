@@ -2,11 +2,15 @@ import { fileCommands } from "./commands/files";
 import { netCommands } from "./commands/net";
 import { systemCommands } from "./commands/system";
 import { scoreScenario, type ScenarioScore, type SimScenario } from "./Scenario";
+import { cephNearfull } from "./scenarios/cephNearfull";
+import { certRenewal } from "./scenarios/certRenewal";
+import { nginxBadConfig } from "./scenarios/nginxBadConfig";
+import { ontapNoisyNeighbour } from "./scenarios/ontapNoisyNeighbour";
 import { pgWalFull } from "./scenarios/pgWalFull";
 import { setSimWorld, simWorld, SimWorld } from "./SimWorld";
 
 /** The incidents the lab can play. */
-export const SCENARIOS: SimScenario[] = [pgWalFull];
+export const SCENARIOS: SimScenario[] = [pgWalFull, nginxBadConfig, certRenewal, ontapNoisyNeighbour, cephNearfull];
 
 export const scenarioById = (id: string): SimScenario | undefined => SCENARIOS.find((s) => s.id === id);
 

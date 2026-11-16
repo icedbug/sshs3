@@ -1,3 +1,4 @@
+import { isIPv4 } from "node:net";
 import { SimHost, type SimHostInit } from "./SimHost";
 import { SimShell, type SimCommand } from "./SimShell";
 
@@ -56,7 +57,7 @@ export class SimWorld {
   /** The address a name leads to, or nothing when it does not resolve. An address is its own answer. */
   resolve(name: string): string | undefined {
     const key = name.trim().toLowerCase();
-    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(key)) return key;
+    if (isIPv4(key)) return key;
     return this.names.get(key) ?? this.names.get(key.split(".")[0]);
   }
 
