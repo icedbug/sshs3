@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { decryptSecretValue, encryptSecretValue } from "../../crypto/SecretFieldCrypto";
 import { ChatIndex, type ChatSearchQuery, type ChatThreadHit, type IndexedChannel, type StoredMessage } from "./ChatIndex";
-import { ChatError, mattermostApi, slackApi, type ChatAuth, type ChatRead, type ChatService, type ChatTransport } from "./ChatSources";
+import { ChatError, mattermostApi, slackApi, type ChatAuth, type ChatMessage, type ChatRead, type ChatService, type ChatTransport } from "./ChatSources";
 import { guardUrl, request, type GuardOptions } from "./Notifier";
 import { clip, safeError } from "./privacy";
 import type { ChatConnectionInput, ChatConnectionView } from "../../../shared/types/aiHub";
@@ -23,6 +23,8 @@ export interface ChatConnection {
   site?: string;
   channelsAt?: number;
   lastError?: string;
+  /** Put there by the demo lab's simulation: there is no service behind it, and nothing is ever asked of one. */
+  simulated?: boolean;
 }
 
 export interface ChatBridgeDeps {
@@ -113,7 +115,10 @@ export class ChatBridge {
     const content = JSON.stringify({
       version: 1,
       retentionDays: this.retentionDays,
-      connections: Object.values(this.connections).map((c) => ({ ...c, token: encryptSecretValue(c.token) })),
+      // A simulated connection is the lab's, for as long as its scenario runs: it is not kept.
+      connections: Object.values(this.connections)
+        .filter((c) => !c.simulated)
+        .map((c) => ({ ...c, token: encryptSecretValue(c.token) })),
     });
     const write = async (): Promise<void> => {
       await fs.mkdir(this.dir, { recursive: true, mode: 0o700 });
@@ -128,7 +133,7 @@ export class ChatBridge {
 
   private auth(service: ChatService, evenIfOff = false): ChatAuth | undefined {
     const c = this.connections[service];
-    if (!c?.token || (!c.enabled && !evenIfOff)) return undefined;
+    if (!c?.token || c.simulated || (!c.enabled && !evenIfOff)) return undefined;
     if (service === "mattermost" && !c.baseUrl) return undefined;
     return { service, baseUrl: c.baseUrl, token: c.token };
   }
@@ -272,6 +277,35 @@ export class ChatBridge {
   async setRetention(days: number | undefined): Promise<void> {
     this.retentionDays = days && days > 0 ? Math.min(3650, Math.floor(days)) : undefined;
     await this.persist();
+    this.changed();
+  }
+
+  /**
+   * Puts a chat in place that no service is behind: the demo lab's scenarios
+   * say what the team wrote, and it is searched and shown like the real thing.
+   * It is kept in memory and on this lab's disk only, and replaces what a
+   * scenario put there before.
+   */
+  async simulate(workspace: string, channels: { id: string; name: string }[], messages: ChatMessage[]): Promise<void> {
+    await this.load();
+    if (this.connections.slack && !this.connections.slack.simulated) throw new Error("A real Slack bot is connected here: the simulation does not replace it.");
+    await this.index.forgetService("slack");
+    this.connections.slack = { service: "slack", token: "simulated", enabled: true, bot: "sshs3-bot", workspace, site: "https://acme.slack.com", simulated: true, channelsAt: Date.now() };
+    this.index.setChannels("slack", channels.map((c) => ({ ...c, private: false })));
+    for (const c of channels) {
+      this.index.channel("slack", c.id)!.selected = true;
+      await this.index.add("slack", c.id, messages.filter((m) => m.channelId === c.id));
+      this.index.channel("slack", c.id)!.lastReadAt = Date.now();
+    }
+    await this.index.save();
+    this.changed();
+  }
+
+  /** Takes a simulated chat away again. A real connection is left alone. */
+  async endSimulation(): Promise<void> {
+    if (!this.connections.slack?.simulated) return;
+    delete this.connections.slack;
+    await this.index.forgetService("slack");
     this.changed();
   }
 

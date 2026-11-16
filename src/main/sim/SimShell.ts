@@ -1,4 +1,5 @@
 import { basename, dirname, normalizePath, type SimHost } from "./SimHost";
+import type { SimWorld } from "./SimWorld";
 
 /**
  * A command line for a simulated server.
@@ -183,6 +184,8 @@ export class SimShell {
   constructor(
     readonly host: SimHost,
     private readonly commands: Map<string, SimCommand>,
+    /** The lab this server is in: what a command that reaches another server asks. */
+    readonly world?: SimWorld,
   ) {
     this.cwd = this.home();
     host.mkdir(this.cwd);
@@ -205,6 +208,8 @@ export class SimShell {
   run(line: string): { output: string; code: number } {
     const result = this.exec(line, { root: false, stdin: "" });
     this.lastCode = result.code;
+    // What follows from the new state follows now, before the next command looks.
+    this.host.settle();
     this.history.push({ at: this.host.now(), line, code: result.code, root: /(^|[;&|]\s*)sudo\b/.test(line) });
     return { output: `${result.out}${result.err}`, code: result.code };
   }
@@ -254,7 +259,7 @@ export class SimShell {
         continue;
       }
       if (t.op === "|") {
-        if (!stage.argv.length) return fail("bash: syntax error near unexpected token `|'\n", 2);
+        if (!stage.argv.length && !stage.redirects.length) return fail("bash: syntax error near unexpected token `|'\n", 2);
         stages.push({ argv: [], redirects: [] });
         continue;
       }
@@ -266,7 +271,7 @@ export class SimShell {
       if (!target || isOp(target)) return fail("bash: syntax error near unexpected token `newline'\n", 2);
       stage.redirects.push({ op: t.op, target: target.text });
     }
-    if (!stages[stages.length - 1].argv.length) return fail("bash: syntax error near unexpected token `|'\n", 2);
+    if (!stages[stages.length - 1].argv.length && !stages[stages.length - 1].redirects.length) return fail("bash: syntax error near unexpected token `|'\n", 2);
     let stdin = opts.stdin;
     let last: SimResult = ok();
     const errors: string[] = [];
@@ -283,6 +288,7 @@ export class SimShell {
     for (const r of stage.redirects.filter((x) => x.op === "<")) {
       const file = this.host.read(normalizePath(r.target, this.cwd));
       if (!file) return fail(`bash: ${r.target}: No such file or directory\n`, 1);
+      if (!this.mayRead(r.target, opts.root)) return fail(`bash: ${r.target}: Permission denied\n`, 1);
       stdin = file.content;
     }
     // Names with a pattern become the files they match; one that matches nothing stays as it was typed.
@@ -361,7 +367,8 @@ export class SimShell {
     if (!this.mayWrite(p, root)) return "Permission denied";
     const had = this.host.read(p);
     const next = append ? `${had?.content ?? ""}${text}` : text;
-    const grows = Buffer.byteLength(next, "utf8") - (had ? Buffer.byteLength(had.content, "utf8") : 0);
+    // A file written anew gives back all it held, its bulk too; one added to keeps it.
+    const grows = Buffer.byteLength(next, "utf8") - (had ? (append ? Buffer.byteLength(had.content, "utf8") : this.host.sizeOf(had)) : 0);
     if (grows > 0 && !this.host.hasRoomFor(p, grows)) return "No space left on device";
     this.host.write(p, next, { pad: append ? had?.pad : 0, owner: had?.owner ?? (root ? "root" : this.host.user) });
     return undefined;

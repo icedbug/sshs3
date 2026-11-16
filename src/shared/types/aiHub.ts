@@ -1085,6 +1085,31 @@ export interface ExternalIssueRef {
   error?: string;
 }
 
+/**
+ * The demo lab's simulation: incidents that can be played in it, and how the
+ * one that is running stands. Judged from the simulated servers' state and
+ * from what was run on them, never by a model.
+ */
+export interface SimulationView {
+  scenarios: { id: string; title: string; story: string; target: string; prompt: string }[];
+  running?: {
+    id: string;
+    title: string;
+    startedAt: number;
+    /** The server the work starts on. */
+    target: string;
+    /** The ticket the scenario's alert became. */
+    ticketId?: string;
+    checks: { id: string; kind: "resolved" | "root-cause" | "no-damage" | "report"; title: string; pass: boolean; why: string }[];
+    passed: number;
+    total: number;
+    /** How many commands were run on the simulated servers. */
+    commands: number;
+    /** Commands that were asked for and are not simulated. */
+    unsupported: string[];
+  };
+}
+
 /** The services a team's bot can read channels of. */
 export type ChatServiceName = "slack" | "mattermost";
 
@@ -1761,6 +1786,8 @@ export interface HubSnapshot {
     /** Server ids being read right now. */
     collecting: string[];
   };
+  /** The demo lab's simulation. Only in demo mode. */
+  simulation?: SimulationView;
   /**
    * The team's bot in Slack and Mattermost: which channels it reads, and how
    * much is kept. The team's, not a person's: `canChange` is false for a
@@ -1994,6 +2021,8 @@ export type HubRequest =
   | { action: "kb-ingest-confluence"; spaceKey?: string; pageId?: string }
   | { action: "kb-confluence-unfollow"; ref: string }
   | { action: "kb-page-publish"; id: string; spaceKey?: string; parentId?: string }
+  | { action: "sim-start"; scenarioId: string }
+  | { action: "sim-reset" }
   | { action: "chat-source-save"; connection: ChatConnectionInput }
   | { action: "chat-source-test"; service: ChatServiceName }
   | { action: "chat-source-disconnect"; service: ChatServiceName; forget?: boolean }

@@ -37,6 +37,7 @@ import type {
   TerminalSession,
   WorkforceRun,
   WorkGoal,
+  SimulationView,
   TicketChatRef,
   WorkTicket,
   WorkTicketStatus,
@@ -124,6 +125,9 @@ import { AtlassianStore } from "./AtlassianStore";
 import { AtlassianBridge } from "./AtlassianBridge";
 import { ChatBridge } from "./ChatBridge";
 import { chatTerms } from "./ChatIndex";
+import { runningScenario, SCENARIOS, scenarioById, scoreRunning, startScenario, stopScenario } from "../../sim/lab";
+import { simFactsOutput } from "../../sim/facts";
+import { simWorld } from "../../sim/SimWorld";
 import { FactsStore, flagStaleMemories, type FactsRecord } from "./FactsStore";
 import { buildScript, diffFacts, factsHash, factsSummary, isWatchPath, parseFacts, problems } from "./ServerFacts";
 import { demoFactsOutput } from "./demoFacts";
@@ -163,6 +167,9 @@ import {
   deleteDemoInfraEdge,
   deleteDemoKbDocument,
   deleteDemoMcpServer,
+  upsertDemoServer,
+  deleteDemoServer,
+  appendDemoActivity,
   getBuiltinAgents,
   getBuiltinKbDocuments,
   getBuiltinSkillsAndMemories,
@@ -1675,6 +1682,105 @@ export class HubService {
     this.assertMayRemoveTeamServer(await this.teamServerCopy(id));
   }
 
+  // ---- the demo lab's simulation ----------------------------------------------
+
+  private simulation?: { startedAt: number; ticketId?: string; servers: string[] };
+
+  /**
+   * Starts an incident in the demo lab: its servers with the fault in them,
+   * what the team wrote about it in chat, what a teammate did, and the alert
+   * that reports it, which becomes a ticket like any alert. Whatever scenario
+   * ran before is gone.
+   */
+  private async startSimulation(scenarioId: string): Promise<void> {
+    if (!isDemoMode()) throw new Error("Scenarios run in the demo lab only: start sshs3 in demo mode.");
+    const scenario = scenarioById(scenarioId);
+    if (!scenario) throw new Error("There is no such scenario.");
+    await this.endSimulation();
+    const world = startScenario(scenario);
+    const now = world.now();
+    for (const server of scenario.servers)
+      upsertDemoServer({ id: server.id, name: server.name, host: server.host, username: server.username, cluster: server.cluster, folder: `Scenario / ${server.cluster}`, description: server.description, tags: server.tags, shared: true });
+    // The chat first: the alert's ticket looks through it.
+    const said = scenario.chat ?? [];
+    const channels = [...new Set(said.map((m) => m.channel))].map((name, i) => ({ id: `CSIM${i + 1}`, name }));
+    const tsOf = (minutesAgo: number): string => ((now - minutesAgo * 60_000) / 1000).toFixed(6);
+    await this.chat.simulate(
+      "Acme",
+      channels,
+      said.map((m) => {
+        const channelId = channels.find((c) => c.name === m.channel)!.id;
+        const id = tsOf(m.minutesAgo);
+        const threadId = m.replyTo === undefined ? id : tsOf(said[m.replyTo].minutesAgo);
+        return { id, channelId, at: now - m.minutesAgo * 60_000, author: m.author, text: m.text, threadId, link: `https://acme.slack.com/archives/${channelId}/p${id.replace(".", "")}` };
+      }),
+    );
+    for (const [i, event] of (scenario.activity ?? []).entries())
+      appendDemoActivity({ id: `sim-${scenario.id}-${i}`, at: now - event.minutesAgo * 60_000, actor: event.actor, kind: event.kind as never, targetLabel: event.target, summary: event.summary } as WorkspaceActivityEvent);
+    this.simulation = { startedAt: now, servers: scenario.servers.map((s) => s.id) };
+    if (scenario.alert) {
+      const made = await this.takeAlerts(
+        parseAlerts({
+          status: "firing",
+          alerts: [
+            {
+              status: "firing",
+              fingerprint: `sim-${scenario.id}-${now}`,
+              labels: { alertname: scenario.alert.name, severity: scenario.alert.severity, instance: scenario.alert.instance },
+              annotations: { summary: scenario.alert.summary, description: scenario.alert.description },
+            },
+          ],
+        }),
+      );
+      this.simulation.ticketId = made.created[0];
+    }
+    this.changed();
+  }
+
+  /** Takes the lab back to having no scenario: its servers, its chat and its ticket go. */
+  private async endSimulation(): Promise<void> {
+    const had = this.simulation;
+    stopScenario();
+    await this.chat.endSimulation();
+    if (!had) return;
+    this.simulation = undefined;
+    for (const id of had.servers) deleteDemoServer(id);
+    const ticket = had.ticketId ? this.store.data.workTickets?.find((t) => t.id === had.ticketId && !t.deleted) : undefined;
+    if (ticket && ticket.status !== "in_progress") this.putTicket({ ...ticket, deleted: true, deletedBy: "the demo lab", updatedAt: Date.now() });
+    this.changed();
+  }
+
+  /** The scenarios, and how the running one stands: read off the lab each time it is asked. */
+  private simulationView(): SimulationView {
+    const scenario = runningScenario();
+    const scenarios = SCENARIOS.map((s) => ({ id: s.id, title: s.title, story: s.story, target: s.target, prompt: s.prompt }));
+    if (!scenario || !this.simulation) return { scenarios };
+    // What whoever worked on it said at the end: the latest finished conversation about its server or its ticket.
+    const ticket = this.simulation.ticketId ? this.store.data.workTickets?.find((t) => t.id === this.simulation!.ticketId) : undefined;
+    const names = new Set(scenario.servers.map((s) => s.name));
+    const report = [...this.store.data.tasks]
+      .filter((t) => t.createdAt >= this.simulation!.startedAt - 1000 && !active(t) && (t.id === ticket?.taskId || names.has(t.target?.label ?? "")))
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .map((t) => [...t.messages].reverse().find((m) => m.role === "assistant" && m.text.trim())?.text)
+      .find(Boolean);
+    const score = scoreRunning(report ?? ticket?.result)!;
+    return {
+      scenarios,
+      running: {
+        id: scenario.id,
+        title: scenario.title,
+        startedAt: this.simulation.startedAt,
+        target: scenario.target,
+        ticketId: this.simulation.ticketId,
+        checks: score.checks,
+        passed: score.passed,
+        total: score.total,
+        commands: score.commands,
+        unsupported: score.unsupported.slice(0, 20),
+      },
+    };
+  }
+
   /** A change to what the bot reads or keeps is written down with who made it. */
   private async chatDone(done: { target: string; what: string }): Promise<void> {
     await this.audit()
@@ -2370,6 +2476,7 @@ export class HubService {
         rebuilt: Object.fromEntries(this.lastRebuilds),
       },
       notifications: this.notificationsView(),
+      ...(isDemoMode() ? { simulation: this.simulationView() } : {}),
       chatSources: {
         connections: this.chat.view(),
         canChange: !this.sharedServer() || Boolean(this.host.teamAdmin?.()),
@@ -4092,6 +4199,12 @@ export class HubService {
         }
         break;
       }
+      case "sim-start":
+        await this.startSimulation(requiredText(request.scenarioId));
+        break;
+      case "sim-reset":
+        await this.endSimulation();
+        break;
       case "chat-source-save":
         this.assertChatAdmin();
         await this.chatDone(await this.chat.save(request.connection));
@@ -7499,7 +7612,15 @@ export class HubService {
       const base = { serverId: server.id, name: server.name, attemptedAt: now, dismissed: prev?.dismissed };
       const demo = isDemoMode();
       const result = demo
-        ? { ok: true, stdout: demoFactsOutput(server, now, prev?.facts ? 1 : 0), via: "demo" as const, error: undefined }
+        ? {
+            ok: true,
+            // A server the lab simulates is read from its state; the others answer as scripted.
+            stdout: simWorld().host(server.id, server.name, server.host)
+              ? simFactsOutput(simWorld().host(server.id, server.name, server.host)!, settings.watchPaths)
+              : demoFactsOutput(server, now, prev?.facts ? 1 : 0),
+            via: "demo" as const,
+            error: undefined,
+          }
         : this.host.execOnServer
           ? await this.host
               .execOnServer(server.id, buildScript(settings.watchPaths), 60_000)

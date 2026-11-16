@@ -40,6 +40,12 @@ export interface SimService {
    * up but cannot write. Asked by `curl`, by clients, and by a scenario's checks.
    */
   healthy?: (host: SimHost) => string | undefined;
+  /**
+   * Called when it has started or reloaded: the moment a program takes in its
+   * configuration. What a file says and what the running program goes by are
+   * two things until then.
+   */
+  applied?: (host: SimHost) => void;
   /** What `ExecStart` is, for `systemctl status` and `ps`. */
   command?: string;
 }
@@ -112,7 +118,7 @@ export class SimHost {
   memoryMb: number;
   cpus: number;
   readonly files = new Map<string, SimFile>();
-  private readonly dirs = new Set<string>(["/"]);
+  private readonly dirs = new Set<string>(["/", "/tmp", "/var", "/var/tmp"]);
   readonly services = new Map<string, SimService>();
   disks: SimDisk[] = [];
   packages: Record<string, string> = {};
@@ -120,6 +126,13 @@ export class SimHost {
   readonly journal: SimLogLine[] = [];
   /** Anything a scenario keeps on the host that is not a file: an appliance's volumes, a database's settings. */
   readonly facts = new Map<string, unknown>();
+  /**
+   * What happens by itself on this server, given how it stands: a database
+   * that archives its logs once it can reach the archive, a disk that fills
+   * while it cannot. Applied after every command, and only then: nothing
+   * moves on a timer, so the same commands always lead to the same state.
+   */
+  readonly laws: ((host: SimHost) => void)[] = [];
   /** Extra processes beside the services', for `ps`. */
   processes: { pid: number; user: string; cpu: number; mem: number; command: string }[] = [];
   private nextPid = 2000;
@@ -263,7 +276,7 @@ export class SimHost {
   /** Starts a service if it can start. Says why not when it cannot, and leaves it failed. */
   start(name: string): string | undefined {
     const service = this.service(name);
-    if (!service) return `Unit ${name}.service not found.`;
+    if (!service) return `Unit ${name.replace(/\.service$/, "")}.service not found.`;
     const why = service.check?.(this);
     if (why) {
       service.state = "failed";
@@ -279,13 +292,14 @@ export class SimHost {
       service.pid = this.nextPid++;
       service.since = this.now();
       this.log("systemd", `Started ${service.name}.service - ${service.description}.`);
+      service.applied?.(this);
     }
     return undefined;
   }
 
   stop(name: string): string | undefined {
     const service = this.service(name);
-    if (!service) return `Unit ${name}.service not found.`;
+    if (!service) return `Unit ${name.replace(/\.service$/, "")}.service not found.`;
     if (service.state === "active") this.log("systemd", `Stopped ${service.name}.service - ${service.description}.`);
     service.state = "inactive";
     service.pid = undefined;
@@ -295,7 +309,7 @@ export class SimHost {
 
   restart(name: string): string | undefined {
     const service = this.service(name);
-    if (!service) return `Unit ${name}.service not found.`;
+    if (!service) return `Unit ${name.replace(/\.service$/, "")}.service not found.`;
     // Stopped first, as systemd does: a service that cannot start again is down after a restart.
     this.stop(name);
     return this.start(name);
@@ -304,7 +318,7 @@ export class SimHost {
   /** Reloads the configuration of a running service: refused, and the service left as it runs, when the configuration is bad. */
   reload(name: string): string | undefined {
     const service = this.service(name);
-    if (!service) return `Unit ${name}.service not found.`;
+    if (!service) return `Unit ${name.replace(/\.service$/, "")}.service not found.`;
     if (service.state !== "active") return `${service.name}.service is not active, cannot reload.`;
     const why = service.check?.(this);
     if (why) {
@@ -313,7 +327,13 @@ export class SimHost {
       return why;
     }
     this.log("systemd", `Reloaded ${service.name}.service - ${service.description}.`);
+    service.applied?.(this);
     return undefined;
+  }
+
+  /** Lets what follows from the state follow: called after every command. */
+  settle(): void {
+    for (const law of this.laws) law(this);
   }
 
   /** What is listening: the ports of the services that run. */

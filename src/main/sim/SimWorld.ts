@@ -10,6 +10,16 @@ export class SimWorld {
   /** Other names a host answers to: its address, a saved server's id. */
   private readonly aliases = new Map<string, string>();
   readonly commands = new Map<string, SimCommand>();
+  /**
+   * The lab's name service: which names lead where. A name that is not here
+   * does not resolve, which is how a decommissioned gateway looks from a server.
+   */
+  readonly names = new Map<string, string>();
+  /**
+   * Things on the lab's network that are not servers one can log in to: an S3
+   * gateway, an ACME service. By `name:port`; each answers a request.
+   */
+  readonly endpoints = new Map<string, (path: string, from: SimHost) => { status: number; body: string }>();
   /** The shells that were opened, for what was run in them. */
   readonly shells: SimShell[] = [];
   private offset = 0;
@@ -28,6 +38,7 @@ export class SimWorld {
     const host = new SimHost(init, this.now);
     this.hosts.set(init.name.toLowerCase(), host);
     for (const alias of [init.address, ...aliases]) if (alias) this.aliases.set(alias.toLowerCase(), init.name.toLowerCase());
+    this.names.set(init.name.toLowerCase(), init.address);
     return host;
   }
 
@@ -42,13 +53,20 @@ export class SimWorld {
     return undefined;
   }
 
+  /** The address a name leads to, or nothing when it does not resolve. An address is its own answer. */
+  resolve(name: string): string | undefined {
+    const key = name.trim().toLowerCase();
+    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(key)) return key;
+    return this.names.get(key) ?? this.names.get(key.split(".")[0]);
+  }
+
   register(commands: Record<string, SimCommand>): void {
     for (const [name, command] of Object.entries(commands)) this.commands.set(name, command);
   }
 
   /** A new shell on a host: its own working directory, the host's one state. */
   shell(host: SimHost): SimShell {
-    const shell = new SimShell(host, this.commands);
+    const shell = new SimShell(host, this.commands, this);
     this.shells.push(shell);
     return shell;
   }

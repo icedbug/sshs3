@@ -11,6 +11,7 @@ import type {
 import { ConfirmButton } from "./ConfirmButton";
 import { AtlassianCard } from "./AtlassianCard";
 import { ChatThread } from "./TeamChatCard";
+import { ScenariosCard } from "./ScenariosCard";
 import { HypothesisTree } from "./HypothesisTree";
 import { type Act, formatTokenUsage, modes, TABULAR_NUMS_STYLE } from "./panelShared";
 import { RichMarkdownContent } from "./RichMarkdownContent";
@@ -385,6 +386,7 @@ export function WorkforceView({
         {heartbeat ? " · Heartbeat on: this app starts tickets by itself." : ""}
       </small>
 
+      <ScenariosCard hub={hub} act={act} onOpenTicket={(id) => setOpenTicketId(id)} />
       <AtlassianCard product="jira" hub={hub} act={act} />
 
       {workforcePaused && (
