@@ -1,5 +1,22 @@
 import type { IPty, IDisposable } from 'node-pty';
 import type { SSHConnectionConfig } from '../../shared/types/ssh';
+import type { SimShell } from '../sim/SimShell';
+import { simWorld } from '../sim/SimWorld';
+
+/**
+ * The frame the agent runtime types around a command (see `commandEnvelope` in
+ * ai/hub/shellAdapters.ts): a mark before, the command in a subshell, and a
+ * mark after that carries the exit code and the folder. A real shell runs the
+ * `printf`s; the virtual one reads the frame and prints the marks itself.
+ */
+const AGENT_FRAME =
+  /^printf '\\033\]777;(SSHS3;[A-Za-z0-9]+);BEGIN\\007'; \(eval ([\s\S]+)\); __sshs3_rc=\$\?; printf '\\033\]777;SSHS3;[A-Za-z0-9]+;END;%s;%s\\007' "\$__sshs3_rc" "\$PWD"\r?$/;
+
+/** A command as the frame quotes it for `eval`, back to what was meant. */
+function unquoteForEval(quoted: string): string {
+  const inner = quoted.startsWith("'") && quoted.endsWith("'") ? quoted.slice(1, -1) : quoted;
+  return inner.replace(/'"'"'/g, "'");
+}
 
 /**
  * The demo workspace's virtual terminal: a scripted shell that stands in for an SSH session to one of
@@ -502,6 +519,25 @@ export class DemoVirtualPty implements IPty {
   private history: string[] = [];
   private historyIdx = -1;
   private killed = false;
+  /** The shell on the simulated server this terminal is on, when the lab has that server. */
+  private simShell?: SimShell;
+
+  /**
+   * Runs a command where this terminal is: on the lab's simulated server when
+   * there is one by this name or address (it has state, and the command may
+   * change it), else as the scripted appliance the demo has always had.
+   */
+  private runHere(command: string): { output: string; exitCode: number; cwd: string } {
+    const host = simWorld().host(this.config.name, this.config.host, this.config.id);
+    if (!host) {
+      this.simShell = undefined;
+      const result = executeDemoServerCommand(this.config.name || this.config.host, command);
+      return { ...result, cwd: '~' };
+    }
+    if (this.simShell?.host !== host) this.simShell = simWorld().shell(host);
+    const result = this.simShell.run(command);
+    return { output: result.output.replace(/\n$/, '').replace(/\r?\n/g, '\r\n'), exitCode: result.code, cwd: this.simShell.cwd };
+  }
 
   constructor(
     private readonly config: SSHConnectionConfig,
@@ -521,6 +557,11 @@ export class DemoVirtualPty implements IPty {
   }
 
   private getPrompt(): string {
+    const sim = simWorld().host(this.config.name, this.config.host, this.config.id);
+    if (sim && sim.kind === 'linux') {
+      const cwd = this.simShell?.host === sim ? this.simShell.cwd : `/home/${sim.user}`;
+      return `\x1b[1;32m${sim.user}@${sim.name}\x1b[0m:\x1b[1;34m${cwd === `/home/${sim.user}` ? '~' : cwd}\x1b[0m$ `;
+    }
     const h = `${this.config.name || ''} ${this.config.host || ''}`.toLowerCase();
     if (h.includes('fas9000')) {
       return '\x1b[1;36mNetApp-DR-Uppsala::>\x1b[0m ';
@@ -605,6 +646,16 @@ export class DemoVirtualPty implements IPty {
 
   public write(data: string): void {
     if (this.killed) return;
+
+    // A command the agent runtime framed: run it, and print the marks a real shell's printf would.
+    const frame = AGENT_FRAME.exec(data);
+    if (frame) {
+      const res = this.runHere(unquoteForEval(frame[2]));
+      this.emitData(
+        `\x1b]777;${frame[1]};BEGIN\x07${res.output ? `${res.output}\r\n` : ''}\x1b]777;${frame[1]};END;${res.exitCode};${res.cwd}\x07${this.getPrompt()}`
+      );
+      return;
+    }
 
     // Handle AI framed command execution (__SSHS3_START_<id>__ ... __SSHS3_END_<id>__)
     const startMatch = data.match(/__SSHS3_START_([a-zA-Z0-9_-]+)__/);
@@ -693,7 +744,7 @@ export class DemoVirtualPty implements IPty {
 
         if (cmd) {
           this.history.push(cmd);
-          const result = executeDemoServerCommand(this.config.name || this.config.host, cmd);
+          const result = this.runHere(cmd);
           if (result.output) {
             this.emitData(result.output + '\r\n');
           }
