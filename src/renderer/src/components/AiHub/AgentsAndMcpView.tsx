@@ -591,7 +591,12 @@ export function AgentsAndMcpView({
               >
                 {run.status}
               </span>
-              {run.simulated && <span className="ai-badge">demo — no model was called</span>}
+              {/* An example that came with the demo data describes no server as it is now. */}
+              {run.id.startsWith("demo-") ? (
+                <span className="ai-badge">Example from the demo data. Not the current state.</span>
+              ) : (
+                run.simulated && <span className="ai-badge">Demo: no model was called</span>
+              )}
             </summary>
             <div className="ai-run-body">
               {run.error && <p className="ai-error">{run.error}</p>}
