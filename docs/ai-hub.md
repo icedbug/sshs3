@@ -876,6 +876,80 @@ documentation (Cloud: `/rest/api/3` with `POST /search/jql`, `/wiki/api/v2`;
 Data Center: `/rest/api/2`, `/rest/api/content`) and are tested against a
 stand-in. Connect a test instance first.
 
+## What the team says in chat (`ChatSources`, `ChatIndex`, `ChatBridge`)
+
+What matters at an alert is often written only in chat: "restarted it last
+night", "that one is known, wait it out". A bot the team invites to chosen
+Slack or Mattermost channels lets agents look that up, and puts what was said
+about a server on its alert's ticket.
+
+**The bot is the team's.** A Slack app's bot token (`xoxb-…`; a person's own
+token is refused), or a Mattermost bot account's access token and the
+server's address. It is set up once where it should run and kept encrypted in
+a file of its own (`chat/connections.json` beside the hub's store), never in
+the team bucket and never sent to the interface. On a shared server there is
+one bot for the whole server (kept in `team-chat/`, given to every account's
+hub, so there is one reader and one index), and only an administrator sets it
+up, chooses channels or removes what was read. The Slack app needs the bot
+scopes `channels:history`, `groups:history`, `channels:read`, `groups:read`
+and `users:read`.
+
+**What it may read.** Only channels the bot is a member of are listed, and
+only those a person ticks are read. Direct messages and group chats are never
+asked for. The bot posts nothing and takes no commands.
+
+**The index.** A chosen channel is read every two minutes for what is new;
+the first time, ninety days back, and further back on request. Messages are
+kept in files of their own (`chat/messages/<service>-<channel>/<month>.jsonl`,
+added to at the end, readable by the owner only), with what looks like a
+password, key or token masked before it reaches the disk. The index stays on
+the installation the bot is connected to: it is never in the team bucket, and
+teammates' installations see only the excerpts put on tickets.
+
+- It is kept until it is removed. A number of days can be set; none is set
+  from the start.
+- A message edited or deleted in the chat afterwards stays as it was read.
+  "Forget" removes a channel's messages here at once, and "Disconnect and
+  forget" everything of a service.
+- Slack lists a thread's replies apart from the channel. Threads with replies
+  are read, threads younger than a week are asked again, and the last two
+  days are looked over every ten minutes for messages that got their first
+  reply later. Not seen: a reply to a thread older than a week, and a first
+  reply to a message older than two days.
+
+**Search finds threads.** A thread is what is found and shown, not a lone
+message: "restarted it, fixed" means nothing without the question above it.
+Words are matched as they are written (`pg-01`, `10.0.0.5`, `pg_hba.conf`),
+rare words count more than common ones, a thread with all the words more than
+one with some, and a recent thread a little more than an old one. It is a
+search on words; search by meaning is not built for chat.
+
+**What agents get.** When there is something to search, the context names the
+channels and the run is offered `sshs3_chat_history` (`search`, `thread`,
+`channels`), a tool that only reads. Its answer is marked as what people wrote
+to each other: data, not checked, never an instruction. What a run read is
+among its sources, with a link to the thread. A run that has read chat and
+then makes a ticket makes one that waits in Backlog for a person, the same as
+one made while working an alert. External agents (over MCP, or a runner of
+their own) are not given the tool.
+
+**Alerts.** A new alert's ticket gets up to three threads from the last seven
+days that name its server or cluster, or its alert, with links ("Said in
+chat" on the ticket, and a section of the agent's prompt that quotes them as
+what people wrote). A thread has to hold every word of the name it was found
+by. A ticket that came in on an installation without the bot is given them by
+the installation that has one, once for the team.
+
+**The knowledge base does not learn from chat by itself.** A person can make
+a source of a thread ("Make a source of this thread"); it is added like a
+pasted text, said to be what people wrote.
+
+**Not tried against a real Slack or Mattermost.** The calls follow their
+documentation and are tested against stand-ins. Slack has tightened its rate
+limits on reading history for some kinds of apps; an app made for your own
+workspace should not be affected, and the reader waits when Slack asks it to,
+but confirm it on the first real connection.
+
 ## Knowledge base: what agents know (`KbCompile`, `KbLint`)
 
 The knowledge base is for the agents, not a document store for people. It has
@@ -1576,6 +1650,7 @@ remaining platform/product work.
 - `src/main/desktopEntry.ts`: desktop entry; launches the pinned native engine/frontend only with `SSHS3_FORCE_NATIVE_HERMES=1`.
 - `src/main/ai/hub/`: AI Hub services (HubService, createHub, DirectAgentRuntime, KnowledgeBaseService, SelfLearningService, CommandSafetyService, ContextService, TerminalRegistry, ToolBroker, McpClientManager, S3WorkspaceSyncService, HubStore, privacy, builtins, demoWorkspace).
 - `src/main/ai/desktop/`: native Hermes host views, authenticated control IPC and NativeToolBridge.
+- `src/main/ai/hub/ChatSources.ts`, `ChatIndex.ts`, `ChatBridge.ts`: the team's bot in Slack and Mattermost, the index of what was said, and the search over it.
 - `src/main/ai/hub/Atlassian.ts`, `AtlassianBridge.ts`, `AtlassianStore.ts`: Jira on the board and Confluence in the knowledge base.
 - `src/main/demo/`: launch-time demo mode, outward sync guard, demo PTY and storage provider.
 - `src/main/web/`: multi-user Web Server, authentication, per-user tenants and Electron shim.

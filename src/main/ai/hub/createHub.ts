@@ -52,6 +52,8 @@ export interface CreateHubOptions {
   peerPresenceProvider?: HubHost["peerPresenceProvider"];
   onSharedWorkspaceChanged?: () => void;
   auditShipper?: HubHost["auditShipper"];
+  /** On the web server: the one chat bot every account's hub shares. */
+  teamChat?: HubHost["teamChat"];
 }
 
 export function createHub(
@@ -379,6 +381,7 @@ export function createHub(
     peerPresenceProvider: options?.peerPresenceProvider,
     onSharedWorkspaceChanged: options?.onSharedWorkspaceChanged,
     auditShipper: options?.auditShipper,
+    teamChat: options?.teamChat,
     file: (...args) => files.invoke(...args),
     restoreCheckpoint: (change, opts) => files.restoreCheckpoint(change, opts),
     delta: (delta) => {

@@ -684,6 +684,8 @@ export interface ExtraWorkspaceContext {
   recentServerChanges?: { name: string; cluster?: string; lines: string[] }[];
   /** How each server stood at its last reading, and how old that reading is. */
   serverFactsNow?: { name: string; cluster?: string; collectedAt: number; age: string; lines: string[] }[];
+  /** The channels of the team's chat that are kept and can be searched. Absent when there is no bot. */
+  teamChat?: { channels: string[]; note: string };
   workspaceServers?: WorkspaceServerSummary[];
   activityLog?: WorkspaceActivityEvent[];
   memories?: MemoryEntry[];
@@ -1158,6 +1160,7 @@ export class ContextService {
       workspaceRuleConflicts: ruleResolution.conflicts,
       inventory: stripInventoryObservedAt(this.store.data.inventory),
       infraDependencyGraph: confirmedEdges,
+      ...(extra?.teamChat ? { teamChat: extra.teamChat } : {}),
       ...(around.length ? { aroundThisTarget: around } : {}),
       coreMemories: deterministicSortByIdOrName(
         applies.filter((m) => m.kind !== "skill" && m.tier === "core"),

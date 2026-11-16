@@ -95,6 +95,16 @@ Confluence spaces again once a day. For work that should not be in one
 person's name, connect with a service account. Details:
 [the AI hub](ai-hub.md#jira-on-the-board-confluence-in-the-knowledge-base-atlassian-atlassianbridge).
 
+## The team's chat
+
+The server is the natural home of the team's chat bot (Settings, "What the
+team says in chat"): an administrator connects a Slack app or a Mattermost bot
+account and ticks the channels to read. There is one bot and one index for
+the whole server; every account's agents can search it, and alerts that come
+in get what was said about their server put on the ticket. What is read stays
+on the server's disk (`team-chat/` in its data folder), not in the team
+bucket. Details: [the AI hub](ai-hub.md#what-the-team-says-in-chat-chatsources-chatindex-chatbridge).
+
 ## What is on the servers, and what changed
 
 Under Infrastructure, "Read the servers on a schedule" lets the server read

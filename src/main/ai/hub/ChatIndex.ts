@@ -26,8 +26,10 @@ export interface IndexedChannel {
   error?: string;
   /** Not before this time: a pause the service asked for, or a wait after failures. */
   notBefore?: number;
-  /** Slack: threads that may still get replies, with the newest reply taken. */
-  threads?: Record<string, number>;
+  /** Slack: when the last two days were last looked over for messages that have since got replies. */
+  rescannedAt?: number;
+  /** Slack: threads that may still get replies: the newest reply taken, and when replies were last asked for. */
+  threads?: Record<string, { latest: number; checked: number }>;
 }
 
 /** One stored message. Its text is masked before it is written. */
@@ -199,7 +201,7 @@ export class ChatIndex {
     if (!channel) return;
     this.messages.delete(key(service, channelId));
     this.seen.delete(key(service, channelId));
-    Object.assign(channel, { selected: false, count: 0, readTo: undefined, oldest: undefined, gaps: undefined, threads: undefined, error: undefined, failures: undefined, notBefore: undefined });
+    Object.assign(channel, { selected: false, count: 0, readTo: undefined, oldest: undefined, gaps: undefined, threads: undefined, rescannedAt: undefined, error: undefined, failures: undefined, notBefore: undefined });
     await this.writes.catch(() => undefined);
     await fs.rm(path.join(this.dir, "messages", `${service}-${safe(channelId)}`), { recursive: true, force: true });
     await this.save();

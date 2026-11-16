@@ -2557,15 +2557,22 @@ export function AiHubPanel({
                 {task?.sources && task.sources.length > 0 && (
                   <div className="ai-sources-bar" data-testid="ai-task-sources" aria-label="Context sources">
                     <small className="ai-hint">Sources:</small>
-                    {task.sources.map((src) => (
-                      <span
-                        key={src.id}
-                        className="ai-pill"
-                        title={src.text.slice(0, 200)}
-                      >
-                        {src.label}
-                      </span>
-                    ))}
+                    {task.sources.map((src) =>
+                      // What was read in the team's chat opens the thread it came from.
+                      src.kind === "chat" && src.link ? (
+                        <a key={src.id} className="ai-pill" title={src.text.slice(0, 200)} href={src.link} target="_blank" rel="noreferrer noopener">
+                          {src.label}
+                        </a>
+                      ) : (
+                        <span
+                          key={src.id}
+                          className="ai-pill"
+                          title={src.text.slice(0, 200)}
+                        >
+                          {src.label}
+                        </span>
+                      ),
+                    )}
                   </div>
                 )}
                 {streamingState &&

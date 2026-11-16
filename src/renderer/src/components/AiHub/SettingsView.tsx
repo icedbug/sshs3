@@ -25,6 +25,7 @@ import {
 import { DEMO_MODE_SET_BY_SERVER, type Act } from "./panelShared";
 import { McpKeysPanel } from "../McpKeysPanel";
 import { NotificationsCard } from "./NotificationsCard";
+import { TeamChatCard } from "./TeamChatCard";
 import { SafetyPolicyCard } from "./SafetyPolicyCard";
 
 export const LABS_ENABLED_STORAGE_KEY = "sshs3.aiHub.labsEnabled";
@@ -961,6 +962,11 @@ export function Settings({
       <section className="ai-set">
         <h3>Notifications</h3>
         <NotificationsCard hub={hub} act={act} />
+      </section>
+
+      <section className="ai-set">
+        <h3>What the team says in chat</h3>
+        <TeamChatCard hub={hub} act={act} />
       </section>
 
       {/* The app answering this person's own agent. In a browser the team server already

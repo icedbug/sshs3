@@ -44,6 +44,7 @@ export const APP_OPS: Record<string, { fallback: string; ops: Record<string, App
   },
   sshs3_kb_manage: { fallback: "list", ops: { list: "read", add_document: "guard-if", delete_document: "change", ingest_local_folder: "guard", ingest_s3_prefix: "guard" } },
   sshs3_tickets: { fallback: "list", ops: { list: "read", read: "read", create: "change", comment: "change" } },
+  sshs3_chat_history: { fallback: "search", ops: { search: "read", thread: "read", channels: "read" } },
   sshs3_workspace_layout: { fallback: "open_terminal", ops: { open_terminal: "change", open_cluster_split: "change", open_dual_pane_explorer: "change" } },
   sshs3_storage_ops: { fallback: "list_files", ops: { list_files: "read", read_remote_file: "read", diff_paths: "read" } },
   sshs3_investigate: { fallback: "investigate", ops: { investigate: "read" } },

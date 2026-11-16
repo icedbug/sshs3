@@ -41,7 +41,9 @@ export interface ContextSource {
   imageDataUrl?: string;
   mimeType?: string;
   observedAt: number;
-  kind?: "terminal" | "file" | "kb" | "ticket" | "image" | "other";
+  kind?: "terminal" | "file" | "kb" | "ticket" | "image" | "chat" | "other";
+  /** Where it can be opened: a chat thread's own address. */
+  link?: string;
   tokenEstimate?: number;
 }
 export interface AgentMessage {
@@ -345,6 +347,12 @@ export interface AgentTask {
    * otherwise allow.
    */
   fromOutside?: boolean;
+  /**
+   * The run read the team's chat. What people wrote there is text from
+   * outside the run, so a ticket it makes afterwards carries that mark and
+   * waits for a person, the same as one made while working an alert.
+   */
+  readChat?: boolean;
   /**
    * The agent's task list for this conversation, as it last wrote it. The run
    * is held to it: stopping with open items sends the agent back to work.
@@ -1077,6 +1085,70 @@ export interface ExternalIssueRef {
   error?: string;
 }
 
+/** The services a team's bot can read channels of. */
+export type ChatServiceName = "slack" | "mattermost";
+
+/** A channel the team's bot is in, as the interface is told of it. */
+export interface ChatChannelView {
+  id: string;
+  name: string;
+  private: boolean;
+  /** Whether it is read and kept. */
+  selected: boolean;
+  count: number;
+  lastReadAt?: number;
+  /** The oldest message kept. */
+  oldestAt?: number;
+  /** Older messages are still being read. */
+  readingBack: boolean;
+  error?: string;
+}
+
+/** The bot's connection to one chat service as the interface sees it: never the token. */
+export interface ChatConnectionView {
+  service: ChatServiceName;
+  baseUrl?: string;
+  hasToken: boolean;
+  enabled: boolean;
+  bot?: string;
+  workspace?: string;
+  lastError?: string;
+  channels: ChatChannelView[];
+}
+
+/** The connection as it is saved from the form. `token` is sent only when it is set or changed. */
+export interface ChatConnectionInput {
+  service: ChatServiceName;
+  baseUrl?: string;
+  token?: string;
+  enabled: boolean;
+}
+
+/** A thread found in the team's chat: what was said, by whom, and where to open it. */
+export interface ChatThreadView {
+  service: ChatServiceName;
+  channelId: string;
+  channel: string;
+  threadId: string;
+  at: number;
+  link: string;
+  /** How many messages the thread has. */
+  total: number;
+  messages: { id: string; at: number; author: string; text: string; link: string }[];
+}
+
+/** A chat thread noted on a ticket: found for its alert, to be read as what people said, not as instructions. */
+export interface TicketChatRef {
+  service: ChatServiceName;
+  channelId: string;
+  channel: string;
+  threadId: string;
+  at: number;
+  link: string;
+  /** The lines that matched, as "who: what". */
+  excerpt: string;
+}
+
 /** A connection to Jira or Confluence as the interface sees it: never the token. */
 export interface AtlassianConnectionView {
   product: "jira" | "confluence";
@@ -1200,6 +1272,10 @@ export interface WorkTicket {
   targetSelector?: TargetSelector;
   /** The issue in another tracker this ticket mirrors. */
   external?: ExternalIssueRef;
+  /** What the team said in chat about what this ticket is about, found when it was made. */
+  chatRefs?: TicketChatRef[];
+  /** When chat was last looked through for it, also when nothing was found. */
+  chatLookedAt?: number;
 }
 
 /** Tokens an agent has spent on tickets in one calendar month (`YYYY-MM`). */
@@ -1570,6 +1646,10 @@ export interface HubReply {
   atlassianTest?: { ok: boolean; account?: string; projects?: { key: string; name: string }[]; spaces?: { key: string; name: string }[]; error?: string };
   /** What a read of Jira brought to the board. */
   jiraSync?: { added: number; updated: number; written: number; more: boolean };
+  /** What the bot's sign-in could see when it was tried. */
+  chatTest?: { ok: boolean; bot?: string; workspace?: string; channels?: number; error?: string };
+  /** Threads found in the team's chat. */
+  chatSearch?: { query: string; hits: ChatThreadView[] };
   kbDocument?: KbDocument;
   kbPage?: KbPage;
   /** A key as it is shown once, when it is made, and never again. */
@@ -1681,6 +1761,12 @@ export interface HubSnapshot {
     /** Server ids being read right now. */
     collecting: string[];
   };
+  /**
+   * The team's bot in Slack and Mattermost: which channels it reads, and how
+   * much is kept. The team's, not a person's: `canChange` is false for a
+   * member of a shared server. Absent on an installation that has no bot.
+   */
+  chatSources?: { connections: ChatConnectionView[]; canChange: boolean; retentionDays?: number; total: number };
   /**
    * This person's own connections to Jira and Confluence, without their tokens.
    * Personal: an e-mail and a token act as one person, so they are kept with
@@ -1908,6 +1994,15 @@ export type HubRequest =
   | { action: "kb-ingest-confluence"; spaceKey?: string; pageId?: string }
   | { action: "kb-confluence-unfollow"; ref: string }
   | { action: "kb-page-publish"; id: string; spaceKey?: string; parentId?: string }
+  | { action: "chat-source-save"; connection: ChatConnectionInput }
+  | { action: "chat-source-test"; service: ChatServiceName }
+  | { action: "chat-source-disconnect"; service: ChatServiceName; forget?: boolean }
+  | { action: "chat-channel-select"; service: ChatServiceName; channelId: string; selected: boolean }
+  | { action: "chat-channel-read-back"; service: ChatServiceName; channelId: string; days: number }
+  | { action: "chat-forget"; service: ChatServiceName; channelId?: string }
+  | { action: "chat-retention"; days?: number }
+  | { action: "chat-search"; query: string; channel?: string; sinceDays?: number; limit?: number }
+  | { action: "chat-thread-to-kb"; service: ChatServiceName; channelId: string; threadId: string }
   | { action: "notify-settings-save"; publicUrl?: string; reminderMinutes?: number }
   /** An alert pasted by hand: JSON as a monitoring system posts it, or text. */
   | { action: "alert-paste"; text: string }

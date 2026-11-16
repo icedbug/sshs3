@@ -19,6 +19,7 @@ import { ProfileStore, type ProfilesData } from '../profile/ProfileStore';
 import { K8sProfileStore } from '../profile/K8sProfileStore';
 import { SessionStore } from '../session/SessionStore';
 import { ClipboardHistoryStore } from '../clipboard/ClipboardHistoryStore';
+import { ChatBridge } from '../ai/hub/ChatBridge';
 import { SnippetStore } from '../snippets/SnippetStore';
 import { SettingsStore } from '../settings/SettingsStore';
 import { DotfilePoolStore } from '../dotfiles/DotfilePoolStore';
@@ -283,6 +284,12 @@ export class WebTenantManager {
   private reloadingTenants = new Set<string>();
   private readonly sharedDir: string;
   private notifyTimer?: NodeJS.Timeout;
+  /**
+   * The team's chat bot: one for the whole server, so there is one reader and
+   * one index however many accounts are signed in. Each account's hub is
+   * given this one; only an administrator's hub may change it.
+   */
+  private readonly teamChat: ChatBridge;
 
   constructor(
     private readonly baseDataDir: string,
@@ -290,6 +297,14 @@ export class WebTenantManager {
     private readonly accountCount?: () => number,
   ) {
     this.sharedDir = path.join(baseDataDir, 'shared-workspace');
+    this.teamChat = new ChatBridge(path.join(baseDataDir, 'team-chat'), {
+      // The same rule as every address a member gives: a server several people sign in to does not
+      // call itself, nor its private network unless its administrator said so.
+      guard: () => {
+        const shared = (this.accountCount?.() ?? 0) > 1;
+        return { server: shared, allowPrivate: !shared || process.env.SSHS3_ALLOW_PRIVATE_ADDRESSES === '1' };
+      },
+    });
   }
 
   async initialize(): Promise<void> {
@@ -674,6 +689,7 @@ export class WebTenantManager {
         peerPresenceProvider: () => this.getAllLocalTenantsPresence(),
         onSharedWorkspaceChanged: () =>
           this.notifyCrossTenantChanged(user.id),
+        teamChat: this.teamChat,
       },
     );
 

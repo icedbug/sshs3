@@ -117,6 +117,8 @@ function createHarness(options: {
   const activities: AgentChange[] = [];
 
   const hub: AppActionHost = {
+    // No chat bot in these tests: nothing is kept, so nothing can be searched.
+    chat: { index: { list: () => [] }, search: () => [], thread: () => [] } as unknown as AppActionHost["chat"],
     store: {
       data: {
         tasks: [],

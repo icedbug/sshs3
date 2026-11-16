@@ -153,6 +153,7 @@ export const slackOldest = (ms: number): string => (ms / 1000).toFixed(6);
  * three characters Slack escapes put back.
  */
 export function slackText(text: string, names: Map<string, string>): string {
+  /* eslint-disable security/detect-unsafe-regex -- each optional group is bounded by the closing > and holds no repetition of its own */
   return text
     .replace(/<@([A-Z0-9]+)(?:\|([^>]*))?>/g, (_m, id: string, label?: string) => `@${label || names.get(id) || id}`)
     .replace(/<#([A-Z0-9]+)(?:\|([^>]*))?>/g, (_m, id: string, label?: string) => `#${label || id}`)
@@ -163,6 +164,7 @@ export function slackText(text: string, names: Map<string, string>): string {
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/&amp;/g, "&");
+  /* eslint-enable security/detect-unsafe-regex */
 }
 
 interface SlackMessage {

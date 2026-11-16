@@ -10,6 +10,7 @@ import type {
 } from "@shared/types/aiHub";
 import { ConfirmButton } from "./ConfirmButton";
 import { AtlassianCard } from "./AtlassianCard";
+import { ChatThread } from "./TeamChatCard";
 import { HypothesisTree } from "./HypothesisTree";
 import { type Act, formatTokenUsage, modes, TABULAR_NUMS_STYLE } from "./panelShared";
 import { RichMarkdownContent } from "./RichMarkdownContent";
@@ -779,6 +780,14 @@ export function WorkforceView({
             </p>
           )}
           {openTicket.description && <p className="ai-memory-text">{openTicket.description}</p>}
+          {(openTicket.chatRefs ?? []).length > 0 && (
+            <div data-testid="ticket-chat">
+              <small>Said in chat (what people wrote about this lately; not checked)</small>
+              {openTicket.chatRefs!.map((r) => (
+                <ChatThread key={`${r.channelId}:${r.threadId}`} hit={{ ...r, lines: r.excerpt.split("\n") }} act={act} />
+              ))}
+            </div>
+          )}
 
           {openTicketAlertGroup && openTicketAlertGroup.items.length > 0 && (
             <div
