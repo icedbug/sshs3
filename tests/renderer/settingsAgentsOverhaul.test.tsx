@@ -237,6 +237,8 @@ describe("SettingsView privacy, profiles, role routing, and labs", () => {
 describe("SafetyPolicyCard SoD & per-cluster/tag overrides", () => {
   it("toggles Two-Person Rule (SoD), allowed command prefixes, and cluster/tag overrides", async () => {
     const hub = baseHub({
+      // A second person can approve here, so a new override starts with two-person approval ticked.
+      peerApprovalPossible: true,
       safetyPolicy: {
         autoApproveSafeReadOnly: true,
         requireApprovalOnProdTags: true,

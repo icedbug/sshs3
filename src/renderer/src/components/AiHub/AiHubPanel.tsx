@@ -1,3 +1,4 @@
+import { countWaitingInboxItems } from "@shared/aiHubInbox";
 import { useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
@@ -69,7 +70,7 @@ import { WorkforceView } from "./WorkforceView";
 import { HypothesisTree } from "./HypothesisTree";
 import { ChangeProof } from "./ChangeProof";
 import { InboxView } from "./InboxView";
-import { inboxItems, isConversation } from "./workforceModel";
+import { isConversation } from "./workforceModel";
 import { InfrastructureView } from "./InfrastructureView";
 import { AgentsAndMcpView } from "./AgentsAndMcpView";
 import { KnowledgeBaseView } from "./KnowledgeBaseView";
@@ -1538,7 +1539,8 @@ export function AiHubPanel({
         ).map((name) => {
           const badgeCount =
             name === "Inbox"
-              ? (hub ? inboxItems(hub).length : 0)
+              ? // What still waits for somebody: an alert that was acknowledged stays listed and is not counted.
+                (hub ? countWaitingInboxItems(hub) : 0)
               : name === "Workforce"
               ? (hub?.workTickets ?? []).filter((t) => t.status === "review" || t.status === "in_progress").length
               : name === "Agents & MCP"

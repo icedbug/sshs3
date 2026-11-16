@@ -16,6 +16,7 @@ vi.mock("../../src/renderer/src/lib/aiHub", () => ({
 }));
 
 import { AiHubPanel } from "../../src/renderer/src/components/AiHub/AiHubPanel";
+import type { Act } from "../../src/renderer/src/components/AiHub/panelShared";
 import { NotificationsCard } from "../../src/renderer/src/components/AiHub/NotificationsCard";
 import { SafetyPolicyCard } from "../../src/renderer/src/components/AiHub/SafetyPolicyCard";
 import { Settings } from "../../src/renderer/src/components/AiHub/SettingsView";
@@ -116,7 +117,7 @@ describe("settings: the save bar is not over the scrolling part", () => {
 });
 
 describe("notification channels: Enter adds the channel", () => {
-  const openEditor = (act: ReturnType<typeof vi.fn>): void => {
+  const openEditor = (act: Act): void => {
     render(<Settings hub={makeHub()} act={act} />);
     fireEvent.click(screen.getByRole("button", { name: "Add a channel" }));
   };
