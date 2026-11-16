@@ -1698,6 +1698,14 @@ export class HubService {
     if (!scenario) throw new Error("There is no such scenario.");
     await this.endSimulation();
     const world = startScenario(scenario);
+    // What is run on the lab's servers changes how the scenario stands: the interface is told, not more than twice a second.
+    let told: ReturnType<typeof setTimeout> | undefined;
+    world.onRan = () => {
+      told ??= setTimeout(() => {
+        told = undefined;
+        if (!this.disposed) this.changed();
+      }, 400);
+    };
     const now = world.now();
     for (const server of scenario.servers)
       upsertDemoServer({ id: server.id, name: server.name, host: server.host, username: server.username, cluster: server.cluster, folder: `Scenario / ${server.cluster}`, description: server.description, tags: server.tags, shared: false });
@@ -3592,7 +3600,10 @@ export class HubService {
         break;
       }
       case "schedule-run-now": {
-        const schedule = this.store.data.schedules.find((x) => x.id === request.id);
+        let schedule = this.store.data.schedules.find((x) => x.id === request.id);
+        // The demo lab's example jobs are listed without being kept: running one makes it a job of this installation.
+        const example = !schedule && isDemoMode() ? getDemoSchedules().find((x) => x.id === request.id) : undefined;
+        if (example) this.store.data.schedules.push((schedule = { ...example }));
         if (!schedule) throw new Error("That job is not here any more.");
         if (!schedule.enabled) throw new Error("This job is paused. Resume it first.");
         if (schedule.lastTaskId && this.store.data.tasks.some((t) => t.id === schedule.lastTaskId && active(t))) throw new Error("Its last run is still going.");
@@ -4533,7 +4544,7 @@ export class HubService {
           const now = next.clusterPolicies ?? {};
           const say = (p: (typeof now)[string] | undefined): string =>
             p
-              ? [p.maxMode ? `max ${p.maxMode}` : "", p.requiredApprovals ? `${p.requiredApprovals} approval${p.requiredApprovals === 1 ? "" : "s"}` : "", p.requireCheckAndRollback ? "check and rollback" : "", p.frozenUntil ? `frozen until ${new Date(p.frozenUntil).toISOString().slice(0, 16).replace("T", " ")} UTC` : ""].filter(Boolean).join(", ") || "no limits"
+              ? [p.maxMode ? `at most "${({ advice: "Ask", plan: "Plan", assisted: "Ask first", autonomous: "Auto" } as Record<string, string>)[p.maxMode] ?? p.maxMode}"` : "", p.requiredApprovals ? `${p.requiredApprovals} approval${p.requiredApprovals === 1 ? "" : "s"}` : "", p.requireCheckAndRollback ? "check and rollback" : "", p.frozenUntil ? `frozen until ${new Date(p.frozenUntil).toISOString().slice(0, 16).replace("T", " ")} UTC` : ""].filter(Boolean).join(", ") || "no limits"
               : "none";
           for (const name of [...new Set([...Object.keys(was), ...Object.keys(now)])].sort())
             if (JSON.stringify(was[name]) !== JSON.stringify(now[name])) moved.push(`rules for "${clip(name, 60)}": ${say(was[name])} → ${say(now[name])}`);
@@ -5895,10 +5906,11 @@ export class HubService {
     if (runAgent?.modelOverride?.trim() && (!runAgent.modelProvider || runAgent.modelProvider === provider))
       model = runAgent.modelOverride.trim();
     task.model = model;
-    if (provider === "anthropic" && !config.apiKey)
-      throw new Error("Anthropic API key missing");
-    if (provider === "openai-compatible" && !baseUrl)
-      throw new Error("Model endpoint missing");
+    // The demo lab has no model: its scripted example answers instead, and says that it does.
+    if (provider === "anthropic" && !config.apiKey && !isDemoMode())
+      throw new Error("Anthropic API key missing. Add a key in AI settings, or choose another model there.");
+    if (provider === "openai-compatible" && !baseUrl && !isDemoMode())
+      throw new Error("Model endpoint missing. Set the model's address in AI settings.");
     const modelConfig: HermesModelConfig =
       provider === "openai-codex"
         ? { kind: "openai-codex", model, baseUrl }

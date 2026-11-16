@@ -116,7 +116,7 @@ describe("what a person changes about the team's rules and memory", () => {
     const { hub, inner } = await makeHub();
     const policy = (await hub.snapshot()).safetyPolicy;
     const changed = await hub.request({ action: "safety-policy-save", policy: { ...policy, clusterPolicies: { "Web-Prod": { maxMode: "assisted", requireCheckAndRollback: true } } } } as never);
-    expect((await audited(inner)).at(-1)).toBe('Safety policy: rules for "Web-Prod": none → max assisted, check and rollback');
+    expect((await audited(inner)).at(-1)).toBe('Safety policy: rules for "Web-Prod": none → at most "Ask first", check and rollback');
     expect(changed.activityLog!.at(-1)!.summary).toContain('Changed the safety rules: rules for "Web-Prod"');
   });
 });
@@ -152,5 +152,30 @@ describe("the demo lab", () => {
     const from = (await hub.snapshot()).tasks.find((t) => t.messages.length > 1 && !["queued", "running", "waiting"].includes(t.status))!;
     const made = await hub.request({ action: "eval-case-save", fromTaskId: from.id, title: "From the example" } as never);
     expect(made.evalCases!.map((c) => c.title)).toContain("From the example");
+  });
+
+  it("answers a chat from its script when no model is set up, and runs one of its example jobs now", async () => {
+    const { hub } = await makeHub({}, true);
+    await hub.request({ action: "configure", config: { enabled: true } } as never);
+    // No key and no address: outside the demo lab this is refused; here the scripted example answers.
+    const started = await hub.request({ action: "start", task: { prompt: "How is the storage doing?", mode: "advice" } } as never);
+    expect(started.reply?.started?.taskId).toBeTruthy();
+    const example = (await hub.snapshot()).schedules.find((s) => s.id.startsWith("demo-sched-"))!;
+    const ran = await hub.request({ action: "schedule-run-now", id: example.id });
+    expect(ran.reply?.notes?.[0] ?? "").not.toContain("not here any more");
+  });
+
+  it("tells the interface when something was run on a scenario's server", async () => {
+    const changed = vi.fn();
+    const { hub } = await makeHub({ changed }, true);
+    const { stopScenario } = await import("../../src/main/sim/lab");
+    const { simWorld } = await import("../../src/main/sim/SimWorld");
+    disposals.push(() => stopScenario());
+    await hub.request({ action: "sim-start", scenarioId: "nginx-bad-config" });
+    changed.mockClear();
+    const world = simWorld();
+    world.shell(world.host("web-prod-01")!).run("sudo nginx -t");
+    await new Promise((r) => setTimeout(r, 600));
+    expect(changed).toHaveBeenCalled();
   });
 });

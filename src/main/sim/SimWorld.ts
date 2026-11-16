@@ -24,6 +24,8 @@ export class SimWorld {
   /** The shells that were opened, for what was run in them. */
   readonly shells: SimShell[] = [];
   private offset = 0;
+  /** Called after a command was run on one of the lab's servers. */
+  onRan?: () => void;
   /** Set while a scenario builds its servers: see `SimHost.settingUp`. */
   building = false;
 

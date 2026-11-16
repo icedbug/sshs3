@@ -175,7 +175,12 @@ function getActiveProfileSummary(hub?: HubSnapshot): {
     baseUrl.includes("::1");
   return {
     // A model name here would read as "ready" while the assistant is switched off.
-    label: !hub?.config.enabled ? "AI off" : profile?.name || model || "Default profile",
+    label: !hub?.config.enabled
+      ? "AI off"
+      : // The demo lab without a model answers from a script: a model's name here would promise one.
+        hub.demoMode && !hub.config.hasApiKey && !hub.config.codexConnected && !baseUrl
+        ? "Demo answers (no model)"
+        : profile?.name || model || "Default profile",
     provider,
     isLocal,
   };
@@ -349,6 +354,12 @@ export function AiHubPanel({
   const [error, setError] = useState("");
   // What a request saved differently from what was asked (a value left out, an id rewritten).
   const [notice, setNotice] = useState("");
+  // A note that something was done goes away by itself: it is not something to act on.
+  useEffect(() => {
+    if (!notice) return;
+    const timer = window.setTimeout(() => setNotice(""), 8000);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
   const [busy, setBusy] = useState(false);
   /** What the person wants to say with an answer, per pending action; the agent is given it. */
   const [approvalNotes, setApprovalNotes] = useState<Record<string, string>>({});

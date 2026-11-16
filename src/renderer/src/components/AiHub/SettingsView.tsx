@@ -288,7 +288,7 @@ export function Settings({
           <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
           <span>
             Assistant on
-            <small>Off: nothing is collected and no model is called.</small>
+            <small style={{ display: "block" }}>Off: nothing is collected and no model is called.</small>
           </span>
         </label>
         <label>

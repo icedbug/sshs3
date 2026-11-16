@@ -1,3 +1,4 @@
+import { isDemoTarget } from "../../demo/demoMode";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
@@ -859,8 +860,10 @@ export function createHub(
         label: p.name || p.host,
         address: p.host,
         port: p.port || 22,
-        blocked:
-          p.proxyJump || p.proxyJumpProfileId || p.proxy
+        blocked: isDemoTarget(p.id)
+          ? // A server of the demo lab has no address on any network: asking it would only say "unreachable".
+            "A server of the demo lab: there is no real address to check."
+          : p.proxyJump || p.proxyJumpProfileId || p.proxy
             ? "Reachable only through a configured proxy; not probed directly."
             : undefined,
       }));

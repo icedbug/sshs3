@@ -1085,7 +1085,7 @@ export function KnowledgeBaseView({
             });
           }}
         >
-          <strong>{draft.id ? "Edit document" : "Write a document"}</strong>
+          <strong>{draft.id ? "Edit source" : "Write a source note"}</strong>
           <label>
             Title
             <input
