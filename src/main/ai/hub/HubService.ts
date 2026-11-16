@@ -1658,12 +1658,6 @@ export class HubService {
     this.assertMayRemoveTeamServer(await this.teamServerCopy(id));
   }
 
-  /** A connection to the team's tracker or wiki writes there in the team's name: on a shared server it is the administrator's to set up. */
-  private assertIntegrationAdmin(): void {
-    if (this.sharedServer() && !this.host.teamAdmin?.())
-      throw new Error("Only an administrator of this server connects Jira or Confluence.");
-  }
-
   /** On a shared server, the team's bucket is the administrator's to set up, change or disconnect: one member's change is everyone's. */
   private assertTeamAdmin(): void {
     if (this.sharedServer() && !this.host.teamAdmin?.())
@@ -2349,7 +2343,6 @@ export class HubService {
       atlassian: {
         jira: this.atlassian.view("jira"),
         confluence: this.atlassian.view("confluence"),
-        canChange: !this.sharedServer() || Boolean(this.host.teamAdmin?.()),
       },
       serverFacts: this.factsView(),
       alertIntake: {
@@ -4022,7 +4015,6 @@ export class HubService {
         break;
       }
       case "atlassian-save": {
-        this.assertIntegrationAdmin();
         await this.atlassian.save(request.connection);
         void this.audit()
           .append({
@@ -4036,11 +4028,9 @@ export class HubService {
         break;
       }
       case "atlassian-test":
-        this.assertIntegrationAdmin();
         reply = { atlassianTest: await this.atlassian.test(request.product) };
         break;
       case "atlassian-disconnect": {
-        this.assertIntegrationAdmin();
         await this.atlassian.disconnect(request.product);
         void this.audit()
           .append({ kind: "setting", actor: await this.resolveActorName(), target: "sshs3 on this computer", what: `Connection to ${request.product === "jira" ? "Jira" : "Confluence"} removed`, outcome: "completed" })
@@ -4067,7 +4057,6 @@ export class HubService {
         break;
       }
       case "kb-confluence-unfollow":
-        this.assertIntegrationAdmin();
         await this.atlassian.unfollowConfluence(requiredText(request.ref));
         break;
       case "jira-sync-now":

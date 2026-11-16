@@ -79,11 +79,9 @@ export function ConfluenceSources({ hub, act }: { hub: HubSnapshot; act: Act }):
                       {w.kind === "space" ? "Space" : "Page tree"} <strong>{w.ref}</strong>
                       {w.pages !== undefined ? ` · ${w.pages} page${w.pages === 1 ? "" : "s"}` : ""} · added by {w.by}
                     </span>
-                    {hub.atlassian?.canChange !== false && (
-                      <button type="button" onClick={() => void act({ action: "kb-confluence-unfollow", ref: w.ref })}>
-                        Stop following
-                      </button>
-                    )}
+                    <button type="button" onClick={() => void act({ action: "kb-confluence-unfollow", ref: w.ref })}>
+                      Stop following
+                    </button>
                   </li>
                 ))}
               </ul>

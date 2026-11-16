@@ -1681,8 +1681,13 @@ export interface HubSnapshot {
     /** Server ids being read right now. */
     collecting: string[];
   };
-  /** The connections to Jira and Confluence, without their tokens. `canChange` is false for a member of a shared server. */
-  atlassian?: { jira?: AtlassianConnectionView; confluence?: AtlassianConnectionView; canChange: boolean };
+  /**
+   * This person's own connections to Jira and Confluence, without their tokens.
+   * Personal: an e-mail and a token act as one person, so they are kept with
+   * that person (per installation, per account on a shared server) and are
+   * never part of the team's workspace.
+   */
+  atlassian?: { jira?: AtlassianConnectionView; confluence?: AtlassianConnectionView };
   /** Where notifications go when something starts to wait for a person. */
   notifications?: {
     channels: NotifyChannelView[];

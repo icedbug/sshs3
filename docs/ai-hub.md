@@ -811,15 +811,18 @@ Teams already have their issues in Jira and their documentation in Confluence.
 The board mirrors the one and the knowledge base reads the other, so sshS3
 works beside them instead of asking a team to move.
 
-**The connection.** One for Jira and one for Confluence, each for Atlassian
-Cloud (the account's e-mail and an API token) or Data Center/Server (a
-personal access token). The token is kept encrypted in a file of its own
-(`atlassian.json` beside the hub's store), never in the team bucket and never
-sent to the interface, which is told only that one is set. A token is for one
-site: when the address changes it has to be typed again. Every call goes
-through `guardUrl` to the address that was checked, and no redirect is
-followed. On a shared server only an administrator sets a connection up.
-Agents have no tool for any of this.
+**The connection is personal.** One for Jira and one for Confluence, each for
+Atlassian Cloud (the account's e-mail and an API token) or Data Center/Server
+(a personal access token). An e-mail and a token act as one person, so they
+are kept with that person: encrypted in a file of its own (`atlassian.json`
+beside that person's hub store; on a shared server each account has its own),
+never in the team's workspace or bucket, and never sent to the interface,
+which is told only that a token is set. Teammates get the tickets and the
+knowledge base documents through the bucket, not anybody's sign-in, and what
+is written to Jira or Confluence is written as the person whose connection
+did it. A token is for one site: when the address changes it has to be typed
+again. Every call goes through `guardUrl` to the address that was checked,
+and no redirect is followed. Agents have no tool for any of this.
 
 **Jira to the board.** Every open issue of the chosen projects is a ticket:
 its key and Jira status are on the card, and title, text, status and new

@@ -12,7 +12,7 @@ const hub = (confluence?: HubSnapshot["atlassian"]): HubSnapshot => ({ atlassian
 
 describe("Confluence under Sources", () => {
   it("offers only the connection until Confluence is connected", () => {
-    render(<ConfluenceSources hub={hub({ canChange: true })} act={vi.fn(async () => undefined)} />);
+    render(<ConfluenceSources hub={hub({})} act={vi.fn(async () => undefined)} />);
     expect(screen.getByTestId("confluence-connection")).toHaveTextContent("Confluence · not connected");
     expect(screen.queryByTestId("kb-confluence")).toBeNull();
   });
@@ -25,7 +25,7 @@ describe("Confluence under Sources", () => {
     });
     render(
       <ConfluenceSources
-        hub={hub({ canChange: true, confluence: { ...connection, watched: [{ kind: "space", ref: "OPS", addedAt: 1, by: "Jacob", pages: 12 }] } })}
+        hub={hub({ confluence: { ...connection, watched: [{ kind: "space", ref: "OPS", addedAt: 1, by: "Jacob", pages: 12 }] } })}
         act={act}
       />,
     );
@@ -51,14 +51,14 @@ describe("Confluence under Sources", () => {
 
 describe("publishing a page to Confluence", () => {
   it("is not offered without a connection", () => {
-    const { container } = render(<PublishToConfluence page={{ id: "p1", revision: 1 }} hub={hub({ canChange: true })} act={vi.fn(async () => undefined)} />);
+    const { container } = render(<PublishToConfluence page={{ id: "p1", revision: 1 }} hub={hub({})} act={vi.fn(async () => undefined)} />);
     expect(container).toBeEmptyDOMElement();
   });
 
   it("asks where the first time, and needs a second click to replace a page that is already there", async () => {
     const sent: HubRequest[] = [];
     const act = vi.fn(async (request: HubRequest) => (sent.push(request), {} as HubSnapshot));
-    const connected = hub({ canChange: true, confluence: connection });
+    const connected = hub({ confluence: connection });
     const first = render(<PublishToConfluence page={{ id: "p1", revision: 3 }} hub={connected} act={act} />);
     fireEvent.click(screen.getByRole("button", { name: "Publish to Confluence" }));
     const form = screen.getByTestId("kb-publish-form-p1");

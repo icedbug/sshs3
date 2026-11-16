@@ -314,15 +314,19 @@ describe("the connection", () => {
     ).rejects.toThrow("The address changed, so the token has to be entered again.");
   });
 
-  it("is an administrator's to set up on a shared server, and refuses an address the server must not call", async () => {
-    const member = await makeHub({ alertHookOwner: "u2", teamAdmin: () => false });
-    const connection = { product: "jira" as const, variant: "cloud" as const, baseUrl: "https://acme.atlassian.net", email: "a@b.se", token: "t", enabled: true, projects: ["OPS"] };
-    await expect(member.hub.request({ action: "atlassian-save", connection })).rejects.toThrow("Only an administrator of this server connects Jira or Confluence.");
-    expect((await member.hub.snapshot()).atlassian).toMatchObject({ canChange: false });
+  it("is each person's own on a shared server, and refuses an address the server must not call", async () => {
+    const connection = { product: "jira" as const, variant: "cloud" as const, baseUrl: "https://acme.atlassian.net", email: "erik@acme.se", token: "eriks-token", enabled: true, projects: ["OPS"] };
+    // Two accounts of one server: each has a hub and a folder of its own.
+    const erik = await makeHub({ alertHookOwner: "u2", teamAdmin: () => false });
+    const anna = await makeHub({ alertHookOwner: "u1", teamAdmin: () => true });
+    await erik.hub.request({ action: "atlassian-save", connection });
+    expect((await erik.hub.snapshot()).atlassian?.jira).toMatchObject({ email: "erik@acme.se", hasToken: true });
+    expect((await anna.hub.snapshot()).atlassian?.jira).toBeUndefined();
+    expect(await fs.readFile(path.join(erik.dir, "atlassian.json"), "utf8")).toContain("erik@acme.se");
+    await expect(fs.readFile(path.join(anna.dir, "atlassian.json"), "utf8")).rejects.toThrow();
 
-    const admin = await makeHub({ alertHookOwner: "u1", teamAdmin: () => true });
-    await expect(admin.hub.request({ action: "atlassian-save", connection: { ...connection, baseUrl: "http://127.0.0.1:8080" } })).rejects.toThrow("A shared server does not call itself.");
-    await expect(admin.hub.request({ action: "atlassian-save", connection: { ...connection, baseUrl: "https://user:pw@acme.atlassian.net" } })).rejects.toThrow("Put the token in its own field");
+    await expect(erik.hub.request({ action: "atlassian-save", connection: { ...connection, baseUrl: "http://127.0.0.1:8080" } })).rejects.toThrow("A shared server does not call itself.");
+    await expect(erik.hub.request({ action: "atlassian-save", connection: { ...connection, baseUrl: "https://user:pw@acme.atlassian.net" } })).rejects.toThrow("Put the token in its own field");
   });
 
   it("stops mirroring when it is removed, and keeps the tickets", async () => {
@@ -380,5 +384,10 @@ describe("two installations of one team, both connected", () => {
     await a.read();
     await b.read();
     expect(jira.issues.get("OPS-11")!.comments.map((c) => c.body)).toEqual(["Investigator finished this in sshS3, and it waits for a person's review:\n\nFound it."]);
+    // The team's bucket holds the tickets, and nothing of anybody's sign-in.
+    const shared = [...files.entries()].map(([name, data]) => `${name}\n${data.toString("utf8")}`).join("\n");
+    expect(shared).toContain("t-jira-acme-atlassian-net-10001");
+    expect(shared).not.toContain("secret-token");
+    expect(shared).not.toContain("ops@acme.se");
   });
 });

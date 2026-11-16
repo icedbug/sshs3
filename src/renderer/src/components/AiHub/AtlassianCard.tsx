@@ -32,7 +32,6 @@ export function atlassianSummary(product: Product, atlassian: HubSnapshot["atlas
  */
 export function AtlassianCard({ product, hub, act }: { product: Product; hub: HubSnapshot; act: Act }): JSX.Element {
   const saved = hub.atlassian?.[product];
-  const canChange = hub.atlassian?.canChange !== false;
   const [variant, setVariant] = useState<"cloud" | "datacenter">(saved?.variant ?? "cloud");
   const [baseUrl, setBaseUrl] = useState(saved?.baseUrl ?? "");
   const [email, setEmail] = useState(saved?.email ?? "");
@@ -107,8 +106,7 @@ export function AtlassianCard({ product, hub, act }: { product: Product; hub: Hu
             ? "Every open issue of the projects you choose becomes a ticket on the board, and follows the issue. An issue's text comes from outside the team, so its ticket waits in Backlog until a person moves it. sshS3 writes only this to Jira: an agent's result as a comment, your decision as a comment, and the issue closed when its ticket is done here."
             : "Pages of a Confluence space can be added as sources of the knowledge base and are read again when they change. A knowledge base page can be published to Confluence, by a person, never by an agent."}
         </p>
-        {!canChange && <p className="ai-hint">Only an administrator of this server connects {NAME[product]}.</p>}
-        <fieldset disabled={!canChange} style={{ border: 0, padding: 0, margin: 0, display: "contents" }}>
+        <fieldset style={{ border: 0, padding: 0, margin: 0, display: "contents" }}>
           <label>
             Kind
             <select value={variant} onChange={(e) => setVariant(e.target.value === "datacenter" ? "datacenter" : "cloud")}>
@@ -141,8 +139,9 @@ export function AtlassianCard({ product, hub, act }: { product: Product; hub: Hu
               onChange={(e) => setToken(e.target.value)}
             />
             <small>
-              It acts as that account: use one that may only do what sshS3 should. Kept encrypted on this
-              {hub.atlassian?.canChange === false ? " server" : " installation"}, never shared with the team bucket.
+              Yours alone: it acts as your account, so it is kept encrypted with your own settings and is never shared
+              with the team&apos;s workspace or bucket. Teammates see the tickets, not your sign-in; what is written to{" "}
+              {NAME[product]} is written as you.
             </small>
           </label>
           {product === "jira" && (

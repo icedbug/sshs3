@@ -61,10 +61,10 @@ describe("the Jira connection on the board", () => {
   it("says in one line what the connection is doing", () => {
     expect(atlassianSummary("jira", undefined)).toBe("Jira · not connected");
     const base = { product: "jira" as const, variant: "cloud" as const, baseUrl: "https://acme.atlassian.net", hasToken: true, enabled: true };
-    expect(atlassianSummary("jira", { canChange: true, jira: { ...base, projects: [] } })).toBe("Jira · connected, no project chosen");
-    expect(atlassianSummary("jira", { canChange: true, jira: { ...base, projects: ["OPS", "NET"] } })).toBe("Jira · mirroring OPS, NET");
-    expect(atlassianSummary("jira", { canChange: true, jira: { ...base, projects: ["OPS"], lastError: "The sign-in was refused" } })).toBe("Jira · could not be read: The sign-in was refused");
-    expect(atlassianSummary("jira", { canChange: true, jira: { ...base, enabled: false } })).toBe("Jira · connected, switched off");
+    expect(atlassianSummary("jira", { jira: { ...base, projects: [] } })).toBe("Jira · connected, no project chosen");
+    expect(atlassianSummary("jira", { jira: { ...base, projects: ["OPS", "NET"] } })).toBe("Jira · mirroring OPS, NET");
+    expect(atlassianSummary("jira", { jira: { ...base, projects: ["OPS"], lastError: "The sign-in was refused" } })).toBe("Jira · could not be read: The sign-in was refused");
+    expect(atlassianSummary("jira", { jira: { ...base, enabled: false } })).toBe("Jira · connected, switched off");
   });
 
   it("saves what is in the form before it tests it, offers the projects found, and never shows a stored token", async () => {
@@ -76,7 +76,7 @@ describe("the Jira connection on the board", () => {
         : {}) as HubSnapshot;
     });
     const saved = { product: "jira" as const, variant: "cloud" as const, baseUrl: "https://acme.atlassian.net", email: "ops@acme.se", hasToken: true, enabled: true, projects: ["OPS"], closeOnApprove: true };
-    render(<WorkforceView hub={hub({ atlassian: { canChange: true, jira: saved } })} act={act} onOpenTask={() => {}} />);
+    render(<WorkforceView hub={hub({ atlassian: { jira: saved } })} act={act} onOpenTask={() => {}} />);
     const card = screen.getByTestId("jira-connection");
     const token = within(card).getByLabelText(/API token/);
     expect(token).toHaveValue("");
@@ -94,10 +94,9 @@ describe("the Jira connection on the board", () => {
     expect(sent[2]).toMatchObject({ connection: { projects: ["OPS", "NET"] } });
   });
 
-  it("is read-only for a member of a shared server", () => {
-    render(<WorkforceView hub={hub({ atlassian: { canChange: false } })} act={vi.fn(async () => undefined)} onOpenTask={() => {}} />);
-    const card = screen.getByTestId("jira-connection");
-    expect(card).toHaveTextContent("Only an administrator of this server connects Jira.");
-    expect(within(card).getByRole("button", { name: "Save", hidden: true })).toBeDisabled();
+  it("says the sign-in is the person's own and not shared with the team", () => {
+    render(<WorkforceView hub={hub({})} act={vi.fn(async () => undefined)} onOpenTask={() => {}} />);
+    expect(screen.getByTestId("jira-connection")).toHaveTextContent("Yours alone: it acts as your account");
+    expect(screen.getByTestId("jira-connection")).toHaveTextContent("never shared with the team's workspace or bucket");
   });
 });

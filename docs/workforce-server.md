@@ -85,12 +85,15 @@ what, on which target, the risk, and a link to the item.
 
 ## Jira and Confluence
 
-On the server, an administrator connects Jira (Workforce, "Jira") and
-Confluence (Knowledge base, Sources). The server then mirrors the chosen Jira
-projects on the board around the clock, writes agents' results and people's
-decisions back as comments, and reads followed Confluence spaces again once a
-day. Use an account for it that may only do what sshS3 should: its token acts
-as that account. Details: [the AI hub](ai-hub.md#jira-on-the-board-confluence-in-the-knowledge-base-atlassian-atlassianbridge).
+Each person connects Jira (Workforce, "Jira") and Confluence (Knowledge base,
+Sources) with their own account: the e-mail and token are kept with that
+account on the server, encrypted, and are not shared with other accounts or
+with the team's bucket. While that person's hub runs on the server it mirrors
+the chosen Jira projects on the board, writes agents' results and that
+person's decisions back as comments in their name, and reads followed
+Confluence spaces again once a day. For work that should not be in one
+person's name, connect with a service account. Details:
+[the AI hub](ai-hub.md#jira-on-the-board-confluence-in-the-knowledge-base-atlassian-atlassianbridge).
 
 ## What is on the servers, and what changed
 
