@@ -509,7 +509,7 @@ describe("a request that is saved differently from what was asked", () => {
 
     snap = await hub.request({ action: "alert-rules-save", rules: [{ match: "db-01", agentId: "lead" }, { match: "web-01", agentId: "gone" }, { match: " ", agentId: "lead" }] });
     expect(snap.alertIntake!.rules).toEqual([{ match: "db-01", agentId: "lead" }]);
-    expect(snap.reply!.notes).toEqual(['Not saved, because the agent does not exist: "web-01".', "1 rule with no text to match was left out."]);
+    expect(snap.reply!.notes).toEqual(['Not saved, because the agent "gone" does not exist (rule "web-01").', "1 rule with no text to match was left out."]);
     expect((await hub.request({ action: "alert-rules-save", rules: [{ match: "db-01", agentId: "lead" }] })).reply?.notes).toBeUndefined();
 
     snap = await hub.request({ action: "runner-save", runner: { id: "Eval Fake!", name: "Fake", command: "node" } } as never);

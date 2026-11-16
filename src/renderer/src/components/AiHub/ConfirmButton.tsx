@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 
 const SR_ONLY_STYLE: CSSProperties = {
   position: "absolute",
@@ -21,7 +21,7 @@ export interface ConfirmButtonProps {
   /** Optional keyboard shortcut hint badge (e.g. "Del", "Esc"). */
   shortcutHint?: string;
   disabled?: boolean;
-  /** How long (ms) the pending confirm state stays armed before resetting. Defaults to 4000ms. */
+  /** How long (ms) the pending confirm state stays armed before resetting. Defaults to 10000ms. */
   confirmTimeoutMs?: number;
 }
 
@@ -34,23 +34,34 @@ export function ConfirmButton({
   ariaLabel,
   shortcutHint,
   disabled = false,
-  confirmTimeoutMs = 4000,
+  confirmTimeoutMs = 10_000,
 }: ConfirmButtonProps): JSX.Element {
   const [asking, setAsking] = useState(false);
-  const [secondsLeft, setSecondsLeft] = useState(0);
+  const [remainingMs, setRemainingMs] = useState(confirmTimeoutMs);
+  const [hovered, setHovered] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const wrapRef = useRef<HTMLSpanElement | null>(null);
 
-  // The question goes away by itself. The seconds left are shown, so it does not vanish without warning.
+  const paused = hovered || focused;
+  const secondsLeft = Math.max(1, Math.ceil(remainingMs / 1000));
+
   useEffect(() => {
-    if (!asking) return;
-    const until = Date.now() + confirmTimeoutMs;
-    setSecondsLeft(Math.ceil(confirmTimeoutMs / 1000));
-    const tick = window.setInterval(() => setSecondsLeft(Math.max(1, Math.ceil((until - Date.now()) / 1000))), 250);
-    const timer = window.setTimeout(() => setAsking(false), confirmTimeoutMs);
-    return () => {
-      window.clearInterval(tick);
-      window.clearTimeout(timer);
-    };
-  }, [asking, confirmTimeoutMs]);
+    if (!asking || paused) return;
+    let last = Date.now();
+    const tick = window.setInterval(() => {
+      const now = Date.now();
+      const elapsed = now - last;
+      last = now;
+      setRemainingMs((prev) => Math.max(0, prev - elapsed));
+    }, 250);
+    return () => window.clearInterval(tick);
+  }, [asking, paused]);
+
+  useEffect(() => {
+    if (asking && remainingMs <= 0) {
+      setAsking(false);
+    }
+  }, [asking, remainingMs]);
 
   useEffect(() => {
     if (!asking) return;
@@ -64,8 +75,26 @@ export function ConfirmButton({
     return () => window.removeEventListener("keydown", onWindowKeyDown);
   }, [asking]);
 
+  const arm = (): void => {
+    setRemainingMs(confirmTimeoutMs);
+    setAsking(true);
+  };
+
   return (
-    <span className="ai-confirm-wrap" style={{ display: "inline-flex", position: "relative" }}>
+    <span
+      ref={wrapRef}
+      className="ai-confirm-wrap"
+      style={{ display: "inline-flex", alignItems: "center", gap: 4, position: "relative" }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      onFocus={() => setFocused(true)}
+      onBlur={(event) => {
+        if (!wrapRef.current?.contains(event.relatedTarget as Node | null)) {
+          setFocused(false);
+          setAsking(false);
+        }
+      }}
+    >
       <button
         type="button"
         disabled={disabled}
@@ -74,7 +103,7 @@ export function ConfirmButton({
         data-confirming={asking ? "true" : undefined}
         onClick={() => {
           if (disabled) return;
-          if (!asking) return setAsking(true);
+          if (!asking) return arm();
           setAsking(false);
           onConfirm();
         }}
@@ -85,7 +114,6 @@ export function ConfirmButton({
             setAsking(false);
           }
         }}
-        onBlur={() => setAsking(false)}
       >
         <span>{asking ? confirmLabel : label}</span>
         {asking && (
@@ -99,6 +127,16 @@ export function ConfirmButton({
           </kbd>
         )}
       </button>
+      {asking && (
+        <button
+          type="button"
+          data-testid="confirm-cancel"
+          aria-label="Cancel"
+          onClick={() => setAsking(false)}
+        >
+          Cancel
+        </button>
+      )}
       <span
         className="ai-sr-only"
         role={asking ? "status" : undefined}

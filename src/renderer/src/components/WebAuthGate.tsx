@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
+import { copyToClipboard } from '../lib/clipboard';
 import { McpKeysPanel } from './McpKeysPanel';
 import {
   isWebBrowserMode,
@@ -20,7 +21,7 @@ const WEB_AUTH_COPY = {
   setupDesc:
     'Welcome. Create the administrator account for this server. You get a personal SSH key and can invite your team with a link.',
   inviteDesc:
-    "Create your personal account. You get your own SSH key on the server and access to the team's shared VMs, clusters, S3 bucket and team memory.",
+    "Create your personal account. You get your own SSH key on the server and access to the team's shared servers, clusters and team memory.",
   loginDesc: "Sign in to open your own terminal tabs and work in the team's shared workspace.",
   stepAdmin: '1. Admin account',
   stepAdminDesc: 'Create your account below',
@@ -109,11 +110,90 @@ interface AuthStatusResponse {
   authenticated: boolean;
   user: WebUserPublic | null;
   wsTicket?: string;
+  publicUrl?: string;
   ssoConfigured?: boolean;
   oidcConfigured?: boolean;
   ssoUrl?: string;
   ssoProviderName?: string;
   sso?: boolean | { enabled?: boolean; loginUrl?: string; label?: string; providerName?: string };
+}
+
+export function isLocalOrPrivateUrl(raw: string): boolean {
+  const trimmed = raw.trim();
+  if (!trimmed) return false;
+  let host: string;
+  try {
+    const hasScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed);
+    const parsed = new URL(hasScheme ? trimmed : `http://${trimmed}`);
+    host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  } catch {
+    const withoutScheme = trimmed.replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, '');
+    const authority = withoutScheme.split('/')[0].toLowerCase();
+    const bracketMatch = /^\[([^\]]+)\](?::\d+)?$/.exec(authority);
+    const unbracketed = bracketMatch ? bracketMatch[1] : authority.replace(/^\[|\]$/g, '');
+    if (unbracketed.includes(':')) {
+      host = unbracketed;
+    } else {
+      return false;
+    }
+  }
+  if (!host) return false;
+  if (host === 'localhost' || host === '::1' || host === '0.0.0.0' || host.endsWith('.local')) {
+    return true;
+  }
+  if (/^127\.\d+\.\d+\.\d+$/.test(host)) return true;
+  if (/^10\.\d+\.\d+\.\d+$/.test(host)) return true;
+  if (/^192\.168\.\d+\.\d+$/.test(host)) return true;
+  if (/^169\.254\.\d+\.\d+$/.test(host)) return true;
+  const m172 = /^172\.(\d+)\.\d+\.\d+$/.exec(host);
+  if (m172) {
+    const second = Number(m172[1]);
+    if (second >= 16 && second <= 31) return true;
+  }
+  const bareV6 = host.split('%')[0];
+  if (bareV6 === '::1') return true;
+  if (/^f[cd][0-9a-f]{2}:/i.test(bareV6)) return true;
+  if (/^fe[89ab][0-9a-f]:/i.test(bareV6)) return true;
+  return false;
+}
+
+function validateInviteBaseUrl(raw: string): { valid: boolean; normalized: string; error: string } {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return {
+      valid: false,
+      normalized: '',
+      error: 'Enter a valid http:// or https:// server address, or click Reset.',
+    };
+  }
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return {
+        valid: false,
+        normalized: '',
+        error: 'The server address must start with http:// or https://.',
+      };
+    }
+    if (!parsed.hostname) {
+      return {
+        valid: false,
+        normalized: '',
+        error: 'Enter a valid server host name or IP address.',
+      };
+    }
+    return {
+      valid: true,
+      normalized: trimmed.replace(/\/+$/, ''),
+      error: '',
+    };
+  } catch {
+    return {
+      valid: false,
+      normalized: '',
+      error: 'Enter a valid server address (for example https://sshs3.example.com).',
+    };
+  }
 }
 
 interface AuthSuccessResponse {
@@ -176,6 +256,7 @@ export const WebAuthGate: React.FC<WebAuthGateProps> = ({ children, onSsoLogin }
   const [modalTab, setModalTab] = useState<'ssh' | 'team'>('ssh');
   const [justOnboarded, setJustOnboarded] = useState(false);
   const [copiedText, setCopiedText] = useState<string | null>(null);
+  const [copyError, setCopyError] = useState<string | null>(null);
   const [customPrivateKey, setCustomPrivateKey] = useState('');
   const [showImportKey, setShowImportKey] = useState(false);
   const [keyStatusMsg, setKeyStatusMsg] = useState<string | null>(null);
@@ -196,7 +277,12 @@ export const WebAuthGate: React.FC<WebAuthGateProps> = ({ children, onSsoLogin }
   const [inviteRole, setInviteRole] = useState<'member' | 'admin'>('member');
   const [inviteMaxUses, setInviteMaxUses] = useState(5);
   const [inviteNote, setInviteNote] = useState('');
+  const [serverPublicUrl, setServerPublicUrl] = useState<string>('');
+  const [inviteBaseUrl, setInviteBaseUrl] = useState<string>(() =>
+    typeof window !== 'undefined' ? window.location.origin : '',
+  );
   const [latestInviteUrl, setLatestInviteUrl] = useState<string | null>(null);
+  const [latestInviteCopied, setLatestInviteCopied] = useState(false);
   const [adminMsg, setAdminMsg] = useState<string | null>(null);
 
   useEffect(() => {
@@ -222,6 +308,10 @@ export const WebAuthGate: React.FC<WebAuthGateProps> = ({ children, onSsoLogin }
     webApiFetch<AuthStatusResponse>('/api/auth/status')
       .then((status) => {
         setInitialized(status.initialized);
+        if (status.publicUrl) {
+          setServerPublicUrl(status.publicUrl);
+          setInviteBaseUrl(status.publicUrl);
+        }
         const ssoObj = typeof status.sso === 'object' && status.sso ? status.sso : null;
         const ssoEnabled = Boolean(
           status.ssoConfigured || status.oidcConfigured || status.ssoUrl || status.sso === true || ssoObj?.enabled
@@ -295,10 +385,18 @@ export const WebAuthGate: React.FC<WebAuthGateProps> = ({ children, onSsoLogin }
     return <>{children}</>;
   }
 
-  const copyToClipboard = (text: string, label: string) => {
-    navigator.clipboard?.writeText(text).catch(() => {});
-    setCopiedText(label);
-    setTimeout(() => setCopiedText(null), 2400);
+  const handleCopyText = async (text: string, label: string): Promise<boolean> => {
+    setCopyError(null);
+    const ok = await copyToClipboard(text);
+    if (ok) {
+      setCopiedText(label);
+      window.setTimeout(() => setCopiedText(null), 2400);
+      return true;
+    }
+    setCopiedText(null);
+    setCopyError(label);
+    window.setTimeout(() => setCopyError((cur) => (cur === label ? null : cur)), 4000);
+    return false;
   };
 
   const handleAuthSuccess = (
@@ -482,7 +580,15 @@ export const WebAuthGate: React.FC<WebAuthGateProps> = ({ children, onSsoLogin }
     }
   };
 
+  const defaultInviteBase = serverPublicUrl || (typeof window !== 'undefined' ? window.location.origin : '');
+  const inviteBaseValidation = validateInviteBaseUrl(inviteBaseUrl);
+  const effectiveInviteBaseUrl = inviteBaseValidation.valid
+    ? inviteBaseValidation.normalized
+    : defaultInviteBase.replace(/\/+$/, '');
+  const inviteUsesLocalAddress = inviteBaseValidation.valid && isLocalOrPrivateUrl(effectiveInviteBaseUrl);
+
   const handleCreateInvite = async () => {
+    if (!inviteBaseValidation.valid) return;
     setAdminMsg(null);
     try {
       const res = await webApiFetch<{ invite: WebInvitePublic }>('/api/admin/invites', {
@@ -494,9 +600,11 @@ export const WebAuthGate: React.FC<WebAuthGateProps> = ({ children, onSsoLogin }
           note: inviteNote.trim() || undefined,
         }),
       });
-      const url = `${window.location.origin}/?invite=${res.invite.token}`;
+      const url = `${effectiveInviteBaseUrl}/?invite=${res.invite.token}`;
       setLatestInviteUrl(url);
-      copyToClipboard(url, 'invite-url');
+      setLatestInviteCopied(false);
+      const copied = await handleCopyText(url, 'invite-url');
+      setLatestInviteCopied(copied);
       setInviteNote('');
       await loadAdminData();
     } catch (err: any) {
@@ -909,7 +1017,7 @@ export const WebAuthGate: React.FC<WebAuthGateProps> = ({ children, onSsoLogin }
           <div className="flex flex-wrap gap-2">
             <button
               type="button"
-              onClick={() => copyToClipboard(user.sshPublicKey, 'onboard-key')}
+              onClick={() => void handleCopyText(user.sshPublicKey, 'onboard-key')}
               className="px-3 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300"
             >
               {copiedText === 'onboard-key' ? t.copiedSshKey : t.copySshKey}
@@ -928,6 +1036,11 @@ export const WebAuthGate: React.FC<WebAuthGateProps> = ({ children, onSsoLogin }
               </button>
             )}
           </div>
+          {copyError === 'onboard-key' && (
+            <div role="status" className="text-amber-300 text-[11px]">
+              Could not copy automatically. Open your SSH key and copy the text.
+            </div>
+          )}
         </div>
       )}
 
@@ -1031,14 +1144,14 @@ export const WebAuthGate: React.FC<WebAuthGateProps> = ({ children, onSsoLogin }
                     <div className="flex flex-wrap items-center gap-2">
                       <button
                         type="button"
-                        onClick={() => copyToClipboard(user.sshPublicKey, 'pubkey')}
+                        onClick={() => void handleCopyText(user.sshPublicKey, 'pubkey')}
                         className="px-3 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-semibold transition"
                       >
                         {copiedText === 'pubkey' ? '✓ Copied' : 'Copy public SSH key'}
                       </button>
                       <button
                         type="button"
-                        onClick={() => copyToClipboard(authorizedKeysCmd, 'authcmd')}
+                        onClick={() => void handleCopyText(authorizedKeysCmd, 'authcmd')}
                         className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 transition"
                       >
                         {copiedText === 'authcmd'
@@ -1060,6 +1173,12 @@ export const WebAuthGate: React.FC<WebAuthGateProps> = ({ children, onSsoLogin }
                         Rotate / generate a new one
                       </button>
                     </div>
+
+                    {(copyError === 'pubkey' || copyError === 'authcmd') && (
+                      <div role="status" data-testid="ssh-copy-error" className="text-amber-300 text-[11px]">
+                        Could not copy automatically. Select and copy the text.
+                      </div>
+                    )}
 
                     {keyStatusMsg && (
                       <div className="rounded-lg bg-cyan-500/10 border border-cyan-500/30 px-3 py-2 text-cyan-200">
@@ -1149,9 +1268,55 @@ export const WebAuthGate: React.FC<WebAuthGateProps> = ({ children, onSsoLogin }
                   <div className="rounded-xl bg-slate-900/80 border border-slate-800 p-4 space-y-3">
                     <h3 className="text-sm font-semibold text-white">Create an invite link</h3>
                     <p className="text-slate-400">
-                      Send the link to a teammate: they choose their own password and get access to the team's shared
-                      VMs, clusters, S3 workspace and team memory.
+                      Send the link to a teammate: they choose their own password and get access to the team&apos;s shared
+                      servers, clusters and team memory on this server. Connect an S3 team bucket on the start page to
+                      also share the Workforce board, agents and Knowledge Base.
                     </p>
+                    <div>
+                      <label className="block text-slate-400 mb-1" htmlFor="invite-base-url-input">
+                        Server address for invite links
+                      </label>
+                      <div className="flex items-center gap-2">
+                        <input
+                          id="invite-base-url-input"
+                          data-testid="invite-base-url"
+                          type="url"
+                          value={inviteBaseUrl}
+                          onChange={(e) => setInviteBaseUrl(e.target.value)}
+                          placeholder="https://sshs3.example.com"
+                          className="w-full rounded-lg bg-slate-950 border border-slate-700 px-2.5 py-1.5 text-white font-mono text-[11px]"
+                        />
+                        {inviteBaseUrl.trim() !== defaultInviteBase && (
+                          <button
+                            type="button"
+                            onClick={() => setInviteBaseUrl(defaultInviteBase)}
+                            className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] shrink-0"
+                          >
+                            Reset
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    {!inviteBaseValidation.valid && (
+                      <div
+                        role="alert"
+                        data-testid="invite-base-url-error"
+                        className="rounded-lg bg-rose-500/10 border border-rose-500/30 px-3 py-2 text-rose-300 text-[11px]"
+                      >
+                        {inviteBaseValidation.error}
+                      </div>
+                    )}
+                    {inviteUsesLocalAddress && (
+                      <div
+                        role="status"
+                        data-testid="invite-local-warning"
+                        className="rounded-lg bg-amber-500/10 border border-amber-500/30 px-3 py-2 text-amber-200 text-[11px]"
+                      >
+                        This address is local or private ({effectiveInviteBaseUrl}). Teammates on other machines cannot
+                        open it unless you enter your public server URL above or set <code>SSHS3_PUBLIC_URL</code> on the
+                        server.
+                      </div>
+                    )}
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                       <div>
                         <label className="block text-slate-400 mb-1">Role</label>
@@ -1188,8 +1353,9 @@ export const WebAuthGate: React.FC<WebAuthGateProps> = ({ children, onSsoLogin }
                     </div>
                     <button
                       type="button"
-                      onClick={handleCreateInvite}
-                      className="px-3.5 py-2 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-semibold transition"
+                      disabled={!inviteBaseValidation.valid}
+                      onClick={() => void handleCreateInvite()}
+                      className="px-3.5 py-2 rounded-lg bg-cyan-500 hover:bg-cyan-400 disabled:opacity-50 text-slate-950 font-semibold transition"
                     >
                       Create and copy invite link
                     </button>
@@ -1197,8 +1363,15 @@ export const WebAuthGate: React.FC<WebAuthGateProps> = ({ children, onSsoLogin }
                     {latestInviteUrl && (
                       <div className="rounded-lg bg-emerald-500/10 border border-emerald-500/30 p-3 space-y-1.5">
                         <div className="text-emerald-300 font-semibold">
-                          ✓ Invite link created and copied to the clipboard
+                          {latestInviteCopied
+                            ? '✓ Invite link created and copied to the clipboard'
+                            : '✓ Invite link created'}
                         </div>
+                        {!latestInviteCopied && (
+                          <div role="status" data-testid="invite-copy-error" className="text-amber-300 text-[11px]">
+                            Could not copy automatically. Select and copy the text.
+                          </div>
+                        )}
                         <div className="font-mono text-[11px] text-slate-200 break-all select-all">
                           {latestInviteUrl}
                         </div>
@@ -1212,7 +1385,7 @@ export const WebAuthGate: React.FC<WebAuthGateProps> = ({ children, onSsoLogin }
                         </div>
                         <div className="divide-y divide-slate-800">
                           {invitesList.map((inv) => {
-                            const invUrl = `${window.location.origin}/?invite=${inv.token}`;
+                            const invUrl = `${effectiveInviteBaseUrl}/?invite=${inv.token}`;
                             return (
                               <div key={inv.token} className="py-2 flex items-center justify-between gap-2">
                                 <div className="min-w-0">
@@ -1221,13 +1394,13 @@ export const WebAuthGate: React.FC<WebAuthGateProps> = ({ children, onSsoLogin }
                                     {inv.note ? ` · ${inv.note}` : ''}
                                   </div>
                                   <div className="text-[10px] text-slate-400">
-                                    Role: {inv.role} · Used: {inv.usedCount}/{inv.maxUses}
+                                    Role: {inv.role} · Used: {inv.usedCount ?? inv.uses ?? 0}/{inv.maxUses}
                                   </div>
                                 </div>
                                 <div className="flex items-center gap-1.5 shrink-0">
                                   <button
                                     type="button"
-                                    onClick={() => copyToClipboard(invUrl, `inv-${inv.token}`)}
+                                    onClick={() => void handleCopyText(invUrl, `inv-${inv.token}`)}
                                     className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 text-[11px]"
                                   >
                                     {copiedText === `inv-${inv.token}` ? '✓ Copied' : 'Copy link'}
@@ -1244,6 +1417,11 @@ export const WebAuthGate: React.FC<WebAuthGateProps> = ({ children, onSsoLogin }
                             );
                           })}
                         </div>
+                        {copyError?.startsWith('inv-') && (
+                          <div role="status" data-testid="invite-copy-error" className="text-amber-300 text-[11px]">
+                            Could not copy automatically. Select and copy the text.
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>

@@ -328,6 +328,9 @@ export function AiHubPanel({
   const [focusInboxItem, setFocusInboxItem] = useState<string | undefined>();
   // A ticket the Inbox asked the Workforce view to open.
   const [workforceTicketId, setWorkforceTicketId] = useState<string | undefined>();
+  const [kbTabRequest, setKbTabRequest] = useState<
+    { tab: "pages" | "sources" | "runbooks" | "review"; pageId?: string; seq: number } | undefined
+  >();
   // The conversation that is open is remembered for this tab: a reload or a reconnect (the server
   // restarted, the connection dropped) opens the same conversation again, not an empty "new chat".
   const [taskId, setTaskIdState] = useState<string>(() => {
@@ -799,6 +802,8 @@ export function AiHubPanel({
           taskId?: string;
           newTask?: boolean;
           prompt?: string;
+          kbTab?: "pages" | "sources" | "runbooks" | "review";
+          pageId?: string;
         }>
       ).detail;
       // With no mode given, Full view stays Full view: only a closed assistant is opened.
@@ -807,6 +812,15 @@ export function AiHubPanel({
       const targetView = normalizeViewTarget(detail?.view);
       if (targetView) {
         if (isLabsView(targetView)) setLabsEnabled(true);
+        if (targetView === "Knowledge Base" && (detail?.kbTab || detail?.pageId)) {
+          setKbTabRequest((prev) => ({
+            tab: detail.kbTab ?? "pages",
+            pageId: detail.pageId,
+            seq: (prev?.seq ?? 0) + 1,
+          }));
+        } else {
+          setKbTabRequest(undefined);
+        }
         setView(targetView);
       }
       if (detail?.newTask) {
@@ -1403,6 +1417,7 @@ export function AiHubPanel({
                       type="button"
                       aria-current={activeView === v ? "true" : undefined}
                       onClick={() => {
+                        setKbTabRequest(undefined);
                         setView(v);
                         setMenu(null);
                       }}
@@ -1557,6 +1572,7 @@ export function AiHubPanel({
               key={name}
               aria-current={activeView === name ? "page" : undefined}
               onClick={() => {
+                setKbTabRequest(undefined);
                 setView(name);
                 setMenu(null);
               }}
@@ -3443,7 +3459,14 @@ export function AiHubPanel({
                 setTaskId(id);
                 setView("Work");
               }}
-              onOpenView={(next) => setView(next)}
+              onOpenView={(next, detail) => {
+                if (next === "Knowledge Base" && detail?.kbTab) {
+                  setKbTabRequest((prev) => ({ tab: detail.kbTab!, seq: (prev?.seq ?? 0) + 1 }));
+                } else {
+                  setKbTabRequest(undefined);
+                }
+                setView(next);
+              }}
               onOpenTicket={(id) => {
                 setWorkforceTicketId(id);
                 setView("Workforce");
@@ -3485,10 +3508,9 @@ export function AiHubPanel({
               hub={hub}
               act={act}
               request={hubRequest}
+              openTab={kbTabRequest}
               onOpenFileRef={handleOpenFileRef}
-              onRunStepInTerminal={(command) => {
-                void runCommandInTerminal(command);
-              }}
+              onRunStepInTerminal={(command) => runCommandInTerminal(command)}
               onAskAiStep={(stepPrompt) => {
                 setPrompt(stepPrompt);
                 setView("Work");

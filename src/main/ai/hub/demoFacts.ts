@@ -162,7 +162,12 @@ const APPLIANCE = /netapp|aff-|fas\d|storagegrid|(^|[^a-z])sg-|ontap|truenas/i;
  * and later readings differ from the first, so that there is something under
  * "Changed recently" without a real server.
  */
-export function demoFactsOutput(server: Pick<WorkspaceServerSummary, "name" | "host">, now: number, generation: number): string {
+export function demoFactsOutput(
+  server: Pick<WorkspaceServerSummary, "name" | "host">,
+  now: number,
+  generation: number,
+  certAnchorAt = now,
+): string {
   // An appliance does not answer the script, and is shown as such.
   if (APPLIANCE.test(server.name)) return 'Error: "export" is not a recognized command';
   const seed = [...server.name].reduce((n, c) => (n * 31 + c.charCodeAt(0)) % 997, 7);
@@ -177,7 +182,7 @@ export function demoFactsOutput(server: Pick<WorkspaceServerSummary, "name" | "h
   const cert = role.cert?.(server.name);
   const hash = (text: string): string => [...Array(64)].map((_, i) => ((text.charCodeAt(i % text.length) * (i + 3) + seed) % 16).toString(16)).join("");
   const days = (n: number): string => {
-    const d = new Date(now + n * 86_400_000);
+    const d = new Date(certAnchorAt + n * 86_400_000);
     const month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getUTCMonth()];
     return `${month} ${String(d.getUTCDate()).padStart(2, " ")} 12:00:00 ${d.getUTCFullYear()} GMT`;
   };

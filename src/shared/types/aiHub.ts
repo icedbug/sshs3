@@ -803,6 +803,8 @@ export interface InventoryEntry {
   label: string;
   address: string;
   status: "unknown" | "reachable" | "unreachable" | "blocked";
+  /** Why an entry is blocked from direct probing, when applicable. */
+  reasonKind?: "demo" | "proxy";
   detail: string;
   observedAt: number;
 }
@@ -925,6 +927,8 @@ export interface ServerFactsView {
   name: string;
   /** ok: collected. unsupported: not a system the collection knows. failed: could not be reached or signed in to. never: not collected yet. */
   status: "ok" | "unsupported" | "failed" | "never";
+  /** True when the server or its facts come from the demo lab rather than a real SSH connection. */
+  demo?: boolean;
   error?: string;
   collectedAt?: number;
   via?: "open-tab" | "own-connection" | "local" | "demo";
@@ -1219,6 +1223,13 @@ export interface CorrelatedAlertRef {
   severity?: string;
 }
 
+/** A knowledge base page matched for an alert ticket when it was created. */
+export interface TicketKbRef {
+  id: string;
+  title: string;
+  known: boolean;
+}
+
 /**
  * One piece of work on the team's board. With a team bucket the board is
  * shared; whoever's app is running takes a ticket by claiming it.
@@ -1301,6 +1312,8 @@ export interface WorkTicket {
   chatRefs?: TicketChatRef[];
   /** When chat was last looked through for it, also when nothing was found. */
   chatLookedAt?: number;
+  /** Knowledge base pages matched for this ticket when it was created from an alert. */
+  kbPages?: TicketKbRef[];
 }
 
 /** Tokens an agent has spent on tickets in one calendar month (`YYYY-MM`). */
@@ -1355,6 +1368,8 @@ export interface McpServerConfig {
   headers?: Record<string, string>;
   enabled: boolean;
   status?: "connected" | "disconnected" | "error" | "unknown";
+  /** True for the demo lab's scripted example MCP servers: nothing real is connected. */
+  demo?: boolean;
   lastError?: string;
   lastTestedAt?: number;
   discoveredTools?: McpToolSummary[];

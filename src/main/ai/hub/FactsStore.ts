@@ -27,6 +27,8 @@ export interface FactsRecord {
   /** When each present problem was first seen, by its key. */
   problemsSince?: Record<string, number>;
   dismissed?: Record<string, number>;
+  /** Initial collection timestamp used to keep baseline demo cert expiry dates fixed across UTC midnight. */
+  demoCertAnchorAt?: number;
 }
 
 const safeName = (id: string): string => id.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 120) || "server";

@@ -292,6 +292,7 @@ export function ServerFactsCard({
   const everyChange = facts.servers.flatMap((s) => s.changes.map((c) => ({ ...c, server: s.name }))).sort((a, b) => b.at - a.at);
   const recent = everyChange.slice(0, allRecent ? 100 : 10);
   const read = facts.servers.filter((s) => s.status === "ok").length;
+  const isDemoLab = Boolean(hub.demoMode || facts.servers.some((s) => s.demo || s.via === "demo"));
 
   const toggle = (serverId: string): void => {
     if (open === serverId) return setOpen(null);
@@ -313,12 +314,22 @@ export function ServerFactsCard({
                 {read}/{facts.servers.length}
               </span>
             )}
+            {isDemoLab && (
+              <span className="ai-badge" data-testid="facts-demo-badge" style={{ marginLeft: 8 }}>
+                Demo lab (simulated)
+              </span>
+            )}
           </strong>
           <small>
             Reads each server on a schedule: system and kernel, packages, services, listening ports, disks, certificates
             and a list of configuration files. Only commands that look; no model is involved. What is different from last
-            time is given to an agent that troubleshoots there, and put into an alert's ticket.
+            time is given to an agent that troubleshoots there, and put into an alert&apos;s ticket.
           </small>
+          {isDemoLab && (
+            <small className="ai-hint" data-testid="facts-demo-note" style={{ display: "block", marginTop: 4 }}>
+              Simulated demo readings. Real servers are read with read-only commands over SSH.
+            </small>
+          )}
         </div>
         {facts.enabled && facts.servers.length > 0 && (
           <button type="button" disabled={facts.collecting.length > 0} onClick={() => void act({ action: "facts-collect-now" })}>
@@ -440,6 +451,16 @@ export function ServerFactsCard({
                           title={`Last read ${ago(s.collectedAt)}; interval is ${facts.intervalHours}h`}
                         >
                           Stale · {ago(s.collectedAt)}
+                        </span>
+                      )}
+                      {(s.demo || s.via === "demo") && (
+                        <span
+                          className="ai-badge"
+                          data-testid={`facts-demo-${s.serverId}`}
+                          style={{ marginLeft: 6 }}
+                          title="Simulated demo server reading, not collected over SSH"
+                        >
+                          Demo (simulated)
                         </span>
                       )}
                       {!left && s.status === "ok" && (

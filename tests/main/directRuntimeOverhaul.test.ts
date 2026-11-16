@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -15,6 +16,7 @@ import {
   formatToolOutputForModel,
   microcompactToolResults,
   normalizeProviderUsage,
+  pinnedNodeFetch,
   resetCircuitBreakers,
   resolveCascadingWorkspaceRules,
   resolveTurnReasoningEffort,
@@ -906,6 +908,68 @@ describe("DirectAgentRuntime Wave 1 Overhaul", () => {
           lastTurnHadError: false,
         }),
       ).toBe("high");
+    });
+
+    it("pinnedNodeFetch handles Node 24 options.all lookup against localhost", async () => {
+      const srv = http.createServer((req, res) => {
+        const chunks: Buffer[] = [];
+        req.on("data", (c: Buffer) => chunks.push(c));
+        req.on("end", () => {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true, echo: Buffer.concat(chunks).toString("utf8") }));
+        });
+      });
+      await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", () => resolve()));
+      try {
+        const { port } = srv.address() as { port: number };
+        const target = await validateLlmEndpointAndEgress(`http://localhost:${port}/v1/chat/completions`, {
+          provider: "openai-compatible",
+          model: "test",
+          server: false,
+          allowPrivate: true,
+          allowPlainHttp: true,
+          lookup: async () => [{ address: "127.0.0.1", family: 4 }],
+        });
+        const resp = await pinnedNodeFetch(target, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model: "test" }),
+        });
+        expect(resp.status).toBe(200);
+        expect(await resp.json()).toEqual({ ok: true, echo: '{"model":"test"}' });
+      } finally {
+        await new Promise<void>((resolve) => srv.close(() => resolve()));
+      }
+    });
+
+    it("pinnedNodeFetch rejects cleanly on an already-aborted AbortSignal without emitting an unhandled error event", async () => {
+      const srv = http.createServer((_req, res) => {
+        res.writeHead(200);
+        res.end("ok");
+      });
+      await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", () => resolve()));
+      try {
+        const { port } = srv.address() as { port: number };
+        const target = await validateLlmEndpointAndEgress(`http://localhost:${port}/v1/chat/completions`, {
+          provider: "openai-compatible",
+          model: "test",
+          server: false,
+          allowPrivate: true,
+          allowPlainHttp: true,
+          lookup: async () => [{ address: "127.0.0.1", family: 4 }],
+        });
+        const reason = new Error("pre-aborted");
+        await expect(
+          pinnedNodeFetch(target, {
+            method: "POST",
+            signal: AbortSignal.abort(reason),
+          }),
+        ).rejects.toThrow("pre-aborted");
+        // Allow nextTick so any unattached ClientRequest 'error' emission would surface before test exits.
+        await new Promise((r) => setTimeout(r, 20));
+      } finally {
+        await new Promise<void>((resolve) => srv.close(() => resolve()));
+      }
     });
   });
 });

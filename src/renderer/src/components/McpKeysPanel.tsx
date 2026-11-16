@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { copyToClipboard } from '../lib/clipboard';
 
 /**
  * The keys that let a person's own agent — Claude Code, Cursor, Codex —
@@ -90,6 +91,7 @@ export function McpKeysPanel({
   const [made, setMade] = useState<{ token: string; name: string } | null>(null);
   const [problem, setProblem] = useState('');
   const [copied, setCopied] = useState('');
+  const [copyFailed, setCopyFailed] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
@@ -105,8 +107,10 @@ export function McpKeysPanel({
     void load();
   }, [load]);
 
-  const create = async (e: React.FormEvent): Promise<void> => {
-    e.preventDefault();
+  const canCreate = !busy && Boolean(name.trim()) && (!scopes.includes('run') || Boolean(serverId.trim())) && (!narrow || only.length > 0);
+
+  const create = async (): Promise<void> => {
+    if (!canCreate) return;
     setProblem('');
     setBusy(true);
     try {
@@ -130,6 +134,12 @@ export function McpKeysPanel({
     }
   };
 
+  const createOnEnter = (e: React.KeyboardEvent<HTMLInputElement>): void => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    void create();
+  };
+
   const revoke = async (id: string): Promise<void> => {
     setProblem('');
     try {
@@ -141,14 +151,42 @@ export function McpKeysPanel({
   };
 
   const copy = (text: string, what: string): void => {
-    void navigator.clipboard?.writeText(text).then(() => {
-      setCopied(what);
-      setTimeout(() => setCopied(''), 2000);
+    setCopyFailed(false);
+    void copyToClipboard(text).then((ok) => {
+      if (ok) {
+        setCopied(what);
+        window.setTimeout(() => setCopied(''), 2000);
+      } else {
+        setCopied('');
+        setCopyFailed(true);
+        window.setTimeout(() => setCopyFailed(false), 4000);
+      }
     });
   };
 
-  const where = endpoint || `${origin}/api/mcp`;
+  const normalizedOrigin = origin.trim().replace(/\/+$/, '');
+  const fallbackOrigin =
+    !normalizedOrigin &&
+    !endpoint?.trim() &&
+    typeof window !== 'undefined' &&
+    /^https?:$/i.test(window.location.protocol)
+      ? window.location.origin.replace(/\/+$/, '')
+      : normalizedOrigin;
+  const where = endpoint?.trim() || (fallbackOrigin ? `${fallbackOrigin}/api/mcp` : '/api/mcp');
   const addCommand = made ? `claude mcp add --transport http sshs3 ${where} --header "Authorization: Bearer ${made.token}"` : '';
+  const sampleClaudeCmd = `claude mcp add --transport http sshs3 ${where} --header "Authorization: Bearer YOUR_KEY"`;
+  const sampleCursorJson = JSON.stringify(
+    {
+      mcpServers: {
+        sshs3: {
+          url: where,
+          headers: { Authorization: 'Bearer YOUR_KEY' },
+        },
+      },
+    },
+    null,
+    2,
+  );
 
   return (
     <div className="space-y-3 text-xs" data-testid="mcp-keys">
@@ -156,9 +194,59 @@ export function McpKeysPanel({
         <h3 className="text-sm font-semibold text-white">{title}</h3>
         <p className="text-slate-400 mt-0.5 leading-relaxed">
           {intro ??
-            "Give your own coding agent a key and it can ask this sshs3 about your team's servers, what changed on them, and what the team has written down — as you, with what you can see. A key carries what it may do, and you can take it back at any time."}
+            "Give your own coding agent a key so it can ask this sshs3 about your team's servers, recent changes, and team notes, with your access level. Each key lists what it may do, and you can revoke it at any time."}
         </p>
       </div>
+
+      <div
+        className="rounded-lg bg-slate-900/70 border border-slate-800 p-3 space-y-2"
+        data-testid="mcp-connection-info"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <span className="text-slate-300 font-medium">MCP server address: </span>
+            <code className="text-cyan-200 font-mono break-all" data-testid="mcp-endpoint-url">
+              {where}
+            </code>
+          </div>
+          <button
+            type="button"
+            data-testid="mcp-copy-url"
+            onClick={() => copy(where, 'url')}
+            className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200"
+          >
+            {copied === 'url' ? 'Copied' : 'Copy address'}
+          </button>
+        </div>
+        <p className="text-slate-400 leading-relaxed">
+          Send a key in the <code>Authorization: Bearer YOUR_KEY</code> header. Secret keys are shown once when created.
+        </p>
+        <details className="text-slate-300">
+          <summary className="cursor-pointer font-medium text-slate-200">
+            Setup examples (Claude Code and Cursor)
+          </summary>
+          <div className="mt-2 space-y-2">
+            <div>
+              <div className="text-slate-400 mb-1">Claude Code:</div>
+              <pre className="rounded bg-slate-950 border border-slate-800 p-2 font-mono text-[11px] text-slate-200 overflow-x-auto">
+                {sampleClaudeCmd}
+              </pre>
+            </div>
+            <div>
+              <div className="text-slate-400 mb-1">Cursor (~/.cursor/mcp.json):</div>
+              <pre className="rounded bg-slate-950 border border-slate-800 p-2 font-mono text-[11px] text-slate-200 overflow-x-auto">
+                {sampleCursorJson}
+              </pre>
+            </div>
+          </div>
+        </details>
+      </div>
+
+      {copyFailed && (
+        <p role="status" data-testid="mcp-copy-error" className="text-amber-300 text-[11px]">
+          Could not copy automatically. Select and copy the text.
+        </p>
+      )}
 
       {problem && (
         <div role="alert" className="rounded-lg bg-rose-500/10 border border-rose-500/30 px-3 py-2 text-rose-300">
@@ -215,7 +303,7 @@ export function McpKeysPanel({
                 </div>
                 <div className="text-slate-500 text-[11px]">
                   {k.scopes.map((s) => WHAT[s]?.label ?? s).join(' · ')}
-                  {k.serverId ? ` (${k.serverId})` : ''} — {ago(k.lastUsedAt)}
+                  {k.serverId ? ` (${k.serverId})` : ''} · {ago(k.lastUsedAt)}
                   {k.uses ? `, ${k.uses} call${k.uses === 1 ? '' : 's'}` : ''}, {expiresText(k.expiresAt)}
                   {k.tools?.length ? <span className="block">Only: {k.tools.join(', ')}</span> : null}
                 </div>
@@ -232,14 +320,15 @@ export function McpKeysPanel({
         </ul>
       )}
 
-      <form onSubmit={create} className="space-y-2 pt-2 border-t border-slate-800">
+      <div className="space-y-2 pt-2 border-t border-slate-800">
         <label className="block text-slate-300 font-medium">
           Make a key
           <input
-            required
+            aria-required="true"
             value={name}
             onChange={(e) => setName(e.target.value)}
-            placeholder="What is it for — “Claude Code on my laptop”"
+            onKeyDown={createOnEnter}
+            placeholder='What is it for (e.g. "Claude Code on my laptop")'
             aria-label="What the key is for"
             className="mt-1 w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2 text-white"
           />
@@ -265,9 +354,10 @@ export function McpKeysPanel({
           <label className="block text-slate-300 font-medium">
             The one server it may run on
             <input
-              required
+              aria-required="true"
               value={serverId}
               onChange={(e) => setServerId(e.target.value)}
+              onKeyDown={createOnEnter}
               placeholder="The server's name, exactly as it is in sshs3"
               aria-label="The one server it may run on"
               className="mt-1 w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2 text-white"
@@ -313,13 +403,14 @@ export function McpKeysPanel({
           )}
         </div>
         <button
-          type="submit"
-          disabled={busy || !name.trim() || (scopes.includes('run') && !serverId.trim()) || (narrow && only.length === 0)}
+          type="button"
+          disabled={!canCreate}
+          onClick={() => void create()}
           className="px-3 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 disabled:opacity-50 text-slate-950 font-semibold transition"
         >
           {busy ? 'Making it…' : 'Make the key'}
         </button>
-      </form>
+      </div>
     </div>
   );
 }

@@ -319,7 +319,7 @@ export function RunbookExecutor({
 }: {
   runbook: RunbookTemplate;
   act: Act;
-  onRunStepInTerminal?: (command: string, step: RunbookStep, runbook: RunbookTemplate) => void;
+  onRunStepInTerminal?: (command: string, step: RunbookStep, runbook: RunbookTemplate) => boolean | void;
   onAskAiStep?: (prompt: string, step: RunbookStep, runbook: RunbookTemplate) => void;
 }): JSX.Element {
   const [values, setValues] = useState<Record<string, string | number | boolean>>(() => {
@@ -495,10 +495,11 @@ export function RunbookExecutor({
                     data-testid={`runbook-step-terminal-${step.id}`}
                     disabled={missingRequired}
                     onClick={() => {
-                      markStep(step.id, "active");
                       if (onRunStepInTerminal) {
-                        onRunStepInTerminal(resolvedCmd, step, runbook);
+                        const ok = onRunStepInTerminal(resolvedCmd, step, runbook);
+                        if (ok !== false) markStep(step.id, "active");
                       } else {
+                        markStep(step.id, "active");
                         setStatusMsg(`Staged command: ${resolvedCmd}`);
                       }
                     }}
@@ -576,6 +577,7 @@ export function KnowledgeBaseView({
   onOpenFileRef,
   onRunStepInTerminal,
   onAskAiStep,
+  openTab,
   request = hubRequest,
 }: {
   hub: HubSnapshot;
@@ -583,8 +585,9 @@ export function KnowledgeBaseView({
   onAttachDoc: (doc: KbDocument) => void;
   onRunRunbook?: (doc: KbDocument) => void;
   onOpenFileRef?: (ref: FileRef) => void;
-  onRunStepInTerminal?: (command: string, step: RunbookStep, runbook: RunbookTemplate) => void;
+  onRunStepInTerminal?: (command: string, step: RunbookStep, runbook: RunbookTemplate) => boolean | void;
   onAskAiStep?: (prompt: string, step: RunbookStep, runbook: RunbookTemplate) => void;
+  openTab?: { tab: "pages" | "sources" | "runbooks" | "review"; pageId?: string; seq: number };
   /** Requests whose own answer or error this view shows itself. */
   request?: (r: HubRequest) => Promise<HubSnapshot>;
 }): JSX.Element {
@@ -602,10 +605,31 @@ export function KnowledgeBaseView({
   const [problem, setProblem] = useState("");
   const [limit, setLimit] = useState(40);
   const [tab, setTab] = useState<"pages" | "sources" | "runbooks" | "review">(
-    (hub.kbPages ?? []).length > 0 ? "pages" : "sources",
+    openTab?.tab ?? ((hub.kbPages ?? []).length > 0 ? "pages" : "sources"),
   );
   const [pageDraft, setPageDraft] = useState<PageDraft | undefined>();
   const [openPage, setOpenPage] = useState<KbPage | undefined>();
+  const requestRef = useRef(request);
+  requestRef.current = request;
+  useEffect(() => {
+    if (!openTab) return;
+    let cancelled = false;
+    setTab(openTab.tab);
+    if (openTab.pageId) {
+      setProblem("");
+      requestRef
+        .current({ action: "kb-page-read", id: openTab.pageId })
+        .then((snap) => {
+          if (!cancelled && snap.reply?.kbPage) setOpenPage(snap.reply.kbPage);
+        })
+        .catch((error) => {
+          if (!cancelled) setProblem(error instanceof Error ? error.message : String(error));
+        });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [openTab]);
   const [activeRunbookId, setActiveRunbookId] = useState<string>("");
   const [openedRefNotice, setOpenedRefNotice] = useState<string>("");
   // People expect "write" to make a page. It makes a source, so say so once it is saved.
@@ -1497,7 +1521,11 @@ export function KnowledgeBaseView({
               <ConfirmButton
                 label="Delete"
                 confirmLabel="Delete this document?"
-                onConfirm={() => void act({ action: "kb-delete", id: doc.id })}
+                onConfirm={() =>
+                  void act({ action: "kb-delete", id: doc.id }).then((next) => {
+                    if (next && open?.id === doc.id) setOpen(undefined);
+                  })
+                }
               />
             </div>
           </article>

@@ -882,10 +882,23 @@ export class Sshs3WebServer {
     // Auth status endpoint
     if (pathname === '/api/auth/status' && method === 'GET') {
       const user = await this.authenticateRequest(req);
+      let publicUrl: string | undefined;
+      const rawPublicUrl = process.env.SSHS3_PUBLIC_URL?.trim();
+      if (rawPublicUrl) {
+        try {
+          const parsed = new URL(rawPublicUrl);
+          if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+            publicUrl = `${parsed.origin}${parsed.pathname.replace(/\/+$/, '')}`;
+          }
+        } catch {
+          // Ignore invalid SSHS3_PUBLIC_URL
+        }
+      }
       sendJson(res, 200, {
         initialized: this.auth.hasAnyUsers(),
         authenticated: Boolean(user),
         user,
+        ...(publicUrl ? { publicUrl } : {}),
       });
       return;
     }

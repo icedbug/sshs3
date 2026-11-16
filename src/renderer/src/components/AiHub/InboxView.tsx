@@ -10,6 +10,7 @@ import {
   type InboxPriorityBucket,
 } from "@shared/aiHubInbox";
 import type { HubSnapshot } from "@shared/types/aiHub";
+import { copyToClipboard } from "../../lib/clipboard";
 import { ChangeProof } from "./ChangeProof";
 import { TABULAR_NUMS_CLASS, TABULAR_NUMS_STYLE, type Act } from "./panelShared";
 import { RichMarkdownContent } from "./RichMarkdownContent";
@@ -18,7 +19,10 @@ export interface InboxViewProps {
   hub: HubSnapshot;
   act: Act;
   onOpenTask: (taskId: string) => void;
-  onOpenView: (view: "Workforce" | "Knowledge Base" | "Infrastructure") => void;
+  onOpenView: (
+    view: "Workforce" | "Knowledge Base" | "Infrastructure",
+    detail?: { kbTab?: "pages" | "sources" | "runbooks" | "review" },
+  ) => void;
   /** Opens a ticket on the Workforce board. */
   onOpenTicket?: (ticketId: string) => void;
   /** The item a notification's link pointed at: shown first, or said to be handled if it is gone. */
@@ -118,8 +122,12 @@ export function InboxView({
   const dispatch = onRequest ?? act;
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [address, setAddress] = useState("");
+  const [copiedAddress, setCopiedAddress] = useState(false);
+  const [copyAddressFailed, setCopyAddressFailed] = useState(false);
+  const [hookStatus, setHookStatus] = useState("");
   const [pasted, setPasted] = useState("");
   const [rules, setRules] = useState<{ match: string; agentId: string }[] | undefined>();
+  const [ruleNotice, setRuleNotice] = useState<{ text: string; isError: boolean } | undefined>();
   const [query, setQuery] = useState("");
   const [sectionFilter, setSectionFilter] = useState<InboxSectionFilter>("all");
   const [selectedId, setSelectedId] = useState<string | null>(focusItemId ?? null);
@@ -228,10 +236,10 @@ export function InboxView({
   const shownRules = rules ?? intake?.rules ?? [];
   const note = useCallback((id: string): string => notes[id] ?? "", [notes]);
 
-  // Marking a ticket done from the keyboard takes two presses. The first one stops waiting after 4 s.
+  // Marking a ticket done from the keyboard takes two presses. The first one stops waiting after 10 s.
   useEffect(() => {
     if (!armedDoneId) return;
-    const timer = window.setTimeout(() => setArmedDoneId(null), 4000);
+    const timer = window.setTimeout(() => setArmedDoneId(null), 10_000);
     return () => window.clearTimeout(timer);
   }, [armedDoneId]);
 
@@ -246,7 +254,7 @@ export function InboxView({
       } else if (item.kind === "health") {
         onOpenView("Infrastructure");
       } else if (item.kind === "knowledge") {
-        onOpenView("Knowledge Base");
+        onOpenView("Knowledge Base", { kbTab: "review" });
       }
     },
     [onOpenTask, onOpenTicket, onOpenView],
@@ -652,7 +660,7 @@ export function InboxView({
       case "knowledge":
         return (
           <>
-            <button type="button" onClick={() => onOpenView("Knowledge Base")}>
+            <button type="button" onClick={() => onOpenView("Knowledge Base", { kbTab: "review" })}>
               Look at it
             </button>
             <button
@@ -905,13 +913,19 @@ export function InboxView({
 
       <details className="ai-fold ai-set-fold" data-testid="alerts-in">
         <summary>
-          Alerts in{intake?.enabled ? ` · on, ${intake.received} received` : " · off"}
+          Alerts in
+          {intake?.enabled
+            ? ` · on, ${intake.received} webhook alert${intake.received === 1 ? "" : "s"} received${
+                intake.lastAt ? ` (last ${ago(intake.lastAt)})` : ""
+              }`
+            : " · off"}
         </summary>
         <div className="ai-form">
           <p className="ai-hint">
             An alert becomes a ticket on the board: the same alert firing again is counted on its ticket, and with the
             heartbeat on an agent starts looking before anyone is awake. The alert&apos;s text is given to the agent
-            as data, never as an instruction.
+            as data, never as an instruction. The counter tracks alerts posted to the webhook address below; pasted
+            and demo alerts create tickets directly.
           </p>
           {intake?.canReceive ? (
             <>
@@ -919,35 +933,87 @@ export function InboxView({
                 <button
                   type="button"
                   className="ai-btn-accent"
-                  onClick={() =>
+                  onClick={() => {
+                    setCopiedAddress(false);
+                    setCopyAddressFailed(false);
+                    setHookStatus("");
                     void dispatch({ action: "alert-hook-create" }).then((snap) => {
                       const path = snap?.reply?.alertHook?.path;
-                      if (path) setAddress(`${window.location.origin}${path}`);
-                    })
-                  }
+                      if (path) {
+                        setAddress(`${window.location.origin}${path}`);
+                        setHookStatus("Webhook address created. Copy it now because it is shown once.");
+                      }
+                    });
+                  }}
                 >
                   {intake.enabled ? "Replace the address" : "Create an address to post to"}
                 </button>
                 {intake.enabled && (
                   <button
                     type="button"
-                    onClick={() => void dispatch({ action: "alert-hook-disable" }).then(() => setAddress(""))}
+                    title="Revokes the webhook secret and turns incoming alert webhooks off"
+                    onClick={() => {
+                      setHookStatus("");
+                      void dispatch({ action: "alert-hook-disable" }).then((snap) => {
+                        setAddress("");
+                        setCopiedAddress(false);
+                        setCopyAddressFailed(false);
+                        const notes = snap?.reply?.notes?.join(" ");
+                        setHookStatus(notes || "Webhook address revoked and turned off.");
+                      });
+                    }}
                   >
-                    Turn off
+                    Revoke and turn off
                   </button>
                 )}
               </div>
+              {hookStatus && (
+                <p className="ai-hint" role="status" data-testid="alert-hook-status">
+                  {hookStatus}
+                </p>
+              )}
+              {intake.enabled && !address && (
+                <p className="ai-hint">
+                  Active. The webhook address is shown once when created; click Replace the address to generate a new one.
+                </p>
+              )}
               {address && (
                 <label>
                   Post alerts here (Alertmanager webhook, Grafana contact point, PagerDuty webhook, or any JSON). Shown
                   once: it is the key.
-                  <input
-                    readOnly
-                    className="ai-mono"
-                    data-testid="alert-address"
-                    value={address}
-                    onFocus={(e) => e.target.select()}
-                  />
+                  <div className="ai-inline-form">
+                    <input
+                      readOnly
+                      className="ai-mono"
+                      data-testid="alert-address"
+                      value={address}
+                      onFocus={(e) => e.target.select()}
+                    />
+                    <button
+                      type="button"
+                      data-testid="alert-address-copy"
+                      onClick={() => {
+                        setCopyAddressFailed(false);
+                        void copyToClipboard(address).then((ok) => {
+                          if (ok) {
+                            setCopiedAddress(true);
+                            window.setTimeout(() => setCopiedAddress(false), 2000);
+                          } else {
+                            setCopiedAddress(false);
+                            setCopyAddressFailed(true);
+                            window.setTimeout(() => setCopyAddressFailed(false), 4000);
+                          }
+                        });
+                      }}
+                    >
+                      {copiedAddress ? "Copied" : "Copy address"}
+                    </button>
+                  </div>
+                  {copyAddressFailed && (
+                    <small role="status" data-testid="alert-address-copy-error" className="ai-warn">
+                      Could not copy automatically. Select and copy the text.
+                    </small>
+                  )}
                 </label>
               )}
             </>
@@ -967,16 +1033,18 @@ export function InboxView({
                   aria-label="Alert contains"
                   placeholder="disk, postgres, DB-Prod…"
                   value={rule.match}
-                  onChange={(e) =>
-                    setRules(shownRules.map((r, j) => (j === i ? { ...r, match: e.target.value } : r)))
-                  }
+                  onChange={(e) => {
+                    setRuleNotice(undefined);
+                    setRules(shownRules.map((r, j) => (j === i ? { ...r, match: e.target.value } : r)));
+                  }}
                 />
                 <select
                   aria-label="Goes to"
                   value={rule.agentId}
-                  onChange={(e) =>
-                    setRules(shownRules.map((r, j) => (j === i ? { ...r, agentId: e.target.value } : r)))
-                  }
+                  onChange={(e) => {
+                    setRuleNotice(undefined);
+                    setRules(shownRules.map((r, j) => (j === i ? { ...r, agentId: e.target.value } : r)));
+                  }}
                 >
                   <option value="">Choose an agent</option>
                   {agents.map((a) => (
@@ -985,20 +1053,60 @@ export function InboxView({
                     </option>
                   ))}
                 </select>
-                <button type="button" onClick={() => setRules(shownRules.filter((_, j) => j !== i))}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRuleNotice(undefined);
+                    setRules(shownRules.filter((_, j) => j !== i));
+                  }}
+                >
                   Remove
                 </button>
               </div>
             ))}
+            {ruleNotice && (
+              <p
+                className={ruleNotice.isError ? "ai-error" : "ai-hint"}
+                role={ruleNotice.isError ? "alert" : "status"}
+                data-testid="alert-rules-status"
+              >
+                {ruleNotice.text}
+              </p>
+            )}
             <div className="ai-card-actions">
-              <button type="button" onClick={() => setRules([...shownRules, { match: "", agentId: "" }])}>
+              <button
+                type="button"
+                onClick={() => {
+                  setRuleNotice(undefined);
+                  setRules([...shownRules, { match: "", agentId: "" }]);
+                }}
+              >
                 Add a rule
               </button>
               {rules && (
                 <button
                   type="button"
                   className="ai-btn-emerald"
-                  onClick={() => void dispatch({ action: "alert-rules-save", rules }).then(() => setRules(undefined))}
+                  onClick={() => {
+                    setRuleNotice(undefined);
+                    void dispatch({ action: "alert-rules-save", rules })
+                      .then((snap) => {
+                        const notes = snap?.reply?.notes ?? [];
+                        const rejected = notes.some((n) => n.startsWith("Not saved"));
+                        if (snap && !rejected) {
+                          setRules(undefined);
+                          setRuleNotice({ text: notes.join(" ") || "Rules saved.", isError: false });
+                        } else if (notes.length > 0) {
+                          setRuleNotice({ text: notes.join(" "), isError: true });
+                        }
+                      })
+                      .catch((err) => {
+                        setRuleNotice({
+                          text: err instanceof Error ? err.message : "Could not save rules.",
+                          isError: true,
+                        });
+                      });
+                  }}
                 >
                   Save rules
                 </button>

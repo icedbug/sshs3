@@ -33,6 +33,7 @@ export interface InventoryTarget {
   address: string;
   port: number;
   blocked?: string;
+  reasonKind?: "demo" | "proxy";
 }
 
 export interface ScopedMemoryTargetContext {
@@ -1379,6 +1380,7 @@ export class ContextService {
               label: target.label,
               address: target.address,
               status: "unknown",
+              ...(target.reasonKind ? { reasonKind: target.reasonKind } : {}),
               detail: "Not checked",
               observedAt: Date.now(),
             };

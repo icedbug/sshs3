@@ -166,6 +166,7 @@ export function AgentsAndMcpView({
 
   const [mcpDraft, setMcpDraft] = useState<McpDraft | undefined>();
   const [testingMcpId, setTestingMcpId] = useState("");
+  const [mcpTestNotes, setMcpTestNotes] = useState<Record<string, string>>({});
   const [runnerDraft, setRunnerDraft] = useState<
     { id: string; name: string; command: string; args: string; cwd: string; note?: string; existing?: boolean } | undefined
   >();
@@ -1292,17 +1293,21 @@ export function AgentsAndMcpView({
       )}
 
       {servers.map((srv) => {
+        const isDemo = Boolean(srv.demo || srv.id.startsWith("demo-mcp-"));
         const state = !srv.enabled
           ? "disabled"
-          : srv.status === "connected"
-            ? "connected"
-            : srv.status === "error"
-              ? "failed"
-              : "not tested";
+          : isDemo
+            ? "Demo (simulated)"
+            : srv.status === "connected"
+              ? "connected"
+              : srv.status === "error"
+                ? "failed"
+                : "not tested";
         const toolCount = srv.discoveredTools?.length ?? 0;
         const promptCount = srv.discoveredPrompts?.length ?? srv.promptCount ?? 0;
         const resourceCount = srv.discoveredResources?.length ?? srv.resourceCount ?? 0;
         const oauthInfo = mcpOAuthStatus(srv.oauth);
+        const testNote = mcpTestNotes[srv.id];
 
         return (
           <article className="ai-card" key={srv.id} data-testid={`mcp-server-${srv.id}`}>
@@ -1313,6 +1318,9 @@ export function AgentsAndMcpView({
                 <small data-testid={`mcp-counts-${srv.id}`}>
                   {toolCount} tool{toolCount === 1 ? "" : "s"} · {promptCount} prompt{promptCount === 1 ? "" : "s"} ·{" "}
                   {resourceCount} resource{resourceCount === 1 ? "" : "s"}
+                  {srv.lastTestedAt
+                    ? ` · Tested ${new Date(srv.lastTestedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+                    : ""}
                 </small>
               </div>
               <div className="ai-tags">
@@ -1330,14 +1338,33 @@ export function AgentsAndMcpView({
                   </span>
                 )}
                 <span
-                  className={`ai-badge ${state === "connected" ? "ai-badge-success" : state === "failed" ? "ai-badge-danger" : ""}`}
+                  data-testid={isDemo && srv.enabled ? `mcp-demo-badge-${srv.id}` : undefined}
+                  className={`ai-badge ${
+                    state === "connected"
+                      ? "ai-badge-success"
+                      : state === "failed"
+                        ? "ai-badge-danger"
+                        : ""
+                  }`}
                 >
                   {state}
                 </span>
               </div>
             </div>
 
+            {isDemo && srv.enabled && (
+              <p className="ai-hint" data-testid={`mcp-demo-note-${srv.id}`}>
+                Simulated demo server. Its tools return scripted answers locally and do not connect to a real network.
+              </p>
+            )}
+
             {srv.lastError && srv.enabled && <p className="ai-error">{srv.lastError}</p>}
+
+            {testNote && (
+              <p className="ai-hint" role="status" data-testid={`mcp-test-status-${srv.id}`}>
+                {testNote}
+              </p>
+            )}
 
             <label className="ai-check">
               <input
@@ -1394,7 +1421,25 @@ export function AgentsAndMcpView({
                 disabled={testingMcpId === srv.id}
                 onClick={() => {
                   setTestingMcpId(srv.id);
-                  void act({ action: "mcp-test", id: srv.id }).finally(() => setTestingMcpId(""));
+                  void act({ action: "mcp-test", id: srv.id })
+                    .then((next) => {
+                      const updated = next?.mcpServers?.find((x) => x.id === srv.id);
+                      const note =
+                        next?.reply?.notes?.join(" ") ||
+                        (updated?.lastError
+                          ? `Failed: ${updated.lastError}`
+                          : updated?.status === "connected"
+                            ? `Connected: ${updated.discoveredTools?.length ?? 0} tool(s) available.`
+                            : "Test finished.");
+                      setMcpTestNotes((prev) => ({ ...prev, [srv.id]: note }));
+                    })
+                    .catch((err) => {
+                      setMcpTestNotes((prev) => ({
+                        ...prev,
+                        [srv.id]: err instanceof Error ? err.message : "Test failed.",
+                      }));
+                    })
+                    .finally(() => setTestingMcpId(""));
                 }}
               >
                 {testingMcpId === srv.id ? "Testing…" : "Test"}
@@ -1465,7 +1510,7 @@ export function AgentsAndMcpView({
       {presets.length > 0 && (
         <>
           <h3 className="ai-subhead">
-            {hub.demoMode ? "Demo servers (invented — nothing is installed)" : "Starting points"}
+            {hub.demoMode ? "Demo servers (invented, nothing is installed)" : "Starting points"}
           </h3>
           <div className="ai-preset-grid" data-testid="mcp-marketplace-grid">
             {presets.map((preset: McpCatalogPreset) => (

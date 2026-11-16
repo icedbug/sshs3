@@ -487,6 +487,11 @@ export async function validateLlmEndpointAndEgress(
  */
 export function pinnedNodeFetch(target: GuardedTarget, init: RequestInit): Promise<Response> {
   return new Promise((resolve, reject) => {
+    if (init.signal?.aborted) {
+      const err = init.signal.reason instanceof Error ? init.signal.reason : new DOMException("Aborted", "AbortError");
+      reject(err);
+      return;
+    }
     const url = target.url;
     const isHttps = url.protocol === "https:";
     const lib = isHttps ? https : http;
@@ -517,8 +522,21 @@ export function pinnedNodeFetch(target: GuardedTarget, init: RequestInit): Promi
         method: init.method ?? "GET",
         headers,
         ...(isHttps && net.isIP(hostname) === 0 ? { servername: hostname } : {}),
-        lookup: (_host, _opts, callback) => {
-          (callback as (e: Error | null, address: string, family: number) => void)(null, target.address, target.family);
+        lookup: (_host, opts, callback) => {
+          const cb = typeof opts === "function" ? opts : callback;
+          const wantsAll = typeof opts === "object" && opts !== null && Boolean(opts.all);
+          if (wantsAll) {
+            (cb as (e: NodeJS.ErrnoException | null, addresses: Array<{ address: string; family: number }>) => void)(
+              null,
+              [{ address: target.address, family: target.family }],
+            );
+          } else {
+            (cb as (e: NodeJS.ErrnoException | null, address: string, family: number) => void)(
+              null,
+              target.address,
+              target.family,
+            );
+          }
         },
       },
       (res) => {
@@ -579,13 +597,6 @@ export function pinnedNodeFetch(target: GuardedTarget, init: RequestInit): Promi
         reject(err);
       }
     };
-    if (init.signal) {
-      if (init.signal.aborted) {
-        onAbort();
-        return;
-      }
-      init.signal.addEventListener("abort", onAbort, { once: true });
-    }
     req.on("error", (err) => {
       if (init.signal) init.signal.removeEventListener("abort", onAbort);
       if (!settled) {
@@ -596,6 +607,13 @@ export function pinnedNodeFetch(target: GuardedTarget, init: RequestInit): Promi
     req.on("close", () => {
       if (init.signal) init.signal.removeEventListener("abort", onAbort);
     });
+    if (init.signal) {
+      if (init.signal.aborted) {
+        onAbort();
+        return;
+      }
+      init.signal.addEventListener("abort", onAbort, { once: true });
+    }
     if (bodyText !== undefined) req.end(bodyText);
     else req.end();
   });

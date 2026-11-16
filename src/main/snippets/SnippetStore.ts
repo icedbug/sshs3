@@ -192,4 +192,22 @@ export class SnippetStore {
       this.cache = next;
     });
   }
+
+  /**
+   * Clears hidden built-in snippet IDs so deleted shipped snippets reappear. Returns how many were restored.
+   */
+  public async restoreBuiltins(): Promise<number> {
+    return this.queueMutation(async () => {
+      const data = await this.load();
+      const count = data.hiddenBuiltinIds.length;
+      if (count === 0) return 0;
+      const next: SnippetData = {
+        ...data,
+        hiddenBuiltinIds: [],
+      };
+      await this.persist(next);
+      this.cache = next;
+      return count;
+    });
+  }
 }

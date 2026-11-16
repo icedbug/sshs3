@@ -567,4 +567,77 @@ describe('LandingView Component', () => {
     fireEvent.change(screen.getByPlaceholderText(/Type user@host to connect/), { target: { value: 'root@example.com' } });
     expect(screen.getByTestId('quick-connect-btn')).not.toBeDisabled();
   });
+
+  it('opens the newly created workforce review task when launching from LandingView and uses server-sharing copy in web mode', async () => {
+    const originalMultissh = (window as any).multissh;
+    const dispatched: Array<Record<string, unknown>> = [];
+    const listener = (ev: Event) => {
+      dispatched.push(((ev as CustomEvent).detail ?? {}) as Record<string, unknown>);
+    };
+    window.addEventListener('sshs3:ai-open', listener);
+    (window as any).__SSHS3_WEB_MODE__ = true;
+    (window as any).multissh = {
+      ...(originalMultissh ?? {}),
+      aiHubRequest: vi.fn().mockResolvedValue({
+        tasks: [{ id: 'task-wf-new', title: 'Workforce review', status: 'running' }],
+        workspaceServers: [
+          {
+            id: 'srv-1',
+            name: 'api-01',
+            host: '10.0.0.1',
+            port: 22,
+            username: 'root',
+            shared: true,
+          },
+        ],
+        agents: [],
+        sessions: [],
+        recentChanges: [],
+        recentActivity: [],
+        infraEdges: [],
+        presence: [],
+        kbDocuments: [],
+        kbPages: [],
+        memories: [],
+        config: { provider: 'openai-codex', model: 'default', enabled: true },
+        preferences: {},
+      }),
+    };
+
+    try {
+      render(
+        <LandingView
+          recentSSH={mockRecentSSH}
+          onConnectRecentSSH={vi.fn()}
+          onConnectSFTP={vi.fn()}
+          onQuickConnectSSH={vi.fn()}
+          onQuickStartTerminal={vi.fn()}
+          onNewTab={vi.fn()}
+          onOpenProfiles={vi.fn()}
+          onNewProfile={vi.fn()}
+          onOpenSyncBootstrap={vi.fn()}
+          onNavigateToTabBar={vi.fn()}
+        />
+      );
+
+      fireEvent.click(screen.getByTestId('add-cluster-node-btn'));
+      expect(screen.getByText('Share with the team on this server')).toBeInTheDocument();
+      expect(screen.queryByText('Share in the S3 team bucket')).not.toBeInTheDocument();
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('landing-run-workforce-btn'));
+        await Promise.resolve();
+      });
+      expect(dispatched).toContainEqual({
+        view: 'Work',
+        mode: 'hub',
+        taskId: 'task-wf-new',
+      });
+    } finally {
+      window.removeEventListener('sshs3:ai-open', listener);
+      delete (window as any).__SSHS3_WEB_MODE__;
+      if (originalMultissh === undefined) delete (window as any).multissh;
+      else (window as any).multissh = originalMultissh;
+    }
+  });
 });

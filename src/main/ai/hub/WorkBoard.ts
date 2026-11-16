@@ -688,6 +688,17 @@ export function ticketPrompt(
     "",
     "## What to do",
     clip(ticket.description || ticket.title, 6000),
+    ...(ticket.kbPages?.length
+      ? [
+          "",
+          "## Knowledge base pages for this ticket",
+          ...ticket.kbPages.map((p) =>
+            p.known
+              ? `- “${p.title}” (an earlier run on the same alert worked from it): sshs3_kb_search page=${p.id}`
+              : `- “${p.title}” (may cover this symptom): sshs3_kb_search page=${p.id}`,
+          ),
+        ]
+      : []),
     notes.length ? "\n## Notes on the ticket (oldest first)" : "",
     ...notes.map((n) => `- ${n.author}: ${clip(n.text, 800)}`),
     ticket.chatRefs?.length

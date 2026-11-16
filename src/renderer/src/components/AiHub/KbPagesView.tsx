@@ -642,7 +642,11 @@ export function KbPages({
                     <ConfirmButton
                       label="Delete"
                       confirmLabel="Delete this page for the team?"
-                      onConfirm={() => void act({ action: "kb-page-delete", id: p.id })}
+                      onConfirm={() =>
+                        void act({ action: "kb-page-delete", id: p.id }).then((next) => {
+                          if (next && open?.id === p.id) setOpen(undefined);
+                        })
+                      }
                     />
                   </div>
                 </article>

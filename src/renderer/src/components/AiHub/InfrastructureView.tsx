@@ -88,12 +88,25 @@ export function InfrastructureView({
   }
   const groupNames = [...groups.keys()].sort((a, b) => (a === "" ? 1 : b === "" ? -1 : a.localeCompare(b)));
 
-  const statusBadge = (check?: InventoryEntry): JSX.Element | null =>
-    check ? (
-      <span className={`ai-badge ${STATUS[check.status].tone}`} title={check.detail}>
-        {STATUS[check.status].text}
+  const statusMeta = (check: InventoryEntry): { text: string; tone: string } => {
+    if (check.status === "blocked" && check.reasonKind === "demo") {
+      return { text: "demo (not probed)", tone: "" };
+    }
+    if (check.status === "blocked" && check.reasonKind === "proxy") {
+      return { text: "via jump host", tone: "" };
+    }
+    return STATUS[check.status];
+  };
+
+  const statusBadge = (check?: InventoryEntry): JSX.Element | null => {
+    if (!check) return null;
+    const meta = statusMeta(check);
+    return (
+      <span className={`ai-badge ${meta.tone}`} title={check.detail} data-testid={`infra-status-${check.id}`}>
+        {meta.text}
       </span>
-    ) : null;
+    );
+  };
 
   return (
     <div className="ai-scroll">
@@ -197,7 +210,7 @@ export function InfrastructureView({
           <div className="ai-rows">
             {groups.get(name)!.map((server) => {
               const check = checkOf(server);
-              const down = check?.status === "unreachable" || check?.status === "blocked";
+              const down = check?.status === "unreachable" || (check?.status === "blocked" && !check.reasonKind);
               return (
                 <div className="ai-row" key={server.id} data-testid={`infra-server-${server.id}`}>
                   <div>

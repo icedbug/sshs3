@@ -183,6 +183,7 @@ import {
   getDemoWorkforceRuns,
   isDemoMode,
   mcpCatalog,
+  restoreDemoBuiltins,
   saveDemoAgent,
   saveDemoInfraEdge,
   saveDemoKbDocument,
@@ -642,6 +643,7 @@ export interface HubHost {
     targetB?: string;
     pathB?: string;
   }): Promise<unknown>;
+  restoreBuiltinSnippets?(): Promise<number>;
 }
 
 /** The Electron main process is the per-user background owner; renderer lifetimes confer no authority. */
@@ -1226,7 +1228,12 @@ export class HubService {
   private mcpServersShown(): McpServerConfig[] {
     const names = (values?: Record<string, string>): Record<string, string> | undefined =>
       values && Object.keys(values).length ? Object.fromEntries(Object.keys(values).map((k) => [k, ""])) : undefined;
-    return this.getMcpServersList().map((s) => ({ ...s, env: names(s.env), headers: names(s.headers) }));
+    return this.getMcpServersList().map((s) => ({
+      ...s,
+      env: names(s.env),
+      headers: names(s.headers),
+      ...(isDemoTarget(s.id) ? { demo: true } : {}),
+    }));
   }
 
   private getMcpServersList(): McpServerConfig[] {
@@ -3647,12 +3654,81 @@ export class HubService {
         return this.snapshot();
       }
       case "restore-builtins": {
+        const restoredIds = new Set<string>();
+        for (const id of this.store.data.preferences.dismissedBuiltinIds ?? []) {
+          restoredIds.add(id);
+        }
         this.store.data.preferences.dismissedBuiltinIds = [];
-        for (const bm of getBuiltinSkillsAndMemories()) {
-          if (this.store.data.deletedMemoryIds?.[bm.id]) {
-            delete this.store.data.deletedMemoryIds[bm.id];
+        if (isDemoMode()) {
+          for (const id of restoreDemoBuiltins()) restoredIds.add(id);
+        }
+        let sharedCleared = false;
+        for (const a of getBuiltinAgents()) {
+          const removedAt = this.store.data.sharedRemoved?.agents?.[a.id];
+          if (removedAt) {
+            delete this.store.data.sharedRemoved!.agents![a.id];
+            const restoredAt = Math.max(Date.now(), removedAt + 1);
+            const existing = (this.store.data.agents ?? []).find((x) => x.id === a.id);
+            const restored: MissionAgent = {
+              ...(existing ?? a),
+              updatedAt: restoredAt,
+            };
+            delete (restored as MissionAgent & { baseAt?: number }).baseAt;
+            this.store.data.agents = [
+              ...(this.store.data.agents ?? []).filter((x) => x.id !== a.id),
+              restored,
+            ];
+            restoredIds.add(a.id);
+            sharedCleared = true;
+          }
+          if (this.store.data.sharedRemovedBy?.agents?.[a.id]) {
+            delete this.store.data.sharedRemovedBy.agents[a.id];
           }
         }
+        for (const doc of getBuiltinKbDocuments()) {
+          const removedAt = this.store.data.sharedRemoved?.kb?.[doc.id];
+          if (removedAt) {
+            delete this.store.data.sharedRemoved!.kb![doc.id];
+            const restoredAt = Math.max(Date.now(), removedAt + 1);
+            const existing = (this.store.data.kbDocuments ?? []).find((x) => x.id === doc.id);
+            const restored: KbDocument = {
+              ...(existing ?? doc),
+              updatedAt: restoredAt,
+            };
+            this.store.data.kbDocuments = [
+              ...(this.store.data.kbDocuments ?? []).filter((x) => x.id !== doc.id),
+              restored,
+            ];
+            restoredIds.add(doc.id);
+            sharedCleared = true;
+          }
+        }
+        let memoryCleared = false;
+        const builtinMemories = [
+          ...getBuiltinSkillsAndMemories(),
+          ...(isDemoMode() ? getDemoMemories() : []),
+        ];
+        for (const bm of builtinMemories) {
+          if (this.store.data.deletedMemoryIds?.[bm.id]) {
+            delete this.store.data.deletedMemoryIds[bm.id];
+            restoredIds.add(bm.id);
+            memoryCleared = true;
+          }
+          if (this.store.data.deletedMemoryBy?.[bm.id]) {
+            delete this.store.data.deletedMemoryBy[bm.id];
+          }
+        }
+        if (sharedCleared) this.scheduleWorkSync();
+        if (memoryCleared) this.s3Workspace.schedulePush(400);
+        const restoredSnippets = (await this.host.restoreBuiltinSnippets?.().catch(() => 0)) ?? 0;
+        const total = restoredIds.size + restoredSnippets;
+        reply = {
+          notes: [
+            total > 0
+              ? `Restored ${total} built-in item${total === 1 ? "" : "s"}.`
+              : "All built-in agents, runbooks, and skills are already present.",
+          ],
+        };
         break;
       }
       case "agent-save": {
@@ -3829,21 +3905,43 @@ export class HubService {
       case "daily-report-read":
         if (this.store.data.dailyReport) this.store.data.dailyReport.readAt = Date.now();
         break;
-      case "alert-hook-disable":
-        this.store.data.alertHook = undefined;
+      case "alert-hook-disable": {
+        const hadHook = Boolean(this.store.data.alertHook);
+        delete this.store.data.alertHook;
+        reply = {
+          notes: [
+            hadHook
+              ? "Alert webhook turned off. The previous webhook URL no longer works."
+              : "Alert webhook was already turned off.",
+          ],
+        };
         break;
+      }
       case "alert-rules-save": {
         const asked = (request.rules ?? []).map((r) => ({
           match: boundedContext(String(r.match ?? "").trim(), 80),
-          agentId: String(r.agentId ?? ""),
+          agentId: String(r.agentId ?? "").trim(),
         }));
         const known = (r: { agentId: string }): boolean => this.getAgentsList().some((a) => a.id === r.agentId);
         const kept = asked.filter((r) => r.match && known(r));
         this.store.data.alertRules = kept.slice(0, 40);
         const notes: string[] = [];
-        const noAgent = asked.filter((r) => r.match && !known(r));
-        if (noAgent.length)
-          notes.push(`Not saved, because the agent does not exist: ${noAgent.map((r) => `"${r.match}"`).join(", ")}.`);
+        const unselected = asked.filter((r) => r.match && !r.agentId);
+        if (unselected.length) {
+          notes.push(
+            unselected.length === 1
+              ? `Not saved: choose an agent for rule "${unselected[0].match}".`
+              : `Not saved: choose an agent for ${unselected.map((r) => `rule "${r.match}"`).join(", ")}.`,
+          );
+        }
+        const unknownAgent = asked.filter((r) => r.match && r.agentId && !known(r));
+        if (unknownAgent.length) {
+          notes.push(
+            unknownAgent.length === 1
+              ? `Not saved, because the agent "${unknownAgent[0].agentId}" does not exist (rule "${unknownAgent[0].match}").`
+              : `Not saved, because these agents do not exist: ${unknownAgent.map((r) => `"${r.agentId}" (rule "${r.match}")`).join(", ")}.`,
+          );
+        }
         const empty = asked.filter((r) => !r.match).length;
         if (empty) notes.push(`${empty} rule${empty === 1 ? "" : "s"} with no text to match ${empty === 1 ? "was" : "were"} left out.`);
         if (kept.length > 40) notes.push("Only the first 40 rules were saved.");
@@ -4628,13 +4726,26 @@ export class HubService {
         break;
       }
       case "mcp-test": {
-        const srv = this.getMcpServersList().find((s) => s.id === request.id);
-        if (!srv) throw new Error("MCP server not found");
-        if (isDemoTarget(srv.id)) {
+        const found = this.getMcpServersList().find((s) => s.id === request.id);
+        if (!found) throw new Error("MCP server not found");
+        const srv: McpServerConfig = { ...found };
+        if (!srv.enabled) {
+          srv.lastTestedAt = Date.now();
+          reply = {
+            notes: [`${srv.name} is turned off. Turn it on before testing.`],
+          };
+        } else if (isDemoTarget(srv.id)) {
           // A demo MCP fixture is scripted (simulateDemoMcpTool): there is no server to start or reach.
           srv.status = "connected";
+          srv.demo = true;
           srv.lastError = undefined;
           srv.lastTestedAt = Date.now();
+          const toolCount = srv.discoveredTools?.length ?? 0;
+          reply = {
+            notes: [
+              `${srv.name} is a demo server. Its ${toolCount} tool${toolCount === 1 ? "" : "s"} are simulated locally and not connected to a real network.`,
+            ],
+          };
         } else {
           const result = await this.mcp.testAndDiscover(srv);
           srv.status = result.ok ? "connected" : "error";
@@ -4643,6 +4754,15 @@ export class HubService {
           // What it answered, including an empty list: a server that no longer offers a tool
           // must not keep offering it here, and a name that cannot be resolved is not offered.
           if (result.ok) srv.discoveredTools = result.tools;
+          const toolCount = srv.discoveredTools?.length ?? 0;
+          const errDetail = result.error?.trim() || "connection failed";
+          reply = {
+            notes: [
+              result.ok
+                ? `Connected to ${srv.name}: found ${toolCount} tool${toolCount === 1 ? "" : "s"}.`
+                : `Could not connect to ${srv.name}: ${errDetail}${/[.!?]$/.test(errDetail) ? "" : "."}`,
+            ],
+          };
         }
         this.store.data.mcpServers = [
           ...(this.store.data.mcpServers ?? []).filter((x) => x.id !== srv.id),
@@ -7521,12 +7641,23 @@ export class HubService {
     const settings = this.factsSettings();
     const servers = this.getKnownServers().map((server): ServerFactsView => {
       const record = this.factsStore.get(server.id);
-      if (!record) return { serverId: server.id, name: server.name, status: "never", problems: [], changes: [] };
+      const demo = record?.via === "demo" || isDemoTarget(server.id);
+      if (!record) {
+        return {
+          serverId: server.id,
+          name: server.name,
+          status: "never",
+          ...(demo ? { demo: true } : {}),
+          problems: [],
+          changes: [],
+        };
+      }
       const summary = record.facts && !record.facts.unsupported ? factsSummary(record.facts) : undefined;
       return {
         serverId: server.id,
         name: server.name,
         status: record.status,
+        ...(demo ? { demo: true } : {}),
         error: record.error,
         collectedAt: record.collectedAt,
         via: record.via,
@@ -7706,13 +7837,17 @@ export class HubService {
       const prev = this.factsStore.get(server.id);
       const base = { serverId: server.id, name: server.name, attemptedAt: now, dismissed: prev?.dismissed };
       const demo = isDemoMode();
+      const simHost = demo ? simWorld().host(server.id, server.name, server.host) : undefined;
+      const certAnchorAt =
+        prev?.demoCertAnchorAt ??
+        (prev?.facts && prev.via === "demo" && prev.collectedAt ? prev.collectedAt : now);
       const result = demo
         ? {
             ok: true,
-            // A server the lab simulates is read from its state; the others answer as scripted.
-            stdout: simWorld().host(server.id, server.name, server.host)
-              ? simFactsOutput(simWorld().host(server.id, server.name, server.host)!, settings.watchPaths)
-              : demoFactsOutput(server, now, prev?.facts ? 1 : 0),
+            // A server the lab simulates is read from its state; the others answer as a stable demo baseline.
+            stdout: simHost
+              ? simFactsOutput(simHost, settings.watchPaths)
+              : demoFactsOutput(server, now, 0, certAnchorAt),
             via: "demo" as const,
             error: undefined,
           }
@@ -7744,6 +7879,7 @@ export class HubService {
         failures: 0,
         changes: [...fresh, ...(prev?.changes ?? [])].filter((c) => now - c.at < 30 * 24 * 3_600_000).slice(0, 200),
         problemsSince: Object.fromEntries(present.map((p) => [p.key, prev?.problemsSince?.[p.key] ?? now])),
+        ...(demo && !simHost ? { demoCertAnchorAt: certAnchorAt } : {}),
       };
       await this.factsStore.put(record);
       const flaggedMemories = flagStaleMemories(this.store.data.memories, record, {
@@ -8252,8 +8388,10 @@ export class HubService {
     const hook = this.store.data.alertHook;
     if (!hook || !hookSecretMatches(secret, hook.hash)) return undefined;
     const alerts = parseAlerts(body);
-    hook.lastAt = Date.now();
-    hook.received += 1;
+    if (alerts.length > 0) {
+      hook.lastAt = Date.now();
+      hook.received += alerts.length;
+    }
     const result = await this.takeAlerts(alerts);
     await this.store.save().catch(() => undefined);
     this.changed();
@@ -8438,10 +8576,11 @@ export class HubService {
       }
       const target = alertTarget(alert, servers);
       const agent = routeAlert(alert, target, this.store.data.alertRules ?? [], agents, servers);
+      const pages = this.pagesForAlert(alert, target);
       const ticket = await this.saveTicketFrom(
         {
           title: clip(`${alert.severity === "critical" ? "Alert (critical)" : "Alert"}: ${alert.title}`, 200),
-          description: alertTicketText(alert, this.changesOn(target, 24 * 3_600_000), this.pagesForAlert(alert, target)),
+          description: alertTicketText(alert, this.changesOn(target, 24 * 3_600_000), pages),
           assigneeAgentId: agent?.id,
           target,
           outside: `an alert from ${alert.source}`,
@@ -8452,6 +8591,7 @@ export class HubService {
       const said = this.chat.active() ? this.chatAbout([target, alertName(alert)], now) : undefined;
       this.putTicket({
         ...ticket,
+        ...(pages.length ? { kbPages: pages } : {}),
         alert: {
           fingerprint: alert.fingerprint,
           name: clip(alertName(alert), 160),
@@ -8531,6 +8671,11 @@ export class HubService {
     removed.agents = a.removed;
     this.store.data.sharedRemovedBy = { ...this.store.data.sharedRemovedBy, agents: a.removedBy };
     for (const goneId of Object.keys(a.removed)) this.markBuiltinDismissed(goneId, getBuiltinAgents());
+    const aliveIds = new Set(a.alive.map((x) => x.id));
+    if (this.store.data.preferences.dismissedBuiltinIds?.some((id) => aliveIds.has(id))) {
+      this.store.data.preferences.dismissedBuiltinIds =
+        this.store.data.preferences.dismissedBuiltinIds.filter((id) => !aliveIds.has(id));
+    }
     if (!updateAgents) return;
     const ownAgents = new Map((this.store.data.agents ?? []).map((x) => [x.id, x]));
     this.store.data.agents = (a.alive as MissionAgent[]).map((x) => {
@@ -8608,6 +8753,7 @@ export class HubService {
 
     const docs = this.store.data.kbDocuments ?? [];
     const mine = new Map(docs.map((d) => [d.id, d]));
+    const builtinKbIds = new Set(getBuiltinKbDocuments().map((d) => d.id));
     // The pieces are made from the text, so they are not sent: a document travels once, not twice.
     const kb = await sync.reconcile(
       "kb",
@@ -8615,12 +8761,13 @@ export class HubService {
         docs.filter((d) => d.shared !== false).map((d) => maskStrings({ ...d, chunks: [] })),
         removed.kb,
       ),
-      // A document is never added back under its id (a new one gets a new id), so its removal is final:
+      // A user document is never added back under its id (a new one gets a new id), so its removal is final:
       // a copy written later (a teammate's computer that finished reading it after it was removed) does
-      // not bring it back. The removal is stamped newer than that copy, so the bucket keeps the removal.
+      // not bring it back. Built-in documents keep fixed ids and can be explicitly restored via restore-builtins.
       (local, remote) => {
         if (Boolean(local.deleted) === Boolean(remote.deleted)) return remote.updatedAt > local.updatedAt ? remote : local;
         const [gone, kept] = local.deleted ? [local, remote] : [remote, local];
+        if (builtinKbIds.has(kept.id) && kept.updatedAt > gone.updatedAt) return kept;
         return gone.updatedAt > kept.updatedAt ? gone : { ...gone, updatedAt: kept.updatedAt + 1 };
       },
     );

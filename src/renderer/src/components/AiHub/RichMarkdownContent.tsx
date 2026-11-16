@@ -2,8 +2,11 @@ import { Component, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Check, Copy, FileCode2, Play, Terminal } from "lucide-react";
+import { copyToClipboard } from "../../lib/clipboard";
 import { AnsiLogView, DiffViewer, HighlightedCode } from "./DiffViewer";
 import { decodeFileRefHref, linkReportRefs, type FileRef } from "./reportRefs";
+
+export { copyToClipboard };
 
 class DiffErrorBoundary extends Component<
   { fallback: ReactNode; children: ReactNode },
@@ -21,32 +24,6 @@ class DiffErrorBoundary extends Component<
 const SHELL_LANGS = new Set(["bash", "sh", "shell", "zsh", "powershell", "cmd", "ontap-cli"]);
 const ANSI_LANGS = new Set(["ansi", "terminal", "console", "tty"]);
 const ESC_CSI = `${String.fromCharCode(27)}[`;
-
-/** Copies text to the system clipboard, returning true on success. */
-export async function copyToClipboard(text: string): Promise<boolean> {
-  if (!text) return false;
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch {
-    // Fall through to execCommand fallback.
-  }
-  try {
-    const area = document.createElement("textarea");
-    area.value = text;
-    area.style.position = "fixed";
-    area.style.opacity = "0";
-    document.body.appendChild(area);
-    area.select();
-    const ok = document.execCommand("copy");
-    document.body.removeChild(area);
-    return ok;
-  } catch {
-    return false;
-  }
-}
 
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);

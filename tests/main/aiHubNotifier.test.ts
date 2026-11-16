@@ -11,8 +11,11 @@ import {
   channelWants,
   deliver,
   diffInbox,
+  get,
   guardUrl,
+  post,
   renderNotification,
+  request,
   standardWebhookHeaders,
   verifyStandardWebhook,
   type NotifyChannel,
@@ -432,5 +435,37 @@ describe("waiting for a person", () => {
     const second = broker.askApproval(task, { id: "x2", kind: "command", target: "pg-01", description: "d", status: "pending", at: Date.now() } as never);
     await vi.advanceTimersByTimeAsync(31 * MIN);
     expect(await second).toBe(false);
+  });
+
+  it("handles Node 24 options.all pinned lookup in post, get, and request against localhost", async () => {
+    const received: Array<{ method?: string; url?: string; body: string }> = [];
+    const srv = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        received.push({ method: req.method, url: req.url, body: Buffer.concat(chunks).toString("utf8") });
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+      });
+    });
+    await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", () => resolve()));
+    disposals.push(() => new Promise<void>((resolve) => srv.close(() => resolve())));
+    const { port } = srv.address() as { port: number };
+    const target = await guardUrl(`http://localhost:${port}/hook`, {
+      server: false,
+      allowPrivate: true,
+      allowPlainHttp: true,
+      lookup: async () => [{ address: "127.0.0.1", family: 4 }],
+    });
+
+    const postStatus = await post(target, { url: target.url.toString(), headers: { "Content-Type": "application/json" }, body: '{"hi":1}' });
+    expect(postStatus).toBe(200);
+    const getRes = await get(target, { Accept: "application/json" }, 1024 * 64);
+    expect(getRes.status).toBe(200);
+    expect(JSON.parse(getRes.data.toString("utf8"))).toEqual({ ok: true });
+    const reqRes = await request(target, { method: "PUT", headers: { "Content-Type": "application/json" }, body: '{"put":2}' });
+    expect(reqRes.status).toBe(200);
+    expect(JSON.parse(reqRes.body)).toEqual({ ok: true });
+    expect(received.map((r) => r.method)).toEqual(["POST", "GET", "PUT"]);
   });
 });

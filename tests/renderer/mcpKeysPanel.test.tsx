@@ -22,7 +22,7 @@ describe("keys for a person's own agents", () => {
     render(<McpKeysPanel api={api} origin="https://sshs3.example.com" />);
     const row = await screen.findByTestId("mcp-key-k1");
     expect(within(row).getByText("Claude Code on my laptop")).toBeVisible();
-    expect(within(row).getByText(/Read — used 2 h ago, 12 calls/)).toBeVisible();
+    expect(within(row).getByText(/Read · used 2 h ago, 12 calls/)).toBeVisible();
   });
 
   it("shows a new key once, with the line to paste into Claude Code", async () => {
@@ -86,5 +86,28 @@ describe("keys for a person's own agents", () => {
     fireEvent.change(screen.getByLabelText("What the key is for"), { target: { value: "one more" } });
     fireEvent.click(screen.getByRole("button", { name: "Make the key" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Revoke one before making another");
+  });
+
+  it("normalizes trailing slashes in origin, omits HTML required attributes, and handles clipboard errors", async () => {
+    const api = vi.fn(async () => ({ keys: [] })) as never;
+    const clipboard = vi.fn().mockRejectedValue(new Error("Clipboard denied"));
+    Object.defineProperty(navigator, "clipboard", { value: { writeText: clipboard }, configurable: true });
+
+    render(<McpKeysPanel api={api} origin="https://sshs3.example.com///" />);
+    expect(screen.getByTestId("mcp-endpoint-url")).toHaveTextContent("https://sshs3.example.com/api/mcp");
+    expect(screen.getByTestId("mcp-endpoint-url").textContent).not.toContain("//api/mcp");
+
+    const nameInput = screen.getByLabelText("What the key is for");
+    expect(nameInput).not.toHaveAttribute("required");
+    expect(nameInput).toHaveAttribute("aria-required", "true");
+    fireEvent.click(screen.getByRole("checkbox", { name: /Run commands on one server/ }));
+    const serverInput = screen.getByLabelText("The one server it may run on");
+    expect(serverInput).not.toHaveAttribute("required");
+    expect(serverInput).toHaveAttribute("aria-required", "true");
+
+    const copyBtn = screen.getByTestId("mcp-copy-url");
+    fireEvent.click(copyBtn);
+    expect(await screen.findByTestId("mcp-copy-error")).toHaveTextContent(/Could not copy automatically/);
+    expect(copyBtn).toHaveTextContent("Copy address");
   });
 });

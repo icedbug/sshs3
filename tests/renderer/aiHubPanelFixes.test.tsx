@@ -162,6 +162,53 @@ describe("history and opening", () => {
     fireEvent(window, new CustomEvent("sshs3:ai-attach", { detail: { text: "x", label: "y" } }));
     expect(screen.getByTestId("mode")).toHaveTextContent("hub");
   });
+  it("clears sticky kbTabRequest on normal Knowledge Base navigation and opens requested pageId", async () => {
+    const page = {
+      id: "p-wal",
+      kind: "troubleshooting",
+      title: "WAL disk full",
+      when: "When pg_wal fills",
+      targets: ["pg-01"],
+      keys: ["pg_wal"],
+      body: "Check archive_command.",
+      sources: [],
+      history: [],
+      revision: 1,
+      updatedAt: 1,
+    };
+    fixture.kbPages = [page] as unknown as HubSnapshot["kbPages"];
+    fixture.kbDocuments = [];
+    fixture.runbooks = [];
+    fixture.kbFindings = [];
+    request.mockImplementation(async (req: { action: string; id?: string }) =>
+      req.action === "kb-page-read" && req.id === "p-wal"
+        ? { ...fixture, reply: { kbPage: page } }
+        : fixture,
+    );
+
+    render(<Harness start="hub" />);
+    // Open Knowledge Base on review tab via sshs3:ai-open.
+    fireEvent(
+      window,
+      new CustomEvent("sshs3:ai-open", { detail: { mode: "hub", view: "Knowledge Base", kbTab: "review" } }),
+    );
+    expect(screen.getByRole("tab", { name: /To review/ })).toHaveAttribute("aria-selected", "true");
+
+    // Navigate away and back via nav buttons: must clear sticky review tab and default to Pages.
+    fireEvent.click(screen.getByRole("button", { name: /^Chat$/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^Knowledge Base/ }));
+    expect(screen.getByRole("tab", { name: /Pages/ })).toHaveAttribute("aria-selected", "true");
+
+    // Open a specific page via sshs3:ai-open with pageId.
+    fireEvent(
+      window,
+      new CustomEvent("sshs3:ai-open", {
+        detail: { mode: "hub", view: "Knowledge Base", kbTab: "pages", pageId: "p-wal" },
+      }),
+    );
+    await waitFor(() => expect(request).toHaveBeenCalledWith({ action: "kb-page-read", id: "p-wal" }));
+    expect(await screen.findByText("Check archive_command.")).toBeVisible();
+  });
 });
 
 describe("Local Ollama", () => {

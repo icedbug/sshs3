@@ -289,12 +289,13 @@ describe("an alert and the page for it", () => {
     expect(alertName({ title: "Something broke", labels: {} })).toBe("Something broke");
   });
 
-  it("names the page an earlier run worked from, and offers one that may fit when there is none", () => {
+  it("names the page an earlier run worked from without leaking raw tool syntax into the ticket description", () => {
     const known = alertTicketText(alert(), [], [{ id: "p-1", title: "A disk fills up", known: true }]);
     expect(known).toContain("The team's page for this alert is “A disk fills up”");
-    expect(known).toContain("sshs3_kb_search page=p-1");
+    expect(known).not.toContain("sshs3_kb_search");
     const guess = alertTicketText(alert(), ["A package was upgraded"], [{ id: "p-2", title: "Disk fills up", known: false }]);
     expect(guess).toContain("may cover this");
+    expect(guess).not.toContain("sshs3_kb_search");
     expect(guess).toContain("What changed on the target");
     expect(alertTicketText(alert())).toContain("open the knowledge base page for this symptom if there is one");
   });

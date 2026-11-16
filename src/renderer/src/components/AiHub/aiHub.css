@@ -2271,6 +2271,13 @@
   color: var(--accent-fg-strong);
 }
 
+.ai-warn,
+.ai-form label > small.ai-warn {
+  color: var(--ai-warn);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
 .ai-view-head,
 .ai-section-head {
   display: flex;
@@ -2399,8 +2406,10 @@
   cursor: pointer;
 }
 
-.ai-switches small {
+.ai-switches small,
+.ai-form label.ai-check small {
   display: block;
+  margin-top: 2px;
   font-size: 11px;
   color: var(--fg-muted);
 }

@@ -188,15 +188,30 @@ describe("a ticket's detail", () => {
 });
 
 describe("the confirm button", () => {
-  it("counts down the seconds it keeps asking", () => {
+  it("counts down 10 seconds, pauses on hover, and cancels when Cancel is clicked", () => {
     vi.useFakeTimers();
     const onConfirm = vi.fn();
     render(<ConfirmButton label="Delete" confirmLabel="Delete this ticket?" onConfirm={onConfirm} />);
+    const btn = screen.getByRole("button", { name: "Delete" });
+    fireEvent.click(btn);
+    expect(screen.getByTestId("confirm-countdown")).toHaveTextContent("(10)");
+    reactAct(() => void vi.advanceTimersByTime(5100));
+    expect(screen.getByTestId("confirm-countdown")).toHaveTextContent("(5)");
+
+    // Hovering pauses the countdown so the operator can finish reading.
+    fireEvent.mouseEnter(btn.parentElement!);
+    reactAct(() => void vi.advanceTimersByTime(4000));
+    expect(screen.getByTestId("confirm-countdown")).toHaveTextContent("(5)");
+
+    // Clicking Cancel exits confirmation immediately without firing onConfirm.
+    fireEvent.click(screen.getByTestId("confirm-cancel"));
+    expect(screen.queryByTestId("confirm-countdown")).not.toBeInTheDocument();
+    expect(onConfirm).not.toHaveBeenCalled();
+
+    // Unhovered, it auto-reverts after 10 seconds.
     fireEvent.click(screen.getByRole("button", { name: "Delete" }));
-    expect(screen.getByTestId("confirm-countdown")).toHaveTextContent("(4)");
-    reactAct(() => void vi.advanceTimersByTime(2100));
-    expect(screen.getByTestId("confirm-countdown")).toHaveTextContent("(2)");
-    reactAct(() => void vi.advanceTimersByTime(2000));
+    fireEvent.mouseLeave(screen.getByRole("button", { name: "Delete this ticket?" }).parentElement!);
+    reactAct(() => void vi.advanceTimersByTime(10_200));
     expect(screen.queryByTestId("confirm-countdown")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Delete" })).toBeVisible();
     expect(onConfirm).not.toHaveBeenCalled();
@@ -244,12 +259,14 @@ describe("tickets in the inbox", () => {
     expect(act).toHaveBeenCalledWith(expect.objectContaining({ action: "ack-inbox", acknowledged: true }));
   });
 
-  it("stops waiting for the second e after four seconds", () => {
+  it("stops waiting for the second e after ten seconds", () => {
     vi.useFakeTimers();
     const act = vi.fn(async () => hub({}));
     render(<InboxView hub={hub({ workTickets: [ticket("r", { status: "review" })] })} act={act} onOpenTask={() => {}} onOpenView={() => {}} />);
     fireEvent.keyDown(window, { key: "e" });
-    reactAct(() => void vi.advanceTimersByTime(4100));
+    reactAct(() => void vi.advanceTimersByTime(5000));
+    expect(screen.getByTestId("inbox-done-arm")).toBeInTheDocument();
+    reactAct(() => void vi.advanceTimersByTime(5100));
     expect(screen.queryByTestId("inbox-done-arm")).not.toBeInTheDocument();
     fireEvent.keyDown(window, { key: "e" });
     expect(act).not.toHaveBeenCalled();

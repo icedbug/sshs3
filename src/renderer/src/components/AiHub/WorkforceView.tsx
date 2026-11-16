@@ -16,6 +16,7 @@ import { ScenariosCard } from "./ScenariosCard";
 import { HypothesisTree } from "./HypothesisTree";
 import { type Act, formatTokenUsage, modes, TABULAR_NUMS_STYLE } from "./panelShared";
 import { RichMarkdownContent } from "./RichMarkdownContent";
+import { isWebBrowserMode } from "../../lib/webClientBridge";
 import {
   COLUMNS,
   agentsLive,
@@ -485,7 +486,9 @@ export function WorkforceView({
       <small className="ai-sync-note">
         {sync?.shared
           ? `Shared with the team${sync.lastSyncAt ? ` · read ${ago(sync.lastSyncAt)}` : ""}${sync.error ? ` · last sync failed: ${sync.error}` : ""}`
-          : "Only on this computer. Connect a team bucket to share the board."}
+          : isWebBrowserMode()
+            ? "Board is personal to your account. Connect an S3 team bucket from the start page to share tickets and goals with the team."
+            : "Board stays on this computer. Connect an S3 team bucket from the start page to share tickets and goals."}
         {heartbeat ? " · Heartbeat on: this app starts tickets by itself." : ""}
       </small>
 
@@ -890,6 +893,41 @@ export function WorkforceView({
             </p>
           )}
           {openTicket.description && <p className="ai-memory-text">{openTicket.description}</p>}
+          {(openTicket.kbPages ?? []).length > 0 && (
+            <div className="ai-tags" data-testid="ticket-kb-pages" style={{ alignItems: "center" }}>
+              <small className="ai-muted">Related knowledge base pages:</small>
+              {openTicket.kbPages!.map((page) => {
+                const inLocalKb = Boolean(page.known) || (hub.kbPages ?? []).some((p) => p.id === page.id);
+                return inLocalKb ? (
+                  <button
+                    key={page.id}
+                    type="button"
+                    className="ai-chip"
+                    data-testid={`ticket-kb-page-${page.id}`}
+                    title={`Open "${page.title}" in Knowledge Base`}
+                    onClick={() =>
+                      window.dispatchEvent(
+                        new CustomEvent("sshs3:ai-open", {
+                          detail: { view: "Knowledge Base", mode: "hub", kbTab: "pages", pageId: page.id },
+                        }),
+                      )
+                    }
+                  >
+                    {page.title}
+                  </button>
+                ) : (
+                  <span
+                    key={page.id}
+                    className="ai-chip"
+                    data-testid={`ticket-kb-page-${page.id}`}
+                    title="Page is referenced by the alert but not in the local knowledge base"
+                  >
+                    {page.title} (not in local KB)
+                  </span>
+                );
+              })}
+            </div>
+          )}
           {(openTicket.chatRefs ?? []).length > 0 && (
             <div data-testid="ticket-chat">
               <small>Said in chat (what people wrote about this lately; not checked)</small>

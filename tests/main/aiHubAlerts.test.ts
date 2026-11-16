@@ -98,7 +98,11 @@ describe("alerts through the hub", () => {
   it("turns a posted alert into a ticket for the right agent, counts a repeat, notes a resolve, and refuses a wrong secret", async () => {
     const hub = await makeHub();
     await hub.request({ action: "agent-save", agent: { id: "dba", name: "DBA", role: "r", mission: "m", systemPrompt: "", defaultMode: "advice", targetCluster: "DB-Prod" } as never });
-    await hub.request({ action: "alert-rules-save", rules: [{ match: "disk", agentId: "dba" }, { match: "x", agentId: "nobody" }] });
+    const savedRules = await hub.request({ action: "alert-rules-save", rules: [{ match: "disk", agentId: "dba" }, { match: "x", agentId: "nobody" }] });
+    expect(savedRules.reply?.notes?.[0]).toContain('"nobody"');
+    expect(savedRules.reply?.notes?.[0]).not.toMatch(/agent does not exist: "x"/);
+    const noAgentRule = await hub.request({ action: "alert-rules-save", rules: [{ match: "disk", agentId: "dba" }, { match: "cpu", agentId: "" }] });
+    expect(noAgentRule.reply?.notes?.[0]).toContain('choose an agent for rule "cpu"');
     expect(await hub.receiveAlert("anything", ALERTMANAGER)).toBeUndefined();
     const created = await hub.request({ action: "alert-hook-create" });
     const secret = created.reply!.alertHook!.path.split(".").pop()!;
@@ -127,7 +131,9 @@ describe("alerts through the hub", () => {
     expect(ticket.alert).toMatchObject({ count: 2 });
     expect(ticket.alert!.resolvedAt).toBeGreaterThan(0);
     expect(ticket.comments!.map((c) => c.text)).toEqual(["Fired again (2 times).", "Alertmanager says this has resolved. Moved to Backlog: nothing is firing. Move it back if it should still be looked at."]);
-    expect((await hub.request({ action: "snapshot" })).alertIntake!.received).toBe(5);
+    // 2 alerts in ALERTMANAGER + 4 single-alert payloads = 6 parsed alerts. Empty payload adds 0.
+    await hub.receiveAlert(secret, { alerts: [] });
+    expect((await hub.request({ action: "snapshot" })).alertIntake!.received).toBe(6);
     // A resolved alert that fires again later is news again: it is back in the inbox as a fresh firing.
     await hub.receiveAlert(secret, { alerts: [{ ...ALERTMANAGER.alerts[0], startsAt: "2026-05-01T12:00:00Z" }] });
     ticket = hub.store.data.workTickets!.find((t) => t.id === ticket.id)!;
@@ -135,7 +141,8 @@ describe("alerts through the hub", () => {
     expect(ticket.alert!.firingSince).toBeGreaterThan(ticket.alert!.firstAt - 1);
 
     // Turned off: the old secret opens nothing.
-    await hub.request({ action: "alert-hook-disable" });
+    const disabled = await hub.request({ action: "alert-hook-disable" });
+    expect(disabled.reply?.notes?.[0]).toMatch(/turned off/i);
     expect(await hub.receiveAlert(secret, ALERTMANAGER)).toBeUndefined();
     // A pasted alert goes the same way without any hook.
     // On pg-01, while its disk alert is open: a symptom of that incident, put on its ticket.

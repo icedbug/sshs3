@@ -1585,7 +1585,9 @@ export const LandingView: React.FC<LandingViewProps> = ({
                           checked={newNodeShared}
                           onChange={(e) => setNewNodeShared(e.target.checked)}
                         />
-                        Share in the S3 team bucket
+                        {isWebBrowserMode() && !hub?.s3Workspace?.configured
+                          ? 'Share with the team on this server'
+                          : 'Share in the S3 team bucket'}
                       </label>
                       <button
                         type="submit"
@@ -2279,14 +2281,14 @@ export const LandingView: React.FC<LandingViewProps> = ({
                       data-testid="s3-workspace-status-badge"
                       className="inline-flex items-center gap-1 rounded-full border border-emerald-500/35 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-300"
                     >
-                      🟢 Shared on this web server: signed-in users share VMs, clusters and team memory directly (an S3 bucket is an optional cloud copy)
+                      🟢 Shared on this web server: signed-in users share servers, clusters, team memory and activity. Connect an S3 bucket to also share the Workforce board, agents and Knowledge Base.
                     </span>
                   ) : (
                     <span
                       data-testid="s3-workspace-status-badge"
                       className="inline-flex items-center gap-1 rounded-full border border-border-subtle bg-app-card px-2 py-0.5 text-[10px] text-txt-muted"
                     >
-                      Not connected. Share VMs, clusters and team memory with your team through an S3 bucket (only S3 keys are needed)
+                      Not connected. Share servers, clusters, team memory, the Workforce board, agents and Knowledge Base through an S3 bucket (only S3 keys are needed).
                     </span>
                   )}
 
@@ -2388,7 +2390,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                         Share the workspace with your team through an S3 bucket (AWS S3, Cloudflare R2, MinIO, Hetzner)
                       </div>
                       <p className="text-[11px] text-txt-muted mt-0.5">
-                        Only IP/host, port, default user, clusters, roles, tags, team memories and presence are synced to S3. Each teammate signs in with their own local SSH key (<code className="text-sky-300">~/.ssh</code>), which never leaves their computer.
+                        Syncs shared servers, clusters, team memory, the Workforce board, agents, Knowledge Base and dependencies to S3. Each teammate signs in with their own local SSH key (<code className="text-sky-300">~/.ssh</code>), which never leaves their computer.
                       </p>
                     </div>
                     <button
@@ -2931,17 +2933,27 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   type="button"
                   data-testid="landing-run-workforce-btn"
                   onClick={() => {
+                    const prevIds = new Set((hub?.tasks ?? []).map((t) => t.id));
                     void hubRequest({
                       action: 'workforce-run',
                       prompt:
                         'Review our shared servers and clusters: recent team changes, known problems in the knowledge base, and what should be checked next.',
-                    }).finally(() => {
-                      window.dispatchEvent(
-                        new CustomEvent('sshs3:ai-open', {
-                          detail: { view: 'Work', mode: 'hub' },
-                        })
-                      );
-                    });
+                    })
+                      .then((nextSnap) => {
+                        const created = nextSnap?.tasks?.find((t) => !prevIds.has(t.id));
+                        window.dispatchEvent(
+                          new CustomEvent('sshs3:ai-open', {
+                            detail: { view: 'Work', mode: 'hub', ...(created?.id ? { taskId: created.id } : {}) },
+                          })
+                        );
+                      })
+                      .catch(() => {
+                        window.dispatchEvent(
+                          new CustomEvent('sshs3:ai-open', {
+                            detail: { view: 'Work', mode: 'hub' },
+                          })
+                        );
+                      });
                   }}
                   className="rounded-md border border-rose-500/35 bg-rose-500/10 px-2 py-0.5 text-[10.5px] font-semibold text-rose-200 hover:bg-rose-500/20 transition-colors"
                 >
@@ -2969,7 +2981,8 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     {workspaceServers.length}
                   </span>
                   <span className="text-[11px] text-txt-muted">
-                    ({workspaceServers.filter((s) => s.shared).length} shared in S3)
+                    ({workspaceServers.filter((s) => s.shared).length}{' '}
+                    {isWebBrowserMode() && !hub?.s3Workspace?.configured ? 'shared' : 'shared in S3'})
                   </span>
                 </div>
               </div>

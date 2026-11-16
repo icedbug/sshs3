@@ -101,4 +101,79 @@ describe("what is waiting for a person", () => {
     expect(within(blocked).getByText("pg_dump").tagName).toBe("CODE");
     expect(blocked.textContent).not.toContain("**");
   });
+
+  it("copies a newly created alert webhook address, explains when an enabled hook hides its one-time URL, and opens KB findings on the review tab", async () => {
+    const clipboard = vi.fn(async (_text: string) => undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText: clipboard }, configurable: true });
+    const openView = vi.fn();
+    const act = vi.fn(async () => hub({ reply: { alertHook: { path: "/api/hooks/u1.secret" } } }));
+
+    const { rerender } = render(
+      <InboxView
+        hub={hub({
+          kbFindings: [{ id: "gap:1", kind: "gap", text: "Missing runbook", at: 1 }],
+        })}
+        act={act}
+        onOpenTask={() => {}}
+        onOpenView={openView}
+      />,
+    );
+
+    fireEvent.click(within(screen.getByTestId("inbox-knowledge")).getByRole("button", { name: "Look at it" }));
+    expect(openView).toHaveBeenCalledWith("Knowledge Base", { kbTab: "review" });
+
+    fireEvent.click(screen.getByText(/^Alerts in/));
+    fireEvent.click(screen.getByRole("button", { name: "Create an address to post to" }));
+    await waitFor(() => expect(screen.getByTestId("alert-address")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("alert-address-copy"));
+    expect(clipboard).toHaveBeenCalledWith(`${window.location.origin}/api/hooks/u1.secret`);
+    await waitFor(() => expect(screen.getByTestId("alert-address-copy")).toHaveTextContent("Copied"));
+
+    clipboard.mockRejectedValueOnce(new Error("Clipboard denied"));
+    fireEvent.click(screen.getByTestId("alert-address-copy"));
+    expect(await screen.findByTestId("alert-address-copy-error")).toHaveTextContent(/Could not copy automatically/);
+
+    rerender(
+      <InboxView
+        hub={hub({ alertIntake: { canReceive: true, enabled: true, received: 2, rules: [] } })}
+        act={act}
+        onOpenTask={() => {}}
+        onOpenView={openView}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Revoke and turn off" }));
+    await waitFor(() => expect(act).toHaveBeenCalledWith({ action: "alert-hook-disable" }));
+    await waitFor(() =>
+      expect(screen.getByText(/The webhook address is shown once when created/)).toBeVisible(),
+    );
+  });
+
+  it("keeps unsaved alert routing rule drafts when validation fails and shows the error inline", async () => {
+    const act = vi.fn(async () =>
+      hub({
+        reply: { notes: ['Not saved: choose an agent for rule "disk".'] },
+      }),
+    );
+    render(
+      <InboxView
+        hub={hub({
+          agents: [{ id: "op", name: "Operator", role: "ops", mission: "", systemPrompt: "", defaultMode: "ask", kbDocIds: [], mcpServerIds: [] }] as unknown as HubSnapshot["agents"],
+        })}
+        act={act}
+        onOpenTask={() => {}}
+        onOpenView={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByText(/^Alerts in/));
+    fireEvent.click(screen.getByRole("button", { name: "Add a rule" }));
+    fireEvent.change(screen.getByLabelText("Alert contains"), { target: { value: "disk" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save rules" }));
+
+    expect(await screen.findByTestId("alert-rules-status")).toHaveTextContent(
+      'Not saved: choose an agent for rule "disk".',
+    );
+    // Draft input remains visible so the user can pick an agent instead of losing their rule.
+    expect(screen.getByLabelText("Alert contains")).toHaveValue("disk");
+    expect(screen.getByRole("button", { name: "Save rules" })).toBeVisible();
+  });
 });

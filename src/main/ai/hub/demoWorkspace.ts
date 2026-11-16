@@ -1073,6 +1073,7 @@ const initialDemoMcpServers: McpServerConfig[] = [
     url: "http://10.30.10.25:8890/mcp",
     enabled: true,
     status: "connected",
+    demo: true,
     lastTestedAt: now - 15 * min,
     discoveredTools: [
       {
@@ -1100,6 +1101,7 @@ const initialDemoMcpServers: McpServerConfig[] = [
     args: ["-y", "@acme-storage/mcp-storagegrid-inspector", "--endpoint", "https://s3-dc1.storage.acme.se:10443"],
     enabled: true,
     status: "connected",
+    demo: true,
     lastTestedAt: now - 30 * min,
     discoveredTools: [
       {
@@ -1827,6 +1829,33 @@ export function saveDemoWorkforceRun(run: WorkforceRun): void {
   const idx = demoWorkforceRunsStore.findIndex((r) => r.id === run.id);
   if (idx >= 0) demoWorkforceRunsStore[idx] = run;
   else demoWorkforceRunsStore.unshift(run);
+}
+
+/**
+ * Restores any shipped demo built-in items (agents, KB documents, MCP servers,
+ * memories/skills, dependency links, workforce runs) that were deleted from the
+ * in-memory demo stores during this process. Returns the restored IDs.
+ */
+export function restoreDemoBuiltins(): string[] {
+  const restored: string[] = [];
+  const restore = <T extends { id: string }>(initial: readonly T[], store: T[], clone?: (x: T) => T): void => {
+    for (const item of initial) {
+      if (!store.some((s) => s.id === item.id)) {
+        store.push(clone ? clone(item) : { ...item });
+        restored.push(item.id);
+      }
+    }
+  };
+  restore(initialDemoAgents, demoAgentsStore);
+  restore(initialDemoKbDocuments, demoKbStore, (d) => ({ ...d, chunks: [...d.chunks] }));
+  restore(initialDemoMcpServers, demoMcpStore, (m) => ({
+    ...m,
+    ...(m.discoveredTools ? { discoveredTools: [...m.discoveredTools] } : {}),
+  }));
+  restore(initialDemoMemories, demoMemoriesStore);
+  restore(initialDemoInfraEdges, demoInfraEdgesStore);
+  restore(initialDemoWorkforceRuns, demoWorkforceRunsStore);
+  return restored;
 }
 
 const initialDemoTasks: AgentTask[] = [

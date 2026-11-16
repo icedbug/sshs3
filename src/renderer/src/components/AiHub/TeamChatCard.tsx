@@ -249,32 +249,47 @@ export function TeamChatCard({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.
             deleted in the chat: use Forget to remove it here.
           </p>
           {canChange && (
-            <form
-              className="ai-inline-form"
-              onSubmit={(e) => {
-                e.preventDefault();
-                void act({ action: "chat-retention", days: days.trim() ? Number(days) : undefined });
-              }}
-            >
+            <div className="ai-inline-form">
               <label>
                 Keep messages for (days; empty: until removed)
-                <input aria-label="Days to keep messages" type="number" min={1} max={3650} value={days} onChange={(e) => setDays(e.target.value)} />
+                <input
+                  aria-label="Days to keep messages"
+                  type="number"
+                  min={1}
+                  max={3650}
+                  value={days}
+                  onChange={(e) => setDays(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key !== "Enter") return;
+                    e.preventDefault();
+                    void act({ action: "chat-retention", days: days.trim() ? Number(days) : undefined });
+                  }}
+                />
               </label>
-              <button type="submit">Save</button>
-            </form>
+              <button
+                type="button"
+                onClick={() => void act({ action: "chat-retention", days: days.trim() ? Number(days) : undefined })}
+              >
+                Save
+              </button>
+            </div>
           )}
-          <form
-            className="ai-inline-form"
-            onSubmit={(e) => {
-              e.preventDefault();
-              find();
-            }}
-          >
-            <input aria-label="Search the team's chat" placeholder="Try what an agent would find: pg-01 restart" value={query} onChange={(e) => setQuery(e.target.value)} />
-            <button type="submit" disabled={!query.trim()}>
+          <div className="ai-inline-form">
+            <input
+              aria-label="Search the team's chat"
+              placeholder="Try what an agent would find: pg-01 restart"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key !== "Enter") return;
+                e.preventDefault();
+                find();
+              }}
+            />
+            <button type="button" disabled={!query.trim()} onClick={find}>
               Search
             </button>
-          </form>
+          </div>
           {found && (
             <div data-testid="team-chat-found">
               {found.hits.length === 0 && <p className="ai-empty">Nothing in what was read mentions &ldquo;{found.query}&rdquo;.</p>}

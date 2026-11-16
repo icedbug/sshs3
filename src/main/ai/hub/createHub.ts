@@ -854,33 +854,85 @@ export function createHub(
     },
     inventoryTargets: async () => {
       const profiles = await bridge.profileStore.getProfiles();
-      const targets: InventoryTarget[] = profiles.ssh.map((p) => ({
-        id: p.id,
-        kind: "ssh",
-        label: p.name || p.host,
-        address: p.host,
-        port: p.port || 22,
-        blocked: isDemoTarget(p.id)
-          ? // A server of the demo lab has no address on any network: asking it would only say "unreachable".
-            "A server of the demo lab: there is no real address to check."
-          : p.proxyJump || p.proxyJumpProfileId || p.proxy
-            ? "Reachable only through a configured proxy; not probed directly."
-            : undefined,
-      }));
+      const targets: InventoryTarget[] = profiles.ssh.map((p) => {
+        const isDemo = isDemoTarget(p.id);
+        const isProxied = Boolean(
+          p.proxyJump?.trim() ||
+            p.proxyJumpProfileId?.trim() ||
+            (p.proxy?.enabled && p.proxy?.host?.trim()),
+        );
+        return {
+          id: p.id,
+          kind: "ssh",
+          label: p.name || p.host,
+          address: p.host,
+          port: p.port || 22,
+          blocked: isDemo
+            ? // A server of the demo lab has no address on any network: asking it would only say "unreachable".
+              "Simulated demo server: not probed on a real network."
+            : isProxied
+              ? "Reachable through a jump host or proxy: not probed directly."
+              : undefined,
+          reasonKind: isDemo ? "demo" : isProxied ? "proxy" : undefined,
+        };
+      });
+      if (isDemoMode()) {
+        for (const demoSrv of getDemoServers()) {
+          if (!targets.some((t) => t.id === demoSrv.id)) {
+            targets.push({
+              id: demoSrv.id,
+              kind: "ssh",
+              label: demoSrv.name || demoSrv.host,
+              address: demoSrv.host,
+              port: demoSrv.port || 22,
+              blocked: "Simulated demo server: not probed on a real network.",
+              reasonKind: "demo",
+            });
+          }
+        }
+      }
       for (const p of profiles.s3) {
         const endpoint =
           p.endpoint || `https://s3.${p.region || "us-east-1"}.amazonaws.com`;
         try {
           const url = new URL(endpoint);
+          const isDemo = isDemoTarget(p.id);
           targets.push({
             id: p.id,
             kind: "s3",
             label: p.name,
             address: url.hostname,
             port: Number(url.port) || (url.protocol === "https:" ? 443 : 80),
+            ...(isDemo
+              ? {
+                  blocked: "Simulated demo storage: not probed on a real network.",
+                  reasonKind: "demo" as const,
+                }
+              : {}),
           });
         } catch {
           /* invalid endpoint stays unprobed */
+        }
+      }
+      if (isDemoMode()) {
+        for (const p of getDemoS3Profiles()) {
+          if (targets.some((t) => t.id === p.id)) continue;
+          const endpoint =
+            p.endpoint || `https://s3.${p.region || "us-east-1"}.amazonaws.com`;
+          try {
+            const url = new URL(endpoint);
+            targets.push({
+              id: p.id,
+              kind: "s3",
+              label: p.name,
+              address: url.hostname,
+              port: Number(url.port) || (url.protocol === "https:" ? 443 : 80),
+              blocked: "Simulated demo storage: not probed on a real network.",
+              reasonKind: "demo",
+            });
+          } catch {
+            /* invalid endpoint stays unprobed */
+          }
         }
       }
       try {
@@ -1482,6 +1534,10 @@ export function createHub(
         diff: unifiedDiff,
       };
     },
+    restoreBuiltinSnippets:
+      typeof bridge.snippetStore?.restoreBuiltins === "function"
+        ? () => bridge.snippetStore.restoreBuiltins()
+        : undefined,
   }, options?.hubDirectory);
   const files = new FileTools(bridge, hub.terminals, () => hub.changed());
   if (bridge.profileSyncService) {

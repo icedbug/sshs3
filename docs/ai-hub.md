@@ -595,13 +595,15 @@ Related hardening done with this:
 
 ### Your own agent, and this app as an MCP server
 
-The desktop app can answer a person's own agent — Claude Code, Cursor,
-anything that speaks MCP — over the same endpoint the team server uses, so
-there is one set of rules for both. It listens on 127.0.0.1 only, it is off
-until switched on in Settings, and it answers nothing without one of that
-person's keys. A key is shown once, acts as them, and can be taken back. A
-request that carries an `Origin` header is refused before the key is read,
-which is what keeps a web page on the same machine from reaching it.
+The desktop app can answer a person's own agent (Claude Code, Cursor, or
+anything else that speaks MCP) over the same protocol the team server uses, so
+there is one set of rules for both. On desktop it listens on 127.0.0.1 only, it
+is off until switched on in Settings, and it answers nothing without one of that
+person's keys. In the web app, Settings and the account dialog both show the
+server's `/api/mcp` address, setup snippets for Claude Code and Cursor, and
+personal key management. A key is shown once, acts as them, and can be taken
+back. A request that carries an `Origin` header is refused before the key is
+read, which is what keeps a web page on the same machine from reaching it.
 
 A key says what it may do: read, write tickets, or ask for a command on one
 named server. A command asked for this way waits for the person in the
@@ -792,8 +794,11 @@ inside Slack or Teams.
   (`event` with incident data), or any JSON with a title or message
   (`parseAlerts`). There is no session; the secret in the address is the key,
   only its hash is stored, a wrong address is answered like a missing one, and
-  an address takes at most 60 posts a minute of 256 kB each. The desktop app
-  has no address; an alert can be pasted there.
+  an address takes at most 60 posts a minute of 256 kB each. The UI shows the
+  one-time address with a `Copy address` button, `Revoke and turn off`, the
+  count of parsed webhook alerts with the time of the last one, and keeps
+  unsaved routing rule drafts intact if validation rejects a save. The desktop
+  app has no address; an alert can be pasted there.
 - **Alert → ticket.** The alert is matched to a server or cluster of the
   workspace (`alertTarget`) and given to an agent: the first matching rule,
   else the agent bound to that cluster, else a team's lead, else nobody
@@ -1345,8 +1350,14 @@ because there is no server to run one on.
   runner id that had to be rewritten), the reply says so in `reply.notes` and
   the panel shows it.
 - **View** (`WorkforceView`, `TeamGraph`, `workforceModel`): the board with
-  drag between columns, ticket detail with report and review, and the team as
-  a live tree on React Flow (MIT) showing what each agent is doing.
+  drag between columns, ticket detail with report and review, clean related
+  knowledge base page chips (`kbPages`, opening local pages directly in
+  Knowledge Base), and the team as a live tree on React Flow (MIT) showing
+  what each agent is doing. On a web server without an S3 team bucket, the
+  board stays per account while servers, clusters, team memory and activity are
+  shared on the server; invite links in `WebAuthGate` use `SSHS3_PUBLIC_URL`
+  when set, require a valid `http://` or `https://` address, and warn on local
+  or private addresses.
 
 Checked with stubbed model responses (`aiHubWorkBoard.test.ts`,
 `workforceView.test.tsx`), against a stand-in ACP agent process
@@ -1372,26 +1383,32 @@ sections ("AI chat: visual layer" and "the other views") carry the current look.
   the sidebar it scrolls sideways instead of wrapping.
 - The other views read as one column of at most 1040 px in the full view, each
   in its own file, with the list first and forms folded or opened on demand:
-  - `AgentsAndMcpView` — agents can be created and edited; the form binds the
+  - `AgentsAndMcpView`: agents can be created and edited; the form binds the
     runbooks (`kbDocIds`) and MCP servers the runtime reads. MCP servers are
     added through a form that saves and then tests; a server counts as
-    connected, and has tools, only after it answered.
-  - `KnowledgeBaseView` — write, edit and read documents (rendered Markdown),
+    connected, and has tools, only after it answered. Demo MCP servers carry a
+    neutral `Demo (simulated)` badge, and `Test` shows inline status and last
+    test time.
+  - `KnowledgeBaseView`: write, edit and read documents (rendered Markdown),
     import a folder, filter by text and collection. The filter is a plain text
     filter; ranked search is what the assistant uses.
-  - `InfrastructureView` — open terminals, the workspace's servers by cluster
-    with their reachability, and `DependencyLinks`.
-  - `ChangesView` — one timeline of team activity and the assistant's own
+  - `InfrastructureView`: open terminals, the workspace's servers by cluster
+    with their reachability, and `DependencyLinks`. Targets that cannot be
+    probed directly (`reasonKind: "demo"` or `"proxy"`) show neutral
+    `demo (not probed)` or `via jump host` badges instead of failure styling.
+  - `ChangesView`: one timeline of team activity and the assistant's own
     commands and file changes, with details folded under each entry.
-  - `MemoryView` — entries with filters (facts, skills, learned, personal).
+  - `MemoryView`: entries with filters (facts, skills, learned, personal).
     The per-server cards generated on every snapshot (`auto-node:` ids) are
     not listed here.
-  - `SchedulesView` — jobs can be edited, paused and resumed; a resumed job
+  - `SchedulesView`: jobs can be edited, paused and resumed; a resumed job
     starts a fresh interval.
-  - `SettingsView` — sections for model, team, safety (`SafetyPolicyCard`),
-    limits, app and data.
+  - `SettingsView`: sections for model, team, safety (`SafetyPolicyCard`),
+    MCP access (`McpKeysPanel`), limits, app and data (including inline status
+    for "Restore built-in agents, runbooks and skills").
 - Anything that cannot be undone goes through `ConfirmButton` (first click
-  asks, second does it).
+  asks for 10 seconds, pauses while hovered or focused, offers `Cancel` and
+  `Escape`, and the second click does it).
 - MCP presets: outside the demo lab `mcpCatalog()` returns `MCP_PRESETS`, which
   may only name packages that exist on npm under a known publisher, because
   setting one up runs the command. The demo lab keeps its invented catalog

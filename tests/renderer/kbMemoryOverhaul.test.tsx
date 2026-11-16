@@ -588,4 +588,49 @@ describe("ServerFactsCard overhaul", () => {
     );
     expect(screen.getByTestId("facts-staged-api-1")).toHaveTextContent("journalctl -p err -n 100 --no-pager");
   });
+
+  it("opens directly on To review tab when openTab asks for review and keeps runbook step pending if terminal run returns false", () => {
+    const page: KbPage = {
+      id: "p1",
+      kind: "procedure",
+      title: "Check disk",
+      when: "When disk is high",
+      body: "Run df -h",
+      targets: [],
+      sources: [],
+      revision: 1,
+      createdAt: 1,
+      updatedAt: 1,
+      updatedBy: "operator",
+      history: [],
+    };
+    const runbook: RunbookTemplate = {
+      id: "rb-fail",
+      name: "Disk Check",
+      inputs: [],
+      steps: [{ id: "s1", title: "Check", kind: "check", command: "df -h" }],
+    };
+
+    render(
+      <KnowledgeBaseView
+        hub={baseHub({
+          kbPages: [page],
+          kbFindings: [{ id: "f1", kind: "gap", text: "Gap 1", at: 1 }],
+          runbooks: [runbook],
+        })}
+        act={vi.fn(async () => baseHub())}
+        onAttachDoc={vi.fn()}
+        onRunStepInTerminal={() => false}
+        openTab={{ tab: "review", seq: 1 }}
+        request={vi.fn(async () => baseHub())}
+      />,
+    );
+
+    expect(screen.getByRole("tab", { name: /To review/ })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByTestId("kb-findings")).toHaveTextContent("Gap 1");
+
+    fireEvent.click(screen.getByRole("tab", { name: "Runbooks · 1" }));
+    fireEvent.click(screen.getByTestId("runbook-step-terminal-s1"));
+    expect(screen.getByTestId("runbook-step-s1")).toHaveAttribute("data-step-state", "pending");
+  });
 });

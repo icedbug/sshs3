@@ -14,7 +14,7 @@ import {
   type AiReasoningEffort,
   type ProviderProfile,
 } from "@shared/types/ai";
-import { isWebBrowserMode } from "../../lib/webClientBridge";
+import { getStoredWebSessionToken, isWebBrowserMode } from "../../lib/webClientBridge";
 import { ConfirmButton } from "./ConfirmButton";
 import {
   dataDestination,
@@ -133,6 +133,20 @@ export function Settings({
     return { keys: next?.localMcp?.keys ?? [] } as T;
   };
 
+  const webMcpKeysApi = async <T,>(path: string, options?: RequestInit): Promise<T> => {
+    if (typeof fetch !== "function") return { keys: [] } as T;
+    const token = getStoredWebSessionToken();
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...((options?.headers as Record<string, string>) || {}),
+    };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const res = await fetch(path, { ...options, credentials: "same-origin", headers });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error((data as { error?: string }).error || `Request failed (${res.status})`);
+    return data as T;
+  };
+
   const [provider, setProvider] = useState(hub.config.provider);
   const [model, setModel] = useState(hub.config.model);
   const [customModelMode, setCustomModelMode] = useState(false);
@@ -158,6 +172,7 @@ export function Settings({
   const [prefs, setPrefs] = useState<HubPreferences>(hub.preferences);
   const [internalLabs, setInternalLabs] = useState<boolean>(() => readStoredLabsEnabled());
   const [savedNotice, setSavedNotice] = useState(false);
+  const [restoreStatus, setRestoreStatus] = useState("");
   const [probing, setProbing] = useState(false);
   const [probe, setProbe] = useState<{ ok: boolean; detail: string }>();
   const modelInputRef = useRef<HTMLInputElement>(null);
@@ -860,7 +875,9 @@ export function Settings({
                   ? ` · synced ${new Date(hub.s3Workspace.lastSyncAt).toLocaleTimeString()}`
                   : ""
               }`
-            : "No team bucket is connected. Memory, runbooks and activity stay on this computer until one is; connect it from the start page (Invite / team)."}
+            : isWebBrowserMode()
+              ? "No S3 bucket is connected. Signed-in users share servers, team memory and activity directly on this web server. Connect an S3 bucket from the start page (Connect S3 team bucket) to share the Workforce board, agents and Knowledge Base."
+              : "No team bucket is connected. Memory, runbooks, the board and activity stay on this computer until one is. Connect it from the start page (Connect S3 team bucket)."}
         </small>
         {/* A path on the computer that runs sshs3: on a shared server that is the administrator's, not the browser's. */}
         {!isWebBrowserMode() && (
@@ -983,9 +1000,18 @@ export function Settings({
         <TeamChatCard hub={hub} act={act} />
       </section>
 
-      {/* The app answering this person's own agent. In a browser the team server already
-          has its endpoint and the keys live with the account, so this is not shown there. */}
-      {!isWebBrowserMode() && (
+      {/* The app answering this person's own agent: desktop starts a local listener; web server already serves /api/mcp. */}
+      {isWebBrowserMode() ? (
+        <section className="ai-set" data-testid="web-mcp">
+          <h3>Your own agents (MCP)</h3>
+          <McpKeysPanel
+            api={webMcpKeysApi}
+            origin={typeof window !== "undefined" ? window.location.origin : ""}
+            title="Your keys for this server"
+            intro="Create a personal MCP key to connect Claude Code, Cursor, or another MCP client to this sshS3 server. Each key acts with your permissions and can be revoked at any time."
+          />
+        </section>
+      ) : (
         <section className="ai-set" data-testid="local-mcp">
           <h3>Your own agents (MCP)</h3>
           <label className="ai-check">
@@ -1006,18 +1032,13 @@ export function Settings({
           </label>
           {hub.localMcp?.error && <p className="ai-error">It could not start: {hub.localMcp.error}</p>}
           {hub.localMcp?.enabled && hub.localMcp.address && (
-            <>
-              <p className="ai-hint">
-                It answers at <code>{hub.localMcp.address}</code>.
-              </p>
-              <McpKeysPanel
-                api={localKeysApi}
-                origin=""
-                endpoint={hub.localMcp.address}
-                title="Your keys"
-                intro="A key is shown once, when you make it. It acts as you and sees what you see; take it back at any time."
-              />
-            </>
+            <McpKeysPanel
+              api={localKeysApi}
+              origin=""
+              endpoint={hub.localMcp.address}
+              title="Your keys"
+              intro="A key is shown once, when you make it. It acts as you and sees what you see; take it back at any time."
+            />
           )}
         </section>
       )}
@@ -1140,7 +1161,9 @@ export function Settings({
           />
           <span>
             Check every 5 minutes whether saved servers answer
-            <small>Only tests that the address responds; nothing is logged in to.</small>
+            <small style={{ display: "block", marginTop: 2 }}>
+              Only tests that the address responds; nothing is logged in to.
+            </small>
           </span>
         </label>
         <label>
@@ -1161,7 +1184,17 @@ export function Settings({
           <button
             type="button"
             title="Brings back the agents, runbooks and skills that ship with sshS3 if you removed them"
-            onClick={() => void act({ action: "restore-builtins" })}
+            onClick={() => {
+              setRestoreStatus("");
+              void act({ action: "restore-builtins" })
+                .then((next) => {
+                  const notes = next?.reply?.notes?.join(" ");
+                  setRestoreStatus(notes || "Built-in agents, runbooks, and skills restored.");
+                })
+                .catch((err) => {
+                  setRestoreStatus(err instanceof Error ? err.message : "Could not restore built-ins.");
+                });
+            }}
           >
             Restore built-in agents, runbooks and skills
           </button>
@@ -1187,6 +1220,11 @@ export function Settings({
             />
           )}
         </div>
+        {restoreStatus && (
+          <small role="status" data-testid="restore-builtins-status">
+            {restoreStatus}
+          </small>
+        )}
         <small>Deleting history does not touch team memory or the knowledge base.</small>
       </section>
       </div>

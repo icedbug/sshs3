@@ -61,4 +61,26 @@ describe("letting this person's own agent reach the app", () => {
     render(<Settings hub={hub({ localMcp: { enabled: false, keys: [] } })} act={vi.fn()} />);
     expect(screen.queryByTestId("local-mcp")).not.toBeInTheDocument();
   });
+
+  it("never nests a <form> inside SettingsView and Enter in key name does not save settings", async () => {
+    const act = vi.fn(async () => hub());
+    const { container } = render(
+      <Settings
+        hub={hub({
+          localMcp: { enabled: true, address: "http://127.0.0.1:51734/mcp", keys: [] },
+          chatSources: {
+            canChange: true,
+            total: 1,
+            connections: [],
+          },
+        })}
+        act={act}
+      />,
+    );
+    expect(container.querySelectorAll("form form")).toHaveLength(0);
+    const keyInput = await screen.findByLabelText("What the key is for");
+    fireEvent.change(keyInput, { target: { value: "Cursor" } });
+    fireEvent.keyDown(keyInput, { key: "Enter" });
+    expect(act).not.toHaveBeenCalledWith(expect.objectContaining({ action: "configure" }));
+  });
 });

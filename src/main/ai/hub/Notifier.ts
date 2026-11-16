@@ -799,6 +799,26 @@ export async function guardUrl(raw: string, options: GuardOptions): Promise<Guar
   return { url, address: found[0].address, family: found[0].family };
 }
 
+/** Returns only the single validated address so Node 24 autoSelectFamily ({ all: true }) cannot pick an unpinned IP or receive a string instead of an array. */
+function pinnedLookup(target: GuardedTarget): NonNullable<http.RequestOptions["lookup"]> {
+  return (_host, options, callback) => {
+    const cb = typeof options === "function" ? options : callback;
+    const wantsAll = typeof options === "object" && options !== null && Boolean(options.all);
+    if (wantsAll) {
+      (cb as (e: NodeJS.ErrnoException | null, addresses: Array<{ address: string; family: number }>) => void)(
+        null,
+        [{ address: target.address, family: target.family }],
+      );
+    } else {
+      (cb as (e: NodeJS.ErrnoException | null, address: string, family: number) => void)(
+        null,
+        target.address,
+        target.family,
+      );
+    }
+  };
+}
+
 /** Posts to the checked address. Redirects are not followed and the answer's body is never passed on. */
 export function post(target: GuardedTarget, request: OutgoingRequest, timeoutMs = 8000): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -814,9 +834,7 @@ export function post(target: GuardedTarget, request: OutgoingRequest, timeoutMs 
         headers: { ...request.headers, "Content-Length": Buffer.byteLength(request.body), "User-Agent": "sshs3-notifier" },
         timeout: timeoutMs,
         // The address that was checked, not whatever the name resolves to now.
-        lookup: (_host, _options, callback) => {
-          (callback as (e: Error | null, address: string, family: number) => void)(null, target.address, target.family);
-        },
+        lookup: pinnedLookup(target),
       },
       (res) => {
         res.resume();
@@ -851,9 +869,7 @@ export function get(
         method: "GET",
         headers,
         timeout: timeoutMs,
-        lookup: (_host, _options, callback) => {
-          (callback as (e: Error | null, address: string, family: number) => void)(null, target.address, target.family);
-        },
+        lookup: pinnedLookup(target),
       },
       (res) => {
         const chunks: Buffer[] = [];
@@ -900,9 +916,7 @@ export function request(
           "User-Agent": "sshs3",
         },
         timeout: timeoutMs,
-        lookup: (_host, _options, callback) => {
-          (callback as (e: Error | null, address: string, family: number) => void)(null, target.address, target.family);
-        },
+        lookup: pinnedLookup(target),
       },
       (res) => {
         const chunks: Buffer[] = [];

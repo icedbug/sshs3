@@ -559,8 +559,8 @@ export function alertTicketText(
   const page = pages
     .map((p) =>
       p.known
-        ? `The team's page for this alert is “${p.title}”: an earlier run on the same alert worked from it. Open it first (sshs3_kb_search page=${p.id}).`
-        : `A knowledge base page that may cover this: “${p.title}” (sshs3_kb_search page=${p.id}). Open it and see whether it is about this symptom.`,
+        ? `The team's page for this alert is “${p.title}”: an earlier run on the same alert worked from it. Open it first.`
+        : `A knowledge base page that may cover this: “${p.title}”. Open it and see whether it is about this symptom.`,
     )
     .join(" ");
   return [
