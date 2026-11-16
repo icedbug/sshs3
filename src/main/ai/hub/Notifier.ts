@@ -873,6 +873,55 @@ export function get(
   });
 }
 
+/**
+ * A request with a body and an answer that is read, to the checked address:
+ * for a service sshs3 talks with (an issue tracker, a wiki), not only posts
+ * to. Redirects are not followed; the answer is cut off at `maxBytes`.
+ */
+export function request(
+  target: GuardedTarget,
+  options: { method: string; headers: Record<string, string>; body?: string },
+  maxBytes = 4 * 1024 * 1024,
+  timeoutMs = 25_000,
+): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: string }> {
+  return new Promise((resolve, reject) => {
+    const url = target.url;
+    const lib = url.protocol === "https:" ? https : http;
+    const req = lib.request(
+      {
+        protocol: url.protocol,
+        hostname: url.hostname.replace(/^\[|\]$/g, ""),
+        port: url.port || undefined,
+        path: `${url.pathname}${url.search}`,
+        method: options.method,
+        headers: {
+          ...options.headers,
+          ...(options.body !== undefined ? { "Content-Length": Buffer.byteLength(options.body) } : {}),
+          "User-Agent": "sshs3",
+        },
+        timeout: timeoutMs,
+        lookup: (_host, _options, callback) => {
+          (callback as (e: Error | null, address: string, family: number) => void)(null, target.address, target.family);
+        },
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        let size = 0;
+        res.on("data", (chunk: Buffer) => {
+          size += chunk.length;
+          if (size > maxBytes) return void req.destroy(new Error("The answer is too large."));
+          chunks.push(chunk);
+        });
+        res.on("end", () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks).toString("utf8") }));
+        res.on("error", reject);
+      },
+    );
+    req.on("timeout", () => req.destroy(new Error("No answer in time")));
+    req.on("error", reject);
+    req.end(options.body);
+  });
+}
+
 export interface DeliveryResult {
   ok: boolean;
   status?: number;
