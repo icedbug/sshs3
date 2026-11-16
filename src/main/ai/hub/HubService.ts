@@ -1745,6 +1745,8 @@ export class HubService {
     if (!had) return;
     this.simulation = undefined;
     for (const id of had.servers) deleteDemoServer(id);
+    // Opening a terminal to one saved it as a profile of this person's: that goes too.
+    for (const id of had.servers) await this.host.deleteServer?.(id).catch(() => undefined);
     // Nothing of the lab stays in what the team shares.
     if (this.store.data.s3SyncedServers?.some((x) => had.servers.includes(x.id))) this.store.data.s3SyncedServers = this.store.data.s3SyncedServers.filter((x) => !had.servers.includes(x.id));
     const ticket = had.ticketId ? this.store.data.workTickets?.find((t) => t.id === had.ticketId && !t.deleted) : undefined;
