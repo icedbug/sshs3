@@ -144,6 +144,16 @@ function readLabsEnabled(): boolean {
   }
 }
 
+/** True when a failure text is about the model or its settings, so a way to the settings is offered. */
+function isModelSetupMessage(text: string | undefined): boolean {
+  return /AI settings|settings first|API key|No model answered|endpoint missing|key was refused/i.test(text ?? "");
+}
+
+/** The last thing the person said: the only message that can be asked again without confusion. */
+function lastUserMessageId(task?: AgentTask): string | undefined {
+  return [...(task?.messages ?? [])].reverse().find((m) => m.role === "user")?.id;
+}
+
 function getActiveProfileSummary(hub?: HubSnapshot): {
   label: string;
   provider?: string;
@@ -164,7 +174,8 @@ function getActiveProfileSummary(hub?: HubSnapshot): {
     baseUrl.includes("127.0.0.1") ||
     baseUrl.includes("::1");
   return {
-    label: profile?.name || model || "Default profile",
+    // A model name here would read as "ready" while the assistant is switched off.
+    label: !hub?.config.enabled ? "AI off" : profile?.name || model || "Default profile",
     provider,
     isLocal,
   };
@@ -309,6 +320,8 @@ export function AiHubPanel({
   const [view, setView] = useState<View>("Work");
   const [labsEnabled, setLabsEnabled] = useState<boolean>(() => readLabsEnabled());
   const [focusInboxItem, setFocusInboxItem] = useState<string | undefined>();
+  // A ticket the Inbox asked the Workforce view to open.
+  const [workforceTicketId, setWorkforceTicketId] = useState<string | undefined>();
   // The conversation that is open is remembered for this tab: a reload or a reconnect (the server
   // restarted, the connection dropped) opens the same conversation again, not an empty "new chat".
   const [taskId, setTaskIdState] = useState<string>(() => {
@@ -329,6 +342,8 @@ export function AiHubPanel({
   /** What was just sent and has not come back in the conversation yet (the answer to the request can take a while). */
   const [sending, setSending] = useState("");
   const [autonomy, setAutonomy] = useState<AgentMode>("assisted");
+  // True once the person chose a mode themselves: then an agent's default no longer decides.
+  const [modePicked, setModePicked] = useState(false);
   const [selectedAgentId, setSelectedAgentId] = useState<string>("");
   const [shell, setShell] = useState<ShellKind>("bash");
   const [error, setError] = useState("");
@@ -367,6 +382,13 @@ export function AiHubPanel({
     (s) => s.id === targetSessionId && (task || s.state !== "disconnected"),
   );
   const activeProfile = getActiveProfileSummary(hub);
+  const draftMode: AgentMode = modePicked ? autonomy : (activeAgent?.defaultMode ?? autonomy);
+  const aiSetUp =
+    !!hub &&
+    (hub.demoMode ||
+      (hub.config.enabled &&
+        !!hub.config.model &&
+        (hub.config.hasApiKey || hub.config.codexConnected || !!hub.config.baseUrl?.includes("11434"))));
   const taskUsage = getTaskUsageSummary(task);
   const streamingState = task ? streamingByTask[task.id] : undefined;
   const visibleHubViews = getVisibleHubViews(labsEnabled || isLabsView(view));
@@ -767,7 +789,9 @@ export function AiHubPanel({
           prompt?: string;
         }>
       ).detail;
-      setMode(detail?.mode ?? "panel");
+      // With no mode given, Full view stays Full view: only a closed assistant is opened.
+      if (detail?.mode) setMode(detail.mode);
+      else if (modeRef.current === "closed") setMode("panel");
       const targetView = normalizeViewTarget(detail?.view);
       if (targetView) {
         if (isLabsView(targetView)) setLabsEnabled(true);
@@ -782,6 +806,7 @@ export function AiHubPanel({
       }
       if (detail?.agentId !== undefined) {
         setSelectedAgentId(detail.agentId);
+        setModePicked(false);
       }
       if (detail?.prompt) {
         setPrompt(detail.prompt);
@@ -855,7 +880,7 @@ export function AiHubPanel({
         setPrompt(detail.prompt);
       }
       if (detail?.text || detail?.prompt) {
-        setMode("panel");
+        if (modeRef.current === "closed") setMode("panel");
         setView("Work");
         setTimeout(() => composer.current?.focus(), 30);
       }
@@ -1073,15 +1098,35 @@ export function AiHubPanel({
   }
 
   function cycleMode(): void {
-    const idx = AGENT_MODES.indexOf(autonomy);
+    const idx = AGENT_MODES.indexOf(draftMode);
     const next = AGENT_MODES[(idx + 1) % AGENT_MODES.length];
     setAutonomy(next);
+    setModePicked(true);
     setConnection(undefined);
     setNotice(`Mode switched to ${modes[next]}.`);
   }
 
-  async function dispatchExtraHubRequest(payload: Record<string, unknown>): Promise<HubSnapshot | undefined> {
-    return act(payload as unknown as HubRequest);
+  // Typed against HubRequest so a wrong field name does not compile.
+  async function dispatchExtraHubRequest(payload: HubRequest): Promise<HubSnapshot | undefined> {
+    return act(payload);
+  }
+
+  // Ollama is asked first: saving an address nothing answers at would leave a broken setup behind.
+  async function connectLocalOllama(): Promise<void> {
+    const baseUrl = "http://127.0.0.1:11434/v1";
+    const probe = (await act({ action: "ai-probe", baseUrl }))?.reply?.probe;
+    if (!probe) return;
+    if (!probe.ok) {
+      setError(probe.detail || `No model answered at ${baseUrl}. Start Ollama, then try again.`);
+      return;
+    }
+    const preferred = "qwen2.5-coder:14b";
+    const model = !probe.models?.length || probe.models.includes(preferred) ? preferred : probe.models[0];
+    const saved = await act({
+      action: "configure",
+      config: { enabled: true, provider: "openai-compatible", baseUrl, model, useHermes: false },
+    });
+    if (saved) setNotice(`Connected to local Ollama. Model: ${model}.`);
   }
 
   async function handleForkTask(fromMessageId?: string): Promise<void> {
@@ -1089,7 +1134,7 @@ export function AiHubPanel({
     const result = await dispatchExtraHubRequest({
       action: "task-fork",
       taskId: task.id,
-      ...(fromMessageId ? { messageId: fromMessageId } : {}),
+      ...(fromMessageId ? { fromMessageId } : {}),
     });
     const forkedId = result?.reply?.started?.taskId ?? result?.tasks.at(-1)?.id;
     if (forkedId && forkedId !== task.id) {
@@ -1109,12 +1154,12 @@ export function AiHubPanel({
     }
   }
 
-  async function handleRestoreCheckpoint(checkpointId: string): Promise<void> {
-    if (!task || busy || !checkpointId) return;
+  async function handleRestoreCheckpoint(changeId: string): Promise<void> {
+    if (!task || busy || !changeId) return;
     const result = await dispatchExtraHubRequest({
       action: "restore-checkpoint",
       taskId: task.id,
-      checkpointId,
+      changeId,
     });
     if (result) {
       setNotice("Restored checkpoint.");
@@ -1173,7 +1218,7 @@ export function AiHubPanel({
           task: {
             prompt: textToSend,
             sessionId,
-            mode: activeAgent?.defaultMode ?? autonomy,
+            mode: draftMode,
             agentId: activeAgent?.id,
             agentName: activeAgent?.name,
             attachments: sentAttachments,
@@ -1446,10 +1491,11 @@ export function AiHubPanel({
           <button className="ai-history-new" onClick={newChat}>
             <Plus size={14} /> New chat
           </button>
-          {!hub?.tasks.length && (
+          {!hub?.tasks.some(isConversation) && (
             <p className="ai-hint">Your conversations will appear here.</p>
           )}
-          {[...(hub?.tasks ?? [])].reverse().map((t) => (
+          {/* Same list as the sidebar: background runs are not conversations. */}
+          {[...(hub?.tasks ?? [])].filter(isConversation).reverse().map((t) => (
             <button
               className="ai-history-entry"
               key={t.id}
@@ -1510,13 +1556,18 @@ export function AiHubPanel({
             onClick={() => handleToggleLabs(!labsEnabled)}
           >
             <FlaskConical size={12} />
-            <span>{labsEnabled ? "Labs: on" : "Labs Features"}</span>
+            <span>{labsEnabled ? "More: on" : "More: Memory, Agents & MCP, Schedules"}</span>
           </button>
         )}
       </nav>
       {error && (
         <div className="ai-error" role="alert">
           {error}
+          {isModelSetupMessage(error) && (
+            <button type="button" className="ai-code-btn" onClick={() => setSettingsOpen(true)}>
+              Open AI settings
+            </button>
+          )}
           <button
             className="ai-icon-button"
             aria-label="Dismiss error"
@@ -1720,9 +1771,8 @@ export function AiHubPanel({
                     <p>
                       Pick a <strong>Mission Agent</strong>, or ask about your clusters, VMs, S3 buckets, runbooks and MCP tools.
                     </p>
-                    {!hub.config.hasApiKey &&
-                      !hub.config.codexConnected &&
-                      !hub.config.baseUrl?.includes("11434") && (
+                    {/* Shown until AI is on and set up, so a failed attempt can be tried again. */}
+                    {!aiSetUp && (
                         <article
                           className="ai-card ai-card-active"
                           data-testid="ai-hub-quick-connect-card"
@@ -1757,18 +1807,8 @@ export function AiHubPanel({
                             </button>
                             <button
                               type="button"
-                              onClick={() =>
-                                void act({
-                                  action: "configure",
-                                  config: {
-                                    enabled: true,
-                                    provider: "openai-compatible",
-                                    baseUrl: "http://127.0.0.1:11434/v1",
-                                    model: "qwen2.5-coder:14b",
-                                    useHermes: false,
-                                  },
-                                })
-                              }
+                              disabled={busy}
+                              onClick={() => void connectLocalOllama()}
                             >
                               Local Ollama (localhost:11434)
                             </button>
@@ -2176,19 +2216,23 @@ export function AiHubPanel({
                               >
                                 <Pencil size={11} /> Edit
                               </button>
-                              <button
-                                type="button"
-                                className="ai-code-btn"
-                                title="Retry this prompt"
-                                onClick={() =>
-                                  void sendMessage(
-                                    terminal && terminal.state !== "disconnected" ? terminal.id : undefined,
-                                    { overridePrompt: item.message!.text },
-                                  )
-                                }
-                              >
-                                <RotateCcw size={11} /> Retry
-                              </button>
+                              {/* Asking again posts the question once more, so it is offered only on the last one. */}
+                              {item.message.id === lastUserMessageId(task) && (
+                                <button
+                                  type="button"
+                                  className="ai-code-btn"
+                                  data-testid="ai-message-retry"
+                                  title="Ask again"
+                                  onClick={() =>
+                                    void sendMessage(
+                                      terminal && terminal.state !== "disconnected" ? terminal.id : undefined,
+                                      { overridePrompt: item.message!.text },
+                                    )
+                                  }
+                                >
+                                  <RotateCcw size={11} /> Retry
+                                </button>
+                              )}
                             </>
                           )}
                           {task && (
@@ -2429,7 +2473,8 @@ export function AiHubPanel({
                               disabled={busy}
                               onClick={() => {
                                 if (checkpointId) {
-                                  void handleRestoreCheckpoint(checkpointId);
+                                  // The hub finds the checkpoint by the change it belongs to.
+                                  void handleRestoreCheckpoint(item.change!.id);
                                 } else {
                                   void act({
                                     action: "rollback-change",
@@ -2612,7 +2657,24 @@ export function AiHubPanel({
                     act={act}
                   />
                 )}
-                {task?.error && <p className="ai-task-error">{task.error}</p>}
+                {task?.error && (
+                  <p className="ai-task-error">
+                    {task.error}
+                    {isModelSetupMessage(task.error) && (
+                      <>
+                        {" "}
+                        <button
+                          type="button"
+                          className="ai-code-btn"
+                          data-testid="ai-task-error-settings"
+                          onClick={() => setSettingsOpen(true)}
+                        >
+                          Open AI settings
+                        </button>
+                      </>
+                    )}
+                  </p>
+                )}
                 {sending && (
                   <article className="ai-message ai-message-user ai-message-sending" data-testid="message-sending">
                     <div className="ai-message-header">
@@ -3260,7 +3322,7 @@ export function AiHubPanel({
                 <div className="ai-composer-footer">
                   <div className="ai-mode-pills" role="group" aria-label="Agent mode">
                     {AGENT_MODES.map((value) => {
-                      const activeMode = (task?.mode ?? autonomy) === value;
+                      const activeMode = (task?.mode ?? draftMode) === value;
                       return (
                         <button
                           key={value}
@@ -3280,11 +3342,12 @@ export function AiHubPanel({
                           }
                           onClick={() => {
                             setAutonomy(value);
+                            setModePicked(true);
                             setConnection(undefined);
                             setMenu(null);
                           }}
                         >
-                          {value === (task?.mode ?? autonomy) && <ShieldCheck size={11} />}
+                          {activeMode && <ShieldCheck size={11} />}
                           <span>{modes[value]}</span>
                         </button>
                       );
@@ -3359,6 +3422,10 @@ export function AiHubPanel({
                 setView("Work");
               }}
               onOpenView={(next) => setView(next)}
+              onOpenTicket={(id) => {
+                setWorkforceTicketId(id);
+                setView("Workforce");
+              }}
               focusItemId={focusInboxItem}
               onRequest={act}
             />
@@ -3367,6 +3434,7 @@ export function AiHubPanel({
             <WorkforceView
               hub={hub}
               act={act}
+              openTicketId={workforceTicketId}
               onOpenTask={(id) => {
                 setTaskId(id);
                 setView("Work");

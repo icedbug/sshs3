@@ -2739,6 +2739,56 @@ function missingProviderSetup(
   return isBlank(model.baseUrl) ? "Model endpoint missing" : undefined;
 }
 
+const CONNECTION_ERROR_CODES = ["ECONNREFUSED", "ENOTFOUND", "ETIMEDOUT", "EAI_AGAIN"];
+
+/**
+ * A provider failure as one plain sentence for the chat: what did not answer
+ * and what to do about it. Only the failures a person can fix in AI settings
+ * are reworded (nothing listening, a refused key, an unknown model); anything
+ * else stays the provider's own text. Masked and bounded like safeError.
+ */
+export function friendlyProviderError(error: unknown, config: HermesModelConfig): string {
+  const raw = safeError(error);
+  const address = (
+    config.baseUrl ||
+    (config.kind === "anthropic" ? "https://api.anthropic.com" : config.kind === "openai-codex" ? "ChatGPT" : "")
+  ).replace(/\/$/, "");
+  const where = address ? ` at ${address}` : "";
+  // fetch reports "fetch failed" and keeps the real reason on `cause`.
+  const cause = error instanceof Error ? (error as { cause?: unknown }).cause : undefined;
+  const codes = [error, cause].map((e) => String((e as { code?: unknown } | undefined)?.code ?? ""));
+  const causeText = cause instanceof Error ? cause.message : "";
+  const status =
+    error instanceof UpstreamHttpError
+      ? error.status
+      : Number((error as { status?: unknown } | undefined)?.status) || undefined;
+
+  // Our own "Model API (404):" prefix must not pass for the provider talking about a model.
+  const said = raw.replace(/^[\w /]*API \(\d+\):\s*/, "");
+  let text = raw;
+  if (
+    !status &&
+    (codes.some((c) => CONNECTION_ERROR_CODES.includes(c)) ||
+      /ECONNREFUSED|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|fetch failed/i.test(`${raw} ${causeText}`))
+  ) {
+    const local = /\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/i.test(address);
+    const fix = /:11434(\/|$)/.test(address)
+      ? "Start Ollama"
+      : local
+        ? "Start the model server on this computer"
+        : "Check the address and your network";
+    text = `No model answered${where}. ${fix}, or choose another model in AI settings.`;
+  } else if (status === 401 || status === 403) {
+    text =
+      config.kind === "openai-codex"
+        ? "The ChatGPT sign-in was refused. Sign in again, or choose another model in AI settings."
+        : `The API key was refused${where}. Enter a valid key in AI settings.`;
+  } else if (status === 404 && /\bmodel\b.{0,120}(not found|does not exist|not exist|unknown)|model_not_found/i.test(said)) {
+    text = `The model "${config.model}" was not found${where}. Choose another model in AI settings.`;
+  }
+  return text === raw ? raw : safeError(new Error(text));
+}
+
 /** Also true for a key or URL that is unset at runtime despite its type. */
 function isBlank(value: string | undefined): boolean {
   return !value?.trim();
@@ -3229,7 +3279,7 @@ export class DirectAgentRuntime implements AgentRuntime {
       // is the result: the scripted demo copilot never stands in for it.
       onEvent({
         type: "run.failed",
-        error: safeError(error),
+        error: friendlyProviderError(error, activeModel),
         usage: this.spentUsage(),
       });
     }

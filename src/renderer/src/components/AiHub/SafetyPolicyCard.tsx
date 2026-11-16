@@ -186,6 +186,9 @@ export function SafetyPolicyCard({ hub, act }: { hub: HubSnapshot; act: Act }): 
               Override max autonomy mode, peer approval (SoD), check/rollback requirement, or change freeze per cluster
               or <code>tag:&lt;name&gt;</code>.
             </small>
+            <small data-testid="safety-own-runs-note">
+              A freeze or an override set here holds for your own runs only.
+            </small>
           </div>
           <button
             type="button"
@@ -245,7 +248,13 @@ export function SafetyPolicyCard({ hub, act }: { hub: HubSnapshot; act: Act }): 
                   setOverrideDraft({ ...overrideDraft, requirePeerApproval: e.target.checked })
                 }
               />
-              <span>Require two-person peer approval (2 approvals, SoD)</span>
+              <span>
+                Require two-person peer approval (2 approvals, SoD)
+                <small>
+                  Needs a team server with a second account. Where only you can approve, untick this or the override
+                  is not saved.
+                </small>
+              </span>
             </label>
             <label className="ai-check">
               <input

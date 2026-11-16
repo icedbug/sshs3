@@ -608,6 +608,8 @@ export function KnowledgeBaseView({
   const [openPage, setOpenPage] = useState<KbPage | undefined>();
   const [activeRunbookId, setActiveRunbookId] = useState<string>("");
   const [openedRefNotice, setOpenedRefNotice] = useState<string>("");
+  // People expect "write" to make a page. It makes a source, so say so once it is saved.
+  const [savedAsSource, setSavedAsSource] = useState(false);
   const picker = useRef<HTMLInputElement>(null);
   const searchSeq = useRef(0);
 
@@ -794,7 +796,7 @@ export function KnowledgeBaseView({
                 setTab("sources");
               }}
             >
-              {draft && !draft.id && tab === "sources" ? "Close" : "Write one"}
+              {draft && !draft.id && tab === "sources" ? "Close" : "Write a source note"}
             </button>
           </div>
           <input
@@ -1035,6 +1037,23 @@ export function KnowledgeBaseView({
 
       {tab === "sources" && (
         <>
+      {savedAsSource && !draft && (
+        <p className="ai-hint" role="status" data-testid="kb-saved-as-source">
+          {hub.demoMode
+            ? "Saved as a source. The demo lab has no model, so it is not worked into a page here."
+            : "Saved as a source. The assistant works sources into pages."}{" "}
+          <button
+            type="button"
+            onClick={() => {
+              setSavedAsSource(false);
+              setTab("pages");
+              setPageDraft(emptyPage());
+            }}
+          >
+            Write a page instead
+          </button>
+        </p>
+      )}
       {draft && (
         <form
           className="ai-form ai-card"
@@ -1059,6 +1078,7 @@ export function KnowledgeBaseView({
               },
             }).then((next) => {
               if (next) {
+                setSavedAsSource(!draft.id);
                 setDraft(undefined);
                 setOpen(undefined);
               }

@@ -59,7 +59,7 @@ const AgentNode = memo(function AgentNode({ data }: NodeProps<Node<AgentNodeData
           {STATE_TEXT[live.state]}
         </span>
       </div>
-      <small>
+      <small className="ai-org-role" title={live.agent.role}>
         {live.agent.role}
         {live.agent.runnerId ? ` · ${live.agent.runnerId}` : ""}
       </small>
@@ -192,33 +192,9 @@ export function TeamGraph({
   }, [onSelect]);
 
   return (
-    <div
-      ref={containerRef}
-      className={`ai-org ${workforcePaused ? "ai-org-workforce-paused" : ""}`}
-      data-testid="team-graph"
-      style={{ position: "relative" }}
-    >
-      <div
-        className="ai-org-legend"
-        data-testid="team-graph-legend"
-        style={{
-          position: "absolute",
-          top: 10,
-          left: 10,
-          right: 10,
-          zIndex: 5,
-          display: "flex",
-          flexWrap: "wrap",
-          alignItems: "center",
-          gap: "10px",
-          padding: "5px 9px",
-          borderRadius: 8,
-          background: "rgba(15, 18, 24, 0.84)",
-          border: "1px solid rgba(255, 255, 255, 0.1)",
-          fontSize: 11,
-          pointerEvents: "auto",
-        }}
-      >
+    <div className="ai-org-wrap" data-testid="team-graph">
+      {/* The legend sits above the canvas, so it never covers an agent. */}
+      <div className="ai-org-legend" data-testid="team-graph-legend">
         <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
           <span className="ai-org-dot" style={{ background: STATE_COLOR.working }} /> Active
         </span>
@@ -251,27 +227,32 @@ export function TeamGraph({
         </button>
       </div>
 
-      <ReactFlow
-        nodes={nodes}
-        edges={edges}
-        nodeTypes={nodeTypes}
-        edgeTypes={edgeTypes}
-        colorMode="dark"
-        fitView
-        fitViewOptions={{ padding: 0.2, maxZoom: 1 }}
-        minZoom={0.3}
-        maxZoom={1.4}
-        nodesConnectable={false}
-        nodesDraggable={false}
-        proOptions={{ hideAttribution: false }}
-        onInit={setRfInstance}
-        onNodeClick={handleNodeClick}
-        onPaneClick={handlePaneClick}
-      >
-        <Background gap={24} size={1} />
-        <Controls showInteractive={false} showZoom showFitView />
-        <MiniMap pannable zoomable nodeColor={miniMapNodeColor} />
-      </ReactFlow>
+      <div ref={containerRef} className={`ai-org ${workforcePaused ? "ai-org-workforce-paused" : ""}`}>
+        <ReactFlow
+          nodes={nodes}
+          edges={edges}
+          nodeTypes={nodeTypes}
+          edgeTypes={edgeTypes}
+          colorMode="dark"
+          fitView
+          fitViewOptions={{ padding: 0.2, maxZoom: 1 }}
+          minZoom={0.3}
+          maxZoom={1.4}
+          nodesConnectable={false}
+          nodesDraggable={false}
+          // The mouse wheel scrolls the page. Zoom is on the controls.
+          zoomOnScroll={false}
+          preventScrolling={false}
+          proOptions={{ hideAttribution: false }}
+          onInit={setRfInstance}
+          onNodeClick={handleNodeClick}
+          onPaneClick={handlePaneClick}
+        >
+          <Background gap={24} size={1} />
+          <Controls showInteractive={false} showZoom showFitView />
+          <MiniMap pannable zoomable nodeColor={miniMapNodeColor} />
+        </ReactFlow>
+      </div>
     </div>
   );
 }

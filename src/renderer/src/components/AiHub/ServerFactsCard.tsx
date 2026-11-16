@@ -204,18 +204,37 @@ function Details({ facts, changes }: { facts?: ServerFacts; changes: FactChange[
           <small className="ai-muted"> Nothing seen (the account may not be allowed to see other users' sockets).</small>
         )}
       </div>
-      {facts.failedServices.length > 0 && (
-        <div>
-          <strong>Failed services</strong>
-          <div className="ai-tags">
-            {facts.failedServices.map((s) => (
-              <span className="ai-chip ai-bad" key={s}>
-                {s}
-              </span>
+      <div data-testid="facts-disks">
+        <strong>Disks</strong>
+        {facts.disks?.length ? (
+          <ul className="ai-facts-changes">
+            {facts.disks.map((d) => (
+              <li key={d.mount}>
+                {d.mount} <small>{d.usedPct} % used</small>
+              </li>
             ))}
-          </div>
-        </div>
-      )}
+          </ul>
+        ) : (
+          <small className="ai-muted"> None were read.</small>
+        )}
+      </div>
+      {/* Said also when there are none: a missing heading does not tell whether it was looked at. */}
+      <div data-testid="facts-failed-services">
+        {facts.failedServices.length > 0 ? (
+          <>
+            <strong>Failed services</strong>
+            <div className="ai-tags">
+              {facts.failedServices.map((s) => (
+                <span className="ai-chip ai-bad" key={s}>
+                  {s}
+                </span>
+              ))}
+            </div>
+          </>
+        ) : (
+          <span>Failed services: none</span>
+        )}
+      </div>
       {facts.certs.length > 0 && (
         <div>
           <strong>Certificates</strong>
@@ -325,6 +344,11 @@ export function ServerFactsCard({
           </span>
         </label>
       </div>
+      {!facts.enabled && (
+        <p className="ai-hint" data-testid="facts-off-note">
+          Off. Nothing is read from your servers until you switch this on. It runs read-only commands only.
+        </p>
+      )}
 
       {facts.enabled && (
         <>

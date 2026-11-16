@@ -50,6 +50,13 @@ const TIERS: Record<Tier, string> = {
   episodic: "A note about one incident",
 };
 
+/**
+ * Text that reads like an instruction about approvals. Approvals are enforced
+ * in code whatever a memory says; the badge tells the reader so.
+ */
+export const MEMORY_RULE_LIKE =
+  /\b(skip|bypass|without|no)\b.{0,30}\b(approval|confirm|review)|always approve|disable.{0,20}safety/i;
+
 /** Checks whether a memory/skill needs verification due to `staleReason`, expiry, or old verification age. */
 export function isMemoryStale(
   entry: MemoryEntry,
@@ -217,6 +224,39 @@ export function Memory({
   const [busyId, setBusyId] = useState<string | null>(null);
   const [saveError, setSaveError] = useState("");
   const [limit, setLimit] = useState(30);
+  // Forget has no undo on the backend, so the forgotten entry is kept here to save it again.
+  const [forgotten, setForgotten] = useState<MemoryEntry | undefined>();
+  const [undoing, setUndoing] = useState(false);
+
+  const forget = async (m: MemoryEntry): Promise<void> => {
+    const next = await act({ action: "memory-delete", id: m.id });
+    if (next) setForgotten(m);
+  };
+
+  const undoForget = async (): Promise<void> => {
+    if (!forgotten || undoing) return;
+    setUndoing(true);
+    try {
+      // Saved as a new entry: the backend refuses to write back under the id of a removed team memory.
+      const next = await act({
+        action: "memory-save",
+        entry: {
+          kind: forgotten.kind,
+          scope: forgotten.scope,
+          title: forgotten.title,
+          text: forgotten.text,
+          tier: forgotten.tier,
+          cluster: forgotten.cluster,
+          author: forgotten.author,
+          sourceCommand: forgotten.sourceCommand,
+          confidence: forgotten.confidence,
+        },
+      });
+      if (next) setForgotten(undefined);
+    } finally {
+      setUndoing(false);
+    }
+  };
 
   const missingEntry = Boolean(draft?.id && !hub.memories.some((m) => m.id === draft.id));
 
@@ -475,6 +515,10 @@ export function Memory({
               Apply scope
             </button>
           </div>
+          <p className="ai-hint" data-testid="memory-approval-hint">
+            Memories are background for the assistant. They never change what needs approval: that is set in AI
+            settings, Command safety.
+          </p>
           <p className="ai-hint">
             Never write passwords, keys or tokens here. An entry that closely resembles an existing one is merged into
             it.
@@ -494,6 +538,15 @@ export function Memory({
             </button>
           </div>
         </form>
+      )}
+
+      {forgotten && (
+        <p className="ai-hint" role="status" data-testid="memory-forgot-notice">
+          Forgot &quot;{forgotten.title}&quot;.{" "}
+          <button type="button" disabled={undoing} onClick={() => void undoForget()}>
+            {undoing ? "Restoring…" : "Undo"}
+          </button>
+        </p>
       )}
 
       {all.length > 0 && (
@@ -606,6 +659,15 @@ export function Memory({
                     title={stale.reason}
                   >
                     Needs Check
+                  </span>
+                )}
+                {MEMORY_RULE_LIKE.test(`${m.title}\n${m.text}`) && (
+                  <span
+                    className="ai-badge ai-badge-mode"
+                    data-testid={`memory-rule-like-${m.id}`}
+                    title="Approvals are set in AI settings, Command safety. A memory cannot switch them off."
+                  >
+                    Reads like a rule: it does not change approvals
                   </span>
                 )}
                 {m.autoLearned && (
@@ -795,7 +857,7 @@ export function Memory({
               <ConfirmButton
                 label="Forget"
                 confirmLabel={m.scope === "personal" ? "Forget this?" : "Forget for the whole team?"}
-                onConfirm={() => void act({ action: "memory-delete", id: m.id })}
+                onConfirm={() => void forget(m)}
               />
             </div>
           </article>

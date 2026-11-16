@@ -19,6 +19,8 @@ export interface InboxViewProps {
   act: Act;
   onOpenTask: (taskId: string) => void;
   onOpenView: (view: "Workforce" | "Knowledge Base" | "Infrastructure") => void;
+  /** Opens a ticket on the Workforce board. */
+  onOpenTicket?: (ticketId: string) => void;
   /** The item a notification's link pointed at: shown first, or said to be handled if it is gone. */
   focusItemId?: string;
   /** Optional request callback override (defaults to `act`). */
@@ -109,6 +111,7 @@ export function InboxView({
   act,
   onOpenTask,
   onOpenView,
+  onOpenTicket,
   focusItemId,
   onRequest,
 }: InboxViewProps): JSX.Element {
@@ -123,6 +126,7 @@ export function InboxView({
   const [snoozeMenuId, setSnoozeMenuId] = useState<string | null>(null);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [armedDestructiveId, setArmedDestructiveId] = useState<string | null>(null);
+  const [armedDoneId, setArmedDoneId] = useState<string | null>(null);
   const [batchBusy, setBatchBusy] = useState(false);
   const [now, setNow] = useState(() => Date.now());
 
@@ -224,10 +228,19 @@ export function InboxView({
   const shownRules = rules ?? intake?.rules ?? [];
   const note = useCallback((id: string): string => notes[id] ?? "", [notes]);
 
+  // Marking a ticket done from the keyboard takes two presses. The first one stops waiting after 4 s.
+  useEffect(() => {
+    if (!armedDoneId) return;
+    const timer = window.setTimeout(() => setArmedDoneId(null), 4000);
+    return () => window.clearTimeout(timer);
+  }, [armedDoneId]);
+
   const openItem = useCallback(
     (item: InboxItem): void => {
       if (item.taskId) {
         onOpenTask(item.taskId);
+      } else if (item.ticketId && onOpenTicket) {
+        onOpenTicket(item.ticketId);
       } else if (item.kind === "alert") {
         onOpenView("Workforce");
       } else if (item.kind === "health") {
@@ -236,7 +249,7 @@ export function InboxView({
         onOpenView("Knowledge Base");
       }
     },
-    [onOpenTask, onOpenView],
+    [onOpenTask, onOpenTicket, onOpenView],
   );
 
   const resolveOrArchiveItem = useCallback(
@@ -327,11 +340,12 @@ export function InboxView({
       }
 
       if (event.key === "Escape") {
-        if (showShortcuts || snoozeMenuId || armedDestructiveId) {
+        if (showShortcuts || snoozeMenuId || armedDestructiveId || armedDoneId) {
           event.preventDefault();
           setShowShortcuts(false);
           setSnoozeMenuId(null);
           setArmedDestructiveId(null);
+          setArmedDoneId(null);
         }
         return;
       }
@@ -347,6 +361,7 @@ export function InboxView({
         if (next) {
           setSelectedId(next.id);
           setArmedDestructiveId(null);
+          setArmedDoneId(null);
           itemRefs.current[next.id]?.scrollIntoView?.({ block: "nearest" });
         }
         return;
@@ -359,6 +374,7 @@ export function InboxView({
         if (prev) {
           setSelectedId(prev.id);
           setArmedDestructiveId(null);
+          setArmedDoneId(null);
           itemRefs.current[prev.id]?.scrollIntoView?.({ block: "nearest" });
         }
         return;
@@ -382,6 +398,14 @@ export function InboxView({
 
       if (event.key === "e") {
         event.preventDefault();
+        // One stray key must not close a ticket: the first press asks, the second does it.
+        const isTicket = active.kind === "review" || active.kind === "blocked";
+        if (isTicket && armedDoneId !== active.id) {
+          setSelectedId(active.id);
+          setArmedDoneId(active.id);
+          return;
+        }
+        setArmedDoneId(null);
         resolveOrArchiveItem(active);
         return;
       }
@@ -419,6 +443,7 @@ export function InboxView({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [
     armedDestructiveId,
+    armedDoneId,
     dispatch,
     openItem,
     resolveOrArchiveItem,
@@ -578,18 +603,37 @@ export function InboxView({
                 Open
               </button>
             )}
+            {item.ticketId && onOpenTicket && (
+              <button type="button" onClick={() => onOpenTicket(item.ticketId!)}>
+                Open ticket
+              </button>
+            )}
             {snoozeControls}
           </>
         );
-      case "alert":
+      case "alert": {
+        // An alert that has an agent needs no assigning: the button leads to its ticket.
+        const hasAgent = Boolean((hub.workTickets ?? []).find((t) => t.id === item.ticketId)?.assigneeAgentId);
+        const open = (): void =>
+          item.ticketId && onOpenTicket ? onOpenTicket(item.ticketId) : onOpenView("Workforce");
         return (
           <>
-            <button type="button" className="ai-btn-accent" onClick={() => onOpenView("Workforce")}>
-              Assign it
+            <button type="button" className="ai-btn-accent" onClick={open}>
+              {item.ticketId && onOpenTicket && hasAgent ? "Open ticket" : "Assign it"}
             </button>
+            {!item.acknowledgedAt && (
+              <button
+                type="button"
+                data-testid={`inbox-ack-btn-${item.id}`}
+                onClick={() => void dispatch({ action: "ack-inbox", itemId: item.id, acknowledged: true })}
+              >
+                Acknowledge
+              </button>
+            )}
             {snoozeControls}
           </>
         );
+      }
       case "health":
         return (
           <>
@@ -663,7 +707,7 @@ export function InboxView({
             <span><kbd>j</kbd> / <kbd>k</kbd> Navigate</span>
             <span><kbd>o</kbd> / <kbd>Enter</kbd> Open</span>
             <span><kbd>a</kbd> Approve</span>
-            <span><kbd>e</kbd> Archive / Resolve</span>
+            <span><kbd>e</kbd> Acknowledge, or mark a ticket done (press twice)</span>
             <span><kbd>h</kbd> Snooze</span>
             <span><kbd>?</kbd> Toggle cheatsheet</span>
           </div>
@@ -744,6 +788,11 @@ export function InboxView({
       {armedDestructiveId && (
         <p className="ai-note" role="status" data-testid="inbox-destructive-arm">
           Destructive change selected: press <kbd>a</kbd> again to confirm approval, or <kbd>Esc</kbd> to cancel.
+        </p>
+      )}
+      {armedDoneId && (
+        <p className="ai-note" role="status" data-testid="inbox-done-arm">
+          Press <kbd>e</kbd> again to mark it done, or <kbd>Esc</kbd> to cancel.
         </p>
       )}
       {allItems.length === 0 && (

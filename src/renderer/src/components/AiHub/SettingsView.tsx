@@ -88,7 +88,8 @@ function writeStoredLabsEnabled(enabled: boolean): void {
       window.localStorage.setItem(LABS_ENABLED_STORAGE_KEY, String(enabled));
     }
     if (typeof window !== "undefined") {
-      window.dispatchEvent(new CustomEvent("sshs3:labs-changed", { detail: { enabled } }));
+      // The panel reads `labsEnabled`: the same key its own toggle sends.
+      window.dispatchEvent(new CustomEvent("sshs3:labs-changed", { detail: { labsEnabled: enabled } }));
     }
   } catch {
     // Ignore storage errors in restricted environments.
@@ -157,6 +158,8 @@ export function Settings({
   const [prefs, setPrefs] = useState<HubPreferences>(hub.preferences);
   const [internalLabs, setInternalLabs] = useState<boolean>(() => readStoredLabsEnabled());
   const [savedNotice, setSavedNotice] = useState(false);
+  const [probing, setProbing] = useState(false);
+  const [probe, setProbe] = useState<{ ok: boolean; detail: string }>();
   const modelInputRef = useRef<HTMLInputElement>(null);
 
   const labsEnabled = controlledLabs ?? internalLabs;
@@ -333,7 +336,7 @@ export function Settings({
           <small>
             {hub.config.codexConnected
               ? `Signed in with ChatGPT${hub.config.codexAccountEmail ? ` (${hub.config.codexAccountEmail})` : ""}. No API key needed.`
-              : "Uses the ChatGPT / Codex sign-in on this computer. Not signed in yet."}
+              : "Uses the ChatGPT / Codex sign-in on this computer. Not signed in yet. To sign in, run `codex login` in a terminal on this computer, then come back here."}
           </small>
         )}
         <div className="ai-form-row">
@@ -402,7 +405,13 @@ export function Settings({
                 autoComplete="off"
                 value={key}
                 onChange={(e) => setKey(e.target.value)}
-                placeholder={hub.config.hasApiKey ? "A key is saved · leave blank to keep it" : "Not needed for local models"}
+                placeholder={
+                  hub.config.hasApiKey
+                    ? "A key is saved · leave blank to keep it"
+                    : provider === "anthropic"
+                      ? "sk-ant-… (needed)"
+                      : "Not needed for local models"
+                }
               />
               <small>
                 {hub.config.keyStorage === "session"
@@ -836,7 +845,7 @@ export function Settings({
           <input
             value={actorName}
             onChange={(e) => setActorName(e.target.value)}
-            placeholder={hub.config.codexAccountEmail ? hub.config.codexAccountEmail.split("@")[0] : "jacob"}
+            placeholder={hub.config.codexAccountEmail ? hub.config.codexAccountEmail.split("@")[0] : "Your name"}
           />
         </label>
         <small>
@@ -1145,7 +1154,33 @@ export function Settings({
         <button type="submit" className="ai-btn-emerald">
           Save settings
         </button>
+        <button
+          type="button"
+          data-testid="ai-test-connection"
+          disabled={probing}
+          title="Asks the saved model whether it answers. Save first to test changes."
+          onClick={() => {
+            setProbing(true);
+            setProbe(undefined);
+            void act({ action: "ai-probe" })
+              .then((result) =>
+                setProbe(result?.reply?.probe ?? { ok: false, detail: "The check could not be made." }),
+              )
+              .finally(() => setProbing(false));
+          }}
+        >
+          {probing ? "Testing…" : "Test connection"}
+        </button>
         {savedNotice && <small role="status">Settings saved.</small>}
+        {probe && (
+          <small
+            data-testid="ai-test-connection-result"
+            role={probe.ok ? "status" : "alert"}
+            style={{ color: probe.ok ? "var(--ok-fg)" : "var(--danger-fg)" }}
+          >
+            {probe.detail || (probe.ok ? "The model answers." : "The model did not answer.")}
+          </small>
+        )}
       </div>
 
       <section className="ai-set ai-set-data">

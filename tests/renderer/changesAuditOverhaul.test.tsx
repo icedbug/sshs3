@@ -585,7 +585,7 @@ describe("SchedulesView overhaul", () => {
     fireEvent.change(within(form).getByLabelText("Event cooldown minutes"), {
       target: { value: "45" },
     });
-    fireEvent.change(within(form).getByLabelText("Where"), {
+    fireEvent.change(within(form).getByLabelText("Where it runs"), {
       target: { value: "srv-prod-1" },
     });
 

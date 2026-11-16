@@ -18,6 +18,7 @@ const KIND: Record<string, string> = {
 export function ScenariosCard({ hub, act, onOpenTicket }: { hub: HubSnapshot; act: Act; onOpenTicket?: (ticketId: string) => void }): JSX.Element | null {
   const sim = hub.simulation;
   const [busy, setBusy] = useState("");
+  const [shownStory, setShownStory] = useState("");
   if (!sim) return null;
   const running = sim.running;
   const start = (scenarioId: string): void => {
@@ -77,8 +78,24 @@ export function ScenariosCard({ hub, act, onOpenTicket }: { hub: HubSnapshot; ac
               <li key={s.id} className="ai-link">
                 <span>
                   <strong>{s.title}</strong>
+                  {s.target && <small> · {s.target}</small>}
+                  {/* The story names the cause and the fix: hidden until asked for, so a person can try it first. */}
                   <br />
-                  <small>{s.story}</small>
+                  <button
+                    type="button"
+                    className="ai-chip"
+                    aria-expanded={shownStory === s.id}
+                    data-testid={`scenario-spoiler-${s.id}`}
+                    onClick={() => setShownStory(shownStory === s.id ? "" : s.id)}
+                  >
+                    {shownStory === s.id ? "Hide what is wrong" : "Show what is wrong (spoiler)"}
+                  </button>
+                  {shownStory === s.id && (
+                    <>
+                      <br />
+                      <small data-testid={`scenario-story-${s.id}`}>{s.story}</small>
+                    </>
+                  )}
                 </span>
                 <button type="button" className="ai-btn-accent" disabled={Boolean(busy)} data-testid={`scenario-start-${s.id}`} onClick={() => start(s.id)}>
                   {busy === s.id ? "Starting…" : "Start"}

@@ -1,6 +1,7 @@
-import { lazy, Suspense, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentTask,
+  HubRequest,
   HubSnapshot,
   MissionAgent,
   WorkGoal,
@@ -59,6 +60,11 @@ const SLA_STYLE: Record<"normal" | "warn" | "breach", React.CSSProperties> = {
   breach: { ...TABULAR_NUMS_STYLE, color: "#f87171", borderColor: "rgba(248, 113, 113, 0.55)" },
 };
 
+/** Opens the Agents & MCP view. The panel shows it even while it is hidden from the menu. */
+const openAgentsView = (): void => {
+  window.dispatchEvent(new CustomEvent("sshs3:ai-open", { detail: { view: "Agents & MCP", mode: "hub" } }));
+};
+
 function matchesTicketFilter(
   ticket: WorkTicket,
   query: string,
@@ -91,10 +97,13 @@ export function WorkforceView({
   hub,
   act,
   onOpenTask,
+  openTicketId: askedTicketId,
 }: {
   hub: HubSnapshot;
   act: Act;
   onOpenTask: (taskId: string) => void;
+  /** A ticket to open, asked for from another view. */
+  openTicketId?: string;
 }): JSX.Element {
   const [tab, setTab] = useState<"board" | "team">("board");
   const [goalFilter, setGoalFilter] = useState("");
@@ -103,7 +112,14 @@ export function WorkforceView({
   const [assigneeFilter, setAssigneeFilter] = useState("");
   const [draft, setDraft] = useState<TicketDraft | undefined>();
   const [goalDraft, setGoalDraft] = useState<{ id?: string; title: string; description: string } | undefined>();
-  const [openTicketId, setOpenTicketId] = useState("");
+  const [openTicketId, setOpenTicketId] = useState(askedTicketId ?? "");
+  const [report, setReport] = useState("");
+  // What was just done to a ticket, and the request that takes it back.
+  const [notice, setNotice] = useState<{ text: string; undo: HubRequest } | undefined>();
+  // The status picked in the detail. It is applied with the Move button, not on change.
+  const [moveTo, setMoveTo] = useState<{ id: string; status: WorkTicketStatus } | undefined>();
+  const [showAll, setShowAll] = useState<Partial<Record<WorkTicketStatus, boolean>>>({});
+  const detailRef = useRef<HTMLElement | null>(null);
   const [agentId, setAgentId] = useState<string | undefined>();
   const [note, setNote] = useState("");
   const [comment, setComment] = useState("");
@@ -137,6 +153,19 @@ export function WorkforceView({
   );
 
   const openTicket = tickets.find((t) => t.id === openTicketId);
+
+  useEffect(() => {
+    if (!askedTicketId) return;
+    setTab("board");
+    setOpenTicketId(askedTicketId);
+  }, [askedTicketId]);
+
+  // The detail is below the board: bring it into view when a ticket is opened.
+  const detailShown = Boolean(openTicket) && tab === "board";
+  useEffect(() => {
+    if (!detailShown) return;
+    detailRef.current?.scrollIntoView?.({ block: "nearest", behavior: "smooth" });
+  }, [detailShown, openTicketId]);
   const openTicketTask = openTicket?.taskId ? hub.tasks.find((t) => t.id === openTicket.taskId) : undefined;
   const openTicketHypotheses = openTicket
     ? openTicket.hypotheses?.length
@@ -178,6 +207,29 @@ export function WorkforceView({
     setBusy(key);
     return act(request).finally(() => setBusy(""));
   };
+  const columnTitle = (status: WorkTicketStatus): string => COLUMNS.find((c) => c.status === status)?.title ?? status;
+  /** Changes a ticket's status and offers to take it back. */
+  const changeStatus = (t: WorkTicket, request: HubRequest): void => {
+    const before = t.status;
+    void act(request).then((next) => {
+      const after = next?.workTickets?.find((x) => x.id === t.id)?.status;
+      // in_progress cannot be moved back to: nothing to undo there.
+      if (!after || after === before || before === "in_progress") return;
+      setNotice({
+        text: `Moved "${t.title}" to ${columnTitle(after)}.`,
+        undo: { action: "ticket-move", id: t.id, status: before },
+      });
+    });
+  };
+  const removeTicket = (t: WorkTicket): void => {
+    setOpenTicketId("");
+    void act({ action: "ticket-delete", id: t.id }).then((next) => {
+      if (!next || (next.workTickets ?? []).some((x) => x.id === t.id && !x.deleted)) return;
+      setNotice({ text: `Removed "${t.title}".`, undo: { action: "ticket-restore", id: t.id } });
+    });
+  };
+  const moveChoice = openTicket && moveTo?.id === openTicket.id ? moveTo.status : openTicket?.status;
+  const editingOpen = Boolean(draft?.id && draft.id === openTicket?.id);
   const canStart = (t: WorkTicket): boolean =>
     Boolean(t.assigneeAgentId) && ["backlog", "todo", "blocked"].includes(t.status);
 
@@ -304,7 +356,10 @@ export function WorkforceView({
           </div>
           <p className="ai-hint ai-footnote">
             A template adds its agents, one goal and the first tickets. Nothing runs until you start a ticket. You can
-            also build your own: add a goal and tickets here, and agents under Agents &amp; MCP.
+            also build your own: add a goal and tickets here, and agents under{" "}
+            <button type="button" className="ai-chip" data-testid="open-agents-view" onClick={openAgentsView}>
+              Agents &amp; MCP
+            </button>
           </p>
         </>
       )}
@@ -368,7 +423,7 @@ export function WorkforceView({
             className="ai-btn-accent"
             onClick={() =>
               setDraft(
-                draft
+                draft && !draft.id
                   ? undefined
                   : { title: "", description: "", goalId: goalFilter || goals[0]?.id || "", assigneeAgentId: "", target: "" },
               )
@@ -386,7 +441,15 @@ export function WorkforceView({
         {heartbeat ? " · Heartbeat on: this app starts tickets by itself." : ""}
       </small>
 
-      <ScenariosCard hub={hub} act={act} onOpenTicket={(id) => setOpenTicketId(id)} />
+      <ScenariosCard
+        hub={hub}
+        act={act}
+        onOpenTicket={(id) => {
+          // The detail is only on the board.
+          setTab("board");
+          setOpenTicketId(id);
+        }}
+      />
       <AtlassianCard product="jira" hub={hub} act={act} />
 
       {workforcePaused && (
@@ -424,6 +487,7 @@ export function WorkforceView({
           hub={hub}
           act={act}
           selectedTaskId={inspectedTaskId}
+          defaultTaskId={openTicket?.taskId}
           selectedRunId={inspectedRunId}
           onSelectTask={(id) => {
             setInspectedRunId(undefined);
@@ -480,7 +544,7 @@ export function WorkforceView({
           </div>
         </form>
       )}
-      {ticketForm}
+      {draft && !draft.id && ticketForm}
 
       {goals.length > 0 && (
         <div className="ai-goals">
@@ -610,6 +674,7 @@ export function WorkforceView({
                 col.status === "done" ? b.updatedAt - a.updatedAt : compareTicketsByPriority(a, b),
               );
             const droppable = col.status !== "in_progress";
+            const cardLimit = col.status === "done" ? 12 : 60;
             return (
               <section
                 key={col.status}
@@ -623,14 +688,14 @@ export function WorkforceView({
                   const moved = tickets.find((t) => t.id === dragId);
                   setDragId("");
                   if (moved && moved.status !== col.status)
-                    void act({ action: "ticket-move", id: moved.id, status: col.status });
+                    changeStatus(moved, { action: "ticket-move", id: moved.id, status: col.status });
                 }}
               >
                 <header title={col.hint}>
                   <span>{col.title}</span>
                   <span className="ai-count">{cards.length}</span>
                 </header>
-                {cards.slice(0, col.status === "done" ? 12 : 60).map((t) => {
+                {(showAll[col.status] ? cards : cards.slice(0, cardLimit)).map((t) => {
                   const prio = ticketPriorityLevel(t);
                   const sla = ticketSlaInfo(t);
                   const corr = groupCorrelatedAlerts(t);
@@ -647,9 +712,20 @@ export function WorkforceView({
                         setOpenTicketId(openTicketId === t.id ? "" : t.id);
                         setNote("");
                         setComment("");
+                        setReport("");
+                        // An edit belongs to the ticket that was open.
+                        if (draft?.id) setDraft(undefined);
                       }}
                     >
-                      <strong>{t.title}</strong>
+                      {/* The click is the card's: the button says it opens and closes, and takes the keyboard. */}
+                      <button
+                        type="button"
+                        className="ai-ticket-title"
+                        aria-expanded={openTicketId === t.id}
+                        title={openTicketId === t.id ? "Close this ticket" : "Open this ticket"}
+                      >
+                        <strong>{t.title}</strong>
+                      </button>
                       <div className="ai-ticket-meta">
                         <span>{t.assigneeName ?? "Unassigned"}</span>
                         {t.target && <span>{t.target}</span>}
@@ -710,6 +786,15 @@ export function WorkforceView({
                     </article>
                   );
                 })}
+                {cards.length > cardLimit && !showAll[col.status] && (
+                  <button
+                    type="button"
+                    data-testid={`column-show-all-${col.status}`}
+                    onClick={() => setShowAll({ ...showAll, [col.status]: true })}
+                  >
+                    Show all ({cards.length})
+                  </button>
+                )}
                 {cards.length === 0 && <p className="ai-column-empty">{col.hint || "Nothing yet"}</p>}
               </section>
             );
@@ -720,7 +805,12 @@ export function WorkforceView({
       {tab === "team" && (
         <div className={`ai-team ${selectedAgent ? "ai-team-split" : ""}`}>
           {agents.length === 0 ? (
-            <p className="ai-empty">No agents yet. Set up a team above, or add agents under Agents &amp; MCP.</p>
+            <p className="ai-empty">
+              No agents yet. Set up a team above, or add agents under{" "}
+              <button type="button" className="ai-chip" data-testid="open-agents-view" onClick={openAgentsView}>
+                Agents &amp; MCP
+              </button>
+            </p>
           ) : (
             <Suspense fallback={<p className="ai-empty">Loading the team…</p>}>
               <TeamGraph
@@ -749,7 +839,7 @@ export function WorkforceView({
       )}
 
       {openTicket && tab === "board" && (
-        <article className="ai-card ai-ticket-detail" data-testid="ticket-detail">
+        <article ref={detailRef} className="ai-card ai-ticket-detail" data-testid="ticket-detail">
           <div className="ai-card-head">
             <div>
               <strong>{openTicket.title}</strong>
@@ -841,10 +931,38 @@ export function WorkforceView({
           )}
 
           {openTicket.result && (
-            <div className="ai-doc-body">
-              <small>{openTicket.status === "blocked" ? "Why it stopped" : "The agent's report"}</small>
+            <div className="ai-doc-body" data-testid="ticket-report">
+              {/* The ticket does not say who wrote the report, so it is not called the agent's. */}
+              <small>{openTicket.status === "blocked" ? "Why it stopped" : "Report"}</small>
               <RichMarkdownContent text={openTicket.result} />
             </div>
+          )}
+          {openTicket.status !== "in_progress" && (
+            <form
+              className="ai-form"
+              data-testid="ticket-report-form"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (!report.trim()) return;
+                void act({ action: "ticket-result", id: openTicket.id, result: report.trim() }).then((next) => {
+                  if (next) setReport("");
+                });
+              }}
+            >
+              <label>
+                Your report
+                <textarea rows={3} value={report} onChange={(e) => setReport(e.target.value)} />
+              </label>
+              <small className="ai-hint">
+                What was wrong and what you did. A scenario&apos;s last check reads this.
+                {openTicket.result ? " Saving replaces the report above." : ""}
+              </small>
+              <div className="ai-card-actions">
+                <button type="submit" disabled={!report.trim()}>
+                  Save report
+                </button>
+              </div>
+            </form>
           )}
           {(openTicket.comments ?? []).length > 0 && (
             <div className="ai-link-list">
@@ -871,21 +989,34 @@ export function WorkforceView({
                 value={note}
                 onChange={(e) => setNote(e.target.value)}
               />
-              <button
-                type="button"
-                className="ai-btn-emerald"
-                onClick={() => {
-                  void act({ action: "ticket-review", id: openTicket.id, approve: true, note });
-                  setNote("");
-                }}
-              >
-                {openTicket.status === "review" ? "Approve: done" : "Mark done anyway"}
-              </button>
+              {openTicket.status === "review" ? (
+                <button
+                  type="button"
+                  className="ai-btn-emerald"
+                  onClick={() => {
+                    changeStatus(openTicket, { action: "ticket-review", id: openTicket.id, approve: true, note });
+                    setNote("");
+                  }}
+                >
+                  Approve: done
+                </button>
+              ) : (
+                // The agent stopped: calling it done over that asks twice.
+                <ConfirmButton
+                  label="Mark done anyway"
+                  confirmLabel="Mark it done?"
+                  className="ai-btn-emerald"
+                  onConfirm={() => {
+                    changeStatus(openTicket, { action: "ticket-review", id: openTicket.id, approve: true, note });
+                    setNote("");
+                  }}
+                />
+              )}
               <button
                 type="button"
                 disabled={openTicket.status === "review" && !note.trim()}
                 onClick={() => {
-                  void act({ action: "ticket-review", id: openTicket.id, approve: false, note });
+                  changeStatus(openTicket, { action: "ticket-review", id: openTicket.id, approve: false, note });
                   setNote("");
                 }}
               >
@@ -948,19 +1079,38 @@ export function WorkforceView({
                 >
                   Edit
                 </button>
-                <select
-                  aria-label="Move to"
-                  value={openTicket.status}
-                  onChange={(e) =>
-                    void act({ action: "ticket-move", id: openTicket.id, status: e.target.value as WorkTicketStatus })
-                  }
-                >
-                  {COLUMNS.filter((c) => c.status !== "in_progress").map((c) => (
-                    <option key={c.status} value={c.status}>
-                      {c.status === openTicket.status ? c.title : `Move to ${c.title}`}
-                    </option>
-                  ))}
-                </select>
+                <span className="ai-move">
+                  <select
+                    aria-label="Move to"
+                    value={moveChoice}
+                    onChange={(e) => setMoveTo({ id: openTicket.id, status: e.target.value as WorkTicketStatus })}
+                  >
+                    {COLUMNS.filter((c) => c.status !== "in_progress").map((c) => (
+                      <option key={c.status} value={c.status}>
+                        {c.status === openTicket.status ? c.title : `Move to ${c.title}`}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    data-testid="ticket-move-apply"
+                    disabled={!moveChoice || moveChoice === openTicket.status}
+                    onClick={() => {
+                      if (!moveChoice || moveChoice === openTicket.status) return;
+                      setMoveTo(undefined);
+                      // Done from review is an approval: the same request as "Approve: done", so its checks run.
+                      changeStatus(
+                        openTicket,
+                        moveChoice === "done" && openTicket.status === "review"
+                          ? { action: "ticket-review", id: openTicket.id, approve: true, note }
+                          : { action: "ticket-move", id: openTicket.id, status: moveChoice },
+                      );
+                      if (moveChoice === "done" && openTicket.status === "review") setNote("");
+                    }}
+                  >
+                    Move
+                  </button>
+                </span>
               </>
             )}
             <span className="ai-spacer" />
@@ -968,13 +1118,11 @@ export function WorkforceView({
               <ConfirmButton
                 label="Delete"
                 confirmLabel={sync?.shared ? "Delete for the whole team?" : "Delete this ticket?"}
-                onConfirm={() => {
-                  setOpenTicketId("");
-                  void act({ action: "ticket-delete", id: openTicket.id });
-                }}
+                onConfirm={() => removeTicket(openTicket)}
               />
             )}
           </div>
+          {editingOpen && ticketForm}
           <form
             className="ai-inline-form"
             onSubmit={(e) => {
@@ -996,6 +1144,28 @@ export function WorkforceView({
           </form>
         </article>
       )}
+
+      {/* Last, and stuck to the bottom of the view: seen wherever the page is scrolled to. */}
+      {notice && (
+        <div className="ai-undo-notice" role="status" data-testid="workforce-notice">
+          <span>{notice.text}</span>
+          <span className="ai-spacer" />
+          <button
+            type="button"
+            className="ai-btn-accent"
+            onClick={() => {
+              const undo = notice.undo;
+              setNotice(undefined);
+              void act(undo);
+            }}
+          >
+            Undo
+          </button>
+          <button type="button" aria-label="Dismiss this notice" onClick={() => setNotice(undefined)}>
+            Dismiss
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -1004,6 +1174,7 @@ function RunInspectionDrawer({
   hub,
   act,
   selectedTaskId,
+  defaultTaskId,
   selectedRunId,
   onSelectTask,
   onSelectRun,
@@ -1013,6 +1184,8 @@ function RunInspectionDrawer({
   hub: HubSnapshot;
   act: Act;
   selectedTaskId?: string;
+  /** The open ticket's run: shown when nothing else was picked. */
+  defaultTaskId?: string;
   selectedRunId?: string;
   onSelectTask: (id: string) => void;
   onSelectRun: (id: string) => void;
@@ -1022,15 +1195,21 @@ function RunInspectionDrawer({
   const tasks = useMemo(() => {
     const score = (t: AgentTask): number =>
       t.status === "running" ? 0 : t.status === "waiting" ? 1 : t.ticketId || t.workforceRunId || t.parentTaskId ? 2 : 3;
-    return [...hub.tasks].sort((a, b) => score(a) - score(b) || b.updatedAt - a.updatedAt);
-  }, [hub.tasks]);
+    // Only what is going on now, and runs of tickets and of the team. Plain conversations are not listed.
+    const ofTickets = new Set((hub.workTickets ?? []).map((t) => t.taskId));
+    return hub.tasks
+      .filter((t) => score(t) < 3 || ofTickets.has(t.id) || t.id === selectedTaskId)
+      .sort((a, b) => score(a) - score(b) || b.updatedAt - a.updatedAt);
+  }, [hub.tasks, hub.workTickets, selectedTaskId]);
 
   const runs: WorkforceRun[] = useMemo(() => hub.workforceRuns ?? [], [hub.workforceRuns]);
 
   const activeRun = selectedRunId ? runs.find((r) => r.id === selectedRunId) : undefined;
   const activeTask = activeRun
     ? undefined
-    : (selectedTaskId ? tasks.find((t) => t.id === selectedTaskId) : undefined) ?? tasks[0];
+    : (selectedTaskId ? tasks.find((t) => t.id === selectedTaskId) : undefined) ??
+      (defaultTaskId ? tasks.find((t) => t.id === defaultTaskId) : undefined) ??
+      tasks[0];
 
   const childSubagents = useMemo(
     () => (activeTask ? tasks.filter((t) => t.parentTaskId === activeTask.id) : []),
@@ -1090,7 +1269,7 @@ function RunInspectionDrawer({
             alignItems: "start",
           }}
         >
-          <div style={{ display: "grid", gap: 6 }} data-testid="run-drawer-list">
+          <div style={{ display: "grid", gap: 6, minWidth: 0 }} data-testid="run-drawer-list">
             {tasks.slice(0, 12).map((t) => {
               const isSelected = activeTask?.id === t.id && !activeRun;
               return (
@@ -1099,14 +1278,8 @@ function RunInspectionDrawer({
                   type="button"
                   data-testid={`run-drawer-task-${t.id}`}
                   aria-pressed={isSelected}
-                  className={`ai-chip ${isSelected ? "ai-chip-on" : ""}`}
-                  style={{
-                    display: "grid",
-                    textAlign: "left",
-                    gap: 2,
-                    padding: "6px 8px",
-                    borderRadius: 8,
-                  }}
+                  className={`ai-chip ai-run-list-item ${isSelected ? "ai-chip-on" : ""}`}
+                  title={t.title}
                   onClick={() => onSelectTask(t.id)}
                 >
                   <span style={{ fontWeight: 600, fontSize: 12 }}>
@@ -1129,14 +1302,7 @@ function RunInspectionDrawer({
                   type="button"
                   data-testid={`run-drawer-workforce-${r.id}`}
                   aria-pressed={isSelected}
-                  className={`ai-chip ${isSelected ? "ai-chip-on" : ""}`}
-                  style={{
-                    display: "grid",
-                    textAlign: "left",
-                    gap: 2,
-                    padding: "6px 8px",
-                    borderRadius: 8,
-                  }}
+                  className={`ai-chip ai-run-list-item ${isSelected ? "ai-chip-on" : ""}`}
                   onClick={() => onSelectRun(r.id)}
                 >
                   <span style={{ fontWeight: 600, fontSize: 12 }}>⚡ {r.title}</span>

@@ -1513,7 +1513,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 }
               } catch {
                 // Fallback to side chat if inline suggestion fails
-                window.dispatchEvent(new CustomEvent('sshs3:ai-open'));
+                window.dispatchEvent(new CustomEvent('sshs3:ai-open', { detail: { newTask: true } }));
                 window.dispatchEvent(
                   new CustomEvent('sshs3:ai-attach', {
                     detail: {
@@ -1557,7 +1557,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                   const q = inlineAiPrompt.trim();
                   const contextText =
                     termRef.current?.getSelection() || outputTrackerRef.current?.lastOutput() || '';
-                  window.dispatchEvent(new CustomEvent('sshs3:ai-open'));
+                  window.dispatchEvent(new CustomEvent('sshs3:ai-open', { detail: { newTask: true } }));
                   window.dispatchEvent(
                     new CustomEvent('sshs3:ai-attach', {
                       detail: {
@@ -1591,7 +1591,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                 if (!q) return;
                 const contextText =
                   termRef.current?.getSelection() || outputTrackerRef.current?.lastOutput() || '';
-                window.dispatchEvent(new CustomEvent('sshs3:ai-open'));
+                window.dispatchEvent(new CustomEvent('sshs3:ai-open', { detail: { newTask: true } }));
                 window.dispatchEvent(
                   new CustomEvent('sshs3:ai-attach', {
                     detail: {
@@ -2043,7 +2043,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                   className="inline-flex items-center gap-1 hover:text-white"
                   onClick={() => {
                     const latest = terminalErrorHint;
-                    window.dispatchEvent(new CustomEvent('sshs3:ai-open'));
+                    // A new question gets its own conversation, not whichever old one is open.
+                    window.dispatchEvent(new CustomEvent('sshs3:ai-open', { detail: { newTask: true } }));
                     window.dispatchEvent(
                       new CustomEvent('sshs3:ai-attach', {
                         detail: {

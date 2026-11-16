@@ -27,8 +27,23 @@ describe("the scenarios card", () => {
     expect(card).toHaveTextContent("The checks below are read off the servers, not judged by a model.");
     const rows = within(screen.getByTestId("scenario-list")).getAllByRole("listitem");
     expect(rows[1]).toHaveTextContent("The web shop is down after a configuration change");
-    fireEvent.click(within(rows[1]).getByRole("button"));
+    expect(rows[1]).toHaveTextContent("web-prod-01");
+    fireEvent.click(within(rows[1]).getByRole("button", { name: "Start" }));
     expect(act).toHaveBeenCalledWith({ action: "sim-start", scenarioId: "nginx-bad-config" });
+  });
+
+  it("keeps the story hidden until it is asked for", () => {
+    render(<ScenariosCard hub={hub({ scenarios })} act={vi.fn(async () => undefined)} />);
+    const list = screen.getByTestId("scenario-list");
+    expect(list).not.toHaveTextContent("A zone has two names.");
+    const toggle = screen.getByTestId("scenario-spoiler-nginx-bad-config");
+    expect(toggle).toHaveTextContent("Show what is wrong (spoiler)");
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(toggle);
+    expect(screen.getByTestId("scenario-story-nginx-bad-config")).toHaveTextContent("A zone has two names.");
+    expect(list).not.toHaveTextContent("The gateway was decommissioned.");
+    fireEvent.click(toggle);
+    expect(list).not.toHaveTextContent("A zone has two names.");
   });
 
   it("shows how the running one stands, what was asked for and not simulated, and leads to its ticket", () => {

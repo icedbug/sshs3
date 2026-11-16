@@ -291,6 +291,10 @@ export const LandingView: React.FC<LandingViewProps> = ({
   const [quickAiKey, setQuickAiKey] = useState('');
   const [quickAiSaving, setQuickAiSaving] = useState(false);
   const [quickAiNotice, setQuickAiNotice] = useState<string | null>(null);
+  const [aiCheck, setAiCheck] = useState<{
+    state: 'checking' | 'ok' | 'failed';
+    detail?: string;
+  } | null>(null);
 
   // Auto-focus the first actionable element on mount so keyboard navigation is immediately active
   useEffect(() => {
@@ -603,6 +607,8 @@ export const LandingView: React.FC<LandingViewProps> = ({
           ]
         : []),
     ];
+    // A question about a server starts its own conversation, not whichever old one is open.
+    window.dispatchEvent(new CustomEvent('sshs3:ai-open', { detail: { newTask: true } }));
     window.dispatchEvent(
       new CustomEvent('sshs3:ai-attach', {
         detail: {
@@ -622,6 +628,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
           `- ${m.name} (${m.username}@${m.host}:${m.port}) [nodeRole=${m.nodeRole || m.role || 'node'}]${m.tags?.length ? ` tags=[${m.tags.join(', ')}]` : ''}${m.description ? `: ${m.description}` : ''}`
       ),
     ];
+    window.dispatchEvent(new CustomEvent('sshs3:ai-open', { detail: { newTask: true } }));
     window.dispatchEvent(
       new CustomEvent('sshs3:ai-attach', {
         detail: {
@@ -881,17 +888,29 @@ export const LandingView: React.FC<LandingViewProps> = ({
     setQuickAiSaving(true);
     setQuickAiNotice(null);
     try {
+      // Ollama is asked first: saving an address nothing answers at would leave a broken setup behind.
+      const baseUrl = 'http://127.0.0.1:11434/v1';
+      const probe = (await hubRequest({ action: 'ai-probe', baseUrl })).reply?.probe;
+      if (!probe?.ok) {
+        setQuickAiNotice(
+          probe?.detail || `No model answered at ${baseUrl}. Start Ollama, then try again.`
+        );
+        return;
+      }
+      const preferred = 'qwen2.5-coder:14b';
+      const model =
+        !probe.models?.length || probe.models.includes(preferred) ? preferred : probe.models[0];
       await hubRequest({
         action: 'configure',
         config: {
           enabled: true,
           provider: 'openai-compatible',
-          baseUrl: 'http://127.0.0.1:11434/v1',
-          model: 'qwen2.5-coder:14b',
+          baseUrl,
+          model,
           useHermes: false,
         },
       });
-      setQuickAiNotice('✅ Local AI (Ollama localhost:11434) enabled');
+      setQuickAiNotice(`✅ Connected to local Ollama. Model: ${model}.`);
       setTimeout(() => setQuickAiOpen(false), 1200);
     } catch (err) {
       setQuickAiNotice(err instanceof Error ? err.message : String(err));
@@ -937,6 +956,22 @@ export const LandingView: React.FC<LandingViewProps> = ({
     }
   };
 
+  // Asked only when the person presses Check: being set up does not mean the model answers.
+  const handleCheckAi = async () => {
+    setAiCheck({ state: 'checking' });
+    try {
+      const probe = (await hubRequest({ action: 'ai-probe' })).reply?.probe;
+      setAiCheck(
+        probe?.ok
+          ? { state: 'ok' }
+          : { state: 'failed', detail: probe?.detail || 'The model did not answer.' }
+      );
+    } catch (err) {
+      setAiCheck({ state: 'failed', detail: err instanceof Error ? err.message : String(err) });
+    }
+  };
+
+  // This is configuration only: whether the model answers is what Check finds out.
   const isAiConnected = Boolean(
     hub?.config.enabled &&
       (hub?.config.hasApiKey ||
@@ -2567,16 +2602,48 @@ export const LandingView: React.FC<LandingViewProps> = ({
                     title="Connect your AI (ChatGPT sign-in, an API key or local Ollama)"
                     className={`rounded-full px-2.5 py-0.5 text-[10.5px] font-semibold transition-all ${
                       isAiConnected
-                        ? 'border border-emerald-400/50 bg-emerald-500/20 text-emerald-200'
+                        ? 'border border-border-subtle bg-app-card text-txt-secondary hover:text-txt-primary'
                         : 'border border-sky-400/60 bg-sky-500/25 text-sky-100 animate-pulse'
                     }`}
                   >
                     {isAiConnected
                       ? hub?.config.model
-                        ? `AI connected (${hub.config.model})`
-                        : 'AI ready'
+                        ? `AI set up (${hub.config.model})`
+                        : 'AI set up'
                       : '⚡ Connect your AI'}
                   </button>
+                  {isAiConnected && (
+                    <>
+                      <button
+                        type="button"
+                        data-testid="workspace-ai-check"
+                        disabled={aiCheck?.state === 'checking'}
+                        onClick={() => void handleCheckAi()}
+                        title="Ask the model whether it answers"
+                        className="rounded-full border border-border-subtle bg-app-card px-2 py-0.5 text-[10.5px] font-semibold text-txt-muted hover:text-txt-primary disabled:opacity-50"
+                      >
+                        {aiCheck?.state === 'checking' ? 'Checking…' : 'Check'}
+                      </button>
+                      {aiCheck?.state === 'ok' && (
+                        <span
+                          data-testid="workspace-ai-check-result"
+                          role="status"
+                          className="rounded-full border border-emerald-400/50 bg-emerald-500/20 px-2 py-0.5 text-[10.5px] font-semibold text-emerald-200"
+                        >
+                          Answers
+                        </span>
+                      )}
+                      {aiCheck?.state === 'failed' && (
+                        <span
+                          data-testid="workspace-ai-check-result"
+                          role="alert"
+                          className="rounded-full border border-rose-400/50 bg-rose-500/20 px-2 py-0.5 text-[10.5px] font-semibold text-rose-200"
+                        >
+                          {aiCheck.detail}
+                        </span>
+                      )}
+                    </>
+                  )}
                   <button
                     type="button"
                     onClick={() => setAiQuickAgentId('')}

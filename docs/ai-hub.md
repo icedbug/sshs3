@@ -490,6 +490,12 @@ stopped.
   entry. They
   are removed after `retentionDays` on every installation, and are this
   computer's own: they are not shared. `recordSessions: false` turns them off.
+- **The demo lab writes neither.** In demo mode an agent's commands and
+  changes are not written to the audit log, and no terminal is recorded. The
+  Timeline there shows invented example data (`demoWorkspace.ts`), and says
+  so. The Audit log screen says that nothing is written to it instead of
+  "verified", and in any mode an empty log reads "nothing to verify yet",
+  not as a chain that holds.
 - **The player.** From a timeline item or a log entry: pauses over 2 s
   shortened, speed, scrubbing, the commands as a list with ✓ or the exit
   code, and a log entry opens it at its own command.
@@ -986,7 +992,8 @@ something unusual gets less than a real machine would give it.
 
 **One state, every way in.** The terminal (`DemoVirtualPty`, which also
 understands the frame the agent engine wraps a command in, so
-`terminal_command`, approvals and recordings work as on a real server), the
+`terminal_command` and approvals work as on a real server; recordings and the
+audit log are off in demo mode), the
 file manager (`SimStorageProvider`, signed in as the login user), a cluster
 run, and server facts (`sim/facts.ts` prints the real facts script's format,
 so the real parser and the real "what changed" are used) all work on the same

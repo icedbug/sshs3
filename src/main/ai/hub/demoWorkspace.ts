@@ -1893,6 +1893,7 @@ const initialDemoTasks: AgentTask[] = [
         status: "completed",
         riskLevel: "safe",
         riskReason: "Read-only ONTAP telemetry inspection (qos statistics show).",
+        decidedHow: "policy",
         exitCode: 0,
         output:
           "Workload               ID     Latency    Network    Cluster       Data       Disk    QoS-Max      NVRAM       WAFL\nvol_ai_scratch_03    4812     2.45ms     0.06ms     0.03ms     1.92ms     0.09ms     0.00ms     0.01ms     0.11ms\nvol_pg_prod_db01     4109     1.88ms     0.04ms     0.01ms     0.15ms     0.08ms     0.00ms     0.02ms     0.02ms",
@@ -1908,6 +1909,23 @@ const initialDemoTasks: AgentTask[] = [
         status: "completed",
         riskLevel: "modify",
         riskReason: "State-modifying ONTAP volume configuration change (volume modify -qos-policy-group).",
+        // A seeded example of what an approved change looks like: who said yes,
+        // the check that shows it held, and the command that takes it back.
+        decidedHow: "person",
+        decidedBy: { name: "Sara", at: now - 17 * min - 20_000, allowed: true },
+        check: {
+          command:
+            "volume show -vserver svm-prod-nfs -volume vol_ai_scratch_03 -fields qos-policy-group",
+          expected: "pg-batch-ceiling",
+          before: false,
+          after: true,
+          output:
+            "vserver      volume            qos-policy-group\nsvm-prod-nfs vol_ai_scratch_03 pg-batch-ceiling",
+        },
+        rollback: {
+          command:
+            "volume modify -vserver svm-prod-nfs -volume vol_ai_scratch_03 -qos-policy-group none",
+        },
         exitCode: 0,
         output:
           'Volume modify successful on volume "vol_ai_scratch_03" in Vserver "svm-prod-nfs": QoS policy group set to "pg-batch-ceiling".',

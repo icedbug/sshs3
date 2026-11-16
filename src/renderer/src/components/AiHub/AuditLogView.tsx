@@ -343,36 +343,56 @@ export function AuditLogView({
             tone: "",
           };
 
+  // A green "verified" over nothing reads as proof. The demo lab writes no
+  // audit entries at all, and an empty log has nothing to verify.
+  const demo = hub.demoMode === true;
+  const emptyLog = verification?.ok === true && verification.entries === 0;
+  // A demo log can still hold a few setting changes; then the real verdict is shown with a note.
+  const demoEmpty = demo && (!verification || emptyLog);
+  const neutral = demoEmpty || emptyLog;
+  const noEntries = entries.length === 0;
+
   return (
     <div className="ai-audit" data-testid="audit-log">
       <div
-        className={`ai-audit-verdict ${verification ? (verification.ok ? "ai-audit-ok" : "ai-audit-broken") : ""}`}
+        className={`ai-audit-verdict ${verification && !neutral ? (verification.ok ? "ai-audit-ok" : "ai-audit-broken") : ""}`}
         role="status"
         data-testid="audit-verdict"
       >
         <div>
           <div className="ai-tags" style={{ marginBottom: 6 }}>
-            <span
-              className={`ai-badge ${
-                !verification
-                  ? ""
+            {!neutral && (
+              <span
+                className={`ai-badge ${
+                  !verification
+                    ? ""
+                    : verification.ok
+                      ? "ai-badge-success"
+                      : "ai-badge-danger"
+                }`}
+                data-testid="audit-chain-badge"
+              >
+                {!verification
+                  ? "Chain verification pending"
                   : verification.ok
-                    ? "ai-badge-success"
-                    : "ai-badge-danger"
-              }`}
-              data-testid="audit-chain-badge"
-            >
-              {!verification
-                ? "Chain verification pending"
-                : verification.ok
-                  ? `Chain verified · ${verification.entries} entries`
-                  : `Chain broken at #${verification.problem?.seq ?? "?"}`}
-            </span>
+                    ? `Chain verified · ${verification.entries} entries`
+                    : `Chain broken at #${verification.problem?.seq ?? "?"}`}
+              </span>
+            )}
             <span className={`ai-badge ${siemBadge.tone}`} data-testid="siem-sink-badge">
               {siemBadge.text}
             </span>
           </div>
-          {!verification ? (
+          {demoEmpty ? (
+            <span data-testid="audit-demo-notice">
+              Demo lab: nothing is written to the audit log here. The Timeline
+              shows invented example data.
+            </span>
+          ) : emptyLog ? (
+            <span data-testid="audit-empty-notice">
+              The log is empty. There is nothing to verify yet.
+            </span>
+          ) : !verification ? (
             <span>Checking the log…</span>
           ) : verification.ok ? (
             <span>
@@ -413,6 +433,13 @@ export function AuditLogView({
               out.
             </span>
           )}
+          {demo && !demoEmpty && (
+            <span data-testid="audit-demo-notice">
+              {" "}
+              Demo lab: commands and changes are not written to the audit log
+              here. The Timeline shows invented example data.
+            </span>
+          )}
         </div>
         <span className="ai-audit-actions">
           {checkedAt > 0 && (
@@ -448,7 +475,11 @@ export function AuditLogView({
           >
             {copiedMsg || "Copy Markdown"}
           </button>
-          <button type="button" onClick={() => void exportLog()}>
+          <button
+            type="button"
+            onClick={() => void exportLog()}
+            disabled={noEntries}
+          >
             Export JSONL
           </button>
         </span>
@@ -532,7 +563,7 @@ export function AuditLogView({
           )}
         </div>
       )}
-      {verification && entries.length === 0 && (
+      {verification && entries.length === 0 && !demo && (
         <p className="ai-empty">
           Nothing has been written to the log yet. Every command an agent runs,
           every change, file write and approval lands here once it has ended.

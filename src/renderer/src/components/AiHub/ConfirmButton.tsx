@@ -37,11 +37,19 @@ export function ConfirmButton({
   confirmTimeoutMs = 4000,
 }: ConfirmButtonProps): JSX.Element {
   const [asking, setAsking] = useState(false);
+  const [secondsLeft, setSecondsLeft] = useState(0);
 
+  // The question goes away by itself. The seconds left are shown, so it does not vanish without warning.
   useEffect(() => {
     if (!asking) return;
+    const until = Date.now() + confirmTimeoutMs;
+    setSecondsLeft(Math.ceil(confirmTimeoutMs / 1000));
+    const tick = window.setInterval(() => setSecondsLeft(Math.max(1, Math.ceil((until - Date.now()) / 1000))), 250);
     const timer = window.setTimeout(() => setAsking(false), confirmTimeoutMs);
-    return () => window.clearTimeout(timer);
+    return () => {
+      window.clearInterval(tick);
+      window.clearTimeout(timer);
+    };
   }, [asking, confirmTimeoutMs]);
 
   useEffect(() => {
@@ -80,6 +88,11 @@ export function ConfirmButton({
         onBlur={() => setAsking(false)}
       >
         <span>{asking ? confirmLabel : label}</span>
+        {asking && (
+          <span className="ai-confirm-count" data-testid="confirm-countdown" aria-hidden="true">
+            ({secondsLeft})
+          </span>
+        )}
         {shortcutHint && (
           <kbd className="ai-confirm-shortcut" aria-hidden="true">
             {shortcutHint}

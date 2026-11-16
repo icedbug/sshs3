@@ -94,6 +94,18 @@ const EVENT_TRIGGERS: { kind: "" | ScheduleEventTrigger["kind"]; label: string }
   { kind: "alert", label: "On incoming alert" },
 ];
 
+interface TargetOption {
+  id: string;
+  label: string;
+  meta?: string;
+}
+
+const TARGET_GROUPS: ["sshOptions" | "workspaceOptions" | "k8sOptions", string][] = [
+  ["sshOptions", "SSH hosts"],
+  ["workspaceOptions", "Workspace servers"],
+  ["k8sOptions", "Kubernetes clusters"],
+];
+
 function every(minutes: number): string {
   const preset = INTERVALS.find(([m]) => m === minutes);
   if (preset) return preset[1].toLowerCase();
@@ -225,10 +237,30 @@ export function Schedules({
   };
 
   const tf = targetFilter.trim().toLowerCase();
-  const matchesTargetFilter = (opt: { label: string; meta?: string }) =>
-    !tf ||
-    opt.label.toLowerCase().includes(tf) ||
-    Boolean(opt.meta?.toLowerCase().includes(tf));
+  const matches = (opt: TargetOption, needle: string): boolean =>
+    !needle ||
+    opt.label.toLowerCase().includes(needle) ||
+    Boolean(opt.meta?.toLowerCase().includes(needle));
+  const matchesTargetFilter = (opt: TargetOption): boolean => matches(opt, tf);
+  // "This computer" is filtered like any server. Left exempt, it stayed selected
+  // while the person typed a server name, and the job saved for the wrong place.
+  const allTargets: TargetOption[] = [
+    { id: "local", label: "This computer" },
+    ...TARGET_GROUPS.flatMap(([key]) => groupedTargets[key]),
+  ];
+  const shownTargets = allTargets.filter(matchesTargetFilter);
+  const shownTargetIds = new Set(shownTargets.map((o) => o.id));
+  const localShown = shownTargetIds.has("local");
+
+  const onTargetFilter = (value: string): void => {
+    setTargetFilter(value);
+    if (!draft) return;
+    const needle = value.trim().toLowerCase();
+    const left = allTargets.filter((o) => matches(o, needle));
+    // One match is the choice; a choice the filter hid moves to the first match.
+    if (left.length === 1 || (left.length > 0 && !left.some((o) => o.id === draft.profileId)))
+      setDraft({ ...draft, profileId: left[0].id });
+  };
 
   return (
     <div className="ai-scroll">
@@ -312,60 +344,47 @@ export function Schedules({
           </label>
 
           <div className="ai-form-row">
-            <label>
-              Target selector
-              <input
-                type="search"
-                aria-label="Filter targets"
-                placeholder="Filter targets by host, cluster, or tag…"
-                value={targetFilter}
-                onChange={(e) => setTargetFilter(e.target.value)}
-                style={{ marginBottom: 4 }}
-              />
-              <select
-                aria-label="Where"
-                value={draft.profileId}
-                onChange={(e) => setDraft({ ...draft, profileId: e.target.value })}
-              >
-                {!targets.has(draft.profileId) && (
-                  <option value={draft.profileId}>{draft.profileId}</option>
-                )}
-                <option value="local">This computer</option>
-                {groupedTargets.sshOptions.some(matchesTargetFilter) && (
-                  <optgroup label="SSH hosts">
-                    {groupedTargets.sshOptions
-                      .filter(matchesTargetFilter)
-                      .map((o) => (
-                        <option key={o.id} value={o.id}>
-                          {o.label}
-                        </option>
-                      ))}
-                  </optgroup>
-                )}
-                {groupedTargets.workspaceOptions.some(matchesTargetFilter) && (
-                  <optgroup label="Workspace servers">
-                    {groupedTargets.workspaceOptions
-                      .filter(matchesTargetFilter)
-                      .map((o) => (
-                        <option key={o.id} value={o.id}>
-                          {o.label}
-                        </option>
-                      ))}
-                  </optgroup>
-                )}
-                {groupedTargets.k8sOptions.some(matchesTargetFilter) && (
-                  <optgroup label="Kubernetes clusters">
-                    {groupedTargets.k8sOptions
-                      .filter(matchesTargetFilter)
-                      .map((o) => (
-                        <option key={o.id} value={o.id}>
-                          {o.label}
-                        </option>
-                      ))}
-                  </optgroup>
-                )}
-              </select>
-            </label>
+            <div>
+              <label>
+                Where it runs
+                <select
+                  aria-label="Where it runs"
+                  value={draft.profileId}
+                  onChange={(e) => setDraft({ ...draft, profileId: e.target.value })}
+                >
+                  {!shownTargetIds.has(draft.profileId) && (
+                    <option value={draft.profileId}>{targetName(draft.profileId)}</option>
+                  )}
+                  {localShown && <option value="local">This computer</option>}
+                  {TARGET_GROUPS.map(([key, label]) =>
+                    groupedTargets[key].some(matchesTargetFilter) ? (
+                      <optgroup key={key} label={label}>
+                        {groupedTargets[key].filter(matchesTargetFilter).map((o) => (
+                          <option key={o.id} value={o.id}>
+                            {o.label}
+                          </option>
+                        ))}
+                      </optgroup>
+                    ) : null,
+                  )}
+                </select>
+              </label>
+              {allTargets.length > 1 && (
+                <label style={{ marginTop: 4 }}>
+                  Filter the list
+                  <input
+                    type="search"
+                    aria-label="Filter the list"
+                    placeholder="Type a host, cluster or tag"
+                    value={targetFilter}
+                    onChange={(e) => onTargetFilter(e.target.value)}
+                  />
+                  {tf && shownTargets.length === 0 && (
+                    <small role="status">No server matches. The choice above is kept.</small>
+                  )}
+                </label>
+              )}
+            </div>
             <label>
               Shell on that machine
               <select
@@ -723,6 +742,15 @@ export function Schedules({
               }
             >
               {s.enabled ? "Pause" : "Resume"}
+            </button>
+            <button
+              type="button"
+              data-testid={`schedule-run-now-${s.id}`}
+              disabled={!s.enabled}
+              title={s.enabled ? "Run this job once now" : "Resume it first"}
+              onClick={() => void act({ action: "schedule-run-now", id: s.id })}
+            >
+              Run now
             </button>
             <span className="ai-spacer" />
             <ConfirmButton

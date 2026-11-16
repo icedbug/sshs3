@@ -605,11 +605,11 @@
   gap: 12px;
 }
 
+/* Full width, so the wheel also scrolls over the side gutters. The content stays a centred 1120px column. */
 .ai-hub-hub .ai-scroll {
-  max-width: 1120px;
   width: 100%;
-  margin: 0 auto;
   padding: 22px 26px 28px;
+  padding-inline: max(26px, calc((100% - 1120px) / 2));
 }
 
 .ai-conversation {
@@ -2981,9 +2981,16 @@
    TeamGraph (ReactFlow Organization Canvas, Legend, Nodes & Controls)
    ========================================================================== */
 
+.ai-org-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
 .ai-org {
   position: relative;
-  height: 360px;
+  height: clamp(360px, 60vh, 640px);
   min-height: 280px;
   border-radius: 10px;
   border: 1px solid var(--border-card);
@@ -3011,17 +3018,24 @@
   gap: 10px;
   flex-wrap: wrap;
   padding: 7px 11px;
-  border-bottom: 1px solid var(--border-subtle);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
   background: var(--bg-surface);
   color: var(--fg-secondary);
   font-size: 11.5px;
+}
+
+.ai-org-legend > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
 }
 
 .light .ai-org-legend,
 .breeze .ai-org-legend {
   background: var(--bg-surface) !important;
   color: var(--fg-secondary) !important;
-  border-bottom: 1px solid var(--border-subtle) !important;
+  border: 1px solid var(--border-subtle) !important;
 }
 
 .ai-org .react-flow__controls {
@@ -3048,8 +3062,11 @@
   border-radius: 8px;
 }
 
+/* As wide as the layout's column (layoutOrg: 250), so neighbours never overlap. */
 .ai-org-node {
-  min-width: 175px;
+  box-sizing: border-box;
+  width: 250px;
+  overflow-wrap: anywhere;
   padding: 9px 11px;
   border-radius: 9px;
   background: var(--bg-card);
@@ -3135,6 +3152,33 @@
   margin-top: 4px;
   font-size: 11px;
   color: var(--fg-muted);
+}
+
+.ai-org-role,
+.ai-org-ticket span,
+.ai-org-ticket em {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
+
+.ai-org-head .ai-org-dot {
+  flex-shrink: 0;
+}
+
+.ai-org-head strong {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-org-state {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .ai-org-budget {
@@ -4409,4 +4453,104 @@
   margin: 2px 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* The mode a conversation runs in shows as chosen. */
+.ai-hub .ai-footer-chip.ai-context-chip-active,
+.ai-hub .ai-footer-chip[aria-pressed="true"] {
+  border-color: var(--ai-accent, #6ea8fe);
+  background: color-mix(in srgb, var(--ai-accent, #6ea8fe) 18%, transparent);
+  font-weight: 600;
+}
+/* A menu in the header opens downward: there is no room above it. */
+.ai-hub .ai-header-actions .ai-popover {
+  top: calc(100% + 6px);
+  bottom: auto;
+  right: 0;
+  left: auto;
+}
+/* A tick box keeps its size beside a long text. */
+.ai-hub input[type="checkbox"],
+.ai-hub input[type="radio"] {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  min-width: 14px;
+  padding: 0;
+  margin-top: 2px;
+}
+
+/* ==========================================================================
+   Workforce: notices with Undo, the report form, the run inspector's list
+   ========================================================================== */
+
+.ai-undo-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--surface-elevated);
+  border: 1px solid var(--accent-border);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
+  color: var(--fg-primary);
+  font-size: 12.5px;
+  /* Stays in sight: the board and the detail can be far apart. */
+  position: sticky;
+  bottom: 0;
+  z-index: 3;
+}
+
+.ai-confirm-count {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.9;
+}
+
+.ai-move {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Buttons are nowrap and do not shrink by default: in the list they must stay inside their column. */
+.ai-hub .ai-run-list-item {
+  display: grid;
+  justify-content: stretch;
+  justify-items: start;
+  text-align: left;
+  gap: 2px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  min-width: 0;
+  max-width: 100%;
+  flex-shrink: 1;
+  white-space: normal;
+}
+
+.ai-hub .ai-run-list-item > span,
+.ai-hub .ai-run-list-item > small {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The card's title opens and closes its ticket: a button that reads as the title. */
+.ai-hub .ai-ticket-title {
+  display: block;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  white-space: normal;
+  flex-shrink: 1;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.ai-hub .ai-ticket-title:hover:not(:disabled) {
+  background: none;
+  text-decoration: underline;
 }

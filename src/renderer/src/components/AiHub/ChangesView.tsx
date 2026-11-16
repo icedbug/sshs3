@@ -264,6 +264,7 @@ export function ChangesView({
     Record<string, { busy?: boolean; message?: string; error?: string }>
   >({});
   const [source, setSource] = useState<Source>("all");
+  const [withRecording, setWithRecording] = useState(false);
   const [filter, setFilter] = useState("");
   const [limit, setLimit] = useState(60);
 
@@ -306,9 +307,18 @@ export function ChangesView({
     ),
   ].sort((a, b) => b.at - a.at);
 
+  // Same lookup as "Watch the terminal recording" on an entry.
+  const recordingOf = (taskId?: string): string | undefined => {
+    if (!taskId) return undefined;
+    const t = hub.tasks.find((x) => x.id === taskId);
+    return t?.recordingIds?.[0] ?? t?.recordingId;
+  };
+  const demo = hub.demoMode === true;
+
   const q = filter.trim().toLowerCase();
   const shown = entries
     .filter((e) => source === "all" || e.source === source)
+    .filter((e) => !withRecording || Boolean(recordingOf(e.taskId)))
     .filter(
       (e) =>
         !q ||
@@ -344,12 +354,6 @@ export function ChangesView({
     } catch (error) {
       setWatchProblem(error instanceof Error ? error.message : String(error));
     }
-  };
-
-  const recordingOf = (taskId?: string): string | undefined => {
-    if (!taskId) return undefined;
-    const t = hub.tasks.find((x) => x.id === taskId);
-    return t?.recordingIds?.[0] ?? t?.recordingId;
   };
 
   const restoreCheckpoint = async (
@@ -390,6 +394,16 @@ export function ChangesView({
     const approvalBadge = c
       ? formatApprovalBadge(c.approvals, c.requiredApprovals, c.decidedBy)
       : null;
+    // A change that touched state with no approver and no stated reason must
+    // say so: an empty spot reads as "nothing was needed".
+    const noApprovalRecorded = Boolean(
+      c &&
+        !approvalBadge &&
+        c.riskLevel !== "safe" &&
+        c.status !== "pending" &&
+        !c.decidedBy &&
+        !c.decidedHow,
+    );
     const restorable = Boolean(e.taskId && c && isRestorableChange(c));
     const entryRestoreKey = `entry:${e.id}`;
     const entryRestore = restoreState[entryRestoreKey];
@@ -435,6 +449,15 @@ export function ChangesView({
               data-testid={`approval-badge-${c?.id ?? e.id}`}
             >
               {approvalBadge.text}
+            </span>
+          )}
+          {noApprovalRecorded && c && (
+            <span
+              className="ai-badge"
+              title="Nobody is on record as allowing this change, and no rule is on record as letting it through."
+              data-testid={`no-approval-${c.id}`}
+            >
+              No approval recorded
             </span>
           )}
           {c?.riskLevel && RISK[c.riskLevel] && (
@@ -666,8 +689,28 @@ export function ChangesView({
             >
               Change Sets
             </button>
+            {demo ? (
+              <small data-testid="recordings-off-demo">
+                Recordings are off in the demo lab.
+              </small>
+            ) : (
+              <button
+                type="button"
+                className={`ai-chip ${withRecording ? "ai-chip-on" : ""}`}
+                aria-pressed={withRecording}
+                data-testid="filter-with-recording"
+                onClick={() => setWithRecording((v) => !v)}
+              >
+                With a recording
+              </button>
+            )}
           </div>
         </div>
+      )}
+      {tab === "timeline" && demo && entries.length > 0 && (
+        <p className="ai-hint" data-testid="timeline-demo-notice">
+          Demo lab: these entries are invented examples.
+        </p>
       )}
 
       {tab === "timeline" && entries.length === 0 && (

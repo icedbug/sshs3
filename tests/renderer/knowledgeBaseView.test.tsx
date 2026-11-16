@@ -274,7 +274,7 @@ describe("the pages agents read", () => {
 
     // Opens on Pages tab by default when pages exist.
     expect(screen.getByRole("tab", { name: "Pages · 1" })).toHaveAttribute("aria-selected", "true");
-    fireEvent.click(screen.getByRole("button", { name: "Write one" }));
+    fireEvent.click(screen.getByRole("button", { name: "Write a source note" }));
     expect(screen.getByRole("tab", { name: "Sources · 0" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByTestId("kb-form")).toBeVisible();
 
@@ -283,7 +283,7 @@ describe("the pages agents read", () => {
     expect(screen.queryByTestId("kb-form")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("tab", { name: "To review · 1" }));
     expect(screen.getByRole("tab", { name: "To review · 1" })).toHaveAttribute("aria-selected", "true");
-    fireEvent.click(screen.getByRole("button", { name: "Write one" }));
+    fireEvent.click(screen.getByRole("button", { name: "Write a source note" }));
     expect(screen.getByRole("tab", { name: "Sources · 0" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByTestId("kb-form")).toBeVisible();
   });
