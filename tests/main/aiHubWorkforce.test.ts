@@ -293,7 +293,7 @@ describe("HubService workforce-run", () => {
         prompt: "Audit everything",
         agentIds: ["ag-one", "ag-two"],
       }),
-    ).rejects.toThrow(/Enable AI/);
+    ).rejects.toThrow(/No model is set up/);
     expect(hub.store.data.workforceRuns ?? []).toHaveLength(0);
     expect(hub.store.data.tasks).toHaveLength(0);
     expect(fetchSpy).not.toHaveBeenCalled();

@@ -35,12 +35,11 @@ async function makeHub(host: Record<string, unknown> = {}, demo = false) {
 const audited = async (inner: Awaited<ReturnType<typeof makeHub>>["inner"]): Promise<string[]> => (await inner.audit().entries()).map((e) => e.what ?? "");
 
 describe("a ticket a person works", () => {
-  it("can be brought back after it was removed, and says that it was removed", async () => {
+  it("can be brought back after it was removed", async () => {
     const { hub } = await makeHub();
     const made = await hub.request({ action: "ticket-save", ticket: { title: "Rotate the backup key" } });
     const id = made.workTickets![0].id;
     const removed = await hub.request({ action: "ticket-delete", id });
-    expect(removed.reply?.notes).toEqual(['Removed "Rotate the backup key".']);
     expect(removed.workTickets!.some((t) => t.id === id)).toBe(false);
     const back = await hub.request({ action: "ticket-restore", id });
     expect(back.reply?.notes).toEqual(['Brought back "Rotate the backup key".']);

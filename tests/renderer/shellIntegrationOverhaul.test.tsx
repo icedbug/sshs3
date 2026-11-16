@@ -337,7 +337,8 @@ describe("Shell Integration Overhaul", () => {
         expect(mockState.hubRequest).toHaveBeenCalledWith({
           action: "restore-checkpoint",
           taskId: "task-1",
-          checkpointId: "ckpt-1",
+          // The request's typed field: the hub finds the checkpoint by its change.
+          changeId: "chg-1",
         }),
       );
 

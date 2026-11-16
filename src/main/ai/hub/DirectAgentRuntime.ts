@@ -2765,6 +2765,7 @@ export function friendlyProviderError(error: unknown, config: HermesModelConfig)
 
   // Our own "Model API (404):" prefix must not pass for the provider talking about a model.
   const said = raw.replace(/^[\w /]*API \(\d+\):\s*/, "");
+  // The status number stays in the sentence: it is what a person quotes when asking for help.
   let text = raw;
   if (
     !status &&
@@ -2781,8 +2782,8 @@ export function friendlyProviderError(error: unknown, config: HermesModelConfig)
   } else if (status === 401 || status === 403) {
     text =
       config.kind === "openai-codex"
-        ? "The ChatGPT sign-in was refused. Sign in again, or choose another model in AI settings."
-        : `The API key was refused${where}. Enter a valid key in AI settings.`;
+        ? `The ChatGPT sign-in was refused (${status}). Sign in again, or choose another model in AI settings.`
+        : `The API key was refused${where} (${status}). Enter a valid key in AI settings.`;
   } else if (status === 404 && /\bmodel\b.{0,120}(not found|does not exist|not exist|unknown)|model_not_found/i.test(said)) {
     text = `The model "${config.model}" was not found${where}. Choose another model in AI settings.`;
   }

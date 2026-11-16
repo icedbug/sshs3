@@ -26,7 +26,7 @@ describe("friendlyProviderError", () => {
   it.each([401, 403])("says the key was refused on %i", (status) => {
     const error = new UpstreamHttpError(status, "https://api.anthropic.com/v1/messages", `Anthropic API (${status}): invalid x-api-key`);
     expect(friendlyProviderError(error, anthropic)).toBe(
-      "The API key was refused at https://api.anthropic.com. Enter a valid key in AI settings.",
+      `The API key was refused at https://api.anthropic.com (${status}). Enter a valid key in AI settings.`,
     );
   });
   it("names the model on a 404 that says the model is not there", () => {

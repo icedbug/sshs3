@@ -1552,7 +1552,7 @@ describe("Production multi-user workspace sync & auto-memory", () => {
         prompt: "Verify ONTAP aggregates and K8s Trident PVCs simultaneously",
         agentIds: ["ag-ontap-test", "ag-k8s-test"],
       }),
-    ).rejects.toThrow(/Enable AI/);
+    ).rejects.toThrow(/No model is set up/);
     expect(hub.store.data.workforceRuns ?? []).toHaveLength(0);
 
     // Verify Swarm Handoff on an existing task

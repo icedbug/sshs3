@@ -3913,7 +3913,6 @@ export class HubService {
           claim: undefined,
           updatedAt: Date.now(),
         });
-        reply = { notes: [`Removed "${clip(this.store.data.workTickets?.find((t) => t.id === request.id)?.title ?? "the ticket", 120)}".`] };
         break;
       }
       case "ticket-restore": {
