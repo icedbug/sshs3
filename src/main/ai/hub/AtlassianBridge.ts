@@ -204,6 +204,8 @@ export class AtlassianBridge {
       this.lastJiraSync = now;
       try {
         const result = await this.pass(connection, auth, now);
+        // Something was written there: read again at the next tick, so the board shows what it became.
+        if (result.written > 0) this.lastJiraSync = 0;
         connection.lastSyncAt = now;
         connection.lastError = undefined;
         await this.store.save();
