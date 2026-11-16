@@ -62,6 +62,8 @@ const RISK: Record<string, { text: string; tone: string }> = {
   destructive: { text: "destructive", tone: "ai-badge-danger" },
 };
 
+const REPORTED_ONLY = "Reported by the team. Not run or approved through sshS3.";
+
 const STATUS_TONE: Record<AgentChange["status"], string> = {
   completed: "ai-badge-success",
   approved: "ai-badge-success",
@@ -404,6 +406,9 @@ export function ChangesView({
         !c.decidedBy &&
         !c.decidedHow,
     );
+    // Team activity is what a teammate's app reported: nothing here ran it or
+    // asked anyone. Said out loud, so silence does not read as "no approval was needed".
+    const reportedOnly = e.source === "team" && !c && e.kind !== "note";
     const restorable = Boolean(e.taskId && c && isRestorableChange(c));
     const entryRestoreKey = `entry:${e.id}`;
     const entryRestore = restoreState[entryRestoreKey];
@@ -419,7 +424,8 @@ export function ChangesView({
         c?.dryRunOutput ||
         c?.preflightSnapshot ||
         c?.status === "uncertain" ||
-        restorable,
+        restorable ||
+        reportedOnly,
     );
 
     const head = (
@@ -460,6 +466,15 @@ export function ChangesView({
               No approval recorded
             </span>
           )}
+          {reportedOnly && (
+            <span
+              className="ai-badge ai-muted"
+              title={REPORTED_ONLY}
+              data-testid={`reported-only-${e.id}`}
+            >
+              Reported by the team
+            </span>
+          )}
           {c?.riskLevel && RISK[c.riskLevel] && (
             <span
               className={`ai-badge ${RISK[c.riskLevel].tone}`}
@@ -495,6 +510,11 @@ export function ChangesView({
             <div className="ai-timeline-more">
               {e.command && <pre>{e.command}</pre>}
               {e.detail && <p>{e.detail}</p>}
+              {reportedOnly && (
+                <small className="ai-muted" data-testid="reported-only-line">
+                  {REPORTED_ONLY}
+                </small>
+              )}
               {hasFileDiff && c && (
                 <div data-testid={`change-diff-${c.id}`}>
                   <small>What changed</small>

@@ -811,6 +811,11 @@ export function AiHubPanel({
       if (detail?.newTask) {
         setTaskIdState("");
         onTaskChange?.("");
+        // A new conversation starts empty, unless the event brings its own text or agent (set below).
+        if (detail.agentId === undefined && !detail.prompt) {
+          setPrompt("");
+          setSelectedAgentId("");
+        }
       } else if (detail?.taskId) {
         setTaskIdState(detail.taskId);
         onTaskChange?.(detail.taskId);
@@ -965,6 +970,10 @@ export function AiHubPanel({
       previous?.focus();
     };
   }, [settingsOpen, mode]);
+  // An error shown in the settings is about the settings: it does not stay on the panel once they are closed.
+  useEffect(() => {
+    if (!settingsOpen) setError("");
+  }, [settingsOpen]);
 
   async function act(request: HubRequest): Promise<HubSnapshot | undefined> {
     setError("");

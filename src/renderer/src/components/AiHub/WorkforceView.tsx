@@ -65,6 +65,15 @@ const openAgentsView = (): void => {
   window.dispatchEvent(new CustomEvent("sshs3:ai-open", { detail: { view: "Agents & MCP", mode: "hub" } }));
 };
 
+const DEMO_RUN_LABEL = "Example from the demo data. Not the current state.";
+
+/**
+ * A run whose findings are scripted: the seeded example (its id starts with
+ * "demo-") or a demo-mode run that called no model. It must not read as a
+ * fresh look at the servers.
+ */
+const isDemoRun = (run: WorkforceRun): boolean => run.simulated === true || run.id.startsWith("demo-");
+
 function matchesTicketFilter(
   ticket: WorkTicket,
   query: string,
@@ -166,6 +175,13 @@ export function WorkforceView({
     if (!detailShown) return;
     detailRef.current?.scrollIntoView?.({ block: "nearest", behavior: "smooth" });
   }, [detailShown, openTicketId]);
+  // The banner is at the top: bring it into view when the workforce becomes paused, not on every render.
+  const pausedRef = useRef<HTMLDivElement | null>(null);
+  const wasPaused = useRef(workforcePaused);
+  useEffect(() => {
+    if (workforcePaused && !wasPaused.current) pausedRef.current?.scrollIntoView?.({ block: "nearest", behavior: "smooth" });
+    wasPaused.current = workforcePaused;
+  }, [workforcePaused]);
   const openTicketTask = openTicket?.taskId ? hub.tasks.find((t) => t.id === openTicket.taskId) : undefined;
   const openTicketHypotheses = openTicket
     ? openTicket.hypotheses?.length
@@ -323,6 +339,38 @@ export function WorkforceView({
 
   return (
     <div className="ai-scroll ai-workforce">
+      {/* First in the view: an emergency stop must show that it took, wherever the page was scrolled to. */}
+      {workforcePaused && (
+        <div
+          ref={pausedRef}
+          className="ai-card"
+          data-testid="workforce-paused-banner"
+          role="status"
+          style={{
+            marginBottom: 8,
+            borderColor: "rgba(248, 113, 113, 0.55)",
+            background: "rgba(248, 113, 113, 0.08)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 10,
+            padding: "8px 12px",
+          }}
+        >
+          <span>
+            <strong>Workforce paused:</strong> autonomous heartbeat and queued ticket dispatch are halted.
+          </span>
+          <button
+            type="button"
+            className="ai-btn-emerald"
+            disabled={busy === "workforce-pause"}
+            onClick={() => void run("workforce-pause", { action: "workforce-pause", paused: false })}
+          >
+            Resume Workforce
+          </button>
+        </div>
+      )}
+
       <header className="ai-view-head">
         <h2>Workforce</h2>
         <p className="ai-hint">
@@ -452,36 +500,6 @@ export function WorkforceView({
       />
       <AtlassianCard product="jira" hub={hub} act={act} />
 
-      {workforcePaused && (
-        <div
-          className="ai-card"
-          data-testid="workforce-paused-banner"
-          role="status"
-          style={{
-            marginTop: 8,
-            borderColor: "rgba(248, 113, 113, 0.55)",
-            background: "rgba(248, 113, 113, 0.08)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: 10,
-            padding: "8px 12px",
-          }}
-        >
-          <span>
-            <strong>Workforce paused:</strong> autonomous heartbeat and queued ticket dispatch are halted.
-          </span>
-          <button
-            type="button"
-            className="ai-btn-emerald"
-            disabled={busy === "workforce-pause"}
-            onClick={() => void run("workforce-pause", { action: "workforce-pause", paused: false })}
-          >
-            Resume Workforce
-          </button>
-        </div>
-      )}
-
       {drawerOpen && (
         <RunInspectionDrawer
           hub={hub}
@@ -567,7 +585,7 @@ export function WorkforceView({
                   title={g.description}
                   onClick={() => setGoalFilter(goalFilter === g.id ? "" : g.id)}
                 >
-                  {g.title} · {p.done}/{p.total}
+                  {g.title} · {p.done} of {p.total} tickets done
                 </button>
                 {goalFilter === g.id && (
                   <>
@@ -659,7 +677,7 @@ export function WorkforceView({
                 setAssigneeFilter("");
               }}
             >
-              Clear ({shown.length}/{tickets.length})
+              Clear filters ({shown.length} of {tickets.length} shown)
             </button>
           )}
         </div>
@@ -1306,6 +1324,7 @@ function RunInspectionDrawer({
                   onClick={() => onSelectRun(r.id)}
                 >
                   <span style={{ fontWeight: 600, fontSize: 12 }}>⚡ {r.title}</span>
+                  {isDemoRun(r) && <span className="ai-badge">Example</span>}
                   <small style={{ opacity: 0.8, fontSize: 11 }}>
                     {r.status} · {r.leadAgentName} · {r.steps.length} specialists
                   </small>
@@ -1485,6 +1504,11 @@ function RunInspectionDrawer({
                   </span>
                   <small>Lead: {activeRun.leadAgentName}</small>
                 </div>
+                {isDemoRun(activeRun) && (
+                  <small className="ai-muted" data-testid="run-drawer-demo-label">
+                    {DEMO_RUN_LABEL}
+                  </small>
+                )}
                 {activeRun.steps.map((step) => (
                   <div
                     key={step.id}

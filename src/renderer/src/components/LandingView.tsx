@@ -291,6 +291,8 @@ export const LandingView: React.FC<LandingViewProps> = ({
   const [quickAiKey, setQuickAiKey] = useState('');
   const [quickAiSaving, setQuickAiSaving] = useState(false);
   const [quickAiNotice, setQuickAiNotice] = useState<string | null>(null);
+  // A check that failed is shown as an error, never in the colour of a success.
+  const [quickAiFailed, setQuickAiFailed] = useState(false);
   const [aiCheck, setAiCheck] = useState<{
     state: 'checking' | 'ok' | 'failed';
     detail?: string;
@@ -858,6 +860,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
   const handleQuickConnectCodex = async () => {
     setQuickAiSaving(true);
     setQuickAiNotice(null);
+    setQuickAiFailed(false);
     try {
       // Said done only when a sign-in is actually there: choosing the provider signs nobody in.
       const next = await hubRequest({
@@ -878,6 +881,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
         );
       }
     } catch (err) {
+      setQuickAiFailed(true);
       setQuickAiNotice(err instanceof Error ? err.message : String(err));
     } finally {
       setQuickAiSaving(false);
@@ -887,11 +891,13 @@ export const LandingView: React.FC<LandingViewProps> = ({
   const handleQuickConnectOllama = async () => {
     setQuickAiSaving(true);
     setQuickAiNotice(null);
+    setQuickAiFailed(false);
     try {
       // Ollama is asked first: saving an address nothing answers at would leave a broken setup behind.
       const baseUrl = 'http://127.0.0.1:11434/v1';
       const probe = (await hubRequest({ action: 'ai-probe', baseUrl })).reply?.probe;
       if (!probe?.ok) {
+        setQuickAiFailed(true);
         setQuickAiNotice(
           probe?.detail || `No model answered at ${baseUrl}. Start Ollama, then try again.`
         );
@@ -913,6 +919,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
       setQuickAiNotice(`✅ Connected to local Ollama. Model: ${model}.`);
       setTimeout(() => setQuickAiOpen(false), 1200);
     } catch (err) {
+      setQuickAiFailed(true);
       setQuickAiNotice(err instanceof Error ? err.message : String(err));
     } finally {
       setQuickAiSaving(false);
@@ -924,6 +931,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
     if (!quickAiKey.trim()) return;
     setQuickAiSaving(true);
     setQuickAiNotice(null);
+    setQuickAiFailed(false);
     try {
       const isAnthropic = quickAiProvider === 'anthropic';
       const isOpenRouter = quickAiProvider === 'openrouter';
@@ -950,6 +958,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
       setQuickAiNotice('✅ API key saved to the OS keyring; AI enabled');
       setTimeout(() => setQuickAiOpen(false), 1200);
     } catch (err) {
+      setQuickAiFailed(true);
       setQuickAiNotice(err instanceof Error ? err.message : String(err));
     } finally {
       setQuickAiSaving(false);
@@ -2805,7 +2814,11 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   </p>
 
                   {quickAiNotice && (
-                    <div className="text-[11px] font-medium text-emerald-300">
+                    <div
+                      data-testid="quick-ai-notice"
+                      role={quickAiFailed ? 'alert' : 'status'}
+                      className={`text-[11px] font-medium ${quickAiFailed ? 'text-rose-300' : 'text-emerald-300'}`}
+                    >
                       {quickAiNotice}
                     </div>
                   )}

@@ -60,7 +60,7 @@ interface OverrideDraft {
 const emptyOverride: OverrideDraft = {
   selector: "",
   maxMode: "assisted",
-  requirePeerApproval: true,
+  requirePeerApproval: false,
   requireCheckAndRollback: true,
   freezeHours: "",
 };
@@ -193,7 +193,14 @@ export function SafetyPolicyCard({ hub, act }: { hub: HubSnapshot; act: Act }): 
           <button
             type="button"
             data-testid="add-cluster-policy-btn"
-            onClick={() => setOverrideDraft(overrideDraft ? undefined : { ...emptyOverride })}
+            onClick={() =>
+              setOverrideDraft(
+                overrideDraft
+                  ? undefined
+                  : // Ticked only where a second person can approve: elsewhere the override would not be saved.
+                    { ...emptyOverride, requirePeerApproval: hub.peerApprovalPossible === true },
+              )
+            }
           >
             {overrideDraft ? "Close" : "Add cluster / tag override"}
           </button>

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type KeyboardEvent } from "react";
 import type {
   HubRequest,
   HubSnapshot,
@@ -269,6 +269,14 @@ export function NotificationsCard({
     }).then((next) => next && setDraft(null));
   };
 
+  const canSave = Boolean(draft && (draft.id || draft.url.trim()));
+  // Enter in a channel field adds the channel. It must not reach the settings form around this card.
+  const saveOnEnter = (e: KeyboardEvent<HTMLInputElement>): void => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    if (canSave) save();
+  };
+
   const test = (id: string): void => {
     setTesting((t) => ({ ...t, [id]: "Sending…" }));
     void act({ action: "notify-channel-test", id }).then((next) => {
@@ -433,6 +441,7 @@ export function NotificationsCard({
                 placeholder="e.g. #ops-oncall"
                 value={draft.name}
                 onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+                onKeyDown={saveOnEnter}
               />
             </label>
           </div>
@@ -449,6 +458,7 @@ export function NotificationsCard({
               }
               value={draft.url}
               onChange={(e) => setDraft({ ...draft, url: e.target.value })}
+              onKeyDown={saveOnEnter}
             />
             <small>
               {KINDS[draft.kind].hint} The address is a secret: it is saved
@@ -467,6 +477,7 @@ export function NotificationsCard({
                 }
                 value={draft.secret}
                 onChange={(e) => setDraft({ ...draft, secret: e.target.value })}
+                onKeyDown={saveOnEnter}
               />
             </label>
           )}
@@ -538,7 +549,7 @@ export function NotificationsCard({
               type="button"
               className="ai-btn-emerald"
               onClick={save}
-              disabled={!draft.id && !draft.url.trim()}
+              disabled={!canSave}
             >
               {draft.id ? "Save channel" : "Add channel"}
             </button>

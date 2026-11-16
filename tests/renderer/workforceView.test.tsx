@@ -119,7 +119,7 @@ describe("the board", () => {
     );
     expect(within(screen.getByTestId("column-todo")).getByText("Ticket todo1")).toBeVisible();
     expect(within(screen.getByTestId("column-in_progress")).getByText(/erik/)).toBeVisible();
-    expect(screen.getByText("Keep prod healthy · 0/2")).toBeVisible();
+    expect(screen.getByText("Keep prod healthy · 0 of 2 tickets done")).toBeVisible();
     // A ticket nobody is assigned to, and one that is running, cannot be started.
     expect(screen.queryByTestId("ticket-start-nobody")).not.toBeInTheDocument();
     expect(screen.queryByTestId("ticket-start-run1")).not.toBeInTheDocument();

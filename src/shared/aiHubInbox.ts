@@ -235,3 +235,20 @@ export function countUrgentInboxItems(
   }
   return count;
 }
+
+/**
+ * How many items still wait for a person: the number for the Inbox tab.
+ * A snoozed item does not count, and neither does an alert somebody has
+ * acknowledged: it stays in the list with its badge, but it is no longer news.
+ * An acknowledged approval, plan or question still counts: an agent is held up by it.
+ */
+export function countWaitingInboxItems(
+  hubOrItems: InboxInput | InboxItem[],
+  options?: { now?: number },
+): number {
+  const now = options?.now ?? Date.now();
+  const items = Array.isArray(hubOrItems) ? hubOrItems : inboxItems(hubOrItems, { now });
+  return items.filter(
+    (item) => !isInboxItemSnoozed(item, now) && !(item.kind === "alert" && item.acknowledgedAt !== undefined),
+  ).length;
+}

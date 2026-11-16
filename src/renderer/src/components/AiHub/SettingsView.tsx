@@ -239,7 +239,7 @@ export function Settings({
 
   return (
     <form
-      className="ai-scroll ai-form"
+      className="ai-settings-form"
       onSubmit={(e) => {
         e.preventDefault();
         setSavedNotice(false);
@@ -275,6 +275,8 @@ export function Settings({
         });
       }}
     >
+      {/* Only this part scrolls. The save bar sits under it, so it never covers a control. */}
+      <div className="ai-scroll ai-form">
       <header className="ai-view-head">
         <h2>Settings</h2>
         <p className="ai-hint">
@@ -317,10 +319,12 @@ export function Settings({
                 if (url.includes("openrouter.ai")) {
                   setUrl("");
                 }
-              } else if (next === "anthropic") {
-                if (!model || !model.startsWith("claude-")) {
-                  setModel(DEFAULT_AI_MODELS.anthropic);
-                }
+              } else if (next !== provider) {
+                // A model of the other provider must not stay under this one. Going back to the saved provider
+                // brings its saved model back; no known default leaves the field empty, with its placeholder.
+                const fits =
+                  DEFAULT_PROVIDER_MODELS[next].includes(model) || (next === "anthropic" && model.startsWith("claude-"));
+                if (!fits) setModel(next === hub.config.provider ? hub.config.model : DEFAULT_AI_MODELS[next]);
               }
             }}
           >
@@ -845,7 +849,8 @@ export function Settings({
           <input
             value={actorName}
             onChange={(e) => setActorName(e.target.value)}
-            placeholder={hub.config.codexAccountEmail ? hub.config.codexAccountEmail.split("@")[0] : "Your name"}
+            // Empty means the sign-in name is used: say which one, so the field does not look unset.
+            placeholder={hub.signsAs ? `Signs as ${hub.signsAs}` : "Your name"}
           />
         </label>
         <small>
@@ -1150,39 +1155,6 @@ export function Settings({
         </label>
       </section>
 
-      <div className="ai-set-save">
-        <button type="submit" className="ai-btn-emerald">
-          Save settings
-        </button>
-        <button
-          type="button"
-          data-testid="ai-test-connection"
-          disabled={probing}
-          title="Asks the saved model whether it answers. Save first to test changes."
-          onClick={() => {
-            setProbing(true);
-            setProbe(undefined);
-            void act({ action: "ai-probe" })
-              .then((result) =>
-                setProbe(result?.reply?.probe ?? { ok: false, detail: "The check could not be made." }),
-              )
-              .finally(() => setProbing(false));
-          }}
-        >
-          {probing ? "Testing…" : "Test connection"}
-        </button>
-        {savedNotice && <small role="status">Settings saved.</small>}
-        {probe && (
-          <small
-            data-testid="ai-test-connection-result"
-            role={probe.ok ? "status" : "alert"}
-            style={{ color: probe.ok ? "var(--ok-fg)" : "var(--danger-fg)" }}
-          >
-            {probe.detail || (probe.ok ? "The model answers." : "The model did not answer.")}
-          </small>
-        )}
-      </div>
-
       <section className="ai-set ai-set-data">
         <h3>Data</h3>
         <div className="ai-card-actions">
@@ -1217,6 +1189,40 @@ export function Settings({
         </div>
         <small>Deleting history does not touch team memory or the knowledge base.</small>
       </section>
+      </div>
+
+      <div className="ai-set-save">
+        <button type="submit" className="ai-btn-emerald">
+          Save settings
+        </button>
+        <button
+          type="button"
+          data-testid="ai-test-connection"
+          disabled={probing}
+          title="Asks the saved model whether it answers. Save first to test changes."
+          onClick={() => {
+            setProbing(true);
+            setProbe(undefined);
+            void act({ action: "ai-probe" })
+              .then((result) =>
+                setProbe(result?.reply?.probe ?? { ok: false, detail: "The check could not be made." }),
+              )
+              .finally(() => setProbing(false));
+          }}
+        >
+          {probing ? "Testing…" : "Test connection"}
+        </button>
+        {savedNotice && <small role="status">Settings saved.</small>}
+        {probe && (
+          <small
+            data-testid="ai-test-connection-result"
+            role={probe.ok ? "status" : "alert"}
+            style={{ color: probe.ok ? "var(--ok-fg)" : "var(--danger-fg)" }}
+          >
+            {probe.detail || (probe.ok ? "The model answers." : "The model did not answer.")}
+          </small>
+        )}
+      </div>
     </form>
   );
 }
