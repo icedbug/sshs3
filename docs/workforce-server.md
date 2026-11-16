@@ -83,6 +83,15 @@ what, on which target, the risk, and a link to the item.
 - Notifications are posted directly, not through an HTTP proxy: the server
   needs a route to the channel.
 
+## Jira and Confluence
+
+On the server, an administrator connects Jira (Workforce, "Jira") and
+Confluence (Knowledge base, Sources). The server then mirrors the chosen Jira
+projects on the board around the clock, writes agents' results and people's
+decisions back as comments, and reads followed Confluence spaces again once a
+day. Use an account for it that may only do what sshS3 should: its token acts
+as that account. Details: [the AI hub](ai-hub.md#jira-on-the-board-confluence-in-the-knowledge-base-atlassian-atlassianbridge).
+
 ## What is on the servers, and what changed
 
 Under Infrastructure, "Read the servers on a schedule" lets the server read

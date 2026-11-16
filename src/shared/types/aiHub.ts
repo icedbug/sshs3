@@ -1092,7 +1092,7 @@ export interface AtlassianConnectionView {
   closeOnApprove?: boolean;
   lastSyncAt?: number;
   lastError?: string;
-  watched?: { kind: "space" | "tree"; ref: string; addedAt: number; by: string }[];
+  watched?: { kind: "space" | "tree"; ref: string; addedAt: number; by: string; lastReadAt?: number; pages?: number }[];
 }
 
 /** A connection as it is saved from the form. `token` is sent only when it is set or changed. */
@@ -1332,7 +1332,9 @@ export interface KbDocument {
   id: string;
   collection?: string;
   title: string;
-  sourceType: "upload" | "folder" | "s3" | "manual" | "note" | "url" | "paste";
+  sourceType: "upload" | "folder" | "s3" | "manual" | "note" | "url" | "paste" | "confluence";
+  /** A Confluence page this document is: which, at which version, and through which followed space or tree it came. */
+  external?: { system: "confluence"; pageId: string; url: string; version: number; watch?: string };
   sourceUri?: string;
   sourceRef?: string;
   targetCluster?: string;
@@ -1452,6 +1454,8 @@ export interface KbPage {
   unverified?: { commands: string[]; citations: string[] };
   /** Alerts this page was worked from, by title: the next ticket for the same alert names the page. */
   alerts?: string[];
+  /** Where a person published this page in Confluence, and which version of each side that was. */
+  published?: { system: "confluence"; pageId: string; url: string; version: number; revision: number; at: number; by: string };
   /**
    * How the page was used, added up over the team's installations. Not part
    * of the stored page: use is not a change to its text (see `KbPageUse`).
@@ -1896,6 +1900,9 @@ export type HubRequest =
   | { action: "atlassian-test"; product: "jira" | "confluence" }
   | { action: "atlassian-disconnect"; product: "jira" | "confluence" }
   | { action: "jira-sync-now" }
+  | { action: "kb-ingest-confluence"; spaceKey?: string; pageId?: string }
+  | { action: "kb-confluence-unfollow"; ref: string }
+  | { action: "kb-page-publish"; id: string; spaceKey?: string; parentId?: string }
   | { action: "notify-settings-save"; publicUrl?: string; reminderMinutes?: number }
   /** An alert pasted by hand: JSON as a monitoring system posts it, or text. */
   | { action: "alert-paste"; text: string }

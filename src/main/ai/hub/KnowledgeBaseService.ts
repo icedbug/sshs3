@@ -538,14 +538,16 @@ export function documentRevisedBy(
   title: string,
   parts: number,
 ): { earlier?: KbDocument; notes?: string[] } {
-  if (!source.sourceRef || (source.sourceType !== "url" && source.sourceType !== "paste")) return {};
+  // A page in a wiki is named by its address too: read again with a new text, it is that page revised.
+  const named = source.sourceType === "url" || source.sourceType === "confluence";
+  if (!source.sourceRef || (!named && source.sourceType !== "paste")) return {};
   const sameRef = docs.filter((d) => d.sourceRef === source.sourceRef && d.sourceType === source.sourceType);
   if (sameRef.length === 0) return {};
   const wanted = title.trim().toLowerCase();
   const earlier =
     parts !== 1
       ? undefined
-      : source.sourceType === "url"
+      : named
         ? sameRef[0]
         : sameRef.find((d) => d.title.trim().toLowerCase() === wanted);
   if (earlier) return { earlier };

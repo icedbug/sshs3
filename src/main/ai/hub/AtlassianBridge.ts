@@ -3,6 +3,8 @@ import type {
   AtlassianConnectionView,
   ExternalIssueRef,
   HubReply,
+  KbDocument,
+  KbPage,
   WorkTicket,
   WorkTicketComment,
 } from "../../../shared/types/aiHub";
@@ -13,17 +15,21 @@ import {
   confluence,
   isProjectKey,
   jira,
+  markdownToStorage,
   pickDoneTransition,
   siteOf,
+  storageToHtml,
   ticketIdFor,
   ticketTextFor,
   type AtlassianAuth,
   type AtlassianTransport,
+  type ConfluencePage,
   type JiraIssue,
 } from "./Atlassian";
+import { htmlToMarkdown, type Extracted } from "./KbExtract";
 import { AtlassianStore, type AtlassianConnection, type AtlassianProduct } from "./AtlassianStore";
 import { guardUrl, request, type GuardOptions } from "./Notifier";
-import { clip, safeError } from "./privacy";
+import { clip, maskContext, safeError } from "./privacy";
 
 /** What the bridge needs of the hub: the board, and the few things only the hub knows. */
 export interface BridgeHost {
@@ -35,6 +41,15 @@ export interface BridgeHost {
   /** True for the one installation of the team that should do a thing; true always without a team bucket. */
   once(key: string): Promise<boolean>;
   guard(): GuardOptions;
+  /** The knowledge base's documents as stored: what a read of Confluence adds to and revises. */
+  kbDocs(): KbDocument[];
+  /** Adds a text to the knowledge base the way every source is added (same text: not again; same address: revised). */
+  ingest(
+    extracted: Extracted,
+    source: { name: string; sourceType: "confluence"; sourceRef: string },
+  ): Promise<NonNullable<HubReply["ingest"]>>;
+  /** Writes the hub's own store: documents were added or marked. */
+  persist(): Promise<void>;
   record(entry: { actor: string; target: string; what: string; outcome: string }): void;
   changed(): void;
 }
@@ -391,5 +406,168 @@ export class AtlassianBridge {
       if (ticket !== snapshot) this.host.putTicket(ticket);
     }
     return written;
+  }
+
+  // ---- Confluence as a source of the knowledge base ---------------------------
+
+  /** Where a page's document says it is from: the same for the same page, whatever its title becomes. */
+  private pageRef(site: string, pageId: string): string {
+    return `confluence://${site}/${pageId}`;
+  }
+
+  /**
+   * Adds the pages of a space, or one page with what is under it, as sources,
+   * and follows them: they are read again when they change. Returns what was
+   * added, as every way of adding sources does.
+   */
+  async addConfluence(from: { spaceKey?: string; pageId?: string }, by: string, now = Date.now()): Promise<NonNullable<HubReply["ingest"]>> {
+    const connection = this.store.data.confluence;
+    const auth = this.store.auth("confluence");
+    if (!connection || !auth) throw new Error("Connect Confluence first.");
+    const spaceKey = from.spaceKey?.trim();
+    const pageId = from.pageId?.trim();
+    if (!spaceKey && !pageId) throw new Error("Give a space key, or the id of a page whose tree to add.");
+    const watch = spaceKey ? { kind: "space" as const, ref: spaceKey } : { kind: "tree" as const, ref: pageId! };
+    const result = await this.readConfluence(connection, auth, watch, now);
+    connection.watched = [
+      ...(connection.watched ?? []).filter((w) => !(w.kind === watch.kind && w.ref === watch.ref)),
+      { ...watch, addedAt: now, by, lastReadAt: now, pages: result.seen },
+    ].slice(-40);
+    connection.lastError = undefined;
+    await this.store.save();
+    return result.reply;
+  }
+
+  async unfollowConfluence(ref: string): Promise<void> {
+    const connection = this.store.data.confluence;
+    if (!connection) return;
+    connection.watched = (connection.watched ?? []).filter((w) => w.ref !== ref);
+    await this.store.save();
+  }
+
+  /** A person removed this document: the page it was is not added again by a later read. */
+  async skipConfluence(doc: Pick<KbDocument, "sourceType" | "sourceRef">): Promise<void> {
+    const connection = this.store.data.confluence;
+    if (!connection || doc.sourceType !== "confluence" || !doc.sourceRef) return;
+    connection.skipped = [...new Set([...(connection.skipped ?? []), doc.sourceRef])].slice(-2000);
+    await this.store.save();
+  }
+
+  /** Reads what is followed again, once a day: a changed page revises its document, a page that is gone is said so on it. */
+  async rereadConfluence(now = Date.now()): Promise<void> {
+    const connection = this.store.data.confluence;
+    const auth = this.store.auth("confluence");
+    if (!connection || !auth) return;
+    for (const watch of connection.watched ?? []) {
+      if (now - (watch.lastReadAt ?? 0) < 20 * 3_600_000) continue;
+      watch.lastReadAt = now;
+      try {
+        watch.pages = (await this.readConfluence(connection, auth, watch, now)).seen;
+        connection.lastError = undefined;
+      } catch (error) {
+        connection.lastError = clip(safeError(error), 300);
+      }
+    }
+    await this.store.save().catch(() => undefined);
+  }
+
+  private async readConfluence(
+    connection: AtlassianConnection,
+    auth: AtlassianAuth,
+    watch: { kind: "space" | "tree"; ref: string },
+    now: number,
+  ): Promise<{ reply: NonNullable<HubReply["ingest"]>; seen: number }> {
+    const site = new URL(siteOf(auth)).host;
+    const found = await confluence.pages(this.send, auth, watch.kind === "space" ? { spaceKey: watch.ref } : { pageId: watch.ref });
+    const reply: NonNullable<HubReply["ingest"]> = { added: [], duplicates: [], failed: [], updated: [], notes: [] };
+    const skipped = new Set(connection.skipped ?? []);
+    const watchKey = `${watch.kind}:${watch.ref}`;
+    const seen = new Set<string>();
+    for (const page of found.pages) {
+      const ref = this.pageRef(site, page.id);
+      seen.add(ref);
+      if (skipped.has(ref)) continue;
+      const had = this.host.kbDocs().find((d) => d.sourceType === "confluence" && d.sourceRef === ref);
+      if (had?.external?.version === page.version) {
+        had.sourceCheck = { at: now };
+        continue;
+      }
+      try {
+        const text = await this.pageText(page);
+        // A page with nothing on it (a folder of a tree, a title only) is not a source.
+        if (text.trim().length < 40) continue;
+        const one = await this.host.ingest({ text, format: "html", title: page.title }, { name: page.title, sourceType: "confluence", sourceRef: ref });
+        reply.added.push(...one.added);
+        reply.duplicates.push(...one.duplicates);
+        reply.updated!.push(...(one.updated ?? []));
+        const doc = this.host.kbDocs().find((d) => d.sourceType === "confluence" && d.sourceRef === ref);
+        if (doc) {
+          doc.external = { system: "confluence", pageId: page.id, url: page.url, version: page.version, watch: watchKey };
+          doc.sourceCheck = { at: now };
+        }
+      } catch (error) {
+        reply.failed.push({ name: page.title, error: clip(safeError(error), 200) });
+      }
+    }
+    // What came through this space or tree and is no longer in it: said on the document, which keeps its text.
+    if (!found.more)
+      for (const doc of this.host.kbDocs()) {
+        if (doc.sourceType !== "confluence" || doc.external?.watch !== watchKey || !doc.sourceRef || seen.has(doc.sourceRef)) continue;
+        doc.sourceCheck = { at: now, error: "This page is no longer in Confluence where it was read from.", failures: (doc.sourceCheck?.failures ?? 0) + 1 };
+      }
+    if (found.more) reply.notes!.push("There were more pages than are read at once (500); the rest were left out. Add a smaller tree to get them.");
+    if (!reply.notes!.length) delete reply.notes;
+    await this.host.persist().catch(() => undefined);
+    this.host.changed();
+    return { reply, seen: seen.size };
+  }
+
+  /** A page's text as the knowledge base keeps text, with what looks like a secret masked: a wiki is where passwords get pasted. */
+  private async pageText(page: ConfluencePage): Promise<string> {
+    const { text } = await htmlToMarkdown(`<html><body>${storageToHtml(page.storage)}</body></html>`, page.url, false);
+    return maskContext(text);
+  }
+
+  // ---- a knowledge base page, published to Confluence -------------------------
+
+  /**
+   * Writes a page to Confluence: a new page the first time, the same page
+   * after that. When somebody changed it there since it was last published,
+   * nothing is written and that is said: their change is not overwritten.
+   */
+  async publishPage(
+    page: Pick<KbPage, "id" | "title" | "when" | "body" | "revision" | "published">,
+    where: { spaceKey?: string; parentId?: string },
+    by: string,
+    now = Date.now(),
+  ): Promise<NonNullable<KbPage["published"]>> {
+    const auth = this.store.auth("confluence");
+    if (!auth) throw new Error("Connect Confluence first.");
+    const storage = [
+      page.when.trim() ? `<p><em>${markdownToStorage(page.when.trim()).replace(/^<p>|<\/p>$/g, "")}</em></p>` : "",
+      markdownToStorage(page.body),
+      `<p><em>Published from the sshS3 knowledge base by ${markdownToStorage(by).replace(/^<p>|<\/p>$/g, "")}, revision ${page.revision}. Changes made here are replaced by the next publish.</em></p>`,
+    ]
+      .filter(Boolean)
+      .join("\n");
+    let made;
+    if (page.published) {
+      const there = await confluence.page(this.send, auth, page.published.pageId).catch((error) => {
+        if (error instanceof AtlassianError && error.status === 404)
+          throw new Error("The page is no longer in Confluence where it was published. Publish it as a new page by giving a space.");
+        throw error;
+      });
+      if (there.version !== page.published.version)
+        throw new Error(
+          `The page was changed in Confluence since it was published from here (version ${there.version} there, version ${page.published.version} published). Nothing was written: look at it there first.`,
+        );
+      made = await confluence.update(this.send, auth, { id: there.id, version: there.version, title: page.title, storage });
+    } else {
+      const spaceKey = where.spaceKey?.trim();
+      if (!spaceKey) throw new Error("Say which space to publish the page in.");
+      made = await confluence.create(this.send, auth, { spaceKey, parentId: where.parentId?.trim() || undefined, title: page.title, storage });
+    }
+    this.host.record({ actor: by, target: `Confluence ${made.url}`, what: `Published the page "${clip(page.title, 120)}" (revision ${page.revision})`, outcome: "completed" });
+    return { system: "confluence", pageId: made.id, url: made.url, version: made.version, revision: page.revision, at: now, by };
   }
 }

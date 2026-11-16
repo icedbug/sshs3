@@ -794,6 +794,9 @@ export class HubService {
         return sync ? sync.markOnce(key, this.clientId(), this.notifySettle) : true;
       },
       guard: () => ({ ...this.outboundGuard(), ...(this.kbNetwork ? { lookup: this.kbNetwork.lookup } : {}) }),
+      kbDocs: () => this.store.data.kbDocuments ?? [],
+      ingest: (extracted, source) => this.ingestExtracted(extracted, source),
+      persist: () => this.store.save(),
       record: (entry) =>
         void this.audit()
           .append({ kind: "integration", ...entry })
@@ -4044,6 +4047,29 @@ export class HubService {
           .catch(() => undefined);
         break;
       }
+      case "kb-ingest-confluence":
+        reply = { ingest: await this.atlassian.addConfluence({ spaceKey: request.spaceKey, pageId: request.pageId }, await this.resolveActorName()) };
+        await this.store.save().catch(() => undefined);
+        break;
+      case "kb-page-publish": {
+        const page = (this.store.data.kbPages ?? []).find((x) => x.id === request.id);
+        if (!page) throw new Error("Page not found");
+        const published = await this.atlassian.publishPage(page, { spaceKey: request.spaceKey, parentId: request.parentId }, await this.resolveActorName());
+        // Read again: the page may have been edited while Confluence answered. Where it was published is
+        // not a change of its text: no new revision, but a newer copy, so the team sees it too.
+        const now = (this.store.data.kbPages ?? []).find((x) => x.id === request.id);
+        if (now) {
+          now.published = published;
+          now.updatedAt = Math.max(Date.now(), now.updatedAt + 1);
+          this.lastWorkSync = 0;
+          reply = { kbPage: now };
+        }
+        break;
+      }
+      case "kb-confluence-unfollow":
+        this.assertIntegrationAdmin();
+        await this.atlassian.unfollowConfluence(requiredText(request.ref));
+        break;
       case "jira-sync-now":
         reply = { jiraSync: await this.atlassian.syncJira(Date.now(), true) };
         break;
@@ -4376,7 +4402,10 @@ export class HubService {
         break;
       }
       case "kb-delete": {
-        if (!this.getKbDocumentsList().some((d) => d.id === request.id)) throw new Error("Document not found");
+        const removedDoc = this.getKbDocumentsList().find((d) => d.id === request.id);
+        if (!removedDoc) throw new Error("Document not found");
+        // A page of a followed Confluence space: removed here, it is not read in again tomorrow.
+        await this.atlassian.skipConfluence(removedDoc);
         this.store.data.kbDocuments = (this.store.data.kbDocuments ?? []).filter(
           (d) => d.id !== request.id,
         );
@@ -8897,6 +8926,7 @@ export class HubService {
       void this.workTick(now, aiEnabled).catch((e) => log.warn("Board tick failed", safeError(e)));
       // The board mirrors Jira whether or not a model is set up: it is the team's record either way.
       void this.atlassian.syncJira(now).catch((e) => log.warn("Reading Jira failed", safeError(e)));
+      void this.atlassian.rereadConfluence(now).catch((e) => log.warn("Reading Confluence failed", safeError(e)));
       if (!aiEnabled) return;
       void (async () => {
         await this.recoverUnreadSessions(now);

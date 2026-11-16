@@ -11,6 +11,7 @@ import {
 import { hubRequest } from "../../lib/aiHub";
 import { isWebBrowserMode } from "../../lib/webClientBridge";
 import { ConfirmButton } from "./ConfirmButton";
+import { ConfluenceSources } from "./ConfluenceSources";
 import { HighlightedCode } from "./DiffViewer";
 import { KbPages, KbReview } from "./KbPagesView";
 import { emptyPage, type PageDraft } from "./kbPageDraft";
@@ -169,6 +170,7 @@ const SOURCES: Record<string, string> = {
   folder: "from a folder",
   s3: "from S3",
   url: "from a link",
+  confluence: "from Confluence",
   upload: "uploaded",
   paste: "pasted",
 };
@@ -1194,6 +1196,8 @@ export function KnowledgeBaseView({
         </details>
       ) : null}
 
+      <ConfluenceSources hub={hub} act={act} />
+
       <div className="ai-section-head">
         <h3>
           Sources <span className="ai-count">{all.length}</span>
@@ -1402,6 +1406,14 @@ export function KnowledgeBaseView({
             )}
             {doc.reading?.state === "done" && doc.reading.error && (
               <small className="ai-last-run">{doc.reading.error}</small>
+            )}
+            {doc.sourceType === "confluence" && doc.external?.url && (
+              <small className="ai-last-run">
+                <a href={doc.external.url} target="_blank" rel="noreferrer noopener">
+                  Open in Confluence
+                </a>{" "}
+                · version {doc.external.version}
+              </small>
             )}
             {doc.sourceType === "url" && doc.sourceRef && (
               <small className="ai-last-run ai-mono">{doc.sourceRef}</small>

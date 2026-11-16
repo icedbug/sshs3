@@ -30,7 +30,9 @@ export interface AtlassianConnection {
   filled?: boolean;
   lastError?: string;
   /** Confluence: what was added as sources, to be read again when it changes. */
-  watched?: { kind: "space" | "tree"; ref: string; addedAt: number; by: string }[];
+  watched?: { kind: "space" | "tree"; ref: string; addedAt: number; by: string; lastReadAt?: number; pages?: number }[];
+  /** Confluence: pages a person removed from the knowledge base. They are not added again. */
+  skipped?: string[];
 }
 
 export interface AtlassianData {

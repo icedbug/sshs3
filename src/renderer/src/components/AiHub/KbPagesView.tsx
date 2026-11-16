@@ -7,6 +7,7 @@ import type {
   KbPageKind,
 } from "@shared/types/aiHub";
 import { ConfirmButton } from "./ConfirmButton";
+import { PublishToConfluence } from "./ConfluenceSources";
 import { KINDS, emptyPage, type PageDraft } from "./kbPageDraft";
 import { type Act } from "./panelShared";
 import { decodeFileRefHref, extractFileRefs, linkFileRefs, type FileRef } from "./reportRefs";
@@ -636,6 +637,7 @@ export function KbPages({
                             : "Read again; the page already said what its sources say."}
                       </small>
                     )}
+                    <PublishToConfluence page={p} hub={hub} act={act} />
                     <span className="ai-spacer" />
                     <ConfirmButton
                       label="Delete"

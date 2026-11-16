@@ -632,6 +632,31 @@ function nextLink(auth: AtlassianAuth, next: string | undefined): string | undef
   return `${siteOf(auth)}${next.startsWith("/wiki/") ? next : `/wiki${next}`}`;
 }
 
+/**
+ * A page's storage format as plain HTML that a converter to text understands.
+ * Confluence's own tags are not HTML: a code block's text sits in character
+ * data inside a macro and would be lost, so it is lifted out as <pre>; the
+ * other macros and their parameters are dropped and what they wrap is kept.
+ */
+export function storageToHtml(storage: string): string {
+  const escape = (text: string): string => text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return (
+    storage
+      .replace(
+        /<ac:structured-macro\b[^>]*ac:name="(?:code|noformat)"[^>]*>([\s\S]*?)<\/ac:structured-macro>/g,
+        (_m, inner: string) => {
+          const parts = [...inner.matchAll(/<!\[CDATA\[([\s\S]*?)\]\]>/g)].map((x) => x[1]);
+          return `<pre><code>${escape(parts.join(""))}</code></pre>`;
+        },
+      )
+      // A macro's settings (a title, a language) are not the page's text.
+      .replace(/<ac:parameter\b[^>]*>[\s\S]*?<\/ac:parameter>/g, "")
+      .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, (_m, text: string) => escape(text))
+      // What is left of Confluence's own tags: gone, their contents kept.
+      .replace(/<\/?(?:ac|ri|at):[^>]*>/g, " ")
+  );
+}
+
 // ---------------------------------------------------------------------------
 // A knowledge base page, written for Confluence
 // ---------------------------------------------------------------------------

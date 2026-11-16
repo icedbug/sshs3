@@ -54,7 +54,7 @@ function tidy(text: string): string {
 }
 
 /** `article`: look for the page's main text and drop what surrounds it. Off for a document that is all main text. */
-async function htmlToMarkdown(
+export async function htmlToMarkdown(
   html: string,
   url?: string,
   article_ = true,

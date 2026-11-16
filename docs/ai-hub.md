@@ -805,6 +805,74 @@ inside Slack or Teams.
 Checked with real HTTP posts against the web server in tests and in a browser
 with a stand-in model. Not checked: a real Alertmanager or PagerDuty sending.
 
+## Jira on the board, Confluence in the knowledge base (`Atlassian`, `AtlassianBridge`)
+
+Teams already have their issues in Jira and their documentation in Confluence.
+The board mirrors the one and the knowledge base reads the other, so sshS3
+works beside them instead of asking a team to move.
+
+**The connection.** One for Jira and one for Confluence, each for Atlassian
+Cloud (the account's e-mail and an API token) or Data Center/Server (a
+personal access token). The token is kept encrypted in a file of its own
+(`atlassian.json` beside the hub's store), never in the team bucket and never
+sent to the interface, which is told only that one is set. A token is for one
+site: when the address changes it has to be typed again. Every call goes
+through `guardUrl` to the address that was checked, and no redirect is
+followed. On a shared server only an administrator sets a connection up.
+Agents have no tool for any of this.
+
+**Jira to the board.** Every open issue of the chosen projects is a ticket:
+its key and Jira status are on the card, and title, text, status and new
+comments follow the issue (read every two minutes, and with "Sync now"). A
+ticket's id is made from the site and the issue, so two installations that
+read the same Jira make one ticket.
+
+- What is written in an issue is text from outside the team. Its ticket is
+  marked so (`outside`), lands in **Backlog**, and never starts an agent by
+  itself: a person reads it and moves it to To do.
+- The board's columns are the board's own. Jira decides only the two ends: an
+  issue closed there is done here (unless a run is working it), and one opened
+  again there goes back to Backlog.
+- A ticket a person removed from the board stays removed.
+
+**The board to Jira, and only this.**
+
+- An agent's result, as one comment, when its run ends in Review or Blocked.
+- A person's decision ("Approve: done", or sent back with a note), as a
+  comment that names the person.
+- The issue closed, when its ticket is done here. A workflow can have several
+  ways to close (Done, Won't do, Duplicate): the transition named in the
+  settings is taken, else the one called Done, Resolved or Closed. With
+  several and none of those, the issue is left open and the ticket says why.
+
+What is owed is read off the ticket on each pass, not kept in a queue. With a
+team bucket one installation does each write (`WorkSync.markOnce`) and tries
+again while it fails; the others see it done when the ticket syncs. A failure
+is kept on the ticket or the connection and shown; it never stops the board.
+Each write is in the audit log (kind `integration`).
+
+**Confluence to the knowledge base.** Under Sources, a space key adds the
+pages of a space and a page id adds that page with everything under it, up to
+500 pages at a time. Each page becomes a source like any other, with code
+blocks kept and what looks like a secret masked. What was added is followed:
+once a day it is read again, a page whose version changed revises its
+document (and so the pages written from it), and a page that is gone is said
+so on its document, which keeps its text. A document a person removes is not
+read in again.
+
+**The knowledge base to Confluence.** "Publish to Confluence" on a page: a
+person, with a confirmation, never an agent. The first time it asks for a
+space (and optionally a parent page); after that it updates the same page.
+When somebody changed the page in Confluence since it was published, nothing
+is written and that is said. The page is written in Confluence's storage
+format from the page's own Markdown; everything the converter does not know
+is escaped, so a page carries no markup of its own into Confluence.
+
+**Not tried against a real Jira or Confluence.** The calls follow Atlassian's
+documentation (Cloud: `/rest/api/3` with `POST /search/jql`, `/wiki/api/v2`;
+Data Center: `/rest/api/2`, `/rest/api/content`) and are tested against a
+stand-in. Connect a test instance first.
+
 ## Knowledge base: what agents know (`KbCompile`, `KbLint`)
 
 The knowledge base is for the agents, not a document store for people. It has
@@ -972,7 +1040,7 @@ Checked with small real PDF and Word files, stubbed model responses
 `knowledgeBaseView.test.tsx`) and in a browser against the web build with a
 stand-in model. Not checked: large real manuals, the packaged desktop app, and
 the quality of a real model's titles and summaries. Not built yet: pictures
-and scanned PDFs, watched sources that re-read themselves, search by meaning
+and scanned PDFs, search by meaning
 without an OpenAI-compatible embedding endpoint, and detecting documents that
 contradict each other.
 
@@ -1505,6 +1573,7 @@ remaining platform/product work.
 - `src/main/desktopEntry.ts`: desktop entry; launches the pinned native engine/frontend only with `SSHS3_FORCE_NATIVE_HERMES=1`.
 - `src/main/ai/hub/`: AI Hub services (HubService, createHub, DirectAgentRuntime, KnowledgeBaseService, SelfLearningService, CommandSafetyService, ContextService, TerminalRegistry, ToolBroker, McpClientManager, S3WorkspaceSyncService, HubStore, privacy, builtins, demoWorkspace).
 - `src/main/ai/desktop/`: native Hermes host views, authenticated control IPC and NativeToolBridge.
+- `src/main/ai/hub/Atlassian.ts`, `AtlassianBridge.ts`, `AtlassianStore.ts`: Jira on the board and Confluence in the knowledge base.
 - `src/main/demo/`: launch-time demo mode, outward sync guard, demo PTY and storage provider.
 - `src/main/web/`: multi-user Web Server, authentication, per-user tenants and Electron shim.
 - `src/shared/types/aiHub.ts`, `src/shared/types/ai.ts`: hub requests, snapshot, memory, safety policy and provider/model types.
