@@ -191,6 +191,17 @@ const AppContent: React.FC = () => {
   const anyTopLevelModalOpen =
     profilesModalOpen || settingsModalOpen || tunnelsModalOpen || dirSyncProfilesOpen || globalSearchOpen;
   const headerRef = useRef<HTMLElement>(null);
+  // Where the content area begins: the AI sidebar sits beside it, from there down.
+  const mainRef = useRef<HTMLElement>(null);
+  const [mainTop, setMainTop] = useState(0);
+  useEffect(() => {
+    const measure = (): void => setMainTop(mainRef.current?.offsetTop ?? 0);
+    measure();
+    if (typeof ResizeObserver === 'undefined' || !headerRef.current) return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(headerRef.current);
+    return () => observer.disconnect();
+  }, []);
   useEffect(() => {
     const el = headerRef.current as (HTMLElement & { inert?: boolean }) | null;
     if (el) el.inert = anyTopLevelModalOpen;
@@ -888,6 +899,7 @@ const AppContent: React.FC = () => {
 
       {/* Main Content Area: non-active tabs stay mounted with display: none */}
       <main
+        ref={mainRef}
         onMouseDownCapture={() => setTabBarFocused(false)}
         className="relative flex flex-1 w-full overflow-hidden bg-app"
         style={{
@@ -1247,6 +1259,13 @@ const AppContent: React.FC = () => {
         runProfile={dirSyncRunProfile}
       />
       {!nativeHermes && (
+        // As a sidebar it lies over the room the content area leaves for it. In the normal flow it
+        // would take the whole height below the header and leave the terminal none.
+        <div
+          className={aiMode === 'panel' ? 'absolute bottom-0 right-0 z-20 flex' : 'contents'}
+          style={aiMode === 'panel' ? { top: mainTop } : undefined}
+          data-testid="ai-dock"
+        >
         <AiHubPanel
           mode={aiMode}
           setMode={setAiMode}
@@ -1275,6 +1294,7 @@ const AppContent: React.FC = () => {
             });
           }}
         />
+        </div>
       )}
     </div>
   );
