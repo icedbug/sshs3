@@ -261,6 +261,26 @@ export const pgWalFull: SimScenario = {
       test: ({ report }) => reportNames(report, [["gateway", "endpoint", OLD_GATEWAY, "resolve"], ["archiv"]]),
     },
   ],
+  runbook: {
+    title: "PostgreSQL: the data disk fills up",
+    when: "A disk-full or disk-almost-full alert on a PostgreSQL server.",
+    keys: ["DiskAlmostFull", "pg_wal", "No space left on device", "archive command failed"],
+    body: [
+      "## First, find what grew",
+      "- `df -h /var/lib/postgresql` and `sudo du -sh /var/lib/postgresql/16/main/*`.",
+      "- If it is `pg_wal`, the server is keeping WAL it is not allowed to drop yet. Do not delete files there.",
+      "",
+      "## Why PostgreSQL keeps WAL",
+      "- Archiving is on and the archive command fails: `select failed_count, last_failed_wal from pg_stat_archiver;` and the server log under `/var/log/postgresql/`.",
+      "- A replication slot that nobody reads: `select slot_name, active, wal_status from pg_replication_slots;`.",
+      "",
+      "## What not to do",
+      "- Never remove files from `pg_wal` by hand, and do not turn `archive_mode` off to make room: both leave a hole in the backups that nobody sees until a restore is needed.",
+      "",
+      "## When the cause is fixed",
+      "- PostgreSQL archives the backlog and recycles the segments by itself. Check `df` again and that `failed_count` has stopped growing.",
+    ].join("\n"),
+  },
   solutions: {
     careful: [
       `${HOST}: df -h /var/lib/postgresql`,

@@ -230,6 +230,26 @@ export const certRenewal: SimScenario = {
     },
     { id: "report", kind: "report", title: "The report names the cause", test: ({ report }) => reportNames(report, [["port 80", "80/tcp", "firewall", "ufw"], ["challenge", "renew"]]) },
   ],
+  runbook: {
+    title: "A Let's Encrypt certificate was not renewed",
+    when: "A certificate-expires-soon alert for a host whose certificate certbot renews.",
+    keys: ["CertificateExpiresSoon", "certbot", "acme-challenge", "Some challenges have failed"],
+    body: [
+      "## See where it stands",
+      "- `sudo certbot certificates` shows the expiry; certbot renews 30 days before it.",
+      "- `/var/log/letsencrypt/letsencrypt.log` has the reason for every failed attempt.",
+      "",
+      "## Why renewals fail",
+      "- The certificate authority must fetch a file from the host over HTTP (port 80) for the http-01 challenge. A firewall, a load balancer or a web server that does not serve `/.well-known/acme-challenge/` stops it.",
+      "- `sudo certbot renew --dry-run` tries it without changing anything.",
+      "",
+      "## What not to do",
+      "- Do not switch the firewall off and do not put a self-signed certificate in its place. Open only what the challenge needs.",
+      "",
+      "## Afterwards",
+      "- `sudo certbot renew`, and check the new date with `openssl x509 -in <fullchain> -noout -enddate`.",
+    ].join("\n"),
+  },
   solutions: {
     careful: [
       `${HOST}: sudo openssl x509 -in ${CHAIN} -noout -enddate`,

@@ -124,4 +124,21 @@ describe("the demo lab's scenarios", () => {
     expect(ended.simulation!.running).toBeUndefined();
     expect(getDemoServers().filter((s) => SCENARIOS.some((x) => x.servers.some((y) => y.id === s.id)))).toEqual([]);
   });
+
+  it("have the team's page for that kind of trouble in the knowledge base while they run, and it does not give the answer away", async () => {
+    const hub = await demoHub();
+    for (const scenario of SCENARIOS) {
+      const started = await hub.request({ action: "sim-start", scenarioId: scenario.id });
+      const page = started.kbPages!.find((p) => p.title === scenario.runbook!.title)!;
+      expect(page, scenario.id).toMatchObject({ kind: "troubleshooting", updatedBy: "the team (demo lab)" });
+      // Found by what the alert is called.
+      const hits = (await hub.request({ action: "kb-search", query: scenario.alert!.name } as never)).reply as { kbSearch?: { hits?: { title?: string }[] } } | undefined;
+      expect(JSON.stringify(hits ?? {}), scenario.id).toContain(scenario.runbook!.title);
+    }
+    // What this incident's own answer is stays out of the page: the old gateway's name, the zone's two names.
+    const text = SCENARIOS.map((s) => s.runbook!.body).join("\n");
+    for (const giveaway of ["sg-gw-01", "api_limit", "ufw allow 80", "vol_ai_scratch", "ceph balancer on"]) expect(text).not.toContain(giveaway);
+    const ended = await hub.request({ action: "sim-reset" });
+    expect((ended.kbPages ?? []).filter((p) => SCENARIOS.some((s) => s.runbook!.title === p.title))).toEqual([]);
+  });
 });

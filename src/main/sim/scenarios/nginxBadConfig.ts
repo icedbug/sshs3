@@ -131,6 +131,24 @@ export const nginxBadConfig: SimScenario = {
     },
     { id: "report", kind: "report", title: "The report names the cause", test: ({ report }) => reportNames(report, [["zone", "limit_req", "rate limit"], ["config", "restart", "upgrade", "reload"]]) },
   ],
+  runbook: {
+    title: "nginx will not start",
+    when: "A site behind nginx does not answer and the nginx service is failed or inactive.",
+    keys: ["HttpProbeFailed", "nginx.service", "nginx: [emerg]", "test failed"],
+    body: [
+      "## Look before starting it",
+      "- `systemctl status nginx` and `journalctl -u nginx -n 20 --no-pager` say why it stopped.",
+      "- `sudo nginx -t` names the file and the line nginx refuses.",
+      "",
+      "## What changed",
+      "- A running nginx keeps its old configuration until it is reloaded or restarted, so a mistake can sit unnoticed for days. Look at when the files under `/etc/nginx/` were changed, and ask in #ops who changed them and why.",
+      "- Nightly package upgrades restart the services they upgrade.",
+      "",
+      "## Fixing it",
+      "- Correct the line that is wrong. Do not copy an old file back over a colleague's change without knowing what the change was for.",
+      "- `sudo nginx -t` again, then `sudo systemctl start nginx`, then check the site with `curl`.",
+    ].join("\n"),
+  },
   solutions: {
     careful: [
       `${HOST}: systemctl status nginx`,

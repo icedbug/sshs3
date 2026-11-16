@@ -1790,6 +1790,10 @@ export interface HubSnapshot {
   };
   /** The demo lab's simulation. Only in demo mode. */
   simulation?: SimulationView;
+  /** The name this person's actions are signed with in the team's activity, when none was typed in the settings. */
+  signsAs?: string;
+  /** Whether somebody else can be asked to approve here: a team server with a second account. */
+  peerApprovalPossible?: boolean;
   /**
    * The team's bot in Slack and Mattermost: which channels it reads, and how
    * much is kept. The team's, not a person's: `canChange` is false for a

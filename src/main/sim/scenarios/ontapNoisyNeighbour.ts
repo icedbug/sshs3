@@ -333,6 +333,23 @@ export const ontapNoisyNeighbour: SimScenario = {
     },
     { id: "report", kind: "report", title: "The report names the cause", test: ({ report }) => reportNames(report, [[NOISY, "scratch"], ["qos", "policy group", "policy-group", "limit"]]) },
   ],
+  runbook: {
+    title: "ONTAP: a volume is slow though its own load is normal",
+    when: "A volume latency alert on an ONTAP cluster.",
+    keys: ["VolumeLatencyHigh", "qos statistics", "noisy neighbour", "policy-group"],
+    body: [
+      "## Find who is busy",
+      "- `qos statistics volume latency show` and `qos statistics volume performance show`: a volume that waits on Disk while another volume on the same aggregate does most of the IOPS has a noisy neighbour.",
+      "- `volume show -fields qos-policy-group,aggregate` shows which volumes have no limit.",
+      "",
+      "## Our rule",
+      "- Every non-production volume belongs in the QoS policy group for capped workloads. `qos policy-group show` lists the groups.",
+      "- `volume modify -vserver <svm> -volume <vol> -qos-policy-group <group>` puts a volume in one. It takes effect at once and interrupts nothing.",
+      "",
+      "## What not to do",
+      "- Do not take a busy volume offline to quiet it: whatever runs on it is cut off. Do not loosen the production volume's own policy.",
+    ].join("\n"),
+  },
   solutions: {
     careful: [
       `${CLUSTER}: qos statistics volume latency show`,

@@ -72,6 +72,12 @@ export interface SimScenario {
   chat?: ScenarioChat[];
   /** What a teammate did lately, for the activity log. */
   activity?: { minutesAgo: number; actor: string; target: string; kind: string; summary: string }[];
+  /**
+   * The team's page for this kind of trouble, as a team that has met it before
+   * would have written it: the symptom and how to look into it, not the answer
+   * to this incident. Put in the knowledge base while the scenario runs.
+   */
+  runbook?: { title: string; when: string; body: string; keys?: string[] };
   checks: SimCheck[];
   /**
    * How to solve it, as lines to run (`server: command`): the careful way and

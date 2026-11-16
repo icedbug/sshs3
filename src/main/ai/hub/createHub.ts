@@ -943,10 +943,13 @@ export function createHub(
         });
         id = session.sessionId;
       } else {
-        const profile = (await bridge.profileStore.getProfiles()).ssh.find(
+        const saved = (await bridge.profileStore.getProfiles()).ssh.find(
           (p) => p.id === schedule.profileId,
         );
-        if (!profile) throw new Error("Saved target missing");
+        // A server of the demo lab is not a saved profile until somebody opens it: a job aimed at one finds it in the lab.
+        const lab = !saved && isDemoMode() ? getDemoServers().find((d) => d.id === schedule.profileId) : undefined;
+        const profile = saved ?? (lab ? ({ ...lab, port: lab.port ?? 22, authType: lab.authType ?? "agent" } as unknown as NonNullable<typeof saved>) : undefined);
+        if (!profile) throw new Error("The server this job runs on is not in the server list any more. Edit the job and choose where it runs.");
         if (["password", "smartcard", "fido2"].includes(profile.authType))
           throw new Error(
             "This target requires interactive authentication. Open a terminal and start an assisted task.",

@@ -1684,7 +1684,7 @@ export class HubService {
 
   // ---- the demo lab's simulation ----------------------------------------------
 
-  private simulation?: { startedAt: number; ticketId?: string; servers: string[] };
+  private simulation?: { startedAt: number; ticketId?: string; servers: string[]; pageId?: string };
 
   /**
    * Starts an incident in the demo lab: its servers with the fault in them,
@@ -1707,6 +1707,13 @@ export class HubService {
       }, 400);
     };
     const now = world.now();
+    // The team's own page for this kind of trouble: there while the scenario runs, as it would be in a team that had met it before.
+    let pageId: string | undefined;
+    if (scenario.runbook) {
+      const page = savePageByPerson(undefined, { kind: "troubleshooting", title: scenario.runbook.title, when: scenario.runbook.when, body: scenario.runbook.body, targets: [...new Set(scenario.servers.map((x) => x.cluster))], keys: scenario.runbook.keys }, "the team (demo lab)");
+      this.store.data.kbPages = [...(this.store.data.kbPages ?? []), page];
+      pageId = page.id;
+    }
     for (const server of scenario.servers)
       upsertDemoServer({ id: server.id, name: server.name, host: server.host, username: server.username, cluster: server.cluster, folder: `Scenario / ${server.cluster}`, description: server.description, tags: server.tags, shared: false });
     // The chat first: the alert's ticket looks through it.
@@ -1725,7 +1732,7 @@ export class HubService {
     );
     for (const [i, event] of (scenario.activity ?? []).entries())
       appendDemoActivity({ id: `sim-${scenario.id}-${i}`, at: now - event.minutesAgo * 60_000, actor: event.actor, kind: event.kind as never, targetLabel: event.target, summary: event.summary } as WorkspaceActivityEvent);
-    this.simulation = { startedAt: now, servers: scenario.servers.map((s) => s.id) };
+    this.simulation = { startedAt: now, servers: scenario.servers.map((s) => s.id), pageId };
     if (scenario.alert) {
       const made = await this.takeAlerts(
         parseAlerts({
@@ -1753,6 +1760,7 @@ export class HubService {
     if (!had) return;
     this.simulation = undefined;
     for (const id of had.servers) deleteDemoServer(id);
+    if (had.pageId) this.store.data.kbPages = (this.store.data.kbPages ?? []).filter((p) => p.id !== had.pageId);
     // Opening a terminal to one saved it as a profile of this person's: that goes too.
     for (const id of had.servers) await this.host.deleteServer?.(id).catch(() => undefined);
     // Nothing of the lab stays in what the team shares.
@@ -2503,6 +2511,8 @@ export class HubService {
       },
       notifications: this.notificationsView(),
       ...(isDemoMode() ? { simulation: this.simulationView() } : {}),
+      signsAs: await this.resolveActorName(),
+      peerApprovalPossible: this.peerApprovalPossible(),
       chatSources: {
         connections: this.chat.view(),
         canChange: !this.sharedServer() || Boolean(this.host.teamAdmin?.()),
