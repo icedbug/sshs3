@@ -1700,7 +1700,7 @@ export class HubService {
     const world = startScenario(scenario);
     const now = world.now();
     for (const server of scenario.servers)
-      upsertDemoServer({ id: server.id, name: server.name, host: server.host, username: server.username, cluster: server.cluster, folder: `Scenario / ${server.cluster}`, description: server.description, tags: server.tags, shared: true });
+      upsertDemoServer({ id: server.id, name: server.name, host: server.host, username: server.username, cluster: server.cluster, folder: `Scenario / ${server.cluster}`, description: server.description, tags: server.tags, shared: false });
     // The chat first: the alert's ticket looks through it.
     const said = scenario.chat ?? [];
     const channels = [...new Set(said.map((m) => m.channel))].map((name, i) => ({ id: `CSIM${i + 1}`, name }));
@@ -1745,6 +1745,8 @@ export class HubService {
     if (!had) return;
     this.simulation = undefined;
     for (const id of had.servers) deleteDemoServer(id);
+    // Nothing of the lab stays in what the team shares.
+    if (this.store.data.s3SyncedServers?.some((x) => had.servers.includes(x.id))) this.store.data.s3SyncedServers = this.store.data.s3SyncedServers.filter((x) => !had.servers.includes(x.id));
     const ticket = had.ticketId ? this.store.data.workTickets?.find((t) => t.id === had.ticketId && !t.deleted) : undefined;
     if (ticket && ticket.status !== "in_progress") this.putTicket({ ...ticket, deleted: true, deletedBy: "the demo lab", updatedAt: Date.now() });
     this.changed();
