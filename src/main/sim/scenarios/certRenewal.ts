@@ -49,9 +49,12 @@ const ufw: SimCommand = (ctx, args) => {
   if (!ctx.root) return fail("ERROR: You need to be root to run this script\n", 1);
   const fw = firewall(host);
   const rule = (text: string): string => (/^\d+$/.test(text) ? text : text.toLowerCase() === "ssh" ? "22/tcp" : text.toLowerCase() === "http" ? "80/tcp" : text.toLowerCase() === "https" ? "443/tcp" : text);
+  // `comment '…'` after a rule is taken and not kept.
+  const said = args.indexOf("comment");
+  if (said > 0) args = args.slice(0, said);
   if (args[0] === "status") {
     if (!fw.active) return ok("Status: inactive\n");
-    return ok(lines(["Status: active", "", "To                         Action      From", "--                         ------      ----", ...fw.allow.map((r) => `${r.padEnd(27)}ALLOW       Anywhere`), ""]));
+    return ok(lines(["Status: active", "", "To                         Action      From", "--                         ------      ----", ...fw.allow.map((r) => `${r.padEnd(27)}ALLOW       Anywhere`), ...fw.allow.map((r) => `${`${r} (v6)`.padEnd(27)}ALLOW       Anywhere (v6)`), ""]));
   }
   if (args[0] === "allow" && args[1]) {
     const r = rule(args[1]);
@@ -85,7 +88,7 @@ const certbot: SimCommand = (ctx, args) => {
   const selfSigned = !!cert && !cert.issuer.includes("Let's Encrypt");
   if (args[0] === "certificates") {
     const until = cert ? new Date(cert.notAfter).toISOString().slice(0, 19).replace("T", " ") : "";
-    return ok(lines(["Saving debug log to /var/log/letsencrypt/letsencrypt.log", "", "- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -", "Found the following certs:", `  Certificate Name: ${NAME}`, "    Serial Number: 4a1c9e03b7d2f58816ac5e2290d1f7c3a55", "    Key Type: ECDSA", `    Domains: ${NAME}`, `    Expiry Date: ${until}+00:00 (${daysLeft < 0 ? "INVALID: EXPIRED" : `VALID: ${daysLeft} days`})`, `    Certificate Path: ${CHAIN}`, `    Private Key Path: ${LIVE}/privkey.pem`, "- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -", ""]));
+    return ok(lines(["Saving debug log to /var/log/letsencrypt/letsencrypt.log", "", "- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -", "Found the following certs:", `  Certificate Name: ${NAME}`, `    Serial Number: ${cert ? (cert.notBefore * 7919).toString(16).padStart(34, "4a1c9e03b7d2f58816ac5e2290d1f7c3a5") : ""}`, "    Key Type: ECDSA", `    Domains: ${NAME}`, `    Expiry Date: ${until}+00:00 (${daysLeft < 0 ? "INVALID: EXPIRED" : `VALID: ${daysLeft} days`})`, `    Certificate Path: ${CHAIN}`, `    Private Key Path: ${LIVE}/privkey.pem`, "- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -", ""]));
   }
   if (args[0] !== "renew") throw new NotSimulated(`certbot ${args[0] ?? ""}`);
   const rest = args.slice(1);
@@ -144,7 +147,7 @@ function build(world: SimWorld): void {
   host.write("/etc/hosts", `127.0.0.1 localhost\n10.30.70.31 ${HOST} ${NAME}\n`);
   const now = world.now();
   for (const path of [CERT, CHAIN]) {
-    host.certs.set(path, { subject: `CN = ${NAME}`, issuer: ISSUER, notBefore: now - 87 * DAY, notAfter: now + 3 * DAY, names: [NAME] });
+    host.certs.set(path, { subject: `CN = ${NAME}`, issuer: ISSUER, notBefore: now - 87 * DAY, notAfter: now + 3 * DAY + 5 * 3_600_000, names: [NAME] });
     host.write(path, pem(now - 87 * DAY), { mode: 0o644 });
   }
   host.write(`${LIVE}/privkey.pem`, "-----BEGIN PRIVATE KEY-----\n(simulated)\n-----END PRIVATE KEY-----\n", { mode: 0o600 });

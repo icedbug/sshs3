@@ -538,7 +538,8 @@ export function createHub(
         return {
           memories: getDemoMemories(),
           activityLog: getDemoActivityLog(),
-          actor: "jacob",
+          // The person signed in, not a name from the example data.
+          actor: options?.defaultActorName?.trim() || "you",
         };
       }
       return { memories: [], activityLog: [] };

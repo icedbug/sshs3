@@ -24,6 +24,8 @@ export class SimWorld {
   /** The shells that were opened, for what was run in them. */
   readonly shells: SimShell[] = [];
   private offset = 0;
+  /** Set while a scenario builds its servers: see `SimHost.settingUp`. */
+  building = false;
 
   constructor(private readonly base: () => number = Date.now) {}
 
@@ -37,6 +39,7 @@ export class SimWorld {
 
   addHost(init: SimHostInit, ...aliases: string[]): SimHost {
     const host = new SimHost(init, this.now);
+    host.settingUp = this.building;
     this.hosts.set(init.name.toLowerCase(), host);
     for (const alias of [init.address, ...aliases]) if (alias) this.aliases.set(alias.toLowerCase(), init.name.toLowerCase());
     this.names.set(init.name.toLowerCase(), init.address);

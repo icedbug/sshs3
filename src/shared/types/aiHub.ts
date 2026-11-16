@@ -1694,6 +1694,8 @@ export interface HubReply {
    * rewritten. Absent when the request was saved as it was sent.
    */
   notes?: string[];
+  /** Whether the model answered when it was asked (`ai-probe`): what to tell the person, and the models it offers. */
+  probe?: { ok: boolean; detail: string; models?: string[] };
 }
 export interface TerminalCommandFailure {
   sessionId: string;
@@ -1985,6 +1987,10 @@ export type HubRequest =
     }
   | { action: "ticket-move"; id: string; status: WorkTicketStatus }
   | { action: "ticket-delete"; id: string }
+  /** Brings back a ticket that was removed: the way a removal is undone. */
+  | { action: "ticket-restore"; id: string }
+  /** What the person who did the work reports on a ticket: kept as its result. */
+  | { action: "ticket-result"; id: string; result: string }
   | { action: "ticket-comment"; id: string; text: string }
   /** Claims the ticket and runs its agent on it now. */
   | { action: "ticket-start"; id: string; sessionId?: string }
@@ -2209,6 +2215,13 @@ export type HubRequest =
       };
     }
   | { action: "schedule-delete"; id: string }
+  /** Runs a scheduled job now, once, without moving its schedule. */
+  | { action: "schedule-run-now"; id: string }
+  /**
+   * Asks the model that is set up whether it answers: nothing is saved. With
+   * `baseUrl`, asks that address instead (to check one before choosing it).
+   */
+  | { action: "ai-probe"; baseUrl?: string }
   /**
    * Asks to run sshs3 with demo mode on/off. Demo mode never changes inside a running process: the
    * desktop app confirms with the user and relaunches itself; the web server refuses (set at server start).

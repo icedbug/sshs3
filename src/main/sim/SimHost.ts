@@ -133,6 +133,19 @@ export class SimHost {
    * moves on a timer, so the same commands always lead to the same state.
    */
   readonly laws: ((host: SimHost) => void)[] = [];
+  /**
+   * Programs of the server's own that can be run by their path: a script a
+   * scenario put there. What the script does is played by the function.
+   */
+  readonly programs = new Map<string, (ctx: never, args: string[]) => { out: string; err: string; code: number }>();
+  /**
+   * While a scenario is putting the server together, a file written without a
+   * time of its own is as old as the server, not from this minute: nobody
+   * looking at `ls -l` should think the whole machine was edited just now.
+   */
+  settingUp = false;
+  /** When set, only these commands exist here: an appliance with a command line of its own. */
+  only?: { commands: Set<string>; unknown: (name: string) => string };
   /** Extra processes beside the services', for `ps`. */
   processes: { pid: number; user: string; cpu: number; mem: number; command: string }[] = [];
   private nextPid = 2000;
@@ -186,7 +199,7 @@ export class SimHost {
       pad: extra.pad ?? 0,
       mode: extra.mode ?? had?.mode ?? 0o644,
       owner: extra.owner ?? had?.owner ?? "root",
-      mtime: extra.mtime ?? this.now(),
+      mtime: extra.mtime ?? (this.settingUp ? this.bootAt - 19 * 86_400_000 : this.now()),
     };
     this.files.set(p, file);
     return file;

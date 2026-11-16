@@ -65,7 +65,8 @@ const aws: SimCommand = (ctx, args) => {
   if (rest[0] !== "s3") throw new NotSimulated(`aws ${rest[0] ?? ""}`);
   const url = values.get("endpoint-url") ?? endpointOf(ctx.host);
   const why = ctx.shell.world ? endpointProblem(ctx.shell.world, url) : "no network";
-  if (why) return fail(`\n${why}\n`, 255);
+  // A listing names the endpoint it could not reach, not an object under it.
+  if (why) return fail(`\n${rest[1] === "ls" ? why.replace(`/pg-wal-archive/${HOST}/`, "/") : why}\n`, 255);
   if (rest[1] === "ls") return ok(`                           PRE ${HOST}/\n`);
   if (rest[1] === "cp") return ok(`upload: ${rest[2] ?? ""} to ${rest[3] ?? ""}\n`);
   throw new NotSimulated(`aws s3 ${rest[1] ?? ""}`);
@@ -137,6 +138,12 @@ function build(world: SimWorld): void {
     ].join("\n"),
     { mode: 0o755 },
   );
+  // The script can be run by hand, as PostgreSQL runs it: it gets one segment to the archive, or says why not.
+  host.programs.set(SCRIPT, ((_ctx: unknown, args: string[]) => {
+    if (args.length < 2) return fail(`${SCRIPT}: 2: $2: parameter not set\n`, 2);
+    const why = endpointProblem(world, endpointOf(host));
+    return why ? fail(`\n${why}\n`, 1) : ok();
+  }) as never);
   host.write(ENV_FILE, `# Where the WAL archive is. Read by ${SCRIPT} every time it runs.\nWAL_S3_ENDPOINT=https://${OLD_GATEWAY}:8082\nWAL_S3_BUCKET=pg-wal-archive\n`, { mode: 0o644 });
 
   // The backlog: every segment since the gateway went away.
@@ -168,8 +175,11 @@ function build(world: SimWorld): void {
     ].join("\n"),
     { owner: "postgres", mode: 0o640 },
   );
-  host.log("postgresql", "archive command failed with exit code 1", 4, world.now() - 2 * 3_600_000);
-  host.log("postgresql", `archiving write-ahead log file "${first}" failed too many times, will try again later`, 4, world.now() - 2 * 3_600_000);
+  // It has failed, and said so, ever since: the journal has it at every retry.
+  for (const hoursAgo of [26, 25.9, 25.8, 20, 14, 8, 2, 1, 0.1]) {
+    host.log("postgresql", "archive command failed with exit code 1", 4, world.now() - hoursAgo * 3_600_000);
+    host.log("postgresql", `archiving write-ahead log file "${first}" failed too many times, will try again later`, 4, world.now() - hoursAgo * 3_600_000);
+  }
 
   applyPgConf(host);
   const state = pg(host);
@@ -206,7 +216,7 @@ export const pgWalFull: SimScenario = {
   },
   chat: [
     { channel: "ops", minutesAgo: 27 * 60, author: "Erik", text: `Heads up: the old StorageGRID gateway ${OLD_GATEWAY} is being decommissioned tonight. Everything that talks S3 to StorageGRID should use ${NEW_ENDPOINT} from now on.` },
-    { channel: "ops", minutesAgo: 27 * 60 - 12, author: "Sara", text: "ok, the backup jobs on the app servers are moved over. did anyone check the postgres hosts?", replyTo: 0 },
+    { channel: "ops", minutesAgo: 27 * 60 - 12, author: "Sara", text: `ok, the backup jobs on the app servers are moved over. did anyone check ${HOST} and db02? their WAL archive goes through that gateway too`, replyTo: 0 },
     { channel: "ops", minutesAgo: 26 * 60, author: "Erik", text: `${OLD_GATEWAY} is powered off and removed from DNS.`, replyTo: 0 },
     { channel: "ops", minutesAgo: 9 * 60, author: "Linnea", text: "web-01 deploy went fine, nothing else from me tonight" },
   ],

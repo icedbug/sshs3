@@ -28,7 +28,10 @@ export function emptyLab(clock?: () => number): SimWorld {
 /** Puts a scenario's servers in a new lab, with its fault in them. The lab that was there is gone. */
 export function startScenario(scenario: SimScenario, clock?: () => number): SimWorld {
   const world = emptyLab(clock);
+  world.building = true;
   scenario.build(world);
+  world.building = false;
+  for (const host of world.hosts.values()) host.settingUp = false;
   setSimWorld(world);
   running = scenario;
   return world;

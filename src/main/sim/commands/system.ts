@@ -467,6 +467,16 @@ function systemctl(ctx: SimContext, args: string[]): SimResult {
     );
   }
 
+  if (verb === "list-timers") {
+    const at = (ms: number): string => new Date(ms).toISOString().slice(0, 19).replace("T", " ");
+    const now = host.now();
+    const timers: [string, number, number][] = [
+      ["apt-daily.timer", now + 5 * 3_600_000, now - 19 * 3_600_000],
+      ["logrotate.timer", now + 14 * 3_600_000, now - 10 * 3_600_000],
+      ...(host.packages.certbot && !host.read("/etc/cron.d/certbot") ? ([["certbot.timer", now + 7 * 3_600_000, now - 5 * 3_600_000]] as [string, number, number][]) : []),
+    ];
+    return ok(lines(["NEXT                        LAST                        UNIT              ACTIVATES", ...timers.map(([unit, next, last]) => `${at(next)} UTC     ${at(last)} UTC     ${unit.padEnd(17)} ${unit.replace(".timer", ".service")}`), "", `${timers.length} timers listed.`, "Pass --all to see loaded but inactive timers, too."]));
+  }
   if (verb === "list-unit-files") {
     const types = (values.get("type") ?? values.get("t"))?.split(",");
     const states = values.get("state")?.split(",");
@@ -2355,7 +2365,7 @@ export const systemCommands: Record<string, SimCommand> = {
   umask: (ctx, args) => (args.length ? ok() : ok(ctx.root ? "0022\n" : "0002\n")),
   ulimit,
   sleep: nothing,
-  clear: nothing,
+  clear: () => ok("\u001b[H\u001b[2J\u001b[3J"),
   history,
   exit: nothing,
   logout: nothing,

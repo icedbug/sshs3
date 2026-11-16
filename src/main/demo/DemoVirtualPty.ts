@@ -558,6 +558,7 @@ export class DemoVirtualPty implements IPty {
 
   private getPrompt(): string {
     const sim = simWorld().host(this.config.name, this.config.host, this.config.id);
+    if (sim && sim.kind === 'ontap') return `${sim.name}::> `;
     if (sim && sim.kind === 'linux') {
       const cwd = this.simShell?.host === sim ? this.simShell.cwd : `/home/${sim.user}`;
       return `\x1b[1;32m${sim.user}@${sim.name}\x1b[0m:\x1b[1;34m${cwd === `/home/${sim.user}` ? '~' : cwd}\x1b[0m$ `;
@@ -588,6 +589,18 @@ export class DemoVirtualPty implements IPty {
     const isOntap = h.includes('netapp') || h.includes('aff-') || h.includes('fas9000');
     const isSg = h.includes('sg-') || h.includes('storagegrid') || h.includes('minio');
     const isCeph = h.includes('ceph') || h.includes('truenas');
+
+    // A server of a running scenario greets as that kind of machine does, and promises nothing it cannot do.
+    const sim = simWorld().host(this.config.name, this.config.host, this.config.id);
+    if (sim) {
+      const greeting = sim.facts.get('motd');
+      const text =
+        typeof greeting === 'string'
+          ? greeting
+          : `Welcome to ${sim.os.pretty} (GNU/Linux ${sim.kernel} x86_64)\n\n  System information as of ${new Date(sim.now()).toUTCString()}\n\nLast login: ${new Date(sim.now() - 19 * 3_600_000).toUTCString().slice(0, 25)} from 10.30.5.14`;
+      this.emitData(`${text.replace(/\r?\n/g, '\r\n')}\r\n${this.getPrompt()}`);
+      return;
+    }
 
     const lines: string[] = [
       '\x1b[1;36m================================================================================\x1b[0m',

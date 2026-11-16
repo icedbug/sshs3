@@ -265,6 +265,7 @@ export function routeAlert(
   target: string | undefined,
   rules: AlertRule[],
   agents: MissionAgent[],
+  servers: Pick<WorkspaceServerSummary, "name" | "host" | "cluster">[] = [],
 ): MissionAgent | undefined {
   const active = agents.filter((a) => a.enabled !== false);
   for (const rule of rules) {
@@ -272,7 +273,10 @@ export function routeAlert(
     const agent = active.find((a) => a.id === rule.agentId);
     if (agent) return agent;
   }
-  const bound = target && active.find((a) => a.targetCluster && a.targetCluster.toLowerCase() === target.toLowerCase());
+  // The alert names a server more often than a cluster: the agent bound to that server's cluster is the one.
+  const about = target?.toLowerCase();
+  const cluster = about ? servers.find((x) => x.name.toLowerCase() === about || x.host.toLowerCase() === about)?.cluster?.toLowerCase() : undefined;
+  const bound = about && active.find((a) => a.targetCluster && [about, cluster].includes(a.targetCluster.toLowerCase()));
   if (bound) return bound;
   const lead = active.find((a) => agents.some((b) => b.reportsTo === a.id));
   if (lead) return lead;

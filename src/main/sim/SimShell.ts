@@ -47,7 +47,7 @@ const isOp = (t: Token | undefined): t is { op: string } => Boolean(t && "op" in
 const OPERATORS = ["2>&1", "&>>", "&>", "2>>", "2>", ">>", "&&", "||", ">", "<", "|", ";"];
 
 /** What the simulation does not do, said once so every refusal reads the same. */
-const NOT_A_SCRIPT = "this simulated shell runs commands, not scripts: no loops, no $( ), no backticks. Run the commands one at a time";
+const NOT_A_SCRIPT = "this simulated shell runs commands and one-line for loops, not scripts: no while, if or functions. Run the commands one at a time";
 
 function tokenize(line: string, vars: Record<string, string>): Token[] | string {
   const tokens: Token[] = [];
@@ -216,6 +216,18 @@ export class SimShell {
 
   /** A line as a command runs it: also what `sudo sh -c '…'` and `bash -c '…'` come down to. */
   exec(line: string, opts: { root: boolean; stdin: string }): SimResult {
+    // for x in a b; do …; done, on one line: each round is the body with the name filled in.
+    const loop = /^\s*for\s+([A-Za-z_]\w*)\s+in\s+([^;]*?)\s*;\s*do\s+([\s\S]*?)\s*;?\s*done\s*$/.exec(line);
+    if (loop) {
+      const listed = this.substitute(loop[2], opts);
+      if (typeof listed !== "string") return listed;
+      const items = listed.split(/\s+/).filter(Boolean).flatMap((w) => (/[*?[]/.test(w) ? this.expand(w) : [w.replace(/^(["'])(.*)\1$/, "$2")]));
+      const rounds: SimResult[] = items.slice(0, 200).map((item) => this.exec(loop[3].replace(new RegExp(`\\$(?:\\{${loop[1]}\\}|${loop[1]}\\b)`, "g"), item), opts));
+      return { out: rounds.map((r) => r.out).join(""), err: rounds.map((r) => r.err).join(""), code: rounds.length ? rounds[rounds.length - 1].code : 0 };
+    }
+    const filled = this.substitute(line, opts);
+    if (typeof filled !== "string") return filled;
+    line = filled;
     const tokens = tokenize(line, {
       "?": String(this.lastCode),
       HOME: this.home(),
@@ -247,6 +259,60 @@ export class SimShell {
       start = i + 1;
     }
     return { out: out.join(""), err: err.join(""), code };
+  }
+
+  /**
+   * `$(command)` and backticks: the command's output in its place, as the
+   * shell does before it reads the line. Not inside single quotes.
+   */
+  private substitute(line: string, opts: { root: boolean; stdin: string }, depth = 0): string | SimResult {
+    if (!line.includes("$(") && !line.includes("`")) return line;
+    if (depth > 8) return fail("bash: command substitution: too deep\n", 2);
+    let out = "";
+    let quote = "";
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (quote === "'") {
+        out += ch;
+        if (ch === "'") quote = "";
+        continue;
+      }
+      if (ch === "\\") {
+        out += ch + (line[i + 1] ?? "");
+        i++;
+        continue;
+      }
+      if (ch === "'" && !quote) quote = "'";
+      else if (ch === '"') quote = quote ? "" : '"';
+      let inner: string | undefined;
+      let end = -1;
+      if (ch === "$" && line[i + 1] === "(" && line[i + 2] !== "(") {
+        let level = 0;
+        for (let j = i + 1; j < line.length; j++) {
+          if (line[j] === "(") level++;
+          else if (line[j] === ")" && --level === 0) {
+            end = j;
+            break;
+          }
+        }
+        if (end < 0) return fail("bash: unexpected EOF while looking for matching `)'\n", 2);
+        inner = line.slice(i + 2, end);
+      } else if (ch === "`") {
+        end = line.indexOf("`", i + 1);
+        if (end < 0) return fail("bash: unexpected EOF while looking for matching ``'\n", 2);
+        inner = line.slice(i + 1, end);
+      }
+      if (inner === undefined) {
+        out += ch;
+        continue;
+      }
+      const ran = this.exec(inner, { root: opts.root, stdin: "" });
+      const text = ran.out.replace(/\n+$/, "");
+      // Inside double quotes it stays one word as it is; outside, its lines become words. Quotes in it are text.
+      out += (quote === '"' ? text : text.replace(/\s+/g, " ")).replace(/[\\"'$`]/g, "\\$&");
+      i = end;
+    }
+    return out;
   }
 
   private pipeline(tokens: Token[], opts: { root: boolean; stdin: string }): SimResult {
@@ -404,6 +470,32 @@ export class SimShell {
       if (!this.host.isDir(target)) return fail(`bash: cd: ${argv[1]}: No such file or directory\n`, 1);
       this.cwd = target;
       return ok();
+    }
+    if (this.host.only && !this.host.only.commands.has(name)) {
+      this.unsupported.push(argv.join(" "));
+      return fail(`${this.host.only.unknown(name)}\n`, 1);
+    }
+    if (name.includes("/") || ((name === "sh" || name === "bash") && argv[1] && !argv[1].startsWith("-"))) {
+      const viaShell = !name.includes("/");
+      const path = normalizePath(viaShell ? argv[1] : name, this.cwd);
+      const file = this.host.read(path);
+      const program = this.host.programs.get(path) as SimCommand | undefined;
+      if (file && !viaShell && !(file.mode & 0o111)) return fail(`bash: ${name}: Permission denied\n`, 126);
+      if (file && !this.mayRead(path, opts.root)) return fail(`bash: ${viaShell ? argv[1] : name}: Permission denied\n`, 126);
+      if (program && file) {
+        try {
+          return program(ctx, argv.slice(viaShell ? 2 : 1));
+        } catch (error) {
+          this.unsupported.push(argv.join(" "));
+          return fail(`${name}: ${error instanceof Error ? error.message : String(error)}\n`, 2);
+        }
+      }
+      if (file || viaShell) {
+        this.unsupported.push(argv.join(" "));
+        return file ? fail(`bash: ${viaShell ? argv[1] : name}: running this script is not part of this simulation (read it with cat, and run what it runs)\n`, 126) : fail(`${name}: ${argv[1]}: No such file or directory\n`, 127);
+      }
+      // A program named by its path is one of the system's own only where those live.
+      if (!this.commands.has(basename(name)) || !/^\/(usr\/(local\/)?)?s?bin$/.test(dirname(path))) return fail(`bash: ${name}: No such file or directory\n`, 127);
     }
     const command = this.commands.get(name.includes("/") ? basename(name) : name);
     if (!command) {

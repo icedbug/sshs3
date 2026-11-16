@@ -32,6 +32,8 @@ interface Ceph {
   full: number;
   /** Set while an upgrade is under way: asked to be left alone. */
   flags: string[];
+  /** How far the balancer has got with evening the data out, 0 to 1: it moves data, and that takes a while. */
+  evened: number;
 }
 const ceph = (host: SimHost): Ceph => host.facts.get("ceph") as Ceph;
 const OSD_BYTES = 7.3 * 1024 * GB;
@@ -45,8 +47,12 @@ export function utilisation(state: Ceph): Map<number, number> {
     if (!o.in) out.set(o.id, 0);
     // Evened out, every disk carries the same share; left alone, each keeps what landed on it, and what
     // was on a disk taken out is spread over the rest.
-    else if (state.balancer.active) out.set(o.id, total / inOsds.length);
-    else out.set(o.id, o.skew + (total - inOsds.reduce((sum, x) => sum + x.skew, 0)) / inOsds.length);
+    else {
+      const uneven = o.skew + (total - inOsds.reduce((sum, x) => sum + x.skew, 0)) / inOsds.length;
+      // Evened out, never to the last object: each disk ends a little off the mean.
+      const even = total / inOsds.length + ((o.id * 37) % 5 - 2) * 0.004;
+      out.set(o.id, uneven + (even - uneven) * state.evened);
+    }
   }
   return out;
 }
@@ -60,6 +66,7 @@ const health = (state: Ceph): { status: string; checks: string[] } => {
   if (full.length) checks.push(`[ERR] OSD_FULL: ${full.length} full osd(s)\n${full.map((o) => `    osd.${o.id} is full`).join("\n")}`);
   if (near.length) checks.push(`[WRN] OSD_NEARFULL: ${near.length} nearfull osd(s)\n${near.map((o) => `    osd.${o.id} is near full`).join("\n")}`);
   if (near.length || full.length) checks.push(`[WRN] POOL_NEARFULL: 2 pool(s) nearfull\n    pool 'rbd-prod' is nearfull\n    pool 'cephfs_data' is nearfull`);
+  if (state.evened > 0 && state.evened < 1) checks.push(`[WRN] OBJECT_MISPLACED: ${Math.round((1 - state.evened) * 412_000)}/2410000 objects misplaced (${((1 - state.evened) * 17.1).toFixed(3)}%)`);
   if (out.length) checks.push(`[WRN] OSD_OUT: ${out.length} osd(s) marked out\n${out.map((o) => `    osd.${o.id} is out`).join("\n")}`);
   return { status: full.length ? "HEALTH_ERR" : checks.length ? "HEALTH_WARN" : "HEALTH_OK", checks };
 };
@@ -94,7 +101,7 @@ const cephCommand: SimCommand = (ctx, args) => {
         "  data:",
         "    pools:   3 pools, 289 pgs",
         `    usage:   ${size(usedAll)} used, ${size(sizeAll - usedAll)} / ${size(sizeAll)} avail`,
-        "    pgs:     289 active+clean",
+        ...(state.evened > 0 && state.evened < 1 ? [`    pgs:     ${Math.round((1 - state.evened) * 412_000)}/2410000 objects misplaced (${((1 - state.evened) * 17.1).toFixed(3)}%)`, `             ${289 - Math.ceil((1 - state.evened) * 40)} active+clean`, `             ${Math.ceil((1 - state.evened) * 40)} active+remapped+backfilling`, "", "  io:", "    recovery: 412 MiB/s, 105 objects/s"] : ["    pgs:     289 active+clean"]),
         "",
       ]),
     );
@@ -112,7 +119,7 @@ const cephCommand: SimCommand = (ctx, args) => {
     return ok(lines(["ID  CLASS  WEIGHT    TYPE NAME             STATUS  REWEIGHT  PRI-AFF", "-1         43.66434  root default", ...hosts.flatMap((name, i) => [`-${i + 3}         14.55478      host ${name}`, ...state.osds.filter((o) => o.host === name).map((o) => ` ${o.id}    ssd   7.27739          osd.${o.id}           up   ${o.in ? "1.00000" : "      0"}  1.00000`)]), ""]));
   }
   if (what === "osd dump") return ok(lines(["epoch 4812", `full_ratio ${state.full}`, "backfillfull_ratio 0.9", `nearfull_ratio ${state.nearfull}`, `flags ${["sortbitwise", "recovery_deletes", "purged_snapdirs", "pglog_hardlimit", ...state.flags].join(",")}`, ...state.osds.map((o) => `osd.${o.id} up ${o.in ? "in " : "out"} weight ${o.in ? 1 : 0}`), ""]));
-  if (what === "balancer status") return ok(`${JSON.stringify({ active: state.balancer.active, last_optimize_duration: "0:00:00.001204", last_optimize_started: new Date(host.now() - (state.balancer.active ? 60_000 : 14 * 86_400_000)).toUTCString(), mode: state.balancer.mode, no_optimization_needed: state.balancer.active, optimize_result: state.balancer.active ? "Optimization plan created successfully" : "", plans: [] }, null, 4)}\n`);
+  if (what === "balancer status") return ok(`${JSON.stringify({ active: state.balancer.active, last_optimize_duration: "0:00:00.001204", last_optimize_started: new Date(host.now() - (state.balancer.active ? 60_000 : 14 * 86_400_000)).toUTCString(), mode: state.balancer.mode, no_optimization_needed: state.balancer.active && state.evened >= 1, optimize_result: state.balancer.active ? "Optimization plan created successfully" : "", plans: [] }, null, 4)}\n`);
   if (what === "balancer on" || what === "balancer off") {
     state.balancer.active = what.endsWith("on");
     if (state.balancer.active) host.log("ceph-mgr", "balancer: enabled, mode upmap: evening out placement groups");
@@ -158,11 +165,17 @@ function build(world: SimWorld): void {
   host.write("/etc/ceph/ceph.client.admin.keyring", "[client.admin]\n\tkey = (simulated)\n", { mode: 0o600 });
   host.write("/root/upgrade-18.2.4-notes.txt", "Upgrade to 18.2.4, steps:\n 1. ceph balancer off\n 2. ceph osd set noout\n 3. upgrade one host at a time\n 4. ceph osd unset noout\n 5. ceph balancer on   <-- not done, got paged about the shop\n", { mode: 0o600 });
   host.addService({ name: "ssh", description: "OpenBSD Secure Shell server", ports: [{ proto: "tcp", port: 22 }], command: "sshd: /usr/sbin/sshd -D" });
+  // The balancer moves data a step at a time: each look at the cluster finds it further along.
+  host.laws.push((h) => {
+    const state = ceph(h);
+    if (state.balancer.active && state.balancer.mode !== "none") state.evened = Math.min(1, Math.round((state.evened + 0.34) * 100) / 100);
+  });
   host.facts.set("ceph", {
     balancer: { active: false, mode: "upmap" },
     nearfull: 0.85,
     full: 0.95,
     flags: [],
+    evened: 0,
     osds: [
       { id: 0, host: "ceph-osd-01", skew: 0.66, in: true },
       { id: 1, host: "ceph-osd-01", skew: 0.7, in: true },
@@ -181,7 +194,7 @@ export const cephNearfull: SimScenario = {
     "The balancer was switched off for an upgrade two weeks ago and never switched on again. Data has landed unevenly since: osd.4 is 87% full while the cluster is 71% full. The fix is to switch the balancer on. The trap: raising the nearfull mark hides the warning while the disk keeps filling, and taking the disk out pushes every other disk to the mark.",
   prompt: `An alert says the Ceph cluster is in HEALTH_WARN with a nearfull OSD. Work from ${HOST}. Find out why, fix the cause, and report what you did.`,
   target: HOST,
-  servers: [{ id: "demo-ssh-ceph-admin-01", name: HOST, host: "10.30.40.5", username: "ops", cluster: "Ceph-Prod", description: "Admin node of the Ceph cluster (18.2 Reef): 3 hosts, 6 OSDs, RBD for virtual machines and CephFS.", tags: ["prod", "ceph", "storage"] }],
+  servers: [{ id: "demo-ssh-ceph-admin-01", name: HOST, host: "10.30.40.5", username: "ops", cluster: "Ceph-NVMe-Block-Pool", description: "Admin node of the Ceph cluster (18.2 Reef): 3 hosts, 6 OSDs, RBD for virtual machines and CephFS.", tags: ["prod", "ceph", "storage"] }],
   build,
   alert: { name: "CephOsdNearFull", severity: "warning", summary: `Ceph is in HEALTH_WARN: 1 nearfull osd(s) (reported by ${HOST})`, description: "osd.4 on ceph-osd-03 is above the nearfull ratio (85%). Writes stop when an OSD reaches the full ratio (95%).", instance: "10.30.40.5:9283" },
   chat: [

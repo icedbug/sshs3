@@ -160,6 +160,7 @@ function query(host: SimHost, sql: string, world: SimWorld | undefined): string 
     const replica = world?.host("pg-prod-db02");
     return table(["client_addr", "state", "sync_state", "replay_lag"], replica ? [[replica.address, "streaming", "async", "00:00:02.114"]] : []);
   }
+  if (low.includes("pg_replication_slots")) return table(["slot_name", "slot_type", "active", "wal_status"], world?.host("pg-prod-db02") ? [["db02_slot", "physical", "t", "reserved"]] : []);
   if (low.includes("pg_is_in_recovery")) return table(["pg_is_in_recovery"], [["f"]]);
   if (low.includes("pg_reload_conf")) {
     applyPgConf(host);

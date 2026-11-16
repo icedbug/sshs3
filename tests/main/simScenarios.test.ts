@@ -102,4 +102,43 @@ describe("the database server's disk", () => {
     expect(sh.run("cat < /etc/secret")).toMatchObject({ code: 1, output: "bash: /etc/secret: Permission denied\n" });
     expect(sh.run("echo x > /tmp/probe && cat /tmp/probe").output).toBe("x\n");
   });
+
+  it("behaves like the machines it stands for where testers said it did not", () => {
+    const pgw = startScenario(SCENARIOS.find((x) => x.id === "pg-wal-full")!, () => NOW);
+    const sh = pgw.shell(pgw.host("pg-prod-db01")!);
+    // A file the scenario put there is old, not from this minute: nobody edited it today.
+    expect(sh.run("find /etc/default/wal-archive -mmin -600").output).toBe("");
+    // $( ), backticks and a one-line loop.
+    expect(sh.run('echo "on $(hostname) as `whoami`"').output).toBe("on pg-prod-db01 as ops\n");
+    expect(sh.run("for h in sg-gw-01.acme.internal s3.storagegrid.acme.internal; do getent hosts $h || echo no $h; done").output).toContain("no sg-gw-01.acme.internal");
+    expect(sh.run("sudo cp /etc/default/wal-archive /root/wal-archive.$(date +%s) && sudo ls /root").output).toMatch(/wal-archive\.\d+/);
+    // The archive script can be run by hand, and fails the way PostgreSQL sees it fail.
+    const byHand = sh.run("sudo -u postgres /usr/local/bin/wal-archive.sh pg_wal/x x");
+    expect(byHand).toMatchObject({ code: 1 });
+    expect(byHand.output).toContain("Could not resolve host: sg-gw-01.acme.internal");
+    expect(sh.run("/etc/hostname").output).toContain("No such file or directory");
+    expect(sh.run('sudo -u postgres psql -c "select slot_name, active from pg_replication_slots"').output).toContain("db02_slot");
+    expect(sh.run("journalctl -u postgresql --no-pager | grep -c 'archive command failed'").output.trim()).toBe("9");
+
+    const ontap = startScenario(SCENARIOS.find((x) => x.id === "ontap-noisy-neighbour")!, () => NOW);
+    const filer = ontap.shell(ontap.host("netapp-prod-cl01")!);
+    expect(filer.run("ls /").output).toBe('Error: "ls" is not a recognized command\n');
+    expect(filer.run("?").output).toContain("storage>");
+    expect(filer.run("storage aggregate show").output).toContain("aggr1_nvme_prod");
+    expect(filer.run("job show").code).toBe(0);
+    expect(filer.run("qos policy-group show -policy-group pg-nonprod-capped").output).not.toContain("pg-prod-gold");
+    const latency = filer.run("qos statistics volume latency show").output.split("\n").filter((l) => l.includes("-wid"));
+    // Not one number repeated down every column.
+    expect(new Set(latency.map((l) => l.split(/\s+/)[3])).size).toBeGreaterThan(1);
+
+    const cephw = startScenario(SCENARIOS.find((x) => x.id === "ceph-nearfull")!, () => NOW);
+    const admin = cephw.shell(cephw.host("ceph-admin-01")!);
+    admin.run("sudo ceph balancer on");
+    // Evening out takes a while and shows as data on the move, and never ends at one number for every disk.
+    expect(admin.run("sudo ceph -s").output).toContain("objects misplaced");
+    admin.run("sudo ceph health");
+    const df = admin.run("sudo ceph osd df").output;
+    expect(admin.run("sudo ceph health").output).toBe("HEALTH_OK\n");
+    expect(new Set(df.split("\n").filter((l) => /osd\.\d/.test(l)).map((l) => l.split(/\s+/).filter(Boolean)[10])).size).toBeGreaterThan(1);
+  });
 });

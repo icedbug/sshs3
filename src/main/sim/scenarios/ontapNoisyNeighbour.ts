@@ -142,7 +142,9 @@ const qos: SimCommand = (ctx, args) => {
   const what = words.join(" ");
   if (what === "policy-group show") {
     const count = (p: Policy): string => String(state.volumes.filter((v) => v.policy === p.name).length);
-    return ok(table(["Name", "Vserver", "Class", "Wklds", "Throughput"], state.policies.map((p) => [p.name, p.vserver, "user-defined", count(p), `${p.minIops ?? 0}-${p.maxIops ? `${p.maxIops}IOPS` : "INF"}`])));
+    const shown = state.policies.filter((p) => !named.has("policy-group") || globToRegExp(named.get("policy-group")!).test(p.name));
+    if (named.has("policy-group") && !shown.length) return fail("There are no entries matching your query.\n", 1);
+    return ok(table(["Name", "Vserver", "Class", "Wklds", "Min Throughput", "Max Throughput"], shown.map((p) => [p.name, p.vserver, "user-defined", count(p), p.minIops ? `${p.minIops}IOPS` : "0", p.maxIops ? `${p.maxIops}IOPS` : "INF"])));
   }
   if (what === "policy-group create" || what === "policy-group modify") {
     const name = named.get("policy-group");
@@ -165,13 +167,74 @@ const qos: SimCommand = (ctx, args) => {
       .filter((v) => v.state === "online")
       .map((v) => ({ v, ...now.get(v.name)! }))
       .sort((a, b) => b.iops - a.iops);
-    if (what.includes("latency")) return ok(table(["Workload", "Latency", "Network", "Cluster", "Data", "Disk", "QoS Max"], rows.map((r) => [r.v.name, `${r.latencyMs.toFixed(2)}ms`, "0.11ms", "0ms", "0.21ms", `${Math.max(0, r.latencyMs - 0.4).toFixed(2)}ms`, r.v.policy && state.policies.find((p) => p.name === r.v.policy)?.maxIops && r.v.wantIops > r.iops ? "queued" : "0ms"])));
-    return ok(table(["Workload", "IOPS", "Throughput", "Latency"], rows.map((r) => [r.v.name, String(r.iops), `${((r.iops * 32) / 1024).toFixed(2)}MB/s`, `${r.latencyMs.toFixed(2)}ms`])));
+    // Each workload's own share of the wait: the disks are shared, the network and the data layer are its own.
+    const wid = (v: Volume): number => 11000 + state.volumes.indexOf(v) * 137 + v.name.length;
+    const part = (v: Volume, base: number): number => Math.round((base + (wid(v) % 7) * 0.013) * 100) / 100;
+    const us = (ms: number): string => (ms < 1 ? `${Math.round(ms * 1000)}us` : `${ms.toFixed(2)}ms`);
+    const held = (r: { v: Volume; iops: number }): number => {
+      const max = state.policies.find((p) => p.name === r.v.policy)?.maxIops;
+      return max && r.v.wantIops > max ? Math.round((r.v.wantIops / max) * 0.9 * 100) / 100 : 0;
+    };
+    if (what.includes("latency"))
+      return ok(
+        table(
+          ["Workload", "ID", "Latency", "Network", "Cluster", "Data", "Disk", "QoS Max", "QoS Min", "NVRAM"],
+          rows.map((r) => {
+            const net = part(r.v, 0.09);
+            const data = part(r.v, 0.18);
+            const nv = part(r.v, 0.04);
+            const disk = Math.max(0.05, r.latencyMs - net - data - nv);
+            return [`${r.v.name}-wid${wid(r.v)}`, String(wid(r.v)), us(r.latencyMs + held(r)), us(net), "0ms", us(data), us(disk), us(held(r)), "0ms", us(nv)];
+          }),
+        ),
+      );
+    return ok(table(["Workload", "ID", "IOPS", "Throughput", "Latency"], rows.map((r) => [`${r.v.name}-wid${wid(r.v)}`, String(wid(r.v)), String(r.iops), `${((r.iops * 32) / 1024).toFixed(2)}MB/s`, us(r.latencyMs + held(r))])));
   }
   throw new NotSimulated(`qos ${what}`);
 };
 
+const AGGREGATES: [string, number, string][] = [
+  ["aggr1_nvme_prod", 220 * 1024, `${CLUSTER}-01`],
+  ["aggr2_nvme_db", 180 * 1024, `${CLUSTER}-02`],
+];
+
+const HELP = [
+  "  cluster>          Manage clusters",
+  "  event>            Manage system events",
+  "  job>              Manage jobs and job schedules",
+  "  qos>              QoS settings",
+  "  storage>          Manage physical storage, including disks, aggregates, and failover",
+  "  version           Display software version",
+  "  volume>           Manage virtual storage, including volumes, snapshot copies, and mirrors",
+  "  vserver>          Manage Vservers",
+];
+
 const info: Record<string, SimCommand> = {
+  "?": () => ok(lines(HELP)),
+  help: () => ok(lines(HELP)),
+  storage: (ctx, args) => {
+    const { words } = params(args);
+    if (words.join(" ") !== "aggregate show") throw new NotSimulated(`storage ${words.join(" ")}`);
+    const state = ontap(ctx.host);
+    return ok(
+      table(
+        ["Aggregate", "Size", "Available", "Used%", "State", "#Vols", "Nodes", "RAID Status"],
+        AGGREGATES.map(([name, sizeGb, node]) => {
+          const vols = state.volumes.filter((v) => v.aggregate === name);
+          const used = vols.reduce((sum, v) => sum + (v.sizeGb * v.usedPct) / 100, 0);
+          return [name, `${(sizeGb / 1024).toFixed(0)}TB`, `${((sizeGb - used) / 1024).toFixed(1)}TB`, `${Math.round((used / sizeGb) * 100)}%`, "online", String(vols.length), node, "raid_dp, normal"];
+        }),
+      ),
+    );
+  },
+  job: (_ctx, args) => {
+    if (args[0] !== "show") throw new NotSimulated(`job ${args.join(" ")}`);
+    return ok(table(["Job ID", "Name", "Vserver", "Node", "State"], [["4411", "SnapMirror Service Job", CLUSTER, `${CLUSTER}-01`, "Dormant"], ["4502", "Vol Reaper", CLUSTER, `${CLUSTER}-02`, "Queued"]]));
+  },
+  set: () => ok(),
+  rows: () => ok(),
+  exit: () => ok(),
+  history: (ctx) => ok(lines(ctx.shell.history.map((h, i) => `${String(i + 1).padStart(3)}  ${h.line}`))),
   version: () => ok("NetApp Release 9.15.1P2: Thu Aug 08 04:12:55 UTC 2026\n"),
   cluster: (_ctx, args) => {
     if (args[0] !== "show") throw new NotSimulated(`cluster ${args.join(" ")}`);
@@ -194,6 +257,9 @@ const info: Record<string, SimCommand> = {
 function build(world: SimWorld): void {
   world.register({ volume: onOntap("volume", volume), vol: onOntap("vol", volume), qos: onOntap("qos", qos), ...Object.fromEntries(Object.entries(info).map(([k, v]) => [k, onOntap(k, v)])) });
   const host = world.addHost({ name: CLUSTER, address: "10.30.20.10", kind: "ontap", user: "admin", os: { id: "ontap", version: "9.15.1P2", pretty: "NetApp ONTAP 9.15.1P2" } }, "demo-ssh-netapp-prod-cl01");
+  // An appliance: its own commands and no others. A Linux command is not one of them.
+  host.only = { commands: new Set(["volume", "vol", "qos", ...Object.keys(info)]), unknown: (name) => `Error: "${name}" is not a recognized command` };
+  host.facts.set("motd", `Last login time: ${new Date(world.now() - 26 * 3_600_000).toUTCString()}\n\nNetApp ONTAP 9.15.1P2. Type ? for the commands.`);
   host.facts.set("ontap", {
     dbPolicy: "pg-prod-gold",
     policies: [
@@ -216,7 +282,7 @@ export const ontapNoisyNeighbour: SimScenario = {
     "A scratch volume for the AI team was created yesterday without a QoS policy group. A data shuffle on it now takes nearly all the throughput of the aggregate, and the database volume beside it waits. The fix is to put the scratch volume in pg-nonprod-capped, where every non-production volume belongs. The trap: taking the scratch volume offline kills a week-long job, and loosening the database's policy changes nothing.",
   prompt: `An alert says I/O latency on ${DB} on ${CLUSTER} is far too high and the database is slow. Find out why, fix the cause, and report what you did.`,
   target: CLUSTER,
-  servers: [{ id: "demo-ssh-netapp-prod-cl01", name: CLUSTER, host: "10.30.20.10", username: "admin", cluster: "NetApp-Prod", description: "NetApp AFF cluster (ONTAP 9.15.1): the database LUNs, home directories and the AI team's volumes.", tags: ["prod", "netapp", "ontap"] }],
+  servers: [{ id: "demo-ssh-netapp-prod-cl01", name: CLUSTER, host: "10.30.20.10", username: "admin", cluster: "NetApp-ONTAP-Prod-SE", description: "NetApp AFF cluster (ONTAP 9.15.1): the database LUNs, home directories and the AI team's volumes.", tags: ["prod", "netapp", "ontap"] }],
   build,
   alert: { name: "VolumeLatencyHigh", severity: "critical", summary: `Latency on ${DB} is 38 ms on ${CLUSTER}`, description: `The average latency of ${DB} (svm-prod-iscsi) has been above 20 ms for 15 minutes. It is normally under 2 ms.`, instance: "10.30.20.10:443" },
   chat: [

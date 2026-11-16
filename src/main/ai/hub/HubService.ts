@@ -1785,6 +1785,20 @@ export class HubService {
     };
   }
 
+  /** What a person did to the team's memory: in the audit log, and in the team's activity when asked. */
+  private async memoryDone(what: string, title: string, activity: boolean): Promise<void> {
+    const actor = await this.resolveActorName();
+    if (activity) {
+      const event: WorkspaceActivityEvent = { id: crypto.randomUUID(), at: Date.now(), actor, targetLabel: clip(title, 120), kind: "note", summary: what };
+      this.appendActivityEvent(event);
+      await this.host.recordWorkspaceActivity?.(event).catch(() => {});
+    }
+    if (isDemoMode()) return;
+    await this.audit()
+      .append({ kind: "setting", actor, target: "team memory", what, outcome: "completed" })
+      .catch((e) => log.warn("Could not write the audit log", safeError(e)));
+  }
+
   /** A change to what the bot reads or keeps is written down with who made it. */
   private async chatDone(done: { target: string; what: string }): Promise<void> {
     await this.audit()
@@ -1891,7 +1905,7 @@ export class HubService {
       return { run, done: Promise.resolve(run) };
     }
     if (!(await this.config.getConfig()).enabled)
-      throw new Error("Enable AI and configure a model in Hub settings first");
+      throw new Error("No model is set up. Switch the assistant on and choose a model in AI settings first.");
 
     let lead: AgentTask | undefined;
     if (opts.createTask) {
@@ -2291,7 +2305,7 @@ export class HubService {
         targetCluster: cluster,
         subTask: `Part for ${ag.name} (${cluster}): ${opts.prompt.slice(0, 140)}`,
         status: "completed",
-        findings: `Covered ${nodeNames}. ${kbHint}${skillHint}${edgeHint}`,
+        findings: `In scope, not checked: ${nodeNames}. ${kbHint}${skillHint}${edgeHint}`,
         recommendedCommands: recCmds,
       };
     });
@@ -2804,6 +2818,7 @@ export class HubService {
         const entry = request.entry;
         if (!["memory", "skill"].includes(entry.kind))
           throw new Error("Invalid memory type");
+        const memoryWasThere = Boolean(entry.id && this.store.data.memories.some((m) => m.id === entry.id));
         const scope = requiredText(entry.scope);
         if (
           scope !== "personal" &&
@@ -2833,6 +2848,7 @@ export class HubService {
           sourceCommand: entry.sourceCommand,
           confidence: entry.confidence,
         });
+        if (savedMemory.scope !== "personal") await this.memoryDone(`${memoryWasThere ? "Changed" : "Saved"} the team ${savedMemory.kind === "skill" ? "skill" : "memory"} "${clip(savedMemory.title, 120)}"`, savedMemory.title, !savedMemory.editedBy);
         // A teammate's memory changed by somebody else keeps its author, and the change is in the team's activity.
         if (savedMemory.editedBy && savedMemory.scope !== "personal") {
           const event: WorkspaceActivityEvent = {
@@ -2885,6 +2901,7 @@ export class HubService {
           await this.host.deleteWorkspaceMemory?.(id).catch(() => {});
         }
         this.s3Workspace.schedulePush(400);
+        if (target && target.scope !== "personal") await this.memoryDone(`Forgot the team ${target.kind === "skill" ? "skill" : "memory"} "${clip(target.title, 120)}"`, target.title, true);
         break;
       }
       case "memory-feedback": {
@@ -3574,6 +3591,19 @@ export class HubService {
         this.store.data.schedules.push(schedule);
         break;
       }
+      case "schedule-run-now": {
+        const schedule = this.store.data.schedules.find((x) => x.id === request.id);
+        if (!schedule) throw new Error("That job is not here any more.");
+        if (!schedule.enabled) throw new Error("This job is paused. Resume it first.");
+        if (schedule.lastTaskId && this.store.data.tasks.some((t) => t.id === schedule.lastTaskId && active(t))) throw new Error("Its last run is still going.");
+        // Once, now: when it next runs by itself stays as it was.
+        const task = await this.launchSchedule(schedule);
+        reply = task ? { started: { taskId: task.id }, notes: [`Started "${clip(schedule.title, 120)}".`] } : { notes: [schedule.lastStatus ?? "It could not be started."] };
+        break;
+      }
+      case "ai-probe":
+        reply = { probe: await this.probeModel(request.baseUrl?.trim() || undefined) };
+        break;
       case "schedule-delete":
         this.store.data.schedules = this.store.data.schedules.filter(
           (s) => s.id !== request.id,
@@ -3752,7 +3782,8 @@ export class HubService {
           if (request.expect) existing.expect = normalizeExpectation({ ...existing.expect, ...request.expect });
           existing.updatedAt = Date.now();
         } else {
-          const from = this.store.data.tasks.find((t) => t.id === request.fromTaskId);
+          // The demo lab's example conversations are listed without being kept: they are found where they come from.
+          const from = this.store.data.tasks.find((t) => t.id === request.fromTaskId) ?? (isDemoMode() ? getDemoTasks().find((t) => t.id === request.fromTaskId) : undefined);
           if (!from) throw new Error("That conversation is not on this computer any more.");
           if (active(from)) throw new Error("Wait until the conversation has ended.");
           this.store.data.evalCases = [
@@ -3880,6 +3911,32 @@ export class HubService {
           deleted: true,
           deletedBy: await this.resolveActorName(),
           claim: undefined,
+          updatedAt: Date.now(),
+        });
+        reply = { notes: [`Removed "${clip(this.store.data.workTickets?.find((t) => t.id === request.id)?.title ?? "the ticket", 120)}".`] };
+        break;
+      }
+      case "ticket-restore": {
+        // A removal is a mark on the ticket, so taking the mark away brings it back as it was.
+        const gone = (this.store.data.workTickets ?? []).find((t) => t.id === request.id);
+        if (!gone) throw new Error("That ticket is not here any more.");
+        if (gone.deleted) this.putTicket({ ...gone, deleted: undefined, deletedBy: undefined, updatedAt: Date.now() });
+        reply = { notes: [`Brought back "${clip(gone.title, 120)}".`] };
+        break;
+      }
+      case "ticket-result": {
+        await this.pullTicket(request.id);
+        const ticket = this.ticket(request.id);
+        const running = await this.ticketRunsNow(ticket);
+        if (running) throw new Error(running);
+        const text = boundedContext(request.result.trim(), 8000);
+        if (!text) throw new Error("Write what was wrong and what you did.");
+        // A person's own account of the work: kept as the ticket's result, with who wrote it in the notes.
+        const who = await this.resolveActorName();
+        this.putTicket({
+          ...ticket,
+          result: text,
+          comments: [...(ticket.comments ?? []), { id: crypto.randomUUID(), author: who, text: "Wrote the report.", at: Date.now() }].slice(-100),
           updatedAt: Date.now(),
         });
         break;
@@ -4473,7 +4530,20 @@ export class HubService {
           moved.push(`commandAllowPrefixes updated (${(next.commandAllowPrefixes ?? []).length} entries)`);
         }
         if (JSON.stringify(next.clusterPolicies ?? {}) !== JSON.stringify(current.clusterPolicies ?? {})) {
-          moved.push(`clusterPolicies updated (${Object.keys(next.clusterPolicies ?? {}).length} cluster(s))`);
+          const was = current.clusterPolicies ?? {};
+          const now = next.clusterPolicies ?? {};
+          const say = (p: (typeof now)[string] | undefined): string =>
+            p
+              ? [p.maxMode ? `max ${p.maxMode}` : "", p.requiredApprovals ? `${p.requiredApprovals} approval${p.requiredApprovals === 1 ? "" : "s"}` : "", p.requireCheckAndRollback ? "check and rollback" : "", p.frozenUntil ? `frozen until ${new Date(p.frozenUntil).toISOString().slice(0, 16).replace("T", " ")} UTC` : ""].filter(Boolean).join(", ") || "no limits"
+              : "none";
+          for (const name of [...new Set([...Object.keys(was), ...Object.keys(now)])].sort())
+            if (JSON.stringify(was[name]) !== JSON.stringify(now[name])) moved.push(`rules for "${clip(name, 60)}": ${say(was[name])} → ${say(now[name])}`);
+        }
+        if (moved.length) {
+          // Who changed the rules is the team's business as well as the log's.
+          const event: WorkspaceActivityEvent = { id: crypto.randomUUID(), at: Date.now(), actor: await this.resolveActorName(), targetLabel: "Command safety", kind: "note", summary: clip(`Changed the safety rules: ${moved.join("; ")}`, 400) };
+          this.appendActivityEvent(event);
+          await this.host.recordWorkspaceActivity?.(event).catch(() => {});
         }
         if (moved.length && !isDemoMode()) {
           this.store.data.safetyPolicyChanged = { by: await this.resolveActorName(), at: Date.now() };
@@ -5759,7 +5829,7 @@ export class HubService {
     const config = await this.config.getConfig();
     assertLaunching();
     if (!config.enabled)
-      throw new Error("Enable AI and configure a model in Hub settings first");
+      throw new Error("No model is set up. Switch the assistant on and choose a model in AI settings first.");
     // An agent that is an external coding agent runs there, not on the configured model.
     const safetyCtx = this.resolveSafetyContext(task, task.target?.label);
     if (safetyCtx.clusterPolicy?.maxMode) {
@@ -8346,7 +8416,7 @@ export class HubService {
         continue;
       }
       const target = alertTarget(alert, servers);
-      const agent = routeAlert(alert, target, this.store.data.alertRules ?? [], agents);
+      const agent = routeAlert(alert, target, this.store.data.alertRules ?? [], agents, servers);
       const ticket = await this.saveTicketFrom(
         {
           title: clip(`${alert.severity === "critical" ? "Alert (critical)" : "Alert"}: ${alert.title}`, 200),
@@ -8696,7 +8766,10 @@ export class HubService {
     const wanted =
       input.status && TICKET_STATUSES.includes(input.status) && input.status !== "in_progress"
         ? input.status
-        : (existing?.status ?? (agent ? "todo" : "backlog"));
+        : // A backlog ticket that gets an agent is ready for it, unless its alert put it aside.
+          existing?.status === "backlog" && !existing.assigneeAgentId && agent && !existing.alert?.parked
+          ? "todo"
+          : (existing?.status ?? (agent ? "todo" : "backlog"));
     // An agent cannot put work that started outside the team in front of another agent: a person moves it.
     const status =
       running && existing ? existing.status : byAgent && outside && !existing && wanted === "todo" ? "backlog" : wanted;
@@ -9304,35 +9377,76 @@ export class HubService {
           this.changed();
           continue;
         }
-        let opened: string | undefined;
-        try {
-          const id = await this.openUnattendedTerminal(schedule, `Schedule: ${schedule.title}`);
-          opened = id;
-          const task = await this.start(
-            {
-              prompt: schedule.prompt,
-              sessionId: id,
-              mode: schedule.mode,
-              maxCommands: schedule.maxCommands,
-              maxMinutes: schedule.maxMinutes,
-            },
-            schedule,
-          );
-          task.ownTerminal = { via: "schedule", profileId: schedule.profileId, shell: schedule.shell, label: `Schedule: ${schedule.title}` };
-          schedule.lastTaskId = task.id;
-          schedule.lastStatus = "Running";
-          this.scheduleSessions.set(task.id, id);
-          opened = undefined;
-        } catch (e) {
-          schedule.lastStatus = `Blocked: ${safeError(e)}`;
-          this.notify("Scheduled task blocked", schedule.title);
-          // A run that never started leaves no terminal behind.
-          if (opened) this.closeOwnTerminal(opened);
-        }
+        await this.launchSchedule(schedule);
         this.changed();
       }
     } finally {
       this.ticking = false;
+    }
+  }
+
+  /** Starts one run of a scheduled job: when it falls due, and when somebody asks for it now. */
+  private async launchSchedule(schedule: AgentSchedule): Promise<AgentTask | undefined> {
+    let opened: string | undefined;
+    try {
+      const id = await this.openUnattendedTerminal(schedule, `Schedule: ${schedule.title}`);
+      opened = id;
+      const task = await this.start(
+        {
+          prompt: schedule.prompt,
+          sessionId: id,
+          mode: schedule.mode,
+          maxCommands: schedule.maxCommands,
+          maxMinutes: schedule.maxMinutes,
+        },
+        schedule,
+      );
+      task.ownTerminal = { via: "schedule", profileId: schedule.profileId, shell: schedule.shell, label: `Schedule: ${schedule.title}` };
+      schedule.lastTaskId = task.id;
+      schedule.lastStatus = "Running";
+      this.scheduleSessions.set(task.id, id);
+      return task;
+    } catch (e) {
+      schedule.lastStatus = `Blocked: ${safeError(e)}`;
+      this.notify("Scheduled task blocked", schedule.title);
+      // A run that never started leaves no terminal behind.
+      if (opened) this.closeOwnTerminal(opened);
+      return undefined;
+    }
+  }
+
+  /**
+   * Whether a model answers at an address: asked once, nothing kept. What it
+   * says is for the person choosing a model, so it names the address and what to do.
+   */
+  private async probeModel(baseUrl?: string): Promise<{ ok: boolean; detail: string; models?: string[] }> {
+    const view = await this.config.getView();
+    const url = (baseUrl ?? view.baseUrl ?? "").trim().replace(/\/+$/, "");
+    if (!baseUrl && !view.enabled) return { ok: false, detail: "The assistant is switched off. Switch it on in AI settings." };
+    if (!url) {
+      if (view.codexConnected) return { ok: true, detail: "Signed in. The sign-in is checked when a message is sent." };
+      return view.hasApiKey
+        ? { ok: true, detail: "A key is saved. It is checked when a message is sent." }
+        : { ok: false, detail: "No key is saved and no model address is set. Add one in AI settings." };
+    }
+    try {
+      await this.assertModelEndpointReach(url);
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 4000);
+      try {
+        const res = await (this.kbNetwork?.fetchImpl ?? fetch)(`${url}/models`, { signal: controller.signal });
+        if (res.status === 401 || res.status === 403) return { ok: false, detail: `${hostOf(url)} answered, and refused the key. Check the key in AI settings.` };
+        if (!res.ok) return { ok: false, detail: `${hostOf(url)} answered with an error (${res.status}). Check the address in AI settings.` };
+        const body = (await res.json().catch(() => undefined)) as { data?: { id?: string }[] } | undefined;
+        const models = (body?.data ?? []).map((m) => String(m.id ?? "")).filter(Boolean).slice(0, 50);
+        return { ok: true, detail: models.length ? `${hostOf(url)} answers. It offers ${models.length} model${models.length === 1 ? "" : "s"}.` : `${hostOf(url)} answers.`, models };
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch (e) {
+      const local = /127\.0\.0\.1|localhost|\[::1\]/.test(url);
+      const why = e instanceof Error && e.name === "AbortError" ? "did not answer in time" : "did not answer";
+      return { ok: false, detail: `No model answered: ${hostOf(url)} ${why}.${local ? " Start the local model (for Ollama: ollama serve), or choose another one in AI settings." : " Check the address, or choose another model in AI settings."}${local ? "" : ` (${clip(safeError(e), 120)})`}` };
     }
   }
 
