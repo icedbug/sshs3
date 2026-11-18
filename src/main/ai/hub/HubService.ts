@@ -24,8 +24,6 @@ import type {
   InlineCommandSuggestion,
   KbDocument,
   LocalServerAuthOverride,
-  McpServerConfig,
-  McpToolPolicy,
   MemoryDistillStatus,
   MemoryEntry,
   MemoryProposal,
@@ -87,7 +85,7 @@ import {
   mergePageCopies,
 } from "./KbCompile";
 import { lowerMode } from "./AppGuard";
-import { guardUrl, hostOf, type GuardOptions, type GuardedTarget } from "./Notifier";
+import { guardUrl, hostOf, type GuardOptions } from "./Notifier";
 import { NotifyStore } from "./NotifyStore";
 import { AtlassianStore } from "./AtlassianStore";
 import { AtlassianBridge } from "./AtlassianBridge";
@@ -100,13 +98,11 @@ import {
   deleteDemoAgent,
   deleteDemoInfraEdge,
   deleteDemoKbDocument,
-  deleteDemoMcpServer,
   getBuiltinAgents,
   getBuiltinKbDocuments,
   getBuiltinSkillsAndMemories,
   getBuiltinSnippets,
   getDemoInfraEdges,
-  getDemoMcpServers,
   getDemoMemories,
   getDemoSchedules,
   getDemoServers,
@@ -118,7 +114,6 @@ import {
   saveDemoAgent,
   saveDemoInfraEdge,
   saveDemoKbDocument,
-  saveDemoMcpServer,
   saveDemoMemory,
 } from "./demoWorkspace";
 import { isDemoTarget } from "../../demo/demoMode";
@@ -187,7 +182,6 @@ import {
 } from "./MemoryDistiller";
 import {
   insideDataDirectory,
-  keepSecrets,
   requiredText,
   integer,
   extractResponseTextFromRaw,
@@ -228,6 +222,7 @@ import { SchedulesPart } from "./areas/schedules";
 import { SimulationPart } from "./areas/simulation";
 import { EvalsPart } from "./areas/evals";
 import { AuditPart } from "./areas/audit";
+import { McpPart } from "./areas/mcp";
 // Declared in files of their own now; still exported from here, where others import them.
 export type { HubHost } from "./hubHost";
 export { changeForSnapshot, taskForSnapshot, incomingAgentForTesting, checkedSuggestionForTesting, withUnanswered, budgetStopLine, renderWorkforceProgress } from "./hubShared";
@@ -792,34 +787,6 @@ export class HubService {
     ];
   }
 
-  /**
-   * The MCP servers as they may leave the hub (to the interface, to a model):
-   * with the names of their environment variables and headers, and no values.
-   * An empty value means "set, not shown".
-   */
-  private mcpServersShown(): McpServerConfig[] {
-    const names = (values?: Record<string, string>): Record<string, string> | undefined =>
-      values && Object.keys(values).length ? Object.fromEntries(Object.keys(values).map((k) => [k, ""])) : undefined;
-    return this.getMcpServersList().map((s) => ({
-      ...s,
-      env: names(s.env),
-      headers: names(s.headers),
-      ...(isDemoTarget(s.id) ? { demo: true } : {}),
-    }));
-  }
-
-  private getMcpServersList(): McpServerConfig[] {
-    const stored = this.store.data.mcpServers ?? [];
-    if (!isDemoMode()) return stored;
-    const dismissed = new Set(this.store.data.preferences.dismissedBuiltinIds ?? []);
-    return [
-      ...stored,
-      ...getDemoMcpServers().filter(
-        (dm) => !dismissed.has(dm.id) && !stored.some((m) => m.id === dm.id),
-      ),
-    ];
-  }
-
   getKbDocumentsList(): KbDocument[] {
     const stored = this.store.data.kbDocuments ?? [];
     const dismissed = new Set(this.store.data.preferences.dismissedBuiltinIds ?? []);
@@ -1287,32 +1254,12 @@ export class HubService {
   }
 
   /**
-   * A stdio MCP server is a program started on this machine as the app's own account. On a shared
-   * server that account holds every user's keys and sign-ins, so only an administrator adds or starts one.
-   */
-  private assertMcpProgramAllowed(server: Pick<McpServerConfig, "transport">): void {
-    if (server.transport !== "http" && this.sharedServer() && !this.host.teamAdmin?.())
-      throw new Error("An MCP server that runs as a program runs on the shared server itself. Only an administrator of this server adds or starts one. Use one with an address (HTTP) instead.");
-  }
-
-  /**
    * An external agent's runner is a program started on this machine as the app's own account, like a
    * stdio MCP server: on a shared server only an administrator adds or starts one. Asked on save and on every start.
    */
   private assertRunnerAllowed(): void {
     if (this.sharedServer() && !this.host.teamAdmin?.())
       throw new Error("An external agent runs as a program on the shared server itself. Only an administrator of this server adds or starts one.");
-  }
-
-  /** Asked each time an MCP server is about to be started or called: see McpClientManager. */
-  private async assertMcpReach(server: McpServerConfig): Promise<GuardedTarget | void> {
-    this.assertMcpProgramAllowed(server);
-    if (server.transport !== "http") return;
-    const url = server.url?.trim();
-    if (!url) return;
-    // The person's own machine may talk to a plain-http server on its own network; a shared server may not be sent anywhere.
-    // The address checked is the one connected to (McpClientManager pins it).
-    return await guardUrl(url, { ...this.outboundGuard(), allowPlainHttp: !this.sharedServer(), ...(this.kbNetwork ? { lookup: this.kbNetwork.lookup } : {}) });
   }
 
   /**
@@ -2110,6 +2057,8 @@ export class HubService {
         return this.handleEvals(request as RequestsOf<"evals">);
       case "audit":
         return this.handleAudit(request as RequestsOf<"audit">);
+      case "mcp":
+        return this.handleMcp(request as RequestsOf<"mcp">);
     }
   }
 
@@ -3533,47 +3482,6 @@ export class HubService {
         this.applyHandoff(task, toAgent, request.reason, { allowCycle });
         break;
       }
-      case "mcp-install-preset": {
-        const preset = mcpCatalog().find(
-          (p) =>
-            p.id === request.presetId ||
-            p.name.toLowerCase() === request.presetId.toLowerCase(),
-        );
-        if (!preset) throw new Error(`MCP preset "${request.presetId}" not found`);
-        // In the demo lab a preset is a scripted fixture: nothing is started for it.
-        if (!isDemoMode()) this.assertMcpProgramAllowed(preset);
-        const installed: McpServerConfig = {
-          id: preset.id,
-          name: preset.name,
-          transport: preset.transport,
-          command: preset.command,
-          args: preset.args,
-          url: preset.url,
-          enabled: true,
-          status: "unknown",
-          discoveredTools: [],
-          updatedAt: Date.now(),
-        };
-        if (isDemoMode()) {
-          // The demo lab's servers are scripted; there is nothing to start.
-          installed.status = "connected";
-          installed.lastTestedAt = Date.now();
-          installed.discoveredTools = preset.defaultTools;
-        } else if (!preset.needs) {
-          // Connected, and its tools, are what the server itself answered.
-          const result = await this.mcp.testAndDiscover(installed);
-          installed.status = result.ok ? "connected" : "error";
-          installed.lastError = result.error;
-          installed.lastTestedAt = Date.now();
-          installed.discoveredTools = result.tools;
-        }
-        this.store.data.mcpServers = [
-          ...(this.store.data.mcpServers ?? []).filter((x) => x.id !== installed.id),
-          installed,
-        ];
-        if (isDemoMode()) saveDemoMcpServer(installed);
-        break;
-      }
       case "infra-edge-save": {
         const e = request.edge;
         const savedEdge: InfraGraphEdge = {
@@ -3745,106 +3653,6 @@ export class HubService {
             .append({ kind: "setting", actor: await this.resolveActorName(), target: "sshs3 on this computer", what: `Safety policy: ${moved.join("; ")}`, outcome: "completed" })
             .catch((e) => log.warn("Could not write to the audit log", safeError(e)));
         }
-        break;
-      }
-      case "mcp-save": {
-        const s = request.server;
-        const id = s.id?.trim() || crypto.randomUUID();
-        const existing = this.getMcpServersList().find((x) => x.id === id);
-        const saved: McpServerConfig = {
-          id,
-          name: clip(requiredText(s.name), 120),
-          transport: s.transport === "http" ? "http" : "stdio",
-          command: s.command?.trim() || undefined,
-          args: s.args?.map((x) => x.trim()).filter(Boolean),
-          env: keepSecrets(existing?.env, s.env),
-          url: s.url?.trim() || undefined,
-          headers: keepSecrets(existing?.headers, s.headers),
-          // Editing a server does not switch it back on.
-          enabled: s.enabled ?? existing?.enabled ?? true,
-          discoveredTools: s.discoveredTools ?? existing?.discoveredTools ?? [],
-          status: existing?.status ?? "unknown",
-          lastError: existing?.lastError,
-          lastTestedAt: existing?.lastTestedAt,
-          // What a person decided about this server's tools is kept over an edit: a tool that was
-          // denied must not run again because the server's name or address was changed.
-          toolPolicies: existing?.toolPolicies,
-          trustReadOnlyHint: s.trustReadOnlyHint ?? existing?.trustReadOnlyHint,
-          oauth: s.oauth ?? existing?.oauth,
-        };
-        this.assertMcpProgramAllowed(saved);
-        const reach = (x: McpServerConfig): string =>
-          JSON.stringify([x.transport, x.command, x.args ?? [], x.url]);
-        if (existing && reach(existing) !== reach(saved)) {
-          // It is a different server now: what the old one answered no longer holds, and neither does
-          // trust in what it says about its own tools. A tool that was denied stays denied.
-          saved.trustReadOnlyHint = s.trustReadOnlyHint ?? false;
-          saved.discoveredTools = [];
-          saved.status = "unknown";
-          saved.lastError = undefined;
-          saved.lastTestedAt = undefined;
-        }
-        this.store.data.mcpServers = [
-          ...(this.store.data.mcpServers ?? []).filter((x) => x.id !== id),
-          saved,
-        ];
-        if (isDemoMode()) saveDemoMcpServer(saved);
-        break;
-      }
-      case "mcp-delete": {
-        this.store.data.mcpServers = (this.store.data.mcpServers ?? []).filter(
-          (s) => s.id !== request.id,
-        );
-        if (isDemoMode()) {
-          this.markBuiltinDismissed(request.id, getDemoMcpServers());
-          deleteDemoMcpServer(request.id);
-        }
-        break;
-      }
-      case "mcp-test": {
-        const found = this.getMcpServersList().find((s) => s.id === request.id);
-        if (!found) throw new Error("MCP server not found");
-        const srv: McpServerConfig = { ...found };
-        if (!srv.enabled) {
-          srv.lastTestedAt = Date.now();
-          reply = {
-            notes: [`${srv.name} is turned off. Turn it on before testing.`],
-          };
-        } else if (isDemoTarget(srv.id)) {
-          // A demo MCP fixture is scripted (simulateDemoMcpTool): there is no server to start or reach.
-          srv.status = "connected";
-          srv.demo = true;
-          srv.lastError = undefined;
-          srv.lastTestedAt = Date.now();
-          const toolCount = srv.discoveredTools?.length ?? 0;
-          reply = {
-            notes: [
-              `${srv.name} is a demo server. Its ${toolCount} tool${toolCount === 1 ? "" : "s"} are simulated locally and not connected to a real network.`,
-            ],
-          };
-        } else {
-          const result = await this.mcp.testAndDiscover(srv);
-          srv.status = result.ok ? "connected" : "error";
-          srv.lastError = result.error;
-          srv.lastTestedAt = Date.now();
-          // What it answered, including an empty list: a server that no longer offers a tool
-          // must not keep offering it here, and a name that cannot be resolved is not offered.
-          if (result.ok) srv.discoveredTools = result.tools;
-          const toolCount = srv.discoveredTools?.length ?? 0;
-          const errDetail = result.error?.trim() || "connection failed";
-          reply = {
-            notes: [
-              result.ok
-                ? `Connected to ${srv.name}: found ${toolCount} tool${toolCount === 1 ? "" : "s"}.`
-                : `Could not connect to ${srv.name}: ${errDetail}${/[.!?]$/.test(errDetail) ? "" : "."}`,
-            ],
-          };
-        }
-        this.store.data.mcpServers = [
-          ...(this.store.data.mcpServers ?? []).filter((x) => x.id !== srv.id),
-          srv,
-        ];
-        if (isDemoMode()) saveDemoMcpServer(srv);
         break;
       }
       case "kb-save": {
@@ -4130,35 +3938,6 @@ export class HubService {
           );
           this.lastWorkSync = 0;
         } else this.store.data.kbDismissedFindings = [...(this.store.data.kbDismissedFindings ?? []), id].slice(-300);
-        break;
-      }
-      case "mcp-key-list":
-        await this.mcpTokens().initialize();
-        break;
-      case "mcp-key-create": {
-        const made = await this.mcpTokens().create({
-          userId: "local",
-          name: requiredText(request.name),
-          createdBy: await this.resolveActorName(),
-          scopes: (request.scopes ?? []).filter((x): x is "read" | "tickets" | "run" => ["read", "tickets", "run"].includes(x)),
-          serverId: request.serverId,
-          expiresInDays: request.expiresInDays,
-          tools: request.tools,
-        });
-        // The only time the key itself leaves this process.
-        reply = { mcpKey: { token: made.token, key: made.view } };
-        break;
-      }
-      case "mcp-key-revoke":
-        await this.mcpTokens().revoke("local", requiredText(request.id));
-        break;
-      case "mcp-local-set": {
-        // The listener is a port on the machine sshs3 runs on. On a shared server that machine is not a member's to open ports on.
-        if (request.enabled && this.sharedServer() && !this.host.teamAdmin?.())
-          throw new Error("Only an administrator of this server switches on its local MCP listener. Outside agents reach your workspace through the server's own MCP address and a key from your account page.");
-        const port = Math.max(0, Math.min(65535, request.port ?? this.store.data.preferences.localMcp?.port ?? 0));
-        this.store.data.preferences.localMcp = { enabled: request.enabled, port };
-        await this.applyLocalMcp();
         break;
       }
       case "kb-gap-answered": {
@@ -4673,28 +4452,6 @@ export class HubService {
       }
       case "profile-delete": {
         await this.config.deleteProfile(requiredText(request.id));
-        break;
-      }
-      case "mcp-tool-policy": {
-        const policy: McpToolPolicy = request.policy;
-        if (!["allow", "ask", "deny"].includes(policy)) {
-          throw new Error("Invalid MCP tool policy");
-        }
-        const serverId = requiredText(request.serverId);
-        const toolName = requiredText(request.toolName);
-        const existing = this.getMcpServersList().find((s) => s.id === serverId);
-        if (!existing) throw new Error("MCP server not found");
-        const updated: McpServerConfig = {
-          ...existing,
-          toolPolicies: { ...(existing.toolPolicies ?? {}), [toolName]: policy },
-          updatedAt: Date.now(),
-        };
-        this.store.data.mcpServers = [
-          ...(this.store.data.mcpServers ?? []).filter((s) => s.id !== existing.id),
-          updated,
-        ];
-        if (isDemoMode()) saveDemoMcpServer(updated);
-        this.mcp.invalidate(existing.id);
         break;
       }
       case "workforce-pause": {
@@ -5297,126 +5054,6 @@ export class HubService {
   }
 
   /**
-   * A command asked for from outside sshs3, over MCP.
-   *
-   * The fence is in what this will not do. It runs on the one server the key
-   * names and nowhere else, in a terminal that is already open for that
-   * server — never "whichever terminal happens to be open", which is what the
-   * ordinary path falls back to. It is always assisted: the change waits in
-   * the inbox until a person approves it, in every mode, whatever the safety
-   * policy says, because nobody is watching the agent that asked. And it
-   * returns at once with the id of what is waiting; the agent asks again for
-   * the outcome instead of holding a connection open.
-   */
-  async runForMcp(input: {
-    serverId: string;
-    command: string;
-    description: string;
-    by: string;
-    check?: { command: string; expected: string };
-    rollback?: string;
-  }): Promise<{ changeId: string; taskId: string; status: AgentChange["status"] }> {
-    if (isDemoMode()) throw new Error("This is the demo lab; nothing is run on a real server here.");
-    const command = requiredText(input.command);
-    const wanted = requiredText(input.serverId).toLowerCase();
-    const server = this.getKnownServers().find((s) => s.id.toLowerCase() === wanted || s.name.toLowerCase() === wanted);
-    if (!server) throw new Error(`No server called "${input.serverId}" in this workspace.`);
-    // The one terminal of that server. Not any other, and not a new one: a command from
-    // outside does not get to open a connection nobody asked for.
-    const session = this.terminals
-      .list()
-      .find((t) => t.state !== "disconnected" && (t.profileId === server.id || t.label.toLowerCase() === server.name.toLowerCase()));
-    if (!session)
-      throw new Error(
-        `Nothing is connected to ${server.name} in sshs3 right now. A command from outside runs in the terminal that is already open for that server; open one and ask again.`,
-      );
-    const task: AgentTask = {
-      id: `mcp-${crypto.randomUUID()}`,
-      title: clip(`From outside: ${input.description || command}`, 120),
-      agentName: `${input.by}'s agent, through MCP`,
-      // Assisted, whatever anything else says: a person approves every one of these.
-      mode: "assisted",
-      status: "running",
-      // Nobody here is watching whoever asked: every command of this run is put to a person.
-      fromOutside: true,
-      target: { sessionId: session.id, generation: session.generation, label: session.label },
-      messages: [{ id: crypto.randomUUID(), role: "user", text: clip(input.description || command, 2000), at: Date.now() }],
-      changes: [],
-      sources: [],
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      maxCommands: 1,
-      maxMinutes: 30,
-      verification: "not-verified",
-    };
-    this.store.data.tasks.push(task);
-    const capability = await this.broker.issue(task);
-    const request = input.check?.command
-      ? {
-          action: "change" as const,
-          command,
-          description: input.description || command,
-          check: input.check,
-          rollback: input.rollback ?? "",
-          observeSeconds: 0,
-          id: session.id,
-        }
-      : { action: "command" as const, command, description: input.description || command, id: session.id };
-    // Not awaited: the answer is "it is waiting", and the agent asks again.
-    let settled: { error?: unknown } | undefined;
-    const running = this.broker
-      .invoke(capability.key, request as never)
-      .then(() => {
-        // Done is not the same as worked: a change that failed its check, or was taken back, did not.
-        task.status = task.changes[0]?.status === "completed" ? "completed" : "failed";
-        settled = {};
-      })
-      .catch((error) => {
-        task.status = "failed";
-        task.error = safeError(error);
-        settled = { error };
-      })
-      .finally(() => {
-        task.updatedAt = Date.now();
-        this.broker.revoke(task.id);
-        // The terminal is the person's again: a command from outside holds it only while it runs.
-        this.terminals.release(task.id);
-        this.changed();
-      });
-    // The change the broker made for it, once it exists: getting the terminal ready can take a while.
-    const until = Date.now() + 20_000;
-    while (task.changes.length === 0 && !settled && Date.now() < until) await new Promise((r) => setTimeout(r, 20));
-    const change = task.changes[0];
-    if (!change) {
-      if (settled?.error) throw settled.error instanceof Error ? settled.error : new Error(String(settled.error));
-      // Still not ready after this long: it is called off, so that asking again does not leave two behind.
-      this.broker.revoke(task.id);
-      await running;
-      throw new Error("The terminal did not get ready in time. Nothing has run; ask again in a moment.");
-    }
-    this.changed();
-    return { changeId: change.id, taskId: task.id, status: change.status };
-  }
-
-  /** What became of a command asked for over MCP. */
-  mcpCommandStatus(changeId: string): { status: AgentChange["status"]; output?: string; exitCode?: number; check?: AgentChange["check"]; rollback?: AgentChange["rollback"]; target: string } | undefined {
-    for (const task of this.store.data.tasks) {
-      if (!task.id.startsWith("mcp-")) continue;
-      const change = task.changes.find((c) => c.id === changeId);
-      if (change)
-        return {
-          status: change.status,
-          output: change.output,
-          exitCode: change.exitCode,
-          check: change.check,
-          rollback: change.rollback,
-          target: change.target,
-        };
-    }
-    return undefined;
-  }
-
-  /**
    * What a run spent, put down to the agent it ran as. A ticket run was the
    * only one counted, so a mission run or a chat with an agent selected spent
    * nothing as far as the budget was concerned — and the budget is what the
@@ -5441,54 +5078,9 @@ export class HubService {
     return task.usageCountedTokens ?? (task.usageCounted ? used : 0);
   }
 
-  private mcpTokenStore?: McpTokenStore;
-  private localMcp?: LocalMcpServer;
-  private localMcpError?: string;
-
-  /** This installation's own MCP keys, kept beside the hub's other data. */
-  private mcpTokens(): McpTokenStore {
-    this.mcpTokenStore ??= new McpTokenStore(this.directory);
-    return this.mcpTokenStore;
-  }
-
-  /**
-   * Starts or stops the listener that lets this person's own agent reach this
-   * app. It is off until they switch it on, and it listens on 127.0.0.1 only.
-   */
-  private async applyLocalMcp(): Promise<void> {
-    const want = this.store.data.preferences.localMcp;
-    this.localMcpError = undefined;
-    if (!want?.enabled) {
-      await this.localMcp?.stop();
-      return;
-    }
-    await this.mcpTokens().initialize();
-    this.localMcp ??= new LocalMcpServer({
-      tokens: this.mcpTokens(),
-      hubFor: async () => ({
-        request: (r) => this.request(r),
-        actor: await this.resolveActorName(),
-        runCommand: (input) => this.runForMcp({ ...input, by: "your agent" }),
-        commandStatus: (id) => this.mcpCommandStatus(id),
-        audit: (entry) => this.audit().append(entry),
-      }),
-    });
-    try {
-      await this.localMcp.set(true, want.port ?? 0);
-    } catch (error) {
-      this.localMcpError = safeError(error);
-    }
-  }
-
-  /** What the settings screen shows about the local listener. */
-  private localMcpView(): { enabled: boolean; address?: string; keys: unknown[]; error?: string } {
-    return {
-      enabled: Boolean(this.store.data.preferences.localMcp?.enabled),
-      address: this.localMcp?.address(),
-      keys: this.mcpTokenStore?.list("local") ?? [],
-      error: this.localMcpError,
-    };
-  }
+  mcpTokenStore?: McpTokenStore;
+  localMcp?: LocalMcpServer;
+  localMcpError?: string;
 
   auditLog?: AuditLog;
   auditShipper?: AuditShipper;
@@ -6550,7 +6142,7 @@ export class HubService {
   }
 
   /** Stands in for the network when a page is fetched for the knowledge base. Set in tests only. */
-  private kbNetwork?: { fetchImpl: typeof fetch; lookup: GuardOptions["lookup"] };
+  kbNetwork?: { fetchImpl: typeof fetch; lookup: GuardOptions["lookup"] };
 
   /** The web server, where people sign in to accounts: a person's name and the server's own paths are the account's, not the request's. */
   private hosted(): boolean {
@@ -8945,5 +8537,5 @@ export class HubService {
 
 /** The hub's methods that are kept in files of their own (./areas). Declared here so the class has them; put on it just below. */
 // eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging -- it names the parts and has no members of its own
-export interface HubService extends InboxPart, ChatAndAtlassianPart, FactsPart, AlertsPart, SchedulesPart, SimulationPart, EvalsPart, AuditPart {}
-mixParts(HubService, [InboxPart, ChatAndAtlassianPart, FactsPart, AlertsPart, SchedulesPart, SimulationPart, EvalsPart, AuditPart]);
+export interface HubService extends InboxPart, ChatAndAtlassianPart, FactsPart, AlertsPart, SchedulesPart, SimulationPart, EvalsPart, AuditPart, McpPart {}
+mixParts(HubService, [InboxPart, ChatAndAtlassianPart, FactsPart, AlertsPart, SchedulesPart, SimulationPart, EvalsPart, AuditPart, McpPart]);
