@@ -11,7 +11,6 @@ import type {
   AgentUsage,
   ClusterSafetyPolicy,
   EvalCase,
-  EvalRun,
   ExternalRunner,
   HubReply,
   KbPage,
@@ -87,7 +86,6 @@ import {
   PAGE_KINDS,
   mergePageCopies,
 } from "./KbCompile";
-import { buildDailyReport } from "./DailyReport";
 import { lowerMode } from "./AppGuard";
 import { guardUrl, hostOf, type GuardOptions, type GuardedTarget } from "./Notifier";
 import { NotifyStore } from "./NotifyStore";
@@ -95,16 +93,7 @@ import { AtlassianStore } from "./AtlassianStore";
 import { AtlassianBridge } from "./AtlassianBridge";
 import { ChatBridge } from "./ChatBridge";
 import { FactsStore } from "./FactsStore";
-import {
-  Replay,
-  caseFromTask,
-  evalRun,
-  judgePrompt,
-  normalizeExpectation,
-  parseJudgement,
-  promoteEvalFailureToIncident,
-  ruleChecks,
-} from "./EvalSuite";
+import { Replay } from "./EvalSuite";
 import { buildContradictionPrompt, lintKnowledgeBase, noteGap, pairsToCompare, parseContradictions } from "./KbLint";
 import { documentRevisedBy, sectionsOf } from "./KnowledgeBaseService";
 import {
@@ -238,6 +227,7 @@ import { FactsPart } from "./areas/facts";
 import { AlertsPart } from "./areas/alerts";
 import { SchedulesPart } from "./areas/schedules";
 import { SimulationPart } from "./areas/simulation";
+import { EvalsPart } from "./areas/evals";
 // Declared in files of their own now; still exported from here, where others import them.
 export type { HubHost } from "./hubHost";
 export { changeForSnapshot, taskForSnapshot, incomingAgentForTesting, checkedSuggestionForTesting, withUnanswered, budgetStopLine, renderWorkforceProgress } from "./hubShared";
@@ -290,7 +280,7 @@ export class HubService {
   private uploadedUsage = "";
   /** Recordings that answer the tool calls of test-case runs, by task id. */
   private evalReplays = new Map<string, Replay>();
-  private evalRunningId?: string;
+  evalRunningId?: string;
   private kbReadingId?: string;
   private kbRetryAt = 0;
   private kbNeedsModel = false;
@@ -1525,27 +1515,6 @@ export class HubService {
     return this.sharedServer() && !this.host.teamAdmin?.() ? { ...status, inviteCode: undefined } : status;
   }
 
-  /**
-   * A test case is replayed against the question as it was asked. What tells about the present
-   * moment is left out of what the replay is given: activity after the case was made, how the
-   * servers stand now, what changed on them lately and what the open terminals show. Otherwise a
-   * case made before a fix fails after it, whatever the agent does: it is told the fault is over.
-   * Memory and the pages stay: they are what a test is run to try.
-   */
-  private asOfEvalCase(task: AgentTask, extra: ExtraWorkspaceContext): ExtraWorkspaceContext {
-    if (!task.evalCaseId) return extra;
-    const found = (this.store.data.evalCases ?? []).find((c) => c.id === task.evalCaseId);
-    const asOf = found?.createdAt ?? 0;
-    return {
-      ...extra,
-      asOf,
-      activityLog: (extra.activityLog ?? this.store.data.activityLog ?? []).filter((a) => a.at <= asOf),
-      recentServerChanges: [],
-      serverFactsNow: [],
-      workforceRuns: [],
-    };
-  }
-
   /** Paused means paused, and a spent budget is spent: however an agent is started. */
   private assertMayRun(agent: MissionAgent): void {
     if (agent.enabled === false) throw new Error(`${agent.name} is paused. Switch it on again before starting it.`);
@@ -1561,7 +1530,7 @@ export class HubService {
   }
 
   /** Resolves when the task's model run has ended and its runtime is released. */
-  private whenSettled(task: AgentTask): Promise<void> {
+  whenSettled(task: AgentTask): Promise<void> {
     if (
       !active(task) &&
       !this.runtimes.has(task.id) &&
@@ -1675,7 +1644,7 @@ export class HubService {
    * declined) is run once more on the main model, so setting a fast model can
    * make background work cheaper but not make it fail.
    */
-  private async runBackground(
+  async runBackground(
     input: StartAgentTask,
     tag: {
       workforceRunId?: string;
@@ -2137,6 +2106,8 @@ export class HubService {
         return this.handleSchedules(request as RequestsOf<"schedules">);
       case "simulation":
         return this.handleSimulation(request as RequestsOf<"simulation">);
+      case "evals":
+        return this.handleEvals(request as RequestsOf<"evals">);
     }
   }
 
@@ -3307,41 +3278,6 @@ export class HubService {
         this.scheduleWorkSync();
         break;
       }
-      case "eval-case-save": {
-        const cases = this.store.data.evalCases ?? [];
-        const existing = cases.find((c) => c.id === request.id);
-        if (existing) {
-          existing.title = boundedContext(request.title?.trim() || existing.title, 160);
-          // Only the parts that were sent: the others stay as they are.
-          if (request.expect) existing.expect = normalizeExpectation({ ...existing.expect, ...request.expect });
-          existing.updatedAt = Date.now();
-        } else {
-          // The demo lab's example conversations are listed without being kept: they are found where they come from.
-          const from = this.store.data.tasks.find((t) => t.id === request.fromTaskId) ?? (isDemoMode() ? getDemoTasks().find((t) => t.id === request.fromTaskId) : undefined);
-          if (!from) throw new Error("That conversation is not on this computer any more.");
-          if (active(from)) throw new Error("Wait until the conversation has ended.");
-          this.store.data.evalCases = [
-            ...cases,
-            caseFromTask(from, { title: request.title, expect: request.expect }, await this.resolveActorName()),
-          ];
-        }
-        this.lastWorkSync = 0;
-        break;
-      }
-      case "eval-case-delete":
-        this.store.data.evalCases = (this.store.data.evalCases ?? []).filter((c) => c.id !== request.id);
-        this.markSharedRemoved("evals", request.id);
-        break;
-      case "eval-run": {
-        const ids = (this.store.data.evalCases ?? []).filter((c) => !request.id || c.id === request.id).map((c) => c.id);
-        if (ids.length === 0) throw new Error("There is no such test case.");
-        if (this.evalRunningId) throw new Error("Test cases are already running.");
-        void this.runEvalCases(ids).catch((e) => log.warn("Running test cases failed", safeError(e)));
-        break;
-      }
-      case "daily-report-read":
-        if (this.store.data.dailyReport) this.store.data.dailyReport.readAt = Date.now();
-        break;
       case "runner-save": {
         this.assertRunnerAllowed();
         const r = request.runner;
@@ -4562,61 +4498,6 @@ export class HubService {
           ];
           task.updatedAt = Date.now();
         }
-        break;
-      }
-      case "promote-eval": {
-        const task = this.task(request.taskId);
-        // Promoted once: a second click (or a retried request) finds the ticket it already made.
-        const promoted = live(this.store.data.workTickets).find(
-          // The promotion's summary is how such a ticket begins (promoteEvalFailureToIncident).
-          (t) => t.taskId === task.id && t.status !== "done" && Boolean(t.description?.startsWith('Eval "')),
-        );
-        if (promoted) break;
-        const existingCase = (this.store.data.evalCases ?? []).find(
-          (c) => c.id === task.evalCaseId || c.fromTaskId === task.id,
-        );
-        const failedStoredRun = existingCase?.runs.find((r) => !r.passed && !r.inconclusive);
-        const promptText =
-          existingCase?.prompt ||
-          task.messages.find((m) => m.role === "user")?.text ||
-          task.title;
-        const targetRun = failedStoredRun ?? {
-          passed: task.status === "completed" && !task.error && !task.changes.some((c) => c.status === "failed"),
-          inconclusive: task.status === "interrupted" && !task.error ? "Interrupted before completion" : undefined,
-          checks: [
-            {
-              name: "task-execution",
-              passed: task.status === "completed" && !task.error,
-              detail: task.error || `Task ended with status "${task.status}"`,
-            },
-          ],
-          answer: [...task.messages].reverse().find((m) => m.role === "assistant")?.text ?? "",
-        };
-        const promotion = promoteEvalFailureToIncident(
-          {
-            id: existingCase?.id ?? task.id,
-            title: existingCase?.title ?? task.title,
-            prompt: promptText,
-            fromTaskId: existingCase?.fromTaskId ?? task.id,
-          },
-          targetRun,
-          { title: request.title },
-        );
-        const actor = await this.resolveActorName();
-        const now = Date.now();
-        const ticket: WorkTicket = {
-          id: `t-${crypto.randomUUID().slice(0, 8)}`,
-          title: promotion.title,
-          description: promotion.summary,
-          status: "todo",
-          ...(task.target?.label ? { target: task.target.label } : {}),
-          ...(task.agentId ? { assigneeAgentId: task.agentId, assigneeName: task.agentName } : {}),
-          taskId: task.id,
-          createdBy: actor,
-          createdAt: now,
-          updatedAt: now,
-        };
-        this.putTicket(ticket);
         break;
       }
       case "rule-save": {
@@ -5846,7 +5727,7 @@ export class HubService {
       ? `target:${terminal.profileId ?? terminal.id}`
       : "personal";
   }
-  private task(id: string): AgentTask {
+  task(id: string): AgentTask {
     const t = this.store.data.tasks.find((x) => x.id === id);
     if (t) return t;
     // A demo conversation is listed without being stored. The first time something is done to it, it becomes a real one.
@@ -6270,7 +6151,7 @@ export class HubService {
    * dropping the link in again); one that cannot be fetched twice in a row is
    * put up for review, and the pages keep what it last said.
    */
-  private async refetchWatchedSources(now = Date.now()): Promise<void> {
+  async refetchWatchedSources(now = Date.now()): Promise<void> {
     const due = (this.store.data.kbDocuments ?? [])
       .filter(
         (d) =>
@@ -6471,7 +6352,7 @@ export class HubService {
    * the review list. One run reads a dozen pairs; with more, each check takes
    * the next dozen, and what earlier checks found about the others is kept.
    */
-  private async checkContradictions(): Promise<void> {
+  async checkContradictions(): Promise<void> {
     if (this.checkingContradictions) return;
     const all = this.store.data.kbPages ?? [];
     const { pairs, total, next } = pairsToCompare(all, 12, this.store.data.kbPairOffset ?? 0);
@@ -6825,126 +6706,7 @@ export class HubService {
 
   // ---- nightly upkeep --------------------------------------------------------
 
-  private nightlyRunning = false;
-  /**
-   * Once a day, after three in the morning and while nothing of the user's is
-   * running: memory is tidied, pages are compared for contradictions, and the
-   * day's report is written. With a team bucket one installation does it for
-   * the team.
-   */
-  private async nightly(now = Date.now()): Promise<void> {
-    const at = new Date(now);
-    const day = `${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, "0")}-${String(at.getDate()).padStart(2, "0")}`;
-    if (this.nightlyRunning || this.store.data.lastNightlyDay === day || at.getHours() < 3 || isDemoMode()) return;
-    if (this.store.data.tasks.some((t) => active(t) && !isBackgroundRun(t))) return;
-    this.nightlyRunning = true;
-    try {
-      const sync = this.work();
-      const client = this.clientId();
-      // The team's upkeep (tidying team memory, fetching the knowledge base's links again, looking for
-      // contradictions) is done once a day by one installation: a mark that stays for the day, not a
-      // lease that lapses after four minutes and lets the next one do it all again.
-      const mine = sync ? await sync.markOnce(`nightly-${day}`, client, this.notifySettle, now).catch(() => false) : true;
-      this.store.data.lastNightlyDay = day;
-      if (mine) {
-        await sync?.pruneMarks(14 * 24 * 60 * 60_000, now).catch(() => undefined);
-        await this.request({ action: "self-learn-reflect" }).catch((e) => log.warn("Nightly tidy failed", safeError(e)));
-        await this.refetchWatchedSources(now).catch((e) => log.warn("Fetching the knowledge base's links again failed", safeError(e)));
-        await this.checkContradictions().catch((e) => log.warn("Nightly contradiction check failed", safeError(e)));
-      }
-      // The report is each installation's own: since its last one, however long the computer was off.
-      const extra = await this.collectExtraContext();
-      const snap = await this.snapshot();
-      const since = this.store.data.dailyReport?.at ?? now - 24 * 60 * 60_000;
-      this.store.data.dailyReport = {
-        day,
-        at: Date.now(),
-        text: buildDailyReport({
-          since,
-          now,
-          activity: extra.activityLog ?? this.store.data.activityLog ?? [],
-          tickets: live(this.store.data.workTickets),
-          tasks: this.store.data.tasks,
-          pages: this.store.data.kbPages ?? [],
-          memories: extra.memories ?? this.store.data.memories,
-          findings: snap.kbFindings ?? [],
-          serverChanges: this.recentServerChanges(Math.max(24 * 3_600_000, now - since), now).flatMap((r) => r.lines).sort().reverse(),
-          serverProblems: this.factsStore.all().flatMap((r) => this.factsProblems(r, now).map((p) => `${r.name}: ${p.text}`)),
-        }),
-      };
-      await this.store.save().catch(() => undefined);
-      this.changed();
-    } finally {
-      this.nightlyRunning = false;
-    }
-  }
-
-  // ---- tests for the agents --------------------------------------------------
-
-  /**
-   * Replays test cases one after the other. Each is the recorded question put
-   * to the agent as it is now, with the tools answering from the recording;
-   * the answer is checked against what a person said should happen.
-   */
-  private async runEvalCases(ids: string[]): Promise<void> {
-    try {
-      for (const [at, id] of ids.entries()) {
-        const found = (this.store.data.evalCases ?? []).find((c) => c.id === id);
-        if (!found || this.disposed) continue;
-        this.evalRunningId = id;
-        this.changed();
-        const replay = new Replay(found.recorded);
-        let run: EvalRun;
-        try {
-          const task = await this.start(
-            { prompt: found.prompt, mode: found.mode, agentId: found.agentId, maxCommands: 40, maxMinutes: 10 },
-            undefined,
-            { evalCaseId: id, title: `Test · ${clip(found.title, 80)}`, mainModel: true },
-            replay,
-          );
-          await this.whenSettled(task);
-          const answer = [...task.messages].reverse().find((m) => m.role === "assistant" && m.text.trim())?.text ?? "";
-          const checks = ruleChecks(found.expect, answer, task.toolLog ?? []);
-          if (found.expect.conclusion && task.status === "completed" && answer) {
-            const judge = await this.runBackground(
-              { prompt: judgePrompt(found, answer), mode: "advice", agentName: "Tests", maxCommands: 1, maxMinutes: 5 },
-              { distillSourceId: `eval:${id}:${Date.now()}`, title: `Judging · ${clip(found.title, 80)}`, mainModel: true },
-            );
-            const verdict = parseJudgement(judge.messages.filter((m) => m.role === "assistant").at(-1)?.text ?? "");
-            checks.push(verdict ?? { name: "reaches the expected conclusion", passed: false, detail: "The judgement could not be read." });
-          }
-          run = evalRun({ task, checks, unrecorded: replay.unrecorded, live: replay.live });
-        } catch (error) {
-          run = {
-            at: Date.now(),
-            passed: false,
-            // It never started: that says nothing about the agent.
-            inconclusive: safeError(error),
-            checks: [],
-            answer: "",
-            calls: [],
-            unrecorded: replay.unrecorded,
-            live: replay.live,
-            tokens: 0,
-          };
-        }
-        const current = (this.store.data.evalCases ?? []).find((c) => c.id === id);
-        if (current) {
-          current.runs = [run, ...current.runs].slice(0, 5);
-          current.updatedAt = Date.now();
-          this.lastWorkSync = 0;
-        }
-        // The result and "which case is running" change in one step: nobody is shown a case that has
-        // its result and is still said to be running.
-        this.evalRunningId = ids[at + 1];
-        await this.store.save().catch(() => undefined);
-        this.changed();
-      }
-    } finally {
-      this.evalRunningId = undefined;
-      this.changed();
-    }
-  }
+  nightlyRunning = false;
   alertIntake: Promise<unknown> = Promise.resolve();
 
   // ---- the board ----------------------------------------------------------
@@ -6995,7 +6757,7 @@ export class HubService {
   }
 
   /** Notes that a shared agent, runbook or dependency was removed here, and syncs soon. */
-  private markSharedRemoved(collection: "agents" | "kb" | "edges" | "pages" | "evals", id: string): void {
+  markSharedRemoved(collection: "agents" | "kb" | "edges" | "pages" | "evals", id: string): void {
     const all = (this.store.data.sharedRemoved ??= {});
     all[collection] = { ...(all[collection] ?? {}), [id]: Date.now() };
     this.scheduleWorkSync();
@@ -9317,5 +9079,5 @@ export class HubService {
 
 /** The hub's methods that are kept in files of their own (./areas). Declared here so the class has them; put on it just below. */
 // eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging -- it names the parts and has no members of its own
-export interface HubService extends InboxPart, ChatAndAtlassianPart, FactsPart, AlertsPart, SchedulesPart, SimulationPart {}
-mixParts(HubService, [InboxPart, ChatAndAtlassianPart, FactsPart, AlertsPart, SchedulesPart, SimulationPart]);
+export interface HubService extends InboxPart, ChatAndAtlassianPart, FactsPart, AlertsPart, SchedulesPart, SimulationPart, EvalsPart {}
+mixParts(HubService, [InboxPart, ChatAndAtlassianPart, FactsPart, AlertsPart, SchedulesPart, SimulationPart, EvalsPart]);
