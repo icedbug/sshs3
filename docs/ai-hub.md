@@ -38,7 +38,9 @@ explicitly enabled presentation on top of the same terminal authority.
 ## AI Hub services (`src/main/ai/hub/`)
 
 - **`HubService`** — the request/action handler (`request(HubRequest)`),
-  agent runs, scheduler and snapshot. The agent tool implementations (`sshs3_*`
+  agent runs, scheduler and snapshot. It is one object whose code is kept in a
+  file per area: see "Where the hub's code is" below. The agent tool
+  implementations (`sshs3_*`
   tools and MCP calls) are in `AppActions.ts`; they reach the hub only through
   `HubService.appActionHost()`, which lists the hub members a tool call may
   use. Response parsing, the instant inline suggestions and the scripted demo
@@ -324,6 +326,70 @@ explicitly enabled presentation on top of the same terminal authority.
   and usage counts, feedback score, `autoLearned`, `sourceCommand`,
   `errorSignature`) through S3 and Team Vault sync (`WorkspaceMemoryEntry` in
   `src/shared/types/teamVault.ts`); credentials are never uploaded.
+
+## Where the hub's code is (`HubService.ts`, `areas/`)
+
+The hub was one file of 11,420 lines. It is still one object: `HubService`.
+Its code is now kept in a file per area, in `src/main/ai/hub/areas/`.
+
+Each area's file is a class that is never made into an object of its own.
+Its methods are put on `HubService` when `HubService.ts` is loaded
+(`areas/mix.ts`), and run as the hub's: `this` is the hub in every one of
+them, and each says so in its first parameter (`this: HubService`). So a
+method in one file calls a method in another as `this.other()`, and a test
+that replaces a method on a hub replaces it for all of the hub's code. Two
+parts that define the same method name are refused when the file loads.
+
+| File | What is in it | Requests |
+| --- | --- | --- |
+| `HubService.ts` | The hub's state (every field), its start and end, the snapshot, the clock (`tick`), `changed`, and the handing out of requests | none of its own |
+| `areas/routes.ts` | The table of which part answers which request, and its types | |
+| `areas/conversations.ts` | A person's requests about a conversation (start, reply, stop, checkpoint, take a change back, fork, compact), the AI settings, a one-line suggestion, the activity log | 19 |
+| `areas/runs.ts` | A run: starting it, its events, its budget and clock, stopping it; runs on an external agent | none: started by other parts |
+| `areas/safety.ts` | The safety rules, approvals of changes and plans (also by a second person), rules and runbooks | 10 |
+| `areas/tickets.ts` | The board: goals and tickets, starting a ticket's agent, the board's clock | 10 |
+| `areas/agents.ts` | Agents, external runners, workforce runs, specialists, a plan's reviewer, investigators | 11 |
+| `areas/knowledge.ts` | The knowledge base: documents, pages, search, gaps | 19 |
+| `areas/memory.ts` | Team memory, proposals from runs and activity, the learning queue, tidying up | 9 |
+| `areas/servers.ts` | Servers, the links between them, saved profiles | 10 |
+| `areas/sharing.ts` | The bucket, the board kept on a server, the shared workspace | 3 |
+| `areas/mcp.ts` | MCP servers and what their tools may do; the keys and commands of an outside client | 9 |
+| `areas/inbox.ts` | What waits for a person, notification channels, the telling | 6 |
+| `areas/facts.ts` | What is on the servers, and what changed | 4 |
+| `areas/alerts.ts` | Alerts in: an alert becomes a ticket; the address and the routing rules | 4 |
+| `areas/evals.ts` | Tests for the agents; the nightly upkeep and the daily report | 5 |
+| `areas/audit.ts` | The audit log and terminal recordings | 3 |
+| `areas/simulation.ts` | The demo lab's incidents and its scripted run | 3 |
+| `areas/schedules.ts` | Schedules | 3 |
+| `areas/chatAndAtlassian.ts` | The team's chat bot, Jira and Confluence: where a request reaches the bridges | 16 |
+| `hubShared.ts`, `hubHost.ts` | Constants and small functions the parts share; what the hub is given by whatever runs it | |
+
+**To add a request:** add it to `HubRequest` (`src/shared/types/aiHub.ts`),
+give it a part in `areas/routes.ts`, and add its case to that part's
+`handle…` method. The compiler refuses the build until all three agree. A
+case answers by leaving something in `reply`, or returns
+`{ snapshot }` when it went on in another request and that one's snapshot is
+the answer.
+
+**What is not there.** The parts are files, not walls: any method can still
+reach any field of the hub. A field cannot be `private` once a method in
+another file uses it, so `private` was taken off the members the moved code
+needed and left on the rest. The fields stay in `HubService.ts` because their
+initial values are set in the order they are written there.
+`reflectTaskCompletion` and `recentServerChanges` stay in the class too: the
+first is called from the native tool bridge through a narrower type of the
+hub, the second uses a static method of the class.
+
+**How the move was checked.** Nothing was rewritten by hand. A script moved
+each method and each request case as text, and a second script compared all
+305 members and 144 request cases with the commit before the split: none
+differs, none is missing, none is new. The only changes a move makes are
+`private` taken off a moved method, `this: HubService` added as its first
+parameter, a case's `return this.snapshot()` written as
+`return { snapshot: … }`, and a path named inside the code written from the
+new folder. `tests/main/hubAreas.test.ts` keeps the files to a size
+(`HubService.ts` under 2,000 lines, a part under 1,500) and checks the table
+against the files.
 
 ## Nightly upkeep, the dependency map, and evidence beside conclusions
 
@@ -705,9 +771,12 @@ so an answer must never travel through shared hub state.
   snapshot: `kbWork` (pages being rewritten from their sources, a comparison
   of pages under way, how the last one ended), `evalRunning`,
   `serverFacts.collecting`.
-- Every action in `HubRequest` has a case in `HubService.request`; the
-  `default` branch assigns the request to `never`, so an action that is typed
-  but not handled does not compile.
+- Every action in `HubRequest` is answered by exactly one part of the hub.
+  `areas/routes.ts` is the table: an action that is typed but missing from it
+  does not compile, and each part's own switch assigns what it does not
+  handle to `never`, so a part that is given an action and has no case for it
+  does not compile either. `HubService.request` only finds the part, hands
+  the request over, and then saves and tells the windows.
 - A schedule runs on the endpoint that is configured now. It keeps a model of
   its own only while it was saved for that same provider and address.
 - `task.contextTokens` is what the model was sent at its last call in a
@@ -1961,6 +2030,7 @@ remaining platform/product work.
 
 - `src/main/desktopEntry.ts`: desktop entry; launches the pinned native engine/frontend only with `SSHS3_FORCE_NATIVE_HERMES=1`.
 - `src/main/ai/hub/`: AI Hub services (HubService, createHub, DirectAgentRuntime, KnowledgeBaseService, SelfLearningService, CommandSafetyService, ContextService, TerminalRegistry, ToolBroker, McpClientManager, S3WorkspaceSyncService, HubStore, privacy, builtins, demoWorkspace).
+- `src/main/ai/hub/areas/`: the hub's own methods, a file per area, and `routes.ts`, the table of which part answers which request (see "Where the hub's code is").
 - `src/main/ai/desktop/`: native Hermes host views, authenticated control IPC and NativeToolBridge.
 - `src/main/ai/hub/ChatSources.ts`, `ChatIndex.ts`, `ChatBridge.ts`: the team's bot in Slack and Mattermost, the index of what was said, and the search over it.
 - `src/main/ai/hub/Atlassian.ts`, `AtlassianBridge.ts`, `AtlassianStore.ts`: Jira on the board and Confluence in the knowledge base.
