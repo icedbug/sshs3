@@ -664,6 +664,19 @@ so an answer must never travel through shared hub state.
   from the newest task in the store, whichever that was.)
 - The self-learning status is counts of what is in the team memory. It names
   no engines and has no default percentages.
+- `reply` with `retry: true` asks the last question again. Nothing is added
+  to the conversation: the answer that followed the question is replaced by
+  the new one, and the question is stamped as asked now, so what the earlier
+  try ran (still in the tool log) is given to the model before the question.
+  It is refused while the conversation is still running.
+- `self-learn-reflect` (Tidy up) answers `reply.notes` with what it did: what
+  it wrote or changed straight away, by title, how many links between servers
+  it added, and how many suggestions wait for a person. The Memory view shows
+  those lines as they are.
+- `runner-test` answers `reply.runnerProbe` (see External agents) and changes
+  nothing.
+- A test case's result and `evalRunning` change in one step: no snapshot
+  shows a case that has its result and is still said to be running.
 
 ## Server facts, and what changed (`ServerFacts`, `FactsStore`)
 
@@ -1359,7 +1372,13 @@ because there is no server to run one on.
   such runs do not count against a budget. On a shared server a runner is a
   program on the server's host: only an administrator saves one, checked
   again at every start. On Windows a `.cmd` runner (npx) runs through cmd.exe
-  with every word quoted for it; anything else is started directly.
+  with every word quoted for it; anything else is started directly. **Test**
+  on a runner's card (`runner-test`, `probeRunner`) starts the program, greets
+  it and stops it again: the card then says whether the program was found,
+  whether it answered as an agent, and what it printed if it ended at once.
+  It is given no work and no session is opened. A run does not wait for ever
+  either: a program that does not answer the greeting within two minutes
+  fails the run with that as its reason.
 - **Server.** `docs/workforce-server.md`: the web build with
   `SSHS3_WORKFORCE=1` starts every user's hub at server start, so tickets,
   schedules and the learning queue are worked without anybody's app open.
@@ -1499,6 +1518,14 @@ readiness; a reconnect or uncertain command requires inspection and rearming.
 - Connecting by itself (`ensureReady`) happens only at something that looks
   like a shell prompt — never into `mysql>`, `psql`, a pager or a password
   prompt — and after a failed connect it is not retried for five minutes.
+- Which shell a terminal runs is read from what it shows and what it was
+  started with (`detectShellFromHint`). Its name is what a person called it
+  and counts only where a tab is named after its program: "cmd", "powershell"
+  or "pwsh" in a name for a local terminal on Windows, "fish" for a local
+  terminal. A server called `cmd-gateway` runs bash like any other. (bash,
+  zsh, sh and dash take the same commands, so a name may tell those apart
+  anywhere.) A guess the terminal did not answer to is not kept: the next try
+  reads the terminal again.
 - An agent's command is never written over something half-typed at the prompt.
 - The command runs in a subshell, so it cannot redefine `printf` to report a
   false exit code, and an `exit` or `cd` in it does not end or move the

@@ -179,8 +179,11 @@ describe('web server: frames are classified by their own type', () => {
     const tenant = await server.tenants.getOrCreateTenant(user);
     const chunk = 'X'.repeat(64 * 1024);
     // The answer is sent right behind a burst of output: the socket is backed up when it goes out.
+    // How much the operating system's own buffers take first differs from machine to machine (megabytes,
+    // with large TCP buffers), so output is sent until the server itself is holding some and drops it.
     tenant.ipcMain.handle('test:echo', async () => {
-      for (let i = 0; i < 40; i++) tenant.sendToSession('sess-flood', 'terminal:data', 'sess-flood', chunk);
+      for (let i = 0; i < 2000 && server.getWsStats().totalDroppedStreamFrames === 0; i++)
+        tenant.sendToSession('sess-flood', 'terminal:data', 'sess-flood', chunk);
       // e.g. a recorded event in a result: its JSON contains "channel":"terminal:data" verbatim.
       return { recorded: [{ channel: 'terminal:data', args: ['s1', 'ls'] }] };
     });
@@ -195,8 +198,9 @@ describe('web server: frames are classified by their own type', () => {
     const chunks: Buffer[] = [];
     sock.on('data', (d: Buffer) => chunks.push(d));
     sock.resume();
-    await vi.waitFor(() => expect(Buffer.concat(chunks).toString('latin1')).toContain('"id":"rpc-echo-1"'), {
-      timeout: 5000,
+    // The answer is small and comes last: it is looked for at the end of what has arrived.
+    await vi.waitFor(() => expect(Buffer.concat(chunks.slice(-8)).toString('latin1')).toContain('"id":"rpc-echo-1"'), {
+      timeout: 15000,
     });
     expect(server.getWsStats().activeConnections).toBe(1);
     sock.destroy();

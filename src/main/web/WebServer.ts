@@ -12,6 +12,7 @@ import { callBudget, handleMcpHttp } from './mcp/McpEndpoint';
 import { AuditLog } from '../ai/hub/AuditLog';
 import { verifyStandardWebhook, WEBHOOK_TOLERANCE_SECONDS } from '../ai/hub/Notifier';
 import { createLogger } from '../log';
+import { createWsSender } from './wsSender';
 
 const log = createLogger('web');
 
@@ -1283,10 +1284,6 @@ export class Sshs3WebServer {
       this.options.wsMaxBufferedBytes ?? MAX_WS_MESSAGE_BYTES,
     );
 
-    const queuedFrames: Array<{ buf: Buffer; bytes: number }> = [];
-    let queuedBytes = 0;
-    let draining = false;
-
     const entry: WsConnectionEntry = {
       socket,
       userId: user.id,
@@ -1298,65 +1295,14 @@ export class Sshs3WebServer {
       droppedStreamFrames: 0,
     };
 
-    const flushQueued = (): void => {
-      draining = false;
-      while (queuedFrames.length > 0 && !socket.destroyed && socket.writable) {
-        if (socket.writableLength >= highWaterBytes) {
-          draining = true;
-          socket.once('drain', flushQueued);
-          return;
-        }
-        const next = queuedFrames.shift()!;
-        queuedBytes -= next.bytes;
-        const ok = socket.write(next.buf);
-        if (!ok) {
-          draining = true;
-          socket.once('drain', flushQueued);
-          return;
-        }
-      }
-    };
-
-    // A response is never dropped: its request would wait for ever. Past this much queued it is the
-    // connection that goes (the client then fails what it was waiting for at once).
-    const maxQueuedResponseBytes = maxBufferedBytes + MAX_WS_MESSAGE_BYTES;
-
-    const sendFrame = (jsonText: string, kind: 'response' | 'other' = 'other') => {
-      if (socket.destroyed || !socket.writable) return;
-      const frame = encodeWsTextFrame(jsonText);
-      const inFlight = socket.writableLength + queuedBytes;
-
-      if (inFlight > 0 && inFlight + frame.length > maxBufferedBytes) {
-        entry.backpressureEvents += 1;
-        if (kind !== 'response' && isDroppableStreamFrame(jsonText)) {
-          entry.droppedStreamFrames += 1;
-          return;
-        }
-        if (kind !== 'response' || inFlight + frame.length > maxQueuedResponseBytes) {
-          // Control frames cannot fit in an overwhelmed socket; reap slow consumer
-          this.reapWsEntry(entry);
-          return;
-        }
-      }
-
-      if (!draining && queuedFrames.length === 0 && socket.writableLength < highWaterBytes) {
-        const ok = socket.write(frame);
-        if (!ok) {
-          entry.backpressureEvents += 1;
-          draining = true;
-          socket.once('drain', flushQueued);
-        }
-        return;
-      }
-
-      if (!draining) {
-        entry.backpressureEvents += 1;
-        draining = true;
-        socket.once('drain', flushQueued);
-      }
-      queuedFrames.push({ buf: frame, bytes: frame.length });
-      queuedBytes += frame.length;
-    };
+    // How frames go out to a client that may read slowly: see wsSender.ts.
+    const sender = createWsSender(
+      socket,
+      { highWaterBytes, maxBufferedBytes, maxQueuedResponseBytes: maxBufferedBytes + MAX_WS_MESSAGE_BYTES },
+      entry,
+      { encode: encodeWsTextFrame, droppable: isDroppableStreamFrame, reap: () => this.reapWsEntry(entry) },
+    );
+    const sendFrame = sender.send;
 
     const clientId = tenant.registerClient(socket, (payload) => sendFrame(payload));
     entry.clientId = clientId;
@@ -1440,8 +1386,7 @@ export class Sshs3WebServer {
           clearTimeout(entry.pongTimer);
           entry.pongTimer = undefined;
         }
-        queuedFrames.length = 0;
-        queuedBytes = 0;
+        sender.clear();
         tenant.unregisterClient(clientId);
         this.activeSockets.delete(socket);
         this.activeWsEntries.delete(socket);

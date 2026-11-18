@@ -940,6 +940,9 @@ export function createHub(
           }
         }
       }
+      // The demo lab asks nothing of a real network: the Kubernetes contexts of whoever runs it are
+      // real clusters (or a "localhost" that answers nobody), and are no part of the lab.
+      if (isDemoMode()) return targets;
       try {
         for (const c of await bridge.k8sDiscoveryService.listContexts()) {
           const url = new URL(c.server);

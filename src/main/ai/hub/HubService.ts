@@ -216,7 +216,7 @@ import { boundedContext, boundedPrompt, clip, HUB_PROMPT_MAX, maskContext, maskS
 import { createLogger } from "../../log";
 import { resolveTargetSelector, runWorkforce } from "./WorkforceRunner";
 import { LearningQueue } from "./LearningQueue";
-import { WorkSync } from "./WorkSync";
+import { standingKbCopy, WorkSync } from "./WorkSync";
 import {
   TICKET_CLAIM_TTL_MS,
   TICKET_STATUSES,
@@ -8368,7 +8368,7 @@ export class HubService {
    */
   private async runEvalCases(ids: string[]): Promise<void> {
     try {
-      for (const id of ids) {
+      for (const [at, id] of ids.entries()) {
         const found = (this.store.data.evalCases ?? []).find((c) => c.id === id);
         if (!found || this.disposed) continue;
         this.evalRunningId = id;
@@ -8414,6 +8414,9 @@ export class HubService {
           current.updatedAt = Date.now();
           this.lastWorkSync = 0;
         }
+        // The result and "which case is running" change in one step: nobody is shown a case that has
+        // its result and is still said to be running.
+        this.evalRunningId = ids[at + 1];
         await this.store.save().catch(() => undefined);
         this.changed();
       }
@@ -8810,17 +8813,8 @@ export class HubService {
         docs.filter((d) => d.shared !== false).map((d) => maskStrings({ ...d, chunks: [] })),
         removed.kb,
       ),
-      // A user document is never added back under its id (a new one gets a new id), so its removal is final:
-      // a copy written later (a teammate's computer that finished reading it after it was removed) does
-      // not bring it back. A built-in document keeps its id, and comes back only when somebody restores it (restore-builtins).
-      (local, remote) => {
-        if (Boolean(local.deleted) === Boolean(remote.deleted)) return remote.updatedAt > local.updatedAt ? remote : local;
-        const [gone, kept] = local.deleted ? [local, remote] : [remote, local];
-        // Brought back on purpose, after the removal: that stands. A copy that is merely newer (a
-        // teammate's computer that read the document after it was removed) does not bring it back.
-        if (builtinKbIds.has(kept.id) && (kept.restoredAt ?? 0) > gone.updatedAt) return kept;
-        return gone.updatedAt > kept.updatedAt ? gone : { ...gone, updatedAt: kept.updatedAt + 1 };
-      },
+      // A removal is final for a user's document, and for a built-in one until somebody restores it: see standingKbCopy.
+      (local, remote) => standingKbCopy(local, remote, builtinKbIds.has(local.id)),
     );
     const k = splitRemovals(kb.items);
     removed.kb = k.removed;

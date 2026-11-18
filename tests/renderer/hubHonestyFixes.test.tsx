@@ -273,6 +273,24 @@ describe("safety card", () => {
     fireEvent.click(screen.getByTestId("add-cluster-policy-btn"));
     expect(screen.getByTestId("cluster-policy-form")).toHaveTextContent("Needs a team server with a second account.");
   });
+
+  it("says whose the rules are: this computer's in the app, each person's own on a shared server", () => {
+    const hub = makeHub();
+    const web = window as unknown as { __SSHS3_WEB_MODE__?: boolean };
+    render(<SafetyPolicyCard hub={hub} act={vi.fn(async () => hub)} />);
+    expect(screen.getByTestId("safety-policy-whose")).toHaveTextContent("These rules apply to runs on this computer. They are not shared with the team: each person sets their own.");
+    cleanup();
+
+    web.__SSHS3_WEB_MODE__ = true;
+    try {
+      render(<SafetyPolicyCard hub={hub} act={vi.fn(async () => hub)} />);
+      expect(screen.getByTestId("safety-policy-whose")).toHaveTextContent(
+        "These rules are yours: they apply to the runs you start. Each person on this server has their own, and they are not shared with the team.",
+      );
+    } finally {
+      delete web.__SSHS3_WEB_MODE__;
+    }
+  });
 });
 
 describe("knowledge base: writing a source note", () => {

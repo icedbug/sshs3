@@ -380,9 +380,11 @@ describe('Web Security Overhaul: Heartbeat, Per-Session Routing & Backpressure',
     sendSub('sess-flood');
     await new Promise((r) => setTimeout(r, 30));
 
-    // Burst 40 chunks of 64 KiB each (2.5 MiB) so OS TCP buffer fills and writableLength > 0
+    // 64 KiB chunks until the server itself is holding output and drops it. How much the operating
+    // system's own buffers take first differs from machine to machine (megabytes, with large TCP
+    // buffers), so the amount is not fixed.
     const bigChunk = 'X'.repeat(64 * 1024);
-    for (let i = 0; i < 40; i++) {
+    for (let i = 0; i < 2000 && server.getWsStats().totalDroppedStreamFrames === 0; i++) {
       tenant.sendToSession('sess-flood', 'terminal:data', 'sess-flood', bigChunk);
     }
 
@@ -454,9 +456,10 @@ describe('Web Security Overhaul: Heartbeat, Per-Session Routing & Backpressure',
       slowSock.on('error', () => resolve());
     });
 
-    // Flood 40 x 64 KiB stream chunks to build un-drained backlog > 512 KiB, then broadcast a control event
+    // 64 KiB stream chunks until the server holds an un-drained backlog past 512 KiB and drops output
+    // (the operating system's buffers take a machine-dependent amount first), then a control event
     const streamChunk = 'Y'.repeat(64 * 1024);
-    for (let i = 0; i < 40; i++) {
+    for (let i = 0; i < 2000 && server.getWsStats().totalDroppedStreamFrames === 0; i++) {
       tenant.sendToSession('sess-slow', 'terminal:data', 'sess-slow', streamChunk);
     }
     expect(server.getWsStats().totalDroppedStreamFrames).toBeGreaterThan(0);

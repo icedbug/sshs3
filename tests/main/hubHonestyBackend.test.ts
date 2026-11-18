@@ -485,4 +485,35 @@ describe("M1 backend honesty & correctness fixes", () => {
       blocked: "Simulated demo storage: not probed on a real network.",
     });
   });
+
+  it("createHub.inventoryTargets leaves the machine's own Kubernetes contexts out of the demo lab, and lists them otherwise", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "sshs3-createhub-demo-k8s-"));
+    const bridge = {
+      profileStore: new ProfileStore(path.join(dir, "profiles.json")),
+      teamVaultService: { listVaultIds: async () => [], isUnlocked: () => false },
+      // What a machine with a kubeconfig (or none: "loaded-context" on localhost) reports.
+      k8sDiscoveryService: { listContexts: async () => [{ contextName: "loaded-context", server: "https://localhost:6443" }] },
+      scheduleAutoSync: () => {},
+    };
+    const hub = createHub(
+      bridge as never,
+      { backgroundChanged: async () => {}, show: () => {} },
+      { hubDirectory: dir, aiConfigFilePath: path.join(dir, "ai.json"), s3ConfigFilePath: path.join(dir, "s3.json") },
+    );
+    disposals.push(async () => {
+      await hub.dispose();
+      await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    });
+    const host = (hub as unknown as { host: { inventoryTargets: () => Promise<Array<{ id: string; kind: string; blocked?: string }>> } }).host;
+
+    setDemoModeForTesting(false);
+    expect((await host.inventoryTargets()).map((t) => t.id)).toContain("k8s:loaded-context");
+
+    // In the lab every target is one of the lab's own, and none is asked on a real network.
+    setDemoModeForTesting(true);
+    const inLab = await host.inventoryTargets();
+    expect(inLab.some((t) => t.kind === "k8s")).toBe(false);
+    expect(inLab.length).toBeGreaterThan(0);
+    expect(inLab.every((t) => Boolean(t.blocked))).toBe(true);
+  });
 });

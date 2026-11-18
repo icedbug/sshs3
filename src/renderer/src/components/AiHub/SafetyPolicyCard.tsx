@@ -6,6 +6,7 @@ import {
   type HubSnapshot,
   type SafetyPolicyConfig as SafetyPolicy,
 } from "@shared/types/aiHub";
+import { isWebBrowserMode } from "../../lib/webClientBridge";
 import { type Act, modes } from "./panelShared";
 
 type BooleanSafetyKey =
@@ -103,7 +104,11 @@ export function SafetyPolicyCard({ hub, act }: { hub: HubSnapshot; act: Act }): 
           <small>
             Before a command runs, each part of it is classified as read-only, changing or destructive — also inside
             pipes, chains, subshells, bash -c and find -exec. What is not known to be read-only counts as changing.
-            These rules apply to runs on this computer; they are not shared with the team.
+          </small>
+          <small data-testid="safety-policy-whose">
+            {isWebBrowserMode()
+              ? "These rules are yours: they apply to the runs you start. Each person on this server has their own, and they are not shared with the team."
+              : "These rules apply to runs on this computer. They are not shared with the team: each person sets their own."}
           </small>
           {hub.safetyPolicyChanged && (
             <small data-testid="safety-policy-changed">
