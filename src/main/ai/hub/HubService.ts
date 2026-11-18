@@ -37,7 +37,6 @@ import type {
   WorkforceRun,
   WorkGoal,
   SimulationView,
-  TicketChatRef,
   WorkTicket,
   WorkTicketStatus,
   WorkforceStep,
@@ -100,7 +99,6 @@ import { NotifyStore } from "./NotifyStore";
 import { AtlassianStore } from "./AtlassianStore";
 import { AtlassianBridge } from "./AtlassianBridge";
 import { ChatBridge } from "./ChatBridge";
-import { chatTerms } from "./ChatIndex";
 import { runningScenario, SCENARIOS, scenarioById, scoreRunning, startScenario, stopScenario } from "../../sim/lab";
 import { simFactsOutput } from "../../sim/facts";
 import { simWorld } from "../../sim/SimWorld";
@@ -262,6 +260,7 @@ import {
 import { areaOf, type AreaName, type Handled, type RequestsOf } from "./areas/routes";
 import { mixParts } from "./areas/mix";
 import { InboxPart } from "./areas/inbox";
+import { ChatAndAtlassianPart } from "./areas/chatAndAtlassian";
 // Declared in files of their own now; still exported from here, where others import them.
 export type { HubHost } from "./hubHost";
 export { changeForSnapshot, taskForSnapshot, incomingAgentForTesting, checkedSuggestionForTesting, withUnanswered, budgetStopLine, renderWorkforceProgress } from "./hubShared";
@@ -303,7 +302,7 @@ export class HubService {
   private readonly embeddings: EmbeddingIndex;
   private learningQueue?: LearningQueue;
   private workSyncStore?: WorkSync;
-  private lastWorkSync = 0;
+  lastWorkSync = 0;
   private workSyncing = false;
   private workSyncInFlight?: Promise<void>;
   private workSyncPushTimer?: NodeJS.Timeout;
@@ -1672,19 +1671,6 @@ export class HubService {
       .catch((e) => log.warn("Could not write the audit log", safeError(e)));
   }
 
-  /** A change to what the bot reads or keeps is written down with who made it. */
-  private async chatDone(done: { target: string; what: string }): Promise<void> {
-    await this.audit()
-      .append({ kind: "setting", actor: await this.resolveActorName(), ...done, outcome: "completed" })
-      .catch((e) => log.warn("Could not write the audit log", safeError(e)));
-  }
-
-  /** The bot is the team's, one for everybody on a shared server: there it is the administrator's to connect, point at channels and empty. */
-  private assertChatAdmin(): void {
-    if (this.sharedServer() && !this.host.teamAdmin?.())
-      throw new Error("Only an administrator of this server sets up the team's chat bot or changes what it reads.");
-  }
-
   /** On a shared server, the team's bucket is the administrator's to set up, change or disconnect: one member's change is everyone's. */
   private assertTeamAdmin(): void {
     if (this.sharedServer() && !this.host.teamAdmin?.())
@@ -2470,6 +2456,8 @@ export class HubService {
     switch (area) {
       case "inbox":
         return this.handleInbox(request as RequestsOf<"inbox">);
+      case "chatAndAtlassian":
+        return this.handleChatAndAtlassian(request as RequestsOf<"chatAndAtlassian">);
     }
   }
 
@@ -4162,122 +4150,11 @@ export class HubService {
         }
         break;
       }
-      case "atlassian-save": {
-        await this.atlassian.save(request.connection);
-        void this.audit()
-          .append({
-            kind: "setting",
-            actor: await this.resolveActorName(),
-            target: "sshs3 on this computer",
-            what: `Connection to ${request.connection.product === "jira" ? "Jira" : "Confluence"} saved: ${hostOf(request.connection.baseUrl)}${request.connection.product === "jira" && request.connection.projects?.length ? `, projects ${request.connection.projects.join(", ")}` : ""}`,
-            outcome: "completed",
-          })
-          .catch(() => undefined);
-        break;
-      }
-      case "atlassian-test":
-        reply = { atlassianTest: await this.atlassian.test(request.product) };
-        break;
-      case "atlassian-disconnect": {
-        await this.atlassian.disconnect(request.product);
-        void this.audit()
-          .append({ kind: "setting", actor: await this.resolveActorName(), target: "sshs3 on this computer", what: `Connection to ${request.product === "jira" ? "Jira" : "Confluence"} removed`, outcome: "completed" })
-          .catch(() => undefined);
-        break;
-      }
-      case "kb-ingest-confluence":
-        reply = { ingest: await this.atlassian.addConfluence({ spaceKey: request.spaceKey, pageId: request.pageId }, await this.resolveActorName()) };
-        await this.store.save().catch(() => undefined);
-        break;
-      case "kb-page-publish": {
-        const page = (this.store.data.kbPages ?? []).find((x) => x.id === request.id);
-        if (!page) throw new Error("Page not found");
-        const published = await this.atlassian.publishPage(page, { spaceKey: request.spaceKey, parentId: request.parentId }, await this.resolveActorName());
-        // Read again: the page may have been edited while Confluence answered. Where it was published is
-        // not a change of its text: no new revision, but a newer copy, so the team sees it too.
-        const now = (this.store.data.kbPages ?? []).find((x) => x.id === request.id);
-        if (now) {
-          now.published = published;
-          now.updatedAt = Math.max(Date.now(), now.updatedAt + 1);
-          this.lastWorkSync = 0;
-          reply = { kbPage: now };
-        }
-        break;
-      }
       case "sim-start":
         await this.startSimulation(requiredText(request.scenarioId));
         break;
       case "sim-reset":
         await this.endSimulation();
-        break;
-      case "chat-source-save":
-        this.assertChatAdmin();
-        await this.chatDone(await this.chat.save(request.connection));
-        break;
-      case "chat-source-test":
-        this.assertChatAdmin();
-        reply = { chatTest: await this.chat.test(request.service) };
-        break;
-      case "chat-source-disconnect":
-        this.assertChatAdmin();
-        await this.chatDone(await this.chat.disconnect(request.service, request.forget === true));
-        break;
-      case "chat-channel-select":
-        this.assertChatAdmin();
-        await this.chatDone(await this.chat.select(request.service, requiredText(request.channelId), request.selected === true));
-        break;
-      case "chat-channel-read-back":
-        this.assertChatAdmin();
-        await this.chat.readBack(request.service, requiredText(request.channelId), integer(request.days, 1, 3650));
-        break;
-      case "chat-forget":
-        this.assertChatAdmin();
-        await this.chatDone(await this.chat.forget(request.service, request.channelId));
-        break;
-      case "chat-retention":
-        this.assertChatAdmin();
-        await this.chat.setRetention(request.days === undefined ? undefined : integer(request.days, 1, 3650));
-        break;
-      case "chat-search": {
-        const query = requiredText(request.query);
-        reply = {
-          chatSearch: {
-            query,
-            hits: this.chat
-              .search({
-                query,
-                channel: request.channel,
-                sinceMs: request.sinceDays ? Date.now() - integer(request.sinceDays, 1, 3650) * 86_400_000 : undefined,
-                limit: Math.max(1, Math.min(20, request.limit ?? 8)),
-              })
-              .map(({ score: _score, ...hit }) => hit),
-          },
-        };
-        break;
-      }
-      case "chat-thread-to-kb": {
-        const thread = this.chat.thread(request.service, requiredText(request.channelId), requiredText(request.threadId));
-        if (!thread.length) throw new Error("That thread is not in what was read.");
-        const channel = this.chat.index.channel(request.service, request.channelId)?.name ?? request.channelId;
-        const day = new Date(thread[0].at).toISOString().slice(0, 10);
-        // A person chose this thread: it becomes a source like a pasted text, and the pages are written from it by the same rules.
-        reply = {
-          ingest: await this.ingestExtracted(
-            {
-              text: [`A thread in the team's chat, #${channel}, ${day}. What people wrote to each other, not checked.`, "", ...thread.map((m) => `${m.author}: ${m.text}`)].join("\n"),
-              format: "text",
-              title: `Chat thread in #${channel}, ${day}: ${clip(thread[0].text, 80)}`,
-            },
-            { name: `#${channel} ${day}`, sourceType: "paste", sourceRef: thread[0].link || `chat:${request.service}/${request.channelId}/${request.threadId}` },
-          ),
-        };
-        break;
-      }
-      case "kb-confluence-unfollow":
-        await this.atlassian.unfollowConfluence(requiredText(request.ref));
-        break;
-      case "jira-sync-now":
-        reply = { jiraSync: await this.atlassian.syncJira(Date.now(), true) };
         break;
       case "infra-edge-confirm": {
         const edge = (this.store.data.infraEdges ?? []).find((x) => x.id === request.id);
@@ -6768,7 +6645,7 @@ export class HubService {
    * (or several, when it is very long), queued to be read for title, summary
    * and tags. Text that is already in the knowledge base is not added again.
    */
-  private async ingestExtracted(
+  async ingestExtracted(
     extracted: Extracted,
     source: {
       name: string;
@@ -7755,7 +7632,7 @@ export class HubService {
    * A shared server with several users: what one of them types must not reach into the server itself.
    * A web server with one account, its administrator's, is that person's own machine like the desktop app.
    */
-  private sharedServer(): boolean {
+  sharedServer(): boolean {
     return this.hosted() && !this.host.soleUser?.();
   }
 
@@ -7930,65 +7807,6 @@ export class HubService {
       `${alert.title} ${target ?? ""}`,
       1,
     ).map((h) => ({ id: h.page.id, title: h.page.title, known: false }));
-  }
-
-  /**
-   * What the team said in chat about what a ticket is about, in the last week:
-   * threads that name its server or cluster, or its alert. A thread has to
-   * hold every word of the name it was found by: "pg-01" is not found by a
-   * thread that only says "pg".
-   */
-  private chatAbout(names: (string | undefined)[], now = Date.now()): TicketChatRef[] {
-    if (!this.chat.active()) return [];
-    const found = new Map<string, TicketChatRef & { score: number }>();
-    for (const name of names) {
-      const terms = [...new Set(chatTerms(name ?? ""))];
-      if (!terms.length) continue;
-      for (const hit of this.chat.search({ query: name!, sinceMs: now - 7 * 86_400_000, limit: 5 }, now)) {
-        const said = new Set(chatTerms(this.chat.thread(hit.service, hit.channelId, hit.threadId).map((m) => m.text).join(" ")));
-        if (!terms.every((term) => said.has(term))) continue;
-        const id = `${hit.service}:${hit.channelId}:${hit.threadId}`;
-        if ((found.get(id)?.score ?? -1) >= hit.score) continue;
-        found.set(id, {
-          service: hit.service,
-          channelId: hit.channelId,
-          channel: hit.channel,
-          threadId: hit.threadId,
-          at: hit.at,
-          link: hit.link,
-          excerpt: hit.messages
-            .slice(-4)
-            .map((m) => `${m.author}: ${clip(m.text, 400)}`)
-            .join("\n"),
-          score: hit.score,
-        });
-      }
-    }
-    return [...found.values()]
-      .sort((a, b) => b.score - a.score || b.at - a.at)
-      .slice(0, 3)
-      .map(({ score: _score, ...ref }) => ref);
-  }
-
-  /**
-   * An alert's ticket that came in where there is no bot (a teammate's
-   * installation, through the bucket) gets what was said in chat from the
-   * installation that has one, once for the team.
-   */
-  private async fillChatOnTickets(now = Date.now()): Promise<void> {
-    if (!this.chat.active()) return;
-    for (const ticket of live(this.store.data.workTickets)) {
-      if (!ticket.alert || ticket.status === "done" || ticket.chatLookedAt || now - ticket.createdAt > 24 * 3_600_000) continue;
-      const sync = this.work();
-      if (sync && !(await sync.markOnce(`chat-ticket-${ticket.id}`, this.clientId(), this.notifySettle).catch(() => false))) {
-        // A teammate's installation has it: looked at here no more.
-        ticket.chatLookedAt = now;
-        continue;
-      }
-      const refs = this.chatAbout([ticket.target, ticket.alert.name], now);
-      const current = this.store.data.workTickets?.find((t) => t.id === ticket.id && !t.deleted);
-      if (current) this.putTicket({ ...current, chatLookedAt: now, ...(refs.length ? { chatRefs: refs } : {}), updatedAt: Math.max(now, current.updatedAt + 1) });
-    }
   }
 
   /**
@@ -8390,7 +8208,7 @@ export class HubService {
   }
 
   /** Stores a ticket here and sends it to the team. The upload is not waited for. */
-  private putTicket(ticket: WorkTicket): void {
+  putTicket(ticket: WorkTicket): void {
     const had = (this.store.data.workTickets ?? []).find((t) => t.id === ticket.id);
     // When it came to this status: what tells a new "review" from an old one with a new comment.
     ticket = { ...ticket, statusAt: had && had.status === ticket.status ? (had.statusAt ?? ticket.statusAt) : Date.now() };
@@ -10523,6 +10341,6 @@ export class HubService {
 }
 
 /** The hub's methods that are kept in files of their own (./areas). Declared here so the class has them; put on it just below. */
-// eslint-disable-next-line @typescript-eslint/no-empty-object-type, @typescript-eslint/no-unsafe-declaration-merging -- it names the parts and has no members of its own
-export interface HubService extends InboxPart {}
-mixParts(HubService, [InboxPart]);
+// eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging -- it names the parts and has no members of its own
+export interface HubService extends InboxPart, ChatAndAtlassianPart {}
+mixParts(HubService, [InboxPart, ChatAndAtlassianPart]);
