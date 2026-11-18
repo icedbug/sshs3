@@ -4,12 +4,8 @@ import path from "node:path";
 import { app, powerMonitor } from "electron";
 import type {
   AgentMode,
-  SafetyPolicyConfig,
   AgentChange,
-  AgentChangeApproval,
-  AgentPlan,
   AgentUsage,
-  ClusterSafetyPolicy,
   EvalCase,
   HubReply,
   KbPage,
@@ -47,7 +43,7 @@ import { S3WorkspaceSyncService, mergeMemoryCopies } from "./S3WorkspaceSyncServ
 import { McpClientManager } from "./McpClientManager";
 import { KnowledgeBaseService } from "./KnowledgeBaseService";
 import { SelfLearningService } from "./SelfLearningService";
-import { DEFAULT_SAFETY_POLICY, analyzeCommandSafety, isProdTag, shouldRequireCommandApproval } from "./CommandSafetyService";
+import { analyzeCommandSafety, isProdTag, shouldRequireCommandApproval } from "./CommandSafetyService";
 import { AcpRuntime, EXTERNAL_RUNNER_PRESETS } from "./AcpRuntime";
 import { withUse, mergePageCopies } from "./KbCompile";
 import { lowerMode } from "./AppGuard";
@@ -67,14 +63,12 @@ import {
   getBuiltinSkillsAndMemories,
   getBuiltinSnippets,
   getDemoInfraEdges,
-  getDemoMemories,
   getDemoSchedules,
   getDemoServers,
   getDemoTasks,
   getDemoWorkforceRuns,
   isDemoMode,
   mcpCatalog,
-  restoreDemoBuiltins,
   saveDemoInfraEdge,
 } from "./demoWorkspace";
 import { isDemoTarget } from "../../demo/demoMode";
@@ -87,7 +81,6 @@ import { LocalMcpServer } from "./LocalMcpServer";
 import { SessionRecorder } from "./SessionRecorder";
 import { McpTokenStore } from "../../web/McpTokenStore";
 import { boundedContext, boundedPrompt, clip, HUB_PROMPT_MAX, maskContext, maskStrings, PERSON_PROMPT_MAX, safeError } from "./privacy";
-import { resolveTargetSelector } from "./WorkforceRunner";
 import { LearningQueue } from "./LearningQueue";
 import { standingKbCopy, WorkSync, type ConditionalQueueStore } from "./WorkSync";
 import {
@@ -113,7 +106,6 @@ import {
   ticketPrompt,
   whyNotRunnable,
 } from "./WorkBoard";
-import { approvalAsksEach, approvalMessage, checkPlanApprovals, rejectionMessage, todosFromPlan } from "./PlanMode";
 import { EmbeddingIndex } from "./EmbeddingIndex";
 import { taskTranscript, worthDistilling } from "./MemoryDistiller";
 import {
@@ -136,7 +128,6 @@ import {
   READ_ONLY_ACTIONS,
   AGENT_FIELD_GROUPS,
   incomingAgent,
-  BOOLEAN_POLICY_NAMES,
   checkedSuggestion,
   active,
   withUnanswered,
@@ -160,6 +151,7 @@ import { McpPart } from "./areas/mcp";
 import { AgentsPart } from "./areas/agents";
 import { MemoryPart } from "./areas/memory";
 import { KnowledgePart } from "./areas/knowledge";
+import { SafetyPart } from "./areas/safety";
 // Declared in files of their own now; still exported from here, where others import them.
 export type { HubHost } from "./hubHost";
 export { changeForSnapshot, taskForSnapshot, incomingAgentForTesting, checkedSuggestionForTesting, withUnanswered, budgetStopLine, renderWorkforceProgress } from "./hubShared";
@@ -734,369 +726,8 @@ export class HubService {
     ];
   }
 
-  private resolveSafetyContext(
-    task: Pick<AgentTask, "target" | "startedAs" | "agentId">,
-    targetLabel?: string,
-  ): {
-    policy: SafetyPolicyConfig;
-    targetTags?: string[];
-    clusterPolicy?: ClusterSafetyPolicy;
-    requesterId?: string;
-    peerApproval?: boolean;
-  } {
-    const policy = this.safetyPolicy();
-    const rawLabel = (targetLabel || task.target?.label || "").trim();
-    const label = rawLabel.toLowerCase();
-    const session = task.target ? this.terminals.get(task.target.sessionId) : undefined;
-    const knownServers = this.getKnownServers();
-    const clusterMatch = /^cluster\s+([^\s(]+)/i.exec(rawLabel)?.[1]?.toLowerCase();
-    const matchedServers = knownServers.filter((s) => {
-      const sName = s.name.toLowerCase();
-      const sId = s.id.toLowerCase();
-      const sCluster = s.cluster?.toLowerCase();
-      if (session?.profileId && s.id === session.profileId) return true;
-      if (!label) return false;
-      if (sName === label || sId === label || s.host.toLowerCase() === label) return true;
-      if (
-        sCluster &&
-        (sCluster === label ||
-          (clusterMatch && (sCluster === clusterMatch || sCluster.includes(clusterMatch))))
-      ) {
-        return true;
-      }
-      if ((rawLabel.includes(",") || rawLabel.includes("(")) && sName.length >= 2 && label.includes(sName)) {
-        return true;
-      }
-      return false;
-    });
-    const aggregatedTags = Array.from(new Set(matchedServers.flatMap((s) => s.tags ?? [])));
-    const clusterPolicies = policy.clusterPolicies;
-    let clusterPolicy: ClusterSafetyPolicy | undefined;
-    if (clusterPolicies && typeof clusterPolicies === "object") {
-      const candidateClusterKeys = new Set<string>();
-      for (const s of matchedServers) {
-        if (s.cluster?.trim()) candidateClusterKeys.add(s.cluster.trim().toLowerCase());
-      }
-      if (clusterMatch) candidateClusterKeys.add(clusterMatch);
-      if (label) candidateClusterKeys.add(label);
-      const matchedPolicies: ClusterSafetyPolicy[] = [];
-      for (const [k, v] of Object.entries(clusterPolicies)) {
-        if (v && candidateClusterKeys.has(k.trim().toLowerCase())) {
-          matchedPolicies.push(v);
-        }
-      }
-      if (matchedPolicies.length > 0) {
-        clusterPolicy = matchedPolicies.reduce<ClusterSafetyPolicy>((acc, cur) => ({
-          ...(cur.maxMode || acc.maxMode
-            ? {
-                maxMode:
-                  cur.maxMode && acc.maxMode
-                    ? lowerMode(cur.maxMode, acc.maxMode)
-                    : (cur.maxMode ?? acc.maxMode),
-              }
-            : {}),
-          ...(cur.requiredApprovals !== undefined || acc.requiredApprovals !== undefined
-            ? {
-                requiredApprovals: Math.max(
-                  cur.requiredApprovals ?? 1,
-                  acc.requiredApprovals ?? 1,
-                ),
-              }
-            : {}),
-          ...(cur.requireCheckAndRollback || acc.requireCheckAndRollback
-            ? { requireCheckAndRollback: true }
-            : {}),
-          ...(cur.frozenUntil !== undefined || acc.frozenUntil !== undefined
-            ? { frozenUntil: Math.max(cur.frozenUntil ?? 0, acc.frozenUntil ?? 0) }
-            : {}),
-        }), {});
-      }
-    }
-    return {
-      policy,
-      targetTags: aggregatedTags.length > 0 ? aggregatedTags : undefined,
-      ...(clusterPolicy ? { clusterPolicy } : {}),
-      // A run acts for the person whose app this is: their approval is one, a second must be someone else's.
-      requesterId: this.localApproverId(),
-      peerApproval: this.peerApprovalPossible(),
-    };
-  }
-
-  /** Who approves from this app: the signed-in account on the web server, the one person on the desktop. */
-  private localApproverId(): string {
-    return this.host.alertHookOwner ? `user:${this.host.alertHookOwner}` : "local";
-  }
-
-  /** Whether a second person can be asked for an approval: only on a team server that routes it to them. */
-  private peerApprovalPossible(): boolean {
-    return this.sharedServer() && Boolean(this.host.peerApproval?.());
-  }
-
-  /**
-   * Another signed-in member of the team server answers a change waiting in this person's app.
-   * The web server calls this after it has checked that member may approve; their answer counts
-   * as theirs, never as a second one of this person's.
-   */
-  async approveAsPeer(
-    taskId: string,
-    changeId: string,
-    allowed: boolean,
-    peer: { id: string; name: string },
-    note?: string,
-  ): Promise<boolean> {
-    if (!this.peerApprovalPossible())
-      throw new Error("Approvals are not shared between people on this server.");
-    const actorId = `user:${requiredText(peer.id)}`;
-    if (actorId === this.localApproverId())
-      throw new Error("The person a change is made for answers it in their own app.");
-    const name = requiredText(peer.name);
-    const resolved = this.broker.approve(taskId, changeId, allowed, note?.trim() ? clip(note.trim(), 1000) : undefined, {
-      actor: name,
-      actorId,
-      peer: true,
-    });
-    const change = this.store.data.tasks.find((t) => t.id === taskId)?.changes.find((c) => c.id === changeId);
-    if (change && (resolved || change.status !== "pending")) change.decidedBy = { name, at: Date.now(), allowed };
-    this.changed();
-    return resolved;
-  }
-
-  /** How a plan stands with the people who have to approve it, by the rules in force for what it touches. */
-  private planApprovalStatus(task: AgentTask, plan: AgentPlan, approvals: ReadonlyArray<AgentChangeApproval>) {
-    const target = task.target?.label ?? plan.steps.find((s) => s.target?.trim())?.target;
-    const ctx = this.resolveSafetyContext(task, target);
-    const status = checkPlanApprovals(plan, {
-      approvals,
-      // The person whose run it is: their approval alone is never the two.
-      proposer: this.localApproverId(),
-      targetTags: ctx.targetTags,
-      defaultTarget: task.target?.label,
-      policy: ctx.policy,
-      clusterPolicy: ctx.clusterPolicy,
-    });
-    return { status, tags: ctx.targetTags ?? [] };
-  }
-
-  /** A plan was just proposed: how many people have to approve it is written on it, for whoever reads it. */
-  private planProposed(task: AgentTask): void {
-    const plan = task.plan;
-    if (!plan || plan.status !== "proposed") return;
-    const needs = this.planApprovalStatus(task, plan, plan.approvals ?? []).status.requiredApprovals;
-    if (needs > 1 && this.peerApprovalPossible()) plan.requiredApprovals = needs;
-    else delete plan.requiredApprovals;
-  }
-
-  /**
-   * A person's answer to the plan a conversation's agent proposed. `who` is the person answering: the
-   * one whose run it is, or, on a server several people share, another member answering as the second
-   * person (approvePlanAsPeer). Returns the snapshot of the conversation going on (the plan was
-   * approved, or sent back with a note), or nothing when it only recorded the answer.
-   *
-   * What another member writes is shown to the person whose run it is. It is never sent to the agent as
-   * that person's words, and a second person's no does not send the agent back to work.
-   */
-  private async decidePlan(
-    task: AgentTask,
-    answer: { approved: boolean; note?: string; askEach?: boolean },
-    who: { actor: string; actorId: string; peer?: boolean },
-  ): Promise<HubSnapshot | undefined> {
-    const plan = task.plan;
-    if (!plan || plan.status !== "proposed") throw new Error("There is no plan waiting for a decision in this conversation");
-    if (active(task)) throw new Error("The agent is still working; decide when it has stopped");
-    const note = answer.note?.trim();
-    const { actor, actorId } = who;
-    const vote = (allowed: boolean): AgentChangeApproval => ({
-      actor,
-      actorId,
-      at: Date.now(),
-      allowed,
-      ...(who.peer ? { peer: true } : {}),
-      ...(note ? { note: boundedContext(note, 1000) } : {}),
-    });
-    const say = (text: string): void => {
-      task.messages.push({ id: crypto.randomUUID(), role: "system", text, at: Date.now() });
-      task.updatedAt = Date.now();
-    };
-    // Another member's own words, quoted as theirs for the person whose run it is.
-    const wrote = who.peer && note ? ` They wrote: "${boundedContext(note, 1000)}"` : "";
-    if (this.getKnownServers().length === 0) {
-      await this.collectExtraContext().catch(() => undefined);
-    }
-    const planTargets = Array.from(new Set([task.target?.label, ...plan.steps.map((s) => s.target)].filter((t): t is string => Boolean(t?.trim()))));
-    if (answer.approved) {
-      for (const tgt of planTargets.length ? planTargets : [undefined]) {
-        const tgtCtx = this.resolveSafetyContext(task, tgt ?? task.target?.label);
-        if (tgtCtx.clusterPolicy?.frozenUntil && tgtCtx.clusterPolicy.frozenUntil > Date.now()) {
-          throw new Error(`Cluster is in a change freeze until ${new Date(tgtCtx.clusterPolicy.frozenUntil).toISOString()}.`);
-        }
-      }
-      const prevApprovals = [...(plan.approvals ?? [])];
-      if (prevApprovals.some((a) => a.allowed && (a.actorId || a.actor).toLowerCase() === actorId.toLowerCase())) {
-        throw new Error("You already approved this plan; it needs the approval of another person.");
-      }
-      const nextApprovals: AgentChangeApproval[] = [...prevApprovals, vote(true)];
-      const approvalStatus = this.planApprovalStatus(task, plan, nextApprovals).status;
-      if (!approvalStatus.satisfied && approvalStatus.requiredApprovals > 1 && !this.peerApprovalPossible()) {
-        throw new Error(
-          `This plan needs the approval of ${approvalStatus.requiredApprovals} different people (the cluster's policy), and only one person can approve in this app.`,
-        );
-      }
-      plan.approvals = nextApprovals;
-      plan.requiredApprovals = approvalStatus.requiredApprovals;
-      if (!approvalStatus.satisfied) {
-        // What the person whose run it is chose about each command is kept for when the plan is approved.
-        if (!who.peer && answer.askEach === true && !plan.askEach) plan.askEach = "person";
-        say(
-          who.peer
-            ? `${actor} approved this plan as the second person. It waits for your own answer.`
-            : approvalStatus.requiredApprovals === 2
-              ? "You approved this plan. Two people have to approve it: the others who may are asked in their inbox, and the agent starts when one of them has."
-              : `You approved this plan. ${approvalStatus.requiredApprovals} different people have to approve it: the others who may are asked in their inbox, and the agent starts when enough of them have.`,
-        );
-        this.changed();
-        return undefined;
-      }
-      plan.decidedAt = Date.now();
-      plan.status = "approved";
-      if (approvalStatus.isProd) plan.production = true;
-      else delete plan.production;
-      // What the person whose run it is added, whoever of the two answered last.
-      const ownNote = who.peer ? nextApprovals.find((a) => a.allowed && !a.peer)?.note : note;
-      // What this approval covers is settled here, where the person decided, and written on the plan.
-      // A second person approves the plan as it stands: what is asked about each command is the
-      // plan's own promise, or what the person whose run it is chose when they approved.
-      const asks = who.peer ? plan.askEach : approvalAsksEach(plan, { note, askEach: answer.askEach });
-      if (asks) plan.askEach = asks;
-      else delete plan.askEach;
-      if (ownNote) plan.decisionNote = boundedContext(ownNote, 2000);
-      // The agent is held to the plan: its steps become its task list.
-      task.todos = todosFromPlan(plan);
-      if (who.peer) say(`${actor} approved this plan as the second person.${wrote}`);
-      this.changed();
-      if (!who.peer) return this.request({ action: "reply", taskId: task.id, text: approvalMessage(plan, ownNote) });
-      try {
-        return await this.request({ action: "reply", taskId: task.id, text: approvalMessage(plan, ownNote) });
-      } catch (error) {
-        // The plan is approved all the same. Why the agent did not start is for the person whose run it is.
-        say(`The plan is approved, but the agent could not be started again: ${clip(error instanceof Error ? error.message : String(error), 300)} Send it a message to go on.`);
-        this.changed();
-        return undefined;
-      }
-    }
-    plan.decidedAt = Date.now();
-    plan.approvals = [...(plan.approvals ?? []), vote(false)];
-    plan.status = "rejected";
-    if (who.peer) {
-      say(`${actor} did not approve this plan.${wrote} Nothing was run. Ask the agent for a new plan, or go on another way.`);
-      this.changed();
-      return undefined;
-    }
-    if (note) {
-      plan.decisionNote = boundedContext(note, 2000);
-      this.changed();
-      return this.request({ action: "reply", taskId: task.id, text: rejectionMessage(note) });
-    }
-    this.changed();
-    return undefined;
-  }
-
-  /**
-   * Another signed-in member of the team server answers the plan waiting in this person's conversation,
-   * as the second person. The web server calls this after it has checked that member may; their answer
-   * counts as theirs, never as a second one of this person's.
-   */
-  async approvePlanAsPeer(taskId: string, allowed: boolean, peer: { id: string; name: string }, note?: string): Promise<void> {
-    if (!this.peerApprovalPossible()) throw new Error("Approvals are not shared between people on this server.");
-    const actorId = `user:${requiredText(peer.id)}`;
-    if (actorId === this.localApproverId()) throw new Error("The person a plan is made for answers it in their own app.");
-    const task = this.store.data.tasks.find((t) => t.id === taskId);
-    if (!task) throw new Error("That conversation is not here any more.");
-    await this.decidePlan(
-      task,
-      { approved: allowed, ...(note?.trim() ? { note: clip(note.trim(), 1000) } : {}) },
-      { actor: requiredText(peer.name), actorId, peer: true },
-    );
-    // Recorded now: a request of this person's own saves at its end, this one is somebody else's.
-    await this.store.save().catch(() => undefined);
-  }
-
-  /** Changes in this app waiting on a person's approval, for the web server to show to the other members. */
-  waitingForApproval(): Array<{
-    taskId: string;
-    changeId: string;
-    agentName?: string;
-    description: string;
-    command?: string;
-    target?: string;
-    risk?: AgentChange["riskLevel"];
-    /** The tags of the server it is about: whether it is production decides who may be the second person. */
-    targetTags: string[];
-    requiredApprovals: number;
-    approvedBy: string[];
-    /** The ones who approved, as the broker counts them (an account's id where it has one). */
-    approvers: Array<{ actor: string; actorId?: string; allowed: boolean }>;
-    at: number;
-    /** Set when what waits is a plan, not one change: its steps, for the person deciding. `changeId` is then the plan's id. */
-    plan?: { steps: Array<{ action: string; command?: string; target?: string; risk: string }> };
-  }> {
-    if (!this.peerApprovalPossible()) return [];
-    const plans = this.store.data.tasks.flatMap((task) => {
-      const plan = task.plan;
-      // Decided when the agent has stopped, as by the person whose run it is. A test run's plan and a
-      // summary's are nobody's to approve.
-      if (!plan || plan.status !== "proposed" || active(task) || task.evalCaseId || task.distillSourceId) return [];
-      const { status, tags } = this.planApprovalStatus(task, plan, plan.approvals ?? []);
-      if (status.requiredApprovals < 2) return [];
-      const target = task.target?.label ?? plan.steps.find((s) => s.target?.trim())?.target;
-      return [
-        {
-          taskId: task.id,
-          changeId: plan.id,
-          ...(task.agentName ? { agentName: task.agentName } : {}),
-          description: plan.goal,
-          ...(target ? { target } : {}),
-          // A plan counts as one for production by the names of what it touches too: said here as a tag,
-          // so the server asks only somebody who may approve on production.
-          targetTags: status.isProd && !tags.some(isProdTag) ? [...tags, "production"] : tags,
-          requiredApprovals: status.requiredApprovals,
-          approvedBy: (plan.approvals ?? []).filter((a) => a.allowed).map((a) => a.actor),
-          approvers: (plan.approvals ?? []).map((a) => ({ actor: a.actor, ...(a.actorId ? { actorId: a.actorId } : {}), allowed: a.allowed })),
-          at: plan.createdAt,
-          plan: { steps: plan.steps.map((st) => ({ action: st.action, ...(st.command ? { command: st.command } : {}), ...(st.target ? { target: st.target } : {}), risk: st.risk })) },
-        },
-      ];
-    });
-    const changes = this.store.data.tasks.flatMap((task) =>
-      task.changes
-        .filter((c) => c.status === "pending" && (c.requiredApprovals ?? 1) > 1 && this.broker.waitingOnPerson(task.id))
-        .map((c) => ({
-          taskId: task.id,
-          changeId: c.id,
-          ...(task.agentName ? { agentName: task.agentName } : {}),
-          description: c.description,
-          ...(c.command ? { command: c.command } : {}),
-          ...(c.target ? { target: c.target } : {}),
-          ...(c.riskLevel ? { risk: c.riskLevel } : {}),
-          targetTags: this.resolveSafetyContext(task, c.target).targetTags ?? [],
-          requiredApprovals: c.requiredApprovals ?? 1,
-          approvedBy: (c.approvals ?? []).filter((a) => a.allowed).map((a) => a.actor),
-          approvers: (c.approvals ?? []).map((a) => ({ actor: a.actor, ...(a.actorId ? { actorId: a.actorId } : {}), allowed: a.allowed })),
-          at: c.at,
-        })),
-    );
-    return [...plans, ...changes];
-  }
-
   /** What this hub last told the server about its own changes waiting for a second person. */
   private peerWaitingTold = "";
-
-  /**
-   * Another member's change that needs a second person has started to wait, or no longer does: this
-   * member's windows fetch again and their notification channels are told. Called by the server.
-   */
-  peerApprovalsChanged(): void {
-    this.changed();
-  }
 
   /**
    * On a shared server, a storage target whose address a user typed is checked like a link they
@@ -1173,22 +804,6 @@ export class HubService {
       runbooks?: RunbookTemplate[];
       rules?: WorkspaceRule[];
     };
-  }
-
-  /**
-   * The safety rules a run is held to. On a shared server a member's own rules may be stricter than
-   * the team's, never looser: one stored before that rule (switched off by a member) counts as on.
-   */
-  private safetyPolicy(): SafetyPolicyConfig {
-    const stored = this.store.data.safetyPolicy ?? DEFAULT_SAFETY_POLICY;
-    // Where only one person can approve, a second approval can never come: the rule is not in force
-    // (and cannot be switched on), rather than leaving every production change to time out.
-    const own =
-      stored.requirePeerApprovalOnProd && !this.peerApprovalPossible()
-        ? { ...stored, requirePeerApprovalOnProd: false }
-        : stored;
-    if (!this.sharedServer() || this.host.teamAdmin?.()) return own;
-    return { ...own, requireApprovalOnProdTags: true, blockDestructiveWithoutConfirm: true };
   }
 
   /**
@@ -1543,6 +1158,8 @@ export class HubService {
         return this.handleMemory(request as RequestsOf<"memory">);
       case "knowledge":
         return this.handleKnowledge(request as RequestsOf<"knowledge">);
+      case "safety":
+        return this.handleSafety(request as RequestsOf<"safety">);
     }
   }
 
@@ -1786,47 +1403,6 @@ export class HubService {
           throw new Error("Unsupported shell");
         await this.terminals.arm(request.sessionId, request.shell);
         break;
-      case "approve": {
-        const actor = await this.resolveActorName();
-        const approvalNote = typeof request.note === "string" && request.note.trim() ? clip(request.note.trim(), 1000) : undefined;
-        const resolved = this.broker.approve(
-          request.taskId,
-          request.changeId,
-          request.approved === true,
-          approvalNote,
-          // The account, not the name it shows: two people may share a name, one person may rename.
-          { actor, actorId: this.localApproverId() },
-        );
-        // Who answered is written down once the broker resolves or records the final decision.
-        const change = this.store.data.tasks
-          .find((t) => t.id === request.taskId)
-          ?.changes.find((c) => c.id === request.changeId);
-        if (change && (resolved || change.status !== "pending")) {
-          change.decidedBy = { name: actor, at: Date.now(), allowed: request.approved === true };
-        }
-        break;
-      }
-      case "peer-approve": {
-        if (!this.host.peerDecide) throw new Error("Approvals are not passed between people here.");
-        await this.host.peerDecide({
-          ownerId: requiredText(request.ownerId),
-          taskId: requiredText(request.taskId),
-          changeId: requiredText(request.changeId),
-          approved: request.approved === true,
-          ...(typeof request.note === "string" && request.note.trim() ? { note: clip(request.note.trim(), 1000) } : {}),
-        });
-        break;
-      }
-      case "plan-decide": {
-        const decided = await this.decidePlan(
-          this.task(request.taskId),
-          { approved: request.approved === true, note: request.note, askEach: request.askEach },
-          { actor: await this.resolveActorName(), actorId: this.localApproverId() },
-        );
-        // Approved or sent back with a note, the conversation went on: that request's answer is this one's.
-        if (decided) return decided;
-        break;
-      }
       case "server-describe": {
         const pid = requiredText(request.profileId);
         // An id nobody here has describes nothing (and writes nothing into the team's activity).
@@ -2152,85 +1728,6 @@ export class HubService {
       case "ai-probe":
         reply = { probe: await this.probeModel(request.baseUrl?.trim() || undefined) };
         break;
-      case "restore-builtins": {
-        const restoredIds = new Set<string>();
-        for (const id of this.store.data.preferences.dismissedBuiltinIds ?? []) {
-          restoredIds.add(id);
-        }
-        this.store.data.preferences.dismissedBuiltinIds = [];
-        if (isDemoMode()) {
-          for (const id of restoreDemoBuiltins()) restoredIds.add(id);
-        }
-        let sharedCleared = false;
-        for (const a of getBuiltinAgents()) {
-          const removedAt = this.store.data.sharedRemoved?.agents?.[a.id];
-          if (removedAt) {
-            delete this.store.data.sharedRemoved!.agents![a.id];
-            const restoredAt = Math.max(Date.now(), removedAt + 1);
-            const existing = (this.store.data.agents ?? []).find((x) => x.id === a.id);
-            const restored: MissionAgent = {
-              ...(existing ?? a),
-              updatedAt: restoredAt,
-            };
-            delete (restored as MissionAgent & { baseAt?: number }).baseAt;
-            this.store.data.agents = [
-              ...(this.store.data.agents ?? []).filter((x) => x.id !== a.id),
-              restored,
-            ];
-            restoredIds.add(a.id);
-            sharedCleared = true;
-          }
-          if (this.store.data.sharedRemovedBy?.agents?.[a.id]) {
-            delete this.store.data.sharedRemovedBy.agents[a.id];
-          }
-        }
-        for (const doc of getBuiltinKbDocuments()) {
-          const removedAt = this.store.data.sharedRemoved?.kb?.[doc.id];
-          if (removedAt) {
-            delete this.store.data.sharedRemoved!.kb![doc.id];
-            const restoredAt = Math.max(Date.now(), removedAt + 1);
-            const existing = (this.store.data.kbDocuments ?? []).find((x) => x.id === doc.id);
-            const restored: KbDocument = {
-              ...(existing ?? doc),
-              updatedAt: restoredAt,
-              restoredAt,
-            };
-            this.store.data.kbDocuments = [
-              ...(this.store.data.kbDocuments ?? []).filter((x) => x.id !== doc.id),
-              restored,
-            ];
-            restoredIds.add(doc.id);
-            sharedCleared = true;
-          }
-        }
-        let memoryCleared = false;
-        const builtinMemories = [
-          ...getBuiltinSkillsAndMemories(),
-          ...(isDemoMode() ? getDemoMemories() : []),
-        ];
-        for (const bm of builtinMemories) {
-          if (this.store.data.deletedMemoryIds?.[bm.id]) {
-            delete this.store.data.deletedMemoryIds[bm.id];
-            restoredIds.add(bm.id);
-            memoryCleared = true;
-          }
-          if (this.store.data.deletedMemoryBy?.[bm.id]) {
-            delete this.store.data.deletedMemoryBy[bm.id];
-          }
-        }
-        if (sharedCleared) this.scheduleWorkSync();
-        if (memoryCleared) this.s3Workspace.schedulePush(400);
-        const restoredSnippets = (await this.host.restoreBuiltinSnippets?.().catch(() => 0)) ?? 0;
-        const total = restoredIds.size + restoredSnippets;
-        reply = {
-          notes: [
-            total > 0
-              ? `Restored ${total} built-in item${total === 1 ? "" : "s"}.`
-              : "All built-in agents, runbooks, and skills are already present.",
-          ],
-        };
-        break;
-      }
       case "goal-save": {
         const g = request.goal;
         const existing = (this.store.data.workGoals ?? []).find((x) => x.id === g.id);
@@ -2398,131 +1895,6 @@ export class HubService {
         if (isDemoMode()) {
           this.markBuiltinDismissed(request.id, getDemoInfraEdges());
           deleteDemoInfraEdge(request.id);
-        }
-        break;
-      }
-      case "safety-policy-save": {
-        const stored = this.store.data.safetyPolicy ?? DEFAULT_SAFETY_POLICY;
-        const asked: Partial<Record<keyof SafetyPolicyConfig, unknown>> =
-          request.policy && typeof request.policy === "object" ? request.policy : {};
-        for (const key of Object.keys(BOOLEAN_POLICY_NAMES) as (keyof typeof BOOLEAN_POLICY_NAMES)[])
-          if (asked[key] !== undefined && typeof asked[key] !== "boolean")
-            throw new Error(`"${BOOLEAN_POLICY_NAMES[key]}" is either on (true) or off (false).`);
-        if (asked.commandAllowPrefixes !== undefined && !Array.isArray(asked.commandAllowPrefixes))
-          throw new Error("Command allowlist prefixes must be an array of strings.");
-        if (
-          asked.clusterPolicies !== undefined &&
-          (typeof asked.clusterPolicies !== "object" || asked.clusterPolicies === null || Array.isArray(asked.clusterPolicies))
-        )
-          throw new Error("Cluster policies must be a map of cluster names to policy settings.");
-        if (this.sharedServer() && !this.host.teamAdmin?.()) {
-          for (const key of ["requireApprovalOnProdTags", "blockDestructiveWithoutConfirm", "requirePeerApprovalOnProd"] as const)
-            if (asked[key] === false)
-              throw new Error(`Only an administrator of this server switches off "${BOOLEAN_POLICY_NAMES[key]}": on a shared server it is the team's rule.`);
-          if (asked.clusterPolicies !== undefined || asked.commandAllowPrefixes !== undefined)
-            throw new Error("Only an administrator of this server changes cluster policies or command allowlists on a shared server.");
-        }
-        if (!this.peerApprovalPossible()) {
-          const twoPeople =
-            asked.requirePeerApprovalOnProd === true ||
-            (asked.clusterPolicies !== undefined &&
-              Object.entries(asked.clusterPolicies as Record<string, unknown>).some(
-                ([name, p]) =>
-                  p &&
-                  typeof p === "object" &&
-                  Number((p as { requiredApprovals?: unknown }).requiredApprovals) > 1 &&
-                  (stored.clusterPolicies?.[name]?.requiredApprovals ?? 1) <= 1,
-              ));
-          if (twoPeople)
-            throw new Error(
-              "An approval by a second person needs a second person who can be asked: only a team server with several accounts has one. Here only you approve, so this rule is not offered.",
-            );
-        }
-        const current: SafetyPolicyConfig = {
-          autoApproveSafeReadOnly: Boolean(stored.autoApproveSafeReadOnly),
-          requireApprovalOnProdTags: Boolean(stored.requireApprovalOnProdTags),
-          blockDestructiveWithoutConfirm: Boolean(stored.blockDestructiveWithoutConfirm),
-          ...(stored.requirePeerApprovalOnProd !== undefined ? { requirePeerApprovalOnProd: Boolean(stored.requirePeerApprovalOnProd) } : {}),
-          ...(stored.commandAllowPrefixes ? { commandAllowPrefixes: [...stored.commandAllowPrefixes] } : {}),
-          ...(stored.clusterPolicies ? { clusterPolicies: { ...stored.clusterPolicies } } : {}),
-        };
-        const nextPrefixes =
-          asked.commandAllowPrefixes !== undefined
-            ? (asked.commandAllowPrefixes as unknown[])
-                .filter((x): x is string => typeof x === "string")
-                .map((x) => x.trim())
-                .filter(Boolean)
-                .slice(0, 100)
-            : current.commandAllowPrefixes;
-        let nextClusterPolicies = current.clusterPolicies;
-        if (asked.clusterPolicies !== undefined) {
-          const sanitized: Record<string, ClusterSafetyPolicy> = {};
-          for (const [clusterName, rawPolicy] of Object.entries(asked.clusterPolicies as Record<string, unknown>)) {
-            const key = clusterName.trim().slice(0, 120);
-            if (!key || !rawPolicy || typeof rawPolicy !== "object") continue;
-            const p = rawPolicy as Record<string, unknown>;
-            const entry: ClusterSafetyPolicy = {};
-            if (typeof p.maxMode === "string" && ["advice", "plan", "assisted", "autonomous"].includes(p.maxMode)) {
-              entry.maxMode = p.maxMode as AgentMode;
-            }
-            if (typeof p.requiredApprovals === "number" && Number.isFinite(p.requiredApprovals)) {
-              entry.requiredApprovals = integer(p.requiredApprovals, 1, 10);
-            }
-            if (typeof p.requireCheckAndRollback === "boolean") {
-              entry.requireCheckAndRollback = p.requireCheckAndRollback;
-            }
-            if (typeof p.frozenUntil === "number" && Number.isFinite(p.frozenUntil)) {
-              entry.frozenUntil = p.frozenUntil;
-            }
-            sanitized[key] = entry;
-          }
-          nextClusterPolicies = sanitized;
-        }
-        this.store.data.safetyPolicy = {
-          autoApproveSafeReadOnly:
-            (asked.autoApproveSafeReadOnly as boolean | undefined) ?? current.autoApproveSafeReadOnly,
-          requireApprovalOnProdTags:
-            (asked.requireApprovalOnProdTags as boolean | undefined) ?? current.requireApprovalOnProdTags,
-          blockDestructiveWithoutConfirm:
-            (asked.blockDestructiveWithoutConfirm as boolean | undefined) ??
-            current.blockDestructiveWithoutConfirm,
-          ...(asked.requirePeerApprovalOnProd !== undefined || current.requirePeerApprovalOnProd !== undefined
-            ? {
-                requirePeerApprovalOnProd:
-                  (asked.requirePeerApprovalOnProd as boolean | undefined) ?? current.requirePeerApprovalOnProd,
-              }
-            : {}),
-          ...(nextPrefixes ? { commandAllowPrefixes: nextPrefixes } : {}),
-          ...(nextClusterPolicies ? { clusterPolicies: nextClusterPolicies } : {}),
-        };
-        const next = this.store.data.safetyPolicy;
-        const moved = (Object.keys(BOOLEAN_POLICY_NAMES) as (keyof typeof BOOLEAN_POLICY_NAMES)[])
-          .filter((k) => Boolean(next[k]) !== Boolean(current[k]))
-          .map((k) => `${BOOLEAN_POLICY_NAMES[k]}: ${current[k] ? "on" : "off"} → ${next[k] ? "on" : "off"}`);
-        if (JSON.stringify(next.commandAllowPrefixes ?? []) !== JSON.stringify(current.commandAllowPrefixes ?? [])) {
-          moved.push(`commandAllowPrefixes updated (${(next.commandAllowPrefixes ?? []).length} entries)`);
-        }
-        if (JSON.stringify(next.clusterPolicies ?? {}) !== JSON.stringify(current.clusterPolicies ?? {})) {
-          const was = current.clusterPolicies ?? {};
-          const now = next.clusterPolicies ?? {};
-          const say = (p: (typeof now)[string] | undefined): string =>
-            p
-              ? [p.maxMode ? `at most "${({ advice: "Ask", plan: "Plan", assisted: "Ask first", autonomous: "Auto" } as Record<string, string>)[p.maxMode] ?? p.maxMode}"` : "", p.requiredApprovals ? `${p.requiredApprovals} approval${p.requiredApprovals === 1 ? "" : "s"}` : "", p.requireCheckAndRollback ? "check and rollback" : "", p.frozenUntil ? `frozen until ${new Date(p.frozenUntil).toISOString().slice(0, 16).replace("T", " ")} UTC` : ""].filter(Boolean).join(", ") || "no limits"
-              : "none";
-          for (const name of [...new Set([...Object.keys(was), ...Object.keys(now)])].sort())
-            if (JSON.stringify(was[name]) !== JSON.stringify(now[name])) moved.push(`rules for "${clip(name, 60)}": ${say(was[name])} → ${say(now[name])}`);
-        }
-        if (moved.length) {
-          // Who changed the rules is the team's business as well as the log's.
-          const event: WorkspaceActivityEvent = { id: crypto.randomUUID(), at: Date.now(), actor: await this.resolveActorName(), targetLabel: "Command safety", kind: "note", summary: clip(`Changed the safety rules: ${moved.join("; ")}`, 400) };
-          this.appendActivityEvent(event);
-          await this.host.recordWorkspaceActivity?.(event).catch(() => {});
-        }
-        if (moved.length && !isDemoMode()) {
-          this.store.data.safetyPolicyChanged = { by: await this.resolveActorName(), at: Date.now() };
-          void this.audit()
-            .append({ kind: "setting", actor: await this.resolveActorName(), target: "sshs3 on this computer", what: `Safety policy: ${moved.join("; ")}`, outcome: "completed" })
-            .catch((e) => log.warn("Could not write to the audit log", safeError(e)));
         }
         break;
       }
@@ -2747,190 +2119,6 @@ export class HubService {
             ...recent,
           ];
           task.updatedAt = Date.now();
-        }
-        break;
-      }
-      case "rule-save": {
-        const r = request.rule;
-        if (!r || typeof r !== "object" || Array.isArray(r)) throw new Error("A rule to save is missing");
-        const scope = r.scope;
-        if (!["global", "env", "tag", "cluster", "server"].includes(scope)) {
-          throw new Error("Invalid workspace rule scope");
-        }
-        const activation = r.activation;
-        if (!["always", "auto", "agent-requested", "manual"].includes(activation)) {
-          throw new Error("Invalid workspace rule activation");
-        }
-        const extra = this.storeDataExtra();
-        const list = extra.rules ?? [];
-        const id = r.id?.trim() || crypto.randomUUID();
-        const prev = list.find((x) => x.id === id);
-        const now = Date.now();
-        const saved: WorkspaceRule = {
-          id,
-          name: clip(requiredText(r.name), 120),
-          scope,
-          ...(r.scopeValue?.trim() ? { scopeValue: clip(r.scopeValue.trim(), 120) } : {}),
-          activation,
-          ...(r.description?.trim() ? { description: boundedContext(r.description.trim(), 500) } : {}),
-          body: boundedContext(requiredText(r.body), 8000),
-          applyToReadOnly: r.applyToReadOnly ?? true,
-          enabled: r.enabled ?? true,
-          ...(typeof r.priority === "number" && Number.isFinite(r.priority)
-            ? { priority: integer(r.priority, -1000, 1000) }
-            : {}),
-          author: r.author?.trim() || prev?.author || (await this.resolveActorName()),
-          createdAt: prev?.createdAt ?? r.createdAt ?? now,
-          updatedAt: now,
-        };
-        extra.rules = [saved, ...list.filter((x) => x.id !== id)];
-        break;
-      }
-      case "rule-delete": {
-        const extra = this.storeDataExtra();
-        extra.rules = (extra.rules ?? []).filter((x) => x.id !== request.id);
-        break;
-      }
-      case "runbook-save": {
-        const rb = request.runbook;
-        if (!rb || typeof rb !== "object" || Array.isArray(rb)) throw new Error("A runbook to save is missing");
-        if (rb.inputs !== undefined && !Array.isArray(rb.inputs)) throw new Error("A runbook's inputs are a list");
-        if (rb.steps !== undefined && !Array.isArray(rb.steps)) throw new Error("A runbook's steps are a list");
-        for (const step of rb.steps ?? [])
-          if (!step || typeof step !== "object" || typeof step.kind !== "string")
-            throw new Error("Each runbook step needs a kind");
-        for (const field of rb.inputs ?? [])
-          if (!field || typeof field !== "object" || typeof field.name !== "string" || !field.name.trim())
-            throw new Error("Each runbook input needs a name");
-        if (rb.targetSelector !== undefined && (typeof rb.targetSelector !== "object" || rb.targetSelector === null || Array.isArray(rb.targetSelector)))
-          throw new Error("A runbook's target is a selector of servers");
-        const extra = this.storeDataExtra();
-        const list = extra.runbooks ?? [];
-        const id = rb.id?.trim() || crypto.randomUUID();
-        const prev = list.find((x) => x.id === id);
-        const now = Date.now();
-        const saved: RunbookTemplate = {
-          id,
-          name: clip(requiredText(rb.name), 120),
-          ...(rb.description?.trim() ? { description: boundedContext(rb.description.trim(), 1000) } : {}),
-          inputs: Array.isArray(rb.inputs) ? rb.inputs.slice(0, 30) : [],
-          steps: Array.isArray(rb.steps) ? rb.steps.slice(0, 40) : [],
-          ...(rb.targetSelector ? { targetSelector: rb.targetSelector } : {}),
-          ...(rb.dispatchStrategy ? { dispatchStrategy: rb.dispatchStrategy } : {}),
-          ...(typeof rb.maxConcurrency === "number" && Number.isFinite(rb.maxConcurrency)
-            ? { maxConcurrency: integer(rb.maxConcurrency, 1, 20) }
-            : {}),
-          author: rb.author?.trim() || prev?.author || (await this.resolveActorName()),
-          createdAt: prev?.createdAt ?? rb.createdAt ?? now,
-          updatedAt: now,
-        };
-        extra.runbooks = [saved, ...list.filter((x) => x.id !== id)];
-        break;
-      }
-      case "runbook-delete": {
-        const extra = this.storeDataExtra();
-        extra.runbooks = (extra.runbooks ?? []).filter((x) => x.id !== request.id);
-        break;
-      }
-      case "runbook-run": {
-        const extra = this.storeDataExtra();
-        const rb = (extra.runbooks ?? []).find((x) => x.id === request.id);
-        if (!rb) throw new Error("Runbook not found");
-        if (request.inputs !== undefined && (typeof request.inputs !== "object" || request.inputs === null || Array.isArray(request.inputs)))
-          throw new Error("A runbook's inputs are given by name");
-        if (
-          request.targetSelector !== undefined &&
-          request.targetSelector !== null &&
-          (typeof request.targetSelector !== "object" || Array.isArray(request.targetSelector))
-        )
-          throw new Error("A runbook's target is a selector of servers");
-        const inputs = request.inputs ?? {};
-        for (const field of rb.inputs) {
-          const val = inputs[field.name] ?? field.defaultValue;
-          if (field.required && (val === undefined || val === "")) {
-            throw new Error(`Runbook input "${field.label || field.name}" is required`);
-          }
-        }
-        const substituteInputs = (raw: string): string =>
-          raw.replace(/\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}/g, (_m, key: string) => {
-            const found = inputs[key] ?? rb.inputs.find((f) => f.name === key)?.defaultValue;
-            return found === undefined ? "" : String(found);
-          });
-        const selector = request.targetSelector ?? rb.targetSelector;
-        const matchedTargets = resolveTargetSelector(this.getKnownServers(), selector);
-        const stepLines = rb.steps.map((s, idx) => {
-          const title = s.title || `Step ${idx + 1}`;
-          const cmd = s.command ? substituteInputs(s.command) : undefined;
-          const promptPart = s.prompt ? substituteInputs(s.prompt) : undefined;
-          return `${idx + 1}. [${s.kind}] ${title}${cmd ? `\n   command: \`${cmd}\`` : ""}${promptPart ? `\n   prompt: ${promptPart}` : ""}${s.expected ? `\n   expected: ${s.expected}` : ""}`;
-        });
-        const targetNames = matchedTargets.map((t) => `${t.name} (${t.host})`).join(", ") || "active session";
-        const promptText = [
-          `Runbook "${rb.name}"${request.dryRun ? " (DRY RUN)" : ""}`,
-          `Targets: ${targetNames}`,
-          ...stepLines,
-        ].join("\n");
-        if (request.dryRun) {
-          const now = Date.now();
-          const dryTask: AgentTask = {
-            id: crypto.randomUUID(),
-            title: `Dry run: ${rb.name}`,
-            mode: "advice",
-            status: "completed",
-            messages: [
-              { id: crypto.randomUUID(), role: "user", text: boundedPrompt(promptText, PERSON_PROMPT_MAX), at: now },
-              {
-                id: crypto.randomUUID(),
-                role: "assistant",
-                text: `Dry run validated ${rb.steps.length} step(s) across ${matchedTargets.length || 1} target(s). No commands executed.`,
-                at: now,
-              },
-            ],
-            changes: [],
-            sources: [],
-            createdAt: now,
-            updatedAt: now,
-            maxCommands: 1,
-            maxMinutes: 15,
-            verification: "not-verified",
-          };
-          this.store.data.tasks.push(dryTask);
-          reply = { started: { taskId: dryTask.id } };
-        } else {
-          // A runbook runs where it was aimed, or not at all: never on whatever terminal happens to be open.
-          const ready = this.terminals.list().filter((s) => s.state === "ready");
-          const hasSelector = !!selector && Object.values(selector).some((v) => (Array.isArray(v) ? v.length > 0 : !!v));
-          let readySession: (typeof ready)[number] | undefined;
-          let scopeNote = "";
-          if (hasSelector) {
-            if (matchedTargets.length === 0)
-              throw new Error("This runbook's target matches no server in the workspace, so it was not started.");
-            const candidates = ready.filter((s) => matchedTargets.some((t) => t.id === s.profileId));
-            if (candidates.length === 0)
-              throw new Error(
-                `No terminal is open and ready on ${matchedTargets.map((t) => t.name).join(", ")}. Open one there and run the runbook again.`,
-              );
-            readySession = candidates[0];
-            const rest = matchedTargets.filter((t) => t.id !== readySession!.profileId);
-            if (rest.length)
-              scopeNote = `This run works in the terminal on ${readySession.label} only. Not covered by it: ${rest.map((t) => t.name).join(", ")}. Say so in your report.`;
-          } else {
-            if (ready.length !== 1)
-              throw new Error(
-                ready.length === 0
-                  ? "This runbook names no target and no terminal is open and ready. Open the terminal it should run in."
-                  : "This runbook names no target and several terminals are open. Give it a target, so that it is clear where it runs.",
-              );
-            readySession = ready[0];
-          }
-          const task = await this.start({
-            prompt: scopeNote ? `${promptText}\n\n${scopeNote}` : promptText,
-            mode: "assisted",
-            sessionId: readySession?.id,
-            maxCommands: Math.max(10, Math.min(100, rb.steps.length * 3)),
-            maxMinutes: 30,
-          });
-          reply = { started: { taskId: task.id } };
         }
         break;
       }
@@ -5746,5 +4934,5 @@ export class HubService {
 
 /** The hub's methods that are kept in files of their own (./areas). Declared here so the class has them; put on it just below. */
 // eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging -- it names the parts and has no members of its own
-export interface HubService extends InboxPart, ChatAndAtlassianPart, FactsPart, AlertsPart, SchedulesPart, SimulationPart, EvalsPart, AuditPart, McpPart, AgentsPart, MemoryPart, KnowledgePart {}
-mixParts(HubService, [InboxPart, ChatAndAtlassianPart, FactsPart, AlertsPart, SchedulesPart, SimulationPart, EvalsPart, AuditPart, McpPart, AgentsPart, MemoryPart, KnowledgePart]);
+export interface HubService extends InboxPart, ChatAndAtlassianPart, FactsPart, AlertsPart, SchedulesPart, SimulationPart, EvalsPart, AuditPart, McpPart, AgentsPart, MemoryPart, KnowledgePart, SafetyPart {}
+mixParts(HubService, [InboxPart, ChatAndAtlassianPart, FactsPart, AlertsPart, SchedulesPart, SimulationPart, EvalsPart, AuditPart, McpPart, AgentsPart, MemoryPart, KnowledgePart, SafetyPart]);
