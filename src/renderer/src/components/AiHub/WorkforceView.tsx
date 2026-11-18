@@ -486,7 +486,7 @@ export function WorkforceView({
 
       <small className="ai-sync-note">
         {sync?.shared
-          ? `Shared with the team${sync.lastSyncAt ? ` · read ${ago(sync.lastSyncAt)}` : ""}${sync.error ? ` · last sync failed: ${sync.error}` : ""}`
+          ? `${sync.via === "server" ? "Shared with everyone who has an account on this server" : "Shared with the team"}${sync.lastSyncAt ? ` · read ${ago(sync.lastSyncAt)}` : ""}${sync.error ? ` · last sync failed: ${sync.error}` : ""}`
           : isWebBrowserMode()
             ? "Board is personal to your account. Connect an S3 team bucket from the start page to share tickets and goals with the team."
             : "Board stays on this computer. Connect an S3 team bucket from the start page to share tickets and goals."}

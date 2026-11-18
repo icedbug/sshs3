@@ -216,7 +216,7 @@ import { boundedContext, boundedPrompt, clip, HUB_PROMPT_MAX, maskContext, maskS
 import { createLogger } from "../../log";
 import { resolveTargetSelector, runWorkforce } from "./WorkforceRunner";
 import { LearningQueue } from "./LearningQueue";
-import { standingKbCopy, WorkSync } from "./WorkSync";
+import { standingKbCopy, WorkSync, type ConditionalQueueStore } from "./WorkSync";
 import {
   TICKET_CLAIM_TTL_MS,
   TICKET_STATUSES,
@@ -621,6 +621,13 @@ export interface HubHost {
   peerApproval?: () => boolean;
   peerPresenceProvider?:() => import("../../../shared/types/aiHub").WorkspacePresenceEntry[];
   onSharedWorkspaceChanged?: () => void;
+  /**
+   * On a server several people share: the folder of the server's own where the team's board is kept
+   * when the team has no bucket (see FileQueueStore). Every account's hub is given the same one, so
+   * everyone on the server has one board, one set of agents and one knowledge base. A bucket, when one
+   * is connected, is used instead.
+   */
+  sharedWorkStore?: ConditionalQueueStore;
   extraAppContext?(): Promise<{
     folders: string[];
     s3Profiles: Array<{
@@ -2570,7 +2577,9 @@ export class HubService {
       agentUsage: this.usageTotal(),
       workforceTemplates: templateSummaries(),
       workBoardSync: {
-        shared: this.s3Workspace.canUseBucket(),
+        shared: Boolean(this.teamStore()),
+        // Who it is shared with: everyone who has the team's bucket, or everyone with an account on this server.
+        ...(this.teamStore() ? { via: this.s3Workspace.canUseBucket() ? ("bucket" as const) : ("server" as const) } : {}),
         lastSyncAt: this.workSyncAt,
         error: this.workSyncError,
       },
@@ -6899,6 +6908,17 @@ export class HubService {
     // Before the early return below: a change while a save is pending must still reach the inbox.
     this.pokeInbox();
     this.auditFinishedChanges();
+    // The board kept on this server (no bucket): what was just marked for the team is written there now,
+    // and the other accounts are told the moment it is. With a bucket it waits for the next look, as before.
+    if (
+      this.lastWorkSync === 0 &&
+      this.initialized &&
+      !this.workSyncPushTimer &&
+      !this.workSyncing &&
+      this.host.sharedWorkStore &&
+      this.teamStore() === this.host.sharedWorkStore
+    )
+      this.scheduleWorkSync(250);
     if (saved || !this.initialized || this.saveTimer) return;
     this.saveTimer = setTimeout(() => {
       this.saveTimer = undefined;
@@ -7137,8 +7157,9 @@ export class HubService {
     } catch {
       // Not here: a teammate added it.
     }
-    if (doc.original?.keptLocal || !this.s3Workspace.canUseBucket()) return undefined;
-    const remote = await this.s3Workspace.objects.read(this.kbOriginalKey(doc)).catch(() => undefined);
+    const team = this.teamStore();
+    if (doc.original?.keptLocal || !team) return undefined;
+    const remote = await team.read(this.kbOriginalKey(doc)).catch(() => undefined);
     if (remote) {
       await fsp.mkdir(path.dirname(local), { recursive: true }).catch(() => undefined);
       await fsp.writeFile(local, remote).catch(() => undefined);
@@ -7155,10 +7176,11 @@ export class HubService {
   private async removeKbOriginal(docId: string): Promise<void> {
     const doc = { id: docId };
     await this.removeLocalKbOriginal(docId);
-    if (!this.s3Workspace.canUseBucket()) return;
+    const team = this.teamStore();
+    if (!team) return;
     const dir = path.posix.dirname(this.kbOriginalKey(doc));
-    const names = await this.s3Workspace.objects.list(dir).catch(() => [] as string[]);
-    for (const name of names) await this.s3Workspace.objects.remove(`${dir}/${name}`).catch(() => undefined);
+    const names = await team.list(dir).catch(() => [] as string[]);
+    for (const name of names) await team.remove(`${dir}/${name}`).catch(() => undefined);
   }
 
   /**
@@ -7225,8 +7247,9 @@ export class HubService {
       const local = path.join(this.kbOriginalDir(first.id), path.basename(this.kbOriginalKey(first)));
       await fsp.mkdir(path.dirname(local), { recursive: true });
       await fsp.writeFile(local, source.original.data);
-      if (!source.original.keptLocal && this.s3Workspace.canUseBucket())
-        void this.s3Workspace.objects
+      const team = source.original.keptLocal ? undefined : this.teamStore();
+      if (team)
+        void team
           .write(this.kbOriginalKey(first), source.original.data)
           .catch((e) => log.warn("Could not upload a knowledge base original", safeError(e)));
     }
@@ -8778,11 +8801,38 @@ export class HubService {
     return this.store.data.clientId;
   }
 
-  /** The board in the team bucket, when one is in use. */
+  /**
+   * Where the team's shared items are kept: its bucket when one is connected, else, on a server several
+   * people share, the server's own shared folder. Undefined when this is one person's app with no
+   * bucket: nothing is shared then. The demo lab shares nothing.
+   */
+  private teamStore(): ConditionalQueueStore | undefined {
+    if (this.s3Workspace.canUseBucket()) return this.s3Workspace.objects;
+    return isDemoMode() ? undefined : this.host.sharedWorkStore;
+  }
+
+  /** The store `workSyncStore` was made for: a bucket connected or taken away later means a new one. */
+  private workSyncOn?: ConditionalQueueStore;
+
+  /** The team's board, where there is somewhere to keep it (see teamStore). */
   private work(): WorkSync | undefined {
-    if (!this.s3Workspace.canUseBucket()) return undefined;
-    this.workSyncStore ??= new WorkSync(this.s3Workspace.objects);
+    const store = this.teamStore();
+    if (!store) return undefined;
+    // Made anew only when the place it was made for is no longer the one in use. One that was put here
+    // from outside (a test's own store) stays.
+    if (!this.workSyncStore || (this.workSyncOn && this.workSyncOn !== store)) {
+      this.workSyncStore = new WorkSync(store);
+      this.workSyncOn = store;
+    }
     return this.workSyncStore;
+  }
+
+  /**
+   * Another account on this server has changed the board: it is read now, not at the next look. Called
+   * by the server for every other account's hub.
+   */
+  teamBoardChanged(): void {
+    this.scheduleWorkSync(60);
   }
 
   /** This month's spending per agent: this installation's runs plus what teammates' apps reported. */

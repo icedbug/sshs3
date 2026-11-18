@@ -1879,7 +1879,12 @@ export interface HubSnapshot {
   agentUsage?: Record<string, AgentUsage>;
   workforceTemplates?: WorkforceTemplateSummary[];
   /** Whether the board is shared through the team bucket, and when it was last read. */
-  workBoardSync?: { shared: boolean; lastSyncAt?: number; error?: string };
+  /**
+   * Whether the board, the agents and the knowledge base are shared, and with whom: everyone who has the
+   * team's bucket (`bucket`), or everyone with an account on this server (`server`: a server several
+   * people share keeps them in a folder of its own when the team has no bucket).
+   */
+  workBoardSync?: { shared: boolean; via?: "bucket" | "server"; lastSyncAt?: number; error?: string };
   kbDocuments?: KbDocument[];
   workforceRuns?: WorkforceRun[];
   infraEdges?: InfraGraphEdge[];

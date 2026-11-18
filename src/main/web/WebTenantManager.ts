@@ -20,6 +20,7 @@ import { K8sProfileStore } from '../profile/K8sProfileStore';
 import { SessionStore } from '../session/SessionStore';
 import { ClipboardHistoryStore } from '../clipboard/ClipboardHistoryStore';
 import { ChatBridge } from '../ai/hub/ChatBridge';
+import { FileQueueStore } from '../ai/hub/FileQueueStore';
 import { SnippetStore } from '../snippets/SnippetStore';
 import { SettingsStore } from '../settings/SettingsStore';
 import { DotfilePoolStore } from '../dotfiles/DotfilePoolStore';
@@ -290,6 +291,13 @@ export class WebTenantManager {
    * given this one; only an administrator's hub may change it.
    */
   private readonly teamChat: ChatBridge;
+  /**
+   * The team's board, agents and knowledge base where the team has no bucket: one folder of the
+   * server's own, and one store over it that every account's hub is given (see FileQueueStore).
+   */
+  private readonly teamBoard: FileQueueStore;
+  private boardTimer?: NodeJS.Timeout;
+  private boardWriters = new Set<string>();
 
   constructor(
     private readonly baseDataDir: string,
@@ -297,6 +305,7 @@ export class WebTenantManager {
     private readonly accountCount?: () => number,
   ) {
     this.sharedDir = path.join(baseDataDir, 'shared-workspace');
+    this.teamBoard = new FileQueueStore(path.join(this.sharedDir, 'board'));
     this.teamChat = new ChatBridge(path.join(baseDataDir, 'team-chat'), {
       // The same rule as every address a member gives: a server several people sign in to does not
       // call itself, nor its private network unless its administrator said so.
@@ -387,6 +396,26 @@ export class WebTenantManager {
       }
     }, 80);
     this.notifyTimer.unref?.();
+  }
+
+  /**
+   * An account wrote to the team's board: the other accounts' hubs read it now, and their windows are
+   * told. Gathered for a moment, so a save that writes several items tells the others once.
+   */
+  private boardChangedBy(userId: string): void {
+    this.boardWriters.add(userId);
+    if (this.boardTimer) return;
+    this.boardTimer = setTimeout(() => {
+      this.boardTimer = undefined;
+      const writers = this.boardWriters;
+      this.boardWriters = new Set();
+      for (const [uid, tenant] of this.resolvedTenants.entries()) {
+        // Whoever wrote has it already. With several writers at once, each has something to read.
+        if (writers.size === 1 && writers.has(uid)) continue;
+        tenant.hub.teamBoardChanged();
+      }
+    }, 120);
+    this.boardTimer.unref?.();
   }
 
   /** Users whose hub is running in this process. */
@@ -689,6 +718,8 @@ export class WebTenantManager {
         peerPresenceProvider: () => this.getAllLocalTenantsPresence(),
         onSharedWorkspaceChanged: () =>
           this.notifyCrossTenantChanged(user.id),
+        // One board for everyone on this server, kept in the server's shared folder when the team has no bucket.
+        sharedWorkStore: this.teamBoard.forAccount(() => this.boardChangedBy(user.id)),
         teamChat: this.teamChat,
       },
     );
@@ -853,6 +884,10 @@ export class WebTenantManager {
     if (this.notifyTimer) {
       clearTimeout(this.notifyTimer);
       this.notifyTimer = undefined;
+    }
+    if (this.boardTimer) {
+      clearTimeout(this.boardTimer);
+      this.boardTimer = undefined;
     }
     for (const tenant of this.resolvedTenants.values()) {
       for (const sock of Array.from(tenant.sockets)) {
