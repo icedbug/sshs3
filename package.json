@@ -26,7 +26,7 @@
     "build:web": "node scripts/build-web.mjs",
     "start:web": "node dist-web/server.mjs",
     "deploy:vm": "bash ./scripts/deploy-vm.sh",
-    "sim": "tsx scripts/sim.ts",
+    "sim": "tsx --tsconfig scripts/tsconfig.sim.json scripts/sim.ts",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:smoke": "node scripts/smoke-test.mjs",

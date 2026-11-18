@@ -3368,6 +3368,23 @@ export class DirectAgentRuntime implements AgentRuntime {
       });
     };
 
+    // A ticket's run with no model: nobody worked on it, and the ticket must not read as if somebody had.
+    // (Its text holds whatever the ticket says, so matching words in it would pick an answer at random.)
+    if (task.ticketId) {
+      const where = task.target?.label ? `\`${task.target.label}\`` : "the server";
+      await streamMarkdown(
+        [
+          "### No agent worked on this ticket",
+          "",
+          "No AI model is set up, so nothing was looked at and nothing was changed. This is the demo lab's scripted answer, not an agent's report.",
+          "",
+          "- To have an agent work the ticket: choose a model in AI settings, then start the ticket again.",
+          `- To work it yourself: open a terminal on ${where}, and write what you found under "Your report" on the ticket.`,
+        ].join("\n"),
+      );
+      return;
+    }
+
     // A request to compare is not a request to open a split view, even when it names the split
     // panes to compare (the split view's own button asks for that).
     const wantsCompare =
@@ -3739,6 +3756,10 @@ export class DirectAgentRuntime implements AgentRuntime {
   private noStreamUsage = false;
   /** The endpoint refused `reasoning_effort`: omitted for the rest of this run. */
   private noReasoningEffort = false;
+  /** The endpoint refused `max_tokens` (OpenAI's newer models take `max_completion_tokens`): sent under that name for the rest of this run. */
+  private maxCompletionTokens = false;
+  /** The endpoint takes its own default temperature only: none is sent for the rest of this run. */
+  private noTemperature = false;
 
   /** Ends a compaction: what the run continues from, built from the note the model just wrote. */
   private finishCompaction(note: string): string {
@@ -4390,6 +4411,8 @@ export class DirectAgentRuntime implements AgentRuntime {
   ): Promise<void> {
     this.noStreamUsage = false;
     this.noReasoningEffort = false;
+    this.maxCompletionTokens = false;
+    this.noTemperature = false;
     let activeModel = model;
     let initialContext: unknown = initialContextCache?.loaded
       ? initialContextCache.value
@@ -4495,8 +4518,8 @@ export class DirectAgentRuntime implements AgentRuntime {
               model: activeModel.model,
               messages,
               ...(tools.length > 0 ? { tools } : {}),
-              max_tokens: tuning.maxOutputTokens,
-              temperature: tuning.temperature,
+              ...(this.maxCompletionTokens ? { max_completion_tokens: tuning.maxOutputTokens } : { max_tokens: tuning.maxOutputTokens }),
+              ...(this.noTemperature ? {} : { temperature: tuning.temperature }),
               ...(this.noReasoningEffort ? {} : { reasoning_effort: turnEffort }),
               stream: true,
               // Without this, OpenAI's streaming API reports no usage at all, and a budget counts nothing.
@@ -4517,6 +4540,17 @@ export class DirectAgentRuntime implements AgentRuntime {
           }
           if (response.status === 400 && !this.noReasoningEffort && /reasoning_effort/i.test(errText)) {
             this.noReasoningEffort = true;
+            turn--;
+            continue;
+          }
+          // OpenAI's newer models take the output limit under another name, and no temperature but their own.
+          if (response.status === 400 && !this.maxCompletionTokens && /max_tokens/i.test(errText)) {
+            this.maxCompletionTokens = true;
+            turn--;
+            continue;
+          }
+          if (response.status === 400 && !this.noTemperature && /temperature/i.test(errText)) {
+            this.noTemperature = true;
             turn--;
             continue;
           }

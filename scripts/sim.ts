@@ -8,11 +8,20 @@
  *   npm run sim -- <id> --run <file>    run the lines of a file ("server: command", or a bare command
  *                                       for the scenario's own server) and score the outcome
  *   npm run sim -- <id> --shell         work on it by hand; "report: <text>" hands in a report, "score" scores
+ *   npm run sim -- <id> --agent         let an agent, run by a model, work on it through the real hub
  *
  * Add --report "<text>" to hand in a final report, and --json for the score as JSON.
  * The exit code is 0 when every check passes.
+ *
+ * --agent takes the model from --base-url and --model (or SSHS3_SIM_BASE_URL and SSHS3_SIM_MODEL): any
+ * OpenAI-compatible address, the part before /chat/completions. The key is read from SSHS3_SIM_API_KEY
+ * and is never printed or stored. --approve all|none|ask says who answers when the agent asks before a
+ * change (all: everything is let through, which shows whether its own judgement holds; ask: you answer).
+ * The run is stopped at --max-commands (40) or --max-minutes (15).
  */
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import readline from "node:readline";
 import { SCENARIOS, scenarioById, startScenario } from "../src/main/sim/lab";
 import { runLines, scoreScenario, type ScenarioScore } from "../src/main/sim/Scenario";
@@ -20,7 +29,8 @@ import { runLines, scoreScenario, type ScenarioScore } from "../src/main/sim/Sce
 const args = process.argv.slice(2);
 const flag = (name: string): boolean => args.includes(`--${name}`);
 const value = (name: string): string | undefined => (args.includes(`--${name}`) ? args[args.indexOf(`--${name}`) + 1] : undefined);
-const id = args.find((a, i) => !a.startsWith("--") && !["--run", "--report"].includes(args[i - 1] ?? ""));
+const VALUED = ["--run", "--report", "--base-url", "--model", "--approve", "--max-commands", "--max-minutes"];
+const id = args.find((a, i) => !a.startsWith("--") && !VALUED.includes(args[i - 1] ?? ""));
 
 function print(score: ScenarioScore): void {
   if (flag("json")) return void console.log(JSON.stringify(score, null, 2));
@@ -29,16 +39,93 @@ function print(score: ScenarioScore): void {
   if (score.unsupported.length) console.log(`Asked for and not simulated:\n${score.unsupported.map((u) => `  ${u}`).join("\n")}`);
 }
 
+/** The first lines of what a command printed. */
+const brief = (text: string | undefined, lines = 6): string => {
+  const all = (text ?? "").replace(/\r/g, "").split("\n").filter((l) => l.trim());
+  return all.slice(0, lines).map((l) => `      ${l.slice(0, 200)}`).join("\n") + (all.length > lines ? `\n      … ${all.length - lines} more lines` : "");
+};
+
+/** An agent on the scenario, through the real hub. The demo lab is chosen before anything of the app is loaded. */
+async function agent(scenarioId: string): Promise<number> {
+  const baseUrl = value("base-url") ?? process.env.SSHS3_SIM_BASE_URL;
+  const model = value("model") ?? process.env.SSHS3_SIM_MODEL;
+  if (!baseUrl || !model) {
+    console.error("An agent needs a model: --base-url <address> --model <name> (or SSHS3_SIM_BASE_URL and SSHS3_SIM_MODEL). The key is read from SSHS3_SIM_API_KEY.");
+    return 2;
+  }
+  const how = value("approve") ?? "all";
+  if (!["all", "none", "ask"].includes(how)) {
+    console.error("--approve is all, none or ask.");
+    return 2;
+  }
+  process.env.SSHS3_DEMO = "1";
+  const { runAgentOnScenario } = await import("../src/main/sim/agentRun");
+  // The run's own folder: made here, used by nothing else.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sshs3-sim-agent-"));
+  const say = !flag("json");
+  const rl = how === "ask" ? readline.createInterface({ input: process.stdin, output: process.stdout }) : undefined;
+  try {
+    const result = await runAgentOnScenario({
+      scenarioId,
+      baseUrl,
+      model,
+      apiKey: process.env.SSHS3_SIM_API_KEY,
+      dir,
+      maxCommands: Number(value("max-commands") ?? 40),
+      maxMinutes: Number(value("max-minutes") ?? 15),
+      approve:
+        how === "ask"
+          ? (ask) =>
+              new Promise<boolean>((resolve) =>
+                rl!.question(`\nThe agent asks to run on ${ask.target}:\n  ${ask.command}\n  (${ask.reason ?? ask.risk ?? "a change"})\nAllow it? [y/N] `, (a) => resolve(/^y(es)?$/i.test(a.trim()))),
+              )
+          : (how as "all" | "none"),
+      onEvent: (e) => {
+        if (!say) return;
+        if (e.kind === "started") console.log(`Agent: ${e.agent} · mode: ${e.mode} · model: ${e.model} · terminal: ${e.target}\n`);
+        else if (e.kind === "approval") console.log(`  ASKED  ${e.ask.command}\n         ${e.ask.reason ?? e.ask.risk ?? ""}: ${e.allowed ? "allowed" : "refused"}`);
+        else if (e.kind === "plan") console.log(`  PLAN   ${e.summary.slice(0, 300)}: ${e.allowed ? "approved" : "not approved"}`);
+        else if (e.kind === "command")
+          console.log(`$ ${e.command}${e.status === "denied" ? "   [not run: refused]" : e.exitCode ? `   [exit ${e.exitCode}]` : ""}${e.output?.trim() ? `\n${brief(e.output)}` : ""}`);
+        else if (e.kind === "stopped") console.log(`\nSTOPPED: ${e.why}`);
+        else if (e.kind === "ended") console.log(`\nThe run ended: ${e.status}${e.error ? ` (${e.error})` : ""}`);
+      },
+    });
+    if (flag("json")) {
+      console.log(JSON.stringify(result, null, 2));
+    } else {
+      console.log(`\nThe agent's report:\n${result.report.trim() || "(none)"}\n`);
+      for (const c of result.score.checks) console.log(`${c.pass ? "PASS" : "FAIL"}  ${c.title}\n      ${c.why}`);
+      const cost = result.usage?.costUsd ? `, about $${result.usage.costUsd.toFixed(3)}` : "";
+      console.log(
+        `\n${result.score.passed} of ${result.score.total} checks pass · ${result.commands} commands · asked ${result.approvals.asked} time${result.approvals.asked === 1 ? "" : "s"}, allowed ${result.approvals.allowed} · ${result.minutes} min` +
+          (result.usage ? ` · ${result.usage.inputTokens} tokens in, ${result.usage.outputTokens} out${cost}` : ""),
+      );
+      if (result.score.unsupported.length) console.log(`Asked for and not simulated:\n${result.score.unsupported.map((u) => `  ${u}`).join("\n")}`);
+      if (result.otherRuns) console.log(`Note: ${result.otherRuns} other conversation(s) ran on this model meanwhile.`);
+    }
+    return result.score.passed === result.score.total ? 0 : 1;
+  } finally {
+    rl?.close();
+    // Only the folder made above, and only where temporary folders live.
+    if (dir.startsWith(path.join(os.tmpdir(), "sshs3-sim-agent-"))) fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 async function main(): Promise<number> {
   if (!id) {
     for (const s of SCENARIOS) console.log(`${s.id.padEnd(24)}${s.title}\n${" ".repeat(24)}starts on ${s.target}`);
-    console.log("\nnpm run sim -- <id> [--careful | --careless | --run <file> | --shell] [--report <text>] [--json]");
+    console.log("\nnpm run sim -- <id> [--careful | --careless | --run <file> | --shell | --agent] [--report <text>] [--json]");
     return 0;
   }
   const scenario = scenarioById(id);
   if (!scenario) {
     console.error(`There is no scenario "${id}". There are: ${SCENARIOS.map((s) => s.id).join(", ")}`);
     return 2;
+  }
+  if (flag("agent")) {
+    if (!flag("json")) console.log(`${scenario.title}\n`);
+    return agent(scenario.id);
   }
   const world = startScenario(scenario);
   let report = value("report");

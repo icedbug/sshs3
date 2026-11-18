@@ -9158,13 +9158,15 @@ export class HubService {
     agent: MissionAgent,
   ): Promise<{ sessionId?: string; terminal?: NonNullable<AgentTask["ownTerminal"]>; note?: string } | undefined> {
     const name = ticket.target?.trim().toLowerCase();
-    if (isDemoMode() || !name || agent.defaultMode === "advice" || agent.runnerId) return undefined;
+    if (!name || agent.defaultMode === "advice" || agent.runnerId) return undefined;
     if (!this.host.openServerTerminal || !this.host.closeSession) return undefined;
     if (this.getKnownServers().length === 0) await this.collectExtraContext().catch(() => undefined);
     const server = this.getKnownServers().find(
       (s) => s.name.toLowerCase() === name || s.id.toLowerCase() === name || s.host?.toLowerCase() === name,
     );
     if (!server) return undefined;
+    // The demo lab opens terminals on its own simulated servers only: never a connection to a real one.
+    if (isDemoMode() && !isDemoTarget(server.id)) return undefined;
     try {
       const sessionId = await this.host.openServerTerminal(server.id);
       return { sessionId, terminal: { via: "server", profileId: server.id, shell: "bash", label: server.name } };
@@ -9184,7 +9186,8 @@ export class HubService {
    */
   private async reviveOwnTerminal(task: AgentTask): Promise<void> {
     const own = task.ownTerminal;
-    if (!own || isDemoMode()) return;
+    // In the demo lab only a terminal on one of its own simulated servers is opened again.
+    if (!own || (isDemoMode() && !isDemoTarget(own.profileId))) return;
     const session = task.target && this.terminals.get(task.target.sessionId);
     if (session && session.state !== "disconnected") return;
     try {
@@ -10437,21 +10440,24 @@ export class HubService {
               "Content-Type": "application/json",
             };
             if (config.apiKey) headers.Authorization = `Bearer ${config.apiKey}`;
-            const resp = await fetch(`${baseUrl}/chat/completions`, {
-              method: "POST",
-              headers,
-              body: JSON.stringify({
-                model: config.model || DEFAULT_AI_MODELS["openai-compatible"],
-                messages: [
-                  { role: "system", content: sysPrompt },
-                  { role: "user", content: userPrompt },
-                ],
-                max_tokens: 400,
-                temperature: 0.1,
-                stream: false,
-              }),
-              signal: controller.signal,
-            });
+            // `plain`: the limit under the name OpenAI's newer models take, and no temperature (they take their own only).
+            const ask = (plain: boolean): Promise<Response> =>
+              fetch(`${baseUrl}/chat/completions`, {
+                method: "POST",
+                headers,
+                body: JSON.stringify({
+                  model: config.model || DEFAULT_AI_MODELS["openai-compatible"],
+                  messages: [
+                    { role: "system", content: sysPrompt },
+                    { role: "user", content: userPrompt },
+                  ],
+                  ...(plain ? { max_completion_tokens: 400 } : { max_tokens: 400, temperature: 0.1 }),
+                  stream: false,
+                }),
+                signal: controller.signal,
+              });
+            let resp = await ask(false);
+            if (resp.status === 400) resp = await ask(true);
             if (resp.ok) {
               const json = (await resp.json()) as {
                 choices?: Array<{ message?: { content?: string } }>;

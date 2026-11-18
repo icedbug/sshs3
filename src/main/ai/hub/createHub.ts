@@ -317,6 +317,11 @@ export function createHub(
         };
       }
     }
+    if (!profile && isDemoMode()) {
+      // A server of the demo lab is not a saved profile until somebody opens it: a ticket's run finds it in the lab.
+      const lab = getDemoServers().find((d) => d.id === profileId);
+      if (lab) profile = { ...lab, port: lab.port ?? 22, authType: lab.authType ?? "agent" } as unknown as NonNullable<typeof profile>;
+    }
     if (!profile) throw new Error(`Saved SSH profile "${profileId}" not found`);
     const localOv = hub.store.data.localOverrides?.[profileId];
     const effectiveProfile = {

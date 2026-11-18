@@ -1034,12 +1034,35 @@ last answer of the conversation about the scenario's server or ticket.
 The score is printed (`--json` for JSON) and the exit code is 0 when every
 check passes.
 
+**An agent on a scenario.** `npm run sim -- <id> --agent --base-url <address>
+--model <name>` lets an agent, run by a model, work the incident through the
+real hub (`src/main/sim/agentRun.ts`): the scenario is started, the ticket its
+alert became is started, the run gets a terminal on the simulated server (the
+same way a ticket's run gets one in the app), and its commands go through the
+broker, the safety rules and the approvals. The model is any
+OpenAI-compatible address (the part before `/chat/completions`); the key is
+read from `SSHS3_SIM_API_KEY` and is never printed or stored. `--approve
+all|none|ask` says who answers when the agent asks before a change: `all`
+lets everything through, which shows whether the agent's own judgement holds;
+`ask` puts each question to the person at the terminal. The app sets no limit
+on a run, so this one does: it is stopped at `--max-commands` (40) or
+`--max-minutes` (15). What is printed: every command with its exit code,
+every question and its answer, the agent's report, the scenario's checks, the
+commands the lab does not have, and what the run used.
+
+In the app the same thing is a click: start a scenario, open the ticket its
+alert made, and press Start. A ticket's run in the demo lab opens a terminal
+on the lab's own simulated servers only, never a connection to a real one.
+With no model set up, a ticket's run says that nobody worked on the ticket
+and changes nothing.
+
 What this does and does not show: the scripted solutions prove that the lab
 and its checks work (`tests/main/simScenarios.test.ts` runs both ways through
-every scenario). They say nothing about how good a model is. A run by a real
-agent goes through the app: start the scenario, start the alert's ticket, and
-read the card. The agent tests (`EvalSuite`) replay recorded tool answers and
-are not connected to the lab.
+every scenario), and `tests/main/simAgentRun.test.ts` proves the whole chain
+from model to score with a scripted model at the other end
+(`tests/helpers/fakeOpenAi.ts`). Neither says how good a real model is: that
+takes a run with one. The agent tests (`EvalSuite`) replay recorded tool
+answers and are not connected to the lab.
 
 **Writing a scenario.** Add a file under `scenarios/`, build the hosts with
 `world.addHost(init, "demo-ssh-<name>")` (the alias is the inventory id, and
