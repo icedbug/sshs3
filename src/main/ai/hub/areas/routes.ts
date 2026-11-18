@@ -5,19 +5,19 @@ import type { HubReply, HubRequest, HubSnapshot } from "../../../../shared/types
  *
  * Every action of `HubRequest` is here exactly once. One that is missing does not compile, and one
  * that is here is answered by that part and no other: the part's own switch has to handle each of
- * its actions, or it does not compile either. "hub" is HubService.ts itself.
+ * its actions, or it does not compile either. A part is a file in this folder of the same name.
  */
 export const AREA_OF = {
-  snapshot: "hub",
-  inspect: "hub",
-  resume: "hub",
-  configure: "hub",
-  start: "hub",
-  reply: "hub",
-  stop: "hub",
-  "task-read": "hub",
-  takeover: "hub",
-  arm: "hub",
+  snapshot: "conversations",
+  inspect: "conversations",
+  resume: "conversations",
+  configure: "conversations",
+  start: "conversations",
+  reply: "conversations",
+  stop: "conversations",
+  "task-read": "conversations",
+  takeover: "conversations",
+  arm: "conversations",
   approve: "safety",
   "memory-save": "memory",
   "memory-delete": "memory",
@@ -37,10 +37,10 @@ export const AREA_OF = {
   "workspace-s3-configure": "sharing",
   "workspace-s3-sync-now": "sharing",
   "workspace-s3-disconnect": "sharing",
-  "inline-suggest": "hub",
+  "inline-suggest": "conversations",
   "schedule-save": "schedules",
   "schedule-run-now": "schedules",
-  "ai-probe": "hub",
+  "ai-probe": "conversations",
   "schedule-delete": "schedules",
   "demo-mode-toggle": "simulation",
   "restore-builtins": "safety",
@@ -132,13 +132,13 @@ export const AREA_OF = {
   "kb-gap-answered": "knowledge",
   "kb-ingest-folder": "knowledge",
   "kb-ingest-s3": "knowledge",
-  "layout-event-ack": "hub",
+  "layout-event-ack": "conversations",
   "inventory-refresh": "servers",
-  "forget-history": "hub",
-  "restore-checkpoint": "hub",
-  "rollback-change": "hub",
-  "task-fork": "hub",
-  "compact-task": "hub",
+  "forget-history": "conversations",
+  "restore-checkpoint": "conversations",
+  "rollback-change": "conversations",
+  "task-fork": "conversations",
+  "compact-task": "conversations",
   "snooze-inbox": "inbox",
   "ack-inbox": "inbox",
   "promote-eval": "evals",
@@ -151,7 +151,7 @@ export const AREA_OF = {
   "profile-delete": "servers",
   "mcp-tool-policy": "mcp",
   "workforce-pause": "agents",
-  quit: "hub",
+  quit: "conversations",
 } as const satisfies Record<HubRequest["action"], string>;
 
 export type AreaName = (typeof AREA_OF)[keyof typeof AREA_OF];
