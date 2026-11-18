@@ -1713,6 +1713,8 @@ export interface HubReply {
   notes?: string[];
   /** Whether the model answered when it was asked (`ai-probe`): what to tell the person, and the models it offers. */
   probe?: { ok: boolean; detail: string; models?: string[] };
+  /** What `runner-test` found for an external agent: whether its program is there and answers as an agent. */
+  runnerProbe?: { id: string; ok: boolean; detail: string };
 }
 export interface TerminalCommandFailure {
   sessionId: string;
@@ -1902,6 +1904,11 @@ export type HubRequest =
       sessionId?: string;
       agentId?: string;
       attachments?: ContextSource[];
+      /**
+       * Ask the last question again: nothing is added to the conversation, and the answer that
+       * followed the question is replaced by the new one. `text` is not read.
+       */
+      retry?: boolean;
     }
   | { action: "stop"; taskId: string }
   | { action: "takeover"; sessionId: string }
@@ -2064,6 +2071,8 @@ export type HubRequest =
   | { action: "alert-paste"; text: string }
   | { action: "runner-save"; runner: { id: string; name: string; command: string; args: string[]; cwd?: string } }
   | { action: "runner-delete"; id: string }
+  /** Starts the external agent's program, greets it and stops it again: says in `reply.runnerProbe` whether it is there and answers. */
+  | { action: "runner-test"; id: string }
   | { action: "mcp-test"; id: string }
   | {
       action: "kb-save";

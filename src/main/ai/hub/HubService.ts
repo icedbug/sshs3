@@ -71,7 +71,7 @@ import {
   isProdTag,
   shouldRequireCommandApproval,
 } from "./CommandSafetyService";
-import { AcpRuntime, EXTERNAL_RUNNER_PRESETS } from "./AcpRuntime";
+import { AcpRuntime, EXTERNAL_RUNNER_PRESETS, probeRunner } from "./AcpRuntime";
 import {
   MAX_UPLOAD_BYTES,
   contentHash,
@@ -306,6 +306,7 @@ const READ_ONLY_ACTIONS: ReadonlySet<HubRequest["action"]> = new Set<HubRequest[
   "server-facts-read",
   "inline-suggest",
   "chat-search",
+  "runner-test",
 ]);
 /**
  * An agent as it arrives from the team bucket, made safe to take: whoever can
@@ -2760,8 +2761,13 @@ export class HubService {
         const rawText =
           request.text?.trim() ||
           (replyImages.length > 0 ? "Analyze the attached image(s)." : "");
+        // Asked again: the question that is already there, answered anew.
+        const again = request.retry === true;
+        if (again && active(task)) throw new Error("This conversation is still running. Stop it first, then ask again.");
+        const asked = again ? task.messages.map((m) => m.role).lastIndexOf("user") : -1;
+        if (again && asked < 0) throw new Error("There is no question here to ask again.");
         // A message is read from its start: what a person says first (or an approval's instruction) is kept.
-        const text = clip(requiredText(rawText), 16_000);
+        const text = again ? "" : clip(requiredText(rawText), 16_000);
         if (active(task)) {
           await this.runtimes.get(task.id)?.steer(text);
           task.messages.push({
@@ -2797,13 +2803,20 @@ export class HubService {
               task.target = undefined;
             }
           }
-          task.messages.push({
-            id: crypto.randomUUID(),
-            role: "user",
-            text,
-            ...(replyImages.length > 0 ? { images: replyImages } : {}),
-            at: Date.now(),
-          });
+          if (again) {
+            // What followed the question was the answer being asked again: the new one takes its place.
+            // The question is asked now, so what the earlier try ran (still in the tool log) comes
+            // before it, and the model knows what was already done.
+            task.messages.splice(asked + 1);
+            task.messages[asked] = { ...task.messages[asked], at: Date.now() };
+          } else
+            task.messages.push({
+              id: crypto.randomUUID(),
+              role: "user",
+              text,
+              ...(replyImages.length > 0 ? { images: replyImages } : {}),
+              at: Date.now(),
+            });
           await this.launch(task);
         }
         break;
@@ -3021,6 +3034,11 @@ export class HubService {
             combinedMemories.push(m);
           }
         }
+        // How the memory read before: what was done is told afterwards, not left for the person to find.
+        const asText = (m: MemoryEntry): string => [m.title, m.text, m.tier ?? "", m.supersededBy ?? ""].join("\u0000");
+        const wasMemories = new Map(this.store.data.memories.map((m) => [m.id, asText(m)]));
+        const waitingNow = (): number => (this.store.data.memoryProposals ?? []).filter((p) => !p.appliedMemoryId).length;
+        const wasWaiting = waitingNow();
         const reflected = this.selfLearning.runReflectionCycle({
           memories: combinedMemories,
           tasks: allTasks,
@@ -3045,6 +3063,28 @@ export class HubService {
             storedEdgeIds.has(e.id) ||
             (!demoEdgeIds.has(e.id) && !isDemoTarget(e.id)),
         );
+        // What it did, said plainly: what it wrote straight away, and what waits for a person.
+        const wrote = this.store.data.memories.filter((m) => !wasMemories.has(m.id));
+        const changedNow = this.store.data.memories.filter((m) => wasMemories.has(m.id) && wasMemories.get(m.id) !== asText(m));
+        const links = this.store.data.infraEdges.filter((e) => !storedEdgeIds.has(e.id)).length;
+        const waits = Math.max(0, waitingNow() - wasWaiting);
+        const count = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`;
+        const names = (list: MemoryEntry[]): string => {
+          const shown = list.slice(0, 3).map((m) => `"${clip(m.title, 60)}"`).join(", ");
+          return list.length > 3 ? `${shown} and ${list.length - 3} more` : shown;
+        };
+        const did = [
+          ...(wrote.length ? [`Wrote ${count(wrote.length, "new entry", "new entries")}: ${names(wrote)}.`] : []),
+          ...(changedNow.length ? [`Changed ${count(changedNow.length, "entry", "entries")}: ${names(changedNow)}.`] : []),
+          ...(links ? [`Added ${count(links, "link", "links")} between servers.`] : []),
+        ];
+        reply = {
+          notes: [
+            ...(did.length ? ["Tidy up did this without asking:", ...did] : []),
+            ...(waits ? [`${count(waits, "suggestion waits", "suggestions wait")} above for you to accept or reject.`] : []),
+            ...(!did.length && !waits ? ["Tidy up found nothing to change."] : []),
+          ],
+        };
         this.s3Workspace.schedulePush(400);
         break;
       }
@@ -3986,6 +4026,14 @@ export class HubService {
           (x) => x.id !== request.id,
         );
         break;
+      case "runner-test": {
+        // The program is started, as it would be for a run: the same people may ask for that.
+        this.assertRunnerAllowed();
+        const runner = (this.store.data.externalRunners ?? []).find((x) => x.id === request.id);
+        if (!runner) throw new Error("That external agent is not set up here any more.");
+        reply = { runnerProbe: { id: runner.id, ...(await probeRunner(runner, { clientVersion: app?.getVersion?.() })) } };
+        break;
+      }
       case "goal-save": {
         const g = request.goal;
         const existing = (this.store.data.workGoals ?? []).find((x) => x.id === g.id);

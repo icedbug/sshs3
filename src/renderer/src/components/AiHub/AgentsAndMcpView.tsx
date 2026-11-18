@@ -178,6 +178,17 @@ export function AgentsAndMcpView({
   const [runnerDraft, setRunnerDraft] = useState<
     { id: string; name: string; command: string; args: string; cwd: string; note?: string; existing?: boolean } | undefined
   >();
+  /** What the last Test of an external agent found, by its id; "testing" while it is asked. */
+  const [runnerTests, setRunnerTests] = useState<Record<string, { ok: boolean; detail: string } | "testing">>({});
+  const testRunner = async (id: string): Promise<void> => {
+    setRunnerTests((now) => ({ ...now, [id]: "testing" }));
+    const snap = await act({ action: "runner-test", id });
+    const found = snap?.reply?.runnerProbe;
+    setRunnerTests((now) => {
+      const { [id]: _was, ...rest } = now;
+      return found?.id === id ? { ...rest, [id]: { ok: found.ok, detail: found.detail } } : rest;
+    });
+  };
   const [ruleDraft, setRuleDraft] = useState<RuleDraft | undefined>();
   const [ruleScopeFilter, setRuleScopeFilter] = useState<"all" | WorkspaceRuleScope>("all");
 
@@ -1010,7 +1021,18 @@ export function AgentsAndMcpView({
                 {r.command} {r.args.join(" ")}
               </small>
               <small>{r.cwd ? `Works in ${r.cwd}` : "No folder set: it cannot run yet"}</small>
-              <small>Not checked here: the command is started when an agent that runs on it is given work.</small>
+              {(() => {
+                const test = runnerTests[r.id];
+                if (test === "testing") return <small data-testid={`runner-test-${r.id}`}>Starting it and waiting for its answer…</small>;
+                if (test)
+                  return (
+                    <small data-testid={`runner-test-${r.id}`} role="status" className={test.ok ? "ai-ok" : "ai-bad"}>
+                      {test.ok ? "Works: " : "Does not work: "}
+                      {test.detail}
+                    </small>
+                  );
+                return <small data-testid={`runner-test-${r.id}`}>Not checked yet. Test starts the program, greets it and stops it again. It is given no work.</small>;
+              })()}
             </div>
             <span className="ai-badge">{agents.filter((a) => a.runnerId === r.id).length} agent(s)</span>
           </div>
@@ -1029,6 +1051,9 @@ export function AgentsAndMcpView({
               }
             >
               Edit
+            </button>
+            <button type="button" data-testid={`runner-test-btn-${r.id}`} disabled={runnerTests[r.id] === "testing"} onClick={() => void testRunner(r.id)}>
+              {runnerTests[r.id] === "testing" ? "Testing…" : "Test"}
             </button>
             <span className="ai-spacer" />
             <ConfirmButton

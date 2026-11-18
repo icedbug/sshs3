@@ -119,8 +119,16 @@ describe("Retry", () => {
     openTask();
     const retry = screen.getAllByTestId("ai-message-retry");
     expect(retry).toHaveLength(1);
-    expect(retry[0]).toHaveAttribute("title", "Ask again");
+    expect(retry[0]).toHaveAttribute("title", "Ask again. The answer below is replaced by the new one.");
     expect(retry[0].closest("article")).toHaveTextContent("Second question");
+  });
+  it("asks the question again without posting it a second time", async () => {
+    render(<Harness />);
+    openTask();
+    fireEvent.click(screen.getByTestId("ai-message-retry"));
+    await waitFor(() => expect(request).toHaveBeenCalled());
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledWith({ action: "reply", taskId: "task", text: "", retry: true, sessionId: undefined });
   });
   it("is not offered while the task is running", () => {
     fixture.tasks = [makeTask({ status: "running" })];

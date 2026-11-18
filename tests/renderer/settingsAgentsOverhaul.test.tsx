@@ -514,6 +514,22 @@ describe("AgentsAndMcpView shows what was saved for an agent", () => {
     render(<AgentsAndMcpView hub={hub} act={vi.fn().mockResolvedValue(hub)} selectedAgentId="" onSelectAgentForChat={vi.fn()} onStartedMission={vi.fn()} />);
     expect(screen.getByTestId("agent-may-a1")).toHaveTextContent("Commands: Never runs commands, advises only. Held to 2 of the things an agent may do.");
     expect(screen.getByTestId("agent-may-a2")).toHaveTextContent("Commands: Asks before each command. May do everything that level allows.");
-    expect(screen.getByTestId("runner-r1")).toHaveTextContent("Not checked here: the command is started when an agent that runs on it is given work.");
+    expect(screen.getByTestId("runner-test-r1")).toHaveTextContent("Not checked yet. Test starts the program, greets it and stops it again. It is given no work.");
+  });
+
+  it("tests an outside agent on request and says what was found", async () => {
+    const hub = baseHub({ externalRunners: [{ id: "r1", name: "Claude Code", command: "npx", args: ["-y", "x"], cwd: "/code" }] as never });
+    const act = vi
+      .fn()
+      .mockResolvedValueOnce({ ...hub, reply: { runnerProbe: { id: "r1", ok: false, detail: 'The program "npx" was not found on this computer. Install it, or give its full path.' } } })
+      .mockResolvedValueOnce({ ...hub, reply: { runnerProbe: { id: "r1", ok: true, detail: "It started and answered as an agent (claude-code 2.1)." } } });
+    render(<AgentsAndMcpView hub={hub} act={act} selectedAgentId="" onSelectAgentForChat={vi.fn()} onStartedMission={vi.fn()} />);
+
+    fireEvent.click(screen.getByTestId("runner-test-btn-r1"));
+    expect(act).toHaveBeenCalledWith({ action: "runner-test", id: "r1" });
+    await waitFor(() => expect(screen.getByTestId("runner-test-r1")).toHaveTextContent('Does not work: The program "npx" was not found on this computer.'));
+
+    fireEvent.click(screen.getByTestId("runner-test-btn-r1"));
+    await waitFor(() => expect(screen.getByTestId("runner-test-r1")).toHaveTextContent("Works: It started and answered as an agent (claude-code 2.1)."));
   });
 });

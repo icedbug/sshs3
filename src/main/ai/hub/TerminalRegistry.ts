@@ -676,11 +676,15 @@ export class TerminalRegistry extends EventEmitter {
       kind: s.view.kind,
     });
     const prevOwner = s.view.owner;
+    // Nobody chose this shell: it was read off the terminal here.
+    const guessed = !s.view.shell && !fallbackShell;
     s.view.owner = undefined;
     try {
       await this.arm(id, inferredShell);
       s.armFailedAt = undefined;
     } catch (error) {
+      // A guess that the terminal did not answer to is not kept: the next try reads the terminal again.
+      if (guessed) s.view.shell = undefined;
       s.armFailedAt = Date.now();
       s.armFailure = `This terminal did not answer like a ${inferredShell} shell (${error instanceof Error ? error.message : String(error)}). sshs3 runs commands in bash, zsh, sh, fish and PowerShell; connect it by hand at such a prompt.`;
       throw new Error(s.armFailure, { cause: error });

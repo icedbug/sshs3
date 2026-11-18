@@ -224,6 +224,8 @@ export function Memory({
   const [busyId, setBusyId] = useState<string | null>(null);
   const [saveError, setSaveError] = useState("");
   const [hiddenNote, setHiddenNote] = useState("");
+  /** What the last Tidy up did, in its own words. */
+  const [tidied, setTidied] = useState<string[]>([]);
   const [limit, setLimit] = useState(30);
   // Forget has no undo on the backend, so the forgotten entry is kept here to save it again.
   const [forgotten, setForgotten] = useState<MemoryEntry | undefined>();
@@ -389,7 +391,8 @@ export function Memory({
           <strong>pinned</strong>: always read first. <strong>global</strong>: for the team, on every server.{" "}
           <strong>Useful</strong> and <strong>Not useful</strong> rank an entry higher or lower when the assistant
           chooses what to read. <strong>Tidy up</strong> looks for entries that say the same thing and for finished
-          runs not written down yet: what it finds is listed above the entries for you to accept or reject.
+          runs not written down yet. Some of what it finds it writes straight away, and the rest it lists above the
+          entries for you to accept or reject. It says which when it is done.
         </p>
       </header>
 
@@ -413,7 +416,10 @@ export function Memory({
               title="Merges entries that say the same thing, turns repeated incident notes into one entry, writes down the steps of finished runs not looked at yet, notes a read-only check for open failures, and adds links it finds between servers. What it writes is shared with the team."
               onClick={() => {
                 setReflecting(true);
-                void act({ action: "self-learn-reflect" }).finally(() => setReflecting(false));
+                setTidied([]);
+                void act({ action: "self-learn-reflect" })
+                  .then((snap) => setTidied(snap?.reply?.notes ?? []))
+                  .finally(() => setReflecting(false));
               }}
             >
               {reflecting ? "Tidying…" : "Tidy up"}
@@ -431,6 +437,14 @@ export function Memory({
           </button>
         </div>
       </div>
+
+      {tidied.length > 0 && (
+        <div className="ai-hint" role="status" data-testid="tidy-result">
+          {tidied.map((line) => (
+            <p key={line}>{line}</p>
+          ))}
+        </div>
+      )}
 
       {draft && (
         <form

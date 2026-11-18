@@ -2355,6 +2355,16 @@ export function conversationWithToolLog(task: AgentTask): AgentMessage[] {
   }
   const userTimes = messages.filter((m) => m.role === "user").map((m) => m.at);
   const out = messages.map((m) => ({ ...m }));
+  // A first question that was asked again: what the earlier try ran is older than every turn there is.
+  // It is given first, so the model knows what was already done.
+  const earlier = userTimes.length > 0 ? log.filter((r) => kept.has(r) && r.at < userTimes[0]) : [];
+  if (earlier.length > 0)
+    out.unshift({
+      id: "toollog-earlier",
+      role: "assistant",
+      text: `[Tool calls made in an earlier try at this, with their results. Check the current state before repeating one that changes something.]\n${earlier.map(render).join("\n")}`,
+      at: userTimes[0] - 1,
+    });
   for (let turn = 0; turn < userTimes.length; turn++) {
     const from = userTimes[turn];
     const until = userTimes[turn + 1] ?? Infinity;

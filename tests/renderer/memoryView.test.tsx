@@ -111,7 +111,21 @@ describe("MemoryView says what its marks mean and when it hid a secret", () => {
     expect(legend).toHaveTextContent("global: for the team, on every server.");
     expect(legend).toHaveTextContent("Useful and Not useful rank an entry higher or lower");
     expect(legend).toHaveTextContent("Tidy up looks for entries that say the same thing");
-    expect(legend).toHaveTextContent("for you to accept or reject");
+    // It does not claim that everything is asked about first: some of it is written straight away.
+    expect(legend).toHaveTextContent("Some of what it finds it writes straight away");
+    expect(legend).toHaveTextContent("the rest it lists above the entries for you to accept or reject");
+    expect(legend).toHaveTextContent("It says which when it is done.");
+  });
+
+  it("shows what Tidy up did, in the hub's own words", async () => {
+    const notes = ["Tidy up did this without asking:", 'Changed 1 entry: "Backup schedule".', "2 suggestions wait above for you to accept or reject."];
+    const act = vi.fn().mockResolvedValue({ ...makeHub([entry]), reply: { notes } });
+    render(<Memory hub={makeHub([entry])} act={act} suggestion="" />);
+    expect(screen.queryByTestId("tidy-result")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("run-self-reflection-btn"));
+    const result = await screen.findByTestId("tidy-result");
+    expect(act).toHaveBeenCalledWith({ action: "self-learn-reflect" });
+    for (const line of notes) expect(result).toHaveTextContent(line);
   });
 
   it("says so when a password in a new entry was hidden before it was saved", async () => {

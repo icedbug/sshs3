@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { constants as fsConstants, accessSync, statSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import type { AiReasoningEffort } from "../../../shared/types/ai";
 import type { AgentTask, AgentTodo, ExternalRunner, ExternalRunnerPreset } from "../../../shared/types/aiHub";
@@ -21,6 +22,8 @@ import { boundedContext, boundedPrompt, safeError } from "./privacy";
  */
 
 export const ACP_PROTOCOL_VERSION = 1;
+/** How long a started agent is given to answer the greeting (the first start of an npx package can be slow). */
+const GREETING_TIMEOUT_MS = 2 * 60_000;
 
 /** The characters cmd.exe gives a meaning of its own. */
 const CMD_META = /([()\][%!^"`<>&|;, *?])/g;
@@ -150,12 +153,132 @@ function defaultHasBinary(binary: string, env: NodeJS.ProcessEnv = process.env):
       return false;
     }
   };
-  if (/[\\/]/.test(binary)) return checkFile(binary);
+  // On Windows a program is found by its name with one of the extensions that run there (npx is npx.cmd).
+  const names =
+    process.platform === "win32"
+      ? [binary, ...(env.PATHEXT || ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean).map((ext) => binary + ext.toLowerCase())]
+      : [binary];
+  if (/[\\/]/.test(binary)) return names.some(checkFile);
   const dirs = (env.PATH || env.Path || "").split(path.delimiter).filter(Boolean);
   for (const dir of dirs) {
-    if (checkFile(path.join(dir, binary))) return true;
+    if (names.some((name) => checkFile(path.join(dir, name)))) return true;
   }
   return false;
+}
+
+/** What `probeRunner` found. `detail` is for the person: one or two sentences. */
+export interface RunnerProbe {
+  ok: boolean;
+  detail: string;
+}
+
+/**
+ * Whether an external agent's program is there and answers as one. It is started, greeted and
+ * stopped again: nothing is asked of it, no session is opened, and nothing in its folder is touched.
+ */
+export function probeRunner(
+  runner: Pick<ExternalRunner, "name" | "command" | "args" | "cwd">,
+  options: { timeoutMs?: number; clientVersion?: string; env?: NodeJS.ProcessEnv } = {},
+): Promise<RunnerProbe> {
+  const env = options.env ?? process.env;
+  const timeoutMs = options.timeoutMs ?? 20_000;
+  if (!defaultHasBinary(runner.command, env))
+    return Promise.resolve({ ok: false, detail: `The program "${runner.command}" was not found on this computer. Install it, or give its full path.` });
+  const cwd = runner.cwd?.trim();
+  if (cwd) {
+    try {
+      if (!statSync(cwd).isDirectory()) throw new Error("not a folder");
+    } catch {
+      return Promise.resolve({ ok: false, detail: `The working folder "${cwd}" does not exist on this computer.` });
+    }
+  }
+  return new Promise<RunnerProbe>((resolve) => {
+    let done = false;
+    let stderr = "";
+    let buffer = "";
+    let child: ChildProcessWithoutNullStreams | undefined;
+    const seconds = Math.max(1, Math.round(timeoutMs / 1000));
+    const timer = setTimeout(
+      () =>
+        finish({
+          ok: false,
+          detail: `"${runner.command}" started but did not answer within ${seconds} second${seconds === 1 ? "" : "s"}. It may not speak the Agent Client Protocol, or it is still installing itself: try again in a moment.`,
+        }),
+      timeoutMs,
+    );
+    const finish = (result: RunnerProbe): void => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      try {
+        child?.kill();
+      } catch {
+        // Already gone.
+      }
+      resolve(result);
+    };
+    try {
+      const plan = runnerSpawn(runner.command, runner.args ?? [], process.platform, env);
+      child = spawn(plan.file, plan.args, {
+        cwd: cwd || os.tmpdir(),
+        env: childEnv(env),
+        stdio: ["pipe", "pipe", "pipe"],
+        windowsVerbatimArguments: plan.verbatim,
+        windowsHide: true,
+      });
+    } catch (error) {
+      return finish({ ok: false, detail: `Could not start "${runner.command}": ${safeError(error)}` });
+    }
+    child.once("error", (error) => finish({ ok: false, detail: `Could not start "${runner.command}": ${safeError(error)}` }));
+    child.once("exit", (code) =>
+      finish({
+        ok: false,
+        detail: `"${runner.command}" started and ended at once (exit ${code ?? "?"}), without answering.${stderr.trim() ? ` It said: ${boundedContext(stderr.trim(), 300)}` : ""}`,
+      }),
+    );
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr = (stderr + chunk.toString("utf8")).slice(-2000);
+    });
+    child.stdin.on("error", () => undefined);
+    child.stdout.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString("utf8");
+      if (buffer.length > MAX_LINE_BYTES) buffer = "";
+      let end: number;
+      while ((end = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, end).trim();
+        buffer = buffer.slice(end + 1);
+        if (!line) continue;
+        let message: { id?: unknown; result?: { protocolVersion?: number; agentInfo?: { name?: string; version?: string } }; error?: { message?: string } };
+        try {
+          message = JSON.parse(line) as typeof message;
+        } catch {
+          continue; // Not protocol: a program that prints to stdout before it answers.
+        }
+        if (message.id !== 1) continue;
+        if (message.error) return finish({ ok: false, detail: `"${runner.command}" answered with an error: ${boundedContext(String(message.error.message ?? "unknown"), 300)}` });
+        const version = message.result?.protocolVersion;
+        if (version !== undefined && version !== ACP_PROTOCOL_VERSION)
+          return finish({ ok: false, detail: `"${runner.name}" speaks protocol version ${version}; sshS3 speaks ${ACP_PROTOCOL_VERSION}.` });
+        const who = [message.result?.agentInfo?.name, message.result?.agentInfo?.version].filter(Boolean).join(" ");
+        return finish({
+          ok: true,
+          detail: `It started and answered as an agent${who ? ` (${boundedContext(who, 80)})` : ""}.${cwd ? "" : " No working folder is set for it on this computer: it needs one before it can be given work."}`,
+        });
+      }
+    });
+    child.stdin.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: ACP_PROTOCOL_VERSION,
+          clientInfo: { name: "sshs3", version: options.clientVersion ?? "0" },
+          clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
+        },
+      })}\n`,
+    );
+  });
 }
 
 /**
@@ -638,7 +761,17 @@ export class AcpRuntime implements AgentRuntime {
           }
         : undefined;
 
+    // A program that never answers the greeting is not waited for for ever.
+    let greetTimer: NodeJS.Timeout | undefined;
+    const unanswered = new Promise<never>((_, reject) => {
+      greetTimer = setTimeout(
+        () => reject(new Error(`"${this.runner.name}" started but did not answer within ${Math.round(GREETING_TIMEOUT_MS / 60_000)} minutes. It may not speak the Agent Client Protocol.`)),
+        GREETING_TIMEOUT_MS,
+      );
+    });
+    unanswered.catch(() => undefined);
     const init = (await Promise.race([
+      unanswered,
       this.request("initialize", {
         protocolVersion: ACP_PROTOCOL_VERSION,
         clientInfo: { name: "sshs3", version: this.options.clientVersion ?? "0" },
@@ -647,7 +780,7 @@ export class AcpRuntime implements AgentRuntime {
         ...(sessionMeta ? { _meta: sessionMeta } : {}),
       }),
       gone,
-    ])) as AcpInitResponse;
+    ]).finally(() => clearTimeout(greetTimer))) as AcpInitResponse;
     if (init?.protocolVersion !== undefined && init.protocolVersion !== ACP_PROTOCOL_VERSION)
       throw new Error(
         `"${this.runner.name}" speaks protocol version ${init.protocolVersion}; sshS3 speaks ${ACP_PROTOCOL_VERSION}.`,

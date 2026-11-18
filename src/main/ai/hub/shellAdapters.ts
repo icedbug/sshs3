@@ -90,21 +90,28 @@ export function detectShellFromHint(hint: {
   const out = hint.output ?? "";
   const outLower = out.toLowerCase();
   const platform = hint.platform ?? process.platform;
+  // A terminal's name is what a person called it. It says which shell runs there only where the tab is
+  // named after the program it starts: a terminal on this machine. A server called "cmd-gateway" or
+  // "fish-market-db" runs neither, and a wrong guess types the wrong handshake into it. So a name counts
+  // for a Windows shell only on a local terminal on Windows, and for fish only on a local terminal.
+  // (bash, zsh, sh and dash take the same commands, so a name may tell those apart anywhere.)
+  const local = hint.kind === "local";
+  const namesWindowsShell = local && platform === "win32";
 
-  if (bin.includes("pwsh") || label.includes("pwsh")) return "pwsh";
+  if (bin.includes("pwsh") || (namesWindowsShell && label.includes("pwsh"))) return "pwsh";
   if (
     bin.includes("powershell") ||
-    label.includes("powershell") ||
+    (namesWindowsShell && label.includes("powershell")) ||
     outLower.includes("windows powershell") ||
     /^ps [a-z]:\\/im.test(out)
   ) {
     return "powershell";
   }
-  if (bin.includes("cmd.exe") || /\bcmd\b/.test(label) || /^[a-z]:\\[^>]*>/im.test(out)) {
+  if (bin.includes("cmd.exe") || (namesWindowsShell && /\bcmd\b/.test(label)) || /^[a-z]:\\[^>]*>/im.test(out)) {
     return "cmd";
   }
   if (bin.includes("zsh") || /\bzsh\b/.test(label)) return "zsh";
-  if (bin.includes("fish") || /\bfish\b/.test(label)) return "fish";
+  if (bin.includes("fish") || (local && /\bfish\b/.test(label))) return "fish";
   if (bin.includes("dash") || /\bdash\b/.test(label)) return "dash";
   if (/\b(?:wsl|ubuntu|debian|alpine|fedora)\b/.test(label) || label.includes("bash") || bin.includes("bash")) {
     return "bash";

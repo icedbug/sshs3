@@ -2254,18 +2254,22 @@ export function AiHubPanel({
                               >
                                 <Pencil size={11} /> Edit
                               </button>
-                              {/* Asking again posts the question once more, so it is offered only on the last one. */}
-                              {item.message.id === lastUserMessageId(task) && (
+                              {/* Asking again answers the last question anew: the question is not posted a second time. */}
+                              {task && item.message.id === lastUserMessageId(task) && (
                                 <button
                                   type="button"
                                   className="ai-code-btn"
                                   data-testid="ai-message-retry"
-                                  title="Ask again"
+                                  title="Ask again. The answer below is replaced by the new one."
+                                  disabled={busy}
                                   onClick={() =>
-                                    void sendMessage(
-                                      terminal && terminal.state !== "disconnected" ? terminal.id : undefined,
-                                      { overridePrompt: item.message!.text },
-                                    )
+                                    void act({
+                                      action: "reply",
+                                      taskId: task.id,
+                                      text: "",
+                                      retry: true,
+                                      sessionId: terminal && terminal.state !== "disconnected" ? terminal.id : undefined,
+                                    })
                                   }
                                 >
                                   <RotateCcw size={11} /> Retry
