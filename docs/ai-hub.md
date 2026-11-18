@@ -1630,9 +1630,36 @@ unattended heartbeat.
 ## The panel (`src/renderer/src/components/AiHub/`)
 
 One chat, and eight views beside it: Inbox, Workforce, Agents & MCP, Knowledge base, Infrastructure,
-Changes, Memory & skills, Schedules. `AiHubPanel.tsx` holds the chat and the
-navigation; each view is its own file. Styling is in `aiHub.css`, whose last
+Changes, Memory & skills, Schedules. Each view is its own file. Styling is in `aiHub.css`, whose last
 sections ("AI chat: visual layer" and "the other views") carry the current look.
+
+**The chat panel's own code** was one file of 3,659 lines. It is now a shell,
+one hook and thirteen pieces, in `panel/`:
+
+| File | What is in it |
+| --- | --- |
+| `AiHubPanel.tsx` (130 lines) | Calls the hook and lays the pieces out |
+| `panel/usePanelState.tsx` | Everything the panel holds and does before it draws: which conversation is open, what is typed, the menus, attachments, and the handlers for sending, stopping, forking and the rest. Returns it as one object, `p` |
+| `panel/PanelHeader.tsx`, `PanelNav.tsx` | The top bar; the history menu, the tabs of the views, an error or a notice |
+| `panel/WorkSidebar.tsx` | The full view's sidebar: conversations, agents, recent team activity |
+| `panel/Welcome.tsx` | What a new chat shows before anything is said |
+| `panel/TaskContextBar.tsx`, `Timeline.tsx`, `ConversationTail.tsx` | A conversation: the bar over it, its messages and changes, and what follows them (tool log, plan, what the agent is doing, why it stopped) |
+| `panel/AboveComposer.tsx`, `ComposerContextRow.tsx`, `ComposerInput.tsx`, `ComposerFooter.tsx` | The task list and the secret warning; the row over the text box; the text box with its slash commands and @ mentions; the row under it |
+| `panel/OtherViews.tsx`, `SettingsOverlay.tsx` | The eight views beside the chat; the AI settings over the panel |
+| `panel/panelHelpers.tsx` | Small functions and constants of the panel |
+
+A piece is a component that is given `p` and reads the names it uses from
+it. What each piece draws is the text it was in the one file. The names it
+reads were found by the compiler's own symbol table, not by hand. Checked: the
+pieces put back where the shell names them are, character for character, the
+JSX the component returned; the hook's body is what the component did before
+it drew; and what the panel puts on the page is the same in 19 states
+(conversation, menus, slash and @ lists, history, a new chat, each view, the
+side panel, settings), compared as HTML before and after.
+
+Not done: the hook is still one function of about a thousand lines. Dividing
+it into several hooks cannot be done by moving text: each would need its
+inputs written out and typed, which is rewriting. It was left as it is.
 
 - The chat column has the conversation, then the run dock above the composer:
   the task list (`TaskTodos`) while a run has one, and the approval or question
@@ -2038,7 +2065,7 @@ remaining platform/product work.
 - `src/main/web/`: multi-user Web Server, authentication, per-user tenants and Electron shim.
 - `src/shared/types/aiHub.ts`, `src/shared/types/ai.ts`: hub requests, snapshot, memory, safety policy and provider/model types.
 - `src/shared/ipc/createMultiSSHApi.ts`: the `MultiSSHApi` used by both the preload and the web client.
-- `src/renderer/src/components/AiHub/`, `src/renderer/src/components/LandingView.tsx`, `src/renderer/src/lib/aiHub.ts`: AI Hub UI. `AiHubPanel.tsx` holds the chat and navigation; each view is its own file (`SettingsView`, `MemoryView` + `MemoryProposals`, `SchedulesView`, `AgentsAndMcpView`, `KnowledgeBaseView`).
+- `src/renderer/src/components/AiHub/`, `src/renderer/src/components/LandingView.tsx`, `src/renderer/src/lib/aiHub.ts`: AI Hub UI. `AiHubPanel.tsx` lays out the chat panel, whose state is in `panel/usePanelState.tsx` and whose pieces are in `panel/`; each view is its own file (`SettingsView`, `MemoryView` + `MemoryProposals`, `SchedulesView`, `AgentsAndMcpView`, `KnowledgeBaseView`).
 - `integrations/hermes-desktop/`: narrow original desktop adaptations and backend plugin.
 - `src/shared/types/nativeHermes.ts`: host layout/control contracts.
 - `scripts/hermes/`: pinned source, original desktop build and PM-based runtime packaging.

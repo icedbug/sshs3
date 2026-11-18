@@ -113,3 +113,24 @@ describe("the hub's parts", () => {
     }
   });
 });
+
+describe("the chat panel's pieces", () => {
+  const panelDir = path.join(__dirname, "../../src/renderer/src/components/AiHub");
+  const lines = async (file: string): Promise<number> => (await fs.readFile(file, "utf8")).split("\n").length;
+
+  it("keeps the shell to laying the pieces out, and each piece small enough to read", async () => {
+    expect(await lines(path.join(panelDir, "AiHubPanel.tsx")), "AiHubPanel.tsx has grown: put what it draws in a piece in panel/ (docs/ai-hub.md, The panel)").toBeLessThan(300);
+    const files = (await fs.readdir(path.join(panelDir, "panel"))).filter((f) => f.endsWith(".tsx"));
+    expect(files).toEqual(expect.arrayContaining(["usePanelState.tsx", "Timeline.tsx", "ComposerInput.tsx", "panelHelpers.tsx"]));
+    for (const file of files) expect(await lines(path.join(panelDir, "panel", file)), `panel/${file} has grown past 1,500 lines`).toBeLessThan(1500);
+  });
+
+  it("names every piece in the shell", async () => {
+    const shell = await fs.readFile(path.join(panelDir, "AiHubPanel.tsx"), "utf8");
+    for (const file of await fs.readdir(path.join(panelDir, "panel"))) {
+      const name = file.replace(/\.tsx$/, "");
+      if (name === "usePanelState" || name === "panelHelpers") continue;
+      expect(shell, name).toContain(`<${name} p={p}`);
+    }
+  });
+});
