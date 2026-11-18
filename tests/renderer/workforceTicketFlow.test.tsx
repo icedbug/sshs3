@@ -198,9 +198,13 @@ describe("the confirm button", () => {
     reactAct(() => void vi.advanceTimersByTime(5100));
     expect(screen.getByTestId("confirm-countdown")).toHaveTextContent("(5)");
 
-    // Hovering pauses the countdown so the operator can finish reading.
+    // Hovering pauses the countdown so the operator can finish reading. A number that stands
+    // still would promise a deadline that is not running, so none is shown meanwhile.
     fireEvent.mouseEnter(btn.parentElement!);
     reactAct(() => void vi.advanceTimersByTime(4000));
+    expect(screen.queryByTestId("confirm-countdown")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Delete this ticket?" })).toBeVisible();
+    fireEvent.mouseLeave(btn.parentElement!);
     expect(screen.getByTestId("confirm-countdown")).toHaveTextContent("(5)");
 
     // Clicking Cancel exits confirmation immediately without firing onConfirm.

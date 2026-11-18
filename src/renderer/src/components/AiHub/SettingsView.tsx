@@ -1181,10 +1181,12 @@ export function Settings({
       <section className="ai-set ai-set-data">
         <h3>Data</h3>
         <div className="ai-card-actions">
-          <button
-            type="button"
-            title="Brings back the agents, runbooks and skills that ship with sshS3 if you removed them"
-            onClick={() => {
+          {/* It also brings back what a teammate removed for the team, so it asks. Nothing of your own is overwritten. */}
+          <ConfirmButton
+            label="Restore built-in agents, runbooks and skills"
+            confirmLabel="Bring back the built-in ones that were removed?"
+            className=""
+            onConfirm={() => {
               setRestoreStatus("");
               void act({ action: "restore-builtins" })
                 .then((next) => {
@@ -1195,9 +1197,7 @@ export function Settings({
                   setRestoreStatus(err instanceof Error ? err.message : "Could not restore built-ins.");
                 });
             }}
-          >
-            Restore built-in agents, runbooks and skills
-          </button>
+          />
           <button
             type="button"
             title={isWebBrowserMode() ? DEMO_MODE_SET_BY_SERVER : "Restarts sshS3 with invented servers and data"}

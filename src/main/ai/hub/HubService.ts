@@ -3694,6 +3694,7 @@ export class HubService {
             const restored: KbDocument = {
               ...(existing ?? doc),
               updatedAt: restoredAt,
+              restoredAt,
             };
             this.store.data.kbDocuments = [
               ...(this.store.data.kbDocuments ?? []).filter((x) => x.id !== doc.id),
@@ -8763,11 +8764,13 @@ export class HubService {
       ),
       // A user document is never added back under its id (a new one gets a new id), so its removal is final:
       // a copy written later (a teammate's computer that finished reading it after it was removed) does
-      // not bring it back. Built-in documents keep fixed ids and can be explicitly restored via restore-builtins.
+      // not bring it back. A built-in document keeps its id, and comes back only when somebody restores it (restore-builtins).
       (local, remote) => {
         if (Boolean(local.deleted) === Boolean(remote.deleted)) return remote.updatedAt > local.updatedAt ? remote : local;
         const [gone, kept] = local.deleted ? [local, remote] : [remote, local];
-        if (builtinKbIds.has(kept.id) && kept.updatedAt > gone.updatedAt) return kept;
+        // Brought back on purpose, after the removal: that stands. A copy that is merely newer (a
+        // teammate's computer that read the document after it was removed) does not bring it back.
+        if (builtinKbIds.has(kept.id) && (kept.restoredAt ?? 0) > gone.updatedAt) return kept;
         return gone.updatedAt > kept.updatedAt ? gone : { ...gone, updatedAt: kept.updatedAt + 1 };
       },
     );

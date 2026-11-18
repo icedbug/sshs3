@@ -1446,6 +1446,8 @@ export interface KbChunk {
 }
 export interface KbDocument {
   id: string;
+  /** When somebody asked for this built-in document back after it was removed: what lets it win over that removal. */
+  restoredAt?: number;
   collection?: string;
   title: string;
   sourceType: "upload" | "folder" | "s3" | "manual" | "note" | "url" | "paste" | "confluence";

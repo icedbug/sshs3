@@ -131,7 +131,10 @@ describe("Milestone 2 UI honesty and clarity fixes", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
     await waitFor(() => expect(act).toHaveBeenCalledWith(expect.objectContaining({ action: "configure" })));
 
+    // It asks first: it also brings back what a teammate removed for the team.
     fireEvent.click(screen.getByRole("button", { name: "Restore built-in agents, runbooks and skills" }));
+    expect(act).not.toHaveBeenCalledWith({ action: "restore-builtins" });
+    fireEvent.click(screen.getByRole("button", { name: "Bring back the built-in ones that were removed?" }));
     expect(await screen.findByTestId("restore-builtins-status")).toHaveTextContent("Restored 2 built-in item(s).");
   });
 

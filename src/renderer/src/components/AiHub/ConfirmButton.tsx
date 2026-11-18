@@ -116,7 +116,8 @@ export function ConfirmButton({
         }}
       >
         <span>{asking ? confirmLabel : label}</span>
-        {asking && (
+        {/* The seconds are shown only while they run: with the pointer on it or the focus in it, the question waits. */}
+        {asking && !paused && (
           <span className="ai-confirm-count" data-testid="confirm-countdown" aria-hidden="true">
             ({secondsLeft})
           </span>
