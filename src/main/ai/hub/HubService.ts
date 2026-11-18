@@ -244,6 +244,7 @@ import { InboxPart } from "./areas/inbox";
 import { ChatAndAtlassianPart } from "./areas/chatAndAtlassian";
 import { FactsPart } from "./areas/facts";
 import { AlertsPart } from "./areas/alerts";
+import { SchedulesPart } from "./areas/schedules";
 // Declared in files of their own now; still exported from here, where others import them.
 export type { HubHost } from "./hubHost";
 export { changeForSnapshot, taskForSnapshot, incomingAgentForTesting, checkedSuggestionForTesting, withUnanswered, budgetStopLine, renderWorkforceProgress } from "./hubShared";
@@ -319,9 +320,9 @@ export class HubService {
   /** For a recording that is being made: the recording its conversation pointed to before. */
   private readonly recordingBefore = new Map<string, string | undefined>();
   /** The terminal each scheduled run was given, so it is closed when the run ends. */
-  private readonly scheduleSessions = new Map<string, string>();
+  readonly scheduleSessions = new Map<string, string>();
   /** Terminals the hub opened for a run while it ran (another server of the cluster, a ticket's target). */
-  private readonly runTerminals = new Map<string, Set<string>>();
+  readonly runTerminals = new Map<string, Set<string>>();
 
   /**
    * A terminal the hub opened for this run is closed when the run ends: it is
@@ -345,7 +346,7 @@ export class HubService {
    * "disconnected" sessions after one ticket and one schedule is what leaving
    * them there looked like.
    */
-  private closeOwnTerminal(sessionId: string): void {
+  closeOwnTerminal(sessionId: string): void {
     this.host.closeSession?.(sessionId);
     this.terminals.forget(sessionId);
   }
@@ -367,29 +368,6 @@ export class HubService {
       }
       if (alive === false) this.terminals.invalidate(session.id, "Terminal exited", true);
     }
-  }
-
-  /**
-   * A scheduled run has ended: its schedule says how (not just "Started"),
-   * a failure is told to the person, and the terminal opened for it is closed.
-   */
-  private scheduledRunEnded(taskId: string): void {
-    const sessionId = this.scheduleSessions.get(taskId);
-    if (sessionId) {
-      this.scheduleSessions.delete(taskId);
-      this.closeOwnTerminal(sessionId);
-    }
-    for (const opened of this.runTerminals.get(taskId) ?? []) this.closeOwnTerminal(opened);
-    this.runTerminals.delete(taskId);
-    const schedule = this.store.data.schedules.find((s) => s.lastTaskId === taskId);
-    const task = this.store.data.tasks.find((t) => t.id === taskId);
-    if (!schedule || !task || active(task)) return;
-    const at = new Date().toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
-    schedule.lastStatus =
-      task.status === "completed"
-        ? `Completed at ${at}${task.verification === "verified" ? ", verified" : ""}`
-        : `${task.status === "failed" ? "Failed" : "Stopped"} at ${at}${task.error ? `: ${clip(task.error, 160)}` : ""}`;
-    if (task.status !== "completed") this.notify("Scheduled task did not finish", schedule.title);
   }
   disposed = false;
   private resume = (): void => {
@@ -875,7 +853,7 @@ export class HubService {
    * Remembers that the user deleted one of `builtins` (this mode's), so it stays hidden until
    * restore-builtins. Any other id is the user's own item, which the delete already removed.
    */
-  private markBuiltinDismissed(id: string, builtins: readonly { id: string }[]): void {
+  markBuiltinDismissed(id: string, builtins: readonly { id: string }[]): void {
     if (!builtins.some((b) => b.id === id)) return;
     const list = this.store.data.preferences.dismissedBuiltinIds ?? [];
     if (!list.includes(id)) {
@@ -2020,7 +1998,7 @@ export class HubService {
    * A terminal that does not get to a prompt is closed again, and the error
    * says what it last showed.
    */
-  private async openUnattendedTerminal(
+  async openUnattendedTerminal(
     target: { profileId: string; shell: AgentSchedule["shell"] },
     label: string,
   ): Promise<string> {
@@ -2445,6 +2423,8 @@ export class HubService {
         return this.handleFacts(request as RequestsOf<"facts">);
       case "alerts":
         return this.handleAlerts(request as RequestsOf<"alerts">);
+      case "schedules":
+        return this.handleSchedules(request as RequestsOf<"schedules">);
     }
   }
 
@@ -3403,60 +3383,8 @@ export class HubService {
         };
         break;
       }
-      case "schedule-save": {
-        const s = request.schedule;
-        if (
-          !SHELL_KINDS.includes(s.shell) ||
-          !["advice", "plan", "assisted", "autonomous"].includes(s.mode) ||
-          !["anthropic", "openai-compatible", "openai-codex"].includes(
-            s.provider,
-          )
-        )
-          throw new Error("Invalid schedule");
-        const id = s.id || crypto.randomUUID();
-        const schedule: AgentSchedule = {
-          ...s,
-          id,
-          title: clip(requiredText(s.title), 200),
-          prompt: boundedPrompt(requiredText(s.prompt), PERSON_PROMPT_MAX),
-          profileId: requiredText(s.profileId),
-          model: requiredText(s.model),
-          intervalMinutes: integer(s.intervalMinutes, 1, 525600),
-          maxCommands: integer(s.maxCommands, 1, 100),
-          maxMinutes: integer(s.maxMinutes, 1, 120),
-          nextRunAt: Number.isFinite(s.nextRunAt)
-            ? s.nextRunAt
-            : Date.now() + 60_000,
-        };
-        this.store.data.schedules = this.store.data.schedules.filter(
-          (x) => x.id !== id,
-        );
-        this.store.data.schedules.push(schedule);
-        break;
-      }
-      case "schedule-run-now": {
-        let schedule = this.store.data.schedules.find((x) => x.id === request.id);
-        // The demo lab's example jobs are listed without being kept: running one makes it a job of this installation.
-        const example = !schedule && isDemoMode() ? getDemoSchedules().find((x) => x.id === request.id) : undefined;
-        if (example) this.store.data.schedules.push((schedule = { ...example }));
-        if (!schedule) throw new Error("That job is not here any more.");
-        if (!schedule.enabled) throw new Error("This job is paused. Resume it first.");
-        if (schedule.lastTaskId && this.store.data.tasks.some((t) => t.id === schedule.lastTaskId && active(t))) throw new Error("Its last run is still going.");
-        // Once, now: when it next runs by itself stays as it was.
-        const task = await this.launchSchedule(schedule);
-        reply = task ? { started: { taskId: task.id }, notes: [`Started "${clip(schedule.title, 120)}".`] } : { notes: [schedule.lastStatus ?? "It could not be started."] };
-        break;
-      }
       case "ai-probe":
         reply = { probe: await this.probeModel(request.baseUrl?.trim() || undefined) };
-        break;
-      case "schedule-delete":
-        this.store.data.schedules = this.store.data.schedules.filter(
-          (s) => s.id !== request.id,
-        );
-        if (isDemoMode()) {
-          this.markBuiltinDismissed(request.id, getDemoSchedules());
-        }
         break;
       case "demo-mode-toggle": {
         // Demo mode never changes inside a running process (demo/demoMode.ts): switching it means a
@@ -5266,7 +5194,7 @@ export class HubService {
     return snap;
   }
 
-  private async start(
+  async start(
     input: StartAgentTask,
     schedule?: AgentSchedule,
     readOnly?: {
@@ -8279,36 +8207,6 @@ export class HubService {
     }
   }
 
-  /** Starts one run of a scheduled job: when it falls due, and when somebody asks for it now. */
-  private async launchSchedule(schedule: AgentSchedule): Promise<AgentTask | undefined> {
-    let opened: string | undefined;
-    try {
-      const id = await this.openUnattendedTerminal(schedule, `Schedule: ${schedule.title}`);
-      opened = id;
-      const task = await this.start(
-        {
-          prompt: schedule.prompt,
-          sessionId: id,
-          mode: schedule.mode,
-          maxCommands: schedule.maxCommands,
-          maxMinutes: schedule.maxMinutes,
-        },
-        schedule,
-      );
-      task.ownTerminal = { via: "schedule", profileId: schedule.profileId, shell: schedule.shell, label: `Schedule: ${schedule.title}` };
-      schedule.lastTaskId = task.id;
-      schedule.lastStatus = "Running";
-      this.scheduleSessions.set(task.id, id);
-      return task;
-    } catch (e) {
-      schedule.lastStatus = `Blocked: ${safeError(e)}`;
-      this.notify("Scheduled task blocked", schedule.title);
-      // A run that never started leaves no terminal behind.
-      if (opened) this.closeOwnTerminal(opened);
-      return undefined;
-    }
-  }
-
   /**
    * Whether a model answers at an address: asked once, nothing kept. What it
    * says is for the person choosing a model, so it names the address and what to do.
@@ -9726,5 +9624,5 @@ export class HubService {
 
 /** The hub's methods that are kept in files of their own (./areas). Declared here so the class has them; put on it just below. */
 // eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging -- it names the parts and has no members of its own
-export interface HubService extends InboxPart, ChatAndAtlassianPart, FactsPart, AlertsPart {}
-mixParts(HubService, [InboxPart, ChatAndAtlassianPart, FactsPart, AlertsPart]);
+export interface HubService extends InboxPart, ChatAndAtlassianPart, FactsPart, AlertsPart, SchedulesPart {}
+mixParts(HubService, [InboxPart, ChatAndAtlassianPart, FactsPart, AlertsPart, SchedulesPart]);
