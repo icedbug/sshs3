@@ -133,6 +133,12 @@ export interface AiHubDeltaEvent {
     | 'run.degraded';
   at: number;
   delta?: string;
+  /**
+   * With `message.delta`: how long the message's text is once this piece is added. A window adds the
+   * piece only where its copy ends exactly before it: a piece it already has (the snapshot was newer)
+   * is not added twice, and a missing piece is noticed instead of the text going on with a hole in it.
+   */
+  length?: number;
   tool?: { name: string; input: string; output: string; at: number };
   usage?: {
     inputTokens: number;

@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import type { AgentMessage, AgentTask, EvalCase, EvalExpectation, EvalRun, HubSnapshot } from "@shared/types/aiHub";
 import { ConfirmButton } from "./ConfirmButton";
+import { userMessageCount } from "../../lib/aiHubTasks";
 import { type Act } from "./panelShared";
 import { isConversation, tokens } from "./workforceModel";
 
@@ -145,7 +146,8 @@ export function getEvalTurns(
   }
   if (evalCase.fromTaskId) {
     const linked = tasks.find((t) => t.id === evalCase.fromTaskId);
-    if (linked && linked.messages.length > 0) {
+    // Only a conversation that is here whole: the last few messages of a long one are not its turns.
+    if (linked && !linked.messagesTail && linked.messages.length > 0) {
       return linked.messages.filter((m) => m.role === "user" || m.role === "assistant");
     }
   }
@@ -204,7 +206,7 @@ export function AgentTestsView({ hub, act }: { hub: HubSnapshot; act: Act }): JS
       (t) =>
         isConversation(t) &&
         !["queued", "running", "waiting"].includes(t.status) &&
-        t.messages.some((m) => m.role === "user"),
+        userMessageCount(t) > 0,
     )
     .slice(-30)
     .reverse();
@@ -218,7 +220,7 @@ export function AgentTestsView({ hub, act }: { hub: HubSnapshot; act: Act }): JS
               t.status === "cancelled" ||
               t.status === "interrupted" ||
               t.changes.some((ch) => ch.status === "failed" || ch.status === "uncertain")) &&
-            t.messages.some((m) => m.role === "user"),
+            userMessageCount(t) > 0,
         )
         .slice(-20)
         .reverse(),
@@ -410,7 +412,7 @@ export function AgentTestsView({ hub, act }: { hub: HubSnapshot; act: Act }): JS
               >
                 <option value="">Choose a finished conversation…</option>
                 {conversations.map((t) => {
-                  const turnCount = t.messages.filter((m) => m.role === "user").length;
+                  const turnCount = userMessageCount(t);
                   return (
                     <option key={t.id} value={t.id}>
                       {t.title} ({turnCount} turn{turnCount === 1 ? "" : "s"})

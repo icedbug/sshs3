@@ -55,7 +55,7 @@ import type {
 } from "../../../shared/types/aiHub";
 import type { AiHubDeltaEvent } from "../../../shared/ipc/createMultiSSHApi";
 import type { IStorageProvider } from "../../../shared/types/storage";
-import { CONTEXT_NOTE_PREFIX, SHELL_KINDS } from "../../../shared/types/aiHub";
+import { CONTEXT_NOTE_PREFIX, SHELL_KINDS, SNAPSHOT_TAIL_CHARS, SNAPSHOT_TAIL_MESSAGES } from "../../../shared/types/aiHub";
 import { DEFAULT_AI_MODELS, type ProviderProfile } from "../../../shared/types/ai";
 import { AiConfigStore } from "../AiConfigStore";
 import { CodexAuthProvider } from "../CodexAuthProvider";
@@ -295,7 +295,80 @@ const log = createLogger("ai-hub");
  * store is not rewritten and no window is told to refetch: a search that runs
  * as a person types must not cost a save and a broadcast per keystroke.
  */
+/** Run events the windows are sent as they happen (host.delta): each changes the conversation it belongs to and nothing else. */
+const STREAMED_EVENTS: ReadonlySet<string> = new Set(["message.delta", "usage.updated", "tool.result", "run.retrying"]);
+/** How often, at most, the windows are told to fetch everything again while a run streams. */
+const STREAM_REFRESH_MS = 1000;
+
+/** A conversation is sent whole in every snapshot while it is no larger than this. */
+const SNAPSHOT_WHOLE_MESSAGES = 6;
+const SNAPSHOT_WHOLE_CHARS = 2000;
+
+/** A change's long parts travel in a snapshot while together they are no longer than this. */
+const SNAPSHOT_CHANGE_CHARS = 600;
+/** Of a longer output: this much of its start, as a preview. */
+const SNAPSHOT_OUTPUT_PREVIEW = 120;
+
+/**
+ * A change as a snapshot carries it. What it ran, on what, how it ended and who answered are always
+ * there. Its long parts (the output, a file's contents and diff, a dry run's output, the snapshot
+ * taken before it) are left out once they are long, and the change says so (`partial`): the row that
+ * shows them asks for the conversation whole. A change that waits for an answer is never cut: the
+ * person deciding sees all of it.
+ */
+export function changeForSnapshot(change: AgentChange): AgentChange {
+  const { partial: _stored, ...whole } = change;
+  if (change.status === "pending") return whole;
+  const long = [change.output, change.before, change.after, change.diff, change.dryRunOutput, change.preflightSnapshot];
+  let chars = 0;
+  for (const part of long) if (typeof part === "string") chars += part.length;
+  if (chars <= SNAPSHOT_CHANGE_CHARS) return whole;
+  const { before: _before, after: _after, diff: _diff, dryRunOutput: _dry, preflightSnapshot: _pre, output, ...rest } = whole;
+  return {
+    ...rest,
+    ...(typeof output === "string" ? { output: output.length > SNAPSHOT_OUTPUT_PREVIEW ? output.slice(0, SNAPSHOT_OUTPUT_PREVIEW) : output } : {}),
+    partial: true,
+  };
+}
+
+/**
+ * A conversation as every window is sent it with every snapshot. Every change anywhere sends all of
+ * them again, so a long one travels by its last messages only (enough for a list and a preview), with
+ * what the whole of it is in `messagesTail`, and its changes without their long parts. The window that
+ * shows the conversation fetches it whole with `task-read` and keeps it current from the stream.
+ * Pictures are never in the tail.
+ */
+export function taskForSnapshot(task: AgentTask): AgentTask {
+  const { toolLog: _toolLog, messagesTail: _stored, ...kept } = task;
+  const rest = { ...kept, changes: task.changes.map(changeForSnapshot) };
+  const messages = task.messages;
+  let chars = 0;
+  let pictures = false;
+  for (const m of messages) {
+    chars += m.text.length;
+    if (m.images?.length) pictures = true;
+  }
+  if (!pictures && messages.length <= SNAPSHOT_WHOLE_MESSAGES && chars <= SNAPSHOT_WHOLE_CHARS) return rest;
+  const last = messages.at(-1);
+  return {
+    ...rest,
+    messages: messages.slice(-SNAPSHOT_TAIL_MESSAGES).map((m) => ({
+      id: m.id,
+      role: m.role,
+      text: m.text.length > SNAPSHOT_TAIL_CHARS ? m.text.slice(-SNAPSHOT_TAIL_CHARS) : m.text,
+      at: m.at,
+    })),
+    messagesTail: {
+      count: messages.length,
+      users: messages.reduce((n, m) => n + (m.role === "user" ? 1 : 0), 0),
+      ...(last ? { lastId: last.id } : {}),
+      lastChars: last?.text.length ?? 0,
+    },
+  };
+}
+
 const READ_ONLY_ACTIONS: ReadonlySet<HubRequest["action"]> = new Set<HubRequest["action"]>([
+  "task-read",
   "audit-read",
   "audit-export",
   "recording-read",
@@ -2461,8 +2534,9 @@ export class HubService {
         version: manifest?.tag ?? "native-ts-1.0",
       },
       sessions: this.terminals.list(),
-      // The tool log is for the model's next run; the UI shows changes and messages.
-      tasks: allTasks.map(({ toolLog: _toolLog, ...task }) => task),
+      // The tool log is for the model's next run; the UI shows changes and messages. A long conversation
+      // is sent by its last messages only: the window that shows it asks for all of it (task-read).
+      tasks: allTasks.map(taskForSnapshot),
       memories: allMemories,
       memoryProposals: this.store.data.memoryProposals ?? [],
       memoryDistillRunning: this.distilling.size > 0,
@@ -2824,6 +2898,15 @@ export class HubService {
       case "stop":
         await this.stop(this.task(request.taskId), "Stopped by user");
         break;
+      case "task-read": {
+        // Read as it is: a demo conversation that is only listed is not made a stored one by being looked at.
+        const found =
+          this.store.data.tasks.find((t) => t.id === request.taskId) ??
+          (isDemoMode() ? getDemoTasks().find((t) => t.id === request.taskId) : undefined);
+        if (!found) throw new Error("Task not found");
+        reply = { task: { id: found.id, messages: found.messages, changes: found.changes } };
+        break;
+      }
       case "takeover":
         this.terminals.takeover(request.sessionId);
         break;
@@ -6235,6 +6318,7 @@ export class HubService {
         type: "message.delta",
         at: now,
         delta: event.delta,
+        length: message.text.length,
       });
     }
     if (event.type === "todos.updated" && event.todos) task.todos = event.todos;
@@ -6381,7 +6465,24 @@ export class HubService {
     }
     task.updatedAt = Date.now();
     if (task.ticketId && !active(task)) this.settleTickets();
-    this.changed();
+    // A piece of text, a usage count, a tool's answer: the windows were sent it as it came (host.delta)
+    // and put it into the conversation themselves. Telling them to fetch everything again for each piece
+    // is what a long answer did hundreds of times a second.
+    if (this.host.delta && STREAMED_EVENTS.has(event.type)) this.streamed();
+    else this.changed();
+  }
+
+  private streamTimer?: NodeJS.Timeout;
+  /**
+   * While a run streams: the windows are told to fetch everything again at most once a second (a window
+   * that missed a piece catches up then), and the store is saved as after any change.
+   */
+  private streamed(): void {
+    if (this.disposed) return;
+    this.streamTimer ??= setTimeout(() => {
+      this.streamTimer = undefined;
+      this.changed();
+    }, STREAM_REFRESH_MS);
   }
 
   /**
@@ -11025,6 +11126,7 @@ export class HubService {
     this.stopChatListening();
     clearInterval(this.tickTimer);
     clearTimeout(this.saveTimer);
+    clearTimeout(this.streamTimer);
     clearTimeout(this.workSyncPushTimer);
     powerMonitor?.removeListener("suspend", this.suspend);
     powerMonitor?.removeListener("resume", this.resume);

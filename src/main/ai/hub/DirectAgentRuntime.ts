@@ -2277,10 +2277,47 @@ const TEAM_MEMORY_CHARS = 12_000;
 const memoryLine = (m: Partial<MemoryEntry>): string =>
   `- [${m.kind === "skill" ? "skill" : "memory"}, ${m.scope ?? "workspace"}] ${maskContext(m.title ?? "")}: ${maskContext(m.text ?? "")}`;
 
+/** In the snapshot's JSON, in place of a part that is given as text beside it: the same thing is not sent twice. */
+const MEMORY_GIVEN_AS_TEXT = "(given above as team memory";
+const KB_GIVEN_AS_TEXT = "(given below, as what this agent always has at hand)";
+/** The parts of the context that repeat what the snapshot gives as text. */
+const GIVEN_AS_TEXT_KEYS = ["memoryTiers", "coreMemories", "kbBoundDocuments", "kbBoundPages"] as const;
+
+/**
+ * The context without its second and third copy of the team's memories. Every one of them is given as
+ * a line of text ("Team memory"), and the context holds them again by tier, and once more as one
+ * formatted string: a third of what each call sent was the same memories over again. Left as it is
+ * when a tier holds an entry that is not among the lines.
+ */
+function withoutMemoryCopies(rest: Record<string, unknown>, memories: Array<Partial<MemoryEntry>>): Record<string, unknown> {
+  const shown = new Set(memories.map((m) => m.id));
+  const all = (list: unknown): boolean => Array.isArray(list) && list.every((e) => e && typeof (e as { id?: unknown }).id === "string" && shown.has((e as { id: string }).id));
+  const out = { ...rest };
+  const tiers = out.memoryTiers as { core?: unknown; archival?: unknown; episodic?: unknown; skills?: unknown; omittedCount?: Record<string, number> } | undefined;
+  if (tiers && typeof tiers === "object" && all(tiers.core ?? []) && all(tiers.archival ?? []) && all(tiers.episodic ?? []) && all(tiers.skills ?? [])) {
+    const omitted = Object.values(tiers.omittedCount ?? {}).reduce((n, x) => n + (Number(x) || 0), 0);
+    out.memoryTiers = `${MEMORY_GIVEN_AS_TEXT}${omitted > 0 ? `; ${omitted} more were left out for space: search with workspace_context` : ""})`;
+  }
+  if (out.coreMemories !== undefined && all(out.coreMemories)) out.coreMemories = `${MEMORY_GIVEN_AS_TEXT})`;
+  return out;
+}
+
+/**
+ * The context without the documents and pages bound to the agent, where they are given as text after
+ * the snapshot (buildUntrustedKbContext): they were in every call twice.
+ */
+function withoutBoundCopies(context: unknown, kbText: string): unknown {
+  if (!kbText || !context || typeof context !== "object" || Array.isArray(context)) return context;
+  const out = { ...(context as Record<string, unknown>) };
+  if (kbText.includes("Sources this agent always has at hand") && Array.isArray(out.kbBoundDocuments) && out.kbBoundDocuments.length > 0) out.kbBoundDocuments = KB_GIVEN_AS_TEXT;
+  if (kbText.includes("Pages this agent always has at hand") && Array.isArray(out.kbBoundPages) && out.kbBoundPages.length > 0) out.kbBoundPages = KB_GIVEN_AS_TEXT;
+  return out;
+}
+
 export function snapshotText(context: unknown, maxChars: number): string {
   if (!context || typeof context !== "object")
     return boundedContext(JSON.stringify(context ?? null), maxChars);
-  const { workspaceMemories, kbPageIndex, ...rest } = context as {
+  const { workspaceMemories, kbPageIndex, ...all } = context as {
     workspaceMemories?: unknown;
     kbPageIndex?: unknown;
   } & Record<string, unknown>;
@@ -2290,11 +2327,6 @@ export function snapshotText(context: unknown, maxChars: number): string {
         (m) => m && typeof m.text === "string" && m.text.trim(),
       )
     : [];
-  const snapshot = boundedContext(JSON.stringify(rest), maxChars);
-  if (memories.length === 0)
-    return pagesBlock.length
-      ? [...pagesBlock, "Workspace snapshot (JSON; when large, its beginning is cut):", snapshot].join("\n")
-      : snapshot;
   const lines: string[] = [];
   let used = 0;
   let left = 0;
@@ -2307,6 +2339,13 @@ export function snapshotText(context: unknown, maxChars: number): string {
     lines.push(line);
     used += line.length;
   }
+  // Every memory is a line of text below: the copies of them inside the JSON are not sent as well.
+  const rest = memories.length > 0 && left === 0 ? withoutMemoryCopies(all, memories) : all;
+  const snapshot = boundedContext(JSON.stringify(rest), maxChars);
+  if (memories.length === 0)
+    return pagesBlock.length
+      ? [...pagesBlock, "Workspace snapshot (JSON; when large, its beginning is cut):", snapshot].join("\n")
+      : snapshot;
   return [
     ...pagesBlock,
     "Team memory (what the team has learned and chosen to remember; best match first):",
@@ -2514,6 +2553,12 @@ export function withoutUnchanged(result: unknown, snapshot: string | undefined):
         return { id: m.id, title: m.title, inSnapshot: true };
       });
       if (shown > 0) unchanged.push(`workspaceMemories (the ${shown} marked inSnapshot)`);
+      continue;
+    }
+    // A part the snapshot gave as text instead (its place in the JSON says so) is not sent now either:
+    // the memories are in workspaceMemories, and what the agent has at hand does not change in a run.
+    if ((GIVEN_AS_TEXT_KEYS as readonly string[]).includes(key) && snapshot.includes(`"${key}":"(given `)) {
+      unchanged.push(key);
       continue;
     }
     const json = JSON.stringify(value);
@@ -2900,8 +2945,9 @@ export class DirectAgentRuntime implements AgentRuntime {
   private snapshot?: string;
   /** Builds the snapshot the model is given at the start of the run, and remembers it. */
   private snapshotFor(task: AgentTask, context: unknown, maxChars: number): string {
-    this.snapshot = snapshotText(contextForModel(task, context), maxChars);
     const kbCtx = buildUntrustedKbContext(task, context);
+    // What the agent always has at hand is given as text after the snapshot, not inside it as well.
+    this.snapshot = snapshotText(withoutBoundCopies(contextForModel(task, context), kbCtx), maxChars);
     return kbCtx ? `${this.snapshot}\n\n${kbCtx}` : this.snapshot;
   }
   /** `asked`: the handover note has been requested and the next text-only turn is it. */

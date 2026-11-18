@@ -67,6 +67,14 @@ describe("an agent run by a model on a scenario", () => {
     expect(result.otherRuns).toBe(0);
     // The model was sent the tools and a real conversation, with the key.
     expect((model.requests[0].tools as unknown[]).length).toBeGreaterThan(3);
+    // What the agent always has at hand, and the team's memories, are in what it was sent once, as text:
+    // not a second time inside the snapshot's JSON.
+    const sent = String((model.requests[0].messages as Array<{ content: unknown }>)[1].content);
+    expect(sent).toContain("Sources this agent always has at hand");
+    expect(sent).toContain('"kbBoundDocuments":"(given below, as what this agent always has at hand)"');
+    expect(sent).toContain("Team memory (what the team has learned");
+    expect(sent).toContain('"memoryTiers":"(given above as team memory');
+    expect(sent).not.toContain('"formatted":');
   }, 60_000);
 
   it.each(SCENARIOS.map((s) => s.id))("%s: the careful solution passes every check, the careless one walks into the trap", async (id) => {

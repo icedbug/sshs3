@@ -678,6 +678,57 @@ so an answer must never travel through shared hub state.
 - A test case's result and `evalRunning` change in one step: no snapshot
   shows a case that has its result and is still said to be running.
 
+**What a snapshot costs, and what is kept out of it.** Every change anywhere
+sends every window a new snapshot, and a snapshot carries every conversation.
+Measured on a workspace of 300 long conversations, 2 000 memories, 500
+documents and 200 tickets, a snapshot was 21.7 MB and, while a model streamed
+an answer, every window was told to fetch it again for every piece of text:
+several hundred times a second. Three things keep that down
+(`tests/main/hubSnapshotSize.test.ts` holds them to a budget):
+
+- **Streamed pieces are sent as pieces.** A piece of text, a usage count, a
+  tool's answer and a retry notice go to the windows as they happen
+  (`host.delta`, `HUB_DELTA_CHANNEL`), and the windows put them into the
+  conversation themselves. For those events the hub does not say "fetch
+  everything": it says so at most once a second while a run streams, so a
+  window that missed a piece catches up. A piece of text says how long the
+  message is once it is added (`length`), so a window adds it only where its
+  copy ends exactly before it: a piece it already has is not added twice, and
+  a gap makes it fetch (`applyDeltaToMessages`, `lib/aiHubDelta.ts`).
+- **A long conversation travels by its tail** (`taskForSnapshot`). While it
+  is small (six messages, 2 000 characters, no pictures) it is sent whole.
+  Past that, the snapshot carries its last two messages, each cut to its last
+  800 characters, and `messagesTail` says what the whole of it is (how many
+  messages, how many a person wrote, the last one's id and length). Pictures
+  are never in a snapshot.
+- **A finished change travels without its long parts** (`changeForSnapshot`).
+  What it ran, where, how it ended and who answered are always there. Its
+  output beyond the first 120 characters, a file's contents and diff, a dry
+  run's output and the snapshot taken before it are left out once together
+  they pass 600 characters, and the change says so (`partial`). A change that
+  waits for an answer is never cut: the person deciding sees all of it.
+
+The view that shows one conversation gets it whole with `task-read` (it
+answers `reply.task`: every message and every change, and it changes
+nothing). `useFullTask` (`lib/aiHubTasks.ts`) asks once, keeps the text
+current from the stream, and asks again only when the snapshot says the
+conversation holds something its copy does not: another message, a longer
+last message, a change that has moved on. The chat panel and the run
+inspector show a conversation that way; the Changes view fetches a change's
+long parts when its row is opened, not for every row of the list. On that
+workspace a snapshot is now 3.6 MB, and a streamed answer asks the windows to
+fetch it about once a second.
+
+**What a run sends the model.** Each call carries the tool list, the
+instructions and a snapshot of the workspace. The team's memories are given in
+that snapshot as lines of text; the context also held them by tier, and once
+more as one formatted string, so they went out three times. The same went for
+the documents and pages bound to the agent, given as text after the snapshot
+and again inside it. Each is now sent once (`snapshotText`,
+`withoutBoundCopies`): where the JSON had the copy it says where the text is.
+On a ticket run in the demo lab that took a call from about 80 000 characters
+to 67 000.
+
 ## Server facts, and what changed (`ServerFacts`, `FactsStore`)
 
 Most faults follow a change, so the hub reads the servers on a schedule and

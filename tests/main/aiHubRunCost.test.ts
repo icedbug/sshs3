@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { DirectAgentRuntime, contextForModel, toolsForTask, withoutUnchanged } from "../../src/main/ai/hub/DirectAgentRuntime";
+import { DirectAgentRuntime, contextForModel, snapshotText, toolsForTask, withoutUnchanged } from "../../src/main/ai/hub/DirectAgentRuntime";
 import type { AgentTask } from "../../src/shared/types/aiHub";
 
 /**
@@ -114,6 +114,47 @@ describe("what a run that works a ticket or a schedule is offered", () => {
     );
     // Without a snapshot to compare with, nothing is left out.
     expect(withoutUnchanged(later, undefined)).toBe(later);
+  });
+
+  it("gives the team's memories once: as lines of text, not again by tier and once more as one string inside the JSON", () => {
+    const backups = { id: "mem-1", kind: "memory", scope: "workspace", title: "Backups", text: "Dumps live in /var/backups/postgres.", author: "Maria Ek", createdAt: 1, updatedAt: 1 };
+    const reload = { id: "mem-2", kind: "skill", scope: "workspace", title: "Reload nginx", text: "Run nginx -t before a reload.", author: "Maria Ek", createdAt: 1, updatedAt: 1 };
+    const withCopies = {
+      workspaceServers: [{ id: "s1", name: "web-01" }],
+      workspaceMemories: [backups, reload],
+      coreMemories: [backups],
+      memoryTiers: {
+        core: [backups],
+        archival: [],
+        episodic: [],
+        skills: [{ id: "mem-2", title: "Reload nginx" }],
+        omittedCount: { core: 0, archival: 3, episodic: 0, skills: 0 },
+        formatted: "CORE\n- Backups: Dumps live in /var/backups/postgres.\nSKILLS\n- Reload nginx",
+      },
+    };
+    const text = snapshotText(withCopies, 50_000);
+    // Each memory is there, once.
+    expect(text.split("Dumps live in /var/backups/postgres.").length - 1).toBe(1);
+    expect(text.split("Run nginx -t before a reload.").length - 1).toBe(1);
+    expect(text).toContain("- [memory, workspace] Backups: Dumps live in /var/backups/postgres.");
+    // The JSON says where they are, and how many did not fit at all.
+    expect(text).toContain('"memoryTiers":"(given above as team memory; 3 more were left out for space: search with workspace_context)"');
+    expect(text).toContain('"coreMemories":"(given above as team memory)"');
+    expect(text).toContain('"workspaceServers":[{"id":"s1","name":"web-01"}]');
+
+    // A tier that holds something the lines do not is left as it is: nothing is lost by this.
+    const other = { ...withCopies, memoryTiers: { ...withCopies.memoryTiers, archival: [{ id: "mem-9", title: "Elsewhere", text: "Only in a tier." }] } };
+    expect(snapshotText(other, 50_000)).toContain("Only in a tier.");
+
+    // Asked for again in the same run, the copies are not sent then either.
+    const later = withoutUnchanged({ ...withCopies, observedAt: 2 }, text) as Record<string, unknown>;
+    expect(later.memoryTiers).toBeUndefined();
+    expect(later.coreMemories).toBeUndefined();
+    expect((later.unchangedSinceRunStart as { parts: string[] }).parts).toEqual(expect.arrayContaining(["memoryTiers", "coreMemories"]));
+    expect(later.workspaceMemories).toEqual([
+      { id: "mem-1", title: "Backups", inSnapshot: true },
+      { id: "mem-2", title: "Reload nginx", inSnapshot: true },
+    ]);
   });
 });
 

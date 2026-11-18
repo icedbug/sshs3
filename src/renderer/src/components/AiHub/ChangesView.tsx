@@ -2,10 +2,12 @@ import { useState } from "react";
 import type {
   AgentChange,
   AgentChangeApproval,
+  AgentTask,
   HubRequest,
   HubSnapshot,
 } from "@shared/types/aiHub";
 import { hubRequest } from "../../lib/aiHub";
+import { useFullTask } from "../../lib/aiHubTasks";
 import { AuditLogView } from "./AuditLogView";
 import { ChangeProof } from "./ChangeProof";
 import { AnsiLogView, DiffViewer } from "./DiffViewer";
@@ -240,6 +242,38 @@ const time = (at: number): string =>
   });
 
 /**
+ * A change's long parts: what a file change changed, and what a command printed. A snapshot carries a
+ * finished change without them once they are long (`change.partial`); `task` is then given when the
+ * change's row has been opened, and the conversation is fetched whole to show them.
+ */
+function ChangeLongParts({ change, task }: { change: AgentChange; task: AgentTask | undefined }): JSX.Element {
+  const whole = useFullTask(task);
+  const c = whole?.changes.find((x) => x.id === change.id) ?? change;
+  const hasFileDiff = c.kind === "file" && Boolean(c.diff || c.before !== undefined || c.after !== undefined);
+  return (
+    <>
+      {hasFileDiff && (
+        <div data-testid={`change-diff-${c.id}`}>
+          <small>What changed</small>
+          <DiffViewer diff={c.diff} before={c.before} after={c.after} filePath={c.target} defaultMode="unified" maxUnchangedCollapsed={6} />
+        </div>
+      )}
+      {c.output && (
+        <div>
+          <small>Output</small>
+          <AnsiLogView text={c.output} maxLines={80} />
+        </div>
+      )}
+      {c.partial && (
+        <small className="ai-muted" data-testid={`change-partial-${c.id}`}>
+          Fetching the rest…
+        </small>
+      )}
+    </>
+  );
+}
+
+/**
  * One timeline of what was changed: what teammates did on the servers (synced
  * through the workspace) and every command or file change the assistant made
  * on this computer, with its result.
@@ -269,6 +303,8 @@ export function ChangesView({
   const [withRecording, setWithRecording] = useState(false);
   const [filter, setFilter] = useState("");
   const [limit, setLimit] = useState(60);
+  /** Rows that have been opened: a change's long parts are fetched then, not for every row of the list. */
+  const [opened, setOpened] = useState<ReadonlySet<string>>(new Set());
 
   // This computer's own assistant changes are in the list once, with all they carry, not again as team activity.
   const ownChanges = new Set(
@@ -416,6 +452,7 @@ export function ChangesView({
     const hasMore = Boolean(
       e.command ||
         e.detail ||
+        c?.partial ||
         c?.output ||
         hasFileDiff ||
         c?.check ||
@@ -505,7 +542,12 @@ export function ChangesView({
       <div key={e.id}>
         {includeDay && heading && <h4 className="ai-timeline-day">{heading}</h4>}
         {hasMore ? (
-          <details className={`ai-timeline-item ai-timeline-${e.source}`}>
+          <details
+            className={`ai-timeline-item ai-timeline-${e.source}`}
+            onToggle={(ev) => {
+              if (c?.partial && ev.currentTarget.open) setOpened((was) => (was.has(e.id) ? was : new Set(was).add(e.id)));
+            }}
+          >
             <summary>{head}</summary>
             <div className="ai-timeline-more">
               {e.command && <pre>{e.command}</pre>}
@@ -515,25 +557,7 @@ export function ChangesView({
                   {REPORTED_ONLY}
                 </small>
               )}
-              {hasFileDiff && c && (
-                <div data-testid={`change-diff-${c.id}`}>
-                  <small>What changed</small>
-                  <DiffViewer
-                    diff={c.diff}
-                    before={c.before}
-                    after={c.after}
-                    filePath={c.target}
-                    defaultMode="unified"
-                    maxUnchangedCollapsed={6}
-                  />
-                </div>
-              )}
-              {c?.output && (
-                <div>
-                  <small>Output</small>
-                  <AnsiLogView text={c.output} maxLines={80} />
-                </div>
-              )}
+              {c && <ChangeLongParts change={c} task={c.partial && opened.has(e.id) ? hub.tasks.find((t) => t.id === e.taskId) : undefined} />}
               {c && decision(c) && (
                 <small data-testid="change-decision">{decision(c)}</small>
               )}

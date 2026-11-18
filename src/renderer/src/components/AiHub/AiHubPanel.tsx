@@ -42,6 +42,7 @@ import {
   useHub,
   useSelectedTerminal,
 } from "../../lib/aiHub";
+import { useFullTask } from "../../lib/aiHubTasks";
 import { isWebBrowserMode } from "../../lib/webClientBridge";
 import "./aiHub.css";
 import { TaskTodos } from "./TaskTodos";
@@ -386,7 +387,8 @@ export function AiHubPanel({
     generation: string;
     label: string;
   }>();
-  const task = hub?.tasks.find((t) => t.id === taskId);
+  // The open conversation with all of its messages: a snapshot carries only the last few of a long one.
+  const task = useFullTask(hub?.tasks.find((t) => t.id === taskId));
   const activeAgent: MissionAgent | undefined = (hub?.agents ?? []).find(
     (a) => a.id === (task?.agentId || selectedAgentId),
   );

@@ -53,6 +53,35 @@ interface TabAiDockState {
 
 const LANDING_DOCK_KEY = '__landing__';
 
+/**
+ * `fn`, run once for a burst of calls: at once for the first, and once more after the burst when more
+ * came within `ms`. For work that only needs to follow a change, not to repeat for each one.
+ */
+function onceForABurst(fn: () => void, ms: number): { (): void; cancel(): void } {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let more = false;
+  const run = (): void => {
+    if (timer) {
+      more = true;
+      return;
+    }
+    fn();
+    timer = setTimeout(() => {
+      timer = undefined;
+      if (more) {
+        more = false;
+        run();
+      }
+    }, ms);
+  };
+  run.cancel = (): void => {
+    clearTimeout(timer);
+    timer = undefined;
+    more = false;
+  };
+  return run;
+}
+
 function readSavedAiPanelWidth(): number {
   try {
     const saved = Number(localStorage.getItem('sshs3:ai-panel-width'));
@@ -431,12 +460,16 @@ const AppContent: React.FC = () => {
 
     loadSettings();
     window.addEventListener("sshs3:open-cluster-split", onOpenClusterSplit);
-    const offHub = window.multissh?.onAiHubChanged?.(() => {
+    // The hub says "something changed" many times in a burst (a run's every step): the settings are
+    // read again once for the burst, at once and once more when it has passed.
+    const onHubChanged = onceForABurst(() => {
       loadSettings();
       void checkLayoutEvents();
-    });
+    }, 400);
+    const offHub = window.multissh?.onAiHubChanged?.(onHubChanged);
     return () => {
       window.removeEventListener("sshs3:open-cluster-split", onOpenClusterSplit);
+      onHubChanged.cancel();
       offHub?.();
     };
   }, []);
@@ -548,11 +581,11 @@ const AppContent: React.FC = () => {
         });
     };
     reloadProfiles();
-    const offHub = window.multissh?.onAiHubChanged?.(() => {
-      reloadProfiles();
-    });
+    const onHubChanged = onceForABurst(reloadProfiles, 400);
+    const offHub = window.multissh?.onAiHubChanged?.(onHubChanged);
     return () => {
       cancelled = true;
+      onHubChanged.cancel();
       offHub?.();
     };
   }, [landingVisible, profilesModalOpen]);

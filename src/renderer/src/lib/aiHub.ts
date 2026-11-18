@@ -1,11 +1,14 @@
 import { useSyncExternalStore } from "react";
-import type { AgentTask, HubRequest, HubSnapshot } from "@shared/types/aiHub";
+import { SNAPSHOT_TAIL_CHARS, SNAPSHOT_TAIL_MESSAGES, type AgentTask, type HubRequest, type HubSnapshot } from "@shared/types/aiHub";
 import type {
   AiHubDeltaEvent,
   MultiSSHApiWithHubDelta,
 } from "@shared/ipc/createMultiSSHApi";
 
+import { applyDeltaToMessages } from "./aiHubDelta";
+
 export type { AiHubDeltaEvent };
+export { applyDeltaToMessages, STREAMED_MESSAGE_ID } from "./aiHubDelta";
 
 let snapshot: HubSnapshot | undefined;
 let selected = "";
@@ -63,6 +66,13 @@ function refresh(): Promise<void> {
   })();
   return inflightRefresh;
 }
+/** Whether a piece of streamed text finds this snapshot's copy of its conversation missing earlier pieces. */
+export function deltaLeavesGap(current: HubSnapshot | undefined, delta: AiHubDeltaEvent): boolean {
+  if (!current || delta.type !== "message.delta" || !delta.delta) return false;
+  const task = current.tasks.find((t) => t.id === delta.taskId);
+  return Boolean(task) && applyDeltaToMessages(task!.messages, delta, task!.messagesTail?.lastChars).fit === "gap";
+}
+
 export function applyAiHubDelta(
   current: HubSnapshot | undefined,
   delta: AiHubDeltaEvent,
@@ -74,22 +84,25 @@ export function applyAiHubDelta(
   let nextTask: AgentTask | undefined;
 
   if (delta.type === "message.delta" && delta.delta) {
-    const messages = [...task.messages];
-    const last = messages.at(-1);
-    if (last && last.role === "assistant") {
-      messages[messages.length - 1] = {
-        ...last,
-        text: `${last.text}${delta.delta}`.slice(-128_000),
+    const tail = task.messagesTail;
+    const put = applyDeltaToMessages(task.messages, delta, tail?.lastChars);
+    if (put.fit !== "applied") return current;
+    if (!tail) nextTask = { ...task, messages: put.messages, updatedAt: delta.at };
+    else {
+      // Only the end of a long conversation is here: it stays that, and what the whole of it is, is kept true.
+      const last = put.messages.at(-1)!;
+      nextTask = {
+        ...task,
+        messages: put.messages.slice(-SNAPSHOT_TAIL_MESSAGES).map((m) => (m.text.length > SNAPSHOT_TAIL_CHARS ? { ...m, text: m.text.slice(-SNAPSHOT_TAIL_CHARS) } : m)),
+        messagesTail: {
+          ...tail,
+          count: tail.count + (put.added ? 1 : 0),
+          lastId: last.id,
+          lastChars: delta.length ?? (put.added ? delta.delta.length : tail.lastChars + delta.delta.length),
+        },
+        updatedAt: delta.at,
       };
-    } else {
-      messages.push({
-        id: `delta-${delta.taskId}-${delta.at}-${messages.length}`,
-        role: "assistant",
-        text: delta.delta.slice(-128_000),
-        at: delta.at,
-      });
     }
-    nextTask = { ...task, messages, updatedAt: delta.at };
   } else if (delta.type === "tool.result" && delta.tool) {
     const toolLog = [...(task.toolLog ?? []), delta.tool].slice(-60);
     nextTask = { ...task, toolLog, updatedAt: delta.at };
@@ -174,6 +187,8 @@ function subscribe(listener: () => void): () => void {
   const api = window.multissh as Partial<MultiSSHApiWithHubDelta> | undefined;
   if (!unsubscribeDelta && api?.onAiHubDelta) {
     unsubscribeDelta = api.onAiHubDelta((delta) => {
+      // A piece that does not follow what is here: pieces were missed, and everything is fetched again.
+      if (deltaLeavesGap(snapshot, delta)) return void refresh();
       const patched = applyAiHubDelta(snapshot, delta);
       if (patched && patched !== snapshot) {
         snapshot = patched;

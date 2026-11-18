@@ -53,6 +53,24 @@ export interface AgentMessage {
   images?: Array<{ label: string; dataUrl: string; mimeType?: string }>;
   at: number;
 }
+/**
+ * On a conversation in a snapshot whose `messages` are only its last few (see taskForSnapshot): what
+ * the whole of it is, so that a list can count and a window that shows the conversation can tell
+ * whether the copy it fetched with `task-read` is still the newest.
+ */
+/** Of a long conversation a snapshot carries this many of its last messages, each cut to this much of its end. */
+export const SNAPSHOT_TAIL_MESSAGES = 2;
+export const SNAPSHOT_TAIL_CHARS = 800;
+
+export interface AgentMessagesTail {
+  /** How many messages the conversation has. */
+  count: number;
+  /** How many of them a person wrote. */
+  users: number;
+  lastId?: string;
+  /** The length of the last message's whole text. */
+  lastChars: number;
+}
 /** One item of an agent's own task list for a job. */
 export interface AgentTodo {
   id: string;
@@ -301,6 +319,12 @@ export interface AgentChange {
   idempotencyKey?: string;
   /** Structured assertion for verifying post-change command output. */
   structuredCheck?: AgentChangeStructuredCheck;
+  /**
+   * In a snapshot only: the long parts of this change (its output beyond the first lines, a file's
+   * contents and diff, a dry run's output, the snapshot taken before it) were left out. `task-read`
+   * has the change whole. A change that waits for an answer is always sent whole. Never stored.
+   */
+  partial?: boolean;
   at: number;
 }
 export interface AgentTask {
@@ -334,6 +358,8 @@ export interface AgentTask {
    * same target when the conversation goes on.
    */
   ownTerminal?: { via: "schedule" | "server"; profileId: string; shell: ShellKind; label: string };
+  /** In a snapshot only: `messages` holds just the last few of a long conversation. Never stored. */
+  messagesTail?: AgentMessagesTail;
   /** When learning last reflected on this run: it is reflected on once, not again every night. */
   reflectedAt?: number;
   /** A handover asked for while a run was going: made when that run ends, so its spending stays with the agent that spent it. */
@@ -1713,6 +1739,8 @@ export interface HubReply {
   notes?: string[];
   /** Whether the model answered when it was asked (`ai-probe`): what to tell the person, and the models it offers. */
   probe?: { ok: boolean; detail: string; models?: string[] };
+  /** What `task-read` asked for: the conversation's messages and changes, whole. */
+  task?: { id: string; messages: AgentMessage[]; changes: AgentChange[] };
   /** What `runner-test` found for an external agent: whether its program is there and answers as an agent. */
   runnerProbe?: { id: string; ok: boolean; detail: string };
 }
@@ -1911,6 +1939,8 @@ export type HubRequest =
       retry?: boolean;
     }
   | { action: "stop"; taskId: string }
+  /** A conversation whole: a snapshot carries only the last few messages of a long one, and a change without its long parts. Answers `reply.task`. */
+  | { action: "task-read"; taskId: string }
   | { action: "takeover"; sessionId: string }
   | { action: "arm"; sessionId: string; shell: ShellKind }
   | { action: "approve"; taskId: string; changeId: string; approved: boolean; note?: string }

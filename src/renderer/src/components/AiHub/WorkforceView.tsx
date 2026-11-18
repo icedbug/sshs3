@@ -16,6 +16,7 @@ import { ScenariosCard } from "./ScenariosCard";
 import { HypothesisTree } from "./HypothesisTree";
 import { type Act, formatTokenUsage, modes, TABULAR_NUMS_STYLE } from "./panelShared";
 import { RichMarkdownContent } from "./RichMarkdownContent";
+import { useFullTask } from "../../lib/aiHubTasks";
 import { isWebBrowserMode } from "../../lib/webClientBridge";
 import {
   COLUMNS,
@@ -1275,9 +1276,11 @@ function RunInspectionDrawer({
   const taskUsage = activeTask?.runUsage ?? activeTask?.usage;
   const toolSteps = activeTask?.toolLog ?? [];
   const scratchpadTodos = activeTask?.todos ?? [];
+  // What the agent said last, from the whole conversation: a snapshot carries only the last few messages of a long one.
+  const activeWhole = useFullTask(activeTask);
   const liveMessages = useMemo(
-    () => (activeTask?.messages ?? []).filter((m) => m.role === "assistant").slice(-3),
-    [activeTask],
+    () => (activeWhole?.messages ?? []).filter((m) => m.role === "assistant").slice(-3),
+    [activeWhole],
   );
   const cmdRefs = useMemo(() => {
     const refs = new Set<string>();
