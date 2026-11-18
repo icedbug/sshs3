@@ -501,3 +501,19 @@ describe("AgentTestsView multi-turn, 3-axis rubric, pass@k, tag filter & promote
     });
   });
 });
+
+describe("AgentsAndMcpView shows what was saved for an agent", () => {
+  it("says the commands level in the form's words and how far the agent is held, and that an outside agent is not checked", () => {
+    const hub = baseHub({
+      agents: [
+        { id: "a1", name: "Disk watcher", role: "Disks", mission: "Watch the disks.", defaultMode: "advice", allowedTools: ["terminal_command", "file_read"], enabled: true },
+        { id: "a2", name: "Fixer", role: "Fixes", mission: "Fix things.", defaultMode: "assisted", allowedTools: ["all"], enabled: true },
+      ] as never,
+      externalRunners: [{ id: "r1", name: "Claude Code", command: "npx", args: ["-y", "x"], cwd: "/code" }] as never,
+    });
+    render(<AgentsAndMcpView hub={hub} act={vi.fn().mockResolvedValue(hub)} selectedAgentId="" onSelectAgentForChat={vi.fn()} onStartedMission={vi.fn()} />);
+    expect(screen.getByTestId("agent-may-a1")).toHaveTextContent("Commands: Never runs commands, advises only. Held to 2 of the things an agent may do.");
+    expect(screen.getByTestId("agent-may-a2")).toHaveTextContent("Commands: Asks before each command. May do everything that level allows.");
+    expect(screen.getByTestId("runner-r1")).toHaveTextContent("Not checked here: the command is started when an agent that runs on it is given work.");
+  });
+});

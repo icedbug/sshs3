@@ -223,6 +223,7 @@ export function Memory({
   const [saving, setSaving] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [saveError, setSaveError] = useState("");
+  const [hiddenNote, setHiddenNote] = useState("");
   const [limit, setLimit] = useState(30);
   // Forget has no undo on the backend, so the forgotten entry is kept here to save it again.
   const [forgotten, setForgotten] = useState<MemoryEntry | undefined>();
@@ -260,6 +261,14 @@ export function Memory({
 
   const missingEntry = Boolean(draft?.id && !hub.memories.some((m) => m.id === draft.id));
 
+  // A password or key in the text is masked before it is kept: said, so nobody wonders what was stored.
+  const noteHidden = (next: HubSnapshot | undefined): void => {
+    if (!draft || /\[redacted\]/.test(`${draft.title} ${draft.text}`)) return setHiddenNote("");
+    const title = draft.title.trim();
+    const kept = next?.memories.find((m) => (draft.id ? m.id === draft.id : m.title === title));
+    setHiddenNote(kept && /\[redacted\]/.test(`${kept.title} ${kept.text}`) ? `A password, key or token in "${title}" was hidden before it was saved. Only "[redacted]" is kept.` : "");
+  };
+
   const saveDraft = async (asNew = false): Promise<void> => {
     if (!draft || saving) return;
     setSaveError("");
@@ -271,12 +280,14 @@ export function Memory({
     };
     try {
       if (request) {
-        await request({ action: "memory-save", entry });
+        noteHidden(await request({ action: "memory-save", entry }));
         setDraft(undefined);
       } else {
         const next = await act({ action: "memory-save", entry });
-        if (next) setDraft(undefined);
-        else setSaveError("Could not save this entry.");
+        if (next) {
+          noteHidden(next);
+          setDraft(undefined);
+        } else setSaveError("Could not save this entry.");
       }
     } catch (e) {
       setSaveError(e instanceof Error ? e.message : String(e));
@@ -374,9 +385,20 @@ export function Memory({
           What the assistant knows about your systems before you say anything: facts about how things are set up, and
           skills — procedures that worked. Team entries are shared with everyone in the workspace.
         </p>
+        <p className="ai-hint" data-testid="memory-legend">
+          <strong>pinned</strong>: always read first. <strong>global</strong>: for the team, on every server.{" "}
+          <strong>Useful</strong> and <strong>Not useful</strong> rank an entry higher or lower when the assistant
+          chooses what to read. <strong>Tidy up</strong> looks for entries that say the same thing and for finished
+          runs not written down yet: what it finds is listed above the entries for you to accept or reject.
+        </p>
       </header>
 
       <MemoryProposals hub={hub} act={act} />
+      {hiddenNote && (
+        <p className="ai-hint" role="status" data-testid="memory-hidden-note">
+          {hiddenNote}
+        </p>
+      )}
 
       <div className="ai-section-head">
         <h3>

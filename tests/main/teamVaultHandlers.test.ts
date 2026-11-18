@@ -209,6 +209,14 @@ describe('Team Vault IPC handlers', () => {
       expect(teamVaultService.enrollOwnPivRecipient).toHaveBeenCalledWith(undefined);
     });
 
+    it('takes a missing vaultId that arrived as null: the web transport cannot send undefined', async () => {
+      teamVaultService.enrollOwnPivRecipient.mockResolvedValue({ recipient: VALID_RECIPIENT, identityFilePath: '/tmp/x' });
+      await expect(call(IPC_CHANNELS.TEAM_VAULT_ENROLL_RECIPIENT, null)).resolves.toMatchObject({ recipient: VALID_RECIPIENT });
+      expect(teamVaultService.enrollOwnPivRecipient).toHaveBeenCalledWith(undefined);
+      // Anything else that is not a vault id is still refused.
+      await expect(call(IPC_CHANNELS.TEAM_VAULT_ENROLL_RECIPIENT, '../etc')).rejects.toThrow('A valid vaultId is required');
+    });
+
     it('remembers the generated identity file path for unlock-form prefill when a vaultId is given and no local vault exists yet', async () => {
       teamVaultService.getStatus.mockResolvedValue({ exists: false, unlocked: false, filePath: '/x' });
       teamVaultService.enrollOwnPivRecipient.mockResolvedValue({

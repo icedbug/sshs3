@@ -18,6 +18,7 @@ import type { StorageConnectConfig } from '@shared/types/ipc';
 import { TeamVaultDetailPanel } from './TeamVaultDetailPanel';
 import { SyncTargetForm, emptySyncTargetDraft, buildSyncTarget, type SyncTargetDraft } from './SyncTargetForm';
 import { describeIpcError } from '../../lib/format';
+import { isWebBrowserMode } from '../../lib/webClientBridge';
 import { buildTeamVaultJoinInfo } from '../../lib/teamVaultJoinInfo';
 import { useConfirm } from '../ConfirmDialog';
 import { useEscapeToClose } from '../../lib/useModalDismiss';
@@ -156,7 +157,13 @@ export const TeamVaultListPanel: React.FC = () => {
         setSelfRecipientId((prev) => prev || result.suggestedLabel || '');
       }
     } catch (err) {
-      setError(describeIpcError(err, 'Failed to generate a recipient from this PIV card'));
+      // A missing program says nothing to the person asking: say what is needed and where.
+      const raw = describeIpcError(err, 'Failed to generate a recipient from this PIV card');
+      setError(
+        /execvp|ENOENT|No such file|not found/i.test(raw)
+          ? `No hardware key tool was found. Team Vault needs a PIV hardware key (such as a YubiKey) and the program age-plugin-yubikey${isWebBrowserMode() ? ' on the computer where sshS3 runs. In the web app that is the server, not your own computer.' : ' on this computer.'}`
+          : raw
+      );
     } finally {
       setEnrolling(false);
     }

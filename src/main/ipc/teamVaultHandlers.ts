@@ -198,13 +198,14 @@ export function registerTeamVaultHandlers(bridge: TeamVaultHost): void {
     return bridge.buildAllTeamVaultStatuses();
   });
 
-  bridge.registerHandler(IPC_CHANNELS.TEAM_VAULT_ENROLL_RECIPIENT, async (_event, vaultId?: string) => {
+  bridge.registerHandler(IPC_CHANNELS.TEAM_VAULT_ENROLL_RECIPIENT, async (_event, vaultId?: string | null) => {
     // Deliberately optional/unvalidated-as-path-segment here: enrolling a recipient for a vault
     // this machine is about to CREATE or JOIN has no real vaultId to pass yet (see
     // `TeamVaultService.enrollOwnPivRecipient`'s doc comment) — `undefined` is the normal case,
     // not a missing-argument bug. When a caller does pass one (enrolling a second identity for a
     // team already partially set up), it's still checked like any other vaultId.
-    const knownVaultId = vaultId === undefined ? undefined : requireVaultId(vaultId);
+    // Over the web transport a missing argument arrives as null, not undefined: both mean "no vault yet".
+    const knownVaultId = vaultId === undefined || vaultId === null ? undefined : requireVaultId(vaultId);
     const result = await bridge.teamVaultService.enrollOwnPivRecipient(knownVaultId);
     // Only remember this identity when there's no local vault yet for this vaultId — this is the
     // first-time setup flow (about to create or join one), the one case `createVault`'s own

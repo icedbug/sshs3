@@ -140,6 +140,7 @@ export const SshCaSettingsPanel: React.FC<{ form: SettingsForm }> = ({ form }) =
       <p className="text-xs text-txt-muted leading-relaxed">
         Configure automated SSH Certificate Authorities (such as Smallstep Step-CA or HashiCorp Vault).
         Users authenticate through an OpenID Connect (OIDC) identity provider, generating ephemeral OpenSSH user certificates on demand.
+        You need two things of your own for this: a CA server (Step-CA or Vault) that your SSH servers trust, and an OIDC identity provider your team signs in to. sshS3 does not provide either.
       </p>
 
       {/* Editing Modal/Form */}

@@ -147,6 +147,14 @@ function mcpOAuthStatus(oauth?: McpOAuthConfig): { label: string; badgeClass: st
   return { label: "OAuth 2.1 disconnected", badgeClass: "ai-badge-danger" };
 }
 
+/** What each commands level means, in one wording for the form and the card. */
+const COMMAND_LEVELS: Record<AgentMode, string> = {
+  advice: "Never runs commands, advises only",
+  plan: "Proposes a plan for approval first",
+  assisted: "Asks before each command",
+  autonomous: "Runs commands on its own",
+};
+
 export function AgentsAndMcpView({
   hub,
   act,
@@ -348,10 +356,11 @@ export function AgentsAndMcpView({
                 value={draft.defaultMode}
                 onChange={(e) => setDraft({ ...draft, defaultMode: e.target.value as AgentMode })}
               >
-                <option value="advice">Never runs commands — advises only</option>
-                <option value="plan">Proposes a plan for approval first</option>
-                <option value="assisted">Asks before each command</option>
-                <option value="autonomous">Runs commands on its own</option>
+                {(Object.keys(COMMAND_LEVELS) as AgentMode[]).map((level) => (
+                  <option key={level} value={level}>
+                    {COMMAND_LEVELS[level]}
+                  </option>
+                ))}
               </select>
             </label>
           </div>
@@ -488,10 +497,19 @@ export function AgentsAndMcpView({
                   </span>
                 )}
                 {selectedAgentId === ag.id && <span className="ai-pill">In chat</span>}
-                <span className="ai-badge ai-badge-mode">{modes[ag.defaultMode] ?? ag.defaultMode}</span>
+                <span className="ai-badge ai-badge-mode" title={COMMAND_LEVELS[ag.defaultMode]}>
+                  {modes[ag.defaultMode] ?? ag.defaultMode}
+                </span>
                 {ag.targetCluster && <span className="ai-badge ai-badge-cluster">{ag.targetCluster}</span>}
               </div>
             </div>
+            {/* What was saved, in the form's own words: the badge alone left people unsure it had stuck. */}
+            <small className="ai-hint" data-testid={`agent-may-${ag.id}`}>
+              Commands: {COMMAND_LEVELS[ag.defaultMode] ?? ag.defaultMode}.{" "}
+              {(ag.allowedTools ?? []).filter((t) => t !== "all").length
+                ? `Held to ${(ag.allowedTools ?? []).filter((t) => t !== "all").length} of the things an agent may do.`
+                : "May do everything that level allows."}
+            </small>
             <p>{ag.mission}</p>
             {(boundDocs.length > 0 || boundServers.length > 0) && (
               <div className="ai-tags">
@@ -992,6 +1010,7 @@ export function AgentsAndMcpView({
                 {r.command} {r.args.join(" ")}
               </small>
               <small>{r.cwd ? `Works in ${r.cwd}` : "No folder set: it cannot run yet"}</small>
+              <small>Not checked here: the command is started when an agent that runs on it is given work.</small>
             </div>
             <span className="ai-badge">{agents.filter((a) => a.runnerId === r.id).length} agent(s)</span>
           </div>

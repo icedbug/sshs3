@@ -97,3 +97,43 @@ describe("MemoryView inline save error on stale edit", () => {
     await waitFor(() => expect(screen.queryByTestId("memory-add-form")).not.toBeInTheDocument());
   });
 });
+
+describe("MemoryView says what its marks mean and when it hid a secret", () => {
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  it("explains pinned, global, the votes and Tidy up in words on the page", () => {
+    render(<Memory hub={makeHub([entry])} act={vi.fn()} suggestion="" />);
+    const legend = screen.getByTestId("memory-legend");
+    expect(legend).toHaveTextContent("pinned: always read first.");
+    expect(legend).toHaveTextContent("global: for the team, on every server.");
+    expect(legend).toHaveTextContent("Useful and Not useful rank an entry higher or lower");
+    expect(legend).toHaveTextContent("Tidy up looks for entries that say the same thing");
+    expect(legend).toHaveTextContent("for you to accept or reject");
+  });
+
+  it("says so when a password in a new entry was hidden before it was saved", async () => {
+    const saved = { ...entry, id: "mem-2", title: "Database login", text: "db password=[redacted]" };
+    const request = vi.fn().mockResolvedValue(makeHub([entry, saved]));
+    render(<Memory hub={makeHub([entry])} act={vi.fn()} request={request} suggestion="" />);
+    fireEvent.click(screen.getByRole("button", { name: /Add|New|Write/ }));
+    fireEvent.change(screen.getByLabelText("Title"), { target: { value: "Database login" } });
+    fireEvent.change(screen.getByLabelText("What should be remembered"), { target: { value: "db password=Hunter2Example" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByTestId("memory-hidden-note")).toHaveTextContent('A password, key or token in "Database login" was hidden before it was saved. Only "[redacted]" is kept.');
+  });
+
+  it("says nothing of the kind when nothing was hidden", async () => {
+    const saved = { ...entry, id: "mem-3", title: "Reload nginx", text: "nginx -t first." };
+    const request = vi.fn().mockResolvedValue(makeHub([entry, saved]));
+    render(<Memory hub={makeHub([entry])} act={vi.fn()} request={request} suggestion="" />);
+    fireEvent.click(screen.getByRole("button", { name: /Add|New|Write/ }));
+    fireEvent.change(screen.getByLabelText("Title"), { target: { value: "Reload nginx" } });
+    fireEvent.change(screen.getByLabelText("What should be remembered"), { target: { value: "nginx -t first." } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(request).toHaveBeenCalled());
+    expect(screen.queryByTestId("memory-hidden-note")).not.toBeInTheDocument();
+  });
+});
