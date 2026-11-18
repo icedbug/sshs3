@@ -9,6 +9,8 @@ vi.mock('electron', async () => {
 });
 
 import { setHeadlessUserDataPath } from '../../src/main/web/electronShim';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { Sshs3WebServer } from '../../src/main/web/WebServer';
 import type { HubRequest, HubSnapshot } from '../../src/shared/types/aiHub';
 
@@ -91,7 +93,7 @@ describe('two accounts on one web server, without a bucket', () => {
     const admin = await post('/api/auth/setup', { username: 'maria', displayName: 'Maria Ek', password: 'maria-password-123' }); // pragma: allowlist secret
     const invite = (await post('/api/admin/invites', { role: 'member', maxUses: 1 }, admin.cookie)).body.invite.token;
     const member = await post('/api/auth/register-invite', { inviteToken: invite, username: 'omar', displayName: 'Omar Lind', password: 'omar-password-123' }); // pragma: allowlist secret
-    return { maria: await browser(admin.cookie), omar: await browser(member.cookie) };
+    return { maria: await browser(admin.cookie), omar: await browser(member.cookie), cookies: { maria: admin.cookie, omar: member.cookie } };
   }
 
   /** What the other account sees once it has been told: asked until it is there, for a moment at most. */
@@ -163,6 +165,45 @@ describe('two accounts on one web server, without a bucket', () => {
     const hers = await maria.hub({ action: 'snapshot' });
     expect(hers.config.model).toBe('marias-model');
     expect(his.tasks.map((t) => t.id).filter((id) => hers.tasks.some((t) => t.id === id))).toEqual([]);
+  }, 30_000);
+
+  it('lets a member\'s own AI client read the team\'s board and add to it, with a key the member made', async () => {
+    const { maria, omar, cookies } = await twoAccounts();
+    await maria.hub({ action: 'ticket-save', ticket: { title: 'Renew the certificate on web-prod-01', description: 'It runs out on Friday.' } });
+    await seenBy(omar, (snap) => snap.workTickets?.find((t) => t.title === 'Renew the certificate on web-prod-01'));
+
+    // A member makes a key for their own client. It is theirs: no administrator is needed for it.
+    const made = await post('/api/mcp-keys', { name: 'Omar\'s Claude Code', scopes: ['read', 'tickets'] }, cookies.omar);
+    const token = made.body.token as string;
+    expect(token).toBeTruthy();
+
+    // The official MCP client, as an outside AI client uses it: nothing of the browser's session.
+    const client = new Client({ name: 'an-outside-client', version: '1.0.0' });
+    await client.connect(new StreamableHTTPClientTransport(new URL(`${baseUrl}/api/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
+    try {
+      expect(client.getServerVersion()).toMatchObject({ name: 'sshs3' });
+      const tools = (await client.listTools()).tools.map((t) => t.name);
+      expect(tools).toEqual(expect.arrayContaining(['tickets_list', 'ticket_create']));
+      // A key that was not given the right to run commands is not shown the tool that does.
+      expect(tools).not.toContain('run_command');
+
+      // It reads what the administrator put on the board.
+      const listed = await client.callTool({ name: 'tickets_list', arguments: {} });
+      expect(listed.isError).toBeFalsy();
+      expect(JSON.stringify(listed.structuredContent)).toContain('Renew the certificate on web-prod-01');
+
+      // What it writes is on the team's board: the administrator has it, without doing anything.
+      const created = await client.callTool({ name: 'ticket_create', arguments: { title: 'Rotate the API keys before Friday', description: 'Found while reading the certificate ticket.', target: 'web-prod-01' } });
+      expect(created.isError).toBeFalsy();
+      const hers = await seenBy(maria, (snap) => snap.workTickets?.find((t) => t.title === 'Rotate the API keys before Friday'));
+      expect(hers.status).toBe('backlog');
+    } finally {
+      await client.close();
+    }
+
+    // Without the key there is no way in.
+    const stranger = new Client({ name: 'a-stranger', version: '1.0.0' });
+    await expect(stranger.connect(new StreamableHTTPClientTransport(new URL(`${baseUrl}/api/mcp`)))).rejects.toThrow();
   }, 30_000);
 
   it('keeps the board in a folder of the server\'s own, one small file an item', async () => {

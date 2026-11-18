@@ -1,4 +1,5 @@
 import http from "node:http";
+import https from "node:https";
 import type { AddressInfo } from "node:net";
 
 /**
@@ -37,6 +38,10 @@ export interface FakeOpenAiOptions {
   usage?: { prompt_tokens: number; completion_tokens: number };
   /** The port to listen on. Any free one when left out. */
   port?: number;
+  /** The address to listen on. This machine only (127.0.0.1) when left out. */
+  host?: string;
+  /** A key and certificate (PEM) to answer over https with. Plain http when left out. */
+  tls?: { key: string; cert: string };
 }
 
 const refusal = (res: http.ServerResponse, message: string, param: string, code: string): void => {
@@ -46,7 +51,7 @@ const refusal = (res: http.ServerResponse, message: string, param: string, code:
 
 export async function fakeOpenAi(steps: FakeModelScript, options: FakeOpenAiOptions = {}): Promise<FakeOpenAi> {
   const requests: Array<Record<string, unknown>> = [];
-  const server = http.createServer((req, res) => {
+  const answer = (req: http.IncomingMessage, res: http.ServerResponse): void => {
     if (req.method === "GET" && req.url?.endsWith("/models")) {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ object: "list", data: [{ id: "fake-1", object: "model" }] }));
@@ -91,11 +96,13 @@ export async function fakeOpenAi(steps: FakeModelScript, options: FakeOpenAiOpti
       send("[DONE]");
       res.end();
     });
-  });
-  await new Promise<void>((resolve) => server.listen(options.port ?? 0, "127.0.0.1", resolve));
+  };
+  const server = options.tls ? https.createServer(options.tls, answer) : http.createServer(answer);
+  const host = options.host ?? "127.0.0.1";
+  await new Promise<void>((resolve) => server.listen(options.port ?? 0, host, resolve));
   const { port } = server.address() as AddressInfo;
   return {
-    url: `http://127.0.0.1:${port}/v1`,
+    url: `${options.tls ? "https" : "http"}://${host}:${port}/v1`,
     requests,
     close: () =>
       new Promise<void>((resolve) => {

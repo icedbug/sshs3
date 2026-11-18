@@ -102,6 +102,31 @@ describe("Milestone 2 UI honesty and clarity fixes", () => {
     );
   });
 
+  it("says in the settings what everyone on the server shares and what is one's own, without sending anybody to a bucket", () => {
+    mockWebMode = true;
+    const server = render(<Settings hub={baseHub()} act={vi.fn(async () => baseHub())} />);
+    const summary = screen.getByTestId("sharing-summary");
+    expect(within(summary).getByTestId("sharing-shared")).toHaveTextContent(
+      "Everyone with an account on this server shares the team's servers and clusters (without anybody's keys), the Workforce board (goals, tickets, agents), the Knowledge Base",
+    );
+    expect(within(summary).getByTestId("sharing-shared")).toHaveTextContent("see who is signed in and which servers each person is connected to");
+    expect(within(summary).getByTestId("sharing-personal")).toHaveTextContent("Yours alone: your model and its key, your Jira and Confluence sign-in, your safety rules");
+    expect(within(summary).getByTestId("sharing-more")).toHaveTextContent("A team bucket is needed only to share with desktop apps or with another server.");
+    expect(summary).not.toHaveTextContent(/to share the Workforce board/);
+    server.unmount();
+
+    // On one computer with no bucket nothing is shared, and that is what it says.
+    mockWebMode = false;
+    const desktop = render(<Settings hub={baseHub()} act={vi.fn(async () => baseHub())} />);
+    expect(screen.getByTestId("sharing-shared")).toHaveTextContent("Nothing is shared. Memory, runbooks, the board and activity stay on this computer.");
+    expect(screen.queryByTestId("sharing-personal")).toBeNull();
+    desktop.unmount();
+
+    // The demo lab's things are made up and each person's own.
+    render(<Settings hub={baseHub({ demoMode: true })} act={vi.fn(async () => baseHub())} />);
+    expect(screen.getByTestId("sharing-shared")).toHaveTextContent("This is the demo lab.");
+  });
+
   it("shows inline status for Restore built-ins and exposes MCP endpoint and instructions in web mode Settings", async () => {
     mockWebMode = true;
     const act = vi.fn(async () =>
@@ -187,7 +212,8 @@ describe("Milestone 2 UI honesty and clarity fixes", () => {
         />,
       );
 
-      expect(screen.getByText(/Board is personal to your account/)).toBeVisible();
+      // This snapshot says the board is not shared: the line says that, and no longer sends people to a bucket.
+      expect(screen.getByTestId("board-shared-with")).toHaveTextContent("The board is not shared: it is kept for your account only.");
       const kbBox = screen.getByTestId("ticket-kb-pages");
       expect(kbBox).not.toHaveTextContent("sshs3_kb_search");
       expect(within(kbBox).getByTestId("ticket-kb-page-p-gone")).toHaveTextContent("Archived guide (not in local KB)");

@@ -1,3 +1,4 @@
+import { sharingWithoutBucket } from '@shared/sharingText';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
@@ -2281,14 +2282,14 @@ export const LandingView: React.FC<LandingViewProps> = ({
                       data-testid="s3-workspace-status-badge"
                       className="inline-flex items-center gap-1 rounded-full border border-emerald-500/35 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-300"
                     >
-                      🟢 Shared on this web server: signed-in users share servers, clusters, team memory and activity. Connect an S3 bucket to also share the Workforce board, agents and Knowledge Base.
+                      🟢 {sharingWithoutBucket(true)}
                     </span>
                   ) : (
                     <span
                       data-testid="s3-workspace-status-badge"
                       className="inline-flex items-center gap-1 rounded-full border border-border-subtle bg-app-card px-2 py-0.5 text-[10px] text-txt-muted"
                     >
-                      Not connected. Share servers, clusters, team memory, the Workforce board, agents and Knowledge Base through an S3 bucket (only S3 keys are needed).
+                      {sharingWithoutBucket(false)}
                     </span>
                   )}
 

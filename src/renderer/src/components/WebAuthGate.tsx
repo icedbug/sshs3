@@ -10,6 +10,10 @@ import {
   setStoredWebSessionToken,
   onWebConnectionStateChange,
 } from '../lib/webClientBridge';
+import { sharingText } from '@shared/sharingText';
+
+/** What an invited teammate shares on this server and what stays theirs: the same words as in the AI settings. */
+const INVITE_SHARING = sharingText({ server: true, bucket: false }, 'each');
 
 const WEB_AUTH_COPY = {
   workspaceBadge: 'sshs3 Multi-User Web Workspace',
@@ -21,7 +25,7 @@ const WEB_AUTH_COPY = {
   setupDesc:
     'Welcome. Create the administrator account for this server. You get a personal SSH key and can invite your team with a link.',
   inviteDesc:
-    "Create your personal account. You get your own SSH key on the server and access to the team's shared servers, clusters and team memory.",
+    "Create your own account. You get your own SSH key on the server. With everyone on this server you share the team's servers, Workforce board, agents, Knowledge Base and team memory. Your model key, sign-ins and conversations stay yours.",
   loginDesc: "Sign in to open your own terminal tabs and work in the team's shared workspace.",
   stepAdmin: '1. Admin account',
   stepAdminDesc: 'Create your account below',
@@ -1268,9 +1272,11 @@ export const WebAuthGate: React.FC<WebAuthGateProps> = ({ children, onSsoLogin }
                   <div className="rounded-xl bg-slate-900/80 border border-slate-800 p-4 space-y-3">
                     <h3 className="text-sm font-semibold text-white">Create an invite link</h3>
                     <p className="text-slate-400">
-                      Send the link to a teammate: they choose their own password and get access to the team&apos;s shared
-                      servers, clusters and team memory on this server. Connect an S3 team bucket on the start page to
-                      also share the Workforce board, agents and Knowledge Base.
+                      Send the link to a teammate. They choose their own user name and password and get an account on
+                      this server.
+                    </p>
+                    <p className="text-slate-400" data-testid="invite-sharing">
+                      {INVITE_SHARING.shared} {INVITE_SHARING.personal} {INVITE_SHARING.more}
                     </p>
                     <div>
                       <label className="block text-slate-400 mb-1" htmlFor="invite-base-url-input">

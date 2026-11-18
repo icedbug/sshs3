@@ -1758,6 +1758,13 @@
   border: 1px solid var(--border-subtle);
 }
 
+/* A step's check and its way back each have a line of their own under the command. */
+.ai-plan-steps li small {
+  display: block;
+  margin-top: 4px;
+  color: var(--fg-muted);
+}
+
 .ai-plan-steps li[data-risk="high"] {
   border-color: var(--warn-border);
   background: var(--warn-bg);
@@ -1808,9 +1815,14 @@
   background: var(--ok-bg);
 }
 
+/* The choice, what approving covers, who has to approve, and the buttons: one under the other. */
 .ai-plan-decision {
   font-size: 11.5px;
   color: var(--fg-muted);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
 }
 
 .ai-plan-actions {
@@ -2856,6 +2868,16 @@
 .ai-sync-note {
   font-size: 11.5px;
   color: var(--fg-muted);
+}
+
+/* What is shared and what is one's own: one sentence to a line. */
+.ai-sharing {
+  display: grid;
+  gap: 6px;
+}
+
+.ai-sharing small {
+  display: block;
 }
 
 .ai-goals {

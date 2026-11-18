@@ -500,7 +500,13 @@ because a change would wait for an answer that cannot come.
   websocket, with a terminal that answers: a member's production change runs
   once the administrator has approved; a refusal runs nothing; another member
   is not asked and cannot answer; a plan takes two in either order and its
-  listed command then runs unasked.
+  listed command then runs unasked. Also checked in two browsers against a
+  server in demo mode with a stand-in model: the member approves in his
+  inbox, the administrator finds the change in hers as "Needs a second
+  person" and approves, and only then does the command run; the same with a
+  plan, whose listed command then runs without a new question. Not checked
+  with a real model, and not with single sign-on groups from a real identity
+  provider.
 
 ## The audit log and terminal recordings (`AuditLog`, `SessionRecorder`)
 
@@ -1490,6 +1496,16 @@ because there is no server to run one on.
   own board is written to the shared one: everybody on the server sees it
   from then on (`workBoardSync.via` is `server`; the Workforce view says
   "Shared with everyone who has an account on this server").
+- **What is shared is said in one place** (`src/shared/sharingText.ts`). The
+  start page, the invite panel, the join page, the AI settings ("You and the
+  team") and the board's own line take their words from it, so they cannot
+  say different things. On a server: everybody with an account shares the
+  team's servers and clusters, the board, the agents, the knowledge base, team
+  memory and runbooks, the activity log and the team's chat bot, and sees who
+  is signed in. Each person's own: the model and its key, the Jira and
+  Confluence sign-in, the safety rules, their memories and conversations,
+  their inbox and notification channels, their own servers, keys and
+  passwords. The demo lab's things are made up and a copy for each person.
 - **External agents** (`AcpRuntime`). An agent with `runnerId` runs on an
   external coding agent over the Agent Client Protocol: a program started on
   this computer that speaks JSON-RPC on stdio. sshS3 sends the prompt, shows
@@ -1533,9 +1549,14 @@ Checked with stubbed model responses (`aiHubWorkBoard.test.ts`,
 OpenAI-compatible endpoint. Two accounts on one server, each over its own
 websocket, are checked in `twoUsersOneServer.test.ts` (one makes a ticket,
 the other has it; both take it at once and one gets it; personal things stay
-personal) and the store's promises in `fileQueueStore.test.ts`. Not checked:
-a real model, the real Claude Code and Codex adapters, two computers sharing
-a real bucket, and a long unattended heartbeat.
+personal; a member's own key lets the official MCP client read the board and
+add a ticket to it) and the store's promises in `fileQueueStore.test.ts`.
+Also checked in two browsers against a running server: an invite link made in
+the interface opens in a browser that is not signed in and makes an account,
+and a ticket one person adds in the interface is on the other's board in
+under a second without a reload. Not checked: a real model, the real Claude
+Code and Codex adapters, two computers sharing a real bucket, and a long
+unattended heartbeat.
 
 ## The panel (`src/renderer/src/components/AiHub/`)
 

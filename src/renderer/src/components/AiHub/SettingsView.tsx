@@ -27,6 +27,7 @@ import { McpKeysPanel } from "../McpKeysPanel";
 import { NotificationsCard } from "./NotificationsCard";
 import { TeamChatCard } from "./TeamChatCard";
 import { SafetyPolicyCard } from "./SafetyPolicyCard";
+import { sharingText } from "@shared/sharingText";
 
 export const LABS_ENABLED_STORAGE_KEY = "sshs3.aiHub.labsEnabled";
 
@@ -155,6 +156,7 @@ export function Settings({
   const [fastModel, setFastModel] = useState(hub.config.fastModel ?? "");
   const [key, setKey] = useState("");
   const [actorName, setActorName] = useState(hub.config.actorName ?? "");
+  const sharing = sharingText({ server: isWebBrowserMode(), bucket: Boolean(hub.s3Workspace?.configured), demo: hub.demoMode === true });
   const [enabled, setEnabled] = useState(hub.config.enabled);
   const [egressPolicy, setEgressPolicy] = useState<AiEgressPolicy>(hub.config.egressPolicy ?? "standard");
   const [zdrConfirmed, setZdrConfirmed] = useState<boolean>(Boolean(hub.config.zdrConfirmed));
@@ -868,17 +870,19 @@ export function Settings({
             placeholder={hub.signsAs ? `Signs as ${hub.signsAs}` : "Your name"}
           />
         </label>
-        <small>
-          {hub.s3Workspace?.configured
-            ? `Team bucket: s3://${hub.s3Workspace.bucket}/${hub.s3Workspace.prefix || "sshs3-team"}${
-                hub.s3Workspace.lastSyncAt
-                  ? ` · synced ${new Date(hub.s3Workspace.lastSyncAt).toLocaleTimeString()}`
-                  : ""
-              }`
-            : isWebBrowserMode()
-              ? "No S3 bucket is connected. Signed-in users share servers, team memory and activity directly on this web server. Connect an S3 bucket from the start page (Connect S3 team bucket) to share the Workforce board, agents and Knowledge Base."
-              : "No team bucket is connected. Memory, runbooks, the board and activity stay on this computer until one is. Connect it from the start page (Connect S3 team bucket)."}
-        </small>
+        {hub.s3Workspace?.configured && (
+          <small>
+            {`Team bucket: s3://${hub.s3Workspace.bucket}/${hub.s3Workspace.prefix || "sshs3-team"}${
+              hub.s3Workspace.lastSyncAt ? ` · synced ${new Date(hub.s3Workspace.lastSyncAt).toLocaleTimeString()}` : ""
+            }`}
+          </small>
+        )}
+        {/* What is shared and what is this person's own: the same words wherever it is said (sharingText). */}
+        <div className="ai-sharing" data-testid="sharing-summary">
+          <small data-testid="sharing-shared">{sharing.shared}</small>
+          {sharing.personal && <small data-testid="sharing-personal">{sharing.personal}</small>}
+          {sharing.more && <small data-testid="sharing-more">{sharing.more}</small>}
+        </div>
         {/* A path on the computer that runs sshs3: on a shared server that is the administrator's, not the browser's. */}
         {!isWebBrowserMode() && (
           <label>

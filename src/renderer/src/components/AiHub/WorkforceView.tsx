@@ -1,3 +1,4 @@
+import { boardSharedWith } from "@shared/sharingText";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentTask,
@@ -484,12 +485,14 @@ export function WorkforceView({
         </div>
       </div>
 
-      <small className="ai-sync-note">
+      <small className="ai-sync-note" data-testid="board-shared-with">
         {sync?.shared
-          ? `${sync.via === "server" ? "Shared with everyone who has an account on this server" : "Shared with the team"}${sync.lastSyncAt ? ` · read ${ago(sync.lastSyncAt)}` : ""}${sync.error ? ` · last sync failed: ${sync.error}` : ""}`
-          : isWebBrowserMode()
-            ? "Board is personal to your account. Connect an S3 team bucket from the start page to share tickets and goals with the team."
-            : "Board stays on this computer. Connect an S3 team bucket from the start page to share tickets and goals."}
+          ? `${boardSharedWith({ server: sync.via === "server", bucket: sync.via === "bucket" })}${sync.lastSyncAt ? ` · read ${ago(sync.lastSyncAt)}` : ""}${sync.error ? ` · last sync failed: ${sync.error}` : ""}`
+          : hub.demoMode
+            ? `${boardSharedWith({ server: false, bucket: false, demo: true })}.`
+            : isWebBrowserMode()
+              ? "The board is not shared: it is kept for your account only."
+              : `${boardSharedWith({ server: false, bucket: false })}.`}
         {heartbeat ? " · Heartbeat on: this app starts tickets by itself." : ""}
       </small>
 
