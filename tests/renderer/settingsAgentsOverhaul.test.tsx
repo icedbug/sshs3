@@ -521,7 +521,7 @@ describe("AgentsAndMcpView shows what was saved for an agent", () => {
     const hub = baseHub({ externalRunners: [{ id: "r1", name: "Claude Code", command: "npx", args: ["-y", "x"], cwd: "/code" }] as never });
     const act = vi
       .fn()
-      .mockResolvedValueOnce({ ...hub, reply: { runnerProbe: { id: "r1", ok: false, detail: 'The program "npx" was not found on this computer. Install it, or give its full path.' } } })
+      .mockResolvedValueOnce({ ...hub, reply: { runnerProbe: { id: "r1", ok: false, detail: 'The program "npx" was not found on this computer. Install it there, or give its full path.' } } })
       .mockResolvedValueOnce({ ...hub, reply: { runnerProbe: { id: "r1", ok: true, detail: "It started and answered as an agent (claude-code 2.1)." } } });
     render(<AgentsAndMcpView hub={hub} act={act} selectedAgentId="" onSelectAgentForChat={vi.fn()} onStartedMission={vi.fn()} />);
 

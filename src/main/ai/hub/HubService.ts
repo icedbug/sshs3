@@ -4031,7 +4031,13 @@ export class HubService {
         this.assertRunnerAllowed();
         const runner = (this.store.data.externalRunners ?? []).find((x) => x.id === request.id);
         if (!runner) throw new Error("That external agent is not set up here any more.");
-        reply = { runnerProbe: { id: runner.id, ...(await probeRunner(runner, { clientVersion: app?.getVersion?.() })) } };
+        reply = {
+          runnerProbe: {
+            id: runner.id,
+            // In the web app the program is the server's, not one on the person's own computer.
+            ...(await probeRunner(runner, { clientVersion: app?.getVersion?.(), ...(this.hosted() ? { where: "on the server sshS3 runs on" } : {}) })),
+          },
+        };
         break;
       }
       case "goal-save": {

@@ -56,8 +56,12 @@ describe("testing an external agent", () => {
   it("says so when the program is not on this computer, or its folder is not", async () => {
     expect(await probeRunner({ name: "Missing", command: "no-such-agent-program-xyz", args: [] })).toEqual({
       ok: false,
-      detail: 'The program "no-such-agent-program-xyz" was not found on this computer. Install it, or give its full path.',
+      detail: 'The program "no-such-agent-program-xyz" was not found on this computer. Install it there, or give its full path.',
     });
+    // In the web app the program is the server's.
+    expect((await probeRunner({ name: "Missing", command: "no-such-agent-program-xyz", args: [] }, { where: "on the server sshS3 runs on" })).detail).toBe(
+      'The program "no-such-agent-program-xyz" was not found on the server sshS3 runs on. Install it there, or give its full path.',
+    );
     expect(await probeRunner({ name: "Node", command: node, args: [], cwd: "/no/such/folder/anywhere" })).toEqual({
       ok: false,
       detail: 'The working folder "/no/such/folder/anywhere" does not exist on this computer.',

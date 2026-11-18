@@ -178,18 +178,25 @@ export interface RunnerProbe {
  */
 export function probeRunner(
   runner: Pick<ExternalRunner, "name" | "command" | "args" | "cwd">,
-  options: { timeoutMs?: number; clientVersion?: string; env?: NodeJS.ProcessEnv } = {},
+  options: {
+    timeoutMs?: number;
+    clientVersion?: string;
+    env?: NodeJS.ProcessEnv;
+    /** Where the program runs, as the person is told: "on this computer", or the server in the web app. */
+    where?: string;
+  } = {},
 ): Promise<RunnerProbe> {
   const env = options.env ?? process.env;
   const timeoutMs = options.timeoutMs ?? 20_000;
+  const where = options.where ?? "on this computer";
   if (!defaultHasBinary(runner.command, env))
-    return Promise.resolve({ ok: false, detail: `The program "${runner.command}" was not found on this computer. Install it, or give its full path.` });
+    return Promise.resolve({ ok: false, detail: `The program "${runner.command}" was not found ${where}. Install it there, or give its full path.` });
   const cwd = runner.cwd?.trim();
   if (cwd) {
     try {
       if (!statSync(cwd).isDirectory()) throw new Error("not a folder");
     } catch {
-      return Promise.resolve({ ok: false, detail: `The working folder "${cwd}" does not exist on this computer.` });
+      return Promise.resolve({ ok: false, detail: `The working folder "${cwd}" does not exist ${where}.` });
     }
   }
   return new Promise<RunnerProbe>((resolve) => {
@@ -262,7 +269,7 @@ export function probeRunner(
         const who = [message.result?.agentInfo?.name, message.result?.agentInfo?.version].filter(Boolean).join(" ");
         return finish({
           ok: true,
-          detail: `It started and answered as an agent${who ? ` (${boundedContext(who, 80)})` : ""}.${cwd ? "" : " No working folder is set for it on this computer: it needs one before it can be given work."}`,
+          detail: `It started and answered as an agent${who ? ` (${boundedContext(who, 80)})` : ""}.${cwd ? "" : ` No working folder is set for it ${where}: it needs one before it can be given work.`}`,
         });
       }
     });
