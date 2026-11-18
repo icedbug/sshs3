@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import os from "node:os";
 import path from "node:path";
-import { app, Notification, powerMonitor } from "electron";
+import { app, powerMonitor } from "electron";
 import type {
   AgentMode,
   SafetyPolicyConfig,
@@ -46,7 +46,6 @@ import type {
   WorkspacePresenceTerminal,
   WorkspaceRule,
   WorkspaceServerSummary,
-  NotifyEventKind,
   FactProblem,
   ServerFacts,
   ServerFactsView,
@@ -96,22 +95,7 @@ import {
 } from "./KbCompile";
 import { buildDailyReport } from "./DailyReport";
 import { lowerMode } from "./AppGuard";
-import { inboxItems, type InboxFilterOptions, type InboxItem } from "../../../shared/aiHubInbox";
-import {
-  NOTIFY_KINDS,
-  channelWants,
-  deliver,
-  diffInbox,
-  evaluateFlapCooldown,
-  evaluateNoiseBudget,
-  guardUrl,
-  hostOf,
-  renderNotification,
-  type GuardOptions,
-  type GuardedTarget,
-  type NotifyChannel,
-  type NotifyItem,
-} from "./Notifier";
+import { guardUrl, hostOf, type GuardOptions, type GuardedTarget } from "./Notifier";
 import { NotifyStore } from "./NotifyStore";
 import { AtlassianStore } from "./AtlassianStore";
 import { AtlassianBridge } from "./AtlassianBridge";
@@ -275,7 +259,9 @@ import {
   investigatorPrompt,
   renderWorkforceProgress,
 } from "./hubShared";
-
+import { areaOf, type AreaName, type Handled, type RequestsOf } from "./areas/routes";
+import { mixParts } from "./areas/mix";
+import { InboxPart } from "./areas/inbox";
 // Declared in files of their own now; still exported from here, where others import them.
 export type { HubHost } from "./hubHost";
 export { changeForSnapshot, taskForSnapshot, incomingAgentForTesting, checkedSuggestionForTesting, withUnanswered, budgetStopLine, renderWorkforceProgress } from "./hubShared";
@@ -284,6 +270,15 @@ export { changeForSnapshot, taskForSnapshot, incomingAgentForTesting, checkedSug
 /** The hub members the agent tool handlers use (see HubService.appActionHost). */
 export type AppActionHost = ReturnType<HubService["appActionHost"]>;
 
+/**
+ * The hub: one object behind every AI request of one person.
+ *
+ * Its methods are kept in several files, one per area, in ./areas. Each of those is a class that is
+ * never made into an object: its methods are put on this class at the end of this file (mixParts),
+ * and the interface of the same name there tells the compiler that this class has them. What is
+ * declared here is the hub's state, its start and its end, and the handing out of requests.
+ */
+// eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging -- one object, several files: see ./areas/mix
 export class HubService {
   // On Windows the terminals run in a pseudo console that delivers a command's markers ahead of its text.
   readonly terminals = new TerminalRegistry({ lateOutput: process.platform === "win32" });
@@ -329,7 +324,7 @@ export class HubService {
   private lastQueueCheck = 0;
   private lastActivityCheck = 0;
   private recoveredSessions = false;
-  private initialized?: Promise<void>;
+  initialized?: Promise<void>;
   private tickTimer?: NodeJS.Timeout;
   private saveTimer?: NodeJS.Timeout;
   private lastInventory = 0;
@@ -414,7 +409,7 @@ export class HubService {
         : `${task.status === "failed" ? "Failed" : "Stopped"} at ${at}${task.error ? `: ${clip(task.error, 160)}` : ""}`;
     if (task.status !== "completed") this.notify("Scheduled task did not finish", schedule.title);
   }
-  private disposed = false;
+  disposed = false;
   private resume = (): void => {
     const now = Date.now();
     for (const schedule of this.store.data.schedules)
@@ -433,7 +428,7 @@ export class HubService {
   };
 
   constructor(
-    private readonly host: HubHost,
+    readonly host: HubHost,
     private readonly directory = path.join(app.getPath("userData"), "ai-hub"),
   ) {
     this.store = new HubStore(path.join(directory, "hub.json"));
@@ -1440,7 +1435,7 @@ export class HubService {
     if (lifted.length) throw new Error(`${who} takes the tag "${lifted[0]}" off a server the team shares: it is what makes changes there wait for a person.`);
   }
 
-  private storeDataExtra(): {
+  storeDataExtra(): {
     inboxState?: Record<string, { snoozedUntil?: number; acknowledgedAt?: number }>;
     workforcePaused?: boolean;
     runbooks?: RunbookTemplate[];
@@ -2470,15 +2465,33 @@ export class HubService {
     );
   }
 
-  async request(request: HubRequest): Promise<HubSnapshot> {
+  /** Hands a request to the part of the hub it belongs to (./areas/routes). */
+  private handleIn(area: Exclude<AreaName, "hub">, request: HubRequest): Promise<Handled> {
+    switch (area) {
+      case "inbox":
+        return this.handleInbox(request as RequestsOf<"inbox">);
+    }
+  }
+
+  async request(asked: HubRequest): Promise<HubSnapshot> {
     await this.initialize();
     // What this request returns beside the snapshot. Local to the call: requests overlap.
     let reply: HubReply | undefined;
     if (this.disposed) throw new Error("Application is shutting down");
-    if (!request || typeof request.action !== "string")
+    if (!asked || typeof asked.action !== "string")
       throw new Error("Invalid AI request");
-    if (process.env.SSHS3_NATIVE_HERMES === '1' && ['start', 'reply', 'resume', 'schedule-save'].includes(request.action))
+    if (process.env.SSHS3_NATIVE_HERMES === '1' && ['start', 'reply', 'resume', 'schedule-save'].includes(asked.action))
       throw new Error('This installation uses native Hermes. Open the Hermes chat to start or schedule work.');
+    // Each request belongs to one part of the hub, and that part answers it.
+    const area = areaOf(asked.action);
+    if (!area) throw new Error(`Unknown AI request: ${String(asked.action)}`);
+    if (area !== "hub") {
+      const handled = await this.handleIn(area, asked);
+      if (handled.snapshot) return handled.snapshot;
+      reply = handled.reply;
+    } else {
+    // The requests that are answered here still.
+    const request = asked as RequestsOf<"hub">;
     switch (request.action) {
       case "snapshot":
         return this.snapshot();
@@ -4149,38 +4162,6 @@ export class HubService {
         }
         break;
       }
-      case "notify-channel-save": {
-        const input = request.channel;
-        const channels = this.notifyStore.data.channels;
-        const existing = input.id ? channels.find((c) => c.id === input.id) : undefined;
-        if (input.id && !existing) throw new Error("Channel not found");
-        if (!["slack", "teams", "ntfy", "webhook"].includes(input.kind)) throw new Error("Unknown kind of channel");
-        const url = (input.url ?? "").trim() || existing?.url || "";
-        if (!url) throw new Error("The channel needs an address to post to");
-        // Checked now so a wrong address is said at once, and again each time something is sent.
-        const target = await guardUrl(url, this.outboundGuard());
-        if (input.kind === "ntfy" && !target.url.pathname.split("/").filter(Boolean).length)
-          throw new Error("An ntfy address ends with the topic, like https://ntfy.sh/my-topic");
-        const events = (input.events ?? []).filter((e) => NOTIFY_KINDS.includes(e));
-        const saved: NotifyChannel = {
-          id: existing?.id ?? crypto.randomUUID(),
-          kind: input.kind,
-          name: requiredText(input.name).slice(0, 80),
-          url,
-          // undefined keeps what is there; an empty text removes it.
-          secret: input.secret === undefined ? existing?.secret : input.secret.trim() || undefined,
-          enabled: input.enabled !== false,
-          events: events.length ? events : ["approval", "plan", "question", "blocked", "alert"],
-          includeCommand: input.includeCommand !== false,
-          alertMinSeverity: ["info", "warning", "critical"].includes(input.alertMinSeverity ?? "") ? input.alertMinSeverity : undefined,
-          last: existing?.url === url ? existing?.last : undefined,
-        };
-        this.notifyStore.data.channels = [...channels.filter((c) => c.id !== saved.id), saved];
-        // What already waits is not news to a channel that was just added.
-        for (const item of this.inboxNow()) this.notifyStore.data.seen[item.id] ??= Date.now();
-        await this.notifyStore.save();
-        break;
-      }
       case "atlassian-save": {
         await this.atlassian.save(request.connection);
         void this.audit()
@@ -4298,80 +4279,6 @@ export class HubService {
       case "jira-sync-now":
         reply = { jiraSync: await this.atlassian.syncJira(Date.now(), true) };
         break;
-      case "notify-channel-delete":
-        this.notifyStore.data.channels = this.notifyStore.data.channels.filter((c) => c.id !== request.id);
-        await this.notifyStore.save();
-        break;
-      case "notify-channel-test": {
-        const channel = this.notifyStore.data.channels.find((c) => c.id === request.id);
-        if (!channel) throw new Error("Channel not found");
-        const link = this.inboxLink();
-        const result = await deliver(
-          renderNotification(
-            channel,
-            [{ id: "test", kind: "report", headline: "A test from sshs3", title: "If you can read this, the channel works.", link }],
-            { inboxLink: link },
-          ),
-          this.outboundGuard(),
-          { waits: [] },
-        );
-        channel.last = { at: Date.now(), ...result };
-        await this.notifyStore.save();
-        reply = { notifyTest: result };
-        break;
-      }
-      case "notify-settings-save": {
-        if (request.publicUrl !== undefined && !process.env.SSHS3_PUBLIC_URL) {
-          const raw = request.publicUrl.trim();
-          if (raw) {
-            let parsed: URL;
-            try {
-              parsed = new URL(raw);
-            } catch {
-              throw new Error("That is not an address. It should look like https://sshs3.example.com");
-            }
-            if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password)
-              throw new Error("The address has to be http or https, without a user name in it");
-            this.notifyStore.data.publicUrl = `${parsed.origin}${parsed.pathname.replace(/\/+$/, "")}`;
-          } else this.notifyStore.data.publicUrl = "";
-        }
-        if (request.reminderMinutes !== undefined) this.notifyStore.data.reminderMinutes = integer(request.reminderMinutes, 0, 60);
-        // Quiet hours as the settings card sends them: "22:00" to "07:00" in a named time zone.
-        const policy = request as { quietHours?: unknown; noiseBudgetPerHour?: unknown };
-        if (policy.quietHours !== undefined) {
-          const q = policy.quietHours as { enabled?: unknown; start?: unknown; end?: unknown; timezone?: unknown; bypassCritical?: unknown } | null;
-          const time = (v: unknown): [number, number] | undefined => {
-            const m = typeof v === "string" ? /^(\d{1,2}):(\d{2})$/.exec(v.trim()) : null;
-            return m && Number(m[1]) < 24 && Number(m[2]) < 60 ? [Number(m[1]), Number(m[2])] : undefined;
-          };
-          if (!q || typeof q !== "object" || !q.enabled) {
-            delete this.notifyStore.data.quietHours;
-          } else {
-            const start = time(q.start);
-            const end = time(q.end);
-            if (!start || !end) throw new Error('Quiet hours are a start and an end time, like "22:00" and "07:00".');
-            const timezone = typeof q.timezone === "string" && q.timezone.trim() ? q.timezone.trim().slice(0, 64) : "UTC";
-            try {
-              new Intl.DateTimeFormat("en-GB", { timeZone: timezone });
-            } catch {
-              throw new Error(`"${timezone}" is not a time zone this computer knows.`);
-            }
-            this.notifyStore.data.quietHours = {
-              enabled: true,
-              startHour: start[0],
-              startMinute: start[1],
-              endHour: end[0],
-              endMinute: end[1],
-              timezone,
-              allowCritical: q.bypassCritical !== false,
-            };
-          }
-        }
-        if (policy.noiseBudgetPerHour !== undefined)
-          this.notifyStore.data.noiseBudgetPerHour = integer(policy.noiseBudgetPerHour as number, 0, 1000);
-        await this.notifyStore.save();
-        break;
-      }
       case "infra-edge-confirm": {
         const edge = (this.store.data.infraEdges ?? []).find((x) => x.id === request.id);
         if (!edge) throw new Error("Link not found");
@@ -5271,43 +5178,6 @@ export class HubService {
         }
         break;
       }
-      case "snooze-inbox": {
-        const itemId = requiredText(request.itemId);
-        const now = Date.now();
-        const durationMin = request.durationMinutes !== undefined
-          ? integer(request.durationMinutes, 1, 7 * 24 * 60)
-          : 60;
-        const snoozedUntil =
-          typeof request.until === "number" && Number.isFinite(request.until)
-            ? request.until
-            : now + durationMin * 60_000;
-        const extra = this.storeDataExtra();
-        const prev = extra.inboxState ?? {};
-        extra.inboxState = {
-          ...prev,
-          [itemId]: { ...prev[itemId], snoozedUntil },
-        };
-        break;
-      }
-      case "ack-inbox": {
-        const itemId = requiredText(request.itemId);
-        const extra = this.storeDataExtra();
-        const prev = extra.inboxState ?? {};
-        const entry = { ...prev[itemId] };
-        if (request.acknowledged === false) {
-          delete entry.acknowledgedAt;
-        } else {
-          entry.acknowledgedAt = Date.now();
-        }
-        if (entry.snoozedUntil === undefined && entry.acknowledgedAt === undefined) {
-          const next = { ...prev };
-          delete next[itemId];
-          extra.inboxState = next;
-        } else {
-          extra.inboxState = { ...prev, [itemId]: entry };
-        }
-        break;
-      }
       case "promote-eval": {
         const task = this.task(request.taskId);
         // Promoted once: a second click (or a retried request) finds the ticket it already made.
@@ -5621,8 +5491,9 @@ export class HubService {
         throw new Error(`Unknown AI request: ${String((unhandled as { action?: unknown })?.action)}`);
       }
     }
+    }
     // A request that only reads changes nothing: the store is not rewritten and the other windows are not told.
-    const read = READ_ONLY_ACTIONS.has(request.action);
+    const read = READ_ONLY_ACTIONS.has(asked.action);
     if (!read) await this.store.save();
     const snap = await this.snapshot();
     if (reply) snap.reply = reply;
@@ -7476,14 +7347,14 @@ export class HubService {
   // ---- server facts ----------------------------------------------------------
 
 
-  private readonly factsStore: FactsStore;
+  readonly factsStore: FactsStore;
   private readonly factsCollecting = new Set<string>();
   private readonly factsInFlight = new Map<string, Promise<void>>();
   private lastFactsTick = 0;
   /** What the bucket says each server was last read as, by whichever installation read it. */
   private readonly factsHeads = new Map<string, { collectedAt: number; hash: string }>();
 
-  private factsSettings(): { enabled: boolean; intervalHours: number; exclude: string[]; watchPaths: string[] } {
+  factsSettings(): { enabled: boolean; intervalHours: number; exclude: string[]; watchPaths: string[] } {
     const s = this.store.data.factsSettings ?? {};
     return {
       enabled: s.enabled === true,
@@ -7501,7 +7372,7 @@ export class HubService {
    * a problem of its own; and a reading older than twice the interval says how
    * old it is.
    */
-  private factsProblems(record: FactsRecord, now = Date.now()): FactProblem[] {
+  factsProblems(record: FactsRecord, now = Date.now()): FactProblem[] {
     if (!record.facts) return [];
     const intervalMs = this.factsSettings().intervalHours * 3_600_000;
     const at = record.collectedAt ?? 0;
@@ -7831,21 +7702,21 @@ export class HubService {
 
   // ---- notifications out -----------------------------------------------------
 
-  private readonly notifyStore: NotifyStore;
+  readonly notifyStore: NotifyStore;
   readonly atlassian: AtlassianBridge;
   /** What the team said in chat: the bot's connection, the channels it reads, and the search over them. */
   readonly chat: ChatBridge;
   private readonly stopChatListening: () => void;
   private readonly runTimers = new Map<string, { timer: NodeJS.Timeout; endsAt: number }>();
-  private inboxDirty = false;
-  private inboxTimer?: NodeJS.Timeout;
-  private flushingInbox = false;
+  inboxDirty = false;
+  inboxTimer?: NodeJS.Timeout;
+  flushingInbox = false;
   /** How long the bucket is given to settle before a shared item is told about. Replaced in tests. */
-  private notifySettle = (): Promise<void> => new Promise((r) => setTimeout(r, 1500 + Math.random() * 1500));
-  private notifyWaits: number[] | undefined;
+  notifySettle = (): Promise<void> => new Promise((r) => setTimeout(r, 1500 + Math.random() * 1500));
+  notifyWaits: number[] | undefined;
 
   /** How long an agent waits for a person's answer. 0, the default, is for as long as it takes. */
-  private approvalWaitMinutes(): number {
+  approvalWaitMinutes(): number {
     return integer(this.store.data.preferences.approvalWaitMinutes ?? 0, 0, 10_080);
   }
 
@@ -7889,266 +7760,8 @@ export class HubService {
   }
 
   /** Where sshs3 may call out to on a user's word: a notification channel, a page for the knowledge base. */
-  private outboundGuard(): GuardOptions {
+  outboundGuard(): GuardOptions {
     return { server: this.sharedServer(), allowPrivate: !this.sharedServer() || process.env.SSHS3_ALLOW_PRIVATE_ADDRESSES === "1" };
-  }
-
-  private publicUrl(): string {
-    return (process.env.SSHS3_PUBLIC_URL?.trim() || this.notifyStore.data.publicUrl || "").replace(/\/+$/, "");
-  }
-
-  private inboxLink(itemId?: string): string | undefined {
-    const base = this.publicUrl();
-    return base ? `${base}/?view=Inbox${itemId ? `&item=${encodeURIComponent(itemId)}` : ""}` : undefined;
-  }
-
-  private notificationsView(): NonNullable<HubSnapshot["notifications"]> {
-    const quiet = this.notifyStore.data.quietHours;
-    const hhmm = (h: number, m = 0): string => `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
-    // What the settings card reads back (it is not in the shared type yet): quiet hours as it sends them.
-    const policy = {
-      ...(quiet
-        ? {
-            quietHours: {
-              enabled: quiet.enabled,
-              start: hhmm(quiet.startHour, quiet.startMinute),
-              end: hhmm(quiet.endHour, quiet.endMinute),
-              timezone: quiet.timezone ?? "UTC",
-              bypassCritical: quiet.allowCritical !== false,
-            },
-          }
-        : {}),
-      ...(this.notifyStore.data.noiseBudgetPerHour ? { noiseBudgetPerHour: this.notifyStore.data.noiseBudgetPerHour } : {}),
-    };
-    return {
-      ...policy,
-      channels: this.notifyStore.data.channels.map((c) => ({
-        id: c.id,
-        kind: c.kind,
-        name: c.name,
-        host: hostOf(c.url),
-        hasSecret: Boolean(c.secret),
-        enabled: c.enabled,
-        events: c.events.filter((e): e is NotifyEventKind => e !== "knowledge"),
-        includeCommand: c.includeCommand,
-        alertMinSeverity: c.alertMinSeverity,
-        last: c.last,
-      })),
-      publicUrl: this.publicUrl(),
-      publicUrlFixed: Boolean(process.env.SSHS3_PUBLIC_URL?.trim()),
-      reminderMinutes: this.notifyStore.data.reminderMinutes,
-    };
-  }
-
-  /** What waits for a person right now, from the store itself: no snapshot is built for this. */
-  private inboxNow(options?: InboxFilterOptions): InboxItem[] {
-    return inboxItems({
-      tasks: this.store.data.tasks,
-      workTickets: live(this.store.data.workTickets),
-      dailyReport: this.store.data.dailyReport,
-      // Other members' changes that need a second person and that this member may answer.
-      ...(this.host.peerWaiting ? { peerApprovals: this.host.peerWaiting() } : {}),
-      // A snoozed item is out of the inbox until its time: nobody is told about it, or reminded.
-      inboxState: this.storeDataExtra().inboxState,
-      serverFacts: {
-        // Only servers this installation still has and has not left alone: a deleted or excluded server reports nothing.
-        servers: this.factsStore
-          .all()
-          .filter((r) => this.getKnownServers().some((s) => s.id === r.serverId) && !this.factsSettings().exclude.includes(r.serverId))
-          .map((r) => ({ serverId: r.serverId, name: r.name, status: r.status, collectedAt: r.collectedAt, problems: this.factsProblems(r), changes: [] })),
-      },
-    }, options).filter((item) => item.kind === "peer" || NOTIFY_KINDS.includes(item.kind));
-  }
-
-  /**
-   * A snooze or an acknowledgement is about one item: once the item has left the inbox it is forgotten,
-   * so the list does not grow for ever and an item that comes back is news again. Knowledge-base items
-   * are not built here; theirs are kept for a month.
-   */
-  private pruneInboxState(now = Date.now()): void {
-    const extra = this.storeDataExtra();
-    const state = extra.inboxState;
-    if (!state || !Object.keys(state).length) return;
-    const present = new Set(this.inboxNow({ snoozeFilter: "all", now }).map((i) => i.id));
-    const kept = Object.entries(state).filter(
-      ([id, s]) =>
-        present.has(id) ||
-        (id.startsWith("knowledge:") && Math.max(s.snoozedUntil ?? 0, (s.acknowledgedAt ?? 0) + 30 * 86_400_000) > now),
-    );
-    if (kept.length !== Object.keys(state).length) extra.inboxState = Object.fromEntries(kept);
-  }
-
-  /** Something changed: look at the inbox shortly. Cheap, because every change in the hub comes through here. */
-  private pokeInbox(): void {
-    this.inboxDirty = true;
-    if (this.inboxTimer || this.disposed || !this.initialized) return;
-    this.inboxTimer = setTimeout(() => {
-      this.inboxTimer = undefined;
-      void this.flushInbox().catch((e) => log.warn("Notifications failed", safeError(e)));
-    }, 3000);
-    this.inboxTimer.unref?.();
-  }
-
-  /** The item with what a person needs to decide, from the run it belongs to. */
-  private notifyItem(item: InboxItem): NotifyItem {
-    const task = item.taskId ? this.store.data.tasks.find((t) => t.id === item.taskId) : undefined;
-    const change = item.changeId ? task?.changes.find((c) => c.id === item.changeId) : undefined;
-    // A teammate's plan is said to be one: it is read whole before it is answered.
-    const peerPlan =
-      item.kind === "peer" && this.host.peerWaiting?.().some((p) => p.ownerId === item.ownerId && p.changeId === item.changeId && p.plan);
-    return {
-      id: item.id,
-      kind: item.kind,
-      ...(peerPlan ? { headline: "A teammate's plan needs a second person" } : {}),
-      title: item.title,
-      detail: item.detail,
-      from: item.kind === "approval" ? task?.agentName || "Assistant" : item.from,
-      target: item.target,
-      risk: item.risk,
-      reason: change?.riskReason,
-      // A teammate's change is not in this member's own conversations: the item carries its command.
-      command: change?.command ?? (item.kind === "peer" ? (item.detail ?? item.title) : undefined),
-      check: change?.check?.command,
-      rollback: change?.rollback?.command,
-      // What is left of the wait, not the whole of it: a reminder comes when part of it has gone.
-      waitsMinutes:
-        item.kind === "approval" && this.approvalWaitMinutes() > 0
-          ? Math.max(1, Math.round(this.approvalWaitMinutes() - (Date.now() - (item.since ?? item.at)) / 60_000))
-          : undefined,
-      link: this.inboxLink(item.id),
-    };
-  }
-
-  /**
-   * Tells the channels about what is new in the inbox, and reminds once about
-   * an approval nobody answered. What blocks a running agent also gives a
-   * desktop notification, which until now nothing did.
-   */
-  private async flushInbox(now = Date.now()): Promise<void> {
-    if (this.flushingInbox || this.disposed || isDemoMode()) return;
-    this.flushingInbox = true;
-    this.inboxDirty = false;
-    let out: NotifyItem[];
-    let since: Map<string, number>;
-    try {
-      const data = this.notifyStore.data;
-      const items = this.inboxNow();
-      const before = JSON.stringify([data.seen, data.reminded, data.flapCooldown, data.pushHistory]);
-      this.pruneInboxState(now);
-      const { fresh: arrived, seen } = diffInbox(items, data.seen, now);
-      data.seen = seen;
-      // An alert that keeps resolving and firing again is told about until it flaps, then quiet for a while.
-      let flaps = data.flapCooldown ?? {};
-      const fresh = arrived.filter((i) => {
-        if (i.acknowledgedAt !== undefined) return false;
-        if (i.kind !== "alert" && i.kind !== "health") return true;
-        const verdict = evaluateFlapCooldown(i.id, flaps, now, {
-          ...(data.flapCooldownMs ? { cooldownMs: data.flapCooldownMs } : {}),
-          severity: i.risk,
-          allowCriticalBypass: true,
-        });
-        flaps = verdict.nextState;
-        return verdict.allow;
-      });
-      data.flapCooldown = flaps;
-      // A reminder comes before the agent stops waiting, or it would never come: at most a minute before the end.
-      const wait = this.approvalWaitMinutes();
-      const remindAfter = (wait > 0 ? Math.min(data.reminderMinutes, Math.max(1, wait - 1)) : data.reminderMinutes) * 60_000;
-      const reminders =
-        remindAfter > 0
-          ? items.filter(
-              (i) =>
-                i.kind === "approval" &&
-                !arrived.includes(i) &&
-                // Acknowledged in the inbox: somebody has it, nobody is reminded.
-                i.acknowledgedAt === undefined &&
-                !data.reminded[i.id] &&
-                now - (i.since ?? i.at) >= remindAfter,
-            )
-          : [];
-      data.reminded = Object.fromEntries(Object.entries(data.reminded).filter(([id]) => seen[id] !== undefined));
-      for (const item of reminders) data.reminded[item.id] = now;
-      data.flapCooldown = Object.fromEntries(
-        Object.entries(data.flapCooldown).filter(([, v]) => (v.suppressedUntil ?? 0) > now || now - v.lastAt <= 3_600_000),
-      );
-      const blocking = fresh.filter((i) => ["approval", "peer", "plan", "question"].includes(i.kind));
-      if (blocking.length) {
-        const first = blocking[0];
-        const run = first.taskId && first.kind !== "peer" ? this.store.data.tasks.find((t) => t.id === first.taskId) : undefined;
-        // The command itself, not only what the agent called it: on this computer's own screen, for the person to decide on.
-        const command = first.kind === "approval" ? run?.changes.find((c) => c.id === first.changeId)?.command : first.kind === "peer" ? first.detail : undefined;
-        this.notify(
-          blocking.length === 1
-            ? first.kind === "approval"
-              ? run && worksOnItsOwn(run)
-                ? "A run nobody is watching waits for your approval"
-                : "Approval needed"
-              : first.kind === "peer"
-                ? "A teammate's change needs a second person"
-                : "An agent is waiting for you"
-            : `${blocking.length} things are waiting for you`,
-          `${first.from ?? "Assistant"}: ${command && command !== first.title ? `${command} (${first.title})` : first.title}`,
-        );
-      }
-      out = [...fresh.map((i) => this.notifyItem(i)), ...reminders.map((i) => ({ ...this.notifyItem(i), reminder: true }))];
-      // Quiet hours and the hourly limit hold back what goes to the channels (a critical alert still goes);
-      // what is held back stays in the inbox. This computer's own notification above is not held back.
-      if (out.length && (data.quietHours?.enabled || (data.noiseBudgetPerHour ?? 0) > 0)) {
-        const budget = evaluateNoiseBudget(out, data.pushHistory ?? [], now, {
-          maxPushesPerHour: data.noiseBudgetPerHour,
-          quietHours: data.quietHours,
-        });
-        out = budget.allowed;
-        data.pushHistory = budget.nextPushHistory;
-      }
-      since = new Map(items.map((i) => [i.id, i.since ?? i.at]));
-      if (before !== JSON.stringify([data.seen, data.reminded, data.flapCooldown, data.pushHistory])) await this.notifyStore.save();
-    } finally {
-      // Released before anything is sent: a channel that does not answer must not hold up what comes next.
-      this.flushingInbox = false;
-    }
-    if (out.length) {
-      await this.sendToChannels(out, since);
-      await this.notifyStore.save();
-    }
-    if (this.inboxDirty) this.pokeInbox();
-  }
-
-  private async sendToChannels(items: NotifyItem[], since: Map<string, number>): Promise<void> {
-    const channels = this.notifyStore.data.channels.filter((c) => c.enabled);
-    if (!channels.length) return;
-    // On a shared server only the person whose installation this is can answer: the message says who.
-    const owner = this.host.alertHookOwner ? await this.resolveActorName() : undefined;
-    const sync = this.work();
-    const client = this.clientId();
-    const hash = (text: string): string => crypto.createHash("sha256").update(text).digest("hex");
-    await Promise.all(
-      channels.map(async (channel) => {
-        let mine = items.filter((item) => channelWants(channel, item));
-        if (sync) {
-          // A ticket is on every installation that shares the bucket: one of them tells the channel.
-          const kept: NotifyItem[] = [];
-          for (const item of mine) {
-            const shared = ["review", "blocked", "alert", "health"].includes(item.kind);
-            if (
-              !shared ||
-              (await sync
-                .markOnce(hash(`${item.id}|${since.get(item.id) ?? 0}|${hash(channel.url).slice(0, 16)}`), client, this.notifySettle)
-                .catch(() => true))
-            )
-              kept.push(item);
-          }
-          mine = kept;
-        }
-        if (!mine.length) return;
-        const result = await deliver(renderNotification(channel, mine, { owner, inboxLink: this.inboxLink() }), this.outboundGuard(), {
-          waits: this.notifyWaits,
-        });
-        channel.last = { at: Date.now(), ...result };
-        if (!result.ok) log.warn("A notification was not delivered", `${channel.name}: ${result.error ?? result.status}`);
-      }),
-    );
-    this.host.changed();
   }
 
   // ---- nightly upkeep --------------------------------------------------------
@@ -8514,7 +8127,7 @@ export class HubService {
   // ---- the board ----------------------------------------------------------
 
   /** Names this installation in ticket claims; made once and kept. */
-  private clientId(): string {
+  clientId(): string {
     this.store.data.clientId ??= crypto.randomUUID();
     return this.store.data.clientId;
   }
@@ -8533,7 +8146,7 @@ export class HubService {
   private workSyncOn?: ConditionalQueueStore;
 
   /** The team's board, where there is somewhere to keep it (see teamStore). */
-  private work(): WorkSync | undefined {
+  work(): WorkSync | undefined {
     const store = this.teamStore();
     if (!store) return undefined;
     // Made anew only when the place it was made for is no longer the one in use. One that was put here
@@ -9348,18 +8961,6 @@ export class HubService {
     if (agents.length) this.scheduleWorkSync();
     return [...there.values()].map((a) => a.name);
   }
-
-  private notify(title: string, body: string): void {
-    // Absent where there is no desktop to notify (the web server's Electron stand-in).
-    if (Notification?.isSupported?.()) {
-      const notification = new Notification({
-        title: `sshs3 · ${title}`,
-        body: clip(body, 160),
-      });
-      notification.on("click", this.host.show);
-      notification.show();
-    }
-  }
   private async tick(): Promise<void> {
     if (this.ticking || this.disposed) return;
     this.ticking = true;
@@ -9541,7 +9142,7 @@ export class HubService {
     }
   }
 
-  private async resolveActorName(): Promise<string> {
+  async resolveActorName(): Promise<string> {
     try {
       const view = await this.config.getView();
       if (view.actorName?.trim()) return view.actorName.trim();
@@ -10755,7 +10356,7 @@ export class HubService {
     };
   }
 
-  private getKnownServers(): WorkspaceServerSummary[] {
+  getKnownServers(): WorkspaceServerSummary[] {
     const map = new Map<string, WorkspaceServerSummary>();
     for (const s of isDemoMode() ? getDemoServers() : []) {
       if (s?.id) map.set(s.id, s);
@@ -10920,3 +10521,8 @@ export class HubService {
     if (this.initialized) await this.store.save();
   }
 }
+
+/** The hub's methods that are kept in files of their own (./areas). Declared here so the class has them; put on it just below. */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type, @typescript-eslint/no-unsafe-declaration-merging -- it names the parts and has no members of its own
+export interface HubService extends InboxPart {}
+mixParts(HubService, [InboxPart]);
