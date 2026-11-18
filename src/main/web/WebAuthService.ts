@@ -79,6 +79,9 @@ export interface OidcClaimMappingConfig {
   customMapper?: (claims: OidcClaims) => Partial<MappedOidcIdentity>;
 }
 
+/** An account, as far as deciding who may be a second approver needs it. */
+export type PeerAccount = Pick<WebUserPublic, 'id' | 'username' | 'displayName' | 'role' | 'ssoGroups' | 'disabled'>;
+
 export interface PeerApprovalPolicyInput {
   requesterId: string;
   requesterUsername?: string;
@@ -563,6 +566,18 @@ export class WebAuthService {
   /** How many accounts this server has. */
   userCount(): number {
     return this.data.users.length;
+  }
+
+  /** The accounts as far as deciding who may approve for whom needs them: who they are and what they may do. Nothing secret. */
+  accountsBrief(): PeerAccount[] {
+    return this.data.users.map((u) => ({
+      id: u.id,
+      username: u.username,
+      displayName: u.displayName,
+      role: u.role,
+      ...(u.ssoGroups ? { ssoGroups: [...u.ssoGroups] } : {}),
+      ...(u.disabled ? { disabled: true } : {}),
+    }));
   }
 
   getUserDataDir(userId: string): string {

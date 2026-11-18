@@ -271,7 +271,7 @@ describe("safety card", () => {
     render(<SafetyPolicyCard hub={hub} act={vi.fn(async () => hub)} />);
     expect(screen.getByTestId("safety-own-runs-note")).toHaveTextContent("A freeze or an override set here holds for your own runs only.");
     fireEvent.click(screen.getByTestId("add-cluster-policy-btn"));
-    expect(screen.getByTestId("cluster-policy-form")).toHaveTextContent("Needs a team server with a second account.");
+    expect(screen.getByTestId("cluster-policy-form")).toHaveTextContent("Needs somebody else who may approve: a second account on a shared server");
   });
 
   it("says whose the rules are: this computer's in the app, each person's own on a shared server", () => {

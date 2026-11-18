@@ -9,6 +9,12 @@ Nothing about the board changes. A server is one more installation that
 shares the team bucket; a ticket is checked out by whichever installation
 claims it first, so the server and your apps do not run the same ticket twice.
 
+Everybody with an account on the same server has one board, one set of agents
+and one knowledge base without a bucket: the server keeps them in its data
+directory. A bucket is needed only to share them with desktop apps or with
+another server. Each person's model key, Jira and Confluence sign-in, safety
+rules, own memories and conversations stay their own.
+
 ## Start it
 
 ```bash
@@ -37,7 +43,8 @@ Open the server in a browser and log in as the user the workforce should run
 as. Then:
 
 1. **Connect the team bucket** (start page, Invite / team). This is what makes
-   the server see the same board, agents, runbooks and memory as your apps.
+   the server see the same board, agents, runbooks and memory as your desktop
+   apps. Skip it if everybody works in the browser against this one server.
 2. **Connect a model** (AI settings). The server calls the model with this
    key; it does not use the key in anybody's desktop app.
 3. **Turn on Heartbeat** in the Workforce view. From then on the server takes
@@ -69,9 +76,17 @@ what, on which target, the risk, and a link to the item.
 - The link opens the inbox on that item. The interface has a phone layout and
   can be added to the home screen. Approving needs a signed-in session; there
   are no approve-by-link tokens.
-- **Only the person whose agent asks can approve.** Each user of the server
-  has their own agents and inbox. A notification in a shared channel says
+- **The person whose agent asks answers it.** Each user of the server has
+  their own conversations and inbox. A notification in a shared channel says
   whose answer is awaited; a teammate who opens the link sees their own inbox.
+- **Two people, where the rule asks for it.** With "Two people must approve a
+  change on production" switched on (Settings → Safety), a change or a plan
+  on a server tagged `prod`, `production` or `critical` is also put to a
+  second person. It is in the inbox of everybody who may be that person: an
+  administrator of this server, or a member of one of its approver groups,
+  and never the person whose agent asks. Their notification channels are
+  told. The rule can be switched on only by somebody for whom such a second
+  person exists on the server.
 - An agent waits for as long as it takes unless a wait is set under
   Settings → Safety. A run has no time limit of its own.
 - A channel's address is a secret: it is stored encrypted in the user's own

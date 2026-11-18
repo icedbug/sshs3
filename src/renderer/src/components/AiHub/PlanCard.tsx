@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Check, Pencil, Play } from "lucide-react";
 import type { AgentPlan, HubRequest, HubSnapshot } from "@shared/types/aiHub";
+import { planPeopleLine } from "@shared/aiHubInbox";
 import { HighlightedCode } from "./DiffViewer";
 
 type Act = (request: HubRequest) => Promise<HubSnapshot | undefined>;
@@ -46,7 +47,11 @@ export function PlanCard({
   const waiting = plan.status === "proposed";
   const listed = plan.steps.filter((s) => s.command).length;
   const promised = plan.askEach === "plan";
-  const asksEach = waiting ? promised || Boolean(askChoice) : Boolean(plan.askEach);
+  // Where a plan takes two people: who has approved, and whether this person's own answer is in.
+  const people = planPeopleLine(plan);
+  const gaveMine = waiting && Boolean(people) && (plan.approvals ?? []).some((a) => a.allowed && !a.peer);
+  // Once this person has approved, what they chose about each command is written on the plan.
+  const asksEach = waiting && !gaveMine ? promised || Boolean(askChoice) : Boolean(plan.askEach);
 
   const decide = (approved: boolean, overrideNote?: string): void => {
     const trimmed = (overrideNote ?? note).trim();
@@ -108,6 +113,7 @@ export function PlanCard({
             : "Approved: the listed commands run without asking again; destructive ones still ask."}
         </small>
       )}
+      {!waiting && people && <small data-testid="plan-people">{people}</small>}
 
       <div
         className="ai-plan-review"
@@ -135,7 +141,9 @@ export function PlanCard({
   const status = (
     <span className="ai-badge" data-testid="plan-status">
       {waiting
-        ? "waiting for your decision"
+        ? gaveMine
+          ? "waiting for a second person"
+          : "waiting for your decision"
         : plan.status === "approved"
           ? "approved"
           : "not approved"}
@@ -186,7 +194,7 @@ export function PlanCard({
               type="checkbox"
               data-testid="plan-ask-each"
               checked={asksEach}
-              disabled={sending || busy || promised}
+              disabled={sending || busy || promised || gaveMine}
               onChange={(e) => setAskChoice(e.target.checked)}
             />
             Ask me before each command that changes something
@@ -201,18 +209,25 @@ export function PlanCard({
                 ? `Approving lets the agent carry the plan out. Every command that changes something asks you before it runs, also the ${listed} listed above${promised ? " (the plan says so)" : ""}.`
                 : `Approving lets the agent carry the plan out. The ${listed} command(s) listed above run without asking you again; anything else, and anything destructive, still asks.`}
         </small>
+        {people && (
+          <small data-testid="plan-people" role="status">
+            {people}
+          </small>
+        )}
 
         <div className="ai-plan-actions">
-          <button
-            type="button"
-            className="ai-btn-emerald"
-            data-testid="plan-approve-btn"
-            disabled={sending || busy}
-            onClick={() => decide(true)}
-          >
-            <Play size={13} aria-hidden="true" />
-            Approve &amp; Execute
-          </button>
+          {!gaveMine && (
+            <button
+              type="button"
+              className="ai-btn-emerald"
+              data-testid="plan-approve-btn"
+              disabled={sending || busy}
+              onClick={() => decide(true)}
+            >
+              <Play size={13} aria-hidden="true" />
+              {people ? "Approve" : <>Approve &amp; Execute</>}
+            </button>
+          )}
           <button
             type="button"
             data-testid="plan-edit-btn"

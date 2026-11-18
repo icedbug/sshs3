@@ -1684,6 +1684,7 @@ export async function handleAppAction(
           );
         const review = await hub.reviewPlan(task, parsed);
         task.plan = newPlan(parsed, task.plan, review);
+        hub.planProposed(task);
         hub.changed();
         return {
           status: "proposed: waiting for the user's approval",

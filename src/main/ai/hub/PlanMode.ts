@@ -376,6 +376,36 @@ export function planCoversCommand(
   return true;
 }
 
+/**
+ * Whether the people who approved a plan are enough for one of the commands it lists, when that
+ * command needs more than one person. They are when as many different people approved the plan as
+ * the command needs, one of them is somebody other than the person the run acts for, and, for a
+ * command on production, the plan was approved as one for production (so whoever approved it as the
+ * second person was somebody who may approve there). Returns the people, or nothing.
+ */
+export function planApprovalsCover(
+  plan: Pick<AgentPlan, "status" | "approvals" | "production"> | undefined,
+  needed: number,
+  requesterId: string | undefined,
+  production: boolean,
+): AgentChangeApproval[] | undefined {
+  if (plan?.status !== "approved") return undefined;
+  if (production && !plan.production) return undefined;
+  const seen = new Set<string>();
+  const people: AgentChangeApproval[] = [];
+  for (const vote of plan.approvals ?? []) {
+    if (!vote.allowed) return undefined;
+    const key = approverKey(vote);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    people.push(vote);
+  }
+  if (people.length < Math.max(2, needed)) return undefined;
+  const requester = requesterId?.trim().toLowerCase();
+  if (requester && !people.some((vote) => approverKey(vote) !== requester)) return undefined;
+  return people;
+}
+
 /** The task list an approved plan starts from: one item per step, with its check. */
 export function todosFromPlan(plan: AgentPlan): AgentTodo[] {
   return plan.steps.map((s, i) => ({
@@ -539,8 +569,9 @@ export interface PlanApprovalStatus {
   reason?: string;
 }
 
-const approverKey = (a: Pick<AgentChangeApproval, "actor" | "actorId">): string =>
-  (a.actorId?.trim() || a.actor.trim()).toLowerCase();
+function approverKey(a: Pick<AgentChangeApproval, "actor" | "actorId">): string {
+  return (a.actorId?.trim() || a.actor.trim()).toLowerCase();
+}
 
 /**
  * Evaluate single or two-person / multi-party peer approval on a plan.

@@ -276,6 +276,79 @@ const waiting = (id = "t1", at = Date.now()): AgentTask =>
   }) as unknown as AgentTask;
 const ALL = ["approval", "plan", "question", "blocked", "alert", "review", "report"] as const;
 
+describe("what a teammate's run asks a second person", () => {
+  const asked = {
+    ownerId: "u-omar",
+    ownerName: "Omar Lind",
+    agentName: "Linux SRE",
+    taskId: "run-1",
+    changeId: "c7",
+    description: "Restart the web server",
+    command: "sudo systemctl restart nginx",
+    target: "web-prod-01",
+    risk: "modify" as const,
+    requiredApprovals: 2,
+    approvedBy: ["Omar Lind"],
+    at: Date.now(),
+  };
+  const told = (body: string): string => (JSON.parse(body) as { blocks: Array<{ text?: { text: string } }> }).blocks[0].text!.text;
+
+  it("is told to the channels of the person who may answer it, once, like an approval of their own", async () => {
+    let waiting: Array<Record<string, unknown>> = [];
+    const { hub, inner } = await makeHub({ peerWaiting: () => waiting });
+    const slack = await receiver();
+    // The channel takes approvals: a teammate's that needs this person is one.
+    await hub.request({ action: "notify-channel-save", channel: { kind: "slack", name: "ops", url: `${slack.url}/services/x`, enabled: true, events: ["approval"], includeCommand: true } });
+    await inner.flushInbox();
+    expect(slack.got).toHaveLength(0);
+
+    waiting = [asked];
+    await inner.flushInbox();
+    expect(slack.got).toHaveLength(1);
+    expect(told(slack.got[0].body)).toContain("A teammate's change needs a second person — Omar Lind (Linux SRE) on web-prod-01");
+    expect(told(slack.got[0].body)).toContain("Restart the web server");
+    expect(told(slack.got[0].body)).toContain("sudo systemctl restart nginx");
+    // Not again while it waits.
+    await inner.flushInbox();
+    expect(slack.got).toHaveLength(1);
+  });
+
+  it("says that it is a plan when it is one, with its steps", async () => {
+    const plan = {
+      ...asked,
+      changeId: "p1",
+      description: "Restart the web server",
+      command: undefined,
+      plan: { steps: [{ action: "Restart nginx", command: "sudo systemctl restart nginx", target: "web-prod-01", risk: "medium" }] },
+    };
+    let waiting: Array<Record<string, unknown>> = [];
+    const { hub, inner } = await makeHub({ peerWaiting: () => waiting });
+    const slack = await receiver();
+    await hub.request({ action: "notify-channel-save", channel: { kind: "slack", name: "ops", url: `${slack.url}/services/x`, enabled: true, events: ["approval"], includeCommand: true } });
+    // What was there before a channel was added is not news to it: the plan starts to wait afterwards.
+    waiting = [plan];
+    await inner.flushInbox();
+    expect(slack.got).toHaveLength(1);
+    expect(told(slack.got[0].body)).toContain("A teammate's plan needs a second person — Omar Lind (Linux SRE) on web-prod-01");
+    expect(told(slack.got[0].body)).toContain("Plan: Restart the web server");
+    expect(told(slack.got[0].body)).toContain("1. [medium risk] Restart nginx (on web-prod-01)");
+    expect(told(slack.got[0].body)).toContain("$ sudo systemctl restart nginx");
+  });
+
+  it("is not told to a channel that does not take approvals", async () => {
+    let waiting: Array<Record<string, unknown>> = [];
+    const { hub, inner } = await makeHub({ peerWaiting: () => waiting });
+    const alertsOnly = await receiver();
+    const approvals = await receiver();
+    await hub.request({ action: "notify-channel-save", channel: { kind: "slack", name: "alerts only", url: `${alertsOnly.url}/services/x`, enabled: true, events: ["alert"], includeCommand: true } });
+    await hub.request({ action: "notify-channel-save", channel: { kind: "slack", name: "approvals", url: `${approvals.url}/services/x`, enabled: true, events: ["approval"], includeCommand: true } });
+    waiting = [asked];
+    await inner.flushInbox();
+    expect(approvals.got).toHaveLength(1);
+    expect(alertsOnly.got).toHaveLength(0);
+  });
+});
+
 describe("notifications from the hub", () => {
   it("tells a channel once when an approval starts to wait, reminds once, and never shows the address", async () => {
     const { hub, inner, dir } = await makeHub();

@@ -253,7 +253,7 @@ describe("SafetyPolicyCard SoD & per-cluster/tag overrides", () => {
     const act = vi.fn().mockResolvedValue(hub);
     render(<SafetyPolicyCard hub={hub} act={act} />);
 
-    expect(screen.getByTestId("cluster-policy-tag:prod")).toHaveTextContent("2-person SoD");
+    expect(screen.getByTestId("cluster-policy-tag:prod")).toHaveTextContent("2 people approve");
     expect(screen.getByTestId("cluster-policy-tag:prod")).toHaveTextContent("Plan");
 
     fireEvent.click(screen.getByTestId("safety-peer-approval-toggle"));

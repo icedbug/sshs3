@@ -7,9 +7,17 @@ import type { AddressInfo } from "node:net";
  *
  * What it says is scripted: each step is either a tool call or the text it ends on. Which step
  * comes next is read from the request (how many tool results the conversation holds), so a request
- * that is sent again gets the same answer again.
+ * that is sent again gets the same answer again. A script that has to look at more than that (a
+ * conversation that stops and is taken up again, a second kind of run beside the first) is given as
+ * a function of the request instead.
  */
 export type FakeModelStep = { tool: string; args: Record<string, unknown> } | { text: string };
+/** The request as the model is sent it, as far as a script needs to read it. */
+export interface FakeModelRequest {
+  messages: Array<{ role: string; content?: unknown }>;
+  [key: string]: unknown;
+}
+export type FakeModelScript = FakeModelStep[] | ((request: FakeModelRequest) => FakeModelStep);
 
 export interface FakeOpenAi {
   /** The address to give as the model's base URL. */
@@ -27,6 +35,8 @@ export interface FakeOpenAiOptions {
   strict?: boolean;
   /** Tokens reported per answer. */
   usage?: { prompt_tokens: number; completion_tokens: number };
+  /** The port to listen on. Any free one when left out. */
+  port?: number;
 }
 
 const refusal = (res: http.ServerResponse, message: string, param: string, code: string): void => {
@@ -34,7 +44,7 @@ const refusal = (res: http.ServerResponse, message: string, param: string, code:
   res.end(JSON.stringify({ error: { message, type: "invalid_request_error", param, code } }));
 };
 
-export async function fakeOpenAi(steps: FakeModelStep[], options: FakeOpenAiOptions = {}): Promise<FakeOpenAi> {
+export async function fakeOpenAi(steps: FakeModelScript, options: FakeOpenAiOptions = {}): Promise<FakeOpenAi> {
   const requests: Array<Record<string, unknown>> = [];
   const server = http.createServer((req, res) => {
     if (req.method === "GET" && req.url?.endsWith("/models")) {
@@ -61,7 +71,7 @@ export async function fakeOpenAi(steps: FakeModelStep[], options: FakeOpenAiOpti
       }
       const messages = (body.messages ?? []) as Array<{ role: string }>;
       const done = messages.filter((m) => m.role === "tool").length;
-      const step = steps[Math.min(done, steps.length - 1)];
+      const step = typeof steps === "function" ? steps(body as FakeModelRequest) : steps[Math.min(done, steps.length - 1)];
       res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
       const send = (data: unknown): void => void res.write(`data: ${typeof data === "string" ? data : JSON.stringify(data)}\n\n`);
       if ("tool" in step) {
@@ -82,7 +92,7 @@ export async function fakeOpenAi(steps: FakeModelStep[], options: FakeOpenAiOpti
       res.end();
     });
   });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  await new Promise<void>((resolve) => server.listen(options.port ?? 0, "127.0.0.1", resolve));
   const { port } = server.address() as AddressInfo;
   return {
     url: `http://127.0.0.1:${port}/v1`,

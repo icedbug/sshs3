@@ -9,6 +9,7 @@ import { IpcBridge } from '../IpcBridge';
 import type { WindowRouter } from '../windows/WindowManager';
 import { createHub } from '../ai/hub/createHub';
 import type { HubService } from '../ai/hub/HubService';
+import type { PeerApprovalItem } from '../../shared/types/aiHub';
 import {
   HUB_CHANGED,
   type WorkspacePresenceEntry,
@@ -30,6 +31,7 @@ import { TeamVaultConfigStore } from '../services/TeamVaultConfigStore';
 import { TeamVaultService } from '../services/TeamVaultService';
 import {
   evaluatePeerApproval,
+  type PeerAccount,
   type PeerApprovalDecision,
   type WebUserPublic,
 } from './WebAuthService';
@@ -303,6 +305,8 @@ export class WebTenantManager {
     private readonly baseDataDir: string,
     /** How many accounts the server has: with one, its administrator is alone on their own machine. */
     private readonly accountCount?: () => number,
+    /** The server's accounts, as far as deciding who may approve for whom needs them. */
+    private readonly accounts?: () => PeerAccount[],
   ) {
     this.sharedDir = path.join(baseDataDir, 'shared-workspace');
     this.teamBoard = new FileQueueStore(path.join(this.sharedDir, 'board'));
@@ -396,6 +400,107 @@ export class WebTenantManager {
       }
     }, 80);
     this.notifyTimer.unref?.();
+  }
+
+  /** The account as it is now (a role may have changed since its hub was started). */
+  private account(userId: string): PeerAccount | undefined {
+    return this.accounts?.().find((a) => a.id === userId) ?? this.resolvedTenants.get(userId)?.user;
+  }
+
+  /**
+   * Whether there is anybody who could be the second person for this member's change on a production
+   * server: another account that is not switched off and that the rule lets approve there (an
+   * administrator, or a member of an approver group). Where there is nobody, nothing asks for two
+   * people: a change would wait for an answer that cannot come.
+   */
+  private hasSecondApproverFor(userId: string): boolean {
+    const requester = this.account(userId);
+    if (!requester) return false;
+    return (this.accounts?.() ?? []).some(
+      (other) =>
+        other.id !== userId &&
+        this.authorizePeerApproval({ requesterUserId: userId, requesterUsername: requester.username, approver: other, targetEnv: 'production', requiredApprovals: 2 }).authorized,
+    );
+  }
+
+  /** The changes in other members' runs that wait for a second person and that this member may answer. */
+  private waitingForSecondPerson(userId: string): PeerApprovalItem[] {
+    const me = this.account(userId);
+    if (!me) return [];
+    const out: PeerApprovalItem[] = [];
+    for (const [ownerId, tenant] of this.resolvedTenants.entries()) {
+      if (ownerId === userId) continue;
+      const owner = this.account(ownerId) ?? tenant.user;
+      for (const waiting of tenant.hub.waitingForApproval()) {
+        // Whoever already answered it does not get it again.
+        if (waiting.approvers.some((a) => a.actorId === `user:${userId}`)) continue;
+        const may = this.authorizePeerApproval({
+          requesterUserId: ownerId,
+          requesterUsername: owner.username,
+          approver: me,
+          targetTags: waiting.targetTags,
+          requiredApprovals: waiting.requiredApprovals,
+        });
+        if (!may.authorized) continue;
+        out.push({
+          ownerId,
+          ownerName: owner.displayName || owner.username,
+          taskId: waiting.taskId,
+          changeId: waiting.changeId,
+          ...(waiting.agentName ? { agentName: waiting.agentName } : {}),
+          description: waiting.description,
+          ...(waiting.command ? { command: waiting.command } : {}),
+          ...(waiting.target ? { target: waiting.target } : {}),
+          ...(waiting.risk ? { risk: waiting.risk } : {}),
+          requiredApprovals: waiting.requiredApprovals,
+          approvedBy: waiting.approvedBy,
+          at: waiting.at,
+          ...(waiting.plan ? { plan: waiting.plan } : {}),
+        });
+      }
+    }
+    return out.sort((a, b) => a.at - b.at);
+  }
+
+  /**
+   * This member's answer to a change in another member's run. Checked here, where the accounts are
+   * known: the change must still be waiting, and the rule must let this member answer it.
+   */
+  private async answerAsSecondPerson(
+    userId: string,
+    answer: { ownerId: string; taskId: string; changeId: string; approved: boolean; note?: string },
+  ): Promise<void> {
+    const me = this.account(userId);
+    if (!me || me.disabled) throw new Error('Your account cannot approve here.');
+    if (answer.ownerId === userId) throw new Error('A change in your own run is answered in your own inbox, and needs somebody else as well.');
+    const tenant = this.resolvedTenants.get(answer.ownerId);
+    const waiting = tenant?.hub.waitingForApproval().find((w) => w.taskId === answer.taskId && w.changeId === answer.changeId);
+    if (!tenant || !waiting) throw new Error('That is not waiting any more: it was answered, or its run was stopped.');
+    const owner = this.account(answer.ownerId) ?? tenant.user;
+    const may = this.authorizePeerApproval({
+      requesterUserId: answer.ownerId,
+      requesterUsername: owner.username,
+      approver: me,
+      targetTags: waiting.targetTags,
+      requiredApprovals: waiting.requiredApprovals,
+    });
+    if (!may.authorized)
+      throw new Error(
+        /production/i.test(may.reason ?? '')
+          ? 'You cannot approve this. On production the second person has to be an administrator of this server, or in one of its approver groups.'
+          : may.reason
+            ? `You cannot approve this: ${may.reason}.`
+            : 'You cannot approve this.',
+      );
+    // The run's own hub says so when what it waits for has changed: everybody's inbox follows from that.
+    const peer = { id: userId, name: me.displayName || me.username };
+    if (waiting.plan) await tenant.hub.approvePlanAsPeer(answer.taskId, answer.approved, peer, answer.note);
+    else await tenant.hub.approveAsPeer(answer.taskId, answer.changeId, answer.approved, peer, answer.note);
+  }
+
+  /** A member's changes that wait for a second person are not what they were: every other member's hub is told. */
+  private secondPersonWantedBy(userId: string): void {
+    for (const [uid, tenant] of this.resolvedTenants.entries()) if (uid !== userId) tenant.hub.peerApprovalsChanged();
   }
 
   /**
@@ -720,6 +825,11 @@ export class WebTenantManager {
           this.notifyCrossTenantChanged(user.id),
         // One board for everyone on this server, kept in the server's shared folder when the team has no bucket.
         sharedWorkStore: this.teamBoard.forAccount(() => this.boardChangedBy(user.id)),
+        // A change that needs two people is put to the other members, and their answer is passed back.
+        peerApproval: () => this.hasSecondApproverFor(user.id),
+        peerWaiting: () => this.waitingForSecondPerson(user.id),
+        peerDecide: (answer) => this.answerAsSecondPerson(user.id, answer),
+        peerWaitingChanged: () => this.secondPersonWantedBy(user.id),
         teamChat: this.teamChat,
       },
     );

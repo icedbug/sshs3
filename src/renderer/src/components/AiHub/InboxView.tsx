@@ -53,6 +53,7 @@ const SNOOZED_SECTION: SectionSpec = {
 
 const KIND: Record<InboxKind, { label: string; tone: string }> = {
   approval: { label: "Wants to run", tone: "ai-inbox-now" },
+  peer: { label: "Needs a second person", tone: "ai-inbox-now" },
   plan: { label: "Plan to decide", tone: "ai-inbox-now" },
   question: { label: "Asks you", tone: "ai-inbox-now" },
   alert: { label: "Alert", tone: "ai-inbox-warn" },
@@ -540,25 +541,69 @@ export function InboxView({
             <button type="button" onClick={() => onOpenTask(item.taskId!)}>
               Open
             </button>
+            {(() => {
+              // A change that needs two people: who has approved, and that somebody else is being asked.
+              const change = hub.tasks.find((t) => t.id === item.taskId)?.changes.find((c) => c.id === item.changeId);
+              const needs = change?.requiredApprovals ?? 1;
+              if (needs < 2) return null;
+              const by = (change?.approvals ?? []).filter((a) => a.allowed).map((a) => a.actor);
+              return (
+                <small className="ai-muted" data-testid={`approval-count-${item.changeId}`}>
+                  {by.length > 0
+                    ? `Approved so far by ${by.join(", ")}. ${needs} different people have to approve: the others who may are asked in their inbox.`
+                    : `${needs} different people have to approve. Your approval counts as one; the others who may are asked in their inbox.`}
+                </small>
+              );
+            })()}
             {snoozeControls}
           </>
         );
-      case "plan":
+      case "peer": {
+        // Another member's change: the answer goes to their run, and counts as this member's.
+        const waiting = hub.peerApprovals?.find((p) => p.ownerId === item.ownerId && p.changeId === item.changeId);
+        const answer = (approved: boolean): void =>
+          void dispatch({ action: "peer-approve", ownerId: item.ownerId!, taskId: item.taskId!, changeId: item.changeId!, approved });
         return (
           <>
-            <button
-              type="button"
-              className="ai-btn-emerald"
-              onClick={() => void dispatch({ action: "plan-decide", taskId: item.taskId!, approved: true })}
-            >
-              Approve the plan
+            <button type="button" className="ai-btn-emerald" data-testid={`peer-approve-${item.changeId}`} onClick={() => answer(true)}>
+              {waiting?.plan ? "Approve the plan" : "Approve"}
             </button>
+            <button type="button" className="ai-btn-danger" data-testid={`peer-deny-${item.changeId}`} onClick={() => answer(false)}>
+              {waiting?.plan ? "Do not approve" : "Deny"}
+            </button>
+            {waiting && (
+              <small className="ai-muted" data-testid={`peer-count-${item.changeId}`}>
+                {waiting.approvedBy.length > 0
+                  ? `Approved so far by ${waiting.approvedBy.join(", ")}. ${waiting.requiredApprovals} different people have to approve.`
+                  : `${waiting.requiredApprovals} different people have to approve. Nobody has yet.`}
+              </small>
+            )}
+            {snoozeControls}
+          </>
+        );
+      }
+      case "plan": {
+        // Where a plan takes two people, this person's own approval is given once: after that it waits for somebody else.
+        const plan = hub.tasks.find((t) => t.id === item.taskId)?.plan;
+        const gaveMine = (plan?.requiredApprovals ?? 1) > 1 && (plan?.approvals ?? []).some((a) => a.allowed && !a.peer);
+        return (
+          <>
+            {!gaveMine && (
+              <button
+                type="button"
+                className="ai-btn-emerald"
+                onClick={() => void dispatch({ action: "plan-decide", taskId: item.taskId!, approved: true })}
+              >
+                Approve the plan
+              </button>
+            )}
             <button type="button" onClick={() => onOpenTask(item.taskId!)}>
               Read it
             </button>
             {snoozeControls}
           </>
         );
+      }
       case "question":
         return (
           <>
@@ -883,7 +928,9 @@ export function InboxView({
                         )}
                       </div>
                     </div>
-                    {item.kind === "approval" && item.detail ? (
+                    {item.kind === "peer" && item.detail ? (
+                      <pre className="ai-terminal-peek">{item.detail}</pre>
+                    ) : item.kind === "approval" && item.detail ? (
                       <>
                         <pre className="ai-terminal-peek">{item.detail}</pre>
                         {(() => {

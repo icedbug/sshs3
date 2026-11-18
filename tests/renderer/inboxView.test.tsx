@@ -177,3 +177,187 @@ describe("what is waiting for a person", () => {
     expect(screen.getByRole("button", { name: "Save rules" })).toBeVisible();
   });
 });
+
+describe("a teammate's change that needs a second person", () => {
+  const teammates = hub({
+    peerApprovals: [
+      {
+        ownerId: "u-omar",
+        ownerName: "Omar Lind",
+        agentName: "Linux SRE",
+        taskId: "run-1",
+        changeId: "c7",
+        description: "Restart the web server",
+        command: "sudo systemctl restart nginx",
+        target: "web-prod-01",
+        risk: "modify",
+        requiredApprovals: 2,
+        approvedBy: ["Omar Lind"],
+        at: 40,
+      },
+    ],
+  });
+
+  it("is in the inbox as what blocks a teammate's run, with what would run and for whom", () => {
+    const [item] = inboxItems(teammates);
+    expect(item).toMatchObject({
+      id: "peer:u-omar:c7",
+      kind: "peer",
+      bucket: "blocking",
+      title: "Restart the web server",
+      detail: "sudo systemctl restart nginx",
+      from: "Omar Lind (Linux SRE) on web-prod-01",
+      ownerId: "u-omar",
+      taskId: "run-1",
+      changeId: "c7",
+      risk: "modify",
+    });
+  });
+
+  it("is answered there, and the answer goes to the teammate's run", () => {
+    const act = vi.fn(async () => hub());
+    render(<InboxView hub={teammates} act={act} onOpenTask={() => {}} onOpenView={() => {}} />);
+    const card = screen.getByTestId("inbox-peer");
+    // The heading says what it is, whose run it is and where: in one line.
+    expect(card).toHaveTextContent(/Needs a second person/i);
+    expect(card).toHaveTextContent(/Omar Lind \(Linux SRE\) on web-prod-01/i);
+    expect(within(card).getByText("sudo systemctl restart nginx")).toBeVisible();
+    expect(within(card).getByTestId("peer-count-c7")).toHaveTextContent("Approved so far by Omar Lind. 2 different people have to approve.");
+    fireEvent.click(within(card).getByRole("button", { name: "Approve" }));
+    expect(act).toHaveBeenCalledWith({ action: "peer-approve", ownerId: "u-omar", taskId: "run-1", changeId: "c7", approved: true });
+    fireEvent.click(within(card).getByRole("button", { name: "Deny" }));
+    expect(act).toHaveBeenCalledWith({ action: "peer-approve", ownerId: "u-omar", taskId: "run-1", changeId: "c7", approved: false });
+  });
+});
+
+describe("a change of one's own that needs two people", () => {
+  const own = (approvals: Array<{ actor: string; allowed: boolean; at: number }>) =>
+    hub({
+      tasks: [
+        {
+          id: "t1",
+          title: "Restart nginx",
+          status: "waiting",
+          agentName: "Linux SRE",
+          updatedAt: 5,
+          messages: [],
+          changes: [{ id: "c1", kind: "command", description: "Restart nginx", command: "systemctl restart nginx", target: "web-prod-01", status: "pending", riskLevel: "modify", requiredApprovals: 2, approvals, at: 4 }],
+        },
+      ] as unknown as HubSnapshot["tasks"],
+    });
+
+  it("says that two people have to approve, and that the others are being asked", () => {
+    render(<InboxView hub={own([])} act={vi.fn(async () => hub())} onOpenTask={() => {}} onOpenView={() => {}} />);
+    expect(screen.getByTestId("approval-count-c1")).toHaveTextContent("2 different people have to approve. Your approval counts as one; the others who may are asked in their inbox.");
+  });
+
+  it("says who has approved once somebody has", () => {
+    render(<InboxView hub={own([{ actor: "Omar Lind", allowed: true, at: 5 }])} act={vi.fn(async () => hub())} onOpenTask={() => {}} onOpenView={() => {}} />);
+    expect(screen.getByTestId("approval-count-c1")).toHaveTextContent("Approved so far by Omar Lind. 2 different people have to approve");
+  });
+
+  it("says nothing of the kind about a change one person may approve", () => {
+    render(<InboxView hub={full} act={vi.fn(async () => hub())} onOpenTask={() => {}} onOpenView={() => {}} />);
+    expect(screen.queryByTestId("approval-count-c1")).not.toBeInTheDocument();
+  });
+});
+
+describe("a plan that waits for its answer", () => {
+  const NOW = 10 * 86_400_000;
+  const withPlan = (plan: Record<string, unknown>, status = "completed") =>
+    hub({
+      tasks: [
+        {
+          id: "t1",
+          title: "Restart nginx",
+          status,
+          agentName: "Linux SRE",
+          updatedAt: NOW,
+          messages: [],
+          changes: [],
+          target: { sessionId: "s", generation: "g", label: "web-prod-01" },
+          plan: { id: "p1", goal: "Restart the web server", steps: [{ action: "Restart nginx", risk: "medium", check: "is-active" }], status: "proposed", revision: 1, review: { verdict: "approve", findings: [] }, createdAt: NOW - 60_000, ...plan },
+        },
+      ] as unknown as HubSnapshot["tasks"],
+    });
+
+  it("is in the inbox once the agent has stopped: that is when it can be answered", () => {
+    const [item] = inboxItems(withPlan({}), { now: NOW });
+    expect(item).toMatchObject({ id: "plan:p1", kind: "plan", bucket: "blocking", title: "Restart the web server", detail: "1 step", from: "Linux SRE", target: "web-prod-01", taskId: "t1" });
+    // One nobody answered for more than a week is not: it can still be answered in its conversation.
+    expect(inboxItems(withPlan({ createdAt: NOW - 8 * 86_400_000 }), { now: NOW })).toEqual([]);
+    // A decided plan is not waiting.
+    expect(inboxItems(withPlan({ status: "approved" }), { now: NOW })).toEqual([]);
+  });
+
+  it("says that it takes two people, and who has approved", () => {
+    const line = (plan: Record<string, unknown>): string => inboxItems(withPlan(plan), { now: NOW })[0].detail!;
+    expect(line({ requiredApprovals: 2 })).toBe("1 step · Two people have to approve this plan: you and one more. The others who may approve are asked in their inbox.");
+    expect(line({ requiredApprovals: 2, approvals: [{ actor: "Omar Lind", allowed: true, at: 1 }] })).toBe(
+      "1 step · You approved. It waits for one more person: the others who may approve are asked in their inbox.",
+    );
+    expect(line({ requiredApprovals: 2, approvals: [{ actor: "Maria Ek", allowed: true, peer: true, at: 1 }] })).toBe("1 step · Approved by Maria Ek. It waits for your own answer.");
+    expect(line({ requiredApprovals: 3 })).toBe("1 step · 3 people have to approve this plan: you and 2 more. The others who may approve are asked in their inbox.");
+    // One person approves it: nothing is said about people.
+    expect(line({ requiredApprovals: 1 })).toBe("1 step");
+  });
+
+  it("offers this person's approval once: after it, the plan waits for somebody else", () => {
+    const act = vi.fn(async () => hub());
+    // On screen the clock is the real one: the plan was proposed a minute ago.
+    const createdAt = Date.now() - 60_000;
+    const before = render(<InboxView hub={withPlan({ requiredApprovals: 2, createdAt })} act={act} onOpenTask={() => {}} onOpenView={() => {}} />);
+    fireEvent.click(within(screen.getByTestId("inbox-plan")).getByRole("button", { name: "Approve the plan" }));
+    expect(act).toHaveBeenCalledWith({ action: "plan-decide", taskId: "t1", approved: true });
+    before.unmount();
+    render(<InboxView hub={withPlan({ requiredApprovals: 2, createdAt, approvals: [{ actor: "Omar Lind", allowed: true, at: 1 }] })} act={act} onOpenTask={() => {}} onOpenView={() => {}} />);
+    const card = screen.getByTestId("inbox-plan");
+    expect(within(card).queryByRole("button", { name: "Approve the plan" })).toBeNull();
+    expect(within(card).getByRole("button", { name: "Read it" })).toBeVisible();
+    expect(card).toHaveTextContent("You approved. It waits for one more person");
+  });
+});
+
+describe("a teammate's plan that needs a second person", () => {
+  const teammates = hub({
+    peerApprovals: [
+      {
+        ownerId: "u-omar",
+        ownerName: "Omar Lind",
+        agentName: "Linux SRE",
+        taskId: "run-1",
+        changeId: "p1",
+        description: "Restart the web server",
+        target: "web-prod-01",
+        requiredApprovals: 2,
+        approvedBy: ["Omar Lind"],
+        at: 40,
+        plan: {
+          steps: [
+            { action: "Restart nginx", command: "sudo systemctl restart nginx", target: "web-prod-01", risk: "medium" },
+            { action: "Look at the error log", risk: "low" },
+          ],
+        },
+      },
+    ],
+  });
+
+  it("is in the inbox with every step, its command and where it runs", () => {
+    const [item] = inboxItems(teammates);
+    expect(item).toMatchObject({ id: "peer:u-omar:p1", kind: "peer", bucket: "blocking", title: "Plan: Restart the web server", from: "Omar Lind (Linux SRE) on web-prod-01" });
+    expect(item.detail).toBe("1. [medium risk] Restart nginx (on web-prod-01)\n   $ sudo systemctl restart nginx\n2. [low risk] Look at the error log");
+  });
+
+  it("is approved or not as a plan, and the answer goes to the teammate's conversation", () => {
+    const act = vi.fn(async () => hub());
+    render(<InboxView hub={teammates} act={act} onOpenTask={() => {}} onOpenView={() => {}} />);
+    const card = screen.getByTestId("inbox-peer");
+    expect(card).toHaveTextContent("Plan: Restart the web server");
+    expect(card).toHaveTextContent("$ sudo systemctl restart nginx");
+    expect(within(card).getByTestId("peer-count-p1")).toHaveTextContent("Approved so far by Omar Lind. 2 different people have to approve.");
+    fireEvent.click(within(card).getByRole("button", { name: "Approve the plan" }));
+    expect(act).toHaveBeenCalledWith({ action: "peer-approve", ownerId: "u-omar", taskId: "run-1", changeId: "p1", approved: true });
+    fireEvent.click(within(card).getByRole("button", { name: "Do not approve" }));
+    expect(act).toHaveBeenCalledWith({ action: "peer-approve", ownerId: "u-omar", taskId: "run-1", changeId: "p1", approved: false });
+  });
+});

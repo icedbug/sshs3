@@ -456,6 +456,52 @@ stopped.
   questions open; each answer counts as given. Without a command to check,
   an external agent's own word that an action only reads is not trusted.
 
+### Two people (`peer-approve`, `approveAsPeer`, `approvePlanAsPeer`)
+
+The rule "Two people must approve a change on production"
+(`requirePeerApprovalOnProd`), and a cluster policy that asks for more than
+one approval, need a second person. There is one only on a web server with
+more than one account. Everywhere else the rule is not in force and cannot be
+switched on (`peerApprovalPossible`, shown as the reason on the safety card),
+because a change would wait for an answer that cannot come.
+
+- **Who the second person may be** is decided by the server, where the
+  accounts are known (`WebTenantManager`, `evaluatePeerApproval`): never the
+  person whose run it is, never a disabled account, and on production only an
+  administrator of the server or a member of one of its approver groups. A
+  member for whom nobody qualifies cannot switch the rule on. An
+  administrator who is the only one who may approve production cannot either.
+- **A change.** The run's own person approves in their inbox as usual; that
+  counts as one. The same change is in the inbox of everybody else who may
+  answer it, as "Needs a second person", with the command, the server, whose
+  run it is and who has approved so far. It runs when as many different
+  people have approved as it needs. Anybody's no ends it. The record names
+  each person (`approvals`, with `peer` on the ones given by somebody else),
+  and one person counts once, by account and not by name.
+- **A plan** that touches production takes two people in the same way. It
+  says so on its card and in the inbox from the moment it is proposed
+  (`requiredApprovals`, written by `planProposed`). The other person reads
+  every step, with its command and where it runs, before answering. The two
+  count in either order, and the agent starts when the second answer is in.
+  What the person whose run it is chose about being asked before each
+  command, and what they wrote, is what the agent is told. What the second
+  person writes is shown to the first in the conversation and is never sent
+  to the agent as theirs. A second person's no does not send the agent back
+  to work: the plan is "not approved", and the person whose run it is decides
+  what next.
+- **A plan two people approved covers its listed commands for both**
+  (`planApprovalsCover`). A command exactly as the plan lists it then runs
+  without asking either of them again, and its record names the two. This
+  holds only for a plan approved as one for production (`plan.production`),
+  so the second person was somebody who may approve there. A destructive
+  command, one with hidden values, a change to the rules, one asked for from
+  outside, and anything the plan does not list are put to both people.
+- Checked in `peerApprovalOnServer.test.ts` over each account's own
+  websocket, with a terminal that answers: a member's production change runs
+  once the administrator has approved; a refusal runs nothing; another member
+  is not asked and cannot answer; a plan takes two in either order and its
+  listed command then runs unasked.
+
 ## The audit log and terminal recordings (`AuditLog`, `SessionRecorder`)
 
 - **The log.** Every finished command, change, file write, setting change,
@@ -675,6 +721,10 @@ so an answer must never travel through shared hub state.
   those lines as they are.
 - `runner-test` answers `reply.runnerProbe` (see External agents) and changes
   nothing.
+- `peer-approve` is one member's answer to what another member's run asks a
+  second person. It is carried out in that other member's hub by the server
+  (`host.peerDecide`), which checks first that this member may answer it; the
+  asking member's own store is not rewritten by it.
 - A test case's result and `evalRunning` change in one step: no snapshot
   shows a case that has its result and is still said to be running.
 
@@ -876,6 +926,12 @@ inside Slack or Teams.
   snapshot (`inboxItems`): commands waiting for approval, plans, questions,
   tickets in review, runs that stopped, alerts nobody has, knowledge base gaps
   and contradictions, the nightly report. Each can be dealt with in place.
+  A plan is listed once its agent has stopped, which is when it can be
+  answered, and for a week after it was proposed (`PLAN_WAITS_MS`). It used to
+  be listed only while the agent was still working, so a plan that waited for
+  its answer was never there. On a shared server the list also has what a
+  colleague's run asks a second person (`peerApprovals`, kind `peer`): see
+  "Two people".
 
 Checked with real HTTP posts against the web server in tests and in a browser
 with a stand-in model. Not checked: a real Alertmanager or PagerDuty sending.
@@ -1413,6 +1469,27 @@ because there is no server to run one on.
   (`sumUsage`), so a budget holds for the team. Not shared, on purpose: MCP
   servers and external runners (commands that run with the user's rights) and
   schedules (they belong to the installation that runs them).
+- **One server, no bucket** (`FileQueueStore`, `WebTenantManager.teamBoard`).
+  Everybody with an account on one web server has the same board, agents,
+  knowledge base, pages and dependencies without a bucket. The same `WorkSync`
+  runs against a folder on the server (`<data>/shared-workspace/board/`)
+  through a store that makes the bucket's promises: a write that names the
+  version it replaces, or asks that nothing be there yet, happens whole or is
+  refused, so two accounts that take the same ticket in the same instant
+  cannot both have it. Every account is a hub in the one server process and
+  they share one store object, which does one write to a path at a time; it
+  would not hold between two server processes on one folder, which is not a
+  way sshS3 is run. When an account writes an item, the other accounts' hubs
+  read at once (`teamBoardChanged`) and their windows are told, so a ticket a
+  colleague made is on the board within a second or so. A connected bucket
+  goes first: then the server is one more installation on that bucket, as
+  before. What stays each person's own on a shared server: the model and its
+  key, the Jira and Confluence sign-in, the safety rules, the person's own
+  memories, conversations, inbox state and notification channels. The first
+  time an account's hub starts on such a server, what was on that person's
+  own board is written to the shared one: everybody on the server sees it
+  from then on (`workBoardSync.via` is `server`; the Workforce view says
+  "Shared with everyone who has an account on this server").
 - **External agents** (`AcpRuntime`). An agent with `runnerId` runs on an
   external coding agent over the Agent Client Protocol: a program started on
   this computer that speaks JSON-RPC on stdio. sshS3 sends the prompt, shows
@@ -1446,18 +1523,19 @@ because there is no server to run one on.
   drag between columns, ticket detail with report and review, clean related
   knowledge base page chips (`kbPages`, opening local pages directly in
   Knowledge Base), and the team as a live tree on React Flow (MIT) showing
-  what each agent is doing. On a web server without an S3 team bucket, the
-  board stays per account while servers, clusters, team memory and activity are
-  shared on the server; invite links in `WebAuthGate` use `SSHS3_PUBLIC_URL`
-  when set, require a valid `http://` or `https://` address, and warn on local
-  or private addresses.
+  what each agent is doing. Invite links in `WebAuthGate` use
+  `SSHS3_PUBLIC_URL` when set, require a valid `http://` or `https://`
+  address, and warn on local or private addresses.
 
 Checked with stubbed model responses (`aiHubWorkBoard.test.ts`,
 `workforceView.test.tsx`), against a stand-in ACP agent process
 (`aiHubAcpRuntime.test.ts`) and in a browser against a stand-in
-OpenAI-compatible endpoint. Not checked: a real model, the real Claude Code
-and Codex adapters, two computers sharing a real bucket, and a long
-unattended heartbeat.
+OpenAI-compatible endpoint. Two accounts on one server, each over its own
+websocket, are checked in `twoUsersOneServer.test.ts` (one makes a ticket,
+the other has it; both take it at once and one gets it; personal things stay
+personal) and the store's promises in `fileQueueStore.test.ts`. Not checked:
+a real model, the real Claude Code and Codex adapters, two computers sharing
+a real bucket, and a long unattended heartbeat.
 
 ## The panel (`src/renderer/src/components/AiHub/`)
 

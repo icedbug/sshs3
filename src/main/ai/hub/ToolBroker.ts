@@ -1,4 +1,4 @@
-import { planCoversCommand } from "./PlanMode";
+import { planApprovalsCover, planCoversCommand } from "./PlanMode";
 import crypto from "node:crypto";
 import http from "node:http";
 import type {
@@ -704,7 +704,7 @@ export class ToolBroker {
     changeId: string,
     allowed: boolean,
     note?: string,
-    approver?: { actor?: string; actorId?: string },
+    approver?: { actor?: string; actorId?: string; peer?: boolean },
   ): boolean {
     const approval = this.approvals.get(changeId);
     if (!approval || approval.taskId !== taskId)
@@ -719,12 +719,14 @@ export class ToolBroker {
     if (change) {
       change.approvals ??= [];
       const actor = approver?.actor ?? change.decidedBy?.name ?? "User";
+      const asPeer = approver?.peer ? { peer: true as const } : {};
       if (!allowed) {
         change.approvals.push({
           actor,
           ...(approverId ? { actorId: approverId } : {}),
           at: Date.now(),
           allowed: false,
+          ...asPeer,
           ...(note ? { note } : {}),
         });
       } else {
@@ -742,6 +744,7 @@ export class ToolBroker {
           ...(approverId ? { actorId: approverId } : {}),
           at: Date.now(),
           allowed: true,
+          ...asPeer,
           ...(note ? { note } : {}),
         });
         const approvers = new Set(
@@ -1723,6 +1726,7 @@ export class ToolBroker {
 
     // The user approved a plan that lists exactly this command: it is not asked
     // about a second time. A destructive command is always asked about.
+    let listedInPlan = false;
     if (
       requiresApproval &&
       change.kind === "command" &&
@@ -1731,6 +1735,7 @@ export class ToolBroker {
     ) {
       requiresApproval = false;
       change.decidedHow = "plan";
+      listedInPlan = true;
     }
     // A change to the rules themselves is a person's to make: no mode, policy or plan lets it through unasked.
     if (change.guard) requiresApproval = true;
@@ -1752,7 +1757,23 @@ export class ToolBroker {
     ) {
       requiredApprovals = Math.max(requiredApprovals, 2);
     }
-    if (requiredApprovals > 1) {
+    // A plan that as many people approved covers the commands it lists for all of them: each of them
+    // read the command in the plan. Not a destructive one, not one with hidden values, not a change to
+    // the rules and not one asked for from outside: those are put to the people themselves.
+    // Who approved the plan is looked at first: a step is marked as run only when the plan does cover it.
+    const enoughPeople =
+      requiredApprovals > 1 && change.kind === "command" && !change.hiddenValues && !change.guard && !task.fromOutside
+        ? planApprovalsCover(task.plan, requiredApprovals, ctxRequesterId, isProd)
+        : undefined;
+    const planPeople =
+      enoughPeople && (listedInPlan || (!requiresApproval && planCoversCommand(task, change.commandHash, change.riskLevel)))
+        ? enoughPeople
+        : undefined;
+    if (planPeople) {
+      change.requiredApprovals = requiredApprovals;
+      change.approvals = planPeople.map((vote) => ({ ...vote }));
+      change.decidedHow = "plan";
+    } else if (requiredApprovals > 1) {
       change.requiredApprovals = requiredApprovals;
       requiresApproval = true;
       if (peerApproval === false) {

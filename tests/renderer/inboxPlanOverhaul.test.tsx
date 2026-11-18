@@ -316,6 +316,74 @@ describe("PlanCard 2-button decision flow", () => {
   });
 });
 
+describe("a plan that takes two people", () => {
+  const plan = (extra: Partial<AgentPlan> = {}): AgentPlan => ({
+    id: "p1",
+    goal: "Restart the web server",
+    steps: [{ action: "Restart nginx", target: "web-prod-01", command: "sudo systemctl restart nginx", risk: "medium", check: "is-active prints active", rollback: "sudo systemctl start nginx" }],
+    status: "proposed",
+    revision: 1,
+    review: { verdict: "approve", findings: [] },
+    createdAt: 100,
+    requiredApprovals: 2,
+    ...extra,
+  });
+
+  it("says so before anybody has answered, and approving is this person's own approval, not the start", () => {
+    const act = vi.fn(async () => undefined);
+    render(<PlanCard taskId="task-1" plan={plan()} busy={false} act={act} />);
+    expect(screen.getByTestId("plan-people")).toHaveTextContent("Two people have to approve this plan: you and one more. The others who may approve are asked in their inbox.");
+    expect(screen.getByTestId("plan-status")).toHaveTextContent("waiting for your decision");
+    expect(screen.getByTestId("plan-approve-btn")).toHaveTextContent(/^Approve$/);
+    fireEvent.click(screen.getByTestId("plan-approve-btn"));
+    expect(act).toHaveBeenCalledWith({ action: "plan-decide", taskId: "task-1", approved: true });
+  });
+
+  it("waits for a second person once this person has approved, and offers no second approval", () => {
+    render(<PlanCard taskId="task-1" plan={plan({ approvals: [{ actor: "Omar Lind", actorId: "user:u1", allowed: true, at: 1 }], askEach: "person" })} busy={false} act={vi.fn(async () => undefined)} />);
+    expect(screen.getByTestId("plan-status")).toHaveTextContent("waiting for a second person");
+    expect(screen.getByTestId("plan-people")).toHaveTextContent("You approved. It waits for one more person: the others who may approve are asked in their inbox.");
+    expect(screen.queryByTestId("plan-approve-btn")).toBeNull();
+    // What this person chose about each command stands, and cannot be changed after the approval.
+    expect(screen.getByTestId("plan-ask-each")).toBeChecked();
+    expect(screen.getByTestId("plan-ask-each")).toBeDisabled();
+    // The plan can still be taken back.
+    expect(screen.getByTestId("plan-edit-btn")).toBeEnabled();
+  });
+
+  it("says when the second person answered first", () => {
+    render(<PlanCard taskId="task-1" plan={plan({ approvals: [{ actor: "Maria Ek", actorId: "user:u2", allowed: true, peer: true, at: 1 }] })} busy={false} act={vi.fn(async () => undefined)} />);
+    expect(screen.getByTestId("plan-people")).toHaveTextContent("Approved by Maria Ek. It waits for your own answer.");
+    expect(screen.getByTestId("plan-status")).toHaveTextContent("waiting for your decision");
+    expect(screen.getByTestId("plan-approve-btn")).toBeEnabled();
+  });
+
+  it("names the two once it is approved", () => {
+    render(
+      <PlanCard
+        taskId="task-1"
+        plan={plan({
+          status: "approved",
+          approvals: [
+            { actor: "Omar Lind", actorId: "user:u1", allowed: true, at: 1 },
+            { actor: "Maria Ek", actorId: "user:u2", allowed: true, peer: true, at: 2 },
+          ],
+        })}
+        busy={false}
+        act={vi.fn(async () => undefined)}
+      />,
+    );
+    expect(screen.getByTestId("plan-people")).toHaveTextContent("Approved by you and Maria Ek.");
+    expect(screen.getByTestId("plan-covers")).toHaveTextContent("Approved: the listed commands run without asking again; destructive ones still ask.");
+  });
+
+  it("says nothing about people for a plan one person approves", () => {
+    render(<PlanCard taskId="task-1" plan={plan({ requiredApprovals: 1 })} busy={false} act={vi.fn(async () => undefined)} />);
+    expect(screen.queryByTestId("plan-people")).toBeNull();
+    expect(screen.getByTestId("plan-approve-btn")).toHaveTextContent("Approve & Execute");
+  });
+});
+
 describe("TerminalControl inline pending approval bar & controls", () => {
   it("shows blast radius, host, reason, command preview, Approve Once, Always Allow Prefix (safe), Deny, Return Control & Step-by-step", async () => {
     const onRequest = vi.fn(async () => makeHub());

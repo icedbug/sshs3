@@ -226,6 +226,7 @@ function createHarness(options: {
     beginWorkforceRun: vi.fn(),
     investigate: vi.fn().mockResolvedValue([]),
     reviewPlan: vi.fn(),
+    planProposed: vi.fn(),
     saveTicketFrom: vi.fn(),
     notePageOpened: vi.fn(),
     noteKbGap: vi.fn(),

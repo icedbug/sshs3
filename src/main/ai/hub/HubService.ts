@@ -31,6 +31,7 @@ import type {
   MemoryEntry,
   MemoryProposal,
   MissionAgent,
+  PeerApprovalItem,
   RunbookTemplate,
   S3WorkspaceConfig,
   StartAgentTask,
@@ -369,6 +370,8 @@ export function taskForSnapshot(task: AgentTask): AgentTask {
 
 const READ_ONLY_ACTIONS: ReadonlySet<HubRequest["action"]> = new Set<HubRequest["action"]>([
   "task-read",
+  // The answer goes to another member's hub: nothing of this one's is written.
+  "peer-approve",
   "audit-read",
   "audit-export",
   "recording-read",
@@ -619,6 +622,15 @@ export interface HubHost {
    * approvals between accounts): only one person can approve here, and nothing asks for two.
    */
   peerApproval?: () => boolean;
+  /**
+   * On the web server: the changes in other members' runs that wait for a second person and that this
+   * member may answer (the server has checked that they may).
+   */
+  peerWaiting?: () => PeerApprovalItem[];
+  /** On the web server: this member's answer to one of them. Refused, in words, when it is not theirs to give. */
+  peerDecide?: (answer: { ownerId: string; taskId: string; changeId: string; approved: boolean; note?: string }) => Promise<void>;
+  /** On the web server: this hub's own changes that wait for a second person are not the same as a moment ago; the other members are told. */
+  peerWaitingChanged?: () => void;
   peerPresenceProvider?:() => import("../../../shared/types/aiHub").WorkspacePresenceEntry[];
   onSharedWorkspaceChanged?: () => void;
   /**
@@ -1550,6 +1562,7 @@ export class HubService {
     const resolved = this.broker.approve(taskId, changeId, allowed, note?.trim() ? clip(note.trim(), 1000) : undefined, {
       actor: name,
       actorId,
+      peer: true,
     });
     const change = this.store.data.tasks.find((t) => t.id === taskId)?.changes.find((c) => c.id === changeId);
     if (change && (resolved || change.status !== "pending")) change.decidedBy = { name, at: Date.now(), allowed };
@@ -1557,21 +1570,241 @@ export class HubService {
     return resolved;
   }
 
+  /** How a plan stands with the people who have to approve it, by the rules in force for what it touches. */
+  private planApprovalStatus(task: AgentTask, plan: AgentPlan, approvals: ReadonlyArray<AgentChangeApproval>) {
+    const target = task.target?.label ?? plan.steps.find((s) => s.target?.trim())?.target;
+    const ctx = this.resolveSafetyContext(task, target);
+    const status = checkPlanApprovals(plan, {
+      approvals,
+      // The person whose run it is: their approval alone is never the two.
+      proposer: this.localApproverId(),
+      targetTags: ctx.targetTags,
+      defaultTarget: task.target?.label,
+      policy: ctx.policy,
+      clusterPolicy: ctx.clusterPolicy,
+    });
+    return { status, tags: ctx.targetTags ?? [] };
+  }
+
+  /** A plan was just proposed: how many people have to approve it is written on it, for whoever reads it. */
+  private planProposed(task: AgentTask): void {
+    const plan = task.plan;
+    if (!plan || plan.status !== "proposed") return;
+    const needs = this.planApprovalStatus(task, plan, plan.approvals ?? []).status.requiredApprovals;
+    if (needs > 1 && this.peerApprovalPossible()) plan.requiredApprovals = needs;
+    else delete plan.requiredApprovals;
+  }
+
+  /**
+   * A person's answer to the plan a conversation's agent proposed. `who` is the person answering: the
+   * one whose run it is, or, on a server several people share, another member answering as the second
+   * person (approvePlanAsPeer). Returns the snapshot of the conversation going on (the plan was
+   * approved, or sent back with a note), or nothing when it only recorded the answer.
+   *
+   * What another member writes is shown to the person whose run it is. It is never sent to the agent as
+   * that person's words, and a second person's no does not send the agent back to work.
+   */
+  private async decidePlan(
+    task: AgentTask,
+    answer: { approved: boolean; note?: string; askEach?: boolean },
+    who: { actor: string; actorId: string; peer?: boolean },
+  ): Promise<HubSnapshot | undefined> {
+    const plan = task.plan;
+    if (!plan || plan.status !== "proposed") throw new Error("There is no plan waiting for a decision in this conversation");
+    if (active(task)) throw new Error("The agent is still working; decide when it has stopped");
+    const note = answer.note?.trim();
+    const { actor, actorId } = who;
+    const vote = (allowed: boolean): AgentChangeApproval => ({
+      actor,
+      actorId,
+      at: Date.now(),
+      allowed,
+      ...(who.peer ? { peer: true } : {}),
+      ...(note ? { note: boundedContext(note, 1000) } : {}),
+    });
+    const say = (text: string): void => {
+      task.messages.push({ id: crypto.randomUUID(), role: "system", text, at: Date.now() });
+      task.updatedAt = Date.now();
+    };
+    // Another member's own words, quoted as theirs for the person whose run it is.
+    const wrote = who.peer && note ? ` They wrote: "${boundedContext(note, 1000)}"` : "";
+    if (this.getKnownServers().length === 0) {
+      await this.collectExtraContext().catch(() => undefined);
+    }
+    const planTargets = Array.from(new Set([task.target?.label, ...plan.steps.map((s) => s.target)].filter((t): t is string => Boolean(t?.trim()))));
+    if (answer.approved) {
+      for (const tgt of planTargets.length ? planTargets : [undefined]) {
+        const tgtCtx = this.resolveSafetyContext(task, tgt ?? task.target?.label);
+        if (tgtCtx.clusterPolicy?.frozenUntil && tgtCtx.clusterPolicy.frozenUntil > Date.now()) {
+          throw new Error(`Cluster is in a change freeze until ${new Date(tgtCtx.clusterPolicy.frozenUntil).toISOString()}.`);
+        }
+      }
+      const prevApprovals = [...(plan.approvals ?? [])];
+      if (prevApprovals.some((a) => a.allowed && (a.actorId || a.actor).toLowerCase() === actorId.toLowerCase())) {
+        throw new Error("You already approved this plan; it needs the approval of another person.");
+      }
+      const nextApprovals: AgentChangeApproval[] = [...prevApprovals, vote(true)];
+      const approvalStatus = this.planApprovalStatus(task, plan, nextApprovals).status;
+      if (!approvalStatus.satisfied && approvalStatus.requiredApprovals > 1 && !this.peerApprovalPossible()) {
+        throw new Error(
+          `This plan needs the approval of ${approvalStatus.requiredApprovals} different people (the cluster's policy), and only one person can approve in this app.`,
+        );
+      }
+      plan.approvals = nextApprovals;
+      plan.requiredApprovals = approvalStatus.requiredApprovals;
+      if (!approvalStatus.satisfied) {
+        // What the person whose run it is chose about each command is kept for when the plan is approved.
+        if (!who.peer && answer.askEach === true && !plan.askEach) plan.askEach = "person";
+        say(
+          who.peer
+            ? `${actor} approved this plan as the second person. It waits for your own answer.`
+            : approvalStatus.requiredApprovals === 2
+              ? "You approved this plan. Two people have to approve it: the others who may are asked in their inbox, and the agent starts when one of them has."
+              : `You approved this plan. ${approvalStatus.requiredApprovals} different people have to approve it: the others who may are asked in their inbox, and the agent starts when enough of them have.`,
+        );
+        this.changed();
+        return undefined;
+      }
+      plan.decidedAt = Date.now();
+      plan.status = "approved";
+      if (approvalStatus.isProd) plan.production = true;
+      else delete plan.production;
+      // What the person whose run it is added, whoever of the two answered last.
+      const ownNote = who.peer ? nextApprovals.find((a) => a.allowed && !a.peer)?.note : note;
+      // What this approval covers is settled here, where the person decided, and written on the plan.
+      // A second person approves the plan as it stands: what is asked about each command is the
+      // plan's own promise, or what the person whose run it is chose when they approved.
+      const asks = who.peer ? plan.askEach : approvalAsksEach(plan, { note, askEach: answer.askEach });
+      if (asks) plan.askEach = asks;
+      else delete plan.askEach;
+      if (ownNote) plan.decisionNote = boundedContext(ownNote, 2000);
+      // The agent is held to the plan: its steps become its task list.
+      task.todos = todosFromPlan(plan);
+      if (who.peer) say(`${actor} approved this plan as the second person.${wrote}`);
+      this.changed();
+      if (!who.peer) return this.request({ action: "reply", taskId: task.id, text: approvalMessage(plan, ownNote) });
+      try {
+        return await this.request({ action: "reply", taskId: task.id, text: approvalMessage(plan, ownNote) });
+      } catch (error) {
+        // The plan is approved all the same. Why the agent did not start is for the person whose run it is.
+        say(`The plan is approved, but the agent could not be started again: ${clip(error instanceof Error ? error.message : String(error), 300)} Send it a message to go on.`);
+        this.changed();
+        return undefined;
+      }
+    }
+    plan.decidedAt = Date.now();
+    plan.approvals = [...(plan.approvals ?? []), vote(false)];
+    plan.status = "rejected";
+    if (who.peer) {
+      say(`${actor} did not approve this plan.${wrote} Nothing was run. Ask the agent for a new plan, or go on another way.`);
+      this.changed();
+      return undefined;
+    }
+    if (note) {
+      plan.decisionNote = boundedContext(note, 2000);
+      this.changed();
+      return this.request({ action: "reply", taskId: task.id, text: rejectionMessage(note) });
+    }
+    this.changed();
+    return undefined;
+  }
+
+  /**
+   * Another signed-in member of the team server answers the plan waiting in this person's conversation,
+   * as the second person. The web server calls this after it has checked that member may; their answer
+   * counts as theirs, never as a second one of this person's.
+   */
+  async approvePlanAsPeer(taskId: string, allowed: boolean, peer: { id: string; name: string }, note?: string): Promise<void> {
+    if (!this.peerApprovalPossible()) throw new Error("Approvals are not shared between people on this server.");
+    const actorId = `user:${requiredText(peer.id)}`;
+    if (actorId === this.localApproverId()) throw new Error("The person a plan is made for answers it in their own app.");
+    const task = this.store.data.tasks.find((t) => t.id === taskId);
+    if (!task) throw new Error("That conversation is not here any more.");
+    await this.decidePlan(
+      task,
+      { approved: allowed, ...(note?.trim() ? { note: clip(note.trim(), 1000) } : {}) },
+      { actor: requiredText(peer.name), actorId, peer: true },
+    );
+    // Recorded now: a request of this person's own saves at its end, this one is somebody else's.
+    await this.store.save().catch(() => undefined);
+  }
+
   /** Changes in this app waiting on a person's approval, for the web server to show to the other members. */
-  waitingForApproval(): Array<{ taskId: string; changeId: string; command?: string; target?: string; requiredApprovals: number; approvedBy: string[] }> {
+  waitingForApproval(): Array<{
+    taskId: string;
+    changeId: string;
+    agentName?: string;
+    description: string;
+    command?: string;
+    target?: string;
+    risk?: AgentChange["riskLevel"];
+    /** The tags of the server it is about: whether it is production decides who may be the second person. */
+    targetTags: string[];
+    requiredApprovals: number;
+    approvedBy: string[];
+    /** The ones who approved, as the broker counts them (an account's id where it has one). */
+    approvers: Array<{ actor: string; actorId?: string; allowed: boolean }>;
+    at: number;
+    /** Set when what waits is a plan, not one change: its steps, for the person deciding. `changeId` is then the plan's id. */
+    plan?: { steps: Array<{ action: string; command?: string; target?: string; risk: string }> };
+  }> {
     if (!this.peerApprovalPossible()) return [];
-    return this.store.data.tasks.flatMap((task) =>
+    const plans = this.store.data.tasks.flatMap((task) => {
+      const plan = task.plan;
+      // Decided when the agent has stopped, as by the person whose run it is. A test run's plan and a
+      // summary's are nobody's to approve.
+      if (!plan || plan.status !== "proposed" || active(task) || task.evalCaseId || task.distillSourceId) return [];
+      const { status, tags } = this.planApprovalStatus(task, plan, plan.approvals ?? []);
+      if (status.requiredApprovals < 2) return [];
+      const target = task.target?.label ?? plan.steps.find((s) => s.target?.trim())?.target;
+      return [
+        {
+          taskId: task.id,
+          changeId: plan.id,
+          ...(task.agentName ? { agentName: task.agentName } : {}),
+          description: plan.goal,
+          ...(target ? { target } : {}),
+          // A plan counts as one for production by the names of what it touches too: said here as a tag,
+          // so the server asks only somebody who may approve on production.
+          targetTags: status.isProd && !tags.some(isProdTag) ? [...tags, "production"] : tags,
+          requiredApprovals: status.requiredApprovals,
+          approvedBy: (plan.approvals ?? []).filter((a) => a.allowed).map((a) => a.actor),
+          approvers: (plan.approvals ?? []).map((a) => ({ actor: a.actor, ...(a.actorId ? { actorId: a.actorId } : {}), allowed: a.allowed })),
+          at: plan.createdAt,
+          plan: { steps: plan.steps.map((st) => ({ action: st.action, ...(st.command ? { command: st.command } : {}), ...(st.target ? { target: st.target } : {}), risk: st.risk })) },
+        },
+      ];
+    });
+    const changes = this.store.data.tasks.flatMap((task) =>
       task.changes
         .filter((c) => c.status === "pending" && (c.requiredApprovals ?? 1) > 1 && this.broker.waitingOnPerson(task.id))
         .map((c) => ({
           taskId: task.id,
           changeId: c.id,
+          ...(task.agentName ? { agentName: task.agentName } : {}),
+          description: c.description,
           ...(c.command ? { command: c.command } : {}),
           ...(c.target ? { target: c.target } : {}),
+          ...(c.riskLevel ? { risk: c.riskLevel } : {}),
+          targetTags: this.resolveSafetyContext(task, c.target).targetTags ?? [],
           requiredApprovals: c.requiredApprovals ?? 1,
           approvedBy: (c.approvals ?? []).filter((a) => a.allowed).map((a) => a.actor),
+          approvers: (c.approvals ?? []).map((a) => ({ actor: a.actor, ...(a.actorId ? { actorId: a.actorId } : {}), allowed: a.allowed })),
+          at: c.at,
         })),
     );
+    return [...plans, ...changes];
+  }
+
+  /** What this hub last told the server about its own changes waiting for a second person. */
+  private peerWaitingTold = "";
+
+  /**
+   * Another member's change that needs a second person has started to wait, or no longer does: this
+   * member's windows fetch again and their notification channels are told. Called by the server.
+   */
+  peerApprovalsChanged(): void {
+    this.changed();
   }
 
   /**
@@ -2576,6 +2809,8 @@ export class HubService {
       workTickets: live(this.store.data.workTickets),
       agentUsage: this.usageTotal(),
       workforceTemplates: templateSummaries(),
+      // Other members' changes that wait for a second person, where the server passes them between accounts.
+      ...(this.host.peerWaiting ? { peerApprovals: this.host.peerWaiting() } : {}),
       workBoardSync: {
         shared: Boolean(this.teamStore()),
         // Who it is shared with: everyone who has the team's bucket, or everyone with an account on this server.
@@ -3208,103 +3443,25 @@ export class HubService {
         this.s3Workspace.schedulePush(400);
         break;
       }
+      case "peer-approve": {
+        if (!this.host.peerDecide) throw new Error("Approvals are not passed between people here.");
+        await this.host.peerDecide({
+          ownerId: requiredText(request.ownerId),
+          taskId: requiredText(request.taskId),
+          changeId: requiredText(request.changeId),
+          approved: request.approved === true,
+          ...(typeof request.note === "string" && request.note.trim() ? { note: clip(request.note.trim(), 1000) } : {}),
+        });
+        break;
+      }
       case "plan-decide": {
-        const task = this.task(request.taskId);
-        const plan = task.plan as
-          | (AgentPlan & { approvals?: AgentChangeApproval[]; requiredApprovals?: number })
-          | undefined;
-        if (!plan || plan.status !== "proposed")
-          throw new Error("There is no plan waiting for a decision in this conversation");
-        if (active(task))
-          throw new Error("The agent is still working; decide when it has stopped");
-        const note = request.note?.trim();
-        const actor = await this.resolveActorName();
-        if (this.getKnownServers().length === 0) {
-          await this.collectExtraContext().catch(() => undefined);
-        }
-        const planTargets = Array.from(
-          new Set(
-            [task.target?.label, ...plan.steps.map((s) => s.target)].filter(
-              (t): t is string => Boolean(t?.trim()),
-            ),
-          ),
+        const decided = await this.decidePlan(
+          this.task(request.taskId),
+          { approved: request.approved === true, note: request.note, askEach: request.askEach },
+          { actor: await this.resolveActorName(), actorId: this.localApproverId() },
         );
-        const safetyCtx = this.resolveSafetyContext(task, task.target?.label ?? planTargets[0]);
-        if (request.approved) {
-          for (const tgt of planTargets.length ? planTargets : [undefined]) {
-            const tgtCtx = tgt ? this.resolveSafetyContext(task, tgt) : safetyCtx;
-            if (tgtCtx.clusterPolicy?.frozenUntil && tgtCtx.clusterPolicy.frozenUntil > Date.now()) {
-              throw new Error(
-                `Cluster is in a change freeze until ${new Date(tgtCtx.clusterPolicy.frozenUntil).toISOString()}.`,
-              );
-            }
-          }
-          const prevApprovals = [...(plan.approvals ?? [])];
-          const actorId = this.localApproverId();
-          if (prevApprovals.some((a) => a.allowed && (a.actorId || a.actor).toLowerCase() === actorId.toLowerCase())) {
-            throw new Error("You already approved this plan; it needs the approval of another person.");
-          }
-          const nextApprovals: AgentChangeApproval[] = [
-            ...prevApprovals,
-            { actor, actorId, at: Date.now(), allowed: true, ...(note ? { note: boundedContext(note, 1000) } : {}) },
-          ];
-          const approvalStatus = checkPlanApprovals(plan, {
-            approvals: nextApprovals,
-            proposer: actorId,
-            targetTags: safetyCtx.targetTags,
-            defaultTarget: task.target?.label,
-            policy: safetyCtx.policy,
-            clusterPolicy: safetyCtx.clusterPolicy,
-          });
-          if (!approvalStatus.satisfied && approvalStatus.requiredApprovals > 1 && !this.peerApprovalPossible()) {
-            throw new Error(
-              `This plan needs the approval of ${approvalStatus.requiredApprovals} different people (the cluster's policy), and only one person can approve in this app.`,
-            );
-          }
-          plan.approvals = nextApprovals;
-          plan.requiredApprovals = approvalStatus.requiredApprovals;
-          if (!approvalStatus.satisfied) {
-            task.messages.push({
-              id: crypto.randomUUID(),
-              role: "system",
-              text: approvalStatus.reason || `Plan approval recorded (${approvalStatus.distinctApprovers.length}/${approvalStatus.requiredApprovals}); awaiting peer approval.`,
-              at: Date.now(),
-            });
-            task.updatedAt = Date.now();
-            this.changed();
-            break;
-          }
-          plan.decidedAt = Date.now();
-          plan.status = "approved";
-          // What this approval covers is settled here, where the person decided, and written on the plan.
-          const asks = approvalAsksEach(plan, { note, askEach: request.askEach });
-          if (asks) plan.askEach = asks;
-          else delete plan.askEach;
-          if (note) plan.decisionNote = boundedContext(note, 2000);
-          // The agent is held to the plan: its steps become its task list.
-          task.todos = todosFromPlan(plan);
-          this.changed();
-          return this.request({
-            action: "reply",
-            taskId: task.id,
-            text: approvalMessage(plan, note),
-          });
-        }
-        plan.decidedAt = Date.now();
-        plan.approvals = [
-          ...(plan.approvals ?? []),
-          { actor, actorId: this.localApproverId(), at: Date.now(), allowed: false, ...(note ? { note: boundedContext(note, 1000) } : {}) },
-        ];
-        plan.status = "rejected";
-        if (note) {
-          plan.decisionNote = boundedContext(note, 2000);
-          this.changed();
-          return this.request({
-            action: "reply",
-            taskId: task.id,
-            text: rejectionMessage(note),
-          });
-        }
+        // Approved or sent back with a note, the conversation went on: that request's answer is this one's.
+        if (decided) return decided;
         break;
       }
       case "memory-proposal-accept": {
@@ -6908,6 +7065,17 @@ export class HubService {
     // Before the early return below: a change while a save is pending must still reach the inbox.
     this.pokeInbox();
     this.auditFinishedChanges();
+    // A change of this member's that waits for a second person, or one that no longer does: the other
+    // members' windows are told, so it is in their inbox (or out of it) without their asking.
+    if (this.host.peerWaitingChanged && this.initialized) {
+      const waiting = this.waitingForApproval()
+        .map((w) => `${w.changeId}:${w.approvers.length}`)
+        .join(",");
+      if (waiting !== this.peerWaitingTold) {
+        this.peerWaitingTold = waiting;
+        this.host.peerWaitingChanged();
+      }
+    }
     // The board kept on this server (no bucket): what was just marked for the team is written there now,
     // and the other accounts are told the moment it is. With a bucket it waits for the next look, as before.
     if (
@@ -8237,6 +8405,8 @@ export class HubService {
       tasks: this.store.data.tasks,
       workTickets: live(this.store.data.workTickets),
       dailyReport: this.store.data.dailyReport,
+      // Other members' changes that need a second person and that this member may answer.
+      ...(this.host.peerWaiting ? { peerApprovals: this.host.peerWaiting() } : {}),
       // A snoozed item is out of the inbox until its time: nobody is told about it, or reminded.
       inboxState: this.storeDataExtra().inboxState,
       serverFacts: {
@@ -8246,7 +8416,7 @@ export class HubService {
           .filter((r) => this.getKnownServers().some((s) => s.id === r.serverId) && !this.factsSettings().exclude.includes(r.serverId))
           .map((r) => ({ serverId: r.serverId, name: r.name, status: r.status, collectedAt: r.collectedAt, problems: this.factsProblems(r), changes: [] })),
       },
-    }, options).filter((item) => NOTIFY_KINDS.includes(item.kind));
+    }, options).filter((item) => item.kind === "peer" || NOTIFY_KINDS.includes(item.kind));
   }
 
   /**
@@ -8282,16 +8452,21 @@ export class HubService {
   private notifyItem(item: InboxItem): NotifyItem {
     const task = item.taskId ? this.store.data.tasks.find((t) => t.id === item.taskId) : undefined;
     const change = item.changeId ? task?.changes.find((c) => c.id === item.changeId) : undefined;
+    // A teammate's plan is said to be one: it is read whole before it is answered.
+    const peerPlan =
+      item.kind === "peer" && this.host.peerWaiting?.().some((p) => p.ownerId === item.ownerId && p.changeId === item.changeId && p.plan);
     return {
       id: item.id,
       kind: item.kind,
+      ...(peerPlan ? { headline: "A teammate's plan needs a second person" } : {}),
       title: item.title,
       detail: item.detail,
       from: item.kind === "approval" ? task?.agentName || "Assistant" : item.from,
       target: item.target,
       risk: item.risk,
       reason: change?.riskReason,
-      command: change?.command,
+      // A teammate's change is not in this member's own conversations: the item carries its command.
+      command: change?.command ?? (item.kind === "peer" ? (item.detail ?? item.title) : undefined),
       check: change?.check?.command,
       rollback: change?.rollback?.command,
       // What is left of the wait, not the whole of it: a reminder comes when part of it has gone.
@@ -8355,19 +8530,21 @@ export class HubService {
       data.flapCooldown = Object.fromEntries(
         Object.entries(data.flapCooldown).filter(([, v]) => (v.suppressedUntil ?? 0) > now || now - v.lastAt <= 3_600_000),
       );
-      const blocking = fresh.filter((i) => ["approval", "plan", "question"].includes(i.kind));
+      const blocking = fresh.filter((i) => ["approval", "peer", "plan", "question"].includes(i.kind));
       if (blocking.length) {
         const first = blocking[0];
-        const run = first.taskId ? this.store.data.tasks.find((t) => t.id === first.taskId) : undefined;
+        const run = first.taskId && first.kind !== "peer" ? this.store.data.tasks.find((t) => t.id === first.taskId) : undefined;
         // The command itself, not only what the agent called it: on this computer's own screen, for the person to decide on.
-        const command = first.kind === "approval" ? run?.changes.find((c) => c.id === first.changeId)?.command : undefined;
+        const command = first.kind === "approval" ? run?.changes.find((c) => c.id === first.changeId)?.command : first.kind === "peer" ? first.detail : undefined;
         this.notify(
           blocking.length === 1
             ? first.kind === "approval"
               ? run && worksOnItsOwn(run)
                 ? "A run nobody is watching waits for your approval"
                 : "Approval needed"
-              : "An agent is waiting for you"
+              : first.kind === "peer"
+                ? "A teammate's change needs a second person"
+                : "An agent is waiting for you"
             : `${blocking.length} things are waiting for you`,
           `${first.from ?? "Assistant"}: ${command && command !== first.title ? `${command} (${first.title})` : first.title}`,
         );
@@ -11121,6 +11298,7 @@ export class HubService {
       beginWorkforceRun: this.beginWorkforceRun.bind(this),
       investigate: this.investigate.bind(this),
       reviewPlan: this.reviewPlan.bind(this),
+      planProposed: this.planProposed.bind(this),
       saveTicketFrom: this.saveTicketFrom.bind(this),
       notePageOpened: this.notePageOpened.bind(this),
       noteKbGap: this.noteKbGap.bind(this),

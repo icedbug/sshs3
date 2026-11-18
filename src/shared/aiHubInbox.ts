@@ -4,12 +4,14 @@ import type { AgentTask, HubSnapshot } from "./types/aiHub";
 export const isConversation = (t: Pick<AgentTask, "workforceRunId" | "distillSourceId" | "evalCaseId">): boolean =>
   !t.workforceRunId && !t.distillSourceId && !t.evalCaseId;
 
-export type InboxKind = "approval" | "plan" | "question" | "review" | "blocked" | "alert" | "health" | "knowledge" | "report";
+export type InboxKind = "approval" | "peer" | "plan" | "question" | "review" | "blocked" | "alert" | "health" | "knowledge" | "report";
 
 export type InboxPriorityBucket = "blocking" | "incident" | "review";
 
 const BUCKET_BY_KIND: Record<InboxKind, InboxPriorityBucket> = {
   approval: "blocking",
+  // Another member's run is held up until a second person answers.
+  peer: "blocking",
   plan: "blocking",
   question: "blocking",
   alert: "incident",
@@ -41,6 +43,8 @@ export interface InboxItem {
   target?: string;
   taskId?: string;
   changeId?: string;
+  /** With `peer`: whose run the change is in. The task and the change are theirs, not this member's. */
+  ownerId?: string;
   ticketId?: string;
   findingId?: string;
   /** A server with problems of its own (disk, certificate, failed service). */
@@ -64,7 +68,7 @@ const KB_WORTH_A_LOOK = new Set(["gap", "contradiction", "dead-target", "lost-so
  */
 /** What the inbox is built from: the same on screen and where notifications are sent from. */
 export type InboxInput = Pick<HubSnapshot, "tasks"> &
-  Partial<Pick<HubSnapshot, "workTickets" | "kbFindings" | "dailyReport" | "inboxState">> & {
+  Partial<Pick<HubSnapshot, "workTickets" | "kbFindings" | "dailyReport" | "inboxState" | "peerApprovals">> & {
     serverFacts?: Pick<NonNullable<HubSnapshot["serverFacts"]>, "servers">;
   };
 
@@ -104,13 +108,47 @@ export function filterInboxItems(items: InboxItem[], options?: InboxFilterOption
   });
 }
 
+/** How long a plan nobody has answered stays in the inbox. It can still be answered in its conversation after that. */
+export const PLAN_WAITS_MS = 7 * 86_400_000;
+
+/** What is said about the people who have to approve a plan, when it takes more than one. */
+export function planPeopleLine(plan: Pick<NonNullable<AgentTask["plan"]>, "approvals" | "requiredApprovals" | "status">): string | undefined {
+  const needs = plan.requiredApprovals ?? 1;
+  if (needs < 2) return undefined;
+  const yes = (plan.approvals ?? []).filter((a) => a.allowed);
+  const others = yes.filter((a) => a.peer).map((a) => a.actor);
+  const mine = yes.some((a) => !a.peer);
+  if (plan.status === "approved") return `Approved by ${yes.map((a) => (a.peer ? a.actor : "you")).join(" and ")}.`;
+  if (plan.status !== "proposed") return undefined;
+  if (mine) return `You approved. It waits for ${needs - yes.length > 1 ? `${needs - yes.length} more people` : "one more person"}: the others who may approve are asked in their inbox.`;
+  if (others.length > 0) return `Approved by ${others.join(" and ")}. It waits for your own answer.`;
+  return `${needs === 2 ? "Two" : needs} people have to approve this plan: you and ${needs === 2 ? "one more" : `${needs - 1} more`}. The others who may approve are asked in their inbox.`;
+}
+
 export function inboxItems(hub: InboxInput, options?: InboxFilterOptions): InboxItem[] {
   const out: InboxItem[] = [];
+  const now = options?.now ?? Date.now();
   for (const task of hub.tasks) {
     if (!isConversation(task)) continue;
     const live = ["running", "waiting", "queued"].includes(task.status);
-    if (!live) continue;
     const who = task.agentName || "Assistant";
+    // A plan is answered when the agent has stopped, so that is when it has to be here.
+    const plan = task.plan?.status === "proposed" && (live || now - task.plan.createdAt < PLAN_WAITS_MS) ? task.plan : undefined;
+    if (plan) {
+      const people = planPeopleLine(plan);
+      out.push({
+        id: `plan:${plan.id}`,
+        kind: "plan",
+        title: plan.goal,
+        detail: `${plan.steps.length} step${plan.steps.length === 1 ? "" : "s"}${plan.review.verdict === "revise" ? " · the reviewer has objections" : ""}${people ? ` · ${people}` : ""}`,
+        from: who,
+        at: plan.createdAt,
+        since: plan.createdAt,
+        target: task.target?.label,
+        taskId: task.id,
+      });
+    }
+    if (!live) continue;
     for (const change of task.changes)
       if (change.status === "pending")
         out.push({
@@ -127,19 +165,7 @@ export function inboxItems(hub: InboxInput, options?: InboxFilterOptions): Inbox
           changeId: change.id,
           risk: change.riskLevel,
         });
-    if (task.plan?.status === "proposed")
-      out.push({
-        id: `plan:${task.plan.id}`,
-        kind: "plan",
-        title: task.plan.goal,
-        detail: `${task.plan.steps.length} step${task.plan.steps.length === 1 ? "" : "s"}${task.plan.review.verdict === "revise" ? " · the reviewer has objections" : ""}`,
-        from: who,
-        at: task.plan.createdAt,
-        since: task.plan.createdAt,
-        target: task.target?.label,
-        taskId: task.id,
-      });
-    else if (task.status === "waiting" && !task.changes.some((c) => c.status === "pending"))
+    if (!plan && task.status === "waiting" && !task.changes.some((c) => c.status === "pending"))
       out.push({
         id: `question:${task.id}`,
         kind: "question",
@@ -193,10 +219,32 @@ export function inboxItems(hub: InboxInput, options?: InboxFilterOptions): Inbox
   for (const f of hub.kbFindings ?? [])
     if (KB_WORTH_A_LOOK.has(f.kind))
       out.push({ id: `knowledge:${f.id}`, kind: "knowledge", title: f.text, detail: f.detail, at: f.at, findingId: f.id });
+  // Another member's change that needs a second person, and that this member may answer.
+  for (const peer of hub.peerApprovals ?? [])
+    out.push({
+      id: `peer:${peer.ownerId}:${peer.changeId}`,
+      kind: "peer",
+      title: peer.plan ? `Plan: ${peer.description}` : peer.description || peer.command || "An action",
+      // A plan is read whole before it is approved: every step, with its command and where it runs.
+      detail: peer.plan
+        ? peer.plan.steps
+            .map((step, i) => `${i + 1}. [${step.risk} risk] ${step.action}${step.target ? ` (on ${step.target})` : ""}${step.command ? `\n   $ ${step.command}` : ""}`)
+            .join("\n")
+        : peer.command && peer.command !== peer.description
+          ? peer.command
+          : undefined,
+      from: `${peer.ownerName}${peer.agentName ? ` (${peer.agentName})` : ""}${peer.target ? ` on ${peer.target}` : ""}`,
+      at: peer.at,
+      since: peer.at,
+      target: peer.target,
+      taskId: peer.taskId,
+      changeId: peer.changeId,
+      ownerId: peer.ownerId,
+      risk: peer.risk,
+    });
   if (hub.dailyReport && !hub.dailyReport.readAt)
     out.push({ id: `report:${hub.dailyReport.day}`, kind: "report", title: `What happened ${hub.dailyReport.day}`, detail: hub.dailyReport.text.slice(0, 240), at: hub.dailyReport.at, since: hub.dailyReport.at });
-  const rank: Record<InboxKind, number> = { approval: 0, plan: 0, question: 0, alert: 1, blocked: 1, health: 2, review: 2, report: 3, knowledge: 4 };
-  const now = options?.now ?? Date.now();
+  const rank: Record<InboxKind, number> = { approval: 0, peer: 0, plan: 0, question: 0, alert: 1, blocked: 1, health: 2, review: 2, report: 3, knowledge: 4 };
   const stateMap = hub.inboxState;
   const enriched = out.map((item): InboxItem => {
     const bucket = inboxPriorityBucket(item.kind);

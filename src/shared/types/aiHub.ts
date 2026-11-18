@@ -46,6 +46,30 @@ export interface ContextSource {
   link?: string;
   tokenEstimate?: number;
 }
+/**
+ * A change in another member's run, on a server several people share, that waits for a second person
+ * and that this member may answer. It is all a person needs to decide: what would run, where, for whom.
+ */
+export interface PeerApprovalItem {
+  /** Whose run it is. */
+  ownerId: string;
+  ownerName: string;
+  taskId: string;
+  changeId: string;
+  /** The agent that asks, when the run is an agent's. */
+  agentName?: string;
+  description: string;
+  command?: string;
+  target?: string;
+  risk?: CommandRiskLevel;
+  /** How many different people have to approve, and who has so far. */
+  requiredApprovals: number;
+  approvedBy: string[];
+  /** When it started to wait. */
+  at: number;
+  /** Set when what waits is a plan, not one change: its steps. `changeId` is then the plan's id. */
+  plan?: { steps: Array<{ action: string; command?: string; target?: string; risk: string }> };
+}
 export interface AgentMessage {
   id: string;
   role: "user" | "assistant" | "system";
@@ -136,6 +160,15 @@ export interface AgentPlan {
    * approval covers the listed commands, as the plan card says.
    */
   askEach?: "plan" | "person" | "note";
+  /** Who has approved it or said no. More than one where several people share a server and a rule asks for two. */
+  approvals?: AgentChangeApproval[];
+  /** How many different people have to approve it, written when it is proposed and again when somebody answers. */
+  requiredApprovals?: number;
+  /**
+   * It was a plan for production when it was approved, so the people who approved it were ones who
+   * may approve there: their approval then also covers a command on production that the plan lists.
+   */
+  production?: boolean;
 }
 /** One tool call an agent made, with what it got back (both masked and shortened). */
 export interface AgentToolRecord {
@@ -225,6 +258,8 @@ export interface AgentChangeApproval {
   at: number;
   allowed: boolean;
   note?: string;
+  /** The answer came from another member of the server, as the second person, not from the one whose run it is. */
+  peer?: boolean;
 }
 
 export interface AgentChangeStructuredCheck {
@@ -1879,6 +1914,8 @@ export interface HubSnapshot {
   agentUsage?: Record<string, AgentUsage>;
   workforceTemplates?: WorkforceTemplateSummary[];
   /** Whether the board is shared through the team bucket, and when it was last read. */
+  /** On a server several people share: other members' changes that wait for a second person and that this member may answer. */
+  peerApprovals?: PeerApprovalItem[];
   /**
    * Whether the board, the agents and the knowledge base are shared, and with whom: everyone who has the
    * team's bucket (`bucket`), or everyone with an account on this server (`server`: a server several
@@ -1949,6 +1986,11 @@ export type HubRequest =
   | { action: "takeover"; sessionId: string }
   | { action: "arm"; sessionId: string; shell: ShellKind }
   | { action: "approve"; taskId: string; changeId: string; approved: boolean; note?: string }
+  /**
+   * This member's answer to a change in another member's run that waits for a second person (one of
+   * `peerApprovals`). The server checks that this member may give it; it counts as theirs.
+   */
+  | { action: "peer-approve"; ownerId: string; taskId: string; changeId: string; approved: boolean; note?: string }
   /**
    * The user's decision on the plan a conversation's agent proposed. Approved:
    * the agent carries it out, and the plan's listed commands run without

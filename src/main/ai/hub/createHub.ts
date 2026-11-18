@@ -54,6 +54,11 @@ export interface CreateHubOptions {
   onSharedWorkspaceChanged?: () => void;
   /** On the web server: where every account's hub keeps the team's board when there is no bucket. */
   sharedWorkStore?: HubHost["sharedWorkStore"];
+  /** On the web server: a second person's approval, passed between the accounts (see HubHost). */
+  peerApproval?: HubHost["peerApproval"];
+  peerWaiting?: HubHost["peerWaiting"];
+  peerDecide?: HubHost["peerDecide"];
+  peerWaitingChanged?: HubHost["peerWaitingChanged"];
   auditShipper?: HubHost["auditShipper"];
   /** On the web server: the one chat bot every account's hub shares. */
   teamChat?: HubHost["teamChat"];
@@ -389,6 +394,10 @@ export function createHub(
     peerPresenceProvider: options?.peerPresenceProvider,
     onSharedWorkspaceChanged: options?.onSharedWorkspaceChanged,
     sharedWorkStore: options?.sharedWorkStore,
+    peerApproval: options?.peerApproval,
+    peerWaiting: options?.peerWaiting,
+    peerDecide: options?.peerDecide,
+    peerWaitingChanged: options?.peerWaitingChanged,
     auditShipper: options?.auditShipper,
     teamChat: options?.teamChat,
     file: (...args) => files.invoke(...args),

@@ -35,9 +35,9 @@ const RULES: { key: BooleanSafetyKey; title: string; detail: string; testId?: st
   },
   {
     key: "requirePeerApprovalOnProd",
-    title: "Require two-person peer approval on production (SoD)",
+    title: "Two people must approve a change on production",
     detail:
-      "Separation of Duties: production changes require a second operator to approve (the requester cannot self-approve).",
+      "A change on a server tagged prod, critical or production runs only when you and one more person have approved it. The other person is asked in their inbox, and their answer counts as theirs.",
     testId: "safety-peer-approval-toggle",
   },
 ];
@@ -67,7 +67,7 @@ const emptyOverride: OverrideDraft = {
 };
 
 /**
- * Command safety policy controls: global safety switches, Two-Person Rule (SoD),
+ * Command safety policy controls: global safety switches, the two-person rule,
  * global allowed command prefixes, and per-cluster / per-tag safety overrides.
  */
 export function SafetyPolicyCard({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.Element {
@@ -120,20 +120,32 @@ export function SafetyPolicyCard({ hub, act }: { hub: HubSnapshot; act: Act }): 
       </div>
 
       <div className="ai-switches">
-        {RULES.map((rule) => (
-          <label key={rule.key}>
-            <input
-              type="checkbox"
-              data-testid={rule.testId}
-              checked={Boolean(policy[rule.key])}
-              onChange={(e) => savePolicy({ [rule.key]: e.target.checked })}
-            />
-            <span>
-              {rule.title}
-              <small>{rule.detail}</small>
-            </span>
-          </label>
-        ))}
+        {RULES.map((rule) => {
+          // Two people can only be asked for where there is a second person who may answer.
+          const nobodyElse = rule.key === "requirePeerApprovalOnProd" && hub.peerApprovalPossible !== true;
+          return (
+            <label key={rule.key}>
+              <input
+                type="checkbox"
+                data-testid={rule.testId}
+                checked={Boolean(policy[rule.key])}
+                disabled={nobodyElse && !policy[rule.key]}
+                onChange={(e) => savePolicy({ [rule.key]: e.target.checked })}
+              />
+              <span>
+                {rule.title}
+                <small>{rule.detail}</small>
+                {nobodyElse && (
+                  <small data-testid="safety-peer-nobody">
+                    {isWebBrowserMode()
+                      ? "Not available to you here: nobody else on this server may approve on production. That takes an administrator other than yourself."
+                      : "Not available here: only one person signs in to this app. It works on an sshS3 server several people share."}
+                  </small>
+                )}
+              </span>
+            </label>
+          );
+        })}
       </div>
 
       <div className="ai-set" data-testid="safety-allow-prefixes">
@@ -188,7 +200,7 @@ export function SafetyPolicyCard({ hub, act }: { hub: HubSnapshot; act: Act }): 
           <div>
             <strong>Per-cluster &amp; per-tag safety overrides</strong>
             <small>
-              Override max autonomy mode, peer approval (SoD), check/rollback requirement, or change freeze per cluster
+              Override max autonomy mode, two-person approval, check/rollback requirement, or change freeze per cluster
               or <code>tag:&lt;name&gt;</code>.
             </small>
             <small data-testid="safety-own-runs-note">
@@ -261,10 +273,11 @@ export function SafetyPolicyCard({ hub, act }: { hub: HubSnapshot; act: Act }): 
                 }
               />
               <span>
-                Require two-person peer approval (2 approvals, SoD)
+                Two people must approve (you and one more)
                 <small>
-                  Needs a team server with a second account. Where only you can approve, untick this or the override
-                  is not saved.
+                  {hub.peerApprovalPossible === true
+                    ? "The other person is asked in their inbox: somebody on this server who may approve there."
+                    : "Needs somebody else who may approve: a second account on a shared server, and on production an administrator other than yourself. Where only you can approve, untick this or the override is not saved."}
                 </small>
               </span>
             </label>
@@ -329,7 +342,7 @@ export function SafetyPolicyCard({ hub, act }: { hub: HubSnapshot; act: Act }): 
                       <span className="ai-badge ai-badge-mode">max: {modes[cp.maxMode] ?? cp.maxMode}</span>
                     )}
                     <span className={`ai-badge ${sodEnabled ? "ai-badge-purple" : ""}`}>
-                      {sodEnabled ? "2-person SoD" : "1 approval"}
+                      {sodEnabled ? "2 people approve" : "1 approval"}
                     </span>
                     {cp.requireCheckAndRollback && (
                       <span className="ai-badge ai-badge-success">check + rollback</span>

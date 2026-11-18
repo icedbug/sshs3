@@ -11,6 +11,7 @@ import {
   newPlan,
   parsePlan,
   parseReview,
+  planApprovalsCover,
   planCoversCommand,
   planGate,
   planPending,
@@ -22,6 +23,7 @@ import {
 import { DirectAgentRuntime } from "../../src/main/ai/hub/DirectAgentRuntime";
 import type { RunEvent } from "../../src/main/ai/hub/AgentRuntime";
 import type { AgentPlan, AgentTask } from "../../src/shared/types/aiHub";
+import { inboxItems } from "../../src/shared/aiHubInbox";
 
 const disposals: Array<() => Promise<unknown> | unknown> = [];
 afterEach(async () => {
@@ -381,6 +383,16 @@ describe("a plan through the hub", () => {
     expect(t.status).toBe("completed");
     const snap = await hub.request({ action: "snapshot" });
     expect(snap.tasks.find((x) => x.id === t.id)!.plan!.steps).toHaveLength(2);
+    // The agent has stopped, and that is when the plan can be answered: it is in the inbox, waiting.
+    expect(inboxItems(snap).find((i) => i.kind === "plan")).toMatchObject({
+      id: `plan:${t.plan!.id}`,
+      taskId: t.id,
+      title: "SSE streams survive 90s",
+      detail: "2 steps · the reviewer has objections",
+      bucket: "blocking",
+    });
+    // One person approves here: nothing is written about how many it takes.
+    expect(t.plan!.requiredApprovals).toBeUndefined();
   });
 
   it("on approval sets the task list to the plan's steps and sends the agent to carry it out", async () => {
@@ -456,6 +468,35 @@ describe("a plan through the hub", () => {
     await expect(
       handleAppAction(hub.appActionHost(), t, { action: "sshs3_plan_propose", payload: { goal: "g", steps: [] } } as never),
     ).rejects.toThrow(/at least one step/);
+  });
+});
+
+describe("a plan that several people approved", () => {
+  const vote = (actor: string, id: string, extra: Record<string, unknown> = {}) => ({ actor, actorId: `user:${id}`, at: 1, allowed: true, ...extra });
+  const two = { status: "approved" as const, approvals: [vote("Omar", "o"), vote("Maria", "m", { peer: true })], production: true };
+
+  it("covers a command it lists that needs as many people, when one of them is somebody else", () => {
+    expect(planApprovalsCover(two, 2, "user:o", true)?.map((a) => a.actor)).toEqual(["Omar", "Maria"]);
+    // The person the run acts for is found whatever the case of the id.
+    expect(planApprovalsCover(two, 2, "USER:O", true)).toHaveLength(2);
+  });
+
+  it("does not when the plan waits, has too few people, or was not approved for production", () => {
+    expect(planApprovalsCover(undefined, 2, "user:o", false)).toBeUndefined();
+    expect(planApprovalsCover({ ...two, status: "proposed" }, 2, "user:o", true)).toBeUndefined();
+    expect(planApprovalsCover({ ...two, status: "rejected" }, 2, "user:o", true)).toBeUndefined();
+    expect(planApprovalsCover({ ...two, approvals: [vote("Omar", "o")] }, 2, "user:o", true)).toBeUndefined();
+    // One person twice is one person.
+    expect(planApprovalsCover({ ...two, approvals: [vote("Omar", "o"), vote("Omar again", "O")] }, 2, "user:o", true)).toBeUndefined();
+    // Three are asked for and two approved.
+    expect(planApprovalsCover(two, 3, "user:o", true)).toBeUndefined();
+    // A command on production, under a plan whose second person was not asked as for production.
+    expect(planApprovalsCover({ ...two, production: false }, 2, "user:o", true)).toBeUndefined();
+    expect(planApprovalsCover({ ...two, production: false }, 2, "user:o", false)).toHaveLength(2);
+    // Somebody said no.
+    expect(planApprovalsCover({ ...two, approvals: [...two.approvals, { ...vote("Lina", "l"), allowed: false }] }, 2, "user:o", true)).toBeUndefined();
+    // A plan one person approved never stands in for two, whatever is asked.
+    expect(planApprovalsCover({ ...two, approvals: [vote("Omar", "o")] }, 1, "user:o", false)).toBeUndefined();
   });
 });
 

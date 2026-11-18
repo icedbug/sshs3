@@ -162,13 +162,13 @@ describe("notification channels: Enter adds the channel", () => {
 
 describe("safety: two-person approval in a new override", () => {
   const peerBox = (): HTMLElement =>
-    within(screen.getByTestId("cluster-policy-form")).getByRole("checkbox", { name: /two-person peer approval/ });
+    within(screen.getByTestId("cluster-policy-form")).getByRole("checkbox", { name: /Two people must approve/ });
 
   it("is unticked where nobody else can approve", () => {
     render(<SafetyPolicyCard hub={makeHub()} act={vi.fn()} />);
     fireEvent.click(screen.getByTestId("add-cluster-policy-btn"));
     expect(peerBox()).not.toBeChecked();
-    expect(screen.getByText(/Needs a team server with a second account/)).toBeInTheDocument();
+    expect(screen.getByText(/Needs somebody else who may approve: a second account on a shared server/)).toBeInTheDocument();
   });
 
   it("is unticked when the flag is false", () => {

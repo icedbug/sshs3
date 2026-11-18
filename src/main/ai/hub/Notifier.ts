@@ -71,7 +71,8 @@ const SEVERITY = { info: 0, warning: 1, critical: 2 } as const;
 
 /** Whether this channel wants this item. */
 export function channelWants(channel: Pick<NotifyChannel, "enabled" | "events" | "alertMinSeverity">, item: Pick<NotifyItem, "kind" | "risk">): boolean {
-  if (!channel.enabled || !channel.events.includes(item.kind)) return false;
+  // A teammate's change that needs a second person is an approval that is asked for: whoever wants to be told of approvals is told.
+  if (!channel.enabled || !channel.events.includes(item.kind === "peer" ? "approval" : item.kind)) return false;
   if (item.kind !== "alert" || !channel.alertMinSeverity) return true;
   const have = SEVERITY[(item.risk as keyof typeof SEVERITY) ?? "warning"] ?? 1;
   return have >= SEVERITY[channel.alertMinSeverity];
@@ -199,6 +200,7 @@ export function evaluateAutoPause(
       item.risk === "critical" ||
       item.risk === "destructive" ||
       item.kind === "approval" ||
+      item.kind === "peer" ||
       item.kind === "plan" ||
       item.kind === "question";
     if (isCriticalOrBlocking) {
@@ -454,6 +456,7 @@ export function verifyChatOpsActionToken(
 
 const HEADLINE: Record<InboxKind, string> = {
   approval: "Approval needed",
+  peer: "A teammate's change needs a second person",
   plan: "A plan to decide",
   question: "An agent has a question",
   blocked: "A run stopped",
@@ -566,8 +569,8 @@ export function renderNotification(channel: NotifyChannel, items: NotifyItem[], 
     const topic = decodeURIComponent(parts.pop() ?? "");
     at.pathname = `/${parts.join("/")}`;
     at.search = "";
-    const top = items.reduce((max, item) => Math.max(max, item.kind === "alert" ? (item.risk === "critical" ? 5 : 4) : ["approval", "plan", "question"].includes(item.kind) ? 4 : item.kind === "report" ? 2 : 3), 1);
-    const tag: Record<InboxKind, string> = { approval: "lock", plan: "clipboard", question: "question", blocked: "octagonal_sign", alert: "rotating_light", health: "warning", review: "eyes", report: "memo", knowledge: "books" };
+    const top = items.reduce((max, item) => Math.max(max, item.kind === "alert" ? (item.risk === "critical" ? 5 : 4) : ["approval", "peer", "plan", "question"].includes(item.kind) ? 4 : item.kind === "report" ? 2 : 3), 1);
+    const tag: Record<InboxKind, string> = { approval: "lock", peer: "busts_in_silhouette", plan: "clipboard", question: "question", blocked: "octagonal_sign", alert: "rotating_light", health: "warning", review: "eyes", report: "memo", knowledge: "books" };
     return {
       url: at.toString(),
       headers: { ...json, ...(channel.secret ? { Authorization: `Bearer ${channel.secret}` } : {}) },
