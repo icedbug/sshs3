@@ -329,8 +329,8 @@ export class KnowledgePart {
   ): Promise<number> {
     const task = await this.runBackground(
       { prompt, mode: "advice", agentName: "Knowledge base", maxCommands: 1, maxMinutes: 8 },
-      // Pages are what agents act on: written on the main model, not the cheap one.
-      { distillSourceId: run.id, title: clip(run.title, 100), mainModel: true },
+      // KB authoring uses its assigned profile, or the main model when no role is assigned.
+      { distillSourceId: run.id, title: clip(run.title, 100), mainModel: true, modelRole: "backgroundDistill" },
     );
     if (task.status !== "completed") throw new Error(task.error || "The run did not finish.");
     if (source.hash) {
@@ -472,7 +472,7 @@ export class KnowledgePart {
     try {
       const task = await this.runBackground(
         { prompt: buildContradictionPrompt(pairs), mode: "advice", agentName: "Knowledge base", maxCommands: 1, maxMinutes: 8 },
-        { distillSourceId: `kbx:${Date.now()}`, title: "Checking pages for contradictions", mainModel: true },
+        { distillSourceId: `kbx:${Date.now()}`, title: "Checking pages for contradictions", mainModel: true, modelRole: "backgroundDistill" },
       );
       const answer = task.messages.filter((m) => m.role === "assistant").at(-1)?.text ?? "";
       const found = task.status === "completed" ? parseContradictions(answer, pairs) : undefined;
@@ -750,7 +750,7 @@ export class KnowledgePart {
    */
   async kbEmbedder(this: HubService): Promise<Embedder | undefined> {
     if (isDemoMode()) return undefined;
-    const config = await this.config.getConfig().catch(() => undefined);
+    const config = await this.config.getConfig("embedding").catch(() => undefined);
     if (
       !config?.enabled ||
       config.provider !== "openai-compatible" ||

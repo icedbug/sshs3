@@ -6,8 +6,6 @@ import { ALL_HUB_VIEWS, type HubViewId } from "../panelShared";
 import { LABS_ENABLED_STORAGE_KEY } from "../panelShared";
 
 export type View = HubViewId;
-/** Where this tab remembers which conversation is open (sessionStorage: kept over a reload, not shared between tabs or people). */
-export const OPEN_TASK_KEY = "sshs3.aiHub.openTask";
 export const VIEWS: View[] = [...ALL_HUB_VIEWS];
 export type Menu = "history" | "target" | "control" | "mention" | "agent" | "views" | null;
 

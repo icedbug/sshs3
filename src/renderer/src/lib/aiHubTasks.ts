@@ -11,6 +11,7 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 import type { AgentChange, AgentMessage, AgentMessagesTail, AgentTask, HubSnapshot, RunStatus } from "@shared/types/aiHub";
 import type { AiHubDeltaEvent, MultiSSHApiWithHubDelta } from "@shared/ipc/createMultiSSHApi";
+import { hubSessionActive, onHubSessionReset } from "./aiHubSession";
 import { applyDeltaToMessages, STREAMED_MESSAGE_ID } from "./aiHubDelta";
 
 /** The window's own way to the hub. Asked for when it is used: a view can be shown before it is there. */
@@ -45,6 +46,13 @@ const publish = (): void => {
   version++;
   for (const listener of listeners) listener();
 };
+
+export function clearFullTaskCache(): void {
+  whole.clear();
+  publish();
+}
+
+onHubSessionReset(clearFullTaskCache);
 
 function subscribe(listener: () => void): () => void {
   listeners.add(listener);
@@ -95,6 +103,7 @@ function upToDate(entry: Whole | undefined, task: AgentTask): boolean {
 }
 
 async function load(taskId: string): Promise<boolean> {
+  if (!hubSessionActive()) return false;
   const entry = whole.get(taskId) ?? { messages: [], changes: new Map<string, AgentChange>(), loaded: false, loading: false, again: false };
   if (entry.loading) {
     entry.again = true;
@@ -104,6 +113,7 @@ async function load(taskId: string): Promise<boolean> {
   whole.set(taskId, entry);
   try {
     const got = await readTask(taskId);
+    if (whole.get(taskId) !== entry) return false;
     if (got) {
       entry.messages = got.messages;
       entry.changes = new Map(got.changes.map((c) => [c.id, c]));
@@ -113,11 +123,11 @@ async function load(taskId: string): Promise<boolean> {
     return Boolean(got);
   } catch {
     // Gone, or the hub is away: the snapshot's own copy is shown, and the next change asks again.
-    if (!entry.loaded) whole.delete(taskId);
+    if (whole.get(taskId) === entry && !entry.loaded) whole.delete(taskId);
     return false;
   } finally {
     entry.loading = false;
-    if (entry.again) {
+    if (entry.again && whole.get(taskId) === entry) {
       entry.again = false;
       void load(taskId);
     }
@@ -165,10 +175,4 @@ export function useFullTask(task: AgentTask | undefined): AgentTask | undefined 
 /** How many messages of a conversation a person wrote, whether or not the snapshot carries it whole. */
 export function userMessageCount(task: AgentTask): number {
   return task.messagesTail?.users ?? task.messages.reduce((n, m) => n + (m.role === "user" ? 1 : 0), 0);
-}
-
-/** For tests: forgets every fetched conversation. */
-export function resetFullTasksForTesting(): void {
-  whole.clear();
-  version++;
 }

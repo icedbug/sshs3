@@ -6,6 +6,7 @@ import path from "node:path";
 import type { MemoryEntry, MissionAgent, WorkspaceServerSummary } from "../../src/shared/types/aiHub";
 import type { FileEntry, IStorageProvider } from "../../src/shared/types/storage";
 import { mergeS3WorkspacePayload } from "../../src/main/ai/hub/S3WorkspaceSyncService";
+import { HubStore } from "../../src/main/ai/hub/HubStore";
 import { WorkSync } from "../../src/main/ai/hub/WorkSync";
 import type { QueueStore } from "../../src/main/ai/hub/LearningQueue";
 
@@ -160,6 +161,33 @@ describe("the workspace merge: a removal and an edit made on a view from before 
     // An edit made after the removal was seen (a new memory under the id, or no base known) stays.
     expect(mergeS3WorkspacePayload({ ...empty, memories: [{ ...edit, baseAt: 250 }] }, removal).merged.memories).toHaveLength(1);
     expect(mergeS3WorkspacePayload({ ...empty, memories: [{ ...edit, baseAt: undefined }] }, removal).merged.memories).toHaveLength(1);
+  });
+
+  it.each([
+    { name: "edit based on an older version", baseAt: 10, remains: false, deletedAt: 31 },
+    { name: "intentional edit after deletion", baseAt: 25, remains: true, deletedAt: 20 },
+    { name: "legacy memory without a base", baseAt: undefined, remains: true, deletedAt: 20 },
+  ])("file and S3 agree on a $name in either order and after a retry", async ({ baseAt, remains, deletedAt }) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "sshs3-memory-merge-"));
+    disposals.push(() => fs.rm(dir, { recursive: true, force: true }));
+    const edit = { ...empty, memories: [memory("m1", { updatedAt: 30, baseAt })], deletedMemoryIds: {} };
+    const removal = { ...empty, memories: [] as MemoryEntry[], deletedMemoryIds: { m1: 20 } };
+    const filename = path.join(dir, "team.json");
+    for (const [local, remote] of [[edit, removal], [removal, edit]]) {
+      const store = new HubStore(path.join(dir, "hub.json"));
+      store.data.memories = local.memories;
+      store.data.deletedMemoryIds = local.deletedMemoryIds;
+      await fs.writeFile(filename, JSON.stringify(remote));
+      await store.syncSharedFile(filename);
+      const s3 = mergeS3WorkspacePayload(local, remote).merged;
+      const published = JSON.parse(await fs.readFile(filename, "utf8")) as typeof s3;
+      for (const state of [store.data, published, s3]) {
+        expect(state.memories.map((m) => m.id)).toEqual(remains ? ["m1"] : []);
+        expect(state.deletedMemoryIds).toEqual({ m1: deletedAt });
+      }
+      expect((await store.syncSharedFile(filename)).changed).toBe(false);
+      expect(mergeS3WorkspacePayload(s3, s3).remoteChanged).toBe(false);
+    }
   });
 
   it("keeps a shared server removed, and the server list says so", () => {

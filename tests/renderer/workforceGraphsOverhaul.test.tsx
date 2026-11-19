@@ -10,6 +10,7 @@ import type {
   MissionAgent,
   WorkTicket,
 } from "../../src/shared/types/aiHub";
+import { taskForSnapshot } from "../../src/main/ai/hub/hubShared";
 import { DependencyLinks } from "../../src/renderer/src/components/AiHub/DependencyLinks";
 import { HypothesisTree } from "../../src/renderer/src/components/AiHub/HypothesisTree";
 import { TeamGraph } from "../../src/renderer/src/components/AiHub/TeamGraph";
@@ -33,7 +34,7 @@ beforeAll(() => {
   }
 });
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 const makeAgent = (id: string, extra: Partial<MissionAgent> = {}): MissionAgent => ({
   id,
@@ -396,10 +397,15 @@ describe("WorkforceView overhaul", () => {
     const baseHub = makeHub({
       agents: [makeAgent("lead")],
       workTickets: [ticket1, ticket2],
-      tasks: [parentTask, childTask],
+      tasks: [parentTask, childTask].map(taskForSnapshot),
       workforcePaused: false,
     });
 
+    const readDetails = vi.fn(async (request: { taskId: string; detail?: string }) => {
+      const stored = [parentTask, childTask].find(task => task.id === request.taskId)!;
+      return { reply: { taskTools: { id: stored.id, count: stored.toolLog!.length, entries: stored.toolLog } } };
+    });
+    vi.stubGlobal("multissh", { aiHubRequest: readDetails });
     const { rerender } = render(<WorkforceView hub={baseHub} act={act} onOpenTask={onOpenTask} />);
 
     // Pause All
@@ -432,7 +438,10 @@ describe("WorkforceView overhaul", () => {
     fireEvent.click(within(detail).getByTestId("inspect-ticket-run"));
     const drawer = screen.getByTestId("run-inspection-drawer");
     expect(drawer).toBeVisible();
-    expect(within(drawer).getByTestId("run-drawer-tool-steps")).toHaveTextContent("sshs3_terminal_exec");
+    expect(readDetails).toHaveBeenCalledWith({ action: "task-read", taskId: parentTask.id, detail: "tools" });
+    expect(readDetails).not.toHaveBeenCalledWith(expect.objectContaining({ taskId: childTask.id }));
+    await waitFor(() => expect(within(drawer).getByTestId("run-drawer-tool-steps")).toHaveTextContent("sshs3_terminal_exec"));
+    expect(within(drawer).getByTestId("run-drawer-tool-steps")).toHaveTextContent("Tool steps (1)");
     expect(within(drawer).getByTestId("run-drawer-scratchpad")).toHaveTextContent("Inspect pg_locks");
     expect(within(drawer).getByTestId("run-drawer-live-output")).toHaveTextContent("Found lock contention on orders table.");
     expect(within(drawer).getByTestId("run-drawer-subagents")).toHaveTextContent("Lead SRE");
@@ -440,5 +449,6 @@ describe("WorkforceView overhaul", () => {
     // Switch to child subagent inside drawer
     fireEvent.click(within(drawer).getByTestId("run-drawer-task-task-sub"));
     expect(within(drawer).getByTestId("run-drawer-live-output")).toHaveTextContent("Replica is healthy.");
+    await waitFor(() => expect(within(drawer).getByTestId("run-drawer-tool-steps")).toHaveTextContent("lag 0s"));
   });
 });

@@ -6,6 +6,7 @@ import type { AiReasoningEffort } from "../../../shared/types/ai";
 import type { AgentTask, AgentTodo, ExternalRunner, ExternalRunnerPreset } from "../../../shared/types/aiHub";
 import type { HermesModelConfig } from "../HermesManager";
 import type { AgentRuntime, RunEvent } from "./AgentRuntime";
+import type { FinalRunEvent } from "./RunOutcome";
 import type { LocalMcpServer } from "./LocalMcpServer";
 import { boundedContext, boundedPrompt, safeError } from "./privacy";
 
@@ -20,6 +21,23 @@ import { boundedContext, boundedPrompt, safeError } from "./privacy";
  * given. What it reads and writes there is not routed through sshS3; what it
  * asks permission for is.
  */
+
+function acpOutcome(reason: string | undefined, text: string): FinalRunEvent {
+  const output = text || undefined;
+  switch (reason) {
+    case "end_turn":
+      return { type: "run.completed", output: output ?? "The agent ended without a report." };
+    case "cancelled":
+      return { type: "run.cancelled", output };
+    case "refusal":
+      return { type: "run.failed", output, error: "The agent refused the request." };
+    case "max_tokens":
+    case "max_turn_requests":
+      return { type: "run.interrupted", output, error: `The agent reached its limit (${reason}) before completing the work.` };
+    default:
+      return { type: "run.interrupted", output, error: "The agent ended without confirming completion." };
+  }
+}
 
 export const ACP_PROTOCOL_VERSION = 1;
 /** How long a started agent is given to answer the greeting (the first start of an npx package can be slow). */
@@ -879,19 +897,7 @@ export class AcpRuntime implements AgentRuntime {
       gone,
     ])) as { stopReason?: string };
 
-    const reason = result?.stopReason ?? "end_turn";
-    if (reason === "cancelled") onEvent({ type: "run.cancelled", output: text || undefined });
-    else if (reason === "refusal")
-      onEvent({ type: "run.failed", output: text || undefined, error: "The agent refused the request." });
-    else
-      onEvent({
-        type: "run.completed",
-        output:
-          (text || "The agent ended without a report.") +
-          (reason === "max_tokens" || reason === "max_turn_requests"
-            ? `\n\n(The agent stopped at its own limit: ${reason}. The work may be unfinished.)`
-            : ""),
-      });
+    onEvent(acpOutcome(result?.stopReason, text));
   }
 
   private async receive(

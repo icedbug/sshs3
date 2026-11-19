@@ -5,6 +5,7 @@ import type {
   MultiSSHApiWithHubDelta,
 } from "@shared/ipc/createMultiSSHApi";
 
+import { hubSessionActive, hubSessionGeneration, onHubSessionReset } from "./aiHubSession";
 import { applyDeltaToMessages } from "./aiHubDelta";
 
 export type { AiHubDeltaEvent };
@@ -36,31 +37,47 @@ const listeners = new Set<() => void>();
 const publish = (): void => {
   for (const listener of listeners) listener();
 };
+onHubSessionReset(() => {
+  snapshot = undefined;
+  selected = "";
+  inflightRefresh = undefined;
+  refreshAgain = false;
+  clearTimeout(timer);
+  timer = undefined;
+  clearTimeout(retryTimer);
+  retryTimer = undefined;
+  publish();
+});
+
 function refresh(): Promise<void> {
-  if (!window.multissh?.aiHubRequest) return Promise.resolve();
+  if (!hubSessionActive() || !window.multissh?.aiHubRequest) return Promise.resolve();
   if (inflightRefresh) {
     refreshAgain = true;
     return inflightRefresh;
   }
+  const generation = hubSessionGeneration();
   inflightRefresh = (async () => {
     const n = ++sent;
     try {
       const next = await window.multissh.aiHubRequest({ action: "snapshot" });
+      if (generation !== hubSessionGeneration()) return;
       clearTimeout(retryTimer);
       retryTimer = undefined;
       if (take(n, next)) publish();
     } catch {
-      if (!snapshot && listeners.size > 0 && !retryTimer) {
+      if (generation === hubSessionGeneration() && !snapshot && listeners.size > 0 && !retryTimer) {
         retryTimer = setTimeout(() => {
           retryTimer = undefined;
           void refresh();
         }, 1000);
       }
     } finally {
-      inflightRefresh = undefined;
-      if (refreshAgain) {
-        refreshAgain = false;
-        void refresh();
+      if (generation === hubSessionGeneration()) {
+        inflightRefresh = undefined;
+        if (refreshAgain) {
+          refreshAgain = false;
+          void refresh();
+        }
       }
     }
   })();
@@ -104,8 +121,12 @@ export function applyAiHubDelta(
       };
     }
   } else if (delta.type === "tool.result" && delta.tool) {
-    const toolLog = [...(task.toolLog ?? []), delta.tool].slice(-60);
-    nextTask = { ...task, toolLog, updatedAt: delta.at };
+    const previous = task.toolStepCount ?? task.toolLog?.length ?? 0;
+    const count = delta.toolStepCount ?? previous + 1;
+    if (count <= previous) return current;
+    const tail = count === previous + 1 ? task.toolLog ?? [] : [];
+    const toolLog = [...tail, delta.tool].slice(-60);
+    nextTask = { ...task, toolLog, toolStepCount: count, updatedAt: delta.at };
   } else if (delta.type === "usage.updated" && delta.usage) {
     nextTask = {
       ...task,
@@ -241,8 +262,11 @@ export function onAiHubDelta(
   return () => {};
 }
 export async function hubRequest(request: HubRequest): Promise<HubSnapshot> {
+  if (!hubSessionActive()) throw new Error("The workspace session has ended");
+  const generation = hubSessionGeneration();
   const n = ++sent;
   const next = await window.multissh.aiHubRequest(request);
+  if (generation !== hubSessionGeneration()) throw new Error("The workspace session has ended");
   if (take(n, next)) publish();
   // The caller gets its own answer (its reply), whatever is on screen.
   return next;

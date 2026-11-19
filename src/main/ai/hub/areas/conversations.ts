@@ -282,7 +282,7 @@ export class ConversationsPart {
     const sysPrompt = `You are an inline terminal command generator for ${targetShell}. Return ONLY a JSON object {"command":"...","explanation":"..."} with a single safe shell command matching the user's request and a 1-sentence explanation in the user's language.`;
 
     try {
-      const config = await this.config.getConfig();
+      const config = await this.config.getConfig("fastTriage");
       if (config.enabled) {
         const hosts = config.piiScrubbing === "strict" ? workspaceHostNames(this.getKnownServers(), session?.label) : undefined;
         const question = clip(maskProviderText(q, config.piiScrubbing, hosts), 1000);
@@ -650,7 +650,9 @@ export class ConversationsPart {
           this.store.data.tasks.find((t) => t.id === request.taskId) ??
           (isDemoMode() ? getDemoTasks().find((t) => t.id === request.taskId) : undefined);
         if (!found) throw new Error("Task not found");
-        reply = { task: { id: found.id, messages: found.messages, changes: found.changes } };
+        reply = request.detail === "tools"
+          ? { taskTools: { id: found.id, count: found.toolStepCount ?? found.toolLog?.length ?? 0, entries: found.toolLog ?? [] } }
+          : { task: { id: found.id, messages: found.messages, changes: found.changes } };
         break;
       }
       case "takeover":

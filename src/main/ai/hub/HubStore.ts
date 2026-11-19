@@ -1,3 +1,4 @@
+import { sharedMemoryRemovals } from "./memory/sharedMemoryRemovals";
 import { sanitizeServerForS3 } from "./S3WorkspaceSyncService";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
@@ -408,29 +409,23 @@ export class HubStore {
     }
     this.data.deletedServerIds = deletedServerIds;
 
-    const deletedMemoryIds: Record<string, number> = {
-      ...(this.data.deletedMemoryIds ?? {}),
-    };
-    if (remote.deletedMemoryIds && typeof remote.deletedMemoryIds === "object") {
-      for (const [id, ts] of Object.entries(remote.deletedMemoryIds)) {
-        if (!id || typeof ts !== "number") continue;
-        if (ts > (deletedMemoryIds[id] ?? 0)) {
-          deletedMemoryIds[id] = ts;
-          changed = true;
-        }
-      }
-    }
+    const removals = sharedMemoryRemovals(this.data, remote);
+    const deletedMemoryIds = removals.deleted;
     this.data.deletedMemoryIds = deletedMemoryIds;
+    changed ||= removals.changed;
 
-    // 1. Merge memories by id (latest updatedAt wins, respecting tombstones)
+    // 1. Merge memories by id, preserving local personal entries outside team sync.
     const memMap = new Map<string, MemoryEntry>();
     for (const m of this.data.memories) {
-      if ((deletedMemoryIds[m.id] ?? 0) >= (m.updatedAt ?? 0)) continue;
+      if (m.scope !== "personal" && removals.removed(m)) {
+        changed = true;
+        continue;
+      }
       memMap.set(m.id, m);
     }
     for (const rm of Array.isArray(remote.memories) ? remote.memories : []) {
       if (!rm || typeof rm.id !== "string") continue;
-      if ((deletedMemoryIds[rm.id] ?? 0) >= (rm.updatedAt ?? 0)) continue;
+      if (rm.scope === "personal" || removals.removed(rm)) continue;
       const prev = memMap.get(rm.id);
       if (!prev || (rm.updatedAt ?? 0) > (prev.updatedAt ?? 0)) {
         memMap.set(rm.id, rm);

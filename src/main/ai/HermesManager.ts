@@ -34,6 +34,7 @@ export type HermesModelConfig = (
 ) & {
   apiProtocol?: import("../../shared/types/ai").AiApiProtocol;
   profileId?: string;
+  tuning?: Pick<import("../../shared/types/ai").AiConfig, "contextWindowTokens" | "maxOutputTokens" | "reasoningEffort" | "temperature">;
   egressPolicy?: import("../../shared/types/ai").AiEgressPolicy;
   zdrConfirmed?: boolean;
   fallbackProfileIds?: string[];

@@ -61,17 +61,17 @@ const PROFILE_ROLES: { role: AiProfileRole; label: string; hint: string }[] = [
   {
     role: "fastTriage",
     label: "Quick checks (fast model)",
-    hint: "Short read-only checks, one-line command suggestions, and a first look at an alert.",
+    hint: "Read-only investigations and one-line terminal command suggestions.",
   },
   {
     role: "backgroundDistill",
     label: "Summaries in the background",
-    hint: "What is learned from finished work, the daily report, and writing knowledge base pages.",
+    hint: "Learning from finished work, writing knowledge base pages, and checking them for contradictions.",
   },
   {
     role: "embedding",
     label: "Search in the knowledge base",
-    hint: "Finding documents and pages by meaning, not only by the same words.",
+    hint: "For semantic search, choose an OpenAI-compatible endpoint that serves the embedding model named in the profile.",
   },
 ];
 
@@ -570,9 +570,13 @@ export function Settings({
                 <select
                   aria-label="Profile provider"
                   value={profileDraft.provider}
-                  onChange={(e) =>
-                    setProfileDraft({ ...profileDraft, provider: e.target.value as AiProvider })
-                  }
+                  onChange={(e) => {
+                    const provider = e.target.value as AiProvider;
+                    setProfileDraft({
+                      ...profileDraft, provider,
+                      activeRole: profileDraft.activeRole === "embedding" && provider !== "openai-compatible" ? "" : profileDraft.activeRole,
+                    });
+                  }}
                 >
                   <option value="openai-codex">ChatGPT / Codex (OAuth)</option>
                   <option value="anthropic">Anthropic</option>
@@ -627,7 +631,7 @@ export function Settings({
                 >
                   <option value="">Do not assign</option>
                   {PROFILE_ROLES.map((r) => (
-                    <option key={r.role} value={r.role}>
+                    <option key={r.role} value={r.role} disabled={r.role === "embedding" && profileDraft.provider !== "openai-compatible"}>
                       {r.label}
                     </option>
                   ))}
@@ -774,7 +778,7 @@ export function Settings({
               >
                 <option value="">Default ({model || "configured model"})</option>
                 {profiles.map((p) => (
-                  <option key={p.id} value={p.id}>
+                  <option key={p.id} value={p.id} disabled={role === "embedding" && p.provider !== "openai-compatible"}>
                     {p.name} ({p.model})
                   </option>
                 ))}

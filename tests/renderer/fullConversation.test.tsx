@@ -5,7 +5,8 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import type { AgentChange, AgentMessage, AgentTask, HubSnapshot } from "../../src/shared/types/aiHub";
 import type { AiHubDeltaEvent } from "../../src/shared/ipc/createMultiSSHApi";
 import { applyAiHubDelta, applyDeltaToMessages, deltaLeavesGap } from "../../src/renderer/src/lib/aiHub";
-import { resetFullTasksForTesting, useFullTask, userMessageCount } from "../../src/renderer/src/lib/aiHubTasks";
+import { clearFullTaskCache, useFullTask, userMessageCount } from "../../src/renderer/src/lib/aiHubTasks";
+import { setHubWebAccount } from "../../src/renderer/src/lib/aiHubSession";
 import { ChangesView } from "../../src/renderer/src/components/AiHub/ChangesView";
 
 /**
@@ -109,7 +110,7 @@ function Shown({ task: shown }: { task: AgentTask | undefined }): JSX.Element {
   );
 }
 
-beforeEach(() => resetFullTasksForTesting());
+beforeEach(() => clearFullTaskCache());
 afterEach(() => {
   cleanup();
   delete (window as unknown as { multissh?: unknown }).multissh;
@@ -117,6 +118,28 @@ afterEach(() => {
 
 describe("showing a conversation whole", () => {
   const all = [message("u1", "user", "Why?"), message("a1", "assistant", "Because."), message("u2", "user", "And then?"), message("a2", "assistant", "It was restarted.")];
+
+  it("starts a fresh full-task cache and ignores an unfinished read from the previous session", async () => {
+    setHubWebAccount("first");
+    const cut = task({ messages: all.slice(-1), messagesTail: { count: 4, users: 2, lastId: "a2", lastChars: 17 } });
+    let finish!: (snapshot: HubSnapshot) => void;
+    const delayed = new Promise<HubSnapshot>((resolve) => { finish = resolve; });
+    const firstFull = { reply: { task: { id: cut.id, messages: all, changes: [] } } } as unknown as HubSnapshot;
+    const currentMessages = [...all.slice(0, -1), message("a2", "assistant", "Current session.")];
+    const currentFull = { reply: { task: { id: cut.id, messages: currentMessages, changes: [] } } } as unknown as HubSnapshot;
+    const read = vi.fn().mockReturnValueOnce(delayed).mockResolvedValueOnce(currentFull);
+    Object.assign(window, { multissh: { aiHubRequest: read } });
+    const old = render(<Shown task={cut} />);
+    expect(read).toHaveBeenCalledTimes(1);
+    old.unmount();
+    setHubWebAccount(null);
+    setHubWebAccount("second");
+    render(<Shown task={{ ...cut, messagesTail: { ...cut.messagesTail!, lastChars: 16 } }} />);
+    await waitFor(() => expect(screen.getByTestId("last")).toHaveTextContent("Current session."));
+    await act(async () => { finish(firstFull); });
+    expect(screen.getByTestId("last")).toHaveTextContent("Current session.");
+    expect(read).toHaveBeenCalledTimes(2);
+  });
 
   it("leaves a conversation the snapshot carries whole as it is, and asks for nothing", () => {
     const api = hubApi(() => ({ messages: [], changes: [] }));

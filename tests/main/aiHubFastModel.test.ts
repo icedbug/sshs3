@@ -104,6 +104,68 @@ describe("a fast model for background work", () => {
     expect(hub.store.data.tasks.find((t) => !t.workforceRunId && !t.distillSourceId)!.model).toBe("claude-opus-5-5");
   });
 
+  it("sends each operation to the assigned profile with its own key, protocol, and model", async () => {
+    const hub = await makeHub({ fastModel: "legacy-fast" });
+    const endpoint = (role: string) => `https://${role}.example/v1`;
+    const profiles = [
+      { id: "quick", provider: "openai-compatible", model: "fast-model", apiProtocol: "responses" },
+      { id: "memory", provider: "anthropic", model: "summary-model", maxOutputTokens: 1536 },
+      { id: "vectors", provider: "openai-compatible", model: "embedding-model" },
+    ] as const;
+    await hub.config.update({
+      profiles: profiles.map((profile) => ({ ...profile, name: profile.id, baseUrl: endpoint(profile.id) })),
+      profileApiKeys: { quick: "test-quick", memory: "test-memory", vectors: "test-vectors" },
+      activeProfileByRole: { fastTriage: "quick", backgroundDistill: "memory", embedding: "vectors" },
+      piiScrubbing: "strict",
+    });
+    const requests: Array<{ url: string; model: string; credential: string | null; body: Record<string, unknown> }> = [];
+    const send = async (url: RequestInfo | URL, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      const body = JSON.parse(String(init?.body));
+      requests.push({ url: String(url), model: body.model, credential: headers.get("authorization") ?? headers.get("x-api-key"), body });
+      if (String(url).endsWith("/embeddings")) return Response.json({ data: [{ index: 0, embedding: [1] }] });
+      if (String(url).endsWith("/responses")) return Response.json({ status: "completed", output_text: JSON.stringify({ command: "pwd", explanation: "Show the working directory." }) });
+      return say('{"proposals":[]}');
+    };
+    hub.kbNetwork = { fetchImpl: send, lookup: async () => [{ address: "93.184.216.34", family: 4 }] };
+    vi.stubGlobal("fetch", send);
+
+    const result = await hub.request({ action: "inline-suggest", prompt: "Show the working directory", shell: "bash" });
+    expect(result.reply?.inlineSuggestion?.source).toBe("model");
+    expect(await (await hub.kbEmbedder())?.embed(["test@example.invalid"])).toEqual([[1]]);
+    const task = await hub.runBackground({ mode: "advice", prompt: "Read a record." }, { distillSourceId: "record", title: "Memory" });
+    expect(task).toMatchObject({ status: "completed", model: "summary-model" });
+    expect(requests.map(({ url, model, credential }) => [url, model, credential])).toEqual([
+      [endpoint("quick") + "/responses", "fast-model", "Bearer test-quick"],
+      [endpoint("vectors") + "/embeddings", "embedding-model", "Bearer test-vectors"],
+      [endpoint("memory") + "/messages", "summary-model", "test-memory"],
+    ]);
+    expect(requests[1].body.input).toEqual(["[email redacted]"]);
+    expect(requests[2].body.max_tokens).toBe(1536);
+
+    await hub.config.update({ egressPolicy: "local-only" });
+    await expect((await hub.kbEmbedder())!.embed(["record"])).rejects.toThrow("outside");
+    expect(requests).toHaveLength(3);
+  });
+
+  it("uses the assigned KB authoring profile even when the page would otherwise use the main model", async () => {
+    const hub = await makeHub({ fastModel: "legacy-fast" });
+    await hub.config.update({
+      profiles: [{ id: "pages", name: "Pages", provider: "anthropic", model: "page-model" }],
+      profileApiKeys: { pages: "test-pages" },
+      activeProfileByRole: { backgroundDistill: "pages" },
+    });
+    const requests: string[] = [];
+    vi.stubGlobal("fetch", async (_url: unknown, init: RequestInit) => {
+      requests.push(JSON.parse(String(init.body)).model);
+      return say('{"pages":[]}');
+    });
+    const source = { docId: "synthetic", title: "Source" };
+    await hub.runPageOps("Compile this document", [], source, { id: "compile", title: "Pages" },
+      { clusters: [], servers: [] }, { sourceText: "Sample source" });
+    expect(requests).toEqual(["page-model"]);
+  });
+
   it("uses the main model for everything when no fast model is set", async () => {
     const hub = await makeHub({});
     const calls = stubModel();

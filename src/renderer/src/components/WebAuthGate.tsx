@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
+import { setHubWebAccount } from '../lib/aiHubSession';
 import { copyToClipboard } from '../lib/clipboard';
 import { McpKeysPanel } from './McpKeysPanel';
 import {
@@ -290,8 +291,19 @@ export const WebAuthGate: React.FC<WebAuthGateProps> = ({ children, onSsoLogin, 
   const [latestInviteCopied, setLatestInviteCopied] = useState(false);
   const [adminMsg, setAdminMsg] = useState<string | null>(null);
 
+  const leaveWorkspace = useCallback(() => {
+    setHubWebAccount(null);
+    setStoredWebSessionToken(null);
+    disconnectWebClientBridge();
+    setAuthenticated(false);
+    setUser(null);
+    setShowModal(false);
+    setJustOnboarded(false);
+  }, []);
+
   useEffect(() => {
     if (!inWebMode) return;
+    let active = true;
     ensureWebClientBridgeInstalled();
 
     const params = new URLSearchParams(window.location.search);
@@ -310,8 +322,15 @@ export const WebAuthGate: React.FC<WebAuthGateProps> = ({ children, onSsoLogin, 
       setWsConnected(connected);
     });
 
+    const expired = () => {
+      active = false;
+      leaveWorkspace();
+      setLoading(false);
+    };
+    window.addEventListener('sshs3:web-auth-expired', expired);
     webApiFetch<AuthStatusResponse>('/api/auth/status')
       .then((status) => {
+        if (!active) return;
         setInitialized(status.initialized);
         if (status.publicUrl) {
           setServerPublicUrl(status.publicUrl);
@@ -328,25 +347,29 @@ export const WebAuthGate: React.FC<WebAuthGateProps> = ({ children, onSsoLogin, 
         });
 
         if (status.authenticated && status.user && !urlInvite) {
-          connectWebClientBridge(status.wsTicket || getStoredWebSessionToken() || null);
+          setHubWebAccount(status.user.id);
+          connectWebClientBridge(status.wsTicket || getStoredWebSessionToken() || null, status.user.id);
           setUser(status.user);
           setAuthenticated(true);
         } else {
+          setHubWebAccount(null);
           setAuthenticated(false);
           setUser(null);
         }
       })
       .catch(() => {
-        setAuthenticated(false);
+        if (active) leaveWorkspace();
       })
       .finally(() => {
-        setLoading(false);
+        if (active) setLoading(false);
       });
 
     return () => {
+      active = false;
       unsubWs();
+      window.removeEventListener('sshs3:web-auth-expired', expired);
     };
-  }, [inWebMode]);
+  }, [inWebMode, leaveWorkspace]);
 
   const loadAdminData = useCallback(async () => {
     if (!user || user.role !== 'admin') return;
@@ -415,7 +438,8 @@ export const WebAuthGate: React.FC<WebAuthGateProps> = ({ children, onSsoLogin, 
     } else {
       setStoredWebSessionToken(null);
     }
-    connectWebClientBridge(wsTicket || token || null);
+    setHubWebAccount(loggedInUser.id);
+    connectWebClientBridge(wsTicket || token || null, loggedInUser.id);
     setUser(loggedInUser);
     setInitialized(true);
     setAuthenticated(true);
@@ -510,12 +534,7 @@ export const WebAuthGate: React.FC<WebAuthGateProps> = ({ children, onSsoLogin, 
     } catch {
       // ignore
     }
-    setStoredWebSessionToken(null);
-    disconnectWebClientBridge();
-    setAuthenticated(false);
-    setUser(null);
-    setShowModal(false);
-    setJustOnboarded(false);
+    leaveWorkspace();
   };
 
   const handleRotateSshKey = async () => {
@@ -993,7 +1012,7 @@ export const WebAuthGate: React.FC<WebAuthGateProps> = ({ children, onSsoLogin, 
         </div>
       </header>
 
-      <div className="min-h-0 flex-1 overflow-hidden [&>*]:!h-full">{children}</div>
+      <div key={user?.id} className="min-h-0 flex-1 overflow-hidden [&>*]:!h-full">{children}</div>
 
       {/* Onboarding Quick-Start Banner right after creating account / joining team */}
       {justOnboarded && user && !showModal && (

@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import path from "node:path";
 import type { AgentChange, AgentSchedule, AgentTask, MissionAgent, StartAgentTask } from "../../../../shared/types/aiHub";
+import { acpWorkspaceAllowlist } from "../../../../shared/acpWorkspaceTools";
 import { DEFAULT_AI_MODELS } from "../../../../shared/types/ai";
 import { CodexAuthProvider } from "../../CodexAuthProvider";
 import { HermesManager, type HermesModelConfig } from "../../HermesManager";
@@ -11,6 +12,7 @@ import { Replay } from "../EvalSuite";
 import { getDemoTasks, isDemoMode } from "../demoWorkspace";
 import { isDemoTarget } from "../../../demo/demoMode";
 import { HermesRuntime, type RunEvent } from "../AgentRuntime";
+import { finalRunStatus } from "../RunOutcome";
 import { LocalMcpServer } from "../LocalMcpServer";
 import { boundedContext, boundedPrompt, clip, HUB_PROMPT_MAX, maskContext, PERSON_PROMPT_MAX, safeError } from "../privacy";
 import { addUsage, live } from "../WorkBoard";
@@ -110,6 +112,7 @@ export class RunsPart {
       distillSourceId?: string;
       title: string;
       mainModel?: boolean;
+      modelRole?: "backgroundDistill";
       investigator?: boolean;
       evalCaseId?: string;
     },
@@ -157,6 +160,7 @@ export class RunsPart {
         ? { distillSourceId: readOnly.distillSourceId }
         : {}),
       ...(readOnly?.mainModel ? { mainModelOnly: true } : {}),
+      ...(readOnly?.modelRole ? { modelRole: readOnly.modelRole } : {}),
       ...(readOnly?.investigator ? { investigator: true } : {}),
       ...(readOnly?.evalCaseId ? { evalCaseId: readOnly.evalCaseId } : {}),
       ...(ticketId ? { ticketId } : {}),
@@ -285,7 +289,9 @@ export class RunsPart {
       )
         throw new Error("Task was stopped during startup");
     };
-    const config = await this.config.getConfig();
+    const role = task.modelRole ?? (schedule || task.mainModelOnly || !isBackgroundRun(task)
+      ? "primary" : task.distillSourceId ? "backgroundDistill" : "fastTriage");
+    const config = await this.config.getConfig(role, !task.mainModelOnly);
     assertLaunching();
     if (!config.enabled)
       throw new Error("No model is set up. Switch the assistant on and choose a model in AI settings first.");
@@ -338,21 +344,11 @@ export class RunsPart {
       }
     }
     if (!model) throw new Error("Choose a model");
-    // The hub's own background work (investigators, reviews, reading for
-    // memory) runs on the fast model when one is set for this provider.
-    if (
-      isBackgroundRun(task) &&
-      !schedule &&
-      !task.mainModelOnly &&
-      config.fastModel &&
-      provider === config.provider
-    )
-      model = config.fastModel;
     // An agent may be given a model of its own. It names a model of the endpoint that is
     // configured now; after a change of provider it follows the configured model instead
     // of being refused for ever — the same rule a schedule's own model follows.
     const runAgent = task.agentId ? this.getAgentsList().find((a) => a.id === task.agentId) : undefined;
-    if (runAgent?.modelOverride?.trim() && (!runAgent.modelProvider || runAgent.modelProvider === provider))
+    if ((role === "primary" || !config.activeProfileByRole?.[role]) && runAgent?.modelOverride?.trim() && (!runAgent.modelProvider || runAgent.modelProvider === provider))
       model = runAgent.modelOverride.trim();
     task.model = model;
     // The demo lab has no model: its scripted example answers instead, and says that it does.
@@ -366,9 +362,14 @@ export class RunsPart {
         : provider === "anthropic"
           ? { kind: "anthropic", model, apiKey: config.apiKey, baseUrl }
           : { kind: "custom", model, apiKey: config.apiKey, baseUrl: baseUrl! };
-    const primary = config.profiles?.find((profile) => profile.id === config.activeProfileByRole?.primary);
-    modelConfig.profileId = primary?.id;
-    modelConfig.fallbackProfileIds = primary?.fallbackProfileIds ?? [];
+    modelConfig.profileId = config.profileId;
+    modelConfig.fallbackProfileIds = config.fallbackProfileIds ?? [];
+    modelConfig.tuning = {
+      contextWindowTokens: config.contextWindowTokens,
+      maxOutputTokens: config.maxOutputTokens,
+      reasoningEffort: config.reasoningEffort,
+      temperature: config.temperature,
+    };
     modelConfig.apiProtocol = config.apiProtocol;
     modelConfig.egressPolicy = config.egressPolicy;
     modelConfig.zdrConfirmed = config.zdrConfirmed;
@@ -535,12 +536,14 @@ export class RunsPart {
     if (event.type === "hypotheses.updated" && event.hypotheses) task.hypotheses = event.hypotheses;
     if (event.type === "tool.result" && event.tool) {
       const entry = { ...event.tool, at: now };
+      task.toolStepCount = (task.toolStepCount ?? task.toolLog?.length ?? 0) + 1;
       task.toolLog = [...(task.toolLog ?? []), entry].slice(-60);
       this.host.delta?.({
         taskId: task.id,
         type: "tool.result",
         at: now,
         tool: entry,
+        toolStepCount: task.toolStepCount,
       });
     }
     if (event.type === "run.retrying") {
@@ -606,8 +609,10 @@ export class RunsPart {
         text: boundedContext(event.text),
         at: now,
       });
-    if (/^run\.(completed|failed|cancelled|interrupted)$/.test(event.type)) {
-      task.status = event.type.slice(4) as AgentTask["status"];
+    const outcome = finalRunStatus(event.type);
+    if (outcome) {
+      task.status = outcome;
+      if (task.status === "interrupted") task.verification = "incomplete";
       task.runUsage = undefined;
       if (event.usage?.context_tokens) task.contextTokens = event.usage.context_tokens;
       if (event.usage) {
@@ -798,18 +803,15 @@ export class RunsPart {
         }
       | undefined;
     let acpTokenId: string | undefined;
+    const tools = acpWorkspaceAllowlist(agent.allowedTools);
     if (this.store.data.preferences.localMcp?.enabled && !this.localMcp?.address()) {
       await this.applyLocalMcp().catch(() => undefined);
     }
-    if (this.localMcp?.address()) {
+    if (this.localMcp?.address() && (!tools || tools.length > 0)) {
       await this.mcpTokens().initialize().catch(() => undefined);
       const serverId = task.target && this.terminals.get(task.target.sessionId)?.profileId;
       const scopes: ("read" | "tickets" | "run")[] =
         task.mode === "advice" || !serverId ? ["read"] : ["read", "run"];
-      const tools =
-        agent.allowedTools?.length && !agent.allowedTools.includes("all")
-          ? [...agent.allowedTools]
-          : undefined;
       const made = await this.mcpTokens()
         .create({
           userId: "local",

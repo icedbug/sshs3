@@ -17,6 +17,7 @@ import { ScenariosCard } from "./ScenariosCard";
 import { HypothesisTree } from "./HypothesisTree";
 import { type Act, formatTokenUsage, modes, TABULAR_NUMS_STYLE } from "./panelShared";
 import { RichMarkdownContent } from "./RichMarkdownContent";
+import { useRunToolSteps } from "./useRunToolSteps";
 import { useFullTask } from "../../lib/aiHubTasks";
 import { isWebBrowserMode } from "../../lib/webClientBridge";
 import {
@@ -1276,7 +1277,7 @@ function RunInspectionDrawer({
   );
 
   const taskUsage = activeTask?.runUsage ?? activeTask?.usage;
-  const toolSteps = activeTask?.toolLog ?? [];
+  const { count: toolCount, steps: toolSteps, failed: toolReadFailed, retry: retryToolRead } = useRunToolSteps(activeTask);
   const scratchpadTodos = activeTask?.todos ?? [];
   // What the agent said last, from the whole conversation: a snapshot carries only the last few messages of a long one.
   const activeWhole = useFullTask(activeTask);
@@ -1350,7 +1351,7 @@ function RunInspectionDrawer({
                   <small style={{ opacity: 0.8, fontSize: 11 }}>
                     {t.status} · {t.agentName ?? "Assistant"}
                     {t.investigator ? " · subagent" : ""}
-                    {t.toolLog?.length ? ` · ${t.toolLog.length} steps` : ""}
+                    {(t.toolStepCount ?? t.toolLog?.length) ? ` · ${t.toolStepCount ?? t.toolLog?.length} steps` : ""}
                   </small>
                 </button>
               );
@@ -1419,7 +1420,7 @@ function RunInspectionDrawer({
                           className="ai-chip"
                           onClick={() => onSelectTask(sub.id)}
                         >
-                          {sub.agentName ?? sub.title} · {sub.status} ({sub.toolLog?.length ?? 0} steps)
+                          {sub.agentName ?? sub.title} · {sub.status} ({sub.toolStepCount ?? sub.toolLog?.length ?? 0} steps)
                         </button>
                       ))}
                     </div>
@@ -1452,11 +1453,13 @@ function RunInspectionDrawer({
                 </div>
 
                 <div data-testid="run-drawer-tool-steps" style={{ display: "grid", gap: 6 }}>
-                  <small className="ai-muted">Tool steps ({toolSteps.length})</small>
+                  <small className="ai-muted">Tool steps ({toolCount})</small>
+                  {toolReadFailed && <button type="button" onClick={retryToolRead}>Retry loading tool steps</button>}
                   {toolSteps.length === 0 ? (
-                    <small style={{ opacity: 0.7 }}>No tool calls logged yet.</small>
+                    <small style={{ opacity: 0.7 }}>{toolCount === 0 ? "No tool calls logged yet." : toolReadFailed ? "Tool details are unavailable." : "Loading tool details…"}</small>
                   ) : (
                     <div style={{ display: "grid", gap: 6, maxHeight: 220, overflowY: "auto" }}>
+                      {toolSteps.length < toolCount && <small>Showing the latest {toolSteps.length} steps.</small>}
                       {toolSteps.map((step, i) => (
                         <div
                           key={`${step.name}-${step.at}-${i}`}

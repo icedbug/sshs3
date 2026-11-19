@@ -216,35 +216,18 @@ export class AiConfigStore {
   public async resolveProfileForRole(
     role: AiProfileRoleInput,
   ): Promise<(ProviderProfile & { apiKey: string }) | null> {
-    const canonicalRole = normalizeAiProfileRole(role);
     const stored = await this.readWithCodexAutoDetect();
     const pub = this.publicFields(stored);
-    const profiles = pub.profiles ?? [];
-
-    const assignedId =
-      pub.activeProfileByRole?.[canonicalRole] ??
-      (canonicalRole !== "primary" ? pub.activeProfileByRole?.primary : undefined);
-
-    if (assignedId) {
-      const matched = profiles.find((p) => p.id === assignedId);
-      if (matched) {
-        const key = this.decryptStoredProfileKey(stored, matched.id) ||
-          (matched.id === pub.activeProfileByRole?.primary ? this.resolveLegacyOrPrimaryKey(stored) : "");
-        return { ...matched, apiKey: key };
-      }
-    }
-
-    if (profiles.length > 0 && canonicalRole === "primary") {
-      const first = profiles[0];
-      return { ...first, apiKey: this.decryptStoredProfileKey(stored, first.id) };
-    }
-
-    // Legacy single-profile fallback
-    const legacyKey = this.sessionKey || (stored.apiKey ? decryptSecretValue(stored.apiKey) : "");
+    const canonical = normalizeAiProfileRole(role);
+    const assigned = this.profileForRole(stored, pub, canonical);
+    if (assigned) return assigned;
+    const first = canonical === "primary" && pub.profiles?.[0];
+    if (first) return { ...first, apiKey: this.decryptStoredProfileKey(stored, first.id) };
+    const apiKey = this.legacyKey(stored);
     const fallbackModel =
-      canonicalRole === "fastTriage" && pub.fastModel
+      canonical === "fastTriage" && pub.fastModel
         ? pub.fastModel
-        : canonicalRole === "embedding" && pub.embeddingModel
+        : canonical === "embedding" && pub.embeddingModel
           ? pub.embeddingModel
           : pub.model;
     return {
@@ -261,27 +244,76 @@ export class AiConfigStore {
       embeddingModel: pub.embeddingModel,
       egressPolicy: pub.egressPolicy,
       zdrConfirmed: pub.zdrConfirmed,
-      hasApiKey: Boolean(legacyKey),
+      hasApiKey: Boolean(apiKey),
       keyStorage: this.sessionKey ? "session" : stored.apiKey ? "encrypted" : undefined,
-      apiKey: legacyKey,
+      apiKey,
     };
+  }
+
+  private profileForRole(stored: StoredAiConfig, pub: AiConfig, role: AiProfileRole): (ProviderProfile & { apiKey: string }) | undefined {
+    const assigned = pub.activeProfileByRole?.[role];
+    const primary = pub.activeProfileByRole?.primary;
+    const matched = pub.profiles?.find((profile) => profile.id === assigned) ??
+      pub.profiles?.find((profile) => profile.id === primary);
+    if (matched) {
+      const legacyMatches = matched.id === pub.activeProfileByRole?.primary &&
+        matched.provider === pub.provider && originOf(matched.baseUrl) === originOf(pub.baseUrl);
+      const apiKey = this.decryptStoredProfileKey(stored, matched.id) || (legacyMatches ? this.legacyKey(stored) : "");
+      return { ...matched, apiKey };
+    }
+    return undefined;
+  }
+
+  private legacyKey(stored: StoredAiConfig): string {
+    return this.sessionKey || (stored.apiKey ? decryptSecretValue(stored.apiKey) : "");
   }
 
   private resolveLegacyOrPrimaryKey(stored: StoredAiConfig): string {
     const primaryId = stored.activeProfileByRole?.primary;
     if (primaryId) {
       const profileKey = this.decryptStoredProfileKey(stored, primaryId);
-      if (profileKey) return profileKey;
+      const profile = this.resolvePrimaryProfile(stored);
+      if (profileKey && profile?.provider === stored.provider && originOf(profile.baseUrl) === originOf(stored.baseUrl)) return profileKey;
     }
     return this.sessionKey || (stored.apiKey ? decryptSecretValue(stored.apiKey) : "");
   }
 
-  /** The configuration including the decrypted API key. Main process only. */
-  public async getConfig(): Promise<AiConfig & { apiKey: string }> {
+  /** Resolve a model operation from one read of its profile, key and workspace-wide privacy settings. Main process only. */
+  public async getConfig(role?: AiProfileRole, useLegacyFastModel = true): Promise<AiConfig & { apiKey: string; profileId?: string; fallbackProfileIds?: string[] }> {
     const stored = await this.readWithCodexAutoDetect();
+    const workspace = this.publicFields(stored);
+    if (!role) return { ...workspace, apiKey: this.resolveLegacyOrPrimaryKey(stored) };
+    const profile = this.profileForRole(stored, workspace, role);
+    const explicitlyAssigned = profile !== undefined && profile.id === workspace.activeProfileByRole?.[role];
+    const legacyFastRole = role === "fastTriage" || role === "backgroundDistill";
+    const fast = useLegacyFastModel && legacyFastRole && !explicitlyAssigned ? workspace.fastModel : undefined;
+    if (!profile) return { ...workspace, apiKey: this.resolveLegacyOrPrimaryKey(stored), model: fast || workspace.model };
+
+    // A profile supplies its own credentials and protocol. Global privacy settings still apply.
+    const globalPolicy = workspace.egressPolicy ?? "standard";
+    const profilePolicy = profile.egressPolicy ?? "standard";
+    if (globalPolicy !== "standard" && profilePolicy !== "standard" && globalPolicy !== profilePolicy) {
+      throw new Error("The selected profile and workspace require different data residency policies.");
+    }
+    const sameEndpoint = profile.id === workspace.activeProfileByRole?.primary && profile.provider === workspace.provider &&
+      originOf(profile.baseUrl) === originOf(workspace.baseUrl);
+    const embeddingModel = role === "embedding" && explicitlyAssigned ? profile.model : sameEndpoint ? workspace.embeddingModel : undefined;
     return {
-      ...this.publicFields(stored),
-      apiKey: this.resolveLegacyOrPrimaryKey(stored),
+      ...workspace,
+      provider: profile.provider,
+      model: fast || profile.model,
+      baseUrl: profile.baseUrl,
+      apiKey: profile.apiKey,
+      apiProtocol: profile.apiProtocol,
+      profileId: profile.id,
+      fallbackProfileIds: profile.fallbackProfileIds,
+      egressPolicy: globalPolicy === "standard" ? profilePolicy : globalPolicy,
+      zdrConfirmed: profile.zdrConfirmed ?? (sameEndpoint ? workspace.zdrConfirmed : false),
+      embeddingModel: profile.embeddingModel ?? embeddingModel,
+      reasoningEffort: profile.reasoningEffort ?? workspace.reasoningEffort,
+      temperature: profile.temperature ?? workspace.temperature,
+      maxOutputTokens: profile.maxOutputTokens ?? workspace.maxOutputTokens,
+      contextWindowTokens: profile.contextWindowTokens ?? workspace.contextWindowTokens,
     };
   }
 

@@ -150,10 +150,17 @@ describe('Web Security Overhaul: Tickets, Cookies & CSWSH', () => {
     const queryWs = await rawUpgradeRequest(baseUrl, `/api/ws?token=${encodeURIComponent(rawSessionToken)}`);
     expect(queryWs.status).toBe(401);
 
+    // A reconnect ticket must still belong to the workspace already open in the tab.
+    const changedWorkspace = await fetch(`${baseUrl}/api/ws-ticket`, {
+      method: 'POST',
+      headers: { cookie: setup.cookie, 'x-sshs3-workspace-user': 'previous-workspace' },
+    });
+    expect(changedWorkspace.status).toBe(401);
+
     // Ticket issued with HttpOnly cookie works once and cannot be replayed
     const ticketRes = await fetch(`${baseUrl}/api/ws-ticket`, {
       method: 'POST',
-      headers: { cookie: setup.cookie },
+      headers: { cookie: setup.cookie, 'x-sshs3-workspace-user': setup.user.id },
     });
     expect(ticketRes.status).toBe(200);
     const { ticket } = (await ticketRes.json()) as { ticket: string };

@@ -5,6 +5,7 @@ import type { HubSnapshot } from '@shared/types/aiHub';
 import type { Snippet } from '@shared/types/snippets';
 import type { SSHConnectionConfig } from '@shared/types/ssh';
 import type { S3Config } from '@shared/types/storage';
+import { openTaskStorageKey } from '../lib/aiHubSession';
 import { useModalDismiss } from '../lib/useModalDismiss';
 import { useDialogFocus } from '../lib/useDialogFocus';
 import { useGlobalSearchIndex } from '../lib/useGlobalSearchIndex';
@@ -373,7 +374,8 @@ export const GlobalSearchPalette: React.FC<GlobalSearchPaletteProps> = ({
     }
     if (entry.kind === 'ai-task') {
       try {
-        window.sessionStorage.setItem('sshs3.aiHub.openTask', entry.ref);
+        const key = openTaskStorageKey();
+        if (key) window.sessionStorage.setItem(key, entry.ref);
       } catch {
         // Ignore storage errors in restricted environments.
       }

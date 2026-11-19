@@ -20,6 +20,7 @@ import type {
 import { AiConfigStore } from "../AiConfigStore";
 import { HermesManager } from "../HermesManager";
 import { HubStore } from "./HubStore";
+import { sharedMemoryRemovals } from "./memory/sharedMemoryRemovals";
 import { S3WorkspaceSyncService, mergeMemoryCopies } from "./S3WorkspaceSyncService";
 import { McpClientManager } from "./McpClientManager";
 import { KnowledgeBaseService } from "./KnowledgeBaseService";
@@ -60,7 +61,7 @@ import { ChatAndAtlassianPart } from "./areas/chatAndAtlassian";
 import { FactsPart } from "./areas/facts";
 import { AlertsPart } from "./areas/alerts";
 import { nextScheduleTime, SchedulesPart } from "./areas/schedules";
-import { SimulationPart } from "./areas/simulation";
+import { disposeSimulation, SimulationPart } from "./areas/simulation";
 import { EvalsPart } from "./areas/evals";
 import { AuditPart } from "./areas/audit";
 import { McpPart } from "./areas/mcp";
@@ -368,7 +369,8 @@ export class HubService {
         },
         applyMergedState: async (state) => {
           this.store.data.deletedServerIds = state.deletedServerIds;
-          this.store.data.deletedMemoryIds = state.deletedMemoryIds;
+          const removals = sharedMemoryRemovals(this.store.data, state);
+          this.store.data.deletedMemoryIds = removals.deleted;
           if (state.deletedServerBy) this.store.data.deletedServerBy = state.deletedServerBy;
           if (state.deletedMemoryBy) this.store.data.deletedMemoryBy = state.deletedMemoryBy;
           this.store.data.s3SyncedServers = state.activeServers;
@@ -379,14 +381,13 @@ export class HubService {
           const sharedMemMap = new Map<string, MemoryEntry>();
           for (const m of this.store.data.memories) {
             if (m.scope !== "personal") {
-              if ((state.deletedMemoryIds[m.id] ?? 0) < (m.updatedAt ?? 0)) {
+              if (!removals.removed(m)) {
                 sharedMemMap.set(m.id, m);
               }
             }
           }
           for (const m of state.memories) {
-            if ((state.deletedMemoryIds[m.id] ?? 0) >= (m.updatedAt ?? 0))
-              continue;
+            if (removals.removed(m)) continue;
             const prev = sharedMemMap.get(m.id);
             // The newer copy decides, also about what it no longer has; votes are kept from both.
             sharedMemMap.set(m.id, prev ? mergeMemoryCopies(prev, m) : m);
@@ -413,7 +414,7 @@ export class HubService {
               log.warn("Failed syncing S3 servers to ProfileStore", safeError(e)),
             );
 
-          if (state.changed) {
+          if (state.changed || removals.changed) {
             this.changed();
           }
         },
@@ -645,10 +646,6 @@ export class HubService {
     if (!baseUrl || !this.sharedServer()) return;
     await guardUrl(baseUrl, { ...this.outboundGuard(), allowPlainHttp: true, ...(this.kbNetwork ? { lookup: this.kbNetwork.lookup } : {}) });
   }
-
-  // ---- the demo lab's simulation ----------------------------------------------
-
-  simulation?: { startedAt: number; ticketId?: string; servers: string[]; pageId?: string };
 
   async snapshot(): Promise<HubSnapshot> {
     await this.initialize();
@@ -1290,6 +1287,7 @@ export class HubService {
 
   async dispose(): Promise<void> {
     this.disposed = true;
+    await disposeSimulation(this);
     this.stopChatListening();
     clearInterval(this.tickTimer);
     clearTimeout(this.saveTimer);

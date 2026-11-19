@@ -13,6 +13,8 @@ import { maskProviderText, safeError } from "./privacy";
 export interface Embedder {
   /** Names the vector space: vectors of different models are never compared. */
   model: string;
+  /** Distinguishes endpoints that serve different vectors under the same model name. */
+  cacheKey?: string;
   embed(texts: string[]): Promise<number[][]>;
 }
 
@@ -31,6 +33,7 @@ export function openAiCompatibleEmbedder(options: {
   const fetchImpl = options.fetchImpl ?? fetch;
   return {
     model: options.model,
+    cacheKey: JSON.stringify([base, options.model]),
     async embed(texts) {
       const out: number[][] = [];
       for (let i = 0; i < texts.length; i += MAX_BATCH) {
@@ -348,7 +351,7 @@ export class EmbeddingIndex {
     // stored here they would grow the file and push out vectors an endpoint was paid for.
     if (embedder.model === LOCAL_FALLBACK_MODEL) return embedder.embed(texts);
     await this.load();
-    const keys = texts.map((t) => keyOf(embedder.model, t));
+    const keys = texts.map((t) => keyOf(embedder.cacheKey ?? embedder.model, t));
     const missing = [
       ...new Map(
         keys

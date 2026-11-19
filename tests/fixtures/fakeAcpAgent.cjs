@@ -30,6 +30,8 @@ readline.createInterface({ input: process.stdin }).on("line", async (line) => {
     update({ sessionUpdate: "plan", entries: [{ content: "Read the code", priority: "high", status: "completed" }, { content: "Run the tests", priority: "high", status: "in_progress" }] });
     update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Prompt was: " + m.params.prompt[0].text.slice(0, 4000) + "\n" } });
     if (mode === "hang") return;
+    if (["max_tokens", "max_turn_requests", "refusal", "cancelled", "unknown"].includes(mode))
+      return send({ jsonrpc: "2.0", id: m.id, result: { stopReason: mode } });
     let verdict = "not asked";
     if (mode === "ask-by-id") {
       // As the spec allows: the command is said when the call is announced, the permission request names only the call.

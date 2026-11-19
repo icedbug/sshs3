@@ -75,6 +75,45 @@ describe("the demo lab's scenarios", () => {
     expect(getDemoActivityLog().some((e) => e.summary.includes("Decommissioned the StorageGRID gateway node sg-gw-01"))).toBe(true);
   });
 
+  it("keeps the shared lab, its start time and the owner's ticket together across hubs", async () => {
+    const first = await demoHub();
+    const second = await demoHub();
+    const a = (await first.request({ action: "sim-start", scenarioId: "pg-wal-full" })).simulation!.running!;
+    expect(a.ticketId).toBeTruthy();
+    expect(second.simulationView().running).toMatchObject({ id: a.id, startedAt: a.startedAt, ticketId: undefined });
+
+    const b = (await second.request({ action: "sim-start", scenarioId: "nginx-bad-config" })).simulation!.running!;
+    expect(b.ticketId).toBeTruthy();
+    expect(b.ticketId).not.toBe(a.ticketId);
+    expect(first.simulationView().running).toMatchObject({ id: b.id, startedAt: b.startedAt, ticketId: undefined });
+    expect(first.store.data.workTickets?.find((t) => t.id === a.ticketId)?.deleted).toBe(true);
+    expect(getDemoServers().some((s) => s.name.startsWith("pg-prod-db"))).toBe(false);
+    expect(first.store.data.kbPages).not.toContainEqual(expect.objectContaining({ title: SCENARIOS[0].runbook!.title }));
+
+    // Disposing a viewer leaves the owner's lab intact. A reset from any hub cleans the current owner's artifacts.
+    const viewer = await demoHub();
+    await viewer.dispose();
+    expect(second.simulationView().running?.ticketId).toBe(b.ticketId);
+    await first.request({ action: "sim-reset" });
+    expect(second.simulationView().running).toBeUndefined();
+    expect(second.store.data.workTickets?.find((t) => t.id === b.ticketId)?.deleted).toBe(true);
+  });
+
+  it("serializes overlapping changes from two demo hubs", async () => {
+    const first = await demoHub();
+    const second = await demoHub();
+    const starting = first.startSimulation("pg-wal-full");
+    const replacing = second.startSimulation("nginx-bad-config");
+    await Promise.all([starting, replacing]);
+    expect(first.simulationView().running).toMatchObject({ id: "nginx-bad-config", ticketId: undefined });
+    const current = second.simulationView().running!;
+    expect(current.ticketId).toBeTruthy();
+    expect(second.store.data.workTickets?.find((t) => t.id === current.ticketId)?.deleted).toBeFalsy();
+    expect(getDemoServers().some((s) => s.name.startsWith("pg-prod-db"))).toBe(false);
+    await second.dispose();
+    expect(first.simulationView().running).toBeUndefined();
+  });
+
   it("read the servers' facts from their state, so a fix shows as a change", async () => {
     const hub = await demoHub();
     await hub.request({ action: "sim-start", scenarioId: "pg-wal-full" });

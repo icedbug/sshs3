@@ -201,7 +201,19 @@ describe("HubService tool log", () => {
       const snap = await hub.request({ action: "snapshot" });
       expect(snap.tasks[0].id).toBe(stored.id);
       expect(snap.tasks[0].toolLog).toBeUndefined();
-      expect(hub.store.data.tasks[0].toolLog).toHaveLength(1);
+      expect(snap.tasks[0].toolStepCount).toBe(1);
+      const details = await hub.request({ action: "task-read", taskId: stored.id, detail: "tools" });
+      expect(details.reply?.taskTools).toEqual({ id: stored.id, count: 1, entries: stored.toolLog });
+      expect(details.reply?.task).toBeUndefined();
+      // A task saved by an older installation only knows about the last 60 results.
+      stored.status = "running";
+      delete stored.toolStepCount;
+      stored.toolLog = Array.from({ length: 60 }, () => stored.toolLog![0]);
+      hub.event(stored, { type: "tool.result", tool: { name: "lookup", input: "{}", output: "ok" } });
+      const next = await hub.request({ action: "task-read", taskId: stored.id, detail: "tools" });
+      expect(next.tasks[0].toolStepCount).toBe(61);
+      expect(next.reply?.taskTools?.entries).toHaveLength(60);
+      expect(next.reply?.taskTools?.entries.at(-1)?.name).toBe("lookup");
     } finally {
       vi.unstubAllGlobals();
       await hub.dispose();

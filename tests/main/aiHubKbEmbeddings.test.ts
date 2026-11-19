@@ -123,6 +123,16 @@ describe("openAiCompatibleEmbedder", () => {
 });
 
 describe("EmbeddingIndex", () => {
+  it("separates vector caches for different profile endpoints serving the same model name", async () => {
+    const index = new EmbeddingIndex(path.join(await tmp(), "vectors.json"));
+    const source = (baseUrl: string, value: number) => openAiCompatibleEmbedder({
+      model: "shared-name", baseUrl,
+      fetchImpl: async () => Response.json({ data: [{ index: 0, embedding: [value] }] }),
+    });
+    expect(await index.vectorsFor(["same record"], source("https://a.example/v1", 1))).toEqual([[1]]);
+    expect(await index.vectorsFor(["same record"], source("https://b.example/v1", 2))).toEqual([[2]]);
+  });
+
   it("embeds a text once per model, across instances, and stores no text", async () => {
     const file = path.join(await tmp(), "kb-embeddings.json");
     const embedder = fakeEmbedder();

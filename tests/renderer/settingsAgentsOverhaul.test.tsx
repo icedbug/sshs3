@@ -522,6 +522,25 @@ describe("AgentsAndMcpView shows what was saved for an agent", () => {
     expect(screen.getByTestId("runner-test-r1")).toHaveTextContent("Not checked yet. Test starts the program, greets it and stops it again. It is given no work.");
   });
 
+  it("saves the workspace tool the external runner can actually request", async () => {
+    const hub = baseHub({
+      agents: [{ id: "ext", name: "Reader", mission: "Read notes", role: "Reader", systemPrompt: "", runnerId: "r1", updatedAt: 1,
+        defaultMode: "advice", allowedTools: ["sshs3_tickets", "file_read"], enabled: true }],
+      externalRunners: [{ id: "r1", name: "External reader", command: "reader", args: [], cwd: "/work", updatedAt: 1 }],
+    });
+    const act = vi.fn().mockResolvedValue(hub);
+    render(<AgentsAndMcpView hub={hub} act={act} selectedAgentId="" onSelectAgentForChat={vi.fn()} onStartedMission={vi.fn()} />);
+    fireEvent.click(within(screen.getByTestId("agent-card-ext")).getByRole("button", { name: "Edit" }));
+    const form = screen.getByTestId("agent-form");
+    expect(within(form).getByLabelText("List the team's tickets")).toBeChecked();
+    expect(within(form).getByLabelText("file_read (unavailable for this runner)")).toBeChecked();
+    fireEvent.click(within(form).getByLabelText("Search the team's knowledge base"));
+    fireEvent.submit(form);
+    await waitFor(() => expect(act).toHaveBeenCalledWith(expect.objectContaining({
+      action: "agent-save", agent: expect.objectContaining({ allowedTools: ["tickets_list", "file_read", "kb_search"] }),
+    })));
+  });
+
   it("tests an outside agent on request and says what was found", async () => {
     const hub = baseHub({ externalRunners: [{ id: "r1", name: "Claude Code", command: "npx", args: ["-y", "x"], cwd: "/code" }] as never });
     const act = vi

@@ -85,6 +85,18 @@ describe("an external agent over ACP", () => {
     expect(done.output).toContain("File read through the client: refused");
   });
 
+  it.each([
+    ["max_tokens", "run.interrupted"],
+    ["max_turn_requests", "run.interrupted"],
+    ["unknown", "run.interrupted"],
+    ["refusal", "run.failed"],
+    ["cancelled", "run.cancelled"],
+  ])("preserves partial output for %s and reports %s", async (reason, type) => {
+    const { events, error } = await run(reason);
+    expect(error).toBeUndefined();
+    expect(events.at(-1)).toMatchObject({ type, output: expect.stringContaining("Add a login form") });
+  });
+
   it("asks before a command and passes the answer on as this once, never as always", async () => {
     const yes = await run("ask", async () => true);
     expect(yes.questions).toMatchObject([{ title: "Run npm test", kind: "execute", command: "npm test" }]);
@@ -170,6 +182,23 @@ describe("a ticket for an external agent", () => {
     expect(done.result).toContain("Permission: yes.");
     expect(done.result).toContain("Follow the conventions.");
     expect(run.model).toBe("Fake agent");
+  });
+
+  it("blocks a ticket and asks for attention when its external agent runs out of tokens", async () => {
+    const { hub, dir } = await makeHub();
+    const notify = vi.spyOn(hub, "notify");
+    process.env.FAKE_ACP = "max_tokens";
+    await hub.request({ action: "runner-save", runner: runner({ cwd: dir }) });
+    await hub.request({ action: "agent-save", agent: { id: "reviewer", name: "Reviewer", role: "Reviewer", systemPrompt: "", defaultMode: "advice", mission: "Review notes", runnerId: "fake" } });
+    const snap = await hub.request({ action: "ticket-save", ticket: { title: "Review notes", assigneeAgentId: "reviewer" } });
+    const id = snap.workTickets![0].id;
+    await hub.request({ action: "ticket-start", id });
+    await waitFor(() => notify.mock.calls.some(([title]) => title === "Task needs attention"));
+    expect(hub.store.data.workTickets!.find(t => t.id === id)).toMatchObject({ status: "blocked", result: expect.stringContaining("max_tokens") });
+    const run = hub.store.data.tasks.find(t => t.ticketId === id)!;
+    expect(run).toMatchObject({ status: "interrupted", verification: "incomplete" });
+    expect(run.messages.at(-1)?.text).toContain("Review notes");
+    expect(notify.mock.calls.some(([title]) => title === "Task finished")).toBe(false);
   });
 
   it("stops a destructive command for approval even when the agent runs on its own", async () => {

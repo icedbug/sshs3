@@ -15,6 +15,8 @@ vi.mock('electron', async () => {
 
 import { setHeadlessUserDataPath } from '../../src/main/web/electronShim';
 import { isDroppableStreamFrame, Sshs3WebServer } from '../../src/main/web/WebServer';
+import { observeHubSnapshot } from '../../src/renderer/src/lib/aiHub';
+import { createMultiSSHApi } from '../../src/shared/ipc/createMultiSSHApi';
 import { installProcessGuards, isConnectionError } from '../../src/main/web/processGuards';
 import {
   BrowserWebSocketIpcTransport,
@@ -257,6 +259,62 @@ describe('webClientBridge: reconnects and lost connections', () => {
     (globalThis as any).WebSocket = realWebSocket;
     (globalThis as any).fetch = realFetch;
   }
+
+  it('opens a fresh transport when the workspace identity changes', async () => {
+    install();
+    const transport = new BrowserWebSocketIpcTransport();
+    try {
+      transport.connect(null, 'first');
+      await vi.waitFor(() => expect(MockWebSocket.all).toHaveLength(1));
+      const first = MockWebSocket.all[0]!;
+      first.open();
+      transport.connect(null, 'second');
+      expect(first.readyState).toBe(MockWebSocket.CLOSED);
+      await vi.waitFor(() => expect(MockWebSocket.all).toHaveLength(2));
+      expect(fetch).toHaveBeenLastCalledWith('/api/ws-ticket', expect.objectContaining({
+        headers: { 'X-SSHS3-Workspace-User': 'second' },
+      }));
+    } finally {
+      transport.disconnect();
+      uninstall();
+    }
+  });
+
+  it('refreshes the visible hub once after reconnect even when the server sends no more events', async () => {
+    install();
+    const transport = new BrowserWebSocketIpcTransport();
+    let stop: (() => void) | undefined;
+    try {
+      const api = createMultiSSHApi(transport);
+      Object.assign(window, { multissh: api });
+      transport.connect(null, 'example-member');
+      await vi.waitFor(() => expect(MockWebSocket.all).toHaveLength(1));
+      const first = MockWebSocket.all[0]!;
+      first.open();
+      const statuses: string[] = [];
+      stop = observeHubSnapshot((snapshot) => statuses.push(snapshot.tasks[0].status));
+      const snapshots = (ws: MockWebSocket) => ws.sent.map((p) => JSON.parse(p)).filter((p) => p.args?.[0]?.action === 'snapshot');
+      const initial = snapshots(first);
+      expect(initial).toHaveLength(1);
+      first.reply(initial[0].id, { tasks: [{ status: 'running' }] });
+      await vi.waitFor(() => expect(statuses).toEqual(['running']));
+      first.drop();
+      await vi.waitFor(() => expect(MockWebSocket.all).toHaveLength(2), { timeout: 3000 });
+      expect(fetch).toHaveBeenLastCalledWith('/api/ws-ticket', expect.objectContaining({
+        headers: { 'X-SSHS3-Workspace-User': 'example-member' },
+      }));
+      const second = MockWebSocket.all[1]!;
+      second.open();
+      await vi.waitFor(() => expect(snapshots(second)).toHaveLength(1));
+      second.reply(snapshots(second)[0].id, { tasks: [{ status: 'completed' }] });
+      await vi.waitFor(() => expect(statuses).toEqual(['running', 'completed']));
+      expect(snapshots(second)).toHaveLength(1);
+    } finally {
+      stop?.();
+      transport.disconnect();
+      uninstall();
+    }
+  });
 
   it('subscribes again to the sessions it opened after a reconnect', async () => {
     install();

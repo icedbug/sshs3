@@ -1,7 +1,9 @@
 import crypto from "node:crypto";
 import type { AgentTask, WorkforceRun, SimulationView, WorkforceStep, WorkspaceActivityEvent } from "../../../../shared/types/aiHub";
 import { savePageByPerson } from "../KbCompile";
-import { runningScenario, SCENARIOS, scenarioById, scoreRunning, startScenario, stopScenario } from "../../../sim/lab";
+import { SCENARIOS, scenarioById, startScenario, stopScenario } from "../../../sim/lab";
+import { scoreScenario, type SimScenario } from "../../../sim/Scenario";
+import type { SimWorld } from "../../../sim/SimWorld";
 import { parseAlerts } from "../AlertIntake";
 import { upsertDemoServer, deleteDemoServer, appendDemoActivity, isDemoMode, saveDemoWorkforceRun } from "../demoWorkspace";
 import { boundedContext, clip } from "../privacy";
@@ -9,6 +11,108 @@ import { requiredText } from "../hubHelpers";
 import { active } from "../hubShared";
 import type { HubService } from "../HubService";
 import type { Handled, RequestsOf } from "./routes";
+
+interface HubSimulation {
+  owner: HubService;
+  scenario: SimScenario;
+  world: SimWorld;
+  startedAt: number;
+  ticketId?: string;
+  pageId?: string;
+}
+
+// The demo hosts and their shells are process-wide. Keep their incident and its owner's artifacts together.
+let simulation: HubSimulation | undefined;
+let transition: Promise<void> = Promise.resolve();
+
+function changeSimulation(change: () => Promise<void>): Promise<void> {
+  const result = transition.then(change);
+  transition = result.catch(() => undefined);
+  return result;
+}
+
+async function clearSimulation(): Promise<void> {
+  const run = simulation;
+  simulation = undefined;
+  stopScenario();
+  if (!run) return;
+  const { owner, scenario, pageId, ticketId } = run;
+  run.world.onRan = undefined;
+  for (const server of scenario.servers) deleteDemoServer(server.id);
+  if (pageId) owner.store.data.kbPages = (owner.store.data.kbPages ?? []).filter((p) => p.id !== pageId);
+  // A terminal may have saved one of the lab's servers as this owner's profile.
+  const serverIds = new Set(scenario.servers.map((server) => server.id));
+  for (const id of serverIds) await owner.host.deleteServer?.(id).catch(() => undefined);
+  if (owner.store.data.s3SyncedServers) owner.store.data.s3SyncedServers = owner.store.data.s3SyncedServers.filter((s) => !serverIds.has(s.id));
+  const ticket = ticketId && owner.store.data.workTickets?.find((t) => t.id === ticketId && !t.deleted);
+  if (ticket && ticket.status !== "in_progress") owner.putTicket({ ...ticket, deleted: true, deletedBy: "the demo lab", updatedAt: Date.now() });
+  await owner.chat.endSimulation();
+  if (owner.disposed) owner.host.onSharedWorkspaceChanged?.();
+  else owner.changed();
+}
+
+async function installSimulation(owner: HubService, scenario: SimScenario): Promise<void> {
+  const world = startScenario(scenario);
+  const run: HubSimulation = { owner, scenario, world, startedAt: world.now() };
+  simulation = run;
+  // What is run on the lab's servers changes how the scenario stands: the interface is told, not more than twice a second.
+  let told: ReturnType<typeof setTimeout> | undefined;
+  world.onRan = () => {
+    told ??= setTimeout(() => {
+      told = undefined;
+      if (simulation === run) owner.changed();
+    }, 400);
+  };
+  const now = run.startedAt;
+  // The team's own page for this kind of trouble: there while the scenario runs, as it would be in a team that had met it before.
+  if (scenario.runbook) {
+    const page = savePageByPerson(undefined, { kind: "troubleshooting", title: scenario.runbook.title, when: scenario.runbook.when, body: scenario.runbook.body, targets: [...new Set(scenario.servers.map((x) => x.cluster))], keys: scenario.runbook.keys }, "the team (demo lab)");
+    owner.store.data.kbPages = [...(owner.store.data.kbPages ?? []), page];
+    run.pageId = page.id;
+  }
+  for (const server of scenario.servers)
+    upsertDemoServer({ id: server.id, name: server.name, host: server.host, username: server.username, cluster: server.cluster, folder: `Scenario / ${server.cluster}`, description: server.description, tags: server.tags, shared: false });
+  // The chat first: the alert's ticket looks through it.
+  const said = scenario.chat ?? [];
+  const channels = [...new Set(said.map((m) => m.channel))].map((name, i) => ({ id: `CSIM${i + 1}`, name }));
+  const tsOf = (minutesAgo: number): string => ((now - minutesAgo * 60_000) / 1000).toFixed(6);
+  await owner.chat.simulate(
+    "Acme",
+    channels,
+    said.map((m) => {
+      const channelId = channels.find((c) => c.name === m.channel)!.id;
+      const id = tsOf(m.minutesAgo);
+      const threadId = m.replyTo === undefined ? id : tsOf(said[m.replyTo].minutesAgo);
+      return { id, channelId, at: now - m.minutesAgo * 60_000, author: m.author, text: m.text, threadId, link: `https://acme.slack.com/archives/${channelId}/p${id.replace(".", "")}` };
+    }),
+  );
+  for (const [i, event] of (scenario.activity ?? []).entries())
+    appendDemoActivity({ id: `sim-${scenario.id}-${i}`, at: now - event.minutesAgo * 60_000, actor: event.actor, kind: event.kind as never, targetLabel: event.target, summary: event.summary } as WorkspaceActivityEvent);
+  if (scenario.alert) {
+    const made = await owner.takeAlerts(
+      parseAlerts({
+        status: "firing",
+        alerts: [
+          {
+            status: "firing",
+            fingerprint: `sim-${scenario.id}-${now}`,
+            labels: { alertname: scenario.alert.name, severity: scenario.alert.severity, instance: scenario.alert.instance },
+            annotations: { summary: scenario.alert.summary, description: scenario.alert.description },
+          },
+        ],
+      }),
+    );
+    run.ticketId = made.created[0];
+  }
+  owner.changed();
+}
+
+/** Closing an unrelated web tenant must leave the shared exercise running. */
+export function disposeSimulation(owner: HubService): Promise<void> {
+  return changeSimulation(async () => {
+    if (simulation?.owner === owner) await clearSimulation();
+  });
+}
 
 /**
  * The demo lab's incidents.
@@ -30,102 +134,46 @@ export class SimulationPart {
     if (!isDemoMode()) throw new Error("Scenarios run in the demo lab only: start sshs3 in demo mode.");
     const scenario = scenarioById(scenarioId);
     if (!scenario) throw new Error("There is no such scenario.");
-    await this.endSimulation();
-    const world = startScenario(scenario);
-    // What is run on the lab's servers changes how the scenario stands: the interface is told, not more than twice a second.
-    let told: ReturnType<typeof setTimeout> | undefined;
-    world.onRan = () => {
-      told ??= setTimeout(() => {
-        told = undefined;
-        if (!this.disposed) this.changed();
-      }, 400);
-    };
-    const now = world.now();
-    // The team's own page for this kind of trouble: there while the scenario runs, as it would be in a team that had met it before.
-    let pageId: string | undefined;
-    if (scenario.runbook) {
-      const page = savePageByPerson(undefined, { kind: "troubleshooting", title: scenario.runbook.title, when: scenario.runbook.when, body: scenario.runbook.body, targets: [...new Set(scenario.servers.map((x) => x.cluster))], keys: scenario.runbook.keys }, "the team (demo lab)");
-      this.store.data.kbPages = [...(this.store.data.kbPages ?? []), page];
-      pageId = page.id;
-    }
-    for (const server of scenario.servers)
-      upsertDemoServer({ id: server.id, name: server.name, host: server.host, username: server.username, cluster: server.cluster, folder: `Scenario / ${server.cluster}`, description: server.description, tags: server.tags, shared: false });
-    // The chat first: the alert's ticket looks through it.
-    const said = scenario.chat ?? [];
-    const channels = [...new Set(said.map((m) => m.channel))].map((name, i) => ({ id: `CSIM${i + 1}`, name }));
-    const tsOf = (minutesAgo: number): string => ((now - minutesAgo * 60_000) / 1000).toFixed(6);
-    await this.chat.simulate(
-      "Acme",
-      channels,
-      said.map((m) => {
-        const channelId = channels.find((c) => c.name === m.channel)!.id;
-        const id = tsOf(m.minutesAgo);
-        const threadId = m.replyTo === undefined ? id : tsOf(said[m.replyTo].minutesAgo);
-        return { id, channelId, at: now - m.minutesAgo * 60_000, author: m.author, text: m.text, threadId, link: `https://acme.slack.com/archives/${channelId}/p${id.replace(".", "")}` };
-      }),
-    );
-    for (const [i, event] of (scenario.activity ?? []).entries())
-      appendDemoActivity({ id: `sim-${scenario.id}-${i}`, at: now - event.minutesAgo * 60_000, actor: event.actor, kind: event.kind as never, targetLabel: event.target, summary: event.summary } as WorkspaceActivityEvent);
-    this.simulation = { startedAt: now, servers: scenario.servers.map((s) => s.id), pageId };
-    if (scenario.alert) {
-      const made = await this.takeAlerts(
-        parseAlerts({
-          status: "firing",
-          alerts: [
-            {
-              status: "firing",
-              fingerprint: `sim-${scenario.id}-${now}`,
-              labels: { alertname: scenario.alert.name, severity: scenario.alert.severity, instance: scenario.alert.instance },
-              annotations: { summary: scenario.alert.summary, description: scenario.alert.description },
-            },
-          ],
-        }),
-      );
-      this.simulation.ticketId = made.created[0];
-    }
-    this.changed();
+    return changeSimulation(async () => {
+      if (this.disposed) return;
+      await clearSimulation();
+      try {
+        await installSimulation(this, scenario);
+      } catch (error) {
+        await clearSimulation();
+        throw error;
+      }
+    });
   }
 
-  /** Takes the lab back to having no scenario: its servers, its chat and its ticket go. */
-  async endSimulation(this: HubService): Promise<void> {
-    const had = this.simulation;
-    stopScenario();
-    await this.chat.endSimulation();
-    if (!had) return;
-    this.simulation = undefined;
-    for (const id of had.servers) deleteDemoServer(id);
-    if (had.pageId) this.store.data.kbPages = (this.store.data.kbPages ?? []).filter((p) => p.id !== had.pageId);
-    // Opening a terminal to one saved it as a profile of this person's: that goes too.
-    for (const id of had.servers) await this.host.deleteServer?.(id).catch(() => undefined);
-    // Nothing of the lab stays in what the team shares.
-    if (this.store.data.s3SyncedServers?.some((x) => had.servers.includes(x.id))) this.store.data.s3SyncedServers = this.store.data.s3SyncedServers.filter((x) => !had.servers.includes(x.id));
-    const ticket = had.ticketId ? this.store.data.workTickets?.find((t) => t.id === had.ticketId && !t.deleted) : undefined;
-    if (ticket && ticket.status !== "in_progress") this.putTicket({ ...ticket, deleted: true, deletedBy: "the demo lab", updatedAt: Date.now() });
-    this.changed();
+  async endSimulation(): Promise<void> {
+    await changeSimulation(clearSimulation);
   }
 
   /** The scenarios, and how the running one stands: read off the lab each time it is asked. */
   simulationView(this: HubService): SimulationView {
-    const scenario = runningScenario();
+    const run = simulation;
     const scenarios = SCENARIOS.map((s) => ({ id: s.id, title: s.title, story: s.story, target: s.target, prompt: s.prompt }));
-    if (!scenario || !this.simulation) return { scenarios };
-    // What whoever worked on it said at the end: the latest finished conversation about its server or its ticket.
-    const ticket = this.simulation.ticketId ? this.store.data.workTickets?.find((t) => t.id === this.simulation!.ticketId) : undefined;
+    if (!run) return { scenarios };
+    const { scenario, startedAt } = run;
+    // Every viewer sees the shared lab, but reports and tickets belong to the hub that started it.
+    const ticketId = run.owner === this ? run.ticketId : undefined;
+    const ticket = ticketId ? this.store.data.workTickets?.find((t) => t.id === ticketId) : undefined;
     const names = new Set(scenario.servers.map((s) => s.name));
-    const report = [...this.store.data.tasks]
-      .filter((t) => t.createdAt >= this.simulation!.startedAt - 1000 && !active(t) && (t.id === ticket?.taskId || names.has(t.target?.label ?? "")))
+    const report = run.owner === this ? [...this.store.data.tasks]
+      .filter((t) => t.createdAt >= startedAt - 1000 && !active(t) && (t.id === ticket?.taskId || names.has(t.target?.label ?? "")))
       .sort((a, b) => b.updatedAt - a.updatedAt)
       .map((t) => [...t.messages].reverse().find((m) => m.role === "assistant" && m.text.trim())?.text)
-      .find(Boolean);
-    const score = scoreRunning(report ?? ticket?.result)!;
+      .find(Boolean) : undefined;
+    const score = scoreScenario(scenario, { world: run.world, report: report ?? ticket?.result });
     return {
       scenarios,
       running: {
         id: scenario.id,
         title: scenario.title,
-        startedAt: this.simulation.startedAt,
+        startedAt,
         target: scenario.target,
-        ticketId: this.simulation.ticketId,
+        ticketId,
         checks: score.checks,
         passed: score.passed,
         total: score.total,

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { ACP_WORKSPACE_TOOLS, acpEditorTools } from "@shared/acpWorkspaceTools";
 import {
   type AgentMode,
   type HubSnapshot,
@@ -319,7 +320,7 @@ export function AgentsAndMcpView({
             <select
               data-testid="agent-runner-select"
               value={draft.runnerId}
-              onChange={(e) => setDraft({ ...draft, runnerId: e.target.value })}
+              onChange={(e) => setDraft({ ...draft, runnerId: e.target.value, allowedTools: e.target.value ? acpEditorTools(draft.allowedTools) : draft.allowedTools })}
             >
               <option value="">sshS3&apos;s assistant, on your model</option>
               {runners.map((r) => (
@@ -340,9 +341,8 @@ export function AgentsAndMcpView({
             </select>
             {draft.runnerId && (
               <small>
-                An external agent works in its own folder with its own tools and model. sshS3&apos;s runbooks, MCP
-                servers and terminals are not given to it; what it asks permission for is judged by your safety
-                settings.
+                An external agent uses its own folder, tools and model. When local MCP is enabled, it can
+                also request the workspace tools selected below. Command requests still require approval.
               </small>
             )}
           </label>
@@ -427,11 +427,11 @@ export function AgentsAndMcpView({
           <fieldset className="ai-checks">
             <legend>What it may do (none ticked: whatever its mode allows)</legend>
             <small className="ai-hint">
-              Ticking narrows this agent and nothing else: it can never do more than its mode and the
-              safety policy allow. It may always look at the workspace, read the knowledge base pages and
-              keep its own notes.
+              {draft.runnerId
+                ? "These restrictions apply to the local workspace MCP connection. The run's mode, target and permissions also apply."
+                : "The agent's mode and safety policy still apply. It may always look at the workspace, read knowledge base pages and keep its own notes."}
             </small>
-            {NARROWABLE.map((t) => (
+            {(draft.runnerId ? ACP_WORKSPACE_TOOLS : NARROWABLE).map((t) => (
               <label key={t.name}>
                 <input
                   type="checkbox"
@@ -439,6 +439,12 @@ export function AgentsAndMcpView({
                   onChange={() => setDraft({ ...draft, allowedTools: toggled(draft.allowedTools, t.name) })}
                 />
                 <span>{t.label}</span>
+              </label>
+            ))}
+            {draft.allowedTools.filter(name => !(draft.runnerId ? ACP_WORKSPACE_TOOLS : NARROWABLE).some(t => t.name === name)).map(name => (
+              <label key={name}>
+                <input type="checkbox" checked onChange={() => setDraft({ ...draft, allowedTools: toggled(draft.allowedTools, name) })} />
+                <span>{name} (unavailable for this runner)</span>
               </label>
             ))}
           </fieldset>
@@ -560,7 +566,7 @@ export function AgentsAndMcpView({
                     defaultMode: ag.defaultMode,
                     kbDocIds: ag.kbDocIds ?? [],
                     mcpServerIds: ag.mcpServerIds ?? [],
-                    allowedTools: (ag.allowedTools ?? []).filter((t) => t !== "all"),
+                    allowedTools: ag.runnerId ? acpEditorTools(ag.allowedTools) : (ag.allowedTools ?? []).filter((t) => t !== "all"),
                     modelOverride: ag.modelOverride ?? "",
                     runnerId: ag.runnerId ?? "",
                   })

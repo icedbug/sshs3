@@ -245,14 +245,17 @@ export class AgentsPart {
       distillSourceId?: string;
       title: string;
       mainModel?: boolean;
+      modelRole?: "backgroundDistill";
       investigator?: boolean;
     },
   ): Promise<AgentTask> {
     const task = await this.start(input, undefined, tag);
     await this.whenSettled(task);
     if (task.status !== "failed") return task;
-    const fast = (await this.config.getConfig().catch(() => undefined))?.fastModel;
-    if (!fast || task.model !== fast) return task;
+    const config = await this.config.getConfig().catch(() => undefined);
+    const role = task.distillSourceId ? "backgroundDistill" : "fastTriage";
+    // Named profiles have their own permitted fallbacks. Only retry a legacy fast model here.
+    if (task.mainModelOnly || config?.activeProfileByRole?.[role] || !config?.fastModel || task.model !== config.fastModel) return task;
     log.warn("Background run failed on the fast model; trying the main model", safeError(task.error));
     const again = await this.start(input, undefined, { ...tag, mainModel: true });
     await this.whenSettled(again);

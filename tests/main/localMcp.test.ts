@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -72,6 +72,57 @@ describe("the app answering this person's own agent", () => {
     await expect(
       after.connect(new StreamableHTTPClientTransport(url, { requestInit: { headers: { authorization: `Bearer ${token}` } } })),
     ).rejects.toThrow();
+  });
+
+  it("gives a launched ACP agent only its selected workspace tools and omits the bridge for unsupported selections", async () => {
+    const { hub, dir } = await makeHub();
+    await hub.request({ action: "configure", config: { enabled: true }, preferences: { proposeMemories: false } });
+    await hub.request({ action: "mcp-local-set", enabled: true, port: 0 });
+    const script = path.join(dir, "list-workspace-tools.cjs");
+    // This synthetic runner reports only the tool names supplied through ACP's session/new.
+    await fs.writeFile(script, String.raw`
+const send = (msg) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...msg }) + "\n");
+let report = "no workspace bridge";
+require("node:readline").createInterface({ input: process.stdin }).on("line", async (line) => {
+  const { id, method, params } = JSON.parse(line);
+  if (method === "initialize") return send({ id, result: { protocolVersion: 1, agentCapabilities: {} } });
+  if (method === "session/new") {
+    const server = params.mcpServers.find((entry) => entry.name === "sshs3");
+    if (server) {
+      if (new URL(server.url).hostname !== "127.0.0.1") throw new Error("Expected the local test listener");
+      const headers = Object.fromEntries(server.headers.map(({ name, value }) => [name, value]));
+      const res = await fetch(server.url, { method: "POST", headers: { ...headers, "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) });
+      const rpc = await res.json();
+      report = "workspace tools: " + rpc.result.tools.map((tool) => tool.name).sort().join(", ");
+    }
+    return send({ id, result: { sessionId: "local-list" } });
+  }
+  if (method === "session/prompt") {
+    send({ method: "session/update", params: { sessionId: "local-list",
+      update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: report } } } });
+    send({ id, result: { stopReason: "end_turn" } });
+  }
+});
+`);
+    await hub.request({ action: "runner-save", runner: { id: "list", name: "List local tools", command: process.execPath, args: [script], cwd: dir } });
+    const createKey = vi.spyOn(hub.mcpTokens(), "create");
+    for (const [id, allowedTools, expected] of [
+      ["limited", ["kb_search", "file_write"], "workspace tools: kb_search"],
+      ["unsupported", ["file_write"], "no workspace bridge"],
+    ] as const) {
+      await hub.request({ action: "agent-save", agent: { id, name: id, role: "Reader", mission: "List available tools", systemPrompt: "", defaultMode: "advice", runnerId: "list", allowedTools: [...allowedTools] } });
+      const snap = await hub.request({ action: "ticket-save", ticket: { title: id, assigneeAgentId: id } });
+      const ticketId = snap.workTickets!.find(ticket => ticket.title === id)!.id;
+      await hub.request({ action: "ticket-start", id: ticketId });
+      await vi.waitFor(() => {
+        const ticket = hub.store.data.workTickets?.find(ticket => ticket.id === ticketId);
+        expect(ticket?.status).toBe("review");
+        expect(ticket?.result).toBe(expected);
+      }, { timeout: 8000 });
+    }
+    expect(createKey).toHaveBeenCalledTimes(1);
+    expect(createKey.mock.calls[0][0]).toMatchObject({ scopes: ["read"], tools: ["kb_search"] });
   });
 
   it("refuses a call that carries an Origin, so a page on this machine gets nowhere", async () => {

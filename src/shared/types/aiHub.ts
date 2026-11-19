@@ -407,6 +407,8 @@ export interface AgentTask {
    * and ran instead of only what it said.
    */
   toolLog?: AgentToolRecord[];
+  /** Total tool results, including entries older than the retained log. Older tasks start at their retained length. */
+  toolStepCount?: number;
   /** The knowledge base pages this conversation opened, so its outcome can be put down to them. */
   kbPages?: string[];
   /** How many of `changes` have been put down to those pages already. */
@@ -516,6 +518,8 @@ export interface AgentTask {
   model?: string;
   /** Set on a background run that is the second attempt, on the main model, after the fast model failed. */
   mainModelOnly?: boolean;
+  /** Explicit role for KB authoring, which otherwise uses the main model. */
+  modelRole?: "backgroundDistill";
   /** Parent task id when this task was spawned as a subagent/investigator or forked from another task. */
   parentTaskId?: string;
   /** Message id in the parent task from which this conversation was forked. */
@@ -1816,6 +1820,8 @@ export interface HubReply {
   probe?: { ok: boolean; detail: string; models?: string[] };
   /** What `task-read` asked for: the conversation's messages and changes, whole. */
   task?: { id: string; messages: AgentMessage[]; changes: AgentChange[] };
+  /** Only returned when the inspection drawer requests the retained tool details for one task. */
+  taskTools?: { id: string; count: number; entries: AgentToolRecord[] };
   /** What `runner-test` found for an external agent: whether its program is there and answers as an agent. */
   runnerProbe?: { id: string; ok: boolean; detail: string };
 }
@@ -2028,7 +2034,7 @@ export type HubRequest =
     }
   | { action: "stop"; taskId: string }
   /** A conversation whole: a snapshot carries only the last few messages of a long one, and a change without its long parts. Answers `reply.task`. */
-  | { action: "task-read"; taskId: string }
+  | { action: "task-read"; taskId: string; detail?: "tools" }
   | { action: "takeover"; sessionId: string }
   | { action: "arm"; sessionId: string; shell: ShellKind }
   | { action: "approve"; taskId: string; changeId: string; approved: boolean; note?: string; adminException?: boolean }

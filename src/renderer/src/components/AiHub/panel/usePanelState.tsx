@@ -9,6 +9,7 @@ import {
   type ShellKind,
 } from "@shared/types/aiHub";
 import { hubRequest, selectAiTerminal, useHub, useSelectedTerminal } from "../../../lib/aiHub";
+import { openTaskStorageKey } from "../../../lib/aiHubSession";
 import { useFullTask } from "../../../lib/aiHubTasks";
 import type { FileRef } from "../reportRefs";
 import { getVisibleHubViews, isLabsView, modes } from "../panelShared";
@@ -16,7 +17,6 @@ import { copyToClipboard } from "../RichMarkdownContent";
 import { LABS_ENABLED_STORAGE_KEY } from "../panelShared";
 import {
   View,
-  OPEN_TASK_KEY,
   VIEWS,
   Menu,
   StreamingTaskState,
@@ -58,12 +58,13 @@ export function usePanelState({
   >();
   // The conversation that is open is remembered for this tab: a reload or a reconnect (the server
   // restarted, the connection dropped) opens the same conversation again, not an empty "new chat".
+  const storageKey = openTaskStorageKey();
   const [taskId, setTaskIdState] = useState<string>(() => {
     // The dock's own state is in memory and empty after a reload: an empty id from it is "nothing
     // chosen yet", not "new chat", so what this tab remembers is opened.
     if (initialTaskId) return initialTaskId;
     try {
-      return window.sessionStorage.getItem(OPEN_TASK_KEY) ?? "";
+      return storageKey ? window.sessionStorage.getItem(storageKey) ?? "" : "";
     } catch {
       return "";
     }
@@ -447,12 +448,13 @@ export function usePanelState({
     follow.current = true;
     end.current?.scrollIntoView?.({ block: "end" });
     try {
-      if (taskId) window.sessionStorage.setItem(OPEN_TASK_KEY, taskId);
-      else window.sessionStorage.removeItem(OPEN_TASK_KEY);
+      if (!storageKey) return;
+      if (taskId) window.sessionStorage.setItem(storageKey, taskId);
+      else window.sessionStorage.removeItem(storageKey);
     } catch {
       // Storage may be blocked: the conversation then simply is not remembered.
     }
-  }, [taskId]);
+  }, [taskId, storageKey]);
   useEffect(() => {
     const element = composer.current;
     if (element) {

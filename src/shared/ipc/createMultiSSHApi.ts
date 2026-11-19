@@ -142,6 +142,8 @@ export interface AiHubDeltaEvent {
    */
   length?: number;
   tool?: { name: string; input: string; output: string; at: number };
+  /** Authoritative total for tool.result, also used to ignore duplicate deliveries. */
+  toolStepCount?: number;
   usage?: {
     inputTokens: number;
     outputTokens: number;

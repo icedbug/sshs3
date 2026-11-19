@@ -62,7 +62,8 @@ export function changeForSnapshot(change: AgentChange): AgentChange {
  */
 export function taskForSnapshot(task: AgentTask): AgentTask {
   const { toolLog: _toolLog, messagesTail: _stored, ...kept } = task;
-  const rest = { ...kept, changes: task.changes.map(changeForSnapshot) };
+  const count = task.toolStepCount ?? _toolLog?.length;
+  const rest = { ...kept, ...(count === undefined ? {} : { toolStepCount: count }), changes: task.changes.map(changeForSnapshot) };
   const messages = task.messages;
   let chars = 0;
   let pictures = false;

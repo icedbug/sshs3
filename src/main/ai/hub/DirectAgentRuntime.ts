@@ -2708,7 +2708,7 @@ function allToolsForTask(
 }
 
 function extractAiRuntimeTuning(
-  _task: AgentTask,
+  model: HermesModelConfig,
   initialContext?: unknown,
 ): {
   snapshotMaxChars: number;
@@ -2722,7 +2722,13 @@ function extractAiRuntimeTuning(
   const ctx = (initialContext ?? {}) as {
     appSettings?: { aiConfig?: Record<string, unknown> };
   };
-  const cfg = ctx.appSettings?.aiConfig ?? {};
+  const defaults = ctx.appSettings?.aiConfig;
+  const cfg = {
+    contextWindowTokens: model.tuning?.contextWindowTokens ?? defaults?.contextWindowTokens,
+    maxOutputTokens: model.tuning?.maxOutputTokens ?? defaults?.maxOutputTokens,
+    reasoningEffort: model.tuning?.reasoningEffort ?? defaults?.reasoningEffort,
+    temperature: model.tuning?.temperature ?? defaults?.temperature,
+  };
   const contextWindowTokens =
     typeof cfg.contextWindowTokens === "number"
       ? cfg.contextWindowTokens
@@ -3243,6 +3249,12 @@ export class DirectAgentRuntime implements AgentRuntime {
       if (converted) {
         converted.profileId = p.id;
         converted.apiProtocol = p.apiProtocol;
+        converted.tuning = {
+          contextWindowTokens: p.contextWindowTokens,
+          maxOutputTokens: p.maxOutputTokens,
+          reasoningEffort: p.reasoningEffort,
+          temperature: p.temperature,
+        };
         converted.egressPolicy = p.egressPolicy;
         converted.zdrConfirmed = p.zdrConfirmed;
         converted.fallbackProfileIds = p.fallbackProfileIds;
@@ -4299,7 +4311,7 @@ export class DirectAgentRuntime implements AgentRuntime {
       }
     }
     this.privacyFor(task, initialContext);
-    const tuning = extractAiRuntimeTuning(task, initialContext);
+    let tuning = extractAiRuntimeTuning(model, initialContext);
     const rules = this.resolveRules(task, initialContext);
     const instructions = buildSystemInstructions(task, initialContext, rules);
 
@@ -4471,6 +4483,7 @@ export class DirectAgentRuntime implements AgentRuntime {
         );
         if (degraded) {
           activeModel = degraded.model;
+          tuning = extractAiRuntimeTuning(activeModel, initialContext);
           degradeCount++;
           turn--;
           continue;
@@ -4567,7 +4580,7 @@ export class DirectAgentRuntime implements AgentRuntime {
       }
     }
     this.privacyFor(task, initialContext);
-    const tuning = extractAiRuntimeTuning(task, initialContext);
+    let tuning = extractAiRuntimeTuning(model, initialContext);
     const rules = this.resolveRules(task, initialContext);
     const instructions = buildSystemInstructions(task, initialContext, rules);
     const messages: Array<Record<string, unknown>> = [{ role: "system", content: instructions }];
@@ -4783,6 +4796,7 @@ export class DirectAgentRuntime implements AgentRuntime {
         );
         if (degraded) {
           activeModel = degraded.model;
+          tuning = extractAiRuntimeTuning(activeModel, initialContext);
           degradeCount++;
           turn--;
           continue;
@@ -4880,7 +4894,7 @@ export class DirectAgentRuntime implements AgentRuntime {
       }
     }
     this.privacyFor(task, initialContext);
-    const tuning = extractAiRuntimeTuning(task, initialContext);
+    let tuning = extractAiRuntimeTuning(model, initialContext);
     const rules = this.resolveRules(task, initialContext);
     // Two system blocks, so the prompt cache can be reused: the static instructions
     // + rules are cacheable and carry a cache breakpoint; the workspace snapshot +
@@ -5105,6 +5119,7 @@ export class DirectAgentRuntime implements AgentRuntime {
         );
         if (degraded) {
           activeModel = degraded.model;
+          tuning = extractAiRuntimeTuning(activeModel, initialContext);
           degradeCount++;
           turn--;
           continue;

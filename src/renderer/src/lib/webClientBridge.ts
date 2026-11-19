@@ -70,12 +70,18 @@ export class BrowserWebSocketIpcTransport implements IpcRendererTransport {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private drainTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectAttempt = 0;
+  private openedInSession = false;
   private connectGeneration = 0;
   private explicitToken: string | null = null;
+  private workspaceUserId?: string;
   private subscribedSessions = new Set<string>();
   private connectionStateListeners = new Set<(connected: boolean) => void>();
 
-  public connect(explicitToken?: string | null): void {
+  public connect(explicitToken?: string | null, workspaceUserId?: string): void {
+    if (workspaceUserId !== undefined) {
+      if (this.workspaceUserId && this.workspaceUserId !== workspaceUserId) this.disconnect();
+      this.workspaceUserId = workspaceUserId;
+    }
     if (explicitToken !== undefined) {
       this.explicitToken = explicitToken || null;
     }
@@ -100,6 +106,7 @@ export class BrowserWebSocketIpcTransport implements IpcRendererTransport {
     let ticket: string;
     try {
       const headers: Record<string, string> = {};
+      if (this.workspaceUserId) headers['X-SSHS3-Workspace-User'] = this.workspaceUserId;
       if (this.explicitToken) {
         headers['Authorization'] = `Bearer ${this.explicitToken}`;
       }
@@ -164,9 +171,13 @@ export class BrowserWebSocketIpcTransport implements IpcRendererTransport {
           this.enqueueOrSend(JSON.stringify({ type: 'subscribe', sessionId: sid }));
         }
         this.flushSendQueue();
+        // Changes broadcast while disconnected were missed. The first open already has a snapshot queued by the UI.
+        if (this.openedInSession) this.dispatchEvent('ai-hub:changed', []);
+        this.openedInSession = true;
       };
 
       socket.onmessage = (ev) => {
+        if (this.ws !== socket) return;
         try {
           let rawText: string;
           if (typeof ev.data === 'string') {
@@ -187,9 +198,8 @@ export class BrowserWebSocketIpcTransport implements IpcRendererTransport {
       };
 
       socket.onclose = (ev?: { code?: number; reason?: string }) => {
-        if (this.ws === socket) {
-          this.ws = null;
-        }
+        if (this.ws !== socket) return;
+        this.ws = null;
         this.notifyConnectionState(false);
         // What was waiting for an answer fails now with a clear message, instead of hanging until the
         // timeout: the server cannot answer a request over a connection that is gone.
@@ -358,9 +368,11 @@ export class BrowserWebSocketIpcTransport implements IpcRendererTransport {
 
   public disconnect(): void {
     this.shouldReconnect = false;
+    this.openedInSession = false;
     this.connectGeneration++;
     this.reconnectAttempt = 0;
     this.explicitToken = null;
+    this.workspaceUserId = undefined;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -500,10 +512,10 @@ export function ensureWebClientBridgeInstalled(): BrowserWebSocketIpcTransport |
   return singletonTransport;
 }
 
-export function connectWebClientBridge(token?: string | null): void {
+export function connectWebClientBridge(token?: string | null, workspaceUserId?: string): void {
   const transport = ensureWebClientBridgeInstalled();
   if (transport) {
-    transport.connect(token);
+    transport.connect(token, workspaceUserId);
   }
 }
 

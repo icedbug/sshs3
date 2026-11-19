@@ -17,6 +17,7 @@ import {
   encryptSecretValue,
 } from "../../crypto/SecretFieldCrypto";
 import { maskContext, safeError } from "./privacy";
+import { sharedMemoryRemovals } from "./memory/sharedMemoryRemovals";
 import { canonicalJson, removalStandsAt } from "./WorkBoard";
 import { createLogger } from "../../log";
 import { writeFileAtomic } from "../../storage/atomicFile";
@@ -615,36 +616,17 @@ export function mergeS3WorkspacePayload(
   activeServers.sort((a, b) => a.id.localeCompare(b.id));
   if (liveServers(activeServers) !== serversBefore) changed = true;
 
-  // 3. Merge deletedMemoryIds tombstones
-  const deletedMemoryIds: Record<string, number> = {
-    ...(local.deletedMemoryIds ?? {}),
-  };
-  for (const [id, delMs] of Object.entries(remote.deletedMemoryIds ?? {})) {
-    if (!id || typeof delMs !== "number") continue;
-    if (delMs > (deletedMemoryIds[id] ?? 0)) {
-      deletedMemoryIds[id] = delMs;
-      changed = true;
-    }
-  }
-
-  // 4. Merge shared memories by id + updatedAt, respecting tombstones
-  /**
-   * Whether a removal stands over this copy: a removal at or after it, or one made after the version
-   * its edit started from (moved one step above the edit, so that every installation drops it).
-   */
-  const memoryRemoved = (m: MemoryEntry): boolean => {
-    const removedAt = deletedMemoryIds[m.id] ?? 0;
-    if (removedAt >= (m.updatedAt ?? 0)) return true;
-    const at = removalStandsAt(removedAt, { id: m.id, updatedAt: m.updatedAt ?? 0, baseAt: m.baseAt });
-    if (at === undefined) return false;
-    deletedMemoryIds[m.id] = at;
-    changed = true;
-    return true;
-  };
+  // 3–4. Apply the shared deletion rule before merging the surviving copies.
+  const removals = sharedMemoryRemovals(local, remote);
+  const deletedMemoryIds = removals.deleted;
+  changed ||= removals.changed;
   const memMap = new Map<string, MemoryEntry>();
   for (const lm of local.memories ?? []) {
     if (!lm?.id || lm.scope === "personal") continue;
-    if (memoryRemoved(lm)) continue;
+    if (removals.removed(lm)) {
+      changed = true;
+      continue;
+    }
     memMap.set(lm.id, {
       ...lm,
       title: maskContext(lm.title),
@@ -655,7 +637,7 @@ export function mergeS3WorkspacePayload(
   for (const rm of Array.isArray(remote.memories) ? remote.memories : []) {
     if (!rm || typeof rm.id !== "string" || rm.scope === "personal") continue;
     const rTime = rm.updatedAt ?? 0;
-    if (memoryRemoved(rm)) continue;
+    if (removals.removed(rm)) continue;
     const prev = memMap.get(rm.id);
     const tie = Boolean(prev) && rTime === (prev!.updatedAt ?? 0);
     if (!prev || rTime > (prev.updatedAt ?? 0) || tie) {
@@ -716,13 +698,6 @@ export function mergeS3WorkspacePayload(
       } else delete kept.votes;
       // Either side is missing a vote the other has: it is applied here and written back.
       if (!sameVotes(votes, prev.votes) || !sameVotes(votes, theirs)) changed = true;
-    }
-  }
-  // Remove any local memory that was tombstoned by remote
-  for (const [id, m] of memMap.entries()) {
-    if (memoryRemoved(m)) {
-      memMap.delete(id);
-      changed = true;
     }
   }
 

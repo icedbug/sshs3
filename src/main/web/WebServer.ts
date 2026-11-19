@@ -1027,6 +1027,12 @@ export class Sshs3WebServer {
           sendJson(res, 403, { error: 'Origin not allowed' });
           return;
         }
+        // A tab reconnecting after the browser's sign-in changed must re-enter the workspace.
+        const expectedUser = req.headers['x-sshs3-workspace-user'];
+        if (expectedUser !== undefined && expectedUser !== user.id) {
+          sendJson(res, 401, { error: 'Workspace session changed' });
+          return;
+        }
         const issued = this.issueWsTicket(user.id, req.headers.origin);
         sendJson(res, 200, issued);
         return;
