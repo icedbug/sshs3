@@ -7,6 +7,10 @@ import electron from 'vite-plugin-electron/simple'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
+const windowsCI = process.platform === 'win32' && Boolean(process.env.CI)
+const availableCpus = os.availableParallelism()
+const testCpus = windowsCI ? Math.max(1, availableCpus - 1) : availableCpus
+
 function copyProxyCliPlugin() {
   return {
     name: 'copy-proxy-cli',
@@ -124,7 +128,10 @@ export default defineConfig({
   test: {
     include: ['tests/**/*.test.{ts,tsx,js,cjs,mjs}', 'src/**/*.test.{ts,tsx}'],
     // Reserve memory for the coordinator and cap concurrent DOM workers on small runners.
-    maxWorkers: Math.max(1, Math.min(os.availableParallelism(), Math.floor(((process.availableMemory?.() || os.freemem()) - 512 * 1024 ** 2) / (768 * 1024 ** 2)))),
+    maxWorkers: Math.max(1, Math.min(testCpus, Math.floor(((process.availableMemory?.() || os.freemem()) - 512 * 1024 ** 2) / (768 * 1024 ** 2)))),
+    // Hosted Windows workers share CPU with Git, Electron and native crypto processes.
+    // Keep the harness deadline separate from deadlines asserted by individual tests.
+    ...(windowsCI ? { testTimeout: 20_000 } : {}),
     globals: true,
     environment: 'node',
     passWithNoTests: true,
