@@ -1163,6 +1163,7 @@ export class ToolBroker {
             ref: dryChange.ref,
             commandId: dryChange.id,
             source: `terminal:${target.sessionId}`,
+            sourceLabel: target.label,
             observedAt: Date.now(),
           };
         }
@@ -1257,6 +1258,7 @@ export class ToolBroker {
             // A scripted example server of the demo lab: its output is invented, and the model is told so.
             ...(demoNote ? { note: demoNote } : {}),
             source: `terminal:${target.sessionId}`,
+            sourceLabel: target.label,
             observedAt: Date.now(),
           };
         } catch (error) {

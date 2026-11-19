@@ -104,8 +104,8 @@ export function ConversationTail({ p, hub }: { p: PanelState; hub: NonNullable<P
                   );
                 })()}
                 {task?.sources && task.sources.length > 0 && (
-                  <div className="ai-sources-bar" data-testid="ai-task-sources" aria-label="Context sources">
-                    <small className="ai-hint">Sources:</small>
+                  <div className="ai-sources-bar" data-testid="ai-task-sources" aria-label="Conversation context">
+                    <small className="ai-hint">Conversation context</small>
                     {task.sources.map((src) =>
                       // What was read in the team's chat opens the thread it came from.
                       src.kind === "chat" && src.link ? (

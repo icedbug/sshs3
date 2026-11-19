@@ -1,6 +1,8 @@
 import { Fragment, useMemo, useState } from "react";
 import type { AgentHypothesis } from "@shared/types/aiHub";
 import { encodeFileRefHref, tokenizeReportRefs, type FileRef } from "./reportRefs";
+import { evidenceKey, supersededEvidence } from "@shared/incidentEvidence";
+import { HypothesisSourceDetails } from "./HypothesisSourceDetails";
 import { buildHypothesisTree, type HypothesisTreeNode } from "./workforceModel";
 
 const LABEL: Record<AgentHypothesis["status"], string> = {
@@ -21,7 +23,9 @@ function deriveConfidence(h: AgentHypothesis): {
 } {
   let forCount = 0;
   let againstCount = 0;
+  const superseded = supersededEvidence(h.evidence);
   for (const e of h.evidence) {
+    if (e.id && superseded.has(evidenceKey(e))) continue;
     if (e.supports) forCount += 1;
     else againstCount += 1;
   }
@@ -155,6 +159,7 @@ export function HypothesisTree({
       return null;
     }
     const confidence = deriveConfidence(h);
+    const superseded = supersededEvidence(h.evidence);
     const visibleChildren = node.children.filter((c) => !(hideRuledOut && c.hypothesis.status === "ruled-out"));
 
     return (
@@ -176,7 +181,7 @@ export function HypothesisTree({
 
         {h.evidence.map((e, i) => (
           <div
-            key={i}
+            key={e.id ? evidenceKey(e) : i}
             className={`ai-hyp-evidence ${e.supports ? "ai-hyp-for" : "ai-hyp-against"}`}
             data-evidence-kind={e.supports ? "for" : "against"}
             style={{
@@ -202,9 +207,15 @@ export function HypothesisTree({
             >
               {e.supports ? "for" : "against"}
             </span>
-            <span>
+            <div>
               <EvidenceText text={e.text} refs={refs} onOpenRef={onOpenRef} onOpenFileRef={onOpenFileRef} />
-            </span>
+              {e.at !== undefined && Number.isFinite(new Date(e.at).getTime()) && (
+                <small className="ai-muted"> · <time dateTime={new Date(e.at).toISOString()}>{new Date(e.at).toLocaleString()}</time></small>
+              )}
+              {e.id && superseded.has(evidenceKey(e)) && <small className="ai-muted"> · Superseded</small>}
+              {e.supersedes && <small className="ai-muted"> · Revises “{h.evidence.find(item => evidenceKey(item) === evidenceKey(e, e.supersedes))?.text ?? e.supersedes}”</small>}
+              {e.source && <HypothesisSourceDetails key={e.source.callId + e.source.ref + e.source.digest} pointer={e.source} />}
+            </div>
           </div>
         ))}
 

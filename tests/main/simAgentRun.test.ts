@@ -98,6 +98,44 @@ describe("an agent run by a model on a scenario", () => {
     for (const trap of scenario.solutions.carelessFails) expect(failed).toContain(trap);
   }, 120_000);
 
+  it("can trace a confirmed incident diagnosis to the terminal output actually sent to the model", async () => {
+    const { dir, runAgentOnScenario } = await lab();
+    let usedRef: string | undefined;
+    const cause = "The nginx rate-limit configuration references an undefined zone.";
+    const model = await fakeOpenAi(({ messages }) => {
+      const replies = messages.filter(message => message.role === "tool");
+      if (!replies.length) return { tool: "terminal_command", args: { command: "nginx -t", description: "Validate the nginx configuration" } };
+      if (replies.length === 1) {
+        const result = String(replies[0].content);
+        usedRef = /\[(S\d+)\]/.exec(result)?.[1];
+        if (usedRef && result.includes("zone")) return { tool: "sshs3_hypotheses", args: { hypotheses: [
+          { id: "h-zone", text: cause, status: "confirmed", evidence: [
+            { id: "config-check", supports: true, text: "The configuration check reported a zero-size zone.", sourceRef: usedRef },
+          ] },
+        ] } };
+      }
+      return { text: cause };
+    });
+    disposals.push(() => model.close());
+    const result = await runAgentOnScenario({ scenarioId: "nginx-bad-config", baseUrl: model.url, model: "fixture", dir, pollMs: 20 });
+    expect(usedRef).toMatch(/^S\d+$/);
+    expect(result.status).toBe("completed");
+    expect(result.diagnosis).toMatchObject({ status: "confirmed", hypothesisId: "h-zone", cause });
+  }, 60_000);
+
+  it("leaves an inconclusive investigation on the scenario ticket with the next observation, even after the run completes", async () => {
+    const { dir, runAgentOnScenario } = await lab();
+    const nextObservation = "Compare the nginx configuration test output on the web host with the last passing deployment.";
+    const model = await fakeOpenAi([
+      { tool: "sshs3_hypotheses", args: { hypotheses: [{ id: "h1", text: "The deployment changed nginx.conf", status: "open" }], nextObservation } },
+      { text: "The incident needs another observation. " + nextObservation },
+    ]);
+    disposals.push(() => model.close());
+    const result = await runAgentOnScenario({ scenarioId: "nginx-bad-config", baseUrl: model.url, model: "fixture", dir, pollMs: 20 });
+    expect(result.status).toBe("completed");
+    expect(result.diagnosis).toMatchObject({ status: "insufficient-evidence", nextObservation });
+  }, 60_000);
+
   it("runs the full scenario through a stateless Responses endpoint", async () => {
     const { dir, runAgentOnScenario } = await lab();
     const scenario = scenarioById("nginx-bad-config")!;

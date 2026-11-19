@@ -231,7 +231,7 @@ const INDEX_KINDS: KbPageKind[] = ["troubleshooting", "procedure", "system"];
  * least used of every kind and not a whole kind. `focus` holds the names of
  * the server and cluster at hand.
  */
-export function pageIndex(pages: KbPage[], focus: string[] = [], maxChars = 6000): string {
+export function pageIndex(pages: KbPage[], focus: string[] = [], maxChars = 6000, included?: (page: KbPage, line: string) => void): string {
   if (pages.length === 0) return "";
   const wanted = focus.map(norm).filter(Boolean);
   const about = (p: KbPage): boolean => p.targets.some((t) => wanted.includes(norm(t)));
@@ -251,6 +251,7 @@ export function pageIndex(pages: KbPage[], focus: string[] = [], maxChars = 6000
       continue;
     }
     lines.push(line);
+    included?.(p, line);
     used += line.length;
   }
   return [

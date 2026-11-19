@@ -99,7 +99,12 @@ const cut = (task: AgentTask): boolean => Boolean(task.messagesTail) || task.cha
 
 function upToDate(entry: Whole | undefined, task: AgentTask): boolean {
   if (!entry?.loaded) return false;
-  return (!task.messagesTail || messagesUpToDate(entry, task.messagesTail, task.status)) && changesUpToDate(entry, task.changes);
+  if (!changesUpToDate(entry, task.changes)) return false;
+  if (!task.messagesTail) return true;
+  if (!messagesUpToDate(entry, task.messagesTail, task.status)) return false;
+  // A completed call can attach its receipt after the last streamed character.
+  return task.messages.every(m => !m.sourceCallCount ||
+    (entry.messages.find(saved => saved.id === m.id)?.sourceCallCount ?? 0) >= m.sourceCallCount);
 }
 
 async function load(taskId: string): Promise<boolean> {

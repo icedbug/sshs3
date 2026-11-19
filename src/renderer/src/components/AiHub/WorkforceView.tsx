@@ -10,6 +10,7 @@ import type {
   WorkTicketStatus,
   WorkforceRun,
 } from "@shared/types/aiHub";
+import { TicketAccessRequestCard } from "./TicketAccessRequestCard";
 import { ConfirmButton } from "./ConfirmButton";
 import { AtlassianCard } from "./AtlassianCard";
 import { ChatThread } from "./TeamChatCard";
@@ -188,9 +189,9 @@ export function WorkforceView({
   }, [workforcePaused]);
   const openTicketTask = openTicket?.taskId ? hub.tasks.find((t) => t.id === openTicket.taskId) : undefined;
   const openTicketHypotheses = openTicket
-    ? openTicket.hypotheses?.length
-      ? openTicket.hypotheses
-      : openTicketTask?.hypotheses
+    ? openTicket.status === "in_progress" && openTicketTask?.hypotheses?.length
+      ? openTicketTask.hypotheses
+      : openTicket.hypotheses?.length ? openTicket.hypotheses : openTicketTask?.hypotheses
     : undefined;
   const openTicketAlertGroup = useMemo(
     () => (openTicket ? groupCorrelatedAlerts(openTicket) : undefined),
@@ -898,6 +899,7 @@ export function WorkforceView({
             </p>
           )}
           {openTicket.description && <p className="ai-memory-text">{openTicket.description}</p>}
+          <TicketAccessRequestCard key={openTicket.id} ticket={openTicket} act={act} />
           {(openTicket.kbPages ?? []).length > 0 && (
             <div className="ai-tags" data-testid="ticket-kb-pages" style={{ alignItems: "center" }}>
               <small className="ai-muted">Related knowledge base pages:</small>
@@ -978,6 +980,15 @@ export function WorkforceView({
                 ))}
               </div>
             </div>
+          )}
+
+          {openTicket.diagnosis && (
+            <section aria-label="Incident diagnosis" data-testid="ticket-diagnosis">
+              <small>Last investigation · {ago(openTicket.diagnosis.at)}</small>
+              <h4>{openTicket.diagnosis.status === "confirmed" ? "Cause confirmed by the investigation" : "Insufficient evidence"}</h4>
+              {openTicket.diagnosis.status === "confirmed" ? <p>{openTicket.diagnosis.cause}</p> :
+                <p><strong>Next observation</strong> · {openTicket.diagnosis.nextObservation}</p>}
+            </section>
           )}
 
           {openTicketHypotheses && openTicketHypotheses.length > 0 && (

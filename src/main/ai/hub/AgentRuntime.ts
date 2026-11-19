@@ -15,14 +15,16 @@ import {
 export interface RunEvent {
   type: string;
   delta?: string;
+  sourceCalls?: import("../../../shared/answerSources").AnswerSourceCall[];
   text?: string;
   output?: string;
   error?: string;
   usage?: Record<string, number>;
   /** With `tool.result`: the call that was made and what it returned. */
-  tool?: { name: string; input: string; output: string };
+  tool?: { name: string; input: string; output: string; sourceSpans?: import("../../../shared/answerSources").StoredSourceSpan[] };
   /** With `hypotheses.updated`: the agent's hypotheses as they now stand. */
   hypotheses?: import("../../../shared/types/aiHub").AgentHypothesis[];
+  nextObservation?: string;
   /** With `todos.updated`: the agent's task list as it now stands. */
   todos?: import("../../../shared/types/aiHub").AgentTodo[];
 }

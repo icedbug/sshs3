@@ -4,6 +4,8 @@ import type {
   AgentUsage,
   CorrelatedAlertRef,
   InfraGraphEdge,
+  HypothesisEvidence,
+  IncidentDiagnosis,
   MissionAgent,
   WorkGoal,
   WorkTicket,
@@ -11,6 +13,7 @@ import type {
   WorkTicketStatus,
   WorkforceTemplateSummary,
 } from "../../../shared/types/aiHub";
+import { evidenceKey, supersededEvidence } from "../../../shared/incidentEvidence";
 import { clip } from "./privacy";
 
 /**
@@ -311,6 +314,7 @@ export function mergeTicketCopies(
         claim: local.claim,
         taskId: local.taskId,
         result: local.result,
+        diagnosis: local.diagnosis,
         baseAt: remote.updatedAt,
         ...(hlc ? { hlc } : {}),
       };
@@ -353,7 +357,7 @@ export function mergeTicketCopies(
 }
 
 /** A ticket's run: these change together, and come from the same copy. */
-const TICKET_RUN_FIELDS = [["status", "statusAt", "claim", "taskId", "result", "tokens", "settledRun"]] as const;
+const TICKET_RUN_FIELDS = [["status", "statusAt", "claim", "taskId", "result", "diagnosis", "tokens", "settledRun"]] as const;
 
 function allComments(a: WorkTicket, b: WorkTicket): WorkTicketComment[] {
   const byId = new Map<string, WorkTicketComment>();
@@ -372,25 +376,29 @@ function mergeHypothesisStatus(
   return newerIsY ? y : x;
 }
 
+function compareEvidence(a: HypothesisEvidence, b: HypothesisEvidence): number {
+  return (a.at ?? 0) - (b.at ?? 0) || a.text.localeCompare(b.text) || Number(b.supports) - Number(a.supports) || (a.id ?? "").localeCompare(b.id ?? "");
+}
+
 function mergeHypothesisPair(
   x: AgentHypothesis,
   y: AgentHypothesis,
   newerIsY: boolean,
 ): AgentHypothesis {
-  const evMap = new Map<string, { supports: boolean; text: string }>();
-  for (const ev of [...(x.evidence ?? []), ...(y.evidence ?? [])]) {
-    if (!ev || typeof ev.text !== "string") continue;
-    evMap.set(`${ev.supports ? 1 : 0}:${ev.text}`, { supports: Boolean(ev.supports), text: ev.text });
-  }
-  const evidence = [...evMap.values()].sort(
-    (a, b) => a.text.localeCompare(b.text) || Number(b.supports) - Number(a.supports),
-  );
   const newer = newerIsY ? y : x;
   const older = newerIsY ? x : y;
+  const evMap = new Map<string, HypothesisEvidence>();
+  for (const ev of [...(older.evidence ?? []), ...(newer.evidence ?? [])]) {
+    if (!ev || typeof ev.text !== "string") continue;
+    evMap.set(ev.id ? evidenceKey(ev) : `legacy:${ev.supports ? 1 : 0}:${ev.text}`, ev);
+  }
+  const evidence = [...evMap.values()].sort(compareEvidence);
+  const reviewed = (older.reviewedAt ?? 0) > (newer.reviewedAt ?? 0) ? older : newer;
   return {
     id: x.id,
     text: newer.text || older.text,
-    status: mergeHypothesisStatus(x.status, y.status, newerIsY),
+    status: reviewed.reviewedAt ? reviewed.status : mergeHypothesisStatus(x.status, y.status, newerIsY),
+    ...(reviewed.reviewedAt ? { reviewedAt: reviewed.reviewedAt } : {}),
     ...(newer.parentId ?? older.parentId ? { parentId: newer.parentId ?? older.parentId } : {}),
     evidence,
   };
@@ -410,9 +418,7 @@ function allHypotheses(
       if (!prev) {
         byId.set(h.id, {
           ...h,
-          evidence: [...(h.evidence ?? [])].sort(
-            (a, b) => a.text.localeCompare(b.text) || Number(b.supports) - Number(a.supports),
-          ),
+          evidence: [...(h.evidence ?? [])].sort(compareEvidence),
         });
       } else {
         byId.set(h.id, mergeHypothesisPair(prev, h, fromRemote ? newerIsRemote : !newerIsRemote));
@@ -717,6 +723,25 @@ export function ticketPrompt(
     .join("\n");
 }
 
+/** A diagnostic conclusion is independent of whether a corrective command or its runtime succeeded. */
+function diagnosisAfterRun(ticket: WorkTicket, task: AgentTask, now: number): IncidentDiagnosis | undefined {
+  const hypotheses = task.hypotheses ?? [];
+  if (!ticket.alert && !hypotheses.length) return undefined;
+  const established = hypotheses.find(h => {
+    const replaced = supersededEvidence(h.evidence);
+    const current = h.evidence.filter(e => !e.id || !replaced.has(evidenceKey(e)));
+    return h.status === "confirmed" && current.some(e => e.supports && e.source) && !current.some(e => !e.supports);
+  });
+  if (established) return { status: "confirmed", cause: established.text, hypothesisId: established.id, at: now };
+  const target = ticket.target ?? task.target?.label;
+  const alert = ticket.alert?.name ?? ticket.title;
+  const candidate = hypotheses.find(h => h.status !== "ruled-out");
+  const next = candidate
+    ? `Capture a timestamped observation${target ? " on " + target : ""} that tests “${candidate.text}” while the symptom is present.`
+    : `Compare a sample of “${alert}”${target ? " on " + target : ""} during the alert with a sample from the last healthy interval.`;
+  return { status: "insufficient-evidence", nextObservation: task.nextDiagnosticObservation || next, at: now };
+}
+
 /**
  * The ticket after its run ended. A finished run goes to review: a person
  * (or the agent's lead) decides whether it is done. A run that failed or was
@@ -732,9 +757,12 @@ export function ticketAfterRun(ticket: WorkTicket, task: AgentTask, now = Date.n
   // The run ends when the agent proposes a plan. Nothing was done yet: the ticket says that it
   // waits for the plan's decision, not that the work is ready for review.
   const waitsForPlan = ok && task.plan?.status === "proposed";
+  const diagnosis = diagnosisAfterRun(ticket, task, now);
   return {
     ...ticket,
     status: ok ? "review" : "blocked",
+    ...(diagnosis ? { diagnosis } : {}),
+    ...(task.hypotheses?.length ? { hypotheses: allHypotheses(ticket, { ...ticket, hypotheses: task.hypotheses }, true) } : {}),
     result: clip(
       waitsForPlan
         ? `${PLAN_WAITS} ${report || ""}`.trim()

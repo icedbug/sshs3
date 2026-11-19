@@ -117,7 +117,7 @@ export class FactsPart {
    * how old that reading is: the agent knows the state it starts from, and
    * knows to look again before it acts on a reading that is hours old.
    */
-  serverFactsNow(this: HubService, now = Date.now()): { name: string; cluster?: string; collectedAt: number; age: string; lines: string[] }[] {
+  serverFactsNow(this: HubService, now = Date.now()): { serverId: string; name: string; cluster?: string; collectedAt: number; age: string; lines: string[] }[] {
     const clusters = new Map(this.getKnownServers().map((s) => [s.id, s.cluster]));
     const ago = (ms: number): string =>
       ms < 3_600_000 ? `${Math.max(1, Math.round(ms / 60_000))} min` : ms < 172_800_000 ? `${Math.round(ms / 3_600_000)} h` : `${Math.round(ms / 86_400_000)} days`;
@@ -137,7 +137,7 @@ export class FactsPart {
             .map((c) => (c.notAfter < now ? `Certificate ${c.path} has expired` : `Certificate ${c.path} expires in ${Math.ceil((c.notAfter - now) / 86_400_000)} days`)),
           f.listening.length ? `Listening: ${[...new Set(f.listening.map((l) => `${l.port}/${l.proto}${l.process ? ` (${l.process})` : ""}`))].slice(0, 15).join(", ")}` : "",
         ].filter(Boolean);
-        return { name: r.name, cluster: clusters.get(r.serverId), collectedAt: r.collectedAt!, age: ago(now - r.collectedAt!), lines };
+        return { serverId: r.serverId, name: r.name, cluster: clusters.get(r.serverId), collectedAt: r.collectedAt!, age: ago(now - r.collectedAt!), lines };
       });
   }
 

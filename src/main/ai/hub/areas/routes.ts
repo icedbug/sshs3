@@ -66,6 +66,7 @@ export const AREA_OF = {
   "ticket-restore": "tickets",
   "ticket-result": "tickets",
   "ticket-comment": "tickets",
+  "ticket-access-request": "tickets",
   "ticket-start": "tickets",
   "ticket-review": "tickets",
   "workforce-template-apply": "agents",

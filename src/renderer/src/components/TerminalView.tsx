@@ -382,14 +382,14 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       onAskAiRef.current?.({ text: trimmed, prompt, sessionId: sid, action });
       const askEvent = new CustomEvent('sshs3:ask-ai', {
         cancelable: true,
-        detail: { sessionId: sid, text: trimmed, label, prompt, action },
+        detail: { sessionId: sid, kind: 'terminal', text: trimmed, label, prompt, action },
       });
       const notPrevented = window.dispatchEvent(askEvent);
       if (notPrevented && !onAskAiRef.current) {
         window.dispatchEvent(new CustomEvent('sshs3:ai-open'));
         window.dispatchEvent(
           new CustomEvent('sshs3:ai-attach', {
-            detail: { sessionId: sid, text: trimmed, label, prompt },
+            detail: { sessionId: sid, kind: 'terminal', text: trimmed, label, prompt },
           })
         );
       }
@@ -1562,6 +1562,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                     new CustomEvent('sshs3:ai-attach', {
                       detail: {
                         sessionId: perfSessionId ?? undefined,
+                        kind: 'terminal',
                         text: contextText || undefined,
                         label: contextText ? `${hostLabel || 'Terminal'} context` : undefined,
                         prompt: q,
@@ -1596,6 +1597,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                   new CustomEvent('sshs3:ai-attach', {
                     detail: {
                       sessionId: perfSessionId ?? undefined,
+                      kind: 'terminal',
                       text: contextText || undefined,
                       label: contextText ? `${hostLabel || 'Terminal'} context` : undefined,
                       prompt: q,
@@ -2049,6 +2051,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                       new CustomEvent('sshs3:ai-attach', {
                         detail: {
                           sessionId: perfSessionId,
+                          kind: 'terminal',
                           text: latest,
                           label: `${hostLabel || 'Terminal'} error output`,
                           prompt:
@@ -2125,6 +2128,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
                         new CustomEvent('sshs3:ai-attach', {
                           detail: {
                             sessionId: perfSessionId,
+                            kind: 'terminal',
                             text,
                             label: termRef.current?.getSelection() ? 'Terminal selection' : 'Last command output',
                           },

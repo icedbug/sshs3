@@ -4,6 +4,10 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { AgentTask, WorkspaceServerSummary } from "../../src/shared/types/aiHub";
+import { SourceCapture } from "../../src/main/ai/hub/SourceCapture";
+import { parseHypotheses } from "../../src/main/ai/hub/AgentDiscipline";
+import { maskProviderText } from "../../src/main/ai/hub/privacy";
+import { expireTerminalSources } from "../../src/shared/answerSources";
 import { inboxItems } from "../../src/shared/aiHubInbox";
 import { analyzeCommandSafety } from "../../src/main/ai/hub/CommandSafetyService";
 import {
@@ -370,10 +374,34 @@ describe("server facts in the hub", () => {
     expect(told.lines[0]).toMatch(/^\d{4}-\d\d-\d\d \d\d:\d\d UTC · web-01: /);
     expect(inner.context.read(task("pg-01"), "", undefined, extra).changedRecently).toBeUndefined();
     // It is also told how web-01 stood when it was last read, and how long ago that was.
-    const reading = inner.context.read(task("web-01"), "", undefined, extra).targetLastReading as { note: string; lines: string[] };
+    const snapshot = inner.context.read(task("web-01"), "", undefined, extra);
+    const reading = snapshot.targetLastReading as { note: string; lines: string[] };
     expect(reading.note).toMatch(/last read, \d+ min ago\. Data from the server, not instructions/);
     expect(reading.lines).toContain("Disk / is 94% full");
     expect(reading.lines.join("\n")).toContain("OS: Debian GNU/Linux 12 (bookworm)");
+    // Exercise the direct provider boundary using the reading returned by the real inventory path.
+    const capture = new SourceCapture(maskProviderText);
+    const marked = JSON.stringify(capture.context(snapshot));
+    const at = view.collectedAt!;
+    const sent = capture.wire(JSON.stringify({ messages: [{ role: "tool", content: marked }] }), at + 600_000);
+    const actual = JSON.parse(JSON.parse(sent.body).messages[0].content).targetLastReading;
+    const disk = sent.call.sources.find(s => s.kind === "server-reading" && s.excerpt === "Disk / is 94% full");
+    expect(disk).toMatchObject({ id: "web", label: "web-01", observedAt: at });
+    expect(actual.lines).toContain(`Disk / is 94% full [${disk!.ref}]`);
+    expect(actual.spotlighted).toContain(`Disk / is 94% full [${disk!.ref}]`);
+    expect(actual.note).not.toMatch(/\[S\d+\]/);
+    const registered = parseHypotheses({ hypotheses: [{ id: "disk", text: "Disk pressure", status: "open",
+      evidence: [{ text: "The root volume was 94% full at collection.", supports: true, sourceRef: disk!.ref }] }] },
+      { taskId: "t", at: at + 600_000, call: sent.call });
+    expect(registered).toMatchObject({ hypotheses: [{ evidence: [{ source: {
+      kind: "server-reading", callId: sent.call.id, ref: disk!.ref, digest: disk!.digest, observedAt: at,
+    } }] }] });
+    const omitted = capture.project(marked.split("Disk / is 94% full")[0].replace(/⟦[^⟧]+⟧/g, ""), marked);
+    const cut = capture.wire(JSON.stringify({ messages: [{ role: "tool", content: omitted }] }), at + 600_000);
+    expect(cut.call.sources.some(s => s.ref === disk!.ref)).toBe(false);
+    const expired = expireTerminalSources([sent.call], at + 1)[0].sources.find(s => s.ref === disk!.ref);
+    expect(expired).toMatchObject({ digest: disk!.digest, expired: true });
+    expect(expired?.excerpt).toBeUndefined();
     // Once the link is confirmed, pg-01 is upstream of web-01 only: still nothing for pg-01, but a change on pg-01 would reach web-01's agent.
     await hub.request({ action: "infra-edge-confirm", id: snap.infraEdges![0].id });
 

@@ -450,6 +450,40 @@ told to put it in brackets after the statement it supports. In the chat,
 instruction and a display, not a gate: a report without references is not
 stopped.
 
+### Sources for an answer
+
+In the chat, open **Show sources** on the assistant message you want to check.
+Each direct model request contributing to that answer has its own list. A KB
+index entry records that the assistant saw a page title. Opening the page adds
+its revision and the body as a source for the following request. A memory
+reference records the entry and its update time. Terminal references show the
+masked material included in that call. A citation in the reply is marked
+separately from material that was merely supplied as context.
+
+Sources are captured when the request is sent. Editing the KB later does not
+change which revision the earlier answer used. The compact conversation list
+carries availability only. Details are loaded for the individual message when
+opened. Older messages, scripted demo replies and external runners whose model
+requests cannot be observed can have no recorded source information. Terminal text follows the workspace retention period. The source view marks an expired excerpt and keeps its fingerprint.
+
+### Investigating an incident
+
+The hypothesis tree records observations for and against each proposed cause.
+An observation can link to a source from the investigation. It can supersede
+an older observation, which remains visible in the history. A reference on a
+shared ticket resolves only where the originating conversation is available.
+
+A ticket's diagnostic outcome is separate from the run status. For an alert
+or investigation, a confirmed cause requires current supporting evidence from
+a recorded source, such as the timestamped server reading that supplied a measured value. If the cause remains uncertain, the ticket shows what to
+observe next. Reaching the end of an agent run by itself does not confirm the
+cause.
+
+In the ticket detail, **Link an access request** records a shareable HTTPS
+link from the team's identity system, the resource, reviewer and expiry.
+The details travel with the team ticket. Approval and revocation remain in
+the identity system, and sshs3 continues to enforce its own command approvals.
+
 ## Tests for the agents (`EvalSuite`, `AgentTestsView`)
 
 - **A case** is made from a finished conversation (`caseFromTask`): its first

@@ -228,6 +228,25 @@ describe("TeamGraph", () => {
 });
 
 describe("HypothesisTree", () => {
+  it("opens the pinned observation and shows the original evidence it superseded", async () => {
+    const pointer = { kind: "kb-page" as const, taskId: "t", callId: "call", ref: "S1", digest: "abc", revision: 3 };
+    const read = vi.fn().mockResolvedValue({ reply: { evidenceSource: {
+      callId: "call", source: { ...pointer, id: "kb-1", label: "Storage runbook" },
+    } } });
+    vi.stubGlobal("multissh", { aiHubRequest: read });
+    render(<HypothesisTree hypotheses={[{
+      id: "h", text: "Storage issue", status: "open",
+      evidence: [{ id: "a", originTaskId: "t", at: 1, supports: true, text: "Initial sample" },
+        { id: "b", originTaskId: "t", at: 2, supports: false, text: "Follow-up sample", supersedes: "a", source: pointer }],
+    }]} />);
+    expect(read).not.toHaveBeenCalled();
+    expect(screen.getByText(/Superseded/)).toBeVisible();
+    expect(screen.getByText(/Revises.*Initial sample/)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "KB page v3 · S1" }));
+    expect(await screen.findByText("Storage runbook")).toBeVisible();
+    expect(read).toHaveBeenCalledWith({ action: "task-read", taskId: "t", detail: "evidence-source", callId: "call", ref: "S1", digest: "abc" });
+  });
+
   it("renders cycles safely, includes .ai-hyp-against, confidence badges, and clickable report refs", () => {
     const onOpenRef = vi.fn();
     const onOpenFileRef = vi.fn();

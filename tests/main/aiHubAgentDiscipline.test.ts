@@ -280,11 +280,11 @@ describe("the run loop holds the agent to its work", () => {
     const skills: MemoryEntry[] = [
       { id: "s1", kind: "skill", scope: "workspace", title: "nginx bind fails on edge nodes", text: "port 443 is held by haproxy; stop haproxy first", sourceCommand: "systemctl restart nginx", updatedAt: 1 },
     ];
-    const { bodies } = await run(
-      [call("terminal_command", { command: "systemctl restart nginx" }), say("It failed; haproxy holds the port.")],
+    const { bodies, events } = await run(
+      [call("terminal_command", { command: "systemctl restart nginx", sessionId: "edge-tab" }), say("It failed; haproxy holds the port.")],
       (req) =>
         req.action === "command"
-          ? { exitCode: 1, output: "nginx: [emerg] bind() to 0.0.0.0:443 failed, haproxy" }
+          ? { exitCode: 1, output: "nginx: [emerg] bind() to 0.0.0.0:443 failed, haproxy", source: "terminal:edge-tab", sourceLabel: "edge host", observedAt: 23 }
           : req.action === "skills"
             ? skills
             : req.action === "memory"
@@ -294,6 +294,13 @@ describe("the run loop holds the agent to its work", () => {
     const result = lastUser(bodies[1]);
     expect(result).toContain("teamMemoryOnThisFailure");
     expect(result).toContain("stop haproxy first");
+    const calls = events.flatMap(event => event.sourceCalls ?? []);
+    const sent = calls.at(-1)!.sources;
+    const memory = sent.find(source => source.kind === "memory" && source.id === "s1");
+    expect(memory).toMatchObject({ updatedAt: 1 });
+    expect(result).toContain(`[${memory!.ref}]`);
+    expect(sent).toContainEqual(expect.objectContaining({ kind: "terminal", id: "edge-tab", label: "edge host", observedAt: 23 }));
+    expect(sent).not.toContainEqual(expect.objectContaining({ kind: "terminal", id: "s" }));
   });
 
   it("turns thorough mode on from the keyword: said in the instructions, and a task list is asked for", async () => {

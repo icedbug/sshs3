@@ -2,6 +2,7 @@ import { GitFork, Pencil, RotateCcw, Terminal } from "lucide-react";
 import { CONTEXT_NOTE_PREFIX, SNAPSHOT_TAIL_CHARS } from "@shared/types/aiHub";
 import { AnsiLogView, DiffViewer } from "../DiffViewer";
 import { copyToClipboard, RichMarkdownContent } from "../RichMarkdownContent";
+import { AnswerSources } from "../AnswerSources";
 import { ChangeProof } from "../ChangeProof";
 import { lastUserMessageId } from "./panelHelpers";
 import type { PanelState } from "./usePanelState";
@@ -179,6 +180,10 @@ export function Timeline({ p }: { p: PanelState }): JSX.Element {
                         terminalActions={terminalHandoff.forMessage(showingMessageTail && item.message.text.length >= SNAPSHOT_TAIL_CHARS ? undefined : item.message.id)}
                         onOpenFileRef={handleOpenFileRef}
                       />
+                      {item.message.role === "assistant" && task && (
+                        <AnswerSources key={`${task.id}:${item.message.id}`} taskId={task.id} messageId={item.message.id}
+                          count={item.message.sourceCallCount} streaming={running && item.message.id === task.messages.at(-1)?.id} />
+                      )}
                       {item.message.role === "assistant" &&
                         idx === timeline.length - 1 &&
                         !running && (

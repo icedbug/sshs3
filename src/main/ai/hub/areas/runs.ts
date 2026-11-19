@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { appendSourceCalls } from "../../../../shared/answerSources";
 import path from "node:path";
 import type { AgentChange, AgentSchedule, AgentTask, MissionAgent, StartAgentTask } from "../../../../shared/types/aiHub";
 import { acpWorkspaceAllowlist } from "../../../../shared/acpWorkspaceTools";
@@ -189,10 +190,11 @@ export class RunsPart {
       sources: rawAttachments
         .filter((s) => !s.imageDataUrl && s.text?.trim())
         .map((s) => ({
-          id: crypto.randomUUID(),
+          id: typeof s.id === "string" && s.id.trim() ? clip(s.id, 200) : crypto.randomUUID(),
+          kind: s.kind,
           label: clip(requiredText(s.label), 200),
           text: boundedContext(requiredText(s.text)),
-          observedAt: now,
+          observedAt: Number.isFinite(s.observedAt) ? s.observedAt : now,
         })),
       createdAt: now,
       updatedAt: now,
@@ -508,6 +510,7 @@ export class RunsPart {
         };
         task.messages.push(message);
       }
+      if (event.sourceCalls) appendSourceCalls(message.sourceCalls ??= [], event.sourceCalls);
       message.text = boundedContext(message.text + event.delta, 128_000);
       this.host.delta?.({
         taskId: task.id,
@@ -533,7 +536,10 @@ export class RunsPart {
         },
       });
     }
-    if (event.type === "hypotheses.updated" && event.hypotheses) task.hypotheses = event.hypotheses;
+    if (event.type === "hypotheses.updated" && event.hypotheses) {
+      task.hypotheses = event.hypotheses;
+      if (event.nextObservation) task.nextDiagnosticObservation = event.nextObservation;
+    }
     if (event.type === "tool.result" && event.tool) {
       const entry = { ...event.tool, at: now };
       task.toolStepCount = (task.toolStepCount ?? task.toolLog?.length ?? 0) + 1;
@@ -607,6 +613,7 @@ export class RunsPart {
         id: crypto.randomUUID(),
         role: "assistant",
         text: boundedContext(event.text),
+        ...(event.sourceCalls && { sourceCalls: event.sourceCalls }),
         at: now,
       });
     const outcome = finalRunStatus(event.type);
@@ -641,6 +648,8 @@ export class RunsPart {
             at: Date.now(),
           });
       }
+      const answer = task.messages.at(-1);
+      if (event.sourceCalls && answer?.role === "assistant") appendSourceCalls(answer.sourceCalls ??= [], event.sourceCalls);
       if (event.error) task.error = boundedContext(event.error);
       this.noteBudgetStop(task);
       if (task.status === "completed" || task.status === "failed") this.reflectTaskCompletion(task);

@@ -302,6 +302,23 @@ async function waitFor(check: () => boolean, ms = 5000): Promise<void> {
 }
 
 describe("working a ticket", () => {
+  it("links and removes an external access request without approving or moving the ticket", async () => {
+    const hub = await makeHub();
+    const sim = await hub.request({ action: "ticket-save", ticket: { title: "Inspect storage", status: "backlog" } });
+    const id = sim.workTickets!.find(t => t.title === "Inspect storage")!.id;
+    const accessRequest = { resource: "storage", reviewer: "On-call reviewer", url: "https://access.example.net/requests/42", expiresAt: Date.UTC(2027, 0, 1) };
+    const linked = await hub.request({ action: "ticket-access-request", id, accessRequest });
+    expect(linked.workTickets!.find(t => t.id === id)).toMatchObject({ status: "backlog", accessRequest });
+    await expect(hub.request({ action: "ticket-access-request", id, accessRequest: { ...accessRequest, url: "data:text/plain,test" } })).rejects.toThrow("HTTPS");
+    const comment = await hub.request({ action: "ticket-comment", id, text: "Awaiting storage logs" });
+    expect(comment.workTickets!.find(t => t.id === id)?.accessRequest).toEqual(accessRequest);
+    const cleared = await hub.request({ action: "ticket-access-request", id, accessRequest: null });
+    const ticket = cleared.workTickets!.find(t => t.id === id)!;
+    expect(ticket.status).toBe("backlog");
+    expect(ticket.accessRequest).toBeUndefined();
+    expect(ticket.comments?.at(-1)?.text).toBe("Awaiting storage logs");
+  });
+
   it("sets up a team from a template: agents with reporting lines, a goal and first tickets", async () => {
     const hub = await makeHub();
     const snap = await hub.request({ action: "workforce-template-apply", templateId: "operate-system", goalTitle: "Keep prod healthy" });

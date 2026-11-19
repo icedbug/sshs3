@@ -10,6 +10,7 @@ import type {
   WorkforceRun,
   WorkTicket,
 } from "../../../shared/types/aiHub";
+import { messageForView } from "./answerSourceRead";
 import { SNAPSHOT_TAIL_CHARS, SNAPSHOT_TAIL_MESSAGES } from "../../../shared/types/aiHub";
 import { analyzeCommandSafety } from "./CommandSafetyService";
 import { lowerMode } from "./AppGuard";
@@ -71,7 +72,8 @@ export function taskForSnapshot(task: AgentTask): AgentTask {
     chars += m.text.length;
     if (m.images?.length) pictures = true;
   }
-  if (!pictures && messages.length <= SNAPSHOT_WHOLE_MESSAGES && chars <= SNAPSHOT_WHOLE_CHARS) return rest;
+  if (!pictures && messages.length <= SNAPSHOT_WHOLE_MESSAGES && chars <= SNAPSHOT_WHOLE_CHARS)
+    return { ...rest, messages: messages.map(messageForView) };
   const last = messages.at(-1);
   return {
     ...rest,
@@ -80,6 +82,7 @@ export function taskForSnapshot(task: AgentTask): AgentTask {
       role: m.role,
       text: m.text.length > SNAPSHOT_TAIL_CHARS ? m.text.slice(-SNAPSHOT_TAIL_CHARS) : m.text,
       at: m.at,
+      ...(m.sourceCalls ? { sourceCallCount: m.sourceCalls.length } : {}),
     })),
     messagesTail: {
       count: messages.length,

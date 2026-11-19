@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { validatedAccessRequest } from "../../../../shared/ticketAccessRequest";
 import type { HubReply, AgentTask, MissionAgent, WorkGoal, WorkTicket, WorkTicketStatus } from "../../../../shared/types/aiHub";
 import { isDemoMode } from "../demoWorkspace";
 import { isDemoTarget } from "../../../demo/demoMode";
@@ -548,6 +549,12 @@ export class TicketsPart {
           comments: [...(ticket.comments ?? []), { id: crypto.randomUUID(), author: who, text: "Wrote the report.", at: Date.now() }].slice(-100),
           updatedAt: Date.now(),
         });
+        break;
+      }
+      case "ticket-access-request": {
+        const ticket = this.ticket(request.id);
+        const accessRequest = request.accessRequest === null ? undefined : validatedAccessRequest(request.accessRequest);
+        this.putTicket({ ...ticket, accessRequest, updatedAt: Date.now() });
         break;
       }
       case "ticket-comment": {

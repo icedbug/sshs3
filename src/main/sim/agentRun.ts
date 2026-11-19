@@ -11,7 +11,7 @@
  */
 import path from "node:path";
 import type { AiApiProtocol } from "../../shared/types/ai";
-import type { AgentChange, AgentTask, RunStatus, SimulationView } from "../../shared/types/aiHub";
+import type { AgentChange, AgentTask, IncidentDiagnosis, RunStatus, SimulationView } from "../../shared/types/aiHub";
 import { resolveModelPricing } from "../ai/hub/DirectAgentRuntime";
 import { FileTools } from "../ai/hub/FileTools";
 import { HubService, type HubHost } from "../ai/hub/HubService";
@@ -67,6 +67,8 @@ export interface AgentRunOptions {
 export interface AgentRunResult {
   status: RunStatus;
   error?: string;
+  /** The diagnostic conclusion visible on the scenario ticket after the run settled. */
+  diagnosis?: IncidentDiagnosis;
   /** Set when this run was stopped at its limit, not by the agent finishing. */
   stoppedBy?: "commands" | "minutes";
   agent: string;
@@ -284,11 +286,13 @@ export async function runAgentOnScenario(options: AgentRunOptions): Promise<Agen
     say({ kind: "ended", status: task.status, error: task.error });
     // The ticket takes the report once the run has let go of it: the checks read it from there.
     await sleep(100);
-    const score = (await hub.snapshot()).simulation?.running;
+    const finalSnapshot = await hub.snapshot();
+    const score = finalSnapshot.simulation?.running;
     if (!score) throw new Error("The scenario was not running any more when the run ended.");
     const report = lastReport();
     return {
       status: task.status,
+      diagnosis: finalSnapshot.workTickets?.find(ticket => ticket.id === sim.ticketId)?.diagnosis,
       error: task.error,
       stoppedBy,
       agent: task.agentName ?? "",

@@ -4601,3 +4601,17 @@
   background: none;
   text-decoration: underline;
 }
+
+.ai-answer-sources { margin-top: 8px; }
+.ai-receipt-body { padding: 8px 0; color: var(--ai-ink-soft); }
+.ai-receipt-calls, .ai-receipt-sources { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.ai-receipt-call-heading, .ai-receipt-source-heading, .ai-receipt-meta { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px; }
+.ai-receipt-call-heading { margin-bottom: 6px; }
+.ai-receipt-call-heading time, .ai-receipt-meta, .ai-receipt-tag { font-size: 0.83em; }
+.ai-receipt-sources > li { border-inline-start: 2px solid var(--ai-accent-line); padding-inline-start: 10px; }
+.ai-receipt-tag { color: var(--ai-accent-strong); }
+.ai-receipt-source-heading { color: var(--ai-ink); }
+.ai-receipt-source { min-width: 0; overflow-wrap: anywhere; }
+.ai-receipt-excerpt { margin: 4px 0; max-height: 12em; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.88em; }
+.ai-receipt-filters { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; margin: 0 0 12px; color: var(--ai-ink); }
+.ai-receipt-filters input, .ai-receipt-filters select { padding: 4px 7px; background: var(--ai-surface-2); color: var(--ai-ink); border: 1px solid var(--ai-line-strong); border-radius: 4px; max-width: 100%; }

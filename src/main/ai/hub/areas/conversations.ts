@@ -26,6 +26,7 @@ import {
   parseInlineCommandJson,
   buildInstantCommandSuggestion,
 } from "../hubHelpers";
+import { answerSourceReply, evidenceSourceReply, messageForView } from "../answerSourceRead";
 import { checkedSuggestion, active, INLINE_SUGGEST_TIMEOUT_MS } from "../hubShared";
 import type { HubService } from "../HubService";
 import type { Handled, RequestsOf } from "./routes";
@@ -571,10 +572,11 @@ export class ConversationsPart {
         for (const s of rawAttachments) {
           if (!s.imageDataUrl && s.text?.trim()) {
             task.sources.push({
-              id: crypto.randomUUID(),
+              id: typeof s.id === "string" && s.id.trim() ? clip(s.id, 200) : crypto.randomUUID(),
+              kind: s.kind,
               label: clip(s.label || "attachment", 200),
               text: boundedContext(s.text),
-              observedAt: Date.now(),
+              observedAt: Number.isFinite(s.observedAt) ? s.observedAt : Date.now(),
             });
           }
         }
@@ -650,9 +652,19 @@ export class ConversationsPart {
           this.store.data.tasks.find((t) => t.id === request.taskId) ??
           (isDemoMode() ? getDemoTasks().find((t) => t.id === request.taskId) : undefined);
         if (!found) throw new Error("Task not found");
-        reply = request.detail === "tools"
-          ? { taskTools: { id: found.id, count: found.toolStepCount ?? found.toolLog?.length ?? 0, entries: found.toolLog ?? [] } }
-          : { task: { id: found.id, messages: found.messages, changes: found.changes } };
+        switch (request.detail) {
+          case "answer-sources":
+            reply = answerSourceReply(found, request.messageId);
+            break;
+          case "evidence-source":
+            reply = evidenceSourceReply(found, request);
+            break;
+          case "tools":
+            reply = { taskTools: { id: found.id, count: found.toolStepCount ?? found.toolLog?.length ?? 0, entries: found.toolLog ?? [] } };
+            break;
+          default:
+            reply = { task: { id: found.id, messages: found.messages.map(messageForView), changes: found.changes } };
+        }
         break;
       }
       case "takeover":

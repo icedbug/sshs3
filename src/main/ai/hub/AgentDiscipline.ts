@@ -8,6 +8,8 @@ import type {
   MissionAgent,
   WorkspaceRule,
 } from "../../../shared/types/aiHub";
+import { recordEvidence, type HypothesisParseContext } from "./IncidentEvidence";
+import { evidenceKey, supersededEvidence } from "../../../shared/incidentEvidence";
 import { analyzeCommandSafety } from "./CommandSafetyService";
 import { extractErrorSignature } from "./SelfLearningService";
 import { boundedContext } from "./privacy";
@@ -132,31 +134,14 @@ export const TODO_TOOL = {
 
 // ------------------------------------------------------------ being held to it
 
-export interface HypothesisEvidence {
-  supports: boolean;
-  text: string;
-  at?: number;
-  toolCallId?: string;
-  author?: string;
-}
-
-export interface EnrichedAgentHypothesis extends AgentHypothesis {
-  evidence: HypothesisEvidence[];
-}
-
-export interface HypothesisParseContext {
-  at?: number;
-  toolCallId?: string;
-  author?: string;
-}
-
 export const HYPOTHESIS_TOOL = {
   name: "sshs3_hypotheses",
   description:
-    "Your working list of what might explain the problem you are investigating. Send the whole list each time. Put down the candidate causes before you dig, aim each check at one of them, and record what you found: evidence for or against, naming the command or source it came from. Mark one `confirmed` only when evidence shows it, and `ruled-out` when evidence excludes it. Refine a confirmed hypothesis with a child (`parent`) when the real cause lies deeper. Use this for investigations (something is wrong, slow, failing); not for plain questions or routine changes.",
+    "Your working list of what might explain the problem you are investigating. Keep stable hypothesis and observation ids between calls. Earlier observations are retained. Put down the candidate causes before you dig, aim each check at one of them, and record what you found: evidence for or against, naming the command or source it came from. Mark one `confirmed` only when evidence shows it, and `ruled-out` when evidence excludes it. Refine a confirmed hypothesis with a child (`parent`) when the real cause lies deeper. Use this for investigations (something is wrong, slow, failing); not for plain questions or routine changes.",
   parameters: {
     type: "object",
     properties: {
+      nextObservation: { type: "string", description: "When the cause is not established, the specific reading or check needed to distinguish the remaining explanations." },
       hypotheses: {
         type: "array",
         items: {
@@ -173,9 +158,9 @@ export const HYPOTHESIS_TOOL = {
                 properties: {
                   supports: { type: "boolean", description: "true: speaks for it; false: speaks against it." },
                   text: { type: "string", description: "What was observed and where (the command, the page, the log line)." },
-                  at: { type: "number", description: "Optional epoch-ms timestamp when the observation occurred." },
-                  toolCallId: { type: "string", description: "Optional tool call id or ref that produced the evidence." },
-                  author: { type: "string", description: "Optional agent or user identifier that recorded the evidence." },
+                  id: { type: "string", description: "A stable short observation id, e.g. e1." },
+                  sourceRef: { type: "string", description: "Exact source reference included in this model call, e.g. S1. Omit for an unlinked observation." },
+                  supersedes: { type: "string", description: "Id of an earlier observation of this hypothesis corrected by this one." },
                 },
                 required: ["supports", "text"],
               },
@@ -199,20 +184,10 @@ export const HYPOTHESIS_TOOL = {
 export function parseHypotheses(
   args: Record<string, unknown>,
   context?: HypothesisParseContext,
-): { hypotheses: EnrichedAgentHypothesis[] } | { error: string } {
+): { hypotheses: AgentHypothesis[]; nextObservation?: string } | { error: string } {
   if (!Array.isArray(args.hypotheses)) return { error: "`hypotheses` must be a list." };
-  const defaultAt =
-    typeof context?.at === "number" && Number.isFinite(context.at) ? context.at : Date.now();
-  const defaultToolCallId =
-    typeof context?.toolCallId === "string" && context.toolCallId.trim()
-      ? context.toolCallId.trim().slice(0, 64)
-      : undefined;
-  const defaultAuthor =
-    typeof context?.author === "string" && context.author.trim()
-      ? context.author.trim().slice(0, 80)
-      : undefined;
-
-  const out: EnrichedAgentHypothesis[] = [];
+  const at = context?.at ?? Date.now();
+  const out: AgentHypothesis[] = [];
   for (const raw of args.hypotheses.slice(0, 24)) {
     if (!raw || typeof raw !== "object") continue;
     const h = raw as Record<string, unknown>;
@@ -221,33 +196,15 @@ export function parseHypotheses(
     if (!id || !text) return { error: "Each hypothesis needs an id and a text." };
     if (out.some((x) => x.id === id)) return { error: `Two hypotheses share the id ${id}.` };
     const status = h.status === "confirmed" || h.status === "ruled-out" ? h.status : "open";
-    const evidence: HypothesisEvidence[] = (Array.isArray(h.evidence) ? h.evidence : [])
-      .filter((e): e is Record<string, unknown> => Boolean(e) && typeof e === "object")
-      .map((e) => {
-        const cleanText = typeof e.text === "string" ? boundedContext(e.text.trim(), 400) : "";
-        const at =
-          typeof e.at === "number" && Number.isFinite(e.at) ? e.at : defaultAt;
-        const toolCallId =
-          typeof e.toolCallId === "string" && e.toolCallId.trim()
-            ? e.toolCallId.trim().slice(0, 64)
-            : defaultToolCallId;
-        const author =
-          typeof e.author === "string" && e.author.trim()
-            ? e.author.trim().slice(0, 80)
-            : defaultAuthor;
-        return {
-          supports: e.supports === true,
-          text: cleanText,
-          at,
-          ...(toolCallId ? { toolCallId } : {}),
-          ...(author ? { author } : {}),
-        };
-      })
-      .filter((e) => e.text)
-      .slice(0, 8);
-    if (status === "confirmed" && !evidence.some((e) => e.supports))
+    const prior = context?.previous?.find(item => item.id === id);
+    const recorded = recordEvidence(h.evidence, prior?.evidence ?? [], { ...context, at });
+    if ("error" in recorded) return recorded;
+    const { evidence } = recorded;
+    const superseded = supersededEvidence(evidence);
+    const activeEvidence = evidence.filter(item => !item.id || !superseded.has(evidenceKey(item)));
+    if (status === "confirmed" && !activeEvidence.some((e) => e.supports))
       return { error: `"${text.slice(0, 80)}" is marked confirmed without evidence for it. Record what showed it, or leave it open.` };
-    if (status === "ruled-out" && !evidence.some((e) => !e.supports))
+    if (status === "ruled-out" && !activeEvidence.some((e) => !e.supports))
       return { error: `"${text.slice(0, 80)}" is marked ruled-out without evidence against it. Record what excluded it, or leave it open.` };
     out.push({
       id,
@@ -255,9 +212,12 @@ export function parseHypotheses(
       status,
       parentId: typeof h.parent === "string" && h.parent.trim() ? h.parent.trim().slice(0, 24) : undefined,
       evidence,
+      ...(context?.taskId ? { reviewedAt: prior?.status === status ? prior.reviewedAt ?? at : at } : {}),
     });
   }
 
+  for (const h of context?.previous ?? []) if (!out.some(entry => entry.id === h.id)) out.push(h);
+  if (out.length > 24) return { error: "An investigation can keep at most 24 hypotheses." };
   const byId = new Map(out.map((h) => [h.id, h]));
   for (const h of out) {
     if (h.parentId && (!byId.has(h.parentId) || h.parentId === h.id)) {
@@ -270,9 +230,9 @@ export function parseHypotheses(
   const verifiedAcyclic = new Set<string>();
   for (const start of out) {
     if (verifiedAcyclic.has(start.id)) continue;
-    const path: EnrichedAgentHypothesis[] = [];
+    const path: AgentHypothesis[] = [];
     const onPath = new Set<string>();
-    let cur: EnrichedAgentHypothesis | undefined = start;
+    let cur: AgentHypothesis | undefined = start;
     while (cur && !verifiedAcyclic.has(cur.id)) {
       if (onPath.has(cur.id)) {
         // `cur` is the cycle entry point; clear its parentId to break the cycle and promote it to a root.
@@ -288,7 +248,8 @@ export function parseHypotheses(
     }
   }
 
-  return { hypotheses: out };
+  const nextObservation = typeof args.nextObservation === "string" ? boundedContext(args.nextObservation.trim(), 400) : "";
+  return { hypotheses: out, ...(nextObservation ? { nextObservation } : {}) };
 }
 
 export interface RunDiscipline {
@@ -361,7 +322,7 @@ export function continuationMessage(state: RunDiscipline): string | undefined {
       state.hypotheses.some((h) => h.status === "confirmed")
         ? ""
         : "No hypothesis is confirmed. Do not present a cause as found: say what is most likely, what speaks for and against it, and what would settle it.",
-      "Update the list with sshs3_hypotheses, then give your report.",
+      "Update the list with sshs3_hypotheses. Include nextObservation when the evidence is insufficient, then give your report.",
     ]
       .filter(Boolean)
       .join("\n");
@@ -440,6 +401,7 @@ export const HANDOVER_REQUEST = [
 ].join("\n");
 
 export interface ToolDigestEntry {
+  sourceSpans?: import("../../../shared/answerSources").StoredSourceSpan[];
   name: string;
   input: string;
   output: string;
@@ -450,6 +412,7 @@ export function handoverMessage(
   note: string,
   todos: AgentTodo[],
   recentCalls: ToolDigestEntry[],
+  resultText = (call: ToolDigestEntry) => boundedContext(call.output, 500),
 ): string {
   const list =
     todos.length === 0
@@ -469,7 +432,7 @@ export function handoverMessage(
           "Your most recent tool calls (results shortened):",
           ...recentCalls.map(
             (c) =>
-              `- ${c.name}(${boundedContext(c.input, 300)}) → ${boundedContext(c.output, 500)}`,
+              `- ${c.name}(${boundedContext(c.input, 300)}) → ${resultText(c)}`,
           ),
         ];
   return [
@@ -559,15 +522,6 @@ export function failureHints(
     )
     .slice(0, limit)
     .map((x) => x.m);
-}
-
-export function renderFailureHints(hints: MemoryEntry[]): string {
-  return hints
-    .map(
-      (m) =>
-        `- [${m.kind}, ${m.scope}] ${m.title}: ${boundedContext(m.text, 600)}`,
-    )
-    .join("\n");
 }
 
 // --------------------------------------------------- autonomous handoff guards

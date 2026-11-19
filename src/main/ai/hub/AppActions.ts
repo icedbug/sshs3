@@ -552,6 +552,8 @@ function pageForAgent(page: KbPage): Record<string, unknown> {
     when: page.when,
     about: page.targets,
     updated: new Date(page.updatedAt).toISOString().slice(0, 10),
+    updatedAt: page.updatedAt,
+    revision: page.revision,
     writtenBy: page.editedByPerson ? "a person" : "the assistant, from the sources below",
     restsOn: page.sources.map((s) => (s.docId.startsWith("task:") ? `${s.title} (a finished run)` : s.title)),
     ...(page.proven ? { provenInUse: `${page.proven} run${page.proven === 1 ? "" : "s"} that worked from this page made a change that passed its own check` } : {}),
@@ -2462,6 +2464,8 @@ export async function handleAppAction(
             summary: doc.summary,
             source: doc.sourceRef,
             updated: new Date(doc.updatedAt).toISOString().slice(0, 10),
+            updatedAt: doc.updatedAt,
+            revision: doc.external?.version,
             totalSections: doc.chunks.length,
             sections,
             ...(i < doc.chunks.length ? { next: i } : {}),
@@ -2470,6 +2474,8 @@ export async function handleAppAction(
         if (!query.trim()) throw new Error("sshs3_kb_search needs a query, a page to read, or an id to read a source");
         const pageHits = searchPages(pages, query).map((h) => ({
           page: h.page.id,
+          revision: h.page.revision,
+          updatedAt: h.page.updatedAt,
           kind: h.page.kind,
           title: h.page.title,
           when: h.page.when,
@@ -2510,6 +2516,8 @@ export async function handleAppAction(
             return {
               ...m,
               section: m.chunkIndex,
+              updatedAt: doc?.updatedAt,
+              revision: doc?.external?.version,
               heading: doc?.chunks?.[m.chunkIndex]?.heading,
               summary: doc?.summary,
               totalSections: doc?.chunks?.length,

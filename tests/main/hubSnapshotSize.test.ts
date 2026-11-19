@@ -120,6 +120,38 @@ async function hubWith(host: Record<string, unknown> = {}) {
 }
 
 describe("asking for a conversation whole", () => {
+  it("returns captured versions only for the selected answer or exact evidence locator", async () => {
+    const hub = await hubWith();
+    const page = { kind: "kb-page", ref: "S1", id: "kb-1", label: "Playbook", revision: 3, digest: "page-v3" } as const;
+    const log = { kind: "terminal", ref: "S2", id: "term-1", label: "Demo terminal", excerpt: "retained terminal lines", digest: "trace-42" } as const;
+    const call = { id: "call-1", at: 15, sources: [page, log] };
+    const messages: AgentTask["messages"] = [
+      { id: "q", at: 1, role: "user", text: "What changed?" },
+      { id: "a1", at: 20, role: "assistant", text: "See [S1]. Example: `[S2]`. Unknown [S99].", sourceCalls: [call] },
+      { id: "a2", at: 40, role: "assistant", text: "Second turn.", sourceCalls: [{ id: "call-2", at: 30, sources: [] }] },
+      { id: "old", at: 45, role: "assistant", text: "Older answer." },
+    ];
+    hub.store.data.tasks.push(conversation({ messages }));
+    const read = (messageId: string) => hub.request({ action: "task-read", detail: "answer-sources", taskId: "t1", messageId });
+    const listed = (await hub.request({ action: "snapshot" })).tasks.find(t => t.id === "t1")!;
+    const whole = (await hub.request({ action: "task-read", taskId: "t1" })).reply!.task!;
+    for (const compact of [listed, whole]) {
+      expect(compact.messages.find(m => m.id === "a1")).toMatchObject({ sourceCallCount: 1 });
+      expect(JSON.stringify(compact.messages)).not.toContain("retained terminal lines");
+    }
+    expect((await read("a1")).reply?.answerSources).toEqual({ messageId: "a1", calls: [call], citations: [{ callId: call.id, ref: "S1" }] });
+    expect((await read("a2")).reply?.answerSources?.calls[0].sources).toEqual([]);
+    expect((await read("old")).reply?.answerSources).toBeUndefined();
+    await expect(read("q")).rejects.toThrow("Answer not found");
+    const lookup = (digest: string) => hub.request({ action: "task-read", detail: "evidence-source", taskId: "t1", callId: call.id, ref: log.ref, digest });
+    expect((await lookup(log.digest)).reply?.evidenceSource).toEqual({ callId: call.id, source: log });
+    expect((await lookup("a different version")).reply?.evidenceSource).toBeUndefined();
+    messages.unshift({ id: "long", at: 0, role: "user", text: words(12_000, "history") });
+    const tail = taskForSnapshot(conversation({ messages: [...messages, messages[1], messages[2]] }));
+    expect(tail.messages.at(-1)).toMatchObject({ id: "a1", sourceCallCount: 1 });
+    expect(JSON.stringify(tail)).not.toContain("retained terminal lines");
+  });
+
   it("returns every message and every change as they are, and changes nothing", async () => {
     const hub = await hubWith();
     const messages = Array.from({ length: 30 }, (_, i) => ({ id: `m${i}`, role: i % 2 ? ("assistant" as const) : ("user" as const), text: words(900, `m${i}`), at: i }));

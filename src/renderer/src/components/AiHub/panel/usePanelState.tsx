@@ -595,6 +595,14 @@ export function usePanelState({
         setTimeout(() => composer.current?.focus(), 30);
       }
     };
+    const appendEventAttachment = (detail?: { text?: string; label?: string; kind?: ContextSource["kind"] }): void => {
+      if (!detail?.text || !detail.label) return;
+      const source: ContextSource = {
+        id: crypto.randomUUID(), label: detail.label, text: detail.text, observedAt: Date.now(),
+        ...(detail.kind ? { kind: detail.kind } : {}),
+      };
+      setAttachments(old => [...old.slice(-9), source]);
+    };
     const askAi = (event: Event): void => {
       const custom = event as CustomEvent<{
         sessionId?: string;
@@ -602,23 +610,14 @@ export function usePanelState({
         label?: string;
         prompt?: string;
         action?: string;
+        kind?: ContextSource["kind"];
       }>;
       custom.preventDefault();
       const detail = custom.detail;
       if (detail?.sessionId) {
         selectAiTerminal(detail.sessionId);
       }
-      if (detail?.text && detail?.label) {
-        setAttachments((old) => [
-          ...old.slice(-9),
-          {
-            id: crypto.randomUUID(),
-            label: detail.label!,
-            text: detail.text!,
-            observedAt: Date.now(),
-          },
-        ]);
-      }
+      appendEventAttachment(detail);
       if (detail?.prompt) {
         setPrompt(detail.prompt);
       }
@@ -642,22 +641,13 @@ export function usePanelState({
           label?: string;
           prompt?: string;
           sessionId?: string;
+          kind?: ContextSource["kind"];
         }>
       ).detail;
       if (detail?.sessionId) {
         selectAiTerminal(detail.sessionId);
       }
-      if (detail?.text && detail?.label) {
-        setAttachments((old) => [
-          ...old.slice(-9),
-          {
-            id: crypto.randomUUID(),
-            label: detail.label!,
-            text: detail.text!,
-            observedAt: Date.now(),
-          },
-        ]);
-      }
+      appendEventAttachment(detail);
       if (detail?.prompt) {
         setPrompt(detail.prompt);
       }

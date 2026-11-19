@@ -10,6 +10,7 @@ import { WorkforceView } from "../../src/renderer/src/components/AiHub/Workforce
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
+  vi.unstubAllGlobals();
 });
 
 const ticket = (id: string, extra: Partial<WorkTicket> = {}): WorkTicket => ({
@@ -38,6 +39,26 @@ const hub = (extra: Partial<HubSnapshot>): HubSnapshot =>
   }) as unknown as HubSnapshot;
 
 describe("a ticket's detail", () => {
+  it("shows the request recorded for the open ticket and saves its edited reviewer", async () => {
+    const accessRequest = { url: "https://access.example.net/requests/42", reviewer: "Day shift", resource: "pg-primary", expiresAt: Date.UTC(2027, 1, 3, 18, 25, 33, 123) };
+    const state = hub({ workTickets: [ticket("access", { accessRequest })] });
+    const send = vi.fn().mockResolvedValue(state);
+    render(<WorkforceView hub={state} act={send} onOpenTask={() => {}} />);
+    fireEvent.click(within(screen.getByTestId("ticket-access")).getByRole("button", { name: "Ticket access" }));
+    const card = within(screen.getByRole("region", { name: "Resource access request" }));
+    const link = card.getByRole("link", { name: "Open access request" });
+    expect(link).toHaveAttribute("href", accessRequest.url);
+    const openExternal = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("multissh", { openExternal });
+    fireEvent.click(link);
+    expect(openExternal).toHaveBeenCalledWith(accessRequest.url);
+    expect(card.getByText(/Reviewer · Day shift/)).toBeVisible();
+    fireEvent.click(card.getByRole("button", { name: "Edit access request" }));
+    fireEvent.change(card.getByLabelText("Reviewer"), { target: { value: "Night shift" } });
+    fireEvent.click(card.getByRole("button", { name: "Save access request" }));
+    await waitFor(() => expect(send).toHaveBeenCalledWith({ action: "ticket-access-request", id: "access", accessRequest: { ...accessRequest, reviewer: "Night shift" } }));
+  });
+
   it("scrolls into view when a ticket is opened, and holds the edit form", () => {
     const scrolled = vi.fn();
     const original = Element.prototype.scrollIntoView;

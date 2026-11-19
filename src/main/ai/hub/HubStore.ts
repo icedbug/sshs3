@@ -1,3 +1,4 @@
+import { expireTerminalSources } from "../../../shared/answerSources";
 import { sharedMemoryRemovals } from "./memory/sharedMemoryRemovals";
 import { sanitizeServerForS3 } from "./S3WorkspaceSyncService";
 import crypto from "node:crypto";
@@ -307,8 +308,10 @@ export class HubStore {
         x.updatedAt >= cutoff ||
         ["queued", "running", "waiting"].includes(x.status),
     );
-    for (const task of this.data.tasks)
+    for (const task of this.data.tasks) {
       task.sources = task.sources.filter((s) => s.observedAt >= cutoff);
+      for (const message of task.messages) if (message.sourceCalls) message.sourceCalls = expireTerminalSources(message.sourceCalls, cutoff);
+    }
   }
 
   save(): Promise<void> {

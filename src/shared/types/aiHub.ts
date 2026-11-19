@@ -75,6 +75,9 @@ export interface AgentMessage {
   role: "user" | "assistant" | "system";
   text: string;
   images?: Array<{ label: string; dataUrl: string; mimeType?: string }>;
+  sourceCalls?: import("../answerSources").AnswerSourceCall[];
+  /** Compact snapshot marker. The receipt itself is read only when its answer is inspected. */
+  sourceCallCount?: number;
   at: number;
 }
 /**
@@ -125,19 +128,42 @@ export interface AgentPlanStep {
   /** Set when an approved plan's command has run without asking again. */
   ranAt?: number;
 }
-/**
- * A plan the agent proposes before changing anything. Nothing that changes a
- * system runs while a plan waits for the user's decision.
- */
-/** Something that might explain what is wrong, and what was found for or against it. */
+/** Opaque lookup for one source included in a model call. Content stays with the owning conversation. */
+export type HypothesisSource = Pick<import("../answerSources").AnswerSource, "ref" | "kind" | "digest" | "revision" | "updatedAt" | "observedAt"> & {
+  taskId: string;
+  callId: string;
+};
+
+export interface HypothesisEvidence {
+  supports: boolean;
+  text: string;
+  id?: string;
+  at?: number;
+  toolCallId?: string;
+  author?: string;
+  source?: HypothesisSource;
+  /** Observation ids are local to the task that recorded them. */
+  originTaskId?: string;
+  /** An earlier observation of this hypothesis that this observation replaces. */
+  supersedes?: string;
+}
+
+export type IncidentDiagnosis =
+  | { status: "confirmed"; cause: string; hypothesisId: string; at: number }
+  | { status: "insufficient-evidence"; nextObservation: string; at: number };
+
+/** A proposed cause with supporting and contrary observations. */
 export interface AgentHypothesis {
   id: string;
   text: string;
   status: "open" | "confirmed" | "ruled-out";
   /** The hypothesis this one refines. */
   parentId?: string;
-  evidence: { supports: boolean; text: string }[];
+  evidence: HypothesisEvidence[];
+  /** Application time of the most recent status transition. */
+  reviewedAt?: number;
 }
+/** A change plan that waits for approval before running. */
 export interface AgentPlan {
   id: string;
   goal: string;
@@ -176,6 +202,7 @@ export interface AgentPlan {
 }
 /** One tool call an agent made, with what it got back (both masked and shortened). */
 export interface AgentToolRecord {
+  sourceSpans?: import("../answerSources").StoredSourceSpan[];
   name: string;
   input: string;
   output: string;
@@ -495,6 +522,8 @@ export interface AgentTask {
    * listed as a conversation.
    */
   distillSourceId?: string;
+  /** Next observation proposed for an investigation that needs more evidence. */
+  nextDiagnosticObservation?: string;
   /** What might explain the problem at hand, as the agent last recorded it. */
   hypotheses?: AgentHypothesis[];
   /**
@@ -1334,6 +1363,8 @@ export interface TicketKbRef {
  * shared; whoever's app is running takes a ticket by claiming it.
  */
 export interface WorkTicket {
+  /** A team-visible link attached by an operator. This metadata grants no permissions. */
+  accessRequest?: import("../ticketAccessRequest").TicketAccessRequest;
   id: string;
   title: string;
   description: string;
@@ -1397,6 +1428,8 @@ export interface WorkTicket {
   baseAt?: number;
   /** When each field was last changed: a merge keeps two people's changes of different fields. */
   fieldAt?: Record<string, number>;
+  /** Diagnostic result of the incident investigation, separate from technical run status. */
+  diagnosis?: IncidentDiagnosis;
   /** Synced investigation hypotheses recorded while working this ticket. */
   hypotheses?: AgentHypothesis[];
   /** Correlated alerts grouped into this incident ticket. */
@@ -1822,6 +1855,8 @@ export interface HubReply {
   task?: { id: string; messages: AgentMessage[]; changes: AgentChange[] };
   /** Only returned when the inspection drawer requests the retained tool details for one task. */
   taskTools?: { id: string; count: number; entries: AgentToolRecord[] };
+  answerSources?: { messageId: string; calls: import("../answerSources").AnswerSourceCall[]; citations: Array<{ callId: string; ref: string }> };
+  evidenceSource?: { callId: string; source: import("../answerSources").AnswerSource };
   /** What `runner-test` found for an external agent: whether its program is there and answers as an agent. */
   runnerProbe?: { id: string; ok: boolean; detail: string };
 }
@@ -2035,6 +2070,8 @@ export type HubRequest =
   | { action: "stop"; taskId: string }
   /** A conversation whole: a snapshot carries only the last few messages of a long one, and a change without its long parts. Answers `reply.task`. */
   | { action: "task-read"; taskId: string; detail?: "tools" }
+  | { action: "task-read"; taskId: string; detail: "answer-sources"; messageId: string }
+  | { action: "task-read"; taskId: string; detail: "evidence-source"; callId: string; ref: string; digest: string }
   | { action: "takeover"; sessionId: string }
   | { action: "arm"; sessionId: string; shell: ShellKind }
   | { action: "approve"; taskId: string; changeId: string; approved: boolean; note?: string; adminException?: boolean }
@@ -2158,6 +2195,7 @@ export type HubRequest =
   /** What the person who did the work reports on a ticket: kept as its result. */
   | { action: "ticket-result"; id: string; result: string }
   | { action: "ticket-comment"; id: string; text: string }
+  | { action: "ticket-access-request"; id: string; accessRequest: import("../ticketAccessRequest").TicketAccessRequest | null }
   /** Claims the ticket and runs its agent on it now. */
   | { action: "ticket-start"; id: string; sessionId?: string }
   /** The person's verdict on a ticket in review: done, or back to the agent with a note. */
