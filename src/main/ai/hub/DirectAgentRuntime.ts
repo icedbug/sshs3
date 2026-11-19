@@ -3812,6 +3812,11 @@ export class DirectAgentRuntime implements AgentRuntime {
   private noStreamUsage = false;
   /** The endpoint refused `reasoning_effort`: omitted for the rest of this run. */
   private noReasoningEffort = false;
+  /**
+   * The endpoint takes tools only with reasoning switched off, and leaving the setting out is not
+   * enough (OpenAI's gpt-6 models on /chat/completions): "none" is sent for the rest of this run.
+   */
+  private reasoningOff = false;
   /** The endpoint refused `max_tokens` (OpenAI's newer models take `max_completion_tokens`): sent under that name for the rest of this run. */
   private maxCompletionTokens = false;
   /** The endpoint takes its own default temperature only: none is sent for the rest of this run. */
@@ -4467,6 +4472,7 @@ export class DirectAgentRuntime implements AgentRuntime {
   ): Promise<void> {
     this.noStreamUsage = false;
     this.noReasoningEffort = false;
+    this.reasoningOff = false;
     this.maxCompletionTokens = false;
     this.noTemperature = false;
     let activeModel = model;
@@ -4576,7 +4582,7 @@ export class DirectAgentRuntime implements AgentRuntime {
               ...(tools.length > 0 ? { tools } : {}),
               ...(this.maxCompletionTokens ? { max_completion_tokens: tuning.maxOutputTokens } : { max_tokens: tuning.maxOutputTokens }),
               ...(this.noTemperature ? {} : { temperature: tuning.temperature }),
-              ...(this.noReasoningEffort ? {} : { reasoning_effort: turnEffort }),
+              ...(this.reasoningOff ? { reasoning_effort: "none" } : this.noReasoningEffort ? {} : { reasoning_effort: turnEffort }),
               stream: true,
               // Without this, OpenAI's streaming API reports no usage at all, and a budget counts nothing.
               ...(this.noStreamUsage ? {} : { stream_options: { include_usage: true } }),
@@ -4594,7 +4600,13 @@ export class DirectAgentRuntime implements AgentRuntime {
             turn--;
             continue;
           }
-          if (response.status === 400 && !this.noReasoningEffort && /reasoning_effort/i.test(errText)) {
+          // A model that takes tools here only with reasoning off says so, and names the value to send.
+          if (response.status === 400 && !this.reasoningOff && /reasoning_effort/i.test(errText) && /to ['"]none['"]/i.test(errText)) {
+            this.reasoningOff = true;
+            turn--;
+            continue;
+          }
+          if (response.status === 400 && !this.noReasoningEffort && !this.reasoningOff && /reasoning_effort/i.test(errText)) {
             this.noReasoningEffort = true;
             turn--;
             continue;

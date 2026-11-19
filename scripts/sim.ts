@@ -18,6 +18,9 @@
  * and is never printed or stored. --approve all|none|ask says who answers when the agent asks before a
  * change (all: everything is let through, which shows whether its own judgement holds; ask: you answer).
  * The run is stopped at --max-commands (40) or --max-minutes (15).
+ * --then "<text>" is what the person answers, once, when the agent has reported and the incident still
+ * stands: an alert's ticket asks the agent to find out what is wrong, and an agent that asks first
+ * stops at saying what it would change. "Go ahead and fix it." is what a person would write then.
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -29,7 +32,7 @@ import { runLines, scoreScenario, type ScenarioScore } from "../src/main/sim/Sce
 const args = process.argv.slice(2);
 const flag = (name: string): boolean => args.includes(`--${name}`);
 const value = (name: string): string | undefined => (args.includes(`--${name}`) ? args[args.indexOf(`--${name}`) + 1] : undefined);
-const VALUED = ["--run", "--report", "--base-url", "--model", "--approve", "--max-commands", "--max-minutes"];
+const VALUED = ["--run", "--report", "--base-url", "--model", "--approve", "--max-commands", "--max-minutes", "--then"];
 const id = args.find((a, i) => !a.startsWith("--") && !VALUED.includes(args[i - 1] ?? ""));
 
 function print(score: ScenarioScore): void {
@@ -70,6 +73,7 @@ async function agent(scenarioId: string): Promise<number> {
       baseUrl,
       model,
       apiKey: process.env.SSHS3_SIM_API_KEY,
+      followUp: value("then"),
       dir,
       maxCommands: Number(value("max-commands") ?? 40),
       maxMinutes: Number(value("max-minutes") ?? 15),
@@ -84,9 +88,10 @@ async function agent(scenarioId: string): Promise<number> {
         if (!say) return;
         if (e.kind === "started") console.log(`Agent: ${e.agent} · mode: ${e.mode} · model: ${e.model} · terminal: ${e.target}\n`);
         else if (e.kind === "approval") console.log(`  ASKED  ${e.ask.command}\n         ${e.ask.reason ?? e.ask.risk ?? ""}: ${e.allowed ? "allowed" : "refused"}`);
-        else if (e.kind === "plan") console.log(`  PLAN   ${e.summary.slice(0, 300)}: ${e.allowed ? "approved" : "not approved"}`);
+        else if (e.kind === "plan") console.log(`  PLAN   ${e.summary.slice(0, 300)}: ${e.allowed ? "approved" : "not approved"}${e.error ? ` (the answer was refused: ${e.error})` : ""}`);
         else if (e.kind === "command")
           console.log(`$ ${e.command}${e.status === "denied" ? "   [not run: refused]" : e.exitCode ? `   [exit ${e.exitCode}]` : ""}${e.output?.trim() ? `\n${brief(e.output)}` : ""}`);
+        else if (e.kind === "follow-up") console.log(`\nThe agent reported with ${e.passed} of ${e.total} checks passing. The person answers: ${e.text}\n`);
         else if (e.kind === "stopped") console.log(`\nSTOPPED: ${e.why}`);
         else if (e.kind === "ended") console.log(`\nThe run ended: ${e.status}${e.error ? ` (${e.error})` : ""}`);
       },
@@ -94,6 +99,7 @@ async function agent(scenarioId: string): Promise<number> {
     if (flag("json")) {
       console.log(JSON.stringify(result, null, 2));
     } else {
+      if (result.beforeFollowUp) console.log(`\nAfter its first report ${result.beforeFollowUp.passed} of ${result.beforeFollowUp.total} checks passed. The rest is after the person's answer.`);
       console.log(`\nThe agent's report:\n${result.report.trim() || "(none)"}\n`);
       for (const c of result.score.checks) console.log(`${c.pass ? "PASS" : "FAIL"}  ${c.title}\n      ${c.why}`);
       const cost = result.usage?.costUsd ? `, about $${result.usage.costUsd.toFixed(3)}` : "";

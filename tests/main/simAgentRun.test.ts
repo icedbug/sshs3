@@ -117,6 +117,25 @@ describe("an agent run by a model on a scenario", () => {
     expect(model.requests.filter((r) => "max_tokens" in r).length).toBe(1);
   }, 60_000);
 
+  it("works with a model that takes tools only with its reasoning switched off, as gpt-6-luna does", async () => {
+    const { dir, runAgentOnScenario } = await lab();
+    const scenario = scenarioById("nginx-bad-config")!;
+    const model = await fakeOpenAi(asModel(scenario.solutions.careful, scenario.story), { reasoningModel: true });
+    disposals.push(() => model.close());
+
+    const result = await runAgentOnScenario({ scenarioId: scenario.id, baseUrl: model.url, model: "gpt-6-luna", dir, pollMs: 20 });
+
+    // The first real run of this model ended here: "Model API (400) … set reasoning_effort to 'none'".
+    expect(result.error).toBeUndefined();
+    expect(result.score.passed).toBe(result.score.total);
+    const last = model.requests.at(-1)!;
+    expect(last.reasoning_effort).toBe("none");
+    expect(last.max_completion_tokens).toBeGreaterThan(0);
+    // Refused twice at the start (the limit's name, then the reasoning), and never again.
+    expect(model.requests.filter((r) => "max_tokens" in r).length).toBe(1);
+    expect(model.requests.filter((r) => !("max_tokens" in r) && r.reasoning_effort !== "none").length).toBe(1);
+  }, 60_000);
+
   it("says that nobody worked on the ticket when the lab has no model", async () => {
     const { dir } = await lab();
     const { HubService } = await import("../../src/main/ai/hub/HubService");

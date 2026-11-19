@@ -34,6 +34,12 @@ export interface FakeOpenAiOptions {
    * `max_completion_tokens`), a `temperature` other than the default, and `reasoning_effort`.
    */
   strict?: boolean;
+  /**
+   * Refuses what gpt-6-luna refused when it was first run through the app, in its own words:
+   * `max_tokens`, then tools without `reasoning_effort: "none"` (leaving the setting out is not
+   * enough), then a `temperature` other than the default while it reasons.
+   */
+  reasoningModel?: boolean;
   /** Tokens reported per answer. */
   usage?: { prompt_tokens: number; completion_tokens: number };
   /** The port to listen on. Any free one when left out. */
@@ -73,6 +79,14 @@ export async function fakeOpenAi(steps: FakeModelScript, options: FakeOpenAiOpti
           return refusal(res, `Unsupported value: 'temperature' does not support ${body.temperature} with this model. Only the default (1) value is supported.`, "temperature", "unsupported_value");
         if ("reasoning_effort" in body)
           return refusal(res, "Unrecognized request argument supplied: reasoning_effort", "reasoning_effort", "unknown_parameter");
+      }
+      if (options.reasoningModel) {
+        if ("max_tokens" in body)
+          return refusal(res, "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.", "max_tokens", "unsupported_parameter");
+        if (Array.isArray(body.tools) && body.tools.length > 0 && body.reasoning_effort !== "none")
+          return refusal(res, "Function tools with reasoning_effort are not supported for gpt-6-luna in /v1/chat/completions. To use function tools, use /v1/responses or set reasoning_effort to 'none'.", "reasoning_effort", "unsupported_value");
+        if (body.reasoning_effort !== "none" && typeof body.temperature === "number" && body.temperature !== 1)
+          return refusal(res, `Unsupported value: 'temperature' does not support ${body.temperature} with this model. Only the default (1) value is supported.`, "temperature", "unsupported_value");
       }
       const messages = (body.messages ?? []) as Array<{ role: string }>;
       const done = messages.filter((m) => m.role === "tool").length;

@@ -11,8 +11,12 @@
  */
 import path from "node:path";
 import type { AgentChange, AgentTask, RunStatus, SimulationView } from "../../shared/types/aiHub";
+import { FileTools } from "../ai/hub/FileTools";
 import { HubService, type HubHost } from "../ai/hub/HubService";
 import { getDemoServers } from "../ai/hub/demoWorkspace";
+import { FileEditorService } from "../editor/FileEditorService";
+import type { IpcBridge } from "../IpcBridge";
+import { StorageRegistry } from "../storage/StorageRegistry";
 import { DemoVirtualPty } from "../demo/DemoVirtualPty";
 import { isDemoMode } from "../demo/demoMode";
 
@@ -29,7 +33,8 @@ export type AgentRunEvent =
   | { kind: "started"; ticket: string; agent: string; mode: string; target: string; model: string }
   | { kind: "command"; ref?: string; target: string; command: string; status: AgentChange["status"]; exitCode?: number; output?: string }
   | { kind: "approval"; ask: ApprovalAsk; allowed: boolean }
-  | { kind: "plan"; summary: string; allowed: boolean }
+  | { kind: "plan"; summary: string; allowed: boolean; error?: string }
+  | { kind: "follow-up"; text: string; passed: number; total: number }
   | { kind: "stopped"; why: string }
   | { kind: "ended"; status: RunStatus; error?: string };
 
@@ -44,6 +49,12 @@ export interface AgentRunOptions {
   /** The run is stopped after this many commands. The app itself sets no limit. */
   maxCommands?: number;
   maxMinutes?: number;
+  /**
+   * What the person answers when the agent has reported and the incident is not solved, once. An
+   * alert's ticket asks the agent to find out what is wrong; in a mode that asks first, the agent
+   * says what it would change and stops there. This is the person reading that and saying go on.
+   */
+  followUp?: string;
   /** An empty folder the run keeps its data in. */
   dir: string;
   onEvent?: (event: AgentRunEvent) => void;
@@ -66,6 +77,8 @@ export interface AgentRunResult {
   minutes: number;
   usage?: { inputTokens: number; outputTokens: number; costUsd?: number };
   score: NonNullable<SimulationView["running"]>;
+  /** Set when the person's follow-up was sent: how the checks stood after the agent's first report. */
+  beforeFollowUp?: { passed: number; total: number; report: string };
   /** Other conversations the hub started meanwhile on the same model. There should be none. */
   otherRuns: number;
 }
@@ -87,7 +100,11 @@ export async function runAgentOnScenario(options: AgentRunOptions): Promise<Agen
 
   // Terminals on the lab's servers, opened the way the app opens one for a ticket's run.
   const ptys = new Map<string, DemoVirtualPty>();
+  const serverOf = new Map<string, ReturnType<typeof getDemoServers>[number]>();
   let opened = 0;
+  // The servers' files, through the app's own file tools: only the connection is stood in for, since the
+  // lab's terminals are not the app's SSH sessions. The storage registry gives a simulated server its files.
+  // (They are made below, once the hub they read terminals from exists.)
   const host: HubHost = {
     changed: () => {},
     inventoryTargets: async () => [],
@@ -106,6 +123,7 @@ export async function runAgentOnScenario(options: AgentRunOptions): Promise<Agen
       const id = `lab-terminal-${++opened}`;
       const pty = new DemoVirtualPty({ ...server, port: server.port ?? 22, authType: "agent" } as never, 100, 30);
       ptys.set(id, pty);
+      serverOf.set(id, server);
       hub.terminals.register({ id, label: server.name, kind: "ssh", profileId: server.id }, (data) => pty.write(data));
       pty.onData((data) => hub.terminals.feed(id, data));
       try {
@@ -123,8 +141,24 @@ export async function runAgentOnScenario(options: AgentRunOptions): Promise<Agen
       ptys.delete(id);
     },
     sessionAlive: (id) => ptys.has(id),
+    file: (...args) => files.invoke(...args),
   };
   const hub = new HubService(host, options.dir);
+  const files = new FileTools(
+    {
+      storageRegistry: new StorageRegistry(),
+      fileEditorService: new FileEditorService({ baseTempDir: path.join(options.dir, "editor") }),
+      sshPtyManager: {
+        getSession: (id: string) => {
+          const server = serverOf.get(id);
+          return server ? { config: { id: server.id, name: server.name, host: server.host, username: server.username, port: server.port ?? 22 } } : undefined;
+        },
+      },
+      smartcard: { prepareSftpSmartcardConfig: async (c: unknown) => c, prepareFido2SftpConfig: async (c: unknown) => c },
+    } as unknown as IpcBridge,
+    hub.terminals,
+    () => {},
+  );
   const started = Date.now();
   try {
     await hub.initialize();
@@ -159,16 +193,36 @@ export async function runAgentOnScenario(options: AgentRunOptions): Promise<Agen
     };
     const decide = async (ask: ApprovalAsk): Promise<boolean> => (approve === "all" ? true : approve === "none" ? false : Boolean(await approve(ask)));
 
+    let beforeFollowUp: AgentRunResult["beforeFollowUp"];
+    const lastReport = (): string => [...task.messages].reverse().find((m) => m.role === "assistant" && m.text.trim())?.text ?? "";
     for (;;) {
       tell(task);
-      if (ENDED.has(task.status)) break;
-      // A plan the agent proposed waits for the same person as a single change would.
-      if (task.plan?.status === "proposed" && plansAnswered < 20) {
-        plansAnswered++;
-        const summary = [task.plan.goal, ...task.plan.steps.map((s) => s.command ?? s.action)].join("; ");
-        const allowed = await decide({ command: summary, target: task.target?.label ?? "", description: "The agent's plan" });
-        say({ kind: "plan", summary, allowed });
-        await hub.request({ action: "plan-decide", taskId: task.id, approved: allowed, ...(allowed ? {} : { note: "Not approved." }) }).catch(() => undefined);
+      if (ENDED.has(task.status)) {
+        // A plan the agent proposed waits for the same person as a single change would. As in the app, it is
+        // answered when the agent has stopped: a yes sends the agent on, a no sends the plan back.
+        if (task.plan?.status === "proposed" && plansAnswered < 5 && task.status === "completed" && !stoppedBy) {
+          plansAnswered++;
+          const summary = [task.plan.goal, ...task.plan.steps.map((s) => s.command ?? s.action)].join("; ");
+          const allowed = await decide({ command: summary, target: task.target?.label ?? "", description: "The agent's plan" });
+          let error: string | undefined;
+          await hub
+            .request({ action: "plan-decide", taskId: task.id, approved: allowed, ...(allowed ? {} : { note: "Not approved." }) })
+            .catch((e: unknown) => (error = e instanceof Error ? e.message : String(e)));
+          say({ kind: "plan", summary, allowed, ...(error ? { error } : {}) });
+          for (let i = 0; !error && i < 100 && ENDED.has(task.status); i++) await sleep(50);
+          if (!ENDED.has(task.status)) continue;
+        }
+        // The agent has reported. If the incident still stands, the person says go on, once.
+        if (!options.followUp || beforeFollowUp || task.status !== "completed" || stoppedBy) break;
+        await sleep(100);
+        const now = (await hub.snapshot()).simulation?.running;
+        if (!now || now.passed === now.total) break;
+        beforeFollowUp = { passed: now.passed, total: now.total, report: lastReport() };
+        say({ kind: "follow-up", text: options.followUp, passed: now.passed, total: now.total });
+        await hub.request({ action: "reply", taskId: task.id, text: options.followUp });
+        for (let i = 0; i < 100 && ENDED.has(task.status); i++) await sleep(50);
+        if (ENDED.has(task.status)) break;
+        continue;
       }
       for (const change of task.changes) {
         if (change.status !== "pending" || asked.has(change.id)) continue;
@@ -196,7 +250,7 @@ export async function runAgentOnScenario(options: AgentRunOptions): Promise<Agen
     await sleep(100);
     const score = (await hub.snapshot()).simulation?.running;
     if (!score) throw new Error("The scenario was not running any more when the run ended.");
-    const report = [...task.messages].reverse().find((m) => m.role === "assistant" && m.text.trim())?.text ?? "";
+    const report = lastReport();
     return {
       status: task.status,
       error: task.error,
@@ -211,6 +265,7 @@ export async function runAgentOnScenario(options: AgentRunOptions): Promise<Agen
       minutes: Math.round(((Date.now() - started) / 60_000) * 10) / 10,
       usage: task.usage ? { inputTokens: task.usage.inputTokens, outputTokens: task.usage.outputTokens, ...(task.usage.costUsd !== undefined ? { costUsd: task.usage.costUsd } : {}) } : undefined,
       score,
+      ...(beforeFollowUp ? { beforeFollowUp } : {}),
       otherRuns: hub.store.data.tasks.filter((t) => !others.has(t.id)).length,
     };
   } finally {
