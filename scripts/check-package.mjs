@@ -12,7 +12,7 @@ const expected = JSON.parse(await readFile(new URL('../package.json', import.met
 const installed = JSON.parse(extractFile(archive, 'package.json'));
 assert.equal(installed.version, expected.version);
 assert.equal(installed.main, expected.main);
-if (process.env.GITHUB_SHA) assert.equal(installed.gitHead, process.env.GITHUB_SHA, 'Packaged Git revision differs from the workflow revision');
+if (process.env.GITHUB_SHA) assert.equal(installed.sshs3Revision, process.env.GITHUB_SHA, 'Packaged Git revision differs from the workflow revision');
 assert.ok(extractFile(archive, installed.main).length);
 await access(path.join(resources, 'ai-hub-icon.png'));
 const suffix = process.platform === 'win32' ? '.exe' : '';

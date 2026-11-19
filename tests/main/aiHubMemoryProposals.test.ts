@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
+import { HubService } from "../../src/main/ai/hub/HubService";
+import { setDemoModeForTesting } from "../../src/main/demo/demoMode";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -186,8 +188,6 @@ function sseResponse(text: string): Response {
 }
 
 async function makeHub(saved: MemoryEntry[] = [], autoSave = false) {
-  const { HubService } = await import("../../src/main/ai/hub/HubService");
-  const { setDemoModeForTesting } = await import("../../src/main/demo/demoMode");
   setDemoModeForTesting(false);
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "sshs3-distill-"));
   const hub = new HubService(
