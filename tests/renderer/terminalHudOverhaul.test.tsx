@@ -562,6 +562,8 @@ describe('WebAuthGate HttpOnly cookie, SSO, and topbar', () => {
 
   it('renders SSO login button when configured, uses English-only UI, and logs in via HttpOnly cookie without JSON token', async () => {
     const onSsoLogin = vi.fn();
+    const prepare = vi.fn();
+    let allowLogin = false;
     const fetchMock = vi.fn().mockImplementation(async (url: string) => {
       if (url === '/api/auth/status') {
         return {
@@ -577,6 +579,7 @@ describe('WebAuthGate HttpOnly cookie, SSO, and topbar', () => {
         } as any;
       }
       if (url === '/api/auth/login') {
+        if (!allowLogin) return { ok: false, json: async () => ({ error: 'Try again' }) };
         return {
           ok: true,
           json: async () => ({
@@ -597,13 +600,14 @@ describe('WebAuthGate HttpOnly cookie, SSO, and topbar', () => {
     global.fetch = fetchMock;
 
     render(
-      <WebAuthGate onSsoLogin={onSsoLogin}>
+      <WebAuthGate onSsoLogin={onSsoLogin} onAuthSubmit={prepare}>
         <div data-testid="workspace-child">Workspace</div>
       </WebAuthGate>
     );
 
     const ssoBtn = await screen.findByTestId('web-auth-sso-btn');
     expect(ssoBtn).toHaveTextContent('Sign in with Okta');
+    expect(prepare).not.toHaveBeenCalled();
     fireEvent.click(ssoBtn);
     expect(onSsoLogin).toHaveBeenCalledWith('/api/auth/sso/login');
 
@@ -615,7 +619,13 @@ describe('WebAuthGate HttpOnly cookie, SSO, and topbar', () => {
     fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'secret12' } });
     fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
 
+    await screen.findByText('Try again');
+    expect(prepare).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId('workspace-child')).not.toBeInTheDocument();
+    allowLogin = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
     await screen.findByTestId('workspace-child');
+    expect(prepare).toHaveBeenCalledTimes(2);
     const topbar = screen.getByTestId('web-auth-topbar');
     expect(topbar).toBeInTheDocument();
     expect(screen.queryByTestId('web-auth-lang-toggle')).not.toBeInTheDocument();

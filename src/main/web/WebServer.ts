@@ -4,6 +4,7 @@ import fsp from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
 import type { Duplex } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { setWebDataDir } from './electronShim';
 import { WebAuthService, type WebUserPublic } from './WebAuthService';
 import { WebTenantManager } from './WebTenantManager';
@@ -413,6 +414,7 @@ export class Sshs3WebServer {
    * about the door.
    */
   public readonly signIns: AuditLog;
+  private readonly staticDir: string;
   private httpServer?: http.Server;
   private boundPort = 0;
   private activeSockets = new Set<Duplex>();
@@ -421,6 +423,7 @@ export class Sshs3WebServer {
   private heartbeatTimer?: NodeJS.Timeout;
 
   constructor(private readonly options: Sshs3WebServerOptions) {
+    this.staticDir = path.resolve(options.staticDir || (fs.existsSync('dist-web-ui/index.html') ? 'dist-web-ui' : 'dist'));
     setWebDataDir(options.dataDir);
     this.auth = new WebAuthService(options.dataDir);
     this.tenants = new WebTenantManager(
@@ -1183,35 +1186,61 @@ export class Sshs3WebServer {
       return;
     }
 
-    // Serve static frontend files from dist/
-    const staticDir =
-      this.options.staticDir || path.resolve(process.cwd(), 'dist');
-    const relPath = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
+    if (method !== 'GET' && method !== 'HEAD') {
+      res.writeHead(405, { Allow: 'GET, HEAD' }).end();
+      return;
+    }
+    const staticDir = this.staticDir;
+    const relPath = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/u, '');
     let candidate = path.resolve(staticDir, relPath);
-    if (!candidate.startsWith(path.resolve(staticDir))) {
-      res.writeHead(403);
-      res.end('Forbidden');
+    const relative = path.relative(staticDir, candidate);
+    if (relative.startsWith('..' + path.sep) || relative === '..' || path.isAbsolute(relative)) {
+      res.writeHead(403).end('Forbidden');
       return;
     }
-
-    if (!fs.existsSync(candidate) || fs.statSync(candidate).isDirectory()) {
-      candidate = path.resolve(staticDir, 'index.html');
+    let file = await fsp.stat(candidate).catch(() => undefined);
+    if (!file?.isFile() && !relPath.startsWith('assets/')) {
+      candidate = path.join(staticDir, 'index.html');
+      file = await fsp.stat(candidate).catch(() => undefined);
     }
-
-    if (!fs.existsSync(candidate)) {
-      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
-      res.end('sshs3 web build not found. Run npm run build:web first.');
+    if (!file?.isFile()) {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }).end('Web file not found.');
       return;
     }
-
     const ext = path.extname(candidate).toLowerCase();
-    const contentType = MIME_TYPES[ext] || 'application/octet-stream';
-    const content = await fsp.readFile(candidate);
-    res.writeHead(200, {
-      'Content-Type': contentType,
-      'Content-Length': String(content.length),
-    });
-    res.end(content);
+    const hashed = /^assets\/[^/]+-[\w-]{8,}\.[\w]+$/.test(relPath);
+    const compressible = hashed && (ext === '.js' || ext === '.css');
+    const headers: http.OutgoingHttpHeaders = {
+      'Content-Type': MIME_TYPES[ext] || 'application/octet-stream',
+      'Cache-Control': hashed ? 'public, max-age=31536000, immutable' : 'no-cache',
+    };
+    if (compressible) {
+      headers.Vary = 'Accept-Encoding';
+      const encodings = new Map<string, number>();
+      for (const token of String(req.headers['accept-encoding'] || '').toLowerCase().split(',')) {
+        const [name, ...params] = token.split(';').map(part => part.trim());
+        const quality = params.find(param => param.startsWith('q='));
+        encodings.set(name, quality ? Number(quality.slice(2)) : 1);
+      }
+      if ((encodings.get('gzip') ?? encodings.get('*') ?? 0) > 0) {
+        const compressed = await fsp.stat(candidate + '.gz').catch(() => undefined);
+        if (compressed?.isFile()) {
+          candidate += '.gz';
+          file = compressed;
+          headers['Content-Encoding'] = 'gzip';
+        }
+      }
+    }
+    const etag = 'W/"' + file.size.toString(16) + '-' + Math.trunc(file.mtimeMs).toString(16) + '"';
+    headers.ETag = etag;
+    if ((req.headers['if-none-match'] || '').split(',').some(tag => tag.trim() === etag || tag.trim() === '*')) {
+      res.writeHead(304, headers).end();
+      return;
+    }
+    headers['Content-Length'] = file.size;
+    res.writeHead(200, headers);
+    if (method === 'HEAD') res.end();
+    else await pipeline(fs.createReadStream(candidate), res);
   }
 
   private async handleWsUpgrade(

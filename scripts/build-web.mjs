@@ -1,6 +1,8 @@
 import { build } from 'vite';
 import path from 'node:path';
-import fs from 'node:fs';
+import fs from 'node:fs/promises';
+import { gzip } from 'node:zlib';
+import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
@@ -8,8 +10,10 @@ import tailwindcss from '@tailwindcss/vite';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
 
-async function buildWeb() {
-  console.log('[build-web] 1/2 Building React SPA frontend -> dist/ ...');
+const gzipAsync = promisify(gzip);
+
+async function buildClient() {
+  const outDir = path.join(rootDir, 'dist-web-ui');
   await build({
     configFile: false,
     root: rootDir,
@@ -22,12 +26,21 @@ async function buildWeb() {
       },
     },
     build: {
-      outDir: path.resolve(rootDir, 'dist'),
+      outDir,
       emptyOutDir: true,
     },
   });
 
-  console.log('[build-web] 2/2 Building Multi-User Web Server -> dist-web/server.mjs ...');
+  const assetsDir = path.join(outDir, 'assets');
+  for (const file of await fs.readdir(assetsDir)) {
+    if (!/\.(?:js|css)$/.test(file)) continue;
+    const source = path.join(assetsDir, file);
+    const bytes = await fs.readFile(source);
+    if (bytes.length >= 1024) await fs.writeFile(source + '.gz', await gzipAsync(bytes));
+  }
+}
+
+async function buildServer() {
   await build({
     configFile: false,
     root: rootDir,
@@ -76,15 +89,13 @@ async function buildWeb() {
   for (const [srcRel, destRel] of helpers) {
     const src = path.resolve(rootDir, srcRel);
     const dest = path.resolve(rootDir, destRel);
-    if (fs.existsSync(src)) {
-      fs.copyFileSync(src, dest);
-    }
+    await fs.copyFile(src, dest);
   }
-
-  console.log('[build-web] Done! Start with: npm run start:web');
 }
 
-buildWeb().catch((err) => {
-  console.error('[build-web] Build failed:', err);
-  process.exit(1);
-});
+const target = process.argv[2] ?? 'all';
+if (!['all', 'client', 'server'].includes(target)) throw new Error('Choose all, client or server.');
+await Promise.all([
+  ...(target !== 'server' ? [buildClient()] : []),
+  ...(target !== 'client' ? [buildServer()] : []),
+]);

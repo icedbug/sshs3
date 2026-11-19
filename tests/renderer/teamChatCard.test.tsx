@@ -33,7 +33,7 @@ describe("the team chat card", () => {
     expect(token).toHaveAttribute("placeholder", "Set. Leave empty to keep it.");
     expect(screen.getByTestId("team-chat-kept")).toHaveTextContent("It is kept until you remove it, also when a message is later edited or deleted in the chat");
     const channels = within(screen.getByTestId("chat-slack-channels"));
-    expect(channels.getByText(/1,234 messages kept/)).toBeInTheDocument();
+    expect(channels.getByText((text) => text.includes(new Intl.NumberFormat().format(1234).replace(/\s/g, " ") + " messages kept"))).toBeInTheDocument();
     expect(channels.getByLabelText("Read #ops")).toBeChecked();
     expect(channels.getByLabelText("Read #incidents")).not.toBeChecked();
   });

@@ -1,4 +1,4 @@
-FROM node:22-bookworm-slim AS builder
+FROM node:24-bookworm-slim AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
@@ -11,13 +11,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-COPY package.json package-lock.json* ./
-RUN npm install --ignore-scripts && npm rebuild node-pty || true
+COPY package.json package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm npm ci --ignore-scripts --no-audit --no-fund && npm rebuild node-pty pkcs11js
 
 COPY . .
-RUN npm run build:web
+RUN npm run build:web && npm prune --omit=dev --ignore-scripts --no-audit --no-fund
 
-FROM node:22-bookworm-slim AS runtime
+FROM node:24-bookworm-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     openssh-client \
@@ -32,7 +32,7 @@ WORKDIR /app
 
 COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/dist-web-ui ./dist-web-ui
 COPY --from=builder /app/dist-web ./dist-web
 
 ENV NODE_ENV=production

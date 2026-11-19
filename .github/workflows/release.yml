@@ -10,6 +10,10 @@ on:
         description: 'Tag name for release (e.g. v0.1.0)'
         required: true
         default: 'v0.1.0'
+      with_hermes:
+        description: 'Include the pinned native Hermes engine in these packages'
+        type: boolean
+        default: false
       publish:
         description: 'Publish the GitHub release. Untick to only build and keep the files as workflow artifacts (for testing).'
         type: boolean
@@ -40,7 +44,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: 24
           cache: 'npm'
 
       - name: Install Linux build dependencies
@@ -57,6 +61,16 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Restore incremental types and Vitest file timings
+        uses: actions/cache@v4
+        with:
+          path: |
+            .typecheck.tsbuildinfo
+            node_modules/.vite/vitest
+          key: checks-v1-${{ runner.os }}-${{ runner.arch }}-node24-${{ hashFiles('package-lock.json', 'tsconfig*.json', 'vite.config.ts') }}-${{ github.sha }}
+          restore-keys: |
+            checks-v1-${{ runner.os }}-${{ runner.arch }}-node24-${{ hashFiles('package-lock.json', 'tsconfig*.json', 'vite.config.ts') }}-
 
       - name: Run tests & typecheck
         run: |
@@ -137,12 +151,43 @@ jobs:
           Write-Host "VcXsrv bundled successfully. Extracted files:"
           Get-ChildItem -Path 'build-resources/vcxsrv' | Select-Object -First 10 Name
 
+      - name: Install optional Hermes build dependencies
+        if: inputs.with_hermes && runner.os == 'Linux'
+        run: sudo apt-get install -y zsh fish build-essential libx11-dev libxi-dev libportaudio2
+
+      - uses: ./.github/actions/build-hermes
+        if: inputs.with_hermes
+
       - name: Build application bundles
         run: |
-          npm run build
+          npm run bundle:desktop
           npx electron-builder --${{ matrix.platform.target }} --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check and start the packaged app on Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          deb="$(find release -maxdepth 1 -name '*.deb' -print -quit)"
+          test "$(dpkg-deb -f "$deb" Version)" = "$version"
+          dpkg-deb -x "$deb" "$RUNNER_TEMP/package-smoke"
+          export SMOKE_APP="$(find "$RUNNER_TEMP/package-smoke/opt" -type f -name sshs3 -print -quit)"
+          node scripts/check-package.mjs "$SMOKE_APP" ${{ inputs.with_hermes && '--hermes' || '' }}
+          xvfb-run --auto-servernum node scripts/smoke-test.mjs
+
+      - name: Check and start the packaged app on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem release/*.zip | Select-Object -First 1
+          $folder = Join-Path $env:RUNNER_TEMP 'package-smoke'
+          Expand-Archive -LiteralPath $zip.FullName -DestinationPath $folder
+          $env:SMOKE_APP = (Get-ChildItem $folder -Recurse -File -Filter sshs3.exe | Select-Object -First 1).FullName
+          node scripts/check-package.mjs "$env:SMOKE_APP" ${{ inputs.with_hermes && '--hermes' || '' }}
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/smoke-test.mjs
 
       - name: Package policy templates (ADMX/ADML and policy.conf example)
         if: runner.os == 'Linux'
@@ -214,7 +259,7 @@ jobs:
       - name: Setup Node.js (for SBOM)
         uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: 24
 
       - name: Generate SBOM (CycloneDX)
         run: npm ci --ignore-scripts && npx --yes @cyclonedx/cyclonedx-npm@4 --omit dev --ignore-npm-errors --output-file dist-artifacts/sbom.cdx.json

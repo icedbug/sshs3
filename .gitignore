@@ -8,6 +8,7 @@ build-resources/hermes-desktop/
 dist/
 dist-electron/
 dist-web/
+dist-web-ui/
 sshs3-data/
 release/
 .superpowers/

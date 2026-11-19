@@ -85,6 +85,7 @@ const WEB_AUTH_COPY = {
 export interface WebAuthGateProps {
   children: React.ReactNode;
   onSsoLogin?: (url: string) => void;
+  onAuthSubmit?: () => void;
 }
 
 interface WebUserPublic {
@@ -228,7 +229,7 @@ async function webApiFetch<T = any>(path: string, options: RequestInit = {}): Pr
   return data as T;
 }
 
-export const WebAuthGate: React.FC<WebAuthGateProps> = ({ children, onSsoLogin }) => {
+export const WebAuthGate: React.FC<WebAuthGateProps> = ({ children, onSsoLogin, onAuthSubmit }) => {
   const inWebMode = isWebBrowserMode();
 
   const t = WEB_AUTH_COPY;
@@ -432,6 +433,7 @@ export const WebAuthGate: React.FC<WebAuthGateProps> = ({ children, onSsoLogin }
     e.preventDefault();
     setAuthError(null);
     setSubmitting(true);
+    onAuthSubmit?.();
     try {
       const res = await webApiFetch<AuthSuccessResponse>('/api/auth/setup', {
         method: 'POST',
@@ -453,6 +455,7 @@ export const WebAuthGate: React.FC<WebAuthGateProps> = ({ children, onSsoLogin }
     e.preventDefault();
     setAuthError(null);
     setSubmitting(true);
+    onAuthSubmit?.();
     try {
       const res = await webApiFetch<AuthSuccessResponse>('/api/auth/login', {
         method: 'POST',
@@ -482,6 +485,7 @@ export const WebAuthGate: React.FC<WebAuthGateProps> = ({ children, onSsoLogin }
     e.preventDefault();
     setAuthError(null);
     setSubmitting(true);
+    onAuthSubmit?.();
     try {
       const res = await webApiFetch<AuthSuccessResponse>('/api/auth/register-invite', {
         method: 'POST',

@@ -1,6 +1,7 @@
 /// <reference types="vitest" />
 import { defineConfig } from 'vite'
 import path from 'node:path'
+import os from 'node:os'
 import fs from 'node:fs'
 import electron from 'vite-plugin-electron/simple'
 import react from '@vitejs/plugin-react'
@@ -117,11 +118,13 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     watch: {
-      ignored: ['**/release/**', '**/dist/**', '**/dist-electron/**'],
+      ignored: ['**/release/**', '**/dist/**', '**/dist-electron/**', '**/dist-web/**', '**/dist-web-ui/**'],
     },
   },
   test: {
     include: ['tests/**/*.test.{ts,tsx,js,cjs,mjs}', 'src/**/*.test.{ts,tsx}'],
+    // Reserve memory for the coordinator and cap concurrent DOM workers on small runners.
+    maxWorkers: Math.max(1, Math.min(os.availableParallelism(), Math.floor(((process.availableMemory?.() || os.freemem()) - 512 * 1024 ** 2) / (768 * 1024 ** 2)))),
     globals: true,
     environment: 'node',
     passWithNoTests: true,

@@ -45,6 +45,7 @@ async function main(): Promise<void> {
   // Resolve static frontend directory (dist/)
   const candidates = [
     process.env.SSHS3_STATIC_DIR ? path.resolve(process.env.SSHS3_STATIC_DIR) : '',
+    path.resolve(import.meta.dirname, '../dist-web-ui'),
     path.resolve(import.meta.dirname, '../dist'),
     path.resolve(process.cwd(), 'dist'),
   ].filter(Boolean);

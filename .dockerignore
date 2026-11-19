@@ -1,0 +1,17 @@
+.git
+node_modules
+dist
+dist-web
+dist-web-ui
+dist-electron
+release
+.npm-cache
+coverage
+*.tsbuildinfo
+sshs3-data
+AI-*.md
+docs/audit
+build-resources/hermes-native-runtime
+build-resources/hermes-desktop
+.env
+.env.*

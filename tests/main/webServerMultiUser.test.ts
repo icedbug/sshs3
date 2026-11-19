@@ -1,3 +1,4 @@
+import { gzipSync } from "node:zlib";
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -41,6 +42,27 @@ describe('Sshs3WebServer Multi-User Hybrid Mode', () => {
       await server.stop();
     }
     await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  });
+
+  it('serves compressed hashed assets and revalidates the login page', async () => {
+    const assets = path.join(tmpDir, 'static', 'assets');
+    const name = 'view-abcDeF12.js';
+    await fs.mkdir(assets);
+    await fs.writeFile(path.join(assets, name), 'hello');
+    await fs.writeFile(path.join(assets, name + '.gz'), gzipSync('hello'));
+    const url = baseUrl + '/assets/' + name;
+    const compressed = await fetch(url, { headers: { 'Accept-Encoding': 'gzip' } });
+    expect(compressed.headers.get('cache-control')).toContain('immutable');
+    expect(compressed.headers.get('content-encoding')).toBe('gzip');
+    expect(await compressed.text()).toBe('hello');
+    const hit = await fetch(url, { headers: { 'Accept-Encoding': 'gzip', 'If-None-Match': compressed.headers.get('etag')! } });
+    expect(hit.status).toBe(304);
+    const head = await fetch(url, { method: 'HEAD', headers: { 'Accept-Encoding': 'gzip;q=0' } });
+    expect(head.headers.get('content-encoding')).toBeNull();
+    expect(head.headers.get('content-length')).toBe('5');
+    expect(await head.text()).toBe('');
+    expect((await fetch(baseUrl + '/assets/gone.js')).status).toBe(404);
+    expect((await fetch(baseUrl + '/')).headers.get('cache-control')).toBe('no-cache');
   });
 
   async function apiJson(
