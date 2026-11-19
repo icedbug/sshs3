@@ -120,15 +120,16 @@ describe("the chat panel's pieces", () => {
 
   it("keeps the shell to laying the pieces out, and each piece small enough to read", async () => {
     expect(await lines(path.join(panelDir, "AiHubPanel.tsx")), "AiHubPanel.tsx has grown: put what it draws in a piece in panel/ (docs/ai-hub.md, The panel)").toBeLessThan(300);
-    const files = (await fs.readdir(path.join(panelDir, "panel"))).filter((f) => f.endsWith(".tsx"));
-    expect(files).toEqual(expect.arrayContaining(["usePanelState.tsx", "Timeline.tsx", "ComposerInput.tsx", "panelHelpers.tsx"]));
+    const files = (await fs.readdir(path.join(panelDir, "panel"))).filter((f) => /\.tsx?$/.test(f));
+    expect(files).toEqual(expect.arrayContaining(["usePanelState.tsx", "useTerminalHandoff.ts", "Timeline.tsx", "ComposerInput.tsx", "panelHelpers.tsx"]));
     for (const file of files) expect(await lines(path.join(panelDir, "panel", file)), `panel/${file} has grown past 1,500 lines`).toBeLessThan(1500);
   });
 
   it("names every piece in the shell", async () => {
     const shell = await fs.readFile(path.join(panelDir, "AiHubPanel.tsx"), "utf8");
     for (const file of await fs.readdir(path.join(panelDir, "panel"))) {
-      const name = file.replace(/\.tsx$/, "");
+      if (!file.endsWith(".tsx")) continue;
+      const name = file.slice(0, -4);
       if (name === "usePanelState" || name === "panelHelpers") continue;
       expect(shell, name).toContain(`<${name} p={p}`);
     }
