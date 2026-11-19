@@ -50,7 +50,9 @@ describe.skipIf(!enabled)("actual PTY adapters", () => {
             ]
           : shell === "cmd"
             ? ["/Q", "/D"]
-            : [];
+            : shell === "zsh"
+              ? ["-f"] // Start at an actual prompt even on a fresh account without a .zshrc.
+              : [];
       const terminal: IPty = spawn(program, args, {
         cols: 200,
         rows: 40,
@@ -94,17 +96,22 @@ describe.skipIf(!enabled)("actual PTY adapters", () => {
             )
           ).exitCode,
         ).toBe(7);
-        expect(
-          (
-            await run(
-              shell === "powershell" || shell === "pwsh"
-                ? "Set-Location $env:TEMP"
-                : shell === "cmd"
-                  ? 'cd /d "%TEMP%"'
-                  : "cd /tmp",
-            )
-          ).cwd.toLowerCase(),
-        ).toContain(process.platform === "win32" ? "temp" : "/tmp");
+        const changed = await run(
+          shell === "powershell" || shell === "pwsh" ? "Set-Location $env:TEMP"
+            : shell === "cmd" ? 'cd /d "%TEMP%"' : "cd /tmp && pwd",
+        );
+        expect(changed.exitCode).toBe(0);
+        if (["bash", "sh", "dash", "zsh"].includes(shell)) {
+          // The command can change its own directory. Its subshell must leave the user's prompt in place.
+          expect(changed.output.split(/\r?\n/).map((line) => line.trim())).toContain("/tmp");
+          expect(changed.cwd).toBe(success.cwd);
+          const next = await run("pwd");
+          expect(next.exitCode).toBe(0);
+          expect(next.cwd).toBe(success.cwd);
+          expect(next.output.split(/\r?\n/).map((line) => line.trim())).toContain(success.cwd);
+        } else {
+          expect(changed.cwd.toLowerCase()).toContain(process.platform === "win32" ? "temp" : "/tmp");
+        }
         expect(
           (
             await run(
