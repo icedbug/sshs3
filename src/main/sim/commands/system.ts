@@ -1,5 +1,6 @@
 import { normalizePath, type SimCert, type SimDisk, type SimHost, type SimLogLine, type SimService } from "../SimHost";
 import { fail, globToRegExp, lines, NotSimulated, ok, parseArgs, type SimCommand, type SimContext, type SimResult } from "../SimShell";
+import { nginxText } from "../programs/nginx";
 
 /**
  * The system and service commands of a simulated Ubuntu/Debian server with
@@ -2278,9 +2279,90 @@ function certText(cert: SimCert, path: string): string[] {
   ];
 }
 
+const PEM_BLOCK = /-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/;
+
+/** The file of the certificate a text holds, by its first PEM block: how a certificate read from a pipe is known again. */
+function certFileOf(host: SimHost, text: string): string | undefined {
+  const block = PEM_BLOCK.exec(text)?.[0];
+  if (!block) return undefined;
+  return [...host.certs.keys()].find((path) => host.read(path)?.content.includes(block));
+}
+
+/**
+ * `openssl s_client -connect host:port`: the certificate the web server on this machine hands out.
+ * nginx hands out the file its configuration names for the server name asked for, so that is what is
+ * shown. Only this machine: what another one hands out is not simulated.
+ */
+function sClient(ctx: SimContext, args: string[]): SimResult {
+  const { host } = ctx;
+  let connect: string | undefined;
+  let servername: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "-connect") connect = args[++i];
+    else if (a === "-servername") servername = args[++i];
+    else if (!["-showcerts", "-quiet", "-brief", "-ign_eof", "-verify_return_error", "-tls1_2", "-tls1_3"].includes(a)) throw new NotSimulated(`openssl s_client ${a}`);
+  }
+  if (!connect) throw new NotSimulated("openssl s_client without -connect");
+  const [name, portText] = connect.split(":");
+  const port = Number(portText) || 443;
+  if (!["localhost", "127.0.0.1", host.name, host.address].includes(name)) throw new NotSimulated("openssl s_client to another machine");
+  if (!host.listening().some((l) => l.port === port && l.proto === "tcp"))
+    return fail(`${hex(`bio${port}`, 12).toUpperCase()}:error:8000006F:system library:BIO_connect:Connection refused:../crypto/bio/bio_sock2.c:114:calling connect()\nconnect:errno=111\n`, 1);
+  // The server block that answers to the name and names a certificate (the one for port 80 names none),
+  // else the first one that names a certificate.
+  const blocks = nginxText(host)
+    .split(/\bserver\s*\{/)
+    .slice(1)
+    .filter((b) => /\bssl_certificate\s/.test(b));
+  const named = servername ? blocks.find((b) => new RegExp(`\\bserver_name\\s[^;]*\\b${servername.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(b)) : undefined;
+  const path = /\bssl_certificate\s+([^;\s]+)\s*;/.exec(named ?? blocks.find((b) => /\bssl_certificate\s/.test(b)) ?? "")?.[1];
+  const cert = path ? host.certs.get(path) : undefined;
+  const stored = path ? host.read(path) : undefined;
+  if (!path || !cert || !stored) throw new NotSimulated("openssl s_client where the web server names no certificate");
+  const selfSigned = cert.issuer === cert.subject;
+  const expired = cert.notAfter <= host.now();
+  const verdict = expired ? "10 (certificate has expired)" : selfSigned ? "18 (self-signed certificate)" : "0 (ok)";
+  const subject = certSubject(cert.subject);
+  const issuer = certSubject(cert.issuer);
+  return {
+    out: lines([
+      "CONNECTED(00000003)",
+      "---",
+      "Certificate chain",
+      ` 0 s:${subject}`,
+      `   i:${issuer}`,
+      "   a:PKEY: rsaEncryption, 2048 (bit); sigalg: RSA-SHA256",
+      `   v:NotBefore: ${opensslTime(cert.notBefore)}; NotAfter: ${opensslTime(cert.notAfter)}`,
+      "---",
+      "Server certificate",
+      PEM_BLOCK.exec(stored.content)?.[0] ?? stored.content.replace(/\n$/, ""),
+      `subject=${subject}`,
+      `issuer=${issuer}`,
+      "---",
+      "No client certificate CA names sent",
+      "Peer signing digest: SHA256",
+      "Peer signature type: RSA-PSS",
+      "Server Temp Key: X25519, 253 bits",
+      "---",
+      "SSL handshake has read 4387 bytes and written 398 bytes",
+      verdict.startsWith("0") ? "Verification: OK" : `Verification error: ${verdict.replace(/^\d+ \(|\)$/g, "")}`,
+      "---",
+      "New, TLSv1.3, Cipher is TLS_AES_256_GCM_SHA384",
+      "Server public key is 2048 bit",
+      `Verify return code: ${verdict}`,
+      "---",
+      "DONE",
+    ]),
+    err: lines([`depth=0 ${subject}`, verdict.startsWith("0") ? "verify return:1" : `verify error:num=${verdict.replace(" (", ":").replace(")", "")}`]),
+    code: 0,
+  };
+}
+
 function openssl(ctx: SimContext, args: string[]): SimResult {
   const { host } = ctx;
   if (args[0] === "version") return ok("OpenSSL 3.0.13 30 Jan 2024 (Library: OpenSSL 3.0.13 30 Jan 2024)\n");
+  if (args[0] === "s_client") return sClient(ctx, args.slice(1));
   if (args[0] !== "x509") throw new NotSimulated(`openssl ${args[0] ?? "without a command"}`);
   let file: string | undefined;
   let noout = false;
@@ -2298,12 +2380,15 @@ function openssl(ctx: SimContext, args: string[]): SimResult {
     else if (a === "-inform") i++;
     else throw new NotSimulated(`openssl x509 ${a}`);
   }
-  if (file === undefined) throw new NotSimulated("openssl x509 reading a certificate from a pipe");
-  const path = normalizePath(file, ctx.cwd);
+  // From a pipe (`openssl s_client … | openssl x509 -noout -dates`): the certificate is known again by its text.
+  const piped = file === undefined ? certFileOf(host, ctx.stdin) : undefined;
+  if (file === undefined && !piped) return fail("Could not read certificate from <stdin>\nUnable to load certificate\n", 1);
+  const path = piped ?? normalizePath(file!, ctx.cwd);
   const cert = host.certs.get(path);
   const stored = host.read(path);
   if (!cert && !stored) return fail(`Could not open file or uri for loading certificate from ${file}\nUnable to load certificate\n`, 1);
-  if (stored && !ctx.shell.mayRead(path, ctx.root)) return fail(`Could not open file or uri for loading certificate from ${file}\nUnable to load certificate\n`, 1);
+  // What came through a pipe was already read by whoever wrote it there: the file's own permissions are not asked again.
+  if (stored && !piped && !ctx.shell.mayRead(path, ctx.root)) return fail(`Could not open file or uri for loading certificate from ${file}\nUnable to load certificate\n`, 1);
   if (!cert) return fail(`Could not read certificate from ${file}\nUnable to load certificate\n`, 1);
   if (checkend !== undefined && !Number.isFinite(checkend)) return fail("x509: Non-positive number \"\" for option -checkend\n", 1);
   const out: string[] = [];

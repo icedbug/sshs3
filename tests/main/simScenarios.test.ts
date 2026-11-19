@@ -141,4 +141,30 @@ describe("the database server's disk", () => {
     expect(admin.run("sudo ceph health").output).toBe("HEALTH_OK\n");
     expect(new Set(df.split("\n").filter((l) => /osd\.\d/.test(l)).map((l) => l.split(/\s+/).filter(Boolean)[10])).size).toBeGreaterThan(1);
   });
+
+it("shows the certificate the web server hands out, also through a pipe (asked for by the first real model)", () => {
+    const scenario = SCENARIOS.find((x) => x.id === "cert-renewal")!;
+    const world = startScenario(scenario, () => NOW);
+    const sh = world.shell(world.host(scenario.target)!);
+    const onDisk = sh.run("sudo openssl x509 -in /etc/letsencrypt/live/portal.acme.se/fullchain.pem -noout -enddate").output.trim();
+    expect(onDisk).toMatch(/^notAfter=/);
+
+    const served = sh.run("openssl s_client -connect 127.0.0.1:443 -servername portal.acme.se -showcerts </dev/null 2>/dev/null");
+    expect(served.code).toBe(0);
+    expect(served.output).toContain("CONNECTED(00000003)");
+    expect(served.output).toContain(" 0 s:CN = portal.acme.se");
+    expect(served.output).toContain("-----BEGIN CERTIFICATE-----");
+    expect(served.output).toMatch(/Verify return code: 0 \(ok\)/);
+
+    // The usual way to read its dates: what is handed out is what is on the disk, and no sudo is needed for it.
+    const piped = sh.run("timeout 8 openssl s_client -connect 127.0.0.1:443 -servername portal.acme.se </dev/null 2>/dev/null | openssl x509 -noout -subject -dates");
+    expect(piped.code).toBe(0);
+    expect(piped.output).toContain("subject=CN = portal.acme.se");
+    expect(piped.output).toContain(onDisk);
+    expect(sh.run("echo nothing | openssl x509 -noout -dates")).toMatchObject({ code: 1, output: expect.stringContaining("Unable to load certificate") });
+    // Nothing listens there: refused, as a closed port is.
+    expect(sh.run("openssl s_client -connect 127.0.0.1:8443").output).toContain("connect:errno=111");
+    expect(sh.unsupported).toEqual([]);
+    stopScenario();
+  });
 });

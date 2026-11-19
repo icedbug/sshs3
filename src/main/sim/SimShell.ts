@@ -353,6 +353,11 @@ export class SimShell {
   private stage(stage: Stage, opts: { root: boolean; stdin: string }): SimResult {
     let stdin = opts.stdin;
     for (const r of stage.redirects.filter((x) => x.op === "<")) {
+      // `</dev/null`: nothing to read, as on any machine. (It came back "No such file or directory".)
+      if (r.target === "/dev/null") {
+        stdin = "";
+        continue;
+      }
       const file = this.host.read(normalizePath(r.target, this.cwd));
       if (!file) return fail(`bash: ${r.target}: No such file or directory\n`, 1);
       if (!this.mayRead(r.target, opts.root)) return fail(`bash: ${r.target}: Permission denied\n`, 1);

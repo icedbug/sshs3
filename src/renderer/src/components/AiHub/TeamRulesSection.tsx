@@ -57,7 +57,7 @@ export function TeamRulesSection({ hub, act }: { hub: HubSnapshot; act: Act }): 
         </span>
       </label>
 
-      <div data-testid="team-freezes">
+      <div data-testid="team-freezes" style={{ display: "grid", gap: 6, marginTop: 8 }}>
         <strong>Change freeze</strong>
         <small>
           During a freeze nothing that changes a server is run there: not by an agent, not from a plan, in any mode.
@@ -94,7 +94,7 @@ export function TeamRulesSection({ hub, act }: { hub: HubSnapshot; act: Act }): 
           <div className="ai-inline-form" data-testid="team-freeze-form">
             <input
               aria-label="Cluster to freeze"
-              placeholder="Cluster name (empty: every server)"
+              placeholder="Cluster (empty: all)"
               value={cluster}
               onChange={(e) => setCluster(e.target.value)}
             />
