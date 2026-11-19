@@ -86,6 +86,8 @@ export const retryPolicy = {
 };
 // 520 to 524 are what the network in front of a provider answers when the provider did not (OpenAI sits
 // behind one): passing trouble, tried again like a 502. The first real run ended on a 520 after 14 commands.
+/** How many times running one call may give one result before it is not made again. */
+const SAME_CALL_LIMIT = 3;
 const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524, 529]);
 
 /** True for upstream server/overload/timeout HTTP status codes that trip the circuit breaker (never 429). */
@@ -3819,6 +3821,11 @@ export class DirectAgentRuntime implements AgentRuntime {
    * enough (OpenAI's gpt-6 models on /chat/completions): "none" is sent for the rest of this run.
    */
   private reasoningOff = false;
+  /**
+   * The call the model made last, what it got back, how many times running it made it and got that, and how
+   * many times it asked again after being told it would not be made again.
+   */
+  private sameCall = { signature: "", output: "", times: 0, refused: 0 };
   /** The endpoint refused `max_tokens` (OpenAI's newer models take `max_completion_tokens`): sent under that name for the rest of this run. */
   private maxCompletionTokens = false;
   /** The endpoint takes its own default temperature only: none is sent for the rest of this run. */
@@ -4005,7 +4012,35 @@ export class DirectAgentRuntime implements AgentRuntime {
     return (await this.executeToolCallDetailed(call)).output;
   }
 
-  private async executeToolCallDetailed(
+  /**
+   * One tool call, unless it is the same call for the fourth time running with the same result each
+   * time. A model that has stopped thinking its way forward does that until the money is gone: the
+   * first real one wrote down the same list of hypotheses 160 times in ten minutes. The fourth call is
+   * not made and the model is told why; if it asks twice more, the run ends, and the person is told.
+   */
+  private async executeToolCallDetailed(call: ParsedToolCall): Promise<{ output: string; isError: boolean }> {
+    const signature = `${call.name}\n${call.argumentsJson ?? ""}`;
+    if (signature === this.sameCall.signature && this.sameCall.times >= SAME_CALL_LIMIT) {
+      if (++this.sameCall.refused > 2)
+        throw new Error(`Stopped: the agent made the same call (${call.name}) again and again and got the same result each time. Nothing more was spent on it. Say what it should do differently, or choose another model.`);
+      return {
+        isError: true,
+        output: JSON.stringify({
+          ok: false,
+          isError: true,
+          errorType: "repeated_call",
+          error: `You made this exact call ${SAME_CALL_LIMIT} times in a row and got the same result each time. It is not made again: the result would be the same. Use what you have, do something different, or end with a report of what you found and what stopped you.`,
+        }),
+      };
+    }
+    const done = await this.carryOutToolCall(call);
+    // A command's result names the time it ran, so two runs never look alike here: the broker compares what a command printed.
+    if (signature === this.sameCall.signature && done.output === this.sameCall.output) this.sameCall.times++;
+    else this.sameCall = { signature, output: done.output, times: 1, refused: 0 };
+    return done;
+  }
+
+  private async carryOutToolCall(
     call: ParsedToolCall,
   ): Promise<{ output: string; isError: boolean }> {
     let output: string;
@@ -4474,6 +4509,7 @@ export class DirectAgentRuntime implements AgentRuntime {
   ): Promise<void> {
     this.noStreamUsage = false;
     this.noReasoningEffort = false;
+    this.sameCall = { signature: "", output: "", times: 0, refused: 0 };
     this.reasoningOff = false;
     this.maxCompletionTokens = false;
     this.noTemperature = false;

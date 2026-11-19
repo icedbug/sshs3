@@ -1347,6 +1347,56 @@ is the same without the demo: the app starts and draws. Both were run that
 way on Linux and passed. Before that, only the web build had been started in
 this work. Not checked: the packaged installers, Windows and macOS.
 
+### Run with a real model (gpt-6-luna, November 2026)
+
+`npm run sim -- <id> --agent --then "Go ahead and fix it."` was run for all
+five incidents against OpenAI's `gpt-6-luna`, with every change the agent asked
+about let through. An alert's ticket asks the agent to find out what is wrong;
+an agent that asks first reports what it would change and stops. `--then` is
+the person's answer to that report.
+
+| Incident | Checks | Commands | What happened |
+| --- | --- | --- | --- |
+| nginx-bad-config | 4 of 4 | 12 | Solved. |
+| pg-wal-full | 4 of 4 | 15 | Solved. |
+| ontap-noisy-neighbour | 4 of 4 | 16 | Solved, through a plan the person approved. |
+| cert-renewal | 3 of 4 | 11 | Cause found and fixed (port 80 closed by the firewall), dry run passes. It left the certificate, with three days to go, to the nightly renewal. The model's choice. |
+| ceph-nearfull | 1 of 4 | 4 | Stopped at "permission denied" and did not try `sudo`. It changed nothing, said so, and made a ticket for the access. The model's judgement. |
+
+No run broke anything. What the runs found in the app, each fixed and tested:
+
+- **The model was refused outright.** `gpt-6-luna` takes tools on
+  `/chat/completions` only with `reasoning_effort: "none"`; leaving the
+  setting out is not enough. The runtime sends `"none"` when the model says
+  so (`reasoningOff`). So this model runs without reasoning here. Letting it
+  reason with tools takes OpenAI's `/v1/responses`, which the app does not
+  speak yet.
+- **Invented answers were not marked.** The demo lab's scripted example
+  servers print the same text whatever is asked. An agent ruled the alert out
+  because the example cluster beside it said `HEALTH_OK`. A result from such a
+  server now carries a note that says what it is (`scriptedDemoNote`). A
+  scenario's server is not marked: it holds state.
+- **The same call, again and again.** One model asked for one command
+  fourteen times and wrote one list of hypotheses 160 times. A command that
+  printed the same thing three times running, just now, is not run a fourth
+  time (`ToolBroker`, `repeated_command`); any other call that gave the same
+  result three times running is not made a fourth time (`DirectAgentRuntime`,
+  `repeated_call`). The model is told why. If it asks twice more, the run
+  ends and the person is told.
+- **A 520 ended a run.** 520 to 524, what the network in front of a provider
+  answers when the provider did not, are tried again like a 502.
+- **The scenario run was not like the app.** It had no file tools, and it
+  answered a plan while the agent still worked (refused each time, silently).
+  It now uses the app's file tools over the simulated files and answers a
+  plan when the agent has stopped.
+- **Missing in the simulation:** `vmstat`, `iostat`, `timeout`,
+  `openssl s_client`, `openssl x509` from a pipe, and reading `/dev/null`.
+  Still asked for and not simulated: `nft`, `iptables -S`, `ufw show raw`,
+  `ss` with a filter, `find -printf`, `python3 -c`.
+
+Not checked: a model that reasons while it uses tools, any other provider,
+and a run nobody watches for hours.
+
 ## Knowledge base: what agents know (`KbCompile`, `KbLint`)
 
 The knowledge base is for the agents, not a document store for people. It has

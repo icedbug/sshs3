@@ -995,7 +995,7 @@ const initialDemoAgents: MissionAgent[] = [
       "Keep the Ceph NVMe pool (`rbd-nvme-prod`) at HEALTH_OK, analyze slow ops and PG scrubbing, and verify the immutable ZFS snapshots on TrueNAS.",
     systemPrompt: [
       "You are a specialist in Ceph Reef (18.2) BlueStore NVMe and OpenZFS 2.2 on TrueNAS Enterprise.",
-      "- Always check `ceph status`, `ceph health detail`, `ceph osd df tree` and `zpool status`.",
+      "- On a Ceph node, start with `ceph status`, `ceph health detail` and `ceph osd df tree`. On a TrueNAS node, start with `zpool status`. Stay on the system the task is about.",
       "- During office hours (07:00–19:00), keep `osd_max_backfills` <= 2 to protect KVM/OpenStack latency.",
     ].join("\n"),
     targetCluster: "Ceph-NVMe-Block-Pool",

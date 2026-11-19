@@ -166,6 +166,24 @@ describe("an agent run by a model on a scenario", () => {
     expect(told.some((t) => t.includes("You ran this exact command 3 times in a row") && t.includes("It is not run again: the answer would be the same."))).toBe(true);
   }, 60_000);
 
+  it("does not make one call a fourth time for the same result, whatever the tool, and ends a run that keeps asking", async () => {
+    const { dir, runAgentOnScenario } = await lab();
+    // What the first real model did for ten minutes: the same list of hypotheses, written down again and again.
+    const same = { hypotheses: [{ id: "h1", text: "The disk is full", status: "open" }] };
+    const model = await fakeOpenAi(() => ({ tool: "sshs3_hypotheses", args: same }));
+    disposals.push(() => model.close());
+
+    const result = await runAgentOnScenario({ scenarioId: "nginx-bad-config", baseUrl: model.url, model: "fake-1", dir, pollMs: 20, maxMinutes: 1 });
+
+    // Three calls made, three refused with the reason, and then the run is ended: seven requests, not hundreds.
+    expect(result.stoppedBy).toBeUndefined();
+    expect(result.status).toBe("failed");
+    expect(result.error).toContain("the agent made the same call (sshs3_hypotheses) again and again");
+    expect(model.requests.length).toBeLessThanOrEqual(8);
+    const told = model.requests.flatMap((r) => (r.messages as Array<{ role: string; content?: unknown }>).filter((m) => m.role === "tool").map((m) => String(m.content)));
+    expect(told.some((t) => t.includes("You made this exact call 3 times in a row and got the same result each time."))).toBe(true);
+  }, 60_000);
+
   it("says that nobody worked on the ticket when the lab has no model", async () => {
     const { dir } = await lab();
     const { HubService } = await import("../../src/main/ai/hub/HubService");
