@@ -72,11 +72,14 @@ jobs:
           restore-keys: |
             checks-v1-${{ runner.os }}-${{ runner.arch }}-node24-${{ hashFiles('package-lock.json', 'tsconfig*.json', 'vite.config.ts') }}-
 
-      - name: Run tests & typecheck
-        run: |
-          npm run typecheck
-          npm run lint
-          npm run test
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Run tests
+        run: npm test
 
       - name: Prepare bundled age + age-plugin-yubikey for Team Vault (Linux)
         if: runner.os == 'Linux'
@@ -159,13 +162,16 @@ jobs:
         if: inputs.with_hermes
 
       - name: Build application bundles
-        run: |
-          npm run bundle:desktop
-          npx electron-builder --${{ matrix.platform.target }} --publish never
+        run: npm run bundle:desktop
+
+      - name: Package application
+        run: npx electron-builder --${{ matrix.platform.target }} --publish never -c.extraMetadata.gitHead=${{ github.sha }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Check and start the packaged app on Linux
+        env:
+          SSHS3_EXPECTED_PACKAGE_ARCH: x64
         if: runner.os == 'Linux'
         shell: bash
         run: |
@@ -176,8 +182,11 @@ jobs:
           export SMOKE_APP="$(find "$RUNNER_TEMP/package-smoke/opt" -type f -name sshs3 -print -quit)"
           node scripts/check-package.mjs "$SMOKE_APP" ${{ inputs.with_hermes && '--hermes' || '' }}
           xvfb-run --auto-servernum node scripts/smoke-test.mjs
+          xvfb-run --auto-servernum node scripts/smoke-test.mjs --demo
 
       - name: Check and start the packaged app on Windows
+        env:
+          SSHS3_EXPECTED_PACKAGE_ARCH: x64
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -188,6 +197,8 @@ jobs:
           node scripts/check-package.mjs "$env:SMOKE_APP" ${{ inputs.with_hermes && '--hermes' || '' }}
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node scripts/smoke-test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/smoke-test.mjs --demo
 
       - name: Package policy templates (ADMX/ADML and policy.conf example)
         if: runner.os == 'Linux'

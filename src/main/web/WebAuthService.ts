@@ -2,7 +2,6 @@ import { execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 
 export interface WebUserRecord {
@@ -241,28 +240,26 @@ export function restrictPrivateKeyFile(
   file: string,
   platform: NodeJS.Platform = process.platform,
   run: (command: string, args: string[]) => unknown = (command, args) =>
-    execFileSync(command, args, { timeout: 10_000, stdio: 'ignore', windowsHide: true }),
+    execFileSync(command, args, { timeout: 10_000, stdio: 'ignore', windowsHide: true,
+      env: { ...process.env, SSHS3_PRIVATE_KEY_PATH: file } }),
 ): boolean {
   if (platform !== 'win32') return true;
-  let user: string;
+  // Replace the DACL in one operation. Changing inheritance and granting the user access
+  // with icacls leaves behind any other accounts with explicit grants.
+  const apply = [
+    "$ErrorActionPreference = 'Stop'",
+    '$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value',
+    '$acl = [IO.File]::GetAccessControl($env:SSHS3_PRIVATE_KEY_PATH, [Security.AccessControl.AccessControlSections]::Access)',
+    "$acl.SetSecurityDescriptorSddlForm(('D:P(A;;FA;;;' + $sid + ')'), [Security.AccessControl.AccessControlSections]::Access)",
+    '[IO.File]::SetAccessControl($env:SSHS3_PRIVATE_KEY_PATH, $acl)',
+  ].join('\n');
+  const powershell = path.win32.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
   try {
-    user = os.userInfo().username;
+    run(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', apply]);
+    return true;
   } catch {
-    user = process.env.USERNAME ?? '';
+    return false;
   }
-  if (!user) return false;
-  const domain = process.env.USERDOMAIN;
-  // The account with its domain (or computer) name first: a bare name can be taken for another
-  // account of the same name. A service account has no such name, so the bare name is tried too.
-  for (const account of domain ? [`${domain}\\${user}`, user] : [user]) {
-    try {
-      run('icacls', [file, '/inheritance:r', '/grant:r', `${account}:F`]);
-      return true;
-    } catch {
-      // try the next way of naming the account
-    }
-  }
-  return false;
 }
 
 const PROD_ENV_PATTERN = /^(prod|production|critical)$/i;

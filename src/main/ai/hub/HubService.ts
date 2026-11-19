@@ -59,7 +59,7 @@ import { InboxPart } from "./areas/inbox";
 import { ChatAndAtlassianPart } from "./areas/chatAndAtlassian";
 import { FactsPart } from "./areas/facts";
 import { AlertsPart } from "./areas/alerts";
-import { SchedulesPart } from "./areas/schedules";
+import { nextScheduleTime, SchedulesPart } from "./areas/schedules";
 import { SimulationPart } from "./areas/simulation";
 import { EvalsPart } from "./areas/evals";
 import { AuditPart } from "./areas/audit";
@@ -148,17 +148,21 @@ export class HubService {
   /** For a recording that is being made: the recording its conversation pointed to before. */
   private readonly recordingBefore = new Map<string, string | undefined>();
   /** The terminal each scheduled run was given, so it is closed when the run ends. */
+  readonly scheduleStarts = new Set<string>();
   readonly scheduleSessions = new Map<string, string>();
   /** Terminals the hub opened for a run while it ran (another server of the cluster, a ticket's target). */
   readonly runTerminals = new Map<string, Set<string>>();
   disposed = false;
   private resume = (): void => {
     const now = Date.now();
-    for (const schedule of this.store.data.schedules)
-      if (schedule.enabled && schedule.nextRunAt <= now) {
+    for (const schedule of this.store.data.schedules) {
+      if (!schedule.enabled || schedule.nextRunAt > now) continue;
+      if (schedule.missedPolicy === "run_once") schedule.nextRunAt = now;
+      else {
         schedule.lastStatus = "Missed while unavailable; not replayed.";
-        schedule.nextRunAt = now + schedule.intervalMinutes * 60_000;
+        schedule.nextRunAt = nextScheduleTime(schedule, now);
       }
+    }
     this.changed();
   };
   private suspend = (): void => {
@@ -212,6 +216,7 @@ export class HubService {
       this.kb,
     );
     this.broker = new ToolBroker(this.terminals, {
+      beforeAction: host.beforeAction,
       context: async (task, query, sessionId) => {
         const extra = await this.collectExtraContext();
         return this.context.read(task, query, sessionId, this.asOfEvalCase(task, extra));
@@ -269,6 +274,15 @@ export class HubService {
       activity: (task, change, sessionId) => {
         void this.recordAgentChangeActivity(task, change, sessionId);
       },
+      recordIntent: async (task, change, rollback) => {
+        await this.audit().append({
+          kind: change.kind === "file" ? "file-write" : change.kind === "setting" ? "setting" : "change",
+          actor: task.agentName ?? "Assistant", target: change.target, taskId: task.id, changeId: change.id,
+          what: rollback ? change.rollback?.command ?? change.description : change.command ?? change.description,
+          outcome: rollback ? "rollback-intent" : "intent",
+          approvedBy: change.decidedBy?.name, detail: change.adminException?.reason, userId: change.adminException?.actorId,
+        }, Date.now(), true);
+      },
       approvalWaitMs: () => this.approvalWaitMinutes() * 60_000,
       // Time spent waiting for a person is not the run's: its budget moves by as much.
       // Nobody sits at a ticket's or a schedule's run: what it waits for is told at once, not on the next look.
@@ -283,6 +297,7 @@ export class HubService {
       budgetSpent: (task) => void this.stop(task, "Command budget exhausted"),
       // Told a command is not run again for the same answer, the agent kept asking for it: the run ends here.
       stuck: (task, why) => void this.stop(task, why),
+      peerStillEligible: host.peerStillEligible,
       safetyContext: (task, targetLabel) =>
         this.resolveSafetyContext(task, targetLabel),
       changed: () => this.changed(),
@@ -531,6 +546,19 @@ export class HubService {
       await this.s3Workspace.start().catch((e) =>
         log.warn("S3 workspace start failed", safeError(e)),
       );
+      let migrated = false;
+      for (const schedule of this.store.data.schedules) {
+        if (!schedule.cron || schedule.cronTimingVersion === 1) continue;
+        try {
+          schedule.nextRunAt = nextScheduleTime(schedule, Date.now());
+        } catch (err) {
+          schedule.enabled = false;
+          schedule.lastStatus = `Paused. ${safeError(err)}`;
+        }
+        schedule.cronTimingVersion = 1;
+        migrated = true;
+      }
+      if (migrated) await this.store.save();
       this.resume();
       if (process.env.SSHS3_NATIVE_HERMES === '1') {
         // Native Hermes owns conversations, profiles, schedules and persistent memory.
@@ -888,6 +916,8 @@ export class HubService {
   localMcpError?: string;
 
   auditLog?: AuditLog;
+  readonly writingAudit = new Set<string>();
+  readonly restoringChanges = new Set<string>();
   auditShipper?: AuditShipper;
   auditShipperUnsub?: () => void;
   private lastAnchorAt = 0;
@@ -982,7 +1012,7 @@ export class HubService {
 
   readonly factsStore: FactsStore;
   readonly factsCollecting = new Set<string>();
-  readonly factsInFlight = new Map<string, Promise<void>>();
+  readonly factsInFlight = new Map<string, { reading: Promise<void>; next?: Promise<void> }>();
   lastFactsTick = 0;
   /** What the bucket says each server was last read as, by whichever installation read it. */
   readonly factsHeads = new Map<string, { collectedAt: number; hash: string }>();
@@ -1145,8 +1175,10 @@ export class HubService {
           if (
             entry.status === "unreachable" &&
             previous.get(entry.id) === "reachable"
-          )
+          ) {
             this.notify("Endpoint became unreachable", entry.label);
+            await this.scheduleEvent("unreachable", [entry.id]);
+          }
         this.changed();
       }
       // Missed means the app was not there when it fell due: a job that fell due while the previous pass
@@ -1157,23 +1189,18 @@ export class HubService {
         if (!schedule.enabled || schedule.nextRunAt > now) continue;
         const dueAt = schedule.nextRunAt;
         const overdue = now - dueAt;
-        schedule.nextRunAt = now + schedule.intervalMinutes * 60_000;
-        if (overdue > 60_000 && dueAt < previousLoop - 60_000) {
+        schedule.nextRunAt = nextScheduleTime(schedule, now);
+        if (schedule.missedPolicy !== "run_once" && overdue > 60_000 && dueAt < previousLoop - 60_000) {
           schedule.lastStatus = "Missed while unavailable; not replayed.";
           this.changed();
           continue;
         }
-        if (
-          schedule.lastTaskId &&
-          this.store.data.tasks.some(
-            (t) => t.id === schedule.lastTaskId && active(t),
-          )
-        ) {
+        if (this.scheduleInProgress(schedule)) {
           schedule.lastStatus = "Skipped: previous run still active";
           this.changed();
           continue;
         }
-        await this.launchSchedule(schedule);
+        await this.launchSchedule(schedule, true);
         this.changed();
       }
     } finally {
@@ -1233,6 +1260,7 @@ export class HubService {
       },
       request: this.request.bind(this),
       changed: this.changed.bind(this),
+      recheckChange: this.broker.checkCurrentPolicy.bind(this.broker),
       closeWhenRunEnds: this.closeWhenRunEnds.bind(this),
       getMcpServersList: this.getMcpServersList.bind(this),
       getKbDocumentsList: this.getKbDocumentsList.bind(this),

@@ -1302,9 +1302,10 @@ check passes.
 real hub (`src/main/sim/agentRun.ts`): the scenario is started, the ticket its
 alert became is started, the run gets a terminal on the simulated server (the
 same way a ticket's run gets one in the app), and its commands go through the
-broker, the safety rules and the approvals. The model is any
-OpenAI-compatible address (the part before `/chat/completions`); the key is
-read from `SSHS3_SIM_API_KEY` and is never printed or stored. `--approve
+broker, the safety rules and the approvals. Use the service's API base URL. The key is read from `SSHS3_SIM_API_KEY`.
+The default protocol is Responses at the official OpenAI API and Chat Completions
+at other addresses. Set `--api-protocol responses` or `--api-protocol chat-completions`
+to select one explicitly. `--approve
 all|none|ask` says who answers when the agent asks before a change: `all`
 lets everything through, which shows whether the agent's own judgement holds;
 `ask` puts each question to the person at the terminal. The app sets no limit
@@ -1312,6 +1313,15 @@ on a run, so this one does: it is stopped at `--max-commands` (40) or
 `--max-minutes` (15). What is printed: every command with its exit code,
 every question and its answer, the agent's report, the scenario's checks, the
 commands the lab does not have, and what the run used.
+
+**Compare the two protocols.** Run `npm run sim:compare -- --fixture --repeats 2`
+to exercise both paths through all five incidents with scripted local answers.
+For a real comparison, replace `--fixture` with `--base-url <address> --model <name>`.
+Both protocols use that model. Each attempt starts a fresh process and workspace.
+The order alternates. Each attempt allows 40 commands and 12 minutes by default.
+The JSON report includes checks passed, total time, time to first visible text,
+HTTP requests including retries, and tokens. A missing measurement or unknown price
+is reported as `null`. Dollar amounts use the app's price table.
 
 In the app the same thing is a click: start a scenario, open the ticket its
 alert made, and press Start. A ticket's run in the demo lab opens a terminal
@@ -1368,9 +1378,9 @@ No run broke anything. What the runs found in the app, each fixed and tested:
 - **The model was refused outright.** `gpt-6-luna` takes tools on
   `/chat/completions` only with `reasoning_effort: "none"`; leaving the
   setting out is not enough. The runtime sends `"none"` when the model says
-  so (`reasoningOff`). So this model runs without reasoning here. Letting it
-  reason with tools takes OpenAI's `/v1/responses`, which the app does not
-  speak yet.
+  so (`reasoningOff`) on that protocol. These historical runs used Chat Completions.
+  API key profiles now also support Responses. Stateless Responses turns retain the
+  model's output items and pair each tool result with its call ID.
 - **Invented answers were not marked.** The demo lab's scripted example
   servers print the same text whatever is asked. An agent ruled the alert out
   because the example cluster beside it said `HEALTH_OK`. A result from such a

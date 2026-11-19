@@ -56,6 +56,7 @@ export interface CreateHubOptions {
   sharedWorkStore?: HubHost["sharedWorkStore"];
   /** On the web server: a second person's approval, passed between the accounts (see HubHost). */
   peerApproval?: HubHost["peerApproval"];
+  peerStillEligible?: HubHost["peerStillEligible"];
   peerWaiting?: HubHost["peerWaiting"];
   peerDecide?: HubHost["peerDecide"];
   peerWaitingChanged?: HubHost["peerWaitingChanged"];
@@ -397,6 +398,7 @@ export function createHub(
     onSharedWorkspaceChanged: options?.onSharedWorkspaceChanged,
     sharedWorkStore: options?.sharedWorkStore,
     peerApproval: options?.peerApproval,
+    peerStillEligible: options?.peerStillEligible,
     peerWaiting: options?.peerWaiting,
     peerDecide: options?.peerDecide,
     peerWaitingChanged: options?.peerWaitingChanged,

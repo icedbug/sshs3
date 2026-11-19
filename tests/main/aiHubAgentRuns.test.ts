@@ -43,7 +43,7 @@ const say = (text: string): Response =>
   sse([
     { type: "message_start", message: { usage: { input_tokens: 700 } } },
     { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } },
-    { type: "message_delta", usage: { output_tokens: 300 } },
+    { type: "message_delta", usage: { output_tokens: 300 } }, { type: "message_stop" },
   ]);
 const callTool = (name: string, input: Record<string, unknown>): Response =>
   sse([
@@ -297,6 +297,17 @@ describe("what an agent's runs spend", () => {
     // Counted once each: looking again adds nothing.
     (hub as unknown as { countAgentUsage(t: AgentTask): void }).countAgentUsage(task);
     expect(spent()).toBe(3000);
+  });
+
+  it("counts cached reads and writes once across calls", async () => {
+    const hub = await makeHub();
+    const task = { agentId: "agent", usage: { inputTokens: 20, outputTokens: 4, cacheReadTokens: 12, cacheCreationTokens: 3 } } as AgentTask;
+    hub.countAgentUsage(task);
+    expect(hub.store.data.agentUsage?.agent.tokens).toBe(39);
+    task.usage!.cacheReadTokens! += 5;
+    hub.countAgentUsage(task);
+    hub.countAgentUsage(task);
+    expect(hub.store.data.agentUsage?.agent.tokens).toBe(44);
   });
 
   it("does not count again what a conversation from before this change had already put down", async () => {

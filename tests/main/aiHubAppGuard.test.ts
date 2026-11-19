@@ -272,6 +272,7 @@ describe("an MCP tool is not a way around the fence", () => {
   const WEATHER = {
     id: "srv-1",
     name: "Weather",
+    trustReadOnlyHint: true,
     transport: "http",
     url: "https://mcp.example/api",
     enabled: true,
@@ -319,6 +320,23 @@ describe("an MCP tool is not a way around the fence", () => {
     const bound = await startRun(hub, "assisted", "run-mcp-3");
     bound.task.agentId = "a1";
     await expect(bound.call("mcp__srv-1__forecast", {})).rejects.toThrow(/switched off, to one this agent was not given/);
+  });
+
+  it("checks the current agent assignment again after a human approves a tool", async () => {
+    const { hub } = await makeHub();
+    hub.store.data.mcpServers = [WEATHER as never];
+    const agent = { id: "watch", name: "Watch", role: "ops", mission: "report", systemPrompt: "", defaultMode: "assisted" as const, mcpServerIds: ["srv-1"], updatedAt: 1 };
+    hub.store.data.agents = [agent];
+    const calls = vi.spyOn(hub.mcp, "callTool");
+    const run = await startRun(hub, "assisted");
+    run.task.agentId = agent.id;
+    const asked = run.call("mcp__srv-1__set_thermostat", { to: 30 });
+    const change = await run.pending();
+    hub.store.data.agents = [{ ...agent, mcpServerIds: ["other"] }];
+    run.broker.approve(run.task.id, change.id, true);
+    await expect(asked).rejects.toThrow(/access changed/);
+    expect(change.status).toBe("denied");
+    expect(calls).not.toHaveBeenCalled();
   });
 
   it("a conversation that only advises does not reach a tool that changes something", async () => {

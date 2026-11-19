@@ -130,6 +130,7 @@ export function InboxView({
   const [rules, setRules] = useState<{ match: string; agentId: string }[] | undefined>();
   const [ruleNotice, setRuleNotice] = useState<{ text: string; isError: boolean } | undefined>();
   const [query, setQuery] = useState("");
+  const [exceptionReasons, setExceptionReasons] = useState<Record<string, string>>({});
   const [sectionFilter, setSectionFilter] = useState<InboxSectionFilter>("all");
   const [selectedId, setSelectedId] = useState<string | null>(focusItemId ?? null);
   const [snoozeMenuId, setSnoozeMenuId] = useState<string | null>(null);
@@ -545,6 +546,13 @@ export function InboxView({
               // A change that needs two people: who has approved, and that somebody else is being asked.
               const change = hub.tasks.find((t) => t.id === item.taskId)?.changes.find((c) => c.id === item.changeId);
               const needs = change?.requiredApprovals ?? 1;
+              if (change?.adminExceptionAvailable) {
+                const reason = exceptionReasons[item.id] ?? "";
+                return <label>Reason for approving alone
+                  <input value={reason} maxLength={1000} onChange={(event) => setExceptionReasons({ ...exceptionReasons, [item.id]: event.target.value })} />
+                  <button type="button" disabled={!reason.trim()} onClick={() => void dispatch({ action: "approve", taskId: item.taskId!, changeId: item.changeId!, approved: true, adminException: true, note: reason.trim() })}>Approve this change alone</button>
+                </label>;
+              }
               if (needs < 2) return null;
               const by = (change?.approvals ?? []).filter((a) => a.allowed).map((a) => a.actor);
               return (

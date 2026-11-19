@@ -80,16 +80,17 @@ export class AuditPart {
           }
         }
         // A change that carries its own proof gets its final status only after its check (and rollback) had their say.
-        if (change.audited || !FINAL.has(change.status)) continue;
-        change.audited = true;
-        const rolledBack = Boolean(change.rollback?.ran);
+        if (change.audited || this.writingAudit.has(change.id) || !FINAL.has(change.status)) continue;
+        this.writingAudit.add(change.id);
+        const attempted = change.rollback?.ran === true;
+        const rolledBack = attempted && change.rollback?.exitCode === 0 && change.rollback?.comparedWithBaseline && change.rollback?.restored === true;
         void this.audit()
           .append({
             kind: change.kind === "setting" ? "setting" : change.kind === "file" ? "file-write" : change.check ? "change" : task.fromOutside ? "mcp" : "command",
             actor: `${task.agentName ?? "Assistant"} (${task.fromOutside ? "from outside" : `run ${task.id.slice(0, 8)}`}, ${task.mode})`,
             target: change.target,
             what: change.command || change.description,
-            outcome: rolledBack ? "rolled-back" : change.status,
+            outcome: rolledBack ? "rolled-back" : attempted ? "rollback-unverified" : change.status,
             exitCode: change.exitCode,
             approvedBy: change.decidedBy
               ? `${change.decidedBy.name} (${change.decidedBy.allowed ? "allowed" : "refused"})`
@@ -103,8 +104,9 @@ export class AuditPart {
               change.check
                 ? `check ${change.check.after === true ? (change.check.before ? "passed (it already passed before)" : "passed") : change.check.after === false ? "failed" : `not looked at (${change.check.skipped ?? "unknown"})`}: ${change.check.command}`
                 : "",
-              rolledBack
-                ? `taken back with: ${change.rollback!.command}${change.rollback!.restored === false ? " (the check does not read as before)" : ""}`
+              change.adminException ? `Administrator exception: ${change.adminException.reason}` : "",
+              attempted
+                ? `Rollback attempted with: ${change.rollback!.command}${change.rollback!.restored === false ? " (the check does not read as before)" : ""}`
                 : change.rollback?.skipped
                   ? `rollback not run: ${change.rollback.skipped}`
                   : "",
@@ -113,8 +115,10 @@ export class AuditPart {
             ]
               .filter(Boolean)
               .join("; "),
-          })
-          .catch((e) => log.warn("Could not write to the audit log", safeError(e)));
+          }, Date.now(), true)
+          .then(() => { change.audited = true; })
+          .catch((e) => log.warn("Could not write to the audit log", safeError(e)))
+          .finally(() => this.writingAudit.delete(change.id));
       }
     }
   }

@@ -1,3 +1,4 @@
+import { observationHash } from "../../src/main/ai/hub/privacy";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -241,6 +242,7 @@ describe("Wave 2 Hub integration overhaul", () => {
     const { hub } = await createTestHub({ servers: [prodServer] });
     registerReadyTerminal(hub, "term-1", "prod-web-01", "srv-prod-1");
 
+    const targetKey = JSON.stringify(["term-1", hub.terminals.get("term-1")!.generation]);
     const baseTask: AgentTask = {
       id: "task-1",
       title: "Investigate high CPU",
@@ -259,6 +261,7 @@ describe("Wave 2 Hub integration overhaul", () => {
       changes: [
         {
           id: "chg-file-1",
+          targetKey,
           kind: "file",
           target: "prod-web-01",
           description: "/etc/nginx/nginx.conf — update worker_connections",
@@ -268,13 +271,14 @@ describe("Wave 2 Hub integration overhaul", () => {
         },
         {
           id: "chg-cmd-1",
+          targetKey,
           kind: "command",
           target: "prod-web-01",
           description: "Reload nginx",
           command: "systemctl reload nginx",
           status: "completed",
           at: 480,
-          check: { command: "systemctl is-active nginx", expected: "active" },
+          check: { command: "systemctl is-active nginx", expected: "active", baselineHash: observationHash("chg-cmd-1", {exitCode:0, output:"active"}) },
           rollback: { command: "cp /etc/nginx/nginx.conf.bak /etc/nginx/nginx.conf" },
         },
       ],

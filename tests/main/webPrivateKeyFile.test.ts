@@ -59,24 +59,12 @@ describe('private key files of the web build', () => {
     expect(restrictPrivateKeyFile('C:\\keys\\id_ed25519', 'win32', run)).toBe(true);
     expect(run).toHaveBeenCalledTimes(1);
     const [command, args] = run.mock.calls[0] as [string, string[]];
-    expect(command).toBe('icacls');
-    expect(args.slice(0, 3)).toEqual(['C:\\keys\\id_ed25519', '/inheritance:r', '/grant:r']);
-    expect(args[3]).toMatch(new RegExp(`${os.userInfo().username.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:F$`));
-
-    // An account that cannot be named with its domain is named without it; when neither works, it says so.
-    const picky = vi.fn((_command: string, a: string[]) => {
-      if (a[3].includes('\\')) throw new Error('No mapping between account names and security IDs was done.');
-    });
-    const before = process.env.USERDOMAIN;
-    process.env.USERDOMAIN = 'WORKGROUP';
-    try {
-      expect(restrictPrivateKeyFile('C:\\keys\\id_ed25519', 'win32', picky)).toBe(true);
-      expect(picky).toHaveBeenCalledTimes(2);
-      expect(restrictPrivateKeyFile('C:\\keys\\id_ed25519', 'win32', () => { throw new Error('no icacls'); })).toBe(false);
-    } finally {
-      if (before === undefined) delete process.env.USERDOMAIN;
-      else process.env.USERDOMAIN = before;
-    }
+    expect(path.win32.basename(command)).toBe('powershell.exe');
+    expect(args).toContain('-NonInteractive');
+    expect(args.at(-1)).toContain('GetCurrent().User.Value');
+    expect(args.at(-1)).toContain('SetSecurityDescriptorSddlForm');
+    expect(args.at(-1)).not.toContain('id_ed25519');
+    expect(restrictPrivateKeyFile('example', 'win32', () => { throw new Error('access denied'); })).toBe(false);
   });
 
   it.runIf(process.platform === 'win32')('writes an account\'s key so that only the running account can read it (ssh.exe refuses any other)', async () => {
@@ -99,6 +87,9 @@ describe('private key files of the web build', () => {
     await fs.mkdir(path.dirname(old), { recursive: true });
     await fs.copyFile(made.privateKeyPath, old);
     execFileSync('icacls', [old, '/reset'], { stdio: 'ignore' });
+    // An earlier explicit grant must be removed too, whatever the directory grants.
+    execFileSync('icacls', [old, '/grant', '*S-1-5-18:F'], { stdio: 'ignore' });
+    expect(accessEntries(old).length).toBeGreaterThan(1);
     await fs.writeFile(auth.getUserPublicKeyPath('user-2'), `${made.publicKey}\n`);
     expect(accessEntries(old).some((entry) => entry.includes('(I)'))).toBe(true);
     await auth.ensureUserSshKey('user-2', 'erik');

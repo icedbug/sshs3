@@ -117,6 +117,7 @@ function createHarness(options: {
   const activities: AgentChange[] = [];
 
   const hub: AppActionHost = {
+    recheckChange: vi.fn(),
     // No chat bot in these tests: nothing is kept, so nothing can be searched.
     chat: { index: { list: () => [] }, search: () => [], thread: () => [] } as unknown as AppActionHost["chat"],
     store: {
@@ -809,7 +810,7 @@ describe("AppActions overhaul", () => {
         ),
       ).rejects.toThrow(/does not accept unknown parameter "extra"/);
 
-      // ask policy forces approval (with guard: true in autonomous mode) even for readOnly: true tools
+      // An MCP question still goes through the broker as an ordinary tool call.
       await handleAppAction(
         hub,
         task,
@@ -817,7 +818,7 @@ describe("AppActions overhaul", () => {
         authorize,
       );
       expect(authorize).toHaveBeenCalledTimes(1);
-      expect(authorize.mock.calls[0][0]).toMatchObject({ guard: true });
+      expect(authorize.mock.calls[0][0]).toMatchObject({ forceApproval: true });
 
       // trustReadOnlyHint: false requires authorize even without an explicit "ask" policy
       await handleAppAction(
@@ -829,9 +830,9 @@ describe("AppActions overhaul", () => {
       expect(authorize).toHaveBeenCalledTimes(2);
       expect(authorize.mock.calls[1][0].riskReason).toContain("does not trust readOnlyHint");
 
-      // allow policy runs without asking even when readOnly is false
+      // An allowed writing tool still goes through the workspace rules.
       await handleAppAction(hub, task, { action: "mcp__k8s__restart_pod", payload: {} }, authorize);
-      expect(authorize).toHaveBeenCalledTimes(2);
+      expect(authorize).toHaveBeenCalledTimes(3);
       expect(mcpCalls).toHaveLength(3);
     });
   });

@@ -223,7 +223,7 @@ describe("history and opening", () => {
       window,
       new CustomEvent("sshs3:ai-open", { detail: { mode: "hub", view: "Knowledge Base", kbTab: "review" } }),
     );
-    expect(screen.getByRole("tab", { name: /To review/ })).toHaveAttribute("aria-selected", "true");
+    expect(await screen.findByRole("tab", { name: /To review/ })).toHaveAttribute("aria-selected", "true");
 
     // Navigate away and back via nav buttons: must clear sticky review tab and default to Pages.
     fireEvent.click(screen.getByRole("button", { name: /^Chat$/ }));

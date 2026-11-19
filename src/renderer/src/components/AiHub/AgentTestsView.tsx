@@ -11,24 +11,6 @@ export type EvalCaseSummary = Omit<EvalCase, "recorded"> & {
   turns?: Array<{ role: "user" | "assistant"; text: string }>;
 };
 
-export interface EvalRubricScores {
-  correctness: number;
-  safety: number;
-  efficiency: number;
-}
-
-type EvalRunWithExtras = EvalRun & {
-  rubric?: Partial<{
-    correctness: number;
-    safety: number;
-    efficiency: number;
-    conclusionCorrectness: number;
-    toolGroundedness: number;
-    trajectorySafety: number;
-  }>;
-  failureMode?: string;
-};
-
 interface Draft {
   id?: string;
   fromTaskId: string;
@@ -56,84 +38,12 @@ const lines = (s: string): string[] =>
     .map((x) => x.trim())
     .filter(Boolean);
 
-function normalizeRubricScale(raw: number): number {
-  if (!Number.isFinite(raw)) return 0;
-  if (raw <= 1) return Math.round(Math.max(0, Math.min(1, raw)) * 100);
-  if (raw <= 5) return Math.round((Math.max(0, Math.min(5, raw)) / 5) * 100);
-  return Math.round(Math.max(0, Math.min(100, raw)));
-}
-
-/** Extracts 0-100 rubric scores (Correctness / Safety / Efficiency) from a run or its check breakdown. */
-export function extractRubricScores(
-  run: EvalRun,
-  evalCase?: Pick<EvalCaseSummary, "expect">,
-): EvalRubricScores {
-  const extra = (run as EvalRunWithExtras).rubric;
-  if (extra) {
-    const corr = extra.correctness ?? extra.conclusionCorrectness;
-    const safe = extra.safety ?? extra.trajectorySafety;
-    const eff = extra.efficiency ?? extra.toolGroundedness;
-    if (corr !== undefined && safe !== undefined && eff !== undefined) {
-      return {
-        correctness: normalizeRubricScale(corr),
-        safety: normalizeRubricScale(safe),
-        efficiency: normalizeRubricScale(eff),
-      };
-    }
-  }
-
-  const safetyChecks = run.checks.filter(
-    (ch) =>
-      ch.name.startsWith("never runs") ||
-      ch.name.toLowerCase().includes("safety") ||
-      ch.name.toLowerCase().includes("does not mention"),
-  );
-  const toolChecks = run.checks.filter(
-    (ch) =>
-      ch.name.startsWith("uses ") ||
-      ch.name.toLowerCase().includes("grounded") ||
-      ch.name.toLowerCase().includes("order") ||
-      ch.name.toLowerCase().includes("max"),
-  );
-  const correctnessChecks = run.checks.filter(
-    (ch) => !safetyChecks.includes(ch) && !toolChecks.includes(ch),
-  );
-
-  const ratio = (arr: typeof run.checks, fallback: number): number =>
-    arr.length === 0 ? fallback : Math.round((arr.filter((c) => c.passed).length / arr.length) * 100);
-
-  const correctness = run.inconclusive
-    ? 0
-    : ratio(correctnessChecks, run.passed ? 100 : 50);
-
-  const safety = run.inconclusive
-    ? 0
-    : safetyChecks.length > 0
-      ? ratio(safetyChecks, 100)
-      : run.passed || (evalCase?.expect.mustNotRun.length ?? 0) === 0
-        ? 100
-        : 50;
-
-  let efficiency = run.inconclusive ? 0 : ratio(toolChecks, 100);
-  if (!run.inconclusive && run.unrecorded > 0) {
-    efficiency = Math.max(0, efficiency - Math.min(40, run.unrecorded * 15));
-  }
-
-  return { correctness, safety, efficiency };
-}
-
-/** Computes pass@k over conclusive runs (newest first). */
-export function computePassAtK(
-  runs: EvalRun[],
-): { k: number; passed: number; ratePct: number } | undefined {
-  const conclusive = runs.filter((r) => !r.inconclusive);
-  if (conclusive.length === 0) return undefined;
-  const passed = conclusive.filter((r) => r.passed).length;
-  return {
-    k: conclusive.length,
-    passed,
-    ratePct: Math.round((passed / conclusive.length) * 100),
-  };
+/** Share of the recorded runs with a conclusive outcome that passed. */
+export function passRate(runs: EvalRun[]): { total: number; passed: number; ratePct: number } | undefined {
+  const conclusive = runs.filter((run) => !run.inconclusive);
+  if (!conclusive.length) return undefined;
+  const passed = conclusive.filter((run) => run.passed).length;
+  return { total: conclusive.length, passed, ratePct: Math.round(100 * passed / conclusive.length) };
 }
 
 /** Resolves multi-turn conversation messages associated with an eval case. */
@@ -172,8 +82,7 @@ export function evalCaseTags(evalCase: EvalCaseSummary, hub: HubSnapshot): strin
   if (latest && !latest.passed && prev?.passed) tags.add("regression");
   const turns = getEvalTurns(evalCase, hub.tasks);
   if (turns.filter((m) => m.role === "user").length > 1) tags.add("multi-turn");
-  const failureMode = (latest as EvalRunWithExtras | undefined)?.failureMode;
-  if (failureMode) tags.add(failureMode);
+  for (const mode of latest?.failureModes ?? []) tags.add(mode);
   return Array.from(tags);
 }
 
@@ -513,8 +422,8 @@ export function AgentTestsView({ hub, act }: { hub: HubSnapshot; act: Act }): JS
           (c.expect.conclusion ? 1 : 0);
         const turns = getEvalTurns(c, hub.tasks);
         const userTurnCount = turns.filter((t) => t.role === "user").length;
-        const passK = computePassAtK(c.runs);
-        const rubric = run && !run.inconclusive ? extractRubricScores(run, c) : undefined;
+        const passK = passRate(c.runs);
+        const rubric = run && !run.inconclusive ? run.rubricScores : undefined;
         const tags = caseTagMap.get(c.id) ?? [];
 
         return (
@@ -539,10 +448,10 @@ export function AgentTestsView({ hub, act }: { hub: HubSnapshot; act: Act }): JS
                 {passK && (
                   <span
                     className={`ai-badge ${passK.ratePct === 100 ? "ai-badge-success" : passK.ratePct === 0 ? "ai-badge-danger" : ""}`}
-                    data-testid={`eval-passk-${c.id}`}
-                    title={`Passed ${passK.passed} of ${passK.k} conclusive runs`}
+                    data-testid={`eval-pass-rate-${c.id}`}
+                    title={`Passed ${passK.passed} of ${passK.total} conclusive runs`}
                   >
-                    pass@{passK.k}: {passK.ratePct}%
+                    Passed {passK.passed} of {passK.total} ({passK.ratePct}%)
                   </span>
                 )}
                 <span
@@ -579,43 +488,13 @@ export function AgentTestsView({ hub, act }: { hub: HubSnapshot; act: Act }): JS
               </div>
             )}
 
-            {rubric && (
+            {run && (
               <div className="ai-form" data-testid={`eval-rubric-${c.id}`}>
-                {(
-                  [
-                    ["Correctness", rubric.correctness],
-                    ["Safety", rubric.safety],
-                    ["Efficiency", rubric.efficiency],
-                  ] as const
-                ).map(([axis, score]) => (
-                  <div key={axis} className="ai-inline-form">
-                    <small style={{ minWidth: 88 }}>{axis}</small>
-                    <div
-                      role="progressbar"
-                      aria-label={`${axis} score for ${c.title}`}
-                      aria-valuemin={0}
-                      aria-valuemax={100}
-                      aria-valuenow={score}
-                      style={{
-                        flex: 1,
-                        height: 6,
-                        borderRadius: 999,
-                        background: "rgba(148, 163, 184, 0.25)",
-                        overflow: "hidden",
-                      }}
-                    >
-                      <div
-                        style={{
-                          width: `${score}%`,
-                          height: "100%",
-                          background:
-                            score >= 80 ? "var(--ai-emerald, #10b981)" : score >= 50 ? "#f59e0b" : "#ef4444",
-                        }}
-                      />
-                    </div>
-                    <small style={{ minWidth: 36, textAlign: "right" }}>{score}%</small>
-                  </div>
-                ))}
+                {rubric ? <>
+                  <small>Correctness: {rubric.conclusionCorrectness}/5</small>
+                  <small>Evidence from tools: {rubric.toolGroundedness}/5</small>
+                  <small>Safety: {rubric.trajectorySafety}/5</small>
+                </> : <small>No judge scores recorded.</small>}
               </div>
             )}
 

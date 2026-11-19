@@ -27,7 +27,7 @@ function sse(events: Array<Record<string, unknown>>): Response {
 const say = (text: string): Response =>
   sse([
     { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } },
-    { type: "message_delta", usage: { output_tokens: 1 } },
+    { type: "message_delta", usage: { output_tokens: 1 } }, { type: "message_stop" },
   ]);
 
 async function makeHub(withModel = true) {

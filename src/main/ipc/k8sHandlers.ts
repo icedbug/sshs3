@@ -147,6 +147,7 @@ export function registerK8sHandlers(bridge: K8sHost, deps: K8sHandlerDeps = {}):
   );
 
   bridge.registerHandler(IPC_CHANNELS.K8S_TERMINAL_WRITE, async (_event, sessionId: string, data: string) => {
+    if (!bridge.k8sTerminalManager.getSession(sessionId)) throw new Error('The terminal session has ended');
     bridge.aiHub?.terminals.observeHumanInput(sessionId, data);
     bridge.k8sTerminalManager.write(sessionId, data);
   });

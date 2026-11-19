@@ -64,9 +64,9 @@ describe("the rules for everyone on a server", () => {
     expect(screen.queryByTestId("team-freeze-form")).toBeNull();
   });
 
-  it("says when the rule does not hold for the administrator's own runs yet", () => {
+  it("shows how the only eligible administrator can approve one change", () => {
     render(<TeamRulesSection hub={hub({ canChange: true, requirePeerApprovalOnProd: true }, { peerApprovalPossible: false })} act={vi.fn(async () => undefined)} />);
-    expect(screen.getByTestId("team-peer-not-you")).toHaveTextContent("It does not hold for your own runs yet");
+    expect(screen.getByTestId("team-peer-not-you")).toHaveTextContent("approve one change alone with a recorded reason");
   });
 
   it("leaves a person's own two-person switch nothing to decide when the rule is on for everyone, and sends only what was changed", () => {

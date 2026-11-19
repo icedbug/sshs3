@@ -94,6 +94,11 @@ export class AlertsPart {
     const created: string[] = [];
     const updated: string[] = [];
     const now = Date.now();
+    const affected = new Set<string>();
+    const noteFiring = (alert: IncomingAlert): void => {
+      const target = alertTarget(alert, servers);
+      if (target) for (const server of servers) if (server.name === target || server.id === target || server.cluster === target) affected.add(server.id);
+    };
     for (const alert of alerts.slice(0, 50)) {
       const open = live(this.store.data.workTickets).find(
         (t) => t.alert?.fingerprint === alert.fingerprint && t.status !== "done",
@@ -108,6 +113,7 @@ export class AlertsPart {
           !resolved &&
           !alert.update &&
           (Boolean(was.resolvedAt) || (alert.startsAt !== undefined && was.startsAt !== undefined && alert.startsAt !== was.startsAt));
+        if (refired) noteFiring(alert);
         const note = resolved
           ? was.resolvedAt
             ? undefined
@@ -158,6 +164,7 @@ export class AlertsPart {
         updated.push(bundled.id);
         continue;
       }
+      noteFiring(alert);
       if (related && related.reason !== "fingerprint") {
         this.putTicket(
           withComment(
@@ -203,6 +210,7 @@ export class AlertsPart {
       });
       created.push(ticket.id);
     }
+    if (affected.size) await this.scheduleEvent("alert", [...affected]);
     if (created.length) this.notify("New alert", `${created.length} ticket${created.length === 1 ? "" : "s"} on the board`);
     return { created, updated };
   }

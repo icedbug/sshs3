@@ -160,7 +160,7 @@ describe("KnowledgeBaseView & KbPagesView overhaul", () => {
 
     fireEvent.click(screen.getByTestId("runbook-step-terminal-s1"));
     expect(onRunStepInTerminal).toHaveBeenCalledWith("systemctl status haproxy", runbook.steps[0], runbook);
-    expect(screen.getByTestId("runbook-step-s1")).toHaveAttribute("data-step-state", "active");
+    await waitFor(() => expect(screen.getByTestId("runbook-step-s1")).toHaveAttribute("data-step-state", "active"));
 
     fireEvent.click(screen.getByTestId("runbook-step-ai-s2"));
     expect(onAskAiStep).toHaveBeenCalledWith("Analyze haproxy for 1h", runbook.steps[1], runbook);

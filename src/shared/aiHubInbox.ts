@@ -1,8 +1,8 @@
 import type { AgentTask, HubSnapshot } from "./types/aiHub";
 
 /** A conversation of the user's own, not one of the hub's runs (specialists, readings for memory and pages, test cases). */
-export const isConversation = (t: Pick<AgentTask, "workforceRunId" | "distillSourceId" | "evalCaseId">): boolean =>
-  !t.workforceRunId && !t.distillSourceId && !t.evalCaseId;
+export const isConversation = (t: Pick<AgentTask, "workforceRunId" | "distillSourceId" | "evalCaseId" | "quietScheduleResult">): boolean =>
+  !t.workforceRunId && !t.distillSourceId && !t.evalCaseId && !t.quietScheduleResult;
 
 export type InboxKind = "approval" | "peer" | "plan" | "question" | "review" | "blocked" | "alert" | "health" | "knowledge" | "report";
 

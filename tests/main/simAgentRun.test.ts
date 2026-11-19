@@ -98,6 +98,19 @@ describe("an agent run by a model on a scenario", () => {
     for (const trap of scenario.solutions.carelessFails) expect(failed).toContain(trap);
   }, 120_000);
 
+  it("runs the full scenario through a stateless Responses endpoint", async () => {
+    const { dir, runAgentOnScenario } = await lab();
+    const scenario = scenarioById("nginx-bad-config")!;
+    const model = await fakeOpenAi(asModel(scenario.solutions.careful, scenario.story), { responses: true });
+    disposals.push(() => model.close());
+    const result = await runAgentOnScenario({ scenarioId: scenario.id, baseUrl: model.url, model: "fixture", apiProtocol: "responses", dir, pollMs: 20 });
+    expect(result.error).toBeUndefined();
+    expect(result.score.passed).toBe(result.score.total);
+    expect(result.report).toBe(scenario.story);
+    expect(result.approvals.allowed).toBeGreaterThan(0);
+    expect(model.requests[1].input).toContainEqual(expect.objectContaining({ encrypted_content: "opaque-0" }));
+  }, 60_000);
+
   it("works with a service that takes its limits the way OpenAI's newer models do", async () => {
     const { dir, runAgentOnScenario } = await lab();
     const scenario = scenarioById("pg-wal-full")!;
@@ -229,11 +242,11 @@ describe("an agent run by a model on a scenario", () => {
     const model = await fakeOpenAi(asModel(scenario.solutions.careful, scenario.story));
     disposals.push(() => model.close());
 
-    const result = await runAgentOnScenario({ scenarioId: scenario.id, baseUrl: model.url, model: "fake-1", dir, maxCommands: 3, pollMs: 20 });
+    const result = await runAgentOnScenario({ scenarioId: scenario.id, baseUrl: model.url, model: "fake-1", dir, maxCommands: 3, pollMs: 500 });
 
     expect(result.stoppedBy).toBe("commands");
     expect(result.status).toBe("interrupted");
-    expect(result.commands).toBeLessThan(scenario.solutions.careful.length);
+    expect(result.commands).toBeLessThanOrEqual(3);
     expect(result.score.passed).toBeLessThan(result.score.total);
   }, 60_000);
 });

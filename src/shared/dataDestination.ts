@@ -12,7 +12,7 @@ import type { S3WorkspaceConfig } from "./types/aiHub";
 
 /** Masking is done in the main process (privacy.ts maskContext) on everything sent to a model. */
 export const MASKED =
-  "Secrets the app recognises, such as keys, tokens and passwords, are masked first.";
+  "Secrets the app recognises, such as keys, tokens and passwords, are masked first. Check attached images for sensitive information yourself.";
 
 export type EgressPolicyMode = AiEgressPolicy;
 
@@ -389,9 +389,9 @@ export function formatEgressPolicyLabel(policy: AiEgressPolicy): string {
 }
 
 export function formatPiiScrubbingLabel(mode: AiPiiScrubbingMode): string {
-  if (mode === "strict") return "Hides secrets, personal details, host names and anything that looks like a key.";
-  if (mode === "off") return "Hides secrets only: keys, tokens and passwords.";
-  return "Hides secrets, e-mail addresses, IP addresses and phone numbers.";
+  if (mode === "strict") return "Hides recognised secrets, e-mail addresses, phone numbers, IP addresses and known workspace host names.";
+  if (mode === "off") return "Hides recognised keys, tokens and passwords.";
+  return "Hides recognised secrets, e-mail addresses and phone numbers. Model requests keep IP addresses and host names.";
 }
 
 /**
@@ -452,7 +452,7 @@ export function describeActiveDataFlow(
       : {
           channel: "team-s3-sync",
           enabled: false,
-          destination: "Disabled (workspace data stays on this device)",
+          destination: "Team bucket is off",
           host: "",
           locality: "disabled",
           encryptedInTransit: true,

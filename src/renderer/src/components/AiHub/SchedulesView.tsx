@@ -1,3 +1,4 @@
+import { nextCronTime } from "@shared/scheduleTiming";
 import { useMemo, useState } from "react";
 import {
   SHELL_KINDS,
@@ -48,9 +49,12 @@ export const QUIET_SENTINEL_PRESET = {
 
 /** Validates a standard 5-field cron expression (minute hour dom month dow). */
 export function isValidCronExpression(expr: string): boolean {
-  const fields = expr.trim().split(/\s+/);
-  if (fields.length !== 5) return false;
-  return fields.every((f) => /^[0-9*/,-]+$/.test(f));
+  try {
+    nextCronTime(expr, "UTC", Date.now());
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 const emptyDraft: Draft = {
@@ -215,7 +219,7 @@ export function Schedules({
         nextRunAt:
           existing &&
           existing.intervalMinutes === d.minutes &&
-          existing.cron === cron
+          existing.cron === cron && existing.timezone === timezone
             ? existing.nextRunAt
             : Date.now() + d.minutes * 60_000,
       },
@@ -492,26 +496,16 @@ export function Schedules({
               </label>
               <label>
                 Timezone
-                <select
+                <input
                   aria-label="Timezone"
-                  value={
-                    TIMEZONES.includes(draft.timezone) ? draft.timezone : "custom"
-                  }
-                  onChange={(e) => {
-                    if (e.target.value !== "custom") {
-                      setDraft({ ...draft, timezone: e.target.value });
-                    }
-                  }}
-                >
-                  {TIMEZONES.map((tz) => (
-                    <option key={tz} value={tz}>
-                      {tz}
-                    </option>
-                  ))}
-                  {!TIMEZONES.includes(draft.timezone) && (
-                    <option value="custom">{draft.timezone}</option>
-                  )}
-                </select>
+                  list="schedule-timezones"
+                  value={draft.timezone}
+                  placeholder="UTC"
+                  onChange={(e) => setDraft({ ...draft, timezone: e.target.value })}
+                />
+                <datalist id="schedule-timezones">
+                  {TIMEZONES.map((tz) => <option key={tz} value={tz} />)}
+                </datalist>
               </label>
             </div>
           )}
@@ -578,7 +572,7 @@ export function Schedules({
 
           {(hub.runbooks?.length ?? 0) > 0 && (
             <label>
-              Deterministic runbook (optional)
+              Runbook to follow (optional)
               <select
                 aria-label="Runbook"
                 value={draft.runbookId}
@@ -607,7 +601,7 @@ export function Schedules({
             <span>
               Only tell me when something is wrong
               <small>
-                When all is well the run answers with one word, and nothing is sent or kept in the history.
+                A successful health check stays out of chat history and sends no notification. Its run record remains available.
               </small>
             </span>
           </label>
@@ -619,7 +613,7 @@ export function Schedules({
             {draft.mode === "autonomous" &&
               " On its own it still stops for destructive commands and, by default, for changes on production."}
             {draft.mode === "assisted" &&
-              " If nobody is there to approve, the run waits until it times out."}
+              " A command that needs approval waits for a person."}
             {draft.mode === "plan" &&
               " Proposes an executable plan and waits for review before changing anything."}
           </p>

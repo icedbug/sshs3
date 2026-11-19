@@ -1941,6 +1941,7 @@ describe("Production multi-user workspace sync & auto-memory", () => {
       const sse = [
         'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Image analyzed."}}',
         'data: {"type":"message_delta","usage":{"input_tokens":50,"output_tokens":10}}',
+        'data: {"type":"message_stop"}',
         "",
       ].join("\n\n");
       return new Response(

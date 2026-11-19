@@ -118,6 +118,10 @@ export interface AgentPlanStep {
   rollback?: string;
   /** sha256 of the exact command as proposed: a plan covers that command and no other. */
   commandHash?: string;
+  /** Captured when proposed. Older plans are kept and ask again before running. */
+  approvedTarget?: string;
+  checkExpected?: string;
+  observeSeconds?: number;
   /** Set when an approved plan's command has run without asking again. */
   ranAt?: number;
 }
@@ -199,6 +203,8 @@ export interface EvalCheck {
   detail?: string;
 }
 export interface EvalRun {
+  rubricScores?: { conclusionCorrectness: number; toolGroundedness: number; trajectorySafety: number };
+  failureModes?: ("kb_miss" | "wrong_tool" | "hallucinated_cause" | "unsafe_cmd")[];
   at: number;
   model?: string;
   passed: boolean;
@@ -290,6 +296,9 @@ export interface AgentChange {
   kind: "command" | "file" | "setting";
   /** Moves the fence agents run inside: asked about in every mode, whatever the safety policy says. */
   guard?: boolean;
+  forceApproval?: boolean;
+  adminExceptionAvailable?: boolean;
+  adminException?: { actorId: string; reason: string; at: number };
   target: string;
   description: string;
   command?: string;
@@ -325,7 +334,7 @@ export interface AgentChange {
    * afterwards does not show that the change did it). `skipped`: why the check
    * was never looked at after the change.
    */
-  check?: { command: string; expected: string; before?: boolean; after?: boolean; output?: string; skipped?: string };
+  check?: { command: string; expected: string; baselineHash?: string; before?: boolean; after?: boolean; output?: string; skipped?: string };
   /**
    * The command that takes the change back, and what happened if it had to run.
    * `restored`: after the rollback the check reads as it did before the change.
@@ -338,6 +347,7 @@ export interface AgentChange {
     output?: string;
     checkAfter?: boolean;
     restored?: boolean;
+    comparedWithBaseline?: boolean;
     skipped?: string;
   };
   /**
@@ -352,6 +362,8 @@ export interface AgentChange {
   hiddenValues?: boolean;
   /** sha256 of the exact command that runs, so that what was approved can be matched exactly. */
   commandHash?: string;
+  /** Exact terminal identity, assigned by the broker. */
+  targetKey?: string;
   /** Hash of the file contents before the change, for safe checkpoint restoration. */
   beforeHash?: string;
   /** Preview output from a dry-run / preflight execution (e.g., kubectl diff, terraform plan, EXPLAIN). */
@@ -403,6 +415,8 @@ export interface AgentTask {
   usageCounted?: boolean;
   /** How many of this conversation's tokens have been put down to an agent so far: each run adds only what is new. */
   usageCountedTokens?: number;
+  /** Cached input already accounted for on earlier runs. */
+  usageCountedCacheTokens?: number;
   /**
    * The hub opened this conversation's terminal itself (a schedule, a ticket
    * nobody sat at). It is closed when a run ends, and opened again on the
@@ -495,6 +509,7 @@ export interface AgentTask {
   ticketId?: string;
   /** Set on a run a schedule started: that schedule's id. */
   scheduleId?: string;
+  quietScheduleResult?: boolean;
   /** Set when the conversation was handed over: the agent and mode it began with, which answered its first question. */
   startedAs?: { agentId?: string; mode: AgentMode };
   /** The model the task's latest run was started on. */
@@ -898,6 +913,9 @@ export interface AgentSchedule {
   shell: ShellKind;
   intervalMinutes: number;
   nextRunAt: number;
+  /** Old cron jobs stored an interval-based next time. */
+  cronTimingVersion?: 1;
+  lastEventAt?: number;
   enabled: boolean;
   mode: AgentMode;
   model: string;
@@ -2013,7 +2031,7 @@ export type HubRequest =
   | { action: "task-read"; taskId: string }
   | { action: "takeover"; sessionId: string }
   | { action: "arm"; sessionId: string; shell: ShellKind }
-  | { action: "approve"; taskId: string; changeId: string; approved: boolean; note?: string }
+  | { action: "approve"; taskId: string; changeId: string; approved: boolean; note?: string; adminException?: boolean }
   /**
    * This member's answer to a change in another member's run that waits for a second person (one of
    * `peerApprovals`). The server checks that this member may give it; it counts as theirs.

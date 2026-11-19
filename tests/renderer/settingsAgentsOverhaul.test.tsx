@@ -15,8 +15,7 @@ import { SafetyPolicyCard } from "../../src/renderer/src/components/AiHub/Safety
 import { AgentsAndMcpView } from "../../src/renderer/src/components/AiHub/AgentsAndMcpView";
 import {
   AgentTestsView,
-  computePassAtK,
-  extractRubricScores,
+  passRate,
 } from "../../src/renderer/src/components/AiHub/AgentTestsView";
 
 afterEach(() => {
@@ -112,7 +111,7 @@ describe("dataDestination residency & data flow", () => {
       { enabled: true, bucket: "ops-team", region: "eu-north-1" },
     );
     expect(flow.egressValidation.allowed).toBe(true);
-    expect(flow.channels.find((c) => c.channel === "llm-inference")?.notes[0]).toBe("Before anything is sent: Hides secrets, personal details, host names and anything that looks like a key.");
+    expect(flow.channels.find((c) => c.channel === "llm-inference")?.notes[0]).toBe("Before anything is sent: Hides recognised secrets, e-mail addresses, phone numbers, IP addresses and known workspace host names.");
     expect(flow.subprocessors).toHaveLength(2);
     expect(flow.subprocessors[1].locality).toBe("eu");
   });
@@ -476,12 +475,10 @@ describe("AgentTestsView multi-turn, 3-axis rubric, pass@k, tag filter & promote
     render(<AgentTestsView hub={hub} act={act} />);
 
     expect(screen.getByTestId("eval-turns-e-multi")).toHaveTextContent("Multi-turn (2 turns)");
-    expect(screen.getByTestId("eval-passk-e-multi")).toHaveTextContent("pass@2: 50%");
+    expect(screen.getByTestId("eval-pass-rate-e-multi")).toHaveTextContent("Passed 1 of 2 (50%)");
 
     const rubricEl = screen.getByTestId("eval-rubric-e-multi");
-    expect(within(rubricEl).getByText("Correctness")).toBeVisible();
-    expect(within(rubricEl).getByText("Safety")).toBeVisible();
-    expect(within(rubricEl).getByText("Efficiency")).toBeVisible();
+    expect(rubricEl).toHaveTextContent("No judge scores recorded.");
 
     fireEvent.click(screen.getByRole("button", { name: "Show the answer" }));
     expect(screen.getByTestId("eval-transcript-e-multi")).toHaveTextContent("Check dmesg too.");
@@ -506,12 +503,7 @@ describe("AgentTestsView multi-turn, 3-axis rubric, pass@k, tag filter & promote
     );
 
     // Helper unit assertions
-    expect(computePassAtK(eval1.runs as never)).toEqual({ k: 2, passed: 1, ratePct: 50 });
-    expect(extractRubricScores(eval1.runs[0] as never, eval1 as never)).toEqual({
-      correctness: 100,
-      safety: 100,
-      efficiency: 100,
-    });
+    expect(passRate(eval1.runs as never)).toEqual({ total: 2, passed: 1, ratePct: 50 });
   });
 });
 

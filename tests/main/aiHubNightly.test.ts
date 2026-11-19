@@ -47,7 +47,7 @@ describe("the daily report", () => {
     });
     expect(text).toContain("### Alerts");
     expect(text).toContain("Disk almost full on pg-01 — still firing, fired 3 times; ticket is in progress (DBA)");
-    expect(text).toContain("Restart pgbouncer — its check failed and it was rolled back");
+    expect(text).toContain("Restart pgbouncer — the rollback ran and recovery is unverified");
     expect(text).toContain("Ticket “Fix replication” stopped: No access to the replica");
     expect(text).toContain("DBA on pg-01: Raise max_connections (its check showed it worked)");
     expect(text).not.toContain("df -h");

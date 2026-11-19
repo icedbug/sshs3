@@ -1,6 +1,8 @@
 import type { AgentMode, HubRequest, HubSnapshot } from "@shared/types/aiHub";
 
 /** The panel's request helper: it shows a failed request in the panel and resolves with nothing. */
+export const LABS_ENABLED_STORAGE_KEY = "sshs3.aiHub.labsEnabled";
+
 export type Act = (request: HubRequest) => Promise<HubSnapshot | undefined>;
 
 /**

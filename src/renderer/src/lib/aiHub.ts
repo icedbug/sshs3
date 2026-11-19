@@ -210,6 +210,12 @@ function subscribe(listener: () => void): () => void {
     }
   };
 }
+export function observeHubSnapshot(listener: (current: HubSnapshot) => void): () => void {
+  const notify = (): void => { if (snapshot) listener(snapshot); };
+  const stop = subscribe(notify);
+  notify();
+  return stop;
+}
 export function useHub(): HubSnapshot | undefined {
   return useSyncExternalStore(subscribe, () => snapshot);
 }

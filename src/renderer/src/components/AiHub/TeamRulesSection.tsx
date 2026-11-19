@@ -45,13 +45,11 @@ export function TeamRulesSection({ hub, act }: { hub: HubSnapshot; act: Act }): 
         <span>
           Two people must approve a change on production
           <small>
-            A change on a server tagged prod, critical or production runs only when a second person has approved it,
-            whoever started the run. The second person is asked in their inbox.
+            Changes on servers tagged prod, critical or production need a second person. They are asked in their inbox.
           </small>
           {rules.requirePeerApprovalOnProd && hub.peerApprovalPossible !== true && (
             <small data-testid="team-peer-not-you">
-              It does not hold for your own runs yet: nobody else on this server may approve on production for you.
-              That takes a second administrator, or somebody in an approver group.
+              {rules.canChange ? "No other eligible approver is available. In the inbox, you can approve one change alone with a recorded reason." : "No eligible second approver is available. Your change cannot run."}
             </small>
           )}
         </span>

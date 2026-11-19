@@ -126,34 +126,31 @@ describe("a change that carries its own proof", () => {
       check: { command: "curl -fsS -o /dev/null -w '%{http_code}' http://localhost/", expected: "200" },
       rollback: "cp nginx.bak /etc/nginx/nginx.conf && systemctl reload nginx",
     })) as Record<string, unknown>;
-    expect(res).toMatchObject({ rolledBack: true, backAsBefore: false });
+    expect(res).toMatchObject({ rolledBack: false, rollbackAttempted: true, backAsBefore: false });
     expect(String(res.next)).toContain("does not read as it did before");
     expect(t.changes[0].rollback).toMatchObject({ ran: true, exitCode: 0, checkAfter: false, restored: false });
   });
 
-  it("when the change command fails and nothing changed, runs no rollback and does not say the check failed", async () => {
+  it("takes back a partly failed change and verifies the original state", async () => {
     const { broker, t, capability, answer, run } = await setup("autonomous");
     answer("inactive", 3);
-    answer("Job for nginx.service failed", 1);
+    answer("service failed after its config changed", 1);
+    answer("");
     answer("inactive", 3);
-    const res = (await broker.invoke(capability.key, nginx)) as Record<string, unknown>;
-    expect(res).toMatchObject({ checkPassed: false, rolledBack: false });
+    const result = await broker.invoke(capability.key, nginx);
+    expect(result).toMatchObject({ checkPassed: false, rolledBack: true, rollbackAttempted: true });
     expect(t.changes[0].status).toBe("failed");
-    expect(t.changes[0].check?.after).toBeUndefined();
-    expect(t.changes[0].check?.skipped).toContain("change command itself failed");
-    expect(t.changes[0].rollback?.skipped).toContain("nothing to take back");
-    expect(run.mock.calls.map((c) => c[3])).not.toContain("systemctl stop nginx");
+    expect(run.mock.calls.map(c => c[3])).toEqual([nginx.check.command, nginx.command, nginx.rollback, nginx.check.command]);
   });
 
-  it("when the run loses the terminal mid-change, says the rollback did not run and why", async () => {
-    const { broker, t, capability, answer, run } = await setup("autonomous");
+  it("leaves a rollback pending when the run loses its terminal", async () => {
+    const { broker, t, capability, terminals, answer, run } = await setup("autonomous");
     answer("inactive", 3);
-    run.mockRejectedValueOnce(new Error("Control returned to the user."));
-    await expect(broker.invoke(capability.key, nginx)).rejects.toThrow("Control returned");
+    run.mockImplementationOnce(async () => { terminals.takeover("one"); throw new Error("Control returned to the user."); });
+    await expect(broker.invoke(capability.key, nginx)).rejects.toThrow(/original terminal/);
     expect(t.changes[0].status).toBe("uncertain");
     expect(t.changes[0].rollback?.ran).toBeUndefined();
-    expect(t.changes[0].rollback?.skipped).toContain("run the rollback yourself");
-    expect(t.changes[0].check?.skipped).toBeTruthy();
+    expect(t.changes[0].rollback?.skipped).toContain("original terminal");
   });
 
   it("tells the team (and learning) only once the outcome is known: a failed change is reported as failed", async () => {

@@ -12,12 +12,12 @@ import type {
 } from "../../../../shared/types/aiHub";
 import { CONTEXT_NOTE_PREFIX, SHELL_KINDS } from "../../../../shared/types/aiHub";
 import { DEFAULT_AI_MODELS, usesResponsesApi } from "../../../../shared/types/ai";
-import { analyzeCommandSafety } from "../CommandSafetyService";
+import { analyzeCommandSafety, isProdTag } from "../CommandSafetyService";
 import { hostOf } from "../Notifier";
 import { getBuiltinSkillsAndMemories, getDemoTasks, getDemoWorkforceRuns, isDemoMode } from "../demoWorkspace";
 import { type DetectedCommandActivity } from "../TerminalRegistry";
 import { scopedMemory } from "../ContextService";
-import { boundedContext, boundedPrompt, clip, maskContext, maskProviderText, safeError, workspaceHostNames } from "../privacy";
+import { boundedContext, boundedPrompt, clip, maskContext, maskProviderText, observationHash, safeError, workspaceHostNames } from "../privacy";
 import {
   requiredText,
   integer,
@@ -26,7 +26,7 @@ import {
   parseInlineCommandJson,
   buildInstantCommandSuggestion,
 } from "../hubHelpers";
-import { log, checkedSuggestion, active, INLINE_SUGGEST_TIMEOUT_MS } from "../hubShared";
+import { checkedSuggestion, active, INLINE_SUGGEST_TIMEOUT_MS } from "../hubShared";
 import type { HubService } from "../HubService";
 import type { Handled, RequestsOf } from "./routes";
 
@@ -166,9 +166,9 @@ export class ConversationsPart {
       const actor = `${await this.resolveActorName()} (AI)`;
       const targetLabel = change.target || session?.label || task.title;
       const how = change.rollback?.ran
-        ? change.rollback.restored === false
-          ? "rolled back, not as it was"
-          : "rolled back"
+        ? change.rollback.comparedWithBaseline && change.rollback.restored
+          ? "rollback verified"
+          : "rollback attempted, recovery unverified"
         : change.status === "completed"
           ? ""
           : change.status;
@@ -700,109 +700,78 @@ export class ConversationsPart {
         this.terminals.observe(false);
         this.terminals.observe((await this.config.getView()).enabled);
         break;
-      case "restore-checkpoint": {
-        const task = this.task(request.taskId);
-        const change = task.changes.find((c) => c.id === request.changeId);
-        if (!change) throw new Error("Change not found");
-        if (!this.host.restoreCheckpoint) {
-          throw new Error("Checkpoint restore is unavailable");
-        }
-        await this.host.restoreCheckpoint(change, { task, force: request.force });
-        task.updatedAt = Date.now();
-        if (!isDemoMode()) {
-          void this.audit()
-            .append({
-              kind: "file-write",
-              actor: await this.resolveActorName(),
-              target: change.target,
-              what: change.rollback?.command || `restoreCheckpoint(${change.description})`,
-              outcome: "rolled-back",
-              taskId: task.id,
-              changeId: change.id,
-            })
-            .catch((e) => log.warn("Could not write to the audit log", safeError(e)));
-        }
-        break;
-      }
+      case "restore-checkpoint":
       case "rollback-change": {
         const task = this.task(request.taskId);
         const change = task.changes.find((c) => c.id === request.changeId);
         if (!change) throw new Error("Change not found");
-        if (change.kind === "file" && this.host.restoreCheckpoint) {
-          await this.host.restoreCheckpoint(change, { task });
-          task.updatedAt = Date.now();
-          break;
-        }
-        const rollbackCmd = change.rollback?.command?.trim();
-        if (!rollbackCmd) throw new Error("This change has no rollback command");
-        // Only what actually ran can be taken back, and only once: the rollback of a change that was
-        // refused or never ran would be a new change that nobody approved.
-        if (!["completed", "failed", "uncertain"].includes(change.status))
-          throw new Error("This change did not run, so there is nothing to take back.");
-        if (change.rollback?.ran) throw new Error("This change has already been taken back.");
-        // The rollback is the model's own command. It was shown on the change the person approved; one
-        // that is destructive (or a check that is not read-only) is not run from a button: it goes
-        // through the agent, where it is asked about like any other command.
-        const rollbackRisk = analyzeCommandSafety(rollbackCmd);
-        if (rollbackRisk.riskLevel === "destructive")
-          throw new Error(
-            `The rollback command is destructive (${rollbackRisk.riskReason}). Ask the assistant to take the change back, so that the command is approved like any other.`,
-          );
-        const checkCmd = change.check?.command?.trim();
-        const checkIsReadOnly = !!checkCmd && analyzeCommandSafety(checkCmd).riskLevel === "safe";
-        const sessionId = task.target?.sessionId;
-        const session = sessionId ? this.terminals.get(sessionId) : undefined;
-        if (!session || session.state !== "ready" || !session.shell) {
-          throw new Error("No ready terminal is bound to this task for rollback");
-        }
-        if (session.owner && session.owner !== task.id) {
-          throw new Error("Terminal is currently busy with another task");
-        }
-        const alreadyOwned = session.owner === task.id;
-        if (!alreadyOwned) {
-          this.terminals.claim(session.id, session.generation, task.id);
-        }
-        let runRes: { output: string; exitCode: number };
-        let restored: boolean | undefined;
-        try {
-          runRes = await this.terminals.execute(session.id, session.generation, task.id, rollbackCmd, 120_000);
-          if (request.verify !== false && checkCmd && checkIsReadOnly) {
-            const checkRes = await this.terminals.execute(
-              session.id,
-              session.generation,
-              task.id,
-              checkCmd,
-              60_000,
-            );
-            restored = checkRes.exitCode === 0;
-          }
-        } finally {
-          if (!alreadyOwned) {
-            this.terminals.release(task.id);
-          }
-        }
-        change.rollback = {
-          ...change.rollback,
-          command: rollbackCmd,
-          ran: true,
-          exitCode: runRes.exitCode,
-          output: maskContext(runRes.output),
-          ...(restored !== undefined ? { restored } : {}),
+        if (!["completed", "failed", "uncertain"].includes(change.status) || change.rollback?.ran)
+          throw new Error("Only a change that ran can be taken back, once.");
+        const session = this.terminals.list().find((t) => JSON.stringify([t.id, t.generation]) === change.targetKey);
+        if (!session || session.state !== "ready" || !session.shell || (session.owner && session.owner !== task.id))
+          throw new Error("The original terminal must be connected and ready. Review a new change if its identity is unknown.");
+        const gate = (): void => {
+          const ctx = this.resolveSafetyContext({ ...task, target: { sessionId: session.id, generation: session.generation, label: session.label } }, change.target);
+          if ((ctx.clusterPolicy?.frozenUntil ?? 0) > Date.now()) throw new Error("This target is frozen.");
+          if (ctx.clusterPolicy?.maxMode === "advice" || ctx.clusterPolicy?.maxMode === "plan" ||
+              (ctx.clusterPolicy?.requiredApprovals ?? 1) > 1 ||
+              (ctx.policy.requirePeerApprovalOnProd && ctx.targetTags?.some(isProdTag)))
+            throw new Error("Request a new checked change so the current rules can be met.");
+          const now = this.terminals.get(session.id);
+          if (!now || now.generation !== session.generation || now.state !== "ready" || (now.owner && now.owner !== task.id))
+            throw new Error("The original terminal is no longer available.");
         };
-        task.updatedAt = Date.now();
-        if (!isDemoMode()) {
-          void this.audit()
-            .append({
-              kind: "change",
-              actor: await this.resolveActorName(),
-              target: change.target,
-              what: `Rollback: ${rollbackCmd}`,
-              outcome: runRes.exitCode === 0 ? "rolled-back" : "failed",
-              exitCode: runRes.exitCode,
-              taskId: task.id,
-              changeId: change.id,
-            })
-            .catch((e) => log.warn("Could not write to the audit log", safeError(e)));
+        gate();
+        const isFile = change.kind === "file";
+        if (request.action === "restore-checkpoint" && !isFile) throw new Error("Only a file has a checkpoint.");
+        const command = change.rollback?.command?.trim();
+        if (isFile && !this.host.restoreCheckpoint) throw new Error("Checkpoint restore is unavailable.");
+        const check = change.check?.command?.trim();
+        if (!isFile && (!command || change.hiddenValues || analyzeCommandSafety(command, session.shell).riskLevel === "destructive" ||
+            (check && analyzeCommandSafety(check, session.shell).riskLevel !== "safe")))
+          throw new Error("Request a new checked change to review this rollback.");
+        const owned = session.owner === task.id;
+        let attempted = false;
+        const event = {
+          kind: isFile ? "file-write" as const : "change" as const,
+          actor: await this.resolveActorName(), target: change.target,
+          what: command || change.description, taskId: task.id, changeId: change.id,
+        };
+        if (this.restoringChanges.has(change.id)) throw new Error("A rollback is already in progress.");
+        this.restoringChanges.add(change.id);
+        try {
+          await this.audit().append({...event, outcome:"manual-rollback-intent"});
+          gate();
+          if (!owned) this.terminals.claim(session.id, session.generation, task.id);
+          if (isFile) {
+            const verified = await this.host.restoreCheckpoint!(change, {
+              task,
+              force: request.action === "restore-checkpoint" && request.force,
+              recheck: () => { gate(); attempted = true; },
+            });
+            if (!verified.restored) throw new Error("The file could not be verified after restoring.");
+            change.rollback = {command:command || "Restore file checkpoint", ran:true, restored:true, comparedWithBaseline:true, exitCode:0};
+          } else {
+            attempted = true;
+            const result = await this.terminals.execute(session.id, session.generation, task.id, command!, 120_000);
+            change.rollback = {command:command!, ran:true, exitCode:result.exitCode, output:maskContext(result.output)};
+            if (result.exitCode === 0 && request.action === "rollback-change" && request.verify !== false && check && change.check?.baselineHash) {
+              const observation = await this.terminals.execute(session.id, session.generation, task.id, check, 60_000);
+              change.rollback.comparedWithBaseline = true;
+              change.rollback.restored = observationHash(change.id, observation) === change.check.baselineHash;
+            }
+          }
+          await this.audit().append({...event, outcome:change.rollback?.restored === true ? "rolled-back":"rollback-unverified"});
+          task.updatedAt = Date.now();
+        } catch (error) {
+          if (attempted) {
+            if (!change.rollback?.ran) change.rollback = { command: command || "Restore file checkpoint", ran: true, output: safeError(error) };
+            await this.audit().append({ ...event, outcome: "rollback-unverified", detail: safeError(error) });
+          }
+          throw error;
+        } finally {
+          if (!owned && this.terminals.get(session.id)?.owner === task.id) this.terminals.release(task.id, session.id);
+          this.restoringChanges.delete(change.id);
         }
         break;
       }

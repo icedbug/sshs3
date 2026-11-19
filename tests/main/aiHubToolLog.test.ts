@@ -101,11 +101,11 @@ describe("tool log across runs", () => {
         ? sse([
             { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "tu_1", name: "sshs3_kb_search" } },
             { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '{"query":"nginx timeout"}' } },
-            { type: "message_delta", usage: { output_tokens: 5 } },
+            { type: "message_delta", usage: { output_tokens: 5 } }, { type: "message_stop" },
           ])
         : sse([
             { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "The runbook says 120s." } },
-            { type: "message_delta", usage: { output_tokens: 5 } },
+            { type: "message_delta", usage: { output_tokens: 5 } }, { type: "message_stop" },
           ]),
     );
     const broker = async (req: { action: string }) =>
@@ -130,7 +130,7 @@ describe("tool log across runs", () => {
       body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       return sse([
         { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "SSE runbook." } },
-        { type: "message_delta", usage: { output_tokens: 3 } },
+        { type: "message_delta", usage: { output_tokens: 3 } }, { type: "message_stop" },
       ]);
     });
     await new DirectAgentRuntime(broker as never, undefined, secondRun as unknown as typeof fetch).start(
@@ -181,11 +181,11 @@ describe("HubService tool log", () => {
             ? sse([
                 { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "tu_1", name: "sshs3_kb_search" } },
                 { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '{"query":"backup"}' } },
-                { type: "message_delta", usage: { output_tokens: 5 } },
+                { type: "message_delta", usage: { output_tokens: 5 } }, { type: "message_stop" }, { type: "message_stop" },
               ])
             : sse([
                 { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "No runbook found." } },
-                { type: "message_delta", usage: { output_tokens: 5 } },
+                { type: "message_delta", usage: { output_tokens: 5 } }, { type: "message_stop" }, { type: "message_stop" },
               ]),
         ),
       );

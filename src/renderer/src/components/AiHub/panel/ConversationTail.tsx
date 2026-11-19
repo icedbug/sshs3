@@ -42,9 +42,10 @@ export function ConversationTail({ p, hub }: { p: PanelState; hub: NonNullable<P
   return (
     <>
                 {(() => {
+                  const streamed = streamingState?.tools ?? [];
                   const combinedTools = [
-                    ...(task?.toolLog ?? []),
-                    ...(streamingState?.tools ?? []),
+                    ...(task?.toolLog ?? []).filter((rec) => !streamed.some((live) => live.at === rec.at && live.name === rec.name && live.input === rec.input)),
+                    ...streamed,
                   ];
                   if (!task || combinedTools.length === 0) return null;
                   return (

@@ -32,7 +32,8 @@ import type { SSHConnectionConfig } from '@shared/types/ssh';
 import type { DirectorySyncProfile } from '@shared/types/dirsync';
 import { countLeaves, createLeaf, findLeaf, genPaneId, getFirstLeafId, shouldHoistLocalPerf } from './lib/paneTree';
 import type { PaneNode } from '@shared/types/session';
-import { hubRequest } from './lib/aiHub';
+import { hubRequest, observeHubSnapshot } from './lib/aiHub';
+import type { HubSnapshot } from '@shared/types/aiHub';
 import { LocalPerfBar } from './components/LocalPerfBar';
 import { DEFAULT_PERF_ITEMS } from '@shared/types/perf';
 import { installSpatialNavPointerReset } from './lib/spatialNavigation';
@@ -280,9 +281,9 @@ const AppContent: React.FC = () => {
       serverIds?: string[];
       layout?: string;
       leftTargetId?: string;
-    }) => {
+    }, snapshot?: HubSnapshot) => {
       try {
-        const snap = await hubRequest({ action: "snapshot" });
+        const snap = snapshot ?? await hubRequest({ action: "snapshot" });
         const savedProfiles = await window.multissh?.profilesGet?.().catch(() => null);
         const sshProfiles = savedProfiles?.ssh ?? [];
         const wsServers = snap.workspaceServers ?? [];
@@ -427,18 +428,13 @@ const AppContent: React.FC = () => {
       }
     };
 
-    const checkLayoutEvents = async () => {
-      try {
-        const snap = await hubRequest({ action: "snapshot" });
-        const evt = snap.pendingLayoutEvent;
-        if (!evt || handledLayoutEventsRef.current.has(evt.id)) return;
-        handledLayoutEventsRef.current.add(evt.id);
-        void hubRequest({ action: "layout-event-ack", id: evt.id }).catch(() => {});
-        await applyLayoutSpec(evt);
-      } catch {
-        // Ignore snapshot errors
-      }
-    };
+    const offLayout = observeHubSnapshot((snap) => {
+      const event = snap.pendingLayoutEvent;
+      if (!event || handledLayoutEventsRef.current.has(event.id)) return;
+      handledLayoutEventsRef.current.add(event.id);
+      void hubRequest({ action: "layout-event-ack", id: event.id }).catch(() => {});
+      void applyLayoutSpec(event, snap);
+    });
 
     const onOpenClusterSplit = (e: Event) => {
       const detail = (
@@ -462,14 +458,12 @@ const AppContent: React.FC = () => {
     window.addEventListener("sshs3:open-cluster-split", onOpenClusterSplit);
     // The hub says "something changed" many times in a burst (a run's every step): the settings are
     // read again once for the burst, at once and once more when it has passed.
-    const onHubChanged = onceForABurst(() => {
-      loadSettings();
-      void checkLayoutEvents();
-    }, 400);
+    const onHubChanged = onceForABurst(loadSettings, 400);
     const offHub = window.multissh?.onAiHubChanged?.(onHubChanged);
     return () => {
       window.removeEventListener("sshs3:open-cluster-split", onOpenClusterSplit);
       onHubChanged.cancel();
+      offLayout();
       offHub?.();
     };
   }, []);

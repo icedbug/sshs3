@@ -56,6 +56,7 @@ export interface AuditInput {
   detail?: string;
   /** Structured event schema version for downstream log consumers. */
   schemaVersion?: number;
+  changeReceipt?: "intent" | "rollback-intent" | "final";
   /** Authenticated human user id, when applicable. */
   userId?: string;
   /** Autonomous agent id, when applicable. */
@@ -135,6 +136,7 @@ const FIELDS: (keyof AuditInput)[] = [
   "userId",
   "agentId",
   "sourceIp",
+  "changeReceipt",
 ];
 
 /** What is kept of a text: masked, then cut from the end. Masking comes first, before any hash sees it. */
@@ -350,6 +352,7 @@ export class AuditLog {
   readonly file: string;
   private head: { seq: number; hash: string } = { seq: 0, hash: "" };
   private loaded = false;
+  private changeReceipts = new Map<string, AuditEntry>();
   private writes: Promise<unknown> = Promise.resolve();
   /** The newest anchor this installation wrote, read back from the bucket once. */
   private lastAnchor?: { n: number; bytes: string };
@@ -378,27 +381,30 @@ export class AuditLog {
   private async load(): Promise<void> {
     if (this.loaded) return;
     await fs.mkdir(this.dir, { recursive: true, mode: 0o700 });
-    const text = await fs.readFile(this.file, "utf8").catch(() => "");
-    const lines = text.split("\n").filter((l) => l.trim());
-    const last = lines.at(-1);
-    if (last) {
+    const text = await fs.readFile(this.file, "utf8").catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return "";
+      throw error;
+    });
+    const lines = text.split("\n").filter((line) => line.trim());
+    const receipts = new Map<string, AuditEntry>();
+    let head = { seq: 0, hash: "" };
+    for (const line of lines) {
+      let entry: AuditEntry;
       try {
-        const entry = JSON.parse(last) as AuditEntry;
-        this.head = { seq: entry.seq, hash: entry.hash };
+        entry = JSON.parse(line) as AuditEntry;
       } catch {
-        // A last line that is not JSON — a write that was cut off by a crash. The chain
-        // continues from the last line that is whole; verify() will say where it broke.
-        for (let i = lines.length - 2; i >= 0; i--) {
-          try {
-            const entry = JSON.parse(lines[i]) as AuditEntry;
-            this.head = { seq: entry.seq, hash: entry.hash };
-            break;
-          } catch {
-            // keep looking
-          }
-        }
+        throw new Error(`Audit entry ${head.seq + 1} is incomplete. Check the journal before making a change.`);
       }
+      if (!entry || entry.seq !== head.seq + 1 || entry.prev !== head.hash || hashEntry(entry) !== entry.hash) {
+        throw new Error(`Audit entry ${head.seq + 1} did not verify. Check the journal before making a change.`);
+      }
+      const key = entry.changeReceipt && this.receiptKey(entry);
+      if (key) receipts.set(key, entry);
+      head = { seq: entry.seq, hash: entry.hash };
     }
+    if (text && !text.endsWith("\n")) throw new Error("Audit journal ends with an incomplete line.");
+    this.head = head;
+    this.changeReceipts = receipts;
     this.loaded = true;
   }
 
@@ -406,9 +412,18 @@ export class AuditLog {
    * Adds one entry. Entries are written one at a time, in the order they were
    * asked for, so the chain is never forked by two writes at once.
    */
-  append(input: AuditInput, now = Date.now()): Promise<AuditEntry> {
+  private receiptKey(input: AuditInput): string | undefined {
+    if (!input.taskId || !input.changeId || input.kind === "recording") return undefined;
+    const phase = input.outcome === "intent" || input.outcome === "rollback-intent" ? input.outcome : "final";
+    return JSON.stringify([input.taskId, input.changeId, phase]);
+  }
+
+  append(input: AuditInput, now = Date.now(), once = false): Promise<AuditEntry> {
     const run = async (): Promise<AuditEntry> => {
       await this.load();
+      const key = once && this.receiptKey(input);
+      const previous = key && this.changeReceipts.get(key);
+      if (previous) return previous;
       const base: Omit<AuditEntry, "hash"> = {
         seq: this.head.seq + 1,
         at: now,
@@ -424,12 +439,19 @@ export class AuditLog {
         changeId: input.changeId,
         detail: keep(input.detail),
         schemaVersion: input.schemaVersion ?? 1,
+        changeReceipt: key ? input.outcome === "intent" || input.outcome === "rollback-intent" ? input.outcome : "final" : undefined,
         userId: keep(input.userId),
         agentId: keep(input.agentId),
         sourceIp: keep(input.sourceIp),
       };
       const entry: AuditEntry = { ...base, hash: hashEntry(base) };
-      await fs.appendFile(this.file, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
+      try {
+        await fs.appendFile(this.file, `${JSON.stringify(entry)}\n`, { mode: 0o600, flush: true });
+      } catch (error) {
+        this.loaded = false;
+        throw error;
+      }
+      if (key) this.changeReceipts.set(key, entry);
       this.head = { seq: entry.seq, hash: entry.hash };
       if (this.subscribers.size > 0) {
         for (const listener of this.subscribers) {

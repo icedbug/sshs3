@@ -104,7 +104,7 @@ function sse(events: Array<Record<string, unknown>>): Response {
   return new Response(new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(text)); c.close(); } }), { status: 200 });
 }
 const say = (text: string): Response =>
-  sse([{ type: "message_start", message: { usage: { input_tokens: 100 } } }, { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } }, { type: "message_delta", usage: { output_tokens: 20 } }]);
+  sse([{ type: "message_start", message: { usage: { input_tokens: 100 } } }, { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } }, { type: "message_delta", usage: { output_tokens: 20 } }, { type: "message_stop" }]);
 const callTool = (name: string, input: Record<string, unknown>): Response =>
   sse([
     { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: `tu_${name}`, name, input: {} } },

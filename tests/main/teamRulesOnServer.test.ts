@@ -225,6 +225,42 @@ describe('rules an administrator sets for everyone on one web server', () => {
     await until(() => run.task.changes.find((c) => c.status === 'pending'), 'the change is asked about again');
   });
 
+  it('enforces the tag rule and its check requirement at execution', async () => {
+    const { maria } = await team();
+    await maria.hub({action:'safety-policy-save', policy:{clusterPolicies:{'tag:prod':{requireCheckAndRollback:true}}}});
+    const run = await runOn(maria);
+    const pending = run.ask('sudo systemctl restart nginx');
+    await expect(pending).rejects.toThrow(/checked change/);
+    expect(run.ran).toHaveLength(0);
+  });
+
+  it('checks a freeze again after the person answers', async () => {
+    const { maria, omar } = await team();
+    const run = await runOn(omar);
+    const pending = run.ask('sudo systemctl restart nginx');
+    const done = expect(pending).rejects.toThrow(/freeze/i);
+    const change = await until(() => run.task.changes.find(c => c.status === 'pending'), 'an approval');
+    await maria.hub({action:'team-rules-save', freeze:{hours:1}});
+    await omar.hub({action:'approve', taskId:run.task.id, changeId:change.id, approved:true});
+    await done;
+    expect(run.ran).toHaveLength(0);
+  });
+
+  it('limits the only eligible administrator to a recorded one-change exception', async () => {
+    const { maria } = await team();
+    await maria.hub({action:'team-rules-save', requirePeerApprovalOnProd:true});
+    const run = await runOn(maria);
+    const pending = run.ask('sudo systemctl restart nginx');
+    const change = await until(() => run.task.changes.find(c => c.adminExceptionAvailable), 'an exception choice');
+    const answer = {action:'approve' as const, taskId:run.task.id, changeId:change.id, approved:true};
+    await expect(maria.hub(answer)).rejects.toThrow(/reason/i);
+    await maria.hub({...answer, adminException:true, note:'Scheduled service repair'});
+    await pending;
+    expect(run.ran).toHaveLength(1);
+    const entries = await maria.own.audit().entries();
+    expect(entries).toEqual(expect.arrayContaining([expect.objectContaining({ changeId:change.id, outcome:'intent', detail:'Scheduled service repair' })]));
+  });
+
   it('freezes one cluster and leaves the others alone', async () => {
     const { maria, omar } = await team();
     await maria.invoke('profiles:save-ssh', { id: 'pg-prod-01', name: 'pg-prod-01', host: '10.30.70.31', port: 22, username: 'ops', authType: 'key', cluster: 'DB-Prod', shared: true });

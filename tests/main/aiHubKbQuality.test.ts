@@ -327,7 +327,7 @@ function sse(events: Array<Record<string, unknown>>): Response {
   return new Response(new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(text)); c.close(); } }), { status: 200 });
 }
 const say = (text: string): Response =>
-  sse([{ type: "content_block_delta", index: 0, delta: { type: "text_delta", text } }, { type: "message_delta", usage: { output_tokens: 1 } }]);
+  sse([{ type: "content_block_delta", index: 0, delta: { type: "text_delta", text } }, { type: "message_delta", usage: { output_tokens: 1 } }, { type: "message_stop" }]);
 async function makeHub() {
   const { HubService } = await import("../../src/main/ai/hub/HubService");
   const { setDemoModeForTesting } = await import("../../src/main/demo/demoMode");

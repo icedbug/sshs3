@@ -161,6 +161,7 @@ export function registerTerminalHandlers(bridge: TerminalHost): void {
   bridge.registerHandler(
     IPC_CHANNELS.TERMINAL_WRITE,
     async (_event, sessionId: string, data: string) => {
+      if (!bridge.sshPtyManager.getSession(sessionId)) throw new Error('The terminal session has ended');
       bridge.aiHub?.terminals.observeHumanInput(sessionId, data);
       bridge.sshPtyManager.write(sessionId, data);
     }

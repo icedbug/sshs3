@@ -8,7 +8,7 @@ import {
   CommandFrames,
 } from "../../src/main/ai/hub/shellAdapters";
 import { TerminalRegistry } from "../../src/main/ai/hub/TerminalRegistry";
-import { ToolBroker } from "../../src/main/ai/hub/ToolBroker";
+import { ToolBroker, type ToolDependencies } from "../../src/main/ai/hub/ToolBroker";
 import { HubStore } from "../../src/main/ai/hub/HubStore";
 import { maskContext } from "../../src/main/ai/hub/privacy";
 import { scopedMemory } from "../../src/main/ai/hub/ContextService";
@@ -169,7 +169,7 @@ describe("terminal ownership", () => {
 });
 
 describe("tool authority", () => {
-  async function setup(mode: AgentTask["mode"] = "assisted") {
+  async function setup(mode: AgentTask["mode"] = "assisted", overrides: Partial<ToolDependencies> = {}) {
     const { terminals, writes } = terminal();
     await terminals.arm("one", "bash");
     const t = task();
@@ -185,11 +185,39 @@ describe("tool authority", () => {
       memory: async () => [],
       file: async () => ({}),
       changed: vi.fn(),
+      ...overrides,
     });
     disposals.unshift(() => broker.dispose());
     const capability = await broker.issue(t);
     return { broker, t, capability, writes, terminals };
   }
+  it("refuses a missing explicit target before any terminal write", async () => {
+    const {broker, capability, writes} = await setup("autonomous");
+    const count = writes.length;
+    await expect(broker.invoke(capability.key, {action:"command", id:"missing", command:"pwd"})).rejects.toThrow(/exact ID/);
+    expect(writes).toHaveLength(count);
+  });
+  it("leaves the terminal alone when the audit intent cannot be saved", async () => {
+    const {broker, capability, writes} = await setup("autonomous", {recordIntent: async () => {throw new Error("Audit disk full");}});
+    const count = writes.length;
+    await expect(broker.invoke(capability.key, {action:"command", command:"touch marker"})).rejects.toThrow(/Audit disk full/);
+    expect(writes).toHaveLength(count);
+  });
+  it("rejects a peer vote if that person's role changed before execution", async () => {
+    let eligible = true;
+    const {broker, t, capability, writes} = await setup("assisted", {
+      safetyContext: () => ({ requesterId: "user:owner", peerApproval: true, clusterPolicy: { requiredApprovals: 2 } }),
+      peerStillEligible: () => eligible,
+      recordIntent: async () => { eligible = false; },
+    });
+    const count = writes.length;
+    const pending = broker.invoke(capability.key, { action: "command", command: "touch marker" });
+    const id = t.changes[0].id;
+    broker.approve(t.id, id, true, undefined, { actor: "Owner", actorId: "user:owner" });
+    broker.approve(t.id, id, true, undefined, { actor: "Peer", actorId: "user:peer", peer: true });
+    await expect(pending).rejects.toThrow(/no longer has permission/);
+    expect(writes).toHaveLength(count);
+  });
   it("requires approval for the exact task and executes once", async () => {
     const { broker, t, capability, writes } = await setup();
     const pending = broker.invoke(capability.key, {
@@ -237,7 +265,7 @@ describe("tool authority", () => {
     answer("502 Bad Gateway", 22);
     answer("502 Bad Gateway", 22);
     answer("restored");
-    answer("200 OK");
+    answer("200");
     const bad = (await broker.invoke(capability.key, {
       action: "change",
       command: "cp nginx.new /etc/nginx/nginx.conf && systemctl reload nginx",
@@ -332,6 +360,7 @@ describe("tool authority", () => {
     await early;
 
     t.plan.status = "approved";
+    t.plan.steps[0].approvedTarget = JSON.stringify([t.target!.sessionId, t.target!.generation]);
     expect(await broker.invoke(capability.key, { action: "command", command: "echo hi" })).toMatchObject({ exitCode: 0 });
     expect(t.plan.steps[0].ranAt).toBeTypeOf("number");
     // The step has run: the same command a second time is not covered, nor is a different one.
@@ -377,7 +406,7 @@ describe("tool authority", () => {
     broker.approve(t.id, t.changes[0].id, true);
     await expect(pending).rejects.toThrow();
     expect(writes).toHaveLength(1);
-    expect(t.changes[0].status).toBe("uncertain");
+    expect(t.changes[0].status).toBe("denied");
   });
   it("rejects browser origins and missing capabilities at the local HTTP boundary", async () => {
     const { capability } = await setup();

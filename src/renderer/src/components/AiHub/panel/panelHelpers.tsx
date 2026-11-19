@@ -1,8 +1,9 @@
+import { dataDestination, isLoopbackHostname } from "@shared/dataDestination";
 // Small functions and constants of the chat panel: moved here from AiHubPanel.tsx as they were.
 import { type AgentTask, type AgentToolRecord, type HubSnapshot } from "@shared/types/aiHub";
 import * as aiHubModule from "../../../lib/aiHub";
 import { ALL_HUB_VIEWS, type HubViewId } from "../panelShared";
-import { LABS_ENABLED_STORAGE_KEY } from "../SettingsView";
+import { LABS_ENABLED_STORAGE_KEY } from "../panelShared";
 
 export type View = HubViewId;
 /** Where this tab remembers which conversation is open (sessionStorage: kept over a reload, not shared between tabs or people). */
@@ -88,31 +89,51 @@ export function getActiveProfileSummary(hub?: HubSnapshot): {
   label: string;
   provider?: string;
   isLocal: boolean;
+  configured: boolean;
+  destination: string;
 } {
   const activeId = hub?.config.activeProfileByRole?.primary;
   const profile = activeId
     ? (hub?.config.profiles ?? []).find((p) => p.id === activeId)
     : undefined;
-  const provider = profile?.provider;
-  const baseUrl = (profile?.baseUrl ?? hub?.config.baseUrl ?? "").toLowerCase();
-  const model = profile?.model ?? hub?.config.model ?? "";
-  const isLocal =
-    Boolean(hub?.demoMode) ||
-    String(provider ?? "") === "ollama" ||
-    model.toLowerCase().startsWith("ollama") ||
-    baseUrl.includes("localhost") ||
-    baseUrl.includes("127.0.0.1") ||
-    baseUrl.includes("::1");
+  const provider = hub?.config.provider;
+  const baseUrl = hub?.config.baseUrl?.trim() ?? "";
+  const model = hub?.config.model ?? "";
+  const configured = provider === "anthropic" ? Boolean(hub?.config.hasApiKey)
+    : provider === "openai-codex" ? Boolean(hub?.config.codexConnected) : Boolean(baseUrl);
+  const scripted = Boolean(hub?.demoMode && !configured);
+  function onThisMachine(kind?: string, address?: string): boolean {
+    if (kind === "openai-codex" || !address) return false;
+    try {
+      return isLoopbackHostname(new URL(address).hostname);
+    } catch {
+      return false;
+    }
+  }
+  const visited = new Set<string>();
+  const reserves = [...(profile?.fallbackProfileIds ?? [])];
+  let isLocal = scripted || onThisMachine(provider, baseUrl);
+  while (isLocal && !scripted && reserves.length) {
+    const id = reserves.pop()!;
+    if (visited.has(id)) continue;
+    visited.add(id);
+    const spare = hub?.config.profiles?.find((entry) => entry.id === id);
+    if (!spare) continue;
+    isLocal = onThisMachine(spare.provider, spare.baseUrl);
+    reserves.push(...(spare.fallbackProfileIds ?? []));
+  }
   return {
     // A model name here would read as "ready" while the assistant is switched off.
     label: !hub?.config.enabled
       ? "AI off"
       : // The demo lab without a model answers from a script: a model's name here would promise one.
-        hub.demoMode && !hub.config.hasApiKey && !hub.config.codexConnected && !baseUrl
+        scripted
         ? "Demo answers (no model)"
         : profile?.name || model || "Default profile",
     provider,
     isLocal,
+    configured,
+    destination: scripted ? "The demo script answers here." : dataDestination(provider ?? "openai-compatible", baseUrl),
   };
 }
 

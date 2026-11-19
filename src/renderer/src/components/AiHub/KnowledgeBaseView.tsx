@@ -319,7 +319,7 @@ export function RunbookExecutor({
 }: {
   runbook: RunbookTemplate;
   act: Act;
-  onRunStepInTerminal?: (command: string, step: RunbookStep, runbook: RunbookTemplate) => boolean | void;
+  onRunStepInTerminal?: (command: string, step: RunbookStep, runbook: RunbookTemplate) => boolean | void | Promise<boolean>;
   onAskAiStep?: (prompt: string, step: RunbookStep, runbook: RunbookTemplate) => void;
 }): JSX.Element {
   const [values, setValues] = useState<Record<string, string | number | boolean>>(() => {
@@ -493,15 +493,9 @@ export function RunbookExecutor({
                     type="button"
                     className="ai-btn-accent"
                     data-testid={`runbook-step-terminal-${step.id}`}
-                    disabled={missingRequired}
-                    onClick={() => {
-                      if (onRunStepInTerminal) {
-                        const ok = onRunStepInTerminal(resolvedCmd, step, runbook);
-                        if (ok !== false) markStep(step.id, "active");
-                      } else {
-                        markStep(step.id, "active");
-                        setStatusMsg(`Staged command: ${resolvedCmd}`);
-                      }
+                    disabled={missingRequired || !onRunStepInTerminal}
+                    onClick={async () => {
+                      if (onRunStepInTerminal && await onRunStepInTerminal(resolvedCmd, step, runbook) !== false) markStep(step.id, "active");
                     }}
                   >
                     Run in terminal
@@ -512,14 +506,11 @@ export function RunbookExecutor({
                     type="button"
                     className="ai-btn-emerald"
                     data-testid={`runbook-step-ai-${step.id}`}
-                    disabled={missingRequired}
+                    disabled={missingRequired || !onAskAiStep}
                     onClick={() => {
+                      if (!onAskAiStep) return;
+                      onAskAiStep(resolvedPrompt, step, runbook);
                       markStep(step.id, "active");
-                      if (onAskAiStep) {
-                        onAskAiStep(resolvedPrompt, step, runbook);
-                      } else {
-                        setStatusMsg(`Sent step to AI: ${resolvedPrompt}`);
-                      }
                     }}
                   >
                     Run with AI
@@ -585,7 +576,7 @@ export function KnowledgeBaseView({
   onAttachDoc: (doc: KbDocument) => void;
   onRunRunbook?: (doc: KbDocument) => void;
   onOpenFileRef?: (ref: FileRef) => void;
-  onRunStepInTerminal?: (command: string, step: RunbookStep, runbook: RunbookTemplate) => boolean | void;
+  onRunStepInTerminal?: (command: string, step: RunbookStep, runbook: RunbookTemplate) => boolean | void | Promise<boolean>;
   onAskAiStep?: (prompt: string, step: RunbookStep, runbook: RunbookTemplate) => void;
   openTab?: { tab: "pages" | "sources" | "runbooks" | "review"; pageId?: string; seq: number };
   /** Requests whose own answer or error this view shows itself. */

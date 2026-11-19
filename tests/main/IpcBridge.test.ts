@@ -176,6 +176,7 @@ describe('IpcBridge', () => {
 
     const ptyEmitter = new EventEmitter();
     mockPtyManager = Object.assign(ptyEmitter, {
+      getSession: vi.fn((id: string) => id === 'session-123' ? { id } : undefined),
       createSession: vi.fn().mockResolvedValue({ sessionId: 'session-123' }),
       createShellSession: vi.fn().mockResolvedValue({ sessionId: 'local-session-123' }),
       write: vi.fn(),
@@ -557,6 +558,9 @@ describe('IpcBridge', () => {
     it('handles terminalWrite, resize, and kill', async () => {
       await mockIpc.invoke(IPC_CHANNELS.TERMINAL_WRITE, 'session-123', 'ls -la\n');
       expect(mockPtyManager.write).toHaveBeenCalledWith('session-123', 'ls -la\n');
+
+      await expect(mockIpc.invoke(IPC_CHANNELS.TERMINAL_WRITE, 'expired-session', 'input')).rejects.toThrow('session has ended');
+      expect(mockPtyManager.write).toHaveBeenCalledTimes(1);
 
       await mockIpc.invoke(IPC_CHANNELS.TERMINAL_RESIZE, 'session-123', 120, 30);
       expect(mockPtyManager.resize).toHaveBeenCalledWith('session-123', 120, 30);

@@ -20,6 +20,10 @@ const mockState = vi.hoisted(() => ({
 
 vi.mock("../../src/renderer/src/lib/aiHub", () => ({
   useHub: () => mockState.hub,
+  observeHubSnapshot: (observe: (hub: HubSnapshot) => void) => {
+    if (mockState.hub) observe(mockState.hub);
+    return () => {};
+  },
   useSelectedTerminal: () => mockState.selectedTerminal,
   selectAiTerminal: (id: string) => mockState.selectAiTerminal(id),
   hubRequest: (req: HubRequest) => mockState.hubRequest(req),
@@ -369,6 +373,39 @@ describe("Shell Integration Overhaul", () => {
       expect(screen.getByTestId("ai-mode-pill-advice")).toHaveAttribute("aria-pressed", "true");
       fireEvent.keyDown(composer, { key: "Tab", shiftKey: true });
       expect(screen.getByTestId("ai-mode-pill-plan")).toHaveAttribute("aria-pressed", "true");
+    });
+
+    it("keeps multiline staging in the editor, writes to the selected pod and rejects a replaced terminal", async () => {
+      window.sessionStorage.setItem("sshs3.aiHub.openTask", "task-1");
+      const hub = mockState.hub!;
+      hub.tasks[0].messages[1].text = ["```bash", "pwd", "date", "```"].join("\n");
+      hub.sessions[0].kind = "k8s";
+      const writePod = vi.fn().mockResolvedValue(undefined);
+      window.multissh!.k8sTerminalWrite = writePod;
+      const props = { mode: "panel" as const, setMode: vi.fn() };
+      const { rerender } = render(<AiHubPanel {...props} />);
+      fireEvent.click(screen.getByRole("button", { name: "Stage in Terminal" }));
+      expect(screen.getByTestId("ai-composer")).toHaveValue("pwd\ndate");
+      expect(writePod).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("button", { name: "Run in Terminal" }));
+      await waitFor(() => expect(writePod).toHaveBeenCalledWith("term-1", "pwd\ndate\n"));
+      expect(mockState.terminalWrite).not.toHaveBeenCalled();
+      hub.sessions[0].generation = "replacement";
+      rerender(<AiHubPanel {...props} />);
+      fireEvent.click(screen.getByRole("button", { name: "Run in Terminal" }));
+      expect(writePod).toHaveBeenCalledTimes(1);
+      expect(screen.getByRole("alert")).toHaveTextContent("no longer available");
+    });
+
+    it("warns about matching secrets in demo when a real remote model is selected", () => {
+      mockState.hub!.demoMode = true;
+      render(<AiHubPanel mode="panel" setMode={vi.fn()} />);
+      expect(screen.getByTestId("ai-profile-badge").title).toContain("api.openai.com");
+      const composer = screen.getByTestId("ai-composer");
+      fireEvent.change(composer, { target: { value: "Check key sk-proj-abcdefghijklmnopqrstuvwxyz1234" } });
+      fireEvent.keyDown(composer, { key: "Enter" });
+      expect(screen.getByTestId("ai-dlp-warning")).toBeInTheDocument();
+      expect(mockState.hubRequest).not.toHaveBeenCalled();
     });
 
     it("streams deltas via onAiHubDelta, supports Stage/Run and ! quick command, DLP warning, and ask-ai events", async () => {

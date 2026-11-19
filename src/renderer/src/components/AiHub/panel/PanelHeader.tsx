@@ -48,7 +48,7 @@ export function PanelHeader({ p }: { p: PanelState }): JSX.Element {
               data-testid="ai-profile-badge"
               className="ai-badge"
               style={{ cursor: "pointer", fontSize: 10.5, padding: "3px 8px" }}
-              title={`Active primary profile: ${activeProfile.label}${activeProfile.provider ? ` (${activeProfile.provider})` : ""}`}
+              title={activeProfile.destination}
               onClick={() => setSettingsOpen(true)}
             >
               <Sparkles size={11} style={{ marginRight: 4 }} />

@@ -304,6 +304,7 @@ export class WebTenantManager {
    * kept in the shared folder. Only an administrator's hub writes them (the hub checks who asks).
    */
   private teamRules: TeamSafetyRules = {};
+  private ruleWrites: Promise<void> = Promise.resolve();
   private boardTimer?: NodeJS.Timeout;
   private boardWriters = new Set<string>();
 
@@ -339,9 +340,14 @@ export class WebTenantManager {
         await fsp.rm(path.join(this.sharedDir, name), { force: true }).catch(() => {});
     try {
       const kept: unknown = JSON.parse(await fsp.readFile(this.getTeamRulesPath(), 'utf8'));
-      if (kept && typeof kept === 'object' && !Array.isArray(kept)) this.teamRules = kept as TeamSafetyRules;
-    } catch {
-      // No rules were set yet, or the file cannot be read: no rules for everyone until an administrator sets them.
+      if (!kept || typeof kept !== 'object' || Array.isArray(kept)) throw new Error('Invalid team rules.');
+      const rules = kept as TeamSafetyRules;
+      if (rules.requirePeerApprovalOnProd !== undefined && typeof rules.requirePeerApprovalOnProd !== 'boolean') throw new Error('Invalid team approval rule.');
+      if (rules.freezes !== undefined && (!rules.freezes || typeof rules.freezes !== 'object' || Array.isArray(rules.freezes) ||
+        Object.values(rules.freezes).some(f => !f || !Number.isFinite(f.until)))) throw new Error('Invalid team freeze.');
+      this.teamRules = rules;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
   }
 
@@ -350,10 +356,17 @@ export class WebTenantManager {
   }
 
   /** An administrator changed the rules for everyone: kept, and every other account's windows are told. */
-  private async saveTeamRules(userId: string, next: TeamSafetyRules): Promise<void> {
-    await writeFileAtomic(this.getTeamRulesPath(), JSON.stringify(next, null, 2));
-    this.teamRules = next;
-    for (const [uid, tenant] of this.resolvedTenants.entries()) if (uid !== userId) tenant.hub.teamRulesChanged();
+  private saveTeamRules(userId: string, next: TeamSafetyRules, previous?: TeamSafetyRules): Promise<void> {
+    const write = this.ruleWrites.then(async () => {
+      if (previous && previous !== this.teamRules) throw new Error('Another administrator updated the rules. Read them again before saving.');
+      const actor = this.account(userId);
+      if (!actor || actor.disabled || actor.role !== 'admin') throw new Error('Only an active administrator can change team rules.');
+      await writeFileAtomic(this.getTeamRulesPath(), JSON.stringify(next, null, 2));
+      this.teamRules = next;
+      for (const [uid, tenant] of this.resolvedTenants.entries()) if (uid !== userId) tenant.hub.teamRulesChanged();
+    });
+    this.ruleWrites = write.catch(() => undefined);
+    return write;
   }
 
   getSharedWorkspaceFilePath(): string {
@@ -427,23 +440,18 @@ export class WebTenantManager {
 
   /** The account as it is now (a role may have changed since its hub was started). */
   private account(userId: string): PeerAccount | undefined {
-    return this.accounts?.().find((a) => a.id === userId) ?? this.resolvedTenants.get(userId)?.user;
+    return this.accounts ? this.accounts().find((a) => a.id === userId) : this.resolvedTenants.get(userId)?.user;
   }
 
-  /**
-   * Whether there is anybody who could be the second person for this member's change on a production
-   * server: another account that is not switched off and that the rule lets approve there (an
-   * administrator, or a member of an approver group). Where there is nobody, nothing asks for two
-   * people: a change would wait for an answer that cannot come.
-   */
-  private hasSecondApproverFor(userId: string): boolean {
-    const requester = this.account(userId);
-    if (!requester) return false;
-    return (this.accounts?.() ?? []).some(
-      (other) =>
-        other.id !== userId &&
-        this.authorizePeerApproval({ requesterUserId: userId, requesterUsername: requester.username, approver: other, targetEnv: 'production', requiredApprovals: 2 }).authorized,
-    );
+  private eligiblePeer(ownerId: string, peer: PeerAccount, tags: string[]): boolean {
+    const owner = this.account(ownerId);
+    return Boolean(owner && !owner.disabled && this.authorizePeerApproval({
+      requesterUserId: ownerId, requesterUsername: owner.username, approver: peer, targetTags: tags, requiredApprovals: 2,
+    }).authorized);
+  }
+
+  private hasSecondApproverFor(userId: string, tags: string[] = ['production']): boolean {
+    return (this.accounts?.() ?? []).some((peer) => this.eligiblePeer(userId, peer, tags));
   }
 
   /** The changes in other members' runs that wait for a second person and that this member may answer. */
@@ -841,7 +849,7 @@ export class WebTenantManager {
         s3ConfigFilePath: this.getSharedS3ConfigPath(),
         defaultActorName: user.displayName || user.username,
         alertHookOwner: user.id,
-        teamAdmin: () => (tenantState.current?.user ?? user).role === 'admin',
+        teamAdmin: () => { const account = this.account(user.id); return !!account && !account.disabled && account.role === 'admin'; },
         soleUser: () => (tenantState.current?.user ?? user).role === 'admin' && this.accountCount?.() === 1,
         peerPresenceProvider: () => this.getAllLocalTenantsPresence(),
         onSharedWorkspaceChanged: () =>
@@ -849,12 +857,16 @@ export class WebTenantManager {
         // One board for everyone on this server, kept in the server's shared folder when the team has no bucket.
         sharedWorkStore: this.teamBoard.forAccount(() => this.boardChangedBy(user.id)),
         // A change that needs two people is put to the other members, and their answer is passed back.
-        peerApproval: () => this.hasSecondApproverFor(user.id),
+        peerApproval: (tags) => this.hasSecondApproverFor(user.id, tags),
+        peerStillEligible: (actorId, tags) => {
+          const peer = actorId.startsWith('user:') ? this.account(actorId.slice(5)) : undefined;
+          return !!peer && this.eligiblePeer(user.id, peer, tags);
+        },
         peerWaiting: () => this.waitingForSecondPerson(user.id),
         peerDecide: (answer) => this.answerAsSecondPerson(user.id, answer),
         peerWaitingChanged: () => this.secondPersonWantedBy(user.id),
         // The rules for everyone on this server: one set, read by every account's hub.
-        teamRules: { read: () => this.teamRules, write: (next) => this.saveTeamRules(user.id, next) },
+        teamRules: { read: () => this.teamRules, write: (next, previous) => this.saveTeamRules(user.id, next, previous) },
         teamChat: this.teamChat,
       },
     );

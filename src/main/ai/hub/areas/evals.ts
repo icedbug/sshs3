@@ -7,7 +7,7 @@ import {
   evalRun,
   judgePrompt,
   normalizeExpectation,
-  parseJudgement,
+  parseRubricJudgement,
   promoteEvalFailureToIncident,
   ruleChecks,
 } from "../EvalSuite";
@@ -128,16 +128,20 @@ export class EvalsPart {
           );
           await this.whenSettled(task);
           const answer = [...task.messages].reverse().find((m) => m.role === "assistant" && m.text.trim())?.text ?? "";
-          const checks = ruleChecks(found.expect, answer, task.toolLog ?? []);
+          const checks = ruleChecks(found.expect, answer, task.toolLog ?? [], { unrecorded: replay.unrecorded });
+          let verdict: ReturnType<typeof parseRubricJudgement>;
+          let judgeError: string | undefined;
           if (found.expect.conclusion && task.status === "completed" && answer) {
             const judge = await this.runBackground(
-              { prompt: judgePrompt(found, answer), mode: "advice", agentName: "Tests", maxCommands: 1, maxMinutes: 5 },
+              { prompt: judgePrompt(found, answer, task.toolLog), mode: "advice", agentName: "Tests", maxCommands: 1, maxMinutes: 5 },
               { distillSourceId: `eval:${id}:${Date.now()}`, title: `Judging · ${clip(found.title, 80)}`, mainModel: true },
             );
-            const verdict = parseJudgement(judge.messages.filter((m) => m.role === "assistant").at(-1)?.text ?? "");
-            checks.push(verdict ?? { name: "reaches the expected conclusion", passed: false, detail: "The judgement could not be read." });
+            verdict = parseRubricJudgement(judge.messages.filter((m) => m.role === "assistant").at(-1)?.text ?? "");
+            if (judge.status === "completed" && verdict) checks.push(verdict.check);
+            else judgeError = "The test judge did not return a result.";
           }
-          run = evalRun({ task, checks, unrecorded: replay.unrecorded, live: replay.live });
+          run = evalRun({ task, checks, unrecorded: replay.unrecorded, live: replay.live, rubricScores: verdict?.scores, failureModes: verdict?.failureModes });
+          if (judgeError) run = { ...run, passed: false, inconclusive: judgeError };
         } catch (error) {
           run = {
             at: Date.now(),

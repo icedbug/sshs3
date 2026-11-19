@@ -45,7 +45,7 @@ export function isUncertainOrPartialRollback(
   const rb = change.rollback;
   if (rb?.ran) {
     if (rb.exitCode !== undefined && rb.exitCode !== 0) return true;
-    if (rb.restored !== true) return true;
+    if (rb.restored !== true || !rb.comparedWithBaseline) return true;
   }
   if (rb?.skipped) return true;
   const decided = !["pending", "approved", "running"].includes(change.status);
@@ -112,7 +112,7 @@ export function ChangeProof({
       if (rollback.exitCode !== 0) {
         return `The rollback failed (exit ${rollback.exitCode ?? "?"})`;
       }
-      if (rollback.restored === true) {
+      if (rollback.restored === true && rollback.comparedWithBaseline) {
         return "Rolled back · the check reads as it did before the change";
       }
       if (rollback.restored === false) {
@@ -145,7 +145,8 @@ export function ChangeProof({
         verify: true,
       });
       setConfirmingRollback(false);
-      setRollbackStatus("State verified and rollback executed.");
+      const outcome = snap.tasks?.find((t) => t.id === taskId)?.changes.find((c) => c.id === change.id)?.rollback;
+      setRollbackStatus(outcome?.restored && outcome.comparedWithBaseline ? "Rollback verified against the original state." : "Rollback requested. Check the result before making another change.");
       onRollbackComplete?.(snap);
     } catch (error) {
       setRollbackError(error instanceof Error ? error.message : String(error));

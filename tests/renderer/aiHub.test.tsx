@@ -357,7 +357,7 @@ describe("persistent AI chat", () => {
     };
     render(<Harness />);
     fireEvent.click(screen.getByRole("button", { name: "AI settings" }));
-    fireEvent.change(screen.getByLabelText("Provider"), {
+    fireEvent.change(await screen.findByLabelText("Provider"), {
       target: { value: "openai-codex" },
     });
     expect(screen.getByLabelText("Model ID")).toHaveValue("gpt-6.1-sol");
@@ -431,7 +431,7 @@ describe("persistent AI chat", () => {
       ),
     );
 
-    expect(screen.getByTestId("self-learning-engine-card")).toBeVisible();
+    expect(await screen.findByTestId("self-learning-engine-card")).toBeVisible();
     // The card shows what the app measured, not a list of named "engines" with version numbers.
     expect(screen.queryByTestId("os-engine-badge-orama-hybrid-rag")).not.toBeInTheDocument();
 

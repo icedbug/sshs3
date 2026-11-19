@@ -8,7 +8,7 @@
  * the stream of pieces as they arrive, and asks again only when the snapshot says the conversation
  * holds something this copy does not.
  */
-import { useEffect, useSyncExternalStore } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import type { AgentChange, AgentMessage, AgentMessagesTail, AgentTask, HubSnapshot, RunStatus } from "@shared/types/aiHub";
 import type { AiHubDeltaEvent, MultiSSHApiWithHubDelta } from "@shared/ipc/createMultiSSHApi";
 import { applyDeltaToMessages, STREAMED_MESSAGE_ID } from "./aiHubDelta";
@@ -94,11 +94,11 @@ function upToDate(entry: Whole | undefined, task: AgentTask): boolean {
   return (!task.messagesTail || messagesUpToDate(entry, task.messagesTail, task.status)) && changesUpToDate(entry, task.changes);
 }
 
-async function load(taskId: string): Promise<void> {
+async function load(taskId: string): Promise<boolean> {
   const entry = whole.get(taskId) ?? { messages: [], changes: new Map<string, AgentChange>(), loaded: false, loading: false, again: false };
   if (entry.loading) {
     entry.again = true;
-    return;
+    return true;
   }
   entry.loading = true;
   whole.set(taskId, entry);
@@ -110,9 +110,11 @@ async function load(taskId: string): Promise<void> {
       entry.loaded = true;
       publish();
     }
+    return Boolean(got);
   } catch {
     // Gone, or the hub is away: the snapshot's own copy is shown, and the next change asks again.
     if (!entry.loaded) whole.delete(taskId);
+    return false;
   } finally {
     entry.loading = false;
     if (entry.again) {
@@ -142,9 +144,16 @@ export function useFullTask(task: AgentTask | undefined): AgentTask | undefined 
   const entry = wanted ? whole.get(wanted.id) : undefined;
   const stale = Boolean(wanted && !upToDate(entry, wanted));
   const id = wanted?.id;
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
-    if (id && stale) void load(id);
-  }, [id, stale]);
+    if (!id || !stale) return;
+    let mounted = true;
+    let timer: ReturnType<typeof setTimeout>;
+    void load(id).then((ok) => {
+      if (mounted && !ok) timer = setTimeout(() => setAttempt((n) => n + 1), Math.min(30_000, 1000 * 2 ** Math.min(attempt, 5)));
+    });
+    return () => { mounted = false; clearTimeout(timer); };
+  }, [id, stale, attempt]);
   if (!task || !wanted || !entry?.loaded) return task;
   return {
     ...task,

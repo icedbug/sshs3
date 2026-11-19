@@ -32,7 +32,7 @@ import { runLines, scoreScenario, type ScenarioScore } from "../src/main/sim/Sce
 const args = process.argv.slice(2);
 const flag = (name: string): boolean => args.includes(`--${name}`);
 const value = (name: string): string | undefined => (args.includes(`--${name}`) ? args[args.indexOf(`--${name}`) + 1] : undefined);
-const VALUED = ["--run", "--report", "--base-url", "--model", "--approve", "--max-commands", "--max-minutes", "--then"];
+const VALUED = ["--run", "--report", "--base-url", "--model", "--api-protocol", "--approve", "--max-commands", "--max-minutes", "--then"];
 const id = args.find((a, i) => !a.startsWith("--") && !VALUED.includes(args[i - 1] ?? ""));
 
 function print(score: ScenarioScore): void {
@@ -52,8 +52,13 @@ const brief = (text: string | undefined, lines = 6): string => {
 async function agent(scenarioId: string): Promise<number> {
   const baseUrl = value("base-url") ?? process.env.SSHS3_SIM_BASE_URL;
   const model = value("model") ?? process.env.SSHS3_SIM_MODEL;
-  if (!baseUrl || !model) {
+  if (!flag("fixture") && (!baseUrl || !model)) {
     console.error("An agent needs a model: --base-url <address> --model <name> (or SSHS3_SIM_BASE_URL and SSHS3_SIM_MODEL). The key is read from SSHS3_SIM_API_KEY.");
+    return 2;
+  }
+  const apiProtocol = value("api-protocol") ?? "auto";
+  if (apiProtocol !== "auto" && apiProtocol !== "responses" && apiProtocol !== "chat-completions") {
+    console.error("--api-protocol is auto, responses or chat-completions.");
     return 2;
   }
   const how = value("approve") ?? "all";
@@ -67,12 +72,22 @@ async function agent(scenarioId: string): Promise<number> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sshs3-sim-agent-"));
   const say = !flag("json");
   const rl = how === "ask" ? readline.createInterface({ input: process.stdin, output: process.stdout }) : undefined;
+  let fixture: import("../tests/helpers/fakeOpenAi").FakeOpenAi | undefined;
   try {
+    if (flag("fixture")) {
+      const { fakeOpenAi } = await import("../tests/helpers/fakeOpenAi");
+      const scenario = scenarioById(scenarioId)!;
+      fixture = await fakeOpenAi([
+        ...scenario.solutions.careful.map((line) => ({ tool: "terminal_command", args: { command: line.replace(/^[\w.-]+:\s/, ""), description: "Scripted step" } })),
+        { text: scenario.story },
+      ], { responses: apiProtocol === "responses" });
+    }
     const result = await runAgentOnScenario({
       scenarioId,
-      baseUrl,
-      model,
-      apiKey: process.env.SSHS3_SIM_API_KEY,
+      baseUrl: fixture?.url ?? baseUrl!,
+      model: fixture ? "scripted-fixture" : model!,
+      apiProtocol,
+      apiKey: fixture ? undefined : process.env.SSHS3_SIM_API_KEY,
       followUp: value("then"),
       dir,
       maxCommands: Number(value("max-commands") ?? 40),
@@ -102,7 +117,8 @@ async function agent(scenarioId: string): Promise<number> {
       if (result.beforeFollowUp) console.log(`\nAfter its first report ${result.beforeFollowUp.passed} of ${result.beforeFollowUp.total} checks passed. The rest is after the person's answer.`);
       console.log(`\nThe agent's report:\n${result.report.trim() || "(none)"}\n`);
       for (const c of result.score.checks) console.log(`${c.pass ? "PASS" : "FAIL"}  ${c.title}\n      ${c.why}`);
-      const cost = result.usage?.costUsd ? `, about $${result.usage.costUsd.toFixed(3)}` : "";
+      console.log(`Model requests: ${result.modelRequests}. Total: ${result.elapsedMs} ms. First visible text: ${result.firstTextMs === undefined ? "none" : `${result.firstTextMs} ms`}.`);
+      const cost = result.usage?.costUsd !== undefined ? `, about $${result.usage.costUsd.toFixed(3)}` : "";
       console.log(
         `\n${result.score.passed} of ${result.score.total} checks pass · ${result.commands} commands · asked ${result.approvals.asked} time${result.approvals.asked === 1 ? "" : "s"}, allowed ${result.approvals.allowed} · ${result.minutes} min` +
           (result.usage ? ` · ${result.usage.inputTokens} tokens in, ${result.usage.outputTokens} out${cost}` : ""),
@@ -113,6 +129,7 @@ async function agent(scenarioId: string): Promise<number> {
     return result.score.passed === result.score.total ? 0 : 1;
   } finally {
     rl?.close();
+    await fixture?.close();
     // Only the folder made above, and only where temporary folders live.
     if (dir.startsWith(path.join(os.tmpdir(), "sshs3-sim-agent-"))) fs.rmSync(dir, { recursive: true, force: true });
   }

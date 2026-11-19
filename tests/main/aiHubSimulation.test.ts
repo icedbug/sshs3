@@ -84,8 +84,29 @@ describe("the demo lab's scenarios", () => {
     expect(before).toMatchObject({ status: "ok", os: "Ubuntu 24.04.1 LTS" });
     expect(before.problems.map((p) => p.text)).toContain("Disk /var/lib/postgresql is 97 % full");
 
+    // Hold an older background sample after it has read the disk, just before it is persisted.
+    // Both explicit refreshes must see the fix even while that old sample is in flight.
+    await hub.factsRound;
+    const server = hub.getKnownServers().find((item) => item.id === "demo-ssh-pg-prod-db01")!;
+    let sampled!: () => void;
+    let release!: () => void;
+    const sampleTaken = new Promise<void>((resolve) => { sampled = resolve; });
+    const keepPending = new Promise<void>((resolve) => { release = resolve; });
+    const persist = hub.factsStore.put.bind(hub.factsStore);
+    const writes = vi.spyOn(hub.factsStore, "put").mockImplementationOnce(async (record) => {
+      sampled();
+      await keepPending;
+      await persist(record);
+    });
+    const background = hub.collectFacts(server);
+    await sampleTaken;
     runLines(simWorld(), ["pg-prod-db01: sudo sed -i 's|https://sg-gw-01.acme.internal:8082|https://s3.storagegrid.acme.internal:10443|' /etc/default/wal-archive"]);
-    const after = await read();
+    const refresh = hub.collectFacts(server, Date.now(), true);
+    const second = hub.collectFacts(server, Date.now(), true);
+    release();
+    await Promise.all([background, refresh, second]);
+    expect(writes).toHaveBeenCalledTimes(2);
+    const after = (await hub.snapshot()).serverFacts!.servers.find((item) => item.serverId === server.id)!;
     expect(after.changes.map((c) => c.text)).toContain("Disk /var/lib/postgresql is back to 36 %");
     expect(after.problems.map((p) => p.text)).not.toContain("Disk /var/lib/postgresql is 97 % full");
   });

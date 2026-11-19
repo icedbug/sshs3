@@ -93,7 +93,7 @@ function correlateServerIncidents(
       targetKey: c.target.trim().toLowerCase(),
       at: c.at,
       ref: `change:${c.id}`,
-      label: `change “${clip(c.description, 80)}” (${c.rollback?.ran ? "rolled back" : c.status})`,
+      label: `change “${clip(c.description, 80)}” (${c.rollback?.ran ? c.rollback.comparedWithBaseline && c.rollback.restored ? "restoration verified" : "rollback attempted" : c.status})`,
     });
   }
   for (const t of blockedTickets) {
@@ -190,7 +190,7 @@ export function buildDailyReport(input: DailyReportInput): string {
   section(
     "Went wrong (runs on this computer, and the board)",
     [
-      ...rolledBack.map((x) => `${x.who} on ${x.c.target}: ${clip(x.c.description, 120)} — its check failed and it was ${x.c.rollback!.exitCode !== 0 ? "NOT rolled back (the rollback failed)" : x.c.rollback!.restored === false ? "rolled back, but the check does not read as before" : "rolled back"}`),
+      ...rolledBack.map((x) => `${x.who} on ${x.c.target}: ${clip(x.c.description, 120)} — ${x.c.rollback!.exitCode !== 0 ? "the rollback failed" : x.c.rollback!.comparedWithBaseline && x.c.rollback!.restored ? "the rollback was verified" : "the rollback ran and recovery is unverified"}`),
       ...failed.slice(0, 6).map((x) => `${x.who} on ${x.c.target}: ${clip(x.c.description, 120)} — ${x.c.status}${x.c.exitCode !== undefined ? `, exit ${x.c.exitCode}` : ""}`),
       ...(failed.length > 6 ? [`…and ${failed.length - 6} more`] : []),
       ...blockedRecent

@@ -102,6 +102,8 @@ export function PlanCard({
             </div>
             {step.command && <HighlightedCode code={`$ ${step.command}`} lang="bash" />}
             <small>Check: {step.check}</small>
+            {step.checkExpected && <small>Expected output: {step.checkExpected}</small>}
+            {Boolean(step.observeSeconds) && <small>Watch for {step.observeSeconds} seconds</small>}
             {step.rollback && <small>Undo: {step.rollback}</small>}
           </li>
         ))}

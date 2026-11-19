@@ -129,6 +129,15 @@ describe("showing a conversation whole", () => {
     expect(api.aiHubRequest).toHaveBeenCalledTimes(1);
   });
 
+  it("recovers after a failed read without switching away from the chat", async () => {
+    const api = hubApi(() => ({ messages: all, changes: [] }));
+    api.aiHubRequest.mockRejectedValueOnce(new Error("Offline"));
+    const cut = task({ status: "completed", messages: all.slice(-2), messagesTail: { count: 4, users: 2, lastId: "a2", lastChars: 17 } });
+    render(<Shown task={cut} />);
+    await waitFor(() => expect(screen.getByTestId("count")).toHaveTextContent("4"), { timeout: 4000 });
+    expect(api.aiHubRequest).toHaveBeenCalledTimes(2);
+  });
+
   it("fetches again when the snapshot says there is a message this copy does not have", async () => {
     let stored = all;
     const api = hubApi(() => ({ messages: stored, changes: [] }));

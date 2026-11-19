@@ -262,7 +262,7 @@ const say = (text: string): Response =>
   sse([
     { type: "message_start", message: { usage: { input_tokens: 700 } } },
     { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } },
-    { type: "message_delta", usage: { output_tokens: 300 } },
+    { type: "message_delta", usage: { output_tokens: 300 } }, { type: "message_stop" },
   ]);
 const callTool = (name: string, input: Record<string, unknown>): Response =>
   sse([

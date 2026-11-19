@@ -1,13 +1,14 @@
-import { hubRequest, selectAiTerminal } from "../../../lib/aiHub";
-import { Memory } from "../MemoryView";
-import { Schedules } from "../SchedulesView";
-import { ChangesView } from "../ChangesView";
-import { WorkforceView } from "../WorkforceView";
-import { InboxView } from "../InboxView";
-import { InfrastructureView } from "../InfrastructureView";
-import { AgentsAndMcpView } from "../AgentsAndMcpView";
-import { KnowledgeBaseView } from "../KnowledgeBaseView";
+import { lazy, Suspense } from "react";
 import type { PanelState } from "./usePanelState";
+import { hubRequest, selectAiTerminal } from "../../../lib/aiHub";
+const Memory = lazy(() => import("../MemoryView").then((m) => ({ default: m.Memory })));
+const Schedules = lazy(() => import("../SchedulesView").then((m) => ({ default: m.Schedules })));
+const ChangesView = lazy(() => import("../ChangesView").then((m) => ({ default: m.ChangesView })));
+const WorkforceView = lazy(() => import("../WorkforceView").then((m) => ({ default: m.WorkforceView })));
+const InboxView = lazy(() => import("../InboxView").then((m) => ({ default: m.InboxView })));
+const InfrastructureView = lazy(() => import("../InfrastructureView").then((m) => ({ default: m.InfrastructureView })));
+const AgentsAndMcpView = lazy(() => import("../AgentsAndMcpView").then((m) => ({ default: m.AgentsAndMcpView })));
+const KnowledgeBaseView = lazy(() => import("../KnowledgeBaseView").then((m) => ({ default: m.KnowledgeBaseView })));
 
 /**
  * The hub's views other than the chat: Inbox, Workforce, Agents & MCP, Knowledge Base, Infrastructure, Changes, Memory & skills and Schedules.
@@ -18,7 +19,7 @@ export function OtherViews({ p, hub }: { p: PanelState; hub: NonNullable<PanelSt
   const {
     activeView,
     act,
-    setTaskId,
+    chooseTask,
     setView,
     setKbTabRequest,
     setWorkforceTicketId,
@@ -26,6 +27,7 @@ export function OtherViews({ p, hub }: { p: PanelState; hub: NonNullable<PanelSt
     workforceTicketId,
     selectedAgentId,
     setSelectedAgentId,
+    newChat,
     setAutonomy,
     kbTabRequest,
     handleOpenFileRef,
@@ -37,13 +39,13 @@ export function OtherViews({ p, hub }: { p: PanelState; hub: NonNullable<PanelSt
     task,
   } = p;
   return (
-    <>
+    <Suspense fallback={<p role="status">Opening view…</p>}>
           {activeView === "Inbox" && (
             <InboxView
               hub={hub}
               act={act}
               onOpenTask={(id) => {
-                setTaskId(id);
+                chooseTask(id);
                 setView("Work");
               }}
               onOpenView={(next, detail) => {
@@ -68,7 +70,7 @@ export function OtherViews({ p, hub }: { p: PanelState; hub: NonNullable<PanelSt
               act={act}
               openTicketId={workforceTicketId}
               onOpenTask={(id) => {
-                setTaskId(id);
+                chooseTask(id);
                 setView("Work");
               }}
             />
@@ -79,13 +81,14 @@ export function OtherViews({ p, hub }: { p: PanelState; hub: NonNullable<PanelSt
               act={act}
               selectedAgentId={selectedAgentId}
               onSelectAgentForChat={(id) => {
+                newChat();
                 setSelectedAgentId(id);
                 const ag = hub.agents?.find((x) => x.id === id);
                 if (ag) setAutonomy(ag.defaultMode);
                 setView("Work");
               }}
               onStartedMission={(newTaskId) => {
-                if (newTaskId) setTaskId(newTaskId);
+                if (newTaskId) chooseTask(newTaskId);
                 setView("Work");
               }}
             />
@@ -127,7 +130,7 @@ export function OtherViews({ p, hub }: { p: PanelState; hub: NonNullable<PanelSt
                     observedAt: Date.now(),
                   },
                 ]);
-                setTaskId("");
+                chooseTask("");
                 setPrompt(
                   `Follow our runbook "${doc.title}" (${doc.collection || "general"}) step by step. Start with read-only checks and summarise the state.`,
                 );
@@ -142,7 +145,7 @@ export function OtherViews({ p, hub }: { p: PanelState; hub: NonNullable<PanelSt
               busy={busy}
               onUseTerminal={(sessionId) => {
                 selectAiTerminal(sessionId);
-                setTaskId("");
+                chooseTask("");
                 setView("Work");
               }}
               onAsk={(text, attach, sessionId) => {
@@ -153,7 +156,7 @@ export function OtherViews({ p, hub }: { p: PanelState; hub: NonNullable<PanelSt
                     { id: crypto.randomUUID(), observedAt: Date.now(), ...attach },
                   ]);
                 if (text) setPrompt(text);
-                setTaskId("");
+                chooseTask("");
                 setView("Work");
               }}
             />
@@ -163,7 +166,7 @@ export function OtherViews({ p, hub }: { p: PanelState; hub: NonNullable<PanelSt
               hub={hub}
               request={hubRequest}
               onOpenTask={(id) => {
-                setTaskId(id);
+                chooseTask(id);
                 setView("Work");
               }}
             />
@@ -174,7 +177,7 @@ export function OtherViews({ p, hub }: { p: PanelState; hub: NonNullable<PanelSt
               act={act}
               request={hubRequest}
               onOpenTask={(id) => {
-                setTaskId(id);
+                chooseTask(id);
                 setView("Work");
               }}
               suggestion={
@@ -190,11 +193,11 @@ export function OtherViews({ p, hub }: { p: PanelState; hub: NonNullable<PanelSt
               hub={hub}
               act={act}
               onOpenTask={(id) => {
-                setTaskId(id);
+                chooseTask(id);
                 setView("Work");
               }}
             />
           )}
-    </>
+    </Suspense>
   );
 }

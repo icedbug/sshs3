@@ -12,9 +12,11 @@ const expected = JSON.parse(await readFile(new URL('../package.json', import.met
 const installed = JSON.parse(extractFile(archive, 'package.json'));
 assert.equal(installed.version, expected.version);
 assert.equal(installed.main, expected.main);
+if (process.env.GITHUB_SHA) assert.equal(installed.gitHead, process.env.GITHUB_SHA, 'Packaged Git revision differs from the workflow revision');
 assert.ok(extractFile(archive, installed.main).length);
 await access(path.join(resources, 'ai-hub-icon.png'));
 const suffix = process.platform === 'win32' ? '.exe' : '';
+if (process.platform === 'win32') await access(path.join(resources, 'vcxsrv', 'vcxsrv.exe'));
 await access(path.join(resources, 'age', 'age' + suffix));
 await access(path.join(resources, 'age', 'age-plugin-yubikey' + suffix));
 if (option === '--hermes') {
@@ -35,6 +37,7 @@ const nativeProbe = `
   const root = fs.existsSync(path.join(archive, 'package.json')) ? archive : archive + '.unpacked';
   const ptyBinding = process.platform === 'win32' ? 'conpty' : 'pty';
   const platform = process.platform + '-' + process.arch;
+  if (process.env.SSHS3_EXPECTED_PACKAGE_ARCH && process.arch !== process.env.SSHS3_EXPECTED_PACKAGE_ARCH) throw new Error('Unexpected packaged architecture: ' + platform);
   let ok = true;
   for (const [name, candidates, method] of [
     ['node-pty', ['build/Release', 'build/Debug', 'prebuilds/' + platform].map(dir => dir + '/' + ptyBinding + '.node'), process.platform === 'win32' ? 'startProcess' : 'fork'],

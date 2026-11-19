@@ -19,6 +19,10 @@ import { requiredText } from "../hubHelpers";
 import { log, STREAMED_EVENTS, STREAM_REFRESH_MS, active, budgetStopLine, isBackgroundRun } from "../hubShared";
 import type { HubService } from "../HubService";
 
+function cachedTokens(task: AgentTask): number {
+  return (task.usage?.cacheReadTokens ?? 0) + (task.usage?.cacheCreationTokens ?? 0);
+}
+
 /**
  * A run: an agent at work in a conversation.
  *
@@ -239,9 +243,11 @@ export class RunsPart {
     task.status = "queued";
     // Every run has the conversation's whole budget: what the last one used is not carried over.
     task.budgetStop = undefined;
+    delete task.quietScheduleResult;
     task.commandsUsed = 0;
     task.runUsage = undefined;
     // What this run spends is its own to be counted: the earlier runs' share stays as it was put down.
+    task.usageCountedCacheTokens ??= task.usageCounted || task.usageCountedTokens !== undefined ? cachedTokens(task) : 0;
     task.usageCountedTokens = this.usagePutDown(task, (task.usage?.inputTokens ?? 0) + (task.usage?.outputTokens ?? 0));
     task.usageCounted = undefined;
     try {
@@ -360,6 +366,12 @@ export class RunsPart {
         : provider === "anthropic"
           ? { kind: "anthropic", model, apiKey: config.apiKey, baseUrl }
           : { kind: "custom", model, apiKey: config.apiKey, baseUrl: baseUrl! };
+    const primary = config.profiles?.find((profile) => profile.id === config.activeProfileByRole?.primary);
+    modelConfig.profileId = primary?.id;
+    modelConfig.fallbackProfileIds = primary?.fallbackProfileIds ?? [];
+    modelConfig.apiProtocol = config.apiProtocol;
+    modelConfig.egressPolicy = config.egressPolicy;
+    modelConfig.zdrConfirmed = config.zdrConfirmed;
     if (task.target && task.mode !== "advice") {
       const live = this.terminals.get(task.target.sessionId);
       if (live && live.state === "ready" && live.shell) {
@@ -392,6 +404,14 @@ export class RunsPart {
       // On a shared server or in the demo, only this workspace's own sign-in: never the host's ~/.codex.
       // The desktop app's own process may use the person's `codex login`.
       isDemoMode() || this.hosted() ? configDir : undefined,
+      {
+        ...this.outboundGuard(),
+        ...(this.kbNetwork?.lookup ? { lookup: this.kbNetwork.lookup } : {}),
+        egressPolicy: config.egressPolicy,
+        piiMode: config.piiScrubbing,
+        getConnectionProfile: (id) => this.config.getConnectionProfile(id),
+        onModelRequest: this.host.onModelRequest,
+      },
     );
     this.runtimes.set(task.id, runtime);
     if (task.maxMinutes > 0) this.armRunTimer(task, Date.now() + task.maxMinutes * 60_000);
@@ -434,7 +454,7 @@ export class RunsPart {
         this.settled(task.id);
         this.changed();
         // A specialist or a memory run is not a task of the user's own.
-        if (!isBackgroundRun(task))
+        if (!isBackgroundRun(task) && !task.quietScheduleResult)
           this.notify(
             task.status === "completed"
               ? "Task finished"
@@ -463,11 +483,11 @@ export class RunsPart {
         task.usage = {
           inputTokens: (task.usage?.inputTokens ?? 0) + mapped.inputTokens,
           outputTokens: (task.usage?.outputTokens ?? 0) + mapped.outputTokens,
-          ...(mapped.cacheReadTokens !== undefined
-            ? { cacheReadTokens: (task.usage?.cacheReadTokens ?? 0) + mapped.cacheReadTokens }
+          ...(mapped.cacheReadTokens !== undefined || task.usage?.cacheReadTokens !== undefined
+            ? { cacheReadTokens: (task.usage?.cacheReadTokens ?? 0) + (mapped.cacheReadTokens ?? 0) }
             : {}),
-          ...(mapped.cacheCreationTokens !== undefined
-            ? { cacheCreationTokens: (task.usage?.cacheCreationTokens ?? 0) + mapped.cacheCreationTokens }
+          ...(mapped.cacheCreationTokens !== undefined || task.usage?.cacheCreationTokens !== undefined
+            ? { cacheCreationTokens: (task.usage?.cacheCreationTokens ?? 0) + (mapped.cacheCreationTokens ?? 0) }
             : {}),
           costUsd: mapped.costUsd,
         };
@@ -594,11 +614,11 @@ export class RunsPart {
         task.usage = {
           inputTokens: (task.usage?.inputTokens ?? 0) + mapped.inputTokens,
           outputTokens: (task.usage?.outputTokens ?? 0) + mapped.outputTokens,
-          ...(mapped.cacheReadTokens !== undefined
-            ? { cacheReadTokens: (task.usage?.cacheReadTokens ?? 0) + mapped.cacheReadTokens }
+          ...(mapped.cacheReadTokens !== undefined || task.usage?.cacheReadTokens !== undefined
+            ? { cacheReadTokens: (task.usage?.cacheReadTokens ?? 0) + (mapped.cacheReadTokens ?? 0) }
             : {}),
-          ...(mapped.cacheCreationTokens !== undefined
-            ? { cacheCreationTokens: (task.usage?.cacheCreationTokens ?? 0) + mapped.cacheCreationTokens }
+          ...(mapped.cacheCreationTokens !== undefined || task.usage?.cacheCreationTokens !== undefined
+            ? { cacheCreationTokens: (task.usage?.cacheCreationTokens ?? 0) + (mapped.cacheCreationTokens ?? 0) }
             : {}),
           costUsd: mapped.costUsd,
         };
@@ -669,11 +689,14 @@ export class RunsPart {
     const used = (task.usage?.inputTokens ?? 0) + (task.usage?.outputTokens ?? 0);
     // `task.usage` is the whole conversation's: every run of it (a reply, an approved plan, "Continue")
     // adds to it, and only what was not put down yet is added to the agent's month.
-    const fresh = used - this.usagePutDown(task, used);
+    const cached = cachedTokens(task);
+    const countedCache = task.usageCountedCacheTokens ?? (task.usageCounted ? cached : 0);
+    const fresh = used - this.usagePutDown(task, used) + cached - countedCache;
     // Nothing new reported yet (a stopped run says what it spent a moment later): not counted yet either.
     if (fresh <= 0) return;
     task.usageCounted = true;
     task.usageCountedTokens = used;
+    task.usageCountedCacheTokens = cached;
     this.store.data.agentUsage = addUsage(this.store.data.agentUsage ?? {}, agentId, fresh);
     this.lastWorkSync = 0;
   }
@@ -779,8 +802,9 @@ export class RunsPart {
     }
     if (this.localMcp?.address()) {
       await this.mcpTokens().initialize().catch(() => undefined);
+      const serverId = task.target && this.terminals.get(task.target.sessionId)?.profileId;
       const scopes: ("read" | "tickets" | "run")[] =
-        task.mode === "advice" ? ["read"] : ["read", "run"];
+        task.mode === "advice" || !serverId ? ["read"] : ["read", "run"];
       const tools =
         agent.allowedTools?.length && !agent.allowedTools.includes("all")
           ? [...agent.allowedTools]
@@ -791,10 +815,11 @@ export class RunsPart {
           name: `acp-${task.id.slice(0, 8)}`,
           createdBy: agent.name,
           scopes,
+          serverId,
           expiresInDays: 1,
           ...(tools ? { tools } : {}),
         })
-        .catch(() => undefined);
+        .catch((error) => { throw new Error(`Could not connect this agent to the workspace: ${safeError(error)}`); });
       if (made) {
         acpTokenId = made.view.id;
         acpLocalMcp = {
@@ -855,6 +880,7 @@ export class RunsPart {
         };
         if (question.toolCallId) changeOfCall.set(question.toolCallId, change);
         const safetyCtx = this.resolveSafetyContext(task, change.target);
+        this.broker.rememberPolicy(task, change);
         const effectiveMode = safetyCtx.clusterPolicy?.maxMode
           ? lowerMode(task.mode, safetyCtx.clusterPolicy.maxMode)
           : task.mode;
@@ -896,7 +922,9 @@ export class RunsPart {
           requiredApprovals = Math.max(requiredApprovals, 2);
         }
         if (requiredApprovals > 1) change.requiredApprovals = requiredApprovals;
-        if (requiredApprovals > 1 && !safetyCtx.peerApproval) {
+        if (requiredApprovals === 2 && !safetyCtx.peerApproval && safetyCtx.canApproveAlone) {
+          change.adminExceptionAvailable = true;
+        } else if (requiredApprovals > 1 && !safetyCtx.peerApproval) {
           // Nobody else can be asked here: refused now, not after ten minutes of waiting.
           change.status = "denied";
           change.decidedHow = "policy";
@@ -919,10 +947,16 @@ export class RunsPart {
           change.status = "approved";
           change.decidedHow = "policy";
           task.changes.push(change);
+        } else if (!await this.broker.askApproval(task, change, safetyCtx.requesterId)) {
+          return false;
+        }
+        try {
+          await this.broker.beforeAction(task, change);
           this.changed();
           return true;
+        } catch {
+          return false;
         }
-        return this.broker.askApproval(task, change, safetyCtx.requesterId);
       },
     });
     task.model = runner.name;
@@ -954,7 +988,7 @@ export class RunsPart {
         if (task.ticketId) this.settleTickets();
         this.settled(task.id);
         this.changed();
-        this.notify(task.status === "completed" ? "Task finished" : "Task needs attention", task.title);
+        if (!task.quietScheduleResult) this.notify(task.status === "completed" ? "Task finished" : "Task needs attention", task.title);
       });
   }
 

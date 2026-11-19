@@ -766,9 +766,9 @@ export class TerminalRegistry extends EventEmitter {
     this.emit("changed");
   }
 
-  release(owner: string): void {
+  release(owner: string, sessionId?: string): void {
     for (const s of this.sessions.values()) {
-      if (s.view.owner !== owner) continue;
+      if (s.view.owner !== owner || (sessionId !== undefined && s.view.id !== sessionId)) continue;
       this.emit("released", { ...s.view }, owner);
       if (s.pending) this.takeover(s.view.id);
       else {

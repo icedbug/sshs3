@@ -158,6 +158,7 @@ function sseResponse(text: string): Response {
   const sse = [
     `data: ${JSON.stringify({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text } })}`,
     'data: {"type":"message_delta","usage":{"output_tokens":3}}',
+    'data: {"type":"message_stop"}',
     "",
   ].join("\n\n");
   return new Response(

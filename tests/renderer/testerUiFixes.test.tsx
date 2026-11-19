@@ -253,7 +253,7 @@ describe("panel: a failed check is an error, and a settings error goes with the 
     render(<Harness />);
     fireEvent.click(screen.getByTestId("ai-profile-badge"));
     const dialog = screen.getByRole("dialog", { name: "AI settings" });
-    fireEvent.click(within(dialog).getByRole("button", { name: "Add a channel" }));
+    fireEvent.click(await within(dialog).findByRole("button", { name: "Add a channel" }));
     fireEvent.change(within(dialog).getByLabelText("Channel address"), {
       target: { value: "https://example.invalid/hook" },
     });

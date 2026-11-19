@@ -5,6 +5,8 @@ import { getDemoSchedules, isDemoMode } from "../demoWorkspace";
 import { boundedPrompt, clip, PERSON_PROMPT_MAX, safeError } from "../privacy";
 import { requiredText, integer } from "../hubHelpers";
 import { active } from "../hubShared";
+import { nextCronTime } from "../../../../shared/scheduleTiming";
+import { resolveTargetSelector } from "../WorkforceRunner";
 import type { HubService } from "../HubService";
 import type { Handled, RequestsOf } from "./routes";
 
@@ -16,7 +18,28 @@ import type { Handled, RequestsOf } from "./routes";
  * A part of HubService. These are the hub's own methods, kept in a file of their own: `this` is the hub,
  * and they are copied onto its class where it is declared (HubService.ts).
  */
+export function nextScheduleTime(schedule: Pick<AgentSchedule, "cron" | "timezone" | "intervalMinutes">, now: number): number {
+  return schedule.cron ? nextCronTime(schedule.cron, schedule.timezone || "UTC", now) : now + schedule.intervalMinutes * 60_000;
+}
+
 export class SchedulesPart {
+  async scheduleEvent(this: HubService, kind: "facts_drift" | "unreachable" | "alert", profileIds: string[]): Promise<void> {
+    const matches = this.store.data.schedules.filter((s) => s.enabled && s.eventTrigger?.kind === kind && profileIds.includes(s.profileId));
+    if (!matches.length || this.disposed || !(await this.config.getView()).enabled) return;
+    const now = Date.now();
+    for (const s of matches) {
+      if (!s.enabled || !this.store.data.schedules.includes(s) || this.scheduleInProgress(s)) continue;
+      if (s.lastEventAt !== undefined && now - s.lastEventAt < (s.eventTrigger?.cooldownMinutes ?? 30) * 60_000) continue;
+      s.lastEventAt = now;
+      await this.launchSchedule(s, true);
+      this.changed();
+    }
+  }
+
+  scheduleInProgress(this: HubService, schedule: AgentSchedule): boolean {
+    return this.scheduleStarts.has(schedule.id) || this.store.data.tasks.some((task) => active(task) && (task.scheduleId === schedule.id || task.id === schedule.lastTaskId));
+  }
+
   /**
    * A scheduled run has ended: its schedule says how (not just "Started"),
    * a failure is told to the person, and the terminal opened for it is closed.
@@ -29,9 +52,17 @@ export class SchedulesPart {
     }
     for (const opened of this.runTerminals.get(taskId) ?? []) this.closeOwnTerminal(opened);
     this.runTerminals.delete(taskId);
-    const schedule = this.store.data.schedules.find((s) => s.lastTaskId === taskId);
     const task = this.store.data.tasks.find((t) => t.id === taskId);
-    if (!schedule || !task || active(task)) return;
+    const schedule = this.store.data.schedules.find((s) => s.id === task?.scheduleId || s.lastTaskId === taskId);
+    if (!task || active(task)) return;
+    delete task.quietScheduleResult;
+    if (!schedule || (schedule.lastTaskId && schedule.lastTaskId !== task.id && !this.scheduleStarts.has(schedule.id))) return;
+    const answer = task.messages.filter((m) => m.role === "assistant").at(-1)?.text.trim();
+    if (schedule.quietSentinel && task.status === "completed" && !task.error && answer === "HEARTBEAT_OK" &&
+        !task.plan && task.changes.every((c) => c.status === "completed" && c.riskLevel === "safe") &&
+        (task.toolLog ?? []).every((rec) => rec.ok !== false && !rec.exitCode)) {
+      task.quietScheduleResult = true;
+    }
     const at = new Date().toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
     schedule.lastStatus =
       task.status === "completed"
@@ -41,14 +72,40 @@ export class SchedulesPart {
   }
 
   /** Starts one run of a scheduled job: when it falls due, and when somebody asks for it now. */
-  async launchSchedule(this: HubService, schedule: AgentSchedule): Promise<AgentTask | undefined> {
+  async launchSchedule(this: HubService, schedule: AgentSchedule, persistDueTime = false): Promise<AgentTask | undefined> {
+    if (this.scheduleInProgress(schedule)) return undefined;
+    this.scheduleStarts.add(schedule.id);
     let opened: string | undefined;
     try {
+      if (persistDueTime) await this.store.save();
+      if (!schedule.enabled || !this.store.data.schedules.includes(schedule)) return undefined;
+      let prompt = schedule.prompt;
+      if (schedule.runbookId) {
+        const book = this.storeDataExtra().runbooks?.find((b) => b.id === schedule.runbookId);
+        if (!book) throw new Error("The selected runbook no longer exists.");
+        if (book.targetSelector && Object.values(book.targetSelector).some((v) => Array.isArray(v) ? v.length > 0 : Boolean(v)) &&
+            !resolveTargetSelector(this.getKnownServers(), book.targetSelector).some((t) => t.id === schedule.profileId)) {
+          throw new Error("This server is outside the runbook's targets.");
+        }
+        if (book.inputs.some((f) => f.required && (f.defaultValue === undefined || f.defaultValue === ""))) {
+          throw new Error("The runbook needs an input value. Set a default before scheduling it.");
+        }
+        const inputs = new Map(book.inputs.map((f) => [f.name, f.defaultValue]));
+        const fill = (value: string): string => value.replace(/\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}/g, (_m, k: string) => String(inputs.get(k) ?? ""));
+        const steps = book.steps.map((step, index) => [`${index + 1}. ${step.title || step.kind}`, step.command && fill(step.command), step.prompt && fill(step.prompt), step.expected && fill(step.expected)].filter(Boolean).join("\n"));
+        prompt = [prompt, `Follow the runbook "${book.name}" on the selected server.`, ...steps].join("\n");
+      }
+      if (schedule.quietSentinel) prompt += "\nOnly answer HEARTBEAT_OK if the available evidence confirms normal operation. Explain any problem or missing evidence.";
+
       const id = await this.openUnattendedTerminal(schedule, `Schedule: ${schedule.title}`);
       opened = id;
+      if (!schedule.enabled || !this.store.data.schedules.includes(schedule)) {
+        this.closeOwnTerminal(id);
+        return undefined;
+      }
       const task = await this.start(
         {
-          prompt: schedule.prompt,
+          prompt,
           sessionId: id,
           mode: schedule.mode,
           maxCommands: schedule.maxCommands,
@@ -60,6 +117,7 @@ export class SchedulesPart {
       schedule.lastTaskId = task.id;
       schedule.lastStatus = "Running";
       this.scheduleSessions.set(task.id, id);
+      if (!active(task)) this.scheduledRunEnded(task.id);
       return task;
     } catch (e) {
       schedule.lastStatus = `Blocked: ${safeError(e)}`;
@@ -67,6 +125,8 @@ export class SchedulesPart {
       // A run that never started leaves no terminal behind.
       if (opened) this.closeOwnTerminal(opened);
       return undefined;
+    } finally {
+      this.scheduleStarts.delete(schedule.id);
     }
   }
   /** The requests this part answers. What a case leaves in `reply` goes back with the snapshot. */
@@ -84,6 +144,16 @@ export class SchedulesPart {
         )
           throw new Error("Invalid schedule");
         const id = s.id || crypto.randomUUID();
+        const previous = this.store.data.schedules.find((item) => item.id === id);
+        const now = Date.now();
+        const cron = s.cron?.trim();
+        if (s.cron !== undefined && !cron) throw new Error("Enter a cron expression.");
+        const timezone = cron ? s.timezone?.trim() || "UTC" : undefined;
+        const cronNext = cron ? nextCronTime(cron, timezone!, now) : undefined;
+        if (s.missedPolicy && !["skip", "run_once"].includes(s.missedPolicy)) throw new Error("Unknown missed run policy.");
+        if (s.eventTrigger && (!["facts_drift", "unreachable", "alert"].includes(s.eventTrigger.kind) ||
+            (s.eventTrigger.cooldownMinutes !== undefined && (!Number.isInteger(s.eventTrigger.cooldownMinutes) || s.eventTrigger.cooldownMinutes < 1 || s.eventTrigger.cooldownMinutes > 1440)))) throw new Error("Invalid event trigger or cooldown.");
+
         const schedule: AgentSchedule = {
           ...s,
           id,
@@ -94,14 +164,18 @@ export class SchedulesPart {
           intervalMinutes: integer(s.intervalMinutes, 1, 525600),
           maxCommands: integer(s.maxCommands, 1, 100),
           maxMinutes: integer(s.maxMinutes, 1, 120),
-          nextRunAt: Number.isFinite(s.nextRunAt)
-            ? s.nextRunAt
-            : Date.now() + 60_000,
+          cron,
+          timezone,
+          cronTimingVersion: cron ? 1 : undefined,
+          lastTaskId: previous?.lastTaskId,
+          lastStatus: previous?.lastStatus,
+          lastEventAt: previous?.lastEventAt,
+          nextRunAt: cronNext !== undefined
+            ? previous?.enabled && previous.cron === cron && previous.timezone === timezone && previous.cronTimingVersion === 1 ? previous.nextRunAt : cronNext
+            : Number.isFinite(s.nextRunAt) ? s.nextRunAt : now + integer(s.intervalMinutes, 1, 525600) * 60_000,
         };
-        this.store.data.schedules = this.store.data.schedules.filter(
-          (x) => x.id !== id,
-        );
-        this.store.data.schedules.push(schedule);
+        if (previous) this.store.data.schedules[this.store.data.schedules.indexOf(previous)] = schedule;
+        else this.store.data.schedules.push(schedule);
         break;
       }
       case "schedule-run-now": {
@@ -111,7 +185,7 @@ export class SchedulesPart {
         if (example) this.store.data.schedules.push((schedule = { ...example }));
         if (!schedule) throw new Error("That job is not here any more.");
         if (!schedule.enabled) throw new Error("This job is paused. Resume it first.");
-        if (schedule.lastTaskId && this.store.data.tasks.some((t) => t.id === schedule.lastTaskId && active(t))) throw new Error("Its last run is still going.");
+        if (this.scheduleInProgress(schedule)) throw new Error("Its last run is still going.");
         // Once, now: when it next runs by itself stays as it was.
         const task = await this.launchSchedule(schedule);
         reply = task ? { started: { taskId: task.id }, notes: [`Started "${clip(schedule.title, 120)}".`] } : { notes: [schedule.lastStatus ?? "It could not be started."] };

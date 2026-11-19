@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { AgentTask } from "../../src/shared/types/aiHub";
+import type { AgentSchedule, AgentTask } from "../../src/shared/types/aiHub";
 
 /**
  * Runs nobody sits at, as the third evaluation round found them: the
@@ -40,7 +40,7 @@ const say = (text: string): Response =>
   sse([
     { type: "message_start", message: { usage: { input_tokens: 700 } } },
     { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } },
-    { type: "message_delta", usage: { output_tokens: 300 } },
+    { type: "message_delta", usage: { output_tokens: 300 } }, { type: "message_stop" },
   ]);
 const callTool = (name: string, input: Record<string, unknown>): Response =>
   sse([
@@ -51,7 +51,7 @@ const callTool = (name: string, input: Record<string, unknown>): Response =>
 
 const SERVERS = [{ id: "srv-db01", name: "db-01", host: "db01.internal", port: 22, username: "ops" }];
 
-async function makeHub(host: Record<string, unknown> = {}) {
+async function makeHub(host: Record<string, unknown> = {}, savedSchedules?: AgentSchedule[]) {
   const { HubService } = await import("../../src/main/ai/hub/HubService");
   const { setDemoModeForTesting } = await import("../../src/main/demo/demoMode");
   setDemoModeForTesting(false);
@@ -74,6 +74,10 @@ async function makeHub(host: Record<string, unknown> = {}) {
     setDemoModeForTesting(undefined);
     await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
+  if (savedSchedules) {
+    hub.store.data.schedules = savedSchedules;
+    await hub.store.save();
+  }
   await hub.initialize();
   await hub.request({
     action: "configure",
@@ -265,5 +269,82 @@ describe("a run nobody sits at that needs an approval", () => {
     expect(after.result).toContain("Report: /var is full.");
     expect(after.result).toContain("Waited for approval and nobody answered, so this did not run:");
     expect(after.result).toContain("on db-01: sudo systemctl restart postgresql");
+  });
+});
+
+describe("schedule timing and events", () => {
+  it("resolves a daily clock time in Stockholm on both changes of the clocks", async () => {
+    const { nextCronTime } = await import("../../src/shared/scheduleTiming");
+    const next = (at: string) => new Date(nextCronTime("30 2 * * *", "Europe/Stockholm", Date.parse(at))).toISOString();
+    expect(next("2026-03-28T23:00:00Z")).toBe("2026-03-29T01:30:00.000Z");
+    expect(next("2026-10-24T23:00:00Z")).toBe("2026-10-25T00:30:00.000Z");
+    expect(next("2026-10-25T00:30:00Z")).toBe("2026-10-26T01:30:00.000Z");
+    expect(() => nextCronTime("75 23 * * *", "UTC", Date.now())).toThrow();
+    expect(() => nextCronTime("0 23 * * *", "unknown", Date.now())).toThrow();
+  });
+
+  it("uses server time for cron and limits event runs to the selected target and cooldown", async () => {
+    const hub = await makeHub();
+    const { nextCronTime } = await import("../../src/shared/scheduleTiming");
+    const now = Date.now();
+    const response = await hub.request({ action: "schedule-save", schedule: {
+      id: "s1", enabled: true, title: "Health", mode: "advice", shell: "bash", profileId: "srv-db01",
+      model: "test", provider: "openai-compatible", prompt: "Report changes", intervalMinutes: 60,
+      maxCommands: 10, maxMinutes: 30, nextRunAt: 0, cron: "30 6 * * *", timezone: "Europe/Stockholm",
+      eventTrigger: { kind: "facts_drift", cooldownMinutes: 20 },
+    } });
+    const job = response.schedules.find((s) => s.id === "s1")!;
+    expect(job.nextRunAt).toBe(nextCronTime(job.cron!, job.timezone!, now));
+    const launch = vi.spyOn(hub, "launchSchedule").mockResolvedValue(undefined);
+    await hub.scheduleEvent("facts_drift", ["other-server"]);
+    expect(launch).not.toHaveBeenCalled();
+    await hub.scheduleEvent("facts_drift", ["srv-db01"]);
+    await hub.scheduleEvent("facts_drift", ["srv-db01"]);
+    expect(launch).toHaveBeenCalledTimes(1);
+    expect(hub.store.data.schedules[0].nextRunAt).toBe(job.nextRunAt);
+    const { eventTrigger: _removed, ...withoutEvent } = job;
+    await hub.request({ action: "schedule-save", schedule: withoutEvent });
+    expect(hub.store.data.schedules[0].eventTrigger).toBeUndefined();
+  });
+
+  it("migrates saved cron jobs to the next future match and pauses invalid legacy settings", async () => {
+    const legacy: AgentSchedule = { enabled: true, title: "Health", id: "old", mode: "advice", shell: "bash",
+      profileId: "srv-db01", model: "test", provider: "anthropic", prompt: "Report health", intervalMinutes: 10,
+      maxCommands: 5, maxMinutes: 8, nextRunAt: 1, cron: "30 6 * * *", timezone: "Europe/Stockholm", missedPolicy: "run_once" };
+    const hub = await makeHub({}, [legacy, { ...legacy, id: "invalid", timezone: "invalid" }]);
+    const stored = JSON.parse(await fs.readFile(path.join(hub.directory, "hub.json"), "utf8")).schedules as AgentSchedule[];
+    expect(stored[0]).toMatchObject({ id: "old", enabled: true, cronTimingVersion: 1 });
+    expect(stored[0].nextRunAt).toBeGreaterThan(Date.now());
+    expect(stored[1]).toMatchObject({ id: "invalid", enabled: false, cronTimingVersion: 1 });
+    expect(stored[1].lastStatus).toContain("time zone");
+    expect(hub.store.data.tasks).toHaveLength(0);
+  });
+
+  it("keeps abnormal reports visible and applies the missed run policy once", async () => {
+    const hub = await makeHub();
+    const { isConversation } = await import("../../src/shared/aiHubInbox");
+    const now = Date.now();
+    const template = { enabled: true, title: "Health", mode: "advice" as const, shell: "bash" as const,
+      profileId: "srv-db01", model: "test", provider: "anthropic" as const, prompt: "Report health",
+      intervalMinutes: 10, maxCommands: 5, maxMinutes: 8, nextRunAt: now - 86400000 };
+    await hub.request({ action: "schedule-save", schedule: { ...template, id: "skip", quietSentinel: true } });
+    await hub.request({ action: "schedule-save", schedule: { ...template, id: "once", missedPolicy: "run_once" } });
+    (hub as unknown as { resume(): void }).resume();
+    expect(hub.store.data.schedules.find((s) => s.id === "skip")!.nextRunAt).toBeGreaterThan(now);
+    expect(hub.store.data.schedules.find((s) => s.id === "once")!.nextRunAt).toBeLessThanOrEqual(Date.now());
+
+    const task = { id: "run", scheduleId: "skip", changes: [], status: "completed",
+      messages: [{ role: "assistant", text: "HEARTBEAT_OK" }] } as unknown as AgentTask;
+    hub.store.data.tasks.push(task);
+    hub.scheduledRunEnded(task.id);
+    expect(isConversation(task)).toBe(false);
+    expect(hub.store.data.tasks).toContain(task);
+    task.messages[0].text = "Disk full. HEARTBEAT_OK";
+    hub.scheduledRunEnded(task.id);
+    expect(isConversation(task)).toBe(true);
+    task.messages[0].text = "HEARTBEAT_OK";
+    task.toolLog = [{ ok: false }] as AgentTask["toolLog"];
+    hub.scheduledRunEnded(task.id);
+    expect(isConversation(task)).toBe(true);
   });
 });

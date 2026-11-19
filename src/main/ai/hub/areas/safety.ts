@@ -53,6 +53,7 @@ export class SafetyPart {
     clusterPolicy?: ClusterSafetyPolicy;
     requesterId?: string;
     peerApproval?: boolean;
+    canApproveAlone?: boolean;
   } {
     const policy = this.safetyPolicy();
     const rawLabel = (targetLabel || task.target?.label || "").trim();
@@ -83,6 +84,7 @@ export class SafetyPart {
     const clusterPolicies = policy.clusterPolicies;
     let clusterPolicy: ClusterSafetyPolicy | undefined;
     const candidateClusterKeys = new Set<string>();
+    const tagKeys = new Set(aggregatedTags.map((tag) => `tag:${tag.trim().toLowerCase()}`));
     for (const s of matchedServers) {
       if (s.cluster?.trim()) candidateClusterKeys.add(s.cluster.trim().toLowerCase());
     }
@@ -91,7 +93,7 @@ export class SafetyPart {
     if (clusterPolicies && typeof clusterPolicies === "object") {
       const matchedPolicies: ClusterSafetyPolicy[] = [];
       for (const [k, v] of Object.entries(clusterPolicies)) {
-        if (v && candidateClusterKeys.has(k.trim().toLowerCase())) {
+        if (v && (candidateClusterKeys.has(k.trim().toLowerCase()) || tagKeys.has(k.trim().toLowerCase()))) {
           matchedPolicies.push(v);
         }
       }
@@ -123,7 +125,7 @@ export class SafetyPart {
       }
     }
     // A freeze the server's administrator set for everyone holds whatever this person's own rules say.
-    const teamUntil = this.teamFrozenUntil(candidateClusterKeys);
+    const teamUntil = this.teamFrozenUntil([...candidateClusterKeys, ...tagKeys]);
     if (teamUntil) clusterPolicy = { ...clusterPolicy, frozenUntil: Math.max(clusterPolicy?.frozenUntil ?? 0, teamUntil) };
     return {
       policy,
@@ -131,7 +133,8 @@ export class SafetyPart {
       ...(clusterPolicy ? { clusterPolicy } : {}),
       // A run acts for the person whose app this is: their approval is one, a second must be someone else's.
       requesterId: this.localApproverId(),
-      peerApproval: this.peerApprovalPossible(),
+      peerApproval: this.peerApprovalPossible(aggregatedTags),
+      canApproveAlone: Boolean(this.host.teamAdmin?.()),
     };
   }
 
@@ -141,8 +144,8 @@ export class SafetyPart {
   }
 
   /** Whether a second person can be asked for an approval: only on a team server that routes it to them. */
-  peerApprovalPossible(this: HubService): boolean {
-    return this.sharedServer() && Boolean(this.host.peerApproval?.());
+  peerApprovalPossible(this: HubService, tags?: string[]): boolean {
+    return this.sharedServer() && Boolean(this.host.peerApproval?.(tags));
   }
 
   /**
@@ -157,7 +160,7 @@ export class SafetyPart {
     peer: { id: string; name: string },
     note?: string,
   ): Promise<boolean> {
-    if (!this.peerApprovalPossible())
+    if (!this.peerApprovalPossible([]))
       throw new Error("Approvals are not shared between people on this server.");
     const actorId = `user:${requiredText(peer.id)}`;
     if (actorId === this.localApproverId())
@@ -194,8 +197,20 @@ export class SafetyPart {
   planProposed(this: HubService, task: AgentTask): void {
     const plan = task.plan;
     if (!plan || plan.status !== "proposed") return;
+    const sessions = this.terminals.list().filter((s) => s.state !== "disconnected");
+    for (const step of plan.steps) {
+      const name = step.target?.trim().toLowerCase();
+      const matches = sessions.filter((s) => name
+        ? s.id.toLowerCase() === name || s.profileId?.toLowerCase() === name || s.label.toLowerCase() === name
+        : s.id === task.target?.sessionId && s.generation === task.target.generation);
+      if (matches.length === 1) {
+        const session = matches[0];
+        step.approvedTarget = JSON.stringify([session.id, session.generation]);
+        step.target ??= session.label;
+      }
+    }
     const needs = this.planApprovalStatus(task, plan, plan.approvals ?? []).status.requiredApprovals;
-    if (needs > 1 && this.peerApprovalPossible()) plan.requiredApprovals = needs;
+    if (needs > 1) plan.requiredApprovals = needs;
     else delete plan.requiredApprovals;
   }
 
@@ -319,7 +334,7 @@ export class SafetyPart {
    * counts as theirs, never as a second one of this person's.
    */
   async approvePlanAsPeer(this: HubService, taskId: string, allowed: boolean, peer: { id: string; name: string }, note?: string): Promise<void> {
-    if (!this.peerApprovalPossible()) throw new Error("Approvals are not shared between people on this server.");
+    if (!this.peerApprovalPossible([])) throw new Error("Approvals are not shared between people on this server.");
     const actorId = `user:${requiredText(peer.id)}`;
     if (actorId === this.localApproverId()) throw new Error("The person a plan is made for answers it in their own app.");
     const task = this.store.data.tasks.find((t) => t.id === taskId);
@@ -352,7 +367,7 @@ export class SafetyPart {
     /** Set when what waits is a plan, not one change: its steps, for the person deciding. `changeId` is then the plan's id. */
     plan?: { steps: Array<{ action: string; command?: string; target?: string; risk: string }> };
   }> {
-    if (!this.peerApprovalPossible()) return [];
+    if (!this.peerApprovalPossible([])) return [];
     const plans = this.store.data.tasks.flatMap((task) => {
       const plan = task.plan;
       // Decided when the agent has stopped, as by the person whose run it is. A test run's plan and a
@@ -417,7 +432,7 @@ export class SafetyPart {
     // Where only one person can approve, a second approval can never come: the rule is not in force
     // (and cannot be switched on), rather than leaving every production change to time out.
     // The rule the server's administrator set for everyone counts as this person's own being on.
-    const peer = Boolean(stored.requirePeerApprovalOnProd || this.teamRules()?.requirePeerApprovalOnProd) && this.peerApprovalPossible();
+    const peer = Boolean(this.teamRules()?.requirePeerApprovalOnProd || (stored.requirePeerApprovalOnProd && this.peerApprovalPossible()));
     const own = peer === Boolean(stored.requirePeerApprovalOnProd) ? stored : { ...stored, requirePeerApprovalOnProd: peer };
     if (!this.sharedServer() || this.host.teamAdmin?.()) return own;
     return { ...own, requireApprovalOnProdTags: true, blockDestructiveWithoutConfirm: true };
@@ -468,7 +483,7 @@ export class SafetyPart {
           request.approved === true,
           approvalNote,
           // The account, not the name it shows: two people may share a name, one person may rename.
-          { actor, actorId: this.localApproverId() },
+          { actor, actorId: this.localApproverId(), adminException: request.adminException === true && this.host.teamAdmin?.() === true },
         );
         // Who answered is written down once the broker resolves or records the final decision.
         const change = this.store.data.tasks
@@ -663,7 +678,7 @@ export class SafetyPart {
           }
           nextClusterPolicies = sanitized;
         }
-        this.store.data.safetyPolicy = {
+        const next: SafetyPolicyConfig = {
           autoApproveSafeReadOnly:
             (asked.autoApproveSafeReadOnly as boolean | undefined) ?? current.autoApproveSafeReadOnly,
           requireApprovalOnProdTags:
@@ -680,7 +695,6 @@ export class SafetyPart {
           ...(nextPrefixes ? { commandAllowPrefixes: nextPrefixes } : {}),
           ...(nextClusterPolicies ? { clusterPolicies: nextClusterPolicies } : {}),
         };
-        const next = this.store.data.safetyPolicy;
         const moved = (Object.keys(BOOLEAN_POLICY_NAMES) as (keyof typeof BOOLEAN_POLICY_NAMES)[])
           .filter((k) => Boolean(next[k]) !== Boolean(current[k]))
           .map((k) => `${BOOLEAN_POLICY_NAMES[k]}: ${current[k] ? "on" : "off"} → ${next[k] ? "on" : "off"}`);
@@ -697,6 +711,10 @@ export class SafetyPart {
           for (const name of [...new Set([...Object.keys(was), ...Object.keys(now)])].sort())
             if (JSON.stringify(was[name]) !== JSON.stringify(now[name])) moved.push(`rules for "${clip(name, 60)}": ${say(was[name])} → ${say(now[name])}`);
         }
+        if (moved.length && !isDemoMode()) await this.audit().append({
+          kind: "setting", actor: await this.resolveActorName(), target: "Command safety", what: moved.join("; "), outcome: "intent",
+        });
+        this.store.data.safetyPolicy = next;
         if (moved.length) {
           // Who changed the rules is the team's business as well as the log's.
           const event: WorkspaceActivityEvent = { id: crypto.randomUUID(), at: Date.now(), actor: await this.resolveActorName(), targetLabel: "Command safety", kind: "note", summary: clip(`Changed the safety rules: ${moved.join("; ")}`, 400) };
@@ -751,12 +769,13 @@ export class SafetyPart {
           moved.push(`change freeze on ${freezeName(key)} until ${new Date(freezes[key].until).toISOString()}${why ? ` (${why})` : ""}`);
         }
         if (!moved.length) break;
+        await this.audit().append({ kind: "setting", actor, target: "everyone on this server", what: moved.join("; "), outcome: "intent" });
         await kept.write({
           ...(peer ? { requirePeerApprovalOnProd: true } : {}),
           ...(Object.keys(freezes).length ? { freezes } : {}),
           changedBy: actor,
           changedAt: now,
-        });
+        }, was);
         // Who changed the rules for everyone is the team's business as well as the log's.
         const event: WorkspaceActivityEvent = { id: crypto.randomUUID(), at: now, actor, targetLabel: "Rules for everyone", kind: "note", summary: clip(`Changed the rules for everyone on this server: ${moved.join("; ")}`, 400) };
         this.appendActivityEvent(event);

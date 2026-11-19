@@ -54,6 +54,8 @@ export const PLAN_TOOL = {
             command: { type: "string", description: "The exact command, when the step is one. An approved plan's commands run without asking again." },
             risk: { type: "string", enum: ["low", "medium", "high"] },
             check: { type: "string", description: "The command and expected output that show the step worked. The command must exit with code 0 when the step worked: a check whose last command exits non-zero on success (a `diff` that finds the change, a `grep` that should match nothing) counts as failed and the step is rolled back." },
+            checkExpected: { type: "string", description: "For a checked change, supply the exact expected text and give its exact command in check." },
+            observeSeconds: { type: "number", description: "Seconds to watch the check after the change, up to 180." },
             rollback: { type: "string", description: "How to undo the step. Required for medium and high risk." },
           },
           required: ["action", "risk", "check"],
@@ -152,6 +154,10 @@ export function parsePlan(
     // A command that deletes or overwrites is never "low risk", whatever the plan calls it.
     if (command && risk === "low" && analyzeCommandSafety(command).riskLevel === "destructive")
       return { error: `Step ${n}: \`${command.slice(0, 80)}\` is destructive; it cannot be low risk, and it needs a rollback` };
+    const shownExpected = whole(s.checkExpected, n, "expected check output");
+    if ("error" in shownExpected) return shownExpected;
+    if (s.observeSeconds !== undefined && (typeof s.observeSeconds !== "number" || !Number.isInteger(s.observeSeconds) || s.observeSeconds < 0 || s.observeSeconds > 180))
+      return { error: "The observation time must be a whole number from 0 to 180." };
     const target = text(s.target, 200);
     steps.push({
       action,
@@ -160,6 +166,8 @@ export function parsePlan(
       risk,
       check,
       ...(rollback ? { rollback } : {}),
+      ...(shownExpected.text ? { checkExpected: shownExpected.text } : {}),
+      ...(typeof s.observeSeconds === "number" ? { observeSeconds: s.observeSeconds } : {}),
     });
   }
   const assumptions = Array.isArray(p.assumptions)
@@ -364,15 +372,24 @@ export function planCoversCommand(
   commandHash: string | undefined,
   riskLevel: string | undefined,
   now = Date.now(),
+  action?: { targetKey?: string; check?: { command?: string; expected?: string }; rollback?: string; observeSeconds?: number; extras?: boolean },
+  consume = true,
 ): boolean {
+  if (!action?.targetKey || action.extras) return false;
   if (task.plan?.status !== "approved" || !commandHash) return false;
   // The plan, or the person approving it, said that every change is asked about.
   if (task.plan.askEach) return false;
   if (riskLevel === "destructive") return false;
   // Matched on the exact command, never on how it looks once its secrets are masked.
-  const step = task.plan.steps.find((s) => !s.ranAt && s.commandHash === commandHash);
+  const step = task.plan.steps.find((s) =>
+    !s.ranAt && s.approvedTarget === action.targetKey && s.commandHash === commandHash &&
+    (action.check
+      ? Boolean(s.checkExpected) && s.check === action.check.command?.trim() && s.checkExpected === action.check.expected?.trim() &&
+        s.rollback === action.rollback?.trim() && (s.observeSeconds ?? 0) === (action.observeSeconds ?? 0)
+      : !s.checkExpected),
+  );
   if (!step) return false;
-  step.ranAt = now;
+  if (consume) step.ranAt = now;
   return true;
 }
 

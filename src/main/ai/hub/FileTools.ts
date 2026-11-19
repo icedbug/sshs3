@@ -126,6 +126,7 @@ export class FileTools {
     task: AgentTask,
     request: ToolRequest,
     authorize: (change: AgentChange) => Promise<void>,
+    recheck?: (change: AgentChange) => void,
   ): Promise<unknown> {
     if (task.mode === "advice")
       throw new Error(
@@ -288,6 +289,7 @@ export class FileTools {
       id: crypto.randomUUID(),
       kind: "file",
       target: session.label,
+      targetKey: JSON.stringify([session.id, session.generation]),
       // The path is always kept, whatever the agent says the change is.
       description: clip(
         request.description ? `${file} — ${request.description}` : file,
@@ -338,6 +340,7 @@ export class FileTools {
     task.verification = "not-verified";
     this.changed();
     try {
+      recheck?.(change);
       await this.bridge.fileEditorService.saveFile(
         this.bridge.storageRegistry,
         providerId,
@@ -396,7 +399,7 @@ export class FileTools {
    */
   async restoreCheckpoint(
     change: AgentChange,
-    options?: { task?: AgentTask; path?: string; force?: boolean },
+    options?: { task?: AgentTask; path?: string; force?: boolean; recheck?: () => void },
   ): Promise<{
     restored: boolean;
     alreadyAtCheckpoint?: boolean;
@@ -417,12 +420,9 @@ export class FileTools {
 
     let providerId = checkpoint?.providerId;
     if (!providerId) {
-      const targetRef = options?.task?.target;
-      const session = targetRef
-        ? this.terminals.get(targetRef.sessionId)
-        : this.terminals
-            .list()
-            .find((s) => s.state !== "disconnected" && s.label === change.target);
+      const session = this.terminals.list().find((s) =>
+        s.state !== "disconnected" && JSON.stringify([s.id, s.generation]) === change.targetKey,
+      );
       if (session) {
         providerId = await this.ensureProvider(session);
       }
@@ -461,6 +461,7 @@ export class FileTools {
       }
     }
 
+    options?.recheck?.();
     await this.bridge.fileEditorService.saveFile(
       this.bridge.storageRegistry,
       providerId,
@@ -478,6 +479,7 @@ export class FileTools {
       ran: true,
       exitCode: 0,
       restored: true,
+      comparedWithBaseline: true,
     };
     this.changed();
     return {

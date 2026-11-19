@@ -10,7 +10,9 @@
  * run in the app goes through. Only the model's address is given from outside.
  */
 import path from "node:path";
+import type { AiApiProtocol } from "../../shared/types/ai";
 import type { AgentChange, AgentTask, RunStatus, SimulationView } from "../../shared/types/aiHub";
+import { resolveModelPricing } from "../ai/hub/DirectAgentRuntime";
 import { FileTools } from "../ai/hub/FileTools";
 import { HubService, type HubHost } from "../ai/hub/HubService";
 import { getDemoServers } from "../ai/hub/demoWorkspace";
@@ -40,8 +42,9 @@ export type AgentRunEvent =
 
 export interface AgentRunOptions {
   scenarioId: string;
-  /** The model's address, OpenAI-compatible: the part before `/chat/completions`. */
+  /** The model service base address, including its API version. */
   baseUrl: string;
+  apiProtocol?: AiApiProtocol;
   model: string;
   apiKey?: string;
   /** Who answers when the agent asks: everything is let through, nothing is, or the caller decides. */
@@ -75,7 +78,13 @@ export interface AgentRunResult {
   commands: number;
   approvals: { asked: number; allowed: number };
   minutes: number;
-  usage?: { inputTokens: number; outputTokens: number; costUsd?: number };
+  /** From starting the ticket until its run ends, including approvals and follow-ups. */
+  elapsedMs: number;
+  /** Time to the first nonblank text delivered to the ticket's chat. */
+  firstTextMs?: number;
+  /** All model HTTP calls made in this isolated scenario, including retry attempts. */
+  modelRequests: number;
+  usage?: { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheCreationTokens?: number; costUsd?: number };
   score: NonNullable<SimulationView["running"]>;
   /** Set when the person's follow-up was sent: how the checks stood after the agent's first report. */
   beforeFollowUp?: { passed: number; total: number; report: string };
@@ -91,6 +100,8 @@ export async function runAgentOnScenario(options: AgentRunOptions): Promise<Agen
   if (!isDemoMode()) throw new Error("An agent works a scenario in the demo lab only. Start with SSHS3_DEMO=1.");
   const maxCommands = options.maxCommands ?? 40;
   const maxMinutes = options.maxMinutes ?? 15;
+  if (!Number.isSafeInteger(maxCommands) || maxCommands < 1 || !Number.isFinite(maxMinutes) || maxMinutes <= 0 || maxMinutes * 60_000 > 2_147_483_647)
+    throw new Error("Set a positive command limit and a time limit of less than 25 days.");
   const approve = options.approve ?? "all";
   const events: AgentRunEvent[] = [];
   const say = (event: AgentRunEvent): void => {
@@ -105,7 +116,35 @@ export async function runAgentOnScenario(options: AgentRunOptions): Promise<Agen
   // The servers' files, through the app's own file tools: only the connection is stood in for, since the
   // lab's terminals are not the app's SSH sessions. The storage registry gives a simulated server its files.
   // (They are made below, once the hub they read terminals from exists.)
+  let spent = 0;
+  let stoppedBy: AgentRunResult["stoppedBy"];
+  let deadline: ReturnType<typeof setTimeout> | undefined;
+  let signalStop!: () => void;
+  const stopped = new Promise<void>((resolve) => { signalStop = resolve; });
+  const stopAtLimit = (task: AgentTask, reason: "commands" | "minutes"): void => {
+    if (stoppedBy) return;
+    stoppedBy = reason;
+    const why = reason === "commands" ? "The scenario reached its action limit." : "The scenario reached its time limit.";
+    say({ kind: "stopped", why });
+    signalStop();
+    void hub.stop(task, why).catch(() => undefined);
+  };
+  let modelRequests = 0;
+  let ticketStarted = 0;
+  const firstText = new Map<string, number>();
   const host: HubHost = {
+    onModelRequest: () => { modelRequests++; },
+    delta: (event) => {
+      if (ticketStarted && event.type === "message.delta" && event.delta?.trim() && !firstText.has(event.taskId)) {
+        firstText.set(event.taskId, Math.round(performance.now() - ticketStarted));
+      }
+    },
+    beforeAction(task) {
+      if (Date.now() >= started + maxMinutes * 60_000) stopAtLimit(task, "minutes");
+      if (spent >= maxCommands) stopAtLimit(task, "commands");
+      if (stoppedBy) throw new Error("The scenario reached its limit.");
+      spent++;
+    },
     changed: () => {},
     inventoryTargets: async () => [],
     backgroundChanged: async () => {},
@@ -164,17 +203,19 @@ export async function runAgentOnScenario(options: AgentRunOptions): Promise<Agen
     await hub.initialize();
     await hub.request({
       action: "configure",
-      config: { enabled: true, provider: "openai-compatible", model: options.model, baseUrl: options.baseUrl, ...(options.apiKey ? { apiKey: options.apiKey } : {}) },
+      config: { enabled: true, provider: "openai-compatible", model: options.model, baseUrl: options.baseUrl, apiProtocol: options.apiProtocol, ...(options.apiKey ? { apiKey: options.apiKey } : {}) },
       // Nothing else in the lab is to spend on this model while the run lasts.
       preferences: { workforceAutopilot: false, proposeMemories: false, autoSaveMemories: false },
     });
     const sim = (await hub.request({ action: "sim-start", scenarioId: options.scenarioId })).simulation?.running;
     if (!sim?.ticketId) throw new Error("The scenario did not make a ticket to start from.");
     const others = new Set(hub.store.data.tasks.map((t) => t.id));
+    ticketStarted = performance.now();
     const reply = await hub.request({ action: "ticket-start", id: sim.ticketId });
     const taskId = reply.reply?.started?.taskId;
     const task = hub.store.data.tasks.find((t) => t.id === taskId);
     if (!task) throw new Error("The ticket's run did not start.");
+    deadline = setTimeout(() => stopAtLimit(task, "minutes"), Math.max(0, started + maxMinutes * 60_000 - Date.now()));
     others.add(task.id);
     say({ kind: "started", ticket: sim.ticketId, agent: task.agentName ?? "", mode: task.mode, target: task.target?.label ?? "(no terminal)", model: task.model ?? options.model });
 
@@ -182,7 +223,6 @@ export async function runAgentOnScenario(options: AgentRunOptions): Promise<Agen
     const asked = new Set<string>();
     let allowedCount = 0;
     let plansAnswered = 0;
-    let stoppedBy: AgentRunResult["stoppedBy"];
     const commandsRun = (t: AgentTask): number => t.changes.filter((c) => c.kind === "command" && DECIDED.has(c.status) && c.status !== "denied").length;
     const tell = (t: AgentTask): void => {
       for (const change of t.changes) {
@@ -191,12 +231,13 @@ export async function runAgentOnScenario(options: AgentRunOptions): Promise<Agen
         say({ kind: "command", ref: change.ref, target: change.target, command: change.command ?? change.description, status: change.status, exitCode: change.exitCode, output: change.output });
       }
     };
-    const decide = async (ask: ApprovalAsk): Promise<boolean> => (approve === "all" ? true : approve === "none" ? false : Boolean(await approve(ask)));
+    const decide = async (ask: ApprovalAsk): Promise<boolean> => (approve === "all" ? true : approve === "none" ? false : Boolean(await Promise.race([approve(ask), stopped.then(() => false)])));
 
     let beforeFollowUp: AgentRunResult["beforeFollowUp"];
     const lastReport = (): string => [...task.messages].reverse().find((m) => m.role === "assistant" && m.text.trim())?.text ?? "";
     for (;;) {
       tell(task);
+      if (stoppedBy) break;
       if (ENDED.has(task.status)) {
         // A plan the agent proposed waits for the same person as a single change would. As in the app, it is
         // answered when the agent has stopped: a yes sends the agent on, a no sends the plan back.
@@ -204,6 +245,7 @@ export async function runAgentOnScenario(options: AgentRunOptions): Promise<Agen
           plansAnswered++;
           const summary = [task.plan.goal, ...task.plan.steps.map((s) => s.command ?? s.action)].join("; ");
           const allowed = await decide({ command: summary, target: task.target?.label ?? "", description: "The agent's plan" });
+          if (stoppedBy) break;
           let error: string | undefined;
           await hub
             .request({ action: "plan-decide", taskId: task.id, approved: allowed, ...(allowed ? {} : { note: "Not approved." }) })
@@ -229,21 +271,15 @@ export async function runAgentOnScenario(options: AgentRunOptions): Promise<Agen
         asked.add(change.id);
         const ask: ApprovalAsk = { command: change.command ?? change.description, target: change.target, description: change.description, risk: change.riskLevel, reason: change.riskReason };
         const allowed = await decide(ask);
+        if (stoppedBy) break;
         if (allowed) allowedCount++;
         say({ kind: "approval", ask, allowed });
         await hub.request({ action: "approve", taskId: task.id, changeId: change.id, approved: allowed });
       }
-      if (!stoppedBy && commandsRun(task) >= maxCommands) stoppedBy = "commands";
-      if (!stoppedBy && Date.now() - started >= maxMinutes * 60_000) stoppedBy = "minutes";
-      if (stoppedBy && !ENDED.has(task.status)) {
-        say({ kind: "stopped", why: stoppedBy === "commands" ? `It had run ${maxCommands} commands, which is this run's limit.` : `It had worked for ${maxMinutes} minutes, which is this run's limit.` });
-        await hub.request({ action: "stop", taskId: task.id }).catch(() => undefined);
-        // The stop is taken at the agent's next step: it is waited for, not assumed.
-        for (let i = 0; i < 200 && !ENDED.has(task.status); i++) await sleep(50);
-        break;
-      }
-      await sleep(options.pollMs ?? 150);
+      if (commandsRun(task) >= maxCommands && !ENDED.has(task.status)) stopAtLimit(task, "commands");
+      await Promise.race([sleep(options.pollMs ?? 150), stopped]);
     }
+    const elapsedMs = Math.round(performance.now() - ticketStarted);
     tell(task);
     say({ kind: "ended", status: task.status, error: task.error });
     // The ticket takes the report once the run has let go of it: the checks read it from there.
@@ -263,12 +299,23 @@ export async function runAgentOnScenario(options: AgentRunOptions): Promise<Agen
       commands: commandsRun(task),
       approvals: { asked: asked.size, allowed: allowedCount },
       minutes: Math.round(((Date.now() - started) / 60_000) * 10) / 10,
-      usage: task.usage ? { inputTokens: task.usage.inputTokens, outputTokens: task.usage.outputTokens, ...(task.usage.costUsd !== undefined ? { costUsd: task.usage.costUsd } : {}) } : undefined,
+      elapsedMs,
+      firstTextMs: firstText.get(task.id),
+      modelRequests,
+      usage: task.usage ? {
+        inputTokens: task.usage.inputTokens + (task.usage.cacheReadTokens ?? 0) + (task.usage.cacheCreationTokens ?? 0),
+        outputTokens: task.usage.outputTokens,
+        cacheReadTokens: task.usage.cacheReadTokens ?? 0,
+        cacheCreationTokens: task.usage.cacheCreationTokens ?? 0,
+        ...(resolveModelPricing(task.model ?? options.model) && task.usage.costUsd !== undefined &&
+          (task.usage.costUsd > 0 || modelRequests === 0) ? { costUsd: task.usage.costUsd } : {}),
+      } : undefined,
       score,
       ...(beforeFollowUp ? { beforeFollowUp } : {}),
       otherRuns: hub.store.data.tasks.filter((t) => !others.has(t.id)).length,
     };
   } finally {
+    clearTimeout(deadline);
     await hub.dispose().catch(() => undefined);
     for (const pty of ptys.values()) pty.kill();
   }

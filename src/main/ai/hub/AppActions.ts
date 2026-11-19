@@ -589,10 +589,12 @@ export async function handleAppAction(
 
     if (request.action.startsWith("mcp__")) {
       // The servers this run was given, by the agent it runs as. A name outside that does not resolve.
-      const runAgent = task.agentId ? hub.getAgentsList().find((a) => a.id === task.agentId) : undefined;
-      const resolved = hub.mcp.resolveQualifiedCall(hub.getMcpServersList(), request.action, {
-        allowedServerIds: runAgent?.mcpServerIds,
-      });
+      const resolveForAgent = () => {
+        const agent = task.agentId ? hub.getAgentsList().find((a) => a.id === task.agentId) : undefined;
+        if (task.agentId && !agent) return undefined;
+        return hub.mcp.resolveQualifiedCall(hub.getMcpServersList(), request.action, { allowedServerIds: agent?.mcpServerIds });
+      };
+      const resolved = resolveForAgent();
       if (!resolved) {
         throw new Error(
           `No MCP tool called ${request.action} is available to this run. It may belong to a server that is switched off, to one this agent was not given, or it may not be among the tools that server listed.`,
@@ -618,16 +620,15 @@ export async function handleAppAction(
       }
       // Respect per-tool toolPolicies (allow | ask | deny) and trustReadOnlyHint instead of blindly
       // trusting server-supplied annotations.readOnlyHint.
-      const trustReadOnly = resolved.server.trustReadOnlyHint !== false;
-      const treatAsReadOnly =
-        toolPolicy === "allow" ||
-        (toolPolicy !== "ask" && Boolean(resolved.tool.readOnly) && trustReadOnly);
+      const trustReadOnly = resolved.server.trustReadOnlyHint === true;
+      const treatAsReadOnly = toolPolicy !== "ask" && resolved.tool.readOnly === true && trustReadOnly;
       if (!treatAsReadOnly) {
         if (authorize) {
+          const approvedConfig = JSON.stringify(resolved.server);
           const change: AgentChange = {
             id: crypto.randomUUID(),
             kind: "command",
-            ...(toolPolicy === "ask" && task.mode !== "advice" ? { guard: true } : {}),
+            ...(toolPolicy !== "allow" ? { forceApproval: true } : {}),
             target: `MCP · ${resolved.server.name}`,
             description: clip(`Call ${resolved.toolName} on the MCP server “${resolved.server.name}”`, 300),
             command: clip(`${resolved.toolName} ${JSON.stringify(p)}`, 4000),
@@ -643,20 +644,32 @@ export async function handleAppAction(
           };
           task.changes.push(change);
           await authorize(change);
+          const current = resolveForAgent();
+          if (!current || JSON.stringify(current.server) !== approvedConfig) {
+            change.status = "denied";
+            change.output = "The MCP server or the agent’s access changed. Review the tool again.";
+            hub.changed();
+            throw new Error(change.output);
+          }
           change.status = "running";
           hub.changed();
-          const res = await hub.mcp.callTool(resolved.server, resolved.toolName, p);
-          change.status = res.ok ? "completed" : "failed";
-          change.output = clip(res.ok ? JSON.stringify(res.output ?? "") : (res.error ?? ""), 4000);
-          hub.changed();
-          if (!res.ok) throw new Error(res.error || "The MCP tool did not do its work.");
-          return { ok: true, mcpServer: resolved.server.name, tool: resolved.toolName, output: res.output };
+          try {
+            const res = await hub.mcp.callTool(resolved.server, resolved.toolName, p);
+            change.status = res.ok ? "completed" : "failed";
+            change.output = clip(res.ok ? JSON.stringify(res.output ?? "") : (res.error ?? ""), 4000);
+            if (!res.ok) throw new Error(res.error || "The MCP tool did not do its work.");
+            return { ok: true, mcpServer: resolved.server.name, tool: resolved.toolName, output: res.output };
+          } catch (error) {
+            if (change.status === "running") {
+              change.status = "uncertain";
+              change.output = safeError(error);
+            }
+            throw error;
+          } finally {
+            hub.changed();
+          }
         }
-        if (toolPolicy === "ask") {
-          throw new Error(
-            `MCP tool "${resolved.toolName}" on server "${resolved.server.name}" requires approval.`,
-          );
-        }
+        throw new Error(`MCP tool "${resolved.toolName}" requires a run with an approval check.`);
       }
       const res = await hub.mcp.callTool(resolved.server, resolved.toolName, p);
       if (!res.ok) {
@@ -1975,31 +1988,15 @@ export async function handleAppAction(
               .filter(Boolean)
           : [];
 
-        const matchedServers: WorkspaceServerSummary[] = [];
-        if (clusterName) {
-          const clLower = clusterName.toLowerCase();
-          for (const srv of allServers) {
-            if (
-              srv.cluster &&
-              (srv.cluster.toLowerCase() === clLower ||
-                srv.cluster.toLowerCase().includes(clLower))
-            ) {
-              matchedServers.push(srv);
-            }
-          }
-        }
+        const matchedServers: WorkspaceServerSummary[] = clusterName
+          ? allServers.filter((server) => server.cluster?.toLowerCase() === clusterName.toLowerCase())
+          : [];
+        if (clusterName && !matchedServers.length) throw new Error("Choose the exact name of a known cluster.");
         for (const item of rawList) {
           const q = item.replace(/^@/, "").toLowerCase();
-          const found = allServers.find(
-            (s) =>
-              s.id.toLowerCase() === q ||
-              s.name.toLowerCase() === q ||
-              s.host.toLowerCase() === q ||
-              s.name.toLowerCase().includes(q),
-          );
-          if (found && !matchedServers.some((m) => m.id === found.id)) {
-            matchedServers.push(found);
-          }
+          const matches = allServers.filter((s) => s.id.toLowerCase() === q || s.name.toLowerCase() === q || s.host.toLowerCase() === q);
+          if (matches.length !== 1) throw new Error("Choose each server by its exact and unique name or ID.");
+          if (!matchedServers.some((m) => m.id === matches[0].id)) matchedServers.push(matches[0]);
         }
         if (matchedServers.length === 0) {
           throw new Error(
@@ -2080,6 +2077,7 @@ export async function handleAppAction(
             try {
               const ready = await hub.terminals.ensureReady(openSession.id);
               hub.terminals.claim(ready.id, ready.generation, task.id);
+              hub.recheckChange?.(task, change);
               const res = await hub.terminals.execute(
                 ready.id,
                 ready.generation,
@@ -2109,6 +2107,7 @@ export async function handleAppAction(
           const simNode = isDemoTarget(srv.id) ? simWorld().host(srv.name, srv.host, srv.id) : undefined;
           if (simNode) {
             // A server of a running scenario: the command runs on its state, as in its terminal.
+            hub.recheckChange?.(task, change);
             const ran = simWorld().shell(simNode).run(command);
             return { node: srv.name, host: srv.host, nodeRole: srv.nodeRole, exitCode: ran.code, output: ran.output, source: `demo-cluster:${srv.id}` };
           }
@@ -2145,6 +2144,7 @@ export async function handleAppAction(
             try {
               const ready = await hub.terminals.ensureReady(sessionId);
               hub.terminals.claim(ready.id, ready.generation, task.id);
+              hub.recheckChange?.(task, change);
               const res = await hub.terminals.execute(
                 ready.id,
                 ready.generation,
@@ -2413,7 +2413,8 @@ export async function handleAppAction(
         const result = await hub.host.file(
           task,
           forwardedRequest,
-          authorize ?? (async () => {}),
+          authorize ?? (async () => { throw new Error("A file write needs an approval check."); }),
+          (change) => hub.recheckChange?.(task, change),
         );
         if (task.changes.length > priorChangeCount) {
           const newest = task.changes[task.changes.length - 1];

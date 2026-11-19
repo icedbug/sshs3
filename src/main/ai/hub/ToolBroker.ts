@@ -1,3 +1,4 @@
+import { lowerMode } from "./AppGuard";
 import { planApprovalsCover, planCoversCommand } from "./PlanMode";
 import crypto from "node:crypto";
 import http from "node:http";
@@ -16,7 +17,7 @@ import {
   matchesCommandAllowPrefix,
   shouldRequireCommandApproval,
 } from "./CommandSafetyService";
-import { boundedContext, exactHash, forApproval, maskStrings, safeError, clip } from "./privacy";
+import { boundedContext, exactHash, observationHash, forApproval, maskStrings, safeError, clip } from "./privacy";
 import { scriptedDemoNote } from "../../sim/scripted";
 
 /** A person's answer, and how it came about when nobody answered. */
@@ -349,12 +350,14 @@ export const nextRef = (task: AgentTask): string =>
   `c${task.changes.reduce((max, c) => Math.max(max, Number(/^c(\d+)$/.exec(c.ref ?? "")?.[1] ?? 0)), 0) + 1}`;
 
 export interface ToolDependencies {
+  beforeAction?(task: AgentTask): void;
   context(task: AgentTask, query?: string, sessionId?: string): Promise<unknown>;
   memory(task: AgentTask, request: ToolRequest): Promise<unknown>;
   file(
     task: AgentTask,
     request: ToolRequest,
     authorize: (change: AgentChange) => Promise<void>,
+    recheck?: (change: AgentChange) => void,
   ): Promise<unknown>;
   appAction?(
     task: AgentTask,
@@ -378,7 +381,10 @@ export interface ToolDependencies {
      * instead of waiting for an approval nobody can give.
      */
     peerApproval?: boolean;
+    canApproveAlone?: boolean;
   };
+  peerStillEligible?(actorId: string, tags: string[]): boolean;
+  recordIntent?(task: AgentTask, change: AgentChange, rollback: boolean): Promise<void>;
   /** How long a person is given to approve, in milliseconds. Ten minutes unless set. */
   approvalWaitMs?(): number;
   /** Non-interactive fail-fast mode predicate for headless / scripted runs. */
@@ -697,6 +703,7 @@ export class ToolBroker {
     grant: { commands: number; refused?: number },
     task: AgentTask,
   ): void {
+    this.deps.beforeAction?.(task);
     // Actions are counted, for the person to see; there is no limit on how many a run may take
     // (maxCommands 0). A limit is held only where one is set.
     if (!(task.maxCommands > 0) || grant.commands < task.maxCommands) {
@@ -720,7 +727,7 @@ export class ToolBroker {
     changeId: string,
     allowed: boolean,
     note?: string,
-    approver?: { actor?: string; actorId?: string; peer?: boolean },
+    approver?: { actor?: string; actorId?: string; peer?: boolean; adminException?: boolean },
   ): boolean {
     const approval = this.approvals.get(changeId);
     if (!approval || approval.taskId !== taskId)
@@ -755,6 +762,12 @@ export class ToolBroker {
             { code: "duplicate_approver" },
           );
         }
+        if (change.adminExceptionAvailable && approval.requiredApprovals === 2) {
+          const ctx = this.safetyFor(approval.task, change);
+          if (!approver?.adminException || !ctx?.canApproveAlone || ctx.peerApproval !== false || !approverId || approverId !== ctx.requesterId || !note?.trim())
+            throw new ToolBrokerError("auth_denied", "Approve this one change in the inbox with an administrator reason.", { code: "admin_reason_required" });
+          change.adminException = { actorId: approverId, reason: note.trim(), at: Date.now() };
+        }
         change.approvals.push({
           actor,
           ...(approverId ? { actorId: approverId } : {}),
@@ -772,7 +785,7 @@ export class ToolBroker {
           approval.requiredApprovals < 2 ||
           !requester ||
           [...approvers].some((k) => k !== requester);
-        if (approvers.size < approval.requiredApprovals || !peer) {
+        if (!change.adminException && (approvers.size < approval.requiredApprovals || !peer)) {
           this.deps.changed();
           return false;
         }
@@ -987,7 +1000,7 @@ export class ToolBroker {
           const fileRes = await this.deps.file(task, request, (change) => {
             activeChange = change;
             return this.authorize(key, task, change, request);
-          });
+          }, (change) => this.checkCurrentPolicy(task, change));
           if (isMutatingFile) {
             const lastChange = task.changes.at(-1);
             if (lastChange) {
@@ -1001,29 +1014,16 @@ export class ToolBroker {
         // Resolve target terminal: explicit request.id (sessionId, profileId, or node label) or bound task.target
         let target = task.target;
         if (request.id) {
-          const direct = this.terminals.get(request.id);
-          const byMatch =
-            direct ??
-            this.terminals
-              .list()
-              .find(
-                (s) =>
-                  s.state !== "disconnected" &&
-                  (s.id === request.id ||
-                    s.profileId === request.id ||
-                    s.label.toLowerCase() === request.id!.toLowerCase() ||
-                    s.label.toLowerCase().includes(request.id!.toLowerCase())),
-              );
-          if (byMatch && byMatch.state !== "disconnected") {
-            target = {
-              sessionId: byMatch.id,
-              generation: byMatch.generation,
-              label: byMatch.label,
-            };
-            if (!task.target) {
-              task.target = target;
-            }
-          }
+          const id = request.id.trim();
+          const direct = this.terminals.get(id);
+          const exact = direct ? [direct] : this.terminals.list().filter((s) =>
+            s.state !== "disconnected" && (s.profileId === id || s.label.toLowerCase() === id.toLowerCase()),
+          );
+          if (exact.length !== 1 || exact[0].state === "disconnected")
+            throw new ToolBrokerError("precondition", "Choose one connected terminal by its exact ID. Nothing ran.", { code: "target_unavailable" });
+          const session = exact[0];
+          target = { sessionId: session.id, generation: session.generation, label: session.label };
+          if (!task.target) task.target = target;
         }
         if (!target) {
           const fallbackSession = this.terminals
@@ -1180,6 +1180,7 @@ export class ToolBroker {
           id: crypto.randomUUID(),
           kind: "command",
           target: target.label,
+          targetKey: JSON.stringify([target.sessionId, target.generation]),
           description: clip(
             request.description || "Run terminal command",
             400,
@@ -1211,6 +1212,7 @@ export class ToolBroker {
             );
             change.preflightSnapshot = boundedContext(snap.output, 4000);
           }
+          this.checkCurrentPolicy(task, change);
           const result = await this.terminals.execute(
             target.sessionId,
             target.generation,
@@ -1431,6 +1433,7 @@ export class ToolBroker {
       id: crypto.randomUUID(),
       kind: "command",
       target: target.label,
+      targetKey: JSON.stringify([target.sessionId, target.generation]),
       description: clip(request.description || "Make a change", 400),
       command: shown.command.text,
       commandHash: exactHash(command.trim()),
@@ -1464,10 +1467,12 @@ export class ToolBroker {
       change.preflightSnapshot = boundedContext(snap.output, 4000);
     }
 
-    // How things stand right before the change: looked at only now that it may run.
+    // Keep the observation in memory. Equality of two failed health checks alone proves nothing.
+    let baseline: { output: string; exitCode: number };
     let before: boolean;
     try {
       const beforeRes = await run(checkCommand);
+      baseline = beforeRes;
       before = passes(beforeRes);
       if (!change.preflightSnapshot && beforeRes.output) {
         change.preflightSnapshot = boundedContext(beforeRes.output, 4000);
@@ -1481,11 +1486,12 @@ export class ToolBroker {
       this.deps.changed();
       throw error;
     }
-    change.check = { ...change.check!, before };
+    change.check = { ...change.check!, before, baselineHash: observationHash(change.id, baseline) };
     this.deps.changed();
 
     let result: { exitCode: number; output: string } | undefined;
     let last: { exitCode: number; output: string } | undefined;
+    this.checkCurrentPolicy(task, change);
     try {
       result = await run(command);
       change.exitCode = result.exitCode;
@@ -1537,43 +1543,24 @@ export class ToolBroker {
             : {}),
         };
       }
-      // A change command that failed, where the check reads as before and did not pass then: nothing to take back.
-      if (result.exitCode !== 0 && !before) {
-        const now = await run(checkCommand).catch(() => undefined);
-        if (now && !passes(now)) {
-          change.status = "failed";
-          change.rollback = { ...change.rollback!, skipped: "the change failed and the check reads as it did before, so there was nothing to take back" };
-          task.verification = "incomplete";
-          this.deps.activity?.(task, change, target.sessionId);
-          this.deps.changed();
-          return {
-            id: change.id,
-            ref: change.ref,
-            exitCode: result.exitCode,
-            output: result.output,
-            checkPassed: false,
-            rolledBack: false,
-            next: "The change command failed and nothing seems to have changed. Find out why it failed before trying again.",
-          };
-        }
-      }
     } catch (error) {
-      // The terminal was taken from the run (stop, takeover, timeout) while the change or its check ran.
-      // Nothing more can be run on it, so the rollback does not run: say so, and say what it would have been.
-      change.status = "uncertain";
       change.output = [result?.output, safeError(error)].filter(Boolean).join("\n");
-      if (change.check && change.check.after === undefined)
-        change.check = { ...change.check, skipped: change.check.skipped ?? "the run lost the terminal before the check had its say" };
-      change.rollback = {
-        ...change.rollback!,
-        skipped: "the run lost the terminal before the change was shown to hold; look at the server, and run the rollback yourself if it is needed",
-      };
       task.verification = "incomplete";
-      this.deps.changed();
-      throw error;
+      // Ownership and generation must still match before a rollback can be attempted.
     }
 
     // The change did not hold: take it back now, once.
+    const liveTarget = this.terminals.get(target.sessionId);
+    try {
+      if (!liveTarget || liveTarget.generation !== target.generation || liveTarget.owner !== task.id || liveTarget.state !== "ready")
+        throw new Error("The run no longer controls the original terminal.");
+      await this.beforeAction(task, change, true);
+    } catch (error) {
+      change.status = "uncertain";
+      change.rollback = { ...change.rollback!, skipped: safeError(error) };
+      this.deps.changed();
+      throw error;
+    }
     let undone: { exitCode: number; output: string };
     try {
       undone = await run(rollback);
@@ -1581,35 +1568,38 @@ export class ToolBroker {
       undone = { exitCode: -1, output: safeError(error) };
     }
     let checkAfter: boolean | undefined;
+    let restored: boolean | undefined;
     try {
-      checkAfter = passes(await run(checkCommand));
+      const observation = await run(checkCommand);
+      checkAfter = passes(observation);
+      restored = undone.exitCode === 0 && observation.exitCode === baseline.exitCode && observation.output === baseline.output;
     } catch {
       checkAfter = undefined;
     }
-    // Taken back means: the rollback ran, and the check reads as it did before the change.
-    const restored = undone.exitCode === 0 && checkAfter !== undefined ? checkAfter === before : undefined;
+    // A successful rollback must reproduce the original observation.
     change.rollback = {
       command: change.rollback!.command,
       ran: true,
       exitCode: undone.exitCode,
       output: boundedContext(undone.output, 2000),
       checkAfter,
-      ...(restored !== undefined ? { restored } : {}),
+      ...(restored !== undefined ? { restored, comparedWithBaseline: true } : {}),
     };
-    change.status = "failed";
+    change.status = restored ? "failed" : "uncertain";
     task.verification = "incomplete";
     this.deps.activity?.(task, change, target.sessionId);
     this.deps.changed();
     return {
       id: change.id,
       ref: change.ref,
-      exitCode: result.exitCode,
-      output: result.output,
+      exitCode: result?.exitCode ?? -1,
+      output: result?.output ?? change.output ?? "",
       checkPassed: false,
       checkOutput: last?.output,
       ...(last ? { checkExitCode: last.exitCode } : {}),
       ...(whyNot(last) ? { checkFailedBecause: whyNot(last) } : {}),
-      rolledBack: undone.exitCode === 0,
+      rolledBack: restored === true,
+      rollbackAttempted: true,
       rollbackExitCode: undone.exitCode,
       rollbackOutput: undone.output,
       checkPassesAfterRollback: checkAfter,
@@ -1617,10 +1607,65 @@ export class ToolBroker {
       next:
         undone.exitCode !== 0
           ? "The change did not pass its check, and the rollback failed too. Stop making changes. Report exactly this state to the person, with the outputs above."
-          : restored === false
+          : restored !== true
             ? "The change did not pass its check. The rollback ran, but the check does not read as it did before the change. Stop making changes and report this state to the person."
             : "The change did not pass its check and was rolled back. Do not make the same change again: find out why the check failed first.",
     };
+  }
+
+  private readonly policyAtDecision = new WeakMap<AgentChange, string>();
+  private readonly capabilityAtDecision = new WeakMap<AgentChange, string>();
+
+  private safetyFor(task: AgentTask, change: AgentChange) {
+    if (!change.targetKey) return this.deps.safetyContext?.(task, change.target);
+    const session = this.terminals.list().find((s) => JSON.stringify([s.id, s.generation]) === change.targetKey);
+    if (!session || session.state === "disconnected") throw new Error("The original terminal is no longer connected.");
+    return this.deps.safetyContext?.({ ...task, target: { sessionId: session.id, generation: session.generation, label: session.label } }, change.target);
+  }
+
+  rememberPolicy(task: AgentTask, change: AgentChange): void {
+    const ctx = this.safetyFor(task, change);
+    if (ctx) this.policyAtDecision.set(change, canonicalJson(ctx));
+  }
+
+  checkCurrentPolicy(task: AgentTask, change: AgentChange): void {
+    if (!["running", "waiting"].includes(task.status)) throw new Error("This run has stopped.");
+    const key = this.capabilityAtDecision.get(change);
+    if (key) {
+      const grant = this.grants.get(key);
+      if (!grant || Date.now() >= grant.expiresAt) throw new Error("Run capability revoked");
+    }
+    if (change.kind === "setting") return;
+    const ctx = this.safetyFor(task, change);
+    if (!ctx) return;
+    if (this.deps.peerStillEligible && change.approvals?.some((vote) =>
+      vote.allowed && vote.peer && (!vote.actorId || !this.deps.peerStillEligible!(vote.actorId, ctx.targetTags ?? [])))) {
+      throw new Error("A second approver no longer has permission for this target. Request approval again.");
+    }
+    const old = this.policyAtDecision.get(change);
+    const mutates = change.kind === "file" || change.riskLevel !== "safe";
+    if (mutates && (ctx.clusterPolicy?.frozenUntil ?? 0) > Date.now()) throw new Error("A change freeze now holds on this target.");
+    if (mutates && ctx.clusterPolicy?.requireCheckAndRollback && (!change.check || !change.rollback))
+      throw new Error("This target requires a checked change with a rollback.");
+    if (old && old !== canonicalJson(ctx)) throw new Error("The rules for this target changed. Request approval again.");
+    if (ctx.clusterPolicy?.maxMode === "advice") throw new Error("This target only allows advice.");
+  }
+
+  async beforeAction(task: AgentTask, change: AgentChange, rollback = false): Promise<void> {
+    try {
+      this.checkCurrentPolicy(task, change);
+      if (change.kind !== "command" || change.riskLevel !== "safe") {
+        await this.deps.recordIntent?.(task, change, rollback);
+        this.checkCurrentPolicy(task, change);
+      }
+    } catch (error) {
+      if (!rollback) {
+        change.status = "denied";
+        change.output = safeError(error);
+        this.deps.changed();
+      }
+      throw error;
+    }
   }
 
   private async authorize(
@@ -1630,6 +1675,7 @@ export class ToolBroker {
     request: ToolRequest,
     sensitiveRead = false,
   ): Promise<void> {
+    this.capabilityAtDecision.set(change, key);
     if (task.investigator) {
       // An investigator looks and never changes: only what the classifier calls read-only, and nobody is asked.
       const readOnly = change.kind === "command" && change.riskLevel === "safe" && !sensitiveRead;
@@ -1651,7 +1697,7 @@ export class ToolBroker {
     }
     // A conversation that only advises runs nothing and changes no file. A change to sshs3's
     // own rules is another matter: it is the person's to decide, and they are asked below.
-    if (task.mode === "advice" && !change.guard) {
+    if (task.mode === "advice" && (!change.guard || change.kind !== "setting")) {
       change.status = "denied";
       change.decidedHow = "policy";
       this.deps.changed();
@@ -1690,16 +1736,19 @@ export class ToolBroker {
     let clusterPolicy: ClusterSafetyPolicy | undefined;
     let ctxRequesterId: string | undefined;
     let peerApproval: boolean | undefined;
+    let adminMayApprove = false;
 
     if (
       (change.kind === "command" || change.kind === "file") &&
       this.deps.safetyContext
     ) {
-      const ctx = this.deps.safetyContext(task, change.target);
+      const ctx = this.safetyFor(task, change)!;
       policy = ctx.policy;
       clusterPolicy = ctx.clusterPolicy;
       ctxRequesterId = ctx.requesterId;
       peerApproval = ctx.peerApproval;
+      adminMayApprove = ctx.canApproveAlone === true;
+      this.rememberPolicy(task, change);
       isProd = (ctx.targetTags ?? []).some(isProdTag);
 
       // A change freeze stops whatever changes the target, in every mode: it is not asked about and not run.
@@ -1720,6 +1769,18 @@ export class ToolBroker {
         );
       }
 
+      const maxMode = lowerMode(task.mode, clusterPolicy?.maxMode);
+      try {
+        this.checkCurrentPolicy(task, change);
+        if (maxMode === "plan" && task.mode !== "plan" && task.plan?.status !== "approved" && change.riskLevel !== "safe")
+          throw new Error("This target requires an approved plan.");
+      } catch (error) {
+        change.status = "denied";
+        change.decidedHow = "policy";
+        change.output = safeError(error);
+        this.deps.changed();
+        throw error;
+      }
       requiresApproval = shouldRequireCommandApproval({
         analysis: {
           riskLevel: change.riskLevel ?? "modify",
@@ -1729,7 +1790,7 @@ export class ToolBroker {
           parsedSubcommands: change.parsedSubcommands ?? [],
           ...(sensitiveRead ? { sensitiveRead: true } : {}),
         },
-        mode: task.mode,
+        mode: maxMode,
         targetTags: ctx.targetTags,
         policy: ctx.policy,
       });
@@ -1776,19 +1837,26 @@ export class ToolBroker {
 
     // The user approved a plan that lists exactly this command: it is not asked
     // about a second time. A destructive command is always asked about.
+    const matchesPlan = (consume = false) => planCoversCommand(task, change.commandHash, change.riskLevel, Date.now(), {
+      targetKey: change.targetKey,
+      check: request.check,
+      rollback: request.rollback,
+      observeSeconds: request.observeSeconds,
+      extras: Boolean(request.preflightCommand || request.structuredCheck || request.check?.structuredCheck || sensitiveRead),
+    }, consume);
     let listedInPlan = false;
     if (
       requiresApproval &&
       change.kind === "command" &&
       !change.hiddenValues &&
-      planCoversCommand(task, change.commandHash, change.riskLevel)
+      matchesPlan()
     ) {
       requiresApproval = false;
       change.decidedHow = "plan";
       listedInPlan = true;
     }
     // A change to the rules themselves is a person's to make: no mode, policy or plan lets it through unasked.
-    if (change.guard) requiresApproval = true;
+    if (change.guard || change.forceApproval) requiresApproval = true;
     // Asked for from outside sshs3: a person decides every one of these, even the
     // ones the policy would let through, because nobody here is watching the asker.
     if (task.fromOutside) requiresApproval = true;
@@ -1816,7 +1884,7 @@ export class ToolBroker {
         ? planApprovalsCover(task.plan, requiredApprovals, ctxRequesterId, isProd)
         : undefined;
     const planPeople =
-      enoughPeople && (listedInPlan || (!requiresApproval && planCoversCommand(task, change.commandHash, change.riskLevel)))
+      enoughPeople && (listedInPlan || (!requiresApproval && matchesPlan()))
         ? enoughPeople
         : undefined;
     if (planPeople) {
@@ -1826,7 +1894,9 @@ export class ToolBroker {
     } else if (requiredApprovals > 1) {
       change.requiredApprovals = requiredApprovals;
       requiresApproval = true;
-      if (peerApproval === false) {
+      if (peerApproval === false && adminMayApprove && requiredApprovals === 2) {
+        change.adminExceptionAvailable = true;
+      } else if (peerApproval === false) {
         change.status = "denied";
         change.decidedHow = "policy";
         this.deps.changed();
@@ -1899,6 +1969,11 @@ export class ToolBroker {
       throw new ToolBrokerError("auth_denied", "Run capability revoked", {
         code: "capability_revoked",
       });
+    }
+    await this.beforeAction(task, change);
+    if (change.decidedHow === "plan" && !matchesPlan(true)) {
+      change.status = "denied";
+      throw new Error("The approved plan changed before execution.");
     }
     change.status = "approved";
     change.decidedHow ??= "policy";

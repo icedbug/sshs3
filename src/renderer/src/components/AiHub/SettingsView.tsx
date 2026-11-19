@@ -22,14 +22,14 @@ import {
   formatEgressPolicyLabel,
   formatPiiScrubbingLabel,
 } from "./dataDestination";
-import { DEMO_MODE_SET_BY_SERVER, type Act } from "./panelShared";
+import { DEMO_MODE_SET_BY_SERVER, LABS_ENABLED_STORAGE_KEY, type Act } from "./panelShared";
 import { McpKeysPanel } from "../McpKeysPanel";
 import { NotificationsCard } from "./NotificationsCard";
 import { TeamChatCard } from "./TeamChatCard";
 import { SafetyPolicyCard } from "./SafetyPolicyCard";
 import { sharingText } from "@shared/sharingText";
 
-export const LABS_ENABLED_STORAGE_KEY = "sshs3.aiHub.labsEnabled";
+export { LABS_ENABLED_STORAGE_KEY };
 
 /** The ways data leaves, and where it ends up, in the words the settings use. */
 const DATA_CHANNEL_NAMES: Record<string, string> = {
@@ -75,12 +75,25 @@ const PROFILE_ROLES: { role: AiProfileRole; label: string; hint: string }[] = [
   },
 ];
 
+type ApiProtocol = NonNullable<ProviderProfile["apiProtocol"]>;
+
+function ProtocolSelect({ value, onChange }: { value: ApiProtocol; onChange: (v: ApiProtocol) => void }): JSX.Element {
+  return <label>API format
+    <select value={value} onChange={(e) => onChange(e.target.value as ApiProtocol)}>
+      <option value="auto">Automatic</option>
+      <option value="responses">Responses</option>
+      <option value="chat-completions">Chat Completions</option>
+    </select>
+  </label>;
+}
+
 interface ProfileDraft {
   id?: string;
   name: string;
   provider: AiProvider;
   model: string;
   baseUrl: string;
+  apiProtocol?: ApiProtocol;
   apiKey: string;
   egressPolicy: AiEgressPolicy;
   zdrConfirmed: boolean;
@@ -165,6 +178,7 @@ export function Settings({
   const [provider, setProvider] = useState(hub.config.provider);
   const [model, setModel] = useState(hub.config.model);
   const [customModelMode, setCustomModelMode] = useState(false);
+  const [apiProtocol, setApiProtocol] = useState<ApiProtocol>(hub.config.apiProtocol ?? "auto");
   const [url, setUrl] = useState(hub.config.baseUrl ?? "");
   const [embeddingModel, setEmbeddingModel] = useState(hub.config.embeddingModel ?? "");
   const [fastModel, setFastModel] = useState(hub.config.fastModel ?? "");
@@ -205,6 +219,7 @@ export function Settings({
     setModel(hub.config.model);
     setCustomModelMode(false);
     setUrl(hub.config.baseUrl ?? "");
+    setApiProtocol(hub.config.apiProtocol ?? "auto");
     setEmbeddingModel(hub.config.embeddingModel ?? "");
     setFastModel(hub.config.fastModel ?? "");
     setActorName(hub.config.actorName ?? "");
@@ -223,6 +238,7 @@ export function Settings({
     hub.config.provider,
     hub.config.model,
     hub.config.baseUrl,
+    hub.config.apiProtocol,
     hub.config.embeddingModel,
     hub.config.fastModel,
     hub.config.actorName,
@@ -280,6 +296,7 @@ export function Settings({
             enabled,
             provider,
             model: model.trim(),
+            ...(provider === "openai-compatible" ? { apiProtocol } : {}),
             baseUrl: provider === "openai-codex" ? "" : url.trim(),
             embeddingModel: provider === "openai-compatible" ? embeddingModel.trim() : "",
             fastModel: fastModel.trim(),
@@ -434,6 +451,7 @@ export function Settings({
                 }
               />
             </label>
+            {provider === "openai-compatible" && <ProtocolSelect value={apiProtocol} onChange={setApiProtocol} />}
             <label>
               API key
               <input
@@ -451,8 +469,10 @@ export function Settings({
               />
               <small>
                 {hub.config.keyStorage === "session"
-                  ? "No system keyring was found: the key is kept only until the app closes."
-                  : "Stored in the operating system keyring, never in the workspace."}
+                  ? "This key is in memory. Enter it again after the app or server restarts."
+                  : isWebBrowserMode()
+                    ? "Saved keys are encrypted on the app server with its credential key."
+                    : "Saved keys are encrypted with help from the operating system. If secure storage is unavailable, the key stays in memory."}
               </small>
             </label>
             {hub.config.hasApiKey && (
@@ -580,6 +600,7 @@ export function Settings({
                 />
               </label>
             </div>
+            {profileDraft.provider === "openai-compatible" && <ProtocolSelect value={profileDraft.apiProtocol ?? "auto"} onChange={(v) => setProfileDraft({ ...profileDraft, apiProtocol: v })} />}
             <div className="ai-form-row">
               <label>
                 Egress policy
@@ -649,6 +670,7 @@ export function Settings({
                       name,
                       provider: profileDraft.provider,
                       model: pModel,
+                      ...(profileDraft.provider === "openai-compatible" ? { apiProtocol: profileDraft.apiProtocol ?? "auto" } : {}),
                       baseUrl: profileDraft.baseUrl.trim() || undefined,
                       egressPolicy: profileDraft.egressPolicy,
                       zdrConfirmed: profileDraft.zdrConfirmed,
@@ -707,6 +729,7 @@ export function Settings({
                           provider: p.provider,
                           model: p.model,
                           baseUrl: p.baseUrl ?? "",
+                          apiProtocol: p.apiProtocol,
                           apiKey: "",
                           egressPolicy: p.egressPolicy ?? "standard",
                           zdrConfirmed: Boolean(p.zdrConfirmed),
@@ -795,7 +818,7 @@ export function Settings({
             >
               <option value="off">Secrets only</option>
               <option value="standard">Secrets and personal details</option>
-              <option value="strict">Also host names and anything like a key</option>
+              <option value="strict">Also IP addresses and workspace host names</option>
             </select>
             <small>{formatPiiScrubbingLabel(piiScrubbing)}</small>
           </label>
@@ -858,8 +881,8 @@ export function Settings({
             {dataFlow.channels.map((ch) => (
               <span key={ch.channel} className="ai-tool-tag" title={ch.destination}>
                 <span>
-                  {DATA_CHANNEL_NAMES[ch.channel] ?? ch.channel}: <strong>{DATA_PLACES[ch.locality] ?? ch.locality}</strong>
-                  {ch.enabled ? (ch.encryptedInTransit ? " · encrypted on the way" : " · not encrypted on the way") : ""}
+                  {DATA_CHANNEL_NAMES[ch.channel] ?? ch.channel}: <strong>{ch.locality === "local" && isWebBrowserMode() ? "the app server" : DATA_PLACES[ch.locality] ?? ch.locality}</strong>
+                  {ch.enabled && ch.channel !== "local-storage" ? (ch.encryptedInTransit ? " · encrypted on the way" : " · not encrypted on the way") : ""}
                   {ch.piiScrubbing && ch.piiScrubbing !== "off" ? " · personal details hidden" : ""}
                 </span>
               </span>
@@ -871,7 +894,7 @@ export function Settings({
               ? `Outside services that receive data: ${dataFlow.subprocessors
                   .map((s) => `${s.name} (${DATA_PLACES[s.locality] ?? s.locality}, ${s.zdrConfirmed ? "confirmed to keep nothing" : "not confirmed to keep nothing"})`)
                   .join("; ")}`
-              : "No outside service receives data: prompts and workspace data stay on this machine or your own network."}
+              : "The selected model and team bucket use local or private network addresses."}
           </small>
         </article>
       </section>

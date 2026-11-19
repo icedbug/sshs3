@@ -162,6 +162,8 @@ describe("what was done here, kept so it can be trusted", () => {
     // A write that was cut off half-way.
     await fs.appendFile(reopened.file, '{"seq":4,"at":1,"prev":"');
     expect(await reopened.verify()).toMatchObject({ ok: false, problem: { text: expect.stringContaining("not a whole entry") } });
+    const afterCrash = new AuditLog(path.dirname(log.file), "client-1");
+    await expect(afterCrash.append(command("next"))).rejects.toThrow(/incomplete/);
   });
 
   it("writes entries one at a time even when they are asked for at once", async () => {

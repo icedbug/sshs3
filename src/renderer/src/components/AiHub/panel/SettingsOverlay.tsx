@@ -1,6 +1,8 @@
 import { X } from "lucide-react";
-import { Settings } from "../SettingsView";
+import { lazy, Suspense } from "react";
 import type { PanelState } from "./usePanelState";
+
+const Settings = lazy(() => import("../SettingsView").then((m) => ({ default: m.Settings })));
 
 /**
  * The AI settings, over the panel.
@@ -49,12 +51,14 @@ export function SettingsOverlay({ p }: { p: PanelState }): JSX.Element {
                 {error}
               </p>
             )}
-            <Settings
-              hub={hub}
-              act={act}
-              labsEnabled={labsEnabled}
-              onToggleLabs={handleToggleLabs}
-            />
+            <Suspense fallback={<p role="status">Opening settings…</p>}>
+              <Settings
+                hub={hub}
+                act={act}
+                labsEnabled={labsEnabled}
+                onToggleLabs={handleToggleLabs}
+              />
+            </Suspense>
           </div>
         </div>
       )}

@@ -232,11 +232,18 @@ export class FactsPart {
 
   /** Reads one server: runs the script, compares with last time, keeps the difference. No model is involved. */
   collectFacts(this: HubService, server: WorkspaceServerSummary, now = Date.now(), asked = false): Promise<void> {
-    // A reading that is under way is the reading: whoever asks again waits for the same one.
+    // A manual refresh must sample after it was requested. If the current reading has
+    // already sampled the server, everyone asking now shares one fresh reading after it.
     const running = this.factsInFlight.get(server.id);
-    if (running) return running;
+    if (running) {
+      if (!asked) return running.reading;
+      running.next ??= running.reading.catch(() => undefined).then(() => {
+        if (!this.disposed) return this.collectFacts(server, Date.now(), true);
+      });
+      return running.next;
+    }
     const reading = this.readFacts(server, now, asked).finally(() => this.factsInFlight.delete(server.id));
-    this.factsInFlight.set(server.id, reading);
+    this.factsInFlight.set(server.id, { reading });
     return reading;
   }
 
@@ -299,6 +306,7 @@ export class FactsPart {
         ...(demo && !simHost ? { demoCertAnchorAt: certAnchorAt } : {}),
       };
       await this.factsStore.put(record);
+      if (fresh.length) await this.scheduleEvent("facts_drift", [server.id]);
       const flaggedMemories = flagStaleMemories(this.store.data.memories, record, {
         prevFacts: prev?.facts,
         cluster: server.cluster,

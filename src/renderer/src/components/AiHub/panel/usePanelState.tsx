@@ -13,7 +13,7 @@ import { useFullTask } from "../../../lib/aiHubTasks";
 import type { FileRef } from "../reportRefs";
 import { getVisibleHubViews, isLabsView, modes } from "../panelShared";
 import { copyToClipboard } from "../RichMarkdownContent";
-import { LABS_ENABLED_STORAGE_KEY } from "../SettingsView";
+import { LABS_ENABLED_STORAGE_KEY } from "../panelShared";
 import {
   View,
   OPEN_TASK_KEY,
@@ -67,6 +67,15 @@ export function usePanelState({
       return "";
     }
   });
+  const draftEpoch = useRef(0);
+  function clearDraft(): void {
+    draftEpoch.current++;
+    setPrompt("");
+    setAttachments([]);
+    setDlpWarning(null);
+    setConnection(undefined);
+    setSending("");
+  }
   const setTaskId = (next: string): void => {
     setTaskIdState(next);
     onTaskChange?.(next);
@@ -123,12 +132,7 @@ export function usePanelState({
   );
   const activeProfile = getActiveProfileSummary(hub);
   const draftMode: AgentMode = modePicked ? autonomy : (activeAgent?.defaultMode ?? autonomy);
-  const aiSetUp =
-    !!hub &&
-    (hub.demoMode ||
-      (hub.config.enabled &&
-        !!hub.config.model &&
-        (hub.config.hasApiKey || hub.config.codexConnected || !!hub.config.baseUrl?.includes("11434"))));
+  const aiSetUp = Boolean(hub?.config.enabled && (hub.demoMode || (hub.config.model && activeProfile.configured)));
   const taskUsage = getTaskUsageSummary(task);
   const streamingState = task ? streamingByTask[task.id] : undefined;
   const visibleHubViews = getVisibleHubViews(labsEnabled || isLabsView(view));
@@ -464,7 +468,10 @@ export function usePanelState({
   useEffect(() => {
     if (initialTaskId === followedTaskId.current) return;
     followedTaskId.current = initialTaskId;
-    if (initialTaskId !== undefined && initialTaskId !== taskId) setTaskIdState(initialTaskId);
+    if (initialTaskId !== undefined && initialTaskId !== taskId) {
+      clearDraft();
+      setTaskIdState(initialTaskId);
+    }
   }, [initialTaskId, taskId]);
   // The conversation remembered over a reload is told to the dock once, so that both agree.
   useEffect(() => {
@@ -549,6 +556,7 @@ export function usePanelState({
         setView(targetView);
       }
       if (detail?.newTask) {
+        clearDraft();
         setTaskIdState("");
         onTaskChange?.("");
         // A new conversation starts empty, unless the event brings its own text or agent (set below).
@@ -557,6 +565,7 @@ export function usePanelState({
           setSelectedAgentId("");
         }
       } else if (detail?.taskId) {
+        clearDraft();
         setTaskIdState(detail.taskId);
         onTaskChange?.(detail.taskId);
       }
@@ -736,23 +745,22 @@ export function usePanelState({
     }
   }
   function newChat(): void {
+    clearDraft();
     setTaskId("");
-    setPrompt("");
-    setAttachments([]);
-    setConnection(undefined);
     setView("Work");
     setMenu(null);
     setError("");
     composer.current?.focus();
   }
   function chooseTask(id: string): void {
+    clearDraft();
     setTaskId(id);
-    setConnection(undefined);
     setView("Work");
     setMenu(null);
     setError("");
   }
   function attachFileOrImage(file: File): void {
+    const epoch = draftEpoch.current;
     const isImage =
       file.type.startsWith("image/") ||
       /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(file.name);
@@ -763,6 +771,7 @@ export function usePanelState({
       }
       const reader = new FileReader();
       reader.onload = () => {
+        if (epoch !== draftEpoch.current) return;
         const dataUrl = typeof reader.result === "string" ? reader.result : "";
         if (!dataUrl.startsWith("data:image/")) {
           setError("Could not read that image.");
@@ -790,7 +799,7 @@ export function usePanelState({
     }
     void file
       .text()
-      .then((text) =>
+      .then((text) => epoch === draftEpoch.current &&
         setAttachments((old) => [
           ...old.slice(-9),
           {
@@ -803,47 +812,49 @@ export function usePanelState({
       )
       .catch(() => setError("Could not read that file."));
   }
-  function activeSessionForHandoff(): { id: string; label: string } | undefined {
-    const candidate =
-      (terminal && terminal.state !== "disconnected" ? terminal : undefined) ??
-      (boundTerminalId
-        ? hub?.sessions.find((s) => s.id === boundTerminalId && s.state !== "disconnected")
-        : undefined) ??
-      (selectedTerminal
-        ? hub?.sessions.find((s) => s.id === selectedTerminal && s.state !== "disconnected")
-        : undefined);
-    if (candidate) return { id: candidate.id, label: candidate.label };
-    const fallbackId = boundTerminalId || (selectedTerminal && selectedTerminal !== "" ? selectedTerminal : "");
-    if (fallbackId) return { id: fallbackId, label: fallbackId };
-    return undefined;
+  function activeSessionForHandoff() {
+    const id = task?.target?.sessionId ?? boundTerminalId ?? selectedTerminal;
+    return hub?.sessions.find((session) =>
+      session.id === id && session.state !== "disconnected" &&
+      (!task?.target || session.generation === task.target.generation),
+    );
+  }
+
+  async function writeToTerminal(cmd: string, run: boolean): Promise<boolean> {
+    const session = activeSessionForHandoff();
+    if (!session) {
+      setError("The selected terminal is no longer available. Select a current terminal first.");
+      return false;
+    }
+    const api = window.multissh;
+    const write = session.kind === "k8s" ? api?.k8sTerminalWrite : api?.terminalWrite;
+    if (!write) {
+      setError("This terminal cannot accept input.");
+      return false;
+    }
+    try {
+      await write(session.id, run && !cmd.endsWith("\n") ? cmd + "\n" : cmd);
+      setError("");
+      setNotice(run ? `Sent to ${session.label}.` : `Staged in ${session.label}.`);
+      return true;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      return false;
+    }
   }
 
   function stageCommandInTerminal(cmd: string): void {
-    const session = activeSessionForHandoff();
-    const write = window.multissh?.terminalWrite;
-    if (session && typeof write === "function") {
-      void write(session.id, cmd);
-      setNotice(`Staged in ${session.label}: ${cmd}`);
-      setError("");
+    if (Array.from(cmd).some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127) || !activeSessionForHandoff()) {
+      setPrompt(cmd);
+      setNotice("Staged in the chat editor. You can review and copy the text here.");
+      composer.current?.focus();
       return;
     }
-    setPrompt(cmd);
-    setNotice("Staged in AI composer (connect a terminal to stage directly).");
-    setTimeout(() => composer.current?.focus(), 20);
+    void writeToTerminal(cmd, false);
   }
 
-  function runCommandInTerminal(cmd: string): boolean {
-    const session = activeSessionForHandoff();
-    const write = window.multissh?.terminalWrite;
-    if (session && typeof write === "function") {
-      const payload = cmd.endsWith("\n") ? cmd : `${cmd}\n`;
-      void write(session.id, payload);
-      setNotice(`Ran in ${session.label}: ${cmd}`);
-      setError("");
-      return true;
-    }
-    setError("No active terminal session selected. Connect or choose a terminal target first.");
-    return false;
+  function runCommandInTerminal(cmd: string): Promise<boolean> {
+    return writeToTerminal(cmd, true);
   }
 
   function handleOpenFileRef(fileRef: FileRef): void {
@@ -941,7 +952,7 @@ export function usePanelState({
     const textToSend =
       rawPrompt.trim() || "Look at the attached image and say what it shows.";
 
-    if (!opts?.bypassDlp && !activeProfile.isLocal) {
+    if (!opts?.bypassDlp && (activeAgent?.runnerId || !activeProfile.isLocal)) {
       const combinedText = [
         textToSend,
         ...candidateAttachments.map((a) => a.text || ""),
@@ -961,6 +972,7 @@ export function usePanelState({
     // The field is emptied at once and the message shown as sent: the answer to the request can take
     // a while on a busy server, and a message that stays in the field looks as if nothing happened.
     setDlpWarning(null);
+    const epoch = draftEpoch.current;
     const sentAttachments = candidateAttachments;
     setSending(textToSend);
     if (opts?.overridePrompt === undefined) setPrompt("");
@@ -984,6 +996,7 @@ export function usePanelState({
             attachments: sentAttachments,
           },
         });
+    if (epoch !== draftEpoch.current) return;
     setSending("");
     if (result) {
       // The conversation this request started: "the newest in the list" may be a background run that began meanwhile.
@@ -1000,8 +1013,8 @@ export function usePanelState({
     if (trimmed.startsWith("!") && !busy) {
       const quickCmd = trimmed.slice(1).trim();
       if (!quickCmd) return;
-      if (runCommandInTerminal(quickCmd)) {
-        setPrompt("");
+      if (await runCommandInTerminal(quickCmd)) {
+        setPrompt((current) => current.trim() === trimmed ? "" : current);
       }
       return;
     }

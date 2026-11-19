@@ -18,6 +18,10 @@ import { type AuditShipperOptions } from "./AuditLog";
 import { type ConditionalQueueStore } from "./WorkSync";
 
 export interface HubHost {
+  /** Optional host admission check, run synchronously before spending an action. */
+  beforeAction?(task: AgentTask): void;
+  /** Optional counter for a model request, including a retry, without its contents. */
+  onModelRequest?(): void;
   /**
    * The team's chat bot, when the host keeps one for several hubs: on a shared
    * server every account's hub is given the same one, so there is one reader
@@ -28,7 +32,7 @@ export interface HubHost {
   delta?(delta: AiHubDeltaEvent): void;
   restoreCheckpoint?: (
     change: AgentChange,
-    options?: { task?: AgentTask; path?: string; force?: boolean },
+    options?: { task?: AgentTask; path?: string; force?: boolean; recheck?: () => void },
   ) => Promise<{
     restored: boolean;
     alreadyAtCheckpoint?: boolean;
@@ -136,7 +140,8 @@ export interface HubHost {
    * who answers through approveAsPeer(). Absent (the desktop app, a server that does not route
    * approvals between accounts): only one person can approve here, and nothing asks for two.
    */
-  peerApproval?: () => boolean;
+  peerApproval?: (tags?: string[]) => boolean;
+  peerStillEligible?: (actorId: string, tags: string[]) => boolean;
   /**
    * On the web server: the changes in other members' runs that wait for a second person and that this
    * member may answer (the server has checked that they may).
@@ -152,7 +157,7 @@ export interface HubHost {
    */
   teamRules?: {
     read(): import("../../../shared/types/aiHub").TeamSafetyRules;
-    write(next: import("../../../shared/types/aiHub").TeamSafetyRules): Promise<void>;
+    write(next: import("../../../shared/types/aiHub").TeamSafetyRules, previous?: import("../../../shared/types/aiHub").TeamSafetyRules): Promise<void>;
   };
   peerPresenceProvider?:() => import("../../../shared/types/aiHub").WorkspacePresenceEntry[];
   onSharedWorkspaceChanged?: () => void;

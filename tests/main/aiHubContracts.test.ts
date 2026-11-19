@@ -19,7 +19,7 @@ const say = (text: string): Response =>
   sse([
     { type: "message_start", message: { usage: { input_tokens: 700 } } },
     { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } },
-    { type: "message_delta", usage: { output_tokens: 300 } },
+    { type: "message_delta", usage: { output_tokens: 300 } }, { type: "message_stop" },
   ]);
 
 async function makeHub(options: { demo?: boolean; model?: boolean } = {}) {
@@ -101,6 +101,7 @@ describe("what a request says it did", () => {
 
     // With a model that answers, the suggestion is the model's and says so.
     const modelled = await makeHub();
+    modelled.hub.kbNetwork = { lookup: async () => [{ address: "93.184.216.34", family: 4 }], fetchImpl: (url, init) => fetch(url, init) };
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ content: [{ type: "text", text: '{"command":"df -h /var","explanation":"Disk use of /var."}' }] }), { status: 200 })));
     const asked = await modelled.hub.request({ action: "inline-suggest", prompt: "how full is /var", sessionId: "t", shell: "bash" });
     expect(asked.reply!.inlineSuggestion).toMatchObject({ command: "df -h /var", source: "model" });
