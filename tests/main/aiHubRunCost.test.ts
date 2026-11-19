@@ -221,7 +221,7 @@ describe("a ticket run on the ChatGPT backend", () => {
       output_tokens: 20,
       cache_read_input_tokens: 0,
       cache_creation_input_tokens: 0,
-      cost_usd: 0.0027,
+      cost_usd: 0.0022,
       context_tokens: 1000,
     });
     expect(live.at(-1)).toEqual({
@@ -229,7 +229,7 @@ describe("a ticket run on the ChatGPT backend", () => {
       output_tokens: 50,
       cache_read_input_tokens: 0,
       cache_creation_input_tokens: 0,
-      cost_usd: 0.00675,
+      cost_usd: 0.0055,
       context_tokens: 1500,
     });
     expect(events.find((e) => e.type === "run.completed")?.usage).toMatchObject({
@@ -237,7 +237,7 @@ describe("a ticket run on the ChatGPT backend", () => {
       output_tokens: 50,
       cache_read_input_tokens: 0,
       cache_creation_input_tokens: 0,
-      cost_usd: 0.00675,
+      cost_usd: 0.0055,
       context_tokens: 1500,
     });
   });

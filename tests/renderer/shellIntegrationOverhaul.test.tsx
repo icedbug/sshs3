@@ -375,6 +375,51 @@ describe("Shell Integration Overhaul", () => {
       expect(screen.getByTestId("ai-mode-pill-plan")).toHaveAttribute("aria-pressed", "true");
     });
 
+    it("starts a separate conversation for Chat with it when another agent's chat is open", async () => {
+      const hub = mockState.hub!;
+      const first = { id: "first", name: "First operator", role: "Operations", mission: "Check services", systemPrompt: "", defaultMode: "assisted" as const, updatedAt: 1 };
+      const next = { ...first, id: "next", name: "Second operator" };
+      hub.agents = [first, next];
+      Object.assign(hub.tasks[0], { agentId: first.id, agentName: first.name });
+      window.sessionStorage.setItem("sshs3.aiHub.openTask", hub.tasks[0].id);
+      render(<AiHubPanel mode="hub" setMode={vi.fn()} />);
+      expect(screen.getByText("Check nginx error logs")).toBeVisible();
+      const nav = screen.getByRole("navigation", { name: "Hub views" });
+      fireEvent.click(screen.getByTestId("ai-hub-labs-toggle"));
+      fireEvent.click(within(nav).getByRole("button", { name: /^Agents & MCP/ }));
+      const card = await screen.findByTestId("agent-card-next");
+      fireEvent.click(within(card).getByRole("button", { name: "Chat with it" }));
+      const prompt = "Review the capacity report";
+      fireEvent.change(screen.getByTestId("ai-composer"), { target: { value: prompt } });
+      fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+      await waitFor(() => expect(mockState.hubRequest).toHaveBeenCalledWith({
+        action: "start", task: expect.objectContaining({ prompt, agentId: next.id, agentName: next.name }),
+      }));
+      expect(mockState.hubRequest).not.toHaveBeenCalledWith(expect.objectContaining({ action: "reply" }));
+    });
+
+    it("keeps one visible tool step when its streamed result arrives in the saved snapshot", () => {
+      const task = mockState.hub!.tasks[0];
+      task.status = "running";
+      task.toolLog = [];
+      window.sessionStorage.setItem("sshs3.aiHub.openTask", task.id);
+      const props = { mode: "panel" as const, setMode: vi.fn() };
+      const { rerender } = render(<AiHubPanel {...props} />);
+      const record = { name: "workspace_context", input: "inventory", output: "two servers", at: 2100 };
+      act(() => {
+        for (const listen of mockState.deltaListeners) listen({ taskId: task.id, toolRecord: record });
+      });
+      const rows = () => within(screen.getByTestId("ai-tool-log-list")).getAllByText(record.name);
+      expect(rows()).toHaveLength(1);
+      mockState.hub = { ...mockState.hub!, tasks: [{ ...task, toolLog: [{ ...record }] }] };
+      rerender(<AiHubPanel {...props} />);
+      expect(rows()).toHaveLength(1);
+      act(() => {
+        for (const listen of mockState.deltaListeners) listen({ taskId: task.id, done: true });
+      });
+      expect(rows()).toHaveLength(1);
+    });
+
     it("keeps multiline staging in the editor, writes to the selected pod and rejects a replaced terminal", async () => {
       window.sessionStorage.setItem("sshs3.aiHub.openTask", "task-1");
       const hub = mockState.hub!;

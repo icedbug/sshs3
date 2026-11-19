@@ -11,35 +11,12 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    name: Test & Lint (${{ matrix.platform.name }})
-    runs-on: ${{ matrix.platform.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        platform:
-          - name: Linux
-            os: ubuntu-24.04
-          - name: Windows
-            os: windows-latest
+  linux:
+    name: Test & Lint (Linux)
+    runs-on: ubuntu-24.04
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          cache: 'npm'
-
-      - name: Start Windows OpenSSH Agent
-        if: runner.os == 'Windows'
-        run: |
-          Set-Service ssh-agent -StartupType Manual
-          Start-Service ssh-agent
-
-      - name: Install dependencies
-        run: npm ci
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/install-node
 
       - name: Restore incremental types and Vitest file timings
         uses: actions/cache@v4
@@ -47,27 +24,133 @@ jobs:
           path: |
             .typecheck.tsbuildinfo
             node_modules/.vite/vitest
-          key: checks-v1-${{ runner.os }}-${{ runner.arch }}-node24-${{ hashFiles('package-lock.json', 'tsconfig*.json', 'vite.config.ts') }}-${{ github.sha }}
+          key: checks-v2-${{ runner.os }}-${{ runner.arch }}-node24-coverage-${{ hashFiles('package-lock.json', 'tsconfig*.json', 'vite.config.ts') }}-${{ github.sha }}
           restore-keys: |
-            checks-v1-${{ runner.os }}-${{ runner.arch }}-node24-${{ hashFiles('package-lock.json', 'tsconfig*.json', 'vite.config.ts') }}-
+            checks-v2-${{ runner.os }}-${{ runner.arch }}-node24-coverage-${{ hashFiles('package-lock.json', 'tsconfig*.json', 'vite.config.ts') }}-
 
       - name: Typecheck
         run: npm run typecheck
-
       - name: Lint
         run: npm run lint
-
-      - name: Run Tests
-        if: runner.os != 'Linux'
-        run: npm run test
-
-      - name: Run Tests with coverage thresholds
-        if: runner.os == 'Linux'
+      - name: Run tests with coverage thresholds
         run: npm run test:coverage
-
       - name: Build
         run: npm run bundle:desktop
-
       - name: Headless Smoke Test
-        if: runner.os == 'Linux'
         run: xvfb-run --auto-servernum npm run test:smoke
+
+  windows-tests:
+    name: Windows tests (${{ matrix.shard }}/3)
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Start Windows OpenSSH Agent
+        run: |
+          Set-Service ssh-agent -StartupType Manual
+          Start-Service ssh-agent
+      - uses: ./.github/actions/install-node
+
+      - name: Restore incremental types and Vitest file timings
+        uses: actions/cache@v4
+        with:
+          path: |
+            .typecheck.tsbuildinfo
+            node_modules/.vite/vitest
+          key: checks-v2-${{ runner.os }}-${{ runner.arch }}-node24-shard-${{ matrix.shard }}-of-3-${{ hashFiles('package-lock.json', 'tsconfig*.json', 'vite.config.ts') }}-${{ github.sha }}
+          restore-keys: |
+            checks-v2-${{ runner.os }}-${{ runner.arch }}-node24-shard-${{ matrix.shard }}-of-3-${{ hashFiles('package-lock.json', 'tsconfig*.json', 'vite.config.ts') }}-
+
+      - name: Typecheck
+        if: matrix.shard == 1
+        run: npm run typecheck
+      - name: Lint
+        if: matrix.shard == 1
+        run: npm run lint
+      - name: Run test shard
+        run: npm test -- --shard=${{ matrix.shard }}/3
+      - name: Build
+        if: matrix.shard == 1
+        run: npm run bundle:desktop
+
+  windows:
+    # Keep the existing required check tied to all Windows tests.
+    name: Test & Lint (Windows)
+    if: always()
+    needs: windows-tests
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require all Windows shards
+        env:
+          RESULT: ${{ needs.windows-tests.result }}
+        run: test "$RESULT" = success
+
+  docker-web:
+    name: Docker web image (Linux)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      IMAGE: sshs3-web:ci
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build and load the runtime image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: false
+          DOCKER_BUILD_SUMMARY: false
+        with:
+          context: .
+          file: ./Dockerfile
+          load: true
+          push: false
+          tags: ${{ env.IMAGE }}
+          cache-from: type=gha,scope=sshs3-web-linux-amd64
+          cache-to: type=gha,scope=sshs3-web-linux-amd64,mode=max,ignore-error=true
+
+      - name: Measure final image size
+        run: |
+          bytes=$(docker image inspect --format '{{.Size}}' "$IMAGE")
+          printf 'Docker web image size: %s bytes (%s) uncompressed.\n' \
+            "$bytes" "$(numfmt --to=iec-i --suffix=B "$bytes")" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check the running web image
+        shell: bash
+        run: |
+          set -euo pipefail
+          export SSHS3_ADMIN_PASSWORD="$(openssl rand -hex 24)"
+          id=$(docker run --detach --publish 127.0.0.1::8080 --tmpfs /data:rw,nosuid,nodev,noexec \
+            --env SSHS3_ADMIN_USER=smoke-admin --env SSHS3_ADMIN_PASSWORD \
+            --health-interval=2s --health-timeout=3s --health-start-period=2s "$IMAGE")
+          unset SSHS3_ADMIN_PASSWORD
+          trap 'if [[ $? != 0 ]]; then docker logs --tail 80 "$id"; fi; docker rm --force --volumes "$id" >/dev/null' EXIT
+          base="http://$(docker port "$id" 8080/tcp)"
+          curl --fail --silent --show-error --retry 20 --retry-delay 1 --retry-connrefused \
+            "$base/api/health" | jq -e '.ok == true and .mode == "web-multiuser"'
+          curl -fsS "$base/api/auth/status" | jq -e '.initialized == true and .authenticated == false'
+
+          # A rendered login form also proves that the image serves executable client JavaScript.
+          timeout 30s google-chrome --headless --disable-gpu --disable-background-networking \
+            --user-data-dir="$RUNNER_TEMP/sshs3-smoke-chrome" --virtual-time-budget=10000 --dump-dom \
+            "$base/" > "$RUNNER_TEMP/sshs3-login.html"
+          grep -q 'autocomplete="username"' "$RUNNER_TEMP/sshs3-login.html"
+          grep -q 'autocomplete="current-password"' "$RUNNER_TEMP/sshs3-login.html"
+
+          docker exec -i "$id" node <<'NODE'
+          const assert = require('node:assert/strict');
+          const { module: pty } = require('node-pty/lib/utils').loadNativeModule('pty');
+          assert.equal(typeof pty.fork, 'function');
+          assert.equal(typeof require('pkcs11js').PKCS11, 'function');
+          NODE
+          for _ in {1..10}; do
+            health=$(docker inspect --format '{{.State.Health.Status}}' "$id")
+            [[ "$health" == healthy ]] && break
+            sleep 1
+          done
+          test "$health" = healthy

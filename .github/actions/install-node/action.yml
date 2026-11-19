@@ -1,0 +1,51 @@
+name: Install locked Node dependencies
+description: Restore or install the development tree before tests and packaging can change it
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v7
+      with:
+        node-version: 24
+        package-manager-cache: false
+    - name: Identify the installed runtime and runner image
+      id: runtime
+      shell: pwsh
+      run: |
+        $node = node -p "process.versions.node + '-abi' + process.versions.modules + '-' + process.arch"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        $npm = npm --version
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        "id=node$node-npm$npm-$env:ImageOS-$env:ImageVersion" >> $env:GITHUB_OUTPUT
+        "image_known=$([bool]($env:ImageOS -and $env:ImageVersion))" >> $env:GITHUB_OUTPUT
+    - name: Restore the exact dependency tree
+      if: steps.runtime.outputs.image_known == 'true'
+      uses: actions/cache/restore@v4
+      id: tree
+      with:
+        path: node_modules
+        key: node-modules-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.runtime.outputs.id }}-${{ hashFiles('package-lock.json', 'package.json', '.npmrc', '.github/actions/install-node/**') }}
+    - name: Check restored dependencies
+      if: steps.tree.outputs.cache-hit == 'true'
+      id: validate
+      continue-on-error: true
+      shell: bash
+      run: node "$GITHUB_ACTION_PATH/verify-install.mjs"
+    # The download cache only helps jobs that actually run npm ci.
+    - name: Restore npm downloads for installation
+      if: steps.tree.outputs.cache-hit != 'true' || steps.validate.outcome != 'success'
+      uses: actions/setup-node@v7
+      with:
+        node-version: 24
+        cache: npm
+    - name: Install or repair dependencies
+      if: steps.tree.outputs.cache-hit != 'true' || steps.validate.outcome != 'success'
+      shell: bash
+      run: |
+        npm ci
+        node "$GITHUB_ACTION_PATH/verify-install.mjs"
+    - name: Save the clean installation
+      if: steps.runtime.outputs.image_known == 'true' && steps.tree.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: node_modules
+        key: ${{ steps.tree.outputs.cache-primary-key }}

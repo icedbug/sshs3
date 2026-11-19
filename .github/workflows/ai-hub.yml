@@ -26,6 +26,7 @@ on:
       - 'eslint.config.js'
       - '.github/workflows/ai-hub.yml'
       - '.github/actions/build-hermes/**'
+      - '.github/actions/install-node/**'
 permissions:
   contents: read
 jobs:
@@ -38,17 +39,12 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          cache: npm
       - name: Install Linux shells and build tools
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y zsh fish build-essential libx11-dev libxi-dev libportaudio2
-      - name: Install sshs3 locked dependencies
-        run: npm ci
+      - uses: ./.github/actions/install-node
       - uses: ./.github/actions/build-hermes
       - name: Native engine tools, host ownership and presentation contracts
         run: npx vitest run tests/main/nativeHermesTools.test.ts tests/main/nativeDesktopShell.test.ts tests/main/nativeHermesLayout.test.ts
