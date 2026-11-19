@@ -55,23 +55,23 @@ export interface SettingsProps {
 const PROFILE_ROLES: { role: AiProfileRole; label: string; hint: string }[] = [
   {
     role: "primary",
-    label: "Reasoning & Coding (primary)",
-    hint: "Main interactive chat, planning, and code/config edits.",
+    label: "The chat and the agents (main model)",
+    hint: "Conversations, plans, and changes to code and configuration.",
   },
   {
     role: "fastTriage",
-    label: "Fast Triage (fast)",
-    hint: "Quick read-only checks, inline suggestions, and alert triage.",
+    label: "Quick checks (fast model)",
+    hint: "Short read-only checks, one-line command suggestions, and a first look at an alert.",
   },
   {
     role: "backgroundDistill",
-    label: "Summary & Distill (summary)",
-    hint: "Background session distillation, daily digests, and KB page compilation.",
+    label: "Summaries in the background",
+    hint: "What is learned from finished work, the daily report, and writing knowledge base pages.",
   },
   {
     role: "embedding",
-    label: "Embeddings (KB search)",
-    hint: "Semantic vector indexing for Knowledge Base documents and pages.",
+    label: "Search in the knowledge base",
+    hint: "Finding documents and pages by meaning, not only by the same words.",
   },
 ];
 
@@ -856,9 +856,11 @@ export function Settings({
           <div className="ai-tags">
             {dataFlow.channels.map((ch) => (
               <span key={ch.channel} className="ai-tool-tag" title={ch.destination}>
-                {DATA_CHANNEL_NAMES[ch.channel] ?? ch.channel}: <strong>{DATA_PLACES[ch.locality] ?? ch.locality}</strong>
-                {ch.enabled ? (ch.encryptedInTransit ? " · encrypted on the way" : " · not encrypted on the way") : ""}
-                {ch.piiScrubbing && ch.piiScrubbing !== "off" ? " · personal details hidden" : ""}
+                <span>
+                  {DATA_CHANNEL_NAMES[ch.channel] ?? ch.channel}: <strong>{DATA_PLACES[ch.locality] ?? ch.locality}</strong>
+                  {ch.enabled ? (ch.encryptedInTransit ? " · encrypted on the way" : " · not encrypted on the way") : ""}
+                  {ch.piiScrubbing && ch.piiScrubbing !== "off" ? " · personal details hidden" : ""}
+                </span>
               </span>
             ))}
           </div>

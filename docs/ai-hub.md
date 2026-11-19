@@ -1294,6 +1294,17 @@ it to the rules: unsolved at the start with nothing broken, green by the
 careful way with no unsimulated command, and red on exactly
 `carelessFails` by the careless way.
 
+**The desktop app, started.** `npm run test:smoke:demo` (after
+`npm run build`) starts the Electron app in its demo lab and goes into the AI
+workspace over the app's own IPC: the hub answers and says it is the demo,
+the five incidents are offered, the board is drawn, one incident is started,
+its alert is a ticket on the board, and the incident is taken back. On a
+machine without a display it runs under
+`xvfb-run --auto-servernum npm run test:smoke:demo`. `npm run test:smoke`
+is the same without the demo: the app starts and draws. Both were run that
+way on Linux and passed. Before that, only the web build had been started in
+this work. Not checked: the packaged installers, Windows and macOS.
+
 ## Knowledge base: what agents know (`KbCompile`, `KbLint`)
 
 The knowledge base is for the agents, not a document store for people. It has
