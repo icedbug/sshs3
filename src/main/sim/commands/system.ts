@@ -1071,6 +1071,69 @@ function hostnamectl(ctx: SimContext, args: string[]): SimResult {
   );
 }
 
+/** How busy the processors are, in percent, from the load: what `vmstat` and `iostat` put in their first columns. */
+function cpuShare(host: SimHost): { user: number; system: number; idle: number } {
+  const busy = Math.min(100, (load(host)[0] / Math.max(1, host.cpus)) * 100);
+  const user = Math.round(busy * 0.7 * 10) / 10;
+  const system = Math.round(busy * 0.3 * 10) / 10;
+  return { user, system, idle: Math.max(0, Math.round((100 - user - system) * 10) / 10) };
+}
+
+/** `vmstat [interval [count]]`: one line per sample. Nothing here waits, so the samples come at once and are alike. */
+function vmstat(ctx: SimContext, args: string[]): SimResult {
+  const numbers = args.filter((a) => /^\d+$/.test(a)).map(Number);
+  for (const a of args) if (!/^\d+$/.test(a) && a !== "-w" && a !== "-n") throw new NotSimulated(`vmstat ${a}`);
+  const samples = numbers.length >= 2 ? Math.max(1, Math.min(numbers[1], 20)) : 1;
+  const m = memory(ctx.host);
+  const cpu = cpuShare(ctx.host);
+  const running = Math.max(0, Math.round(load(ctx.host)[0]));
+  const buffers = Math.round(m.cache * 0.04);
+  const row = [running, 0, 0, m.free, buffers, m.cache - buffers, 0, 0, 3, 21, 380 + running * 40, 720 + running * 90, Math.round(cpu.user), Math.round(cpu.system), Math.round(cpu.idle), 0, 0];
+  const widths = [2, 2, 6, 7, 6, 7, 4, 4, 5, 5, 4, 4, 2, 2, 2, 2, 2];
+  const line = row.map((n, i) => String(n).padStart(widths[i])).join(" ");
+  return ok(
+    lines([
+      "procs -----------memory---------- ---swap-- -----io---- -system-- ------cpu-----",
+      " r  b   swpd   free   buff  cache   si   so    bi    bo   in   cs us sy id wa st",
+      ...Array.from({ length: samples }, () => line),
+    ]),
+  );
+}
+
+/** `iostat [-x] [-z] [interval [count]]`: the processors, then each disk. The disks here are never the bottleneck: they idle. */
+function iostat(ctx: SimContext, args: string[]): SimResult {
+  let extended = false;
+  for (const a of args) {
+    if (/^\d+$/.test(a)) continue;
+    if (/^-[xzkmdcty]+$/.test(a)) extended ||= a.includes("x");
+    else throw new NotSimulated(`iostat ${a}`);
+  }
+  const cpu = cpuShare(ctx.host);
+  const day = new Date(ctx.host.now());
+  const date = `${p2(day.getUTCMonth() + 1)}/${p2(day.getUTCDate())}/${day.getUTCFullYear()}`;
+  // One line per disk, not per partition: /dev/sda1 and /dev/nvme0n1p2 are sda and nvme0n1.
+  const devices = [...new Set(ctx.host.disks.map((d) => d.device.replace(/^\/dev\//, "").replace(/(?<=\D)\d+$|p\d+$/, "")).filter((d) => /^(sd|vd|xvd|nvme)/.test(d)))];
+  const head = extended
+    ? "Device            r/s     rkB/s   rrqm/s  %rrqm r_await rareq-sz     w/s     wkB/s   wrqm/s  %wrqm w_await wareq-sz     d/s     dkB/s   drqm/s  %drqm d_await dareq-sz     f/s f_await  aqu-sz  %util"
+    : "Device             tps    kB_read/s    kB_wrtn/s    kB_dscd/s    kB_read    kB_wrtn    kB_dscd";
+  const row = (name: string): string =>
+    extended
+      ? `${name.padEnd(13)}    0.42     11.20     0.01   2.30    0.31    26.67    3.10     41.80     2.40  43.64    0.52    13.48    0.00      0.00     0.00   0.00    0.00     0.00    0.20    0.41    0.00   0.21`
+      : `${name.padEnd(13)}    3.52        11.20        41.80         0.00    3968211   14809344          0`;
+  return ok(
+    lines([
+      `Linux ${ctx.host.kernel} (${ctx.host.name}) \t${date} \t_x86_64_\t(${ctx.host.cpus} CPU)`,
+      "",
+      "avg-cpu:  %user   %nice %system %iowait  %steal   %idle",
+      `        ${cpu.user.toFixed(2).padStart(7)}    0.00 ${cpu.system.toFixed(2).padStart(7)}    0.10    0.00 ${Math.max(0, cpu.idle - 0.1).toFixed(2).padStart(7)}`,
+      "",
+      head,
+      ...devices.map(row),
+      "",
+    ]),
+  );
+}
+
 function uname(ctx: SimContext, args: string[]): SimResult {
   const { host } = ctx;
   const { flags } = parseArgs(args);
@@ -2336,6 +2399,8 @@ export const systemCommands: Record<string, SimCommand> = {
   hostname,
   hostnamectl,
   uname,
+  vmstat,
+  iostat,
   date,
   timedatectl,
   lsb_release: lsbRelease,

@@ -59,6 +59,46 @@ describe("system commands of a simulated server", () => {
     shell = new SimShell(host, new Map(Object.entries(systemCommands)));
   });
 
+  describe("what an agent looks at first (asked for by the first real model, and not there)", () => {
+    it("vmstat gives one line per sample, with the memory free says and an idle processor", () => {
+      const one = run("vmstat");
+      expect(one.code).toBe(0);
+      const rows = one.output.replace(/\r/g, "").trim().split("\n");
+      expect(rows[1]).toBe(" r  b   swpd   free   buff  cache   si   so    bi    bo   in   cs us sy id wa st");
+      expect(rows).toHaveLength(3);
+      const cells = rows[2].trim().split(/\s+/).map(Number);
+      expect(cells).toHaveLength(17);
+      // free memory is the same number `free` prints
+      const free = Number(run("free").output.split("\n")[1].trim().split(/\s+/)[3]);
+      expect(cells[3]).toBe(free);
+      // user + system + idle make a whole
+      expect(cells[12] + cells[13] + cells[14]).toBeGreaterThanOrEqual(99);
+      expect(run("vmstat 1 3").output.replace(/\r/g, "").trim().split("\n")).toHaveLength(5);
+      expect(shell.unsupported).toEqual([]);
+    });
+
+    it("iostat names the server and lists each disk once, with and without -x", () => {
+      const plain = run("iostat");
+      expect(plain.code).toBe(0);
+      expect(plain.output).toContain("(web-01)");
+      expect(plain.output).toContain("(4 CPU)");
+      expect(plain.output).toMatch(/avg-cpu:\s+%user\s+%nice\s+%system\s+%iowait\s+%steal\s+%idle/);
+      const wide = run("iostat -xz 1 2");
+      expect(wide.code).toBe(0);
+      expect(wide.output).toMatch(/Device\s+r\/s\s+rkB\/s/);
+      expect(wide.output).toMatch(/%util/);
+      expect(shell.unsupported).toEqual([]);
+    });
+
+    it("timeout runs the command it is given, and its exit code is the command's", () => {
+      expect(run("timeout 8 uname -n").output.trim()).toBe("web-01");
+      expect(run("timeout -k 2 8 uname -Q").code).toBe(1);
+      expect(run("sudo timeout 5 whoami").output.trim()).toBe("root");
+      expect(run("timeout 5").code).toBe(125);
+      expect(shell.unsupported).toEqual([]);
+    });
+  });
+
   describe("systemctl", () => {
     it("shows a running unit the way systemd does, with its last journal lines", () => {
       const { output, code } = run("systemctl status nginx");

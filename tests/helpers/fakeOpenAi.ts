@@ -40,6 +40,8 @@ export interface FakeOpenAiOptions {
    * enough), then a `temperature` other than the default while it reasons.
    */
   reasoningModel?: boolean;
+  /** Answers this status, with no body worth reading, to the first `times` requests: a provider having a bad moment. */
+  flaky?: { status: number; times: number };
   /** Tokens reported per answer. */
   usage?: { prompt_tokens: number; completion_tokens: number };
   /** The port to listen on. Any free one when left out. */
@@ -72,6 +74,11 @@ export async function fakeOpenAi(steps: FakeModelScript, options: FakeOpenAiOpti
     req.on("end", () => {
       const body = JSON.parse(raw) as Record<string, unknown>;
       requests.push(body);
+      if (options.flaky && requests.length <= options.flaky.times) {
+        res.writeHead(options.flaky.status, { "Content-Type": "text/plain" });
+        res.end(`error code: ${options.flaky.status}`);
+        return;
+      }
       if (options.strict) {
         if ("max_tokens" in body)
           return refusal(res, "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.", "max_tokens", "unsupported_parameter");

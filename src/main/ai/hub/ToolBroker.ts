@@ -17,6 +17,7 @@ import {
   shouldRequireCommandApproval,
 } from "./CommandSafetyService";
 import { boundedContext, exactHash, forApproval, maskStrings, safeError, clip } from "./privacy";
+import { scriptedDemoNote } from "../../sim/scripted";
 
 /** A person's answer, and how it came about when nobody answered. */
 interface Answer {
@@ -41,6 +42,19 @@ export interface ToolErrorEnvelope {
   message: string;
   details?: Record<string, unknown>;
   recoverable?: boolean;
+}
+
+/** How many times running one command may give one answer before it is not run again. */
+const REPEAT_LIMIT = 3;
+/** Only a repeat just now counts: the same check a while later is a new look at a system that may have moved. */
+const REPEAT_WITHIN_MS = 90_000;
+
+/** Whether the run's last commands were this one, each with one and the same output, the last of them just now. */
+function repeatedWithSameAnswer(task: AgentTask, commandHash: string): boolean {
+  const ran = task.changes.filter((c) => c.kind === "command" && (c.status === "completed" || c.status === "failed"));
+  const last = ran.slice(-REPEAT_LIMIT);
+  if (last.length < REPEAT_LIMIT || Date.now() - last[last.length - 1].at > REPEAT_WITHIN_MS) return false;
+  return last.every((c) => c.commandHash === commandHash && c.output === last[0].output && c.exitCode === last[0].exitCode);
 }
 
 export class ToolBrokerError extends Error {
@@ -377,6 +391,8 @@ export interface ToolDependencies {
   waited?(task: AgentTask, ms: number): void;
   /** The run asked for another action after it was told its budget is spent: end it. */
   budgetSpent?(task: AgentTask): void;
+  /** Told that a command is not run a fourth time for the same answer, the agent kept asking: the run ends here. */
+  stuck?(task: AgentTask, why: string): void;
   changed(): void;
 }
 
@@ -386,7 +402,7 @@ export class ToolBroker {
   private listening?: Promise<void>;
   private grants = new Map<
     string,
-    { task: AgentTask; commands: number; refused?: number; expiresAt: number; busy: boolean }
+    { task: AgentTask; commands: number; refused?: number; repeats?: number; expiresAt: number; busy: boolean }
   >();
   private approvals = new Map<
     string,
@@ -1144,6 +1160,19 @@ export class ToolBroker {
           };
         }
 
+        // The same command with the same answer, three times running and just now: a fourth run would say
+        // the same. A model that has stopped thinking its way forward repeats itself until the money is gone
+        // (the first real model did, fourteen times). Refused, and after two more tries the run is ended.
+        if (repeatedWithSameAnswer(task, exactHash(request.command!.trim()))) {
+          grant.repeats = (grant.repeats ?? 0) + 1;
+          if (grant.repeats > 2) this.deps.stuck?.(task, "It kept asking for the same command, which printed the same thing each time. Stopped, so it does not go on spending.");
+          throw new ToolBrokerError(
+            "precondition",
+            `You ran this exact command ${REPEAT_LIMIT} times in a row and it printed the same thing each time. It is not run again: the answer would be the same. Use what it showed, try something different, or end with a report of what you found and what stopped you.`,
+            { code: "repeated_command" },
+          );
+        }
+        grant.repeats = 0;
         const safety = analyzeCommandSafety(request.command!, shellKind);
         const shown = forApproval(request.command!, 16_000, "command");
         const sc = request.structuredCheck ?? request.check?.structuredCheck;
@@ -1199,6 +1228,7 @@ export class ToolBroker {
           if (request.action === "verify")
             task.verification = checkPassed ? "verified" : "incomplete";
           else task.verification = "not-verified";
+          const demoNote = scriptedDemoNote(this.terminals.get(target.sessionId)?.profileId, target.label);
           this.deps.activity?.(task, change, target.sessionId);
           this.deps.changed();
           return {
@@ -1215,6 +1245,8 @@ export class ToolBroker {
                   personNote: `Approved with a note from the person: ${change.decisionNote}`,
                 }
               : {}),
+            // A scripted example server of the demo lab: its output is invented, and the model is told so.
+            ...(demoNote ? { note: demoNote } : {}),
             source: `terminal:${target.sessionId}`,
             observedAt: Date.now(),
           };

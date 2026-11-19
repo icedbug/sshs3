@@ -281,6 +281,8 @@ export class HubService {
       },
       // Told its budget is spent, the agent asked for more anyway: the run ends here.
       budgetSpent: (task) => void this.stop(task, "Command budget exhausted"),
+      // Told a command is not run again for the same answer, the agent kept asking for it: the run ends here.
+      stuck: (task, why) => void this.stop(task, why),
       safetyContext: (task, targetLabel) =>
         this.resolveSafetyContext(task, targetLabel),
       changed: () => this.changed(),

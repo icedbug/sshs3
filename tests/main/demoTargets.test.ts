@@ -283,12 +283,15 @@ describe("AI tools on demo targets", () => {
       (await hub.broker.invoke(cap.key, {
         action: "sshs3_cluster_exec",
         payload: { cluster: "NetApp-ONTAP-Prod-SE", command: "storage aggregate show" },
-      })) as { results: Array<{ node: string; source: string }> };
+      })) as { results: Array<{ node: string; source: string; note?: string }> };
 
     const demoRun = await run();
     expect(demoRun.results.find((r) => r.node === "netapp-aff-a800-01a")?.source).toBe(
       `demo-cluster:${DEMO_PROFILE_ID}`,
     );
+    // What a scripted example prints is invented: the model is told so with the result, and only there.
+    expect(demoRun.results.find((r) => r.node === "netapp-aff-a800-01a")?.note).toMatch(/scripted examples: what it prints is invented and never changes/);
+    expect(demoRun.results.find((r) => r.node === "lab-ontap")?.note).toBeUndefined();
     // A real server in the same address range is not fake: without an open terminal it stays unconnected.
     expect(demoRun.results.find((r) => r.node === "lab-ontap")?.source).toBe("unconnected:srv-lab-ontap");
 

@@ -84,7 +84,9 @@ export const retryPolicy = {
   maxDelayMs: 20_000,
   sseIdleTimeoutMs: 35_000,
 };
-const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504, 529]);
+// 520 to 524 are what the network in front of a provider answers when the provider did not (OpenAI sits
+// behind one): passing trouble, tried again like a 502. The first real run ended on a 520 after 14 commands.
+const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524, 529]);
 
 /** True for upstream server/overload/timeout HTTP status codes that trip the circuit breaker (never 429). */
 export function isCircuitTrippingStatus(status: number): boolean {

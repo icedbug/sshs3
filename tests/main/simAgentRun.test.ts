@@ -136,6 +136,36 @@ describe("an agent run by a model on a scenario", () => {
     expect(model.requests.filter((r) => !("max_tokens" in r) && r.reasoning_effort !== "none").length).toBe(1);
   }, 60_000);
 
+  it("tries again when the provider's network answers 520, instead of ending the run", async () => {
+    const { dir, runAgentOnScenario } = await lab();
+    const scenario = scenarioById("nginx-bad-config")!;
+    const model = await fakeOpenAi(asModel(scenario.solutions.careful, scenario.story), { flaky: { status: 520, times: 1 } });
+    disposals.push(() => model.close());
+
+    const result = await runAgentOnScenario({ scenarioId: scenario.id, baseUrl: model.url, model: "fake-1", dir, pollMs: 20 });
+
+    // The first real run ended here: "Model API (520): error code: 520".
+    expect(result.error).toBeUndefined();
+    expect(result.score.passed).toBe(result.score.total);
+  }, 60_000);
+
+  it("does not run one command a fourth time for the same answer, and ends a run that keeps asking", async () => {
+    const { dir, runAgentOnScenario } = await lab();
+    // A model that has stopped moving: the same look, whatever it is told. (The first real one did this fourteen times.)
+    const model = await fakeOpenAi(() => ({ tool: "terminal_command", args: { command: "hostname", description: "Which server is this" } }));
+    disposals.push(() => model.close());
+
+    const result = await runAgentOnScenario({ scenarioId: "nginx-bad-config", baseUrl: model.url, model: "fake-1", dir, pollMs: 20, maxCommands: 30 });
+
+    // Three runs, not thirty: then it is told why, and when it asks twice more the run is ended.
+    expect(result.commands).toBe(3);
+    expect(result.stoppedBy).toBeUndefined();
+    expect(result.status).toBe("interrupted");
+    expect(result.error).toContain("It kept asking for the same command, which printed the same thing each time.");
+    const told = model.requests.flatMap((r) => (r.messages as Array<{ role: string; content?: unknown }>).filter((m) => m.role === "tool").map((m) => String(m.content)));
+    expect(told.some((t) => t.includes("You ran this exact command 3 times in a row") && t.includes("It is not run again: the answer would be the same."))).toBe(true);
+  }, 60_000);
+
   it("says that nobody worked on the ticket when the lab has no model", async () => {
     const { dir } = await lab();
     const { HubService } = await import("../../src/main/ai/hub/HubService");

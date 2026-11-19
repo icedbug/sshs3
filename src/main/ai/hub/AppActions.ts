@@ -38,6 +38,7 @@ import {
   mcpCatalog,
 } from "./demoWorkspace";
 import { simWorld } from "../../sim/SimWorld";
+import { SCRIPTED_DEMO_NOTE } from "../../sim/scripted";
 import { isDemoTarget } from "../../demo/demoMode";
 import { nextRef } from "./ToolBroker";
 
@@ -2118,6 +2119,8 @@ export async function handleAppAction(
               nodeRole: srv.nodeRole,
               exitCode: 0,
               output: simulateDemoNodeCommand(srv, command),
+              // Invented and always the same: said with the result, so it is not taken for a system's state.
+              note: SCRIPTED_DEMO_NOTE,
               source: `demo-cluster:${srv.id}`,
             };
           }

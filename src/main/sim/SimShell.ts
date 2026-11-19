@@ -464,6 +464,17 @@ export class SimShell {
       if (!rest.length) return fail("usage: sudo [-u user] command\n", 1);
       return this.dispatch(rest, { root: true, stdin: opts.stdin });
     }
+    // `timeout 8 command`: nothing here waits, so no command runs out of time. The command is what counts.
+    if (name === "timeout") {
+      const rest = argv.slice(1);
+      while (rest[0]?.startsWith("-")) {
+        const flag = rest.shift()!;
+        if (flag === "-s" || flag === "-k") rest.shift();
+      }
+      rest.shift();
+      if (!rest.length) return fail("timeout: missing operand\nTry 'timeout --help' for more information.\n", 125);
+      return this.dispatch(rest, opts);
+    }
     if ((name === "sh" || name === "bash") && argv[1] === "-c") return argv[2] === undefined ? fail(`${name}: -c: option requires an argument\n`, 2) : this.exec(argv[2], opts);
     if (name === "cd") {
       const target = normalizePath(argv[1] ?? this.home(), this.cwd);
