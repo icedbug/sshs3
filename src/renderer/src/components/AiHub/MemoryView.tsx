@@ -513,7 +513,7 @@ export function Memory({
               </select>
             </label>
             <label>
-              Weight
+              When it is used
               <select value={draft.tier} onChange={(e) => setDraft({ ...draft, tier: e.target.value as Tier })}>
                 {(Object.keys(TIERS) as Tier[]).map((t) => (
                   <option key={t} value={t}>

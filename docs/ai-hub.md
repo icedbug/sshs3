@@ -391,6 +391,32 @@ new folder. `tests/main/hubAreas.test.ts` keeps the files to a size
 (`HubService.ts` under 2,000 lines, a part under 1,500) and checks the table
 against the files.
 
+## Where data may go (`src/shared/dataDestination.ts`)
+
+The settings let a person choose where data may be sent (any service they set
+up, only services in the EU, or only this machine and their own network),
+what is hidden before anything is sent, and whether they have confirmed that
+the model's provider keeps none of it. `validateEgressPolicy` answers whether
+an address is allowed under those choices; a run asks it before it calls a
+model, and the settings card "What leaves this machine" shows the answer.
+
+- **One piece of code for both.** There were two copies, one in the main
+  process and one beside the settings, and they had drifted in what they
+  asked. The card asked whether the "keeps nothing" confirmation was there
+  and said "Blocked by policy" without it; a run never required it. So the
+  page said a cloud model was blocked while runs used it. Both sides now use
+  `src/shared/dataDestination.ts`, and the card asks exactly what a run asks
+  (`requireZdr: false`): a confirmation that is missing is shown as a note,
+  and "Stopped by these settings" is said only when a run would be stopped.
+- **Plain words.** What the card and a stopped run say is written for a
+  person who does not know the terms: "You chose to send nothing outside your
+  own network, and api.anthropic.com is outside it." The identifiers in code
+  and in saved settings (`egressPolicy`, `zdrConfirmed`, `piiScrubbing`) are
+  unchanged.
+- Not decided here: whether a run should be stopped until the confirmation is
+  ticked. Today it is not. Making it so is one option (`requireZdr`) and
+  would stop every cloud model until each person ticks the box.
+
 ## Nightly upkeep, the dependency map, and evidence beside conclusions
 
 **Nightly upkeep** (`HubService.nightly`, `DailyReport.ts`). Once a day, after
@@ -1509,7 +1535,8 @@ because there is no server to run one on.
   ticket, add a note and create a ticket for another agent (at most 10 an
   hour). A created ticket hangs on the ticket being worked. What an agent
   writes on the board is signed "<agent> (agent, for <person>)".
-- **Heartbeat** (`preferences.workforceAutopilot`, off by default): on each
+- **Heartbeat** (`preferences.workforceAutopilot`, off by default; the Workforce
+  view calls it "Start tickets by itself"): on each
   timer tick the app takes the oldest runnable ticket in To do and starts it,
   one at a time. It runs in the agent's own mode, so an agent set to run
   commands on its own does so unattended, within the safety policy.
@@ -1656,6 +1683,16 @@ JSX the component returned; the hook's body is what the component did before
 it drew; and what the panel puts on the page is the same in 19 states
 (conversation, menus, slash and @ lists, history, a new chat, each view, the
 side panel, settings), compared as HTML before and after.
+
+**Words.** Labels a colleague did not understand were replaced where they
+were only labels: "Heartbeat" is "Start tickets by itself", "Run inspector"
+and "Subagent" are "What is running" and "Runs it started", "Snooze" is
+"Later", "Quiet sentinel" is "Only tell me when something is wrong", "SLA" is
+"open for", "Concerns" is "About", "Mission Agents" is "Agents", "Approve
+safe" is "Approve the low-risk ones", "Weight" is "When it is used", and
+"correlated alerts" is "Alerts on this ticket". "Team bucket" is a name people
+have to recognise, so it stays and is explained where it is introduced ("S3
+storage the whole team uses"). Test ids and the names in code are unchanged.
 
 Not done: the hook is still one function of about a thousand lines. Dividing
 it into several hooks cannot be done by moving text: each would need its

@@ -36,7 +36,7 @@ export const SCHEDULE_MODES: Record<AgentMode, string> = {
 };
 
 export const QUIET_SENTINEL_PRESET = {
-  title: "Quiet sentinel (notify only on anomaly)",
+  title: "Health check that tells you only when something is wrong",
   prompt:
     "Check disk space, failed services, memory pressure, and recent errors. If everything is healthy, reply strictly with HEARTBEAT_OK and nothing else. Notify only when an anomaly is found.",
   minutes: 15,
@@ -605,10 +605,9 @@ export function Schedules({
               }
             />
             <span>
-              Quiet sentinel (notify only on anomaly)
+              Only tell me when something is wrong
               <small>
-                Suppresses notifications and history noise when the run replies
-                HEARTBEAT_OK.
+                When all is well the run answers with one word, and nothing is sent or kept in the history.
               </small>
             </span>
           </label>
@@ -667,7 +666,7 @@ export function Schedules({
             </div>
             <div className="ai-tags">
               {s.quietSentinel && (
-                <span className="ai-badge ai-badge-mode">Quiet sentinel</span>
+                <span className="ai-badge ai-badge-mode">tells only when wrong</span>
               )}
               {s.eventTrigger && (
                 <span className="ai-badge">

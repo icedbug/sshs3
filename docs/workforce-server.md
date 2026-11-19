@@ -47,7 +47,8 @@ as. Then:
    apps. Skip it if everybody works in the browser against this one server.
 2. **Connect a model** (AI settings). The server calls the model with this
    key; it does not use the key in anybody's desktop app.
-3. **Turn on Heartbeat** in the Workforce view. From then on the server takes
+3. **Tick "Start tickets by itself"** in the Workforce view (this document calls
+   it the heartbeat). From then on the server takes
    the oldest ticket in To do that has an agent and can run, one at a time.
 4. Give the server's SSH key access to the systems the agents work on, or add
    the servers with their own credentials, as you would in the app.

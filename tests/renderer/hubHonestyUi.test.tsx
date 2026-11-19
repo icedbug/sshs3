@@ -111,7 +111,7 @@ describe("Milestone 2 UI honesty and clarity fixes", () => {
     );
     expect(within(summary).getByTestId("sharing-shared")).toHaveTextContent("see who is signed in and which servers each person is connected to");
     expect(within(summary).getByTestId("sharing-personal")).toHaveTextContent("Yours alone: your model and its key, your Jira and Confluence sign-in, your safety rules");
-    expect(within(summary).getByTestId("sharing-more")).toHaveTextContent("A team bucket is needed only to share with desktop apps or with another server.");
+    expect(within(summary).getByTestId("sharing-more")).toHaveTextContent("A team bucket (S3 storage the whole team uses) is needed only to share with desktop apps or with another server.");
     expect(summary).not.toHaveTextContent(/to share the Workforce board/);
     server.unmount();
 

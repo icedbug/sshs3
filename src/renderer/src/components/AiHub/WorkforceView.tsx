@@ -276,7 +276,7 @@ export function WorkforceView({
     >
       <strong>{draft.id ? "Edit ticket" : "New ticket"}</strong>
       <label>
-        Outcome
+        Title: the result you want
         <input
           required
           autoFocus
@@ -321,7 +321,7 @@ export function WorkforceView({
           </select>
         </label>
         <label>
-          Concerns (optional)
+          About (optional)
           <input
             placeholder="A cluster or server"
             value={draft.target}
@@ -446,7 +446,7 @@ export function WorkforceView({
                 })
               }
             />
-            <span className={heartbeat ? "ai-heartbeat-on" : ""}>Heartbeat</span>
+            <span className={heartbeat ? "ai-heartbeat-on" : ""}>Start tickets by itself</span>
           </label>
           <button
             type="button"
@@ -464,7 +464,7 @@ export function WorkforceView({
             aria-expanded={drawerOpen}
             onClick={() => setDrawerOpen((v) => !v)}
           >
-            Run inspector{liveRunCount > 0 ? ` (${liveRunCount})` : ""}
+            What is running{liveRunCount > 0 ? ` (${liveRunCount})` : ""}
           </button>
           <button type="button" onClick={() => setGoalDraft(goalDraft ? undefined : { title: "", description: "" })}>
             New goal
@@ -493,7 +493,7 @@ export function WorkforceView({
             : isWebBrowserMode()
               ? "The board is not shared: it is kept for your account only."
               : `${boardSharedWith({ server: false, bucket: false })}.`}
-        {heartbeat ? " · Heartbeat on: this app starts tickets by itself." : ""}
+        {heartbeat ? " · On: this app starts tickets by itself, one at a time." : ""}
       </small>
 
       <ScenariosCard
@@ -760,7 +760,7 @@ export function WorkforceView({
                           </span>
                         )}
                         {corr.items.length > 1 && (
-                          <span className="ai-badge" title={`${corr.total} correlated alerts`}>
+                          <span className="ai-badge" title={`${corr.total} alerts about the same thing`}>
                             {corr.items.length} alerts
                           </span>
                         )}
@@ -780,7 +780,7 @@ export function WorkforceView({
                             data-testid={`ticket-sla-${t.id}`}
                             data-sla-level={sla.level}
                             style={SLA_STYLE[sla.level]}
-                            title={`Open / firing age: ${sla.label}`}
+                            title={`Open for ${sla.label}. It changes colour the longer it waits, sooner for a critical alert.`}
                           >
                             {sla.label}
                           </span>
@@ -872,7 +872,7 @@ export function WorkforceView({
                 {openTicket.id} · {COLUMNS.find((c) => c.status === openTicket.status)?.title} ·{" "}
                 {openTicket.assigneeName ?? "unassigned"}
                 {goals.find((g) => g.id === openTicket.goalId) ? ` · ${goals.find((g) => g.id === openTicket.goalId)!.title}` : ""}
-                {openTicket.tokens ? ` · ${tokens(openTicket.tokens)} tokens` : ""} · SLA{" "}
+                {openTicket.tokens ? ` · ${tokens(openTicket.tokens)} tokens` : ""} · open for{" "}
                 {ticketSlaInfo(openTicket).label} · by {openTicket.createdBy}
               </small>
             </div>
@@ -948,8 +948,7 @@ export function WorkforceView({
               style={{ display: "grid", gap: 6, margin: "8px 0" }}
             >
               <small className="ai-muted">
-                Correlated alerts ({openTicketAlertGroup.total} event
-                {openTicketAlertGroup.total === 1 ? "" : "s"} across {openTicketAlertGroup.items.length} group
+                Alerts on this ticket ({openTicketAlertGroup.total} in all, of {openTicketAlertGroup.items.length} kind
                 {openTicketAlertGroup.items.length === 1 ? "" : "s"})
               </small>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
@@ -1298,7 +1297,7 @@ function RunInspectionDrawer({
       className="ai-card ai-run-drawer"
       data-testid="run-inspection-drawer"
       role="region"
-      aria-label="Subagent and run inspection drawer"
+      aria-label="What is running"
       style={{
         marginTop: 10,
         marginBottom: 12,
@@ -1310,9 +1309,9 @@ function RunInspectionDrawer({
     >
       <div className="ai-card-head">
         <div>
-          <strong>Subagent &amp; Run Inspector</strong>
+          <strong>What is running</strong>
           <small>
-            Live tool steps, scratchpad todos, child subagents, and streaming output across active workforce runs.
+            Each run's steps, its task list, the runs it started, and its text as it comes.
           </small>
         </div>
         <button type="button" aria-label="Close run drawer" onClick={onClose}>
@@ -1321,7 +1320,7 @@ function RunInspectionDrawer({
       </div>
 
       {tasks.length === 0 && runs.length === 0 ? (
-        <p className="ai-empty">No active or recent runs yet. Start a ticket or workforce run to inspect its steps.</p>
+        <p className="ai-empty">Nothing is running and nothing ran lately. Start a ticket to see its steps here.</p>
       ) : (
         <div
           style={{
@@ -1411,7 +1410,7 @@ function RunInspectionDrawer({
 
                 {childSubagents.length > 0 && (
                   <div data-testid="run-drawer-subagents" style={{ display: "grid", gap: 6 }}>
-                    <small className="ai-muted">Child subagents ({childSubagents.length})</small>
+                    <small className="ai-muted">Runs it started ({childSubagents.length})</small>
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                       {childSubagents.map((sub) => (
                         <button

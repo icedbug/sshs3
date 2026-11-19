@@ -407,7 +407,7 @@ describe("dataDestination.ts — egress policy validation & active data flow bre
       egressPolicy: "local-only",
     });
     expect(httpPrivate.allowed).toBe(false);
-    expect(httpPrivate.errors.join(" ")).toContain("HTTPS");
+    expect(httpPrivate.errors.join(" ")).toContain("has to be reached over https. This address is not: http://10.0.0.5:8000.");
 
     // local-only rejects cloud providers
     expect(
@@ -443,7 +443,7 @@ describe("dataDestination.ts — egress policy validation & active data flow bre
       zdrConfirmed: false,
     });
     expect(noZdr.allowed).toBe(false);
-    expect(noZdr.errors.join(" ")).toContain("zdrConfirmed");
+    expect(noZdr.errors.join(" ")).toContain("You have not confirmed that api.anthropic.com keeps none of what is sent to it");
   });
 
   it("describes active data flow across LLM, S3 sync, and local storage", () => {

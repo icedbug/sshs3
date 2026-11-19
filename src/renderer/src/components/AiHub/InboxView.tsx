@@ -47,7 +47,7 @@ const PRIORITY_SECTIONS: readonly SectionSpec[] = [
 
 const SNOOZED_SECTION: SectionSpec = {
   id: "snoozed",
-  title: "Snoozed",
+  title: "Put off until later",
   testId: "inbox-section-snoozed",
 };
 
@@ -74,15 +74,15 @@ const ago = (at: number): string => {
 
 /** Formats remaining snooze duration as a compact countdown string. */
 function formatSnoozeCountdown(snoozedUntil: number | undefined, now = Date.now()): string {
-  if (typeof snoozedUntil !== "number") return "Snoozed";
+  if (typeof snoozedUntil !== "number") return "Put off";
   const remainingMs = Math.max(0, snoozedUntil - now);
   const mins = Math.ceil(remainingMs / 60_000);
-  if (mins <= 1) return "Snoozed · <1m left";
-  if (mins < 60) return `Snoozed · ${mins}m left`;
+  if (mins <= 1) return "Back in under a minute";
+  if (mins < 60) return `Back in ${mins} min`;
   const hours = Math.round(mins / 60);
-  if (hours < 24) return `Snoozed · ${hours}h left`;
+  if (hours < 24) return `Back in ${hours} h`;
   const days = Math.round(hours / 24);
-  return `Snoozed · ${days}d left`;
+  return `Back in ${days} d`;
 }
 
 function tomorrowMorningMs(now: number): number {
@@ -472,7 +472,7 @@ export function InboxView({
             data-testid={`inbox-unsnooze-btn-${item.id}`}
             onClick={() => void dispatch({ action: "snooze-inbox", itemId: item.id, until: 0 })}
           >
-            Wake now
+            Show now
           </button>
         ) : (
           <button
@@ -481,14 +481,14 @@ export function InboxView({
             data-testid={`inbox-snooze-btn-${item.id}`}
             onClick={() => setSnoozeMenuId((prev) => (prev === item.id ? null : item.id))}
           >
-            <Clock size={12} aria-hidden="true" /> Snooze
+            <Clock size={12} aria-hidden="true" /> Later
           </button>
         )}
         {snoozeMenuId === item.id && !snoozed && (
           <span
             className="ai-inbox-snooze-menu"
             role="group"
-            aria-label="Snooze duration"
+            aria-label="Show it again in"
             data-testid={`inbox-snooze-menu-${item.id}`}
             style={{ display: "inline-flex", gap: 4 }}
           >
@@ -761,7 +761,7 @@ export function InboxView({
             <span><kbd>o</kbd> / <kbd>Enter</kbd> Open</span>
             <span><kbd>a</kbd> Approve</span>
             <span><kbd>e</kbd> Acknowledge, or mark a ticket done (press twice)</span>
-            <span><kbd>h</kbd> Snooze</span>
+            <span><kbd>h</kbd> Later</span>
             <span><kbd>?</kbd> Toggle cheatsheet</span>
           </div>
         </section>
@@ -789,7 +789,7 @@ export function InboxView({
                   { id: "incident", label: "Urgent Alerts", count: bucketCounts.incident },
                   { id: "review", label: "Findings & Suggestions", count: bucketCounts.review },
                   ...(bucketCounts.snoozed > 0
-                    ? [{ id: "snoozed" as const, label: "Snoozed", count: bucketCounts.snoozed }]
+                    ? [{ id: "snoozed" as const, label: "Later", count: bucketCounts.snoozed }]
                     : []),
                 ] as Array<{ id: InboxSectionFilter; label: string; count: number }>
               ).map((tab) => (

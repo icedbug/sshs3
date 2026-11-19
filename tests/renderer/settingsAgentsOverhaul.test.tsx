@@ -77,7 +77,7 @@ describe("dataDestination residency & data flow", () => {
       egressPolicy: "local-only",
     });
     expect(localBlocked.allowed).toBe(false);
-    expect(localBlocked.errors[0]).toMatch(/local-only/);
+    expect(localBlocked.errors[0]).toBe("You chose to send nothing outside your own network, and api.anthropic.com is outside it.");
 
     const euOk = validateEgressPolicy({
       provider: "anthropic",
@@ -92,8 +92,13 @@ describe("dataDestination residency & data flow", () => {
       egressPolicy: "standard",
       zdrConfirmed: false,
     });
+    // Asked on its own, the stricter question: where the confirmation is required, its absence stops.
     expect(missingZdr.allowed).toBe(false);
-    expect(missingZdr.errors.some((e) => e.includes("zdrConfirmed"))).toBe(true);
+    expect(missingZdr.errors).toEqual(["You have not confirmed that api.anthropic.com keeps none of what is sent to it, and here that has to be confirmed first."]);
+    // A run does not require it: asked the way a run asks, it is a note and nothing is stopped.
+    const asARun = validateEgressPolicy({ provider: "anthropic", egressPolicy: "standard", zdrConfirmed: false }, { requireZdr: false });
+    expect(asARun.allowed).toBe(true);
+    expect(asARun.warnings).toEqual(["You have not confirmed that api.anthropic.com keeps none of what is sent to it."]);
   });
 
   it("describes active data flow channels and subprocessors", () => {
@@ -107,7 +112,7 @@ describe("dataDestination residency & data flow", () => {
       { enabled: true, bucket: "ops-team", region: "eu-north-1" },
     );
     expect(flow.egressValidation.allowed).toBe(true);
-    expect(flow.channels.find((c) => c.channel === "llm-inference")?.notes[0]).toContain("Strict");
+    expect(flow.channels.find((c) => c.channel === "llm-inference")?.notes[0]).toBe("Before anything is sent: Hides secrets, personal details, host names and anything that looks like a key.");
     expect(flow.subprocessors).toHaveLength(2);
     expect(flow.subprocessors[1].locality).toBe("eu");
   });
@@ -119,14 +124,22 @@ describe("SettingsView privacy, profiles, role routing, and labs", () => {
     const act = vi.fn().mockResolvedValue(hub);
     render(<Settings hub={hub} act={act} />);
 
-    expect(screen.getByTestId("data-flow-status-badge")).toHaveTextContent("Blocked by policy");
+    // A cloud model whose provider is not confirmed to keep nothing: runs are not stopped by that, and
+    // the card does not say they are. It says what has not been confirmed.
+    expect(screen.getByTestId("data-flow-status-badge")).toHaveTextContent("Allowed by these settings");
+    expect(screen.getByTestId("data-flow-warnings")).toHaveTextContent("You have not confirmed that api.anthropic.com keeps none of what is sent to it.");
+    expect(screen.getByTestId("data-flow-subprocessors")).toHaveTextContent("Outside services that receive data: Anthropic (an outside service, not confirmed to keep nothing)");
+    expect(screen.queryByTestId("data-flow-errors")).toBeNull();
 
     fireEvent.click(screen.getByTestId("ai-zdr-confirmed"));
-    expect(screen.getByTestId("data-flow-status-badge")).toHaveTextContent("Policy allowed");
+    expect(screen.getByTestId("data-flow-status-badge")).toHaveTextContent("Allowed by these settings");
+    expect(screen.queryByTestId("data-flow-warnings")).toBeNull();
+    expect(screen.getByTestId("data-flow-subprocessors")).toHaveTextContent("confirmed to keep nothing");
 
+    // Choosing to send nothing outside the network does stop a cloud model, and says so in plain words.
     fireEvent.change(screen.getByTestId("ai-egress-policy"), { target: { value: "local-only" } });
-    expect(screen.getByTestId("data-flow-status-badge")).toHaveTextContent("Blocked by policy");
-    expect(screen.getByTestId("data-flow-errors")).toHaveTextContent(/local-only/);
+    expect(screen.getByTestId("data-flow-status-badge")).toHaveTextContent("Stopped by these settings");
+    expect(screen.getByTestId("data-flow-errors")).toHaveTextContent("You chose to send nothing outside your own network, and api.anthropic.com is outside it.");
 
     fireEvent.change(screen.getByTestId("ai-egress-policy"), { target: { value: "standard" } });
     fireEvent.change(screen.getByTestId("ai-pii-scrubbing"), { target: { value: "strict" } });

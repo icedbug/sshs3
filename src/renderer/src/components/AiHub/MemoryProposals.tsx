@@ -212,7 +212,7 @@ export function MemoryProposals({
             disabled={batchBusy || safePending.length === 0}
             onClick={() => void approveSafeBatch()}
           >
-            Approve safe ({safePending.length})
+            Approve the low-risk ones ({safePending.length})
           </button>
           <button
             type="button"
@@ -322,7 +322,7 @@ function ProposalRow({
           <span className="ai-badge">task:{sourceTaskId}</span>
         )}
         <span className="ai-badge">
-          {evidenceCount} evidence
+          Backed by {evidenceCount} {evidenceCount === 1 ? "thing" : "things"} it saw
         </span>
         <small className="ai-muted">
           {new Date(proposal.createdAt).toLocaleString()}

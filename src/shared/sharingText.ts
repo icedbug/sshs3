@@ -43,7 +43,7 @@ export function sharingText(place: SharingPlace, reader: "you" | "each" = "you")
       personal: mine,
       more: place.bucket
         ? "The team bucket carries the same board, agents, Knowledge Base, team memory and activity to desktop apps and other servers that use it."
-        : "A team bucket is needed only to share with desktop apps or with another server.",
+        : "A team bucket (S3 storage the whole team uses) is needed only to share with desktop apps or with another server.",
     };
   if (place.bucket)
     return {
@@ -53,7 +53,7 @@ export function sharingText(place: SharingPlace, reader: "you" | "each" = "you")
   return {
     shared: "Nothing is shared. Memory, runbooks, the board and activity stay on this computer.",
     personal: "",
-    more: "Connect a team bucket from the start page (Connect S3 team bucket) to share them with a team.",
+    more: "Connect a team bucket (S3 storage the whole team uses) from the start page to share them with a team.",
   };
 }
 

@@ -513,7 +513,7 @@ describe("the agent's plan", () => {
     expect(screen.getByTestId("plan-review")).toHaveTextContent("Step 2 does not go through haproxy");
     expect(card).toHaveTextContent("Not checked: haproxy has no shorter timeout");
     // One of the two steps lists a command: that is what runs without asking again.
-    expect(card).toHaveTextContent("The 1 command(s) listed above run without asking you again");
+    expect(card).toHaveTextContent("The command listed above runs without asking you again");
   });
 
   it("opens Edit Plan to send a revision note or reject the plan, and approves directly", async () => {

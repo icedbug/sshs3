@@ -556,10 +556,10 @@ describe("SchedulesView overhaul", () => {
     fireEvent.click(screen.getByTestId("quiet-sentinel-preset-btn"));
     const form = screen.getByTestId("schedule-form");
     expect(within(form).getByLabelText("Name")).toHaveValue(
-      "Quiet sentinel (notify only on anomaly)",
+      "Health check that tells you only when something is wrong",
     );
     expect(
-      within(form).getByLabelText(/Quiet sentinel \(notify only on anomaly\)/),
+      within(form).getByLabelText(/Only tell me when something is wrong/),
     ).toBeChecked();
 
     // Switch mode to plan

@@ -122,7 +122,7 @@ export function ChangeProof({
     }
     if (rollback.skipped) return `Did not run: ${rollback.skipped}`;
     if (change.status === "uncertain") {
-      return "Outcome uncertain · verify current state before executing rollback";
+      return "It is not known whether this ran. Check the current state before you roll back.";
     }
     return decided
       ? "Not needed: the check passed"

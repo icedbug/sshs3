@@ -8,6 +8,9 @@ const SHOT_DIR = process.env.SCREENSHOT_DIR || '/tmp/shots';
 const PROFILE_DIR = process.env.TEST_PROFILE_DIR || path.join('/tmp', `sshs3-smoke-${Date.now()}`);
 const CDP_PORT = process.env.CDP_PORT || '9223';
 const TIMEOUT_MS = Number(process.env.SMOKE_TIMEOUT_MS) || 30_000;
+// --demo (or SMOKE_DEMO=1) starts the app in its demo lab and goes on into the AI workspace: the board, the
+// demo's incidents, and one incident started and taken back.
+const DEMO = process.env.SMOKE_DEMO === '1' || process.argv.includes('--demo');
 
 mkdirSync(SHOT_DIR, { recursive: true });
 mkdirSync(PROFILE_DIR, { recursive: true });
@@ -87,6 +90,7 @@ async function run() {
     `--remote-debugging-port=${CDP_PORT}`,
     `--user-data-dir=${PROFILE_DIR}`,
     '.',
+    ...(DEMO ? ['--demo'] : []),
   ];
 
   child = spawn(electronBin, spawnArgs, {
@@ -189,6 +193,8 @@ async function run() {
   writeFileSync(shotPath, Buffer.from(data, 'base64'));
   console.log(`[smoke-test] Screenshot saved: ${shotPath}`);
 
+  if (DEMO) await demoWorkspace();
+
   // Check fatal errors
   const fatalErrors = consoleErrors.filter(
     (e) => !e.includes('GPU process exited') && !e.includes('libva error') && !e.includes('mesa')
@@ -203,6 +209,58 @@ async function run() {
 
   const elapsed = Date.now() - startTime;
   console.log(`[smoke-test] SUCCESS: App launched, rendered UI, and captured screenshot in ${elapsed}ms!`);
+}
+
+/** Waits until an expression is true on the page, or says what never happened. */
+async function waitFor(expression, what, ms = 15_000) {
+  const until = Date.now() + ms;
+  while (Date.now() < until) {
+    if (await evalJs(expression)) return;
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  throw new Error(`Never happened: ${what}`);
+}
+
+/**
+ * The AI workspace in the demo lab, as a person finds it in the desktop app: the hub answers, it is
+ * the demo, the board is drawn, the demo's incidents are offered, and one of them can be started
+ * (its alert becomes a ticket on the board) and taken back.
+ */
+async function demoWorkspace() {
+  console.log('[smoke-test] Demo lab: opening the AI workspace...');
+  const hub = (request) =>
+    evalJs(`window.multissh.aiHubRequest(${JSON.stringify(request)}).then((s) => JSON.stringify({ ok: true, demoMode: s.demoMode, scenarios: (s.simulation?.scenarios ?? []).map((x) => x.id), running: s.simulation?.running ? { title: s.simulation.running.title, ticketId: s.simulation.running.ticketId, total: s.simulation.running.total } : null, tickets: (s.workTickets ?? []).map((t) => ({ id: t.id, title: t.title })), agents: (s.agents ?? []).length }), (e) => JSON.stringify({ ok: false, error: String(e) }))`).then((text) => JSON.parse(text));
+
+  const first = await hub({ action: 'snapshot' });
+  if (!first.ok) throw new Error(`The hub did not answer: ${first.error}`);
+  if (first.demoMode !== true) throw new Error('The app was started with --demo and the hub does not say it is the demo lab');
+  if (first.scenarios.length < 5) throw new Error(`The demo lab offers ${first.scenarios.length} incidents, expected 5`);
+  console.log(`[smoke-test] Demo lab: the hub answers (${first.agents} agents, incidents: ${first.scenarios.join(', ')})`);
+
+  await evalJs(`window.dispatchEvent(new CustomEvent('sshs3:ai-open', { detail: { view: 'Workforce', mode: 'hub' } })), true`);
+  await waitFor('Boolean(document.querySelector(".ai-hub"))', 'the AI workspace opens');
+  await waitFor('Boolean(document.querySelector(\'[data-testid="scenarios"]\'))', 'the board shows the demo incidents');
+  await waitFor('Boolean(document.querySelector(\'[data-testid="board-shared-with"]\'))', 'the board says who has it');
+  const note = await evalJs('document.querySelector(\'[data-testid="board-shared-with"]\').textContent');
+  console.log(`[smoke-test] Demo lab: the board is drawn ("${note.trim()}")`);
+
+  const started = await hub({ action: 'sim-start', scenarioId: 'nginx-bad-config' });
+  if (!started.ok) throw new Error(`An incident could not be started: ${started.error}`);
+  if (!started.running?.ticketId) throw new Error('The incident started and its alert did not become a ticket');
+  const ticket = started.tickets.find((t) => t.id === started.running.ticketId);
+  if (!ticket) throw new Error('The incident\'s ticket is not on the board');
+  await waitFor(`document.body.textContent.includes(${JSON.stringify(ticket.title.slice(0, 40))})`, 'the alert ticket is drawn on the board');
+  console.log(`[smoke-test] Demo lab: incident "${started.running.title}" started, its alert is the ticket "${ticket.title}" (${started.running.total} checks)`);
+
+  const shot = path.join(SHOT_DIR, 'smoke-test-demo.png');
+  const { data } = await cdpSend('Page.captureScreenshot', { format: 'png' });
+  writeFileSync(shot, Buffer.from(data, 'base64'));
+  console.log(`[smoke-test] Screenshot saved: ${shot}`);
+
+  const reset = await hub({ action: 'sim-reset' });
+  if (!reset.ok) throw new Error(`The incident could not be taken back: ${reset.error}`);
+  if (reset.running) throw new Error('The incident was taken back and is still said to be running');
+  console.log('[smoke-test] Demo lab: the incident was taken back');
 }
 
 run()

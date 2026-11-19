@@ -207,7 +207,7 @@ export function PlanCard({
               ? "Approving lets the agent carry the plan out; commands that change something still ask."
               : asksEach
                 ? `Approving lets the agent carry the plan out. Every command that changes something asks you before it runs, also the ${listed} listed above${promised ? " (the plan says so)" : ""}.`
-                : `Approving lets the agent carry the plan out. The ${listed} command(s) listed above run without asking you again; anything else, and anything destructive, still asks.`}
+                : `Approving lets the agent carry the plan out. ${listed === 1 ? "The command listed above runs" : `The ${listed} commands listed above run`} without asking you again; anything else, and anything destructive, still asks.`}
         </small>
         {people && (
           <small data-testid="plan-people" role="status">

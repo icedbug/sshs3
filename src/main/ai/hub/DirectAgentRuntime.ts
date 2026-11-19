@@ -3220,7 +3220,7 @@ export class DirectAgentRuntime implements AgentRuntime {
         { requireZdr: candEgress.requireZdr ?? false },
       );
       if (!policyCheck.allowed) {
-        blockedReason = `Fallback to ${cand.model.kind}:${cand.model.model} blocked by egress policy (${policyCheck.errors.join("; ")})`;
+        blockedReason = `The spare model ${cand.model.kind}:${cand.model.model} was not used: ${policyCheck.errors.join(" ")}`;
         continue;
       }
       return { model: cand.model };

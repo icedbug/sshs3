@@ -118,9 +118,9 @@ describe("InboxView priority sections, keyboard triage, snooze & batch actions",
     expect(within(review).getByText("Active gap")).toBeInTheDocument();
 
     const snoozed = screen.getByTestId("inbox-section-snoozed");
-    expect(snoozed).toHaveTextContent("Snoozed");
+    expect(snoozed).toHaveTextContent("Put off until later");
     expect(within(snoozed).getByText("Snoozed gap")).toBeInTheDocument();
-    expect(within(snoozed).getByTestId("inbox-snooze-countdown")).toHaveTextContent(/Snoozed · \d+h left|Snoozed · \d+m left/);
+    expect(within(snoozed).getByTestId("inbox-snooze-countdown")).toHaveTextContent(/Back in \d+ h|Back in \d+ min/);
   });
 
   it("supports keyboard triage (j/k/o/a/e/h/?) and ignores shortcuts while typing in inputs", async () => {
@@ -240,7 +240,7 @@ describe("InboxView priority sections, keyboard triage, snooze & batch actions",
       }),
     );
     expect(act).toHaveBeenCalledTimes(1);
-    expect(screen.getByTestId("inbox-snooze-countdown")).toHaveTextContent(/Snoozed · 4[45]m left/);
+    expect(screen.getByTestId("inbox-snooze-countdown")).toHaveTextContent(/Back in 4[45] min/);
   });
 });
 

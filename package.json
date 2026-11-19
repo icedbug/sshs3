@@ -30,6 +30,7 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:smoke": "node scripts/smoke-test.mjs",
+    "test:smoke:demo": "node scripts/smoke-test.mjs --demo",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "package": "npm run build && electron-builder",

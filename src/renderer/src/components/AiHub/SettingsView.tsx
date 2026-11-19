@@ -31,6 +31,20 @@ import { sharingText } from "@shared/sharingText";
 
 export const LABS_ENABLED_STORAGE_KEY = "sshs3.aiHub.labsEnabled";
 
+/** The ways data leaves, and where it ends up, in the words the settings use. */
+const DATA_CHANNEL_NAMES: Record<string, string> = {
+  "llm-inference": "The model",
+  "team-s3-sync": "The team bucket",
+  "local-storage": "Kept here",
+};
+const DATA_PLACES: Record<string, string> = {
+  external: "an outside service",
+  eu: "a service in the EU",
+  "private-network": "your own network",
+  local: "this machine",
+  disabled: "not used",
+};
+
 export interface SettingsProps {
   hub: HubSnapshot;
   act: Act;
@@ -748,12 +762,12 @@ export function Settings({
       </section>
 
       <section className="ai-set" data-testid="privacy-residency-section">
-        <h3>Privacy, Data Residency &amp; Zero Data Retention</h3>
+        <h3>Where your data may go</h3>
         <div className="ai-form-row">
           <label>
-            Egress policy
+            Where data may be sent
             <select
-              aria-label="Egress policy"
+              aria-label="Where data may be sent"
               data-testid="ai-egress-policy"
               value={egressPolicy}
               onChange={(e) => {
@@ -761,16 +775,16 @@ export function Settings({
                 setSavedNotice(false);
               }}
             >
-              <option value="standard">Standard — all HTTPS &amp; local endpoints</option>
-              <option value="eu-pinned">EU-pinned — EU residency endpoints only</option>
-              <option value="local-only">Local-only — loopback &amp; private network only</option>
+              <option value="standard">Any service you set up</option>
+              <option value="eu-pinned">Only services in the EU</option>
+              <option value="local-only">Only this machine and your own network</option>
             </select>
             <small>{formatEgressPolicyLabel(egressPolicy)}</small>
           </label>
           <label>
-            PII scrubbing before egress
+            What is hidden before anything is sent
             <select
-              aria-label="PII scrubbing"
+              aria-label="What is hidden before anything is sent"
               data-testid="ai-pii-scrubbing"
               value={piiScrubbing}
               onChange={(e) => {
@@ -778,9 +792,9 @@ export function Settings({
                 setSavedNotice(false);
               }}
             >
-              <option value="off">Off — recognised secrets only</option>
-              <option value="standard">Standard — secrets + emails, IPs, phones</option>
-              <option value="strict">Strict — aggressive PII, hostnames &amp; high-entropy</option>
+              <option value="off">Secrets only</option>
+              <option value="standard">Secrets and personal details</option>
+              <option value="strict">Also host names and anything like a key</option>
             </select>
             <small>{formatPiiScrubbingLabel(piiScrubbing)}</small>
           </label>
@@ -797,10 +811,10 @@ export function Settings({
             }}
           />
           <span>
-            Zero Data Retention (ZDR) confirmed
+            The model's provider keeps none of what is sent to it
             <small>
-              Acknowledge that your external provider agreement guarantees zero prompt/response training or retention
-              before sending context off-device.
+              Tick this when your agreement with the provider says it does not keep your prompts and answers, or
+              train on them. Until you do, this page reminds you. It stops nothing by itself.
             </small>
           </span>
         </label>
@@ -815,7 +829,7 @@ export function Settings({
               className={`ai-badge ${dataFlow.egressValidation.allowed ? "ai-badge-success" : "ai-badge-danger"}`}
               data-testid="data-flow-status-badge"
             >
-              {dataFlow.egressValidation.allowed ? "Policy allowed" : "Blocked by policy"}
+              {dataFlow.egressValidation.allowed ? "Allowed by these settings" : "Stopped by these settings"}
             </span>
           </div>
 
@@ -842,19 +856,19 @@ export function Settings({
           <div className="ai-tags">
             {dataFlow.channels.map((ch) => (
               <span key={ch.channel} className="ai-tool-tag" title={ch.destination}>
-                {ch.channel}: <strong>{ch.locality}</strong>
-                {ch.enabled ? (ch.encryptedInTransit ? " · TLS" : " · plaintext") : ""}
-                {ch.piiScrubbing ? ` · PII:${ch.piiScrubbing}` : ""}
+                {DATA_CHANNEL_NAMES[ch.channel] ?? ch.channel}: <strong>{DATA_PLACES[ch.locality] ?? ch.locality}</strong>
+                {ch.enabled ? (ch.encryptedInTransit ? " · encrypted on the way" : " · not encrypted on the way") : ""}
+                {ch.piiScrubbing && ch.piiScrubbing !== "off" ? " · personal details hidden" : ""}
               </span>
             ))}
           </div>
 
           <small data-testid="data-flow-subprocessors">
             {dataFlow.subprocessors.length > 0
-              ? `External subprocessors: ${dataFlow.subprocessors
-                  .map((s) => `${s.name} (${s.locality}, ${s.zdrConfirmed ? "ZDR confirmed" : "ZDR unconfirmed"})`)
+              ? `Outside services that receive data: ${dataFlow.subprocessors
+                  .map((s) => `${s.name} (${DATA_PLACES[s.locality] ?? s.locality}, ${s.zdrConfirmed ? "confirmed to keep nothing" : "not confirmed to keep nothing"})`)
                   .join("; ")}`
-              : "No external subprocessors — prompts and workspace data remain on this machine or private network."}
+              : "No outside service receives data: prompts and workspace data stay on this machine or your own network."}
           </small>
         </article>
       </section>

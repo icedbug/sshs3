@@ -253,7 +253,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 className="flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-medium text-sky-300 hover:bg-sky-500/15 transition-colors text-left"
               >
                 <span>🤖</span>
-                <span>Mission Agents &amp; MCP</span>
+                <span>Agents &amp; MCP</span>
               </button>
               <button
                 type="button"

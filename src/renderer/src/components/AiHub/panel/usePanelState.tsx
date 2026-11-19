@@ -294,7 +294,7 @@ export function usePanelState({
     {
       cmd: "/workforce",
       title: "Run a workforce review",
-      subtitle: "Have your Mission Agents investigate an objective in parallel and combine their reports",
+      subtitle: "Have your agents look into one question at the same time and combine their reports",
       template:
         "Run a workforce review with sshs3_agent_and_mcp_manage (operation=run_workforce) to investigate: ",
     },

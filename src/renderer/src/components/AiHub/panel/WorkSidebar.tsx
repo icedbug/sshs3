@@ -110,11 +110,11 @@ export function WorkSidebar({ p, hub }: { p: PanelState; hub: NonNullable<PanelS
 
                   <div className="ai-sidebar-section">
                     <div className="ai-sidebar-header">
-                      <strong>Mission Agents</strong>
+                      <strong>Agents</strong>
                       <button
                         className="ai-sidebar-new"
                         onClick={() => setView("Agents & MCP")}
-                        title="Manage Mission Agents & MCP servers"
+                        title="Manage agents and MCP servers"
                       >
                         Manage
                       </button>

@@ -478,7 +478,7 @@ describe("DirectAgentRuntime Wave 1 Overhaul", () => {
           },
           true,
         ),
-      ).rejects.toThrow(/eu-pinned/i);
+      ).rejects.toThrow("You chose to send data only to services in the EU, and api.openai.com is not on that list.");
     });
 
     it("NEVER silently falls back a local-only profile to a public cloud fallback, while allowing local fallbacks", async () => {
@@ -532,7 +532,8 @@ describe("DirectAgentRuntime Wave 1 Overhaul", () => {
         expect(fetchedUrls.every((u) => u.startsWith("http://127.0.0.1:11434"))).toBe(true);
         expect(events.some((e) => e.type === "run.degraded")).toBe(false);
         const failed = events.find((e) => e.type === "run.failed");
-        expect(failed?.error).toMatch(/local-only|blocked by egress policy/i);
+        // Said in plain words: which spare model was left alone, and the choice that left it alone.
+        expect(failed?.error).toMatch(/was not used: You chose to send nothing outside your own network/);
       } finally {
         retryPolicy.baseDelayMs = origBaseDelay;
       }

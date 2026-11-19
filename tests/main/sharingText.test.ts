@@ -14,7 +14,7 @@ describe("what is shared, in one place", () => {
     expect(text.personal).toBe(
       "Yours alone: your model and its key, your Jira and Confluence sign-in, your safety rules, your own memories and conversations, your inbox and notification channels, and your own servers, keys and passwords.",
     );
-    expect(text.more).toBe("A team bucket is needed only to share with desktop apps or with another server.");
+    expect(text.more).toBe("A team bucket (S3 storage the whole team uses) is needed only to share with desktop apps or with another server.");
     // Nothing sends a team that works in the browser to a bucket for its board.
     expect(`${text.shared} ${text.more}`).not.toMatch(/connect an? (S3 )?(team )?bucket/i);
   });
@@ -35,7 +35,7 @@ describe("what is shared, in one place", () => {
     expect(sharingText({ server: false, bucket: false })).toEqual({
       shared: "Nothing is shared. Memory, runbooks, the board and activity stay on this computer.",
       personal: "",
-      more: "Connect a team bucket from the start page (Connect S3 team bucket) to share them with a team.",
+      more: "Connect a team bucket (S3 storage the whole team uses) from the start page to share them with a team.",
     });
     expect(sharingText({ server: true, bucket: false, demo: true })).toEqual({
       shared: "This is the demo lab. Its servers, board and knowledge base are made up, and each person has a copy of their own: nothing here is shared.",

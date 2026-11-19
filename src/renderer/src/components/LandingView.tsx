@@ -2188,7 +2188,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
                   <div className="flex flex-wrap items-center gap-1.5">
                     <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-sky-400 mr-1">
                       <Sparkles className="h-3 w-3" />
-                      Mission Agents:
+                      Agents:
                     </span>
                     {(hub?.agents ?? []).slice(0, 4).map((ag) => (
                       <button
@@ -3024,7 +3024,7 @@ export const LandingView: React.FC<LandingViewProps> = ({
               >
                 <div className="flex items-center justify-between">
                   <span className="text-[10px] font-bold uppercase tracking-wider text-purple-300">
-                    🤖 Mission Agents & MCP
+                    🤖 Agents & MCP
                   </span>
                   <span className="rounded-full border border-purple-500/30 bg-purple-500/15 px-1.5 py-0.5 text-[9.5px] font-semibold text-purple-200">
                     {totalMcpTools} MCP tools

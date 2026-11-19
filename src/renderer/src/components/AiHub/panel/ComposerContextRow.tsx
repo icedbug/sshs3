@@ -160,7 +160,7 @@ export function ComposerContextRow({ p, hub }: { p: PanelState; hub: NonNullable
                       <div
                         className="ai-popover"
                         style={{ right: 0, left: "auto", minWidth: 250 }}
-                        aria-label="Mission Agents"
+                        aria-label="Agents"
                       >
                         <strong>Active Mission Agent</strong>
                         <button

@@ -489,11 +489,11 @@ describe("MemoryProposals overhaul", () => {
     expect(screen.getByTestId("memory-proposal-risk-prop-safe")).toHaveTextContent("risk: safe");
     expect(screen.getByTestId("memory-proposal-risk-prop-risky")).toHaveTextContent("risk: high");
     expect(screen.getByTestId("memory-proposal-provenance-prop-safe")).toHaveTextContent("task:t-101");
-    expect(screen.getByTestId("memory-proposal-provenance-prop-safe")).toHaveTextContent("2 evidence");
+    expect(screen.getByTestId("memory-proposal-provenance-prop-safe")).toHaveTextContent("Backed by 2 things it saw");
 
     // Batch Approve safe approves only prop-safe
     const approveSafeBtn = screen.getByTestId("memory-approve-safe-btn");
-    expect(approveSafeBtn).toHaveTextContent("Approve safe (1)");
+    expect(approveSafeBtn).toHaveTextContent("Approve the low-risk ones (1)");
     fireEvent.click(approveSafeBtn);
     await waitFor(() =>
       expect(act).toHaveBeenCalledTimes(1),

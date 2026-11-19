@@ -245,7 +245,7 @@ export function Welcome({ p, hub }: { p: PanelState; hub: NonNullable<PanelState
                         }}
                       >
                         <strong>Run a workforce review</strong>
-                        <small>Your Mission Agents investigate in parallel (read-only) and one report combines their findings</small>
+                        <small>Your agents investigate at the same time (read-only) and one report combines their findings</small>
                       </button>
                       <button
                         type="button"
