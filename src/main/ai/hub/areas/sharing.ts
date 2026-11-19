@@ -13,7 +13,7 @@ import type {
   WorkspaceServerSummary,
 } from "../../../../shared/types/aiHub";
 import { S3WorkspaceSyncService } from "../S3WorkspaceSyncService";
-import { mergePageCopies } from "../KbCompile";
+import { isPrivateKbPage, mergePageCopies } from "../KbCompile";
 import { sectionsOf } from "../KnowledgeBaseService";
 import { getBuiltinAgents, getBuiltinKbDocuments, getBuiltinSkillsAndMemories, getBuiltinSnippets, isDemoMode } from "../demoWorkspace";
 import { type ExtraWorkspaceContext } from "../ContextService";
@@ -238,26 +238,31 @@ export class SharingPart {
     if (agents.changed) changed = true;
 
     const docs = this.store.data.kbDocuments ?? [];
-    const mine = new Map(docs.map((d) => [d.id, d]));
+    const privateDocs = this.privateDocumentIds();
     const builtinKbIds = new Set(getBuiltinKbDocuments().map((d) => d.id));
     // The pieces are made from the text, so they are not sent: a document travels once, not twice.
     const kb = await sync.reconcile(
       "kb",
       withRemovals(
-        docs.filter((d) => d.shared !== false).map((d) => maskStrings({ ...d, chunks: [] })),
+        docs.filter((d) => d.shared !== false).map((d) => maskStrings({ ...d, chunks: [] as KbDocument["chunks"] })),
         removed.kb,
       ),
       // A removal is final for a user's document, and for a built-in one until somebody restores it: see standingKbCopy.
       (local, remote) => standingKbCopy(local, remote, builtinKbIds.has(local.id)),
     );
-    const k = splitRemovals(kb.items);
+    const currentDocs = this.store.data.kbDocuments ?? [];
+    const mine = new Map(currentDocs.map((d) => [d.id, d]));
+    const privateNow = this.privateDocumentIds();
+    const mergeDoc = (a: (typeof kb.items)[number], b: (typeof kb.items)[number]) => standingKbCopy(a, b, builtinKbIds.has(a.id));
+    const merged = mergeItems(withRemovals(currentDocs.filter((d) => d.shared !== false), removed.kb), kb.items, mergeDoc);
+    const k = splitRemovals(merged.items);
     removed.kb = k.removed;
     // A document a teammate removed takes its original file with it: the copy fetched to this computer is not kept behind.
-    for (const d of docs) if (d.original && d.id in k.removed) void this.removeLocalKbOriginal(d.id);
-    if (kb.changed) {
+    for (const d of currentDocs) if (d.shared !== false && d.original && d.id in k.removed) void this.removeLocalKbOriginal(d.id);
+    if (kb.changed || merged.changed) {
       this.store.data.kbDocuments = [
-        ...docs.filter((d) => d.shared === false && !(d.id in k.removed)),
-        ...(k.alive as KbDocument[]).map((d) => {
+        ...currentDocs.filter((d) => d.shared === false),
+        ...(k.alive as KbDocument[]).filter((d) => !privateNow.has(d.id)).map((d) => {
           const local = mine.get(d.id);
           return local && local.updatedAt === d.updatedAt
             ? local
@@ -268,15 +273,28 @@ export class SharingPart {
     }
 
     // A document that is gone takes the pages written only from it along, here as on the computer that removed it.
-    for (const d of docs) if (d.id in k.removed) this.forgetKbSource(d.id);
+    for (const d of currentDocs) if (d.shared !== false && d.id in k.removed) this.forgetKbSource(d.id);
 
-    const pages = await sync.reconcile("pages", withRemovals(this.store.data.kbPages ?? [], removed.pages), mergePageCopies);
+    const publicPages = (): KbPage[] => {
+      const privateIds = this.privateDocumentIds();
+      return (this.store.data.kbPages ?? []).filter((p) => !isPrivateKbPage(p, privateIds));
+    };
+    // Older versions could share a page derived from a private document. Withdraw the remote copy.
+    for (const page of this.store.data.kbPages ?? []) {
+      if (isPrivateKbPage(page, privateDocs) && !removed.pages?.[page.id]) {
+        (removed.pages ??= {})[page.id] = Math.max(Date.now(), page.updatedAt + 1);
+      }
+    }
+    const pages = await sync.reconcile("pages", withRemovals(publicPages(), removed.pages), mergePageCopies);
     // Merged into the pages as they are now: one that was compiled here while the bucket was read stays.
-    const pagesNow = mergeItems(withRemovals(this.store.data.kbPages ?? [], removed.pages), pages.items, mergePageCopies);
+    const pagesNow = mergeItems(withRemovals(publicPages(), removed.pages), pages.items, mergePageCopies);
     const pg = splitRemovals(pagesNow.items);
     removed.pages = pg.removed;
     if (pages.changed || pagesNow.changed) {
-      this.store.data.kbPages = pg.alive as KbPage[];
+      const privateNow = this.privateDocumentIds();
+      const kept = (this.store.data.kbPages ?? []).filter((p) => isPrivateKbPage(p, privateNow));
+      const privateIds = new Set(kept.map((p) => p.id));
+      this.store.data.kbPages = [...kept, ...(pg.alive as KbPage[]).filter((p) => !privateIds.has(p.id) && !isPrivateKbPage(p, privateNow))];
       changed = true;
     }
 

@@ -678,6 +678,11 @@ const stamped = (source: KbPageSource, now: number): KbPageSource => (source.has
  * is held against it (see KbCheck): commands and named sources that are not
  * there are listed on the page.
  */
+export function isPrivateKbPage(page: KbPage, privateDocs: ReadonlySet<string>): boolean {
+  const isPrivate = (source: KbPageSource): boolean => source.private === true || privateDocs.has(source.docId);
+  return page.private === true || page.sources.some(isPrivate) || (page.history ?? []).some((change) => change.previous?.sources.some(isPrivate));
+}
+
 export function applyPageOps(
   pages: KbPage[],
   ops: PageOp[],

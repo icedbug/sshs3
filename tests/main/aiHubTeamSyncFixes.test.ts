@@ -264,7 +264,7 @@ const say = (text: string): Response =>
   sse([
     { type: "message_start", message: { usage: { input_tokens: 700 } } },
     { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } },
-    { type: "message_delta", usage: { output_tokens: 300 } },
+    { type: "message_delta", usage: { output_tokens: 300 } }, { type: "message_stop" },
   ]);
 
 describe("a ticket whose conversation goes on after its run", () => {
@@ -325,6 +325,26 @@ describe("a ticket whose conversation goes on after its run", () => {
 // ---- 3. concurrent edits ---------------------------------------------------------------------
 
 describe("two copies of a page", () => {
+  it("keeps a page with a private revision on the owner's computer", async () => {
+    const bucket = memoryBucket();
+    const owner = await makeHub({}, bucket);
+    const member = await makeHub({}, bucket);
+    const privateText = "Personal handover notes";
+    await owner.hub.request({ action: "kb-save", doc: { id: "private-note", title: "Personal", sourceType: "note", content: privateText, shared: false } });
+    const draft = { kind: "procedure" as const, title: "Recent changes", when: "During review", body: "Team notes", targets: [] };
+    const id = (await owner.hub.request({ action: "kb-page-save", page: draft })).reply!.kbPage!.id;
+    const page = owner.hub.store.data.kbPages!.find((p) => p.id === id)!;
+    page.history.push({ at: Date.now(), by: "author", summary: "Previous draft", previous: { ...draft, body: privateText, sources: [{ docId: "private-note", title: "Personal" }] } });
+    await sync(owner.inner);
+    await sync(member.inner);
+    expect(member.hub.store.data.kbPages?.some((p) => p.id === id) ?? false).toBe(false);
+    expect([...bucket.files.values()].some((data) => data.includes(privateText))).toBe(false);
+    await owner.hub.request({ action: "kb-delete", id: "private-note" });
+    await sync(owner.inner);
+    expect(owner.hub.store.data.kbPages?.find((p) => p.id === id)?.private).toBe(true);
+    expect([...bucket.files.values()].some((data) => data.includes(privateText))).toBe(false);
+  });
+
   const first = savePageByPerson(undefined, { kind: "procedure" as never, title: "Nginx change procedure", when: "Before changing nginx", body: "Run nginx -t first." }, "Sara", 1000);
 
   it("keeps the text that lost in the page's history, the same on both installations", () => {

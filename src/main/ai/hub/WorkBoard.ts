@@ -808,8 +808,9 @@ export function withRemovals<T extends { id: string; updatedAt?: number }>(
   const alive = items
     .map((x) => ({ ...x, updatedAt: x.updatedAt ?? 0 }))
     .filter((x) => (dead[x.id] ?? -1) < x.updatedAt);
+  const aliveIds = new Set(alive.map((item) => item.id));
   const markers = Object.entries(dead)
-    .filter(([id, at]) => !alive.some((x) => x.id === id && x.updatedAt > at))
+    .filter(([id]) => !aliveIds.has(id))
     .map(([id, at]) => ({ id, updatedAt: at, deleted: true, ...(removedBy?.[id] ? { deletedBy: removedBy[id] } : {}) }) as unknown as T & Mergeable);
   return [...alive, ...markers];
 }

@@ -167,6 +167,19 @@ describe("a Confluence space as a source of the knowledge base", () => {
 describe("a knowledge base page, published to Confluence", () => {
   const draft = { kind: "procedure" as const, title: "Renew the certificate", when: "When the certificate expires within 14 days", body: "## Steps\n\n1. Run `certbot renew`\n2. Reload nginx\n\n<script>alert(1)</script>", targets: [] };
 
+  it("keeps an edited page private after its private source is removed", async () => {
+    const { hub, wiki } = await connected();
+    await hub.request({ action: "kb-save", doc: { id: "my-note", title: "Private note", sourceType: "note", content: "Personal notes", shared: false } });
+    const page = (await hub.request({ action: "kb-page-save", page: draft })).reply!.kbPage!;
+    const local = hub.store.data.kbPages!.find((p) => p.id === page.id)!;
+    local.sources = [{ docId: "my-note", title: "Private note" }];
+    await expect(hub.request({ action: "kb-page-publish", id: page.id, spaceKey: "OPS" })).rejects.toThrow("private sources");
+    await hub.request({ action: "kb-delete", id: "my-note" });
+    expect(hub.store.data.kbPages!.find((p) => p.id === page.id)?.private).toBe(true);
+    await expect(hub.request({ action: "kb-page-publish", id: page.id, spaceKey: "OPS" })).rejects.toThrow("private sources");
+    expect(wiki.written).toEqual([]);
+  });
+
   it("makes a page the first time and updates the same page after that, without a new revision here", async () => {
     const { hub, wiki } = await connected();
     const page = (await hub.request({ action: "kb-page-save", page: draft })).reply!.kbPage!;

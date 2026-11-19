@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import path from "node:path";
 import type {
   HubReply,
@@ -21,6 +22,7 @@ import {
 import { buildReadingPrompt, parseReading } from "../KbEnrich";
 import {
   applyPageOps,
+  isPrivateKbPage,
   buildCompilePrompt,
   buildLearnPrompt,
   buildRebuildPrompt,
@@ -59,6 +61,12 @@ import type { Handled, RequestsOf } from "./routes";
  * A part of HubService. These are the hub's own methods, kept in a file of their own: `this` is the hub,
  * and they are copied onto its class where it is declared (HubService.ts).
  */
+function originalDirectoryName(id: string): string {
+  const name = id.replace(/[^A-Za-z0-9._-]/g, "_");
+  if (name && !name.endsWith(".") && !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name)) return name;
+  return "document-" + createHash("sha256").update(id).digest("hex");
+}
+
 export class KnowledgePart {
   getKbDocumentsList(this: HubService): KbDocument[] {
     const stored = this.store.data.kbDocuments ?? [];
@@ -80,11 +88,11 @@ export class KnowledgePart {
   // ---- knowledge base: what is dropped in ----------------------------------
 
   kbOriginalDir(this: HubService, docId: string): string {
-    return path.join(this.directory, "kb-originals", docId.replace(/[^A-Za-z0-9._-]/g, "_"));
+    return path.join(this.directory, "kb-originals", originalDirectoryName(docId));
   }
   kbOriginalKey(this: HubService, doc: Pick<KbDocument, "id" | "original">): string {
     const name = (doc.original?.name ?? "file").replace(/[^A-Za-z0-9._-]/g, "_").slice(-120);
-    return `kb/originals/${doc.id.replace(/[^A-Za-z0-9._-]/g, "_")}/${name}`;
+    return `kb/originals/${originalDirectoryName(doc.id)}/${name}`;
   }
 
   /** The file a document was taken from: from this computer, else from the team bucket (and then kept here). */
@@ -97,7 +105,7 @@ export class KnowledgePart {
       // Not here: a teammate added it.
     }
     const team = this.teamStore();
-    if (doc.original?.keptLocal || !team) return undefined;
+    if (doc.shared === false || doc.original?.keptLocal || !team) return undefined;
     const remote = await team.read(this.kbOriginalKey(doc)).catch(() => undefined);
     if (remote) {
       await fsp.mkdir(path.dirname(local), { recursive: true }).catch(() => undefined);
@@ -323,6 +331,13 @@ export class KnowledgePart {
       { distillSourceId: run.id, title: clip(run.title, 100), mainModel: true },
     );
     if (task.status !== "completed") throw new Error(task.error || "The run did not finish.");
+    if (source.hash) {
+      const current = this.getKbDocumentsList().find((d) => d.id === source.docId);
+      if (!current || (current.contentHash ?? contentHash(current.content)) !== source.hash || (current.shared === false) !== Boolean(source.private)) return 0;
+    }
+    // A previously shared page may have become private while the model was working.
+    const privateDocs = this.privateDocumentIds();
+    if (!source.private && shown.some((p) => this.store.data.kbPages?.some((q) => q.id === p.id && isPrivateKbPage(q, privateDocs)) && !options.updatesOnly)) return 0;
     const answer = task.messages.filter((m) => m.role === "assistant").at(-1)?.text ?? "";
     // The pages the model was shown are the only ones it may update, and only as they are now.
     const now = this.store.data.kbPages ?? [];
@@ -354,17 +369,22 @@ export class KnowledgePart {
     return applied.changed.length;
   }
 
-  /** Works a source into the pages, stretch by stretch when it is long. */
+  privateDocumentIds(this: HubService): Set<string> {
+    return new Set((this.store.data.kbDocuments ?? []).filter((d) => d.shared === false).map((d) => d.id));
+  }
+
+  /** Works a source into pages with the same sharing scope. */
   async compileSource(this: HubService,
     doc: KbDocument,
     known: { clusters: string[]; servers: string[] },
     revised = false,
   ): Promise<number> {
     const parts = sourceParts(doc);
-    const source: KbPageSource = { docId: doc.id, title: doc.title, hash: doc.contentHash ?? contentHash(doc.content) };
+    const source: KbPageSource = { docId: doc.id, title: doc.title, hash: doc.contentHash ?? contentHash(doc.content), ...(doc.shared === false ? { private: true } : {}) };
     let touched = 0;
     for (let i = 0; i < parts.length; i++) {
-      const pages = this.store.data.kbPages ?? [];
+      const privateDocs = this.privateDocumentIds();
+      const pages = (this.store.data.kbPages ?? []).filter((p) => isPrivateKbPage(p, privateDocs) === (doc.shared === false));
       // One source may not fill the knowledge base: new pages are counted over all its stretches.
       const mayCreate = MAX_NEW_PAGES_PER_SOURCE - pages.filter((p) => p.sources[0]?.docId === doc.id).length;
       touched += await this.runPageOps(
@@ -395,7 +415,7 @@ export class KnowledgePart {
         changed += await this.runPageOps(
           buildRebuildPrompt(page, doc, parts[i], known, parts.length > 1 ? { index: i + 1, of: parts.length } : undefined),
           [page],
-          { docId: doc.id, title: doc.title, hash: doc.contentHash ?? contentHash(doc.content) },
+          { docId: doc.id, title: doc.title, hash: doc.contentHash ?? contentHash(doc.content), ...(doc.shared === false ? { private: true as const } : {}) },
           { id: `kbr:${pageId}:${doc.id}:${i}`, title: `Rebuilding · ${page.title}` },
           known,
           // A person asked for this page to be put right from its sources.
@@ -420,7 +440,8 @@ export class KnowledgePart {
     const remembered = (this.store.data.memoryProposals ?? [])
       .filter((p) => p.sourceId === source.id)
       .map((p) => `${p.title}: ${p.text}`);
-    const pages = this.store.data.kbPages ?? [];
+    const privateDocs = this.privateDocumentIds();
+    const pages = (this.store.data.kbPages ?? []).filter((p) => !isPrivateKbPage(p, privateDocs));
     await this.runPageOps(
       buildLearnPrompt(source, pages, known, remembered, this.openGaps()),
       candidatePages(pages, `${source.title} ${source.transcript}`),
@@ -699,8 +720,12 @@ export class KnowledgePart {
    * document for what it says, and the page says the same); one that rests on other sources too
    * no longer names it. A page a person edited is kept, without the source.
    */
-  forgetKbSource(this: HubService, docId: string): void {
+  forgetKbSource(this: HubService, docId: string, wasPrivate = false): void {
     const pages = this.store.data.kbPages ?? [];
+    if (wasPrivate) {
+      const privateDoc = new Set([docId]);
+      for (const page of pages) if (isPrivateKbPage(page, privateDoc)) page.private = true;
+    }
     if (!pages.some((p) => p.sources.some((s) => s.docId === docId))) return;
     const now = Date.now();
     this.store.data.kbPages = pages.flatMap((p) => {
@@ -710,7 +735,7 @@ export class KnowledgePart {
         this.markSharedRemoved("pages", p.id);
         return [];
       }
-      return [{ ...p, sources: rest, updatedAt: Math.max(now, p.updatedAt + 1) }];
+      return [{ ...p, ...(wasPrivate || p.sources.some((source) => source.private) ? { private: true as const } : {}), sources: rest, updatedAt: Math.max(now, p.updatedAt + 1) }];
     });
     this.changed();
   }
@@ -743,6 +768,7 @@ export class KnowledgePart {
     switch (request.action) {
       case "kb-save": {
         const d = request.doc;
+        const before = d.id ? this.getKbDocumentsList().find((x) => x.id === d.id) : undefined;
         const doc = this.kb.createDocument({
           id: d.id,
           collection: d.collection,
@@ -752,17 +778,37 @@ export class KnowledgePart {
           cluster: d.cluster,
           tags: d.tags,
           content: requiredText(d.content),
-          shared: d.shared ?? true,
+          shared: d.shared ?? before?.shared ?? true,
           author: await this.resolveActorName(),
         });
-        const before = this.getKbDocumentsList().find((x) => x.id === doc.id);
         if (before) {
+          doc.restoredAt = before.restoredAt;
+          doc.republishedAt = before.republishedAt;
+          if (before.shared === false && doc.shared !== false) {
+            doc.republishedAt = Math.max(Date.now(), (this.store.data.sharedRemoved?.kb?.[doc.id] ?? 0) + 1);
+            doc.updatedAt = Math.max(doc.updatedAt, doc.republishedAt);
+          }
           // Whoever brought it in stays its author; an edit does not take the document over.
           if (before.author) doc.author = before.author;
           // An edit keeps what the reading and the upload gave the document.
           doc.summary = before.summary;
           doc.kind = before.kind;
           doc.original = before.original;
+          if (doc.shared === false && before.original && !before.original.keptLocal && before.shared !== false) {
+            const team = this.teamStore();
+            if (!team) throw new Error("Connect to your team storage to make this original private.");
+            // Keep the owner's own copy before withdrawing the original from the team.
+            if (!(await this.readKbOriginal(before))) throw new Error("The original file could not be saved here. Try again when your team storage is available.");
+            await team.remove(this.kbOriginalKey(before));
+            doc.original = { ...before.original, keptLocal: true };
+          }
+          if (doc.shared === false) {
+            const sourceId = new Set([doc.id]);
+            for (const page of this.store.data.kbPages ?? []) {
+              if (isPrivateKbPage(page, sourceId)) page.private = true;
+            }
+            if (before.shared !== false) this.markSharedRemoved("kb", doc.id);
+          }
           doc.pages = before.pages;
           doc.reading = before.reading;
           doc.compiled = before.compiled;
@@ -795,7 +841,7 @@ export class KnowledgePart {
           (d) => d.id !== request.id,
         );
         this.markSharedRemoved("kb", request.id);
-        this.forgetKbSource(request.id);
+        this.forgetKbSource(request.id, removedDoc.shared === false);
         void this.removeKbOriginal(request.id);
         // Before deleteDemoKbDocument: in demo mode the built-ins are the demo store's documents.
         this.markBuiltinDismissed(request.id, getBuiltinKbDocuments());

@@ -1,3 +1,4 @@
+import { isPrivateKbPage } from "../KbCompile";
 import type { HubReply, TicketChatRef } from "../../../../shared/types/aiHub";
 import { hostOf } from "../Notifier";
 import { chatTerms } from "../ChatIndex";
@@ -124,6 +125,7 @@ export class ChatAndAtlassianPart {
       case "kb-page-publish": {
         const page = (this.store.data.kbPages ?? []).find((x) => x.id === request.id);
         if (!page) throw new Error("Page not found");
+        if (isPrivateKbPage(page, this.privateDocumentIds())) throw new Error("This page uses private sources and cannot be published.");
         const published = await this.atlassian.publishPage(page, { spaceKey: request.spaceKey, parentId: request.parentId }, await this.resolveActorName());
         // Read again: the page may have been edited while Confluence answered. Where it was published is
         // not a change of its text: no new revision, but a newer copy, so the team sees it too.

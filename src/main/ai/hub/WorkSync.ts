@@ -82,10 +82,10 @@ async function inBatches<T, R>(items: T[], size: number, fn: (item: T) => Promis
  * gets a new id. A built-in document keeps its id, so it does come back, and only when somebody
  * restored it on purpose after the removal (`restoredAt`, set by restore-builtins).
  */
-export function standingKbCopy<T extends { deleted?: boolean; updatedAt: number; restoredAt?: number }>(local: T, remote: T, builtin: boolean): T {
+export function standingKbCopy<T extends { deleted?: boolean; updatedAt: number; restoredAt?: number; republishedAt?: number }>(local: T, remote: T, builtin: boolean): T {
   if (Boolean(local.deleted) === Boolean(remote.deleted)) return remote.updatedAt > local.updatedAt ? remote : local;
   const [gone, kept] = local.deleted ? [local, remote] : [remote, local];
-  if (builtin && (kept.restoredAt ?? 0) > gone.updatedAt) return kept;
+  if ((builtin && (kept.restoredAt ?? 0) > gone.updatedAt) || (kept.republishedAt ?? 0) > gone.updatedAt) return kept;
   return gone.updatedAt > kept.updatedAt ? gone : { ...gone, updatedAt: kept.updatedAt + 1 };
 }
 

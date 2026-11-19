@@ -1525,6 +1525,8 @@ export interface KbDocument {
   id: string;
   /** When somebody asked for this built-in document back after it was removed: what lets it win over that removal. */
   restoredAt?: number;
+  /** An explicit decision to share this private document again. */
+  republishedAt?: number;
   collection?: string;
   title: string;
   sourceType: "upload" | "folder" | "s3" | "manual" | "note" | "url" | "paste" | "confluence";
@@ -1601,6 +1603,8 @@ export interface KbPageChange {
   previous?: KbPageVersion;
 }
 export interface KbPageSource {
+  /** The page and its revisions stay with this account when a source is private. */
+  private?: true;
   /** A source document's id, or `task:<id>` for a session the page learned from. */
   docId: string;
   title: string;
@@ -1615,6 +1619,8 @@ export interface KbPageSource {
  * `when` is the line in the index every agent carries.
  */
 export interface KbPage {
+  /** Kept even when a private source is later removed. */
+  private?: true;
   id: string;
   kind: KbPageKind;
   title: string;
