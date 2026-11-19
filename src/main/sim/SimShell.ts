@@ -524,22 +524,32 @@ export class SimShell {
     } catch (error) {
       // A command that was asked something it has no answer for: said plainly, and written down.
       this.unsupported.push(argv.join(" "));
-      return fail(`${name}: ${error instanceof Error ? error.message : String(error)}\n`, 2);
+      return fail(`${name}: ${error instanceof Error ? error.message : String(error)}\n`, 2, error instanceof NotSimulated ? error.output : "");
     }
   }
 }
 
 /** For a command to say it does not do what was asked: the shell answers with it and notes the line. */
 export class NotSimulated extends Error {
+  /** Output already printed before an unsupported operation stopped the command. */
+  output = "";
   constructor(what: string) {
     super(`${what} is not part of this simulation`);
   }
 }
 
 /** Options and operands of a command line, the usual way: `-abc`, `-n 5`, `--long`, `--key=value`, `--` ends options. */
-export function parseArgs(args: string[], takesValue: string[] = []): { flags: Set<string>; values: Map<string, string>; rest: string[] } {
+export function parseArgs(
+  args: string[],
+  takesValue: string[] = [],
+  onValue?: (key: string, value: string) => void,
+): { flags: Set<string>; values: Map<string, string>; rest: string[] } {
   const flags = new Set<string>();
   const values = new Map<string, string>();
+  const setValue = (key: string, value: string): void => {
+    values.set(key, value);
+    onValue?.(key, value);
+  };
   const rest: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -550,8 +560,8 @@ export function parseArgs(args: string[], takesValue: string[] = []): { flags: S
     if (a.startsWith("--")) {
       const eq = a.indexOf("=");
       const key = eq < 0 ? a.slice(2) : a.slice(2, eq);
-      if (eq >= 0) values.set(key, a.slice(eq + 1));
-      else if (takesValue.includes(key) && i + 1 < args.length) values.set(key, args[++i]);
+      if (eq >= 0) setValue(key, a.slice(eq + 1));
+      else if (takesValue.includes(key) && i + 1 < args.length) setValue(key, args[++i]);
       else flags.add(key);
       continue;
     }
@@ -560,7 +570,7 @@ export function parseArgs(args: string[], takesValue: string[] = []): { flags: S
         const key = a[j];
         if (takesValue.includes(key)) {
           const value = a.slice(j + 1) || args[++i];
-          if (value !== undefined) values.set(key, value);
+          if (value !== undefined) setValue(key, value);
           break;
         }
         flags.add(key);

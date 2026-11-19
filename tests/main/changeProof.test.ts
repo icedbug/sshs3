@@ -101,6 +101,61 @@ describe("a change that carries its own proof", () => {
     expect(t.changes[0]).toMatchObject({ status: "failed", check: { after: false }, rollback: { ran: true } });
   });
 
+  it.each([
+    { terminal: "\r\n", expected: "\n", label: "CRLF terminal" },
+    { terminal: "\n", expected: "\r\n", label: "LF terminal" },
+  ])("verifies two lines from a $label", async ({ terminal, expected }) => {
+    const { broker, capability, t, run, answer } = await setup("autonomous");
+    const observed = ["first ready", "second ready"].join(terminal);
+    const wanted = ["first ready", "second ready"].join(expected);
+    answer("waiting");
+    answer("");
+    answer(observed);
+    const result = await broker.invoke(capability.key, {
+      ...nginx,
+      check: { command: nginx.check.command, expected: wanted, structuredCheck: { equals: wanted } },
+    });
+    expect(result).toMatchObject({ checkPassed: true, checkPassedBefore: false });
+    expect(t.verification).toBe("verified");
+    expect(t.changes[0].rollback?.ran).toBeUndefined();
+    expect(run.mock.calls.map(call => call[3])).toEqual([nginx.check.command, nginx.command, nginx.check.command]);
+  });
+
+  it.each([
+    { label: "a longer word", output: "first ready\r\nsecond ready-now", exitCode: 0 },
+    { label: "an extra space", output: "first ready\r\nsecond  ready", exitCode: 0 },
+    { label: "a lone carriage return", output: "first ready\rsecond ready", exitCode: 0 },
+    { label: "a nonzero exit code", output: "first ready\r\nsecond ready", exitCode: 3 },
+  ])("rolls back a multiline check with $label", async ({ output, exitCode }) => {
+    const { broker, capability, t, answer } = await setup("autonomous");
+    const before = "first waiting\r\nsecond waiting";
+    answer(before);
+    answer("");
+    answer(output, exitCode);
+    answer(output, exitCode);
+    answer("");
+    answer(before);
+    const result = await broker.invoke(capability.key, {
+      ...nginx,
+      check: { command: nginx.check.command, expected: "first ready\nsecond ready" },
+    });
+    expect(result).toMatchObject({ checkPassed: false, checkExitCode: exitCode, rolledBack: true });
+    expect(t.changes[0].rollback).toMatchObject({ ran: true, restored: true });
+  });
+
+  it("verifies multiline text through the standalone tool and keeps the original output for an explicit regex", async () => {
+    const { broker, capability, answer } = await setup("autonomous");
+    const output = "first ready\r\nsecond ready";
+    answer(output);
+    const result = await broker.invoke(capability.key, {
+      action: "verify",
+      command: nginx.check.command,
+      expected: "first ready\nsecond ready",
+      structuredCheck: { regex: "first ready\\r\\nsecond ready" },
+    });
+    expect(result).toMatchObject({ checkPassed: true, output, exitCode: 0 });
+  });
+
   it("gives a restarted service a moment before the first failing look counts", async () => {
     const { broker, t, capability, answer } = await setup("autonomous");
     answer("inactive", 3);

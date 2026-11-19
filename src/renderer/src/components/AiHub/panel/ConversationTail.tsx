@@ -21,7 +21,7 @@ export function ConversationTail({ p, hub }: { p: PanelState; hub: NonNullable<P
     running,
     activeAgent,
     stageCommandInTerminal,
-    runCommandInTerminal,
+    runCodeBlockInTerminal,
     handleOpenFileRef,
     targetSessionId,
     act,
@@ -141,7 +141,7 @@ export function ConversationTail({ p, hub }: { p: PanelState; hub: NonNullable<P
                     <RichMarkdownContent
                       text={streamingState.text}
                       onUseCommand={stageCommandInTerminal}
-                      onRunCommand={runCommandInTerminal}
+                      onRunCommand={runCodeBlockInTerminal}
                       onOpenFileRef={handleOpenFileRef}
                     />
                   </article>

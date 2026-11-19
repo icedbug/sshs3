@@ -420,26 +420,57 @@ describe("Shell Integration Overhaul", () => {
       expect(rows()).toHaveLength(1);
     });
 
-    it("keeps multiline staging in the editor, writes to the selected pod and rejects a replaced terminal", async () => {
+    it("preserves the chat draft, cancels or runs edited CRLF commands and waits for the pod transport", async () => {
       window.sessionStorage.setItem("sshs3.aiHub.openTask", "task-1");
       const hub = mockState.hub!;
-      hub.tasks[0].messages[1].text = ["```bash", "pwd", "date", "```"].join("\n");
+      hub.tasks[0].messages[1].text = ["```bash", "pwd", "date", "```"].join("\r\n");
       hub.sessions[0].kind = "k8s";
-      const writePod = vi.fn().mockResolvedValue(undefined);
+      let received!: () => void;
+      const transport = new Promise<void>((resolve) => { received = resolve; });
+      const writePod = vi.fn().mockReturnValue(transport);
       window.multissh!.k8sTerminalWrite = writePod;
       const props = { mode: "panel" as const, setMode: vi.fn() };
       const { rerender } = render(<AiHubPanel {...props} />);
-      fireEvent.click(screen.getByRole("button", { name: "Stage in Terminal" }));
-      expect(screen.getByTestId("ai-composer")).toHaveValue("pwd\ndate");
+      const stage = () => screen.getByRole("button", { name: "Stage in Terminal" });
+      const codeRun = () => screen.getByRole("button", { name: "Run in Terminal" });
+      const composer = screen.getByTestId("ai-composer");
+      fireEvent.change(composer, { target: { value: "unsent chat" } });
+      fireEvent.click(stage());
+      const draft = () => screen.getByRole("textbox", { name: "Terminal command draft" });
+      expect(draft()).toHaveValue("pwd\ndate");
+      expect(composer).toHaveValue("unsent chat");
+      fireEvent.change(draft(), { target: { value: "echo discarded" } });
+      fireEvent.click(screen.getByRole("button", { name: "Cancel draft" }));
+      expect(screen.queryByRole("textbox", { name: "Terminal command draft" })).not.toBeInTheDocument();
       expect(writePod).not.toHaveBeenCalled();
-      fireEvent.click(screen.getByRole("button", { name: "Run in Terminal" }));
-      await waitFor(() => expect(writePod).toHaveBeenCalledWith("term-1", "pwd\ndate\n"));
+      fireEvent.click(stage());
+      fireEvent.change(draft(), { target: { value: "echo first\r\necho second" } });
+      fireEvent.click(codeRun());
+      expect(writePod).toHaveBeenCalledWith("term-1", "echo first\necho second\n");
+      expect(screen.getByRole("button", { name: "Sending…" })).toBeDisabled();
+      expect(screen.queryByText("Sent to prod-web-01.")).not.toBeInTheDocument();
+      fireEvent.click(codeRun());
+      expect(writePod).toHaveBeenCalledTimes(1);
+      await act(async () => received());
+      expect(screen.getByText("Sent to prod-web-01.")).toBeVisible();
+      expect(screen.queryByRole("textbox", { name: "Terminal command draft" })).not.toBeInTheDocument();
       expect(mockState.terminalWrite).not.toHaveBeenCalled();
+      fireEvent.click(stage());
+      writePod.mockRejectedValueOnce(new Error("Pod transport closed"));
+      fireEvent.click(screen.getByRole("button", { name: "Run edited command" }));
+      expect(await screen.findByRole("alert")).toHaveTextContent("Pod transport closed");
+      expect(draft()).toHaveValue("pwd\ndate");
+      expect(screen.queryByText("Sent to prod-web-01.")).not.toBeInTheDocument();
+      hub.sessions[0].state = "disconnected";
+      rerender(<AiHubPanel {...props} />);
+      expect(screen.getByRole("button", { name: "Run edited command" })).toBeDisabled();
+      hub.sessions[0].state = "ready";
       hub.sessions[0].generation = "replacement";
       rerender(<AiHubPanel {...props} />);
-      fireEvent.click(screen.getByRole("button", { name: "Run in Terminal" }));
-      expect(writePod).toHaveBeenCalledTimes(1);
+      fireEvent.click(codeRun());
+      expect(writePod).toHaveBeenCalledTimes(2);
       expect(screen.getByRole("alert")).toHaveTextContent("no longer available");
+      expect(composer).toHaveValue("unsent chat");
     });
 
     it("warns about matching secrets in demo when a real remote model is selected", () => {

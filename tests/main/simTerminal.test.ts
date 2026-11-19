@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { commandEnvelope, CommandFrames, type CommandResult } from "../../src/main/ai/hub/shellAdapters";
+import { scenarioById, startScenario } from "../../src/main/sim/lab";
 import { TerminalRegistry } from "../../src/main/ai/hub/TerminalRegistry";
 import { ToolBroker } from "../../src/main/ai/hub/ToolBroker";
 import { DemoVirtualPty } from "../../src/main/demo/DemoVirtualPty";
@@ -51,6 +53,52 @@ describe("a demo terminal and the agent runtime", () => {
     expect(shown.exitCode).toBe(0);
     expect(shown.output).toContain("aggr1_nvme_prod");
     expect(t.changes[0]).toMatchObject({ status: "completed", exitCode: 0 });
+  });
+
+  it.each([512, 1])("keeps a PostgreSQL diagnostic in one frame across %i-byte PTY writes", (size) => {
+    const scenario = scenarioById("pg-wal-full")!;
+    const world = startScenario(scenario);
+    const host = world.host(scenario.target)!;
+    const pty = new DemoVirtualPty({ id: scenario.servers[0].id, name: host.name, host: host.address, port: 22, authType: "agent" } as never);
+    disposals.push(() => pty.kill());
+    const nonce = "1234567890abcdef1234567890abcdef";
+    const command = 'sudo du -sh /var/lib/postgresql/16/main/* 2>/dev/null | sort -hr | head -20; ' +
+      'sudo -u postgres psql -X -P pager=off -c "select archived_count, last_archived_wal, last_archived_time, failed_count, last_failed_wal, last_failed_time from pg_stat_archiver;" ' +
+      '-c "select slot_name, slot_type,\nactive, wal_status from pg_replication_slots;"';
+    const envelope = commandEnvelope("bash", command, nonce);
+    const frames = new CommandFrames(nonce);
+    let result: CommandResult | undefined;
+    pty.onData(data => { result = frames.feed(data) ?? result; });
+    expect(Buffer.byteLength(envelope)).toBeGreaterThan(512);
+    const before = world.ran(host).length;
+    for (let offset = 0; offset < envelope.length - 1; offset += size) {
+      pty.write(envelope.slice(offset, Math.min(offset + size, envelope.length - 1)));
+    }
+    expect(result).toBeUndefined();
+    expect(world.ran(host)).toHaveLength(before);
+    pty.write("\r");
+    expect(result).toMatchObject({ exitCode: 0, cwd: `/home/${host.user}` });
+    expect(result?.output).toContain("archived_count");
+    expect(result?.output).toContain("slot_name");
+    expect(world.ran(host).slice(before).map(entry => entry.line)).toEqual([command]);
+  });
+
+  it("discards interrupted frames and rejects mismatched completion markers", () => {
+    const pty = new DemoVirtualPty({ id: "demo-ssh-ontap-a", name: "netapp-aff-a800-01a", host: "10.30.10.11" } as never);
+    disposals.push(() => pty.kill());
+    let output = "";
+    pty.onData(chunk => { output += chunk; });
+    const nonce = "1234567890abcdef1234567890abcdef";
+    const frame = commandEnvelope("bash", "storage aggregate show", nonce);
+    pty.write(frame.slice(0, 60));
+    pty.write("\x03");
+    pty.write(frame.replace(nonce + ";END", "f".repeat(32) + ";END"));
+    expect(output).toContain("Invalid demo shell frame");
+    expect(output).not.toContain("\x1b]777;");
+    expect(output).not.toContain("aggr1_nvme_prod");
+    output = "";
+    pty.write(frame);
+    expect(new CommandFrames(nonce).feed(output)).toMatchObject({ exitCode: 0, output: expect.stringContaining("aggr1_nvme_prod") });
   });
 
   it("runs on the lab's simulated server when there is one: state, folders and failures are real", async () => {

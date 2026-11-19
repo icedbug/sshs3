@@ -54,6 +54,23 @@ describe.each(SCENARIOS)("scenario $id", (scenario) => {
 });
 
 describe("the database server's disk", () => {
+  it("runs repeated psql -c queries in order and retains the earlier output on failure", () => {
+    const scenario = SCENARIOS.find(s => s.id === "pg-wal-full")!;
+    const world = startScenario(scenario, () => NOW);
+    const shell = world.shell(world.host(scenario.target)!);
+    const psql = (args: string) => shell.run("sudo -u postgres psql " + args);
+    const archived = psql('-c "select archived_count from pg_stat_archiver"').output;
+    const slots = psql('-c "select slot_name from pg_replication_slots"').output;
+    expect(psql('-P pager=off -c "select archived_count from pg_stat_archiver" -c "select slot_name from pg_replication_slots"'))
+      .toEqual({ code: 0, output: archived + slots });
+    const badSetting = psql('-c "show nonexistent_setting"');
+    expect(psql('-c "select archived_count from pg_stat_archiver" -c "show nonexistent_setting"'))
+      .toEqual({ code: 1, output: archived + badSetting.output });
+    const unsupported = psql('-c "select missing_fixture_function()"');
+    expect(psql('-c "select archived_count from pg_stat_archiver" -c "select missing_fixture_function()"'))
+      .toEqual({ code: 2, output: archived + unsupported.output });
+  });
+
   it("shows the trouble the way an operator would find it, and the fix takes effect by itself", () => {
     const scenario = SCENARIOS.find((s) => s.id === "pg-wal-full")!;
     const world = startScenario(scenario, () => NOW);

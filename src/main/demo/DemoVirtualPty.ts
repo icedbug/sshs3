@@ -9,8 +9,23 @@ import { simWorld } from '../sim/SimWorld';
  * mark after that carries the exit code and the folder. A real shell runs the
  * `printf`s; the virtual one reads the frame and prints the marks itself.
  */
+const AGENT_FRAME_PREFIX = "printf '\\033]777;SSHS3;";
 const AGENT_FRAME =
-  /^printf '\\033\]777;(SSHS3;[A-Za-z0-9]+);BEGIN\\007'; \(eval ([\s\S]+)\); __sshs3_rc=\$\?; printf '\\033\]777;SSHS3;[A-Za-z0-9]+;END;%s;%s\\007' "\$__sshs3_rc" "\$PWD"\r?$/;
+  /^printf '\\033\]777;(SSHS3;[a-f0-9]{32});BEGIN\\007'; \(eval ('(?:[^']|'"'"')*')\); __sshs3_rc=\$\?; printf '\\033\]777;\1;END;%s;%s\\007' "\$__sshs3_rc" "\$PWD"$/;
+
+/** The generated frame quotes the whole command, including any embedded newlines. */
+function frameLineEnd(input: string): number {
+  let quote = '';
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i];
+    if (ch === '\x03' || (!quote && (ch === '\r' || ch === '\n'))) return i;
+    if (ch === "'" || ch === '"') {
+      if (!quote) quote = ch;
+      else if (quote === ch) quote = '';
+    }
+  }
+  return -1;
+}
 
 /** A command as the frame quotes it for `eval`, back to what was meant. */
 function unquoteForEval(quoted: string): string {
@@ -660,14 +675,32 @@ export class DemoVirtualPty implements IPty {
   public write(data: string): void {
     if (this.killed) return;
 
-    // A command the agent runtime framed: run it, and print the marks a real shell's printf would.
-    const frame = AGENT_FRAME.exec(data);
-    if (frame) {
-      const res = this.runHere(unquoteForEval(frame[2]));
-      this.emitData(
-        `\x1b]777;${frame[1]};BEGIN\x07${res.output ? `${res.output}\r\n` : ''}\x1b]777;${frame[1]};END;${res.exitCode};${res.cwd}\x07${this.getPrompt()}`
-      );
-      return;
+    // The Windows SSH writer submits up to 512 bytes at a time. Interpret a frame only
+    // after its Enter, so a fragment never runs as an ordinary simulated shell command.
+    let input = this.lineBuffer + data;
+    while (input.startsWith(AGENT_FRAME_PREFIX)) {
+      const end = /[\r\n]/.test(data) || data.includes('\x03') ? frameLineEnd(input) : -1;
+      if (end < 0) {
+        this.lineBuffer = input;
+        return;
+      }
+      this.lineBuffer = '';
+      if (input[end] === '\x03') {
+        this.emitData('^C\r\n' + this.getPrompt());
+      } else {
+        const frame = AGENT_FRAME.exec(input.slice(0, end));
+        if (frame) {
+          const res = this.runHere(unquoteForEval(frame[2]));
+          this.emitData(
+            `\x1b]777;${frame[1]};BEGIN\x07${res.output ? `${res.output}\r\n` : ''}\x1b]777;${frame[1]};END;${res.exitCode};${res.cwd}\x07${this.getPrompt()}`
+          );
+        } else {
+          this.emitData('\r\nInvalid demo shell frame\r\n' + this.getPrompt());
+        }
+      }
+      data = input.slice(end + (input.startsWith('\r\n', end) ? 2 : 1));
+      input = data;
+      if (!data) return;
     }
 
     // Handle AI framed command execution (__SSHS3_START_<id>__ ... __SSHS3_END_<id>__)

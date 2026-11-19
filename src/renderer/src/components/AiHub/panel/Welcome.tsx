@@ -29,7 +29,7 @@ export function Welcome({ p, hub }: { p: PanelState; hub: NonNullable<PanelState
     copyMessage,
     copiedMsgId,
     stageCommandInTerminal,
-    runCommandInTerminal,
+    runCodeBlockInTerminal,
     handleOpenFileRef,
   } = p;
   return (
@@ -321,7 +321,7 @@ export function Welcome({ p, hub }: { p: PanelState; hub: NonNullable<PanelState
                           <RichMarkdownContent
                             text={DEMO_SHOWCASE_RESPONSE}
                             onUseCommand={stageCommandInTerminal}
-                            onRunCommand={runCommandInTerminal}
+                      onRunCommand={runCodeBlockInTerminal}
                             onOpenFileRef={handleOpenFileRef}
                           />
                         </article>

@@ -285,10 +285,17 @@ describe("the knowledge base through the hub", () => {
     const written = (await hub.request({ action: "kb-page-save", page: { kind: "system", title: "How the backup pool is set up", when: "Before touching the backup pool", body: "The pool is raidz2 on truenas-01. Scrubs run on Sundays. " + "Detail. ".repeat(20) } })).reply!.kbPage!;
     expect(written.editedByPerson).toBe(true);
     await hub.request({ action: "kb-save", doc: { title: "Vendor manual", content: "UNIQUE-SOURCE-TEXT ".repeat(400), sourceType: "manual" } });
+    const question = "What do we know about backups?";
     let sent = "";
-    vi.stubGlobal("fetch", vi.fn(async (_u: unknown, init?: RequestInit) => { sent = String(init?.body); return say("Done."); }));
-    await hub.request({ action: "start", task: { prompt: "What do we know about backups?", mode: "advice" } });
-    await waitFor(() => hub.store.data.tasks.some((t) => t.status === "completed"));
+    vi.stubGlobal("fetch", vi.fn(async (_u: unknown, init?: RequestInit) => {
+      const body = String(init?.body);
+      // Background reading may reach the same endpoint after the conversation.
+      if (body.includes(question)) sent = body;
+      return say("Done.");
+    }));
+    const started = await hub.request({ action: "start", task: { prompt: question, mode: "advice" } });
+    const taskId = started.reply!.started!.taskId;
+    await waitFor(() => hub.store.data.tasks.some((t) => t.id === taskId && t.status === "completed"));
     expect(sent).toContain("Knowledge base pages");
     expect(sent).toContain(`How the backup pool is set up (system, page ${written.id}): Before touching the backup pool`);
     // The source's text is not poured into the prompt; its title is there to be looked up.

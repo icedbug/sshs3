@@ -174,23 +174,40 @@ function query(host: SimHost, sql: string, world: SimWorld | undefined): string 
 }
 
 const psql: SimCommand = (ctx, args) => {
-  const { values, flags, rest } = parseArgs(args, ["c", "U", "d", "h", "p", "f"]);
+  const statements: string[] = [];
+  const { flags, rest } = parseArgs(args, ["c", "command", "U", "d", "h", "p", "P", "f"], (key, value) => {
+    if (key === "c" || key === "command") statements.push(value);
+  });
   const service = ctx.host.service("postgresql");
   if (!ctx.root) return fail(`psql: error: connection to server on socket "/var/run/postgresql/.s.PGSQL.5432" failed: FATAL:  role "${ctx.user}" does not exist\n`, 2);
   if (service?.state !== "active")
     return fail('psql: error: connection to server on socket "/var/run/postgresql/.s.PGSQL.5432" failed: No such file or directory\n\tIs the server running locally and accepting connections on that socket?\n', 2);
-  const sql = values.get("c") ?? (ctx.stdin.trim() || rest.find((r) => /\s/.test(r)));
-  if (!sql) throw new NotSimulated("an interactive psql session (use psql -c '…')");
-  if (sql.trim() === "\\l") return ok(query(ctx.host, "select datname from pg_database", ctx.shell.world));
-  try {
-    const out = query(ctx.host, sql, ctx.shell.world);
-    // -t -A: the bare value, as scripts ask for it.
-    if (flags.has("t") || flags.has("A")) return ok(lines(out.split("\n").slice(2).filter((l) => l.trim() && !/^\(\d+ rows?\)$/.test(l.trim())).map((l) => l.trim())));
-    return ok(out);
-  } catch (error) {
-    if (error instanceof NotSimulated) throw error;
-    return fail(`${error instanceof Error ? error.message : String(error)}\n`, 1);
+  if (!statements.length) {
+    const sql = ctx.stdin.trim() || rest.find((r) => /\s/.test(r));
+    if (!sql) throw new NotSimulated("an interactive psql session (use psql -c '…')");
+    statements.push(sql);
   }
+  let output = "";
+  for (const sql of statements) {
+    try {
+      if (sql.trim() === "\\l") {
+        output += query(ctx.host, "select datname from pg_database", ctx.shell.world);
+        continue;
+      }
+      const out = query(ctx.host, sql, ctx.shell.world);
+      // -t -A: the bare value, as scripts ask for it.
+      output += flags.has("t") || flags.has("A")
+        ? lines(out.split("\n").slice(2).filter((l) => l.trim() && !/^\(\d+ rows?\)$/.test(l.trim())).map((l) => l.trim()))
+        : out;
+    } catch (error) {
+      if (error instanceof NotSimulated) {
+        error.output = output;
+        throw error;
+      }
+      return fail(`${error instanceof Error ? error.message : String(error)}\n`, 1, output);
+    }
+  }
+  return ok(output);
 };
 
 const pgLsclusters: SimCommand = (ctx) => {

@@ -26,7 +26,7 @@ export function Timeline({ p }: { p: PanelState }): JSX.Element {
     copyMessage,
     copiedMsgId,
     stageCommandInTerminal,
-    runCommandInTerminal,
+    runCodeBlockInTerminal,
     handleOpenFileRef,
     handleRestoreCheckpoint,
     approvalNotes,
@@ -177,7 +177,7 @@ export function Timeline({ p }: { p: PanelState }): JSX.Element {
                           setTimeout(() => el.classList.remove("ai-change-flash"), 1600);
                         }}
                         onUseCommand={stageCommandInTerminal}
-                        onRunCommand={runCommandInTerminal}
+                      onRunCommand={runCodeBlockInTerminal}
                         onOpenFileRef={handleOpenFileRef}
                       />
                       {item.message.role === "assistant" &&

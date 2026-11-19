@@ -226,6 +226,11 @@ function validateStructuredCheck(
   }
 }
 
+/** Terminal text can use either CRLF or LF. A lone CR and other whitespace are significant. */
+function normalizeCheckText(text: string): string {
+  return text.replaceAll("\r\n", "\n");
+}
+
 /**
  * Whether output shows what a check expects: as a whole word or phrase, not
  * inside another word, so "inactive" does not pass for "active", plus optional
@@ -233,7 +238,7 @@ function validateStructuredCheck(
  */
 export function showsExpected(
   output: string,
-  expected: string,
+  expectedText: string,
   structuredCheck?: AgentChangeStructuredCheck,
 ): boolean {
   const hasStructured = Boolean(
@@ -242,7 +247,9 @@ export function showsExpected(
         structuredCheck.maxNumber !== undefined ||
         structuredCheck.equals !== undefined),
   );
-  if (!expected && !hasStructured) return false;
+  if (!expectedText && !hasStructured) return false;
+  const text = normalizeCheckText(output);
+  const expected = normalizeCheckText(expectedText);
 
   if (expected && expected.length > 0) {
     const escaped = expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -251,7 +258,7 @@ export function showsExpected(
     const left = word.test(expected[0] ?? "") ? "(?:^|[^A-Za-z0-9_-])" : "";
     const right = word.test(expected.at(-1) ?? "") ? "(?:$|[^A-Za-z0-9_-])" : "";
     // eslint-disable-next-line security/detect-non-literal-regexp -- every special character of `expected` is escaped above
-    if (!new RegExp(`${left}${escaped}${right}`, "m").test(output)) {
+    if (!new RegExp(`${left}${escaped}${right}`, "m").test(text)) {
       return false;
     }
   }
@@ -259,7 +266,7 @@ export function showsExpected(
   if (structuredCheck) {
     if (
       structuredCheck.equals !== undefined &&
-      output.trim() !== structuredCheck.equals.trim()
+      text.trim() !== normalizeCheckText(structuredCheck.equals).trim()
     ) {
       return false;
     }

@@ -7,6 +7,7 @@ import {
   type HubSnapshot,
   type MissionAgent,
   type ShellKind,
+  type TerminalSession,
 } from "@shared/types/aiHub";
 import { hubRequest, selectAiTerminal, useHub, useSelectedTerminal } from "../../../lib/aiHub";
 import { useFullTask } from "../../../lib/aiHubTasks";
@@ -71,6 +72,7 @@ export function usePanelState({
   function clearDraft(): void {
     draftEpoch.current++;
     setPrompt("");
+    setTerminalDraft(null);
     setAttachments([]);
     setDlpWarning(null);
     setConnection(undefined);
@@ -81,6 +83,13 @@ export function usePanelState({
     onTaskChange?.(next);
   };
   const [prompt, setPrompt] = useState("");
+  const [terminalDraft, setTerminalDraft] = useState<{
+    source: string;
+    text: string;
+    target?: Pick<TerminalSession, "id" | "generation" | "label">;
+  } | null>(null);
+  const [writingDraft, setWritingDraft] = useState(false);
+  const draftWritePending = useRef(false);
   /** What was just sent and has not come back in the conversation yet (the answer to the request can take a while). */
   const [sending, setSending] = useState("");
   const [autonomy, setAutonomy] = useState<AgentMode>("assisted");
@@ -821,6 +830,7 @@ export function usePanelState({
   }
 
   async function writeToTerminal(cmd: string, run: boolean): Promise<boolean> {
+    setNotice("");
     const session = activeSessionForHandoff();
     if (!session) {
       setError("The selected terminal is no longer available. Select a current terminal first.");
@@ -833,7 +843,8 @@ export function usePanelState({
       return false;
     }
     try {
-      await write(session.id, run && !cmd.endsWith("\n") ? cmd + "\n" : cmd);
+      const text = run ? cmd.replace(/\r\n?/g, "\n") : cmd;
+      await write(session.id, run && !text.endsWith("\n") ? text + "\n" : text);
       setError("");
       setNotice(run ? `Sent to ${session.label}.` : `Staged in ${session.label}.`);
       return true;
@@ -844,13 +855,43 @@ export function usePanelState({
   }
 
   function stageCommandInTerminal(cmd: string): void {
-    if (Array.from(cmd).some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127) || !activeSessionForHandoff()) {
-      setPrompt(cmd);
-      setNotice("Staged in the chat editor. You can review and copy the text here.");
-      composer.current?.focus();
+    if (draftWritePending.current) return;
+    const target = activeSessionForHandoff();
+    if (Array.from(cmd).some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127) || !target) {
+      setTerminalDraft({ source: cmd, text: cmd.replace(/\r\n?/g, "\n"), target });
+      setError("");
+      setNotice("");
       return;
     }
     void writeToTerminal(cmd, false);
+  }
+
+  const draftTarget = activeSessionForHandoff();
+  const draftConnected = Boolean(terminalDraft?.target && draftTarget &&
+    terminalDraft.target.id === draftTarget.id && terminalDraft.target.generation === draftTarget.generation);
+  const draftHasControl = Boolean(terminalDraft && Array.from(terminalDraft.text).some((char) =>
+    char !== "\n" && char !== "\t" && (char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127),
+  ));
+  async function runTerminalDraft(): Promise<boolean> {
+    if (!terminalDraft || draftWritePending.current || draftHasControl || !terminalDraft.text.trim()) return false;
+    if (!draftConnected) {
+      setError("The selected terminal is no longer available. Stage the command again in a current terminal.");
+      return false;
+    }
+    draftWritePending.current = true;
+    setWritingDraft(true);
+    try {
+      const written = await writeToTerminal(terminalDraft.text, true);
+      if (written) setTerminalDraft((current) => current === terminalDraft ? null : current);
+      return written;
+    } finally {
+      draftWritePending.current = false;
+      setWritingDraft(false);
+    }
+  }
+
+  function runCodeBlockInTerminal(cmd: string): Promise<boolean> {
+    return terminalDraft?.source === cmd ? runTerminalDraft() : runCommandInTerminal(cmd);
   }
 
   function runCommandInTerminal(cmd: string): Promise<boolean> {
@@ -1142,6 +1183,13 @@ export function usePanelState({
     chooseTask,
     attachFileOrImage,
     stageCommandInTerminal,
+    terminalDraft,
+    setTerminalDraft,
+    draftConnected,
+    draftHasControl,
+    writingDraft,
+    runTerminalDraft,
+    runCodeBlockInTerminal,
     runCommandInTerminal,
     handleOpenFileRef,
     cycleMode,
