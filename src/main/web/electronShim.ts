@@ -31,36 +31,51 @@ function getOrCreateMasterKey(): Buffer {
     return cachedMasterKey;
   }
   const keyPath = path.join(configuredDataDir, 'server-master.key');
-  try {
-    fs.mkdirSync(configuredDataDir, { recursive: true, mode: 0o700 });
-    if (fs.existsSync(keyPath)) {
-      const raw = fs.readFileSync(keyPath, 'utf8').trim();
-      const buf = Buffer.from(raw, 'hex');
-      if (buf.length === 32) {
-        // Once per start, also for a key file from before this was done.
-        restrictPrivateKeyFile(keyPath);
-        cachedMasterKey = buf;
-        return cachedMasterKey;
-      }
-    }
-    const generated = crypto.randomBytes(32);
-    fs.writeFileSync(keyPath, generated.toString('hex'), { mode: 0o600 });
-    // On Windows the mode restricts nothing: the key that opens every stored secret is for this account only.
-    restrictPrivateKeyFile(keyPath);
-    cachedMasterKey = generated;
-    return cachedMasterKey;
-  } catch {
-    cachedMasterKey = crypto
-      .createHash('sha256')
-      .update(`sshs3-fallback-${os.hostname()}-${os.userInfo().username}`)
-      .digest();
-    return cachedMasterKey;
+  function restrictKey(file: string): void {
+    if (process.platform !== 'win32') fs.chmodSync(file, 0o600);
+    if (!restrictPrivateKeyFile(file)) throw new Error('Cannot restrict access to the credential key.');
   }
+  function readKey(): Buffer {
+    const raw = fs.readFileSync(keyPath, 'utf8').trim();
+    if (!/^[a-fA-F0-9]{64}$/.test(raw)) throw new Error('The saved credential key is invalid.');
+    restrictKey(keyPath);
+    return Buffer.from(raw, 'hex');
+  }
+  fs.mkdirSync(configuredDataDir, { recursive: true, mode: 0o700 });
+  try {
+    cachedMasterKey = readKey();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    // Publish a complete, private file without overwriting a key created by another process.
+    const temporary = keyPath + '.' + crypto.randomUUID();
+    const fd = fs.openSync(temporary, 'wx', 0o600);
+    try {
+      restrictKey(temporary);
+      fs.writeFileSync(fd, crypto.randomBytes(32).toString('hex'));
+      fs.fsyncSync(fd);
+      try {
+        fs.linkSync(temporary, keyPath);
+      } catch (linkError) {
+        if ((linkError as NodeJS.ErrnoException).code !== 'EEXIST') throw linkError;
+      }
+    } finally {
+      fs.closeSync(fd);
+      fs.unlinkSync(temporary);
+    }
+    cachedMasterKey = readKey();
+  }
+  return cachedMasterKey;
 }
 
 export const safeStorage = {
+  requiresEncryptedPersistence: true,
   isEncryptionAvailable(): boolean {
-    return true;
+    try {
+      getOrCreateMasterKey();
+      return true;
+    } catch {
+      return false;
+    }
   },
   encryptString(plainText: string): Buffer {
     const key = getOrCreateMasterKey();

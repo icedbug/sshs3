@@ -100,6 +100,20 @@ describe('encryptSecretValue (M2)', () => {
     mockDecryptString.mockClear();
   });
 
+  it('refuses to return plaintext when the web server cannot secure a saved credential', async () => {
+    const { safeStorage } = await import('electron');
+    Object.assign(safeStorage, { requiresEncryptedPersistence: true });
+    try {
+      mockIsEncryptionAvailable.mockReturnValue(false);
+      expect(() => encryptSecretValue('test value')).toThrow('Cannot save this credential securely');
+      mockIsEncryptionAvailable.mockReturnValue(true);
+      mockEncryptString.mockImplementationOnce(() => { throw new Error('private key cannot be opened'); });
+      expect(() => encryptSecretValue('test value')).toThrow('Cannot save this credential securely');
+    } finally {
+      Reflect.deleteProperty(safeStorage, 'requiresEncryptedPersistence');
+    }
+  });
+
   it('stores as plaintext without warning when no OS keyring is available', () => {
     mockIsEncryptionAvailable.mockReturnValue(false);
     const warnSpy = captureLogs();

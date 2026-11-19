@@ -31,15 +31,24 @@ export function isEncryptedSecret(value: unknown): value is string {
   return typeof value === 'string' && value.startsWith(ENC_PREFIX);
 }
 
+/** The web server must never persist a credential without its private master key. */
+function requireEncryptedPersistence(): void {
+  if ((safeStorage as typeof safeStorage & { requiresEncryptedPersistence?: boolean })?.requiresEncryptedPersistence) {
+    throw new Error('Cannot save this credential securely. Check the server credential key and its permissions.');
+  }
+}
+
 export function encryptSecretValue(value: string): string {
   if (!value) return value;
   if (!isEncryptionAvailable()) {
+    requireEncryptedPersistence();
     // Expected, normal fallback: no OS keyring backend on this machine.
     return value;
   }
   try {
     return ENC_PREFIX + safeStorage.encryptString(value).toString('base64');
   } catch (err) {
+    requireEncryptedPersistence();
     // Unexpected: the keyring reported itself available but encryption
     // still threw. Log it so this doesn't look identical to the normal
     // no-keyring fallback above — falling through to plaintext rather than

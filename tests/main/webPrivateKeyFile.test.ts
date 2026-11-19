@@ -20,6 +20,37 @@ function accessEntries(file: string): string[] {
 }
 
 describe('private key files of the web build', () => {
+  it('keeps an existing key and reports broken or missing storage without replacing it', async () => {
+    const { setWebDataDir, safeStorage } = await import('../../src/main/web/electronShim');
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'sshs3-web-master-'));
+    dirs.push(dir);
+    const previous = process.env.SSHS3_MASTER_KEY;
+    delete process.env.SSHS3_MASTER_KEY;
+    try {
+      setWebDataDir(dir);
+      const ciphertext = safeStorage.encryptString('fixture-secret');
+      const file = path.join(dir, 'server-master.key');
+      const original = await fs.readFile(file, 'utf8');
+      setWebDataDir(dir);
+      expect(safeStorage.decryptString(ciphertext)).toBe('fixture-secret');
+      expect(await fs.readFile(file, 'utf8')).toBe(original);
+
+      await fs.writeFile(file, 'invalid');
+      setWebDataDir(dir);
+      expect(safeStorage.isEncryptionAvailable()).toBe(false);
+      expect(() => safeStorage.encryptString('fixture-secret')).toThrow();
+      expect(() => safeStorage.decryptString(ciphertext)).toThrow();
+      expect(await fs.readFile(file, 'utf8')).toBe('invalid');
+      setWebDataDir(file);
+      expect(safeStorage.isEncryptionAvailable()).toBe(false);
+
+      await fs.writeFile(file, original);
+      setWebDataDir(dir);
+      expect(safeStorage.decryptString(ciphertext)).toBe('fixture-secret');
+    } finally {
+      if (previous !== undefined) process.env.SSHS3_MASTER_KEY = previous;
+    }
+  });
   it('asks Windows for an access list of the running account alone, and nothing elsewhere', () => {
     const run = vi.fn();
     expect(restrictPrivateKeyFile('/keys/id_ed25519', 'linux', run)).toBe(true);
