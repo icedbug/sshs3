@@ -259,8 +259,8 @@ export class SafetyPart {
           who.peer
             ? `${actor} approved this plan as the second person. It waits for your own answer.`
             : approvalStatus.requiredApprovals === 2
-              ? "You approved this plan. Two people have to approve it: the others who may are asked in their inbox, and the agent starts when one of them has."
-              : `You approved this plan. ${approvalStatus.requiredApprovals} different people have to approve it: the others who may are asked in their inbox, and the agent starts when enough of them have.`,
+              ? "You approved this plan. It needs one more person. The teammates who may approve it see it in their inbox. The agent starts when one of them has approved."
+              : `You approved this plan. It needs ${approvalStatus.requiredApprovals} different people in all. The teammates who may approve it see it in their inbox. The agent starts when enough of them have approved.`,
         );
         this.changed();
         return undefined;

@@ -71,3 +71,10 @@ export function boardSharedWith(place: SharingPlace): string {
   if (place.bucket) return "Shared with everyone who uses the team bucket";
   return "Board stays on this computer. Connect a team bucket from the start page to share tickets and goals";
 }
+
+/**
+ * What an administrator of a web server may do that a member may not, for the screens where a role
+ * is chosen. It follows what the server refuses a member: see `teamAdmin` in the hub's areas.
+ */
+export const ROLES_ON_A_SERVER =
+  "A member has their own conversations and works on the shared board and the shared servers. An administrator can also add and remove people, remove a shared server, set up the team's bucket and chat bot, start programs on this server (external agents, and MCP servers that run as a program), and be the second person on a change to production.";

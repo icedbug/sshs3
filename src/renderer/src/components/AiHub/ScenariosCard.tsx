@@ -4,11 +4,17 @@ import { ConfirmButton } from "./ConfirmButton";
 import type { Act } from "./panelShared";
 
 const KIND: Record<string, string> = {
-  resolved: "The trouble is gone",
-  "root-cause": "The cause is fixed",
-  "no-damage": "Nothing was broken",
-  report: "The report",
+  resolved: "checks that the trouble is gone",
+  "root-cause": "checks that the cause is fixed",
+  "no-damage": "checks that nothing was broken on the way",
+  report: "checks the report",
 };
+
+/** A check for damage passes from the start: "pass" there would read as progress. */
+function verdict(check: { kind: string; pass: boolean }): string {
+  if (check.kind === "no-damage") return check.pass ? "ok so far" : "broken";
+  return check.pass ? "pass" : "not yet";
+}
 
 /**
  * The demo lab's incidents: pick one, start it, and see how it stands while an
@@ -28,7 +34,7 @@ export function ScenariosCard({ hub, act, onOpenTicket }: { hub: HubSnapshot; ac
   return (
     <details className="ai-fold ai-set-fold" data-testid="scenarios" open={Boolean(running)}>
       <summary>
-        {running ? `Scenario · ${running.title} · ${running.passed} of ${running.total} checks pass` : `Scenarios · ${sim.scenarios.length} incident${sim.scenarios.length === 1 ? "" : "s"} to play in the demo lab`}
+        {running ? `Scenario · ${running.title} · ${running.passed === running.total ? "solved" : "not solved yet"} · ${running.passed} of ${running.total} checks pass` : `Scenarios · ${sim.scenarios.length} incident${sim.scenarios.length === 1 ? "" : "s"} to play in the demo lab`}
       </summary>
       <div className="ai-form">
         <p className="ai-hint">
@@ -42,7 +48,7 @@ export function ScenariosCard({ hub, act, onOpenTicket }: { hub: HubSnapshot; ac
               {running.checks.map((c) => (
                 <li key={c.id} className="ai-link" data-pass={c.pass}>
                   <span>
-                    <span className={`ai-badge ${c.pass ? "ai-badge-success" : "ai-badge-danger"}`}>{c.pass ? "pass" : "not yet"}</span>{" "}
+                    <span className={`ai-badge ${c.pass ? "ai-badge-success" : "ai-badge-danger"}`}>{verdict(c)}</span>{" "}
                     <strong>{c.title}</strong>
                     <small> · {KIND[c.kind] ?? c.kind}</small>
                     <br />

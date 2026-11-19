@@ -81,11 +81,34 @@ describe("header badge", () => {
   });
 });
 
+describe("the demo lab's example conversation", () => {
+  it("says where it is read that it is invented, and only there", () => {
+    fixture.demoMode = true;
+    fixture.tasks = [makeTask({ id: "demo-task-ontap-latency-triage", status: "completed" })];
+    const view = render(<Harness />);
+    openTask();
+    expect(screen.getByTestId("demo-example-note")).toHaveTextContent(
+      "Demo lab: this conversation is an invented example. Nothing in it was run.",
+    );
+    // A conversation somebody started in the demo lab themselves is not an example.
+    view.unmount();
+    fixture.tasks = [makeTask({ status: "completed" })];
+    render(<Harness />);
+    openTask();
+    expect(screen.queryByTestId("demo-example-note")).toBeNull();
+  });
+  it("names the mode that runs nothing Advice, not Ask", () => {
+    render(<Harness />);
+    expect(screen.getByTestId("ai-mode-pill-advice")).toHaveTextContent("Advice");
+    expect(screen.getByTestId("ai-mode-pill-assisted")).toHaveTextContent("Ask first");
+  });
+});
+
 describe("fork and restore", () => {
   it("forks with the typed field name fromMessageId", async () => {
     render(<Harness />);
     openTask();
-    fireEvent.click(screen.getAllByTitle("Fork conversation from this message")[1]);
+    fireEvent.click(screen.getAllByTitle("Start a new conversation from a copy of this one, up to this message")[1]);
     await waitFor(() => expect(request).toHaveBeenCalled());
     expect(request).toHaveBeenCalledWith({ action: "task-fork", taskId: "task", fromMessageId: "a1" });
   });

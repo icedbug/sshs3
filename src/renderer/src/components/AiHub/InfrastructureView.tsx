@@ -13,7 +13,7 @@ import type { Act } from "./panelShared";
 const STATUS: Record<InventoryEntry["status"], { text: string; tone: string }> = {
   reachable: { text: "reachable", tone: "ai-badge-success" },
   unreachable: { text: "unreachable", tone: "ai-badge-danger" },
-  blocked: { text: "blocked", tone: "ai-badge-danger" },
+  blocked: { text: "not checked: not allowed", tone: "ai-badge-danger" },
   unknown: { text: "not checked", tone: "" },
 };
 
@@ -221,7 +221,8 @@ export function InfrastructureView({
                         {server.port !== 22 ? `:${server.port}` : ""}
                       </span>
                       {server.nodeRole || server.role ? ` · ${server.nodeRole || server.role}` : ""}
-                      {server.shared ? "" : " · personal"}
+                      {/* A scenario's server in the demo lab is nobody's own: it is simulated. */}
+                      {server.shared ? "" : hub.demoMode ? " · simulated" : " · personal"}
                     </small>
                   </div>
                   <span className="ai-tags">

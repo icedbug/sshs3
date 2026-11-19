@@ -642,7 +642,7 @@ describe("NotificationsCard overhaul", () => {
     // Add escalation step
     fireEvent.click(screen.getByTestId("add-escalation-step-btn"));
     expect(screen.getByTestId("escalation-step-1")).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("Tier 1 delay minutes"), {
+    fireEvent.change(screen.getByLabelText("Step 1 minutes to wait"), {
       target: { value: "10" },
     });
 
@@ -653,11 +653,11 @@ describe("NotificationsCard overhaul", () => {
     });
 
     // Enable signed ChatOps callbacks
-    fireEvent.click(screen.getByLabelText("Enable signed ChatOps callbacks"));
+    fireEvent.click(screen.getByLabelText("Let Approve and Deny be answered from chat"));
     expect(screen.getByTestId("chatops-signed-badge")).toHaveTextContent(
-      "Signed ChatOps enabled",
+      "Answers from chat are on",
     );
-    fireEvent.change(screen.getByLabelText("ChatOps callback URL"), {
+    fireEvent.change(screen.getByLabelText("Address the answers are sent to"), {
       target: { value: "https://sshs3.example.com/api/ai/chatops/callback" },
     });
 

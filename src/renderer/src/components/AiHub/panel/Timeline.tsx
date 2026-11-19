@@ -115,10 +115,10 @@ export function Timeline({ p }: { p: PanelState }): JSX.Element {
                             <button
                               type="button"
                               className="ai-code-btn"
-                              title="Fork conversation from this message"
+                              title="Start a new conversation from a copy of this one, up to this message"
                               onClick={() => void handleForkTask(item.message!.id)}
                             >
-                              <GitFork size={11} /> Fork
+                              <GitFork size={11} /> Branch off here
                             </button>
                           )}
                           {item.message.role === "assistant" && (

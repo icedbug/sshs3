@@ -46,6 +46,22 @@ describe("the scenarios card", () => {
     expect(list).not.toHaveTextContent("A zone has two names.");
   });
 
+  it("does not let a check for damage read as progress, and says solved only when all hold", () => {
+    const base = { id: "pg-wal-full", title: "The database server's disk is filling up", startedAt: 1, target: "pg-prod-01", commands: 0, unsupported: [] };
+    const checks: NonNullable<SimulationView["running"]>["checks"] = [
+      { id: "room", title: "The disk has room again", why: "97% used", kind: "resolved", pass: false },
+      { id: "wal", title: "No WAL was deleted by hand", why: "none removed", kind: "no-damage", pass: true },
+    ];
+    const view = render(<ScenariosCard hub={hub({ scenarios: [], running: { ...base, checks, passed: 1, total: 2 } })} act={vi.fn(async () => undefined)} />);
+    expect(screen.getByTestId("scenarios")).toHaveTextContent("not solved yet · 1 of 2 checks pass");
+    const items = within(screen.getByTestId("scenario-checks")).getAllByRole("listitem");
+    expect(items[0]).toHaveTextContent("not yet The disk has room again");
+    expect(items[1]).toHaveTextContent("ok so far No WAL was deleted by hand · checks that nothing was broken on the way");
+    view.unmount();
+    render(<ScenariosCard hub={hub({ scenarios: [], running: { ...base, checks: checks.map((c) => ({ ...c, pass: true })), passed: 2, total: 2 } })} act={vi.fn(async () => undefined)} />);
+    expect(screen.getByTestId("scenarios")).toHaveTextContent("· solved · 2 of 2 checks pass");
+  });
+
   it("shows how the running one stands, what was asked for and not simulated, and leads to its ticket", () => {
     const act = vi.fn(async () => undefined);
     const open = vi.fn();
@@ -65,10 +81,10 @@ describe("the scenarios card", () => {
       unsupported: ["strace -p 1432"],
     };
     render(<ScenariosCard hub={hub({ scenarios, running })} act={act} onOpenTicket={open} />);
-    expect(screen.getByTestId("scenarios")).toHaveTextContent("Scenario · The database server's disk is filling up · 1 of 2 checks pass");
+    expect(screen.getByTestId("scenarios")).toHaveTextContent("Scenario · The database server's disk is filling up · not solved yet · 1 of 2 checks pass");
     const checks = within(screen.getByTestId("scenario-checks")).getAllByRole("listitem");
-    expect(checks[0]).toHaveTextContent("pass The disk has room again · The trouble is gone");
-    expect(checks[1]).toHaveTextContent("not yet No WAL was deleted by hand · Nothing was broken");
+    expect(checks[0]).toHaveTextContent("pass The disk has room again · checks that the trouble is gone");
+    expect(checks[1]).toHaveTextContent("broken No WAL was deleted by hand · checks that nothing was broken on the way");
     expect(checks[1]).toHaveTextContent("2356 WAL segments were removed");
     expect(screen.getByTestId("scenario-unsupported")).toHaveTextContent("strace -p 1432");
     expect(screen.getByTestId("scenarios")).toHaveTextContent("7 commands run so far.");

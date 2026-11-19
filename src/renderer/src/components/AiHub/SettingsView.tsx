@@ -311,7 +311,7 @@ export function Settings({
       <header className="ai-view-head">
         <h2>Settings</h2>
         <p className="ai-hint">
-          The assistant uses the model you connect here. Nothing is sent anywhere else.
+          The assistant uses the model you connect here. What else can receive data is listed under &ldquo;Where your data may go&rdquo; below.
         </p>
       </header>
 
@@ -499,11 +499,11 @@ export function Settings({
         <div className="ai-section-head">
           <div>
             <h3>
-              Provider profiles &amp; role routing <span className="ai-count">{profiles.length}</span>
+              Saved models, and which one does what <span className="ai-count">{profiles.length}</span>
             </h3>
             <small>
-              Save multiple model endpoints (e.g. Anthropic cloud, local Ollama, internal vLLM) and route each role
-              independently.
+              Save several models (for example Anthropic in the cloud, Ollama on this machine, one in your own network)
+              and choose which one the chat, the quick checks, the summaries and the search use.
             </small>
           </div>
           <button
@@ -944,7 +944,7 @@ export function Settings({
       </section>
 
       <section className="ai-set" data-testid="labs-features-section">
-        <h3>Labs Features (Autonomous Ops &amp; Evaluation)</h3>
+        <h3>More views, and work that starts by itself</h3>
         <label className="ai-check">
           <input
             type="checkbox"
@@ -953,10 +953,9 @@ export function Settings({
             onChange={(e) => setLabsEnabled(e.target.checked)}
           />
           <span>
-            Show Labs views &amp; autonomous ops (Workforce, Agent Evals, KB Compile, Memory &amp; Schedules)
+            Show the extra views (Workforce, Agent tests, Memory, Schedules) and the switches for work that starts by itself
             <small>
-              Progressive disclosure: keeps the daily workspace focused on Terminal Chat, Approvals, and Runbooks until
-              enabled.
+              Off keeps the workspace to the chat, approvals and runbooks.
             </small>
           </span>
         </label>
@@ -969,8 +968,8 @@ export function Settings({
                 onChange={(e) => setPrefs({ ...prefs, workforceAutopilot: e.target.checked })}
               />
               <span>
-                Workforce Autopilot
-                <small>Allow background heartbeat to claim and execute queued &ldquo;todo&rdquo; tickets.</small>
+                Start tickets by itself
+                <small>A timer in the background picks up tickets that wait in &ldquo;To do&rdquo; and starts an agent on them.</small>
               </span>
             </label>
             <label className="ai-check">
@@ -980,8 +979,8 @@ export function Settings({
                 onChange={(e) => setPrefs({ ...prefs, proposeMemories: e.target.checked })}
               />
               <span>
-                KB Compile &amp; Memory Distillation
-                <small>After finished tasks, propose team memories and compile verified findings into KB pages.</small>
+                Learn from finished work
+                <small>After a finished task, suggest team memories and write what was confirmed into knowledge base pages.</small>
               </span>
             </label>
             <label className="ai-check">

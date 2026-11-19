@@ -11,7 +11,8 @@ export const DEMO_MODE_SET_BY_SERVER =
   "Demo mode is set when the sshs3 server starts and can't be changed here.";
 
 export const modes: Record<AgentMode, string> = {
-  advice: "Ask",
+  // "Ask" next to "Ask first" was read as the same thing.
+  advice: "Advice",
   assisted: "Ask first",
   autonomous: "Auto",
   plan: "Plan",

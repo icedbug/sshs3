@@ -16,6 +16,10 @@ export interface PlanCardProps {
   onSaveDraft?: (note: string) => void;
 }
 
+// How the line under a plan starts: alone, your yes starts the agent. Where two people are needed, it does not.
+const ONE_START = "Approving lets the agent carry the plan out";
+const TWO_START = "The agent carries the plan out when you and a second person have both approved";
+
 const RISK_CLASS: Record<AgentPlan["steps"][number]["risk"], string> = {
   low: "ai-badge ai-badge-success",
   medium: "ai-badge ai-badge-mode",
@@ -204,10 +208,10 @@ export function PlanCard({
           {busy
             ? "The agent is still working; you can decide when it has stopped."
             : listed === 0
-              ? "Approving lets the agent carry the plan out; commands that change something still ask."
+              ? `${people ? TWO_START : ONE_START}; commands that change something still ask.`
               : asksEach
-                ? `Approving lets the agent carry the plan out. Every command that changes something asks you before it runs, also the ${listed} listed above${promised ? " (the plan says so)" : ""}.`
-                : `Approving lets the agent carry the plan out. ${listed === 1 ? "The command listed above runs" : `The ${listed} commands listed above run`} without asking you again; anything else, and anything destructive, still asks.`}
+                ? `${people ? TWO_START : ONE_START}. Every command that changes something asks you before it runs, also the ${listed} listed above${promised ? " (the plan says so)" : ""}.`
+                : `${people ? TWO_START : ONE_START}. ${listed === 1 ? "The command listed above runs" : `The ${listed} commands listed above run`} without asking you again; anything else, and anything destructive, still asks.`}
         </small>
         {people && (
           <small data-testid="plan-people" role="status">

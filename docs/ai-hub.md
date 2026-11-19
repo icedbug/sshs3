@@ -698,7 +698,7 @@ Guarded:
 - reading a local folder or a bucket prefix into the shared knowledge base.
 
 Not guarded: everything else, including an agent or a schedule that asks before
-each command. A conversation in Ask mode still runs no command and writes no
+each command. A conversation in Advice mode still runs no command and writes no
 file, but it does ask about a guarded change: the person is there to answer.
 
 Beside the gate:

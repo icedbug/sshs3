@@ -965,7 +965,7 @@ export function InboxView({
             ? ` · on, ${intake.received} webhook alert${intake.received === 1 ? "" : "s"} received${
                 intake.lastAt ? ` (last ${ago(intake.lastAt)})` : ""
               }`
-            : " · off"}
+            : " · no address for your monitoring yet"}
         </summary>
         <div className="ai-form">
           <p className="ai-hint">

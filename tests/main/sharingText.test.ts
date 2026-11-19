@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { boardSharedWith, sharingText, sharingWithoutBucket } from "../../src/shared/sharingText";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { boardSharedWith, ROLES_ON_A_SERVER, sharingText, sharingWithoutBucket } from "../../src/shared/sharingText";
 
 /**
  * What is shared and what is each person's own is said in one place, so the start page, the invite
@@ -59,5 +61,20 @@ describe("what is shared, in one place", () => {
     expect(sharingWithoutBucket(true)).toMatch(/^Shared on this web server: everyone with an account has .* the Workforce board, agents, the Knowledge Base/);
     expect(sharingWithoutBucket(true)).toContain("A team bucket is needed only to share with desktop apps or another server.");
     expect(sharingWithoutBucket(false)).toMatch(/^Not connected\. A team bucket shares/);
+  });
+
+  it("says what an administrator may do that a member may not, where the role is chosen", () => {
+    // Each thing named is something the server refuses a member: the words follow those refusals.
+    const areas = (name: string): string => readFileSync(join(__dirname, "../../src/main/ai/hub/areas", name), "utf8");
+    expect(ROLES_ON_A_SERVER).toContain("remove a shared server");
+    expect(areas("servers.ts")).toContain("Only an administrator of this server removes a server the team shares.");
+    expect(ROLES_ON_A_SERVER).toContain("the team's bucket and chat bot");
+    expect(areas("sharing.ts")).toContain("Only an administrator of this server sets up, changes or disconnects the team's bucket.");
+    expect(areas("chatAndAtlassian.ts")).toContain("Only an administrator of this server sets up the team's chat bot");
+    expect(ROLES_ON_A_SERVER).toContain("start programs on this server");
+    expect(areas("agents.ts")).toContain("Only an administrator of this server adds or starts one.");
+    expect(ROLES_ON_A_SERVER).toContain("the second person on a change to production");
+    const gate = readFileSync(join(__dirname, "../../src/renderer/src/components/WebAuthGate.tsx"), "utf8");
+    expect(gate).toContain('data-testid="invite-roles"');
   });
 });

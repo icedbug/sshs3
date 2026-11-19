@@ -17,11 +17,6 @@ import { boundedContext, clip } from "./privacy";
 import { createLogger } from "../../log";
 
 export const log = createLogger("ai-hub");
-/**
- * Requests that only read. They answer in `reply` and change nothing, so the
- * store is not rewritten and no window is told to refetch: a search that runs
- * as a person types must not cost a save and a broadcast per keystroke.
- */
 /** Run events the windows are sent as they happen (host.delta): each changes the conversation it belongs to and nothing else. */
 export const STREAMED_EVENTS: ReadonlySet<string> = new Set(["message.delta", "usage.updated", "tool.result", "run.retrying"]);
 /** How often, at most, the windows are told to fetch everything again while a run streams. */
@@ -94,6 +89,11 @@ export function taskForSnapshot(task: AgentTask): AgentTask {
   };
 }
 
+/**
+ * Requests that only read. They answer in `reply` and change nothing, so the
+ * store is not rewritten and no window is told to refetch: a search that runs
+ * as a person types must not cost a save and a broadcast per keystroke.
+ */
 export const READ_ONLY_ACTIONS: ReadonlySet<HubRequest["action"]> = new Set<HubRequest["action"]>([
   "task-read",
   // The answer goes to another member's hub: nothing of this one's is written.

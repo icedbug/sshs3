@@ -634,11 +634,12 @@ export function NotificationsCard({
       >
         <div className="ai-card-head">
           <div>
-            <strong>Escalation Chain, Quiet Hours &amp; Signed ChatOps</strong>
+            <strong>Who is told next, quiet hours, and answers from chat</strong>
             <small>
-              Configure multi-tier escalation when approvals or alerts go
-              unanswered, suppress low-priority pages during quiet hours, and
-              enable HMAC-signed ChatOps callbacks.
+              Who is told next when an approval or an alert gets no answer, the
+              hours when only urgent things are sent, and whether a button
+              pressed in chat counts as an answer (each one is signed, so it
+              cannot be faked).
             </small>
           </div>
           <div className="ai-tags">
@@ -655,7 +656,7 @@ export function NotificationsCard({
                 className="ai-badge ai-badge-success"
                 data-testid="chatops-signed-badge"
               >
-                Signed ChatOps enabled
+                Answers from chat are on
               </span>
             )}
           </div>
@@ -663,19 +664,19 @@ export function NotificationsCard({
 
         <div data-testid="escalation-chain-config">
           <div className="ai-section-head">
-            <strong>Escalation chain</strong>
+            <strong>Who is told next</strong>
             <button
               type="button"
               data-testid="add-escalation-step-btn"
               onClick={addEscalationStep}
             >
-              Add escalation step
+              Add a step
             </button>
           </div>
           {policy.escalationChain.length === 0 ? (
             <small className="ai-muted">
-              No escalation steps configured. Unanswered items notify primary
-              channels once (plus reminder).
+              No steps yet. Something that gets no answer is sent to your
+              channels once, and reminded about once.
             </small>
           ) : (
             <div className="ai-rows">
@@ -686,12 +687,12 @@ export function NotificationsCard({
                   data-testid={`escalation-step-${idx + 1}`}
                 >
                   <div className="ai-form-row">
-                    <span>Tier {idx + 1}</span>
+                    <span>Step {idx + 1}</span>
                     <label>
                       After (min)
                       <input
                         type="number"
-                        aria-label={`Tier ${idx + 1} delay minutes`}
+                        aria-label={`Step ${idx + 1} minutes to wait`}
                         min={1}
                         max={240}
                         value={step.afterMinutes}
@@ -716,7 +717,7 @@ export function NotificationsCard({
                     <label>
                       Target channel
                       <select
-                        aria-label={`Tier ${idx + 1} channel`}
+                        aria-label={`Step ${idx + 1} channel`}
                         value={step.channelId}
                         onChange={(e) =>
                           setPolicy((p) => ({
@@ -740,7 +741,7 @@ export function NotificationsCard({
                     <label>
                       Min severity
                       <select
-                        aria-label={`Tier ${idx + 1} severity`}
+                        aria-label={`Step ${idx + 1} severity`}
                         value={step.minSeverity}
                         onChange={(e) =>
                           setPolicy((p) => ({
@@ -764,7 +765,7 @@ export function NotificationsCard({
                   </div>
                   <button
                     type="button"
-                    aria-label={`Remove tier ${idx + 1}`}
+                    aria-label={`Remove step ${idx + 1}`}
                     onClick={() =>
                       setPolicy((p) => ({
                         ...p,
@@ -871,7 +872,7 @@ export function NotificationsCard({
           <label className="ai-check">
             <input
               type="checkbox"
-              aria-label="Enable signed ChatOps callbacks"
+              aria-label="Let Approve and Deny be answered from chat"
               checked={policy.chatOps.enabled}
               onChange={(e) =>
                 setPolicy((p) => ({
@@ -881,20 +882,21 @@ export function NotificationsCard({
               }
             />
             <span>
-              Enable signed ChatOps approve/deny callbacks
+              Let Approve and Deny be answered from chat
               <small>
-                Attaches single-use HMAC-SHA256 signed action tokens
-                (Standard Webhooks v1 + X-Sshs3-Signature) to webhook
-                notifications.
+                A webhook notification then carries an Approve and a Deny
+                button. Each works once and is signed (HMAC-SHA256, the
+                Standard Webhooks way), so an answer cannot be faked or used
+                twice.
               </small>
             </span>
           </label>
           {policy.chatOps.enabled && (
             <div className="ai-form-row">
               <label>
-                ChatOps callback URL
+                Address the answers are sent to
                 <input
-                  aria-label="ChatOps callback URL"
+                  aria-label="Address the answers are sent to"
                   placeholder={
                     settings.publicUrl
                       ? `${settings.publicUrl}/api/ai/chatops/callback`
@@ -910,10 +912,10 @@ export function NotificationsCard({
                 />
               </label>
               <label>
-                Action token TTL (seconds)
+                How long a button works (seconds)
                 <input
                   type="number"
-                  aria-label="ChatOps token TTL (seconds)"
+                  aria-label="How long a button works (seconds)"
                   min={60}
                   max={3600}
                   value={policy.chatOps.ttlSeconds}

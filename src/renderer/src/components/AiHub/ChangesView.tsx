@@ -730,8 +730,9 @@ export function ChangesView({
               className={`ai-chip ${groupBySet ? "ai-chip-on" : ""}`}
               aria-pressed={groupBySet}
               onClick={() => setGroupBySet((v) => !v)}
+              title="Put the changes of one piece of work together"
             >
-              Change Sets
+              Group by task
             </button>
             {demo ? (
               <small data-testid="recordings-off-demo">

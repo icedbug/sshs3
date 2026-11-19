@@ -1905,7 +1905,7 @@ const initialDemoTasks: AgentTask[] = [
           "```bash",
           "# Check the current QoS latency on ONTAP:",
           "qos statistics volume latency show -iterations 3",
-          "# Switch multipath to ALUA on the K8s GPU worker:",
+          "# After group_by_prio is set in /etc/multipath.conf on the K8s GPU worker, reload the maps and list them:",
           "sudo multipath -r && sudo multipath -ll",
           "```",
         ].join("\n"),

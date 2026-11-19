@@ -660,8 +660,9 @@ export function Schedules({
                   ? `cron "${s.cron}" (${s.timezone ?? "UTC"})`
                   : every(s.intervalMinutes)}{" "}
                 ·{" "}
-                {SCHEDULE_MODES[s.mode].split(" — ")[0].split(" (")[0].toLowerCase()}{" "}
-                · {s.model}
+                {SCHEDULE_MODES[s.mode].split(" — ")[0].split(" (")[0].toLowerCase()}
+                {/* The demo lab's own schedules name a model nobody connected: not shown as if it ran them. */}
+                {s.id.startsWith("demo-sched-") ? "" : ` · ${s.model}`}
               </small>
             </div>
             <div className="ai-tags">

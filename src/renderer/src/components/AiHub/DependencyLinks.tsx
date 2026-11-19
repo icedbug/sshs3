@@ -222,8 +222,8 @@ export function DependencyLinks({
               }}
             >
               <span>
-                Focused: <strong>{selectedTopo.label}</strong> · blast radius{" "}
-                <strong>{selectedTopo.blastRadius}</strong> · {selectedTopo.upstreamIds.length} upstream
+                Chosen: <strong>{selectedTopo.label}</strong> · <strong>{selectedTopo.blastRadius}</strong> depend on it ·{" "}
+                it depends on {selectedTopo.upstreamIds.length}
               </span>
               <span className="ai-spacer" />
               {onOpenHost && (
@@ -313,14 +313,14 @@ export function DependencyLinks({
                           data-testid={`blast-radius-${node.id}`}
                           title={
                             node.downstreamIds.length > 0
-                              ? `Impacts: ${node.downstreamIds.join(", ")}`
-                              : "No downstream dependents impacted"
+                              ? `If this one fails, these are hit: ${node.downstreamIds.join(", ")}`
+                              : "Nothing depends on this one"
                           }
                         >
-                          {node.blastRadius} blast
+                          {node.blastRadius} depend on it
                         </span>
                         {node.hasCycle && (
-                          <span className="ai-badge ai-badge-danger" title="Participates in a dependency cycle">
+                          <span className="ai-badge ai-badge-danger" title="It depends on something that depends on it">
                             cycle
                           </span>
                         )}

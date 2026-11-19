@@ -329,7 +329,7 @@ describe('a change that needs a second person, between accounts on one web serve
     expect(run.launched).toEqual([]);
     expect(run.task.messages.at(-1)).toMatchObject({
       role: 'system',
-      text: 'You approved this plan. Two people have to approve it: the others who may are asked in their inbox, and the agent starts when one of them has.',
+      text: 'You approved this plan. It needs one more person. The teammates who may approve it see it in their inbox. The agent starts when one of them has approved.',
     });
     expect(inboxItems(await omar.hub({ action: 'snapshot' })).find((i) => i.kind === 'plan')!.detail).toContain('You approved. It waits for one more person');
     await expect(omar.hub({ action: 'plan-decide', taskId: 'run-1', approved: true })).rejects.toThrow('already approved');

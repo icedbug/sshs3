@@ -40,21 +40,21 @@ export function TaskContextBar({ p, hub }: { p: PanelState; hub: NonNullable<Pan
                         className="ai-mini-btn"
                         data-testid="ai-task-fork-btn"
                         disabled={busy}
-                        title="Fork this conversation into a new branch"
+                        title="Start a new conversation from a copy of this one. This one stays as it is."
                         onClick={() => void handleForkTask()}
                       >
                         <GitFork size={11} />
-                        Fork
+                        Branch off
                       </button>
                       <button
                         type="button"
                         className="ai-mini-btn"
                         data-testid="ai-task-compact-btn"
                         disabled={busy || task.messages.length === 0}
-                        title="Compact older messages to save context tokens"
+                        title="Replace the older messages with a short summary, so the model has room for more"
                         onClick={() => void handleCompactTask()}
                       >
-                        Compact
+                        Shorten
                       </button>
                       {task.changes.some(
                         (c) => c.status === "pending" && c.riskLevel === "safe",
@@ -90,11 +90,16 @@ export function TaskContextBar({ p, hub }: { p: PanelState; hub: NonNullable<Pan
                         </button>
                       )}
                     </div>
+                    {hub.demoMode && task.id.startsWith("demo-task-") && (
+                      <small className="ai-hint" data-testid="demo-example-note">
+                        Demo lab: this conversation is an invented example. Nothing in it was run.
+                      </small>
+                    )}
                     {(hub.agents ?? []).length > 0 && (
                       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                        <small>Hand over:</small>
+                        <small>Give to another agent:</small>
                         <select
-                          aria-label="Swarm Handoff to specialist agent"
+                          aria-label="Give this conversation to another agent"
                           data-testid="chat-swarm-handoff-select"
                           style={{ padding: "2px 6px", fontSize: 11 }}
                           value={task.agentId || selectedAgentId || ""}

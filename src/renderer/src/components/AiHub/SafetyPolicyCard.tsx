@@ -25,7 +25,7 @@ const RULES: { key: BooleanSafetyKey; title: string; detail: string; testId?: st
     key: "requireApprovalOnProdTags",
     title: "Always ask before a change on production",
     detail:
-      "On a server tagged prod, critical or production: when the assistant asks before commands, a change is always asked about. In Auto mode a bare command that changes something is refused there; a change has to come with its check and its rollback.",
+      "On a server tagged prod, critical or production: when the assistant asks before commands, a change is always asked about. In Auto mode a command that changes something is refused there when it comes alone: the agent has to send it together with a check that shows it worked and a way to undo it.",
   },
   {
     key: "blockDestructiveWithoutConfirm",

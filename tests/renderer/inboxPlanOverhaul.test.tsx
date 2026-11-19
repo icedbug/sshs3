@@ -334,6 +334,9 @@ describe("a plan that takes two people", () => {
     render(<PlanCard taskId="task-1" plan={plan()} busy={false} act={act} />);
     expect(screen.getByTestId("plan-people")).toHaveTextContent("Two people have to approve this plan: you and one more. The others who may approve are asked in their inbox.");
     expect(screen.getByTestId("plan-status")).toHaveTextContent("waiting for your decision");
+    // Your yes alone does not start the agent here, so the line under the plan does not say it does.
+    expect(screen.getByTestId("plan-covers")).toHaveTextContent("The agent carries the plan out when you and a second person have both approved.");
+    expect(screen.getByTestId("plan-covers")).not.toHaveTextContent("Approving lets the agent carry the plan out");
     expect(screen.getByTestId("plan-approve-btn")).toHaveTextContent(/^Approve$/);
     fireEvent.click(screen.getByTestId("plan-approve-btn"));
     expect(act).toHaveBeenCalledWith({ action: "plan-decide", taskId: "task-1", approved: true });

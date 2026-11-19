@@ -10,7 +10,7 @@ import {
   setStoredWebSessionToken,
   onWebConnectionStateChange,
 } from '../lib/webClientBridge';
-import { sharingText } from '@shared/sharingText';
+import { ROLES_ON_A_SERVER, sharingText } from '@shared/sharingText';
 
 /** What an invited teammate shares on this server and what stays theirs: the same words as in the AI settings. */
 const INVITE_SHARING = sharingText({ server: true, bucket: false }, 'each');
@@ -1277,6 +1277,9 @@ export const WebAuthGate: React.FC<WebAuthGateProps> = ({ children, onSsoLogin }
                     </p>
                     <p className="text-slate-400" data-testid="invite-sharing">
                       {INVITE_SHARING.shared} {INVITE_SHARING.personal} {INVITE_SHARING.more}
+                    </p>
+                    <p className="text-slate-400" data-testid="invite-roles">
+                      {ROLES_ON_A_SERVER}
                     </p>
                     <div>
                       <label className="block text-slate-400 mb-1" htmlFor="invite-base-url-input">

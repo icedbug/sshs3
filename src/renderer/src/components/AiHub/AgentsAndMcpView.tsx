@@ -1259,7 +1259,7 @@ export function AgentsAndMcpView({
               checked={Boolean(mcpDraft.trustReadOnlyHint)}
               onChange={(e) => setMcpDraft({ ...mcpDraft, trustReadOnlyHint: e.target.checked })}
             />
-            <span>Trust server&apos;s readOnlyHint annotation without asking (not recommended on prod)</span>
+            <span>Believe this server when it says a tool only reads, and run those tools without asking (not for production)</span>
           </label>
           <fieldset className="ai-secret-rows" data-testid="mcp-secrets">
             <legend>{mcpDraft.transport === "stdio" ? "Environment variables" : "Headers"} (tokens and keys go here)</legend>
@@ -1421,19 +1421,19 @@ export function AgentsAndMcpView({
                   })
                 }
               />
-              <span>Trust server readOnlyHint without prompting</span>
+              <span>Believe this server when it says a tool only reads, and run those tools without asking</span>
             </label>
 
             {(srv.discoveredTools ?? []).length > 0 && (
               <div className="ai-form" data-testid={`mcp-tool-matrix-${srv.id}`}>
-                <small>Per-tool execution policy (allow / ask / deny):</small>
+                <small>For each tool: run it, ask first, or never run it.</small>
                 {srv.discoveredTools!.map((t) => {
                   const policy = effectiveToolPolicy(srv, t.name, t.readOnly);
                   return (
                     <div className="ai-inline-form" key={t.name}>
                       <span className="ai-tool-tag" title={t.description}>
                         {t.name}
-                        {t.readOnly ? " · readOnlyHint" : ""}
+                        {t.readOnly ? " · says it only reads" : ""}
                       </span>
                       <select
                         aria-label={`Policy for ${srv.name} ${t.name}`}
