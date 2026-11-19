@@ -309,7 +309,7 @@ describe("DependencyLinks", () => {
 
     expect(screen.getByTestId("dependency-topology")).toBeVisible();
     expect(screen.getByTestId("blast-radius-pg-primary")).toHaveTextContent("2 depend on it");
-    expect(screen.getByTestId("blast-radius-api-01")).toHaveTextContent("1 depend on it");
+    expect(screen.getByTestId("blast-radius-api-01")).toHaveTextContent("1 depends on it");
     expect(screen.getByTestId("blast-radius-web-01")).toHaveTextContent("0 depend on it");
 
     fireEvent.click(screen.getByTestId("topo-node-web-01"));

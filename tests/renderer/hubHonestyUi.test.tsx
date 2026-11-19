@@ -105,6 +105,9 @@ describe("Milestone 2 UI honesty and clarity fixes", () => {
   it("says in the settings what everyone on the server shares and what is one's own, without sending anybody to a bucket", () => {
     mockWebMode = true;
     const server = render(<Settings hub={baseHub()} act={vi.fn(async () => baseHub())} />);
+    // The page does not promise that only the model receives data: it names what else is connected.
+    expect(server.container).not.toHaveTextContent("Nothing is sent anywhere else");
+    expect(server.container).toHaveTextContent("Data also goes to the services you connect yourself: a team bucket, notification channels, Jira and Confluence, a chat bot, MCP servers and external agents.");
     const summary = screen.getByTestId("sharing-summary");
     expect(within(summary).getByTestId("sharing-shared")).toHaveTextContent(
       "Everyone with an account on this server shares the team's servers and clusters (without anybody's keys), the Workforce board (goals, tickets, agents), the Knowledge Base",
@@ -422,6 +425,8 @@ describe("Milestone 2 UI honesty and clarity fixes", () => {
     fireEvent.click(screen.getByRole("button", { name: /Invite \/ team/ }));
 
     expect(await screen.findByTestId("invite-local-warning")).toHaveTextContent(/local or private/);
+    // Where the role is chosen, it says what the two roles may do.
+    expect(screen.getByTestId("invite-roles")).toHaveTextContent("An administrator can also add and remove people, remove a shared server");
     const baseInput = screen.getByTestId("invite-base-url");
     const createInviteBtn = screen.getByRole("button", { name: "Create and copy invite link" });
 

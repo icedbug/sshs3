@@ -222,7 +222,7 @@ export function DependencyLinks({
               }}
             >
               <span>
-                Chosen: <strong>{selectedTopo.label}</strong> · <strong>{selectedTopo.blastRadius}</strong> depend on it ·{" "}
+                Chosen: <strong>{selectedTopo.label}</strong> · <strong>{selectedTopo.blastRadius}</strong> depend{selectedTopo.blastRadius === 1 ? "s" : ""} on it ·{" "}
                 it depends on {selectedTopo.upstreamIds.length}
               </span>
               <span className="ai-spacer" />
@@ -317,7 +317,7 @@ export function DependencyLinks({
                               : "Nothing depends on this one"
                           }
                         >
-                          {node.blastRadius} depend on it
+                          {node.blastRadius} depend{node.blastRadius === 1 ? "s" : ""} on it
                         </span>
                         {node.hasCycle && (
                           <span className="ai-badge ai-badge-danger" title="It depends on something that depends on it">

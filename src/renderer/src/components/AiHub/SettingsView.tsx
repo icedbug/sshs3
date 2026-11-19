@@ -311,7 +311,8 @@ export function Settings({
       <header className="ai-view-head">
         <h2>Settings</h2>
         <p className="ai-hint">
-          The assistant uses the model you connect here. What else can receive data is listed under &ldquo;Where your data may go&rdquo; below.
+          The assistant uses the model you connect here. Data also goes to the services you connect yourself: a team
+          bucket, notification channels, Jira and Confluence, a chat bot, MCP servers and external agents.
         </p>
       </header>
 
