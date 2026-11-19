@@ -1670,6 +1670,24 @@ export class ToolBroker {
       peerApproval = ctx.peerApproval;
       isProd = (ctx.targetTags ?? []).some(isProdTag);
 
+      // A change freeze stops whatever changes the target, in every mode: it is not asked about and not run.
+      if (
+        clusterPolicy?.frozenUntil &&
+        clusterPolicy.frozenUntil > Date.now() &&
+        (change.kind === "file" || (change.riskLevel ?? "modify") !== "safe")
+      ) {
+        const until = new Date(clusterPolicy.frozenUntil).toISOString();
+        change.status = "denied";
+        change.decidedHow = "policy";
+        change.output = `A change freeze holds here until ${until}. Nothing that changes this target is run until it ends.`;
+        this.deps.changed();
+        throw new ToolBrokerError(
+          "auth_denied",
+          `A change freeze holds on ${change.target} until ${until}: nothing that changes it is run until then. Read-only commands still run. Tell the user what you would have changed, and do not try to make the change another way.`,
+          { code: "change_freeze" },
+        );
+      }
+
       requiresApproval = shouldRequireCommandApproval({
         analysis: {
           riskLevel: change.riskLevel ?? "modify",

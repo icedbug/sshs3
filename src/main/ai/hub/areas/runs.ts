@@ -872,7 +872,7 @@ export class RunsPart {
         ) {
           change.status = "denied";
           change.decidedHow = "policy";
-          change.output = "Cluster is in an active change freeze.";
+          change.output = `A change freeze holds here until ${new Date(safetyCtx.clusterPolicy.frozenUntil).toISOString()}. Nothing that changes this target is run until it ends.`;
           task.changes.push(change);
           this.changed();
           return false;

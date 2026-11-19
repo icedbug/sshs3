@@ -252,6 +252,22 @@ export interface SafetyPolicyConfig {
   clusterPolicies?: Record<string, ClusterSafetyPolicy>;
 }
 
+/**
+ * Rules an administrator sets for everyone on a server several people sign in to. They hold for
+ * every account's runs, the administrator's too, and nobody's own rules can loosen them.
+ */
+export interface TeamSafetyRules {
+  /** A change to production runs only when a second person has approved it. */
+  requirePeerApprovalOnProd?: boolean;
+  /**
+   * Change freezes. The key is a cluster's name in lower case, or "*" for every server. Until the
+   * time given, nothing that changes anything is run there.
+   */
+  freezes?: Record<string, { until: number; by: string; at: number; why?: string }>;
+  changedBy?: string;
+  changedAt?: number;
+}
+
 export interface AgentChangeApproval {
   actor: string;
   actorId?: string;
@@ -1926,6 +1942,12 @@ export interface HubSnapshot {
   workforceRuns?: WorkforceRun[];
   infraEdges?: InfraGraphEdge[];
   safetyPolicy?: SafetyPolicyConfig;
+  /**
+   * On a server several people sign in to: the rules its administrator set for everyone, and whether
+   * this person may change them. (`safetyPolicy` is what holds for this person: their own rules with
+   * the server's on top.)
+   */
+  teamRules?: TeamSafetyRules & { canChange: boolean };
   /** Who last changed the safety policy on this computer, and when. */
   safetyPolicyChanged?: { by: string; at: number };
   pendingLayoutEvent?: WorkspaceLayoutEvent;
@@ -2063,6 +2085,15 @@ export type HubRequest =
   | {
       action: "safety-policy-save";
       policy: Partial<SafetyPolicyConfig>;
+    }
+  | {
+      /** The rules for everyone on a shared server. Only one of its administrators may send this. */
+      action: "team-rules-save";
+      requirePeerApprovalOnProd?: boolean;
+      /** Start a change freeze. `cluster` left out or "*": every server. */
+      freeze?: { cluster?: string; hours: number; why?: string };
+      /** End the freeze on this cluster now ("*": the one on every server). */
+      endFreeze?: string;
     }
   | {
       action: "mcp-save";

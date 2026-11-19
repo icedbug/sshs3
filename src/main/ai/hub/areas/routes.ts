@@ -103,6 +103,7 @@ export const AREA_OF = {
   "infra-edge-confirm": "servers",
   "infra-edge-delete": "servers",
   "safety-policy-save": "safety",
+  "team-rules-save": "safety",
   "mcp-save": "mcp",
   "mcp-delete": "mcp",
   "mcp-test": "mcp",

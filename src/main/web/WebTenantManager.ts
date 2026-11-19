@@ -9,7 +9,8 @@ import { IpcBridge } from '../IpcBridge';
 import type { WindowRouter } from '../windows/WindowManager';
 import { createHub } from '../ai/hub/createHub';
 import type { HubService } from '../ai/hub/HubService';
-import type { PeerApprovalItem } from '../../shared/types/aiHub';
+import type { PeerApprovalItem, TeamSafetyRules } from '../../shared/types/aiHub';
+import { writeFileAtomic } from '../storage/atomicFile';
 import {
   HUB_CHANGED,
   type WorkspacePresenceEntry,
@@ -298,6 +299,11 @@ export class WebTenantManager {
    * server's own, and one store over it that every account's hub is given (see FileQueueStore).
    */
   private readonly teamBoard: FileQueueStore;
+  /**
+   * The rules an administrator set for everyone on this server: in memory for every account's hub,
+   * kept in the shared folder. Only an administrator's hub writes them (the hub checks who asks).
+   */
+  private teamRules: TeamSafetyRules = {};
   private boardTimer?: NodeJS.Timeout;
   private boardWriters = new Set<string>();
 
@@ -331,6 +337,23 @@ export class WebTenantManager {
     for (const name of await fsp.readdir(this.sharedDir).catch(() => [] as string[]))
       if (/\.json\.tmp-\d/.test(name) || (name.startsWith(".") && name.endsWith(".tmp")))
         await fsp.rm(path.join(this.sharedDir, name), { force: true }).catch(() => {});
+    try {
+      const kept: unknown = JSON.parse(await fsp.readFile(this.getTeamRulesPath(), 'utf8'));
+      if (kept && typeof kept === 'object' && !Array.isArray(kept)) this.teamRules = kept as TeamSafetyRules;
+    } catch {
+      // No rules were set yet, or the file cannot be read: no rules for everyone until an administrator sets them.
+    }
+  }
+
+  getTeamRulesPath(): string {
+    return path.join(this.sharedDir, 'team-rules.json');
+  }
+
+  /** An administrator changed the rules for everyone: kept, and every other account's windows are told. */
+  private async saveTeamRules(userId: string, next: TeamSafetyRules): Promise<void> {
+    await writeFileAtomic(this.getTeamRulesPath(), JSON.stringify(next, null, 2));
+    this.teamRules = next;
+    for (const [uid, tenant] of this.resolvedTenants.entries()) if (uid !== userId) tenant.hub.teamRulesChanged();
   }
 
   getSharedWorkspaceFilePath(): string {
@@ -830,6 +853,8 @@ export class WebTenantManager {
         peerWaiting: () => this.waitingForSecondPerson(user.id),
         peerDecide: (answer) => this.answerAsSecondPerson(user.id, answer),
         peerWaitingChanged: () => this.secondPersonWantedBy(user.id),
+        // The rules for everyone on this server: one set, read by every account's hub.
+        teamRules: { read: () => this.teamRules, write: (next) => this.saveTeamRules(user.id, next) },
         teamChat: this.teamChat,
       },
     );

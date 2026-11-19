@@ -146,6 +146,14 @@ export interface HubHost {
   peerDecide?: (answer: { ownerId: string; taskId: string; changeId: string; approved: boolean; note?: string }) => Promise<void>;
   /** On the web server: this hub's own changes that wait for a second person are not the same as a moment ago; the other members are told. */
   peerWaitingChanged?: () => void;
+  /**
+   * On the web server: the rules its administrator set for everyone. Read from memory (every account's
+   * hub runs in the one server); a write is kept in the server's shared folder and the others are told.
+   */
+  teamRules?: {
+    read(): import("../../../shared/types/aiHub").TeamSafetyRules;
+    write(next: import("../../../shared/types/aiHub").TeamSafetyRules): Promise<void>;
+  };
   peerPresenceProvider?:() => import("../../../shared/types/aiHub").WorkspacePresenceEntry[];
   onSharedWorkspaceChanged?: () => void;
   /**

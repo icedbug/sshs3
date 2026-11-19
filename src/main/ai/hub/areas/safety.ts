@@ -12,6 +12,7 @@ import type {
   KbDocument,
   MissionAgent,
   RunbookTemplate,
+  TeamSafetyRules,
   WorkspaceActivityEvent,
   WorkspaceRule,
 } from "../../../../shared/types/aiHub";
@@ -81,13 +82,13 @@ export class SafetyPart {
     const aggregatedTags = Array.from(new Set(matchedServers.flatMap((s) => s.tags ?? [])));
     const clusterPolicies = policy.clusterPolicies;
     let clusterPolicy: ClusterSafetyPolicy | undefined;
+    const candidateClusterKeys = new Set<string>();
+    for (const s of matchedServers) {
+      if (s.cluster?.trim()) candidateClusterKeys.add(s.cluster.trim().toLowerCase());
+    }
+    if (clusterMatch) candidateClusterKeys.add(clusterMatch);
+    if (label) candidateClusterKeys.add(label);
     if (clusterPolicies && typeof clusterPolicies === "object") {
-      const candidateClusterKeys = new Set<string>();
-      for (const s of matchedServers) {
-        if (s.cluster?.trim()) candidateClusterKeys.add(s.cluster.trim().toLowerCase());
-      }
-      if (clusterMatch) candidateClusterKeys.add(clusterMatch);
-      if (label) candidateClusterKeys.add(label);
       const matchedPolicies: ClusterSafetyPolicy[] = [];
       for (const [k, v] of Object.entries(clusterPolicies)) {
         if (v && candidateClusterKeys.has(k.trim().toLowerCase())) {
@@ -121,6 +122,9 @@ export class SafetyPart {
         }), {});
       }
     }
+    // A freeze the server's administrator set for everyone holds whatever this person's own rules say.
+    const teamUntil = this.teamFrozenUntil(candidateClusterKeys);
+    if (teamUntil) clusterPolicy = { ...clusterPolicy, frozenUntil: Math.max(clusterPolicy?.frozenUntil ?? 0, teamUntil) };
     return {
       policy,
       targetTags: aggregatedTags.length > 0 ? aggregatedTags : undefined,
@@ -236,7 +240,7 @@ export class SafetyPart {
       for (const tgt of planTargets.length ? planTargets : [undefined]) {
         const tgtCtx = this.resolveSafetyContext(task, tgt ?? task.target?.label);
         if (tgtCtx.clusterPolicy?.frozenUntil && tgtCtx.clusterPolicy.frozenUntil > Date.now()) {
-          throw new Error(`Cluster is in a change freeze until ${new Date(tgtCtx.clusterPolicy.frozenUntil).toISOString()}.`);
+          throw new Error(`A change freeze holds on ${tgt ?? task.target?.label ?? "this target"} until ${new Date(tgtCtx.clusterPolicy.frozenUntil).toISOString()}. The plan cannot be approved before it ends.`);
         }
       }
       const prevApprovals = [...(plan.approvals ?? [])];
@@ -412,13 +416,45 @@ export class SafetyPart {
     const stored = this.store.data.safetyPolicy ?? DEFAULT_SAFETY_POLICY;
     // Where only one person can approve, a second approval can never come: the rule is not in force
     // (and cannot be switched on), rather than leaving every production change to time out.
-    const own =
-      stored.requirePeerApprovalOnProd && !this.peerApprovalPossible()
-        ? { ...stored, requirePeerApprovalOnProd: false }
-        : stored;
+    // The rule the server's administrator set for everyone counts as this person's own being on.
+    const peer = Boolean(stored.requirePeerApprovalOnProd || this.teamRules()?.requirePeerApprovalOnProd) && this.peerApprovalPossible();
+    const own = peer === Boolean(stored.requirePeerApprovalOnProd) ? stored : { ...stored, requirePeerApprovalOnProd: peer };
     if (!this.sharedServer() || this.host.teamAdmin?.()) return own;
     return { ...own, requireApprovalOnProdTags: true, blockDestructiveWithoutConfirm: true };
   }
+  /** The rules the server's administrator set for everyone. None on the desktop, and none in the demo lab. */
+  teamRules(this: HubService): TeamSafetyRules | undefined {
+    return isDemoMode() ? undefined : this.host.teamRules?.read();
+  }
+
+  /** Until when a freeze set for everyone holds on a target: the one on every server, or one on a cluster it is in. */
+  teamFrozenUntil(this: HubService, clusterKeys: Iterable<string>): number | undefined {
+    const freezes = this.teamRules()?.freezes;
+    if (!freezes) return undefined;
+    let until = freezes["*"]?.until ?? 0;
+    for (const key of clusterKeys) until = Math.max(until, freezes[key]?.until ?? 0);
+    return until > Date.now() ? until : undefined;
+  }
+
+  /** The server's rules as the settings show them: a freeze that has run out is left out. */
+  teamRulesView(this: HubService): HubSnapshot["teamRules"] {
+    const rules = this.teamRules();
+    if (!rules) return undefined;
+    const now = Date.now();
+    const freezes = Object.fromEntries(Object.entries(rules.freezes ?? {}).filter(([, f]) => f.until > now));
+    return {
+      requirePeerApprovalOnProd: Boolean(rules.requirePeerApprovalOnProd),
+      ...(Object.keys(freezes).length ? { freezes } : {}),
+      ...(rules.changedBy ? { changedBy: rules.changedBy, changedAt: rules.changedAt } : {}),
+      canChange: Boolean(this.host.teamAdmin?.()),
+    };
+  }
+
+  /** An administrator changed the rules for everyone: this member's windows fetch again. Called by the server. */
+  teamRulesChanged(this: HubService): void {
+    this.changed();
+  }
+
   /** The requests this part answers. What a case leaves in `reply` goes back with the snapshot. */
   async handleSafety(this: HubService, request: RequestsOf<"safety">): Promise<Handled> {
     let reply: HubReply | undefined;
@@ -558,10 +594,17 @@ export class SafetyPart {
         )
           throw new Error("Cluster policies must be a map of cluster names to policy settings.");
         if (this.sharedServer() && !this.host.teamAdmin?.()) {
-          for (const key of ["requireApprovalOnProdTags", "blockDestructiveWithoutConfirm", "requirePeerApprovalOnProd"] as const)
+          // These two hold for every member whatever is stored. The two-person rule is a member's own to
+          // switch: the one for everyone is the administrator's (team-rules-save) and holds either way.
+          for (const key of ["requireApprovalOnProdTags", "blockDestructiveWithoutConfirm"] as const)
             if (asked[key] === false)
               throw new Error(`Only an administrator of this server switches off "${BOOLEAN_POLICY_NAMES[key]}": on a shared server it is the team's rule.`);
-          if (asked.clusterPolicies !== undefined || asked.commandAllowPrefixes !== undefined)
+          // What is sent back unchanged is not a change: a member is not refused for what they did not touch.
+          const same = (a: unknown, b: unknown): boolean => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+          if (
+            (asked.clusterPolicies !== undefined && !same(asked.clusterPolicies, stored.clusterPolicies ?? {})) ||
+            (asked.commandAllowPrefixes !== undefined && !same(asked.commandAllowPrefixes, stored.commandAllowPrefixes ?? []))
+          )
             throw new Error("Only an administrator of this server changes cluster policies or command allowlists on a shared server.");
         }
         if (!this.peerApprovalPossible()) {
@@ -649,7 +692,7 @@ export class SafetyPart {
           const now = next.clusterPolicies ?? {};
           const say = (p: (typeof now)[string] | undefined): string =>
             p
-              ? [p.maxMode ? `at most "${({ advice: "Ask", plan: "Plan", assisted: "Ask first", autonomous: "Auto" } as Record<string, string>)[p.maxMode] ?? p.maxMode}"` : "", p.requiredApprovals ? `${p.requiredApprovals} approval${p.requiredApprovals === 1 ? "" : "s"}` : "", p.requireCheckAndRollback ? "check and rollback" : "", p.frozenUntil ? `frozen until ${new Date(p.frozenUntil).toISOString().slice(0, 16).replace("T", " ")} UTC` : ""].filter(Boolean).join(", ") || "no limits"
+              ? [p.maxMode ? `at most "${({ advice: "Advice", plan: "Plan", assisted: "Ask first", autonomous: "Auto" } as Record<string, string>)[p.maxMode] ?? p.maxMode}"` : "", p.requiredApprovals ? `${p.requiredApprovals} approval${p.requiredApprovals === 1 ? "" : "s"}` : "", p.requireCheckAndRollback ? "check and rollback" : "", p.frozenUntil ? `frozen until ${new Date(p.frozenUntil).toISOString().slice(0, 16).replace("T", " ")} UTC` : ""].filter(Boolean).join(", ") || "no limits"
               : "none";
           for (const name of [...new Set([...Object.keys(was), ...Object.keys(now)])].sort())
             if (JSON.stringify(was[name]) !== JSON.stringify(now[name])) moved.push(`rules for "${clip(name, 60)}": ${say(was[name])} → ${say(now[name])}`);
@@ -666,6 +709,61 @@ export class SafetyPart {
             .append({ kind: "setting", actor: await this.resolveActorName(), target: "sshs3 on this computer", what: `Safety policy: ${moved.join("; ")}`, outcome: "completed" })
             .catch((e) => log.warn("Could not write to the audit log", safeError(e)));
         }
+        break;
+      }
+      case "team-rules-save": {
+        const kept = this.host.teamRules;
+        if (!kept || isDemoMode()) throw new Error("Rules for everyone belong to a server several people sign in to. Here the rules are your own.");
+        if (!this.host.teamAdmin?.()) throw new Error("Only an administrator of this server sets the rules that hold for everyone.");
+        const was = kept.read();
+        const actor = await this.resolveActorName();
+        const now = Date.now();
+        const freezeKey = (raw: unknown): string => {
+          const name = typeof raw === "string" ? raw.trim().toLowerCase().slice(0, 120) : "";
+          return !name || name === "*" ? "*" : name;
+        };
+        const freezeName = (key: string): string => (key === "*" ? "every server" : `the cluster "${clip(key, 60)}"`);
+        const freezes = Object.fromEntries(Object.entries(was.freezes ?? {}).filter(([, f]) => f.until > now));
+        const moved: string[] = [];
+        let peer = Boolean(was.requirePeerApprovalOnProd);
+        if (request.requirePeerApprovalOnProd !== undefined) {
+          if (typeof request.requirePeerApprovalOnProd !== "boolean") throw new Error("The two-person rule is either on (true) or off (false).");
+          if (request.requirePeerApprovalOnProd && !peer && this.host.soleUser?.())
+            throw new Error("This server has one account, so there is no second person to ask. Invite somebody first, then switch this on.");
+          if (request.requirePeerApprovalOnProd !== peer) {
+            moved.push(`two people on a change to production: ${peer ? "on" : "off"} → ${request.requirePeerApprovalOnProd ? "on" : "off"}`);
+            peer = request.requirePeerApprovalOnProd;
+          }
+        }
+        if (request.endFreeze !== undefined) {
+          const key = freezeKey(request.endFreeze);
+          if (freezes[key]) {
+            delete freezes[key];
+            moved.push(`change freeze on ${freezeName(key)}: ended`);
+          }
+        }
+        if (request.freeze !== undefined) {
+          const hours = Number(request.freeze?.hours);
+          if (!Number.isFinite(hours) || hours <= 0 || hours > 1440) throw new Error("A change freeze lasts a number of hours: more than 0, and at most 1440 (60 days).");
+          const key = freezeKey(request.freeze.cluster);
+          const why = typeof request.freeze.why === "string" && request.freeze.why.trim() ? clip(request.freeze.why.trim(), 200) : undefined;
+          freezes[key] = { until: now + Math.round(hours * 3_600_000), by: actor, at: now, ...(why ? { why } : {}) };
+          moved.push(`change freeze on ${freezeName(key)} until ${new Date(freezes[key].until).toISOString()}${why ? ` (${why})` : ""}`);
+        }
+        if (!moved.length) break;
+        await kept.write({
+          ...(peer ? { requirePeerApprovalOnProd: true } : {}),
+          ...(Object.keys(freezes).length ? { freezes } : {}),
+          changedBy: actor,
+          changedAt: now,
+        });
+        // Who changed the rules for everyone is the team's business as well as the log's.
+        const event: WorkspaceActivityEvent = { id: crypto.randomUUID(), at: now, actor, targetLabel: "Rules for everyone", kind: "note", summary: clip(`Changed the rules for everyone on this server: ${moved.join("; ")}`, 400) };
+        this.appendActivityEvent(event);
+        await this.host.recordWorkspaceActivity?.(event).catch(() => {});
+        void this.audit()
+          .append({ kind: "setting", actor, target: "everyone on this server", what: `Rules for everyone: ${moved.join("; ")}`, outcome: "completed" })
+          .catch((e) => log.warn("Could not write to the audit log", safeError(e)));
         break;
       }
       case "rule-save": {

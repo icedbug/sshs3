@@ -59,6 +59,8 @@ export interface CreateHubOptions {
   peerWaiting?: HubHost["peerWaiting"];
   peerDecide?: HubHost["peerDecide"];
   peerWaitingChanged?: HubHost["peerWaitingChanged"];
+  /** On the web server: the rules its administrator set for everyone (see HubHost). */
+  teamRules?: HubHost["teamRules"];
   auditShipper?: HubHost["auditShipper"];
   /** On the web server: the one chat bot every account's hub shares. */
   teamChat?: HubHost["teamChat"];
@@ -398,6 +400,7 @@ export function createHub(
     peerWaiting: options?.peerWaiting,
     peerDecide: options?.peerDecide,
     peerWaitingChanged: options?.peerWaitingChanged,
+    teamRules: options?.teamRules,
     auditShipper: options?.auditShipper,
     teamChat: options?.teamChat,
     file: (...args) => files.invoke(...args),

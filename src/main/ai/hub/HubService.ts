@@ -789,6 +789,7 @@ export class HubService {
       workforceRuns: this.getWorkforceRunsList(),
       infraEdges: allInfraEdges,
       safetyPolicy: this.safetyPolicy(),
+      ...(this.teamRulesView() ? { teamRules: this.teamRulesView() } : {}),
       safetyPolicyChanged: this.store.data.safetyPolicyChanged,
       pendingLayoutEvent: this.pendingLayoutEvent,
       selfLearning: this.selfLearning.getStatus({

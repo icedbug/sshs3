@@ -8,6 +8,7 @@ import {
 } from "@shared/types/aiHub";
 import { isWebBrowserMode } from "../../lib/webClientBridge";
 import { type Act, modes } from "./panelShared";
+import { TeamRulesSection } from "./TeamRulesSection";
 
 type BooleanSafetyKey =
   | "autoApproveSafeReadOnly"
@@ -84,13 +85,9 @@ export function SafetyPolicyCard({ hub, act }: { hub: HubSnapshot; act: Act }): 
   const [overrideDraft, setOverrideDraft] = useState<OverrideDraft | undefined>();
 
   const savePolicy = (patch: Partial<SafetyPolicy>): void => {
-    void act({
-      action: "safety-policy-save",
-      policy: {
-        ...policy,
-        ...patch,
-      },
-    });
+    // Only what was changed is sent. What is shown here is what holds (the server's rules for everyone
+    // on top of this person's own), and sending that back whole would store the server's rule as theirs.
+    void act({ action: "safety-policy-save", policy: patch });
   };
 
   const clusterEntries = Object.entries(policy.clusterPolicies ?? {});
@@ -107,7 +104,7 @@ export function SafetyPolicyCard({ hub, act }: { hub: HubSnapshot; act: Act }): 
           </small>
           <small data-testid="safety-policy-whose">
             {isWebBrowserMode()
-              ? "These rules are yours: they apply to the runs you start. Each person on this server has their own, and they are not shared with the team."
+              ? `These rules are yours: they apply to the runs you start. Each person on this server has their own, and they are not shared with the team.${hub.teamRules ? " The rules for everyone on this server are set by an administrator, and yours cannot loosen them." : ""}`
               : "These rules apply to runs on this computer. They are not shared with the team: each person sets their own."}
           </small>
           {hub.safetyPolicyChanged && (
@@ -119,23 +116,28 @@ export function SafetyPolicyCard({ hub, act }: { hub: HubSnapshot; act: Act }): 
         </div>
       </div>
 
+      <TeamRulesSection hub={hub} act={act} />
+
       <div className="ai-switches">
         {RULES.map((rule) => {
           // Two people can only be asked for where there is a second person who may answer.
           const nobodyElse = rule.key === "requirePeerApprovalOnProd" && hub.peerApprovalPossible !== true;
+          // On for everyone: this person's own switch has nothing left to decide.
+          const forEveryone = rule.key === "requirePeerApprovalOnProd" && hub.teamRules?.requirePeerApprovalOnProd === true;
           return (
             <label key={rule.key}>
               <input
                 type="checkbox"
                 data-testid={rule.testId}
                 checked={Boolean(policy[rule.key])}
-                disabled={nobodyElse && !policy[rule.key]}
+                disabled={forEveryone || (nobodyElse && !policy[rule.key])}
                 onChange={(e) => savePolicy({ [rule.key]: e.target.checked })}
               />
               <span>
                 {rule.title}
                 <small>{rule.detail}</small>
-                {nobodyElse && (
+                {forEveryone && <small data-testid="safety-peer-for-everyone">On for everyone on this server: see the rules for everyone above.</small>}
+                {nobodyElse && !forEveryone && (
                   <small data-testid="safety-peer-nobody">
                     {isWebBrowserMode()
                       ? "Not available to you here: nobody else on this server may approve on production. That takes an administrator other than yourself."

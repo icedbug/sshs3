@@ -346,7 +346,7 @@ parts that define the same method name are refused when the file loads.
 | `areas/routes.ts` | The table of which part answers which request, and its types | |
 | `areas/conversations.ts` | A person's requests about a conversation (start, reply, stop, checkpoint, take a change back, fork, compact), the AI settings, a one-line suggestion, the activity log | 19 |
 | `areas/runs.ts` | A run: starting it, its events, its budget and clock, stopping it; runs on an external agent | none: started by other parts |
-| `areas/safety.ts` | The safety rules, approvals of changes and plans (also by a second person), rules and runbooks | 10 |
+| `areas/safety.ts` | The safety rules (a person's own, and the ones an administrator sets for everyone), approvals of changes and plans (also by a second person), rules and runbooks | 11 |
 | `areas/tickets.ts` | The board: goals and tickets, starting a ticket's agent, the board's clock | 10 |
 | `areas/agents.ts` | Agents, external runners, workforce runs, specialists, a plan's reviewer, investigators | 11 |
 | `areas/knowledge.ts` | The knowledge base: documents, pages, search, gaps | 19 |
@@ -599,6 +599,48 @@ because a change would wait for an answer that cannot come.
   plan, whose listed command then runs without a new question. Not checked
   with a real model, and not with single sign-on groups from a real identity
   provider.
+
+### Rules for everyone on a server (`team-rules-save`, `TeamSafetyRules`)
+
+Each person's safety rules are their own. On a web server an administrator can
+also set two rules that hold for every account, the administrator's included.
+Nobody's own rules can loosen them. The settings show them over a person's own
+rules (`TeamRulesSection`): an administrator changes them there, a member
+reads them. There are none in the desktop app and none in the demo lab.
+
+- **Two people on a change to production.** The same rule as a person's own
+  (above), switched on for everybody. `safetyPolicy()` counts it as the
+  person's own being on, so everything that follows from it is the same. A
+  person's own switch then has nothing left to decide and is shown as on. It
+  still needs a second person who may answer: for an account nobody else may
+  approve production for (the only administrator), it does not hold, and the
+  card says so.
+- **A change freeze.** On every server (`*`) or on one cluster, for a number
+  of hours, with a reason. Until it ends, nothing that changes a target there
+  is run: the broker refuses the command or the file write before anything
+  is asked or typed (`ToolBroker`, code `change_freeze`), an external agent's
+  change is refused, and a plan cannot be approved. Commands that only look
+  still run. An administrator can end a freeze early. A freeze a person set
+  for a cluster in their own rules is stopped at the same places.
+- **Where they are kept.** One file in the server's shared folder
+  (`shared-workspace/team-rules.json`), read into memory when the server
+  starts. Every account's hub reads the same set (`HubHost.teamRules`). A
+  change is written by the administrator's hub only, goes into the team's
+  activity and the audit log with who made it, and the other accounts'
+  windows are told at once.
+- **What a member may change of their own.** Their own switches, and their
+  own two-person rule on and off. Not the two that hold for every member
+  ("Always ask before a change on production", "Stop destructive commands
+  until reviewed"), and not cluster policies or command allowlists. The
+  settings send only the switch that was moved, so a member is not refused
+  for lists they did not touch.
+- Checked in `teamRulesOnServer.test.ts` over each account's own websocket:
+  the rule holds for a member who never switched it on and only an
+  administrator sets it; a freeze refuses a member's change without typing
+  it and lets a read-only command through; a cluster's freeze leaves other
+  servers alone; a member changes their own rules and is refused only what
+  is the administrator's.
+
 
 ## The audit log and terminal recordings (`AuditLog`, `SessionRecorder`)
 
