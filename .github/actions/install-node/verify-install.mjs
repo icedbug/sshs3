@@ -15,6 +15,8 @@ for (const bin of ['tsc', 'vitest', 'vite', 'electron-builder']) {
   accessSync(path.join('node_modules', '.bin', bin + (process.platform === 'win32' ? '.cmd' : '')));
 }
 const require = createRequire(path.resolve('package.json'));
+// Electron 45 extracts its executable on first import. Finish before parallel test workers start.
+accessSync(require('electron'));
 const onWindows = process.platform === 'win32';
 const { module: pty } = require('node-pty/lib/utils').loadNativeModule(onWindows ? 'conpty' : 'pty');
 assert.equal(typeof pty[onWindows ? 'startProcess' : 'fork'], 'function');

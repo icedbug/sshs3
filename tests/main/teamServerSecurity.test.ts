@@ -3,6 +3,8 @@ import fs from "node:fs/promises";
 import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { HubService } from "../../src/main/ai/hub/HubService";
+import { setDemoModeForTesting } from "../../src/main/demo/demoMode";
 import { McpClientManager } from "../../src/main/ai/hub/McpClientManager";
 import type { QueueStore } from "../../src/main/ai/hub/LearningQueue";
 import { WorkSync } from "../../src/main/ai/hub/WorkSync";
@@ -27,8 +29,6 @@ type Inner = {
 };
 
 async function makeHub(host: Record<string, unknown> = {}) {
-  const { HubService } = await import("../../src/main/ai/hub/HubService");
-  const { setDemoModeForTesting } = await import("../../src/main/demo/demoMode");
   setDemoModeForTesting(false);
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "sshs3-teamsec-"));
   const hub = new HubService(
