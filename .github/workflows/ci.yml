@@ -130,9 +130,15 @@ jobs:
             --health-interval=2s --health-timeout=3s --health-start-period=2s "$IMAGE")
           unset SSHS3_ADMIN_PASSWORD
           trap 'if [[ $? != 0 ]]; then docker logs --tail 80 "$id"; fi; docker rm --force --volumes "$id" >/dev/null' EXIT
+          for _ in {1..45}; do
+            state=$(docker inspect --format '{{.State.Status}} {{.State.Health.Status}}' "$id")
+            [[ "$state" == "running healthy" ]] && break
+            [[ "$state" == "running starting" ]] || { echo "Web image status: $state"; exit 1; }
+            sleep 1
+          done
+          test "$state" = "running healthy"
           base="http://$(docker port "$id" 8080/tcp)"
-          curl --fail --silent --show-error --retry 20 --retry-delay 1 --retry-connrefused \
-            "$base/api/health" | jq -e '.ok == true and .mode == "web-multiuser"'
+          curl -fsS "$base/api/health" | jq -e '.ok == true and .mode == "web-multiuser"'
           curl -fsS "$base/api/auth/status" | jq -e '.initialized == true and .authenticated == false'
 
           # A rendered login form also proves that the image serves executable client JavaScript.
@@ -148,9 +154,3 @@ jobs:
           assert.equal(typeof pty.fork, 'function');
           assert.equal(typeof require('pkcs11js').PKCS11, 'function');
           NODE
-          for _ in {1..10}; do
-            health=$(docker inspect --format '{{.State.Health.Status}}' "$id")
-            [[ "$health" == healthy ]] && break
-            sleep 1
-          done
-          test "$health" = healthy
