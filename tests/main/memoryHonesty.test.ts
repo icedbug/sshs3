@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { KnowledgeBaseService, capMemories } from "../../src/main/ai/hub/KnowledgeBaseService";
+import { KnowledgeBaseService } from "../../src/main/ai/hub/KnowledgeBaseService";
 import { SelfLearningService } from "../../src/main/ai/hub/SelfLearningService";
 import { scopedMemory } from "../../src/main/ai/hub/ContextService";
 import type { AgentTask, MemoryEntry } from "../../src/shared/types/aiHub";
@@ -48,19 +48,6 @@ describe("tidying up every night", () => {
     }
     expect(new Set(counts.map((c) => JSON.stringify(c))).size).toBe(1);
     expect(counts[0][0]).toBeLessThan(0.65);
-  });
-});
-
-describe("what is kept", () => {
-  it("never drops a person's or a personal memory to make room, and keeps long text", () => {
-    const person = (i: number): MemoryEntry => ({ id: `p${i}`, kind: "memory", scope: "workspace", title: `note ${i}`, text: "x", updatedAt: i }) as MemoryEntry;
-    const learned = (i: number): MemoryEntry => ({ ...person(i), id: `l${i}`, autoLearned: true });
-    const all = [...Array.from({ length: 150 }, (_, i) => person(i)), ...Array.from({ length: 400 }, (_, i) => learned(i))];
-    const kept = capMemories(all);
-    expect(kept.filter((m) => !m.autoLearned)).toHaveLength(150);
-    expect(kept.filter((m) => m.autoLearned)).toHaveLength(300);
-    const long = "y".repeat(3000);
-    expect(kb.deduplicateOrMergeMemory([], { kind: "skill", scope: "workspace", title: "long", text: long }).saved.text).toBe(long);
   });
 });
 

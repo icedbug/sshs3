@@ -286,8 +286,7 @@ describe("Shell Integration Overhaul", () => {
           refs={new Set(["c1"])}
           onOpenRef={onOpenRef}
           onOpenFileRef={onOpenFileRef}
-          onUseCommand={onUseCommand}
-          onRunCommand={onRunCommand}
+          terminalActions={{ stage: onUseCommand, run: onRunCommand }}
         />,
       );
 
@@ -303,10 +302,10 @@ describe("Shell Integration Overhaul", () => {
       );
 
       fireEvent.click(screen.getByRole("button", { name: "Stage in Terminal" }));
-      expect(onUseCommand).toHaveBeenCalledWith("systemctl status nginx");
+      expect(onUseCommand).toHaveBeenCalledWith("systemctl status nginx", expect.any(Number));
 
       fireEvent.click(screen.getByRole("button", { name: "Run in Terminal" }));
-      expect(onRunCommand).toHaveBeenCalledWith("systemctl status nginx");
+      expect(onRunCommand).toHaveBeenCalledWith(...onUseCommand.mock.calls[0]);
     });
   });
 
@@ -471,6 +470,63 @@ describe("Shell Integration Overhaul", () => {
       expect(writePod).toHaveBeenCalledTimes(2);
       expect(screen.getByRole("alert")).toHaveTextContent("no longer available");
       expect(composer).toHaveValue("unsent chat");
+    });
+
+    it("runs the edited draft only for its own block, including across messages and task switches", async () => {
+      const hub = mockState.hub!;
+      const task = hub.tasks[0];
+      const code = ["```bash", "echo first", "echo second", "```"].join("\n");
+      task.messages[1].text = code + "\n\n" + code;
+      task.messages.push({ ...task.messages[1], id: "second-answer", text: code, at: Date.now() });
+      const other = { ...task, id: "other-task", messages: [...task.messages] };
+      hub.tasks.push(other);
+      const props = { mode: "panel" as const, setMode: vi.fn() };
+      const { rerender } = render(<AiHubPanel {...props} initialTaskId={task.id} />);
+      const buttons = (name: string) => screen.getAllByRole("button", { name });
+      const editor = () => screen.getByRole("textbox", { name: "Terminal command draft" });
+      fireEvent.click(buttons("Stage in Terminal")[0]);
+      fireEvent.change(editor(), { target: { value: "echo only-the-first" } });
+      for (const index of [1, 2]) {
+        fireEvent.click(buttons("Run in Terminal")[index]);
+        expect(mockState.terminalWrite).toHaveBeenLastCalledWith("term-1", "echo first\necho second\n");
+        expect(editor()).toHaveValue("echo only-the-first");
+      }
+      fireEvent.click(buttons("Run in Terminal")[0]);
+      expect(mockState.terminalWrite).toHaveBeenLastCalledWith("term-1", "echo only-the-first\n");
+      await waitFor(() => expect(screen.queryByRole("textbox", { name: "Terminal command draft" })).toBeNull());
+      fireEvent.click(buttons("Stage in Terminal")[0]);
+      fireEvent.change(editor(), { target: { value: "echo previous-task" } });
+      rerender(<AiHubPanel {...props} initialTaskId={other.id} />);
+      expect(screen.queryByRole("textbox", { name: "Terminal command draft" })).toBeNull();
+      fireEvent.click(buttons("Run in Terminal")[0]);
+      expect(mockState.terminalWrite).toHaveBeenLastCalledWith("term-1", "echo first\necho second\n");
+      await waitFor(() => expect(screen.getByText("Sent to prod-web-01.")).toBeVisible());
+    });
+
+    it("keeps a streamed block bound to its saved message when an older answer has identical text", async () => {
+      const task = mockState.hub!.tasks[0];
+      const code = ["See [c1].", "", "```bash", "echo first", "echo second", "```"].join("\n");
+      task.messages[1].text = code;
+      task.status = "running";
+      const props = { mode: "panel" as const, setMode: vi.fn(), initialTaskId: task.id };
+      const { rerender } = render(<AiHubPanel {...props} />);
+      act(() => {
+        for (const listen of mockState.deltaListeners) listen({ taskId: task.id, messageId: "new-answer", delta: code, length: code.length });
+      });
+      const stream = screen.getByTestId("ai-streaming-message");
+      fireEvent.click(within(stream).getByRole("button", { name: "Stage in Terminal" }));
+      fireEvent.change(screen.getByRole("textbox", { name: "Terminal command draft" }), { target: { value: "echo edited-stream" } });
+      const complete = code + "\n\nFinished.";
+      task.messages.push({ id: "new-answer", role: "assistant", text: complete, at: Date.now() });
+      task.status = "completed";
+      rerender(<AiHubPanel {...props} />);
+      expect(screen.queryByTestId("ai-streaming-message")).toBeNull();
+      const run = () => screen.getAllByRole("button", { name: "Run in Terminal" });
+      fireEvent.click(run()[0]);
+      expect(mockState.terminalWrite).toHaveBeenLastCalledWith("term-1", "echo first\necho second\n");
+      fireEvent.click(run()[1]);
+      expect(mockState.terminalWrite).toHaveBeenLastCalledWith("term-1", "echo edited-stream\n");
+      await waitFor(() => expect(screen.queryByRole("textbox", { name: "Terminal command draft" })).toBeNull());
     });
 
     it("warns about matching secrets in demo when a real remote model is selected", () => {

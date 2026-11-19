@@ -511,6 +511,7 @@ export class RunsPart {
       this.host.delta?.({
         taskId: task.id,
         type: "message.delta",
+        messageId: message.id,
         at: now,
         delta: event.delta,
         length: message.text.length,

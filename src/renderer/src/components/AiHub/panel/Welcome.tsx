@@ -28,8 +28,7 @@ export function Welcome({ p, hub }: { p: PanelState; hub: NonNullable<PanelState
     showDemoPreview,
     copyMessage,
     copiedMsgId,
-    stageCommandInTerminal,
-    runCodeBlockInTerminal,
+    terminalHandoff,
     handleOpenFileRef,
   } = p;
   return (
@@ -320,8 +319,7 @@ export function Welcome({ p, hub }: { p: PanelState; hub: NonNullable<PanelState
                           </div>
                           <RichMarkdownContent
                             text={DEMO_SHOWCASE_RESPONSE}
-                            onUseCommand={stageCommandInTerminal}
-                      onRunCommand={runCodeBlockInTerminal}
+                            terminalActions={terminalHandoff.forMessage("demo-showcase")}
                             onOpenFileRef={handleOpenFileRef}
                           />
                         </article>

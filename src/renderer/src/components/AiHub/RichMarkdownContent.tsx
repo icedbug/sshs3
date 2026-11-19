@@ -61,10 +61,11 @@ function isLikelyAnsi(lang: string, raw: string): boolean {
 
 export interface RichMarkdownContentProps {
   text: string;
-  /** Stages a shell command into the active terminal composer / prompt. */
-  onUseCommand?: (cmd: string) => void;
-  /** Runs a shell command directly in the active terminal session. */
-  onRunCommand?: (cmd: string) => void;
+  /** Bound to this message; the opening fence's source line identifies a block as text streams in. */
+  terminalActions?: {
+    stage(command: string, line: number): void;
+    run(command: string, line: number): void;
+  };
   /** The short names of this conversation's commands; `[cN]` becomes a clickable ref link. */
   refs?: ReadonlySet<string>;
   onOpenRef?: (ref: string) => void;
@@ -79,8 +80,7 @@ export interface RichMarkdownContentProps {
  */
 export function RichMarkdownContent({
   text,
-  onUseCommand,
-  onRunCommand,
+  terminalActions,
   refs,
   onOpenRef,
   onOpenFileRef,
@@ -141,7 +141,7 @@ export function RichMarkdownContent({
           pre({ children }) {
             return <>{children}</>;
           },
-          code({ className, children, ...props }) {
+          code({ className, children, node, ...props }) {
             const raw = String(children ?? "").replace(/\n$/, "");
             const langMatch = /language-([^\s]+)/.exec(className ?? "");
             const isBlock = Boolean(langMatch) || raw.includes("\n");
@@ -190,33 +190,33 @@ export function RichMarkdownContent({
               );
             }
 
-            const isShell = SHELL_LANGS.has(lang);
+            const line = node?.position?.start.line;
             return (
               <div className="ai-code-block">
                 <div className="ai-code-head">
                   <span>{lang}</span>
                   <div className="ai-code-actions">
-                    {isShell && onUseCommand && (
-                      <button
-                        type="button"
-                        className="ai-mini-btn"
-                        title="Stage in Terminal"
-                        onClick={() => onUseCommand(raw)}
-                      >
-                        <Terminal size={12} />
-                        Stage in Terminal
-                      </button>
-                    )}
-                    {isShell && onRunCommand && (
-                      <button
-                        type="button"
-                        className="ai-mini-btn"
-                        title="Run in Terminal"
-                        onClick={() => onRunCommand(raw)}
-                      >
-                        <Play size={12} />
-                        Run in Terminal
-                      </button>
+                    {SHELL_LANGS.has(lang) && terminalActions && line !== undefined && (
+                      <>
+                        <button
+                          type="button"
+                          className="ai-mini-btn"
+                          title="Stage in Terminal"
+                          onClick={() => terminalActions.stage(raw, line)}
+                        >
+                          <Terminal size={12} />
+                          Stage in Terminal
+                        </button>
+                        <button
+                          type="button"
+                          className="ai-mini-btn"
+                          title="Run in Terminal"
+                          onClick={() => terminalActions.run(raw, line)}
+                        >
+                          <Play size={12} />
+                          Run in Terminal
+                        </button>
+                      </>
                     )}
                     <CopyButton text={raw} />
                   </div>

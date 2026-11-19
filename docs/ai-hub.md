@@ -351,6 +351,7 @@ parts that define the same method name are refused when the file loads.
 | `areas/agents.ts` | Agents, external runners, workforce runs, specialists, a plan's reviewer, investigators | 11 |
 | `areas/knowledge.ts` | The knowledge base: documents, pages, search, gaps | 19 |
 | `areas/memory.ts` | Team memory, proposals from runs and activity, the learning queue, tidying up | 9 |
+| `memory/mergeMemory.ts` | Matches, merges and replaces memories. Its rule tests sit beside it. | |
 | `areas/servers.ts` | Servers, the links between them, saved profiles | 10 |
 | `areas/sharing.ts` | The bucket, the board kept on a server, the shared workspace | 3 |
 | `areas/mcp.ts` | MCP servers and what their tools may do; the keys and commands of an outside client | 9 |
@@ -1774,12 +1775,13 @@ Changes, Memory & skills, Schedules. Each view is its own file. Styling is in `a
 sections ("AI chat: visual layer" and "the other views") carry the current look.
 
 **The chat panel's own code** was one file of 3,659 lines. It is now a shell,
-one hook and thirteen pieces, in `panel/`:
+the panel state and terminal draft hooks, and thirteen components in `panel/`.
 
 | File | What is in it |
 | --- | --- |
 | `AiHubPanel.tsx` (130 lines) | Calls the hook and lays the pieces out |
 | `panel/usePanelState.tsx` | Everything the panel holds and does before it draws: which conversation is open, what is typed, the menus, attachments, and the handlers for sending, stopping, forking and the rest. Returns it as one object, `p` |
+| `panel/useTerminalHandoff.ts` | Stages, edits and sends a command from a chat code block. A draft belongs to its conversation, message, block and terminal session. |
 | `panel/PanelHeader.tsx`, `PanelNav.tsx` | The top bar; the history menu, the tabs of the views, an error or a notice |
 | `panel/WorkSidebar.tsx` | The full view's sidebar: conversations, agents, recent team activity |
 | `panel/Welcome.tsx` | What a new chat shows before anything is said |
@@ -1807,9 +1809,7 @@ safe" is "Approve the low-risk ones", "Weight" is "When it is used", and
 have to recognise, so it stays and is explained where it is introduced ("S3
 storage the whole team uses"). Test ids and the names in code are unchanged.
 
-Not done: the hook is still one function of about a thousand lines. Dividing
-it into several hooks cannot be done by moving text: each would need its
-inputs written out and typed, which is rewriting. It was left as it is.
+The chat panel keeps its shared state in `usePanelState`. The terminal hook receives the task and terminal session from it.
 
 - The chat column has the conversation, then the run dock above the composer:
   the task list (`TaskTodos`) while a run has one, and the approval or question

@@ -40,8 +40,7 @@ Feature requests are very welcome! Please use our [Feature Request Template](.gi
 
 ### Prerequisites
 
-- **Node.js**: 20.x or higher (LTS recommended)
-- **npm**: 10.x or higher
+- Use Node.js 24.15 or later in the 24.x series with its bundled npm. CI uses Node 24.
 - **C/C++ toolchain**: Required to compile native modules such as `node-pty` (via `node-gyp`).
   - *Ubuntu/Debian*: `sudo apt-get install build-essential python3`
   - *Fedora/RHEL*: `sudo dnf groupinstall "Development Tools"`
@@ -57,7 +56,7 @@ Feature requests are very welcome! Please use our [Feature Request Template](.gi
 
 2. **Install dependencies**:
    ```bash
-   npm install
+   npm ci
    ```
 
 3. **Start development mode**:
@@ -66,6 +65,8 @@ Feature requests are very welcome! Please use our [Feature Request Template](.gi
    ```
 
 ### Architecture & Codebase Overview
+
+The [repository guide](AGENTS.md) lists entry points and commands for running targeted tests and builds.
 
 Before writing new features or modifying IPC interfaces, please read [`ARCHITECTURE.md`](ARCHITECTURE.md). It outlines:
 - Process boundaries between Electron Main, Preload (`contextBridge`), and React Renderer.

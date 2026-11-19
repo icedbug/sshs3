@@ -20,8 +20,7 @@ export function ConversationTail({ p, hub }: { p: PanelState; hub: NonNullable<P
     streamingState,
     running,
     activeAgent,
-    stageCommandInTerminal,
-    runCodeBlockInTerminal,
+    terminalHandoff,
     handleOpenFileRef,
     targetSessionId,
     act,
@@ -127,9 +126,9 @@ export function ConversationTail({ p, hub }: { p: PanelState; hub: NonNullable<P
                 )}
                 {streamingState &&
                   streamingState.text &&
-                  !task?.messages.some(
-                    (m) => m.role === "assistant" && m.text === streamingState.text,
-                  ) && (
+                  !(streamingState.messageId
+                    ? task?.messages.some((m) => m.id === streamingState.messageId)
+                    : task?.messages.at(-1)?.role === "assistant" && task.messages.at(-1)?.text === streamingState.text) && (
                   <article className="ai-message ai-message-assistant" data-testid="ai-streaming-message">
                     <div className="ai-message-header">
                       <small className="ai-message-author">
@@ -140,8 +139,7 @@ export function ConversationTail({ p, hub }: { p: PanelState; hub: NonNullable<P
                     </div>
                     <RichMarkdownContent
                       text={streamingState.text}
-                      onUseCommand={stageCommandInTerminal}
-                      onRunCommand={runCodeBlockInTerminal}
+                      terminalActions={terminalHandoff.forMessage(streamingState.partial ? undefined : streamingState.messageId ?? streamingState.localId)}
                       onOpenFileRef={handleOpenFileRef}
                     />
                   </article>

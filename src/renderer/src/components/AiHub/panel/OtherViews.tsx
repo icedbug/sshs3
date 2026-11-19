@@ -31,7 +31,7 @@ export function OtherViews({ p, hub }: { p: PanelState; hub: NonNullable<PanelSt
     setAutonomy,
     kbTabRequest,
     handleOpenFileRef,
-    runCommandInTerminal,
+    terminalHandoff,
     setPrompt,
     composer,
     setAttachments,
@@ -100,7 +100,7 @@ export function OtherViews({ p, hub }: { p: PanelState; hub: NonNullable<PanelSt
               request={hubRequest}
               openTab={kbTabRequest}
               onOpenFileRef={handleOpenFileRef}
-              onRunStepInTerminal={(command) => runCommandInTerminal(command)}
+              onRunStepInTerminal={terminalHandoff.run}
               onAskAiStep={(stepPrompt) => {
                 setPrompt(stepPrompt);
                 setView("Work");

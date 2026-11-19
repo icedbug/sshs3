@@ -12,7 +12,9 @@ import type {
   WorkspaceServerSummary,
 } from "../../../shared/types/aiHub";
 import { analyzeCommandSafety } from "./CommandSafetyService";
-import { KnowledgeBaseService, tokenize } from "./KnowledgeBaseService";
+import type { KnowledgeBaseService } from "./KnowledgeBaseService";
+import { deduplicateOrMergeMemory } from "./memory/mergeMemory";
+import { tokenize } from "./searchTokens";
 import type { HubStore } from "./HubStore";
 import {
   MAX_STORED_PROPOSALS,
@@ -596,7 +598,7 @@ export class SelfLearningService {
       };
     }
 
-    const merged = this.kb.deduplicateOrMergeMemory(memories, {
+    const merged = deduplicateOrMergeMemory(memories, {
       kind: "skill",
       tier,
       cluster,
@@ -740,7 +742,7 @@ export class SelfLearningService {
             }),
           );
         } else {
-          const mergedCritique = this.kb.deduplicateOrMergeMemory(currentMemories, {
+          const mergedCritique = deduplicateOrMergeMemory(currentMemories, {
             kind: "memory",
             tier: "episodic",
             cluster,
@@ -946,7 +948,7 @@ export class SelfLearningService {
             }),
           );
         } else {
-          const merged = this.kb.deduplicateOrMergeMemory(currentMemories, {
+          const merged = deduplicateOrMergeMemory(currentMemories, {
             kind: "skill",
             tier: playbookTier,
             cluster,
@@ -1278,7 +1280,7 @@ export class SelfLearningService {
             }),
           );
         } else {
-          const merged = this.kb.deduplicateOrMergeMemory(currentMemories, {
+          const merged = deduplicateOrMergeMemory(currentMemories, {
             id: ep.id,
             kind: primaryCmd ? "skill" : "memory",
             tier: targetTier,
@@ -1358,7 +1360,7 @@ export class SelfLearningService {
       if (governed) {
         this.queueProposalToStore(diagProposal);
       } else {
-        const merged = this.kb.deduplicateOrMergeMemory(currentMemories, {
+        const merged = deduplicateOrMergeMemory(currentMemories, {
           kind: "skill",
           // A suggestion from the kind of error, never tried: not something to put in front of every run.
           tier: "archival",

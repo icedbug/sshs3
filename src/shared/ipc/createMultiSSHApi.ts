@@ -133,6 +133,8 @@ export interface AiHubDeltaEvent {
     | 'run.degraded';
   at: number;
   delta?: string;
+  /** The persisted assistant message receiving this piece. Older senders omit it. */
+  messageId?: string;
   /**
    * With `message.delta`: how long the message's text is once this piece is added. A window adds the
    * piece only where its copy ends exactly before it: a piece it already has (the snapshot was newer)

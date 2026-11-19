@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AGENT_MODES,
   type AgentMode,
@@ -7,7 +7,6 @@ import {
   type HubSnapshot,
   type MissionAgent,
   type ShellKind,
-  type TerminalSession,
 } from "@shared/types/aiHub";
 import { hubRequest, selectAiTerminal, useHub, useSelectedTerminal } from "../../../lib/aiHub";
 import { useFullTask } from "../../../lib/aiHubTasks";
@@ -28,6 +27,7 @@ import {
   subscribeAiHubDelta,
   normalizeViewTarget,
 } from "./panelHelpers";
+import { useTerminalHandoff } from "./useTerminalHandoff";
 import type { AiHubPanelProps } from "../AiHubPanel";
 
 /**
@@ -69,27 +69,12 @@ export function usePanelState({
     }
   });
   const draftEpoch = useRef(0);
-  function clearDraft(): void {
-    draftEpoch.current++;
-    setPrompt("");
-    setTerminalDraft(null);
-    setAttachments([]);
-    setDlpWarning(null);
-    setConnection(undefined);
-    setSending("");
-  }
   const setTaskId = (next: string): void => {
+    if (taskId !== next) terminalHandoff.reset();
     setTaskIdState(next);
     onTaskChange?.(next);
   };
   const [prompt, setPrompt] = useState("");
-  const [terminalDraft, setTerminalDraft] = useState<{
-    source: string;
-    text: string;
-    target?: Pick<TerminalSession, "id" | "generation" | "label">;
-  } | null>(null);
-  const [writingDraft, setWritingDraft] = useState(false);
-  const draftWritePending = useRef(false);
   /** What was just sent and has not come back in the conversation yet (the answer to the request can take a while). */
   const [sending, setSending] = useState("");
   const [autonomy, setAutonomy] = useState<AgentMode>("assisted");
@@ -129,7 +114,23 @@ export function usePanelState({
     label: string;
   }>();
   // The open conversation with all of its messages: a snapshot carries only the last few of a long one.
-  const task = useFullTask(hub?.tasks.find((t) => t.id === taskId));
+  const snapshotTask = hub?.tasks.find((t) => t.id === taskId);
+  const task = useFullTask(snapshotTask);
+  const showingMessageTail = Boolean(task?.messagesTail && task.messages === snapshotTask?.messages);
+  const handoffId = task?.target?.sessionId ?? boundTerminalId ?? selectedTerminal;
+  const handoffSession = hub?.sessions.find((s) => s.id === handoffId && s.state !== "disconnected" &&
+    (!task?.target || s.generation === task.target.generation));
+  const terminalHandoff = useTerminalHandoff(taskId, handoffSession, setError, setNotice);
+  const resetTerminalDraft = terminalHandoff.reset;
+  const clearDraft = useCallback(() => {
+    draftEpoch.current++;
+    setPrompt("");
+    resetTerminalDraft();
+    setAttachments([]);
+    setDlpWarning(null);
+    setConnection(undefined);
+    setSending("");
+  }, [resetTerminalDraft]);
   const activeAgent: MissionAgent | undefined = (hub?.agents ?? []).find(
     (a) => a.id === (task?.agentId || selectedAgentId),
   );
@@ -481,7 +482,7 @@ export function usePanelState({
       clearDraft();
       setTaskIdState(initialTaskId);
     }
-  }, [initialTaskId, taskId]);
+  }, [initialTaskId, taskId, clearDraft]);
   // The conversation remembered over a reload is told to the dock once, so that both agree.
   useEffect(() => {
     if (taskId && taskId !== initialTaskId) onTaskChange?.(taskId);
@@ -506,15 +507,20 @@ export function usePanelState({
           delete copy[ev.taskId];
           return copy;
         }
-        const current = prev[ev.taskId] ?? { text: "", tools: [] };
-        const nextText = ev.text !== undefined ? ev.text : `${current.text}${deltaChunk}`;
-        const nextTools = incomingTool ? [...current.tools, incomingTool] : current.tools;
+        if (!deltaChunk && ev.text === undefined && !incomingTool) return prev;
+        const current = prev[ev.taskId];
+        const newMessage = Boolean(ev.messageId && ev.messageId !== current?.messageId);
+        const prefix = newMessage ? "" : current?.text ?? "";
+        const nextText = ev.text ?? (prefix + deltaChunk);
+        const tools = current?.tools ?? [];
         return {
           ...prev,
           [ev.taskId]: {
             text: nextText,
-            messageId: ev.messageId ?? current.messageId,
-            tools: nextTools,
+            messageId: ev.messageId ?? current?.messageId,
+            localId: current?.localId ?? crypto.randomUUID(),
+            partial: ev.length === undefined ? (!newMessage && Boolean(current?.partial)) : nextText.length < ev.length,
+            tools: incomingTool ? [...tools, incomingTool] : tools,
           },
         };
       });
@@ -694,7 +700,7 @@ export function usePanelState({
       window.removeEventListener("sshs3:labs-changed", onLabsChanged);
       window.removeEventListener("sshs3:settings-updated", onLabsChanged);
     };
-  }, [onTaskChange, setMode]);
+  }, [onTaskChange, setMode, clearDraft]);
   useEffect(() => {
     if (!settingsOpen || mode === "closed") return;
     const previous = document.activeElement as HTMLElement | null;
@@ -821,83 +827,6 @@ export function usePanelState({
       )
       .catch(() => setError("Could not read that file."));
   }
-  function activeSessionForHandoff() {
-    const id = task?.target?.sessionId ?? boundTerminalId ?? selectedTerminal;
-    return hub?.sessions.find((session) =>
-      session.id === id && session.state !== "disconnected" &&
-      (!task?.target || session.generation === task.target.generation),
-    );
-  }
-
-  async function writeToTerminal(cmd: string, run: boolean): Promise<boolean> {
-    setNotice("");
-    const session = activeSessionForHandoff();
-    if (!session) {
-      setError("The selected terminal is no longer available. Select a current terminal first.");
-      return false;
-    }
-    const api = window.multissh;
-    const write = session.kind === "k8s" ? api?.k8sTerminalWrite : api?.terminalWrite;
-    if (!write) {
-      setError("This terminal cannot accept input.");
-      return false;
-    }
-    try {
-      const text = run ? cmd.replace(/\r\n?/g, "\n") : cmd;
-      await write(session.id, run && !text.endsWith("\n") ? text + "\n" : text);
-      setError("");
-      setNotice(run ? `Sent to ${session.label}.` : `Staged in ${session.label}.`);
-      return true;
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-      return false;
-    }
-  }
-
-  function stageCommandInTerminal(cmd: string): void {
-    if (draftWritePending.current) return;
-    const target = activeSessionForHandoff();
-    if (Array.from(cmd).some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127) || !target) {
-      setTerminalDraft({ source: cmd, text: cmd.replace(/\r\n?/g, "\n"), target });
-      setError("");
-      setNotice("");
-      return;
-    }
-    void writeToTerminal(cmd, false);
-  }
-
-  const draftTarget = activeSessionForHandoff();
-  const draftConnected = Boolean(terminalDraft?.target && draftTarget &&
-    terminalDraft.target.id === draftTarget.id && terminalDraft.target.generation === draftTarget.generation);
-  const draftHasControl = Boolean(terminalDraft && Array.from(terminalDraft.text).some((char) =>
-    char !== "\n" && char !== "\t" && (char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127),
-  ));
-  async function runTerminalDraft(): Promise<boolean> {
-    if (!terminalDraft || draftWritePending.current || draftHasControl || !terminalDraft.text.trim()) return false;
-    if (!draftConnected) {
-      setError("The selected terminal is no longer available. Stage the command again in a current terminal.");
-      return false;
-    }
-    draftWritePending.current = true;
-    setWritingDraft(true);
-    try {
-      const written = await writeToTerminal(terminalDraft.text, true);
-      if (written) setTerminalDraft((current) => current === terminalDraft ? null : current);
-      return written;
-    } finally {
-      draftWritePending.current = false;
-      setWritingDraft(false);
-    }
-  }
-
-  function runCodeBlockInTerminal(cmd: string): Promise<boolean> {
-    return terminalDraft?.source === cmd ? runTerminalDraft() : runCommandInTerminal(cmd);
-  }
-
-  function runCommandInTerminal(cmd: string): Promise<boolean> {
-    return writeToTerminal(cmd, true);
-  }
-
   function handleOpenFileRef(fileRef: FileRef): void {
     if (onOpenFileRef) {
       onOpenFileRef(fileRef);
@@ -1054,7 +983,7 @@ export function usePanelState({
     if (trimmed.startsWith("!") && !busy) {
       const quickCmd = trimmed.slice(1).trim();
       if (!quickCmd) return;
-      if (await runCommandInTerminal(quickCmd)) {
+      if (await terminalHandoff.run(quickCmd)) {
         setPrompt((current) => current.trim() === trimmed ? "" : current);
       }
       return;
@@ -1182,15 +1111,8 @@ export function usePanelState({
     newChat,
     chooseTask,
     attachFileOrImage,
-    stageCommandInTerminal,
-    terminalDraft,
-    setTerminalDraft,
-    draftConnected,
-    draftHasControl,
-    writingDraft,
-    runTerminalDraft,
-    runCodeBlockInTerminal,
-    runCommandInTerminal,
+    terminalHandoff,
+    showingMessageTail,
     handleOpenFileRef,
     cycleMode,
     connectLocalOllama,

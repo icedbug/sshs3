@@ -5,7 +5,7 @@
 import type { AgentMessage } from "@shared/types/aiHub";
 import type { AiHubDeltaEvent } from "@shared/ipc/createMultiSSHApi";
 
-/** A message a window made itself from the stream: it has this id until the conversation is fetched. */
+/** Fallback for older senders that omit the persisted message ID. */
 export const STREAMED_MESSAGE_ID = "delta-";
 
 /**
@@ -25,6 +25,11 @@ export function applyDeltaToMessages(
   const piece = delta.delta ?? "";
   const last = messages.at(-1);
   const continues = Boolean(last && last.role === "assistant");
+  if (delta.messageId && last?.id !== delta.messageId) {
+    if (messages.some((m) => m.id === delta.messageId)) return { messages, fit: "have", added: false };
+    // A new reply follows a user's turn. Fetch that turn if this copy still ends at a different reply.
+    if (continues) return { messages, fit: "gap", added: false };
+  }
   if (delta.length !== undefined) {
     const have = continues ? (lastChars ?? last!.text.length) : 0;
     const before = delta.length - piece.length;
@@ -38,7 +43,7 @@ export function applyDeltaToMessages(
     return { messages: next, fit: "applied", added: false };
   }
   next.push({
-    id: `${STREAMED_MESSAGE_ID}${delta.taskId}-${delta.at}-${next.length}`,
+    id: delta.messageId ?? `${STREAMED_MESSAGE_ID}${delta.taskId}-${delta.at}-${next.length}`,
     role: "assistant",
     text: piece.slice(-128_000),
     at: delta.at,

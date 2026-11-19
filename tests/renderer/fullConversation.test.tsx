@@ -46,6 +46,15 @@ describe("a piece of streamed text", () => {
   it("is added as it comes when it does not say where it belongs", () => {
     expect(applyDeltaToMessages([message("a1", "assistant", "Hel")], piece("lo", undefined)).messages.at(-1)!.text).toBe("Hello");
   });
+
+  it("retains the hub's message ID and never appends a late piece to another answer", () => {
+    const first = { ...piece("Hi", 2), messageId: "a1" };
+    const streamed = applyDeltaToMessages([message("u1", "user", "hi")], first);
+    expect(streamed.messages.at(-1)).toMatchObject({ id: "a1", text: "Hi" });
+    const later = [...streamed.messages, message("u2", "user", "again"), message("a2", "assistant", "Hi")];
+    expect(applyDeltaToMessages(later, { ...piece("!", 3), messageId: "a1" })).toEqual({ messages: later, fit: "have", added: false });
+    expect(applyDeltaToMessages(later, { ...piece("Hi", 2), messageId: "a3" }).fit).toBe("gap");
+  });
 });
 
 const task = (over: Partial<AgentTask> = {}): AgentTask =>

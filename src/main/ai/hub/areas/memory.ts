@@ -7,7 +7,7 @@ import type {
   MemoryProposal,
   WorkspaceActivityEvent,
 } from "../../../../shared/types/aiHub";
-import { MAX_MEMORY_TEXT } from "../KnowledgeBaseService";
+import { deduplicateOrMergeMemory, MAX_MEMORY_TEXT } from "../memory/mergeMemory";
 import {
   getBuiltinSkillsAndMemories,
   getDemoInfraEdges,
@@ -579,7 +579,7 @@ export class MemoryPart {
   }): Promise<MemoryEntry> {
     const author = input.author?.trim() || (await this.resolveActorName());
     const before = new Map(this.store.data.memories.map((m) => [m.id, m.updatedAt]));
-    const { memories, saved: merged, superseded } = this.kb.deduplicateOrMergeMemory(
+    const { memories, saved: merged, superseded } = deduplicateOrMergeMemory(
       this.store.data.memories,
       {
         id: input.id,

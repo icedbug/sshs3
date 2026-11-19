@@ -17,39 +17,35 @@ export function AboveComposer({ p }: { p: PanelState }): JSX.Element {
     setAttachments,
     sendMessage,
     setDlpWarning,
-    terminalDraft,
-    setTerminalDraft,
-    draftConnected,
-    writingDraft,
-    runTerminalDraft,
-    draftHasControl,
+    terminalHandoff,
   } = p;
+  const { draft, writing, connected, hasControl } = terminalHandoff;
   return (
     <>
-      {terminalDraft && (
+      {draft && (
         <div className="ai-card" style={{ margin: "4px 8px" }}>
           <label>
-            <strong>Terminal draft{terminalDraft.target ? ` · ${terminalDraft.target.label}` : ""}</strong>
+            <strong>Terminal draft{draft.target ? ` · ${draft.target.label}` : ""}</strong>
             <textarea
               aria-label="Terminal command draft"
               className="ai-mono"
               style={{ display: "block", width: "100%", boxSizing: "border-box" }}
               rows={3}
               autoFocus
-              value={terminalDraft.text}
-              disabled={writingDraft}
-              onChange={(e) => setTerminalDraft({ ...terminalDraft, text: e.target.value })}
+              value={draft.text}
+              disabled={writing}
+              onChange={(e) => terminalHandoff.edit(e.target.value)}
             />
           </label>
-          {draftHasControl && <small className="ai-muted">Remove terminal control characters to run this draft.</small>}
-          {!draftConnected && (
+          {hasControl && <small className="ai-muted">Remove terminal control characters to run this draft.</small>}
+          {!connected && (
             <small className="ai-muted">Select a current terminal and stage the command again to run it.</small>
           )}
           <div className="ai-card-actions">
-            <button type="button" className="ai-btn-accent" disabled={!draftConnected || draftHasControl || writingDraft || !terminalDraft.text.trim()} onClick={() => void runTerminalDraft()}>
-              {writingDraft ? "Sending…" : "Run edited command"}
+            <button type="button" className="ai-btn-accent" disabled={!connected || hasControl || writing || !draft.text.trim()} onClick={() => void terminalHandoff.runDraft()}>
+              {writing ? "Sending…" : "Run edited command"}
             </button>
-            <button type="button" disabled={writingDraft} onClick={() => setTerminalDraft(null)}>Cancel draft</button>
+            <button type="button" disabled={writing} onClick={() => terminalHandoff.reset()}>Cancel draft</button>
           </div>
         </div>
       )}

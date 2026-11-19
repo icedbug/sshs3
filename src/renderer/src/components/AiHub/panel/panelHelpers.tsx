@@ -16,6 +16,7 @@ export const ESC_CSI = `${String.fromCharCode(27)}[`;
 export interface AiHubDeltaEvent {
   taskId: string;
   messageId?: string;
+  length?: number;
   delta?: string;
   textDelta?: string;
   text?: string;
@@ -27,6 +28,8 @@ export interface AiHubDeltaEvent {
 export interface StreamingTaskState {
   text: string;
   messageId?: string;
+  localId: string;
+  partial: boolean;
   tools: AgentToolRecord[];
 }
 

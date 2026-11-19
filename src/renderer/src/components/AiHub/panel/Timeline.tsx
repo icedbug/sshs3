@@ -1,5 +1,5 @@
 import { GitFork, Pencil, RotateCcw, Terminal } from "lucide-react";
-import { CONTEXT_NOTE_PREFIX } from "@shared/types/aiHub";
+import { CONTEXT_NOTE_PREFIX, SNAPSHOT_TAIL_CHARS } from "@shared/types/aiHub";
 import { AnsiLogView, DiffViewer } from "../DiffViewer";
 import { copyToClipboard, RichMarkdownContent } from "../RichMarkdownContent";
 import { ChangeProof } from "../ChangeProof";
@@ -25,8 +25,8 @@ export function Timeline({ p }: { p: PanelState }): JSX.Element {
     handleForkTask,
     copyMessage,
     copiedMsgId,
-    stageCommandInTerminal,
-    runCodeBlockInTerminal,
+    terminalHandoff,
+    showingMessageTail,
     handleOpenFileRef,
     handleRestoreCheckpoint,
     approvalNotes,
@@ -176,8 +176,7 @@ export function Timeline({ p }: { p: PanelState }): JSX.Element {
                           el.classList.add("ai-change-flash");
                           setTimeout(() => el.classList.remove("ai-change-flash"), 1600);
                         }}
-                        onUseCommand={stageCommandInTerminal}
-                      onRunCommand={runCodeBlockInTerminal}
+                        terminalActions={terminalHandoff.forMessage(showingMessageTail && item.message.text.length >= SNAPSHOT_TAIL_CHARS ? undefined : item.message.id)}
                         onOpenFileRef={handleOpenFileRef}
                       />
                       {item.message.role === "assistant" &&

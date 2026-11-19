@@ -5,6 +5,7 @@ import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import type { AgentChange, AgentTask } from "../../src/shared/types/aiHub";
+import type { AiHubDeltaEvent } from "../../src/shared/ipc/createMultiSSHApi";
 import { changeForSnapshot, taskForSnapshot } from "../../src/main/ai/hub/HubService";
 
 /**
@@ -171,8 +172,8 @@ describe("a streamed answer", () => {
     const model = await streamingModel(pieces);
     disposals.push(() => model.close());
     let refetches = 0;
-    const deltas: Array<{ type: string; delta?: string; length?: number }> = [];
-    const hub = await hubWith({ changed: () => void refetches++, delta: (d: { type: string; delta?: string; length?: number }) => void deltas.push(d) });
+    const deltas: AiHubDeltaEvent[] = [];
+    const hub = await hubWith({ changed: () => void refetches++, delta: (d: AiHubDeltaEvent) => void deltas.push(d) });
     await hub.request({ action: "configure", config: { enabled: true, provider: "openai-compatible", model: "fake-1", baseUrl: model.url, apiKey: "not-a-real-key" }, preferences: { proposeMemories: false } });
 
     refetches = 0;
@@ -185,6 +186,7 @@ describe("a streamed answer", () => {
     expect(task.status).toBe("completed");
     const text = deltas.filter((d) => d.type === "message.delta");
     expect(text.length).toBeGreaterThan(pieces * 0.9);
+    expect(new Set(text.map((d) => d.messageId))).toEqual(new Set([task.messages.at(-1)!.id]));
     // Each piece says how long the message is with it: a window can tell a repeat from a gap.
     let length = 0;
     for (const d of text) {
