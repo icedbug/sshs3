@@ -1,7 +1,8 @@
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { maskContext, safeError } from "./privacy";
+import type { AiPiiScrubbingMode } from "../../../shared/types/ai";
+import { maskProviderText, safeError } from "./privacy";
 
 /**
  * Real text embeddings for the knowledge base. The vectors come from the
@@ -23,6 +24,8 @@ export function openAiCompatibleEmbedder(options: {
   apiKey?: string;
   model: string;
   fetchImpl?: typeof fetch;
+  piiMode?: AiPiiScrubbingMode;
+  hosts?: ReadonlySet<string>;
 }): Embedder {
   const base = options.baseUrl.replace(/\/$/, "");
   const fetchImpl = options.fetchImpl ?? fetch;
@@ -34,7 +37,7 @@ export function openAiCompatibleEmbedder(options: {
         // Masked like everything else that leaves for a model endpoint.
         const input = texts
           .slice(i, i + MAX_BATCH)
-          .map((t) => maskContext(t).slice(0, MAX_INPUT_CHARS) || " ");
+          .map((t) => maskProviderText(t, options.piiMode, options.hosts).slice(0, MAX_INPUT_CHARS) || " ");
         const response = await fetchImpl(`${base}/embeddings`, {
           method: "POST",
           headers: {

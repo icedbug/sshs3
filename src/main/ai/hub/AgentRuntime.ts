@@ -9,6 +9,7 @@ import { boundedContext, boundedPrompt, HUB_PROMPT_MAX } from "./privacy";
 import {
   DirectAgentRuntime,
   type DirectToolInvoker,
+  type DirectRuntimeOptions,
 } from "./DirectAgentRuntime";
 
 export interface RunEvent {
@@ -51,9 +52,10 @@ export class HermesRuntime implements AgentRuntime {
     replayLive?: (tool: string) => boolean,
     /** Where this workspace keeps its own ChatGPT/Codex sign-in: never the host's ~/.codex for a tenant or the demo. */
     authBaseDir?: string,
+    options?: DirectRuntimeOptions,
   ) {
     if (invokeTool && process.env.SSHS3_HERMES_INTEGRATION !== "1") {
-      this.direct = new DirectAgentRuntime(invokeTool, authBaseDir);
+      this.direct = new DirectAgentRuntime(invokeTool, authBaseDir, undefined, options);
       this.direct.replay = replay;
       this.direct.replayLive = replayLive;
     }

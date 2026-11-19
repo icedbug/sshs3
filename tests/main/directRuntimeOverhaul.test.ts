@@ -12,6 +12,7 @@ import {
   buildUntrustedKbContext,
   computeRetryDelayMs,
   computeUsageCostUsd,
+  MODEL_PRICING_USD_PER_M,
   consumeSseStream,
   formatToolOutputForModel,
   microcompactToolResults,
@@ -105,6 +106,18 @@ describe("DirectAgentRuntime Wave 1 Overhaul", () => {
       expect(usage.output_tokens).toBe(400);
       expect(usage.context_tokens).toBe(10_000);
       expect(usage.cost_usd).toBeCloseTo(computeUsageCostUsd("gpt-4o", usage), 8);
+    });
+
+    it("separates cache writes from cached reads and ordinary input", () => {
+      const { prefix, pricing } = MODEL_PRICING_USD_PER_M.find((entry) => entry.pricing.longContextAt !== undefined)!;
+      const usage = normalizeProviderUsage("openai-compatible", {
+        input_tokens: 10_000,
+        output_tokens: 400,
+        input_tokens_details: { cached_tokens: 6000, cache_write_tokens: 2500, cache_write_tokens_details: { ttl_30m_tokens: 2000, ttl_12h_tokens: 500 } },
+      }, prefix);
+      expect(usage).toMatchObject({ input_tokens: 1500, cache_read_input_tokens: 6000, cache_creation_input_tokens: 2500, context_tokens: 10_000 });
+      expect(usage.cost_usd).toBeCloseTo((1500 * pricing.inputPerM + 6000 * pricing.cacheReadPerM + 2000 * pricing.cacheWritePerM + 500 * pricing.cacheWrite12hPerM! + 400 * pricing.outputPerM) / 1e6, 8);
+      expect(computeUsageCostUsd(prefix, { input_tokens: 300_000, output_tokens: 400 })).toBeCloseTo((600_000 * pricing.inputPerM + 600 * pricing.outputPerM) / 1e6, 8);
     });
 
     it("emits live cache and cost fields on both usage.updated and run.completed across Anthropic turns", async () => {

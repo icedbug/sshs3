@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { isIPv6 } from "node:net";
 import { stripVTControlCharacters } from "node:util";
 import type { AiPiiScrubbingMode } from "../../../shared/types/ai";
 
@@ -211,7 +212,7 @@ function isValidIpv4(ip: string): boolean {
  * - "standard": masks emails, formatted international/North-American phones, and public IPs while keeping RFC1918/loopback IPs.
  * - "strict": masks emails, all IPs (including RFC1918), and broader phone patterns.
  */
-export function scrubPii(text: string, mode: PiiScrubMode = "standard"): string {
+export function scrubPii(text: string, mode: PiiScrubMode = "standard", preservePublicIps = false): string {
   if (!text || mode === "off") return text;
 
   // Emails
@@ -220,15 +221,13 @@ export function scrubPii(text: string, mode: PiiScrubMode = "standard"): string 
     "[email redacted]",
   );
 
-  // IPv4 addresses (bounded octet check; skip trailing/leading dots like version strings)
-  out = out.replace(
-    /(?<![\d.])(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(?![\d.])/g,
-    (ip) => {
-      if (!isValidIpv4(ip)) return ip;
-      if (mode === "standard" && RFC1918_OR_LOCAL_IPV4_RE.test(ip)) return ip;
+  // A sentence-ending period is punctuation. A fifth numeric segment is part of a version.
+  if (mode === "strict" || !preservePublicIps) {
+    out = out.replace(/(?<![\d.])\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?!\d|\.\d)/g, (ip) => {
+      if (!isValidIpv4(ip) || (mode === "standard" && RFC1918_OR_LOCAL_IPV4_RE.test(ip))) return ip;
       return "[ip redacted]";
-    },
-  );
+    });
+  }
 
   // Formatted phone numbers (e.g. +46 70 123 45 67, +1-555-234-5678, (555) 234-5678)
   out = out.replace(
@@ -241,6 +240,11 @@ export function scrubPii(text: string, mode: PiiScrubMode = "standard"): string 
   );
 
   if (mode === "strict") {
+    // eslint-disable-next-line security/detect-unsafe-regex -- address, zone and candidate lengths are all bounded before IPv6 validation.
+    out = out.replace(/(?<![\w:])[\da-f]{0,4}:[\da-f:.]{1,45}(?:%[\w.-]{1,64})?(?![\w:])/gi, (candidate) => {
+      const text = candidate.replace(/[.,]+$/, "");
+      return isIPv6(text) ? "[ip redacted]" + candidate.slice(text.length) : candidate;
+    });
     // Also redact un-prefixed hyphenated/spaced local phone numbers like 070-1234567 or 555-123-4567
     out = out.replace(
       /(?<!\w)(?:0\d{1,3}-\d{5,8}|\d{3}-\d{3}-\d{4})(?!\w)/g,
@@ -249,6 +253,19 @@ export function scrubPii(text: string, mode: PiiScrubMode = "standard"): string 
   }
 
   return out;
+}
+
+export function workspaceHostNames(servers: ReadonlyArray<{ host?: string; name?: string }> = [], target?: string): Set<string> {
+  const values = [target, ...(Array.isArray(servers) ? servers.flatMap((s) => [s?.host, s?.name]) : [])];
+  return new Set(values.filter((s): s is string => typeof s === "string" && /^[\w.-]+$/.test(s)).map((s) => s.toLowerCase().replace(/\.$/, "")));
+}
+
+/** The model can use public service addresses in standard mode. Stored and exported records keep their own policy. */
+export function maskProviderText(text: string, piiMode?: PiiScrubMode, hosts?: ReadonlySet<string>): string {
+  const clean = maskContext(text);
+  const scrubbed = piiMode ? scrubPii(clean, piiMode, true) : clean;
+  if (piiMode !== "strict" || !hosts?.size) return scrubbed;
+  return scrubbed.replace(/[\w.-]+/g, (token) => hosts.has(token.toLowerCase().replace(/\.$/, "")) ? "[host redacted]" : token);
 }
 
 /** Mask BEFORE clipping. Call on complete records, not individual transport chunks. */
@@ -517,6 +534,9 @@ export function safeError(error: unknown): string {
 
 /** sha256 of an exact text: to match what was approved against what runs without keeping the text. */
 export const exactHash = (value: string): string => crypto.createHash("sha256").update(value, "utf8").digest("hex");
+
+export const observationHash = (id: string, observation: { exitCode: number; output: string }): string =>
+  exactHash(JSON.stringify([id, observation.exitCode, observation.output]));
 
 /**
  * A command (or check, or rollback) as a person is asked to approve it:

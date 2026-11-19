@@ -11,6 +11,7 @@ import {
   type CodexCredentials,
 } from "../CodexAuthProvider";
 import type { HermesModelConfig } from "../HermesManager";
+import { usesResponsesApi } from "../../../shared/types/ai";
 import type {
   AiEgressPolicy,
   AiPiiScrubbingMode,
@@ -47,6 +48,8 @@ import {
   HUB_PROMPT_MAX,
   maskContext,
   maskSecrets,
+  maskProviderText,
+  workspaceHostNames,
   safeError,
   stripInvisibleUnicode,
 } from "./privacy";
@@ -69,6 +72,8 @@ import {
   type ToolDigestEntry,
 } from "./AgentDiscipline";
 
+import { modelRequestBody } from "./modelWirePrivacy";
+import { ResponsesTurn } from "./ResponsesTurn";
 import { PLAN_TOOL, planGate, wantsPlanFirst } from "./PlanMode";
 
 const NATIVE_FETCH = globalThis.fetch;
@@ -83,6 +88,7 @@ export const retryPolicy = {
   baseDelayMs: 1000,
   maxDelayMs: 20_000,
   sseIdleTimeoutMs: 35_000,
+  responseHeadersTimeoutMs: 60_000,
 };
 // 520 to 524 are what the network in front of a provider answers when the provider did not (OpenAI sits
 // behind one): passing trouble, tried again like a 502. The first real run ended on a 520 after 14 commands.
@@ -137,6 +143,8 @@ export interface ModelPricing {
   outputPerM: number;
   cacheReadPerM: number;
   cacheWritePerM: number;
+  cacheWrite12hPerM?: number;
+  longContextAt?: number;
 }
 
 export const MODEL_PRICING_USD_PER_M: ReadonlyArray<{ prefix: string; pricing: ModelPricing }> = [
@@ -153,10 +161,10 @@ export const MODEL_PRICING_USD_PER_M: ReadonlyArray<{ prefix: string; pricing: M
   { prefix: "claude-3-5-haiku", pricing: { inputPerM: 0.8, outputPerM: 4, cacheReadPerM: 0.08, cacheWritePerM: 1 } },
   { prefix: "claude-3-haiku", pricing: { inputPerM: 0.25, outputPerM: 1.25, cacheReadPerM: 0.03, cacheWritePerM: 0.3 } },
   // OpenAI / Codex models (USD per 1M tokens)
-  { prefix: "gpt-6.1-sol", pricing: { inputPerM: 2.5, outputPerM: 10, cacheReadPerM: 0.25, cacheWritePerM: 2.5 } },
-  { prefix: "gpt-6-astra", pricing: { inputPerM: 3, outputPerM: 12, cacheReadPerM: 0.3, cacheWritePerM: 3 } },
-  { prefix: "gpt-6-sol", pricing: { inputPerM: 2.5, outputPerM: 10, cacheReadPerM: 0.25, cacheWritePerM: 2.5 } },
-  { prefix: "gpt-6-luna", pricing: { inputPerM: 0.4, outputPerM: 1.6, cacheReadPerM: 0.04, cacheWritePerM: 0.4 } },
+  { prefix: "gpt-6.1-sol", pricing: { inputPerM: 2, outputPerM: 10, cacheReadPerM: 0.1, cacheWritePerM: 2.5, cacheWrite12hPerM: 5, longContextAt: 272_000 } },
+  { prefix: "gpt-6-astra", pricing: { inputPerM: 10, outputPerM: 50, cacheReadPerM: 1, cacheWritePerM: 12.5, cacheWrite12hPerM: 25, longContextAt: 272_000 } },
+  { prefix: "gpt-6-sol", pricing: { inputPerM: 2, outputPerM: 10, cacheReadPerM: 0.2, cacheWritePerM: 2.5, cacheWrite12hPerM: 5, longContextAt: 272_000 } },
+  { prefix: "gpt-6-luna", pricing: { inputPerM: 0.1, outputPerM: 0.5, cacheReadPerM: 0.01, cacheWritePerM: 0.125, cacheWrite12hPerM: 0.25, longContextAt: 272_000 } },
   { prefix: "gpt-5.6-sol", pricing: { inputPerM: 2, outputPerM: 8, cacheReadPerM: 0.2, cacheWritePerM: 2 } },
   { prefix: "gpt-5.6-terra", pricing: { inputPerM: 2.5, outputPerM: 10, cacheReadPerM: 0.25, cacheWritePerM: 2.5 } },
   { prefix: "gpt-5.6-luna", pricing: { inputPerM: 0.3, outputPerM: 1.2, cacheReadPerM: 0.03, cacheWritePerM: 0.3 } },
@@ -194,16 +202,20 @@ export function computeUsageCostUsd(
     output_tokens: number;
     cache_read_input_tokens?: number;
     cache_creation_input_tokens?: number;
+    cache_write_12h_tokens?: number;
   },
 ): number {
   const pricing = resolveModelPricing(model);
   if (!pricing) return 0;
-  const usd =
-    (Math.max(0, usage.input_tokens) * pricing.inputPerM +
-      Math.max(0, usage.output_tokens) * pricing.outputPerM +
-      Math.max(0, usage.cache_read_input_tokens ?? 0) * pricing.cacheReadPerM +
-      Math.max(0, usage.cache_creation_input_tokens ?? 0) * pricing.cacheWritePerM) /
-    1_000_000;
+  const input = Math.max(0, usage.input_tokens);
+  const cacheRead = Math.max(0, usage.cache_read_input_tokens ?? 0);
+  const cacheWrite = Math.max(0, usage.cache_creation_input_tokens ?? 0);
+  const extendedWrites = Math.min(cacheWrite, Math.max(0, usage.cache_write_12h_tokens ?? 0));
+  const long = input + cacheRead + cacheWrite > (pricing.longContextAt ?? Infinity);
+  const inputCost = input * pricing.inputPerM + cacheRead * pricing.cacheReadPerM +
+    (cacheWrite - extendedWrites) * pricing.cacheWritePerM + extendedWrites * (pricing.cacheWrite12hPerM ?? pricing.cacheWritePerM);
+  const outputCost = Math.max(0, usage.output_tokens) * pricing.outputPerM;
+  const usd = (inputCost * (long ? 2 : 1) + outputCost * (long ? 1.5 : 1)) / 1_000_000;
   return Number(usd.toFixed(8));
 }
 
@@ -251,14 +263,17 @@ export function normalizeProviderUsage(
   const details = (raw.prompt_tokens_details ?? raw.input_tokens_details) as Record<string, unknown> | undefined;
   const rawCached = toNonNegInt(details?.cached_tokens ?? raw.cached_tokens);
   const cacheRead = Math.min(totalInput, rawCached);
-  const cacheCreation = 0;
-  const input = Math.max(0, totalInput - cacheRead);
+  const breakdown = details?.cache_write_tokens_details as Record<string, unknown> | undefined;
+  const extendedWrites = toNonNegInt(breakdown?.ttl_12h_tokens);
+  const cacheCreation = Math.min(totalInput - cacheRead, toNonNegInt(details?.cache_write_tokens ?? (extendedWrites + toNonNegInt(breakdown?.ttl_30m_tokens))));
+  const input = totalInput - cacheRead - cacheCreation;
   const output = toNonNegInt(raw.completion_tokens ?? raw.output_tokens);
   const cost_usd = computeUsageCostUsd(model, {
     input_tokens: input,
     output_tokens: output,
     cache_read_input_tokens: cacheRead,
     cache_creation_input_tokens: cacheCreation,
+    cache_write_12h_tokens: extendedWrites,
   });
   return {
     input_tokens: input,
@@ -341,6 +356,10 @@ export class EndpointCircuitBreaker {
       return true;
     }
     return false;
+  }
+
+  releaseProbe(): void {
+    if (this.state === "half-open") this.halfOpenInFlight = Math.max(0, this.halfOpenInFlight - 1);
   }
 
   recordSuccess(): void {
@@ -641,7 +660,12 @@ export class StreamingSecretMasker {
     private readonly holdBackChars = 128,
     private readonly maxTokenHoldback = 1024,
     private readonly maxPemHoldback = 8192,
+    private readonly mask: (text: string) => string = maskSecrets,
   ) {}
+
+  static forAnswer(mask: (text: string) => string): StreamingSecretMasker {
+    return new StreamingSecretMasker(undefined, undefined, undefined, mask);
+  }
 
   push(chunk: string): string {
     if (!chunk) return "";
@@ -652,7 +676,7 @@ export class StreamingSecretMasker {
       const pemEndAfter = this.pending.indexOf(PEM_END_MARKER, pemBegin);
       if (pemEndAfter < 0 && this.pending.length - pemBegin < this.maxPemHoldback) {
         if (pemBegin > 0) {
-          const safe = maskSecrets(this.pending.slice(0, pemBegin));
+          const safe = this.mask(this.pending.slice(0, pemBegin));
           this.pending = this.pending.slice(pemBegin);
           return safe;
         }
@@ -664,7 +688,7 @@ export class StreamingSecretMasker {
       return "";
     }
 
-    const masked = maskSecrets(this.pending);
+    const masked = this.mask(this.pending);
     if (masked.length <= this.holdBackChars) {
       this.pending = masked;
       return "";
@@ -709,7 +733,7 @@ export class StreamingSecretMasker {
 
   flush(): string {
     if (!this.pending) return "";
-    const out = maskSecrets(this.pending);
+    const out = this.mask(this.pending);
     this.pending = "";
     return out;
   }
@@ -739,6 +763,7 @@ export interface FormatToolOutputOptions {
   callId?: string;
   maxChars?: number;
   piiMode?: AiPiiScrubbingMode;
+  hosts?: ReadonlySet<string>;
   spillArtifact?: ArtifactSpillFn;
   spillDir?: string;
 }
@@ -753,7 +778,7 @@ export async function formatToolOutputForModel(
   options: FormatToolOutputOptions = {},
 ): Promise<string> {
   const maxChars = options.maxChars ?? TOOL_OUTPUT_MAX_CHARS;
-  const clean = maskContext(output, options.piiMode ? { piiMode: options.piiMode } : {});
+  const clean = maskProviderText(output, options.piiMode, options.hosts);
   if (clean.length <= maxChars) return clean;
 
   let ref: ArtifactSpillRef | undefined;
@@ -763,7 +788,7 @@ export async function formatToolOutputForModel(
         taskId: options.taskId ?? "unknown",
         toolName: options.toolName ?? "tool",
         callId: options.callId ?? "call",
-        content: clean,
+        content: maskContext(clean, { piiMode: options.piiMode }),
       });
     } catch {
       ref = undefined;
@@ -773,7 +798,7 @@ export async function formatToolOutputForModel(
       await fs.mkdir(options.spillDir, { recursive: true });
       const id = `art_${crypto.randomBytes(6).toString("hex")}`;
       const filePath = path.join(options.spillDir, `${id}.txt`);
-      await fs.writeFile(filePath, clean, "utf8");
+      await fs.writeFile(filePath, maskContext(clean, { piiMode: options.piiMode }), "utf8");
       ref = { id, path: filePath };
     } catch {
       ref = undefined;
@@ -1119,6 +1144,9 @@ export function resolveTurnReasoningEffort(params: {
 }
 
 export interface DirectRuntimeOptions {
+  /** Called for each outbound model request, including HTTP retries. No payload is exposed. */
+  onModelRequest?: () => void;
+  getConnectionProfile?: (id: string) => Promise<(ProviderProfile & { apiKey: string }) | undefined>;
   /** Optional fallback resolver invoked when primary endpoint circuit is Open or retries exhaust on 5xx/529/timeout. */
   resolveFallbackModel?: (context: {
     failedModel: HermesModelConfig;
@@ -2945,6 +2973,22 @@ export class DirectAgentRuntime implements AgentRuntime {
   /** The run's task list and what it has changed and verified (AgentDiscipline). */
   private discipline: RunDiscipline = newDiscipline();
   private task?: AgentTask;
+  private piiMode?: AiPiiScrubbingMode;
+  private hosts?: ReadonlySet<string>;
+
+  private privacyFor(task: AgentTask, context: unknown): void {
+    const ctx = context as { appSettings?: { aiConfig?: { piiScrubbing?: AiPiiScrubbingMode } }; workspaceServers?: Array<{ host?: string; name?: string }> } | undefined;
+    this.piiMode = this.options.piiMode ?? ctx?.appSettings?.aiConfig?.piiScrubbing;
+    this.hosts = this.piiMode === "strict" ? workspaceHostNames(ctx?.workspaceServers, task.target?.label) : undefined;
+  }
+
+  private recordedText(text: string): string {
+    return this.piiMode === "strict" ? maskProviderText(text, this.piiMode, this.hosts) : maskContext(text, { piiMode: this.piiMode });
+  }
+  private readonly answerText = (text: string): string => this.piiMode === "strict"
+    ? maskProviderText(text, this.piiMode, this.hosts)
+    : maskSecrets(text);
+
   /** The workspace snapshot this run began with, as the model was given it. */
   private snapshot?: string;
   /** Builds the snapshot the model is given at the start of the run, and remembers it. */
@@ -3018,6 +3062,7 @@ export class DirectAgentRuntime implements AgentRuntime {
       callId,
       maxChars: TOOL_OUTPUT_MAX_CHARS,
       piiMode,
+      hosts: this.hosts,
       spillArtifact: this.options.spillArtifact,
       spillDir: this.options.spillDir,
     });
@@ -3025,7 +3070,7 @@ export class DirectAgentRuntime implements AgentRuntime {
 
   private modelKey(model: HermesModelConfig): string {
     const base = "baseUrl" in model ? (model.baseUrl ?? "") : "";
-    return `${model.kind}|${model.model}|${base}`;
+    return `${model.kind}|${model.model}|${base}|${model.apiProtocol ?? "auto"}`;
   }
 
   private defaultEndpointForModel(model: HermesModelConfig): string {
@@ -3036,7 +3081,7 @@ export class DirectAgentRuntime implements AgentRuntime {
     if (model.kind === "openai-codex") {
       return `${(model.baseUrl || "https://chatgpt.com/backend-api/codex").replace(/\/$/, "")}/responses`;
     }
-    return `${model.baseUrl.replace(/\/$/, "")}/chat/completions`;
+    return `${model.baseUrl.replace(/\/$/, "")}/${usesResponsesApi(model.baseUrl, model.apiProtocol) ? "responses" : "chat/completions"}`;
   }
 
   private extractEgressContext(
@@ -3081,8 +3126,8 @@ export class DirectAgentRuntime implements AgentRuntime {
           ? "openai-codex"
           : (matchedProfile?.provider ?? "openai-compatible");
     const egressPolicy =
-      this.options.egressPolicy ??
       modelExtra.egressPolicy ??
+      this.options.egressPolicy ??
       matchedProfile?.egressPolicy ??
       aiConfig?.egressPolicy ??
       aiConfig?.defaultEgressPolicy;
@@ -3144,7 +3189,7 @@ export class DirectAgentRuntime implements AgentRuntime {
     sameKindOnly = false,
   ): Promise<{ model?: HermesModelConfig; blockedReason?: string }> {
     const primaryEgress = this.extractEgressContext(failedModel, endpoint, initialContext);
-    const enforceLocalOnly = primaryEgress.egressPolicy === "local-only";
+    const runEgress = this.options.egressPolicy ?? primaryEgress.egressPolicy;
 
     type RuntimeProfile = ProviderProfile & { apiKey?: string; euAllowedHosts?: string[] };
     const ctx = (initialContext ?? {}) as {
@@ -3190,17 +3235,32 @@ export class DirectAgentRuntime implements AgentRuntime {
       }
     }
     for (const pid of fallbackProfileIds) {
-      const p = profiles.find((prof) => prof.id === pid);
+      const p = this.options.getConnectionProfile
+        ? await this.options.getConnectionProfile(pid)
+        : profiles.find((prof) => prof.id === pid);
       if (!p) continue;
       const converted = this.profileToHermesModel(p);
-      if (converted) candidates.push({ model: converted, profile: p });
+      if (converted) {
+        converted.profileId = p.id;
+        converted.apiProtocol = p.apiProtocol;
+        converted.egressPolicy = p.egressPolicy;
+        converted.zdrConfirmed = p.zdrConfirmed;
+        converted.fallbackProfileIds = p.fallbackProfileIds;
+        candidates.push({ model: converted, profile: p });
+      }
     }
 
     let blockedReason: string | undefined;
     for (const cand of candidates) {
       if (sameKindOnly && cand.model.kind !== failedModel.kind) continue;
+      if (sameKindOnly && cand.model.kind === "custom" && failedModel.kind === "custom" &&
+        usesResponsesApi(cand.model.baseUrl, cand.model.apiProtocol) !== usesResponsesApi(failedModel.baseUrl, failedModel.apiProtocol)) continue;
       if (triedKeys.has(this.modelKey(cand.model))) continue;
       const candEndpoint = this.defaultEndpointForModel(cand.model);
+      // Opaque Responses items belong to their original endpoint.
+      if (sameKindOnly && (failedModel.kind === "openai-codex" ||
+          (failedModel.kind === "custom" && usesResponsesApi(failedModel.baseUrl, failedModel.apiProtocol))) &&
+          this.defaultEndpointForModel(failedModel) !== candEndpoint) continue;
       const candEgress = this.extractEgressContext(cand.model, candEndpoint, initialContext);
       if (cand.profile) {
         candEgress.provider = cand.profile.provider;
@@ -3208,23 +3268,13 @@ export class DirectAgentRuntime implements AgentRuntime {
         candEgress.zdrConfirmed = cand.profile.zdrConfirmed ?? candEgress.zdrConfirmed;
         candEgress.euAllowedHosts = cand.profile.euAllowedHosts ?? candEgress.euAllowedHosts;
       }
-      // Residency invariant: a local-only profile must NEVER silently fall back to public cloud.
-      if (enforceLocalOnly) {
-        candEgress.egressPolicy = "local-only";
-      }
-      const policyCheck = validateEgressPolicy(
-        {
-          provider: candEgress.provider,
-          baseUrl: candEgress.baseUrl ?? candEndpoint,
-          model: candEgress.model,
-          egressPolicy: candEgress.egressPolicy,
-          zdrConfirmed: candEgress.zdrConfirmed,
-          euAllowedHosts: candEgress.euAllowedHosts,
-        },
+      const policies = new Set([runEgress, primaryEgress.egressPolicy, candEgress.egressPolicy]);
+      const blocked = [...policies].map((egressPolicy) => validateEgressPolicy(
+        { ...candEgress, baseUrl: candEndpoint, egressPolicy },
         { requireZdr: candEgress.requireZdr ?? false },
-      );
-      if (!policyCheck.allowed) {
-        blockedReason = `The spare model ${cand.model.kind}:${cand.model.model} was not used: ${policyCheck.errors.join(" ")}`;
+      )).find((result) => !result.allowed);
+      if (blocked) {
+        blockedReason = `The spare model ${cand.model.kind}:${cand.model.model} was not used: ${blocked.errors.join(" ")}`;
         continue;
       }
       return { model: cand.model };
@@ -3292,7 +3342,7 @@ export class DirectAgentRuntime implements AgentRuntime {
             const auth = new CodexAuthProvider(this.authBaseDir);
             const creds = await auth.resolveCredentials(this.fetchImpl ?? globalThis.fetch);
             if (creds) {
-              await this.runCodexResponsesLoop(task, activeModel, creds, onEvent, cachedInitialContext);
+              await this.runResponsesLoop(task, activeModel, creds, onEvent, cachedInitialContext);
             } else {
               await this.runWithoutProvider(task, NO_CODEX_SESSION, onEvent);
             }
@@ -3305,6 +3355,8 @@ export class DirectAgentRuntime implements AgentRuntime {
           }
           if (activeModel.kind === "anthropic") {
             await this.runAnthropicLoop(task, activeModel, onEvent, cachedInitialContext);
+          } else if (usesResponsesApi(activeModel.baseUrl, activeModel.apiProtocol)) {
+            await this.runResponsesLoop(task, activeModel, undefined, onEvent, cachedInitialContext);
           } else {
             await this.runOpenAiCompatibleLoop(task, activeModel, onEvent, cachedInitialContext);
           }
@@ -3321,7 +3373,7 @@ export class DirectAgentRuntime implements AgentRuntime {
             error instanceof CircuitOpenError || error instanceof UpstreamHttpError
               ? error.endpoint
               : this.defaultEndpointForModel(activeModel);
-          const reason = safeError(error);
+          const reason = this.answerText(safeError(error));
           const { model: nextModel, blockedReason } = await this.resolveFallbackCandidate(
             activeModel,
             endpoint,
@@ -3358,7 +3410,7 @@ export class DirectAgentRuntime implements AgentRuntime {
       // is the result: the scripted demo copilot never stands in for it.
       onEvent({
         type: "run.failed",
-        error: friendlyProviderError(error, activeModel),
+        error: this.answerText(friendlyProviderError(error, activeModel)),
         usage: this.spentUsage(),
       });
     }
@@ -3874,20 +3926,30 @@ export class DirectAgentRuntime implements AgentRuntime {
 
       let response: Response | undefined;
       let failure: unknown;
+      const deadline = new AbortController();
+      const timer = setTimeout(() => deadline.abort(new DOMException("Model response timed out", "TimeoutError")), retryPolicy.responseHeadersTimeoutMs);
+      const attemptInit = { ...requestInit, signal: AbortSignal.any([this.abort.signal, deadline.signal]) };
       try {
+        this.options.onModelRequest?.();
         response =
           guardedTarget && isNativeFetch
-            ? await pinnedNodeFetch(guardedTarget, requestInit)
-            : await activeFetch(url, requestInit);
+            ? await pinnedNodeFetch(guardedTarget, attemptInit)
+            : await activeFetch(url, attemptInit);
       } catch (error) {
-        if (this.cancelled || this.abort.signal.aborted) throw error;
+        if (this.cancelled || this.abort.signal.aborted) {
+          breaker.releaseProbe();
+          throw error;
+        }
         failure = error;
+      } finally {
+        clearTimeout(timer);
       }
 
       if (
         response &&
         (response.type === "opaqueredirect" || (response.status >= 300 && response.status < 400))
       ) {
+        breaker.releaseProbe();
         await response.body?.cancel().catch(() => {});
         throw new Error(`Redirect blocked (${response.status || "opaque"}) for LLM endpoint ${url}`);
       }
@@ -3898,6 +3960,10 @@ export class DirectAgentRuntime implements AgentRuntime {
       let circuitOpened = false;
       if (statusTripping || errorTripping) {
         circuitOpened = breaker.recordFailure(this.nowMs()) === "open";
+      } else if (response && !response.ok) {
+        breaker.recordSuccess();
+      } else if (failure) {
+        breaker.releaseProbe();
       }
 
       if (!retryable || attempt >= retryPolicy.attempts || circuitOpened) {
@@ -3941,6 +4007,7 @@ export class DirectAgentRuntime implements AgentRuntime {
     deltaMasker: StreamingSecretMasker,
     onData: (data: string) => void,
     onEvent: (event: RunEvent) => void,
+    onEnd?: () => void,
   ): Promise<void> {
     const breaker = this.circuitBreakers().get(endpoint);
     try {
@@ -3948,6 +4015,7 @@ export class DirectAgentRuntime implements AgentRuntime {
         idleTimeoutMs: retryPolicy.sseIdleTimeoutMs,
         signal: this.abort.signal,
       });
+      onEnd?.();
       const remaining = deltaMasker.flush();
       if (this.compaction !== "asked" && remaining) {
         onEvent({ type: "message.delta", delta: remaining });
@@ -3960,6 +4028,8 @@ export class DirectAgentRuntime implements AgentRuntime {
         (error instanceof SseIdleTimeoutError || isTimeoutOrNetworkError(error))
       ) {
         breaker.recordFailure(this.nowMs());
+      } else {
+        breaker.releaseProbe();
       }
       throw error;
     }
@@ -3977,7 +4047,7 @@ export class DirectAgentRuntime implements AgentRuntime {
     if (this.runCalls.length === 0 || !this.isFallbackEligibleError(error) || degradeCount >= 4) {
       return undefined;
     }
-    const reason = safeError(error);
+    const reason = this.answerText(safeError(error));
     const { model: nextModel, blockedReason } = await this.resolveFallbackCandidate(
       activeModel,
       endpoint,
@@ -4173,8 +4243,8 @@ export class DirectAgentRuntime implements AgentRuntime {
 
     const record = {
       name: call.name,
-      input: boundedContext(call.argumentsJson || "{}", 800),
-      output: boundedHeadTailContext(output, 3000),
+      input: boundedContext(this.recordedText(call.argumentsJson || "{}"), 800),
+      output: boundedHeadTailContext(this.recordedText(output), 3000),
     };
     this.runCalls.push(record);
     // A tool call instead of the note: the note is asked for again after this round.
@@ -4183,15 +4253,23 @@ export class DirectAgentRuntime implements AgentRuntime {
     return { output, isError };
   }
 
-  private async runCodexResponsesLoop(
+  private async runResponsesLoop(
     task: AgentTask,
-    model: Extract<HermesModelConfig, { kind: "openai-codex" }>,
-    creds: CodexCredentials,
+    model: Extract<HermesModelConfig, { kind: "openai-codex" | "custom" }>,
+    creds: CodexCredentials | undefined,
     onEvent: (event: RunEvent) => void,
     initialContextCache?: { loaded: boolean; value: unknown },
   ): Promise<void> {
     let activeModel = model;
-    const resolveCodexTarget = (m: Extract<HermesModelConfig, { kind: "openai-codex" }>) => {
+    let supportsEffort = true;
+    const resolveTarget = (m: typeof model) => {
+      if (m.kind === "custom") {
+        const baseUrl = m.baseUrl.replace(/\/$/, "");
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (m.apiKey) headers.Authorization = `Bearer ${m.apiKey}`;
+        return { headers, resolvedModel: m.model, endpoint: `${baseUrl}/responses` };
+      }
+      if (!creds) throw new Error("The ChatGPT sign-in is missing.");
       const sanitizedBaseUrl =
         m.baseUrl && !m.baseUrl.includes("openrouter.ai") ? m.baseUrl : creds.baseUrl;
       const baseUrl = sanitizedBaseUrl.replace(/\/$/, "");
@@ -4207,7 +4285,7 @@ export class DirectAgentRuntime implements AgentRuntime {
         m.model.startsWith("claude-")
           ? creds.defaultModel || "gpt-6.1-sol"
           : m.model;
-      return { baseUrl, resolvedModel, endpoint: `${baseUrl}/responses` };
+      return { headers: buildCodexHeaders(creds.accessToken, baseUrl), resolvedModel, endpoint: `${baseUrl}/responses` };
     };
 
     let initialContext: unknown = initialContextCache?.loaded
@@ -4220,6 +4298,7 @@ export class DirectAgentRuntime implements AgentRuntime {
         initialContextCache.value = initialContext;
       }
     }
+    this.privacyFor(task, initialContext);
     const tuning = extractAiRuntimeTuning(task, initialContext);
     const rules = this.resolveRules(task, initialContext);
     const instructions = buildSystemInstructions(task, initialContext, rules);
@@ -4269,6 +4348,7 @@ export class DirectAgentRuntime implements AgentRuntime {
       name: t.name,
       description: t.description,
       parameters: t.parameters,
+      ...(model.kind === "custom" ? { strict: false } : {}),
     }));
 
     const maxTurns = tuning.maxTurns;
@@ -4309,32 +4389,43 @@ export class DirectAgentRuntime implements AgentRuntime {
         lastTurnToolNames,
       });
 
-      const { baseUrl, resolvedModel, endpoint } = resolveCodexTarget(activeModel);
+      const { headers, resolvedModel, endpoint } = resolveTarget(activeModel);
       const egressOpts = this.extractEgressContext(activeModel, endpoint, initialContext);
 
       const toolCalls: ParsedToolCall[] = [];
       let turnText = "";
       this.commitTurn();
       let usage: Record<string, number> | undefined;
-      const deltaMasker = new StreamingSecretMasker();
+      const deltaMasker = StreamingSecretMasker.forAnswer(this.answerText);
+      const responseTurn = new ResponsesTurn(
+        (text) => {
+          if (this.compaction === "asked" || !text) return;
+          const safe = deltaMasker.push(text);
+          if (safe) onEvent({ type: "message.delta", delta: safe });
+        },
+        (raw) => {
+          usage = { ...normalizeProviderUsage(egressOpts.provider, raw, resolvedModel) };
+          this.turnUsage = usage;
+        },
+      );
 
       try {
         const response = await this.request(
           endpoint,
           {
             method: "POST",
-            headers: buildCodexHeaders(creds.accessToken, baseUrl),
-            body: JSON.stringify({
+            headers,
+            body: modelRequestBody({
               model: resolvedModel,
               instructions,
               input: inputItems,
               ...(wireTools.length > 0 ? { tools: wireTools } : {}),
               max_output_tokens: tuning.maxOutputTokens,
-              reasoning: { effort: turnEffort },
+              ...(supportsEffort ? { reasoning: { effort: turnEffort } } : {}),
               // No `temperature`: the ChatGPT Codex backend answers 400 "Unsupported parameter: temperature".
               store: false,
               stream: true,
-            }),
+            }, this.piiMode, this.hosts),
             signal: this.abort.signal,
           },
           egressOpts,
@@ -4342,67 +4433,31 @@ export class DirectAgentRuntime implements AgentRuntime {
 
         if (!response.ok) {
           const errText = boundedContext(await response.text().catch(() => ""), 1500);
+          if (model.kind === "custom" && supportsEffort && response.status === 400 && /reasoning/i.test(errText) && /unsupported|not supported|unrecognized/i.test(errText)) {
+            supportsEffort = false;
+            turn--;
+            continue;
+          }
           throw new UpstreamHttpError(
             response.status,
             this.circuitBreakers().normalizeKey(endpoint),
-            `Codex API (${response.status}): ${errText || response.statusText}`,
+            `Model API (${response.status}): ${errText || response.statusText}`,
           );
         }
-        if (!response.body) throw new Error("Codex response stream missing");
+        if (!response.body) throw new Error("The model response stream is missing.");
 
         await this.streamSseWithBreaker(
           endpoint,
           response.body,
           deltaMasker,
-          (data) => {
-            if (data === "[DONE]") return;
-            let event: Record<string, unknown>;
-            try {
-              event = JSON.parse(data) as Record<string, unknown>;
-            } catch {
-              return;
-            }
-            const type = String(event.type || "");
-            if (type === "response.output_text.delta" && typeof event.delta === "string") {
-              turnText += event.delta;
-              if (this.compaction !== "asked") {
-                const safe = deltaMasker.push(event.delta);
-                if (safe) onEvent({ type: "message.delta", delta: safe });
-              }
-            } else if (type === "response.output_item.done" && event.item && typeof event.item === "object") {
-              const item = event.item as Record<string, unknown>;
-              if (item.type === "function_call") {
-                const callId = String(item.call_id || item.id || `call_${toolCalls.length}`);
-                const name = String(item.name || "");
-                const args = typeof item.arguments === "string" ? item.arguments : JSON.stringify(item.arguments ?? {});
-                toolCalls.push({ id: callId, name, argumentsJson: args });
-              } else if (item.type === "message" && !turnText && Array.isArray(item.content)) {
-                for (const part of item.content as Array<Record<string, unknown>>) {
-                  if (typeof part.text === "string") {
-                    turnText += part.text;
-                    if (this.compaction !== "asked") {
-                      const safe = deltaMasker.push(part.text);
-                      if (safe) onEvent({ type: "message.delta", delta: safe });
-                    }
-                  }
-                }
-              }
-            } else if (type === "response.completed" && event.response && typeof event.response === "object") {
-              const respObj = event.response as Record<string, unknown>;
-              if (respObj.usage && typeof respObj.usage === "object") {
-                const u = respObj.usage as Record<string, unknown>;
-                usage = normalizeProviderUsage("openai-codex", u, resolvedModel) as unknown as Record<string, number>;
-                this.turnUsage = usage;
-              }
-            } else if (type === "error" || type === "response.failed") {
-              const msg =
-                (event.error as { message?: string } | undefined)?.message ||
-                ((event.response as { error?: { message?: string } } | undefined)?.error?.message) ||
-                "Codex stream error";
-              throw new Error(msg);
-            }
-          },
+          (data) => responseTurn.accept(data),
           onEvent,
+          () => {
+            const { items, calls } = responseTurn.finish();
+            inputItems.push(...items);
+            toolCalls.push(...calls);
+            turnText = responseTurn.text;
+          },
         );
       } catch (error) {
         const degraded = await this.tryDegradeSameKind(
@@ -4425,14 +4480,7 @@ export class DirectAgentRuntime implements AgentRuntime {
 
       this.commitTurn();
 
-      if (turnText) {
-        finalOutput = turnText;
-        inputItems.push({
-          type: "message",
-          role: "assistant",
-          content: [{ type: "output_text", text: turnText }],
-        });
-      }
+      if (turnText && this.compaction !== "asked") finalOutput = turnText;
 
       if (toolCalls.length === 0) {
         if (this.compaction === "asked") {
@@ -4460,7 +4508,7 @@ export class DirectAgentRuntime implements AgentRuntime {
         }
         onEvent({
           type: "run.completed",
-          output: maskSecrets(finalOutput),
+          output: this.answerText(finalOutput),
           usage: this.spentUsage(usage?.context_tokens),
         });
         return;
@@ -4473,12 +4521,6 @@ export class DirectAgentRuntime implements AgentRuntime {
       let turnHadError = false;
       for (const call of toolCalls) {
         if (this.cancelled) break;
-        inputItems.push({
-          type: "function_call",
-          call_id: call.id,
-          name: call.name,
-          arguments: call.argumentsJson,
-        });
         const { output, isError } = await this.executeToolCallDetailed(call);
         if (isError) turnHadError = true;
         const formattedOutput = await this.formatToolOutput(task, call.name, call.id, output, initialContext);
@@ -4524,6 +4566,7 @@ export class DirectAgentRuntime implements AgentRuntime {
         initialContextCache.value = initialContext;
       }
     }
+    this.privacyFor(task, initialContext);
     const tuning = extractAiRuntimeTuning(task, initialContext);
     const rules = this.resolveRules(task, initialContext);
     const instructions = buildSystemInstructions(task, initialContext, rules);
@@ -4604,9 +4647,10 @@ export class DirectAgentRuntime implements AgentRuntime {
 
       let turnText = "";
       const toolCallsByIndex = new Map<number, ParsedToolCall>();
+      let finished = false;
       this.commitTurn();
       let usage: Record<string, number> | undefined;
-      const deltaMasker = new StreamingSecretMasker();
+      const deltaMasker = StreamingSecretMasker.forAnswer(this.answerText);
 
       try {
         const response = await this.request(
@@ -4614,7 +4658,7 @@ export class DirectAgentRuntime implements AgentRuntime {
           {
             method: "POST",
             headers,
-            body: JSON.stringify({
+            body: modelRequestBody({
               model: activeModel.model,
               messages,
               ...(tools.length > 0 ? { tools } : {}),
@@ -4624,7 +4668,7 @@ export class DirectAgentRuntime implements AgentRuntime {
               stream: true,
               // Without this, OpenAI's streaming API reports no usage at all, and a budget counts nothing.
               ...(this.noStreamUsage ? {} : { stream_options: { include_usage: true } }),
-            }),
+            }, this.piiMode, this.hosts),
             signal: this.abort.signal,
           },
           egressOpts,
@@ -4673,13 +4717,17 @@ export class DirectAgentRuntime implements AgentRuntime {
           response.body,
           deltaMasker,
           (data) => {
-            if (data === "[DONE]") return;
+            if (data === "[DONE]") {
+              finished = true;
+              return;
+            }
             let chunk: Record<string, unknown>;
             try {
               chunk = JSON.parse(data) as Record<string, unknown>;
             } catch {
-              return;
+              throw new Error("The model sent an invalid response event.");
             }
+            if (chunk.error) throw new Error(String((chunk.error as { message?: string }).message ?? "The model reported an error."));
             if (chunk.usage && typeof chunk.usage === "object") {
               const u = chunk.usage as Record<string, unknown>;
               usage = normalizeProviderUsage(egressOpts.provider, u, activeModel.model) as unknown as Record<
@@ -4689,8 +4737,12 @@ export class DirectAgentRuntime implements AgentRuntime {
               this.turnUsage = usage;
             }
             const choices = chunk.choices as Array<Record<string, unknown>> | undefined;
+            const reason = choices?.[0]?.finish_reason;
+            if (reason === "length" || reason === "content_filter") throw new Error("The model stopped before its response was complete.");
+            if (typeof reason === "string" && reason) finished = true;
             const delta = choices?.[0]?.delta as Record<string, unknown> | undefined;
             if (!delta) return;
+            if (delta.refusal) throw new Error("The model declined this request.");
             if (typeof delta.content === "string" && delta.content) {
               turnText += delta.content;
               if (this.compaction !== "asked") {
@@ -4715,6 +4767,9 @@ export class DirectAgentRuntime implements AgentRuntime {
             }
           },
           onEvent,
+          () => {
+            if (!finished) throw new Error("The model connection ended before the response finished.");
+          },
         );
       } catch (error) {
         const degraded = await this.tryDegradeSameKind(
@@ -4738,7 +4793,7 @@ export class DirectAgentRuntime implements AgentRuntime {
       this.commitTurn();
 
       const toolCalls = [...toolCallsByIndex.values()].filter((c) => c.name);
-      if (turnText) finalOutput = turnText;
+      if (turnText && this.compaction !== "asked") finalOutput = turnText;
 
       if (toolCalls.length === 0) {
         if (this.compaction === "asked") {
@@ -4759,7 +4814,7 @@ export class DirectAgentRuntime implements AgentRuntime {
         }
         onEvent({
           type: "run.completed",
-          output: maskSecrets(finalOutput),
+          output: this.answerText(finalOutput),
           usage: this.spentUsage(usage?.context_tokens),
         });
         return;
@@ -4824,6 +4879,7 @@ export class DirectAgentRuntime implements AgentRuntime {
         initialContextCache.value = initialContext;
       }
     }
+    this.privacyFor(task, initialContext);
     const tuning = extractAiRuntimeTuning(task, initialContext);
     const rules = this.resolveRules(task, initialContext);
     // Two system blocks, so the prompt cache can be reused: the static instructions
@@ -4928,7 +4984,8 @@ export class DirectAgentRuntime implements AgentRuntime {
       let anthropicStartUsage: Record<string, unknown> = {};
       let anthropicDeltaUsage: Record<string, unknown> = {};
       let sawMessageStart = false;
-      const deltaMasker = new StreamingSecretMasker();
+      let finished = false;
+      const deltaMasker = StreamingSecretMasker.forAnswer(this.answerText);
       this.commitTurn();
 
       try {
@@ -4941,7 +4998,7 @@ export class DirectAgentRuntime implements AgentRuntime {
               "x-api-key": activeModel.apiKey,
               "anthropic-version": "2023-06-01",
             },
-            body: JSON.stringify({
+            body: modelRequestBody({
               model: activeModel.model,
               max_tokens: tuning.maxOutputTokens,
               // No `temperature`: current Claude models reject sampling parameters.
@@ -4950,7 +5007,7 @@ export class DirectAgentRuntime implements AgentRuntime {
               messages,
               ...(tools.length > 0 ? { tools } : {}),
               stream: true,
-            }),
+            }, this.piiMode, this.hosts),
             signal: this.abort.signal,
           },
           egressOpts,
@@ -4978,10 +5035,15 @@ export class DirectAgentRuntime implements AgentRuntime {
               return;
             }
             const type = String(evt.type || "");
+            if (type === "error") throw new Error(String((evt.error as { message?: string } | undefined)?.message ?? "The model reported an error."));
+            if (type === "message_stop") finished = true;
             if (type === "message_start" && evt.message && typeof evt.message === "object") {
               sawMessageStart = true;
               const u = (evt.message as { usage?: Record<string, unknown> }).usage;
-              if (u) anthropicStartUsage = u;
+              if (u) {
+                anthropicStartUsage = u;
+                this.turnUsage = { ...normalizeProviderUsage("anthropic", u, activeModel.model) };
+              }
             } else if (type === "content_block_start" && evt.content_block && typeof evt.content_block === "object") {
               const block = evt.content_block as Record<string, unknown>;
               const idx = typeof evt.index === "number" ? evt.index : 0;
@@ -5017,13 +5079,19 @@ export class DirectAgentRuntime implements AgentRuntime {
                 if (block)
                   block.signature = `${typeof block.signature === "string" ? block.signature : ""}${delta.signature}`;
               }
-            } else if (type === "message_delta" && evt.usage && typeof evt.usage === "object") {
+            } else if (type === "message_delta") {
               const reason = (evt.delta as { stop_reason?: unknown } | undefined)?.stop_reason;
               if (typeof reason === "string") stopReason = reason;
-              anthropicDeltaUsage = evt.usage as Record<string, unknown>;
+              if (evt.usage && typeof evt.usage === "object") {
+                anthropicDeltaUsage = evt.usage as Record<string, unknown>;
+                this.turnUsage = { ...normalizeProviderUsage("anthropic", { ...anthropicStartUsage, ...anthropicDeltaUsage }, activeModel.model) };
+              }
             }
           },
           onEvent,
+          () => {
+            if (!stopReason && !finished) throw new Error("The model connection ended before the response finished.");
+          },
         );
       } catch (error) {
         const degraded = await this.tryDegradeSameKind(
@@ -5064,12 +5132,13 @@ export class DirectAgentRuntime implements AgentRuntime {
       this.commitTurn();
 
       const calls = [...toolCalls.values()].filter((c) => c.name);
-      if (turnText) finalOutput = turnText;
+      if (turnText && this.compaction !== "asked") finalOutput = turnText;
 
       // A declined request is a result of its own, not an empty answer.
       if (stopReason === "refusal")
         throw new Error("The model declined this request (stop reason: refusal).");
       // A tool call cut off at the output limit has incomplete arguments.
+      if (stopReason === "max_tokens" && !calls.length) throw new Error("The model reached its output limit before it finished.");
       if (stopReason === "max_tokens" && calls.length > 0)
         throw new Error(
           "The model reached its output limit in the middle of a tool call; raise the max output tokens setting.",
@@ -5099,7 +5168,7 @@ export class DirectAgentRuntime implements AgentRuntime {
         }
         onEvent({
           type: "run.completed",
-          output: maskSecrets(finalOutput),
+          output: this.answerText(finalOutput),
           usage: this.spentUsage(normalized.context_tokens),
         });
         return;
@@ -5178,6 +5247,7 @@ export async function consumeSseStream(
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let pendingCr = false;
 
   const readChunkWithTimeout = async (): Promise<ReadableStreamReadResult<Uint8Array>> => {
     if (!(idleTimeoutMs > 0) || !Number.isFinite(idleTimeoutMs)) {
@@ -5220,7 +5290,11 @@ export async function consumeSseStream(
     while (true) {
       const part = await readChunkWithTimeout();
       if (part.done) break;
-      buffer += decoder.decode(part.value, { stream: true }).replace(/\r\n/g, "\n");
+      let piece = decoder.decode(part.value, { stream: true });
+      if (pendingCr) piece = "\r" + piece;
+      pendingCr = piece.endsWith("\r");
+      if (pendingCr) piece = piece.slice(0, -1);
+      buffer += piece.replace(/\r\n?/g, "\n");
       let sep: number;
       while ((sep = buffer.indexOf("\n\n")) >= 0) {
         const frame = buffer.slice(0, sep);

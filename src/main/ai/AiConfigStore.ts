@@ -6,6 +6,7 @@ import {
   DEFAULT_AI_CONFIG,
   DEFAULT_AI_MODELS,
   type AiActiveProfileByRole,
+  type AiApiProtocol,
   type AiConfig,
   type AiConfigUpdate,
   type AiConfigView,
@@ -37,6 +38,7 @@ interface StoredAiConfig extends AiConfig {
 }
 
 const PROVIDERS: AiProvider[] = ["openai-codex", "anthropic", "openai-compatible"];
+const API_PROTOCOLS: AiApiProtocol[] = ["auto", "responses", "chat-completions"];
 const EGRESS_POLICIES: AiEgressPolicy[] = ["standard", "local-only", "eu-pinned"];
 const PII_SCRUBBING_MODES: AiPiiScrubbingMode[] = ["off", "standard", "strict"];
 const REASONING_EFFORTS: AiReasoningEffort[] = ["low", "medium", "high"];
@@ -113,6 +115,10 @@ function sanitizeProfile(input: ProviderProfile): ProviderProfile {
     updatedAt: typeof input.updatedAt === "number" && Number.isFinite(input.updatedAt) ? input.updatedAt : Date.now(),
   };
   if (baseUrl) sanitized.baseUrl = baseUrl;
+  if (input.apiProtocol !== undefined) {
+    if (!API_PROTOCOLS.includes(input.apiProtocol)) throw new Error("Unknown model API protocol.");
+    sanitized.apiProtocol = input.apiProtocol;
+  }
   if (input.reasoningEffort && REASONING_EFFORTS.includes(input.reasoningEffort)) {
     sanitized.reasoningEffort = input.reasoningEffort;
   }
@@ -183,6 +189,13 @@ export class AiConfigStore {
     return cipher ? decryptSecretValue(cipher) : "";
   }
 
+  /** Read destination and secret together so an edited profile cannot send its new key to its old address. */
+  public async getConnectionProfile(id: string): Promise<(ProviderProfile & { apiKey: string }) | undefined> {
+    const stored = await this.readWithCodexAutoDetect();
+    const profile = this.publicFields(stored).profiles?.find((p) => p.id === id);
+    return profile && { ...profile, apiKey: this.decryptStoredProfileKey(stored, id) };
+  }
+
   private resolvePrimaryProfile(stored: StoredAiConfig): ProviderProfile | undefined {
     const primaryId = stored.activeProfileByRole?.primary;
     if (!primaryId || !Array.isArray(stored.profiles)) return undefined;
@@ -240,6 +253,7 @@ export class AiConfigStore {
       provider: pub.provider,
       model: fallbackModel,
       baseUrl: pub.baseUrl,
+      apiProtocol: pub.apiProtocol,
       reasoningEffort: pub.reasoningEffort,
       temperature: pub.temperature,
       maxOutputTokens: pub.maxOutputTokens,
@@ -285,18 +299,19 @@ export class AiConfigStore {
       const mem = this.sessionProfileKeys.get(p.id);
       const cipher = stored.profileApiKeys?.[p.id];
       const profileOAuth = p.provider === "openai-codex" && codex.connected;
-      const hasProfileKey = Boolean(mem || cipher) || profileOAuth;
+      const hasSavedKey = Boolean(cipher && !mem && decryptSecretValue(cipher));
+      const hasProfileKey = Boolean(mem || hasSavedKey || profileOAuth);
       const keyStorage: ProviderProfile["keyStorage"] = mem
         ? "session"
-        : profileOAuth && !cipher
+        : profileOAuth && !hasSavedKey
           ? "oauth"
-          : cipher
+          : hasSavedKey
             ? "encrypted"
             : undefined;
       return {
         ...p,
         hasApiKey: hasProfileKey,
-        ...(keyStorage ? { keyStorage } : {}),
+        keyStorage,
       };
     });
 
@@ -439,6 +454,10 @@ export class AiConfigStore {
         next.baseUrl = baseUrl || undefined;
       }
 
+      if (update.apiProtocol !== undefined) {
+        if (!API_PROTOCOLS.includes(update.apiProtocol)) throw new Error("Unknown model API protocol.");
+        next.apiProtocol = update.apiProtocol;
+      }
       if (update.egressPolicy !== undefined) {
         if (!EGRESS_POLICIES.includes(update.egressPolicy)) {
           throw new Error(`Invalid egressPolicy: ${String(update.egressPolicy)}`);
@@ -553,6 +572,7 @@ export class AiConfigStore {
         next.provider = primaryProfile.provider;
         if (primaryProfile.model) next.model = primaryProfile.model;
         next.baseUrl = primaryProfile.baseUrl;
+        if (update.apiProtocol === undefined) next.apiProtocol = primaryProfile.apiProtocol;
         if (primaryProfile.reasoningEffort) next.reasoningEffort = primaryProfile.reasoningEffort;
         if (primaryProfile.temperature !== undefined) next.temperature = primaryProfile.temperature;
         if (primaryProfile.maxOutputTokens !== undefined) next.maxOutputTokens = primaryProfile.maxOutputTokens;
@@ -679,6 +699,7 @@ export class AiConfigStore {
             provider: PROVIDERS.includes(p.provider) ? p.provider : DEFAULT_AI_CONFIG.provider,
             model: typeof p.model === "string" ? p.model : "",
             ...(typeof p.baseUrl === "string" && p.baseUrl ? { baseUrl: p.baseUrl } : {}),
+            ...(p.apiProtocol && API_PROTOCOLS.includes(p.apiProtocol) ? { apiProtocol: p.apiProtocol } : {}),
             ...(p.reasoningEffort && REASONING_EFFORTS.includes(p.reasoningEffort)
               ? { reasoningEffort: p.reasoningEffort }
               : {}),
@@ -727,6 +748,7 @@ export class AiConfigStore {
         typeof stored.model === "string" && stored.model
           ? stored.model
           : DEFAULT_AI_CONFIG.model,
+      ...(stored.apiProtocol && API_PROTOCOLS.includes(stored.apiProtocol) ? { apiProtocol: stored.apiProtocol } : {}),
       ...(typeof stored.baseUrl === "string" && stored.baseUrl
         ? { baseUrl: stored.baseUrl }
         : {}),

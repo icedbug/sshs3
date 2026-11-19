@@ -507,6 +507,18 @@ describe("AiConfigStore multi-profile, roles & residency/PII persistence", () =>
     await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
+  it("restores the selected protocol and leaves existing profiles on their automatic choice", async () => {
+    const store = new AiConfigStore(file);
+    const old = { id: "old", name: "Existing service", provider: "openai-compatible" as const, model: "fixture", baseUrl: "http://localhost:11434/v1" };
+    await store.update({ profiles: [old, { ...old, id: "new", apiProtocol: "responses" }], activeProfileByRole: { primary: "new" } });
+    const reloaded = new AiConfigStore(file);
+    expect((await reloaded.getConfig()).apiProtocol).toBe("responses");
+    expect((await reloaded.getConnectionProfile("new"))?.apiProtocol).toBe("responses");
+    const restored = await reloaded.update({ activeProfileByRole: { primary: "old" } });
+    expect(restored.apiProtocol).toBeUndefined();
+    expect(restored.profiles?.find((p) => p.id === "old")).not.toHaveProperty("apiProtocol");
+  });
+
   it("stores encrypted per-profile keys, binds roles & aliases, and persists egressPolicy/zdrConfirmed/piiScrubbing", async () => {
     const store = new AiConfigStore(file);
 

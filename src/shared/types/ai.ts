@@ -1,6 +1,18 @@
 /** Model connection settings; task execution contracts live in aiHub.ts. */
 export type AiProvider = "openai-codex" | "anthropic" | "openai-compatible";
 
+export type AiApiProtocol = "auto" | "responses" | "chat-completions";
+
+export function usesResponsesApi(baseUrl: string, protocol?: AiApiProtocol): boolean {
+  if (protocol && protocol !== "auto") return protocol === "responses";
+  try {
+    const url = new URL(baseUrl);
+    return url.origin === "https://api.openai.com" && url.pathname.replace(/\/$/, "") === "/v1" && !url.search && !url.hash;
+  } catch {
+    return false;
+  }
+}
+
 export type AiReasoningEffort = "low" | "medium" | "high";
 
 export type AiEgressPolicy = "standard" | "local-only" | "eu-pinned";
@@ -18,6 +30,7 @@ export interface ProviderProfile {
   provider: AiProvider;
   model: string;
   baseUrl?: string;
+  apiProtocol?: AiApiProtocol;
   reasoningEffort?: AiReasoningEffort;
   temperature?: number;
   maxOutputTokens?: number;
@@ -38,6 +51,7 @@ export interface AiConfig {
   model: string;
   /** Optional endpoint override. Required for 'openai-compatible' (e.g. http://localhost:11434/v1). */
   baseUrl?: string;
+  apiProtocol?: AiApiProtocol;
   /** Reserved for config compatibility. */
   useHermes: boolean;
   /** Display name / handle used when recording team workspace changes (e.g. 'jacob'). */

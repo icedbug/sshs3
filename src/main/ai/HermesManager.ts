@@ -27,10 +27,17 @@ export interface HermesManifest {
 }
 
 /** Which model Hermes itself uses: Anthropic (optionally through the user's own endpoint), or any OpenAI-compatible server. */
-export type HermesModelConfig =
+export type HermesModelConfig = (
   | { kind: "anthropic"; model: string; apiKey: string; baseUrl?: string }
   | { kind: "custom"; model: string; baseUrl: string; apiKey?: string }
-  | { kind: "openai-codex"; model: string; baseUrl?: string };
+  | { kind: "openai-codex"; model: string; baseUrl?: string }
+) & {
+  apiProtocol?: import("../../shared/types/ai").AiApiProtocol;
+  profileId?: string;
+  egressPolicy?: import("../../shared/types/ai").AiEgressPolicy;
+  zdrConfirmed?: boolean;
+  fallbackProfileIds?: string[];
+};
 
 export interface HermesEndpoint {
   baseUrl: string;

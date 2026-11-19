@@ -33,6 +33,7 @@ async function hub(config: Record<string, unknown>) {
     setDemoModeForTesting(undefined);
     await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
+  h.kbNetwork = { lookup: async () => [{ address: "93.184.216.34", family: 4 }], fetchImpl: (url, init) => fetch(url, init) };
   await h.initialize();
   await h.request({ action: "configure", config: { enabled: true, ...config } } as never);
   return h;
@@ -58,6 +59,22 @@ describe("a suggestion from the model", () => {
     expect(bodies[0]).not.toHaveProperty("temperature");
     expect(s.source).toBe("model");
     expect(s.command).toBe("tail -n 20 /var/log/nginx/error.log");
+  });
+
+  it("uses the chosen API for a key-based profile and denies a destination outside its data policy", async () => {
+    const h = await hub({ provider: "openai-compatible", model: "fixture", baseUrl: "https://model.example/v1", apiProtocol: "responses", piiScrubbing: "strict" });
+    const send = vi.fn(async (_url: URL | RequestInfo, init?: RequestInit) => {
+      expect(init?.redirect).toBe("manual");
+      expect(JSON.parse(String(init?.body))).toMatchObject({ model: "fixture", store: false, input: expect.stringContaining("[email redacted]") });
+      return Response.json({ status: "completed", output: [{ type: "message", content: [{ type: "output_text", text: answer }] }] });
+    });
+    h.kbNetwork!.fetchImpl = send;
+    const ask = () => h.request({ action: "inline-suggest", prompt: "Read the nginx log for sample@example.invalid", shell: "bash" });
+    expect((await ask()).reply!.inlineSuggestion?.source).toBe("model");
+    expect(send.mock.calls[0][0]).toBe("https://model.example/v1/responses");
+    await h.config.update({ egressPolicy: "local-only" });
+    expect((await ask()).reply!.inlineSuggestion?.source).toBe("fallback");
+    expect(send).toHaveBeenCalledOnce();
   });
 
   it("waits longer than five seconds for the answer, and still gives up", async () => {

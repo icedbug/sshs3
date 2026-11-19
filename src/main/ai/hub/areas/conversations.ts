@@ -11,13 +11,13 @@ import type {
   WorkspaceActivityEvent,
 } from "../../../../shared/types/aiHub";
 import { CONTEXT_NOTE_PREFIX, SHELL_KINDS } from "../../../../shared/types/aiHub";
-import { DEFAULT_AI_MODELS } from "../../../../shared/types/ai";
+import { DEFAULT_AI_MODELS, usesResponsesApi } from "../../../../shared/types/ai";
 import { analyzeCommandSafety } from "../CommandSafetyService";
 import { hostOf } from "../Notifier";
 import { getBuiltinSkillsAndMemories, getDemoTasks, getDemoWorkforceRuns, isDemoMode } from "../demoWorkspace";
 import { type DetectedCommandActivity } from "../TerminalRegistry";
 import { scopedMemory } from "../ContextService";
-import { boundedContext, boundedPrompt, clip, maskContext, safeError } from "../privacy";
+import { boundedContext, boundedPrompt, clip, maskContext, maskProviderText, safeError, workspaceHostNames } from "../privacy";
 import {
   requiredText,
   integer,
@@ -56,12 +56,22 @@ export class ConversationsPart {
         : { ok: false, detail: "No key is saved and no model address is set. Add one in AI settings." };
     }
     try {
-      await this.assertModelEndpointReach(url);
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 4000);
       try {
-        const res = await (this.kbNetwork?.fetchImpl ?? fetch)(`${url}/models`, { signal: controller.signal });
-        if (res.status === 401 || res.status === 403) return { ok: false, detail: `${hostOf(url)} answered, and refused the key. Check the key in AI settings.` };
+        const saved = await this.config.getConfig();
+        const headers: Record<string, string> = {};
+        if (saved.apiKey && saved.baseUrl?.trim().replace(/\/+$/, "") === url) {
+          if (saved.provider === "openai-compatible") headers.Authorization = `Bearer ${saved.apiKey}`;
+          if (saved.provider === "anthropic") {
+            headers["x-api-key"] = saved.apiKey;
+            headers["anthropic-version"] = "2023-06-01";
+          }
+        }
+        const res = await this.fetchModel(saved, `${url}/models`, { headers, signal: controller.signal });
+        if (res.status === 401 || res.status === 403) return { ok: false, detail: Object.keys(headers).length
+          ? `${hostOf(url)} refused the saved key. Check the key in AI settings.`
+          : `${hostOf(url)} requires a key to list models. Save the address and its key in AI settings.` };
         if (!res.ok) return { ok: false, detail: `${hostOf(url)} answered with an error (${res.status}). Check the address in AI settings.` };
         const body = (await res.json().catch(() => undefined)) as { data?: { id?: string }[] } | undefined;
         const models = (body?.data ?? []).map((m) => String(m.id ?? "")).filter(Boolean).slice(0, 50);
@@ -270,12 +280,14 @@ export class ConversationsPart {
       learnedMatch ?? buildInstantCommandSuggestion(q, lower, targetShell);
 
     const sysPrompt = `You are an inline terminal command generator for ${targetShell}. Return ONLY a JSON object {"command":"...","explanation":"..."} with a single safe shell command matching the user's request and a 1-sentence explanation in the user's language.`;
-    // What the person typed is masked and bounded like the output around it.
-    const userPrompt = `Request: ${clip(q, 1000)}\n${context ? `Terminal output context:\n${boundedContext(context, 1500)}` : ""}`;
 
     try {
       const config = await this.config.getConfig();
       if (config.enabled) {
+        const hosts = config.piiScrubbing === "strict" ? workspaceHostNames(this.getKnownServers(), session?.label) : undefined;
+        const question = clip(maskProviderText(q, config.piiScrubbing, hosts), 1000);
+        const output = context ? boundedContext(maskProviderText(context, config.piiScrubbing, hosts), 1500) : "";
+        const userPrompt = `Request: ${question}\n${output ? `Terminal output context:\n${output}` : ""}`;
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), INLINE_SUGGEST_TIMEOUT_MS);
         try {
@@ -294,7 +306,7 @@ export class ConversationsPart {
             const creds = await auth.resolveCredentials();
             if (creds) {
               const baseUrl = (config.baseUrl || creds.baseUrl).replace(/\/$/, "");
-              const resp = await fetch(`${baseUrl}/responses`, {
+              const resp = await this.fetchModel(config, `${baseUrl}/responses`, {
                 method: "POST",
                 headers: buildCodexHeaders(creds.accessToken, baseUrl),
                 body: JSON.stringify({
@@ -324,6 +336,18 @@ export class ConversationsPart {
                 }
               }
             }
+          } else if (config.provider === "openai-compatible" && config.baseUrl && usesResponsesApi(config.baseUrl, config.apiProtocol)) {
+            const url = config.baseUrl.replace(/\/$/, "") + "/responses";
+            const headers: Record<string, string> = { "Content-Type": "application/json" };
+            if (config.apiKey) headers.Authorization = `Bearer ${config.apiKey}`;
+            const resp = await this.fetchModel(config, url, {
+              method: "POST", headers, signal: controller.signal,
+              body: JSON.stringify({ model: config.model, instructions: sysPrompt, input: userPrompt, max_output_tokens: 400, store: false }),
+            });
+            if (resp.ok) {
+              const result = await resp.json() as Record<string, unknown>;
+              if (result.status === "completed") outputText = extractResponseText(result);
+            }
           } else if (config.provider === "openai-compatible" && config.baseUrl) {
             const baseUrl = config.baseUrl.replace(/\/$/, "");
             const headers: Record<string, string> = {
@@ -332,7 +356,7 @@ export class ConversationsPart {
             if (config.apiKey) headers.Authorization = `Bearer ${config.apiKey}`;
             // `plain`: the limit under the name OpenAI's newer models take, and no temperature (they take their own only).
             const ask = (plain: boolean): Promise<Response> =>
-              fetch(`${baseUrl}/chat/completions`, {
+              this.fetchModel(config, `${baseUrl}/chat/completions`, {
                 method: "POST",
                 headers,
                 body: JSON.stringify({
@@ -362,7 +386,7 @@ export class ConversationsPart {
             const endpoint = base.endsWith("/v1")
               ? `${base}/messages`
               : `${base}/v1/messages`;
-            const resp = await fetch(endpoint, {
+            const resp = await this.fetchModel(config, endpoint, {
               method: "POST",
               headers: {
                 "Content-Type": "application/json",
@@ -372,7 +396,6 @@ export class ConversationsPart {
               body: JSON.stringify({
                 model: config.model || DEFAULT_AI_MODELS.anthropic,
                 max_tokens: 400,
-                temperature: 0.1,
                 system: sysPrompt,
                 messages: [{ role: "user", content: userPrompt }],
               }),

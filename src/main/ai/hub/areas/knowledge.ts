@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
+import type { AiConfig } from "../../../../shared/types/ai";
+import { pinnedNodeFetch, validateLlmEndpointAndEgress } from "../DirectAgentRuntime";
 import type {
   HubReply,
   KbPage,
@@ -42,7 +44,7 @@ import {
 import { buildContradictionPrompt, noteGap, pairsToCompare, parseContradictions } from "../KbLint";
 import { documentRevisedBy, sectionsOf } from "../KnowledgeBaseService";
 import { deleteDemoKbDocument, getBuiltinKbDocuments, isDemoMode, saveDemoKbDocument } from "../demoWorkspace";
-import { boundedContext, clip, maskContext, safeError } from "../privacy";
+import { boundedContext, clip, maskContext, safeError, workspaceHostNames } from "../privacy";
 import { live } from "../WorkBoard";
 import { openAiCompatibleEmbedder, type Embedder } from "../EmbeddingIndex";
 import { confirmedSomething, type DistillSource } from "../MemoryDistiller";
@@ -760,8 +762,29 @@ export class KnowledgePart {
       baseUrl: config.baseUrl,
       apiKey: config.apiKey || undefined,
       model: config.embeddingModel,
+      piiMode: config.piiScrubbing,
+      hosts: config.piiScrubbing === "strict" ? workspaceHostNames(this.getKnownServers()) : undefined,
+      fetchImpl: (url, init) => this.fetchModel(config, String(url), init ?? {}),
     });
   }
+  /** Checks the configured data policy and connects to the address that passed the check. */
+  async fetchModel(this: HubService, config: Pick<AiConfig, "provider" | "model" | "egressPolicy" | "zdrConfirmed">, url: string, init: RequestInit): Promise<Response> {
+    const target = await validateLlmEndpointAndEgress(url, {
+      provider: config.provider, model: config.model, baseUrl: url,
+      egressPolicy: config.egressPolicy, zdrConfirmed: config.zdrConfirmed,
+      ...this.outboundGuard(), lookup: this.kbNetwork?.lookup,
+    });
+    const request: RequestInit = { ...init, redirect: "manual" };
+    const response = this.kbNetwork
+      ? await this.kbNetwork.fetchImpl(url, request)
+      : await pinnedNodeFetch(target, request);
+    if (response.type === "opaqueredirect" || (response.status >= 300 && response.status < 400)) {
+      await response.body?.cancel().catch(() => {});
+      throw new Error("The model service redirected the request.");
+    }
+    return response;
+  }
+
   /** The requests this part answers. What a case leaves in `reply` goes back with the snapshot. */
   async handleKnowledge(this: HubService, request: RequestsOf<"knowledge">): Promise<Handled> {
     let reply: HubReply | undefined;

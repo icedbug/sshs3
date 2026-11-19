@@ -34,6 +34,7 @@ export interface FakeOpenAiOptions {
    * `max_completion_tokens`), a `temperature` other than the default, and `reasoning_effort`.
    */
   strict?: boolean;
+  responses?: boolean;
   /**
    * Refuses what gpt-6-luna refused when it was first run through the app, in its own words:
    * `max_tokens`, then tools without `reasoning_effort: "none"` (leaving the setting out is not
@@ -65,7 +66,7 @@ export async function fakeOpenAi(steps: FakeModelScript, options: FakeOpenAiOpti
       res.end(JSON.stringify({ object: "list", data: [{ id: "fake-1", object: "model" }] }));
       return;
     }
-    if (req.method !== "POST" || !req.url?.endsWith("/chat/completions")) {
+    if (req.method !== "POST" || !req.url?.endsWith(options.responses ? "/responses" : "/chat/completions")) {
       res.writeHead(404).end();
       return;
     }
@@ -96,10 +97,24 @@ export async function fakeOpenAi(steps: FakeModelScript, options: FakeOpenAiOpti
           return refusal(res, `Unsupported value: 'temperature' does not support ${body.temperature} with this model. Only the default (1) value is supported.`, "temperature", "unsupported_value");
       }
       const messages = (body.messages ?? []) as Array<{ role: string }>;
-      const done = messages.filter((m) => m.role === "tool").length;
+      const input = (body.input ?? []) as Array<{ type?: string }>;
+      const done = options.responses
+        ? input.filter((item) => item.type === "function_call_output").length
+        : messages.filter((m) => m.role === "tool").length;
       const step = typeof steps === "function" ? steps(body as FakeModelRequest) : steps[Math.min(done, steps.length - 1)];
       res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
       const send = (data: unknown): void => void res.write(`data: ${typeof data === "string" ? data : JSON.stringify(data)}\n\n`);
+      if (options.responses) {
+        const item = "tool" in step
+          ? { type: "function_call", name: step.tool, arguments: JSON.stringify(step.args), call_id: `c${done}`, id: `fc${done}`, status: "completed" }
+          : { type: "message", role: "assistant", id: `m${done}`, status: "completed", content: [{ type: "output_text", text: step.text, annotations: [] }] };
+        if ("text" in step) send({ type: "response.output_text.delta", delta: step.text });
+        send({ type: "response.completed", response: { status: "completed", output: [
+          { type: "reasoning", id: `r${done}`, encrypted_content: `opaque-${done}`, summary: [] }, item,
+        ], usage: { input_tokens: 1200, output_tokens: 40 } } });
+        res.end();
+        return;
+      }
       if ("tool" in step) {
         const args = JSON.stringify(step.args);
         // Sent in two pieces, as a real stream splits the arguments.

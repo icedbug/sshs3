@@ -91,7 +91,7 @@ describe("Anthropic agent loop: prompt caching and token accounting", () => {
     const fetchImpl = vi.fn(async () =>
       sse([
         { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ok" } },
-        { type: "message_delta", usage: { input_tokens: 50, output_tokens: 10 } },
+        { type: "message_delta", usage: { input_tokens: 50, output_tokens: 10 } }, { type: "message_stop" },
       ]),
     );
     const events: RunEvent[] = [];

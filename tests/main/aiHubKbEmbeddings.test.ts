@@ -227,6 +227,24 @@ describe("HubService embedding configuration", () => {
       expect(snap.config.embeddingModel).toBe("nomic-embed-text");
       expect((await embedder())?.model).toBe("nomic-embed-text");
 
+      const lookup = vi.fn(async () => [{ address: "93.184.216.34", family: 4 }]);
+      const send = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+        expect(url).toBe("https://vectors.example/v1/embeddings");
+        expect(init?.redirect).toBe("manual");
+        expect(JSON.parse(String(init?.body)).input).toEqual(["Contact [email redacted] at [ip redacted]"]);
+        return Response.json({ data: [{ index: 0, embedding: [1] }] });
+      });
+      hub.kbNetwork = { fetchImpl: send, lookup };
+      await hub.config.update({ baseUrl: "https://vectors.example/v1", piiScrubbing: "strict" });
+      const term = ["Contact sample@example.invalid at 10.2.3.4"];
+      expect(await (await embedder())!.embed(term)).toEqual([[1]]);
+      expect(lookup).toHaveBeenCalledOnce();
+      send.mockResolvedValueOnce(new Response(null, { status: 307, headers: { Location: "https://other.example" } }));
+      await expect((await embedder())!.embed(term)).rejects.toThrow("redirected");
+      await hub.config.update({ egressPolicy: "local-only" });
+      await expect((await embedder())!.embed(term)).rejects.toThrow("outside");
+      expect(send).toHaveBeenCalledTimes(2);
+
       // Anthropic has no embeddings endpoint: the setting is not used there.
       await hub.request({
         action: "configure",
