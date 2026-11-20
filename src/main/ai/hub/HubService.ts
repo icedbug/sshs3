@@ -74,6 +74,8 @@ import { TicketsPart } from "./areas/tickets";
 import { SharingPart } from "./areas/sharing";
 import { RunsPart } from "./areas/runs";
 import { ConversationsPart } from "./areas/conversations";
+import { ChatRunsPart, type HubRunEvent } from "./areas/chatRuns";
+import { memoryInFence } from "./chatFence";
 // Declared in files of their own now; still exported from here, where others import them.
 export type { HubHost } from "./hubHost";
 export { changeForSnapshot, taskForSnapshot, incomingAgentForTesting, checkedSuggestionForTesting, withUnanswered, budgetStopLine, renderWorkforceProgress } from "./hubShared";
@@ -153,6 +155,8 @@ export class HubService {
   readonly scheduleSessions = new Map<string, string>();
   /** Terminals the hub opened for a run while it ran (another server of the cluster, a ticket's target). */
   readonly runTerminals = new Map<string, Set<string>>();
+  /** Who follows the runs without a browser (see onRun). */
+  readonly runListeners = new Set<(event: HubRunEvent) => void>();
   disposed = false;
   private resume = (): void => {
     const now = Date.now();
@@ -220,7 +224,10 @@ export class HubService {
       beforeAction: host.beforeAction,
       context: async (task, query, sessionId) => {
         const extra = await this.collectExtraContext();
-        return this.context.read(task, query, sessionId, this.asOfEvalCase(task, extra));
+        // A run asked for from chat sees only its own terminals and servers: never what another
+        // conversation's terminal showed, what it did, or what was learned from it.
+        const fence = this.chatFence(task);
+        return this.context.read(task, query, sessionId, this.asOfEvalCase(task, fence ? this.fencedContext(extra, fence) : extra));
       },
       memory: async (task, request) => {
         if (request.action === "memory-save") {
@@ -245,8 +252,10 @@ export class HubService {
               (s.name.toLowerCase() === targetLabel.toLowerCase() ||
                 s.id.toLowerCase() === targetLabel.toLowerCase())),
         );
+        const fence = this.chatFence(task);
+        const memories = extra.memories ?? this.store.data.memories;
         return scopedMemory(
-          extra.memories ?? this.store.data.memories,
+          fence ? memories.filter((m) => memoryInFence(m, fence.allows, extra.workspaceServers ?? [])) : memories,
           this.scope(task),
           request.action === "skills",
           {
@@ -287,9 +296,14 @@ export class HubService {
       approvalWaitMs: () => this.approvalWaitMinutes() * 60_000,
       // Time spent waiting for a person is not the run's: its budget moves by as much.
       // Nobody sits at a ticket's or a schedule's run: what it waits for is told at once, not on the next look.
-      asking: (task) => {
+      asking: (task, change) => {
         if (worksOnItsOwn(task)) void this.flushInbox().catch((e) => log.warn("Notifications failed", safeError(e)));
+        this.emitRun({ type: "asking", taskId: task.id, changeId: change.id });
       },
+      answered: (task, changeId, answer) =>
+        this.emitRun({ type: "answered", taskId: task.id, changeId, allowed: answer.allowed, how: answer.how, final: answer.final }),
+      chatFence: (task) => this.chatFence(task),
+      chatTerminal: (task, name) => this.chatTerminal(task, name),
       waited: (task, ms) => {
         const armed = this.runTimers.get(task.id);
         if (armed) this.armRunTimer(task, armed.endsAt + ms);
@@ -923,6 +937,7 @@ export class HubService {
 
   reflectTaskCompletion(task: AgentTask): void {
     if (task.status !== "completed" && task.status !== "failed") return;
+    if (!this.learnsFrom(task)) return;
     try {
       const knownServers = this.getKnownServers();
       const session = task.target
@@ -1259,6 +1274,7 @@ export class HubService {
       changed: this.changed.bind(this),
       recheckChange: this.broker.checkCurrentPolicy.bind(this.broker),
       closeWhenRunEnds: this.closeWhenRunEnds.bind(this),
+      chatFence: this.chatFence.bind(this),
       getMcpServersList: this.getMcpServersList.bind(this),
       getKbDocumentsList: this.getKbDocumentsList.bind(this),
       getAgentsList: this.getAgentsList.bind(this),
@@ -1319,5 +1335,5 @@ export class HubService {
 
 /** The hub's methods that are kept in files of their own (./areas). Declared here so the class has them; put on it just below. */
 // eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging -- it names the parts and has no members of its own
-export interface HubService extends InboxPart, ChatAndAtlassianPart, FactsPart, AlertsPart, SchedulesPart, SimulationPart, EvalsPart, AuditPart, McpPart, AgentsPart, MemoryPart, KnowledgePart, SafetyPart, ServersPart, TicketsPart, SharingPart, RunsPart, ConversationsPart {}
-mixParts(HubService, [InboxPart, ChatAndAtlassianPart, FactsPart, AlertsPart, SchedulesPart, SimulationPart, EvalsPart, AuditPart, McpPart, AgentsPart, MemoryPart, KnowledgePart, SafetyPart, ServersPart, TicketsPart, SharingPart, RunsPart, ConversationsPart]);
+export interface HubService extends InboxPart, ChatAndAtlassianPart, FactsPart, AlertsPart, SchedulesPart, SimulationPart, EvalsPart, AuditPart, McpPart, AgentsPart, MemoryPart, KnowledgePart, SafetyPart, ServersPart, TicketsPart, SharingPart, RunsPart, ConversationsPart, ChatRunsPart {}
+mixParts(HubService, [InboxPart, ChatAndAtlassianPart, FactsPart, AlertsPart, SchedulesPart, SimulationPart, EvalsPart, AuditPart, McpPart, AgentsPart, MemoryPart, KnowledgePart, SafetyPart, ServersPart, TicketsPart, SharingPart, RunsPart, ConversationsPart, ChatRunsPart]);

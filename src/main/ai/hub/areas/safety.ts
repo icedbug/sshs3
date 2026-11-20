@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import type {
+  ChatServiceName,
   AgentMode,
   SafetyPolicyConfig,
   AgentChange,
@@ -31,6 +32,7 @@ import { resolveTargetSelector } from "../WorkforceRunner";
 import { approvalAsksEach, approvalMessage, checkPlanApprovals, rejectionMessage, todosFromPlan } from "../PlanMode";
 import { requiredText, integer } from "../hubHelpers";
 import { log, BOOLEAN_POLICY_NAMES, active } from "../hubShared";
+import { chatServiceLabel } from "../chatFence";
 import type { HubService } from "../HubService";
 import type { Handled, RequestsOf } from "./routes";
 
@@ -43,6 +45,9 @@ import type { Handled, RequestsOf } from "./routes";
  * A part of HubService. These are the hub's own methods, kept in a file of their own: `this` is the hub,
  * and they are copied onto its class where it is declared (HubService.ts).
  */
+/** Said when an answer was given to a plan that is no longer the one waiting. */
+const PLAN_REPLACED = "That plan was replaced. Answer the new one.";
+
 export class SafetyPart {
   resolveSafetyContext(this: HubService,
     task: Pick<AgentTask, "target" | "startedAs" | "agentId">,
@@ -197,7 +202,10 @@ export class SafetyPart {
   planProposed(this: HubService, task: AgentTask): void {
     const plan = task.plan;
     if (!plan || plan.status !== "proposed") return;
-    const sessions = this.terminals.list().filter((s) => s.state !== "disconnected");
+    // A run asked for from chat binds its steps only to terminals of its own: a person's tab on the
+    // same server is not where its plan runs.
+    const fence = this.chatFence(task);
+    const sessions = this.terminals.list().filter((s) => s.state !== "disconnected" && (!fence || fence.own(s.id)));
     for (const step of plan.steps) {
       const name = step.target?.trim().toLowerCase();
       const matches = sessions.filter((s) => name
@@ -212,6 +220,7 @@ export class SafetyPart {
     const needs = this.planApprovalStatus(task, plan, plan.approvals ?? []).status.requiredApprovals;
     if (needs > 1) plan.requiredApprovals = needs;
     else delete plan.requiredApprovals;
+    this.emitRun({ type: "plan", taskId: task.id, planId: plan.id, status: plan.status });
   }
 
   /**
@@ -222,25 +231,34 @@ export class SafetyPart {
    *
    * What another member writes is shown to the person whose run it is. It is never sent to the agent as
    * that person's words, and a second person's no does not send the agent back to work.
+   *
+   * A person who answers in a chat thread (`chatApprover`) is another account too, but the conversation
+   * is nobody's own: they answer it as its owner would. Their note goes to the agent, their choice about
+   * each command holds, and their no with a note sends the agent back to revise.
    */
   async decidePlan(this: HubService,
     task: AgentTask,
     answer: { approved: boolean; note?: string; askEach?: boolean },
-    who: { actor: string; actorId: string; peer?: boolean },
+    who: { actor: string; actorId: string; peer?: boolean; chatApprover?: boolean; via?: ChatServiceName },
   ): Promise<HubSnapshot | undefined> {
     const plan = task.plan;
     if (!plan || plan.status !== "proposed") throw new Error("There is no plan waiting for a decision in this conversation");
     if (active(task)) throw new Error("The agent is still working; decide when it has stopped");
     const note = answer.note?.trim();
     const { actor, actorId } = who;
+    const ownerLike = !who.peer || who.chatApprover === true;
+    // Where the answer was given, for the conversation to say: "Maria Ek approved in Slack."
+    const inChat = who.chatApprover && who.via ? ` in ${chatServiceLabel(who.via)}` : "";
     const vote = (allowed: boolean): AgentChangeApproval => ({
       actor,
       actorId,
       at: Date.now(),
       allowed,
       ...(who.peer ? { peer: true } : {}),
+      ...(who.via ? { via: who.via } : {}),
       ...(note ? { note: boundedContext(note, 1000) } : {}),
     });
+    const told = (): void => this.emitRun({ type: "plan", taskId: task.id, planId: plan.id, status: plan.status });
     const say = (text: string): void => {
       task.messages.push({ id: crypto.randomUUID(), role: "system", text, at: Date.now() });
       task.updatedAt = Date.now();
@@ -249,6 +267,9 @@ export class SafetyPart {
     const wrote = who.peer && note ? ` They wrote: "${boundedContext(note, 1000)}"` : "";
     if (this.getKnownServers().length === 0) {
       await this.collectExtraContext().catch(() => undefined);
+      // Looked at again after the wait: the agent may have proposed another plan, or started, meanwhile.
+      if (task.plan !== plan || plan.status !== "proposed") throw new Error(PLAN_REPLACED);
+      if (active(task)) throw new Error("The agent is still working; decide when it has stopped");
     }
     const planTargets = Array.from(new Set([task.target?.label, ...plan.steps.map((s) => s.target)].filter((t): t is string => Boolean(t?.trim()))));
     if (answer.approved) {
@@ -273,34 +294,53 @@ export class SafetyPart {
       plan.requiredApprovals = approvalStatus.requiredApprovals;
       if (!approvalStatus.satisfied) {
         // What the person whose run it is chose about each command is kept for when the plan is approved.
-        if (!who.peer && answer.askEach === true && !plan.askEach) plan.askEach = "person";
+        if (ownerLike && answer.askEach === true && !plan.askEach) plan.askEach = "person";
         say(
-          who.peer
+          who.chatApprover
+            ? `${actor} approved this plan${inChat}. It needs ${approvalStatus.requiredApprovals === 2 ? "one more person" : `${approvalStatus.requiredApprovals} different people in all`}. The agent starts when enough of them have approved.`
+            : who.peer
             ? `${actor} approved this plan as the second person. It waits for your own answer.`
             : approvalStatus.requiredApprovals === 2
               ? "You approved this plan. It needs one more person. The teammates who may approve it see it in their inbox. The agent starts when one of them has approved."
               : `You approved this plan. It needs ${approvalStatus.requiredApprovals} different people in all. The teammates who may approve it see it in their inbox. The agent starts when enough of them have approved.`,
         );
         this.changed();
+        told();
         return undefined;
       }
       plan.decidedAt = Date.now();
       plan.status = "approved";
       if (approvalStatus.isProd) plan.production = true;
       else delete plan.production;
-      // What the person whose run it is added, whoever of the two answered last.
-      const ownNote = who.peer ? nextApprovals.find((a) => a.allowed && !a.peer)?.note : note;
+      // What the person whose run it is added, whoever of the two answered last. In a chat thread each
+      // approver answers as the owner would, so what every one of them wrote goes to the agent.
+      const chatNotes = nextApprovals.filter((a) => a.allowed && a.via && a.note);
+      const ownNote = who.chatApprover
+        ? chatNotes.length > 1
+          ? chatNotes.map((a) => `${a.actor}: ${a.note}`).join("\n")
+          : chatNotes[0]?.note
+        : ownerLike
+          ? note
+          : nextApprovals.find((a) => a.allowed && !a.peer)?.note;
       // What this approval covers is settled here, where the person decided, and written on the plan.
       // A second person approves the plan as it stands: what is asked about each command is the
-      // plan's own promise, or what the person whose run it is chose when they approved.
-      const asks = who.peer ? plan.askEach : approvalAsksEach(plan, { note, askEach: answer.askEach });
+      // plan's own promise, or what the person whose run it is chose when they approved. An earlier
+      // choice to be asked about each command is never undone by the one who answers last.
+      const asks =
+        plan.askEach === "person"
+          ? "person"
+          : ownerLike
+            ? approvalAsksEach(plan, { note, askEach: answer.askEach })
+            : plan.askEach;
       if (asks) plan.askEach = asks;
       else delete plan.askEach;
       if (ownNote) plan.decisionNote = boundedContext(ownNote, 2000);
       // The agent is held to the plan: its steps become its task list.
       task.todos = todosFromPlan(plan);
-      if (who.peer) say(`${actor} approved this plan as the second person.${wrote}`);
+      if (who.chatApprover) say(`${actor} approved${inChat}.`);
+      else if (who.peer) say(`${actor} approved this plan as the second person.${wrote}`);
       this.changed();
+      told();
       if (!who.peer) return this.request({ action: "reply", taskId: task.id, text: approvalMessage(plan, ownNote) });
       try {
         return await this.request({ action: "reply", taskId: task.id, text: approvalMessage(plan, ownNote) });
@@ -314,15 +354,24 @@ export class SafetyPart {
     plan.decidedAt = Date.now();
     plan.approvals = [...(plan.approvals ?? []), vote(false)];
     plan.status = "rejected";
-    if (who.peer) {
+    told();
+    if (!ownerLike) {
       say(`${actor} did not approve this plan.${wrote} Nothing was run. Ask the agent for a new plan, or go on another way.`);
       this.changed();
       return undefined;
     }
+    if (who.chatApprover) say(`${actor} did not approve this plan${inChat}.`);
     if (note) {
       plan.decisionNote = boundedContext(note, 2000);
       this.changed();
-      return this.request({ action: "reply", taskId: task.id, text: rejectionMessage(note) });
+      if (!who.peer) return this.request({ action: "reply", taskId: task.id, text: rejectionMessage(note) });
+      try {
+        return await this.request({ action: "reply", taskId: task.id, text: rejectionMessage(note) });
+      } catch (error) {
+        say(`The agent could not be started again: ${clip(error instanceof Error ? error.message : String(error), 300)} Send it a message to go on.`);
+        this.changed();
+        return undefined;
+      }
     }
     this.changed();
     return undefined;
@@ -345,6 +394,114 @@ export class SafetyPart {
       { actor: requiredText(peer.name), actorId, peer: true },
     );
     // Recorded now: a request of this person's own saves at its end, this one is somebody else's.
+    await this.store.save().catch(() => undefined);
+  }
+
+  /**
+   * What a button in a chat thread would answer, for the server to check whether the person who pressed
+   * it may: the tags of what it touches (a plan for production says "production"), how many people it
+   * needs, and who has answered. Only a conversation asked for from chat is answered from there.
+   */
+  chatApprovalSubject(this: HubService, taskId: string, id: string): {
+    kind: "change" | "plan";
+    targetTags: string[];
+    requiredApprovals: number;
+    votes: Array<{ actor: string; actorId?: string; allowed: boolean }>;
+    /** A change to sshs3's own rules: only answered in the app. */
+    setting: boolean;
+    /** Still waiting for an answer. */
+    waiting: boolean;
+  } {
+    const task = this.store.data.tasks.find((t) => t.id === taskId);
+    if (!task?.chat) throw new Error("That conversation was not asked for from chat.");
+    const votesOf = (list: AgentChangeApproval[] | undefined) =>
+      (list ?? []).map((a) => ({ actor: a.actor, ...(a.actorId ? { actorId: a.actorId } : {}), allowed: a.allowed }));
+    const plan = task.plan;
+    if (plan && plan.id === id) {
+      const { status, tags } = this.planApprovalStatus(task, plan, plan.approvals ?? []);
+      return {
+        kind: "plan",
+        targetTags: status.isProd && !tags.some(isProdTag) ? [...tags, "production"] : tags,
+        requiredApprovals: status.requiredApprovals,
+        votes: votesOf(plan.approvals),
+        setting: false,
+        waiting: plan.status === "proposed" && !active(task),
+      };
+    }
+    const change = task.changes.find((c) => c.id === id);
+    if (!change) throw new Error("That change is not in this conversation.");
+    // The tags of the terminal the change runs on, as the broker reads them (ToolBroker.safetyFor):
+    // not of the run's first target, which may be another server.
+    let on: AgentTask["target"] = task.target;
+    if (change.targetKey) {
+      const session = this.terminals.list().find((s) => JSON.stringify([s.id, s.generation]) === change.targetKey);
+      on = session ? { sessionId: session.id, generation: session.generation, label: session.label } : undefined;
+    }
+    return {
+      kind: "change",
+      targetTags: this.resolveSafetyContext({ ...task, target: on }, change.target).targetTags ?? [],
+      requiredApprovals: Math.max(1, change.requiredApprovals ?? 1),
+      votes: votesOf(change.approvals),
+      setting: change.kind === "setting",
+      waiting: change.status === "pending" && this.broker.waitingFor(change.id),
+    };
+  }
+
+  /**
+   * A person who linked their chat account answers a change from a button in the thread. The server
+   * has checked that they may (chatApprovalSubject, the same rules as a second person in the app). The
+   * answer counts as theirs, once, and the conversation records where it was given.
+   */
+  async approveFromChat(this: HubService,
+    taskId: string,
+    changeId: string,
+    allowed: boolean,
+    person: { id: string; name: string; via: ChatServiceName },
+    note?: string,
+  ): Promise<boolean> {
+    const task = this.store.data.tasks.find((t) => t.id === taskId);
+    if (!task?.chat) throw new Error("That conversation was not asked for from chat.");
+    const change = task.changes.find((c) => c.id === changeId);
+    if (change?.kind === "setting") throw new Error("A change to sshs3's own rules is answered in the app.");
+    const actorId = `user:${requiredText(person.id)}`;
+    if (actorId === this.localApproverId()) throw new Error("This account answers its own changes in the app.");
+    const name = requiredText(person.name);
+    const resolved = this.broker.approve(taskId, changeId, allowed, note?.trim() ? clip(note.trim(), 1000) : undefined, {
+      actor: name,
+      actorId,
+      peer: true,
+      via: person.via,
+    });
+    if (change && (resolved || change.status !== "pending")) change.decidedBy = { name, at: Date.now(), allowed };
+    this.changed();
+    // Recorded now: nobody's request saves at its end here.
+    await this.store.save().catch(() => undefined);
+    return resolved;
+  }
+
+  /**
+   * A person who linked their chat account answers the plan of a conversation asked for from chat, as
+   * its owner would (see decidePlan): an approval that completes it starts the agent again.
+   */
+  async decidePlanFromChat(this: HubService,
+    taskId: string,
+    planId: string,
+    approved: boolean,
+    person: { id: string; name: string; via: ChatServiceName },
+    options: { note?: string; askEach?: boolean } = {},
+  ): Promise<void> {
+    const note = options.note;
+    const task = this.store.data.tasks.find((t) => t.id === taskId);
+    if (!task?.chat) throw new Error("That conversation was not asked for from chat.");
+    // A card stays in the thread: a press on it answers the plan it showed, never a newer one.
+    if (task.plan?.id !== planId || task.plan.status !== "proposed") throw new Error(PLAN_REPLACED);
+    const actorId = `user:${requiredText(person.id)}`;
+    if (actorId === this.localApproverId()) throw new Error("This account answers its own plans in the app.");
+    await this.decidePlan(
+      task,
+      { approved, ...(note?.trim() ? { note: clip(note.trim(), 1000) } : {}), ...(options.askEach ? { askEach: true } : {}) },
+      { actor: requiredText(person.name), actorId, peer: true, chatApprover: true, via: person.via },
+    );
     await this.store.save().catch(() => undefined);
   }
 

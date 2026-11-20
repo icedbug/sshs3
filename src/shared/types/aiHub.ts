@@ -309,6 +309,8 @@ export interface AgentChangeApproval {
   note?: string;
   /** The answer came from another member of the server, as the second person, not from the one whose run it is. */
   peer?: boolean;
+  /** The answer was given with a button in a chat thread, by a person who linked their chat account. */
+  via?: ChatServiceName;
 }
 
 export interface AgentChangeStructuredCheck {
@@ -409,6 +411,12 @@ export interface AgentChange {
   idempotencyKey?: string;
   /** Structured assertion for verifying post-change command output. */
   structuredCheck?: AgentChangeStructuredCheck;
+  /**
+   * The servers a change runs on when it is not one terminal: a command run
+   * across a cluster names every server it reaches, so a chat fence can be
+   * checked against each of them.
+   */
+  targetProfiles?: string[];
   /**
    * In a snapshot only: the long parts of this change (its output beyond the first lines, a file's
    * contents and diff, a dry run's output, the snapshot taken before it) were left out. `task-read`
@@ -561,6 +569,41 @@ export interface AgentTask {
   sessionAllowPrefixes?: string[];
   /** Ordered list of agent ids/names that handled this task across handoffs (for loop & hop guards). */
   handoffChain?: string[];
+  /**
+   * The conversation was asked for from a chat thread. Its runs stay inside
+   * the fence the administrator set for that channel: only those servers, and
+   * no further than that reach.
+   */
+  chat?: ChatOrigin;
+}
+
+/**
+ * How far an agent asked from a chat channel may go. "read": only safe
+ * read-only commands. "ask": changes, each approved by a person. "plan": a
+ * plan first, approved before anything runs.
+ */
+export type ChatReach = "read" | "ask" | "plan";
+
+/** What an administrator lets a chat channel reach. */
+export interface ChatFence {
+  /** Server profile ids, names or hosts, matched exactly. "*" is every server of the hub. */
+  servers: string[] | "*";
+  /** Cluster names: every server in one of them is inside the fence. */
+  clusters: string[];
+  reach: ChatReach;
+  /** Channel ids whose team chat the agent may search. Absent: only the channel it was asked in. */
+  historyFrom?: string[];
+}
+
+/** Where a conversation asked from chat came from, and the fence it runs inside. */
+export interface ChatOrigin {
+  service: ChatServiceName;
+  channelId: string;
+  channelName: string;
+  threadId: string;
+  kind: "channel" | "dm";
+  askedBy: { chatUserId: string; name: string; accountId?: string };
+  fence: ChatFence;
 }
 
 export type MemoryScope =

@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { appendSourceCalls } from "../../../../shared/answerSources";
 import path from "node:path";
-import type { AgentChange, AgentSchedule, AgentTask, MissionAgent, StartAgentTask } from "../../../../shared/types/aiHub";
+import type { AgentChange, AgentSchedule, AgentTask, ChatOrigin, MissionAgent, StartAgentTask } from "../../../../shared/types/aiHub";
 import { acpWorkspaceAllowlist } from "../../../../shared/acpWorkspaceTools";
 import { DEFAULT_AI_MODELS } from "../../../../shared/types/ai";
 import { CodexAuthProvider } from "../../CodexAuthProvider";
@@ -9,6 +9,7 @@ import { HermesManager, type HermesModelConfig } from "../../HermesManager";
 import { analyzeCommandSafety, isProdTag, shouldRequireCommandApproval } from "../CommandSafetyService";
 import { AcpRuntime } from "../AcpRuntime";
 import { lowerMode } from "../AppGuard";
+import { CHAT_NOT_EXTERNAL, reachMode } from "../chatFence";
 import { Replay } from "../EvalSuite";
 import { getDemoTasks, isDemoMode } from "../demoWorkspace";
 import { isDemoTarget } from "../../../demo/demoMode";
@@ -99,6 +100,9 @@ export class RunsPart {
 
   settled(this: HubService, taskId: string): void {
     this.scheduledRunEnded(taskId);
+    // Told to whoever follows the run without a browser: the hub's own background work is not followed.
+    const ended = this.store.data.tasks.find((t) => t.id === taskId);
+    if (ended && !isBackgroundRun(ended)) this.emitRun({ type: "settled", taskId, status: ended.status });
     const list = this.settleWaiters.get(taskId);
     if (!list) return;
     this.settleWaiters.delete(taskId);
@@ -121,6 +125,8 @@ export class RunsPart {
     replay?: Replay,
     /** The ticket the run works, known before it starts: what it is offered depends on it. */
     ticketId?: string,
+    /** The chat thread it was asked from (startFromChat): its fence holds from the first tool call. */
+    chat?: ChatOrigin,
   ): Promise<AgentTask> {
     if (!["advice", "plan", "assisted", "autonomous"].includes(input.mode))
       throw new Error("Invalid autonomy mode");
@@ -166,6 +172,8 @@ export class RunsPart {
       ...(readOnly?.evalCaseId ? { evalCaseId: readOnly.evalCaseId } : {}),
       ...(ticketId ? { ticketId } : {}),
       ...(schedule ? { scheduleId: schedule.id } : {}),
+      // Words from a channel, or from somebody who is not linked to an account, are from outside.
+      ...(chat ? { chat, ...(chat.kind === "channel" || !chat.askedBy.accountId ? { tainted: true } : {}) } : {}),
       mode: input.mode,
       agentId: matchedAgent?.id ?? input.agentId,
       agentName: matchedAgent?.name ?? input.agentName,
@@ -302,6 +310,8 @@ export class RunsPart {
     if (safetyCtx.clusterPolicy?.maxMode) {
       task.mode = lowerMode(task.mode, safetyCtx.clusterPolicy.maxMode);
     }
+    // Asked for from chat: never further than the channel's reach, and never on its own.
+    if (task.chat) task.mode = lowerMode(task.mode, reachMode(task.chat.fence.reach));
     // The workspace rules reach the run through its context (ContextService: `workspaceRules`, the ones
     // that apply to its target), not as a copy of every rule's text stored on every task.
     const viaRunner = !isBackgroundRun(task) && this.getAgentsList().some((a) => a.id === task.agentId && a.runnerId);
@@ -309,6 +319,9 @@ export class RunsPart {
     const external = isBackgroundRun(task)
       ? undefined
       : this.getAgentsList().find((a) => a.id === task.agentId && a.runnerId);
+    // An external agent runs its commands on this machine, through no fence and no approval in the
+    // thread: a conversation asked for from chat runs on the configured model only.
+    if (external && this.chatLead(task)) throw new Error(CHAT_NOT_EXTERNAL);
     if (external) return this.launchExternal(task, external, assertLaunching);
     // A schedule runs on the endpoint that is configured now. It keeps a model
     // of its own only while it was saved for this same endpoint: after a change
@@ -662,6 +675,7 @@ export class RunsPart {
       if (
         !isBackgroundRun(task) &&
         this.store.data.preferences.proposeMemories !== false &&
+        this.learnsFrom(task) &&
         worthDistilling(task)
       )
         void this.queueForLearning(
@@ -675,6 +689,8 @@ export class RunsPart {
     }
     task.updatedAt = Date.now();
     if (task.ticketId && !active(task)) this.settleTickets();
+    // A piece of the answer is not news to a follower: it reads the stored text when the run settles.
+    if (!isBackgroundRun(task) && event.type !== "message.delta") this.emitRun({ type: "progress", taskId: task.id, event: event.type });
     // A piece of text, a usage count, a tool's answer: the windows were sent it as it came (host.delta)
     // and put it into the conversation themselves. Telling them to fetch everything again for each piece
     // is what a long answer did hundreds of times a second.
@@ -988,6 +1004,12 @@ export class RunsPart {
         }
       })
       .finally(async () => {
+        // A run that was let go of while it hung (see `releaseStuckRun`) ends here much later, perhaps
+        // beside a new run of the same conversation: only its own token is left to let go of.
+        if (this.runtimes.get(task.id) !== runtime) {
+          if (acpTokenId) await this.mcpTokens().revoke("local", acpTokenId).catch(() => undefined);
+          return;
+        }
         this.clearRunTimer(task.id);
         this.broker.revoke(task.id);
         if (active(task)) {
@@ -1028,6 +1050,39 @@ export class RunsPart {
   }
 
   /**
+   * The steps of a plan were bound to the terminal they were proposed for. When the hub opened that
+   * terminal itself, it was closed at the end of the run and is opened again under a new id when the
+   * conversation goes on (reviveOwnTerminal, a chat run naming the server again). The steps not run
+   * yet follow it to the new terminal on the same server: the approval was for that server, and would
+   * otherwise ask again for every step. A step bound to a terminal that is still open stays with it.
+   */
+  rebindPlanSteps(this: HubService, task: AgentTask, profileId: string, sessionId: string, formerKey?: string): void {
+    const plan = task.plan;
+    const session = this.terminals.get(sessionId);
+    if (!plan || plan.status === "rejected" || !session) return;
+    const key = JSON.stringify([session.id, session.generation]);
+    const server = this.getKnownServers().find((s) => s.id === profileId);
+    const names = (name: string | undefined): boolean => {
+      const wanted = name?.trim().toLowerCase();
+      return Boolean(wanted && server && [server.id, server.name, server.host].some((n) => n.toLowerCase() === wanted));
+    };
+    for (const step of plan.steps) {
+      if (step.ranAt || !step.approvedTarget || step.approvedTarget === key) continue;
+      let boundTo: string | undefined;
+      try {
+        const parsed: unknown = JSON.parse(step.approvedTarget);
+        if (Array.isArray(parsed) && typeof parsed[0] === "string") boundTo = parsed[0];
+      } catch {
+        continue;
+      }
+      const was = boundTo ? this.terminals.get(boundTo) : undefined;
+      if (was && was.state !== "disconnected") continue;
+      const sameServer = was ? was.profileId === profileId : step.approvedTarget === formerKey || names(step.target);
+      if (sameServer) step.approvedTarget = key;
+    }
+  }
+
+  /**
    * A conversation whose terminal the hub opened itself goes on: the terminal
    * was closed when its last run ended, and is opened again on the same
    * target. Left as it is when it cannot be opened; the caller then treats
@@ -1046,7 +1101,9 @@ export class RunsPart {
           : await this.openUnattendedTerminal({ profileId: own.profileId, shell: own.shell }, own.label);
       const opened = this.terminals.get(id);
       if (!opened) return;
+      const before = task.target ? JSON.stringify([task.target.sessionId, task.target.generation]) : undefined;
       task.target = { sessionId: opened.id, generation: opened.generation, label: opened.label };
+      this.rebindPlanSteps(task, own.profileId, opened.id, before);
       // Closed again when the run that is about to start ends (also when it fails to start).
       const set = this.runTerminals.get(task.id) ?? new Set<string>();
       set.add(id);

@@ -346,6 +346,7 @@ parts that define the same method name are refused when the file loads.
 | `areas/routes.ts` | The table of which part answers which request, and its types | |
 | `areas/conversations.ts` | A person's requests about a conversation (start, reply, stop, checkpoint, take a change back, fork, compact), the AI settings, a one-line suggestion, the activity log | 19 |
 | `areas/runs.ts` | A run: starting it, its events, its budget and clock, stopping it; runs on an external agent | none: started by other parts |
+| `areas/chatRuns.ts` | Conversations asked for from a chat thread: the fence they run inside (`chatFence.ts`), starting and going on, their own terminals, and following a run without a browser (`onRun`, `runView`) | none: called by the chat agent |
 | `areas/safety.ts` | The safety rules (a person's own, and the ones an administrator sets for everyone), approvals of changes and plans (also by a second person), rules and runbooks | 11 |
 | `areas/tickets.ts` | The board: goals and tickets, starting a ticket's agent, the board's clock | 10 |
 | `areas/agents.ts` | Agents, external runners, workforce runs, specialists, a plan's reviewer, investigators | 11 |

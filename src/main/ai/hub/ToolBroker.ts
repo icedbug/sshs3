@@ -6,9 +6,12 @@ import type {
   AgentChange,
   AgentChangeStructuredCheck,
   AgentTask,
+  ChatServiceName,
   ClusterSafetyPolicy,
   SafetyPolicyConfig,
+  TerminalSession,
 } from "../../../shared/types/aiHub";
+import { CHAT_APP_TOOLS, mayKeepNotes, sensitiveFile, type ChatFenceCheck } from "./chatFence";
 import type { TerminalRegistry } from "./TerminalRegistry";
 import {
   analyzeCommandSafety,
@@ -406,8 +409,35 @@ export interface ToolDependencies {
   budgetSpent?(task: AgentTask): void;
   /** Told that a command is not run a fourth time for the same answer, the agent kept asking: the run ends here. */
   stuck?(task: AgentTask, why: string): void;
+  /**
+   * A person answered a change, or the wait for one ended. `final` is false for an approval that
+   * still needs another person's.
+   */
+  answered?(task: AgentTask, changeId: string, answer: { allowed: boolean; how: NonNullable<AgentChange["decidedHow"]>; final: boolean }): void;
+  /** The fence of a run asked for from chat: only its servers, only its own terminals. Undefined for any other run. */
+  chatFence?(task: AgentTask): ChatFenceCheck | undefined;
+  /** Opens a terminal for a chat run on the server it named, when that server is inside its fence; refuses otherwise. */
+  chatTerminal?(task: AgentTask, name: string): Promise<string>;
   changed(): void;
 }
+
+/** Said to an agent asked for from chat that reached for something outside what the channel was given. */
+const outsideFence = (what: string): ToolBrokerError =>
+  new ToolBrokerError("auth_denied", `${what} Nothing ran. Work with the servers and tools this chat was given, or say what a person should do in the app.`, {
+    code: "outside_chat_fence",
+  });
+
+/** Said to a chat run that reached for a file that may hold secrets with a tool that asks nobody. */
+export const sensitiveForChat = (fence: ChatFenceCheck): ToolBrokerError =>
+  fence.reach === "read"
+    ? new ToolBrokerError("auth_denied", "This chat may only look, and that file may hold secrets. It was not read. Say what you would look for, and that a person can read it in the app.", {
+        code: "chat_read_only",
+      })
+    : new ToolBrokerError(
+        "auth_denied",
+        "That file may hold secrets. It was not read. If it is needed, read it with terminal_command, which a person approves first.",
+        { code: "sensitive_file" },
+      );
 
 /** A random capability is issued to one run. Model-supplied IDs can never rebind its target. */
 export class ToolBroker {
@@ -734,7 +764,7 @@ export class ToolBroker {
     changeId: string,
     allowed: boolean,
     note?: string,
-    approver?: { actor?: string; actorId?: string; peer?: boolean; adminException?: boolean },
+    approver?: { actor?: string; actorId?: string; peer?: boolean; adminException?: boolean; via?: ChatServiceName },
   ): boolean {
     const approval = this.approvals.get(changeId);
     if (!approval || approval.taskId !== taskId)
@@ -749,7 +779,7 @@ export class ToolBroker {
     if (change) {
       change.approvals ??= [];
       const actor = approver?.actor ?? change.decidedBy?.name ?? "User";
-      const asPeer = approver?.peer ? { peer: true as const } : {};
+      const asPeer = { ...(approver?.peer ? { peer: true as const } : {}), ...(approver?.via ? { via: approver.via } : {}) };
       if (!allowed) {
         change.approvals.push({
           actor,
@@ -794,6 +824,7 @@ export class ToolBroker {
           [...approvers].some((k) => k !== requester);
         if (!change.adminException && (approvers.size < approval.requiredApprovals || !peer)) {
           this.deps.changed();
+          this.deps.answered?.(approval.task, changeId, { allowed: true, how: "person", final: false });
           return false;
         }
       }
@@ -806,6 +837,11 @@ export class ToolBroker {
     this.approvals.delete(changeId);
     approval.resolve({ allowed, how: "person", ...(note ? { note } : {}) });
     return true;
+  }
+
+  /** Whether a person is asked about this change right now. */
+  waitingFor(changeId: string): boolean {
+    return this.approvals.has(changeId);
   }
 
   /** Whether a run has a question out to a person. */
@@ -826,13 +862,15 @@ export class ToolBroker {
     task.changes.push(change);
     task.status = "waiting";
     this.deps.changed();
-    this.deps.asking?.(task, change);
-    const answer = await this.waitForPerson(
+    // The question is out before anybody is told of it: whoever is told can answer it at once.
+    const waiting = this.waitForPerson(
       task,
       change.id,
       Math.max(1, change.requiredApprovals ?? 1),
       requesterId,
     );
+    this.deps.asking?.(task, change);
+    const answer = await waiting;
     // Stopped while it waited: no answer lets it through. Otherwise the run waits on while
     // another of its questions is still open (an external agent may ask several at once).
     const still = task.status === "waiting" || task.status === "running";
@@ -840,6 +878,7 @@ export class ToolBroker {
     change.decidedHow = still ? answer.how : "stopped";
     if (still) task.status = this.waitingOnPerson(task.id) ? "waiting" : "running";
     this.deps.changed();
+    this.deps.answered?.(task, change.id, { allowed: answer.allowed, how: answer.how, final: true });
     return answer.allowed && still;
   }
 
@@ -965,15 +1004,27 @@ export class ToolBroker {
       const commandsBefore = grant.commands;
       let activeChange: AgentChange | undefined;
 
+      // Set only for a run asked for from chat: everything below is held to it.
+      const fence = this.deps.chatFence?.(task);
       const executeBody = async (): Promise<unknown> => {
         if (request.action === "context")
           return await this.deps.context(task, request.query, request.id);
+        // What is said in a channel, or by somebody who is not linked, is not a person's own note: it would
+        // be written into the memory every channel's runs read. A run that may only look writes nothing.
+        if (request.action === "memory-save" && fence && !mayKeepNotes(fence.origin))
+          throw outsideFence("A conversation asked for from chat saves to memory only in a direct message from a linked person.");
         if (
           request.action === "memory" ||
           request.action === "skills" ||
           request.action === "memory-save"
         )
           return await this.deps.memory(task, request);
+        if (
+          fence &&
+          (request.action.startsWith("sshs3_") || request.action.startsWith("mcp__")) &&
+          !CHAT_APP_TOOLS.has(request.action)
+        )
+          throw outsideFence(`${clip(request.action, 80)} is managed in the app, not from chat.`);
         if (
           (request.action.startsWith("sshs3_") ||
             request.action.startsWith("mcp__")) &&
@@ -1003,6 +1054,11 @@ export class ToolBroker {
               "An investigator does not change files.",
               { code: "investigator_read_only" },
             );
+          if (fence && (!task.target || !fence.own(task.target.sessionId)))
+            throw outsideFence("Files are read on a terminal this chat run opened on one of its servers, and it has none.");
+          // A file that may hold secrets is read only as a command that reads it would be: a person
+          // approves it first, and a chat that may only look does not read it. The file tools ask nobody.
+          if (fence && typeof request.path === "string" && sensitiveFile(request.path)) throw sensitiveForChat(fence);
           if (isMutatingFile) this.spend(grant, task);
           const fileRes = await this.deps.file(task, request, (change) => {
             activeChange = change;
@@ -1020,7 +1076,36 @@ export class ToolBroker {
 
         // Resolve target terminal: explicit request.id (sessionId, profileId, or node label) or bound task.target
         let target = task.target;
-        if (request.id) {
+        if (fence) {
+          // A chat run uses only terminals it was given or opened, on its servers. A name of another
+          // server inside the fence opens one there; anything else is refused. Never another open
+          // terminal of the account, and never a local shell.
+          if (target && !fence.own(target.sessionId)) target = undefined;
+          if (request.id) {
+            const id = request.id.trim();
+            const direct = this.terminals.get(id);
+            const named = direct
+              ? [direct]
+              : this.terminals.list().filter((s) => s.profileId === id || s.label.toLowerCase() === id.toLowerCase());
+            const mine = named.filter((s) => s.state !== "disconnected" && fence.own(s.id));
+            // Several of its own on that server: the one it works in, else the first. Never one more.
+            let session: TerminalSession | undefined = mine.find((s) => s.id === task.target?.sessionId) ?? mine[0];
+            if (!session) {
+              if (!this.deps.chatTerminal) throw outsideFence(`"${clip(id, 80)}" is not a terminal of this chat run.`);
+              session = this.terminals.get(await this.deps.chatTerminal(task, id));
+            }
+            if (!session || session.state === "disconnected" || !fence.own(session.id))
+              throw outsideFence(`"${clip(id, 80)}" is not a terminal of this chat run.`);
+            target = { sessionId: session.id, generation: session.generation, label: session.label };
+            if (!task.target || !fence.own(task.target.sessionId)) task.target = target;
+          }
+          if (!target)
+            throw new ToolBrokerError(
+              "precondition",
+              "This conversation has no terminal yet. Name the server to run it on in sessionId: one of the servers this chat was given.",
+              { code: "no_terminal" },
+            );
+        } else if (request.id) {
           const id = request.id.trim();
           const direct = this.terminals.get(id);
           const exact = direct ? [direct] : this.terminals.list().filter((s) =>
@@ -1032,7 +1117,7 @@ export class ToolBroker {
           target = { sessionId: session.id, generation: session.generation, label: session.label };
           if (!task.target) task.target = target;
         }
-        if (!target) {
+        if (!target && !fence) {
           const fallbackSession = this.terminals
             .list()
             .find((s) => s.state !== "disconnected");
@@ -1065,7 +1150,7 @@ export class ToolBroker {
         this.spend(grant, task);
 
         // Auto-handshake on demand if the terminal has not been armed yet (and was not invalidated)
-        if (task.mode !== "advice" || task.investigator) {
+        if (task.mode !== "advice" || task.investigator || fence?.reach === "read") {
           const live = this.terminals.get(target.sessionId);
           if (
             live &&
@@ -1677,6 +1762,27 @@ export class ToolBroker {
     }
   }
 
+  /**
+   * Why a change of a chat run falls outside its fence, or nothing when it is inside. A command or file
+   * runs on a terminal the run owns; one sent to several servers names each, and each must be inside.
+   * A change to sshs3's own rules is made in the app.
+   */
+  private outsideChatFence(task: AgentTask, change: AgentChange, fence: ChatFenceCheck): string | undefined {
+    if (change.kind === "setting") return "sshs3's own rules are changed in the app, not from chat.";
+    if (change.targetProfiles?.length)
+      return change.targetProfiles.every((p) => fence.allows(p)) ? undefined : `${change.target} reaches a server this chat was not given.`;
+    let sessionId: string | undefined;
+    if (change.targetKey) {
+      try {
+        const parsed: unknown = JSON.parse(change.targetKey);
+        if (Array.isArray(parsed) && typeof parsed[0] === "string") sessionId = parsed[0];
+      } catch {
+        sessionId = undefined;
+      }
+    } else sessionId = task.target?.sessionId;
+    return sessionId && fence.own(sessionId) ? undefined : `${change.target} is not a terminal this chat run opened on its servers.`;
+  }
+
   private async authorize(
     key: string,
     task: AgentTask,
@@ -1685,17 +1791,45 @@ export class ToolBroker {
     sensitiveRead = false,
   ): Promise<void> {
     this.capabilityAtDecision.set(change, key);
-    if (task.investigator) {
+    const fence = this.deps.chatFence?.(task);
+    if (fence) {
+      const outside = this.outsideChatFence(task, change, fence);
+      if (outside) {
+        change.status = "denied";
+        change.decidedHow = "policy";
+        change.output = outside;
+        this.deps.changed();
+        throw outsideFence(outside);
+      }
+    }
+    // A chat channel that may only look is held to the investigator's rule: advice would refuse even a look.
+    const looksOnly = task.investigator || fence?.reach === "read";
+    if (looksOnly) {
       // An investigator looks and never changes: only what the classifier calls read-only, and nobody is asked.
       const readOnly = change.kind === "command" && change.riskLevel === "safe" && !sensitiveRead;
+      // A chat run is held to the target's own rules as any run is: a cluster that allows only advice
+      // runs nothing from it, a look included.
+      if (readOnly && fence) {
+        try {
+          this.checkCurrentPolicy(task, change);
+        } catch (error) {
+          change.status = "denied";
+          change.decidedHow = "policy";
+          change.output = safeError(error);
+          this.deps.changed();
+          throw error;
+        }
+      }
       change.status = readOnly ? "approved" : "denied";
       change.decidedHow = "policy";
       this.deps.changed();
       if (!readOnly)
         throw new ToolBrokerError(
           "auth_denied",
-          `An investigator only runs read-only commands, and this one is classified as "${change.riskLevel ?? "changing"}"${change.riskReason ? ` (${change.riskReason})` : ""}. Find it out another way, or report that it needs a command you may not run.`,
-          { code: "investigator_read_only" },
+          task.investigator
+            ? `An investigator only runs read-only commands, and this one is classified as "${change.riskLevel ?? "changing"}"${change.riskReason ? ` (${change.riskReason})` : ""}. Find it out another way, or report that it needs a command you may not run.`
+            : `This chat may only look, and this command is classified as "${change.riskLevel ?? "changing"}"${change.riskReason ? ` (${change.riskReason})` : ""}. It was not run. Say what you would change, and that a person can do it in the app.`,
+          { code: task.investigator ? "investigator_read_only" : "chat_read_only" },
         );
       const grant = this.grants.get(key);
       if (!grant || Date.now() >= grant.expiresAt || task.status !== "running")
@@ -1863,6 +1997,10 @@ export class ToolBroker {
       requiresApproval = false;
       change.decidedHow = "plan";
       listedInPlan = true;
+      // Another account's approval of the plan (a person in a chat thread) is that person's, and is
+      // checked again just before the step runs, perhaps much later: they may no longer be allowed to.
+      if (task.plan?.approvals?.some((vote) => vote.allowed && vote.peer))
+        change.approvals = task.plan.approvals.filter((vote) => vote.allowed).map((vote) => ({ ...vote }));
     }
     // A change to the rules themselves is a person's to make: no mode, policy or plan lets it through unasked.
     if (change.guard || change.forceApproval) requiresApproval = true;
@@ -1917,76 +2055,86 @@ export class ToolBroker {
       }
     }
 
-    if (requiresApproval) {
-      const nonInteractive =
-        request.nonInteractive === true ||
-        this.deps.nonInteractive?.(task) === true;
-      if (nonInteractive) {
-        this.deps.changed();
-        this.deps.asking?.(task, change);
-        throw new ApprovalRequiredSignal(change);
-      }
+    // Told once the change says how it was answered (approved, refused, timed out), never before:
+    // whoever is told reads the conversation at once.
+    let answered: Answer | undefined;
+    try {
+      if (requiresApproval) {
+        const nonInteractive =
+          request.nonInteractive === true ||
+          this.deps.nonInteractive?.(task) === true;
+        if (nonInteractive) {
+          this.deps.changed();
+          this.deps.asking?.(task, change);
+          throw new ApprovalRequiredSignal(change);
+        }
 
-      // Never the model's own word: a run cannot name somebody else as the person it acts for.
-      const requesterId =
-        ctxRequesterId ??
-        task.startedAs?.agentId ??
-        task.agentId;
+        // Never the model's own word: a run cannot name somebody else as the person it acts for.
+        const requesterId =
+          ctxRequesterId ??
+          task.startedAs?.agentId ??
+          task.agentId;
 
-      task.status = "waiting";
-      this.deps.changed();
-      this.deps.asking?.(task, change);
-      const answer = await this.waitForPerson(
-        task,
-        change.id,
-        requiredApprovals,
-        requesterId,
-      );
-      const allowed = answer.allowed;
-      change.decidedHow = answer.how;
-      if (answer.note) change.decisionNote = answer.note;
-      const grant = this.grants.get(key);
-      if (
-        !allowed ||
-        !grant ||
-        Date.now() >= grant.expiresAt ||
-        task.status !== "waiting"
-      ) {
-        change.status = "denied";
-        if (grant && task.status === "waiting") task.status = "running";
+        task.status = "waiting";
         this.deps.changed();
-        // A refusal with a reason is something to act on: the run goes on, and the agent reads why.
-        throw new ToolBrokerError(
-          "auth_denied",
-          answer.note && answer.how === "person"
-            ? `Not approved. The person said: ${answer.note}`
-            : answer.how === "timeout"
-              ? // Said as it is, with the command: "not approved" read as a person's no, and the report then left out what waited.
-                `Nobody answered within ${minutes(this.deps.approvalWaitMs?.() ?? 0)}, so this did not run: ${change.command ?? change.description}. It was not refused; nobody was there. Do not ask for it again in this run. Go on with what does not need it, and name this command in your report as waiting for a person's approval.`
-              : "Action not approved or task stopped",
-          { code: answer.how === "timeout" ? "approval_timeout" : "approval_denied" },
+        // The question is out before anybody is told of it: whoever is told can answer it at once.
+        const waiting = this.waitForPerson(
+          task,
+          change.id,
+          requiredApprovals,
+          requesterId,
         );
+        this.deps.asking?.(task, change);
+        const answer = await waiting;
+        answered = answer;
+        const allowed = answer.allowed;
+        change.decidedHow = answer.how;
+        if (answer.note) change.decisionNote = answer.note;
+        const grant = this.grants.get(key);
+        if (
+          !allowed ||
+          !grant ||
+          Date.now() >= grant.expiresAt ||
+          task.status !== "waiting"
+        ) {
+          change.status = "denied";
+          if (grant && task.status === "waiting") task.status = "running";
+          this.deps.changed();
+          // A refusal with a reason is something to act on: the run goes on, and the agent reads why.
+          throw new ToolBrokerError(
+            "auth_denied",
+            answer.note && answer.how === "person"
+              ? `Not approved. The person said: ${answer.note}`
+              : answer.how === "timeout"
+                ? // Said as it is, with the command: "not approved" read as a person's no, and the report then left out what waited.
+                  `Nobody answered within ${minutes(this.deps.approvalWaitMs?.() ?? 0)}, so this did not run: ${change.command ?? change.description}. It was not refused; nobody was there. Do not ask for it again in this run. Go on with what does not need it, and name this command in your report as waiting for a person's approval.`
+                : "Action not approved or task stopped",
+            { code: answer.how === "timeout" ? "approval_timeout" : "approval_denied" },
+          );
+        }
+        task.status = "running";
       }
-      task.status = "running";
-    }
-    const grant = this.grants.get(key);
-    if (!grant || Date.now() >= grant.expiresAt || task.status !== "running") {
-      // Never left pending or approved: the run that asked is gone.
-      change.status = "denied";
-      change.decidedHow = "stopped";
+      const grant = this.grants.get(key);
+      if (!grant || Date.now() >= grant.expiresAt || task.status !== "running") {
+        // Never left pending or approved: the run that asked is gone.
+        change.status = "denied";
+        change.decidedHow = "stopped";
+        this.deps.changed();
+        throw new ToolBrokerError("auth_denied", "Run capability revoked", {
+          code: "capability_revoked",
+        });
+      }
+      await this.beforeAction(task, change);
+      if (change.decidedHow === "plan" && !matchesPlan(true)) {
+        change.status = "denied";
+        throw new Error("The approved plan changed before execution.");
+      }
+      change.status = "approved";
+      change.decidedHow ??= "policy";
       this.deps.changed();
-      throw new ToolBrokerError("auth_denied", "Run capability revoked", {
-        code: "capability_revoked",
-      });
+    } finally {
+      if (answered) this.deps.answered?.(task, change.id, { allowed: answered.allowed, how: answered.how, final: true });
     }
-    await this.beforeAction(task, change);
-    if (change.decidedHow === "plan" && !matchesPlan(true)) {
-      change.status = "denied";
-      throw new Error("The approved plan changed before execution.");
-    }
-    change.status = "approved";
-    change.decidedHow ??= "policy";
-    this.deps.changed();
   }
 
   private async handle(

@@ -32,8 +32,10 @@ import type {
   MissionAgent,
   WorkspaceRule,
   WorkspaceRuleScope,
+  WorkspaceServerSummary,
 } from "../../../shared/types/aiHub";
 import { CONTEXT_NOTE_PREFIX } from "../../../shared/types/aiHub";
+import { allowedServerNames, CHAT_APP_TOOLS, mayKeepNotes } from "./chatFence";
 import type { ToolRequest } from "./ToolBroker";
 import type { AgentRuntime, RunEvent } from "./AgentRuntime";
 import { isProdTag } from "./CommandSafetyService";
@@ -2507,8 +2509,9 @@ export function isDistillRun(task: AgentTask): boolean {
  * those tools act on. Every call carries the tool list and the snapshot again:
  * here they were half of what a heartbeat run was sent each time.
  */
-export function worksOnItsOwn(task: Pick<AgentTask, "ticketId" | "scheduleId">): boolean {
-  return Boolean(task.ticketId || task.scheduleId);
+export function worksOnItsOwn(task: Pick<AgentTask, "ticketId" | "scheduleId" | "chat">): boolean {
+  // A conversation asked for from chat too: the person is in a chat thread, not at the app.
+  return Boolean(task.ticketId || task.scheduleId || task.chat);
 }
 
 /** The management tools a run that works on its own is not given (see worksOnItsOwn). */
@@ -2544,7 +2547,7 @@ const MANAGEMENT_CONTEXT = [
  * closed ones: those are a person's tabs, not its target. The context itself
  * is left as it is: the runtime still reads its settings from it.
  */
-export function contextForModel(task: Pick<AgentTask, "ticketId" | "scheduleId">, context: unknown): unknown {
+export function contextForModel(task: Pick<AgentTask, "ticketId" | "scheduleId" | "chat">, context: unknown): unknown {
   if (!context || typeof context !== "object" || Array.isArray(context)) return context;
   const out: Record<string, unknown> = { ...(context as Record<string, unknown>) };
   const target = out.target as { session?: { id?: string } } | null | undefined;
@@ -2649,7 +2652,8 @@ function allToolsForTask(
   const activeAgent = resolveActiveAgent(task, initialContext);
   let baseTools: FunctionToolDef[] =
     // A replayed test case has no terminal, but the conversation it was made from had: it gets the same tools.
-    task.mode === "advice" || (!task.target && !task.evalCaseId)
+    // A chat run opens a terminal on the server it names (see chatTools), so it has them without one too.
+    task.mode === "advice" || (!task.target && !task.evalCaseId && !task.chat)
       ? AGENT_TOOLS.filter(
           (t) =>
             t.name === "workspace_context" ||
@@ -2713,7 +2717,48 @@ function allToolsForTask(
     });
   }
 
-  return baseTools;
+  return task.chat ? chatTools(task, baseTools, initialContext) : baseTools;
+}
+
+/** Tools that only write: a chat that may only look is not offered them, as they would always be refused. */
+const CHAT_WRITE_TOOLS = new Set(["sshs3_change", "file_write", PLAN_TOOL.name]);
+/** Tools that need a terminal: offered to a chat run with the servers it may open one on. */
+const TERMINAL_TOOLS = new Set(["terminal_command", "sshs3_change", "terminal_verify"]);
+
+/**
+ * The tools of a conversation asked for from chat, held to its fence: sshs3's own only where
+ * CHAT_APP_TOOLS has them, no MCP tool, and nothing that writes to memory unless a linked person asked
+ * in a direct message (mayKeepNotes).
+ * Without a terminal yet, the terminal tools say which servers it may name; the broker opens one there.
+ */
+function chatTools(task: AgentTask, tools: FunctionToolDef[], initialContext?: unknown): FunctionToolDef[] {
+  const chat = task.chat!;
+  const servers = (initialContext as { workspaceServers?: WorkspaceServerSummary[] } | undefined)?.workspaceServers;
+  const names = allowedServerNames(chat.fence, Array.isArray(servers) ? servers : []);
+  const kept = tools.filter((t) => {
+    if (t.name.startsWith("mcp__")) return false;
+    if (t.name.startsWith("sshs3_") && !CHAT_APP_TOOLS.has(t.name)) return false;
+    if (chat.fence.reach === "read" && CHAT_WRITE_TOOLS.has(t.name)) return false;
+    if (!mayKeepNotes(chat) && t.name === "workspace_remember") return false;
+    // File tools read the run's own terminal: without one they would only be refused.
+    if (!task.target && (t.name === "file_read" || t.name === "file_write")) return false;
+    if (!task.target && !names.length && TERMINAL_TOOLS.has(t.name)) return false;
+    return true;
+  });
+  if (task.target || !names.length) return kept;
+  const choose = `Required: the server to run it on, one of: ${names.join(", ")}. A terminal is opened there for this conversation.`;
+  return kept.map((t) => {
+    if (!TERMINAL_TOOLS.has(t.name)) return t;
+    const params = t.parameters as { properties?: Record<string, unknown>; required?: string[] };
+    return {
+      ...t,
+      parameters: {
+        ...params,
+        properties: { ...params.properties, sessionId: { type: "string", description: choose } },
+        required: [...new Set([...(params.required ?? []), "sessionId"])],
+      },
+    };
+  });
 }
 
 function extractAiRuntimeTuning(

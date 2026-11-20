@@ -324,9 +324,13 @@ export class AgentsPart {
   ): Promise<AgentPlan["review"]> {
     const request =
       task.messages.filter((m) => m.role === "user").at(-1)?.text ?? task.title;
+    const runId = `plan-${crypto.randomUUID().slice(0, 8)}`;
+    // The reviewer of a plan asked for from chat reads for that conversation: its fence holds for it too.
+    const fenced = Boolean(this.chatLead(task));
+    if (fenced) this.workforceLeads.set(runId, task.id);
     try {
       const result = await this.runReadOnlySpecialist({
-        runId: `plan-${crypto.randomUUID().slice(0, 8)}`,
+        runId,
         prompt: reviewerPrompt(plan, request),
         agentName: "Plan reviewer",
         mainModel: true,
@@ -346,6 +350,8 @@ export class AgentsPart {
           `The review could not be done: ${safeError(error)}. This plan has not been reviewed.`,
         ],
       };
+    } finally {
+      if (fenced) this.workforceLeads.delete(runId);
     }
   }
 

@@ -15,6 +15,7 @@ import type {
   WorkspaceServerSummary,
 } from "../../../shared/types/aiHub";
 import { isProdTag } from "./CommandSafetyService";
+import { memoryInFence } from "./chatFence";
 import { pageIndex } from "./KbCompile";
 import type { HubStore } from "./HubStore";
 import type { KnowledgeBaseService } from "./KnowledgeBaseService";
@@ -678,6 +679,21 @@ export function resolveWorkspaceRules(
 
 export interface ExtraWorkspaceContext {
   /**
+   * Set for a run asked for from chat: the terminals it may see. Another terminal of the account, its
+   * output and its history are left out, as if it were not open.
+   */
+  allowSession?: (sessionId: string) => boolean;
+  /**
+   * Set with `allowSession`: the saved servers it may know about. What was done on another server, what
+   * was read from it, and notes about it are left out, and so are the servers themselves.
+   */
+  allowProfile?: (profileId: string | undefined) => boolean;
+  /**
+   * Set with `allowSession`: the other conversations whose work it may see (the same channel's). What
+   * another one changed is left out of the activity, also on a server it may use.
+   */
+  allowTask?: (task: AgentTask) => boolean;
+  /**
    * Set for the replay of a test case: the moment the case was made. What the open terminals show
    * now is left out, and so is activity after that moment.
    */
@@ -979,9 +995,13 @@ export class ContextService {
     extra?: ExtraWorkspaceContext,
   ): PartitionedContextSnapshot {
     const q = query.toLowerCase().slice(0, 500);
+    const allowSession = extra?.allowSession;
+    const visible = (sessionId: string | undefined): sessionId is string => Boolean(sessionId) && (!allowSession || allowSession(sessionId!));
     // The run's own target, or none: never whichever terminal happens to be open first, whose output,
-    // links and changes would then be given as "the target".
-    const id = sessionIdOverride ?? task.target?.sessionId;
+    // links and changes would then be given as "the target". A run held to a fence asking about a
+    // terminal outside it is given its own target instead.
+    const wanted = sessionIdOverride ?? task.target?.sessionId;
+    const id = !allowSession ? wanted : visible(wanted) ? wanted : visible(task.target?.sessionId) ? task.target!.sessionId : undefined;
     const termChars = Math.max(
       1000,
       Math.min(64_000, extra?.terminalContextChars ?? 8000),
@@ -991,7 +1011,7 @@ export class ContextService {
     const allTerminals =
       extra?.asOf !== undefined
         ? []
-        : this.terminals.list().map((t) => {
+        : this.terminals.list().filter((t) => !allowSession || allowSession(t.id)).map((t) => {
             const rawOutput = this.terminals.context(t.id);
             return {
               ...t,
@@ -1002,11 +1022,29 @@ export class ContextService {
             };
           });
 
+    // Held to a fence (a run asked for from chat): only its own servers, only what was done there, and
+    // not what another channel's conversation did, wrote down or found. Other runs' work is theirs.
+    const allowProfile = extra?.allowProfile;
+    const hiddenChanges = allowProfile
+      ? new Set(
+          this.store.data.tasks
+            .filter((t) => !extra?.allowTask?.(t))
+            .flatMap((t) => t.changes.map((c) => `change-${c.id}`)),
+        )
+      : undefined;
     const activitySource = (extra?.activityLog ?? this.store.data.activityLog ?? []).filter(
-      (a) => extra?.asOf === undefined || a.at <= extra.asOf,
+      (a) =>
+        (extra?.asOf === undefined || a.at <= extra.asOf) &&
+        (!allowProfile || (allowProfile(a.profileId) && !hiddenChanges!.has(a.id))),
     );
-    const memorySource = extra?.memories ?? this.store.data.memories;
-    const servers = extra?.workspaceServers ?? [];
+    const everyServer = extra?.workspaceServers ?? [];
+    const memorySource = (extra?.memories ?? this.store.data.memories).filter(
+      (m) => !allowProfile || memoryInFence(m, allowProfile, everyServer),
+    );
+    const servers = allowProfile ? everyServer.filter((s) => allowProfile(s.id)) : everyServer;
+    const serverNames = new Set(servers.map((s) => s.name.toLowerCase()));
+    const readHere = (r: { serverId?: string; name: string }): boolean =>
+      !allowProfile || (r.serverId ? allowProfile(r.serverId) : serverNames.has(r.name.toLowerCase()));
 
     const clusterMap = new Map<string, string[]>();
     for (const s of servers) {
@@ -1045,8 +1083,9 @@ export class ContextService {
     const changedRecentlyLines = (extra?.recentServerChanges ?? [])
       .filter(
         (r) =>
-          watched.has(r.name.toLowerCase()) ||
-          (r.cluster && watched.has(r.cluster.toLowerCase())),
+          readHere(r) &&
+          (watched.has(r.name.toLowerCase()) ||
+            (r.cluster && watched.has(r.cluster.toLowerCase()))),
       )
       .flatMap((r) => r.lines)
       .map((line) => clip(stripInvisibleUnicode(line), 400))
@@ -1055,7 +1094,7 @@ export class ContextService {
       .slice(0, 30);
     // Only this target's own reading: a cluster name would bring in every server of it.
     const nowFacts = (extra?.serverFactsNow ?? []).find((r) =>
-      mine.includes(r.name.toLowerCase()),
+      readHere(r) && mine.includes(r.name.toLowerCase()),
     );
     const nowFactLines = nowFacts
       ? nowFacts.lines.slice(0, 60).map((line) => clip(stripInvisibleUnicode(line), 400))
@@ -1188,10 +1227,13 @@ export class ContextService {
         ...(a.detail ? { detail: clip(stripInvisibleUnicode(a.detail), 800) } : {}),
       }));
 
+    // A workforce run does not say which conversation asked for it: a fenced run is given none.
     const recentWorkforceRuns = (
-      extra?.workforceRuns ??
-      this.store.data.workforceRuns ??
-      []
+      allowProfile
+        ? []
+        : extra?.workforceRuns ??
+          this.store.data.workforceRuns ??
+          []
     )
       .slice(0, 5)
       .map((r) => ({
@@ -1240,6 +1282,7 @@ export class ContextService {
         .filter(
           (s) =>
             (!id || s.id === `terminal:${id}`) &&
+            (!allowSession || (s.id.startsWith("terminal:") && allowSession(s.id.slice("terminal:".length)))) &&
             (!q || s.text.toLowerCase().includes(q)),
         )
         .slice(-10)

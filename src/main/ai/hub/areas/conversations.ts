@@ -193,8 +193,10 @@ export class ConversationsPart {
       };
       this.appendActivityEvent(event);
 
-      // Voyager Failure->Fix Self-Learning: if an AI command succeeded on a session with a prior failure
+      // Voyager Failure->Fix Self-Learning: if an AI command succeeded on a session with a prior failure.
+      // Not from a run of the hub every chat channel shares (learnsFrom).
       if (
+        this.learnsFrom(task) &&
         session &&
         activeFailure &&
         change.kind === "command" &&
