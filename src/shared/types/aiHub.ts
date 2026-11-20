@@ -269,6 +269,13 @@ export interface EvalCase {
 
 export type CommandRiskLevel = "safe" | "modify" | "destructive";
 
+/** How far a change goes, in plain words: the same on the agent bot's chat cards and in the app's lists. */
+export const RISK_LEVEL_TEXT: Record<CommandRiskLevel, string> = {
+  safe: "Low. It only reads.",
+  modify: "It changes something.",
+  destructive: "High. It can remove or overwrite data.",
+};
+
 export interface ClusterSafetyPolicy {
   maxMode?: AgentMode;
   requiredApprovals?: number;
@@ -1546,7 +1553,11 @@ export interface ChatTaskView {
   title: string;
   status: AgentTask["status"];
   chat: ChatOrigin;
-  messages: AgentMessage[];
+  /**
+   * A person's message holds only what they wrote; `told` is what the agent was given with it: who
+   * asked and how far it may go, and what the team wrote in the thread before.
+   */
+  messages: Array<AgentMessage & { told?: string }>;
   changes: AgentChange[];
   plan?: AgentPlan;
   tokens?: number;
@@ -1559,7 +1570,8 @@ export interface ChatTryResult {
   thread: string;
   /** The run ended (or none was started) before the answer was sent. */
   settled: boolean;
-  posts: Array<{ id: string; threadId?: string; text: string; edits: number; buttons: boolean }>;
+  /** `waitingCard`: a card for a change or plan that still waits for an answer. */
+  posts: Array<{ id: string; threadId?: string; text: string; edits: number; buttons: boolean; waitingCard?: boolean }>;
   /** What the bot showed to the person alone. */
   privateNotes: string[];
 }

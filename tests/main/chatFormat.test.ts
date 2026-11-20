@@ -216,7 +216,7 @@ describe('change card', () => {
     expect(card.fits).toEqual({ slack: true, mattermost: true });
     const blocks = card.slack.blocks!;
     const text = blocks.map((b) => JSON.stringify(b)).join('\n');
-    for (const want of ['Restart nginx', 'web-1', 'sudo systemctl restart nginx', 'systemctl is-active nginx', 'active', 'sudo systemctl start nginx', '+y', 'Approvals: 1 of 2', 'Maria in Slack', 'look like secrets', 'linked their chat account'])
+    for (const want of ['Restart nginx', 'web-1', 'sudo systemctl restart nginx', 'systemctl is-active nginx', 'active', 'sudo systemctl start nginx', '+y', '1 of 2 approvals. Approved by Maria in Slack.', 'Maria in Slack', 'look like secrets', 'linked their chat account'])
       expect(text).toContain(want);
     const actions = blocks.find((b) => b.type === 'actions') as { elements: Array<{ action_id: string; value: string; confirm?: unknown }> };
     expect(actions.elements.map((e) => [e.action_id, e.value])).toEqual([
@@ -280,7 +280,7 @@ describe('change card', () => {
     expect(JSON.stringify(approved.slack.blocks).match(/Approved by/g)).toHaveLength(1);
     expect(approved.mattermost.message.match(/Approved by/g)).toHaveLength(1);
     // A denied card still shows who approved before somebody denied it.
-    expect(JSON.stringify(changeCard(change(), { approvers: 'linked', final: { state: 'denied', by: ['Omar'], via: 'slack' } }).slack.blocks)).toContain('Approvals: 1 of 2');
+    expect(JSON.stringify(changeCard(change(), { approvers: 'linked', final: { state: 'denied', by: ['Omar'], via: 'slack' } }).slack.blocks)).toContain('1 of 2 approvals. Approved by Maria in Slack.');
     const restarted = changeCard(change(), { approvers: 'linked', final: { state: 'restarted' } });
     expect(restarted.mattermost.message).toContain(RESTARTED_TEXT);
     expect(restarted.mattermost.attachments).toEqual([]);
@@ -315,10 +315,34 @@ describe('plan card', () => {
   it('shows the goal, every step, the review and how many must approve', () => {
     const card = planCard(plan(), { approvers: 'linked', production: true, buttons });
     const text = JSON.stringify(card.slack.blocks);
-    for (const want of ['Move the database', 'Step 1', 'Stop the service', 'systemctl stop pg', 'Risk: medium', 'inactive', 'systemctl start pg', 'Step 2', 'rsync -a', 'asks for changes', 'Take a backup first.', 'none yet', '2 people must approve', 'production'])
+    for (const want of ['Move the database', 'Step 1', 'Stop the service', 'systemctl stop pg', 'Risk: medium', 'inactive', 'systemctl start pg', 'Step 2', 'rsync -a', 'asks for changes', 'Take a backup first.', 'No approvals yet. 2 needed.', 'production'])
       expect(text).toContain(want);
     expect(card.mattermost.message).toContain('**Step 2**');
     expect(card.fits.mattermost).toBe(true);
+  });
+});
+
+describe('card lines', () => {
+  it('end as sentences where they are prose, whatever the model wrote', () => {
+    const card = changeCard(
+      change({ description: 'Restart the Harvest poller', riskReason: 'Systemd service state modification', blastRadius: 'the poller only', check: { command: 'systemctl is-active harvest', expected: 'active' } }),
+      { approvers: 'linked', buttons },
+    );
+    const mm = card.mattermost.message;
+    expect(mm).toContain('Restart the Harvest poller.');
+    expect(mm).toContain('It changes something. Systemd service state modification.');
+    expect(mm).toContain('What it can affect: the poller only.');
+    expect(mm).toContain('It should show: active.');
+    // A command is not prose: it gets no period.
+    expect(mm).toContain('```\nsystemctl is-active harvest\n```');
+    // What already ends a sentence keeps its own mark.
+    expect(changeCard(change({ description: 'Is it up?' }), { approvers: 'linked', buttons }).mattermost.message).toContain('Is it up?\n');
+
+    const p = planCard(plan({ goal: 'Move the database', review: { verdict: 'revise', findings: ['Take a backup first'] } }), { approvers: 'linked', buttons }).mattermost.message;
+    expect(p).toContain('Move the database.');
+    expect(p).toContain('Stop the service.');
+    expect(p).toContain('It should show: inactive.');
+    expect(p).toContain('• Take a backup first.');
   });
 });
 

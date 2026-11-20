@@ -717,6 +717,9 @@ describe('the agent bot in chat, from end to end through the web server', () => 
     expect(card.text).toContain('sudo systemctl restart ledger');
     expect(card.text).toContain('Taken back with');
     expect(card.text).toContain('Who may approve');
+    // The card that waits is marked, so the page can say how it is answered; nothing else is.
+    expect(change.posts.filter((p) => p.waitingCard).map((p) => p.id)).toEqual([card.id]);
+    expect(read.posts.some((p) => p.waitingCard)).toBe(false);
     expect(ranOn('db-1', 'systemctl restart ledger')).toBe(false);
     // Nothing went to a real chat, and the tried link is not a real one.
     expect(slack.calls).toEqual([]);

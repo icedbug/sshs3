@@ -18,7 +18,7 @@ import { getBuiltinAgents } from '../../ai/hub/demoWorkspace';
 import type { HubService } from '../../ai/hub/HubService';
 import type { GuardOptions } from '../../ai/hub/Notifier';
 import { clip, safeError } from '../../ai/hub/privacy';
-import { chatServiceLabel } from '../../ai/hub/chatFence';
+import { chatServiceLabel, splitChatMessage } from '../../ai/hub/chatFence';
 import { writeFileAtomic } from '../../storage/atomicFile';
 import type { PeerAccount, WebUserPublic } from '../WebAuthService';
 import type { ChatAnsweringBackend, UserTenant, WebTenantManager } from '../WebTenantManager';
@@ -575,7 +575,13 @@ export class ChatAnswering implements ChatAnsweringBackend {
       title: task.title,
       status: task.status,
       chat: task.chat,
-      messages: task.messages,
+      // What the person asked, apart from what the agent was told with it (who asked, how far it may go,
+      // what the team wrote before): the read view shows the question, and the rest folded away.
+      messages: task.messages.map((m) => {
+        if (m.role !== 'user') return m;
+        const split = splitChatMessage(task.chat, m.text);
+        return split.told ? { ...m, text: split.asked, told: split.told } : m;
+      }),
       changes: task.changes,
       ...(task.plan ? { plan: task.plan } : {}),
       ...(tokens ? { tokens } : {}),
@@ -666,13 +672,16 @@ export class ChatAnswering implements ChatAnsweringBackend {
       if (entry.op === 'post') ids.add(entry.post.id);
       else if (entry.op === 'ephemeral' && entry.userId === chatUser) privateNotes.push(entry.text);
     }
+    // The cards in the thread that still wait for an answer: the page says how they are answered.
+    const cards = Object.values(trial.links.thread(service, channel, threadId)?.cards ?? {});
+    const waitingCards = new Set(cards.filter((c) => !c.final).map((c) => c.post));
     const posts = [...ids].flatMap((id) => {
       const p = trial.chat.posts.get(id);
       if (!p) return [];
       const buttons = (p.blocks ?? []).some((b) => b.type === 'actions') || (p.attachments ?? []).some((a) => Array.isArray(a.actions) && a.actions.length > 0);
       // What a person reads: in Slack the blocks, as the post's own text is only the short line a notification shows.
       const text = p.blocks?.length ? blockTexts(p.blocks).join('\n\n') || p.text : p.text;
-      return [{ id: p.id, ...(p.threadId ? { threadId: p.threadId } : {}), text, edits: p.edits, buttons }];
+      return [{ id: p.id, ...(p.threadId ? { threadId: p.threadId } : {}), text, edits: p.edits, buttons, ...(waitingCards.has(p.id) ? { waitingCard: true } : {}) }];
     });
     return { channelId: channel, thread: dm ? DM_THREAD : (thread ?? said), settled, posts, privateNotes };
   }

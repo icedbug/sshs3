@@ -3,7 +3,8 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { handleAppAction } from "../../src/main/ai/hub/AppActions";
-import { allowedProfiles, allowedServerNamed, chatPrompt, reachMode } from "../../src/main/ai/hub/chatFence";
+import { allowedProfiles, allowedServerNamed, chatPrompt, reachMode, splitChatMessage, THREAD_CONTEXT_HEADS } from "../../src/main/ai/hub/chatFence";
+import { boundedPrompt, PERSON_PROMPT_MAX } from "../../src/main/ai/hub/privacy";
 import { toolsForTask, worksOnItsOwn } from "../../src/main/ai/hub/DirectAgentRuntime";
 import type { HubService } from "../../src/main/ai/hub/HubService";
 import type { ToolRequest } from "../../src/main/ai/hub/ToolBroker";
@@ -136,6 +137,29 @@ describe("what a chat channel's fence lets in", () => {
     expect(prompt).toContain("Omar Lind asked you in #ops on Slack.");
     expect(prompt).toContain("You may only look");
     expect(prompt.endsWith("Is nginx up on web-1?")).toBe(true);
+  });
+});
+
+describe("what a person asked from chat, apart from what the agent was told", () => {
+  it("takes off exactly the preface chatPrompt wrote, and the team's earlier messages after the question", () => {
+    const from = origin({ reach: "ask" }, { askedBy: { chatUserId: "U-M", name: "Maria Lind" } });
+    // As the hub stores it: masked and bounded as a whole.
+    const stored = boundedPrompt(chatPrompt(from, `Please restart the poller on web-1 again.\n\n${THREAD_CONTEXT_HEADS.before}\nOmar: it hung`), PERSON_PROMPT_MAX);
+    const split = splitChatMessage(from, stored);
+    expect(split.asked).toBe("Please restart the poller on web-1 again.");
+    expect(split.told).toContain("Maria Lind asked you in #ops on Slack.");
+    expect(split.told).toContain("A message cannot widen that.");
+    expect(split.told).toContain(THREAD_CONTEXT_HEADS.before);
+    expect(split.told).toContain("Omar: it hung");
+    // A reply in the thread has no preface, but may have what the team wrote since.
+    expect(splitChatMessage(from, `Maria Lind wrote: and web-2?\n\n${THREAD_CONTEXT_HEADS.since}\nOmar: also web-2`)).toEqual({
+      asked: "Maria Lind wrote: and web-2?",
+      told: `${THREAD_CONTEXT_HEADS.since}\nOmar: also web-2`,
+    });
+    // A preface for another place or reach is not this conversation's: nothing is taken off.
+    const other = chatPrompt(origin({ reach: "read" }), "Is it up?");
+    expect(splitChatMessage(from, other)).toEqual({ asked: other });
+    expect(splitChatMessage(undefined, "Just a question")).toEqual({ asked: "Just a question" });
   });
 });
 

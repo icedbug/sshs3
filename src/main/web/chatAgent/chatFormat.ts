@@ -1,4 +1,4 @@
-import type { ChatServiceName } from '../../../shared/types/aiHub';
+import { RISK_LEVEL_TEXT, type ChatServiceName } from '../../../shared/types/aiHub';
 import type { RunView } from '../../ai/hub/areas/chatRuns';
 import { maskContext } from '../../ai/hub/privacy';
 import type { MattermostAttachment, SlackBlock } from './AgentBotApi';
@@ -481,10 +481,11 @@ function approvalsText(required: number, votes: Vote[]): string {
   const no = votes.filter((v) => !v.allowed);
   const people = (list: Vote[]): string => names(list.map((v) => `${v.actor}${viaLabel(v.via)}`));
   const need = Math.max(1, required);
+  // The words sshs3 uses for the same change in the waiting list, the Inbox and a conversation.
   let line =
     yes.length === 0
-      ? `Approvals: none yet. ${need === 1 ? 'One person' : `${need} people`} must approve.`
-      : `Approvals: ${yes.length} of ${need}. Approved by ${people(yes)}.`;
+      ? `No approvals yet. ${need} needed.`
+      : `${yes.length} of ${Math.max(need, yes.length)} ${Math.max(need, yes.length) === 1 ? 'approval' : 'approvals'}. Approved by ${people(yes)}.`;
   if (no.length) line += ` Denied by ${people(no)}.`;
   return line;
 }
@@ -497,11 +498,7 @@ function whoMayText(options: CardOptions): string {
   return options.production ? `${who} This is production, so only people allowed to approve changes there can.` : who;
 }
 
-const RISK_TEXT: Record<string, string> = {
-  safe: 'Low. It only reads.',
-  modify: 'It changes something.',
-  destructive: 'High. It can remove or overwrite data.',
-};
+const RISK_TEXT: Record<string, string> = RISK_LEVEL_TEXT;
 
 const STEP_RISK: Record<string, string> = { low: 'low', medium: 'medium', high: 'high' };
 
@@ -649,10 +646,10 @@ function buildCard(spec: CardSpec, options: CardOptions): CardOut {
 export function changeCard(change: CardChange, options: CardOptions): CardOut {
   const title =
     change.kind === 'setting' ? "A change to sshs3's rules is waiting" : change.kind === 'file' ? 'A file change is waiting for approval' : 'A change is waiting for approval';
-  const what: Part = { label: 'What', segments: [{ text: change.description || 'No description was given.' }] };
+  const what: Part = { label: 'What', segments: [{ text: sentence(change.description) || 'No description was given.' }] };
   const where: Part = { label: 'Where', segments: [{ text: `${change.target || 'Not said.'}${options.production ? ' (production)' : ''}` }] };
-  const riskLines: Segment[] = [{ text: [change.riskLevel ? RISK_TEXT[change.riskLevel] : 'Not rated.', change.riskReason].filter(Boolean).join(' ') }];
-  if (change.blastRadius) riskLines.push({ text: `What it can affect: ${change.blastRadius}` });
+  const riskLines: Segment[] = [{ text: [change.riskLevel ? RISK_TEXT[change.riskLevel] : 'Not rated.', sentence(change.riskReason)].filter(Boolean).join(' ') }];
+  if (change.blastRadius) riskLines.push({ text: `What it can affect: ${sentence(change.blastRadius)}` });
   const risk: Part = { label: 'Risk', segments: riskLines };
   const parts: Part[] = [what, where, risk];
   if (change.command !== undefined) {
@@ -662,12 +659,12 @@ export function changeCard(change: CardChange, options: CardOptions): CardOut {
   }
   if (change.diff) parts.push({ label: 'File change', segments: [{ code: change.diff, lang: 'diff' }] });
   if (change.check)
-    parts.push({ label: 'Check', segments: [{ code: change.check.command }, { text: `It should show: ${change.check.expected || 'not said'}` }] });
+    parts.push({ label: 'Check', segments: [{ code: change.check.command }, { text: `It should show: ${sentence(change.check.expected) || 'not said.'}` }] });
   parts.push({ label: 'Taken back with', segments: change.rollback ? [{ code: change.rollback }] : [{ text: 'No way to take it back was given.' }] });
   // An approved card's last line already says who approved it.
   if (options.final?.state !== 'approved') parts.push({ segments: [{ text: approvalsText(change.requiredApprovals, change.approvals) }] });
   const short: Part[] = [
-    { label: 'What', segments: [{ text: shorten(change.description || 'No description was given.', 300) }] },
+    { label: 'What', segments: [{ text: shorten(sentence(change.description) || 'No description was given.', 300) }] },
     where,
     { label: 'Risk', segments: [{ text: change.riskLevel ? RISK_TEXT[change.riskLevel] : 'Not rated.' }] },
   ];
@@ -702,22 +699,23 @@ const VERDICT: Record<string, string> = {
  * the reviewer's verdict, and how many people must approve.
  */
 export function planCard(plan: CardPlan, options: CardOptions): CardOut {
-  const parts: Part[] = [{ label: 'Goal', segments: [{ text: plan.goal || 'No goal was given.' }] }];
+  const parts: Part[] = [{ label: 'Goal', segments: [{ text: sentence(plan.goal) || 'No goal was given.' }] }];
   plan.steps.forEach((step, i) => {
-    const segments: Segment[] = [{ text: step.action || 'No action was given.' }];
+    const segments: Segment[] = [{ text: sentence(step.action) || 'No action was given.' }];
     segments.push({ text: `On: ${step.target || 'not said'}. Risk: ${STEP_RISK[step.risk] ?? step.risk}.` });
     if (step.command !== undefined) segments.push({ code: step.command });
-    segments.push({ text: `Check: ${step.check || 'not said'}${step.checkExpected ? `. It should show: ${step.checkExpected}` : ''}` });
+    // The check and the way back may be commands: only the words around them end as sentences.
+    segments.push({ text: `Check: ${step.check || 'not said.'}${step.checkExpected ? ` It should show: ${sentence(step.checkExpected)}` : ''}` });
     if (step.rollback) segments.push({ text: `Taken back with: ${step.rollback}` });
     parts.push({ label: `Step ${i + 1}`, segments });
   });
   const verdict = plan.review?.verdict ?? 'unreviewed';
   const review: Segment[] = [{ text: VERDICT[verdict] ?? VERDICT.unreviewed }];
-  if (verdict === 'revise') for (const f of plan.review.findings ?? []) review.push({ text: `• ${f}` });
+  if (verdict === 'revise') for (const f of plan.review.findings ?? []) review.push({ text: `• ${sentence(f)}` });
   parts.push({ label: 'Review', segments: review });
   if (options.final?.state !== 'approved') parts.push({ segments: [{ text: approvalsText(plan.requiredApprovals, plan.approvals) }] });
   const short: Part[] = [
-    { label: 'Goal', segments: [{ text: shorten(plan.goal || 'No goal was given.', 300) }] },
+    { label: 'Goal', segments: [{ text: shorten(sentence(plan.goal) || 'No goal was given.', 300) }] },
     { segments: [{ text: `${plan.steps.length} ${plan.steps.length === 1 ? 'step' : 'steps'}.` }] },
   ];
   return buildCard(
@@ -729,6 +727,12 @@ export function planCard(plan: CardPlan, options: CardOptions): CardOut {
     },
     options,
   );
+}
+
+/** Prose as a sentence: what the model wrote often ends without a period. Empty stays empty. */
+function sentence(text: string | undefined): string {
+  const t = (text ?? '').trim();
+  return !t || /[.!?…:]$/.test(t) ? t : `${t}.`;
 }
 
 function shorten(text: string, max: number): string {

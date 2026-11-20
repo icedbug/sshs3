@@ -223,14 +223,15 @@ export function TeamChatCard({ hub, act }: { hub: HubSnapshot; act: Act }): JSX.
     void act({ action: "chat-search", query: query.trim() }).then((next) => next?.reply?.chatSearch && setFound(next.reply.chatSearch));
   };
   return (
-    <article className="ai-card" data-testid="team-chat-card">
+    <article className="ai-card ai-chat-card" data-testid="team-chat-card">
       <div className="ai-card-head">
         <div>
           <strong>
             Context bot <span className="ai-count">{(chat?.total ?? 0).toLocaleString()}</span>
           </strong>
           <small data-testid="context-bot-line">
-            It only reads the channels you pick, so agents can search what the team wrote.
+            {/* A member cannot pick channels: an administrator does. */}
+            It only reads the channels {canChange ? "you pick" : "an administrator picks"}, so agents can search what the team wrote.
             {/* The agent bot is only on a web server: the desktop app has no Agent in chat card to point to. */}
             {hub.chatAnswering ? " Talking to the agent goes through the agent bot: see Agent in chat." : ""}
           </small>

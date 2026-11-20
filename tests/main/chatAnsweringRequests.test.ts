@@ -13,6 +13,7 @@ import { Sshs3WebServer } from '../../src/main/web/WebServer';
 import { AgentBotApi } from '../../src/main/web/chatAgent/AgentBotApi';
 import type { ChatTransportFactory } from '../../src/main/web/chatAgent/ChatAgentService';
 import { READ_ONLY_ACTIONS } from '../../src/main/ai/hub/hubShared';
+import { chatPrompt } from '../../src/main/ai/hub/chatFence';
 import { encryptSecretValue } from '../../src/main/crypto/SecretFieldCrypto';
 import type { AgentTask, ChatAnsweringRequest, HubRequest, HubSnapshot } from '../../src/shared/types/aiHub';
 import type { HubService } from '../../src/main/ai/hub/HubService';
@@ -296,12 +297,22 @@ describe('the agent bot in chat, asked through the web server', () => {
     expect(READ_ONLY_ACTIONS.has('chat-answering-task')).toBe(true);
     expect(READ_ONLY_ACTIONS.has('chat-answering-runs')).toBe(true);
     const agent = await server.tenants.getChatAgentTenant();
+    const chat = {
+      service: 'slack' as const,
+      channelId: 'COPS',
+      channelName: 'ops',
+      threadId: '1700000000.000100',
+      kind: 'channel' as const,
+      askedBy: { chatUserId: 'U2OMAR', name: 'Omar Lind' },
+      fence: { servers: ['web-dev-01'], clusters: [], reach: 'read' as const },
+    };
     agent.hub.store.data.tasks.push({
       id: 'chat-run-1',
       title: 'Disk on web-dev-01',
       mode: 'assisted',
       status: 'completed',
-      messages: [{ id: 'u1', role: 'user', text: 'How full is the disk on web-dev-01?', at: Date.now() }],
+      // Stored as the hub starts it: the preface for the agent, then what the person wrote.
+      messages: [{ id: 'u1', role: 'user', text: chatPrompt(chat, 'How full is the disk on web-dev-01?'), at: Date.now() }],
       changes: [],
       sources: [],
       createdAt: Date.now() - 1000,
@@ -309,15 +320,7 @@ describe('the agent bot in chat, asked through the web server', () => {
       maxCommands: 0,
       maxMinutes: 0,
       verification: 'not-verified',
-      chat: {
-        service: 'slack',
-        channelId: 'COPS',
-        channelName: 'ops',
-        threadId: '1700000000.000100',
-        kind: 'channel',
-        askedBy: { chatUserId: 'U2OMAR', name: 'Omar Lind' },
-        fence: { servers: ['web-dev-01'], clusters: [], reach: 'read' },
-      },
+      chat,
     } as unknown as AgentTask);
     const listed = await maria.ask({ action: 'chat-answering-runs' });
     expect(listed.reply?.chatRuns).toEqual([
@@ -326,6 +329,11 @@ describe('the agent bot in chat, asked through the web server', () => {
     const save = vi.spyOn(maria.hub.store, 'save');
     const read = await maria.ask({ action: 'chat-answering-task', taskId: 'chat-run-1' });
     expect(read.reply?.chatTask).toMatchObject({ taskId: 'chat-run-1', chat: { channelName: 'ops' }, messages: [expect.objectContaining({ text: 'How full is the disk on web-dev-01?' })] });
+    // What the agent was told is apart from the question, for the page to fold away.
+    expect(read.reply?.chatTask?.messages[0]?.told).toContain('Omar Lind asked you in #ops on Slack.');
+    expect(read.reply?.chatTask?.messages[0]?.told).not.toContain('How full is the disk');
+    // The conversation as stored keeps the whole message the agent was given.
+    expect(agent.hub.store.data.tasks.find((t) => t.id === 'chat-run-1')?.messages[0]?.text).toContain('Omar Lind asked you');
     expect(save).not.toHaveBeenCalled();
     await expect(maria.ask({ action: 'chat-answering-task', taskId: 'nope' })).rejects.toThrow("not one of the chat agent's");
   }, 30_000);

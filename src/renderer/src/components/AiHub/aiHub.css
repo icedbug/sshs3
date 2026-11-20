@@ -4615,3 +4615,123 @@
 .ai-receipt-excerpt { margin: 4px 0; max-height: 12em; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.88em; }
 .ai-receipt-filters { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; margin: 0 0 12px; color: var(--ai-ink); }
 .ai-receipt-filters input, .ai-receipt-filters select { padding: 4px 7px; background: var(--ai-surface-2); color: var(--ai-ink); border: 1px solid var(--ai-line-strong); border-radius: 4px; max-width: 100%; }
+
+/* The context bot and Agent in chat: nothing in them is wider than the card, on a phone too. A grid
+   column sizes to its widest content unless told otherwise, and a manifest line or a long id is wide. */
+.ai-chat-card .ai-form {
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+}
+.ai-chat-card .ai-form > *,
+.ai-chat-card .ai-fold {
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+.ai-chat-card select,
+.ai-chat-card textarea,
+.ai-chat-card input:not([type="checkbox"]):not([type="radio"]) {
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+.ai-chat-card pre {
+  max-width: 100%;
+  box-sizing: border-box;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.ai-chat-card small,
+.ai-chat-card p,
+.ai-chat-card summary,
+.ai-chat-card strong {
+  overflow-wrap: anywhere;
+}
+/* A fold's mark stays at its title's first line when the title wraps. */
+.ai-chat-card .ai-fold > summary {
+  align-items: flex-start;
+}
+.ai-chat-card .ai-fold > summary::before {
+  flex: none;
+  margin-top: 1px;
+}
+/* A channel rule: a box with its title inside it. */
+.ai-chat-rule {
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 8px;
+  margin: 8px 0 0;
+  min-width: 0;
+}
+.ai-chat-rule-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
+}
+.ai-chat-rule-head small {
+  color: var(--fg-muted);
+  overflow-wrap: anywhere;
+}
+/* A command on its own line, under what it does. */
+.ai-chat-command {
+  margin: 4px 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--surface-3);
+  font-size: 12px;
+}
+/* Under what Try it brought back, each note stands apart from the one before. */
+.ai-chat-try-result > .ai-hint {
+  margin-top: 8px;
+}
+/* What the person sent in Try it, apart from what the bot posted. */
+.ai-chat-sent {
+  border-left-color: var(--accent-border);
+}
+
+/* A phone: fewer boxes inside boxes, so the forms keep their width. */
+@media (max-width: 480px) {
+  .ai-settings-form > .ai-scroll.ai-form {
+    padding-left: 6px;
+    padding-right: 6px;
+    border: 0;
+  }
+  .ai-set {
+    padding: 10px 8px;
+  }
+  /* The Slack and Mattermost section and its two cards: no box of their own, a line between the cards.
+     Each fold inside a card stays the one box around its form. */
+  .ai-set:has(> .ai-chat-card) {
+    border: 0;
+    background: transparent;
+    padding: 10px 0;
+  }
+  .ai-chat-card,
+  .ai-chat-card:hover {
+    border-width: 1px 0 0;
+    border-radius: 0;
+    background: transparent;
+    padding: 10px 0 0;
+  }
+  .ai-chat-card .ai-set-fold {
+    padding: 8px;
+  }
+  .ai-chat-card .ai-set-fold > .ai-form {
+    padding: 4px 0 8px;
+  }
+  /* A fold inside a fold (each bot, the manifest): no box of its own. */
+  .ai-chat-card .ai-fold .ai-fold {
+    border: 0;
+    background: transparent;
+    padding: 6px 0;
+  }
+  .ai-chat-rule {
+    border-width: 1px 0 0;
+    border-radius: 0;
+    padding: 8px 0 0;
+  }
+  .ai-chat-card .ai-switches {
+    padding: 8px;
+  }
+}

@@ -39,6 +39,16 @@ describe("the team chat card", () => {
     expect(screen.getByTestId("context-bot-line")).toHaveTextContent(
       "It only reads the channels you pick, so agents can search what the team wrote. Talking to the agent goes through the agent bot: see Agent in chat.",
     );
+    // A member cannot pick channels: the line says who does.
+    view.rerender(
+      <TeamChatCard
+        hub={hub({ connections: [slack], canChange: false, total: 1234 }, { chatAnswering: { enabled: false, services: [], links: [], waiting: [] } })}
+        act={vi.fn(async () => undefined)}
+      />,
+    );
+    expect(screen.getByTestId("context-bot-line")).toHaveTextContent("It only reads the channels an administrator picks, so agents can search what the team wrote.");
+    expect(screen.getByTestId("context-bot-line")).not.toHaveTextContent("you pick");
+    view.rerender(<TeamChatCard hub={hub({ connections: [slack], canChange: true, total: 1234 })} act={vi.fn(async () => undefined)} />);
     expect(within(card).getByTestId("chat-slack")).toHaveTextContent("Slack · sshs3-bot, reading 1 channel");
     expect(within(card).getByTestId("chat-mattermost")).toHaveTextContent("Mattermost · not connected");
     const token = within(screen.getByTestId("chat-slack")).getByLabelText(/Bot token of the Slack app/);

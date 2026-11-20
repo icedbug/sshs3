@@ -4,7 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import "@testing-library/jest-dom/vitest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChatAnsweringSnapshot, ChatTaskView, HubRequest, HubSnapshot } from "../../src/shared/types/aiHub";
-import { AGENT_BOT_SLACK_MANIFEST, AgentInChatCard, chatTextAsMarkdown } from "../../src/renderer/src/components/AiHub/AgentInChatCard";
+import { AGENT_BOT_SLACK_MANIFEST, AgentInChatCard, approvalsText, chatTextAsMarkdown } from "../../src/renderer/src/components/AiHub/AgentInChatCard";
 
 afterEach(cleanup);
 
@@ -96,6 +96,8 @@ describe("Agent in chat, for an administrator", () => {
     expect(slack).toHaveTextContent("Waiting to try again");
     expect(slack).toHaveTextContent("Slack did not answer");
     expect(screen.getByTestId("agent-bot-mattermost")).toHaveTextContent("Mattermost · not connected");
+    // After the "·" in a fold's title the state starts small, as "not connected" does.
+    expect(screen.getByTestId("agent-bot-slack").querySelector("summary")).toHaveTextContent(/^Slack · waiting to try again/);
     fireEvent.click(screen.getByLabelText("Answer in chat"));
     await waitFor(() => expect(sent).toEqual([{ action: "chat-answering-save", input: { enabled: true } }]));
   });
@@ -264,7 +266,8 @@ describe("Agent in chat, for an administrator", () => {
     const { sent, act } = recorder((r) => (r.action === "chat-answering-copy-model" ? { reply: { notes: ["The chat agent now uses the same model settings as you."] } } : {}));
     render(<AgentInChatCard hub={hub(adminChat())} act={act} />);
     const model = screen.getByTestId("agent-chat-model");
-    expect(screen.getByTestId("agent-chat-usage")).toHaveTextContent(`Used in 2026-11: ${(12_345).toLocaleString()} of ${(2_000_000).toLocaleString()} tokens`);
+    // The month as people say it, not as it is stored ("2026-11").
+    expect(screen.getByTestId("agent-chat-usage")).toHaveTextContent(`Used in November 2026: ${(12_345).toLocaleString()} of ${(2_000_000).toLocaleString()} tokens`);
     fireEvent.click(within(model).getByRole("button", { name: "Copy my model" }));
     await waitFor(() => expect(screen.getByTestId("agent-chat-model-said")).toHaveTextContent("same model settings as you"));
     fireEvent.change(within(model).getByLabelText("Approval wait in minutes"), { target: { value: "30" } });
@@ -328,7 +331,13 @@ describe("Agent in chat, for an administrator", () => {
         fence: { servers: ["web-1"], clusters: [], reach: "ask" },
       },
       messages: [
-        { id: "m1", role: "user", text: "Omar Lind wrote: clean the tmp folder on web-1", at: NOW },
+        {
+          id: "m1",
+          role: "user",
+          text: "clean the tmp folder on web-1",
+          told: "Omar asked you in #ops on Slack. Your answer is posted in that thread, so keep it short and plain.",
+          at: NOW,
+        },
         { id: "m2", role: "assistant", text: "I will remove old files.", at: NOW },
       ],
       changes: [
@@ -352,10 +361,26 @@ describe("Agent in chat, for an administrator", () => {
     fireEvent.click(within(runs).getByRole("button", { name: "Show the conversations" }));
     fireEvent.click(await within(runs).findByRole("button", { name: "Open Disk on web-1" }));
     expect(within(runs).getByText(/asked by Omar/)).toBeInTheDocument();
+    // What waits is said once, plainly.
+    const line = within(runs).getByTestId("agent-chat-run-line");
+    expect(line).toHaveTextContent("Waiting for 2 answers");
+    expect(line).not.toHaveTextContent("waiting ·");
     const open = await screen.findByTestId("agent-chat-task");
-    expect(open).toHaveTextContent("clean the tmp folder on web-1");
+    expect(within(open).getByTestId("agent-chat-task-status")).toHaveTextContent("Status: Waiting.");
+    // The person's question is what was asked; what the agent was told is folded away under it.
+    const asked = within(open).getByTestId("agent-chat-message-user");
+    expect(asked.querySelector("blockquote")).toHaveTextContent(/^clean the tmp folder on web-1$/);
+    const told = within(asked).getByTestId("agent-chat-told");
+    expect(told.tagName).toBe("DETAILS");
+    expect(told).not.toHaveAttribute("open");
+    expect(within(told).getByText("What the agent was told")).toBeInTheDocument();
+    expect(told).toHaveTextContent("keep it short and plain");
     const change = within(open).getByTestId("agent-chat-change-c1");
     expect(change).toHaveTextContent("find /tmp -mtime +7 -delete");
+    // The same plain words as the waiting list, the Inbox and the chat card: never "risk: destructive".
+    expect(change).toHaveTextContent("High. It can remove or overwrite data. No approvals yet. 1 needed.");
+    expect(change).not.toHaveTextContent("risk:");
+    expect(change).not.toHaveTextContent("0 of 1");
     fireEvent.click(within(change).getByRole("button", { name: "Approve" }));
     await waitFor(() => expect(screen.getByTestId("agent-chat-answered")).toHaveTextContent("Approved. It runs now."));
     fireEvent.click(within(screen.getByTestId("agent-chat-plan")).getByRole("button", { name: "Deny" }));
@@ -392,6 +417,11 @@ describe("Agent in chat, for an administrator", () => {
     fireEvent.change(within(tryIt).getByLabelText("Message to the agent bot"), { target: { value: "How full is web-1?" } });
     fireEvent.click(within(tryIt).getByRole("button", { name: "Send" }));
     const result = await screen.findByTestId("agent-chat-try-result");
+    // What was sent comes first, marked as the person's own.
+    const sentPost = within(result).getByTestId("agent-chat-try-sent");
+    expect(sentPost).toHaveTextContent("You wrote, as someone not linked");
+    expect(sentPost).toHaveTextContent("How full is web-1?");
+    expect(result.firstElementChild).toBe(sentPost);
     const posts = within(result).getAllByTestId("agent-chat-try-post");
     expect(posts[0]).toHaveTextContent("Working on it.");
     expect(posts[0]).toHaveTextContent("edited 2 times");
@@ -475,6 +505,10 @@ describe("Agent in chat, for an administrator", () => {
     on.admin!.settings.enabled = true;
     view.rerender(<AgentInChatCard hub={hub(on)} act={recorder().act} />);
     expect(screen.getByTestId("agent-chat-no-model")).toHaveAttribute("role", "alert");
+    expect(screen.getByTestId("agent-chat-no-model")).toHaveTextContent(
+      'Until then the agent bot answers every question with an error that says "No model is set up".',
+    );
+    expect(screen.getByTestId("agent-chat-no-model")).not.toHaveTextContent("with that.");
   });
 
   it("says what the data policy means while answering is on, and how to change it", () => {
@@ -638,6 +672,119 @@ describe("Agent in chat, for an administrator", () => {
     });
   });
 
+  it("reads the conversation again after an answer until its agent is done, so the status matches", async () => {
+    const base: ChatTaskView = {
+      taskId: "t2",
+      title: "Restart the poller",
+      status: "waiting",
+      chat: {
+        service: "mattermost",
+        channelId: "mmops",
+        channelName: "ops",
+        threadId: "p1",
+        kind: "channel",
+        askedBy: { chatUserId: "U2", name: "Maria" },
+        fence: { servers: "*", clusters: [], reach: "ask" },
+      },
+      messages: [{ id: "m1", role: "user", text: "Restart the poller on um-01", at: NOW }],
+      changes: [
+        {
+          id: "c1",
+          kind: "command",
+          target: "um-01",
+          description: "Restart the Harvest poller",
+          command: "sudo systemctl restart harvest",
+          status: "pending",
+          riskLevel: "modify",
+          // A change from chat need not carry how many must approve: one person does.
+          at: NOW + 1,
+        } as ChatTaskView["changes"][number],
+      ],
+    };
+    const done = (status: ChatTaskView["status"], change: string): ChatTaskView => ({
+      ...base,
+      status,
+      changes: [{ ...base.changes[0], status: change, approvals: [{ actor: "Maria", allowed: true, at: NOW }] } as ChatTaskView["changes"][number]],
+      messages: status === "completed" ? [...base.messages, { id: "m2", role: "assistant", text: "Restarted it.", at: NOW + 2 }] : base.messages,
+    });
+    // Read once before the answer; after it, the agent still works on the first read and is done on the next.
+    const reads = [base, done("running", "completed"), done("completed", "completed")];
+    const { sent, act } = recorder((r) => {
+      if (r.action === "chat-answering-runs")
+        return { reply: { chatRuns: [{ taskId: "t2", title: "Restart the poller", status: "waiting", service: "mattermost", channelId: "mmops", channelName: "ops", kind: "channel", threadId: "p1", askedBy: "Maria", reach: "ask", waiting: 1, createdAt: NOW, updatedAt: NOW }] } };
+      if (r.action === "chat-answering-task") return { reply: { chatTask: reads.shift() ?? done("completed", "completed") } };
+      if (r.action === "chat-answering-answer") return { reply: { chatAnswer: { outcome: "approved", message: "Maria approved." } } };
+      return {};
+    });
+    render(<AgentInChatCard hub={hub(adminChat())} act={act} />);
+    const runs = screen.getByTestId("agent-chat-runs");
+    expect(within(runs).queryByTestId("agent-chat-run-line")).toBeNull();
+    fireEvent.click(within(runs).getByRole("button", { name: "Show the conversations" }));
+    expect(await within(runs).findByTestId("agent-chat-run-line")).toHaveTextContent("Waiting for 1 answer ·");
+    fireEvent.click(within(runs).getByRole("button", { name: "Open Restart the poller" }));
+    const status = await screen.findByTestId("agent-chat-task-status");
+    expect(status).toHaveTextContent("Status: Waiting.");
+    expect(within(screen.getByTestId("agent-chat-change-c1")).getByText("It changes something. No approvals yet. 1 needed.")).toBeInTheDocument();
+    fireEvent.click(within(screen.getByTestId("agent-chat-change-c1")).getByRole("button", { name: "Approve" }));
+    await waitFor(() => expect(screen.getByTestId("agent-chat-task-status")).toHaveTextContent("Status: Working on it."));
+    await waitFor(() => expect(screen.getByTestId("agent-chat-task-status")).toHaveTextContent("Status: Done."), { timeout: 3000 });
+    expect(screen.getByTestId("agent-chat-change-c1")).toHaveTextContent("Change on um-01. Done.");
+    expect(screen.getByTestId("agent-chat-change-c1")).toHaveTextContent("1 of 1 approval.");
+    // The change shows before the reply the agent gave after it ran, as it happened.
+    const changeBlock = screen.getByTestId("agent-chat-change-c1");
+    const reply = screen.getByTestId("agent-chat-message-assistant");
+    expect(changeBlock.compareDocumentPosition(reply) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByTestId("agent-chat-answered")).toHaveTextContent("Maria approved.");
+    // Once done, it is not read again.
+    const count = sent.filter((r) => r.action === "chat-answering-task").length;
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    expect(sent.filter((r) => r.action === "chat-answering-task")).toHaveLength(count);
+  });
+
+  it("says under a waiting card in Try it how it is answered in Slack, in Mattermost and here", async () => {
+    const card = { id: "p2", threadId: "1", text: "*A change is waiting for approval*\nRestart nginx. Answer it in sshs3.", edits: 0, buttons: false, waitingCard: true };
+    const { act } = recorder(() => ({ reply: { chatTry: { channelId: "C1", thread: "1", settled: false, posts: [card], privateNotes: [] } } }));
+    const view = render(<AgentInChatCard hub={hub(adminChat())} act={act} />);
+    const tryIt = screen.getByTestId("agent-chat-try");
+    // Short option labels: what the channel may do is said under the list.
+    expect(within(tryIt).getByRole("option", { name: "#ops, Slack" })).toBeInTheDocument();
+    expect(within(tryIt).getByTestId("agent-chat-try-reach")).toHaveTextContent("There: Ask before changes.");
+    // It does not claim the person is linked: Try it only acts as if they were.
+    expect(within(tryIt).getByRole("option", { name: "You, as if linked" })).toBeInTheDocument();
+    expect(within(tryIt).getByText(/This does not link it/)).toBeInTheDocument();
+    fireEvent.change(within(tryIt).getByLabelText("Who writes"), { target: { value: "guest" } });
+    fireEvent.change(within(tryIt).getByLabelText("Message to the agent bot"), { target: { value: "Restart nginx on web-1" } });
+    fireEvent.click(within(tryIt).getByRole("button", { name: "Send" }));
+    const note = await screen.findByTestId("agent-chat-try-card-note");
+    expect(note).toHaveTextContent(
+      "In Slack this card has Approve and Deny buttons. In Mattermost people answer it with reactions, as set under How Mattermost cards are answered. Here nobody can press or react, so answer it under Conversations from chat.",
+    );
+    expect(screen.getByTestId("agent-chat-try-sent")).toHaveTextContent("Restart nginx on web-1");
+    // With Mattermost buttons set up, it says buttons.
+    view.rerender(<AgentInChatCard hub={hub(adminChat({ mattermostAnswers: "buttons" }))} act={act} />);
+    fireEvent.change(within(screen.getByTestId("agent-chat-try")).getByLabelText("Message to the agent bot"), { target: { value: "again" } });
+    fireEvent.click(within(screen.getByTestId("agent-chat-try")).getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(screen.getByTestId("agent-chat-try-card-note")).toHaveTextContent("In Mattermost people answer it with Approve and Deny buttons"));
+  });
+
+  it("says nothing of buttons under Try it when no card waits", async () => {
+    const { act } = recorder(() => ({ reply: { chatTry: { channelId: "C1", thread: "1", settled: true, posts: [{ id: "p1", text: "The disk is 40% full.", edits: 0, buttons: false }], privateNotes: [] } } }));
+    render(<AgentInChatCard hub={hub(adminChat())} act={act} />);
+    const tryIt = screen.getByTestId("agent-chat-try");
+    fireEvent.change(within(tryIt).getByLabelText("Message to the agent bot"), { target: { value: "How full is web-1?" } });
+    fireEvent.click(within(tryIt).getByRole("button", { name: "Send" }));
+    expect(await screen.findByTestId("agent-chat-try-sent")).toHaveTextContent("You wrote");
+    expect(screen.queryByTestId("agent-chat-try-card-note")).toBeNull();
+  });
+
+  it("says approvals in one way, and keeps a number on the line of its word", () => {
+    expect(approvalsText(0, 1)).toBe("No approvals yet. 1\u00a0needed.");
+    expect(approvalsText(1, 2)).toBe("1 of 2\u00a0approvals.");
+    expect(approvalsText(1, 1)).toBe("1 of 1\u00a0approval.");
+    // Never fewer needed than approved.
+    expect(approvalsText(2, 1)).toBe("2 of 2\u00a0approvals.");
+  });
+
   it("says when try it cannot be used", () => {
     render(<AgentInChatCard hub={hub(adminChat({ canTry: false }))} act={recorder().act} />);
     expect(screen.queryByTestId("agent-chat-try")).toBeNull();
@@ -692,9 +839,12 @@ describe("Your chat account", () => {
     };
     render(<AgentInChatCard hub={hub(member)} act={act} />);
     const waiting = screen.getByTestId("agent-chat-waiting");
-    expect(waiting).toHaveTextContent("A change asked by Omar in #ops (Slack): Restart nginx");
-    expect(waiting).toHaveTextContent("on web-1. Risk: it changes something.");
-    expect(waiting).toHaveTextContent("1 of 2 approvals");
+    expect(waiting).toHaveTextContent("A change asked by Omar in #ops (Slack): Restart nginx.");
+    // The command on its own line, in a code block; the target, risk and approvals after it.
+    expect(within(waiting).getByTestId("agent-chat-waiting-command").tagName).toBe("PRE");
+    expect(within(waiting).getByTestId("agent-chat-waiting-command")).toHaveTextContent("systemctl restart nginx");
+    expect(waiting).not.toHaveTextContent("Restart nginx systemctl");
+    expect(waiting).toHaveTextContent("On web-1. It changes something. 1 of 2 approvals.");
     // A column, so a long command wraps on a phone.
     expect(within(waiting).getByRole("listitem")).toHaveStyle({ flexDirection: "column" });
     fireEvent.click(within(waiting).getByRole("button", { name: "Approve" }));

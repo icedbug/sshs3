@@ -142,7 +142,11 @@ describe("the agent bot in the panel", () => {
     fireEvent.click(inbox);
     const waiting = await screen.findByTestId("inbox-chat-waiting");
     expect(waiting).toHaveTextContent("1 change from chat waits for your answer.");
-    expect(waiting).toHaveTextContent("Restart nginx");
+    expect(waiting).toHaveTextContent("Restart nginx.");
+    // The command on its own line, then the target, the risk and the approvals in plain words.
+    expect(within(waiting).getByTestId("agent-chat-waiting-command")).toHaveTextContent("sudo systemctl restart nginx");
+    expect(waiting).toHaveTextContent("On web-1. It changes something. No approvals yet. 1 needed.");
+    expect(waiting).not.toHaveTextContent("0 of 1");
     expect(screen.queryByTestId("inbox-empty")).toBeNull();
     request.mockImplementation(async (r: { action: string }) => (r.action === "chat-answering-answer" ? { ...fixture, reply: { chatAnswer: { outcome: "approved", message: "Maria Ek approved." } } } : fixture));
     fireEvent.click(within(waiting).getByRole("button", { name: "Approve" }));

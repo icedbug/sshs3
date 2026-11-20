@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type {
   AgentBotView,
   ChatAnsweringLimits,
@@ -12,8 +12,11 @@ import type {
   ChatTaskView,
   ChatTryResult,
   ChatWaitingItem,
+  CommandRiskLevel,
   HubSnapshot,
+  RunStatus,
 } from "@shared/types/aiHub";
+import { RISK_LEVEL_TEXT } from "@shared/types/aiHub";
 import { copyToClipboard } from "../../lib/clipboard";
 import { ConfirmButton } from "./ConfirmButton";
 import { RichMarkdownContent } from "./RichMarkdownContent";
@@ -75,12 +78,61 @@ export function chatTextAsMarkdown(service: ChatServiceName, text: string): stri
 }
 
 const when = (at: number): string => new Date(at).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
-const clock = (at: number): string => new Date(at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+const clock = (at: number): string => new Date(at).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
 const splitNames = (text: string): string[] =>
   text
     .split(/[,\n]/)
     .map((s) => s.trim())
     .filter(Boolean);
+
+/** Prose as a sentence: what the model wrote often ends without a period. */
+const sentence = (text: string): string => {
+  const t = text.trim();
+  return !t || /[.!?…:]$/.test(t) ? t : `${t}.`;
+};
+
+const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
+/** A month as the usage stores it ("2026-11"), as people say it ("November 2026"). */
+export function monthText(month: string): string {
+  const m = /^(\d{4})-(\d{2})$/.exec(month.trim());
+  const name = m ? MONTHS[Number(m[2]) - 1] : undefined;
+  return m && name ? `${name} ${m[1]}` : month;
+}
+
+/** How far a change goes, in the same words in the waiting list, the Inbox, a conversation and the chat card. */
+export function riskText(risk: string | undefined): string {
+  if (!risk) return "";
+  return RISK_LEVEL_TEXT[risk as CommandRiskLevel] ?? `Risk: ${risk}.`;
+}
+
+/** "No approvals yet. 1 needed." or "1 of 2 approvals." The number stays on the line of its word. */
+export function approvalsText(approved: number, required: number): string {
+  const need = Math.max(1, required, approved);
+  return approved === 0 ? `No approvals yet. ${need}\u00a0needed.` : `${approved} of ${need}\u00a0${need === 1 ? "approval" : "approvals"}.`;
+}
+
+const RUN_STATUS: Record<RunStatus, string> = {
+  queued: "Starting",
+  running: "Working on it",
+  waiting: "Waiting",
+  completed: "Done",
+  failed: "Stopped with an error",
+  cancelled: "Stopped",
+  interrupted: "Stopped when the server restarted",
+};
+const runStatusText = (status: RunStatus): string => RUN_STATUS[status] ?? status;
+
+const CHANGE_STATUS: Record<string, string> = {
+  pending: "Waiting for an answer",
+  approved: "Approved",
+  denied: "Denied",
+  running: "Running",
+  completed: "Done",
+  failed: "Failed",
+  uncertain: "Not sure it worked",
+};
+const PLAN_STATUS: Record<string, string> = { proposed: "Waiting for an answer", approved: "Approved", rejected: "Denied" };
 
 function statusText(status: ChatLineStatus | undefined, bot: AgentBotView): string {
   if (!bot.enabled) return "Switched off";
@@ -97,6 +149,12 @@ function statusText(status: ChatLineStatus | undefined, bot: AgentBotView): stri
       return bot.lastError ? `Not connected: ${bot.lastError}` : "Not running";
   }
 }
+
+/** The same state after a "·" in a fold's title, small as "not connected" is there. */
+const statusTitle = (status: ChatLineStatus | undefined, bot: AgentBotView): string => {
+  const text = statusText(status, bot);
+  return text.charAt(0).toLowerCase() + text.slice(1);
+};
 
 /**
  * Says where the last failed request of this card went wrong, close to what was pressed. Only the part
@@ -163,7 +221,7 @@ function Connect({
     <details className="ai-fold ai-set-fold" data-testid={`agent-bot-${service}`} open={Boolean(bot)}>
       <summary>
         {NAME[service]}
-        {bot ? ` · ${statusText(status, bot)}` : " · not connected"}
+        {bot ? ` · ${statusTitle(status, bot)}` : " · not connected"}
       </summary>
       <div className="ai-form">
         {bot && (
@@ -183,7 +241,8 @@ function Connect({
             </small>
             <details className="ai-fold" data-testid="agent-bot-manifest">
               <summary>The Slack app manifest</summary>
-              <pre className="ai-mono" style={{ whiteSpace: "pre-wrap", maxHeight: 220, overflow: "auto" }}>
+              {/* Unwrapped, so its lines keep their indent: on a phone the box scrolls sideways inside the card. */}
+              <pre className="ai-mono" style={{ whiteSpace: "pre", overflowWrap: "normal", maxWidth: "100%", maxHeight: 220, overflow: "auto" }}>
                 {AGENT_BOT_SLACK_MANIFEST}
               </pre>
               <button
@@ -370,16 +429,15 @@ function Channels({
         const others = read(row.service).filter((c) => c.id !== row.channelId);
         const label = `#${row.channelName || row.channelId}`;
         return (
-          <fieldset
-            key={row.key}
-            className="ai-form"
-            data-testid={`agent-chat-row-${row.channelId}`}
-            // A fieldset is as wide as its widest content unless told otherwise: on a phone that is wider than the card.
-            style={{ border: "1px solid var(--ai-border, #8884)", borderRadius: 6, padding: 8, minWidth: 0 }}
-          >
-            <legend>
-              {label} in {NAME[row.service]} <small className="ai-mono" style={{ overflowWrap: "anywhere" }}>{row.channelId}</small>
-            </legend>
+          // A fieldset is as wide as its widest content unless told otherwise: ai-chat-rule keeps it to the card.
+          // Its title is inside the box, not a legend: a long channel id would wrap onto the border.
+          <fieldset key={row.key} className="ai-form ai-chat-rule" aria-label={`${label} in ${NAME[row.service]}`} data-testid={`agent-chat-row-${row.channelId}`}>
+            <div className="ai-chat-rule-head">
+              <strong>
+                {label} in {NAME[row.service]}
+              </strong>
+              <small className="ai-mono">{row.channelId}</small>
+            </div>
             <label className="ai-check">
               <input type="checkbox" aria-label={`All servers for ${label}`} checked={row.allServers} onChange={(e) => change(row.key, { allServers: e.target.checked })} />
               <span>All servers of the chat agent</span>
@@ -633,7 +691,8 @@ function ModelAndLimits({
   };
   return (
     <div className="ai-form" data-testid="agent-chat-model">
-      <div>
+      {/* Spaced as the labels below are, so the button does not touch the text around it. */}
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 8 }}>
         <p className="ai-hint" data-testid="agent-chat-model-now">
           {admin.model.set ? `The chat agent uses ${admin.model.name || "a model"}.` : "The chat agent has no model yet."}
         </p>
@@ -662,7 +721,7 @@ function ModelAndLimits({
         Tokens the chat answers may use in a month
         <input aria-label="Monthly token budget" type="number" min={10000} step={10000} value={budget} onChange={(e) => { setSaved(false); setBudget(e.target.value); }} />
         <small data-testid="agent-chat-usage">
-          Used in {s.usage.month}: {used.toLocaleString()} of {s.monthlyTokenBudget.toLocaleString()} tokens
+          Used in {monthText(s.usage.month)}: {used.toLocaleString()} of {s.monthlyTokenBudget.toLocaleString()} tokens
           {used >= s.monthlyTokenBudget ? ". The budget is spent: the agent bot says so and starts nothing new until next month." : "."}
         </small>
       </label>
@@ -782,12 +841,6 @@ function Answer({
   );
 }
 
-const RISK: Record<NonNullable<ChatWaitingItem["risk"]>, string> = {
-  safe: "it only looks",
-  modify: "it changes something",
-  destructive: "it can remove data",
-};
-
 /**
  * What waits for this person's answer: anybody who may approve a change of the chat agent's sees it, in
  * this card and in the Inbox. An answer given here needs no linked chat account.
@@ -817,11 +870,16 @@ export function ChatWaitingList({
           <li key={`${item.taskId}:${item.id}`} className="ai-link" style={{ flexDirection: "column", alignItems: "flex-start", gap: 4 }}>
             <span style={{ overflowWrap: "anywhere", minWidth: 0, maxWidth: "100%" }}>
               <strong>{item.kind === "plan" ? "A plan" : "A change"}</strong> asked by {item.askedBy} in{" "}
-              {item.channelName ? `#${item.channelName}` : "a direct message"} ({NAME[item.service]}): {item.description}
-              {item.command && <code className="ai-mono"> {item.command}</code>}
-              {item.target ? ` on ${item.target}` : ""}.{item.risk ? ` Risk: ${RISK[item.risk] ?? item.risk}.` : ""} {item.approvedBy.length}{" "}
-              of {item.requiredApprovals} approvals.
+              {item.channelName ? `#${item.channelName}` : "a direct message"} ({NAME[item.service]}): {sentence(item.description)}
             </span>
+            {item.command && (
+              <pre className="ai-mono ai-chat-command" data-testid="agent-chat-waiting-command">
+                {item.command}
+              </pre>
+            )}
+            <small>
+              {[item.target ? `On ${item.target}.` : "", riskText(item.risk), approvalsText(item.approvedBy.length, item.requiredApprovals)].filter(Boolean).join(" ")}
+            </small>
             {item.kind === "plan" && (
               <small>
                 {admin
@@ -843,22 +901,125 @@ export function ChatWaitingList({
   );
 }
 
+/** After an answer, the open conversation is read again this often while its agent still works, so the status matches. */
+const FOLLOW_MS = 1000;
+const FOLLOW_TRIES = 30;
+
+type ReadEntry =
+  | { at: number; message: ChatTaskView["messages"][number]; change?: undefined; plan?: undefined }
+  | { at: number; change: ChatTaskView["changes"][number]; message?: undefined; plan?: undefined }
+  | { at: number; plan: NonNullable<ChatTaskView["plan"]>; message?: undefined; change?: undefined };
+
+/** A conversation in the order it happened: a change shows before the reply the agent gave after it ran. */
+export function readOrder(view: ChatTaskView): ReadEntry[] {
+  const entries: ReadEntry[] = [
+    ...view.messages.map((message) => ({ at: message.at, message })),
+    // A change kept from before changes had a time goes last, where it always was.
+    ...view.changes.map((change) => ({ at: change.at ?? Number.POSITIVE_INFINITY, change })),
+    ...(view.plan ? [{ at: view.plan.createdAt, plan: view.plan }] : []),
+  ];
+  // A stable sort: what has the same time keeps the order it was stored in.
+  return entries.map((entry, i) => ({ entry, i })).sort((a, b) => a.entry.at - b.entry.at || a.i - b.i).map(({ entry }) => entry);
+}
+
+function ReadMessage({ m }: { m: ChatTaskView["messages"][number] }): JSX.Element {
+  return (
+    <div className="ai-chat-thread" data-testid={`agent-chat-message-${m.role}`}>
+      <small>
+        {m.role === "user" ? "Asked" : m.role === "assistant" ? "The agent" : "Note"} · {when(m.at)}
+      </small>
+      <blockquote>
+        {m.role === "assistant" ? <RichMarkdownContent text={m.text} /> : <p style={{ whiteSpace: "pre-wrap" }}>{m.text}</p>}
+      </blockquote>
+      {m.told && (
+        <details className="ai-fold" data-testid="agent-chat-told">
+          <summary>What the agent was told</summary>
+          <p style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{m.told}</p>
+        </details>
+      )}
+    </div>
+  );
+}
+
+/** How many approved a change, in the words of the waiting list: said while it waits, and once someone approved. */
+function changeApprovals(c: ChatTaskView["changes"][number]): string {
+  const approved = (c.approvals ?? []).filter((a) => a.allowed).length || (c.decidedBy?.allowed ? 1 : 0);
+  if (c.status !== "pending" && approved === 0) return "";
+  return approvalsText(approved, c.requiredApprovals ?? 1);
+}
+
+function ReadChange({ c, taskId, act, onDone }: { c: ChatTaskView["changes"][number]; taskId: string; act: Act; onDone: (message: string) => void }): JSX.Element {
+  return (
+    <div className="ai-chat-thread" data-testid={`agent-chat-change-${c.id}`}>
+      <small>
+        Change on {c.target}. {CHANGE_STATUS[c.status] ?? c.status}.
+      </small>
+      <p>{sentence(c.description)}</p>
+      {c.command && <pre className="ai-mono ai-chat-command">{c.command}</pre>}
+      <small data-testid="agent-chat-change-line">{[riskText(c.riskLevel), changeApprovals(c)].filter(Boolean).join(" ")}</small>
+      {c.status === "pending" && <Answer taskId={taskId} id={c.id} kind="change" act={act} onDone={onDone} />}
+    </div>
+  );
+}
+
+function ReadPlan({ plan, taskId, act, onDone }: { plan: NonNullable<ChatTaskView["plan"]>; taskId: string; act: Act; onDone: (message: string) => void }): JSX.Element {
+  return (
+    <div className="ai-chat-thread" data-testid="agent-chat-plan">
+      <small>Plan. {PLAN_STATUS[plan.status] ?? plan.status}.</small>
+      <p>{sentence(plan.goal)}</p>
+      <ol>
+        {plan.steps.map((step, i) => (
+          <li key={i}>
+            {sentence(step.action)}
+            {step.command && <pre className="ai-mono ai-chat-command">{step.command}</pre>}
+          </li>
+        ))}
+      </ol>
+      {plan.status === "proposed" && <Answer taskId={taskId} id={plan.id} kind="plan" act={act} onDone={onDone} />}
+    </div>
+  );
+}
+
 function Conversations({ act, error, failed }: { act: Act; error?: string; failed: boolean }): JSX.Element {
   const [runs, setRuns] = useState<ChatRunItem[] | undefined>();
   const [open, setOpen] = useState<ChatTaskView | undefined>();
   const [said, setSaid] = useState("");
+  // Each read the person starts, and each answer, starts a new follow: an older one stops.
+  const follow = useRef(0);
+  useEffect(
+    () => () => {
+      follow.current += 1;
+    },
+    [],
+  );
   const load = async (): Promise<void> => {
     const next = await act({ action: "chat-answering-runs" });
     if (next?.reply?.chatRuns) setRuns(next.reply.chatRuns);
   };
+  const read = async (taskId: string): Promise<ChatTaskView | undefined> => {
+    const got = (await act({ action: "chat-answering-task", taskId }))?.reply?.chatTask;
+    if (got) setOpen(got);
+    return got;
+  };
   const show = async (taskId: string): Promise<void> => {
+    follow.current += 1;
     setSaid("");
-    const next = await act({ action: "chat-answering-task", taskId });
-    if (next?.reply?.chatTask) setOpen(next.reply.chatTask);
+    await read(taskId);
   };
   const answered = (message: string): void => {
     setSaid(message);
-    if (open) void show(open.taskId).then(() => setSaid(message));
+    if (!open) return;
+    const mine = ++follow.current;
+    const taskId = open.taskId;
+    // Read again at once, and again while the agent goes on after the answer, until it waits or ends.
+    void (async () => {
+      for (let i = 0; i < FOLLOW_TRIES; i++) {
+        const view = await read(taskId);
+        if (follow.current !== mine || !view || (view.status !== "queued" && view.status !== "running")) return;
+        await new Promise((resolve) => setTimeout(resolve, FOLLOW_MS));
+        if (follow.current !== mine) return;
+      }
+    })();
   };
   return (
     <div data-testid="agent-chat-runs">
@@ -881,10 +1042,9 @@ function Conversations({ act, error, failed }: { act: Act; error?: string; faile
               >
                 {r.title}
               </button>
-              <small>
+              <small data-testid="agent-chat-run-line">
                 {r.kind === "dm" ? "Direct message" : `#${r.channelName}`} in {NAME[r.service]} · asked by {r.askedBy} · {REACH[r.reach]} ·{" "}
-                {r.status}
-                {r.waiting ? ` · ${r.waiting} waiting` : ""}
+                {r.waiting ? `Waiting for ${r.waiting} ${r.waiting === 1 ? "answer" : "answers"}` : runStatusText(r.status)}
                 {r.tokens ? ` · ${r.tokens.toLocaleString()} tokens` : ""} · {when(r.updatedAt)}
               </small>
             </li>
@@ -894,46 +1054,18 @@ function Conversations({ act, error, failed }: { act: Act; error?: string; faile
       {open && (
         <div className="ai-form" data-testid="agent-chat-task">
           <strong>{open.title}</strong>
-          <small>
+          <small data-testid="agent-chat-task-status">
             {open.chat.kind === "dm" ? "Direct message" : `#${open.chat.channelName}`} in {NAME[open.chat.service]}, asked by{" "}
-            {open.chat.askedBy.name}. {REACH[open.chat.fence.reach]}. Status: {open.status}.
+            {open.chat.askedBy.name}. {REACH[open.chat.fence.reach]}. Status: {runStatusText(open.status)}.
           </small>
-          {open.messages.map((m) => (
-            <div key={m.id} className="ai-chat-thread">
-              <small>
-                {m.role === "user" ? "Asked" : m.role === "assistant" ? "The agent" : "Note"} · {when(m.at)}
-              </small>
-              <blockquote>
-                {m.role === "assistant" ? <RichMarkdownContent text={m.text} /> : <p style={{ whiteSpace: "pre-wrap" }}>{m.text}</p>}
-              </blockquote>
-            </div>
-          ))}
-          {open.changes.map((c) => (
-            <div key={c.id} className="ai-chat-thread" data-testid={`agent-chat-change-${c.id}`}>
-              <small>
-                Change on {c.target} · {c.status}
-                {c.riskLevel ? ` · risk: ${c.riskLevel}` : ""}
-                {c.requiredApprovals ? ` · ${(c.approvals ?? []).filter((a) => a.allowed).length} of ${c.requiredApprovals} approvals` : ""}
-              </small>
-              <p>{c.description}</p>
-              {c.command && <pre className="ai-mono">{c.command}</pre>}
-              {c.status === "pending" && <Answer taskId={open.taskId} id={c.id} kind="change" act={act} onDone={answered} />}
-            </div>
-          ))}
-          {open.plan && (
-            <div className="ai-chat-thread" data-testid="agent-chat-plan">
-              <small>Plan · {open.plan.status}</small>
-              <p>{open.plan.goal}</p>
-              <ol>
-                {open.plan.steps.map((step, i) => (
-                  <li key={i}>
-                    {step.action}
-                    {step.command && <code className="ai-mono"> {step.command}</code>}
-                  </li>
-                ))}
-              </ol>
-              {open.plan.status === "proposed" && <Answer taskId={open.taskId} id={open.plan.id} kind="plan" act={act} onDone={answered} />}
-            </div>
+          {readOrder(open).map((entry) =>
+            entry.message ? (
+              <ReadMessage key={`m:${entry.message.id}`} m={entry.message} />
+            ) : entry.change ? (
+              <ReadChange key={`c:${entry.change.id}`} c={entry.change} taskId={open.taskId} act={act} onDone={answered} />
+            ) : (
+              <ReadPlan key="plan" plan={entry.plan} taskId={open.taskId} act={act} onDone={answered} />
+            ),
           )}
           {said && (
             <p role="status" className="ai-hint" data-testid="agent-chat-answered">
@@ -963,6 +1095,7 @@ function TryIt({
   error,
   failed,
   modelSet,
+  mattermostAnswers,
 }: {
   channels: Record<ChatServiceName, ChatChannelRule[]>;
   act: Act;
@@ -970,28 +1103,32 @@ function TryIt({
   failed: boolean;
   /** Whether the chat agent has a model: without one nothing it runs can answer. */
   modelSet: boolean;
+  /** How a card is answered in a real Mattermost: with buttons, or with reactions. */
+  mattermostAnswers: "buttons" | "reactions";
 }): JSX.Element {
   const rows = SERVICES.flatMap((s) => (channels[s] ?? []).map((r) => ({ service: s, rule: r })));
   const [channel, setChannel] = useState(rows[0]?.rule.channelId ?? "dm");
   const [as, setAs] = useState<"me" | "guest">("me");
   const [text, setText] = useState("");
-  const [result, setResult] = useState<(ChatTryResult & { service: ChatServiceName; ownAccount: boolean }) | undefined>();
+  const [result, setResult] = useState<(ChatTryResult & { service: ChatServiceName; ownAccount: boolean; sent: string; as: "me" | "guest" }) | undefined>();
   const [goOn, setGoOn] = useState(false);
   const [busy, setBusy] = useState(false);
   // A direct message is tried in Slack's form; a channel in the form of the service it is listed for.
-  const triedIn: ChatServiceName = rows.find((r) => r.rule.channelId === channel)?.service ?? "slack";
+  const chosen = rows.find((r) => r.rule.channelId === channel);
+  const triedIn: ChatServiceName = chosen?.service ?? "slack";
   // Only a thread of the channel chosen now can be gone on with: never one of another channel.
   const sameThread = Boolean(result && channel !== "dm" && result.channelId === channel);
   const own = inOwnAccount(channel, as);
   const send = async (): Promise<void> => {
-    if (!text.trim()) return;
+    const sent = text.trim();
+    if (!sent) return;
     setBusy(true);
     const thread = goOn && sameThread && result ? result.thread : undefined;
-    const next = await act({ action: "chat-answering-try", channel, as, text: text.trim(), ...(thread ? { thread } : {}) });
+    const next = await act({ action: "chat-answering-try", channel, as, text: sent, ...(thread ? { thread } : {}) });
     setBusy(false);
     const got = next?.reply?.chatTry;
     if (got) {
-      setResult({ ...got, service: triedIn, ownAccount: own });
+      setResult({ ...got, service: triedIn, ownAccount: own, sent, as });
       setText("");
     }
   };
@@ -1020,20 +1157,27 @@ function TryIt({
             setGoOn(false);
           }}
         >
+          {/* Short labels, so a phone shows them whole: what the channel may do is said under it. */}
           {rows.map(({ service, rule }) => (
             <option key={`${service}:${rule.channelId}`} value={rule.channelId}>
-              #{rule.channelName} ({NAME[service]}, {REACH[rule.reach]})
+              #{rule.channelName}, {NAME[service]}
             </option>
           ))}
           <option value="dm">A direct message</option>
         </select>
+        {chosen && <small data-testid="agent-chat-try-reach">There: {REACH[chosen.rule.reach]}.</small>}
       </label>
       <label>
         Who writes
         <select aria-label="Who writes" value={as} onChange={(e) => setAs(e.target.value as "me" | "guest")}>
-          <option value="me">You, with your chat account linked</option>
-          <option value="guest">Someone who did not link</option>
+          <option value="me">You, as if linked</option>
+          <option value="guest">Someone not linked</option>
         </select>
+        <small>
+          {as === "me"
+            ? "As you, as if your chat account were linked. This does not link it: that is under Your chat account."
+            : "As someone who did not link their chat account."}
+        </small>
       </label>
       <label>
         Message to the agent bot
@@ -1051,7 +1195,13 @@ function TryIt({
         </button>
       </div>
       {result && (
-        <div data-testid="agent-chat-try-result">
+        <div className="ai-chat-try-result" data-testid="agent-chat-try-result">
+          <div className="ai-chat-thread ai-chat-sent" data-testid="agent-chat-try-sent">
+            <small>{result.as === "me" ? "You wrote" : "You wrote, as someone not linked"}</small>
+            <blockquote>
+              <p>{result.sent}</p>
+            </blockquote>
+          </div>
           {result.posts.length === 0 && <p className="ai-empty">The bot posted nothing.</p>}
           {result.posts.map((p) => (
             <div key={p.id} className="ai-chat-thread" data-testid="agent-chat-try-post">
@@ -1064,6 +1214,14 @@ function TryIt({
               </blockquote>
             </div>
           ))}
+          {result.posts.some((p) => p.waitingCard) && (
+            <p className="ai-hint" data-testid="agent-chat-try-card-note">
+              In Slack this card has Approve and Deny buttons. In Mattermost people answer it with{" "}
+              {mattermostAnswers === "buttons" ? "Approve and Deny buttons" : "reactions"}, as set under How Mattermost cards are answered.
+              Here nobody can press or react, so answer it{" "}
+              {result.ownAccount ? "in that conversation, in your list." : "under Conversations from chat."}
+            </p>
+          )}
           {result.privateNotes.map((n, i) => (
             <p key={i} className="ai-hint" data-testid="agent-chat-try-private">
               Only the person who wrote saw: {n}
@@ -1071,10 +1229,12 @@ function TryIt({
           ))}
           {!result.settled && (
             <p className="ai-hint">
-              The agent is still working, or waits for an answer. This is what was posted so far.{" "}
-              {result.ownAccount
-                ? "A change that waits is in that conversation, in your list, as nobody can press or react in this simulated chat."
-                : "A change that waits can be answered under Conversations from chat, as nobody can press or react in this simulated chat."}
+              The agent is still working, or waits for an answer. This is what was posted so far.
+              {result.posts.some((p) => p.waitingCard)
+                ? ""
+                : result.ownAccount
+                  ? " A change that waits is in that conversation, in your list, as nobody can press or react in this simulated chat."
+                  : " A change that waits can be answered under Conversations from chat, as nobody can press or react in this simulated chat."}
             </p>
           )}
         </div>
@@ -1192,7 +1352,7 @@ export function AgentInChatCard({ hub, act, error }: { hub: HubSnapshot; act: Ac
   if (!admin) {
     if (!showAccount && chat.waiting.length === 0) return null;
     return (
-      <article className="ai-card" data-testid="agent-in-chat-card">
+      <article className="ai-card ai-chat-card" data-testid="agent-in-chat-card">
         <div className="ai-card-head">
           <div>
             <strong>Agent in chat</strong>
@@ -1216,7 +1376,7 @@ export function AgentInChatCard({ hub, act, error }: { hub: HubSnapshot; act: Ac
     await actFor("toggle")({ action: "chat-answering-save", input: { enabled } });
   };
   return (
-    <article className="ai-card" data-testid="agent-in-chat-card">
+    <article className="ai-card ai-chat-card" data-testid="agent-in-chat-card">
       <div className="ai-card-head">
         <div>
           <strong>Agent in chat</strong>
@@ -1248,7 +1408,7 @@ export function AgentInChatCard({ hub, act, error }: { hub: HubSnapshot; act: Ac
       {!admin.model.set && (
         <p role={s.enabled ? "alert" : undefined} className={s.enabled ? "ai-error" : "ai-hint"} data-testid="agent-chat-no-model">
           The chat agent has no model yet. Press Copy my model first, under Model, budget and limits.
-          {s.enabled ? " Until then the agent bot answers every question with that." : ""}
+          {s.enabled ? ' Until then the agent bot answers every question with an error that says "No model is set up".' : ""}
         </p>
       )}
       {refused.length > 0 && (
@@ -1268,7 +1428,7 @@ export function AgentInChatCard({ hub, act, error }: { hub: HubSnapshot; act: Ac
       <Failed shown={failed("toggle")} error={error} />
 
       <details className="ai-fold ai-set-fold" open={botsOpen}>
-        <summary>The agent bot{admin.bots.length ? ` · ${admin.bots.map((b) => `${NAME[b.service]}: ${statusText(admin.status[b.service], b)}`).join(", ")}` : " · not connected"}</summary>
+        <summary>The agent bot{admin.bots.length ? ` · ${admin.bots.map((b) => `${NAME[b.service]}: ${statusTitle(admin.status[b.service], b)}`).join(", ")}` : " · not connected"}</summary>
         {SERVICES.map((service) => {
           const bot = admin.bots.find((b) => b.service === service);
           return (
@@ -1326,13 +1486,16 @@ export function AgentInChatCard({ hub, act, error }: { hub: HubSnapshot; act: Ac
 
       <details className="ai-fold ai-set-fold">
         <summary>How Mattermost cards are answered · {admin.mattermostAnswers === "buttons" ? "buttons" : "reactions"}</summary>
-        <p className="ai-hint" data-testid="agent-chat-mattermost-answers">
-          {admin.mattermostAnswers === "buttons"
-            ? "Mattermost cards have Approve and Deny buttons: SSHS3_PUBLIC_URL and SSHS3_MATTERMOST_ACTION_FROM are both set on this server."
-            : "Mattermost cards are answered with reactions: ✅ to approve, ❌ to deny. For buttons, set both SSHS3_PUBLIC_URL and SSHS3_MATTERMOST_ACTION_FROM, the IP addresses Mattermost's server posts from, exactly as this server sees them. Host names and ranges are not matched."}{" "}
-          Behind a reverse proxy this server sees the proxy&apos;s address, so that is the address the list must hold. In Slack,
-          cards have buttons.
-        </p>
+        {/* In a form like the other folds: the same padding and the same size of type. */}
+        <div className="ai-form">
+          <small data-testid="agent-chat-mattermost-answers">
+            {admin.mattermostAnswers === "buttons"
+              ? "Mattermost cards have Approve and Deny buttons: SSHS3_PUBLIC_URL and SSHS3_MATTERMOST_ACTION_FROM are both set on this server."
+              : "Mattermost cards are answered with reactions: ✅ to approve, ❌ to deny. For buttons, set both SSHS3_PUBLIC_URL and SSHS3_MATTERMOST_ACTION_FROM, the IP addresses Mattermost's server posts from, exactly as this server sees them. Host names and ranges are not matched."}{" "}
+            Behind a reverse proxy this server sees the proxy&apos;s address, so that is the address the list must hold. In Slack,
+            cards have buttons.
+          </small>
+        </div>
       </details>
 
       <details className="ai-fold ai-set-fold">
@@ -1367,7 +1530,15 @@ export function AgentInChatCard({ hub, act, error }: { hub: HubSnapshot; act: Ac
       <details className="ai-fold ai-set-fold">
         <summary>Try it</summary>
         {admin.canTry ? (
-          <TryIt key={channelsKey} channels={s.channels} act={actFor("try")} error={error} failed={failed("try")} modelSet={admin.model.set} />
+          <TryIt
+            key={channelsKey}
+            channels={s.channels}
+            act={actFor("try")}
+            error={error}
+            failed={failed("try")}
+            modelSet={admin.model.set}
+            mattermostAnswers={admin.mattermostAnswers === "buttons" ? "buttons" : "reactions"}
+          />
         ) : (
           <p className="ai-hint">Try it is for the demo, or for before the agent bot is connected. Now ask the agent bot in your chat.</p>
         )}
