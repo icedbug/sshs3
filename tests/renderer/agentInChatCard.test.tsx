@@ -704,7 +704,11 @@ describe("Agent in chat, for an administrator", () => {
     const done = (status: ChatTaskView["status"], change: string): ChatTaskView => ({
       ...base,
       status,
-      changes: [{ ...base.changes[0], status: change, approvals: [{ actor: "Maria", allowed: true, at: NOW }] } as ChatTaskView["changes"][number]],
+      changes: [
+        { ...base.changes[0], status: change, approvals: [{ actor: "Maria", allowed: true, at: NOW }] } as ChatTaskView["changes"][number],
+        // A command that only reads is kept with the changes, and must not be called one.
+        { id: "c0", kind: "command", target: "um-01", description: "Look at the poller", command: "systemctl status harvest", status: "completed", riskLevel: "safe", at: NOW } as ChatTaskView["changes"][number],
+      ],
       messages: status === "completed" ? [...base.messages, { id: "m2", role: "assistant", text: "Restarted it.", at: NOW + 2 }] : base.messages,
     });
     // Read once before the answer; after it, the agent still works on the first read and is done on the next.
@@ -729,6 +733,8 @@ describe("Agent in chat, for an administrator", () => {
     await waitFor(() => expect(screen.getByTestId("agent-chat-task-status")).toHaveTextContent("Status: Working on it."));
     await waitFor(() => expect(screen.getByTestId("agent-chat-task-status")).toHaveTextContent("Status: Done."), { timeout: 3000 });
     expect(screen.getByTestId("agent-chat-change-c1")).toHaveTextContent("Change on um-01. Done.");
+    expect(screen.getByTestId("agent-chat-change-c0")).toHaveTextContent("Command on um-01. Done.");
+    expect(screen.getByTestId("agent-chat-change-c0")).toHaveTextContent("Low. It only reads.");
     expect(screen.getByTestId("agent-chat-change-c1")).toHaveTextContent("1 of 1 approval.");
     // The change shows before the reply the agent gave after it ran, as it happened.
     const changeBlock = screen.getByTestId("agent-chat-change-c1");

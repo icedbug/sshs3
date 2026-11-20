@@ -952,7 +952,8 @@ function ReadChange({ c, taskId, act, onDone }: { c: ChatTaskView["changes"][num
   return (
     <div className="ai-chat-thread" data-testid={`agent-chat-change-${c.id}`}>
       <small>
-        Change on {c.target}. {CHANGE_STATUS[c.status] ?? c.status}.
+        {/* A command that only reads is kept with the changes, but it is not one. */}
+        {c.riskLevel === "safe" ? "Command" : "Change"} on {c.target}. {CHANGE_STATUS[c.status] ?? c.status}.
       </small>
       <p>{sentence(c.description)}</p>
       {c.command && <pre className="ai-mono ai-chat-command">{c.command}</pre>}
