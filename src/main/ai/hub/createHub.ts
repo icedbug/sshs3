@@ -65,6 +65,8 @@ export interface CreateHubOptions {
   auditShipper?: HubHost["auditShipper"];
   /** On the web server: the one chat bot every account's hub shares. */
   teamChat?: HubHost["teamChat"];
+  /** On the web server: the hub of an account the server keeps for itself (see HubHost). */
+  serviceAccount?: boolean;
 }
 
 export function createHub(
@@ -405,6 +407,7 @@ export function createHub(
     teamRules: options?.teamRules,
     auditShipper: options?.auditShipper,
     teamChat: options?.teamChat,
+    serviceAccount: options?.serviceAccount,
     file: (...args) => files.invoke(...args),
     restoreCheckpoint: (change, opts) => files.restoreCheckpoint(change, opts),
     delta: (delta) => {

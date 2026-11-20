@@ -6,9 +6,10 @@ import path from 'node:path';
 import type { Duplex } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { setWebDataDir } from './electronShim';
-import { WebAuthService, type WebUserPublic } from './WebAuthService';
+import { SERVICE_ACCOUNT_PREFIX, WebAuthService, type WebUserPublic } from './WebAuthService';
 import { WebTenantManager } from './WebTenantManager';
 import { MCP_SCOPES, McpTokenStore, type McpScope } from './McpTokenStore';
+import { ChatAgentStore } from './chatAgent/ChatAgentStore';
 import { callBudget, handleMcpHttp } from './mcp/McpEndpoint';
 import { AuditLog } from '../ai/hub/AuditLog';
 import { verifyStandardWebhook, WEBHOOK_TOLERANCE_SECONDS } from '../ai/hub/Notifier';
@@ -407,6 +408,8 @@ export class Sshs3WebServer {
   public readonly tenants: WebTenantManager;
   /** The keys that let a person's own agent reach this server over MCP. */
   public readonly mcpTokens: McpTokenStore;
+  /** Who in chat is who here, and which chat thread is which conversation (the agent bot's). */
+  public readonly chatAgent: ChatAgentStore;
   private readonly mcpRate = callBudget();
   /**
    * The server's own chain: who signed in, who failed to, who was added or
@@ -432,6 +435,10 @@ export class Sshs3WebServer {
       () => this.auth.accountsBrief(),
     );
     this.mcpTokens = new McpTokenStore(options.dataDir);
+    // An account that is turned off or removed is never linked in chat, whatever asks the store.
+    this.chatAgent = new ChatAgentStore(options.dataDir, {
+      usable: (accountId) => this.auth.accountsBrief().some((a) => a.id === accountId && !a.disabled),
+    });
     this.signIns = new AuditLog(path.join(options.dataDir, 'audit'), 'server');
   }
 
@@ -572,6 +579,7 @@ export class Sshs3WebServer {
     await this.auth.initialize();
     await this.tenants.initialize();
     await this.mcpTokens.initialize();
+    await this.chatAgent.initialize();
 
     const host = this.options.host ?? process.env.SSHS3_WEB_HOST ?? '0.0.0.0';
     const requestedPort =
@@ -1143,13 +1151,23 @@ export class Sshs3WebServer {
             : '';
           const body = pathUserId ? {} : await readJsonBody(req);
           const targetUserId = String(pathUserId || body.userId || '');
+          // The server's own accounts (the chat agent) are not people's: refused before anything is stopped.
+          if (targetUserId.startsWith(SERVICE_ACCOUNT_PREFIX)) {
+            sendJson(res, 400, { error: 'The chat agent belongs to the server and cannot be removed' });
+            return;
+          }
           try {
             await this.auth.deleteUserByAdmin(targetUserId, user.id);
-            await this.signIns
-              .append({ kind: 'setting', actor: user.username, target: 'server', what: `removed the account ${targetUserId}` })
-              .catch(() => undefined);
-            await this.tenants.disposeTenant(targetUserId);
-            await this.mcpTokens.forgetUser(targetUserId);
+            // The account is gone. Everything that still knows it forgets it, each on its own, so one
+            // that fails does not keep the others from doing so.
+            const forgotten = await Promise.allSettled([
+              this.signIns.append({ kind: 'setting', actor: user.username, target: 'server', what: `removed the account ${targetUserId}` }),
+              this.tenants.disposeTenant(targetUserId),
+              this.mcpTokens.forgetUser(targetUserId),
+              this.chatAgent.forgetAccount(targetUserId),
+            ]);
+            const failed = forgotten.slice(1).find((r): r is PromiseRejectedResult => r.status === 'rejected');
+            if (failed) throw failed.reason;
             sendJson(res, 200, { ok: true });
           } catch (err) {
             sendJson(res, 400, {

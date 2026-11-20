@@ -68,7 +68,13 @@ export class EvalsPart {
       // The team's upkeep (tidying team memory, fetching the knowledge base's links again, looking for
       // contradictions) is done once a day by one installation: a mark that stays for the day, not a
       // lease that lapses after four minutes and lets the next one do it all again.
-      const mine = sync ? await sync.markOnce(`nightly-${day}`, client, this.notifySettle, now).catch(() => false) : true;
+      // The chat agent's hub never does it: it is not an installation of the team's, and it would take
+      // the day's mark from one that is.
+      const mine = this.host.serviceAccount
+        ? false
+        : sync
+          ? await sync.markOnce(`nightly-${day}`, client, this.notifySettle, now).catch(() => false)
+          : true;
       this.store.data.lastNightlyDay = day;
       if (mine) {
         await sync?.pruneMarks(14 * 24 * 60 * 60_000, now).catch(() => undefined);

@@ -140,7 +140,7 @@ export interface HubHost {
    * who answers through approveAsPeer(). Absent (the desktop app, a server that does not route
    * approvals between accounts): only one person can approve here, and nothing asks for two.
    */
-  peerApproval?: (tags?: string[]) => boolean;
+  peerApproval?: (tags?: string[], task?: Pick<import("../../../shared/types/aiHub").AgentTask, "chat">) => boolean;
   peerStillEligible?: (actorId: string, tags: string[]) => boolean;
   /**
    * On the web server: the changes in other members' runs that wait for a second person and that this
@@ -159,6 +159,12 @@ export interface HubHost {
     read(): import("../../../shared/types/aiHub").TeamSafetyRules;
     write(next: import("../../../shared/types/aiHub").TeamSafetyRules, previous?: import("../../../shared/types/aiHub").TeamSafetyRules): Promise<void>;
   };
+  /**
+   * On the web server: this hub is an account the server keeps for itself (the chat agent), not a
+   * person's. It says nothing about who is here: no presence of its own, and no terminals shown as a
+   * person's.
+   */
+  serviceAccount?: boolean;
   peerPresenceProvider?:() => import("../../../shared/types/aiHub").WorkspacePresenceEntry[];
   onSharedWorkspaceChanged?: () => void;
   /**

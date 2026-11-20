@@ -819,6 +819,8 @@ export class S3WorkspaceSyncService {
       requestTimeoutMs?: number;
       clientId?: string;
       providerFactory?: (cfg: S3WorkspaceConfig) => IStorageProvider;
+      /** False for an account the server keeps for itself: it is nobody, so it writes no presence. */
+      publishPresence?: boolean;
     } = {},
   ) {}
 
@@ -1207,7 +1209,7 @@ export class S3WorkspaceSyncService {
           }
         }
 
-        if (lastLocal) {
+        if (lastLocal && this.options.publishPresence !== false) {
           await this.publishAndRefreshPresenceInternal(provider, lastLocal);
         }
 
@@ -1272,7 +1274,7 @@ export class S3WorkspaceSyncService {
   }
 
   async publishAndRefreshPresence(): Promise<void> {
-    if (this.disposed || !this.canReachBucket()) return;
+    if (this.disposed || !this.canReachBucket() || this.options.publishPresence === false) return;
     const provider = await this.getOrCreateProvider();
     const local = await this.callbacks.getLocalState();
     await this.publishAndRefreshPresenceInternal(provider, local);

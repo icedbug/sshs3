@@ -593,6 +593,12 @@ export interface ChatFence {
   reach: ChatReach;
   /** Channel ids whose team chat the agent may search. Absent: only the channel it was asked in. */
   historyFrom?: string[];
+  /**
+   * Who in the channel may answer its changes and plans: every linked person the rules allow (absent or
+   * "linked"), or administrators only. Kept with the run, so how many people a change can ask for
+   * follows the same rule as who may answer it.
+   */
+  approvers?: "linked" | "admins";
 }
 
 /** Where a conversation asked from chat came from, and the fence it runs inside. */

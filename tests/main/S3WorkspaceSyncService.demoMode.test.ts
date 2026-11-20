@@ -160,7 +160,7 @@ async function writeConnectedBucket(file: string): Promise<void> {
   );
 }
 
-async function createService(options: { connected?: boolean; pollIntervalMs?: number; presenceIntervalMs?: number } = {}) {
+async function createService(options: { connected?: boolean; pollIntervalMs?: number; presenceIntervalMs?: number; publishPresence?: boolean } = {}) {
   const dir = await tempDir('sshs3-s3-sync-mode-');
   const file = path.join(dir, 's3-workspace.json');
   if (options.connected ?? true) await writeConnectedBucket(file);
@@ -183,6 +183,7 @@ async function createService(options: { connected?: boolean; pollIntervalMs?: nu
       pollIntervalMs: options.pollIntervalMs ?? 60_000,
       presenceIntervalMs: options.presenceIntervalMs ?? 60_000,
       pushDebounceMs: 0,
+      ...(options.publishPresence === undefined ? {} : { publishPresence: options.publishPresence }),
     }
   );
   disposals.push(() => service.dispose());
@@ -314,6 +315,26 @@ describe('S3 team workspace sync: outside demo mode against demo mode', () => {
     expect(getLocalState).not.toHaveBeenCalled();
     expect(bucket.log).toEqual([]);
     expect(service.getPresence()).toEqual([]);
+  });
+
+  it('an account the server keeps for itself syncs the workspace but never says it is here', async () => {
+    setDemoModeForTesting(false);
+    const { service, bucket } = await createService({ publishPresence: false, pollIntervalMs: 5, presenceIntervalMs: 5 });
+    await service.load();
+    await service.syncNow({ forcePush: true });
+    await service.pollOnce();
+    await service.publishAndRefreshPresence();
+    service.schedulePresenceUpdate();
+    service.startTimers();
+    try {
+      // Let the poll and presence timers tick a few times.
+      await new Promise((r) => setTimeout(r, 60));
+    } finally {
+      service.stopTimers();
+    }
+    await settle();
+    expect(bucket.log).toContain(`writeFile ${WORKSPACE_OBJECT}`);
+    expect(bucket.log.filter((line) => WRITE_OWN_PRESENCE.test(line))).toEqual([]);
   });
 
   it('normal mode: "Sync now" writes the workspace to the bucket', async () => {

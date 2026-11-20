@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
+import { writeFileAtomic } from '../storage/atomicFile';
 
 export interface WebUserRecord {
   id: string;
@@ -261,6 +262,43 @@ export function restrictPrivateKeyFile(
     return false;
   }
 }
+
+/**
+ * The key pair in `sshDir` (id_ed25519 and id_ed25519.pub), made when there is none or when asked to
+ * rotate it. An account's key and the chat agent's key are made the same way; the chat agent's folder
+ * is outside the accounts' folders, so it is kept by this function and not by an account record.
+ * `restricted` remembers the keys already restricted in this process, so Windows is not asked again.
+ */
+export async function ensureKeyPairAt(
+  sshDir: string,
+  comment: string,
+  options: { rotate?: boolean; restricted?: Set<string> } = {},
+): Promise<{ privateKeyPath: string; publicKey: string }> {
+  const privPath = path.join(sshDir, 'id_ed25519');
+  const pubPath = path.join(sshDir, 'id_ed25519.pub');
+  const restricted = options.restricted ?? new Set<string>();
+  await fsp.mkdir(sshDir, { recursive: true, mode: 0o700 });
+
+  if (!options.rotate && fs.existsSync(privPath) && fs.existsSync(pubPath)) {
+    // A key written before sshs3 restricted it (on Windows) is put right once, when it is next asked for.
+    if (!restricted.has(privPath) && restrictPrivateKeyFile(privPath)) restricted.add(privPath);
+    const pub = (await fsp.readFile(pubPath, 'utf8')).trim();
+    return { privateKeyPath: privPath, publicKey: pub };
+  }
+
+  const { privateKeyPem, publicKeyLine } = generateOpenSshEd25519KeyPair(comment);
+  // Written whole and then moved into place: a crash or a full disk while rotating leaves the old key,
+  // never half of a new one. The mode is set on the new file, whatever the old one had.
+  await writeFileAtomic(privPath, privateKeyPem, { mode: 0o600 });
+  if (restrictPrivateKeyFile(privPath)) restricted.add(privPath);
+  await writeFileAtomic(pubPath, `${publicKeyLine}\n`, { mode: 0o644 });
+
+  const pub = (await fsp.readFile(pubPath, 'utf8')).trim();
+  return { privateKeyPath: privPath, publicKey: pub };
+}
+
+/** Ids of the server's own service accounts start with this. No person's account does (theirs start with "usr_"). */
+export const SERVICE_ACCOUNT_PREFIX = 'svc_';
 
 const PROD_ENV_PATTERN = /^(prod|production|critical)$/i;
 const DEFAULT_PROD_APPROVER_GROUPS = new Set(['approver', 'prod-approver', 'sre-lead', 'admin', 'admins']);
@@ -602,27 +640,10 @@ export class WebAuthService {
     username: string,
     forceRotate = false,
   ): Promise<{ privateKeyPath: string; publicKey: string }> {
-    const sshDir = this.getUserSshDir(userId);
-    const privPath = this.getUserPrivateKeyPath(userId);
-    const pubPath = this.getUserPublicKeyPath(userId);
-    await fsp.mkdir(sshDir, { recursive: true, mode: 0o700 });
-
-    if (!forceRotate && fs.existsSync(privPath) && fs.existsSync(pubPath)) {
-      // A key written before sshs3 restricted it (on Windows) is put right once, when it is next asked for.
-      if (!this.restrictedKeys.has(privPath) && restrictPrivateKeyFile(privPath)) this.restrictedKeys.add(privPath);
-      const pub = (await fsp.readFile(pubPath, 'utf8')).trim();
-      return { privateKeyPath: privPath, publicKey: pub };
-    }
-
-    const comment = `${username}@sshs3-web`;
-    const { privateKeyPem, publicKeyLine } =
-      generateOpenSshEd25519KeyPair(comment);
-    await fsp.writeFile(privPath, privateKeyPem, { mode: 0o600 });
-    if (restrictPrivateKeyFile(privPath)) this.restrictedKeys.add(privPath);
-    await fsp.writeFile(pubPath, `${publicKeyLine}\n`, { mode: 0o644 });
-
-    const pub = (await fsp.readFile(pubPath, 'utf8')).trim();
-    return { privateKeyPath: privPath, publicKey: pub };
+    return ensureKeyPairAt(this.getUserSshDir(userId), `${username}@sshs3-web`, {
+      rotate: forceRotate,
+      restricted: this.restrictedKeys,
+    });
   }
 
   async importUserSshKey(
@@ -996,6 +1017,9 @@ export class WebAuthService {
   }
 
   async deleteUserByAdmin(targetUserId: string, actorUserId: string): Promise<void> {
+    if (targetUserId.startsWith(SERVICE_ACCOUNT_PREFIX)) {
+      throw new Error('The chat agent belongs to the server and cannot be removed');
+    }
     if (targetUserId === actorUserId) {
       throw new Error('You cannot remove the account you are signed in with');
     }

@@ -9,7 +9,7 @@ import { IpcBridge } from '../IpcBridge';
 import type { WindowRouter } from '../windows/WindowManager';
 import { createHub } from '../ai/hub/createHub';
 import type { HubService } from '../ai/hub/HubService';
-import type { PeerApprovalItem, TeamSafetyRules } from '../../shared/types/aiHub';
+import type { ChatServiceName, PeerApprovalItem, TeamSafetyRules } from '../../shared/types/aiHub';
 import { writeFileAtomic } from '../storage/atomicFile';
 import {
   HUB_CHANGED,
@@ -31,11 +31,36 @@ import { SyncConfigStore } from '../services/SyncConfigStore';
 import { TeamVaultConfigStore } from '../services/TeamVaultConfigStore';
 import { TeamVaultService } from '../services/TeamVaultService';
 import {
+  ensureKeyPairAt,
   evaluatePeerApproval,
+  SERVICE_ACCOUNT_PREFIX,
   type PeerAccount,
   type PeerApprovalDecision,
   type WebUserPublic,
 } from './WebAuthService';
+
+/**
+ * The chat agent: the account a conversation asked for in a chat channel runs in. The server makes it
+ * itself. It has no record among the accounts, so nobody can sign in as it, invite it or remove it, and
+ * it is never counted as a person: not for the two person rule, not among who is here, not in the
+ * administrator's list. ":" is not allowed in a person's username, so its name cannot be taken.
+ */
+export const CHAT_AGENT_ID = `${SERVICE_ACCOUNT_PREFIX}chat-agent`;
+export const CHAT_AGENT_USERNAME = 'svc:chat-agent';
+export const CHAT_AGENT_NAME = 'Chat agent';
+/**
+ * The comment on the chat agent's public key, as it shows in a server's authorized_keys. A person's key
+ * is "<username>@sshs3-web", and no username has a ":", so an administrator can always tell this line
+ * from a person's when they remove it.
+ */
+export const CHAT_AGENT_KEY_COMMENT = `${CHAT_AGENT_USERNAME}@sshs3-web`;
+
+/** What a person's answer from chat came to, in words the chat can show them. */
+export type ChatAgentAnswer =
+  | { outcome: 'approved'; message: string }
+  | { outcome: 'denied'; message: string }
+  | { outcome: 'waiting'; remaining: number; message: string }
+  | { outcome: 'refused'; message: string };
 
 type RpcHandler = (event: unknown, ...args: unknown[]) => unknown;
 
@@ -307,6 +332,14 @@ export class WebTenantManager {
   private ruleWrites: Promise<void> = Promise.resolve();
   private boardTimer?: NodeJS.Timeout;
   private boardWriters = new Set<string>();
+  /**
+   * The chat agent's tenant, kept apart from the accounts' so that nothing that goes through the
+   * accounts (who is here, who may approve, who is running) ever finds it.
+   */
+  private chatAgent?: Promise<UserTenant>;
+  private chatAgentResolved?: UserTenant;
+  /** The chat agent's private keys already restricted in this process: Windows is asked once, not on every read. */
+  private readonly chatAgentRestrictedKeys = new Set<string>();
 
   constructor(
     private readonly baseDataDir: string,
@@ -364,6 +397,7 @@ export class WebTenantManager {
       await writeFileAtomic(this.getTeamRulesPath(), JSON.stringify(next, null, 2));
       this.teamRules = next;
       for (const [uid, tenant] of this.resolvedTenants.entries()) if (uid !== userId) tenant.hub.teamRulesChanged();
+      this.chatAgentResolved?.hub.teamRulesChanged();
     });
     this.ruleWrites = write.catch(() => undefined);
     return write;
@@ -411,7 +445,10 @@ export class WebTenantManager {
 
   private notifyCrossTenantChanged(excludeUserId?: string): void {
     if (excludeUserId && this.reloadingTenants.has(excludeUserId)) return;
-    for (const [uid, tenant] of this.resolvedTenants.entries()) {
+    const everyone: Array<[string, UserTenant]> = [...this.resolvedTenants.entries()];
+    // The chat agent reads the team's servers too; it has no window to tell.
+    if (this.chatAgentResolved) everyone.push([CHAT_AGENT_ID, this.chatAgentResolved]);
+    for (const [uid, tenant] of everyone) {
       if (uid !== excludeUserId && !this.reloadingTenants.has(uid)) {
         this.reloadingTenants.add(uid);
         void tenant.hub.s3Workspace
@@ -438,20 +475,57 @@ export class WebTenantManager {
     this.notifyTimer.unref?.();
   }
 
-  /** The account as it is now (a role may have changed since its hub was started). */
+  /**
+   * A person's account as it is now (a role may have changed since its hub was started). Never one of the
+   * server's own: whatever looks an account up here to approve, answer or change rules finds nobody.
+   */
   private account(userId: string): PeerAccount | undefined {
+    if (userId.startsWith(SERVICE_ACCOUNT_PREFIX)) return undefined;
     return this.accounts ? this.accounts().find((a) => a.id === userId) : this.resolvedTenants.get(userId)?.user;
   }
 
+  /**
+   * The one a change is asked for: a person's account, or the chat agent. The chat agent asks for
+   * approvals and never gives one, so it is found only here, in that role.
+   */
+  private requester(userId: string): PeerAccount | undefined {
+    return userId === CHAT_AGENT_ID ? this.chatAgentAccount() : this.account(userId);
+  }
+
+  private chatAgentAccount(): PeerAccount {
+    return { id: CHAT_AGENT_ID, username: CHAT_AGENT_USERNAME, displayName: CHAT_AGENT_NAME, role: 'member' };
+  }
+
+  /** The people who could be a second person for this account's changes: never the chat agent. */
+  private people(): PeerAccount[] {
+    return (this.accounts?.() ?? []).filter((a) => !a.id.startsWith(SERVICE_ACCOUNT_PREFIX));
+  }
+
   private eligiblePeer(ownerId: string, peer: PeerAccount, tags: string[]): boolean {
-    const owner = this.account(ownerId);
+    // The server's own accounts are never anybody's second person.
+    if (peer.id.startsWith(SERVICE_ACCOUNT_PREFIX)) return false;
+    const owner = this.requester(ownerId);
     return Boolean(owner && !owner.disabled && this.authorizePeerApproval({
       requesterUserId: ownerId, requesterUsername: owner.username, approver: peer, targetTags: tags, requiredApprovals: 2,
     }).authorized);
   }
 
   private hasSecondApproverFor(userId: string, tags: string[] = ['production']): boolean {
-    return (this.accounts?.() ?? []).some((peer) => this.eligiblePeer(userId, peer, tags));
+    return this.people().some((peer) => this.eligiblePeer(userId, peer, tags));
+  }
+
+  /**
+   * Whether a change of the chat agent's can be put to people. The rule for an account counts its owner
+   * as the first person; the chat agent is nobody, so two people who may answer are needed. In a channel
+   * that takes answers from administrators only, only they are counted: otherwise a change could ask for
+   * two people the channel would never let answer, and wait until it timed out.
+   */
+  private chatAgentHasTwoApprovers(tags: string[] = ['production'], approvers?: 'linked' | 'admins'): boolean {
+    return (
+      this.people().filter(
+        (peer) => (approvers !== 'admins' || peer.role === 'admin') && this.eligiblePeer(CHAT_AGENT_ID, peer, tags),
+      ).length >= 2
+    );
   }
 
   /** The changes in other members' runs that wait for a second person and that this member may answer. */
@@ -550,6 +624,7 @@ export class WebTenantManager {
         if (writers.size === 1 && writers.has(uid)) continue;
         tenant.hub.teamBoardChanged();
       }
+      if (this.chatAgentResolved && !(writers.size === 1 && writers.has(CHAT_AGENT_ID))) this.chatAgentResolved.hub.teamBoardChanged();
     }, 120);
     this.boardTimer.unref?.();
   }
@@ -560,6 +635,8 @@ export class WebTenantManager {
   }
 
   async getOrCreateTenant(user: WebUserPublic): Promise<UserTenant> {
+    // A service account is never anybody's: it is started by the server, under its own folder.
+    if (user.id.startsWith(SERVICE_ACCOUNT_PREFIX)) throw new Error('That account belongs to the server.');
     const existing = this.tenants.get(user.id);
     if (existing) {
       const resolved = await existing;
@@ -579,10 +656,10 @@ export class WebTenantManager {
     }
   }
 
-  private async createTenantInternal(user: WebUserPublic): Promise<UserTenant> {
+  private async createTenantInternal(user: WebUserPublic, service?: { userDir: string }): Promise<UserTenant> {
     await this.initialize();
     const safeId = user.id.replace(/[^a-zA-Z0-9_-]/g, '');
-    const userDir = path.join(this.baseDataDir, 'users', safeId);
+    const userDir = service?.userDir ?? path.join(this.baseDataDir, 'users', safeId);
     await fsp.mkdir(userDir, { recursive: true, mode: 0o700 });
 
     const virtualIpcMain = new VirtualIpcMain();
@@ -835,6 +912,21 @@ export class WebTenantManager {
 
     const tenantState: { current?: UserTenant } = {};
 
+    const shared = {
+      hubDirectory: path.join(userDir, 'ai-hub'),
+      aiConfigFilePath: path.join(userDir, 'ai-config.json'),
+      s3ConfigFilePath: this.getSharedS3ConfigPath(),
+      alertHookOwner: user.id,
+      onSharedWorkspaceChanged: () => this.notifyCrossTenantChanged(user.id),
+      // One board for everyone on this server, kept in the server's shared folder when the team has no bucket.
+      sharedWorkStore: this.teamBoard.forAccount(() => this.boardChangedBy(user.id)),
+      peerStillEligible: (actorId: string, tags: string[]) => {
+        const peer = actorId.startsWith('user:') ? this.account(actorId.slice(5)) : undefined;
+        return !!peer && this.eligiblePeer(user.id, peer, tags);
+      },
+      peerWaitingChanged: () => this.secondPersonWantedBy(user.id),
+      teamChat: this.teamChat,
+    };
     const hub = createHub(
       bridge,
       // No relaunchForDemoMode: demo mode is fixed for the whole server when it starts (serverEntry.ts),
@@ -843,32 +935,36 @@ export class WebTenantManager {
         backgroundChanged: async () => {},
         show: () => {},
       },
-      {
-        hubDirectory: path.join(userDir, 'ai-hub'),
-        aiConfigFilePath: path.join(userDir, 'ai-config.json'),
-        s3ConfigFilePath: this.getSharedS3ConfigPath(),
-        defaultActorName: user.displayName || user.username,
-        alertHookOwner: user.id,
-        teamAdmin: () => { const account = this.account(user.id); return !!account && !account.disabled && account.role === 'admin'; },
-        soleUser: () => (tenantState.current?.user ?? user).role === 'admin' && this.accountCount?.() === 1,
-        peerPresenceProvider: () => this.getAllLocalTenantsPresence(),
-        onSharedWorkspaceChanged: () =>
-          this.notifyCrossTenantChanged(user.id),
-        // One board for everyone on this server, kept in the server's shared folder when the team has no bucket.
-        sharedWorkStore: this.teamBoard.forAccount(() => this.boardChangedBy(user.id)),
-        // A change that needs two people is put to the other members, and their answer is passed back.
-        peerApproval: (tags) => this.hasSecondApproverFor(user.id, tags),
-        peerStillEligible: (actorId, tags) => {
-          const peer = actorId.startsWith('user:') ? this.account(actorId.slice(5)) : undefined;
-          return !!peer && this.eligiblePeer(user.id, peer, tags);
-        },
-        peerWaiting: () => this.waitingForSecondPerson(user.id),
-        peerDecide: (answer) => this.answerAsSecondPerson(user.id, answer),
-        peerWaitingChanged: () => this.secondPersonWantedBy(user.id),
-        // The rules for everyone on this server: one set, read by every account's hub.
-        teamRules: { read: () => this.teamRules, write: (next, previous) => this.saveTeamRules(user.id, next, previous) },
-        teamChat: this.teamChat,
-      },
+      service
+        ? {
+            ...shared,
+            defaultActorName: CHAT_AGENT_NAME,
+            // Nobody signs in to it: it administers nothing and is never alone on the server, so what
+            // is asked of it in a channel never reaches into the server itself.
+            teamAdmin: () => false,
+            soleUser: () => false,
+            serviceAccount: true,
+            // It has no owner to be the first person, so two people who may answer are needed.
+            peerApproval: (tags, task) => this.chatAgentHasTwoApprovers(tags, task?.chat?.fence.approvers),
+            // It reads the team's rules and never writes them.
+            teamRules: {
+              read: () => this.teamRules,
+              write: () => Promise.reject(new Error('Only an active administrator can change team rules.')),
+            },
+          }
+        : {
+            ...shared,
+            defaultActorName: user.displayName || user.username,
+            teamAdmin: () => { const account = this.account(user.id); return !!account && !account.disabled && account.role === 'admin'; },
+            soleUser: () => (tenantState.current?.user ?? user).role === 'admin' && this.accountCount?.() === 1,
+            peerPresenceProvider: () => this.getAllLocalTenantsPresence(),
+            // A change that needs two people is put to the other members, and their answer is passed back.
+            peerApproval: (tags) => this.hasSecondApproverFor(user.id, tags),
+            peerWaiting: () => this.waitingForSecondPerson(user.id),
+            peerDecide: (answer) => this.answerAsSecondPerson(user.id, answer),
+            // The rules for everyone on this server: one set, read by every account's hub.
+            teamRules: { read: () => this.teamRules, write: (next, previous) => this.saveTeamRules(user.id, next, previous) },
+          },
     );
 
     bridge.aiHub = hub;
@@ -937,6 +1033,154 @@ export class WebTenantManager {
     return tenantState.current;
   }
 
+  /** The chat agent's own folder: outside the accounts' folders, so no account's removal or listing reaches it. */
+  getChatAgentDir(): string {
+    return path.join(this.baseDataDir, 'service', 'chat-agent');
+  }
+
+  private chatAgentSshDir(): string {
+    return path.join(this.getChatAgentDir(), '.ssh');
+  }
+
+  /**
+   * The chat agent's tenant, started once. Its hub runs every conversation asked for in a channel, and a
+   * direct message from somebody who has not linked their account.
+   */
+  async getChatAgentTenant(): Promise<UserTenant> {
+    if (!this.chatAgent) {
+      const creation = (async () => {
+        const userDir = this.getChatAgentDir();
+        await fsp.mkdir(userDir, { recursive: true, mode: 0o700 });
+        const key = await ensureKeyPairAt(this.chatAgentSshDir(), CHAT_AGENT_KEY_COMMENT, { restricted: this.chatAgentRestrictedKeys });
+        const user: WebUserPublic = {
+          ...this.chatAgentAccount(),
+          createdAt: 0,
+          sshPublicKey: key.publicKey,
+          sshPrivateKeyPath: key.privateKeyPath,
+        };
+        const tenant = await this.createTenantInternal(user, { userDir });
+        // It proposes nothing to remember: what every channel asked is not the team's to learn from.
+        // The hub holds to that whatever its preferences say (HubService.tick); this keeps them honest.
+        if (tenant.hub.store.data.preferences.proposeMemories !== false) {
+          tenant.hub.store.data.preferences.proposeMemories = false;
+          await tenant.hub.store.save().catch(() => {});
+        }
+        return tenant;
+      })();
+      this.chatAgent = creation;
+      try {
+        this.chatAgentResolved = await creation;
+      } catch (err) {
+        this.chatAgent = undefined;
+        throw err;
+      }
+    }
+    return this.chatAgent;
+  }
+
+  /** The public half of the chat agent's SSH key: an administrator puts it only on the servers the bot may reach. */
+  async chatAgentPublicKey(): Promise<string> {
+    return (await ensureKeyPairAt(this.chatAgentSshDir(), CHAT_AGENT_KEY_COMMENT, { restricted: this.chatAgentRestrictedKeys })).publicKey;
+  }
+
+  /**
+   * A new key for the chat agent, used for every terminal it opens from now on. The old public key stays
+   * authorized on every server it was put on until an administrator removes it there (its line ends in
+   * CHAT_AGENT_KEY_COMMENT). Terminals already open keep their connection until they close.
+   */
+  async rotateChatAgentKey(): Promise<string> {
+    const key = await ensureKeyPairAt(this.chatAgentSshDir(), CHAT_AGENT_KEY_COMMENT, {
+      rotate: true,
+      restricted: this.chatAgentRestrictedKeys,
+    });
+    if (this.chatAgentResolved) this.chatAgentResolved.user = { ...this.chatAgentResolved.user, sshPublicKey: key.publicKey };
+    return key.publicKey;
+  }
+
+  /**
+   * A linked person's answer, from chat, to a change or a plan of the chat agent's. Checked as a second
+   * person's answer in the app is: the chat agent is the one who asks, so on production the answer has
+   * to come from an administrator or an approver group, never from a turned off account, and one person
+   * counts once. A change to sshs3's own rules is only answered in the app. With `approvers` "admins",
+   * here or in the fence the run was started with, the channel takes answers from administrators only.
+   */
+  async answerForChatAgent(
+    approverUserId: string,
+    answer: {
+      taskId: string;
+      id: string;
+      kind: 'change' | 'plan';
+      approved: boolean;
+      note?: string;
+      via: ChatServiceName;
+      approvers?: 'linked' | 'admins';
+    },
+  ): Promise<ChatAgentAnswer> {
+    const refused = (message: string): ChatAgentAnswer => ({ outcome: 'refused', message });
+    // The server's own accounts are never found here: the chat agent never answers for itself.
+    const me = this.account(approverUserId);
+    if (!me) return refused('Your sshs3 account was not found. Link your chat account again.');
+    if (me.disabled) return refused('Your sshs3 account is turned off, so it cannot approve.');
+    const hub = (await this.getChatAgentTenant()).hub;
+    let subject: ReturnType<HubService['chatApprovalSubject']>;
+    try {
+      subject = hub.chatApprovalSubject(answer.taskId, answer.id);
+    } catch {
+      return refused('That is not waiting any more: it was answered, or its run was stopped.');
+    }
+    if (subject.kind !== answer.kind) return refused('That is not waiting any more: it was answered, or its run was stopped.');
+    if (subject.setting) return refused('A change to sshs3\'s own rules can only be answered in the app.');
+    if (!subject.waiting) return refused('That is not waiting any more: it was answered, or its run was stopped.');
+    if ((answer.approvers === 'admins' || subject.approvers === 'admins') && me.role !== 'admin')
+      return refused('In this channel only an administrator can answer.');
+    const mine = `user:${me.id}`;
+    if (subject.votes.some((v) => v.actorId === mine)) return refused('You already answered this.');
+    const may = this.authorizePeerApproval({
+      requesterUserId: CHAT_AGENT_ID,
+      requesterUsername: CHAT_AGENT_USERNAME,
+      approver: me,
+      targetTags: subject.targetTags,
+      requiredApprovals: subject.requiredApprovals,
+      // The votes as the rule reads them: by account id, so one person is counted once.
+      existingApprovals: subject.votes.map((v) => ({
+        actorId: v.actorId?.startsWith('user:') ? v.actorId.slice(5) : v.actorId,
+        actor: v.actor,
+        allowed: v.allowed,
+      })),
+    });
+    if (!may.authorized)
+      return refused(
+        /production/i.test(may.reason ?? '')
+          ? 'You cannot approve this. On production it has to be an administrator of this server, or somebody in one of its approver groups.'
+          : 'You cannot approve this.',
+      );
+    const person = { id: me.id, name: me.displayName || me.username, via: answer.via };
+    try {
+      if (answer.kind === 'plan')
+        await hub.decidePlanFromChat(answer.taskId, answer.id, answer.approved, person, answer.note ? { note: answer.note } : {});
+      else await hub.approveFromChat(answer.taskId, answer.id, answer.approved, person, answer.note);
+    } catch (err) {
+      return refused(err instanceof Error ? err.message : 'That could not be answered.');
+    }
+    if (!answer.approved) return { outcome: 'denied', message: `${person.name} said no. Nothing runs.` };
+    let after: ReturnType<HubService['chatApprovalSubject']> | undefined;
+    try {
+      after = hub.chatApprovalSubject(answer.taskId, answer.id);
+    } catch {
+      after = undefined;
+    }
+    if (after?.waiting) {
+      const yes = new Set(after.votes.filter((v) => v.allowed).map((v) => v.actorId ?? v.actor)).size;
+      const remaining = Math.max(1, after.requiredApprovals - yes);
+      return {
+        outcome: 'waiting',
+        remaining,
+        message: `${person.name} approved. It needs ${remaining === 1 ? 'one more person' : `${remaining} more people`}.`,
+      };
+    }
+    return { outcome: 'approved', message: `${person.name} approved.` };
+  }
+
   /**
    * Closes all active WebSocket connections for a user without deleting their tenant files
    * (e.g. on SCIM deprovision, session revocation, or password change).
@@ -1001,6 +1245,8 @@ export class WebTenantManager {
   }
 
   async disposeTenant(userId: string): Promise<void> {
+    // The chat agent is the server's own: it is stopped with the server, never removed with an account.
+    if (userId.startsWith(SERVICE_ACCOUNT_PREFIX)) return;
     const pending = this.tenants.get(userId);
     const resolved =
       this.resolvedTenants.get(userId) ??
@@ -1050,5 +1296,12 @@ export class WebTenantManager {
     }
     this.resolvedTenants.clear();
     this.tenants.clear();
+    const chatAgent = this.chatAgentResolved ?? (this.chatAgent ? await this.chatAgent.catch(() => undefined) : undefined);
+    this.chatAgent = undefined;
+    this.chatAgentResolved = undefined;
+    if (chatAgent) {
+      await chatAgent.hub.dispose().catch(() => {});
+      await chatAgent.bridge.dispose().catch(() => {});
+    }
   }
 }

@@ -289,6 +289,8 @@ export class MemoryPart {
       .filter(
         (t) =>
           !isBackgroundRun(t) &&
+          // Not a run asked in a channel, or by somebody who is not linked: the same rule as at its end.
+          this.learnsFrom(t) &&
           worthDistilling(t) &&
           now - t.updatedAt < 7 * 86_400_000,
       )

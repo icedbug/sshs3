@@ -354,7 +354,8 @@ export class HubService {
             const s = srvMap.get(id);
             if (s) srvMap.set(id, { ...s, baseAt: base });
           }
-          const activeTerminals: WorkspacePresenceTerminal[] = this.terminals
+          // A service account's terminals are nobody's at a keyboard: they are not shown as somebody here.
+          const activeTerminals: WorkspacePresenceTerminal[] = this.host.serviceAccount ? [] : this.terminals
             .list()
             .filter((t) => t.state !== "disconnected" && t.kind === "ssh")
             .map((t) => ({
@@ -438,11 +439,12 @@ export class HubService {
       },
       {
         providerFactory: host.s3ProviderFactory,
+        publishPresence: !host.serviceAccount,
       },
     );
     this.terminals.on("changed", () => {
       this.changed();
-      this.s3Workspace.schedulePresenceUpdate();
+      if (!this.host.serviceAccount) this.s3Workspace.schedulePresenceUpdate();
     });
     this.terminals.on(
       "commandLine",
@@ -1120,12 +1122,16 @@ export class HubService {
       void this.chat.tick(now).catch((e) => log.warn("Reading the team's chat failed", safeError(e)));
       void this.fillChatOnTickets(now).catch((e) => log.warn("Looking through the team's chat for a ticket failed", safeError(e)));
       if (!aiEnabled) return;
-      void (async () => {
-        await this.recoverUnreadSessions(now);
-        await this.maybeLearnFromOwnActivity(now);
-        await this.queueTeamActivity(now);
-        await this.readLearningQueue(now);
-      })().catch((e) => log.warn("Learning failed", safeError(e)));
+      // The team's learning is done by people's installations. The chat agent's hub holds what every
+      // channel asked, and it never hands that over, reads the team's queue or learns from activity,
+      // whatever its preferences say.
+      if (!this.host.serviceAccount)
+        void (async () => {
+          await this.recoverUnreadSessions(now);
+          await this.maybeLearnFromOwnActivity(now);
+          await this.queueTeamActivity(now);
+          await this.readLearningQueue(now);
+        })().catch((e) => log.warn("Learning failed", safeError(e)));
       if (now - this.lastAnchorAt > 10 * 60_000) {
         this.lastAnchorAt = now;
         void this.audit()

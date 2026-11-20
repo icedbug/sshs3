@@ -50,7 +50,7 @@ const PLAN_REPLACED = "That plan was replaced. Answer the new one.";
 
 export class SafetyPart {
   resolveSafetyContext(this: HubService,
-    task: Pick<AgentTask, "target" | "startedAs" | "agentId">,
+    task: Pick<AgentTask, "target" | "startedAs" | "agentId" | "chat">,
     targetLabel?: string,
   ): {
     policy: SafetyPolicyConfig;
@@ -138,7 +138,7 @@ export class SafetyPart {
       ...(clusterPolicy ? { clusterPolicy } : {}),
       // A run acts for the person whose app this is: their approval is one, a second must be someone else's.
       requesterId: this.localApproverId(),
-      peerApproval: this.peerApprovalPossible(aggregatedTags),
+      peerApproval: this.peerApprovalPossible(aggregatedTags, task),
       canApproveAlone: Boolean(this.host.teamAdmin?.()),
     };
   }
@@ -148,9 +148,12 @@ export class SafetyPart {
     return this.host.alertHookOwner ? `user:${this.host.alertHookOwner}` : "local";
   }
 
-  /** Whether a second person can be asked for an approval: only on a team server that routes it to them. */
-  peerApprovalPossible(this: HubService, tags?: string[]): boolean {
-    return this.sharedServer() && Boolean(this.host.peerApproval?.(tags));
+  /**
+   * Whether a second person can be asked for an approval: only on a team server that routes it to them.
+   * With `task`, for that run: a conversation from chat counts only the people its channel lets answer.
+   */
+  peerApprovalPossible(this: HubService, tags?: string[], task?: Pick<AgentTask, "chat">): boolean {
+    return this.sharedServer() && Boolean(this.host.peerApproval?.(tags, task));
   }
 
   /**
@@ -285,7 +288,7 @@ export class SafetyPart {
       }
       const nextApprovals: AgentChangeApproval[] = [...prevApprovals, vote(true)];
       const approvalStatus = this.planApprovalStatus(task, plan, nextApprovals).status;
-      if (!approvalStatus.satisfied && approvalStatus.requiredApprovals > 1 && !this.peerApprovalPossible()) {
+      if (!approvalStatus.satisfied && approvalStatus.requiredApprovals > 1 && !this.peerApprovalPossible(undefined, task)) {
         throw new Error(
           `This plan needs the approval of ${approvalStatus.requiredApprovals} different people (the cluster's policy), and only one person can approve in this app.`,
         );
@@ -411,21 +414,31 @@ export class SafetyPart {
     setting: boolean;
     /** Still waiting for an answer. */
     waiting: boolean;
+    /** Who the channel it was asked in lets answer, as the run was started with. */
+    approvers: "linked" | "admins";
   } {
     const task = this.store.data.tasks.find((t) => t.id === taskId);
     if (!task?.chat) throw new Error("That conversation was not asked for from chat.");
+    const approvers = task.chat.fence.approvers === "admins" ? "admins" : "linked";
     const votesOf = (list: AgentChangeApproval[] | undefined) =>
       (list ?? []).map((a) => ({ actor: a.actor, ...(a.actorId ? { actorId: a.actorId } : {}), allowed: a.allowed }));
     const plan = task.plan;
     if (plan && plan.id === id) {
       const { status, tags } = this.planApprovalStatus(task, plan, plan.approvals ?? []);
+      // Whoever answers a plan answers for every server it touches, not only for its first one: a step
+      // on a server tagged production makes the whole plan one for production.
+      const all = new Set(tags);
+      for (const step of plan.steps)
+        for (const tag of this.resolveSafetyContext(task, step.target?.trim() || task.target?.label).targetTags ?? []) all.add(tag);
+      const targetTags = [...all];
       return {
         kind: "plan",
-        targetTags: status.isProd && !tags.some(isProdTag) ? [...tags, "production"] : tags,
+        targetTags: status.isProd && !targetTags.some(isProdTag) ? [...targetTags, "production"] : targetTags,
         requiredApprovals: status.requiredApprovals,
         votes: votesOf(plan.approvals),
         setting: false,
         waiting: plan.status === "proposed" && !active(task),
+        approvers,
       };
     }
     const change = task.changes.find((c) => c.id === id);
@@ -444,6 +457,7 @@ export class SafetyPart {
       votes: votesOf(change.approvals),
       setting: change.kind === "setting",
       waiting: change.status === "pending" && this.broker.waitingFor(change.id),
+      approvers,
     };
   }
 
