@@ -802,8 +802,11 @@ export async function guardUrl(raw: string, options: GuardOptions): Promise<Guar
   return { url, address: found[0].address, family: found[0].family };
 }
 
-/** Returns only the single validated address so Node 24 autoSelectFamily ({ all: true }) cannot pick an unpinned IP or receive a string instead of an array. */
-function pinnedLookup(target: GuardedTarget): NonNullable<http.RequestOptions["lookup"]> {
+/**
+ * Returns only the single validated address so Node 24 autoSelectFamily ({ all: true }) cannot pick an unpinned IP or receive a string instead of an array.
+ * Exported for the WebSocket client, which opens its connection the same way.
+ */
+export function pinnedLookup(target: GuardedTarget): NonNullable<http.RequestOptions["lookup"]> {
   return (_host, options, callback) => {
     const cb = typeof options === "function" ? options : callback;
     const wantsAll = typeof options === "object" && options !== null && Boolean(options.all);

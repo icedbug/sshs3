@@ -90,7 +90,8 @@ export interface ChatIdentity {
 
 const SLACK = "https://slack.com/api";
 
-function retryAfter(headers: Record<string, string | string[] | undefined> | undefined): number | undefined {
+/** How long a service asked to be left alone, from its Retry-After header, at most ten minutes. */
+export function retryAfter(headers: Record<string, string | string[] | undefined> | undefined): number | undefined {
   const raw = headers?.["retry-after"] ?? headers?.["Retry-After"];
   const seconds = Number(Array.isArray(raw) ? raw[0] : raw);
   return Number.isFinite(seconds) && seconds > 0 ? Math.min(seconds, 600) * 1000 : undefined;
@@ -153,14 +154,16 @@ export const slackOldest = (ms: number): string => (ms / 1000).toFixed(6);
  * three characters Slack escapes put back.
  */
 export function slackText(text: string, names: Map<string, string>): string {
+  // No part matches "<": Slack escapes it in what people type, and a run of unclosed "<http:" would
+  // otherwise make each one scan to the end of the text, which grows with the square of its length.
   /* eslint-disable security/detect-unsafe-regex -- each optional group is bounded by the closing > and holds no repetition of its own */
   return text
-    .replace(/<@([A-Z0-9]+)(?:\|([^>]*))?>/g, (_m, id: string, label?: string) => `@${label || names.get(id) || id}`)
-    .replace(/<#([A-Z0-9]+)(?:\|([^>]*))?>/g, (_m, id: string, label?: string) => `#${label || id}`)
-    .replace(/<!(here|channel|everyone)(?:\|[^>]*)?>/g, "@$1")
-    .replace(/<!subteam\^[A-Z0-9]+(?:\|([^>]*))?>/g, (_m, label?: string) => label || "@group")
-    .replace(/<((?:https?|mailto):[^|>]+)\|([^>]+)>/g, (_m, url: string, label: string) => `${label} (${url})`)
-    .replace(/<((?:https?|mailto):[^>]+)>/g, "$1")
+    .replace(/<@([A-Z0-9]+)(?:\|([^<>]*))?>/g, (_m, id: string, label?: string) => `@${label || names.get(id) || id}`)
+    .replace(/<#([A-Z0-9]+)(?:\|([^<>]*))?>/g, (_m, id: string, label?: string) => `#${label || id}`)
+    .replace(/<!(here|channel|everyone)(?:\|[^<>]*)?>/g, "@$1")
+    .replace(/<!subteam\^[A-Z0-9]+(?:\|([^<>]*))?>/g, (_m, label?: string) => label || "@group")
+    .replace(/<((?:https?|mailto):[^|<>]+)\|([^<>]+)>/g, (_m, url: string, label: string) => `${label} (${url})`)
+    .replace(/<((?:https?|mailto):[^<>]+)>/g, "$1")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/&amp;/g, "&");
@@ -274,7 +277,10 @@ export const slackApi = {
     };
   },
 
-  /** The replies in one thread after `sinceMs`, oldest first. The message that started it is not repeated. */
+  /**
+   * The replies in one thread after `sinceMs`, oldest first. The message that started it is not
+   * repeated, unless `withStart` asks for the whole thread.
+   */
   async replies(
     t: ChatTransport,
     auth: ChatAuth,
@@ -283,6 +289,7 @@ export const slackApi = {
     sinceMs: number,
     site: string,
     names: Map<string, string>,
+    withStart = false,
   ): Promise<ChatMessage[]> {
     const raw: SlackMessage[] = [];
     let cursor: string | undefined;
@@ -299,7 +306,7 @@ export const slackApi = {
       cursor = got.has_more ? got.response_metadata?.next_cursor || undefined : undefined;
       if (!cursor) break;
     }
-    const replies = raw.filter((m) => m.ts && m.ts !== threadId);
+    const replies = raw.filter((m) => m.ts && (withStart || m.ts !== threadId));
     await slackApi.names(t, auth, replies.map((m) => m.user ?? ""), names);
     return replies
       .map((m) => slackMessage({ ...m, thread_ts: threadId }, channel.id, site, names))
@@ -357,6 +364,7 @@ async function mattermost<T>(t: ChatTransport, auth: ChatAuth, method: "GET" | "
 
 interface MmPost {
   id?: string;
+  channel_id?: string;
   create_at?: number;
   delete_at?: number;
   user_id?: string;
@@ -429,22 +437,39 @@ export const mattermostApi = {
     }
     const taken = posts.filter((p) => p.id).sort((a, b) => (a.create_at ?? 0) - (b.create_at ?? 0));
     await mattermostApi.names(t, auth, taken.map((p) => p.user_id ?? ""), names);
-    const site = mmSite(auth);
     return {
-      messages: taken
-        .filter((p) => !p.delete_at && !(p.type ?? "").startsWith("system_") && (p.message ?? "").trim())
-        .map((p) => ({
-          id: p.id!,
-          channelId: channel.id,
-          at: p.create_at ?? 0,
-          author: names.get(p.user_id ?? "") || "somebody",
-          text: (p.message ?? "").trim(),
-          threadId: p.root_id || p.id!,
-          link: channel.team ? `${site}/${channel.team}/pl/${p.id}` : `${site}/_redirect/pl/${p.id}`,
-        })),
+      messages: mmMessages(taken, channel, mmSite(auth), names),
       threads: [],
       more,
       ...(taken.length ? { oldest: { cursor: taken[0].id!, at: taken[0].create_at ?? 0 } } : {}),
     };
   },
+
+  /**
+   * One whole thread, oldest first. Mattermost finds a thread by its post id alone, whatever the
+   * channel: only posts of the channel asked about are kept, so a thread of another channel is
+   * never read in as this one's.
+   */
+  async thread(t: ChatTransport, auth: ChatAuth, channel: Pick<ChatChannel, "id" | "team">, threadId: string, names: Map<string, string>): Promise<ChatMessage[]> {
+    const got = await mattermost<{ order?: string[]; posts?: Record<string, MmPost> }>(t, auth, "GET", `/posts/${mmId(threadId)}/thread`);
+    const posts = Object.values(got.posts ?? {})
+      .filter((p) => p?.id && p.channel_id === channel.id && (p.id === threadId || p.root_id === threadId))
+      .sort((a, b) => (a.create_at ?? 0) - (b.create_at ?? 0));
+    await mattermostApi.names(t, auth, posts.map((p) => p.user_id ?? ""), names);
+    return mmMessages(posts, channel, mmSite(auth), names);
+  },
 };
+
+function mmMessages(posts: MmPost[], channel: Pick<ChatChannel, "id" | "team">, site: string, names: Map<string, string>): ChatMessage[] {
+  return posts
+    .filter((p) => p.id && !p.delete_at && !(p.type ?? "").startsWith("system_") && (p.message ?? "").trim())
+    .map((p) => ({
+      id: p.id!,
+      channelId: channel.id,
+      at: p.create_at ?? 0,
+      author: names.get(p.user_id ?? "") || "somebody",
+      text: (p.message ?? "").trim(),
+      threadId: p.root_id || p.id!,
+      link: channel.team ? `${site}/${channel.team}/pl/${p.id}` : `${site}/_redirect/pl/${p.id}`,
+    }));
+}

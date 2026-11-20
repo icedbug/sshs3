@@ -1330,6 +1330,51 @@ export interface ChatConnectionInput {
   enabled: boolean;
 }
 
+/** Who the agent bot is in a chat service, as the service said when it was last asked. */
+export interface AgentBotIdentity {
+  /** The bot's own user id: its messages are not answered, and a mention of it is a question. */
+  userId: string;
+  /** Slack: the bot's id, which its own messages carry. */
+  botId?: string;
+  /** Mattermost: the bot's user name, which a mention of it is written with. */
+  username?: string;
+  name?: string;
+  /** The Slack workspace, or the Mattermost server. */
+  team?: string;
+  teamId?: string;
+}
+
+/**
+ * The agent bot's connection to one chat service as the interface sees it: never a token. The agent
+ * bot is a separate Slack app or Mattermost bot account from the context bot, with tokens of its own.
+ */
+export interface AgentBotView {
+  service: ChatServiceName;
+  enabled: boolean;
+  /** Slack: the bot token (xoxb-). Mattermost: the bot account's token. */
+  hasToken: boolean;
+  /** Slack: the app-level token (xapp-) that opens the socket. */
+  hasAppToken?: boolean;
+  /** Mattermost: the server's address. */
+  baseUrl?: string;
+  identity?: AgentBotIdentity;
+  lastError?: string;
+  lastErrorAt?: number;
+  savedAt?: number;
+}
+
+/** The agent bot's connection as it is saved from the form. A token is sent only when it is set or changed. */
+export interface AgentBotInput {
+  service: ChatServiceName;
+  /** Slack: the bot token (xoxb-). Mattermost: the bot account's token. */
+  token?: string;
+  /** Slack: the app-level token (xapp-). */
+  appToken?: string;
+  /** Mattermost: the server's address. */
+  baseUrl?: string;
+  enabled?: boolean;
+}
+
 /** A thread found in the team's chat: what was said, by whom, and where to open it. */
 export interface ChatThreadView {
   service: ChatServiceName;

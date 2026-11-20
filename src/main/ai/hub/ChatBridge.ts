@@ -317,6 +317,35 @@ export class ChatBridge {
     return this.index.thread(service, channelId, threadId);
   }
 
+  /**
+   * Reads one thread now, for the agent bot when it is mentioned in it: what the team wrote before
+   * it was asked. Only when this bot is connected and the channel is one an administrator chose for
+   * it to read; anything else gives nothing, so the agent bot never sees more through this than it
+   * could find in the index later. The thread is kept in the index like any other read, masked, and
+   * is returned as the index keeps it. When the service cannot be reached now, what was read before
+   * is returned. Like everything here, this only reads.
+   */
+  async readThreadNow(service: ChatService, channelId: string, threadId: string): Promise<StoredMessage[] | undefined> {
+    if (!SERVICES.includes(service)) return undefined;
+    await this.load();
+    const auth = this.auth(service);
+    const connection = this.connections[service];
+    const channel = this.index.channel(service, channelId);
+    if (!auth || !connection || !channel?.selected) return undefined;
+    const valid = service === "slack" ? /^\d{6,12}\.\d{1,8}$/.test(threadId) : /^[a-z0-9]{20,32}$/.test(threadId);
+    if (!valid) return undefined;
+    try {
+      const messages =
+        service === "slack"
+          ? await slackApi.replies(this.send, auth, channel, threadId, 0, connection.site ?? "", this.names.slack, true)
+          : await mattermostApi.thread(this.send, auth, channel, threadId, this.names.mattermost);
+      await this.index.add(service, channelId, messages);
+    } catch {
+      // The service could not be asked now: what was read before is still worth having.
+    }
+    return this.index.thread(service, channelId, threadId);
+  }
+
   /** One round: each chosen channel that is due is asked what is new, one at a time. Failures are kept on the channel, never thrown. */
   tick(now = Date.now()): Promise<void> {
     const run = this.running.then(async () => {
