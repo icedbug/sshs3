@@ -299,6 +299,13 @@ export class AgentsPart {
         ...(input.mainModel ? { mainModel: true } : {}),
       },
     );
+    // A run that looked on behalf of a chat conversation is paid from the chat's budget: its tokens
+    // are added to that conversation's, apart from its own usage. Found now, while the run's lead is known.
+    const lead = this.chatLead(task);
+    if (lead && lead !== task) {
+      const used = (task.usage?.inputTokens ?? 0) + (task.usage?.outputTokens ?? 0);
+      if (used > 0) lead.chatBackgroundTokens = (lead.chatBackgroundTokens ?? 0) + used;
+    }
     const text =
       task.messages.filter((m) => m.role === "assistant").at(-1)?.text ?? "";
     return task.status === "completed"

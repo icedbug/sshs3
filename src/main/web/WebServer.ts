@@ -10,6 +10,10 @@ import { SERVICE_ACCOUNT_PREFIX, WebAuthService, type WebUserPublic } from './We
 import { WebTenantManager } from './WebTenantManager';
 import { MCP_SCOPES, McpTokenStore, type McpScope } from './McpTokenStore';
 import { ChatAgentStore } from './chatAgent/ChatAgentStore';
+import { ChatAnswering, type ChatAnsweringOptions } from './chatAgent/ChatAnswering';
+import type { AgentBotApi } from './chatAgent/AgentBotApi';
+import type { ChatTransportFactory } from './chatAgent/ChatAgentService';
+import { isDemoMode } from '../demo/demoMode';
 import { callBudget, handleMcpHttp } from './mcp/McpEndpoint';
 import { AuditLog } from '../ai/hub/AuditLog';
 import { verifyStandardWebhook, WEBHOOK_TOLERANCE_SECONDS } from '../ai/hub/Notifier';
@@ -161,6 +165,33 @@ async function readRawBody(
     chunks.push(buf);
   }
   return Buffer.concat(chunks).toString('utf8');
+}
+
+/** The server's public address from SSHS3_PUBLIC_URL, without a trailing slash, or nothing when it is not a web address. */
+function publicUrlFromEnv(): string | undefined {
+  const raw = process.env.SSHS3_PUBLIC_URL?.trim();
+  if (!raw) return undefined;
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return `${parsed.origin}${parsed.pathname.replace(/\/+$/, '')}`;
+  } catch {
+    // Not an address: as if it were not set.
+  }
+  return undefined;
+}
+
+/** An address as the socket gives it, without the IPv4-in-IPv6 prefix, so "::ffff:10.0.0.5" is "10.0.0.5". */
+function plainAddress(address: string | undefined): string {
+  const a = (address ?? '').trim().toLowerCase();
+  return a.startsWith('::ffff:') && a.includes('.') ? a.slice('::ffff:'.length) : a;
+}
+
+/** The addresses Mattermost's server posts button presses from (SSHS3_MATTERMOST_ACTION_FROM, comma separated). */
+function mattermostActionFrom(): string[] {
+  return (process.env.SSHS3_MATTERMOST_ACTION_FROM ?? '')
+    .split(',')
+    .map((a) => plainAddress(a))
+    .filter(Boolean);
 }
 
 function sendJson(
@@ -395,6 +426,8 @@ export interface Sshs3WebServerOptions {
   wsTicketTtlMs?: number;
   /** Server-side WS ping interval in milliseconds (default: 30000; 0 disables). */
   wsHeartbeatIntervalMs?: number;
+  /** For tests: how the agent bot reaches Slack and Mattermost, and its lines to them. */
+  chatAgent?: { api?: AgentBotApi; transport?: ChatTransportFactory; tryWaitMs?: number; outboxGaps?: ChatAnsweringOptions['outboxGaps'] };
   /** Max time to wait for a WS pong before reaping zombie socket (default: 10000). */
   wsHeartbeatTimeoutMs?: number;
   /** High-water threshold on socket.writableLength before queueing frames (default: 262144). */
@@ -410,6 +443,9 @@ export class Sshs3WebServer {
   public readonly mcpTokens: McpTokenStore;
   /** Who in chat is who here, and which chat thread is which conversation (the agent bot's). */
   public readonly chatAgent: ChatAgentStore;
+  /** The agent bot in chat: its settings, its connection and the service that answers. */
+  public readonly chatAnswering: ChatAnswering;
+  private readonly mattermostActionHits = new Map<string, number[]>();
   private readonly mcpRate = callBudget();
   /**
    * The server's own chain: who signed in, who failed to, who was added or
@@ -440,6 +476,28 @@ export class Sshs3WebServer {
       usable: (accountId) => this.auth.accountsBrief().some((a) => a.id === accountId && !a.disabled),
     });
     this.signIns = new AuditLog(path.join(options.dataDir, 'audit'), 'server');
+    this.chatAnswering = new ChatAnswering({
+      dataDir: options.dataDir,
+      links: this.chatAgent,
+      tenants: this.tenants,
+      accounts: () => this.auth.accountsBrief(),
+      user: (id) => this.auth.getUserById(id),
+      audit: (entry) => this.signIns.append({ kind: 'setting', actor: entry.actor, target: 'agent bot', what: entry.what }).then(() => undefined),
+      // The same rule as the context bot's: a server several people sign in to does not call its own
+      // network, unless its administrator said so.
+      guard: () => {
+        const shared = this.auth.userCount() > 1;
+        return { server: shared, allowPrivate: !shared || process.env.SSHS3_ALLOW_PRIVATE_ADDRESSES === '1' };
+      },
+      demo: () => isDemoMode(),
+      publicUrl: () => publicUrlFromEnv(),
+      mattermostActionFrom: () => mattermostActionFrom(),
+      ...(options.chatAgent?.api ? { api: options.chatAgent.api } : {}),
+      ...(options.chatAgent?.transport ? { transport: options.chatAgent.transport } : {}),
+      ...(options.chatAgent?.tryWaitMs !== undefined ? { tryWaitMs: options.chatAgent.tryWaitMs } : {}),
+      ...(options.chatAgent?.outboxGaps ? { outboxGaps: options.chatAgent.outboxGaps } : {}),
+    });
+    this.tenants.setChatAnswering(this.chatAnswering);
   }
 
   getPort(): number {
@@ -580,6 +638,9 @@ export class Sshs3WebServer {
     await this.tenants.initialize();
     await this.mcpTokens.initialize();
     await this.chatAgent.initialize();
+    // After the stores it reads: threads a restart cut off are redrawn, then the lines are opened. A file
+    // of the agent bot's that cannot be read stops the bot, not the server: it is logged and shown as off.
+    await this.chatAnswering.start().catch((err) => log.error('The agent bot could not start', err));
 
     const host = this.options.host ?? process.env.SSHS3_WEB_HOST ?? '0.0.0.0';
     const requestedPort =
@@ -707,6 +768,63 @@ export class Sshs3WebServer {
   }
 
   /**
+   * A press on an Approve or Deny button of the agent bot's card in Mattermost, which Mattermost's server
+   * posts here. Who pressed is what Mattermost says; what was pressed is the signed token in the button,
+   * checked by the service against the card, the channel and the person's link. A card's token is the
+   * same for everybody who presses, so who pressed is only as true as where the press comes from: the
+   * route takes presses only from the addresses in SSHS3_MATTERMOST_ACTION_FROM, and without that list it
+   * takes none (cards are then answered with reactions, which reach the bot over its own socket). At
+   * most 60 presses a minute per address and 32 kB per press. The answer is what Mattermost shows the
+   * person alone; the card is edited by the bot.
+   */
+  private async handleMattermostAction(req: http.IncomingMessage, res: http.ServerResponse, method: string): Promise<void> {
+    if (method !== 'POST') {
+      sendJson(res, 405, { error: 'Use POST.' }, { Allow: 'POST' });
+      return;
+    }
+    const from = plainAddress(req.socket.remoteAddress);
+    const allowed = mattermostActionFrom();
+    if (!allowed.includes(from)) {
+      sendJson(res, 403, { error: allowed.length ? 'Not from here.' : 'Buttons are off on this server. Answer with a reaction, or in sshs3.' });
+      return;
+    }
+    const now = Date.now();
+    const recent = (this.mattermostActionHits.get(from) ?? []).filter((t) => now - t < 60_000);
+    if (recent.length >= 60) {
+      sendJson(res, 429, { error: 'Too many presses from here; try again in a minute.' });
+      return;
+    }
+    if (this.mattermostActionHits.size > 4000)
+      for (const [key, times] of this.mattermostActionHits) if (!times.some((t) => now - t < 60_000)) this.mattermostActionHits.delete(key);
+    this.mattermostActionHits.set(from, [...recent, now]);
+    let body: Record<string, unknown>;
+    try {
+      const raw = (await readRawBody(req, 32_000)).trim();
+      const parsed: unknown = raw ? JSON.parse(raw) : {};
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object');
+      body = parsed as Record<string, unknown>;
+    } catch (err) {
+      const big = err instanceof Error && err.message === 'Request payload too large';
+      sendJson(res, big ? 413 : 400, { error: 'The body must be JSON of at most 32 kB.' });
+      return;
+    }
+    const text = (value: unknown): string => (typeof value === 'string' ? value.trim().slice(0, 64) : '');
+    const context = body.context && typeof body.context === 'object' && !Array.isArray(body.context) ? (body.context as Record<string, unknown>) : {};
+    const userId = text(body.user_id);
+    const postId = text(body.post_id);
+    const channelId = text(body.channel_id);
+    if (!userId || !postId || typeof context.t !== 'string') {
+      sendJson(res, 400, { error: 'A press names the person, the post and the button.' });
+      return;
+    }
+    const answer = await this.chatAnswering.service
+      .mattermostAction({ userId, postId, ...(channelId ? { channelId } : {}), token: context.t })
+      .catch(() => ({ ephemeralText: 'That could not be answered. Try again, or answer in sshs3.' }));
+    // No `update`: Mattermost would put it in place of the card, and the bot edits the card itself.
+    sendJson(res, 200, { ephemeral_text: answer.ephemeralText });
+  }
+
+  /**
    * Starts each user's hub, whose timer runs their schedules, takes tickets
    * when their heartbeat is on, and reads the team's learning queue. A user
    * whose hub cannot start is logged and skipped.
@@ -748,6 +866,8 @@ export class Sshs3WebServer {
       }
     }
     this.activeSockets.clear();
+    // Before the hubs go: the bot stops following their runs and lets what is queued go out.
+    await this.chatAnswering.stop().catch((err) => log.warn('The agent bot did not stop cleanly', err));
     await this.tenants.disposeAll();
     if (this.httpServer) {
       const srv = this.httpServer;
@@ -889,6 +1009,12 @@ export class Sshs3WebServer {
       return;
     }
 
+    // A button on the agent bot's card in Mattermost. No session: the signed token in the button is the key.
+    if (pathname === '/api/chat/mattermost/action') {
+      await this.handleMattermostAction(req, res, method);
+      return;
+    }
+
     // Somebody's own agent, over MCP. Its own key in the Authorization header; no session, no cookie.
     if (pathname === '/api/mcp') {
       await this.handleMcpEndpoint(req, res, method);
@@ -898,18 +1024,7 @@ export class Sshs3WebServer {
     // Auth status endpoint
     if (pathname === '/api/auth/status' && method === 'GET') {
       const user = await this.authenticateRequest(req);
-      let publicUrl: string | undefined;
-      const rawPublicUrl = process.env.SSHS3_PUBLIC_URL?.trim();
-      if (rawPublicUrl) {
-        try {
-          const parsed = new URL(rawPublicUrl);
-          if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
-            publicUrl = `${parsed.origin}${parsed.pathname.replace(/\/+$/, '')}`;
-          }
-        } catch {
-          // Ignore invalid SSHS3_PUBLIC_URL
-        }
-      }
+      const publicUrl = publicUrlFromEnv();
       sendJson(res, 200, {
         initialized: this.auth.hasAnyUsers(),
         authenticated: Boolean(user),

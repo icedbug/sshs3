@@ -232,7 +232,13 @@ export class InboxPart {
           `${first.from ?? "Assistant"}: ${command && command !== first.title ? `${command} (${first.title})` : first.title}`,
         );
       }
-      out = [...fresh.map((i) => this.notifyItem(i)), ...reminders.map((i) => ({ ...this.notifyItem(i), reminder: true }))];
+      // A conversation asked for from chat shows its changes as cards in its own thread, where the people
+      // who may answer them are: the notification channels do not get them as well.
+      const toChannels = (i: InboxItem): boolean => !(i.taskId && i.kind !== "peer" && this.store.data.tasks.find((t) => t.id === i.taskId)?.chat);
+      out = [
+        ...fresh.filter(toChannels).map((i) => this.notifyItem(i)),
+        ...reminders.filter(toChannels).map((i) => ({ ...this.notifyItem(i), reminder: true })),
+      ];
       // Quiet hours and the hourly limit hold back what goes to the channels (a critical alert still goes);
       // what is held back stays in the inbox. This computer's own notification above is not held back.
       if (out.length && (data.quietHours?.enabled || (data.noiseBudgetPerHour ?? 0) > 0)) {

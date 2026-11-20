@@ -1,5 +1,5 @@
 import type { AiEgressPolicy, AiPiiScrubbingMode, AiProvider } from "./types/ai";
-import type { S3WorkspaceConfig } from "./types/aiHub";
+import type { ChatServiceName, S3WorkspaceConfig } from "./types/aiHub";
 
 /**
  * Where data may be sent, and what is said about it.
@@ -46,7 +46,7 @@ export interface EgressValidationResult {
 }
 
 export interface DataFlowChannel {
-  channel: "llm-inference" | "team-s3-sync" | "local-storage";
+  channel: "llm-inference" | "team-s3-sync" | "local-storage" | "team-chat";
   enabled: boolean;
   destination: string;
   host: string;
@@ -382,6 +382,100 @@ function providerDisplayName(
   return `OpenAI-compatible endpoint (${host || "unconfigured"})`;
 }
 
+/** What the agent bot sends to a chat service, as checked against the data policy. */
+export interface ChatEgressResult {
+  allowed: boolean;
+  service: ChatServiceName;
+  host: string;
+  locality: DataFlowChannel["locality"];
+  encryptedInTransit: boolean;
+  errors: string[];
+  warnings: string[];
+}
+
+const SLACK_HOST = "slack.com";
+
+/**
+ * Whether the agent bot may post answers in a chat service under a data policy. The chat is a place
+ * data goes like any other: an answer can quote terminal output.
+ *
+ * "Only my network" allows only a Mattermost on this machine or the private network, never Slack.
+ * "Only EU" allows Mattermost on a host on the EU list or on the private network, never Slack, whose
+ * servers are not pinned to the EU. Standard allows both.
+ */
+export function validateChatEgress(
+  policy: AiEgressPolicy | undefined,
+  service: ChatServiceName,
+  baseUrl?: string,
+  options: { euAllowedHosts?: string[] } = {},
+): ChatEgressResult {
+  const mode: AiEgressPolicy = policy ?? "standard";
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  if (service === "slack") {
+    if (mode === "local-only") errors.push("You chose to send nothing outside your own network. Slack is an outside service.");
+    if (mode === "eu-pinned") errors.push("You chose to send data only to services in the EU. Slack is not one of them.");
+    return { allowed: errors.length === 0, service, host: SLACK_HOST, locality: "external", encryptedInTransit: true, errors, warnings };
+  }
+  let parsed: URL | undefined;
+  try {
+    parsed = baseUrl?.trim() ? new URL(baseUrl.trim()) : undefined;
+  } catch {
+    parsed = undefined;
+  }
+  if (!parsed || (parsed.protocol !== "https:" && parsed.protocol !== "http:")) {
+    errors.push("Mattermost needs the server's address, like https://chat.example.com");
+    return { allowed: false, service, host: "", locality: "external", encryptedInTransit: false, errors, warnings };
+  }
+  const hostname = normalizeHostname(parsed.hostname);
+  const isLoopback = isLoopbackHostname(hostname);
+  const isPrivate = isPrivateNetworkHostname(hostname);
+  const isEu = isEuPinnedHostname(hostname, options.euAllowedHosts ?? []);
+  const locality: DataFlowChannel["locality"] = isLoopback ? "local" : isPrivate ? "private-network" : isEu ? "eu" : "external";
+  const encryptedInTransit = parsed.protocol === "https:";
+  if (mode === "local-only" && !isLoopback && !isPrivate)
+    errors.push(`You chose to send nothing outside your own network, and ${parsed.host} is outside it.`);
+  if (mode === "eu-pinned" && !isLoopback && !isPrivate && !isEu)
+    errors.push(`You chose to send data only to services in the EU, and ${parsed.host} is not on that list.`);
+  if (!encryptedInTransit && !isLoopback) warnings.push(`Mattermost at ${parsed.host} is reached without https, so answers are not encrypted on the way.`);
+  return { allowed: errors.length === 0, service, host: parsed.host, locality, encryptedInTransit, errors, warnings };
+}
+
+/** The agent bot's connection to a chat service, for the description of where data goes. */
+export interface ChatFlowConfig {
+  service: ChatServiceName;
+  baseUrl?: string;
+  enabled: boolean;
+}
+
+function chatChannel(chat: ChatFlowConfig, policy: AiEgressPolicy | undefined, euAllowedHosts: string[]): DataFlowChannel {
+  const name = chat.service === "slack" ? "Slack" : "Mattermost";
+  if (!chat.enabled)
+    return {
+      channel: "team-chat",
+      enabled: false,
+      destination: `The agent bot in ${name} is off`,
+      host: "",
+      locality: "disabled",
+      encryptedInTransit: true,
+      secretsMasked: true,
+      dataTypes: [],
+      notes: [],
+    };
+  const check = validateChatEgress(policy, chat.service, chat.baseUrl, { euAllowedHosts });
+  return {
+    channel: "team-chat",
+    enabled: true,
+    destination: `Answers in ${name}${check.host ? ` (${check.host})` : ""}`,
+    host: check.host,
+    locality: check.locality,
+    encryptedInTransit: check.encryptedInTransit,
+    secretsMasked: true,
+    dataTypes: ["answers", "approval cards", "status of runs"],
+    notes: [...check.errors, ...check.warnings],
+  };
+}
+
 export function formatEgressPolicyLabel(policy: AiEgressPolicy): string {
   if (policy === "local-only") return "Nothing is sent outside this machine and your own network.";
   if (policy === "eu-pinned") return "Data is sent only to services in the EU.";
@@ -402,6 +496,7 @@ export function formatPiiScrubbingLabel(mode: AiPiiScrubbingMode): string {
 export function describeActiveDataFlow(
   config: EgressPolicyConfig,
   syncConfig?: Partial<S3WorkspaceConfig> | null,
+  chat: ChatFlowConfig[] = [],
 ): ActiveDataFlowDescription {
   // Asked the way a run asks it (DirectAgentRuntime): not having confirmed that a service keeps nothing
   // is said as a note, because it stops no run. Saying "stopped" here about a model that runs use was wrong.
@@ -493,10 +588,24 @@ export function describeActiveDataFlow(
     });
   }
 
+  // The team chat is listed only where the agent bot was set up: a page without it stays as it was.
+  const chatChannels = chat.map((c) => chatChannel(c, config.egressPolicy, config.euAllowedHosts ?? []));
+  chatChannels.forEach((c, i) => {
+    if (!c.enabled || c.locality === "local" || c.locality === "private-network") return;
+    const slack = chat[i].service === "slack";
+    subprocessors.push({
+      name: slack ? "Slack" : `Mattermost (${c.host})`,
+      purpose: "Answers and approvals in the team's chat",
+      endpoint: slack ? `https://${SLACK_HOST}` : (chat[i].baseUrl ?? "").trim(),
+      locality: c.locality,
+      zdrConfirmed: false,
+    });
+  });
+
   return {
     summary: dataDestination(config.provider, config.baseUrl),
     egressValidation,
-    channels: [llmChannel, s3Channel, localChannel],
+    channels: [llmChannel, s3Channel, localChannel, ...chatChannels],
     subprocessors,
   };
 }

@@ -113,6 +113,10 @@ export const READ_ONLY_ACTIONS: ReadonlySet<HubRequest["action"]> = new Set<HubR
   "inline-suggest",
   "chat-search",
   "runner-test",
+  // The agent bot's requests are answered by the web server: nothing of this hub's is written.
+  "chat-answering-task",
+  "chat-answering-runs",
+  "chat-link-code",
 ]);
 /**
  * An agent as it arrives from the team bucket, made safe to take: whoever can

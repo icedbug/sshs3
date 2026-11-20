@@ -23,6 +23,8 @@ export interface AgentMessageEvent {
   text: string;
   /** The bot was named in it. In a channel the bot answers only then. */
   mentioned: boolean;
+  /** How many files came with it. They are not read: the person is told so. */
+  files?: number;
 }
 
 /** Somebody pressed a button on a message of the bot's. */

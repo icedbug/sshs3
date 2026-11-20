@@ -75,6 +75,7 @@ import { SharingPart } from "./areas/sharing";
 import { RunsPart } from "./areas/runs";
 import { ConversationsPart } from "./areas/conversations";
 import { ChatRunsPart, type HubRunEvent } from "./areas/chatRuns";
+import { ChatAnsweringPart } from "./areas/chatAnswering";
 import { memoryInFence } from "./chatFence";
 // Declared in files of their own now; still exported from here, where others import them.
 export type { HubHost } from "./hubHost";
@@ -704,6 +705,13 @@ export class HubService {
       : this.store.data.tasks;
     const allMemories = extra.memories ?? this.store.data.memories;
     const allInfraEdges = this.getInfraEdgesList();
+    // The agent bot in chat is the server's: a failure to read it leaves it out, never the whole snapshot.
+    const chatAnswering = this.host.chatAnswering
+      ? await this.host.chatAnswering.view().catch((e) => {
+          log.warn("The agent bot's state could not be read for the snapshot", safeError(e));
+          return undefined;
+        })
+      : undefined;
     const allMcpServers = this.mcpServersShown();
 
     return {
@@ -833,6 +841,7 @@ export class HubService {
       infraEdges: allInfraEdges,
       safetyPolicy: this.safetyPolicy(),
       ...(this.teamRulesView() ? { teamRules: this.teamRulesView() } : {}),
+      ...(chatAnswering ? { chatAnswering } : {}),
       safetyPolicyChanged: this.store.data.safetyPolicyChanged,
       pendingLayoutEvent: this.pendingLayoutEvent,
       selfLearning: this.selfLearning.getStatus({
@@ -864,6 +873,8 @@ export class HubService {
         return this.handleInbox(request as RequestsOf<"inbox">);
       case "chatAndAtlassian":
         return this.handleChatAndAtlassian(request as RequestsOf<"chatAndAtlassian">);
+      case "chatAnswering":
+        return this.handleChatAnswering(request as RequestsOf<"chatAnswering">);
       case "facts":
         return this.handleFacts(request as RequestsOf<"facts">);
       case "alerts":
@@ -1341,5 +1352,5 @@ export class HubService {
 
 /** The hub's methods that are kept in files of their own (./areas). Declared here so the class has them; put on it just below. */
 // eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging -- it names the parts and has no members of its own
-export interface HubService extends InboxPart, ChatAndAtlassianPart, FactsPart, AlertsPart, SchedulesPart, SimulationPart, EvalsPart, AuditPart, McpPart, AgentsPart, MemoryPart, KnowledgePart, SafetyPart, ServersPart, TicketsPart, SharingPart, RunsPart, ConversationsPart, ChatRunsPart {}
-mixParts(HubService, [InboxPart, ChatAndAtlassianPart, FactsPart, AlertsPart, SchedulesPart, SimulationPart, EvalsPart, AuditPart, McpPart, AgentsPart, MemoryPart, KnowledgePart, SafetyPart, ServersPart, TicketsPart, SharingPart, RunsPart, ConversationsPart, ChatRunsPart]);
+export interface HubService extends InboxPart, ChatAndAtlassianPart, FactsPart, AlertsPart, SchedulesPart, SimulationPart, EvalsPart, AuditPart, McpPart, AgentsPart, MemoryPart, KnowledgePart, SafetyPart, ServersPart, TicketsPart, SharingPart, RunsPart, ConversationsPart, ChatRunsPart, ChatAnsweringPart {}
+mixParts(HubService, [InboxPart, ChatAndAtlassianPart, FactsPart, AlertsPart, SchedulesPart, SimulationPart, EvalsPart, AuditPart, McpPart, AgentsPart, MemoryPart, KnowledgePart, SafetyPart, ServersPart, TicketsPart, SharingPart, RunsPart, ConversationsPart, ChatRunsPart, ChatAnsweringPart]);

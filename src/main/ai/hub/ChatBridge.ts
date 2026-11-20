@@ -346,6 +346,19 @@ export class ChatBridge {
     return this.index.thread(service, channelId, threadId);
   }
 
+  /**
+   * Whether a token is the context bot's own. The token is only compared here, never handed out: the
+   * agent bot must be a separate app or bot account, so this bot stays the one that only reads.
+   */
+  async usesToken(service: ChatService, token: string): Promise<boolean> {
+    await this.load();
+    const own = this.connections[service]?.token;
+    if (!own || !token || this.connections[service]?.simulated) return false;
+    const a = crypto.createHash("sha256").update(own).digest();
+    const b = crypto.createHash("sha256").update(token).digest();
+    return crypto.timingSafeEqual(a, b);
+  }
+
   /** One round: each chosen channel that is due is asked what is new, one at a time. Failures are kept on the channel, never thrown. */
   tick(now = Date.now()): Promise<void> {
     const run = this.running.then(async () => {

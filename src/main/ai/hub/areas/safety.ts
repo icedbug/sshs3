@@ -317,7 +317,8 @@ export class SafetyPart {
       else delete plan.production;
       // What the person whose run it is added, whoever of the two answered last. In a chat thread each
       // approver answers as the owner would, so what every one of them wrote goes to the agent.
-      const chatNotes = nextApprovals.filter((a) => a.allowed && a.via && a.note);
+      // An answer given in the app (no `via`) by a linked person counts as one given in the thread.
+      const chatNotes = nextApprovals.filter((a) => a.allowed && (a.via || a.peer) && a.note);
       const ownNote = who.chatApprover
         ? chatNotes.length > 1
           ? chatNotes.map((a) => `${a.actor}: ${a.note}`).join("\n")
@@ -470,7 +471,7 @@ export class SafetyPart {
     taskId: string,
     changeId: string,
     allowed: boolean,
-    person: { id: string; name: string; via: ChatServiceName },
+    person: { id: string; name: string; via?: ChatServiceName },
     note?: string,
   ): Promise<boolean> {
     const task = this.store.data.tasks.find((t) => t.id === taskId);
@@ -484,7 +485,7 @@ export class SafetyPart {
       actor: name,
       actorId,
       peer: true,
-      via: person.via,
+      ...(person.via ? { via: person.via } : {}),
     });
     if (change && (resolved || change.status !== "pending")) change.decidedBy = { name, at: Date.now(), allowed };
     this.changed();
@@ -501,7 +502,7 @@ export class SafetyPart {
     taskId: string,
     planId: string,
     approved: boolean,
-    person: { id: string; name: string; via: ChatServiceName },
+    person: { id: string; name: string; via?: ChatServiceName },
     options: { note?: string; askEach?: boolean } = {},
   ): Promise<void> {
     const note = options.note;
@@ -514,7 +515,7 @@ export class SafetyPart {
     await this.decidePlan(
       task,
       { approved, ...(note?.trim() ? { note: clip(note.trim(), 1000) } : {}), ...(options.askEach ? { askEach: true } : {}) },
-      { actor: requiredText(person.name), actorId, peer: true, chatApprover: true, via: person.via },
+      { actor: requiredText(person.name), actorId, peer: true, chatApprover: true, ...(person.via ? { via: person.via } : {}) },
     );
     await this.store.save().catch(() => undefined);
   }

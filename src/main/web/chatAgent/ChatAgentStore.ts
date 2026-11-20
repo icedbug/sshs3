@@ -51,6 +51,12 @@ export interface ChatThreadCard {
   answered: Record<string, number>;
   /** The card shows its outcome and takes no more answers. */
   final?: boolean;
+  /**
+   * How the card can be answered in the chat as it was last drawn: with its buttons, or (Mattermost
+   * without buttons) with a reaction. Absent: it cannot be answered there at all (it did not fit whole,
+   * it is answered only in the app, or it has ended), and a press or a reaction on it changes nothing.
+   */
+  answer?: 'buttons' | 'reactions';
 }
 
 export interface ChatThread {
@@ -63,6 +69,22 @@ export interface ChatThread {
   cards: Record<string, ChatThreadCard>;
   askedBy: { chatUserId: string; name: string };
   lastAt: number;
+  /** The status post shows how its run ended: a restart does not need to redraw it. */
+  statusDone?: boolean;
+  /** Tokens of this conversation already counted against the month's budget. */
+  counted?: number;
+  /** A hash of the last answer posted, so the same answer is not posted twice. */
+  answered?: string;
+  /** When the agent was last given what the team wrote in the thread: later messages are new to it. */
+  seenAt?: number;
+}
+
+/** A thread as listed: where it is, and what it holds. */
+export interface ChatThreadEntry {
+  service: ChatServiceName;
+  channelId: string;
+  threadId: string;
+  thread: ChatThread;
 }
 
 interface ThreadsFile {
@@ -97,6 +119,16 @@ function sameHash(a: string, b: string): boolean {
 }
 
 const isService = (value: unknown): value is ChatServiceName => value === 'slack' || value === 'mattermost';
+
+/** A thread key taken apart. Channel ids hold no colon; a thread id may. */
+function splitKey(key: string): { service: ChatServiceName; channelId: string; threadId: string } | undefined {
+  const first = key.indexOf(':');
+  const second = key.indexOf(':', first + 1);
+  if (first < 0 || second < 0) return undefined;
+  const service = key.slice(0, first);
+  if (!isService(service)) return undefined;
+  return { service, channelId: key.slice(first + 1, second), threadId: key.slice(second + 1) };
+}
 
 /** Whether a thread ran in a person's own hub through this link: same service, same person, same account. */
 const ranThrough = (key: string, thread: ChatThread, link: ChatLink): boolean =>
@@ -327,6 +359,47 @@ export class ChatAgentStore {
     if (found.owner !== 'agent' && this.linkOf(service, found.askedBy?.chatUserId ?? '')?.accountId !== found.owner.slice('user:'.length))
       return undefined;
     return structuredClone(found);
+  }
+
+  /** Every thread kept, as copies: the ones a restart cut off are found here. */
+  threadList(): ChatThreadEntry[] {
+    const out: ChatThreadEntry[] = [];
+    for (const [key, thread] of Object.entries(this.threads.threads)) {
+      const entry = splitKey(key);
+      if (entry) out.push({ ...entry, thread: structuredClone(thread) });
+    }
+    return out;
+  }
+
+  /**
+   * The card a post of the bot's is, found by the post alone: a reaction names only the post. Under the
+   * same rule as `thread`: a conversation in a person's own hub is found only while their link holds.
+   */
+  cardByPost(service: ChatServiceName, postId: string): (ChatThreadEntry & { cardId: string }) | undefined {
+    if (!postId) return undefined;
+    for (const [key, thread] of Object.entries(this.threads.threads)) {
+      if (!key.startsWith(`${service}:`)) continue;
+      const cardId = Object.keys(thread.cards ?? {}).find((id) => thread.cards[id].post === postId);
+      if (!cardId) continue;
+      const entry = splitKey(key);
+      const found = entry && this.thread(entry.service, entry.channelId, entry.threadId);
+      return entry && found ? { ...entry, thread: found, cardId } : undefined;
+    }
+    return undefined;
+  }
+
+  /**
+   * Changes a kept thread in place and saves it. Says whether it was there. Used instead of setThread
+   * for a thread that exists, so a claim made on one of its cards meanwhile is not written over.
+   */
+  async patchThread(service: ChatServiceName, channelId: string, threadId: string, change: (thread: ChatThread) => void): Promise<boolean> {
+    await this.initialize();
+    const thread = this.threads.threads[threadKey(service, channelId, threadId)];
+    if (!thread) return false;
+    change(thread);
+    thread.lastAt = Math.max(thread.lastAt ?? 0, this.clock());
+    await this.saveThreads();
+    return true;
   }
 
   /** Removes the threads `drop` names. Says whether there were any. */

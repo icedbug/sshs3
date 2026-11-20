@@ -575,6 +575,12 @@ export interface AgentTask {
    * no further than that reach.
    */
   chat?: ChatOrigin;
+  /**
+   * Tokens used by background runs this chat conversation asked for (a plan's reviewer, investigators,
+   * specialists). Kept apart from `usage`, which is the conversation's own: the chat's monthly budget
+   * counts both.
+   */
+  chatBackgroundTokens?: number;
 }
 
 /**
@@ -1375,6 +1381,185 @@ export interface AgentBotInput {
   enabled?: boolean;
 }
 
+/**
+ * One channel the agent bot answers in, as an administrator set it: the fence of every conversation
+ * started there. The agent answers only when it is mentioned.
+ */
+export interface ChatChannelRule {
+  channelId: string;
+  /** The channel's name when it was chosen, for showing. */
+  channelName: string;
+  /** Server profile ids, names or hosts, matched exactly. "*" is every server of the chat agent. */
+  servers: string[] | "*";
+  clusters: string[];
+  reach: ChatReach;
+  /** The agent that answers. Absent: the default agent. */
+  agentId?: string;
+  /** Who may answer its changes and plans: linked people the rules allow, or administrators only. */
+  approvers: "linked" | "admins";
+  /** Channel ids of the context bot's index the agent may search. Empty: only this channel. */
+  historyFrom: string[];
+}
+
+/** Direct messages to the agent bot. A linked person's run in their own hub; anybody else's in the chat agent's. */
+export interface ChatDmRule {
+  enabled: boolean;
+  /** People who did not link their chat account: answered read only, or not at all. */
+  unlinked: "read" | "off";
+  /** What an unlinked person's direct message may reach. */
+  servers: string[] | "*";
+  clusters: string[];
+}
+
+/** How much the agent bot may be asked, per hour and at once. */
+export interface ChatAnsweringLimits {
+  /** New conversations one person may start in an hour. */
+  personNewPerHour: number;
+  /** Messages one person may send the agent in an hour. */
+  personMessagesPerHour: number;
+  /** Messages one channel may send the agent in an hour. */
+  channelPerHour: number;
+  /** Chat runs at the same time, over all channels. */
+  concurrentRuns: number;
+}
+
+/** What an administrator set for answering in chat. */
+export interface ChatAnsweringSettings {
+  enabled: boolean;
+  channels: Record<ChatServiceName, ChatChannelRule[]>;
+  dms: ChatDmRule;
+  limits: ChatAnsweringLimits;
+  /** Tokens the chat answers may use in a calendar month (UTC). */
+  monthlyTokenBudget: number;
+  /** How long a change asked for from chat waits for an answer. */
+  approvalWaitMinutes: number;
+}
+
+/** What an administrator saves: only the fields given change, and a service's channel list given replaces it. */
+export interface ChatAnsweringInput {
+  enabled?: boolean;
+  channels?: Partial<Record<ChatServiceName, Partial<ChatChannelRule>[]>>;
+  dms?: Partial<ChatDmRule>;
+  limits?: Partial<ChatAnsweringLimits>;
+  monthlyTokenBudget?: number;
+  approvalWaitMinutes?: number;
+}
+
+/** Answering in chat as the interface sees it: the settings, this month's use, and who changed them last. */
+export interface ChatAnsweringView extends ChatAnsweringSettings {
+  usage: { month: string; tokens: number };
+  changedBy?: string;
+  changedAt?: number;
+}
+
+/** How the agent bot's line to one chat service is doing, for the administrator. Never a token. */
+export interface ChatLineStatus {
+  state: "connecting" | "open" | "waiting" | "stopped";
+  error?: string;
+  retryAt?: number;
+}
+
+/** A chat account linked to an sshs3 account, as an administrator sees it. */
+export interface ChatLinkView {
+  service: ChatServiceName;
+  chatUserId: string;
+  chatName: string;
+  accountId: string;
+  /** The sshs3 account's name now. */
+  accountName: string;
+  linkedAt: number;
+}
+
+/** A change or a plan of the chat agent's that waits for an answer this person may give in the app. */
+export interface ChatWaitingItem {
+  taskId: string;
+  /** The change's id, or the plan's. */
+  id: string;
+  kind: "change" | "plan";
+  service: ChatServiceName;
+  channelName: string;
+  askedBy: string;
+  description: string;
+  command?: string;
+  target?: string;
+  risk?: AgentChange["riskLevel"];
+  requiredApprovals: number;
+  approvedBy: string[];
+  at: number;
+}
+
+/** One conversation asked for in chat, in the chat agent's hub, as the administrator's list shows it. */
+export interface ChatRunItem {
+  taskId: string;
+  title: string;
+  status: AgentTask["status"];
+  service: ChatServiceName;
+  channelId: string;
+  channelName: string;
+  kind: "channel" | "dm";
+  threadId: string;
+  askedBy: string;
+  reach: ChatReach;
+  /** Changes and plans that wait for an answer. */
+  waiting: number;
+  tokens?: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
+ * Answering in chat as one person's snapshot shows it. Everybody sees their own links and whether the
+ * agent bot answers; an administrator also sees the settings, the bot (never a token) and who is linked.
+ */
+export interface ChatAnsweringSnapshot {
+  /** Answering is switched on. */
+  enabled: boolean;
+  /** The chat services the agent bot is connected to and switched on for. */
+  services: ChatServiceName[];
+  /** This person's own chat accounts linked to sshs3. */
+  links: Array<{ service: ChatServiceName; chatName: string; linkedAt: number }>;
+  /** Changes and plans of the chat agent's that this person may answer here. */
+  waiting: ChatWaitingItem[];
+  admin?: {
+    settings: ChatAnsweringView;
+    bots: AgentBotView[];
+    status: Partial<Record<ChatServiceName, ChatLineStatus>>;
+    linked: ChatLinkView[];
+    /** The chat agent's public SSH key: put it only on the servers the bot may reach. */
+    publicKey?: string;
+    /** Mattermost cards get buttons when the server has a public address, otherwise people react. */
+    mattermostAnswers: "buttons" | "reactions";
+    /** Whether the data policy of the chat agent lets answers go to each connected service. */
+    dataPolicy: Array<{ service: ChatServiceName; allowed: boolean; errors: string[]; warnings: string[] }>;
+    /** Whether "try it" can be used: in the demo, or while no agent bot is connected. */
+    canTry: boolean;
+  };
+}
+
+/** One conversation of the chat agent's, read only, as an administrator opens it. */
+export interface ChatTaskView {
+  taskId: string;
+  title: string;
+  status: AgentTask["status"];
+  chat: ChatOrigin;
+  messages: AgentMessage[];
+  changes: AgentChange[];
+  plan?: AgentPlan;
+  tokens?: number;
+}
+
+/** What "try it" brought back: what the bot posted in the simulated chat for the message. */
+export interface ChatTryResult {
+  channelId: string;
+  /** The thread the message started or went on with: give it back to go on in the same thread. */
+  thread: string;
+  /** The run ended (or none was started) before the answer was sent. */
+  settled: boolean;
+  posts: Array<{ id: string; threadId?: string; text: string; edits: number; buttons: boolean }>;
+  /** What the bot showed to the person alone. */
+  privateNotes: string[];
+}
+
 /** A thread found in the team's chat: what was said, by whom, and where to open it. */
 export interface ChatThreadView {
   service: ChatServiceName;
@@ -1953,6 +2138,17 @@ export interface HubReply {
   evidenceSource?: { callId: string; source: import("../answerSources").AnswerSource };
   /** What `runner-test` found for an external agent: whether its program is there and answers as an agent. */
   runnerProbe?: { id: string; ok: boolean; detail: string };
+  /** A new code to link a chat account, shown this once. */
+  chatLinkCode?: { service: ChatServiceName; code: string; expiresAt: number };
+  /** Who the agent bot is, as the service said when its connection was saved. */
+  chatAgentConnect?: { service: ChatServiceName; bot: string; team?: string; notes: string[] };
+  /** The chat agent's public SSH key after it was made new. */
+  chatAgentKey?: { publicKey: string };
+  chatRuns?: ChatRunItem[];
+  chatTask?: ChatTaskView;
+  /** What an answer given in the app to a change or plan of the chat agent's came to. */
+  chatAnswer?: { outcome: "approved" | "denied" | "waiting" | "refused"; message: string; remaining?: number };
+  chatTry?: ChatTryResult;
 }
 export interface TerminalCommandFailure {
   sessionId: string;
@@ -2107,6 +2303,8 @@ export interface HubSnapshot {
    * the server's on top.)
    */
   teamRules?: TeamSafetyRules & { canChange: boolean };
+  /** On a web server: answering in chat by the agent bot, as this person may see it. */
+  chatAnswering?: ChatAnsweringSnapshot;
   /** Who last changed the safety policy on this computer, and when. */
   safetyPolicyChanged?: { by: string; at: number };
   pendingLayoutEvent?: WorkspaceLayoutEvent;
@@ -2128,6 +2326,20 @@ export interface HubSnapshot {
     temperature: number;
   };
 }
+/** The requests about the agent bot in chat: a web server answers them, outside any one person's hub. */
+export type ChatAnsweringAction =
+  | "chat-answering-save"
+  | "chat-answering-connect"
+  | "chat-answering-disconnect"
+  | "chat-answering-rotate-key"
+  | "chat-answering-copy-model"
+  | "chat-link-code"
+  | "chat-unlink"
+  | "chat-answering-runs"
+  | "chat-answering-task"
+  | "chat-answering-answer"
+  | "chat-answering-try";
+export type ChatAnsweringRequest = Extract<HubRequest, { action: ChatAnsweringAction }>;
 export interface StartAgentTask {
   prompt: string;
   sessionId?: string;
@@ -2336,6 +2548,24 @@ export type HubRequest =
   | { action: "chat-retention"; days?: number }
   | { action: "chat-search"; query: string; channel?: string; sinceDays?: number; limit?: number }
   | { action: "chat-thread-to-kb"; service: ChatServiceName; channelId: string; threadId: string }
+  /** An administrator: what the agent bot answers, where, and how much. */
+  | { action: "chat-answering-save"; input: ChatAnsweringInput }
+  /** An administrator: the agent bot's own Slack app or Mattermost bot account. Tried before it is saved. */
+  | { action: "chat-answering-connect"; input: AgentBotInput }
+  | { action: "chat-answering-disconnect"; service: ChatServiceName }
+  | { action: "chat-answering-rotate-key" }
+  /** An administrator: the chat agent uses the same model settings as the administrator. */
+  | { action: "chat-answering-copy-model" }
+  /** Anybody: a code to send the agent bot in a direct message, to link one's chat account. */
+  | { action: "chat-link-code"; service: ChatServiceName }
+  /** One's own link; an administrator may name somebody else's with `chatUserId`. */
+  | { action: "chat-unlink"; service: ChatServiceName; chatUserId?: string }
+  | { action: "chat-answering-runs" }
+  | { action: "chat-answering-task"; taskId: string }
+  /** An answer in the app to a change or plan of the chat agent's, by the same rules as from chat. */
+  | { action: "chat-answering-answer"; taskId: string; id: string; kind: "change" | "plan"; approved: boolean; note?: string }
+  /** An administrator, in the demo or before a bot is connected: a message to the agent bot in a simulated chat. */
+  | { action: "chat-answering-try"; channel: string; as: "me" | "guest"; text: string; thread?: string }
   | { action: "notify-settings-save"; publicUrl?: string; reminderMinutes?: number }
   /** An alert pasted by hand: JSON as a monitoring system posts it, or text. */
   | { action: "alert-paste"; text: string }

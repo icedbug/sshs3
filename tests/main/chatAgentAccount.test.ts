@@ -452,6 +452,26 @@ describe('the chat agent account on a web server', () => {
     expect(await answer(maria, { id: 'rules-1' } as AgentChange)).toEqual({ outcome: 'refused', message: 'A change to sshs3\'s own rules can only be answered in the app.' });
   }, 30_000);
 
+  it("holds an answer in the app, and the app's list, to the channel's approvers rule as it is now", async () => {
+    const { maria, omar } = await team();
+    const run = await chatRun('web-dev-01');
+    run.task.chat!.channelId = 'COPS';
+    // The run started when #ops took answers from anybody linked; the administrator made it administrators only since.
+    await server.chatAnswering.answering.save(
+      { channels: { slack: [{ channelId: 'COPS', channelName: 'ops', servers: ['web-dev-01'], clusters: [], reach: 'ask', approvers: 'admins', historyFrom: [] }] } },
+      'Maria Ek',
+    );
+    expect(server.tenants.chatAgentWaitingFor(omar.id).map((w) => w.id)).toEqual([]);
+    expect(server.tenants.chatAgentWaitingFor(maria.id).map((w) => w.id)).toEqual([run.change.id]);
+    // As the app asks: no rule given with the answer.
+    expect(await server.tenants.answerForChatAgent(omar.id, { taskId: 'chat-run-1', id: run.change.id, kind: 'change', approved: true })).toEqual({
+      outcome: 'refused',
+      message: 'In this channel only an administrator can answer.',
+    });
+    expect(run.change.approvals ?? []).toEqual([]);
+    expect(await server.tenants.answerForChatAgent(maria.id, { taskId: 'chat-run-1', id: run.change.id, kind: 'change', approved: true })).toMatchObject({ outcome: 'approved' });
+  }, 30_000);
+
   it('counts one person once when a change needs two', async () => {
     const { maria, eva } = await team(true);
     await maria.hub.request({ action: 'team-rules-save', requirePeerApprovalOnProd: true } as never);

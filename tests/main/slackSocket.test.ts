@@ -110,6 +110,23 @@ describe('SlackSocket', () => {
     expect(events[1]).toMatchObject({ channelType: 'im', userId: 'U2OMAR', text: 'hey look', mentioned: true });
   });
 
+  it('hands on a message with a file, saying how many came, but no other kind of changed message', async () => {
+    const { events, statuses } = start();
+    await until(() => opened(statuses) === 1);
+    const base = slack.say('DMARIA', 'hello', { im: true }).envelope;
+    await until(() => events.length === 1);
+    const variant = (id: string, event: Record<string, unknown>) =>
+      slack.send({ ...base, envelope_id: `env-${id}`, payload: { ...base.payload, event_id: `Ev-${id}`, event: { ...(base.payload.event as object), ts: `176365${id}.000100`, ...event } } });
+    variant('0001', { subtype: 'file_share', text: 'see the log', files: [{ id: 'F1' }, { id: 'F2' }] });
+    variant('0002', { subtype: 'message_deleted' });
+    await until(() => slack.acks.length === 3);
+    await until(() => events.length === 2);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(events).toHaveLength(2);
+    expect(events[1]).toMatchObject({ kind: 'message', text: 'see the log', files: 2 });
+    expect(events[0]).not.toHaveProperty('files');
+  });
+
   it('hands on a button press', async () => {
     const { events, statuses } = start();
     await until(() => opened(statuses) === 1);

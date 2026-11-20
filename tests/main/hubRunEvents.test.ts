@@ -270,6 +270,11 @@ describe("following a chat run without a browser", () => {
       expect(text).not.toContain("person-1");
       expect(text).not.toContain("PERSON-TAB-MARKER");
     }
+    // What the reviewer used is the conversation's to pay from the chat's budget, kept apart from its own usage.
+    const reviewer = hub.store.data.tasks.find((t) => t.id !== task.id && t.title.includes("Plan reviewer"))!;
+    const reviewerTokens = (reviewer.usage?.inputTokens ?? 0) + (reviewer.usage?.outputTokens ?? 0);
+    expect(reviewerTokens).toBeGreaterThan(0);
+    expect(task.chatBackgroundTokens).toBe(reviewerTokens);
 
     // A card stays in the thread: pressed for a plan that is no longer the one waiting, it answers nothing.
     await expect(hub.decidePlanFromChat(task.id, "plan-old", true, MARIA)).rejects.toThrow(/replaced/);

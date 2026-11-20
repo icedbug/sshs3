@@ -36,6 +36,7 @@ const DATA_CHANNEL_NAMES: Record<string, string> = {
   "llm-inference": "The model",
   "team-s3-sync": "The team bucket",
   "local-storage": "Kept here",
+  "team-chat": "The team chat",
 };
 const DATA_PLACES: Record<string, string> = {
   external: "an outside service",

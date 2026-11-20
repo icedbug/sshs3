@@ -165,6 +165,14 @@ export interface HubHost {
    * person's.
    */
   serviceAccount?: boolean;
+  /**
+   * On the web server: the agent bot in chat, as this person may see and change it. The server keeps it
+   * for everyone (WebTenantManager), so these requests are answered there, never in this hub.
+   */
+  chatAnswering?: {
+    view(): Promise<import("../../../shared/types/aiHub").ChatAnsweringSnapshot | undefined>;
+    request(request: import("../../../shared/types/aiHub").ChatAnsweringRequest): Promise<import("../../../shared/types/aiHub").HubReply | undefined>;
+  };
   peerPresenceProvider?:() => import("../../../shared/types/aiHub").WorkspacePresenceEntry[];
   onSharedWorkspaceChanged?: () => void;
   /**

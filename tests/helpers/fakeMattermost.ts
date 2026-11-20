@@ -29,6 +29,7 @@ export interface FakeMmPost {
   create_at: number;
   type: string;
   props: Record<string, unknown>;
+  file_ids?: string[];
 }
 
 export interface FakeMmCall {
@@ -84,7 +85,7 @@ export interface FakeMattermost {
   sockets(bot?: string): FakeMmSocket[];
   waitForSocket(count: number, bot?: string): Promise<FakeMmSocket>;
   /** Somebody posts; the bots' sockets are told. */
-  post(channelId: string, text: string, options?: { user?: string; root?: string; type?: string; props?: Record<string, unknown> }): FakeMmPost;
+  post(channelId: string, text: string, options?: { user?: string; root?: string; type?: string; props?: Record<string, unknown>; files?: string[] }): FakeMmPost;
   react(user: string, postId: string, emoji: string): void;
   /** The direct message channel between a person and a bot. */
   dm(user: string, bot?: string): string;
@@ -215,6 +216,7 @@ export async function startFakeMattermost(bots: FakeMattermostBot[] = DEFAULT_BO
         create_at: ++clock,
         type: options.type ?? '',
         props: options.props ?? {},
+        ...(options.files?.length ? { file_ids: options.files } : {}),
       };
       posts[post.id] = post;
       announce(channel, post);

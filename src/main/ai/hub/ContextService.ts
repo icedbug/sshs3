@@ -1062,8 +1062,22 @@ export class ContextService {
       }))
       .sort((a, b) => a.cluster.localeCompare(b.cluster));
 
+    // A fenced run is told only of links between its own servers (by id, name or host, or a cluster of
+    // one), and not what an agent saw that made it suggest one: a link to a server outside would give
+    // away that server's name, and its label or evidence may hold an address.
+    const fenceNames = new Set(
+      servers.flatMap((s) => [s.id, s.name, s.host, s.cluster ?? ""]).map((n) => n.trim().toLowerCase()).filter(Boolean),
+    );
+    const inFence = (name: string): boolean => fenceNames.has(name.trim().toLowerCase());
     const confirmedEdges = deterministicSortByIdOrName(
-      (extra?.infraEdges ?? this.store.data.infraEdges ?? []).filter((e) => !e.proposed),
+      (extra?.infraEdges ?? this.store.data.infraEdges ?? [])
+        .filter((e) => !e.proposed)
+        .filter((e) => !allowProfile || (inFence(e.from) && inFence(e.to)))
+        .map((e) => {
+          if (!allowProfile) return e;
+          const { evidence: _evidence, proposedBy: _proposedBy, ...kept } = e;
+          return kept;
+        }),
     );
     const label = task.target?.label ?? "";
     // The session knows which saved server it is; the label is only a fallback, and only an exact one.
@@ -1203,7 +1217,10 @@ export class ContextService {
       workspaceServers: sortedWorkspaceServers,
       workspaceRules: ruleResolution.activeRules,
       workspaceRuleConflicts: ruleResolution.conflicts,
-      inventory: stripInventoryObservedAt(this.store.data.inventory),
+      // A fenced run sees only its own servers here too: not the names, addresses and state of the others.
+      inventory: stripInventoryObservedAt(
+        allowProfile ? this.store.data.inventory.filter((e) => e.kind === "ssh" && allowProfile(e.id)) : this.store.data.inventory,
+      ),
       infraDependencyGraph: confirmedEdges,
       ...(extra?.teamChat ? { teamChat: extra.teamChat } : {}),
       ...(around.length ? { aroundThisTarget: around } : {}),

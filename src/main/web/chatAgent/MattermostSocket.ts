@@ -55,6 +55,7 @@ interface MmPost {
   message?: string;
   type?: string;
   props?: Record<string, unknown>;
+  file_ids?: unknown[];
 }
 
 const MAX_MESSAGE_BYTES = 1024 * 1024;
@@ -329,6 +330,7 @@ export class MattermostSocket {
       ...(sender ? { userName: sender } : {}),
       text: text.replace(/[ \t]{2,}/g, ' ').trim(),
       mentioned,
+      ...(Array.isArray(post.file_ids) && post.file_ids.length ? { files: Math.min(post.file_ids.length, 100) } : {}),
     });
   }
 

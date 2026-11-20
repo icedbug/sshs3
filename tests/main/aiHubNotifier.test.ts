@@ -390,6 +390,27 @@ describe("notifications from the hub", () => {
     }
   });
 
+  it("leaves out a conversation asked for from chat: its cards are in its own thread", async () => {
+    const { hub, inner } = await makeHub();
+    const slack = await receiver();
+    await hub.request({ action: "notify-channel-save", channel: { kind: "slack", name: "ops", url: `${slack.url}/services/x`, enabled: true, events: [...ALL], includeCommand: true } });
+    await inner.flushInbox();
+    const fromChat = {
+      ...waiting("chat-1"),
+      chat: { service: "slack", channelId: "COPS", channelName: "ops", threadId: "1.1", kind: "dm", askedBy: { chatUserId: "U1", name: "Maria" }, fence: { servers: "*", clusters: [], reach: "ask" } },
+    } as unknown as AgentTask;
+    hub.store.data.tasks.push(fromChat);
+    await inner.flushInbox();
+    await inner.flushInbox(Date.now() + 30 * MIN);
+    expect(slack.got).toHaveLength(0);
+    // It is still in the app's own inbox, and a run of the app's own still goes to the channel.
+    expect((await hub.snapshot()).tasks.some((t) => t.id === "chat-1")).toBe(true);
+    hub.store.data.tasks.push(waiting("t2"));
+    await inner.flushInbox();
+    expect(slack.got).toHaveLength(1);
+    expect(slack.got[0].body).toContain("Approval needed");
+  });
+
   it("does not push what already waited when a channel is added, and tests a channel on request", async () => {
     const { hub, inner } = await makeHub();
     hub.store.data.tasks.push(waiting());

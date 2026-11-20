@@ -9,7 +9,15 @@ import { IpcBridge } from '../IpcBridge';
 import type { WindowRouter } from '../windows/WindowManager';
 import { createHub } from '../ai/hub/createHub';
 import type { HubService } from '../ai/hub/HubService';
-import type { ChatServiceName, PeerApprovalItem, TeamSafetyRules } from '../../shared/types/aiHub';
+import type {
+  ChatAnsweringRequest,
+  ChatAnsweringSnapshot,
+  ChatServiceName,
+  ChatWaitingItem,
+  HubReply,
+  PeerApprovalItem,
+  TeamSafetyRules,
+} from '../../shared/types/aiHub';
 import { writeFileAtomic } from '../storage/atomicFile';
 import {
   HUB_CHANGED,
@@ -61,6 +69,17 @@ export type ChatAgentAnswer =
   | { outcome: 'denied'; message: string }
   | { outcome: 'waiting'; remaining: number; message: string }
   | { outcome: 'refused'; message: string };
+
+/**
+ * The agent bot in chat, as the server keeps it for everyone (ChatAnswering). Each account's hub is
+ * given these two calls with the account's id already in them, so the server always knows who asks.
+ */
+export interface ChatAnsweringBackend {
+  view(userId: string): Promise<ChatAnsweringSnapshot>;
+  request(userId: string, request: ChatAnsweringRequest): Promise<HubReply | undefined>;
+  /** Who may answer in a conversation's channel as the administrator set it now. Undefined: no rule there. */
+  currentApprovers?(origin: { service: ChatServiceName; channelId: string; kind: 'channel' | 'dm' }): 'linked' | 'admins' | undefined;
+}
 
 type RpcHandler = (event: unknown, ...args: unknown[]) => unknown;
 
@@ -340,6 +359,8 @@ export class WebTenantManager {
   private chatAgentResolved?: UserTenant;
   /** The chat agent's private keys already restricted in this process: Windows is asked once, not on every read. */
   private readonly chatAgentRestrictedKeys = new Set<string>();
+  /** The agent bot in chat, once the server has set it up. */
+  private chatAnswering?: ChatAnsweringBackend;
 
   constructor(
     private readonly baseDataDir: string,
@@ -382,6 +403,29 @@ export class WebTenantManager {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
+  }
+
+  /** The server sets up the agent bot in chat after the stores it needs are read. */
+  setChatAnswering(backend: ChatAnsweringBackend | undefined): void {
+    this.chatAnswering = backend;
+  }
+
+  /**
+   * The team's context bot, one for the server. The agent bot only asks it to read a thread now
+   * (readThreadNow); nothing writes through it.
+   */
+  contextBot(): ChatBridge {
+    return this.teamChat;
+  }
+
+  /** The chat agent's tenant if it was started already: reading a list never starts it. */
+  chatAgentIfStarted(): UserTenant | undefined {
+    return this.chatAgentResolved;
+  }
+
+  /** What the agent bot shows changed: every account's windows read their snapshot again. */
+  chatAnsweringChanged(exceptUserId?: string): void {
+    for (const [uid, tenant] of this.resolvedTenants.entries()) if (uid !== exceptUserId) tenant.broadcast(HUB_CHANGED);
   }
 
   getTeamRulesPath(): string {
@@ -964,6 +1008,14 @@ export class WebTenantManager {
             peerDecide: (answer) => this.answerAsSecondPerson(user.id, answer),
             // The rules for everyone on this server: one set, read by every account's hub.
             teamRules: { read: () => this.teamRules, write: (next, previous) => this.saveTeamRules(user.id, next, previous) },
+            // The agent bot is the server's: asked with this account's id, which the request cannot change.
+            chatAnswering: {
+              view: async () => this.chatAnswering?.view(user.id),
+              request: async (request) => {
+                if (!this.chatAnswering) throw new Error('The agent bot is not set up on this server yet.');
+                return this.chatAnswering.request(user.id, request);
+              },
+            },
           },
     );
 
@@ -1112,7 +1164,8 @@ export class WebTenantManager {
       kind: 'change' | 'plan';
       approved: boolean;
       note?: string;
-      via: ChatServiceName;
+      /** Where the answer was given: a chat service, or absent for the app itself. */
+      via?: ChatServiceName;
       approvers?: 'linked' | 'admins';
     },
   ): Promise<ChatAgentAnswer> {
@@ -1129,32 +1182,10 @@ export class WebTenantManager {
       return refused('That is not waiting any more: it was answered, or its run was stopped.');
     }
     if (subject.kind !== answer.kind) return refused('That is not waiting any more: it was answered, or its run was stopped.');
-    if (subject.setting) return refused('A change to sshs3\'s own rules can only be answered in the app.');
-    if (!subject.waiting) return refused('That is not waiting any more: it was answered, or its run was stopped.');
-    if ((answer.approvers === 'admins' || subject.approvers === 'admins') && me.role !== 'admin')
-      return refused('In this channel only an administrator can answer.');
-    const mine = `user:${me.id}`;
-    if (subject.votes.some((v) => v.actorId === mine)) return refused('You already answered this.');
-    const may = this.authorizePeerApproval({
-      requesterUserId: CHAT_AGENT_ID,
-      requesterUsername: CHAT_AGENT_USERNAME,
-      approver: me,
-      targetTags: subject.targetTags,
-      requiredApprovals: subject.requiredApprovals,
-      // The votes as the rule reads them: by account id, so one person is counted once.
-      existingApprovals: subject.votes.map((v) => ({
-        actorId: v.actorId?.startsWith('user:') ? v.actorId.slice(5) : v.actorId,
-        actor: v.actor,
-        allowed: v.allowed,
-      })),
-    });
-    if (!may.authorized)
-      return refused(
-        /production/i.test(may.reason ?? '')
-          ? 'You cannot approve this. On production it has to be an administrator of this server, or somebody in one of its approver groups.'
-          : 'You cannot approve this.',
-      );
-    const person = { id: me.id, name: me.displayName || me.username, via: answer.via };
+    // Whoever asks, in chat or in the app: the channel's rule as it is now holds too, when it is stricter.
+    const no = this.chatAgentRefusal(me, subject, this.stricterApprovers(hub, answer.taskId, answer.approvers));
+    if (no) return refused(no);
+    const person = { id: me.id, name: me.displayName || me.username, ...(answer.via ? { via: answer.via } : {}) };
     try {
       if (answer.kind === 'plan')
         await hub.decidePlanFromChat(answer.taskId, answer.id, answer.approved, person, answer.note ? { note: answer.note } : {});
@@ -1179,6 +1210,92 @@ export class WebTenantManager {
       };
     }
     return { outcome: 'approved', message: `${person.name} approved.` };
+  }
+
+  /** The stricter of the approvers rule given and the one the conversation's channel has now. */
+  private stricterApprovers(hub: HubService, taskId: string, given?: 'linked' | 'admins'): 'linked' | 'admins' | undefined {
+    const chat = hub.store.data.tasks.find((t) => t.id === taskId)?.chat;
+    const now = chat ? this.chatAnswering?.currentApprovers?.(chat) : undefined;
+    return given === 'admins' || now === 'admins' ? 'admins' : (given ?? now);
+  }
+
+  /**
+   * Why this person may not answer this change or plan of the chat agent's, or nothing when they may.
+   * The same rules from chat and in the app: a second person's in the app, the channel's approvers rule
+   * (from the request or the fence the run was started with, the stricter), and one answer per person.
+   */
+  private chatAgentRefusal(
+    me: PeerAccount,
+    subject: ReturnType<HubService['chatApprovalSubject']>,
+    approvers?: 'linked' | 'admins',
+  ): string | undefined {
+    if (subject.setting) return 'A change to sshs3\'s own rules can only be answered in the app.';
+    if (!subject.waiting) return 'That is not waiting any more: it was answered, or its run was stopped.';
+    if ((approvers === 'admins' || subject.approvers === 'admins') && me.role !== 'admin') return 'In this channel only an administrator can answer.';
+    const mine = `user:${me.id}`;
+    if (subject.votes.some((v) => v.actorId === mine)) return 'You already answered this.';
+    const may = this.authorizePeerApproval({
+      requesterUserId: CHAT_AGENT_ID,
+      requesterUsername: CHAT_AGENT_USERNAME,
+      approver: me,
+      targetTags: subject.targetTags,
+      requiredApprovals: subject.requiredApprovals,
+      // The votes as the rule reads them: by account id, so one person is counted once.
+      existingApprovals: subject.votes.map((v) => ({
+        actorId: v.actorId?.startsWith('user:') ? v.actorId.slice(5) : v.actorId,
+        actor: v.actor,
+        allowed: v.allowed,
+      })),
+    });
+    if (may.authorized) return undefined;
+    return /production/i.test(may.reason ?? '')
+      ? 'You cannot approve this. On production it has to be an administrator of this server, or somebody in one of its approver groups.'
+      : 'You cannot approve this.';
+  }
+
+  /**
+   * The chat agent's changes and plans that wait for an answer this person may give, for their window.
+   * A change that needs one person reaches no inbox otherwise: the chat agent has no owner to ask. Only
+   * read when the chat agent runs already; a list never starts it.
+   */
+  chatAgentWaitingFor(userId: string): ChatWaitingItem[] {
+    const me = this.account(userId);
+    const hub = this.chatAgentResolved?.hub;
+    if (!me || me.disabled || !hub) return [];
+    const out: ChatWaitingItem[] = [];
+    for (const task of hub.store.data.tasks) {
+      if (!task.chat) continue;
+      const asks: Array<{ id: string; kind: 'change' | 'plan' }> = [
+        ...task.changes.filter((c) => c.status === 'pending').map((c) => ({ id: c.id, kind: 'change' as const })),
+        ...(task.plan?.status === 'proposed' ? [{ id: task.plan.id, kind: 'plan' as const }] : []),
+      ];
+      for (const ask of asks) {
+        let subject: ReturnType<HubService['chatApprovalSubject']>;
+        try {
+          subject = hub.chatApprovalSubject(task.id, ask.id);
+        } catch {
+          continue;
+        }
+        if (this.chatAgentRefusal(me, subject, this.stricterApprovers(hub, task.id))) continue;
+        const change = ask.kind === 'change' ? task.changes.find((c) => c.id === ask.id) : undefined;
+        out.push({
+          taskId: task.id,
+          id: ask.id,
+          kind: ask.kind,
+          service: task.chat.service,
+          channelName: task.chat.channelName,
+          askedBy: task.chat.askedBy.name,
+          description: change ? change.description : (task.plan?.goal ?? task.title),
+          ...(change?.command ? { command: change.command } : {}),
+          ...(change?.target ? { target: change.target } : {}),
+          ...(change?.riskLevel ? { risk: change.riskLevel } : {}),
+          requiredApprovals: subject.requiredApprovals,
+          approvedBy: subject.votes.filter((v) => v.allowed).map((v) => v.actor),
+          at: task.updatedAt,
+        });
+      }
+    }
+    return out.sort((a, b) => a.at - b.at);
   }
 
   /**

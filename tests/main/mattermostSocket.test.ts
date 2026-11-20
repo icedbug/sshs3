@@ -90,6 +90,17 @@ describe('MattermostSocket', () => {
     expect(events[0]).toMatchObject({ channelId: dm, channelType: 'im', threadId: post.id, text: 'link ABCD2345', mentioned: true });
   });
 
+  it('says how many files came with a post', async () => {
+    const { events, statuses } = start();
+    await until(() => opened(statuses) === 1);
+    const dm = mm.dm(USER_MARIA);
+    mm.post(dm, 'see the log');
+    mm.post(dm, 'here it is', { files: [mmId(), mmId(), mmId()] });
+    await until(() => events.length === 2);
+    expect(events[0]).not.toHaveProperty('files');
+    expect(events[1]).toMatchObject({ text: 'here it is', files: 3 });
+  });
+
   it('skips its own posts, system messages and other bots', async () => {
     const { events, statuses } = start();
     await until(() => opened(statuses) === 1);

@@ -67,6 +67,8 @@ export interface CreateHubOptions {
   teamChat?: HubHost["teamChat"];
   /** On the web server: the hub of an account the server keeps for itself (see HubHost). */
   serviceAccount?: boolean;
+  /** On the web server: the agent bot in chat, answered by the server (see HubHost). */
+  chatAnswering?: HubHost["chatAnswering"];
 }
 
 export function createHub(
@@ -408,6 +410,7 @@ export function createHub(
     auditShipper: options?.auditShipper,
     teamChat: options?.teamChat,
     serviceAccount: options?.serviceAccount,
+    chatAnswering: options?.chatAnswering,
     file: (...args) => files.invoke(...args),
     restoreCheckpoint: (change, opts) => files.restoreCheckpoint(change, opts),
     delta: (delta) => {

@@ -62,6 +62,7 @@ interface SlackEvent {
   text?: string;
   ts?: string;
   thread_ts?: string;
+  files?: unknown[];
 }
 
 const MAX_MESSAGE_BYTES = 1024 * 1024;
@@ -326,7 +327,8 @@ export class SlackSocket {
     const isMention = event.type === 'app_mention';
     const isDirect = event.type === 'message' && event.channel_type === 'im';
     if (!isMention && !isDirect) return;
-    if (event.subtype || event.bot_id || event.bot_profile) return;
+    // A message with a file comes as "file_share": it is still a message to the bot, and it is told the file was not read.
+    if ((event.subtype && event.subtype !== 'file_share') || event.bot_id || event.bot_profile) return;
     const user = shaped(event.user, SLACK_ID);
     const channel = shaped(event.channel, SLACK_ID);
     const ts = shaped(event.ts, SLACK_TS);
@@ -352,6 +354,7 @@ export class SlackSocket {
       userId: user,
       text,
       mentioned,
+      ...(Array.isArray(event.files) && event.files.length ? { files: Math.min(event.files.length, 100) } : {}),
     });
   }
 }
